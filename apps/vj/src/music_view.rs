@@ -1316,6 +1316,7 @@ script_mod! {
         // the phones. Painted per row from the host's active key.
         // ButtonIcon, not Button: an icon-only button carries no label and
         // no label spacing, which is what centres the glyph in the well.
+        Tip{ text: "Pre-listen in the phones; green while loaded there; press again to stop"
         row_hp := ButtonIcon{
             width: 22
             height: 18
@@ -1335,10 +1336,12 @@ script_mod! {
                 color: #x9fabb7
             }
         }
+        }
         // The set list's own remove: a row in the QUEUE is a decision, and
         // taking it back should not mean dragging the row out or clearing
         // the lot. Sits beside the phones mark, where the explorer keeps
         // its `+` — the same place means the same kind of job.
+        Tip{ text: "Take this row off the set list; a locked list keeps it"
         row_unqueue := Button{
             width: 22
             height: 18
@@ -1358,6 +1361,8 @@ script_mod! {
                 text_style: theme.font_bold{font_size: 9}
             }
         }
+        }
+        Tip{ text: "Queue last, shift next, ctrl restarts the list; an empty deck takes it"
         row_queue := Button{
             width: 26
             height: 18
@@ -1378,6 +1383,7 @@ script_mod! {
                 color: #xd6dee6
                 text_style: theme.font_bold{font_size: 9}
             }
+        }
         }
     }
 
@@ -1424,6 +1430,7 @@ script_mod! {
             flow: Right
             spacing: 6
             align: Align{x: 0.0, y: 0.5}
+            Tip{ text: "Start the phones pre-listen from where it stands"
             hp_play := ButtonIcon{
                 visible: false
                 width: 24
@@ -1444,6 +1451,8 @@ script_mod! {
                     color: #xd6dee6
                 }
             }
+            }
+            Tip{ text: "Pause the phones pre-listen; play picks up from here"
             hp_pause := ButtonIcon{
                 width: 24
                 height: 20
@@ -1462,6 +1471,7 @@ script_mod! {
                     svg: crate_resource("self:resources/icons/pause.svg")
                     color: #xd6dee6
                 }
+            }
             }
             // The title clips here and scrolls as a ticker when it does
             // not fit — the host advances the margin while playing.
@@ -1488,6 +1498,7 @@ script_mod! {
             // is absent once the track is already in the queue, because a
             // control that cannot do anything should not ask to be
             // pressed.
+            Tip{ text: "Load the pre-listened track onto deck A; the playing-deck rule applies"
             hp_load_a := Button{
                 width: 18
                 height: 20
@@ -1507,6 +1518,8 @@ script_mod! {
                     text_style: theme.font_bold{font_size: 9}
                 }
             }
+            }
+            Tip{ text: "Load the pre-listened track onto deck B; the playing-deck rule applies"
             hp_load_b := Button{
                 width: 18
                 height: 20
@@ -1526,6 +1539,8 @@ script_mod! {
                     text_style: theme.font_bold{font_size: 9}
                 }
             }
+            }
+            Tip{ text: "Add the pre-listened track to the set list; an empty deck takes it"
             hp_queue := Button{
                 width: 18
                 height: 20
@@ -1545,6 +1560,8 @@ script_mod! {
                     text_style: theme.font_bold{font_size: 10}
                 }
             }
+            }
+            Tip{ text: "Stop the pre-listen and put the player away"
             hp_close := Button{
                 width: 20
                 height: 20
@@ -1564,8 +1581,11 @@ script_mod! {
                     text_style: theme.font_bold{font_size: 10}
                 }
             }
+            }
         }
+        Tip{ text: "Click or drag to move the pre-listen to that point of the track"
         hp_seek := mod.widgets.VjPhonesWave{}
+        }
     }
 
     mod.widgets.VjTrackListBase = #(VjTrackList::register_widget(vm))
@@ -2249,10 +2269,12 @@ script_mod! {
                 //
                 // The room for it comes out of the title column's Fill, so
                 // nothing below moves.
+                Tip{ text: "Clear a stopped deck; a second press within ½ s puts the track back"
                 deck_a_retire := MusicButton{
                     width: 22 height: 22 padding: 0
                     align: Align{x: 0.5, y: 0.5}
                     text: "×"
+                }
                 }
                 Label{
                     text: "A"
@@ -2304,7 +2326,9 @@ script_mod! {
                     align: Align{x: 0.5, y: 0.5}
                     deck_a_beat := VjBeatLed{width: 18 height: 22}
                 }
+                Tip{ text: "Key shift in semitones; click for 0, the track's own key under key lock"
                 deck_a_key := KeyReadout{text: "—"}
+                }
                 deck_a_time := MusicLabel{width: 78 text: "0:00 / 0:00"}
             }
             // QUANT, not SNAP: an immediate, phase-preserving jump, which
@@ -2331,8 +2355,12 @@ script_mod! {
                     height: Fit
                     flow: Right
                     spacing: 4
+                    Tip{ text: "A's overview clicks and drags snap 1–16 beats; — frees them, no auto jumps"
                     music_snap_a := VjBeatsDrop{width: 34}
+                    }
+                    Tip{ text: "B's overview clicks and drags snap 1–16 beats; — frees them, no auto jumps"
                     music_snap_b := VjBeatsDrop{width: 34}
+                    }
                 }
             }
             deck_b_head := RoundedView{
@@ -2351,7 +2379,9 @@ script_mod! {
                     border_radius: 8.0
                 }
                 deck_b_time := MusicLabel{width: 78 text: "0:00 / 0:00"}
+                Tip{ text: "Key shift in semitones; click for 0, the track's own key under key lock"
                 deck_b_key := KeyReadout{text: "—"}
+                }
                 // The count, beside the tempo it is counting. Its own
                 // batch: the LED resolves its phase at draw time and
                 // redraws every frame, and the head's title, art, tempo
@@ -2402,10 +2432,12 @@ script_mod! {
                     draw_text.color: #x6aa8ff
                     draw_text.text_style: theme.font_bold{font_size: 13}
                 }
+                Tip{ text: "Clear a stopped deck; a second press within ½ s puts the track back"
                 deck_b_retire := MusicButton{
                     width: 22 height: 22 padding: 0
                     align: Align{x: 0.5, y: 0.5}
                     text: "×"
+                }
                 }
             }
         }
@@ -2419,16 +2451,20 @@ script_mod! {
             new_batch: true
             deck_a_well := DeckWell{
                 width: Fill
+                Tip{ text: "Click jumps on the QUANT, or moves a running loop; wheel nudges a mark"
                 deck_a_overview := mod.widgets.VjWaveOverview{
                     height: Fill
                     draw_load +: {color: #xff5c39}
                 }
+                }
             }
             deck_b_well := DeckWell{
                 width: Fill
+                Tip{ text: "Click jumps on the QUANT, or moves a running loop; wheel nudges a mark"
                 deck_b_overview := mod.widgets.VjWaveOverview{
                     height: Fill
                     draw_load +: {color: #x6aa8ff}
+                }
                 }
             }
         }
@@ -2491,10 +2527,16 @@ script_mod! {
                         flow: Right
                         spacing: 6
                         align: Align{x: 0.0, y: 0.5}
+                        Tip{ text: "Show deck A in this slot; in target mode it also aims the library at A"
                         deck_a_tab_0 := MusicButton{width: 62 height: 22 text: "deck A"}
+                        }
+                        Tip{ text: "Show deck B in this slot; in target mode it also aims the library at B"
                         deck_a_tab_1 := MusicButton{width: 62 height: 22 text: "deck B"}
+                        }
                         // Only once the mixer is a tab as well.
+                        Tip{ text: "Show the mixer in this slot"
                         deck_a_tab_2 := MusicButton{visible: false width: 56 height: 22 text: "mixer"}
+                        }
                         View{width: Fill height: 1}
                         Tip{
                             text: "Manual — only you change what is on screen"
@@ -2527,16 +2569,22 @@ script_mod! {
                         flow: Right
                         spacing: 4
                         align: Align{x: 0.0, y: 0.5}
+                        Tip{ text: "Lock to the other deck; ctrl tempo once, shift phase once, alt room clock"
                         deck_a_sync := MusicButton{width: Fill height: 22 text: "SYNC"}
+                        }
                         // SLIP: the track keeps running where you left it
                         // while the record goes somewhere else. The room
                         // comes out of SYNC's own Fill, which is the only
                         // elastic thing in this row and where the headphone
                         // button's width came from too.
+                        Tip{ text: "Track keeps time while you cue over it; off lands back, shift+off stays"
                         deck_a_slip := MusicButton{width: 34 height: 22 text: "SLIP"}
+                        }
                         // The analyser's grid can sit on the off pulse: same tempo,
                         // sync exactly half a beat out. This flips it.
+                        Tip{ text: "Flip the beat grid half a beat when the count sits on the off pulse"
                         deck_a_phase_flip := MusicButton{width: 26 height: 22 padding: 0 align: Align{x: 0.5, y: 0.5} text: "½"}
+                        }
                         // Headphone cue: latch this deck onto the phones bus.
                         // Green when live — monitoring, never program.
                         //
@@ -2546,19 +2594,29 @@ script_mod! {
                         // now sits between. The height is the row's 22, not the
                         // icon button's own 24 — two points proud of the
                         // buttons either side reads as a mistake.
+                        Tip{ text: "Latch this deck onto the phones; opens phones setup if none is armed"
                         deck_a_hp := MusicIconButton{
                             width: 30
                             height: 22
                             draw_icon +: { svg: crate_resource("self:resources/icons/headphones.svg") }
                         }
+                        }
+                        Tip{ text: "Hold the key while the tempo moves; alt picks KEY, NOW or NOW+ to hold"
                         deck_a_keylock := MusicButton{width: 44 height: 22 text: "KEY"}
+                        }
                         // The key steps in whole semitones, so it steps: a fader
                         // with twelve detents a side would be a worse way to ask
                         // for the same number. The readout is up in the header,
                         // beside the BPM the key belongs to.
+                        Tip{ text: "Key down a semitone, to −12 below; click the readout to reset"
                         deck_a_key_down := MusicButton{width: 22 height: 22 padding: 0 align: Align{x: 0.5, y: 0.5} text: "-"}
+                        }
+                        Tip{ text: "Key up a semitone, to +12 above; click the readout to reset"
                         deck_a_key_up := MusicButton{width: 22 height: 22 padding: 0 align: Align{x: 0.5, y: 0.5} text: "+"}
+                        }
+                        Tip{ text: "Tempo fader reach: press for wider, shift for narrower (±4% to ±90%)"
                         deck_a_range := MusicButton{width: 46 height: 22 text: "±8%"}
+                        }
                     }
                     View{
                         width: Fill
@@ -2583,8 +2641,12 @@ script_mod! {
                                 spacing: 2
                                 align: Align{x: 0.5, y: 0.0}
                                 MusicLabel{text: "TEMPO"}
+                                Tip{ text: "Tempo vs. the track's own; moving it drops sync unless SYNC reads MSTR"
                                 deck_a_pitch := MusicFader{min: -1.0 max: 1.0 default: 0.0 arc_from_origin: true}
+                                }
+                                Tip{ text: "Tempo back to the track's own (0.0%); drops sync unless SYNC reads MSTR"
                                 deck_a_pitch_reset := MusicButton{width: Fill height: 14 padding: 0 align: Align{x: 0.5, y: 0.5} text: "0"}
+                                }
                             }
                             View{
                                 width: 44
@@ -2593,8 +2655,12 @@ script_mod! {
                                 spacing: 2
                                 align: Align{x: 0.5, y: 0.0}
                                 MusicLabel{text: "VOL"}
+                                Tip{ text: "Deck level: unity two-thirds up, +3.5 dB at top; double-click for unity"
                                 deck_a_gain := MusicFader{min: 0.0 max: 1.5 default: 1.0}
+                                }
+                                Tip{ text: "Mute the deck in the room; pre-fader phones still hear it; fader stays put"
                                 deck_a_mute := MusicButton{width: Fill height: 14 padding: 0 align: Align{x: 0.5, y: 0.5} text: "M"}
+                                }
                             }
                             View{
                                 width: 10
@@ -2633,13 +2699,17 @@ script_mod! {
                                 // glyphs are not in this font and came out as boxes. Two marks
                                 // with one shown, never one mark with its svg swapped — that
                                 // drops the loaded document and leaves a white silhouette.
+                                Tip{ text: "Open or fold the equalizer on a short console; one block always stays"
                                 deck_a_eq_chev_up := ChevronIcon{
                                     visible: false
                                     draw_icon +: { svg: crate_resource("self:resources/icons/chevron_up.svg") }
                                 }
+                                }
+                                Tip{ text: "Open or fold the equalizer on a short console; one block always stays"
                                 deck_a_eq_chev_down := ChevronIcon{
                                     visible: false
                                     draw_icon +: { svg: crate_resource("self:resources/icons/chevron_down.svg") }
+                                }
                                 }
                             }
                             deck_a_eq_body := View{
@@ -2648,32 +2718,60 @@ script_mod! {
                                 flow: Right
                                 spacing: 3
                                 KnobStack{
+                                    Tip{ text: "Click to set the highs flat again"
                                     deck_a_label_eq_high := KnobLabel{text: "HIGH"}
+                                    }
+                                    Tip{ text: "Highs: flat at top, +6 dB right, KILL left; double-click for flat"
                                     deck_a_eq_high := MusicKnob{}
+                                    }
                                     MSRow{
+                                        Tip{ text: "Kill the highs; the knob keeps its setting"
                                         deck_a_kill_high := MSButton{text: "M"}
+                                        }
+                                        Tip{ text: "Solo the highs; only soloed bands sound"
                                         deck_a_soloband_high := MSButton{text: "S"}
+                                        }
                                     }
                                 }
                                 KnobStack{
+                                    Tip{ text: "Click to set the mids flat again"
                                     deck_a_label_eq_mid := KnobLabel{text: "MID"}
+                                    }
+                                    Tip{ text: "Mids: flat at top, +6 dB right, KILL left; double-click for flat"
                                     deck_a_eq_mid := MusicKnob{}
+                                    }
                                     MSRow{
+                                        Tip{ text: "Kill the mids; the knob keeps its setting"
                                         deck_a_kill_mid := MSButton{text: "M"}
+                                        }
+                                        Tip{ text: "Solo the mids; only soloed bands sound"
                                         deck_a_soloband_mid := MSButton{text: "S"}
+                                        }
                                     }
                                 }
                                 KnobStack{
+                                    Tip{ text: "Click to set the lows flat again"
                                     deck_a_label_eq_low := KnobLabel{text: "LOW"}
+                                    }
+                                    Tip{ text: "Lows: flat at top, +6 dB right, KILL left; double-click for flat"
                                     deck_a_eq_low := MusicKnob{}
+                                    }
                                     MSRow{
+                                        Tip{ text: "Kill the lows; the knob keeps its setting"
                                         deck_a_kill_low := MSButton{text: "M"}
+                                        }
+                                        Tip{ text: "Solo the lows; only soloed bands sound"
                                         deck_a_soloband_low := MSButton{text: "S"}
+                                        }
                                     }
                                 }
                                 KnobStack{
+                                    Tip{ text: "Click to set the sweep back to OFF"
                                     deck_a_label_filter := KnobLabel{text: "FILTER"}
+                                    }
+                                    Tip{ text: "Sweep: OFF at centre, low-pass to the left, high-pass to the right"
                                     deck_a_filter := MusicKnob{min: 0.0 max: 1.0 default: 0.5 taper: Linear}
+                                    }
                                     // The slot the three bands spend on
                                     // kill and solo: the sweep has no
                                     // bands to kill, so its row carries
@@ -2682,8 +2780,12 @@ script_mod! {
                                     // each chip is a single letter, the
                                     // way M and S already are.
                                     MSRow{
+                                        Tip{ text: "Step the sweep's resonance: flat, a lift, a bigger lift, round again"
                                         deck_a_resonance := MSButton{text: "R"}
+                                        }
+                                        Tip{ text: "Hold to stutter the last beat (or a sub-beat loop rung) while pressed"
                                         deck_a_freeze := MSButton{text: "F"}
+                                        }
                                     }
                                 }
                             }
@@ -2692,6 +2794,7 @@ script_mod! {
                                 height: Fit
                                 flow: Right
                                 align: Align{x: 0.0, y: 0.0}
+                                Tip{ text: "Cycle stems: live separates, cached only reuses, off is the full mix"
                                 deck_a_stem_mix := KnobLabel{
                                     text: "STEM MIX"
                                     // KnobLabel centres for knob legends; this one
@@ -2711,18 +2814,23 @@ script_mod! {
                                         color_down: #xffffff
                                     }
                                 }
+                                }
                                 View{width: Fill height: 1}
                                 // The chevron, drawn rather than typed: the small triangle
                                 // glyphs are not in this font and came out as boxes. Two marks
                                 // with one shown, never one mark with its svg swapped — that
                                 // drops the loaded document and leaves a white silhouette.
+                                Tip{ text: "Open or fold the stem mix on a short console; one block always stays"
                                 deck_a_stems_chev_up := ChevronIcon{
                                     visible: false
                                     draw_icon +: { svg: crate_resource("self:resources/icons/chevron_up.svg") }
                                 }
+                                }
+                                Tip{ text: "Open or fold the stem mix on a short console; one block always stays"
                                 deck_a_stems_chev_down := ChevronIcon{
                                     visible: false
                                     draw_icon +: { svg: crate_resource("self:resources/icons/chevron_down.svg") }
+                                }
                                 }
                             }
                             deck_a_stems_body := View{
@@ -2731,35 +2839,67 @@ script_mod! {
                                 flow: Right
                                 spacing: 3
                                 StemStack{
+                                    Tip{ text: "Click to reset the drums lane to unity"
                                     deck_a_label_drums := KnobLabel{text: "DRUMS"}
+                                    }
+                                    Tip{ text: "Drums lane level (unity at top); live only once the stems are separated"
                                     deck_a_stem_drums := StemKnob{}
+                                    }
                                     MSRow{
+                                        Tip{ text: "Kill the drums lane; the knob keeps its setting"
                                         deck_a_kill_drums := MSButton{text: "M"}
+                                        }
+                                        Tip{ text: "Solo the drums lane; only soloed lanes sound"
                                         deck_a_solo_drums := MSButton{text: "S"}
+                                        }
                                     }
                                 }
                                 StemStack{
+                                    Tip{ text: "Click to reset the bass lane to unity"
                                     deck_a_label_bass := KnobLabel{text: "BASS"}
+                                    }
+                                    Tip{ text: "Bass lane level (unity at top); live only once the stems are separated"
                                     deck_a_stem_bass := StemKnob{}
+                                    }
                                     MSRow{
+                                        Tip{ text: "Kill the bass lane; the knob keeps its setting"
                                         deck_a_kill_bass := MSButton{text: "M"}
+                                        }
+                                        Tip{ text: "Solo the bass lane; only soloed lanes sound"
                                         deck_a_solo_bass := MSButton{text: "S"}
+                                        }
                                     }
                                 }
                                 StemStack{
+                                    Tip{ text: "Click to reset the vocals lane to unity"
                                     deck_a_label_vocals := KnobLabel{text: "VOCALS"}
+                                    }
+                                    Tip{ text: "Vocals lane level (unity at top); live only once the stems are separated"
                                     deck_a_stem_vocals := StemKnob{}
+                                    }
                                     MSRow{
+                                        Tip{ text: "Kill the vocals lane; the knob keeps its setting"
                                         deck_a_kill_vocals := MSButton{text: "M"}
+                                        }
+                                        Tip{ text: "Solo the vocals lane; only soloed lanes sound"
                                         deck_a_solo_vocals := MSButton{text: "S"}
+                                        }
                                     }
                                 }
                                 StemStack{
+                                    Tip{ text: "Click to reset the other lane to unity"
                                     deck_a_label_other := KnobLabel{text: "OTHER"}
+                                    }
+                                    Tip{ text: "Other lane level (unity at top); live only once the stems are separated"
                                     deck_a_stem_other := StemKnob{}
+                                    }
                                     MSRow{
+                                        Tip{ text: "Kill the other lane; the knob keeps its setting"
                                         deck_a_kill_other := MSButton{text: "M"}
+                                        }
+                                        Tip{ text: "Solo the other lane; only soloed lanes sound"
                                         deck_a_solo_other := MSButton{text: "S"}
+                                        }
                                     }
                                 }
                             }
@@ -2780,6 +2920,7 @@ script_mod! {
                                 height: Fit
                                 flow: Right
                                 align: Align{x: 0.0, y: 0.0}
+                                Tip{ text: "Lyrics: live transcribes the vocals, cached reuses only, off hides them"
                                 deck_a_kar_title := KnobLabel{
                                     text: "KARAOKE"
                                     margin: Inset{left: 0.0 right: 0.0 top: 6.0 bottom: 0.0}
@@ -2790,18 +2931,23 @@ script_mod! {
                                         color_down: #xffffff
                                     }
                                 }
+                                }
                                 View{width: Fill height: 1}
                                 // The chevron, drawn rather than typed: the small triangle
                                 // glyphs are not in this font and came out as boxes. Two marks
                                 // with one shown, never one mark with its svg swapped — that
                                 // drops the loaded document and leaves a white silhouette.
+                                Tip{ text: "Open or fold the karaoke on a short console; one block always stays"
                                 deck_a_kar_chev_up := ChevronIcon{
                                     visible: false
                                     draw_icon +: { svg: crate_resource("self:resources/icons/chevron_up.svg") }
                                 }
+                                }
+                                Tip{ text: "Open or fold the karaoke on a short console; one block always stays"
                                 deck_a_kar_chev_down := ChevronIcon{
                                     visible: false
                                     draw_icon +: { svg: crate_resource("self:resources/icons/chevron_down.svg") }
+                                }
                                 }
                             }
                             // The transcript, filling the column down to the
@@ -2816,7 +2962,9 @@ script_mod! {
                             deck_a_kar_body := View{
                                 width: Fill
                                 height: Fill
+                                Tip{ text: "Click a line to put the needle on it; wheel browses the transcript"
                                 deck_a_lyrics := mod.widgets.VjLyricReader{height: Fill}
+                                }
                             }
                         }
                     }
@@ -2832,15 +2980,19 @@ script_mod! {
                         spacing: 3
                         wrap_spacing: 3
                         align: Align{x: 0.0, y: 0.5}
+                        Tip{ text: "Play or pause; shift: brake / soft start, ctrl: spin back"
                         deck_a_play := MusicTransportIconButton{
                             width: 26
                             icon_walk: Walk{width: 13 height: Fit}
                             draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") }
                         }
+                        }
+                        Tip{ text: "Hold plays from the cue, release stops on it; paused off it, sets it here"
                         deck_a_cue := MusicTransportIconButton{
                             width: 38
                             icon_walk: Walk{width: 14 height: Fit}
                             draw_icon +: { svg: crate_resource("self:resources/icons/cue.svg") }
+                        }
                         }
                         // One beat either way -- the nudge a hand makes
                         // when the drop lands a hair off -- and held, they
@@ -2854,30 +3006,48 @@ script_mod! {
                         // a beat back, which is the same convention as a
                         // hand on the platter. NOT mirrored on deck B: the
                         // sense is the same whichever deck it is.
+                        Tip{ text: "Tap: a beat ahead; hold: lean faster; shift 4 bars, ctrl 16 bars ahead"
                         deck_a_beat_fwd := MusicTransportButton{width: 22 text: "<"}
+                        }
+                        Tip{ text: "Tap: a beat back; hold: lean slower; shift 4 bars, ctrl 16 bars back"
                         deck_a_beat_back := MusicTransportButton{width: 22 text: ">"}
+                        }
+                        Tip{ text: "Exit the loop (kept), or jump back into the last; shift repeats the track"
                         deck_a_loop := MusicTransportIconButton{
                             width: 26
                             icon_walk: Walk{width: 13 height: Fit}
                             draw_icon +: { svg: crate_resource("self:resources/icons/loop_one.svg") }
                         }
+                        }
+                        Tip{ text: "Halve the loop: one rung down the ladder"
                         deck_a_loop_halve := MusicTransportButton{width: 22 text: "-"}
+                        }
+                        Tip{ text: "Loop length in beats: 1/32 to 512; 0 sets by hand with [ ], ∞ bookmarks"
                         deck_a_loop_len := VjBeatsDrop{
                             width: 30 height: 34 loop_rows: true
                             draw_bg +: {arrow: 0.0}
                             draw_text +: {text_style: theme.font_bold{font_size: 10}}
                         }
+                        }
+                        Tip{ text: "Double the loop: one rung up the ladder"
                         deck_a_loop_double := MusicTransportButton{width: 22 text: "+"}
+                        }
                         // The loop pair, in glyphs that read as the marks
                         // they set: `[` in, `]` out. The loop icon left of the
                         // stepper is RELOOP/EXIT; the sparkle past them opens the
                         // scanner, which is also where marks go to be forgotten.
+                        Tip{ text: "Loop in: a loop of the set count from here; shift-hold: a roll, alt keeps"
                         deck_a_loop_in := MusicTransportButton{width: 22 text: "["}
+                        }
+                        Tip{ text: "Loop out: end here, the set count back; on 0 it closes the loop from ["
                         deck_a_loop_out := MusicTransportButton{width: 22 text: "]"}
+                        }
+                        Tip{ text: "Open the loop scanner: find loops, clear or renumber this deck's pads"
                         deck_a_loop_scan := MusicTransportIconButton{
                             width: 26
                             icon_walk: Walk{width: 13 height: Fit}
                             draw_icon +: { svg: crate_resource("self:resources/icons/sparkle.svg") }
+                        }
                         }
                     }
                 }
@@ -2905,10 +3075,16 @@ script_mod! {
                         flow: Right
                         spacing: 6
                         align: Align{x: 0.0, y: 0.5}
+                        Tip{ text: "Show deck A in this slot"
                         mixer_tab_0 := MusicButton{width: 62 height: 22 text: "deck A"}
+                        }
+                        Tip{ text: "Show deck B in this slot"
                         mixer_tab_1 := MusicButton{width: 62 height: 22 text: "deck B"}
+                        }
                         // Only once the mixer is a tab as well.
+                        Tip{ text: "Show the mixer in this slot"
                         mixer_tab_2 := MusicButton{visible: false width: 56 height: 22 text: "mixer"}
+                        }
                         View{width: Fill height: 1}
                         Tip{
                             text: "Manual — only you change what is on screen"
@@ -2945,7 +3121,9 @@ script_mod! {
                             width: Fill
                             height: Fill
                             new_batch: true
+                            Tip{ text: "Drag to scratch; shift-hold runs a playing record backwards; wheel zooms"
                             music_waves := mod.widgets.VjWaveScroll{}
+                            }
                         }
                     }
                     // Fade shaping, the crossfader and the automation. The strip
@@ -2969,6 +3147,7 @@ script_mod! {
                             align: Align{x: 0.5, y: 0.5}
                             // How long a fade takes — the number the two buttons
                             // beside it spend.
+                            Tip{ text: "Seconds for a full fade; halfway takes half; double-click resets it"
                             xfade_secs := Slider{
                                 width: 118
                                 margin: 0
@@ -2978,21 +3157,32 @@ script_mod! {
                                 default: 4.0
                                 scroll_step: 0.025
                             }
+                            }
                             // FADE walks the console to the other side over that
                             // duration; CUT jumps there. Both land on the
                             // other deck, whichever side that currently is.
+                            Tip{ text: "Fade to the other deck over the duration; AUTOPLAY starts it if stopped"
                             xfade_now := MusicButton{width: 46 height: 22 text: "FADE"}
+                            }
+                            Tip{ text: "Jump the fader to the other deck at once; AUTOPLAY starts it if stopped"
                             xfade_switch := MusicButton{width: 40 height: 22 text: "CUT"}
+                            }
                             // Eight gain laws, each row wearing a plot of itself.
+                            Tip{ text: "Crossfader gain law; each row draws what it does to the two levels"
                             xcurve := mod.widgets.VjCurveDrop{}
+                            }
                             // Tone follows the fader too when this is lit: the deck
                             // on its way out loses its bass, so two kicks never
                             // stack in the middle of a blend.
+                            Tip{ text: "Fader also pulls the outgoing deck's bass; its LOW knob stays where set"
                             music_eqfade := MusicButton{width: 34 height: 22 text: "EQ"}
+                            }
                             // The travel turned round: the left end answers
                             // to the deck that was on the right, and the
                             // letters beside the sweep follow it.
+                            Tip{ text: "Turn the fader round: left hears the deck that was on the right"
                             xfade_rev := MusicButton{width: 40 height: 22 text: "REV"}
+                            }
                         }
                         // The sweep and its two cue keys are three children, not
                         // one: the strip flanks the sweep with them while there
@@ -3004,7 +3194,9 @@ script_mod! {
                             flow: Right
                             spacing: 6
                             align: Align{x: 0.0, y: 0.5}
+                            Tip{ text: "Fade to the end that hears deck A over the duration; AUTOPLAY starts A"
                             fade_to_a := MusicButton{width: 46 height: 22 text: "◀ A"}
+                            }
                             xfade_label_a := MusicLabel{width: 12 text: "A"}
                         }
                         // Fit here is only a fallback: the strip always draws this
@@ -3018,7 +3210,9 @@ script_mod! {
                             // margin: 0 — the themed Slider's mspace margin is
                             // dead width here, and the sweep should own every
                             // pixel the row does not spend on its cue keys.
+                            Tip{ text: "Blend the decks; a hand here stops a running fade; double-click centres"
                             xfader := CrossFader{margin: 0}
+                            }
                         }
                         fader_cue_b := View{
                             width: Fit
@@ -3027,7 +3221,9 @@ script_mod! {
                             spacing: 6
                             align: Align{x: 0.0, y: 0.5}
                             xfade_label_b := MusicLabel{width: 12 text: "B"}
+                            Tip{ text: "Fade to the end that hears deck B over the duration; AUTOPLAY starts B"
                             fade_to_b := MusicButton{width: 46 height: 22 text: "B ▶"}
+                            }
                         }
                         strip_automation := View{
                             width: Fit
@@ -3042,7 +3238,9 @@ script_mod! {
                             // plus their gaps have to stay inside the strip's
                             // 290pt budget or the row wraps and reads as two
                             // unrelated groups.
+                            Tip{ text: "Swap the decks, room unchanged; shift instead doubles the live record"
                             decks_swap := MusicButton{width: 46 height: 22 text: "SWAP"}
+                            }
                             // Level-matching: a quiet master comes up, a hot one
                             // comes down, and the faders still read what the hand
                             // set. The ECG waveform says levelling without a word.
@@ -3054,7 +3252,9 @@ script_mod! {
                                     draw_icon +: { svg: crate_resource("self:resources/icons/waveform.svg") }
                                 }
                             }
+                            Tip{ text: "Hold both decks to one tempo and phase; off unlocks, room clock stays"
                             auto_sync := MusicButton{width: 80 height: 22 text: "AUTO SYNC"}
+                            }
                             // The AUTO DJ latch wears its own status line, the way
                             // the SYNC button wears its mode — one control, one
                             // home — and the gear that configures it never leaves
@@ -3065,10 +3265,14 @@ script_mod! {
                                 flow: Right
                                 spacing: 6
                                 align: Align{x: 0.0, y: 0.5}
+                                Tip{ text: "Mix the set list automatically; off drops the plan it was holding"
                                 auto_dj := MusicButton{width: 74 height: 22 text: "AUTO DJ"}
+                                }
+                                Tip{ text: "AUTO DJ settings: mix brain, style, picking and the set's arc"
                                 auto_cfg := MusicIconButton{
                                     width: 26 height: 22
                                     draw_icon +: { svg: crate_resource("self:resources/icons/gear.svg") }
+                                }
                                 }
                             }
                         }
@@ -3094,10 +3298,16 @@ script_mod! {
                         flow: Right
                         spacing: 6
                         align: Align{x: 0.0, y: 0.5}
+                        Tip{ text: "Show deck A in this slot; in target mode it also aims the library at A"
                         deck_b_tab_0 := MusicButton{width: 62 height: 22 text: "deck A"}
+                        }
+                        Tip{ text: "Show deck B in this slot; in target mode it also aims the library at B"
                         deck_b_tab_1 := MusicButton{width: 62 height: 22 text: "deck B"}
+                        }
                         // Only once the mixer is a tab as well.
+                        Tip{ text: "Show the mixer in this slot"
                         deck_b_tab_2 := MusicButton{visible: false width: 56 height: 22 text: "mixer"}
+                        }
                         View{width: Fill height: 1}
                         Tip{
                             text: "Manual — only you change what is on screen"
@@ -3130,24 +3340,40 @@ script_mod! {
                         flow: Right
                         spacing: 4
                         align: Align{x: 0.0, y: 0.5}
+                        Tip{ text: "Tempo fader reach: press for wider, shift for narrower (±4% to ±90%)"
                         deck_b_range := MusicButton{width: 46 height: 22 text: "±8%"}
+                        }
                         // Mirrored against deck A: + then −, reading outward from
                         // the console's centre line.
+                        Tip{ text: "Key up a semitone, to +12 above; click the readout to reset"
                         deck_b_key_up := MusicButton{width: 22 height: 22 padding: 0 align: Align{x: 0.5, y: 0.5} text: "+"}
+                        }
+                        Tip{ text: "Key down a semitone, to −12 below; click the readout to reset"
                         deck_b_key_down := MusicButton{width: 22 height: 22 padding: 0 align: Align{x: 0.5, y: 0.5} text: "-"}
+                        }
+                        Tip{ text: "Hold the key while the tempo moves; alt picks KEY, NOW or NOW+ to hold"
                         deck_b_keylock := MusicButton{width: 44 height: 22 text: "KEY"}
+                        }
+                        Tip{ text: "Flip the beat grid half a beat when the count sits on the off pulse"
                         deck_b_phase_flip := MusicButton{width: 26 height: 22 padding: 0 align: Align{x: 0.5, y: 0.5} text: "½"}
+                        }
                         // Deck A's phones latch, mirrored: KEY then hp then
                         // SYNC, reading outward from the console's centre.
+                        Tip{ text: "Latch this deck onto the phones; opens phones setup if none is armed"
                         deck_b_hp := MusicIconButton{
                             width: 30
                             height: 22
                             draw_icon +: { svg: crate_resource("self:resources/icons/headphones.svg") }
                         }
+                        }
                         // Mirrored, so SLIP sits inboard of SYNC on this
                         // side the way the rest of the row is mirrored.
+                        Tip{ text: "Track keeps time while you cue over it; off lands back, shift+off stays"
                         deck_b_slip := MusicButton{width: 34 height: 22 text: "SLIP"}
+                        }
+                        Tip{ text: "Lock to the other deck; ctrl tempo once, shift phase once, alt room clock"
                         deck_b_sync := MusicButton{width: Fill height: 22 text: "SYNC"}
+                        }
                     }
                     View{
                         width: Fill
@@ -3181,13 +3407,17 @@ script_mod! {
                                 // glyphs are not in this font and came out as boxes. Two marks
                                 // with one shown, never one mark with its svg swapped — that
                                 // drops the loaded document and leaves a white silhouette.
+                                Tip{ text: "Open or fold the equalizer on a short console; one block always stays"
                                 deck_b_eq_chev_up := ChevronIcon{
                                     visible: false
                                     draw_icon +: { svg: crate_resource("self:resources/icons/chevron_up.svg") }
                                 }
+                                }
+                                Tip{ text: "Open or fold the equalizer on a short console; one block always stays"
                                 deck_b_eq_chev_down := ChevronIcon{
                                     visible: false
                                     draw_icon +: { svg: crate_resource("self:resources/icons/chevron_down.svg") }
+                                }
                                 }
                             }
                             deck_b_eq_body := View{
@@ -3196,8 +3426,12 @@ script_mod! {
                                 flow: Right
                                 spacing: 3
                                 KnobStack{
+                                    Tip{ text: "Click to set the sweep back to OFF"
                                     deck_b_label_filter := KnobLabel{text: "FILTER"}
+                                    }
+                                    Tip{ text: "Sweep: OFF at centre, low-pass to the left, high-pass to the right"
                                     deck_b_filter := MusicKnob{min: 0.0 max: 1.0 default: 0.5 taper: Linear}
+                                    }
                                     // The slot the three bands spend on
                                     // kill and solo: the sweep has no
                                     // bands to kill, so its row carries
@@ -3206,32 +3440,60 @@ script_mod! {
                                     // each chip is a single letter, the
                                     // way M and S already are.
                                     MSRow{
+                                        Tip{ text: "Step the sweep's resonance: flat, a lift, a bigger lift, round again"
                                         deck_b_resonance := MSButton{text: "R"}
+                                        }
+                                        Tip{ text: "Hold to stutter the last beat (or a sub-beat loop rung) while pressed"
                                         deck_b_freeze := MSButton{text: "F"}
+                                        }
                                     }
                                 }
                                 KnobStack{
+                                    Tip{ text: "Click to set the lows flat again"
                                     deck_b_label_eq_low := KnobLabel{text: "LOW"}
+                                    }
+                                    Tip{ text: "Lows: flat at top, +6 dB right, KILL left; double-click for flat"
                                     deck_b_eq_low := MusicKnob{}
+                                    }
                                     MSRow{
+                                        Tip{ text: "Kill the lows; the knob keeps its setting"
                                         deck_b_kill_low := MSButton{text: "M"}
+                                        }
+                                        Tip{ text: "Solo the lows; only soloed bands sound"
                                         deck_b_soloband_low := MSButton{text: "S"}
+                                        }
                                     }
                                 }
                                 KnobStack{
+                                    Tip{ text: "Click to set the mids flat again"
                                     deck_b_label_eq_mid := KnobLabel{text: "MID"}
+                                    }
+                                    Tip{ text: "Mids: flat at top, +6 dB right, KILL left; double-click for flat"
                                     deck_b_eq_mid := MusicKnob{}
+                                    }
                                     MSRow{
+                                        Tip{ text: "Kill the mids; the knob keeps its setting"
                                         deck_b_kill_mid := MSButton{text: "M"}
+                                        }
+                                        Tip{ text: "Solo the mids; only soloed bands sound"
                                         deck_b_soloband_mid := MSButton{text: "S"}
+                                        }
                                     }
                                 }
                                 KnobStack{
+                                    Tip{ text: "Click to set the highs flat again"
                                     deck_b_label_eq_high := KnobLabel{text: "HIGH"}
+                                    }
+                                    Tip{ text: "Highs: flat at top, +6 dB right, KILL left; double-click for flat"
                                     deck_b_eq_high := MusicKnob{}
+                                    }
                                     MSRow{
+                                        Tip{ text: "Kill the highs; the knob keeps its setting"
                                         deck_b_kill_high := MSButton{text: "M"}
+                                        }
+                                        Tip{ text: "Solo the highs; only soloed bands sound"
                                         deck_b_soloband_high := MSButton{text: "S"}
+                                        }
                                     }
                                 }
                             }
@@ -3240,6 +3502,7 @@ script_mod! {
                                 height: Fit
                                 flow: Right
                                 align: Align{x: 0.0, y: 0.0}
+                                Tip{ text: "Cycle stems: live separates, cached only reuses, off is the full mix"
                                 deck_b_stem_mix := KnobLabel{
                                     text: "STEM MIX"
                                     // KnobLabel centres for knob legends; this one
@@ -3258,18 +3521,23 @@ script_mod! {
                                         color_down: #xffffff
                                     }
                                 }
+                                }
                                 View{width: Fill height: 1}
                                 // The chevron, drawn rather than typed: the small triangle
                                 // glyphs are not in this font and came out as boxes. Two marks
                                 // with one shown, never one mark with its svg swapped — that
                                 // drops the loaded document and leaves a white silhouette.
+                                Tip{ text: "Open or fold the stem mix on a short console; one block always stays"
                                 deck_b_stems_chev_up := ChevronIcon{
                                     visible: false
                                     draw_icon +: { svg: crate_resource("self:resources/icons/chevron_up.svg") }
                                 }
+                                }
+                                Tip{ text: "Open or fold the stem mix on a short console; one block always stays"
                                 deck_b_stems_chev_down := ChevronIcon{
                                     visible: false
                                     draw_icon +: { svg: crate_resource("self:resources/icons/chevron_down.svg") }
+                                }
                                 }
                             }
                             deck_b_stems_body := View{
@@ -3278,35 +3546,67 @@ script_mod! {
                                 flow: Right
                                 spacing: 3
                                 StemStack{
+                                    Tip{ text: "Click to reset the drums lane to unity"
                                     deck_b_label_drums := KnobLabel{text: "DRUMS"}
+                                    }
+                                    Tip{ text: "Drums lane level (unity at top); live only once the stems are separated"
                                     deck_b_stem_drums := StemKnob{}
+                                    }
                                     MSRow{
+                                        Tip{ text: "Kill the drums lane; the knob keeps its setting"
                                         deck_b_kill_drums := MSButton{text: "M"}
+                                        }
+                                        Tip{ text: "Solo the drums lane; only soloed lanes sound"
                                         deck_b_solo_drums := MSButton{text: "S"}
+                                        }
                                     }
                                 }
                                 StemStack{
+                                    Tip{ text: "Click to reset the bass lane to unity"
                                     deck_b_label_bass := KnobLabel{text: "BASS"}
+                                    }
+                                    Tip{ text: "Bass lane level (unity at top); live only once the stems are separated"
                                     deck_b_stem_bass := StemKnob{}
+                                    }
                                     MSRow{
+                                        Tip{ text: "Kill the bass lane; the knob keeps its setting"
                                         deck_b_kill_bass := MSButton{text: "M"}
+                                        }
+                                        Tip{ text: "Solo the bass lane; only soloed lanes sound"
                                         deck_b_solo_bass := MSButton{text: "S"}
+                                        }
                                     }
                                 }
                                 StemStack{
+                                    Tip{ text: "Click to reset the vocals lane to unity"
                                     deck_b_label_vocals := KnobLabel{text: "VOCALS"}
+                                    }
+                                    Tip{ text: "Vocals lane level (unity at top); live only once the stems are separated"
                                     deck_b_stem_vocals := StemKnob{}
+                                    }
                                     MSRow{
+                                        Tip{ text: "Kill the vocals lane; the knob keeps its setting"
                                         deck_b_kill_vocals := MSButton{text: "M"}
+                                        }
+                                        Tip{ text: "Solo the vocals lane; only soloed lanes sound"
                                         deck_b_solo_vocals := MSButton{text: "S"}
+                                        }
                                     }
                                 }
                                 StemStack{
+                                    Tip{ text: "Click to reset the other lane to unity"
                                     deck_b_label_other := KnobLabel{text: "OTHER"}
+                                    }
+                                    Tip{ text: "Other lane level (unity at top); live only once the stems are separated"
                                     deck_b_stem_other := StemKnob{}
+                                    }
                                     MSRow{
+                                        Tip{ text: "Kill the other lane; the knob keeps its setting"
                                         deck_b_kill_other := MSButton{text: "M"}
+                                        }
+                                        Tip{ text: "Solo the other lane; only soloed lanes sound"
                                         deck_b_solo_other := MSButton{text: "S"}
+                                        }
                                     }
                                 }
                             }
@@ -3318,6 +3618,7 @@ script_mod! {
                                 height: Fit
                                 flow: Right
                                 align: Align{x: 0.0, y: 0.0}
+                                Tip{ text: "Lyrics: live transcribes the vocals, cached reuses only, off hides them"
                                 deck_b_kar_title := KnobLabel{
                                     text: "KARAOKE"
                                     margin: Inset{left: 0.0 right: 0.0 top: 6.0 bottom: 0.0}
@@ -3328,24 +3629,31 @@ script_mod! {
                                         color_down: #xffffff
                                     }
                                 }
+                                }
                                 View{width: Fill height: 1}
                                 // The chevron, drawn rather than typed: the small triangle
                                 // glyphs are not in this font and came out as boxes. Two marks
                                 // with one shown, never one mark with its svg swapped — that
                                 // drops the loaded document and leaves a white silhouette.
+                                Tip{ text: "Open or fold the karaoke on a short console; one block always stays"
                                 deck_b_kar_chev_up := ChevronIcon{
                                     visible: false
                                     draw_icon +: { svg: crate_resource("self:resources/icons/chevron_up.svg") }
                                 }
+                                }
+                                Tip{ text: "Open or fold the karaoke on a short console; one block always stays"
                                 deck_b_kar_chev_down := ChevronIcon{
                                     visible: false
                                     draw_icon +: { svg: crate_resource("self:resources/icons/chevron_down.svg") }
+                                }
                                 }
                             }
                             deck_b_kar_body := View{
                                 width: Fill
                                 height: Fill
+                                Tip{ text: "Click a line to put the needle on it; wheel browses the transcript"
                                 deck_b_lyrics := mod.widgets.VjLyricReader{height: Fill}
+                                }
                             }
                         }
                         View{
@@ -3375,8 +3683,12 @@ script_mod! {
                                 spacing: 2
                                 align: Align{x: 0.5, y: 0.0}
                                 MusicLabel{text: "VOL"}
+                                Tip{ text: "Deck level: unity two-thirds up, +3.5 dB at top; double-click for unity"
                                 deck_b_gain := MusicFader{min: 0.0 max: 1.5 default: 1.0}
+                                }
+                                Tip{ text: "Mute the deck in the room; pre-fader phones still hear it; fader stays put"
                                 deck_b_mute := MusicButton{width: Fill height: 14 padding: 0 align: Align{x: 0.5, y: 0.5} text: "M"}
+                                }
                             }
                             View{
                                 width: 44
@@ -3385,8 +3697,12 @@ script_mod! {
                                 spacing: 2
                                 align: Align{x: 0.5, y: 0.0}
                                 MusicLabel{text: "TEMPO"}
+                                Tip{ text: "Tempo vs. the track's own; moving it drops sync unless SYNC reads MSTR"
                                 deck_b_pitch := MusicFader{min: -1.0 max: 1.0 default: 0.0 arc_from_origin: true}
+                                }
+                                Tip{ text: "Tempo back to the track's own (0.0%); drops sync unless SYNC reads MSTR"
                                 deck_b_pitch_reset := MusicButton{width: Fill height: 14 padding: 0 align: Align{x: 0.5, y: 0.5} text: "0"}
+                                }
                             }
                         }
                     }
@@ -3400,38 +3716,60 @@ script_mod! {
                         align: Align{x: 1.0, y: 0.5}
                         // NOT mirrored, exactly as the loop marks are not:
                         // the chevrons read the same on both decks.
+                        Tip{ text: "Tap: a beat ahead; hold: lean faster; shift 4 bars, ctrl 16 bars ahead"
                         deck_b_beat_fwd := MusicTransportButton{width: 22 text: "<"}
+                        }
+                        Tip{ text: "Tap: a beat back; hold: lean slower; shift 4 bars, ctrl 16 bars back"
                         deck_b_beat_back := MusicTransportButton{width: 22 text: ">"}
+                        }
+                        Tip{ text: "Hold plays from the cue, release stops on it; paused off it, sets it here"
                         deck_b_cue := MusicTransportIconButton{
                             width: 38
                             icon_walk: Walk{width: 14 height: Fit}
                             draw_icon +: { svg: crate_resource("self:resources/icons/cue.svg") }
                         }
+                        }
+                        Tip{ text: "Play or pause; shift: brake / soft start, ctrl: spin back"
                         deck_b_play := MusicTransportIconButton{
                             width: 26
                             icon_walk: Walk{width: 13 height: Fit}
                             draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") }
                         }
+                        }
                         // The sparkle stays outermost. IN then OUT keeps the
                         // gesture's temporal order on either deck.
+                        Tip{ text: "Open the loop scanner: find loops, clear or renumber this deck's pads"
                         deck_b_loop_scan := MusicTransportIconButton{
                             width: 26
                             icon_walk: Walk{width: 13 height: Fit}
                             draw_icon +: { svg: crate_resource("self:resources/icons/sparkle.svg") }
                         }
+                        }
+                        Tip{ text: "Loop in: a loop of the set count from here; shift-hold: a roll, alt keeps"
                         deck_b_loop_in := MusicTransportButton{width: 22 text: "["}
+                        }
+                        Tip{ text: "Loop out: end here, the set count back; on 0 it closes the loop from ["
                         deck_b_loop_out := MusicTransportButton{width: 22 text: "]"}
+                        }
+                        Tip{ text: "Halve the loop: one rung down the ladder"
                         deck_b_loop_halve := MusicTransportButton{width: 22 text: "-"}
+                        }
+                        Tip{ text: "Loop length in beats: 1/32 to 512; 0 sets by hand with [ ], ∞ bookmarks"
                         deck_b_loop_len := VjBeatsDrop{
                             width: 30 height: 34 loop_rows: true
                             draw_bg +: {arrow: 0.0}
                             draw_text +: {text_style: theme.font_bold{font_size: 10}}
                         }
+                        }
+                        Tip{ text: "Double the loop: one rung up the ladder"
                         deck_b_loop_double := MusicTransportButton{width: 22 text: "+"}
+                        }
+                        Tip{ text: "Exit the loop (kept), or jump back into the last; shift repeats the track"
                         deck_b_loop := MusicTransportIconButton{
                             width: 26
                             icon_walk: Walk{width: 13 height: Fit}
                             draw_icon +: { svg: crate_resource("self:resources/icons/loop_one.svg") }
+                        }
                         }
                     }
                 }
@@ -3444,6 +3782,7 @@ script_mod! {
             // are not. `App::sync_page_body_flow` turns it, and dragging it sets
             // the lists their size — overriding the automatic allotment, but
             // never past the point where the mixer would starve.
+            Tip{ text: "Drag to give the lists more or less room; the mixer keeps its minimum"
             page_splitter := RoundedView{
                 width: Fill
                 height: 7
@@ -3490,6 +3829,7 @@ script_mod! {
                     }
                 }
             }
+            }
             // The lists and the strip that switches them, as ONE column.
             //
             // The strip has to live in here rather than beside the deck region:
@@ -3519,9 +3859,15 @@ script_mod! {
                     flow: Right
                     spacing: 6
                     align: Align{x: 0.0, y: 0.5}
+                    Tip{ text: "Show the explorer (and the set list when there is room for both)"
                     lists_tab_0 := MusicButton{width: 74 height: 22 text: "explorer"}
+                    }
+                    Tip{ text: "Show the set list (and the explorer when there is room for both)"
                     lists_tab_1 := MusicButton{width: 62 height: 22 text: "queue"}
+                    }
+                    Tip{ text: "Show the loops page in place of the explorer and set list"
                     lists_tab_2 := MusicButton{width: 62 height: 22 text: "loops"}
+                    }
                 }
                 // A GRIP between the listing and the set list.
                 //
@@ -3587,6 +3933,7 @@ script_mod! {
                                 // that matters. The category and paging controls stay
                                 // catalog-only below, because a local listing has
                                 // neither.
+                                Tip{ text: "Filter as you type; Enter runs it now, ↑/↓ recall earlier searches"
                                 music_search := TextInput{
                                     // Twelve characters of query at the floor, and a
                                     // ceiling: past ~488 the box is just a long empty
@@ -3597,6 +3944,7 @@ script_mod! {
                                     // the whole row two lines tall.
                                     flow: Flow.Right{wrap: false}
                                     empty_text: "search music…"
+                                }
                                 }
                                 // Fit, not Fill: a Fill here is handed what is left of
                                 // the row, and when that is less than the category cell
@@ -3614,6 +3962,7 @@ script_mod! {
                                     music_category_cell := View{
                                         width: 96
                                         height: Fit
+                                        Tip{ text: "Store category to search in; empty for all audio; applies as you type"
                                         music_category := TextInput{
                                             width: Fill
                                             flow: Flow.Right{wrap: false}
@@ -3624,14 +3973,19 @@ script_mod! {
                                             // honest — clear it for all audio.
                                             text: "music"
                                         }
+                                        }
                                     }
+                                    Tip{ text: "Run the search with this text and category, from page one"
                                     music_go := MusicChipButton{
                                         text: "Search"
                                         draw_icon +: { svg: crate_resource("self:resources/icons/search.svg") }
                                     }
+                                    }
+                                    Tip{ text: "Fetch the next page of results onto the end of the listing"
                                     music_more := MusicChipButton{
                                         text: "More"
                                         draw_icon +: { svg: crate_resource("self:resources/icons/more.svg") }
+                                    }
                                     }
                                 }
                                 // Narrow the listing to what has already been worked
@@ -3655,21 +4009,27 @@ script_mod! {
                                 // Height PINNED to the chips it now sits between —
                                 // its own line let it stand at 18, and four points
                                 // short in this row reads as a mistake.
+                                Tip{ text: "Only rows already carrying every ticked kind: stems, karaoke, key, BPM"
                                 music_has_filter := DropToggles{
                                     height: 22
                                     text: "FILTER"
                                     labels: ["STEMS" "KARAOKE" "KEY" "BPM"]
                                     draw_icon +: { svg: crate_resource("self:resources/icons/filter.svg") }
                                 }
+                                }
+                                Tip{ text: "Browse audio files on this machine instead of the store"
                                 music_local := MusicChipButton{
                                     text: "LOCAL FILES"
                                     draw_icon +: { svg: crate_resource("self:resources/icons/folder.svg") }
                                 }
+                                }
                                 // The same IMPORT CONTENT flow the VJ page has: pick a
                                 // folder, and its media publishes into the store no-copy.
+                                Tip{ text: "Pick a folder; its music goes into the store; lit while importing"
                                 music_import := MusicChipButton{
                                     text: "IMPORT"
                                     draw_icon +: { svg: crate_resource("self:resources/icons/import.svg") }
+                                }
                                 }
                                 // The explorer's menu: what may be worked out
                                 // ahead of the set, which columns each list
@@ -3679,10 +4039,12 @@ script_mod! {
                                 // opens the lists' own menu. Icon-only, so it
                                 // takes the house icon button rather than a bare
                                 // Button, which would leave the glyph off-centre.
+                                Tip{ text: "Lists menu: what is worked out ahead, the columns, the cache folder"
                                 music_prep_cfg := MusicIconButton{
                                     width: 24
                                     height: 20
                                     draw_icon +: { svg: crate_resource("self:resources/icons/menu.svg") }
+                                }
                                 }
                                 // Fit, not a fixed 90: the count is four characters and a
                                 // slash, and the dead width it used to carry pushed the
@@ -3696,6 +4058,7 @@ script_mod! {
                                 // is `height: Fit` — collapsed to its icon it
                                 // would otherwise stand six points shorter than
                                 // the chips it sits between.
+                                Tip{ text: "Click target: Auto spares the live deck, Off only drags, Mix fades in"
                                 deck_target := DropDown{
                                     height: 22
                                     labels: ["Auto" "Deck A" "Deck B" "Off" "Mix"]
@@ -3706,6 +4069,7 @@ script_mod! {
                                         crate_resource("self:resources/icons/off.svg")
                                         crate_resource("self:resources/icons/mix.svg")
                                     ]
+                                }
                                 }
                                 // What a pick may take over, read straight on
                                 // from where it goes: the two are one thought,
@@ -3723,20 +4087,26 @@ script_mod! {
                                 // no icon says "refuse" without being learned,
                                 // and this is the one control here whose
                                 // default changes what a click does.
+                                Tip{ text: "A load onto a playing deck: refused, stopped and loaded, or played in"
                                 deck_over_playing := DropDown{
                                     height: 22
                                     labels: ["Refuse" "Stop" "Play in"]
                                 }
+                                }
                                 // Which end of the crossfader each deck answers
                                 // to, or THRU: out from under it, at full
                                 // wherever the fader stands.
+                                Tip{ text: "Fader end that hears deck A; thru keeps A at full wherever the fader is"
                                 xf_side_a := DropDown{
                                     height: 22
                                     labels: ["A left" "A thru" "A right"]
                                 }
+                                }
+                                Tip{ text: "Fader end that hears deck B; thru keeps B at full wherever the fader is"
                                 xf_side_b := DropDown{
                                     height: 22
                                     labels: ["B left" "B thru" "B right"]
+                                }
                                 }
                                 // What a plain press on a deck's LOCK means.
                                 // Tap locks is what it has always been. Hold
@@ -3745,9 +4115,11 @@ script_mod! {
                                 // a finger that stays hands the lock over —
                                 // for a surface with no modifier keys to
                                 // hold down.
+                                Tip{ text: "Plain SYNC press: always latch, or tap to match once and hold to latch"
                                 deck_sync_gesture := DropDown{
                                     height: 22
                                     labels: ["Tap locks" "Hold locks"]
+                                }
                                 }
                                 // How much of a record the zoomed lanes show,
                                 // in seconds across their width. A wheel over
@@ -3755,6 +4127,7 @@ script_mod! {
                                 // where a hand can see it, a controller can
                                 // reach it, and shift puts it back.
                                 wave_zoom_learn := Learn{
+                                    Tip{ text: "Seconds across the zoomed lanes; click to set, shift for the default"
                                     wave_zoom_knob := DropSlider{
                                         min: 1.5
                                         max: 10.0
@@ -3762,18 +4135,21 @@ script_mod! {
                                         suffix: "s"
                                         draw_icon +: { svg: crate_resource("self:resources/icons/waveform.svg") }
                                     }
+                                    }
                                 }
                                 // How tall the wave draws, on both surfaces.
                                 // Beside the zoom because the two are the
                                 // same kind of thing -- neither is heard,
                                 // both are how the record is being looked at.
                                 wave_gain_learn := Learn{
+                                    Tip{ text: "Drawn wave height only, nothing audible; click sets, shift for default"
                                     wave_gain_knob := DropSlider{
                                         min: 0.5
                                         max: 4.0
                                         default: 1.0
                                         suffix: "x"
                                         draw_icon +: { svg: crate_resource("self:resources/icons/levels.svg") }
+                                    }
                                     }
                                 }
                                 // Latched, the deck a picked track lands on starts as
@@ -3785,9 +4161,11 @@ script_mod! {
                                 // to survive losing its word, because this chip
                                 // collapses to its icon on a narrow console like
                                 // the rest of the row.
+                                Tip{ text: "Explorer and phones loads start as they land; MIX does this anyway"
                                 music_autoplay := MusicChipButton{
                                     text: "AUTOPLAY"
                                     draw_icon +: { svg: crate_resource("self:resources/icons/autoplay.svg") }
+                                }
                                 }
                             }
                             // The music import's whole face, on a line of its own.
@@ -3834,19 +4212,19 @@ script_mod! {
                                 spacing: 6
                                 clip_x: true
                                 align: Align{x: 0.0, y: 0.5}
-                                th_cell0 := View{width: 0 height: Fit th_head0 := MusicColHead{width: Fill text: ""}}
-                                th_cell1 := View{width: 0 height: Fit th_head1 := MusicColHead{width: Fill text: ""}}
-                                th_cell2 := View{width: 0 height: Fit th_head2 := MusicColHead{width: Fill text: ""}}
-                                th_cell3 := View{width: 0 height: Fit th_head3 := MusicColHead{width: Fill text: ""}}
-                                th_cell4 := View{width: 0 height: Fit th_head4 := MusicColHead{width: Fill text: ""}}
-                                th_cell5 := View{width: 0 height: Fit th_head5 := MusicColHead{width: Fill text: ""}}
-                                th_cell6 := View{width: 0 height: Fit th_head6 := MusicColHead{width: Fill text: ""}}
-                                th_cell7 := View{width: 0 height: Fit th_head7 := MusicColHead{width: Fill text: ""}}
-                                th_cell8 := View{width: 0 height: Fit th_head8 := MusicColHead{width: Fill text: ""}}
-                                th_cell9 := View{width: 0 height: Fit th_head9 := MusicColHead{width: Fill text: ""}}
-                                th_cell10 := View{width: 0 height: Fit th_head10 := MusicColHead{width: Fill text: ""}}
-                                th_cell11 := View{width: 0 height: Fit th_head11 := MusicColHead{width: Fill text: ""}}
-                                th_cell12 := View{width: 0 height: Fit th_head12 := MusicColHead{width: Fill text: ""}}
+                                th_cell0 := View{width: 0 height: Fit Tip{ text: "Sort the listing by this column; press again to reverse the order" th_head0 := MusicColHead{width: Fill text: ""} }}
+                                th_cell1 := View{width: 0 height: Fit Tip{ text: "Sort the listing by this column; press again to reverse the order" th_head1 := MusicColHead{width: Fill text: ""} }}
+                                th_cell2 := View{width: 0 height: Fit Tip{ text: "Sort the listing by this column; press again to reverse the order" th_head2 := MusicColHead{width: Fill text: ""} }}
+                                th_cell3 := View{width: 0 height: Fit Tip{ text: "Sort the listing by this column; press again to reverse the order" th_head3 := MusicColHead{width: Fill text: ""} }}
+                                th_cell4 := View{width: 0 height: Fit Tip{ text: "Sort the listing by this column; press again to reverse the order" th_head4 := MusicColHead{width: Fill text: ""} }}
+                                th_cell5 := View{width: 0 height: Fit Tip{ text: "Sort the listing by this column; press again to reverse the order" th_head5 := MusicColHead{width: Fill text: ""} }}
+                                th_cell6 := View{width: 0 height: Fit Tip{ text: "Sort the listing by this column; press again to reverse the order" th_head6 := MusicColHead{width: Fill text: ""} }}
+                                th_cell7 := View{width: 0 height: Fit Tip{ text: "Sort the listing by this column; press again to reverse the order" th_head7 := MusicColHead{width: Fill text: ""} }}
+                                th_cell8 := View{width: 0 height: Fit Tip{ text: "Sort the listing by this column; press again to reverse the order" th_head8 := MusicColHead{width: Fill text: ""} }}
+                                th_cell9 := View{width: 0 height: Fit Tip{ text: "Sort the listing by this column; press again to reverse the order" th_head9 := MusicColHead{width: Fill text: ""} }}
+                                th_cell10 := View{width: 0 height: Fit Tip{ text: "Sort the listing by this column; press again to reverse the order" th_head10 := MusicColHead{width: Fill text: ""} }}
+                                th_cell11 := View{width: 0 height: Fit Tip{ text: "Sort the listing by this column; press again to reverse the order" th_head11 := MusicColHead{width: Fill text: ""} }}
+                                th_cell12 := View{width: 0 height: Fit Tip{ text: "Sort the listing by this column; press again to reverse the order" th_head12 := MusicColHead{width: Fill text: ""} }}
                                 }
                                 // Stands in for the row's headphone + queue
                                 // chips, so a head sits over its own column
@@ -3878,6 +4256,7 @@ script_mod! {
                                 width: Fill
                                 height: Fit
                                 flow: Down
+                                Tip{ text: "Drag to set how tall the open console is; up makes it taller"
                                 console_grip := RoundedView{
                                     visible: false
                                     width: Fill
@@ -3891,18 +4270,23 @@ script_mod! {
                                         hover: instance(0.0)
                                     }
                                 }
+                                }
                                 View{
                                     width: Fill
                                     height: 24
                                     flow: Right
                                     spacing: 6
                                     align: Align{x: 0.0, y: 0.5}
+                                    Tip{ text: "Close the console back to its one line"
                                     console_chevron_up := ChevronIcon{
                                         visible: false
                                         draw_icon +: { svg: crate_resource("self:resources/icons/chevron_up.svg") }
                                     }
+                                    }
+                                    Tip{ text: "Open the console: live numbers, the log, or both"
                                     console_chevron_down := ChevronIcon{
                                         draw_icon +: { svg: crate_resource("self:resources/icons/chevron_down.svg") }
+                                    }
                                     }
                                     // One line, and it says so: the row is
                                     // twenty-four points and a second line
@@ -3915,9 +4299,15 @@ script_mod! {
                                         text_overflow: TextOverflow.Ellipsis
                                         text: ""
                                     }
+                                    Tip{ text: "Show the live numbers; opens the console if it is shut"
                                     console_view_0 := MusicChipButton{height: 20 text: "numbers"}
+                                    }
+                                    Tip{ text: "Show the app's own log; opens the console if it is shut"
                                     console_view_1 := MusicChipButton{height: 20 text: "log"}
+                                    }
+                                    Tip{ text: "Show the numbers and the log; opens the console if it is shut"
                                     console_view_2 := MusicChipButton{height: 20 text: "both"}
+                                    }
                                 }
                                 console_body := View{
                                     visible: false
@@ -3932,12 +4322,16 @@ script_mod! {
                                         flow: Right
                                         spacing: 6
                                         align: Align{x: 0.0, y: 0.5}
+                                        Tip{ text: "Narrow the log to lines containing this, as you type"
                                         console_filter := TextInput{
                                             width: Fill{min: 96. max: 320.}
                                             flow: Flow.Right{wrap: false}
                                             empty_text: "filter…"
                                         }
+                                        }
+                                        Tip{ text: "Drop the lines the console has kept; the process log is untouched"
                                         console_clear := MusicChipButton{height: 20 text: "clear"}
+                                        }
                                     }
                                     console_log := MusicLabel{width: Fill text: ""}
                                 }
@@ -3979,24 +4373,32 @@ script_mod! {
                                 // Queue policy lives with the queue it governs:
                                 // recycling and the pick order. The transition style
                                 // moved into the AUTO DJ gear modal.
+                                Tip{ text: "AUTO DJ puts a finished track back at the end of the set list"
                                 queue_repeat := MusicChipButton{
                                     height: 20
                                     text: "REPEAT"
                                     draw_icon +: { svg: crate_resource("self:resources/icons/loop.svg") }
                                 }
+                                }
+                                Tip{ text: "Next track is drawn at random from the set list, sparing recent picks"
                                 queue_shuffle := MusicChipButton{
                                     height: 20
                                     text: "SHUFFLE"
                                     draw_icon +: { svg: crate_resource("self:resources/icons/shuffle.svg") }
                                 }
+                                }
+                                Tip{ text: "Open the shelf of set lists: switch, lock, rename or add one"
                                 queue_lists := MusicChipButton{
                                     height: 20
                                     text: "LISTS"
                                 }
+                                }
+                                Tip{ text: "Empty the set list; a locked list refuses"
                                 queue_clear := MusicChipButton{
                                     height: 20
                                     text: "Clear"
                                     draw_icon +: { svg: crate_resource("self:resources/icons/square_x.svg") }
+                                }
                                 }
                             }
                             // Compact: the 320-wide panel cannot seat the explorer's
@@ -4038,9 +4440,15 @@ script_mod! {
                         flow: Right
                         spacing: 6
                         align: Align{x: 0.0, y: 0.5}
+                        Tip{ text: "Show deck A's loop grid; the GRID row then corrects deck A"
                         splat_deck_a := MusicButton{width: 26 height: 22 text: "A"}
+                        }
+                        Tip{ text: "Show deck B's loop grid; the GRID row then corrects deck B"
                         splat_deck_b := MusicButton{width: 26 height: 22 text: "B"}
+                        }
+                        Tip{ text: "Switch this deck's loop grid on or off; launching a cell switches it on"
                         splat_on := MusicButton{width: 36 height: 22 text: "ON"}
+                        }
                         View{width: Fill height: Fit}
                         // Correcting the grid of the deck named to the
                         // left. Here rather than in the deck head because
@@ -4051,30 +4459,58 @@ script_mod! {
                         // the four ratios are the octave and the two
                         // musical thirds the detector confuses.
                         MusicLabel{text: "GRID"}
+                        Tip{ text: "Make the beat under the playhead the one of the bar; nothing else moves"
                         grid_one := MusicButton{width: 34 height: 22 text: "1"}
+                        }
+                        Tip{ text: "Pull the nearest beat onto the playhead; the tempo is untouched"
                         grid_here := MusicButton{width: 44 height: 22 text: "here"}
+                        }
                         // The same correction by a hair, for a grid whose
                         // tempo is right and whose beats sit early or late:
                         // the ear is the judge and the record keeps
                         // playing. Shift walks five hairs at once.
+                        Tip{ text: "Walk the whole grid 5 ms earlier; shift walks 25 ms"
                         grid_earlier := MusicButton{width: 24 height: 22 text: "◂"}
+                        }
+                        Tip{ text: "Walk the whole grid 5 ms later; shift walks 25 ms"
                         grid_later := MusicButton{width: 24 height: 22 text: "▸"}
+                        }
+                        Tip{ text: "Double the tempo, hinged on the beat under the playhead"
                         grid_double := MusicButton{width: 34 height: 22 text: "×2"}
+                        }
+                        Tip{ text: "Halve the tempo, hinged on the beat under the playhead"
                         grid_halve := MusicButton{width: 34 height: 22 text: "÷2"}
+                        }
+                        Tip{ text: "Set the tempo to two thirds, hinged on the playhead"
                         grid_two_thirds := MusicButton{width: 38 height: 22 text: "×⅔"}
+                        }
+                        Tip{ text: "Set the tempo to three quarters, hinged on the playhead"
                         grid_three_quarters := MusicButton{width: 38 height: 22 text: "×¾"}
+                        }
+                        Tip{ text: "Tap the tempo in; the grid takes it and the tapped beat becomes the one"
                         grid_tap := MusicButton{width: 40 height: 22 text: "tap"}
+                        }
+                        Tip{ text: "Take back the last grid correction; a run of one kind is one step"
                         grid_undo := MusicButton{width: 44 height: 22 text: "undo"}
+                        }
+                        Tip{ text: "Protect this record's grid: no correction, tap or undo touches it"
                         grid_lock := MusicButton{width: 40 height: 22 text: "lock"}
+                        }
                         // Measure this record again from nothing: for the
                         // case where the analysis is simply wrong and a
                         // model has been installed, or the stems have
                         // arrived, since the last look at it.
+                        Tip{ text: "Throw away this record's analysis and measure it again from nothing"
                         grid_rescan := MusicButton{width: 56 height: 22 text: "re-scan"}
+                        }
                         View{width: Fill height: Fit}
+                        Tip{ text: "Open the score of the selected loop cell; press again to close it"
                         splat_score := MusicButton{width: 52 height: 22 text: "score"}
+                        }
                     }
+                    Tip{ text: "Click plays/stops a loop, right-click a part; shift stops on the bar"
                     loop_splat := mod.widgets.VjLoopSplat{}
+                    }
                 }
             }
         }
@@ -4106,26 +4542,34 @@ script_mod! {
                         draw_text.color: #xf4f7fa
                         draw_text.text_style: theme.font_bold{font_size: 10}
                     }
+                    Tip{ text: "Play the loop's transcribed score into the room, on the pads strip"
                     loop_score_play := MusicButton{
                         width: 28
                         height: 22
                         padding: 0
                         text: "▶"
                     }
+                    }
+                    Tip{ text: "Stop the score preview"
                     loop_score_stop := MusicButton{
                         width: 28
                         height: 22
                         padding: 0
                         text: "■"
                     }
+                    }
+                    Tip{ text: "Repeat the score preview instead of playing it once"
                     loop_score_loop := MusicChipButton{
                         height: 22
                         text: "LOOP"
                     }
+                    }
+                    Tip{ text: "Stop the preview and close the score panel"
                     loop_score_close := MusicButton{
                         width: 24
                         height: 22
                         text: "×"
+                    }
                     }
                 }
                 loop_score := mod.widgets.ScoreView{
@@ -4155,7 +4599,9 @@ script_mod! {
             spacing: 8
             align: Align{x: 0.0, y: 0.5}
             models_state := MusicLabel{width: Fill text: ""}
+            Tip{ text: "Fetch the missing models once their terms are accepted; again cancels"
             models_install := MusicButton{width: 130 height: 20 text: "INSTALL MODELS"}
+            }
         }
 
         // The AUTO DJ settings dialog: mix tier, transition style, and the
@@ -4192,7 +4638,9 @@ script_mod! {
                         align: Align{x: 0.0, y: 0.5}
                         MusicLabel{width: 90 text: "MIX BRAIN"}
                         // RANDOM rolls a fresh brain for every transition.
+                        Tip{ text: "AUTO DJ's mix: fader, EQ swap, stem swap (else EQ), or a roll per mix"
                         auto_brain := DropDown{labels: ["FADE" "EQ" "STEMS" "RANDOM"]}
+                        }
                     }
                     View{
                         width: Fill
@@ -4203,7 +4651,9 @@ script_mod! {
                         MusicLabel{width: 90 text: "STYLE"}
                         // Checked mixes body-to-body; unchecked rides the
                         // outro, the classic hand-off.
+                        Tip{ text: "On: land past the intro, before the outro; off: intro under the outro"
                         auto_style := CheckBox{text: "BODY TO BODY"}
+                        }
                     }
                     View{
                         width: Fill
@@ -4222,8 +4672,12 @@ script_mod! {
                         height: Fit
                         flow: Right
                         spacing: 8
+                        Tip{ text: "Move the fade up to 2 bars so singers overlap least; re-plans on vocals"
                         auto_vocal := MusicButton{width: 110 height: 22 text: "VOCAL GUARD"}
+                        }
+                        Tip{ text: "Land the transition on a phrase boundary of the outgoing record"
                         auto_phrase := MusicButton{width: 110 height: 22 text: "PHRASE SNAP"}
+                        }
                     }
                     // Its own line: three of these do not fit the panel's
                     // width, and a clipped label is worse than a short row.
@@ -4232,16 +4686,24 @@ script_mod! {
                         height: Fit
                         flow: Right
                         spacing: 8
+                        Tip{ text: "Let the picker choose what plays next instead of the set list order"
                         auto_choose := MusicButton{width: 110 height: 22 text: "CHOOSE NEXT"}
+                        }
+                        Tip{ text: "Leave the outgoing record where its shape says, not always at the outro"
                         auto_exit := MusicButton{width: 110 height: 22 text: "PICK EXIT"}
+                        }
                     }
                     View{
                         width: Fill
                         height: Fit
                         flow: Right
                         spacing: 8
+                        Tip{ text: "Pick each transition's shape per pair rather than always the long blend"
                         auto_route := MusicButton{width: 110 height: 22 text: "PICK SHAPE"}
+                        }
+                        Tip{ text: "Offer each transition and wait for GO instead of running it"
                         auto_suggest := MusicButton{width: 110 height: 22 text: "ASK FIRST"}
+                        }
                     }
                     // The arc: how long the night is and what shape it
                     // takes. Read only while CHOOSE NEXT is doing the
@@ -4254,8 +4716,12 @@ script_mod! {
                         spacing: 8
                         align: Align{y: 0.5}
                         MusicLabel{width: 62 text: "SET"}
+                        Tip{ text: "SET length for CHOOSE NEXT: cycles 60m, 90m, 120m, 180m, 300m or —"
                         auto_length := MusicButton{width: 62 height: 22 text: "\u{2014}"}
+                        }
+                        Tip{ text: "CHOOSE NEXT's shape across the SET length: BUILD, PEAK, WARM, WAVES"
                         auto_curve := MusicButton{width: 78 height: 22 text: "BUILD"}
+                        }
                     }
                     // Why the last record was chosen, in the scorer's own
                     // words so the label and the plan cannot disagree.
@@ -4266,10 +4732,18 @@ script_mod! {
                         spacing: 8
                         align: Align{y: 0.5}
                         auto_why := MusicLabel{width: Fill text: ""}
+                        Tip{ text: "Mark the last transition as good in the set history"
                         auto_good := MusicButton{width: 30 height: 22 text: "+"}
+                        }
+                        Tip{ text: "Mark the last transition as bad in the set history"
                         auto_bad := MusicButton{width: 30 height: 22 text: "-"}
+                        }
+                        Tip{ text: "Accept the offered transition; it fires on the next tick"
                         auto_go := MusicButton{width: 42 height: 22 text: "GO"}
+                        }
+                        Tip{ text: "Pass over CHOOSE NEXT's pick for now; it stays in the set list"
                         auto_veto := MusicButton{width: 78 height: 22 text: "NOT THAT"}
+                        }
                     }
                     // Three verbs that act on the queue and the pending
                     // transition directly, rather than configuring how
@@ -4279,16 +4753,24 @@ script_mod! {
                         height: Fit
                         flow: Right
                         spacing: 8
+                        Tip{ text: "Fire the planned transition now, wherever the outgoing record is"
                         auto_fade_now := MusicButton{width: 100 height: 22 text: "FADE NOW"}
+                        }
+                        Tip{ text: "Cut to the next record now, no fade; a fade already running is left be"
                         auto_skip := MusicButton{width: 78 height: 22 text: "SKIP"}
+                        }
+                        Tip{ text: "Add one random explorer track to the set list; an empty deck takes it"
                         auto_add_random := MusicButton{width: 100 height: 22 text: "+ RANDOM"}
+                        }
                     }
                     View{
                         width: Fill
                         height: Fit
                         flow: Right
                         align: Align{x: 1.0, y: 0.5}
+                        Tip{ text: "Close AUTO DJ settings"
                         auto_cfg_close := MusicButton{width: 60 height: 22 text: "Close"}
+                        }
                     }
                 }
             }
@@ -4350,8 +4832,12 @@ script_mod! {
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
                         MusicLabel{width: Fill text: "STEMS"}
+                        Tip{ text: "Not acted on yet: nothing separates explorer tracks ahead"
                         prep_stems_explorer := CheckBox{width: 90 text: ""}
+                        }
+                        Tip{ text: "Not acted on yet: the set list's next track is separated either way"
                         prep_stems_queue := CheckBox{width: 70 text: ""}
+                        }
                     }
                     View{
                         width: Fill
@@ -4360,8 +4846,12 @@ script_mod! {
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
                         MusicLabel{width: Fill text: "KARAOKE"}
+                        Tip{ text: "Not acted on yet: nothing transcribes explorer tracks ahead"
                         prep_karaoke_explorer := CheckBox{width: 90 text: ""}
+                        }
+                        Tip{ text: "Not acted on yet: the set list's next track is transcribed either way"
                         prep_karaoke_queue := CheckBox{width: 70 text: ""}
+                        }
                     }
                     View{
                         width: Fill
@@ -4370,8 +4860,12 @@ script_mod! {
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
                         MusicLabel{width: Fill text: "KEY"}
+                        Tip{ text: "Work out key (and BPM) ahead for tracks down the explorer"
                         prep_key_explorer := CheckBox{width: 90 text: ""}
+                        }
+                        Tip{ text: "Work out key (and BPM) ahead for tracks in the set list"
                         prep_key_queue := CheckBox{width: 70 text: ""}
+                        }
                     }
                     View{
                         width: Fill
@@ -4380,8 +4874,12 @@ script_mod! {
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
                         MusicLabel{width: Fill text: "BPM"}
+                        Tip{ text: "Work out BPM (and key) ahead for tracks down the explorer"
                         prep_bpm_explorer := CheckBox{width: 90 text: ""}
+                        }
+                        Tip{ text: "Work out BPM (and key) ahead for tracks in the set list"
                         prep_bpm_queue := CheckBox{width: 70 text: ""}
+                        }
                     }
                     // Tempo and key fall out of ONE pass over the samples, so
                     // asking for either buys both. Said here rather than
@@ -4400,12 +4898,14 @@ script_mod! {
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
                         MusicLabel{width: 110 text: "TRACKS AHEAD"}
+                        Tip{ text: "How many tracks down each source the key/BPM pass works, 1 to 500"
                         prep_ahead := ValueInput{
                             width: 70
                             min: 1.0
                             max: 500.0
                             step: 1.0
                             precision: 0
+                        }
                         }
                         MusicLabel{width: Fill text: "per source"}
                     }
@@ -4416,7 +4916,9 @@ script_mod! {
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
                         MusicLabel{width: 110 text: "FIRST MINUTE"}
+                        Tip{ text: "Columns from the first minute only; a deck measures the whole record"
                         prep_fast := MusicChipButton{height: 20 text: "FAST"}
+                        }
                         MusicLabel{width: Fill text: "columns sooner; a deck still measures the whole record"}
                     }
                     View{
@@ -4426,12 +4928,14 @@ script_mod! {
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
                         MusicLabel{width: 110 text: "AT ONCE"}
+                        Tip{ text: "Key/BPM jobs at once, 1 to 8; stems and karaoke stay one at a time"
                         prep_concurrency := ValueInput{
                             width: 70
                             min: 1.0
                             max: 8.0
                             step: 1.0
                             precision: 0
+                        }
                         }
                         // Separation and transcription hold the one device the
                         // show is drawing on; they stay serial whatever this
@@ -4447,7 +4951,9 @@ script_mod! {
                         align: Align{x: 0.0, y: 0.5}
                         MusicLabel{width: 110 text: "CACHE FOLDER"}
                         prep_cache_path := MusicLabel{width: Fill text: ""}
+                        Tip{ text: "Choose the folder for analysis, stems and lyrics; asks to move old data"
                         prep_cache_browse := MusicButton{width: 70 height: 22 text: "Browse"}
+                        }
                     }
                     View{
                         width: Fill
@@ -4473,9 +4979,15 @@ script_mod! {
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
                         MusicLabel{width: 110 text: "A LOAD CLEARS"}
+                        Tip{ text: "A new load puts the tempo back to 0.0%; off keeps a hand-set tempo"
                         reset_speed := CheckBox{width: 86 text: "tempo"}
+                        }
+                        Tip{ text: "A new load resets the key shift; off keeps it across loads"
                         reset_key := CheckBox{width: 86 text: "key"}
+                        }
+                        Tip{ text: "A new load flattens the EQ and lifts kills and solos; off keeps them"
                         reset_eq := CheckBox{width: 86 text: "EQ"}
+                        }
                         MusicLabel{width: Fill text: ""}
                     }
                     // Three and three: the dialog is four hundred points
@@ -4487,9 +4999,15 @@ script_mod! {
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
                         MusicLabel{width: 110 text: ""}
+                        Tip{ text: "A new load opens the deck's filter; off keeps it where set"
                         reset_filter := CheckBox{width: 86 text: "filter"}
+                        }
+                        Tip{ text: "A new load puts the deck's VOL fader back to unity; off keeps it set"
                         reset_gain := CheckBox{width: 86 text: "trim"}
+                        }
+                        Tip{ text: "A new load resets the stem lanes; off keeps kills and levels"
                         reset_stems := CheckBox{width: 86 text: "lanes"}
+                        }
                         MusicLabel{width: Fill text: ""}
                     }
                     // What a LAUNCH clears. Off is what the tab has always
@@ -4504,7 +5022,9 @@ script_mod! {
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
                         MusicLabel{width: 110 text: "A LAUNCH CLEARS"}
+                        Tip{ text: "At app start, unmute both DJ channels on the MIX page; off keeps them"
                         launch_clears_dj_mutes := CheckBox{width: 170 text: "the DJ channel mutes"}
+                        }
                         MusicLabel{width: Fill text: "a fader is not a mute"}
                     }
                     // Where the equalizer's three bands meet. The equalizer's
@@ -4520,6 +5040,7 @@ script_mod! {
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
                         MusicLabel{width: 110 text: "EQ SPLIT"}
+                        Tip{ text: "Where low meets mid on every chain's EQ; saved; double-click resets"
                         sfx_eq_low_hz := Slider{
                             width: 170
                             text: "low | mid"
@@ -4530,6 +5051,7 @@ script_mod! {
                             unit: "Hz"
                             precision: 0
                         }
+                        }
                         MusicLabel{width: Fill text: ""}
                     }
                     View{
@@ -4539,6 +5061,7 @@ script_mod! {
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
                         MusicLabel{width: 110 text: ""}
+                        Tip{ text: "Where mid meets high on every chain's EQ; saved; double-click resets"
                         sfx_eq_high_hz := Slider{
                             width: 170
                             text: "mid | high"
@@ -4548,6 +5071,7 @@ script_mod! {
                             taper: Log
                             unit: "Hz"
                             precision: 0
+                        }
                         }
                         MusicLabel{width: Fill text: "every chain, and it survives a restart"}
                     }
@@ -4563,7 +5087,9 @@ script_mod! {
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
                         MusicLabel{width: 110 text: "THE ONE LINE"}
+                        Tip{ text: "The one line names the newest fault; opening the log clears it"
                         console_faults := CheckBox{width: 170 text: "names the newest fault"}
+                        }
                         MusicLabel{width: Fill text: "cleared by opening the log"}
                     }
                     View{
@@ -4573,10 +5099,12 @@ script_mod! {
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
                         MusicLabel{width: 110 text: "COLUMNS"}
+                        Tip{ text: "Choose which columns each list shows, and in what order"
                         prep_columns_open := MusicButton{
                             width: 150
                             height: 22
                             text: "CHOOSE COLUMNS"
+                        }
                         }
                         // Artist, album, genre, year and bitrate come out of
                         // the file's own tags: no pass here fills them, and
@@ -4597,11 +5125,14 @@ script_mod! {
                         // No confirmation: what it forgets it immediately
                         // sets about replacing, which is the opposite of
                         // the button beside it.
+                        Tip{ text: "Measure the picked explorer rows again; your marks and grids are kept"
                         prep_rescan_picked := MusicButton{
                             width: 150
                             height: 22
                             text: "RE-SCAN PICKED"
                         }
+                        }
+                        Tip{ text: "Delete every cached BPM, key, wave, stem and transcript; asks first"
                         prep_clear := MusicButton{
                             width: 130
                             height: 22
@@ -4616,7 +5147,10 @@ script_mod! {
                             }
                             draw_text +: { color: #xff8a6a }
                         }
+                        }
+                        Tip{ text: "Close the lists menu"
                         prep_close := MusicButton{width: 60 height: 22 text: "Close"}
+                        }
                     }
                 }
             }
@@ -4660,8 +5194,12 @@ script_mod! {
                         flow: Right
                         spacing: 8
                         align: Align{x: 1.0 y: 0.5}
+                        Tip{ text: "No: for a folder move, keep the new folder and leave old data in place"
                         prep_confirm_no := MusicButton{width: 60 height: 22 text: "No"}
+                        }
+                        Tip{ text: "Yes: move the cached data, or delete it all; there is no undo"
                         prep_confirm_yes := MusicButton{width: 90 height: 22 text: "Yes"}
+                        }
                     }
                 }
             }
@@ -4709,8 +5247,12 @@ script_mod! {
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
                         MusicLabel{width: Fit text: "EDITING"}
+                        Tip{ text: "Edit the explorer's columns"
                         prep_cols_explorer := MusicChipButton{height: 20 text: "EXPLORER"}
+                        }
+                        Tip{ text: "Edit the set list's columns"
                         prep_cols_queue := MusicChipButton{height: 20 text: "SET LIST"}
+                        }
                         prep_cols_note := MusicLabel{width: Fill text: ""}
                     }
                     // How the KEY column is written. A reading habit, not
@@ -4724,9 +5266,15 @@ script_mod! {
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
                         MusicLabel{width: Fit text: "KEY AS"}
+                        Tip{ text: "Write the KEY column as wheel numbers (8A); the order does not change"
                         prep_key_wheel := MusicChipButton{height: 20 text: "8A"}
+                        }
+                        Tip{ text: "Write the KEY column in open notation (1m)"
                         prep_key_open := MusicChipButton{height: 20 text: "1m"}
+                        }
+                        Tip{ text: "Write the KEY column as key names (Am)"
                         prep_key_names := MusicChipButton{height: 20 text: "Am"}
+                        }
                         MusicLabel{width: Fill text: ""}
                     }
                     View{
@@ -4735,10 +5283,16 @@ script_mod! {
                         flow: Right
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
+                        Tip{ text: "Show or hide this column; it keeps its place in the order"
                         prep_col_show0 := CheckBox{width: 26 text: ""}
+                        }
                         prep_col_label0 := MusicLabel{width: Fill text: ""}
+                        Tip{ text: "Move this column one place left in the list; stops at the front"
                         prep_col_up0 := MusicButton{width: 26 height: 20 text: "UP"}
+                        }
+                        Tip{ text: "Move this column one place right in the list; stops at the end"
                         prep_col_down0 := MusicButton{width: 26 height: 20 text: "DN"}
+                        }
                     }
                     View{
                         width: Fill
@@ -4746,10 +5300,16 @@ script_mod! {
                         flow: Right
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
+                        Tip{ text: "Show or hide this column; it keeps its place in the order"
                         prep_col_show1 := CheckBox{width: 26 text: ""}
+                        }
                         prep_col_label1 := MusicLabel{width: Fill text: ""}
+                        Tip{ text: "Move this column one place left in the list; stops at the front"
                         prep_col_up1 := MusicButton{width: 26 height: 20 text: "UP"}
+                        }
+                        Tip{ text: "Move this column one place right in the list; stops at the end"
                         prep_col_down1 := MusicButton{width: 26 height: 20 text: "DN"}
+                        }
                     }
                     View{
                         width: Fill
@@ -4757,10 +5317,16 @@ script_mod! {
                         flow: Right
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
+                        Tip{ text: "Show or hide this column; it keeps its place in the order"
                         prep_col_show2 := CheckBox{width: 26 text: ""}
+                        }
                         prep_col_label2 := MusicLabel{width: Fill text: ""}
+                        Tip{ text: "Move this column one place left in the list; stops at the front"
                         prep_col_up2 := MusicButton{width: 26 height: 20 text: "UP"}
+                        }
+                        Tip{ text: "Move this column one place right in the list; stops at the end"
                         prep_col_down2 := MusicButton{width: 26 height: 20 text: "DN"}
+                        }
                     }
                     View{
                         width: Fill
@@ -4768,10 +5334,16 @@ script_mod! {
                         flow: Right
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
+                        Tip{ text: "Show or hide this column; it keeps its place in the order"
                         prep_col_show3 := CheckBox{width: 26 text: ""}
+                        }
                         prep_col_label3 := MusicLabel{width: Fill text: ""}
+                        Tip{ text: "Move this column one place left in the list; stops at the front"
                         prep_col_up3 := MusicButton{width: 26 height: 20 text: "UP"}
+                        }
+                        Tip{ text: "Move this column one place right in the list; stops at the end"
                         prep_col_down3 := MusicButton{width: 26 height: 20 text: "DN"}
+                        }
                     }
                     View{
                         width: Fill
@@ -4779,10 +5351,16 @@ script_mod! {
                         flow: Right
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
+                        Tip{ text: "Show or hide this column; it keeps its place in the order"
                         prep_col_show4 := CheckBox{width: 26 text: ""}
+                        }
                         prep_col_label4 := MusicLabel{width: Fill text: ""}
+                        Tip{ text: "Move this column one place left in the list; stops at the front"
                         prep_col_up4 := MusicButton{width: 26 height: 20 text: "UP"}
+                        }
+                        Tip{ text: "Move this column one place right in the list; stops at the end"
                         prep_col_down4 := MusicButton{width: 26 height: 20 text: "DN"}
+                        }
                     }
                     View{
                         width: Fill
@@ -4790,10 +5368,16 @@ script_mod! {
                         flow: Right
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
+                        Tip{ text: "Show or hide this column; it keeps its place in the order"
                         prep_col_show5 := CheckBox{width: 26 text: ""}
+                        }
                         prep_col_label5 := MusicLabel{width: Fill text: ""}
+                        Tip{ text: "Move this column one place left in the list; stops at the front"
                         prep_col_up5 := MusicButton{width: 26 height: 20 text: "UP"}
+                        }
+                        Tip{ text: "Move this column one place right in the list; stops at the end"
                         prep_col_down5 := MusicButton{width: 26 height: 20 text: "DN"}
+                        }
                     }
                     View{
                         width: Fill
@@ -4801,10 +5385,16 @@ script_mod! {
                         flow: Right
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
+                        Tip{ text: "Show or hide this column; it keeps its place in the order"
                         prep_col_show6 := CheckBox{width: 26 text: ""}
+                        }
                         prep_col_label6 := MusicLabel{width: Fill text: ""}
+                        Tip{ text: "Move this column one place left in the list; stops at the front"
                         prep_col_up6 := MusicButton{width: 26 height: 20 text: "UP"}
+                        }
+                        Tip{ text: "Move this column one place right in the list; stops at the end"
                         prep_col_down6 := MusicButton{width: 26 height: 20 text: "DN"}
+                        }
                     }
                     View{
                         width: Fill
@@ -4812,10 +5402,16 @@ script_mod! {
                         flow: Right
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
+                        Tip{ text: "Show or hide this column; it keeps its place in the order"
                         prep_col_show7 := CheckBox{width: 26 text: ""}
+                        }
                         prep_col_label7 := MusicLabel{width: Fill text: ""}
+                        Tip{ text: "Move this column one place left in the list; stops at the front"
                         prep_col_up7 := MusicButton{width: 26 height: 20 text: "UP"}
+                        }
+                        Tip{ text: "Move this column one place right in the list; stops at the end"
                         prep_col_down7 := MusicButton{width: 26 height: 20 text: "DN"}
+                        }
                     }
                     View{
                         width: Fill
@@ -4823,10 +5419,16 @@ script_mod! {
                         flow: Right
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
+                        Tip{ text: "Show or hide this column; it keeps its place in the order"
                         prep_col_show8 := CheckBox{width: 26 text: ""}
+                        }
                         prep_col_label8 := MusicLabel{width: Fill text: ""}
+                        Tip{ text: "Move this column one place left in the list; stops at the front"
                         prep_col_up8 := MusicButton{width: 26 height: 20 text: "UP"}
+                        }
+                        Tip{ text: "Move this column one place right in the list; stops at the end"
                         prep_col_down8 := MusicButton{width: 26 height: 20 text: "DN"}
+                        }
                     }
                     View{
                         width: Fill
@@ -4834,10 +5436,16 @@ script_mod! {
                         flow: Right
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
+                        Tip{ text: "Show or hide this column; it keeps its place in the order"
                         prep_col_show9 := CheckBox{width: 26 text: ""}
+                        }
                         prep_col_label9 := MusicLabel{width: Fill text: ""}
+                        Tip{ text: "Move this column one place left in the list; stops at the front"
                         prep_col_up9 := MusicButton{width: 26 height: 20 text: "UP"}
+                        }
+                        Tip{ text: "Move this column one place right in the list; stops at the end"
                         prep_col_down9 := MusicButton{width: 26 height: 20 text: "DN"}
+                        }
                     }
                     View{
                         width: Fill
@@ -4845,10 +5453,16 @@ script_mod! {
                         flow: Right
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
+                        Tip{ text: "Show or hide this column; it keeps its place in the order"
                         prep_col_show10 := CheckBox{width: 26 text: ""}
+                        }
                         prep_col_label10 := MusicLabel{width: Fill text: ""}
+                        Tip{ text: "Move this column one place left in the list; stops at the front"
                         prep_col_up10 := MusicButton{width: 26 height: 20 text: "UP"}
+                        }
+                        Tip{ text: "Move this column one place right in the list; stops at the end"
                         prep_col_down10 := MusicButton{width: 26 height: 20 text: "DN"}
+                        }
                     }
                     View{
                         width: Fill
@@ -4856,10 +5470,16 @@ script_mod! {
                         flow: Right
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
+                        Tip{ text: "Show or hide this column; it keeps its place in the order"
                         prep_col_show11 := CheckBox{width: 26 text: ""}
+                        }
                         prep_col_label11 := MusicLabel{width: Fill text: ""}
+                        Tip{ text: "Move this column one place left in the list; stops at the front"
                         prep_col_up11 := MusicButton{width: 26 height: 20 text: "UP"}
+                        }
+                        Tip{ text: "Move this column one place right in the list; stops at the end"
                         prep_col_down11 := MusicButton{width: 26 height: 20 text: "DN"}
+                        }
                     }
                     View{
                         width: Fill
@@ -4867,10 +5487,16 @@ script_mod! {
                         flow: Right
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
+                        Tip{ text: "Show or hide this column; it keeps its place in the order"
                         prep_col_show12 := CheckBox{width: 26 text: ""}
+                        }
                         prep_col_label12 := MusicLabel{width: Fill text: ""}
+                        Tip{ text: "Move this column one place left in the list; stops at the front"
                         prep_col_up12 := MusicButton{width: 26 height: 20 text: "UP"}
+                        }
+                        Tip{ text: "Move this column one place right in the list; stops at the end"
                         prep_col_down12 := MusicButton{width: 26 height: 20 text: "DN"}
+                        }
                     }
                     View{
                         width: Fill
@@ -4878,8 +5504,12 @@ script_mod! {
                         flow: Right
                         spacing: 8
                         align: Align{x: 1.0, y: 0.5}
+                        Tip{ text: "Put this list's columns back to the default set and order"
                         prep_cols_reset := MusicButton{width: 80 height: 22 text: "Reset"}
+                        }
+                        Tip{ text: "Close the columns dialog"
                         prep_cols_close := MusicButton{width: 60 height: 22 text: "Close"}
+                        }
                     }
                 }
             }
@@ -4920,10 +5550,16 @@ script_mod! {
                         flow: Right
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
+                        Tip{ text: "Put this list on the decks; the one put away keeps everything"
                         sl_pick0 := MusicChipButton{width: 60 height: 20 text: "PLAY"}
+                        }
                         sl_name0 := MusicLabel{width: Fill text: ""}
+                        Tip{ text: "Lock: a clicked row loads and stays; no add, move, remove or auto-load"
                         sl_lock0 := MusicChipButton{width: 56 height: 20 text: "LOCK"}
+                        }
+                        Tip{ text: "Delete this list and its rows, locked or not; the last list cannot go"
                         sl_drop0 := MusicButton{width: 26 height: 20 text: "X"}
+                        }
                     }
                     View{
                         width: Fill
@@ -4931,10 +5567,16 @@ script_mod! {
                         flow: Right
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
+                        Tip{ text: "Put this list on the decks; the one put away keeps everything"
                         sl_pick1 := MusicChipButton{width: 60 height: 20 text: "PLAY"}
+                        }
                         sl_name1 := MusicLabel{width: Fill text: ""}
+                        Tip{ text: "Lock: a clicked row loads and stays; no add, move, remove or auto-load"
                         sl_lock1 := MusicChipButton{width: 56 height: 20 text: "LOCK"}
+                        }
+                        Tip{ text: "Delete this list and its rows, locked or not; the last list cannot go"
                         sl_drop1 := MusicButton{width: 26 height: 20 text: "X"}
+                        }
                     }
                     View{
                         width: Fill
@@ -4942,10 +5584,16 @@ script_mod! {
                         flow: Right
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
+                        Tip{ text: "Put this list on the decks; the one put away keeps everything"
                         sl_pick2 := MusicChipButton{width: 60 height: 20 text: "PLAY"}
+                        }
                         sl_name2 := MusicLabel{width: Fill text: ""}
+                        Tip{ text: "Lock: a clicked row loads and stays; no add, move, remove or auto-load"
                         sl_lock2 := MusicChipButton{width: 56 height: 20 text: "LOCK"}
+                        }
+                        Tip{ text: "Delete this list and its rows, locked or not; the last list cannot go"
                         sl_drop2 := MusicButton{width: 26 height: 20 text: "X"}
+                        }
                     }
                     View{
                         width: Fill
@@ -4953,10 +5601,16 @@ script_mod! {
                         flow: Right
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
+                        Tip{ text: "Put this list on the decks; the one put away keeps everything"
                         sl_pick3 := MusicChipButton{width: 60 height: 20 text: "PLAY"}
+                        }
                         sl_name3 := MusicLabel{width: Fill text: ""}
+                        Tip{ text: "Lock: a clicked row loads and stays; no add, move, remove or auto-load"
                         sl_lock3 := MusicChipButton{width: 56 height: 20 text: "LOCK"}
+                        }
+                        Tip{ text: "Delete this list and its rows, locked or not; the last list cannot go"
                         sl_drop3 := MusicButton{width: 26 height: 20 text: "X"}
+                        }
                     }
                     View{
                         width: Fill
@@ -4964,10 +5618,16 @@ script_mod! {
                         flow: Right
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
+                        Tip{ text: "Put this list on the decks; the one put away keeps everything"
                         sl_pick4 := MusicChipButton{width: 60 height: 20 text: "PLAY"}
+                        }
                         sl_name4 := MusicLabel{width: Fill text: ""}
+                        Tip{ text: "Lock: a clicked row loads and stays; no add, move, remove or auto-load"
                         sl_lock4 := MusicChipButton{width: 56 height: 20 text: "LOCK"}
+                        }
+                        Tip{ text: "Delete this list and its rows, locked or not; the last list cannot go"
                         sl_drop4 := MusicButton{width: 26 height: 20 text: "X"}
+                        }
                     }
                     View{
                         width: Fill
@@ -4975,10 +5635,16 @@ script_mod! {
                         flow: Right
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
+                        Tip{ text: "Put this list on the decks; the one put away keeps everything"
                         sl_pick5 := MusicChipButton{width: 60 height: 20 text: "PLAY"}
+                        }
                         sl_name5 := MusicLabel{width: Fill text: ""}
+                        Tip{ text: "Lock: a clicked row loads and stays; no add, move, remove or auto-load"
                         sl_lock5 := MusicChipButton{width: 56 height: 20 text: "LOCK"}
+                        }
+                        Tip{ text: "Delete this list and its rows, locked or not; the last list cannot go"
                         sl_drop5 := MusicButton{width: 26 height: 20 text: "X"}
+                        }
                     }
                     View{
                         width: Fill
@@ -4986,10 +5652,16 @@ script_mod! {
                         flow: Right
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
+                        Tip{ text: "Put this list on the decks; the one put away keeps everything"
                         sl_pick6 := MusicChipButton{width: 60 height: 20 text: "PLAY"}
+                        }
                         sl_name6 := MusicLabel{width: Fill text: ""}
+                        Tip{ text: "Lock: a clicked row loads and stays; no add, move, remove or auto-load"
                         sl_lock6 := MusicChipButton{width: 56 height: 20 text: "LOCK"}
+                        }
+                        Tip{ text: "Delete this list and its rows, locked or not; the last list cannot go"
                         sl_drop6 := MusicButton{width: 26 height: 20 text: "X"}
+                        }
                     }
                     View{
                         width: Fill
@@ -4997,10 +5669,16 @@ script_mod! {
                         flow: Right
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
+                        Tip{ text: "Put this list on the decks; the one put away keeps everything"
                         sl_pick7 := MusicChipButton{width: 60 height: 20 text: "PLAY"}
+                        }
                         sl_name7 := MusicLabel{width: Fill text: ""}
+                        Tip{ text: "Lock: a clicked row loads and stays; no add, move, remove or auto-load"
                         sl_lock7 := MusicChipButton{width: 56 height: 20 text: "LOCK"}
+                        }
+                        Tip{ text: "Delete this list and its rows, locked or not; the last list cannot go"
                         sl_drop7 := MusicButton{width: 26 height: 20 text: "X"}
+                        }
                     }
                     View{
                         width: Fill
@@ -5008,13 +5686,19 @@ script_mod! {
                         flow: Right
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
+                        Tip{ text: "Rename the list on the decks; Enter applies it"
                         sl_rename := TextInput{
                             width: Fill
                             height: 22
                             empty_text: "name this list&"
                         }
+                        }
+                        Tip{ text: "Add an empty list and switch to it; the shelf holds eight"
                         sl_new := MusicButton{width: 70 height: 22 text: "+ NEW"}
+                        }
+                        Tip{ text: "Close the set lists shelf"
                         sl_close := MusicButton{width: 60 height: 22 text: "Close"}
+                        }
                     }
                 }
             }
@@ -5057,7 +5741,9 @@ script_mod! {
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
                         MusicLabel{width: 90 text: "UNIT"}
+                        Tip{ text: "Hunt by seconds or by beats; the rows below follow"
                         scan_unit := DropDown{labels: ["SECONDS" "BEATS"]}
+                        }
                     }
                     scan_secs_rows := View{
                         width: Fill
@@ -5071,9 +5757,15 @@ script_mod! {
                             spacing: 8
                             align: Align{x: 0.0, y: 0.5}
                             MusicLabel{width: 90 text: "MIN SECS"}
+                            Tip{ text: "One second shorter; never below 1"
                             scan_min_secs_dec := MusicButton{width: 22 height: 22 text: "-"}
+                            }
+                            Tip{ text: "Shortest loop to keep, in seconds"
                             scan_min_secs := TextInput{width: 60 text: "4"}
+                            }
+                            Tip{ text: "One second longer"
                             scan_min_secs_inc := MusicButton{width: 22 height: 22 text: "+"}
+                            }
                         }
                         View{
                             width: Fill
@@ -5082,9 +5774,15 @@ script_mod! {
                             spacing: 8
                             align: Align{x: 0.0, y: 0.5}
                             MusicLabel{width: 90 text: "MAX SECS"}
+                            Tip{ text: "One second shorter; never below 1"
                             scan_max_secs_dec := MusicButton{width: 22 height: 22 text: "-"}
+                            }
+                            Tip{ text: "Longest loop to keep, in seconds"
                             scan_max_secs := TextInput{width: 60 text: "10"}
+                            }
+                            Tip{ text: "One second longer"
                             scan_max_secs_inc := MusicButton{width: 22 height: 22 text: "+"}
+                            }
                         }
                         View{
                             width: Fill
@@ -5093,9 +5791,15 @@ script_mod! {
                             spacing: 8
                             align: Align{x: 0.0, y: 0.5}
                             MusicLabel{width: 90 text: "MIN GAP"}
+                            Tip{ text: "One second less gap; zero butts loops end to end"
                             scan_gap_secs_dec := MusicButton{width: 22 height: 22 text: "-"}
+                            }
+                            Tip{ text: "Clear air between finds in seconds; IN to IN when OVERLAP is lit"
                             scan_gap_secs := TextInput{width: 60 text: "2"}
+                            }
+                            Tip{ text: "One second more gap"
                             scan_gap_secs_inc := MusicButton{width: 22 height: 22 text: "+"}
+                            }
                         }
                     }
                     scan_beats_rows := View{
@@ -5111,7 +5815,9 @@ script_mod! {
                             spacing: 8
                             align: Align{x: 0.0, y: 0.5}
                             MusicLabel{width: 90 text: "MIN BEATS"}
+                            Tip{ text: "Shortest loop to keep, in beats"
                             scan_min_beats := DropDown{labels: ["8" "16" "32" "64" "128" "256" "512" "1024" "2048" "4096" "8192"]}
+                            }
                         }
                         View{
                             width: Fill
@@ -5120,7 +5826,9 @@ script_mod! {
                             spacing: 8
                             align: Align{x: 0.0, y: 0.5}
                             MusicLabel{width: 90 text: "MAX BEATS"}
+                            Tip{ text: "Longest loop to keep, in beats"
                             scan_max_beats := DropDown{labels: ["8" "16" "32" "64" "128" "256" "512" "1024" "2048" "4096" "8192"]}
+                            }
                         }
                         View{
                             width: Fill
@@ -5129,9 +5837,15 @@ script_mod! {
                             spacing: 8
                             align: Align{x: 0.0, y: 0.5}
                             MusicLabel{width: 90 text: "MIN GAP"}
+                            Tip{ text: "One beat less gap; zero butts loops end to end"
                             scan_gap_beats_dec := MusicButton{width: 22 height: 22 text: "-"}
+                            }
+                            Tip{ text: "Clear air between finds in beats; IN to IN when OVERLAP is lit"
                             scan_gap_beats := TextInput{width: 60 text: "4"}
+                            }
+                            Tip{ text: "One beat more gap"
                             scan_gap_beats_inc := MusicButton{width: 22 height: 22 text: "+"}
+                            }
                         }
                     }
                     View{
@@ -5141,9 +5855,15 @@ script_mod! {
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
                         MusicLabel{width: 90 text: "LOOPS"}
+                        Tip{ text: "Keep one loop fewer; never below 1"
                         scan_count_dec := MusicButton{width: 22 height: 22 text: "-"}
+                        }
+                        Tip{ text: "How many loops a scan keeps, 1 to 16"
                         scan_count := TextInput{width: 60 text: "10"}
+                        }
+                        Tip{ text: "Keep one loop more; a scan keeps 16 at most"
                         scan_count_inc := MusicButton{width: 22 height: 22 text: "+"}
+                        }
                     }
                     // Lit = on, the switch idiom the AUTO DJ dialog next
                     // door already uses for its two brains. Lit OVERLAP
@@ -5157,7 +5877,9 @@ script_mod! {
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
                         MusicLabel{width: 90 text: "OVERLAP"}
+                        Tip{ text: "Lit lets finds lie over each other and the gap reads IN to IN"
                         scan_overlap := MusicButton{width: 110 height: 22 text: "ALLOWED"}
+                        }
                     }
                     View{
                         width: Fill
@@ -5166,7 +5888,9 @@ script_mod! {
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
                         MusicLabel{width: 90 text: "AUTOMATIC"}
+                        Tip{ text: "A never-scanned record scans itself on load; cleared marks stay cleared"
                         scan_auto := MusicButton{width: 110 height: 22 text: "AUTO FIND"}
+                        }
                     }
                     View{
                         width: Fill
@@ -5174,8 +5898,12 @@ script_mod! {
                         flow: Right
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
+                        Tip{ text: "Clear this deck's cue and loop pads and bookmark; CANCEL restores"
                         scan_remove_user := MusicButton{width: 146 height: 22 text: "REMOVE USER LOOPS"}
+                        }
+                        Tip{ text: "Clear this deck's found loops; CANCEL puts them back"
                         scan_remove_ai := MusicButton{width: 146 height: 22 text: "REMOVE AI LOOPS"}
+                        }
                     }
                     // Filing, not sound. SORT puts the row in playing order
                     // on the numbers it already holds -- the gaps stay where
@@ -5189,8 +5917,12 @@ script_mod! {
                         flow: Right
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
+                        Tip{ text: "Renumber the pads in time order along the record; the gaps stay"
                         scan_sort_loops := MusicButton{width: 146 height: 22 text: "SORT BY TIME"}
+                        }
+                        Tip{ text: "Sort the pads by time and renumber them from the first, closing gaps"
                         scan_pack_loops := MusicButton{width: 146 height: 22 text: "PACK NUMBERS"}
+                        }
                     }
                     // SCAN NOW sits alone on the left: it is the one button
                     // here that DOES something and leaves the dialog open,
@@ -5202,10 +5934,16 @@ script_mod! {
                         flow: Right
                         spacing: 8
                         align: Align{x: 0.0, y: 0.5}
+                        Tip{ text: "Find loops in this deck's record now; needs a beat grid; stays open"
                         scan_find := MusicButton{width: 84 height: 22 text: "FIND NOW"}
+                        }
                         View{width: Fill height: 1}
+                        Tip{ text: "Put the deck's marks, finds and settings back as the dialog found them"
                         scan_cancel := MusicButton{width: 70 height: 22 text: "CANCEL"}
+                        }
+                        Tip{ text: "Keep what landed and save the settings"
                         scan_ok := MusicButton{width: 50 height: 22 text: "OK"}
+                        }
                     }
                 }
             }
@@ -5273,7 +6011,9 @@ script_mod! {
                         flow: Right
                         spacing: 8
                         align: Align{x: 1.0, y: 0.5}
+                        Tip{ text: "Accept and fetch the missing deck models; MORE MODELS rows install alone"
                         models_download := MusicButton{width: 100 height: 22 text: "Download"}
+                        }
                     }
                 }
             }

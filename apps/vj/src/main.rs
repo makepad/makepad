@@ -887,10 +887,18 @@ script_mod! {
                             // sample pads, MIX the bus where every source
                             // meets and the effects live. Each button
                             // replaces the whole console body.
+                            Tip{ text: "Switch to the VJ page; the pad controller follows onto video"
                             mode_vj := PillButton{text: "VJ"}
+                            }
+                            Tip{ text: "Switch to the DJ page; the pad controller follows onto music"
                             mode_dj := PillButton{text: "DJ"}
+                            }
+                            Tip{ text: "Switch to the SYNTH page; the pad controller stays where it was"
                             mode_synth := PillButton{text: "SYNTH"}
+                            }
+                            Tip{ text: "Switch to the MIX page; the pad controller stays where it was"
                             mode_mix := PillButton{text: "MIX"}
+                            }
                             // OFFSCREEN RENDER HOSTS — every 4x4 heartbeat
                             // widget stacked in ONE overlay slot with a
                             // bar-colored cover on top: the sample draws
@@ -1177,7 +1185,9 @@ script_mod! {
                             // The master program-audio mute lives with the
                             // MASTER it silences — nothing floats loose in
                             // panel space.
+                            Tip{ text: "Mute the video decks' sound; hazards disarm and the desk powers down"
                             video_mute := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/mute.svg") } }
+                            }
                             // The headphone rig: green while a phones
                             // device is live on output slot 1.
                             Tip{ text: "Headphone cue setup"
@@ -1190,6 +1200,7 @@ script_mod! {
                                 visible: false
                                 width: Fit height: Fit
                                 flow: Right
+                                Tip{ text: "Minimise the window"
                                 win_min := DesktopButton{
                                     draw_bg.button_type: DesktopButtonType.WindowsMin
                                     width: 40 height: 26
@@ -1198,6 +1209,8 @@ script_mod! {
                                         bg_color_hover: #x2b3440, bg_color_down: #x1e232b
                                     }
                                 }
+                                }
+                                Tip{ text: "Maximise the window; press again to restore it"
                                 win_max := DesktopButton{
                                     draw_bg.button_type: DesktopButtonType.WindowsMax
                                     width: 40 height: 26
@@ -1206,6 +1219,8 @@ script_mod! {
                                         bg_color_hover: #x2b3440, bg_color_down: #x1e232b
                                     }
                                 }
+                                }
+                                Tip{ text: "Quit the app; the output window closes with it"
                                 win_close := DesktopButton{
                                     draw_bg.button_type: DesktopButtonType.WindowsClose
                                     width: 40 height: 26
@@ -1213,6 +1228,7 @@ script_mod! {
                                         color: #xd6dee6, color_hover: #xffffff, color_down: #xffffff
                                         bg_color_hover: #xe81123, bg_color_down: #xf1707a
                                     }
+                                }
                                 }
                             }
                         }
@@ -1310,7 +1326,9 @@ script_mod! {
                                                     width: Fill
                                                     height: Fill
                                                     flow: Overlay
+                                                    Tip{ text: "Cue A monitor: drag orbits, wheel zooms 3D content"
                                                     preview_a := VideoProgram{}
+                                                    }
                                                     // NO cue spinner here: the
                                                     // monitors show the mix
                                                     // path only — load
@@ -1373,7 +1391,9 @@ script_mod! {
                                                     width: Fill
                                                     height: Fill
                                                     flow: Overlay
+                                                    Tip{ text: "Cue B monitor: drag orbits, wheel zooms 3D content"
                                                     preview_b := VideoProgram{}
+                                                    }
                                                     // NO cue spinner here: the
                                                     // monitors show the mix
                                                     // path only — load
@@ -1503,7 +1523,7 @@ script_mod! {
                                                         // import choice made
                                                         // HERE, defaulted from
                                                         // last time.
-                                                        Tip{ width: Fill text: "Convert to variable-framerate (motion-flow) video: owned copy, scratch at any rate"
+                                                        Tip{ text: "Convert to variable-framerate (motion-flow) video: owned copy, scratch at any rate"
                                                             import_flow := CheckBox{
                                                                 width: Fill
                                                                 text: "Make VFR"
@@ -1526,8 +1546,12 @@ script_mod! {
                                                         }
                                                         View{
                                                             width: Fill height: Fit flow: Right spacing: 2
+                                                            Tip{ text: "Run the staged import; STOP on the panel cancels it"
                                                             import_start := ChromeButton{width: Fill text: "START"}
+                                                            }
+                                                            Tip{ text: "Fold the import panel away; nothing is imported"
                                                             import_dismiss := ChromeButton{width: 22 text: "×"}
+                                                            }
                                                         }
                                                     }
                                                     import_running := View{
@@ -1556,7 +1580,9 @@ script_mod! {
                                                             draw_text.color: #x7a8592
                                                             draw_text.text_style: theme.font_regular{font_size: 7}
                                                         }
+                                                        Tip{ text: "Stop the import; what already landed stays"
                                                         import_stop := ChromeButton{width: Fill text: "STOP"}
+                                                        }
                                                     }
                                                 }
                                             }
@@ -1593,6 +1619,7 @@ script_mod! {
                                                 // quad just gets covered.
                                                 View{
                                                     width: 420 height: 228 flow: Overlay
+                                                    Tip{ text: "Scrub the clip; drag the notches to trim in and out"
                                                     deck_a_source := VideoView{
                                                         width: Fill
                                                         // 4px shy of the
@@ -1609,6 +1636,7 @@ script_mod! {
                                                             show_bg: true
                                                             draw_bg +: { color: #x000000 }
                                                         }
+                                                    }
                                                     }
                                                     // NEGATIVE CORNERS: four
                                                     // tiny cap quads round the
@@ -1666,7 +1694,9 @@ script_mod! {
                                                         // button shows the
                                                         // NEXT action.
                                                         deck_a_play_learn := Learn{
+                                                            Tip{ text: "Play or pause the deck (the face shows the next action)"
                                                             vdeck_a_play := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") } }
+                                                            }
                                                         }
                                                         // INSTANT REVERSE: a
                                                         // live direction flip,
@@ -1678,7 +1708,9 @@ script_mod! {
                                                                 deck_a_rev := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/reverse.svg") } }
                                                             }
                                                         }
+                                                        Tip{ text: "Rewind to the in point: restart the cycle now"
                                                         deck_a_rw := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/rewind.svg") } }
+                                                        }
                                                         // PLAY MODE: one picker
                                                         // instead of the loop +
                                                         // bounce latch pair.
@@ -1751,7 +1783,9 @@ script_mod! {
                                                             width: 42 height: 22 text: ""
                                                             draw_text +: {color: #x94a8b8 font_size: 9.0}
                                                         }
+                                                        Tip{ text: "Deck audio on or off; lit while its sound is live"
                                                         vdeck_a_mute := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/volume.svg") } }
+                                                        }
                                                         // THE JOG WHEEL: the
                                                         // sprung scratch hand
                                                         // (push right forward,
@@ -1777,7 +1811,9 @@ script_mod! {
                                                         // UNSLOT: eject the
                                                         // clip (the effect
                                                         // slots' × idiom).
+                                                        Tip{ text: "Eject the clip: the deck goes back to its empty cue state"
                                                         deck_a_eject := ChromeButton{width: 22 text: "×"}
+                                                        }
                                                     }
                                                     // PAUSE face on its own
                                                     // overlay lane, exactly
@@ -1788,14 +1824,18 @@ script_mod! {
                                                     View{
                                                         width: Fit height: Fill flow: Right
                                                         align: Align{x: 0.0, y: 0.5}
+                                                        Tip{ text: "Pause the deck (the face shows the next action)"
                                                         deck_a_pause := IconButton{ visible: false draw_icon +: { svg: crate_resource("self:resources/icons/pause.svg") } }
+                                                        }
                                                     }
                                                 }
                                                 slot_a_anim_box := View{
                                                     width: Fill
                                                     height: Fit
                                                     visible: false
+                                                    Tip{ text: "Animation: which clip a 3D model or sprite plays on this deck"
                                                     slot_a_anim := DropDown{width: Fill labels: ["—"]}
+                                                    }
                                                 }
                                             }
                                             // THE MIDDLE COLUMN: the three FX
@@ -1836,7 +1876,9 @@ script_mod! {
                                                 // left / × bottom-right —
                                                 // the card takes no more
                                                 // width than its tile.
+                                                Tip{ text: "Arm effect slot A: the next effect tile loads here; again disarms"
                                                 fx_slot_a_tile := VjFxSlotTile{width: 142 height: 80}
+                                                }
                                                 // (FIXED widths inside the
                                                 // Fit card: a Fill child
                                                 // resolves against the OUTER
@@ -1855,19 +1897,19 @@ script_mod! {
                                                     View{
                                                         width: Fill height: Fit flow: Right spacing: 1
                                                         align: Align{x: 0.0, y: 0.5}
-                                                        fx_slot_a_spd_learn := Learn{ fx_slot_a_spd := ApcKnob{width: 26 height: 26 default: 0.5} }
+                                                        fx_slot_a_spd_learn := Learn{ Tip{ text: "Effect clock: 0.25x to 4x, centre 1x; double-click resets" fx_slot_a_spd := ApcKnob{width: 26 height: 26 default: 0.5} } }
                                                         fx_slot_a_spd_lab := Tick{width: 36 margin: Inset{left: -3.0} text: "SPD"}
                                                         View{width: Fill height: 1}
-                                                        fx_slot_a_d0_learn := Learn{ fx_slot_a_d0 := ApcKnob{width: 26 height: 26 default: 0.5} }
+                                                        fx_slot_a_d0_learn := Learn{ Tip{ text: "Effect dial 1 (the label names it); remembered per effect" fx_slot_a_d0 := ApcKnob{width: 26 height: 26 default: 0.5} } }
                                                         fx_slot_a_d0_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
                                                     }
                                                     View{
                                                         width: Fill height: Fit flow: Right spacing: 1
                                                         align: Align{x: 0.0, y: 0.5}
-                                                        fx_slot_a_d1_learn := Learn{ fx_slot_a_d1 := ApcKnob{width: 26 height: 26 default: 0.5} }
+                                                        fx_slot_a_d1_learn := Learn{ Tip{ text: "Effect dial 2 (the label names it); remembered per effect" fx_slot_a_d1 := ApcKnob{width: 26 height: 26 default: 0.5} } }
                                                         fx_slot_a_d1_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
                                                         View{width: Fill height: 1}
-                                                        fx_slot_a_d2_learn := Learn{ fx_slot_a_d2 := ApcKnob{width: 26 height: 26 default: 0.5} }
+                                                        fx_slot_a_d2_learn := Learn{ Tip{ text: "Effect dial 3 (the label names it); remembered per effect" fx_slot_a_d2 := ApcKnob{width: 26 height: 26 default: 0.5} } }
                                                         fx_slot_a_d2_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
                                                     }
                                                 }
@@ -1882,9 +1924,13 @@ script_mod! {
                                                     width: 142 height: Fit flow: Right
                                                     margin: Inset{top: -4.0}
                                                     align: Align{x: 0.0, y: 0.5}
+                                                    Tip{ text: "Bypass toggle: off keeps the effect loaded; lit while it runs"
                                                     fx_slot_a_on := ChromeButton{width: 30 text: "ON"}
+                                                    }
                                                     View{width: Fill height: 1}
+                                                    Tip{ text: "Unload the effect; the slot goes empty"
                                                     fx_slot_a_clear := ChromeButton{width: 22 text: "×"}
+                                                    }
                                                 }
                                             }
                                             // Tile over dials: the effect's face on
@@ -1911,7 +1957,9 @@ script_mod! {
                                                 // left / × bottom-right —
                                                 // the card takes no more
                                                 // width than its tile.
+                                                Tip{ text: "Arm the transition slot: next transition tile loads here; again disarms"
                                                 fx_slot_t_tile := VjFxSlotTile{width: 142 height: 80}
+                                                }
                                                 // (FIXED widths inside the
                                                 // Fit card: a Fill child
                                                 // resolves against the OUTER
@@ -1924,19 +1972,19 @@ script_mod! {
                                                     View{
                                                         width: Fill height: Fit flow: Right spacing: 1
                                                         align: Align{x: 0.0, y: 0.5}
-                                                        fx_slot_t_spd_learn := Learn{ fx_slot_t_spd := ApcKnob{width: 26 height: 26 default: 0.5} }
+                                                        fx_slot_t_spd_learn := Learn{ Tip{ text: "Transition clock: 0.25x to 4x, centre 1x; double-click resets" fx_slot_t_spd := ApcKnob{width: 26 height: 26 default: 0.5} } }
                                                         fx_slot_t_spd_lab := Tick{width: 36 margin: Inset{left: -3.0} text: "SPD"}
                                                         View{width: Fill height: 1}
-                                                        fx_slot_t_d0_learn := Learn{ fx_slot_t_d0 := ApcKnob{width: 26 height: 26 default: 0.5} }
+                                                        fx_slot_t_d0_learn := Learn{ Tip{ text: "Transition dial 1 (the label names it); remembered per effect" fx_slot_t_d0 := ApcKnob{width: 26 height: 26 default: 0.5} } }
                                                         fx_slot_t_d0_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
                                                     }
                                                     View{
                                                         width: Fill height: Fit flow: Right spacing: 1
                                                         align: Align{x: 0.0, y: 0.5}
-                                                        fx_slot_t_d1_learn := Learn{ fx_slot_t_d1 := ApcKnob{width: 26 height: 26 default: 0.5} }
+                                                        fx_slot_t_d1_learn := Learn{ Tip{ text: "Transition dial 2 (the label names it); remembered per effect" fx_slot_t_d1 := ApcKnob{width: 26 height: 26 default: 0.5} } }
                                                         fx_slot_t_d1_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
                                                         View{width: Fill height: 1}
-                                                        fx_slot_t_d2_learn := Learn{ fx_slot_t_d2 := ApcKnob{width: 26 height: 26 default: 0.5} }
+                                                        fx_slot_t_d2_learn := Learn{ Tip{ text: "Transition dial 3 (the label names it); remembered per effect" fx_slot_t_d2 := ApcKnob{width: 26 height: 26 default: 0.5} } }
                                                         fx_slot_t_d2_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
                                                     }
                                                 }
@@ -1951,9 +1999,13 @@ script_mod! {
                                                     width: 142 height: Fit flow: Right
                                                     margin: Inset{top: -4.0}
                                                     align: Align{x: 0.0, y: 0.5}
+                                                    Tip{ text: "Bypass toggle: off keeps the transition loaded; lit while it runs"
                                                     fx_slot_t_on := ChromeButton{width: 30 text: "ON"}
+                                                    }
                                                     View{width: Fill height: 1}
+                                                    Tip{ text: "Unload the transition; the slot goes empty"
                                                     fx_slot_t_clear := ChromeButton{width: 22 text: "×"}
+                                                    }
                                                 }
                                             }
                                             // Tile over dials: the effect's face on
@@ -1980,7 +2032,9 @@ script_mod! {
                                                 // left / × bottom-right —
                                                 // the card takes no more
                                                 // width than its tile.
+                                                Tip{ text: "Arm effect slot B: the next effect tile loads here; again disarms"
                                                 fx_slot_b_tile := VjFxSlotTile{width: 142 height: 80}
+                                                }
                                                 // (FIXED widths inside the
                                                 // Fit card: a Fill child
                                                 // resolves against the OUTER
@@ -1993,19 +2047,19 @@ script_mod! {
                                                     View{
                                                         width: Fill height: Fit flow: Right spacing: 1
                                                         align: Align{x: 0.0, y: 0.5}
-                                                        fx_slot_b_spd_learn := Learn{ fx_slot_b_spd := ApcKnob{width: 26 height: 26 default: 0.5} }
+                                                        fx_slot_b_spd_learn := Learn{ Tip{ text: "Effect clock: 0.25x to 4x, centre 1x; double-click resets" fx_slot_b_spd := ApcKnob{width: 26 height: 26 default: 0.5} } }
                                                         fx_slot_b_spd_lab := Tick{width: 36 margin: Inset{left: -3.0} text: "SPD"}
                                                         View{width: Fill height: 1}
-                                                        fx_slot_b_d0_learn := Learn{ fx_slot_b_d0 := ApcKnob{width: 26 height: 26 default: 0.5} }
+                                                        fx_slot_b_d0_learn := Learn{ Tip{ text: "Effect dial 1 (the label names it); remembered per effect" fx_slot_b_d0 := ApcKnob{width: 26 height: 26 default: 0.5} } }
                                                         fx_slot_b_d0_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
                                                     }
                                                     View{
                                                         width: Fill height: Fit flow: Right spacing: 1
                                                         align: Align{x: 0.0, y: 0.5}
-                                                        fx_slot_b_d1_learn := Learn{ fx_slot_b_d1 := ApcKnob{width: 26 height: 26 default: 0.5} }
+                                                        fx_slot_b_d1_learn := Learn{ Tip{ text: "Effect dial 2 (the label names it); remembered per effect" fx_slot_b_d1 := ApcKnob{width: 26 height: 26 default: 0.5} } }
                                                         fx_slot_b_d1_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
                                                         View{width: Fill height: 1}
-                                                        fx_slot_b_d2_learn := Learn{ fx_slot_b_d2 := ApcKnob{width: 26 height: 26 default: 0.5} }
+                                                        fx_slot_b_d2_learn := Learn{ Tip{ text: "Effect dial 3 (the label names it); remembered per effect" fx_slot_b_d2 := ApcKnob{width: 26 height: 26 default: 0.5} } }
                                                         fx_slot_b_d2_lab := Tick{width: 36 margin: Inset{left: -3.0} flow: Flow.Right{wrap: false} max_lines: 1 text: "—"}
                                                     }
                                                 }
@@ -2020,9 +2074,13 @@ script_mod! {
                                                     width: 142 height: Fit flow: Right
                                                     margin: Inset{top: -4.0}
                                                     align: Align{x: 0.0, y: 0.5}
+                                                    Tip{ text: "Bypass toggle: off keeps the effect loaded; lit while it runs"
                                                     fx_slot_b_on := ChromeButton{width: 30 text: "ON"}
+                                                    }
                                                     View{width: Fill height: 1}
+                                                    Tip{ text: "Unload the effect; the slot goes empty"
                                                     fx_slot_b_clear := ChromeButton{width: 22 text: "×"}
+                                                    }
                                                 }
                                             }
                                                 }
@@ -2068,7 +2126,9 @@ script_mod! {
                                                     }
                                                     Tick{width: 14 text: "A"}
                                                     xfader_learn := Learn{
+                                                        Tip{ text: "Crossfade A to B, picture and sound; a hand cancels the autofade"
                                                         apc_xfader := ApcXfader{width: 240}
+                                                        }
                                                     }
                                                     Tick{width: 14 text: "B"}
                                                     // SWAP ⇄: the decks trade
@@ -2108,6 +2168,7 @@ script_mod! {
                                                 // picture, UI-only spinner.
                                                 View{
                                                     width: 420 height: 228 flow: Overlay
+                                                    Tip{ text: "Scrub the clip; drag the notches to trim in and out"
                                                     deck_b_source := VideoView{
                                                         width: Fill
                                                         // 4px shy of the
@@ -2124,6 +2185,7 @@ script_mod! {
                                                             show_bg: true
                                                             draw_bg +: { color: #x000000 }
                                                         }
+                                                    }
                                                     }
                                                     View{
                                                         width: Fill height: 208
@@ -2164,14 +2226,18 @@ script_mod! {
                                                         width: Fill height: Fill flow: Right spacing: 4
                                                         align: Align{x: 0.0, y: 0.5}
                                                         deck_b_play_learn := Learn{
+                                                            Tip{ text: "Play or pause the deck (the face shows the next action)"
                                                             vdeck_b_play := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/play.svg") } }
+                                                            }
                                                         }
                                                         Tip{ text: "Reverse: flip play direction now"
                                                             deck_b_rev_learn := Learn{
                                                                 deck_b_rev := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/reverse.svg") } }
                                                             }
                                                         }
+                                                        Tip{ text: "Rewind to the in point: restart the cycle now"
                                                         deck_b_rw := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/rewind.svg") } }
+                                                        }
                                                         Tip{ text: "Play mode"
                                                             deck_b_mode := DropDown{
                                                                 width: 92
@@ -2241,7 +2307,9 @@ script_mod! {
                                                             width: 42 height: 22 text: ""
                                                             draw_text +: {color: #x94a8b8 font_size: 9.0}
                                                         }
+                                                        Tip{ text: "Deck audio on or off; lit while its sound is live"
                                                         vdeck_b_mute := IconButton{ draw_icon +: { svg: crate_resource("self:resources/icons/volume.svg") } }
+                                                        }
                                                         Tip{ text: "Jog: push right forward, pull left reverse — springs home"
                                                             deck_b_wheel_learn := Learn{
                                                                 deck_b_wheel := VjSlowmoWheel{width: 84}
@@ -2257,19 +2325,25 @@ script_mod! {
                                                         // UNSLOT: eject the
                                                         // clip (the effect
                                                         // slots' × idiom).
+                                                        Tip{ text: "Eject the clip: the deck goes back to its empty cue state"
                                                         deck_b_eject := ChromeButton{width: 22 text: "×"}
+                                                        }
                                                     }
                                                     View{
                                                         width: Fit height: Fill flow: Right
                                                         align: Align{x: 0.0, y: 0.5}
+                                                        Tip{ text: "Pause the deck (the face shows the next action)"
                                                         deck_b_pause := IconButton{ visible: false draw_icon +: { svg: crate_resource("self:resources/icons/pause.svg") } }
+                                                        }
                                                     }
                                                 }
                                                 slot_b_anim_box := View{
                                                     width: Fill
                                                     height: Fit
                                                     visible: false
+                                                    Tip{ text: "Animation: which clip a 3D model or sprite plays on this deck"
                                                     slot_b_anim := DropDown{width: Fill labels: ["—"]}
+                                                    }
                                                 }
                                             }
                                         }
@@ -2290,23 +2364,41 @@ script_mod! {
                                                 height: Fill
                                                 flow: Down
                                                 spacing: 4
+                                                Tip{ text: "Filter the library as you type; Enter searches at once"
                                                 pad_filter := TextInput{
                                                     width: Fill
                                                     empty_text: "filter"
                                                 }
+                                                }
+                                                Tip{ text: "Show the transition lane; returns from LIGHTS or ARCHIVE to the grid"
                                                 preset_transition := PillButton{width: Fill text: "TRANSITION"}
+                                                }
+                                                Tip{ text: "Show the effect lane; returns from LIGHTS or ARCHIVE to the grid"
                                                 preset_effect := PillButton{width: Fill text: "EFFECT"}
+                                                }
+                                                Tip{ text: "Show the video lane; returns from LIGHTS or ARCHIVE to the grid"
                                                 preset_video := PillButton{width: Fill text: "VIDEO"}
+                                                }
+                                                Tip{ text: "Show the image lane; returns from LIGHTS or ARCHIVE to the grid"
                                                 chip_image := PillButton{width: Fill text: "IMAGE"}
+                                                }
+                                                Tip{ text: "Show the 3D mesh lane; returns from LIGHTS or ARCHIVE to the grid"
                                                 chip_mesh := PillButton{width: Fill text: "MESH"}
+                                                }
+                                                Tip{ text: "Show the map lane: walkable worlds cued as deck content"
                                                 chip_map := PillButton{width: Fill text: "MAP"}
+                                                }
                                                 // The special pages ride the
                                                 // same rail: not content
                                                 // lanes but places — any
                                                 // content chip returns to
                                                 // the grid.
+                                                Tip{ text: "Open the lighting desk in place of the grid"
                                                 chip_lights := PillButton{width: Fill text: "LIGHTS"}
+                                                }
+                                                Tip{ text: "Open the online archive search in place of the grid"
                                                 chip_archive := PillButton{width: Fill text: "ARCHIVE"}
+                                                }
                                                 // (IMPORT moved to its dock
                                                 // card in the console band —
                                                 // the rail keeps REMOVE, the
@@ -2323,17 +2415,29 @@ script_mod! {
                                                 // (IMPORT arms the transient
                                                 // panel card up in the
                                                 // console band.)
+                                                Tip{ text: "Pick a folder to import; lit while running, click then to cancel"
                                                 import_toggle := ChromeButton{width: Fill text: "IMPORT"}
+                                                }
+                                                Tip{ text: "Remove the selected tile from the library (asks first); file stays"
                                                 remove_asset := ChromeButton{width: Fill text: "REMOVE"}
+                                                }
                                                 // Bank paging at the column's
                                                 // FOOT — one line with the
                                                 // grid's scrollbar beside it.
                                                 View{
                                                     width: Fill height: Fit flow: Right spacing: 2
+                                                    Tip{ text: "Page the grid back eight columns"
                                                     grid_prev_page := IconButton{width: 24 icon_walk: Walk{width: 9 height: Fit} draw_icon +: { svg: crate_resource("self:resources/icons/page_first.svg") }}
+                                                    }
+                                                    Tip{ text: "Step the grid back one column"
                                                     grid_prev_row := IconButton{width: 24 icon_walk: Walk{width: 9 height: Fit} draw_icon +: { svg: crate_resource("self:resources/icons/page_prev.svg") }}
+                                                    }
+                                                    Tip{ text: "Step the grid forward one column"
                                                     grid_next_row := IconButton{width: 24 icon_walk: Walk{width: 9 height: Fit} draw_icon +: { svg: crate_resource("self:resources/icons/page_next.svg") }}
+                                                    }
+                                                    Tip{ text: "Page the grid forward eight columns"
                                                     grid_next_page := IconButton{width: 24 icon_walk: Walk{width: 9 height: Fit} draw_icon +: { svg: crate_resource("self:resources/icons/page_last.svg") }}
+                                                    }
                                                 }
                                             }
                                             lower_pages := PageFlip{
@@ -2393,8 +2497,12 @@ script_mod! {
                                                         flow: Right
                                                         spacing: 8
                                                         align: Align{x: 1.0 y: 0.5}
+                                                        Tip{ text: "Keep it: close without removing"
                                                         remove_no := ChromeButton{width: 60 text: "No"}
+                                                        }
+                                                        Tip{ text: "Remove it from the library now; the original file is untouched"
                                                         remove_yes := ChromeButton{width: 80 text: "Remove"}
+                                                        }
                                                     }
                                                 }
                                             }
@@ -2427,9 +2535,15 @@ script_mod! {
                                                 draw_text.color: #x8e9aa7
                                                 draw_text.text_style.font_size: 8
                                             }
+                                            Tip{ text: "Desk power: off sends a dark frame to the room"
                                             light_power := Toggle{text: "pwr"}
+                                            }
+                                            Tip{ text: "Write: while lit, every scene pad saves the desk into its slot"
                                             light_write := Toggle{text: "wrt"}
+                                            }
+                                            Tip{ text: "Blackout: desk power off and hazards disarmed; pwr brings it back"
                                             light_blackout := Button{text: "BLK"}
+                                            }
                                         }
                                         View{
                                             width: Fill
@@ -2437,23 +2551,23 @@ script_mod! {
                                             flow: Right
                                             spacing: 6
                                             align: Align{x: 0.0, y: 0.0}
-                                            KnobCol{ Tick{text: "—"} light_knob_0 := ApcKnob{} }
-                                            KnobCol{ Tick{text: "WASH"} light_knob_1 := ApcKnob{} }
-                                            KnobCol{ Tick{text: "COL"} light_knob_2 := ApcKnob{} }
-                                            KnobCol{ Tick{text: "HUE"} light_knob_3 := ApcKnob{} }
-                                            KnobCol{ Tick{text: "—"} light_knob_4 := ApcKnob{} }
-                                            KnobCol{ Tick{text: "BEAM"} light_knob_5 := ApcKnob{} }
-                                            KnobCol{ Tick{text: "—"} light_knob_6 := ApcKnob{} }
-                                            KnobCol{ Tick{text: "—"} light_knob_7 := ApcKnob{} }
+                                            KnobCol{ Tick{text: "—"} Tip{ text: "Top dial 1: stored with the scene, not patched to a fixture" light_knob_0 := ApcKnob{} } }
+                                            KnobCol{ Tick{text: "WASH"} Tip{ text: "Wash dial: a moving-wash channel, saved with the scene" light_knob_1 := ApcKnob{} } }
+                                            KnobCol{ Tick{text: "COL"} Tip{ text: "Wash colour: picks the moving washes' colour" light_knob_2 := ApcKnob{} } }
+                                            KnobCol{ Tick{text: "HUE"} Tip{ text: "Hue: the colour of the RGB laser and the RGB strobe" light_knob_3 := ApcKnob{} } }
+                                            KnobCol{ Tick{text: "—"} Tip{ text: "Top dial 5: stored with the scene, not patched to a fixture" light_knob_4 := ApcKnob{} } }
+                                            KnobCol{ Tick{text: "BEAM"} Tip{ text: "Beam dial: a beam-laser channel, saved with the scene" light_knob_5 := ApcKnob{} } }
+                                            KnobCol{ Tick{text: "—"} Tip{ text: "Top dial 7: stored with the scene, not patched to a fixture" light_knob_6 := ApcKnob{} } }
+                                            KnobCol{ Tick{text: "—"} Tip{ text: "Top dial 8: stored with the scene, not patched to a fixture" light_knob_7 := ApcKnob{} } }
                                             View{width: 14 height: 1}
-                                            KnobCol{ dev_knob_legend := Tick{text: "SMK"} light_dev_0 := ApcKnob{} }
-                                            KnobCol{ Tick{text: "—"} light_dev_1 := ApcKnob{} }
-                                            KnobCol{ Tick{text: "—"} light_dev_2 := ApcKnob{} }
-                                            KnobCol{ Tick{text: "—"} light_dev_3 := ApcKnob{} }
-                                            KnobCol{ Tick{text: "—"} light_dev_4 := ApcKnob{} }
-                                            KnobCol{ Tick{text: "—"} light_dev_5 := ApcKnob{} }
-                                            KnobCol{ Tick{text: "—"} light_dev_6 := ApcKnob{} }
-                                            KnobCol{ Tick{text: "—"} light_dev_7 := ApcKnob{} }
+                                            KnobCol{ dev_knob_legend := Tick{text: "SMK"} Tip{ text: "Device dial 1 of the lit track; the legend names the fixture group" light_dev_0 := ApcKnob{} } }
+                                            KnobCol{ Tick{text: "—"} Tip{ text: "Device dial 2 of the lit track; dial 1's legend names the fixture" light_dev_1 := ApcKnob{} } }
+                                            KnobCol{ Tick{text: "—"} Tip{ text: "Device dial 3 of the lit track; dial 1's legend names the fixture" light_dev_2 := ApcKnob{} } }
+                                            KnobCol{ Tick{text: "—"} Tip{ text: "Device dial 4 of the lit track; dial 1's legend names the fixture" light_dev_3 := ApcKnob{} } }
+                                            KnobCol{ Tick{text: "—"} Tip{ text: "Device dial 5 of the lit track; dial 1's legend names the fixture" light_dev_4 := ApcKnob{} } }
+                                            KnobCol{ Tick{text: "—"} Tip{ text: "Device dial 6 of the lit track; dial 1's legend names the fixture" light_dev_5 := ApcKnob{} } }
+                                            KnobCol{ Tick{text: "—"} Tip{ text: "Device dial 7 of the lit track; dial 1's legend names the fixture" light_dev_6 := ApcKnob{} } }
+                                            KnobCol{ Tick{text: "—"} Tip{ text: "Device dial 8 of the lit track; dial 1's legend names the fixture" light_dev_7 := ApcKnob{} } }
                                         }
                                         View{
                                             width: Fill
@@ -2461,15 +2575,15 @@ script_mod! {
                                             flow: Right
                                             spacing: 6
                                             align: Align{x: 0.0, y: 1.0}
-                                            FaderCol{ Tick{text: "—"} light_fader_0 := ApcFader{} }
-                                            FaderCol{ Tick{text: "WASH"} light_fader_1 := ApcFader{} }
-                                            FaderCol{ Tick{text: "GOBO"} light_fader_2 := ApcFader{} }
-                                            FaderCol{ Tick{text: "RGB"} light_fader_3 := ApcFader{} }
-                                            FaderCol{ Tick{text: "STRB"} light_fader_4 := ApcFader{} }
-                                            FaderCol{ Tick{text: "BEAM"} light_fader_5 := ApcFader{} }
-                                            FaderCol{ Tick{text: "UV"} light_fader_6 := ApcFader{} }
-                                            FaderCol{ Tick{text: "UV+"} light_fader_7 := ApcFader{} }
-                                            FaderCol{ Tick{text: "M"} light_fader_8 := ApcFader{} }
+                                            FaderCol{ Tick{text: "—"} Tip{ text: "Fader 1: stored with the scene, not patched to a fixture" light_fader_0 := ApcFader{} } }
+                                            FaderCol{ Tick{text: "WASH"} Tip{ text: "Wash dimmer: the moving washes' level" light_fader_1 := ApcFader{} } }
+                                            FaderCol{ Tick{text: "GOBO"} Tip{ text: "Gobo: the moving washes' gobo channel" light_fader_2 := ApcFader{} } }
+                                            FaderCol{ Tick{text: "RGB"} Tip{ text: "RGB: laser pattern steps and the strobe's colour level" light_fader_3 := ApcFader{} } }
+                                            FaderCol{ Tick{text: "STRB"} Tip{ text: "Strobe: drives the RGB strobe" light_fader_4 := ApcFader{} } }
+                                            FaderCol{ Tick{text: "BEAM"} Tip{ text: "Beam: the beam lasers' level" light_fader_5 := ApcFader{} } }
+                                            FaderCol{ Tick{text: "UV"} Tip{ text: "UV: the UV fixtures' level" light_fader_6 := ApcFader{} } }
+                                            FaderCol{ Tick{text: "UV+"} Tip{ text: "UV+: above half switches the UV's extra channel on" light_fader_7 := ApcFader{} } }
+                                            FaderCol{ Tick{text: "M"} Tip{ text: "Master: stored with the scene; the room patch does not use it yet" light_fader_8 := ApcFader{} } }
                                             View{
                                                 width: Fill
                                                 height: Fit
@@ -2478,34 +2592,76 @@ script_mod! {
                                                 Tick{width: Fit text: "TRACKS"}
                                                 View{
                                                     width: Fill height: Fit flow: Right spacing: 4
+                                                    Tip{ text: "Track 1: the device dials edit this fixture's bank"
                                                     light_track_0 := ApcPad{text: "1"}
+                                                    }
+                                                    Tip{ text: "Track 2: the device dials edit this fixture's bank"
                                                     light_track_1 := ApcPad{text: "2"}
+                                                    }
+                                                    Tip{ text: "Track 3: its device dials are stored with the scene, not patched"
                                                     light_track_2 := ApcPad{text: "3"}
+                                                    }
+                                                    Tip{ text: "Track 4: the device dials edit this fixture's bank"
                                                     light_track_3 := ApcPad{text: "4"}
+                                                    }
+                                                    Tip{ text: "Track 5: the device dials edit this fixture's bank"
                                                     light_track_4 := ApcPad{text: "5"}
+                                                    }
+                                                    Tip{ text: "Track 6: the device dials edit this fixture's bank"
                                                     light_track_5 := ApcPad{text: "6"}
+                                                    }
+                                                    Tip{ text: "Track 7: its device dials are stored with the scene, not patched"
                                                     light_track_6 := ApcPad{text: "7"}
+                                                    }
+                                                    Tip{ text: "Track 8: its device dials are stored with the scene, not patched"
                                                     light_track_7 := ApcPad{text: "8"}
+                                                    }
                                                 }
                                                 Tick{width: Fit text: "SCENES"}
                                                 View{
                                                     width: Fill height: Fit flow: Right spacing: 4
+                                                    Tip{ text: "Scene P1: recall it, smoke dials kept; with wrt lit, save here instead"
                                                     light_scene_0 := ApcPad{text: "P1"}
+                                                    }
+                                                    Tip{ text: "Scene P2: recall it, smoke dials kept; with wrt lit, save here instead"
                                                     light_scene_1 := ApcPad{text: "P2"}
+                                                    }
+                                                    Tip{ text: "Scene P3: recall it, smoke dials kept; with wrt lit, save here instead"
                                                     light_scene_2 := ApcPad{text: "P3"}
+                                                    }
+                                                    Tip{ text: "Scene P4: recall it, smoke dials kept; with wrt lit, save here instead"
                                                     light_scene_3 := ApcPad{text: "P4"}
+                                                    }
+                                                    Tip{ text: "Scene P5: recall it, smoke dials kept; with wrt lit, save here instead"
                                                     light_scene_4 := ApcPad{text: "P5"}
+                                                    }
+                                                    Tip{ text: "Scene P6: recall it, smoke dials kept; with wrt lit, save here instead"
                                                     light_scene_5 := ApcPad{text: "P6"}
+                                                    }
+                                                    Tip{ text: "Scene P7: recall it, smoke dials kept; with wrt lit, save here instead"
                                                     light_scene_6 := ApcPad{text: "P7"}
+                                                    }
                                                 }
                                                 View{
                                                     width: Fill height: Fit flow: Right spacing: 4
+                                                    Tip{ text: "Scene P8: recall it, smoke dials kept; with wrt lit, save here instead"
                                                     light_scene_7 := ApcPad{text: "P8"}
+                                                    }
+                                                    Tip{ text: "Scene P9: recall it, smoke dials kept; with wrt lit, save here instead"
                                                     light_scene_8 := ApcPad{text: "P9"}
+                                                    }
+                                                    Tip{ text: "Scene P10: recall it, smoke dials kept; with wrt lit, save here instead"
                                                     light_scene_9 := ApcPad{text: "P10"}
+                                                    }
+                                                    Tip{ text: "Scene P11: recall it, smoke dials kept; with wrt lit, save here instead"
                                                     light_scene_10 := ApcPad{text: "P11"}
+                                                    }
+                                                    Tip{ text: "Scene P12: recall it, smoke dials kept; with wrt lit, save here instead"
                                                     light_scene_11 := ApcPad{text: "P12"}
+                                                    }
+                                                    Tip{ text: "Scene P13: recall it, smoke dials kept; with wrt lit, save here instead"
                                                     light_scene_12 := ApcPad{text: "P13"}
+                                                    }
                                                     View{width: Fill height: 1}
                                                 }
                                             }
@@ -2528,14 +2684,24 @@ script_mod! {
                                                         spacing: 6
                                                         align: Align{x: 0.0, y: 0.5}
                                                         Tick{width: Fit text: "ARCHIVE.ORG"}
+                                                        Tip{ text: "Search the online archive; Enter runs it"
                                                         archive_search := TextInput{
                                                             width: 240
                                                             empty_text: "search the internet archive"
                                                         }
+                                                        }
+                                                        Tip{ text: "Run the archive search"
                                                         archive_go := ChromeButton{width: 70 text: "SEARCH"}
+                                                        }
+                                                        Tip{ text: "Show video and image results"
                                                         archive_chip_all := PillButton{width: 44 text: "ALL"}
+                                                        }
+                                                        Tip{ text: "Show video results only"
                                                         archive_chip_video := PillButton{width: 56 text: "VIDEO"}
+                                                        }
+                                                        Tip{ text: "Show image results only"
                                                         archive_chip_images := PillButton{width: 62 text: "IMAGES"}
+                                                        }
                                                         archive_status := Label{
                                                             width: Fill
                                                             flow: Flow.Right{wrap: false}
@@ -2544,9 +2710,13 @@ script_mod! {
                                                             draw_text.color: #x8e9aa7
                                                             draw_text.text_style.font_size: 9
                                                         }
+                                                        Tip{ text: "Previous page of results"
                                                         archive_prev := IconButton{width: 24 icon_walk: Walk{width: 9 height: Fit} draw_icon +: { svg: crate_resource("self:resources/icons/page_prev.svg") }}
+                                                        }
                                                         archive_page_lab := Tick{width: Fit text: "1 / 1"}
+                                                        Tip{ text: "Next page of results"
                                                         archive_next := IconButton{width: 24 icon_walk: Walk{width: 9 height: Fit} draw_icon +: { svg: crate_resource("self:resources/icons/page_next.svg") }}
+                                                        }
                                                     }
                                                     View{
                                                         width: Fill
@@ -2582,7 +2752,9 @@ script_mod! {
                                                             }
                                                             // Where the swatch is: a thin scrub bar the frames advance and the
                                                             // operator can drag — a look at minute eight costs one gesture.
+                                                            Tip{ text: "Scrub the swatch; it seeks when you let go"
                                                             archive_scrub := ApcHSlider{height: 12}
+                                                            }
                                                             // The verbs: audition, throw onto a deck (STREAMING — nothing
                                                             // is imported or downloaded), and — deliberately — import.
                                                             View{
@@ -2590,11 +2762,19 @@ script_mod! {
                                                                 height: Fit
                                                                 flow: Right
                                                                 spacing: 6
+                                                                Tip{ text: "Play or pause the swatch (silent preview, nothing imported)"
                                                                 archive_play := ChromeButton{width: 70 text: "PLAY"}
+                                                                }
+                                                                Tip{ text: "Cue the picked video onto deck A, streamed: nothing is imported"
                                                                 archive_cue_a := ChromeButton{width: Fill text: "CUE A"}
+                                                                }
+                                                                Tip{ text: "Cue the picked video onto deck B, streamed: nothing is imported"
                                                                 archive_cue_b := ChromeButton{width: Fill text: "CUE B"}
+                                                                }
                                                             }
+                                                            Tip{ text: "Import the picked item into the library"
                                                             archive_import := ChromeButton{width: Fill text: "IMPORT"}
+                                                            }
                                                             archive_swatch_lab := Label{
                                                                 width: Fill
                                                                 padding: 0
@@ -2668,7 +2848,9 @@ script_mod! {
                                 View{
                                     width: Fill height: 28 flow: Right spacing: 8
                                     align: Align{x: 0.0 y: 0.5}
+                                    Tip{ text: "Run the rack on the shared beat clock; press again to stop"
                                     synth_play := ChromeButton{width: 62 text: "PLAY"}
+                                    }
                                     synth_status := Label{
                                         width: Fit text: "STEP 01"
                                         draw_text.color: #xffe0a3
@@ -2711,7 +2893,9 @@ script_mod! {
                                                         draw_text.color: #x657383
                                                         draw_text.text_style.font_size: 8
                                                     }
+                                                    Tip{ text: "Wipe every step in the piano lanes"
                                                     piano_clear := ChromeButton{width: 54 text: "CLEAR"}
+                                                    }
                                                 }
                                                 View{width: Fill height: Fill flow: Right spacing: 8
                                                     View{width: 74 height: Fill flow: Down
@@ -2728,7 +2912,9 @@ script_mod! {
                                                         View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "C#3"}}
                                                         View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "C3"}}
                                                     }
+                                                    Tip{ text: "Click a step to set or clear it; notes in a row tie"
                                                     piano_grid := VjStepGrid{width: Fill height: Fill rows: 12}
+                                                    }
                                                 }
                                             }
                                             synth_ironfish_editor := View{
@@ -2739,10 +2925,16 @@ script_mod! {
                                                     Tick{width: Fit text: "IRONFISH · 12 SCALE-DEGREE LANES"}
                                                     View{width: Fill height: 1}
                                                     Tick{width: 30 text: "ROOT"}
+                                                    Tip{ text: "Root note of the scale; the lane names follow it"
                                                     ironfish_root := DropDown{width: 92 labels: ["A" "A#" "B" "C" "C#" "D" "D#" "E" "F" "F#" "G" "G#"]}
+                                                    }
                                                     Tick{width: 34 text: "SCALE"}
+                                                    Tip{ text: "Scale that spells the 12 lanes up from the root"
                                                     ironfish_scale := DropDown{width: 116 labels: ["MINOR" "MAJOR" "DORIAN" "PENTATONIC"]}
+                                                    }
+                                                    Tip{ text: "Wipe every step in the Ironfish lanes"
                                                     ironfish_clear := ChromeButton{width: 54 text: "CLEAR"}
+                                                    }
                                                 }
                                                 View{width: Fill height: Fill flow: Right spacing: 8
                                                     View{width: 74 height: Fill flow: Down
@@ -2759,7 +2951,9 @@ script_mod! {
                                                         View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} ironfish_lane_1 := Tick{text: ""}}
                                                         View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} ironfish_lane_0 := Tick{text: ""}}
                                                     }
+                                                    Tip{ text: "Click a step to set or clear it; the lanes are scale degrees"
                                                     ironfish_grid := VjStepGrid{width: Fill height: Fill rows: 12}
+                                                    }
                                                 }
                                             }
                                             synth_drums_editor := View{
@@ -2769,7 +2963,9 @@ script_mod! {
                                                     align: Align{x: 0.0 y: 0.5}
                                                     Tick{width: Fit text: "DRUM COMPUTER · 8 LANES"}
                                                     View{width: Fill height: 1}
+                                                    Tip{ text: "Wipe every step in the drum lanes"
                                                     drums_clear := ChromeButton{width: 54 text: "CLEAR"}
+                                                    }
                                                 }
                                                 View{
                                                     width: Fill height: Fill flow: Right spacing: 8
@@ -2784,7 +2980,9 @@ script_mod! {
                                                         View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "SNARE"}}
                                                         View{width: Fill height: Fill align: Align{x: 0.0 y: 0.5} Tick{text: "KICK"}}
                                                     }
+                                                    Tip{ text: "Click a step to set or clear that drum hit"
                                                     drums_grid := VjStepGrid{width: Fill height: Fill rows: 8}
+                                                    }
                                                 }
                                             }
                                         }
@@ -2799,22 +2997,34 @@ script_mod! {
                                                 Tick{width: Fit text: "MUTE IS SHARED WITH MIX"}
                                             }
                                             View{width: Fill height: 30 flow: Right spacing: 7 align: Align{x: 0.0 y: 0.5}
+                                                Tip{ text: "Open the piano editor; it runs full width with no engine panel"
                                                 synth_piano_btn := PillButton{width: 82 text: "PIANO"}
+                                                }
                                                 rack_piano_state := Label{width: 150 text: "IDLE · 12 NOTE LANES" draw_text.color: #x657383 draw_text.text_style.font_size: 9}
                                                 piano_rack_grid := VjStepGrid{width: Fill height: 22 rows: 1 read_only: true}
+                                                Tip{ text: "Mute the PIANO strip; the same mute as on the MIX page"
                                                 rack_piano_mute := ChromeButton{width: 34 text: "M"}
+                                                }
                                             }
                                             View{width: Fill height: 30 flow: Right spacing: 7 align: Align{x: 0.0 y: 0.5}
+                                                Tip{ text: "Open the Ironfish editor with its engine panel beside it"
                                                 synth_ironfish_btn := PillButton{width: 82 text: "IRONFISH"}
+                                                }
                                                 rack_ironfish_state := Label{width: 150 text: "IDLE · DUAL OSC SYNTH" draw_text.color: #x657383 draw_text.text_style.font_size: 9}
                                                 ironfish_rack_grid := VjStepGrid{width: Fill height: 22 rows: 1 read_only: true}
+                                                Tip{ text: "Mute the IRON strip; the same mute as on the MIX page"
                                                 rack_ironfish_mute := ChromeButton{width: 34 text: "M"}
+                                                }
                                             }
                                             View{width: Fill height: 30 flow: Right spacing: 7 align: Align{x: 0.0 y: 0.5}
+                                                Tip{ text: "Open the drum editor; it runs full width with no engine panel"
                                                 synth_drums_btn := PillButton{width: 82 text: "DRUMS"}
+                                                }
                                                 rack_drums_state := Label{width: 150 text: "IDLE · 8 DRUM LANES" draw_text.color: #x657383 draw_text.text_style.font_size: 9}
                                                 drums_rack_grid := VjStepGrid{width: Fill height: 22 rows: 1 read_only: true}
+                                                Tip{ text: "Mute the DRUMS strip; the same mute as on the MIX page"
                                                 rack_drums_mute := ChromeButton{width: 34 text: "M"}
+                                                }
                                             }
                                             Tick{width: Fill text: "+ FUTURE SYNTHS APPEAR HERE · THE TRANSPORT AND MIX BUS STAY SHARED"}
                                         }
@@ -2831,18 +3041,38 @@ script_mod! {
                                             ironfish_voice_status := Label{width: Fit text: "0 / 16 VOICES" draw_text.color: #xffe0a3 draw_text.text_style.font_size: 9}
                                         }
                                         View{width: Fill height: 22 flow: Right spacing: 4
+                                            Tip{ text: "Load the INIT program; root and scale reset to C minor"
                                             ironfish_preset_0 := ChromeButton{width: Fill text: "INIT"}
+                                            }
+                                            Tip{ text: "Load the GLASS program; root and scale reset to C minor"
                                             ironfish_preset_1 := ChromeButton{width: Fill text: "GLASS"}
+                                            }
+                                            Tip{ text: "Load the ACID program; root and scale reset to C minor"
                                             ironfish_preset_2 := ChromeButton{width: Fill text: "ACID"}
+                                            }
+                                            Tip{ text: "Load the SUB program; root and scale reset to C minor"
                                             ironfish_preset_3 := ChromeButton{width: Fill text: "SUB"}
+                                            }
+                                            Tip{ text: "Load the FORMANT program; root and scale reset to C minor"
                                             ironfish_preset_4 := ChromeButton{width: Fill text: "FORMANT"}
+                                            }
+                                            Tip{ text: "Load the CRUSH program; root and scale reset to C minor"
                                             ironfish_preset_5 := ChromeButton{width: Fill text: "CRUSH"}
+                                            }
+                                            Tip{ text: "Load the WIDE program; root and scale reset to C minor"
                                             ironfish_preset_6 := ChromeButton{width: Fill text: "WIDE"}
+                                            }
+                                            Tip{ text: "Load the PAD program; root and scale reset to C minor"
                                             ironfish_preset_7 := ChromeButton{width: Fill text: "PAD"}
+                                            }
                                         }
                                         View{width: Fill height: 22 flow: Right spacing: 4
+                                            Tip{ text: "Show the voice page: oscillators, envelopes, filter, LFO"
                                             ironfish_voice_tab := PillButton{width: 76 text: "VOICE"}
+                                            }
+                                            Tip{ text: "Show the FX page: bitcrush, chorus, delay, reverb, output"
                                             ironfish_fx_tab := PillButton{width: 62 text: "FX"}
+                                            }
                                             View{width: Fill height: 1}
                                             Tick{width: Fit text: "FULL FINAL ENGINE · SHARED CLOCK"}
                                         }
@@ -2854,78 +3084,90 @@ script_mod! {
                                                 View{width: Fill height: Fit flow: Right spacing: 6
                                                     SynthPanel{
                                                         Tick{width: Fill text: "OSCILLATOR 1"}
+                                                        Tip{ text: "Osc 1 wave; saw clouds use SPREAD and VOICES, HARMONIC its own row"
                                                         ironfish_osc1_type := DropDown{width: Fill labels: ["DPW SAW" "BLAMP TRI" "PURE SINE" "SUPERSAW" "HYPERSAW" "HARMONIC"]}
-                                                        SynthParamRow{Tick{width: 62 text: "TRANSPOSE"} ironfish_osc1_transpose := ApcBipolarSlider{}}
-                                                        SynthParamRow{Tick{width: 62 text: "DETUNE"} ironfish_osc1_detune := ApcBipolarSlider{}}
-                                                        SynthParamRow{Tick{width: 62 text: "SPREAD"} ironfish_osc1_spread := ApcHSlider{}}
-                                                        SynthParamRow{Tick{width: 62 text: "VOICES"} ironfish_osc1_diffuse := ApcHSlider{}}
-                                                        SynthParamRow{Tick{width: 62 text: "HARMONIC"} ironfish_osc1_harmonic := ApcHSlider{}}
-                                                        SynthParamRow{Tick{width: 62 text: "HARM ENV"} ironfish_osc1_harmonic_env := ApcBipolarSlider{}}
-                                                        SynthParamRow{Tick{width: 62 text: "HARM LFO"} ironfish_osc1_harmonic_lfo := ApcBipolarSlider{}}
+                                                        }
+                                                        SynthParamRow{Tick{width: 62 text: "TRANSPOSE"} Tip{ text: "Osc 1 pitch, 24 semitones either way; centre is untransposed" ironfish_osc1_transpose := ApcBipolarSlider{} }}
+                                                        SynthParamRow{Tick{width: 62 text: "DETUNE"} Tip{ text: "Osc 1 fine detune either side of centre" ironfish_osc1_detune := ApcBipolarSlider{} }}
+                                                        SynthParamRow{Tick{width: 62 text: "SPREAD"} Tip{ text: "How far the saw cloud spreads in pitch; SUPERSAW and HYPERSAW only" ironfish_osc1_spread := ApcHSlider{} }}
+                                                        SynthParamRow{Tick{width: 62 text: "VOICES"} Tip{ text: "SUPERSAW: how loud the side saws are; HYPERSAW: how many saws" ironfish_osc1_diffuse := ApcHSlider{} }}
+                                                        SynthParamRow{Tick{width: 62 text: "HARMONIC"} Tip{ text: "Which harmonic the sine sits on, 1st to 17th; HARMONIC wave only" ironfish_osc1_harmonic := ApcHSlider{} }}
+                                                        SynthParamRow{Tick{width: 62 text: "HARM ENV"} Tip{ text: "How far the mod envelope pushes the harmonics, either way" ironfish_osc1_harmonic_env := ApcBipolarSlider{} }}
+                                                        SynthParamRow{Tick{width: 62 text: "HARM LFO"} Tip{ text: "How far the LFO swings the harmonics, either way" ironfish_osc1_harmonic_lfo := ApcBipolarSlider{} }}
                                                     }
                                                     SynthPanel{
                                                         Tick{width: Fill text: "OSCILLATOR 2"}
+                                                        Tip{ text: "Osc 2 wave; saw clouds use SPREAD and VOICES, HARMONIC its own row"
                                                         ironfish_osc2_type := DropDown{width: Fill labels: ["DPW SAW" "BLAMP TRI" "PURE SINE" "SUPERSAW" "HYPERSAW" "HARMONIC"]}
-                                                        SynthParamRow{Tick{width: 62 text: "TRANSPOSE"} ironfish_osc2_transpose := ApcBipolarSlider{}}
-                                                        SynthParamRow{Tick{width: 62 text: "DETUNE"} ironfish_osc2_detune := ApcBipolarSlider{}}
-                                                        SynthParamRow{Tick{width: 62 text: "SPREAD"} ironfish_osc2_spread := ApcHSlider{}}
-                                                        SynthParamRow{Tick{width: 62 text: "VOICES"} ironfish_osc2_diffuse := ApcHSlider{}}
-                                                        SynthParamRow{Tick{width: 62 text: "HARMONIC"} ironfish_osc2_harmonic := ApcHSlider{}}
-                                                        SynthParamRow{Tick{width: 62 text: "HARM ENV"} ironfish_osc2_harmonic_env := ApcBipolarSlider{}}
-                                                        SynthParamRow{Tick{width: 62 text: "HARM LFO"} ironfish_osc2_harmonic_lfo := ApcBipolarSlider{}}
+                                                        }
+                                                        SynthParamRow{Tick{width: 62 text: "TRANSPOSE"} Tip{ text: "Osc 2 pitch, 24 semitones either way; centre is untransposed" ironfish_osc2_transpose := ApcBipolarSlider{} }}
+                                                        SynthParamRow{Tick{width: 62 text: "DETUNE"} Tip{ text: "Osc 2 fine detune either side of centre" ironfish_osc2_detune := ApcBipolarSlider{} }}
+                                                        SynthParamRow{Tick{width: 62 text: "SPREAD"} Tip{ text: "How far the saw cloud spreads in pitch; SUPERSAW and HYPERSAW only" ironfish_osc2_spread := ApcHSlider{} }}
+                                                        SynthParamRow{Tick{width: 62 text: "VOICES"} Tip{ text: "SUPERSAW: how loud the side saws are; HYPERSAW: how many saws" ironfish_osc2_diffuse := ApcHSlider{} }}
+                                                        SynthParamRow{Tick{width: 62 text: "HARMONIC"} Tip{ text: "Which harmonic the sine sits on, 1st to 17th; HARMONIC wave only" ironfish_osc2_harmonic := ApcHSlider{} }}
+                                                        SynthParamRow{Tick{width: 62 text: "HARM ENV"} Tip{ text: "How far the mod envelope pushes the harmonics, either way" ironfish_osc2_harmonic_env := ApcBipolarSlider{} }}
+                                                        SynthParamRow{Tick{width: 62 text: "HARM LFO"} Tip{ text: "How far the LFO swings the harmonics, either way" ironfish_osc2_harmonic_lfo := ApcBipolarSlider{} }}
                                                     }
                                                 }
                                                 SynthPanel{
                                                     Tick{width: Fill text: "VOICE MIX"}
                                                     View{width: Fill height: Fit flow: Right spacing: 6
-                                                        SynthParamRow{Tick{width: 62 text: "BALANCE"} ironfish_osc_balance := ApcHSlider{}}
-                                                        SynthParamRow{Tick{width: 40 text: "SUB"} ironfish_sub := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "BALANCE"} Tip{ text: "Balance: left is all osc 1, right is all osc 2" ironfish_osc_balance := ApcHSlider{} }}
+                                                        SynthParamRow{Tick{width: 40 text: "SUB"} Tip{ text: "Sub oscillator level under the voice" ironfish_sub := ApcHSlider{} }}
                                                     }
                                                     View{width: Fill height: Fit flow: Right spacing: 6
-                                                        SynthParamRow{Tick{width: 62 text: "NOISE"} ironfish_noise := ApcHSlider{}}
-                                                        SynthParamRow{Tick{width: 40 text: "PORTA"} ironfish_portamento := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "NOISE"} Tip{ text: "Noise level in the voice" ironfish_noise := ApcHSlider{} }}
+                                                        SynthParamRow{Tick{width: 40 text: "PORTA"} Tip{ text: "Glide time between notes; at zero they jump" ironfish_portamento := ApcHSlider{} }}
                                                     }
                                                 }
                                                 View{width: Fill height: Fit flow: Right spacing: 6
                                                     SynthPanel{
                                                         Tick{width: Fill text: "AMP ENVELOPE"}
-                                                        SynthParamRow{Tick{width: 62 text: "PREDELAY"} ironfish_amp_predelay := ApcHSlider{}}
-                                                        SynthParamRow{Tick{width: 62 text: "ATTACK"} ironfish_amp_attack := ApcHSlider{}}
-                                                        SynthParamRow{Tick{width: 62 text: "HOLD"} ironfish_amp_hold := ApcHSlider{}}
-                                                        SynthParamRow{Tick{width: 62 text: "DECAY"} ironfish_amp_decay := ApcHSlider{}}
-                                                        SynthParamRow{Tick{width: 62 text: "SUSTAIN"} ironfish_amp_sustain := ApcHSlider{}}
-                                                        SynthParamRow{Tick{width: 62 text: "RELEASE"} ironfish_amp_release := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "PREDELAY"} Tip{ text: "Wait before the note swells in" ironfish_amp_predelay := ApcHSlider{} }}
+                                                        SynthParamRow{Tick{width: 62 text: "ATTACK"} Tip{ text: "How fast a note swells in" ironfish_amp_attack := ApcHSlider{} }}
+                                                        SynthParamRow{Tick{width: 62 text: "HOLD"} Tip{ text: "How long it holds at full before decaying" ironfish_amp_hold := ApcHSlider{} }}
+                                                        SynthParamRow{Tick{width: 62 text: "DECAY"} Tip{ text: "How fast it falls to the sustain level" ironfish_amp_decay := ApcHSlider{} }}
+                                                        SynthParamRow{Tick{width: 62 text: "SUSTAIN"} Tip{ text: "Level held while the step is on" ironfish_amp_sustain := ApcHSlider{} }}
+                                                        SynthParamRow{Tick{width: 62 text: "RELEASE"} Tip{ text: "How long the note rings after the step ends" ironfish_amp_release := ApcHSlider{} }}
                                                     }
                                                     SynthPanel{
                                                         Tick{width: Fill text: "MOD ENVELOPE"}
-                                                        SynthParamRow{Tick{width: 62 text: "PREDELAY"} ironfish_mod_predelay := ApcHSlider{}}
-                                                        SynthParamRow{Tick{width: 62 text: "ATTACK"} ironfish_mod_attack := ApcHSlider{}}
-                                                        SynthParamRow{Tick{width: 62 text: "HOLD"} ironfish_mod_hold := ApcHSlider{}}
-                                                        SynthParamRow{Tick{width: 62 text: "DECAY"} ironfish_mod_decay := ApcHSlider{}}
-                                                        SynthParamRow{Tick{width: 62 text: "SUSTAIN"} ironfish_mod_sustain := ApcHSlider{}}
-                                                        SynthParamRow{Tick{width: 62 text: "RELEASE"} ironfish_mod_release := ApcHSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "PREDELAY"} Tip{ text: "Wait before the mod envelope starts; it drives ENV AMT and HARM ENV" ironfish_mod_predelay := ApcHSlider{} }}
+                                                        SynthParamRow{Tick{width: 62 text: "ATTACK"} Tip{ text: "How fast the mod envelope rises; it drives ENV AMT and HARM ENV" ironfish_mod_attack := ApcHSlider{} }}
+                                                        SynthParamRow{Tick{width: 62 text: "HOLD"} Tip{ text: "How long the mod envelope holds at full" ironfish_mod_hold := ApcHSlider{} }}
+                                                        SynthParamRow{Tick{width: 62 text: "DECAY"} Tip{ text: "How fast the mod envelope falls to its sustain" ironfish_mod_decay := ApcHSlider{} }}
+                                                        SynthParamRow{Tick{width: 62 text: "SUSTAIN"} Tip{ text: "Mod envelope level held while the step is on" ironfish_mod_sustain := ApcHSlider{} }}
+                                                        SynthParamRow{Tick{width: 62 text: "RELEASE"} Tip{ text: "How long the mod envelope takes to fall after the step" ironfish_mod_release := ApcHSlider{} }}
                                                     }
                                                 }
                                                 View{width: Fill height: Fit flow: Right spacing: 6
                                                     SynthPanel{
                                                         Tick{width: Fill text: "FILTER"}
+                                                        Tip{ text: "Filter shape: low pass, high pass, band pass or band reject"
                                                         ironfish_filter_type := DropDown{width: Fill labels: ["LOW PASS" "HIGH PASS" "BAND PASS" "BAND REJECT"]}
-                                                        SynthParamRow{Tick{width: 62 text: "CUTOFF"} ironfish_filter_cutoff := ApcHSlider{}}
-                                                        SynthParamRow{Tick{width: 62 text: "RESONANCE"} ironfish_filter_resonance := ApcHSlider{}}
-                                                        SynthParamRow{Tick{width: 62 text: "ENV AMT"} ironfish_filter_env := ApcBipolarSlider{}}
-                                                        SynthParamRow{Tick{width: 62 text: "LFO AMT"} ironfish_filter_lfo := ApcBipolarSlider{}}
-                                                        SynthParamRow{Tick{width: 62 text: "TOUCH AMT"} ironfish_filter_touch := ApcBipolarSlider{}}
+                                                        }
+                                                        SynthParamRow{Tick{width: 62 text: "CUTOFF"} Tip{ text: "Where the filter closes; envelope, LFO and TOUCH move it from here" ironfish_filter_cutoff := ApcHSlider{} }}
+                                                        SynthParamRow{Tick{width: 62 text: "RESONANCE"} Tip{ text: "Peak at the cutoff; high values ring" ironfish_filter_resonance := ApcHSlider{} }}
+                                                        SynthParamRow{Tick{width: 62 text: "ENV AMT"} Tip{ text: "How far the mod envelope moves the cutoff, up or down" ironfish_filter_env := ApcBipolarSlider{} }}
+                                                        SynthParamRow{Tick{width: 62 text: "LFO AMT"} Tip{ text: "How far the LFO moves the cutoff, up or down" ironfish_filter_lfo := ApcBipolarSlider{} }}
+                                                        SynthParamRow{Tick{width: 62 text: "TOUCH AMT"} Tip{ text: "How far the TOUCH slider moves the cutoff, up or down" ironfish_filter_touch := ApcBipolarSlider{} }}
                                                     }
                                                     SynthPanel{
                                                         Tick{width: Fill text: "LFO + PERFORMANCE"}
+                                                        Tip{ text: "LFO shape for the filter and harmonic sweeps"
                                                         ironfish_lfo_wave := DropDown{width: Fill labels: ["SAW" "SINE" "PULSE" "TRIANGLE"]}
-                                                        SynthParamRow{Tick{width: 62 text: "RATE"} ironfish_lfo_rate := ApcHSlider{}}
-                                                        SynthParamRow{Tick{width: 62 text: "TOUCH"} ironfish_touch := ApcHSlider{}}
-                                                        View{width: Fill height: 22 flow: Right spacing: 5
-                                                            ironfish_lfo_key_sync := Toggle{width: 92 text: "KEY SYNC"}
-                                                            ironfish_arp_enable := Toggle{width: 70 text: "ARP"}
                                                         }
-                                                        SynthParamRow{Tick{width: 62 text: "OCTAVES"} ironfish_arp_octaves := ApcBipolarSlider{}}
+                                                        SynthParamRow{Tick{width: 62 text: "RATE"} Tip{ text: "LFO speed" ironfish_lfo_rate := ApcHSlider{} }}
+                                                        SynthParamRow{Tick{width: 62 text: "TOUCH"} Tip{ text: "Hand-played modulation; TOUCH AMT says how much cutoff it moves" ironfish_touch := ApcHSlider{} }}
+                                                        View{width: Fill height: 22 flow: Right spacing: 5
+                                                            Tip{ text: "Restart the LFO on every new note"
+                                                            ironfish_lfo_key_sync := Toggle{width: 92 text: "KEY SYNC"}
+                                                            }
+                                                            Tip{ text: "Arpeggiate the held notes; OCTAVES sets how far and which way"
+                                                            ironfish_arp_enable := Toggle{width: 70 text: "ARP"}
+                                                            }
+                                                        }
+                                                        SynthParamRow{Tick{width: 62 text: "OCTAVES"} Tip{ text: "Arp range, up to 3 octaves; left runs down, right up, centre stays put" ironfish_arp_octaves := ApcBipolarSlider{} }}
                                                     }
                                                 }
                                             }
@@ -2937,37 +3179,39 @@ script_mod! {
                                                         SynthPanel{
                                                             View{width: Fill height: 22 flow: Right
                                                                 Tick{width: Fill text: "BITCRUSH"}
+                                                                Tip{ text: "Switch the bitcrusher in; AMOUNT is inert while off"
                                                                 ironfish_bitcrush_enable := Toggle{width: 48 text: "ON"}
+                                                                }
                                                             }
-                                                            SynthParamRow{Tick{width: 62 text: "AMOUNT"} ironfish_bitcrush := ApcHSlider{}}
+                                                            SynthParamRow{Tick{width: 62 text: "AMOUNT"} Tip{ text: "How many bits get crushed away; needs ON" ironfish_bitcrush := ApcHSlider{} }}
                                                         }
                                                         SynthPanel{
                                                             Tick{width: Fill text: "CROSS STEREO DELAY"}
-                                                            SynthParamRow{Tick{width: 62 text: "SEND"} ironfish_delay_send := ApcHSlider{}}
-                                                            SynthParamRow{Tick{width: 62 text: "FEEDBACK"} ironfish_delay_feedback := ApcHSlider{}}
-                                                            SynthParamRow{Tick{width: 62 text: "CROSS"} ironfish_delay_cross := ApcHSlider{}}
-                                                            SynthParamRow{Tick{width: 62 text: "DIFFERENCE"} ironfish_delay_difference := ApcHSlider{}}
-                                                            SynthParamRow{Tick{width: 62 text: "LENGTH"} ironfish_delay_length := ApcHSlider{}}
+                                                            SynthParamRow{Tick{width: 62 text: "SEND"} Tip{ text: "How much of the voice goes into the cross delay" ironfish_delay_send := ApcHSlider{} }}
+                                                            SynthParamRow{Tick{width: 62 text: "FEEDBACK"} Tip{ text: "How much of each repeat feeds the next" ironfish_delay_feedback := ApcHSlider{} }}
+                                                            SynthParamRow{Tick{width: 62 text: "CROSS"} Tip{ text: "How much each side's repeat crosses to the other side" ironfish_delay_cross := ApcHSlider{} }}
+                                                            SynthParamRow{Tick{width: 62 text: "DIFFERENCE"} Tip{ text: "Offset between left and right repeat times; 0 keeps them together" ironfish_delay_difference := ApcHSlider{} }}
+                                                            SynthParamRow{Tick{width: 62 text: "LENGTH"} Tip{ text: "Delay time between repeats" ironfish_delay_length := ApcHSlider{} }}
                                                         }
                                                         SynthPanel{
                                                             Tick{width: Fill text: "OUTPUT"}
-                                                            SynthParamRow{Tick{width: 62 text: "LEVEL"} ironfish_output := ApcHSlider{}}
+                                                            SynthParamRow{Tick{width: 62 text: "LEVEL"} Tip{ text: "Engine level before the IRON strip, up to 1.25x" ironfish_output := ApcHSlider{} }}
                                                         }
                                                     }
                                                     View{width: Fill height: Fit flow: Down spacing: 6
                                                         SynthPanel{
                                                             Tick{width: Fill text: "SIX-LINE WAVEGUIDE CHORUS"}
-                                                            SynthParamRow{Tick{width: 62 text: "MIN DELAY"} ironfish_chorus_min_delay := ApcHSlider{}}
-                                                            SynthParamRow{Tick{width: 62 text: "DEPTH"} ironfish_chorus_mod_depth := ApcHSlider{}}
-                                                            SynthParamRow{Tick{width: 62 text: "RATE"} ironfish_chorus_rate := ApcHSlider{}}
-                                                            SynthParamRow{Tick{width: 62 text: "PHASE"} ironfish_chorus_phase_diff := ApcHSlider{}}
-                                                            SynthParamRow{Tick{width: 62 text: "MIX"} ironfish_chorus_mix := ApcHSlider{}}
-                                                            SynthParamRow{Tick{width: 62 text: "FEEDBACK"} ironfish_chorus_feedback := ApcHSlider{}}
+                                                            SynthParamRow{Tick{width: 62 text: "MIN DELAY"} Tip{ text: "Shortest delay of the six chorus lines" ironfish_chorus_min_delay := ApcHSlider{} }}
+                                                            SynthParamRow{Tick{width: 62 text: "DEPTH"} Tip{ text: "How far the chorus lines sweep" ironfish_chorus_mod_depth := ApcHSlider{} }}
+                                                            SynthParamRow{Tick{width: 62 text: "RATE"} Tip{ text: "How fast the chorus lines sweep" ironfish_chorus_rate := ApcHSlider{} }}
+                                                            SynthParamRow{Tick{width: 62 text: "PHASE"} Tip{ text: "Phase offset between the six lines; more is wider" ironfish_chorus_phase_diff := ApcHSlider{} }}
+                                                            SynthParamRow{Tick{width: 62 text: "MIX"} Tip{ text: "How much chorus is heard" ironfish_chorus_mix := ApcHSlider{} }}
+                                                            SynthParamRow{Tick{width: 62 text: "FEEDBACK"} Tip{ text: "How much chorus feeds back into itself" ironfish_chorus_feedback := ApcHSlider{} }}
                                                         }
                                                         SynthPanel{
                                                             Tick{width: Fill text: "GRIESINGER REVERB"}
-                                                            SynthParamRow{Tick{width: 62 text: "MIX"} ironfish_reverb_mix := ApcHSlider{}}
-                                                            SynthParamRow{Tick{width: 62 text: "FEEDBACK"} ironfish_reverb_feedback := ApcHSlider{}}
+                                                            SynthParamRow{Tick{width: 62 text: "MIX"} Tip{ text: "How much reverb is heard" ironfish_reverb_mix := ApcHSlider{} }}
+                                                            SynthParamRow{Tick{width: 62 text: "FEEDBACK"} Tip{ text: "How long the reverb tail rings" ironfish_reverb_feedback := ApcHSlider{} }}
                                                         }
                                                     }
                                                 }
@@ -3004,20 +3248,30 @@ script_mod! {
                                         Tick{width: Fit text: "TRIGGERED BY HAND · SHARE THE SFX STRIP IN MIX"}
                                     }
                                     SearchRow{
+                                        Tip{ text: "Search the pads library: fires as you type, Enter now, Up/Down recall"
                                         sfx_search := TextInput{
                                             width: Fill
                                             empty_text: "search sfx…"
                                         }
+                                        }
+                                        Tip{ text: "Category the pad search is limited to; Enter applies it"
                                         sfx_category := TextInput{
                                             width: 120
                                             text: "sfx"
                                         }
+                                        }
+                                        Tip{ text: "Search now with these words and this category"
                                         sfx_go := ChromeButton{text: "Search"}
+                                        }
+                                        Tip{ text: "Fetch the next page of results"
                                         sfx_more := ChromeButton{text: "More"}
+                                        }
                                         sfx_count := PanelLabel{text: ""}
                                         sfx_voices := PanelLabel{text: "voices 0"}
                                     }
+                                    Tip{ text: "Click a pad to fire it; hold pads stop on release, loop pads toggle"
                                     sfx_grid := VjTileGrid{}
+                                    }
                                     // Selected-pad strip: pads themselves stay
                                     // pure triggers (no per-pad transport).
                                     View{
@@ -3027,6 +3281,7 @@ script_mod! {
                                         spacing: 8
                                         align: Align{x: 0.0, y: 0.5}
                                         sfx_sel := ValueLabel{text: "pad: —"}
+                                        Tip{ text: "Level of the selected pad, live voices too; double-click resets to 1x"
                                         sfx_gain := Slider{
                                             width: 170
                                             text: "gain"
@@ -3037,12 +3292,23 @@ script_mod! {
                                             unit: "x"
                                             precision: 2
                                         }
+                                        }
                                         PanelLabel{text: "choke"}
+                                        Tip{ text: "Choke group: firing this pad first cuts every voice in its group"
                                         sfx_choke := DropDown{labels: ["off" "1" "2" "3" "4"]}
+                                        }
+                                        Tip{ text: "Hold: the pad plays while pressed and stops when you let go"
                                         sfx_hold := Toggle{text: "hold"}
+                                        }
+                                        Tip{ text: "Loop: the pad repeats until it is clicked again or stopped"
                                         sfx_loop := Toggle{text: "loop"}
+                                        }
+                                        Tip{ text: "Silence every voice of the selected pad"
                                         sfx_stop := ChromeButton{text: "stop pad"}
+                                        }
+                                        Tip{ text: "Silence every pad at once"
                                         sfx_stop_all := ChromeButton{text: "stop all"}
+                                        }
                                     }
                                 }
                             }
@@ -3068,24 +3334,26 @@ script_mod! {
                                     // them, and the final bus beside them.
                                     View{
                                     width: 470 height: Fit flow: Right spacing: 10
-                                    FaderCol{width: 54 Tick{text: "VIDEO"} mix_video_meter := Tick{text: "····"} mix_video_gain := ApcFader{max: 1.5} mix_video_mute := ChromeButton{width: 54 text: "MUTE"} mix_video_solo := ChromeButton{width: 54 text: "SOLO"}}
-                                    FaderCol{width: 54 Tick{text: "DJ A"} mix_dja_meter := Tick{text: "····"} mix_dja_gain := ApcFader{max: 1.5} mix_dja_mute := ChromeButton{width: 54 text: "MUTE"} mix_dja_solo := ChromeButton{width: 54 text: "SOLO"}}
-                                    FaderCol{width: 54 Tick{text: "DJ B"} mix_djb_meter := Tick{text: "····"} mix_djb_gain := ApcFader{max: 1.5} mix_djb_mute := ChromeButton{width: 54 text: "MUTE"} mix_djb_solo := ChromeButton{width: 54 text: "SOLO"}}
-                                    FaderCol{width: 54 Tick{text: "SFX"} mix_sfx_meter := Tick{text: "····"} mix_sfx_gain := ApcFader{max: 1.5} mix_sfx_mute := ChromeButton{width: 54 text: "MUTE"} mix_sfx_solo := ChromeButton{width: 54 text: "SOLO"}}
-                                    FaderCol{width: 54 Tick{text: "PIANO"} mix_piano_meter := Tick{text: "····"} mix_piano_gain := ApcFader{max: 1.5} mix_piano_mute := ChromeButton{width: 54 text: "MUTE"} mix_piano_solo := ChromeButton{width: 54 text: "SOLO"}}
-                                    FaderCol{width: 54 Tick{text: "IRON"} mix_ironfish_meter := Tick{text: "····"} mix_ironfish_gain := ApcFader{max: 1.5} mix_ironfish_mute := ChromeButton{width: 54 text: "MUTE"} mix_ironfish_solo := ChromeButton{width: 54 text: "SOLO"}}
-                                    FaderCol{width: 54 Tick{text: "DRUMS"} mix_drums_meter := Tick{text: "····"} mix_drums_gain := ApcFader{max: 1.5} mix_drums_mute := ChromeButton{width: 54 text: "MUTE"} mix_drums_solo := ChromeButton{width: 54 text: "SOLO"}}
+                                    FaderCol{width: 54 Tick{text: "VIDEO"} mix_video_meter := Tick{text: "····"} Tip{ text: "VIDEO level into the final bus, up to 1.5x: the clip decks' sound" mix_video_gain := ApcFader{max: 1.5} } Tip{ text: "Mute the VIDEO strip; a solo elsewhere leaves this lamp as it is" mix_video_mute := ChromeButton{width: 54 text: "MUTE"} } Tip{ text: "Solo VIDEO: strips not soloed fall silent; a mute still holds" mix_video_solo := ChromeButton{width: 54 text: "SOLO"} }}
+                                    FaderCol{width: 54 Tick{text: "DJ A"} mix_dja_meter := Tick{text: "····"} Tip{ text: "DJ A level into the final bus, up to 1.5x" mix_dja_gain := ApcFader{max: 1.5} } Tip{ text: "Mute the DJ A strip; a solo elsewhere leaves this lamp as it is" mix_dja_mute := ChromeButton{width: 54 text: "MUTE"} } Tip{ text: "Solo DJ A: strips not soloed fall silent; a mute still holds" mix_dja_solo := ChromeButton{width: 54 text: "SOLO"} }}
+                                    FaderCol{width: 54 Tick{text: "DJ B"} mix_djb_meter := Tick{text: "····"} Tip{ text: "DJ B level into the final bus, up to 1.5x" mix_djb_gain := ApcFader{max: 1.5} } Tip{ text: "Mute the DJ B strip; a solo elsewhere leaves this lamp as it is" mix_djb_mute := ChromeButton{width: 54 text: "MUTE"} } Tip{ text: "Solo DJ B: strips not soloed fall silent; a mute still holds" mix_djb_solo := ChromeButton{width: 54 text: "SOLO"} }}
+                                    FaderCol{width: 54 Tick{text: "SFX"} mix_sfx_meter := Tick{text: "····"} Tip{ text: "SFX level into the final bus, up to 1.5x: every pad" mix_sfx_gain := ApcFader{max: 1.5} } Tip{ text: "Mute the SFX strip; a solo elsewhere leaves this lamp as it is" mix_sfx_mute := ChromeButton{width: 54 text: "MUTE"} } Tip{ text: "Solo SFX: strips not soloed fall silent; a mute still holds" mix_sfx_solo := ChromeButton{width: 54 text: "SOLO"} }}
+                                    FaderCol{width: 54 Tick{text: "PIANO"} mix_piano_meter := Tick{text: "····"} Tip{ text: "PIANO level into the final bus, up to 1.5x" mix_piano_gain := ApcFader{max: 1.5} } Tip{ text: "Mute the PIANO strip; the rack's M lamp follows it" mix_piano_mute := ChromeButton{width: 54 text: "MUTE"} } Tip{ text: "Solo PIANO: strips not soloed fall silent; a mute still holds" mix_piano_solo := ChromeButton{width: 54 text: "SOLO"} }}
+                                    FaderCol{width: 54 Tick{text: "IRON"} mix_ironfish_meter := Tick{text: "····"} Tip{ text: "IRON level into the final bus, up to 1.5x" mix_ironfish_gain := ApcFader{max: 1.5} } Tip{ text: "Mute the IRON strip; the rack's M lamp follows it" mix_ironfish_mute := ChromeButton{width: 54 text: "MUTE"} } Tip{ text: "Solo IRON: strips not soloed fall silent; a mute still holds" mix_ironfish_solo := ChromeButton{width: 54 text: "SOLO"} }}
+                                    FaderCol{width: 54 Tick{text: "DRUMS"} mix_drums_meter := Tick{text: "····"} Tip{ text: "DRUMS level into the final bus, up to 1.5x" mix_drums_gain := ApcFader{max: 1.5} } Tip{ text: "Mute the DRUMS strip; the rack's M lamp follows it" mix_drums_mute := ChromeButton{width: 54 text: "MUTE"} } Tip{ text: "Solo DRUMS: strips not soloed fall silent; a mute still holds" mix_drums_solo := ChromeButton{width: 54 text: "SOLO"} }}
                                     }
                                     RoundedView{
                                         width: Fill height: Fit flow: Down spacing: 3 padding: 8
                                         draw_bg +: {color: #x181e25 border_color: #xffffff20 border_size: 1.0 border_radius: 3.0}
                                         View{width: Fill height: Fit flow: Right
                                             Tick{width: Fill text: "FINAL BUS · COMPRESSOR / LIMITER"}
+                                            Tip{ text: "Bypass the final compressor; the ceiling limiter stays on"
                                             mix_master_bypass := ChromeButton{width: 66 text: "BYPASS"}
+                                            }
                                         }
-                                        View{width: Fill height: Fit flow: Right spacing: 5 Tick{width: 72 text: "THRESHOLD"} mix_comp_threshold := ApcHSlider{} Tick{width: 52 text: "RATIO"} mix_comp_ratio := ApcHSlider{}}
-                                        View{width: Fill height: Fit flow: Right spacing: 5 Tick{width: 72 text: "ATTACK"} mix_comp_attack := ApcHSlider{} Tick{width: 52 text: "RELEASE"} mix_comp_release := ApcHSlider{}}
-                                        View{width: Fill height: Fit flow: Right spacing: 5 Tick{width: 72 text: "MAKEUP"} mix_comp_makeup := ApcHSlider{} Tick{width: 52 text: "CEILING"} mix_limiter_ceiling := ApcHSlider{}}
+                                        View{width: Fill height: Fit flow: Right spacing: 5 Tick{width: 72 text: "THRESHOLD"} Tip{ text: "Final compressor threshold, -42 to 0 dB; idle while BYPASS is lit" mix_comp_threshold := ApcHSlider{} } Tick{width: 52 text: "RATIO"} Tip{ text: "Squeeze above the threshold, 1:1 to 20:1; idle while BYPASS is lit" mix_comp_ratio := ApcHSlider{} }}
+                                        View{width: Fill height: Fit flow: Right spacing: 5 Tick{width: 72 text: "ATTACK"} Tip{ text: "How fast it clamps down, 1 to 200 ms; idle while BYPASS is lit" mix_comp_attack := ApcHSlider{} } Tick{width: 52 text: "RELEASE"} Tip{ text: "How fast it lets go, 20 ms to 1 s; idle while BYPASS is lit" mix_comp_release := ApcHSlider{} }}
+                                        View{width: Fill height: Fit flow: Right spacing: 5 Tick{width: 72 text: "MAKEUP"} Tip{ text: "Gain added after the squeeze, 0 to 12 dB; idle while BYPASS is lit" mix_comp_makeup := ApcHSlider{} } Tick{width: 52 text: "CEILING"} Tip{ text: "Limiter ceiling, -6 to 0 dB; no peak gets past it" mix_limiter_ceiling := ApcHSlider{} }}
                                         Label{
                                             width: Fill text: "All audio sources meet here. Solo is a listen mask; mute state is preserved. Dynamics are post-channel and post-DJ crossfade."
                                             draw_text.color: #x657383
@@ -3116,7 +3384,9 @@ script_mod! {
                                             FxRoute{
                                                 PanelLabel{text: "fx on"}
                                                 View{width: Fill height: 1}
+                                                Tip{ text: "Open FX LEVELS: what each effect does to loudness when engaged"
                                                 sfx_fx_levels := PillButton{width: 70 text: "LEVELS"}
+                                                }
                                             }
                                         }
                                         View{
@@ -3126,18 +3396,41 @@ script_mod! {
                                             spacing: 8
                                             align: Align{x: 0.0, y: 0.5}
                                             FxRoute{
+                                                Tip{ text: "Echo on the final bus"
                                                 fx_on_echo_master := PillButton{width: 64 text: "MASTER"}
+                                                }
+                                                Tip{ text: "Echo on the VIDEO strip"
                                                 fx_on_echo_video := PillButton{width: 52 text: "VIDEO"}
+                                                }
+                                                Tip{ text: "Echo on deck A"
                                                 fx_on_echo_a := PillButton{width: 32 text: "A"}
+                                                }
+                                                Tip{ text: "Echo on deck B"
                                                 fx_on_echo_b := PillButton{width: 32 text: "B"}
+                                                }
+                                                Tip{ text: "Echo on both decks; if only one has it, a press turns both on"
                                                 fx_on_echo_both := PillButton{width: 48 text: "BOTH"}
+                                                }
+                                                Tip{ text: "Echo on the SFX strip: the pads"
                                                 fx_on_echo_sfx := PillButton{width: 40 text: "SFX"}
+                                                }
+                                                Tip{ text: "Echo on the PIANO strip"
                                                 fx_on_echo_piano := PillButton{width: 52 text: "PIANO"}
+                                                }
+                                                Tip{ text: "Echo on the IRON strip"
                                                 fx_on_echo_ironfish := PillButton{width: 44 text: "IRON"}
+                                                }
+                                                Tip{ text: "Echo on the DRUMS strip"
                                                 fx_on_echo_drums := PillButton{width: 56 text: "DRUMS"}
+                                                }
                                             }
+                                            Tip{ text: "Echo master: off everywhere if on anywhere, else on both decks"
                                             sfx_fx_echo := PillButton{width: 62 text: "ECHO"}
+                                            }
+                                            Tip{ text: "Echo time in beats wherever it is on; off takes it off everywhere"
                                             sfx_fx_echo_rung := VjBeatsDrop{width: 44 echo_rows: true}
+                                            }
+                                            Tip{ text: "How much of a repeat feeds the next; double-click resets"
                                             sfx_fx_feedback := Slider{
                                                 width: 170
                                                 text: "echo feedback"
@@ -3148,7 +3441,10 @@ script_mod! {
                                                 display_scale: 100.0
                                                 precision: 0
                                             }
+                                            }
+                                            Tip{ text: "Ping-pong: repeats bounce between left and right"
                                             sfx_fx_echo_ping := PillButton{width: 54 text: "PING"}
+                                            }
                                         }
                                         View{
                                             width: Fill
@@ -3157,20 +3453,41 @@ script_mod! {
                                             spacing: 8
                                             align: Align{x: 0.0, y: 0.5}
                                             FxRoute{
+                                                Tip{ text: "Flanger on the final bus"
                                                 fx_on_flanger_master := PillButton{width: 64 text: "MASTER"}
+                                                }
+                                                Tip{ text: "Flanger on the VIDEO strip"
                                                 fx_on_flanger_video := PillButton{width: 52 text: "VIDEO"}
+                                                }
+                                                Tip{ text: "Flanger on deck A"
                                                 fx_on_flanger_a := PillButton{width: 32 text: "A"}
+                                                }
+                                                Tip{ text: "Flanger on deck B"
                                                 fx_on_flanger_b := PillButton{width: 32 text: "B"}
+                                                }
+                                                Tip{ text: "Flanger on both decks; if only one has it, a press turns both on"
                                                 fx_on_flanger_both := PillButton{width: 48 text: "BOTH"}
+                                                }
+                                                Tip{ text: "Flanger on the SFX strip: the pads"
                                                 fx_on_flanger_sfx := PillButton{width: 40 text: "SFX"}
+                                                }
+                                                Tip{ text: "Flanger on the PIANO strip"
                                                 fx_on_flanger_piano := PillButton{width: 52 text: "PIANO"}
+                                                }
+                                                Tip{ text: "Flanger on the IRON strip"
                                                 fx_on_flanger_ironfish := PillButton{width: 44 text: "IRON"}
+                                                }
+                                                Tip{ text: "Flanger on the DRUMS strip"
                                                 fx_on_flanger_drums := PillButton{width: 56 text: "DRUMS"}
+                                                }
                                             }
+                                            Tip{ text: "Flanger master: off everywhere if on anywhere, else on both decks"
                                             sfx_fx_flanger := PillButton{width: 78 text: "FLANGER"}
+                                            }
                                             sfx_fx_flanger_free := View{
                                                 width: Fit
                                                 height: Fit
+                                                Tip{ text: "Flanger sweep speed in Hz while sync reads Hz; double-click resets"
                                                 sfx_fx_flanger_rate := Slider{
                                                     width: 170
                                                     text: "flanger rate"
@@ -3181,8 +3498,11 @@ script_mod! {
                                                     unit: "Hz"
                                                     precision: 2
                                                 }
+                                                }
                                             }
+                                            Tip{ text: "Lock the sweep to the grid, 1/8 to 64 cycles a beat; Hz runs free"
                                             sfx_fx_flanger_sync := VjBeatsDrop{width: 40 lfo_rows: true}
+                                            }
                                             sfx_fx_flanger_locked := View{
                                                 width: Fit
                                                 height: Fit
@@ -3190,6 +3510,7 @@ script_mod! {
                                                 spacing: 8
                                                 align: Align{x: 0.0, y: 0.5}
                                                 visible: false
+                                                Tip{ text: "Where in its cycle the beat-locked sweep starts; double-click resets"
                                                 sfx_fx_flanger_offset := Slider{
                                                     width: 170
                                                     text: "flanger offset"
@@ -3200,6 +3521,7 @@ script_mod! {
                                                     display_scale: 100.0
                                                     precision: 0
                                                 }
+                                                }
                                             }
                                         }
                                         View{
@@ -3209,17 +3531,38 @@ script_mod! {
                                             spacing: 8
                                             align: Align{x: 0.0, y: 0.5}
                                             FxRoute{
+                                                Tip{ text: "Bitcrush on the final bus"
                                                 fx_on_bitcrusher_master := PillButton{width: 64 text: "MASTER"}
+                                                }
+                                                Tip{ text: "Bitcrush on the VIDEO strip"
                                                 fx_on_bitcrusher_video := PillButton{width: 52 text: "VIDEO"}
+                                                }
+                                                Tip{ text: "Bitcrush on deck A"
                                                 fx_on_bitcrusher_a := PillButton{width: 32 text: "A"}
+                                                }
+                                                Tip{ text: "Bitcrush on deck B"
                                                 fx_on_bitcrusher_b := PillButton{width: 32 text: "B"}
+                                                }
+                                                Tip{ text: "Bitcrush on both decks; if only one has it, a press turns both on"
                                                 fx_on_bitcrusher_both := PillButton{width: 48 text: "BOTH"}
+                                                }
+                                                Tip{ text: "Bitcrush on the SFX strip: the pads"
                                                 fx_on_bitcrusher_sfx := PillButton{width: 40 text: "SFX"}
+                                                }
+                                                Tip{ text: "Bitcrush on the PIANO strip"
                                                 fx_on_bitcrusher_piano := PillButton{width: 52 text: "PIANO"}
+                                                }
+                                                Tip{ text: "Bitcrush on the IRON strip"
                                                 fx_on_bitcrusher_ironfish := PillButton{width: 44 text: "IRON"}
+                                                }
+                                                Tip{ text: "Bitcrush on the DRUMS strip"
                                                 fx_on_bitcrusher_drums := PillButton{width: 56 text: "DRUMS"}
+                                                }
                                             }
+                                            Tip{ text: "Bitcrush master: off everywhere if on anywhere, else on both decks"
                                             sfx_fx_bitcrusher := PillButton{width: 92 text: "BITCRUSH"}
+                                            }
+                                            Tip{ text: "Bit depth of the crush, 1 to 16; fewer is harsher; double-click resets"
                                             sfx_fx_bitcrusher_bits := Slider{
                                                 width: 170
                                                 text: "bitcrusher bits"
@@ -3231,6 +3574,7 @@ script_mod! {
                                                 unit: "bits"
                                                 precision: 0
                                             }
+                                            }
                                         }
                                         View{
                                             width: Fill
@@ -3239,20 +3583,41 @@ script_mod! {
                                             spacing: 8
                                             align: Align{x: 0.0, y: 0.5}
                                             FxRoute{
+                                                Tip{ text: "Tremolo on the final bus"
                                                 fx_on_tremolo_master := PillButton{width: 64 text: "MASTER"}
+                                                }
+                                                Tip{ text: "Tremolo on the VIDEO strip"
                                                 fx_on_tremolo_video := PillButton{width: 52 text: "VIDEO"}
+                                                }
+                                                Tip{ text: "Tremolo on deck A"
                                                 fx_on_tremolo_a := PillButton{width: 32 text: "A"}
+                                                }
+                                                Tip{ text: "Tremolo on deck B"
                                                 fx_on_tremolo_b := PillButton{width: 32 text: "B"}
+                                                }
+                                                Tip{ text: "Tremolo on both decks; if only one has it, a press turns both on"
                                                 fx_on_tremolo_both := PillButton{width: 48 text: "BOTH"}
+                                                }
+                                                Tip{ text: "Tremolo on the SFX strip: the pads"
                                                 fx_on_tremolo_sfx := PillButton{width: 40 text: "SFX"}
+                                                }
+                                                Tip{ text: "Tremolo on the PIANO strip"
                                                 fx_on_tremolo_piano := PillButton{width: 52 text: "PIANO"}
+                                                }
+                                                Tip{ text: "Tremolo on the IRON strip"
                                                 fx_on_tremolo_ironfish := PillButton{width: 44 text: "IRON"}
+                                                }
+                                                Tip{ text: "Tremolo on the DRUMS strip"
                                                 fx_on_tremolo_drums := PillButton{width: 56 text: "DRUMS"}
+                                                }
                                             }
+                                            Tip{ text: "Tremolo master: off everywhere if on anywhere, else on both decks"
                                             sfx_fx_tremolo := PillButton{width: 78 text: "TREMOLO"}
+                                            }
                                             sfx_fx_tremolo_free := View{
                                                 width: Fit
                                                 height: Fit
+                                                Tip{ text: "Tremolo speed in Hz while sync reads Hz; double-click resets"
                                                 sfx_fx_tremolo_rate := Slider{
                                                     width: 170
                                                     text: "tremolo rate"
@@ -3263,8 +3628,11 @@ script_mod! {
                                                     unit: "Hz"
                                                     precision: 2
                                                 }
+                                                }
                                             }
+                                            Tip{ text: "Lock the tremolo to the grid, 1/8 to 64 cycles a beat; Hz runs free"
                                             sfx_fx_tremolo_sync := VjBeatsDrop{width: 40 lfo_rows: true}
+                                            }
                                             sfx_fx_tremolo_locked := View{
                                                 width: Fit
                                                 height: Fit
@@ -3272,6 +3640,7 @@ script_mod! {
                                                 spacing: 8
                                                 align: Align{x: 0.0, y: 0.5}
                                                 visible: false
+                                                Tip{ text: "Where in its cycle the beat-locked tremolo starts; double-click resets"
                                                 sfx_fx_tremolo_offset := Slider{
                                                     width: 170
                                                     text: "tremolo offset"
@@ -3282,6 +3651,7 @@ script_mod! {
                                                     display_scale: 100.0
                                                     precision: 0
                                                 }
+                                                }
                                             }
                                         }
                                         View{
@@ -3291,17 +3661,38 @@ script_mod! {
                                             spacing: 8
                                             align: Align{x: 0.0, y: 0.5}
                                             FxRoute{
+                                                Tip{ text: "Distortion on the final bus"
                                                 fx_on_distortion_master := PillButton{width: 64 text: "MASTER"}
+                                                }
+                                                Tip{ text: "Distortion on the VIDEO strip"
                                                 fx_on_distortion_video := PillButton{width: 52 text: "VIDEO"}
+                                                }
+                                                Tip{ text: "Distortion on deck A"
                                                 fx_on_distortion_a := PillButton{width: 32 text: "A"}
+                                                }
+                                                Tip{ text: "Distortion on deck B"
                                                 fx_on_distortion_b := PillButton{width: 32 text: "B"}
+                                                }
+                                                Tip{ text: "Distortion on both decks; if only one has it, a press turns both on"
                                                 fx_on_distortion_both := PillButton{width: 48 text: "BOTH"}
+                                                }
+                                                Tip{ text: "Distortion on the SFX strip: the pads"
                                                 fx_on_distortion_sfx := PillButton{width: 40 text: "SFX"}
+                                                }
+                                                Tip{ text: "Distortion on the PIANO strip"
                                                 fx_on_distortion_piano := PillButton{width: 52 text: "PIANO"}
+                                                }
+                                                Tip{ text: "Distortion on the IRON strip"
                                                 fx_on_distortion_ironfish := PillButton{width: 44 text: "IRON"}
+                                                }
+                                                Tip{ text: "Distortion on the DRUMS strip"
                                                 fx_on_distortion_drums := PillButton{width: 56 text: "DRUMS"}
+                                                }
                                             }
+                                            Tip{ text: "Distortion master: off everywhere if on anywhere, else on both decks"
                                             sfx_fx_distortion := PillButton{width: 92 text: "DISTORT"}
+                                            }
+                                            Tip{ text: "Drive into the soft clip, 1x to 20x; double-click resets"
                                             sfx_fx_distortion_drive := Slider{
                                                 width: 170
                                                 text: "distortion drive"
@@ -3312,6 +3703,7 @@ script_mod! {
                                                 unit: "x"
                                                 precision: 1
                                             }
+                                            }
                                         }
                                         View{
                                             width: Fill
@@ -3320,20 +3712,41 @@ script_mod! {
                                             spacing: 8
                                             align: Align{x: 0.0, y: 0.5}
                                             FxRoute{
+                                                Tip{ text: "Phaser on the final bus"
                                                 fx_on_phaser_master := PillButton{width: 64 text: "MASTER"}
+                                                }
+                                                Tip{ text: "Phaser on the VIDEO strip"
                                                 fx_on_phaser_video := PillButton{width: 52 text: "VIDEO"}
+                                                }
+                                                Tip{ text: "Phaser on deck A"
                                                 fx_on_phaser_a := PillButton{width: 32 text: "A"}
+                                                }
+                                                Tip{ text: "Phaser on deck B"
                                                 fx_on_phaser_b := PillButton{width: 32 text: "B"}
+                                                }
+                                                Tip{ text: "Phaser on both decks; if only one has it, a press turns both on"
                                                 fx_on_phaser_both := PillButton{width: 48 text: "BOTH"}
+                                                }
+                                                Tip{ text: "Phaser on the SFX strip: the pads"
                                                 fx_on_phaser_sfx := PillButton{width: 40 text: "SFX"}
+                                                }
+                                                Tip{ text: "Phaser on the PIANO strip"
                                                 fx_on_phaser_piano := PillButton{width: 52 text: "PIANO"}
+                                                }
+                                                Tip{ text: "Phaser on the IRON strip"
                                                 fx_on_phaser_ironfish := PillButton{width: 44 text: "IRON"}
+                                                }
+                                                Tip{ text: "Phaser on the DRUMS strip"
                                                 fx_on_phaser_drums := PillButton{width: 56 text: "DRUMS"}
+                                                }
                                             }
+                                            Tip{ text: "Phaser master: off everywhere if on anywhere, else on both decks"
                                             sfx_fx_phaser := PillButton{width: 70 text: "PHASER"}
+                                            }
                                             sfx_fx_phaser_free := View{
                                                 width: Fit
                                                 height: Fit
+                                                Tip{ text: "Phaser sweep speed in Hz while sync reads Hz; double-click resets"
                                                 sfx_fx_phaser_rate := Slider{
                                                     width: 170
                                                     text: "phaser rate"
@@ -3344,8 +3757,11 @@ script_mod! {
                                                     unit: "Hz"
                                                     precision: 2
                                                 }
+                                                }
                                             }
+                                            Tip{ text: "Lock the phaser to the grid, 1/8 to 64 cycles a beat; Hz runs free"
                                             sfx_fx_phaser_sync := VjBeatsDrop{width: 40 lfo_rows: true}
+                                            }
                                             sfx_fx_phaser_locked := View{
                                                 width: Fit
                                                 height: Fit
@@ -3353,6 +3769,7 @@ script_mod! {
                                                 spacing: 8
                                                 align: Align{x: 0.0, y: 0.5}
                                                 visible: false
+                                                Tip{ text: "Where in its cycle the beat-locked phaser starts; double-click resets"
                                                 sfx_fx_phaser_offset := Slider{
                                                     width: 170
                                                     text: "phaser offset"
@@ -3363,7 +3780,9 @@ script_mod! {
                                                     display_scale: 100.0
                                                     precision: 0
                                                 }
+                                                }
                                             }
+                                            Tip{ text: "How much phaser output feeds its first stage; double-click resets"
                                             sfx_fx_phaser_feedback := Slider{
                                                 width: 170
                                                 text: "phaser feedback"
@@ -3374,6 +3793,7 @@ script_mod! {
                                                 display_scale: 100.0
                                                 precision: 0
                                             }
+                                            }
                                         }
                                         View{
                                             width: Fill
@@ -3382,20 +3802,41 @@ script_mod! {
                                             spacing: 8
                                             align: Align{x: 0.0, y: 0.5}
                                             FxRoute{
+                                                Tip{ text: "Autopan on the final bus"
                                                 fx_on_autopan_master := PillButton{width: 64 text: "MASTER"}
+                                                }
+                                                Tip{ text: "Autopan on the VIDEO strip"
                                                 fx_on_autopan_video := PillButton{width: 52 text: "VIDEO"}
+                                                }
+                                                Tip{ text: "Autopan on deck A"
                                                 fx_on_autopan_a := PillButton{width: 32 text: "A"}
+                                                }
+                                                Tip{ text: "Autopan on deck B"
                                                 fx_on_autopan_b := PillButton{width: 32 text: "B"}
+                                                }
+                                                Tip{ text: "Autopan on both decks; if only one has it, a press turns both on"
                                                 fx_on_autopan_both := PillButton{width: 48 text: "BOTH"}
+                                                }
+                                                Tip{ text: "Autopan on the SFX strip: the pads"
                                                 fx_on_autopan_sfx := PillButton{width: 40 text: "SFX"}
+                                                }
+                                                Tip{ text: "Autopan on the PIANO strip"
                                                 fx_on_autopan_piano := PillButton{width: 52 text: "PIANO"}
+                                                }
+                                                Tip{ text: "Autopan on the IRON strip"
                                                 fx_on_autopan_ironfish := PillButton{width: 44 text: "IRON"}
+                                                }
+                                                Tip{ text: "Autopan on the DRUMS strip"
                                                 fx_on_autopan_drums := PillButton{width: 56 text: "DRUMS"}
+                                                }
                                             }
+                                            Tip{ text: "Autopan master: off everywhere if on anywhere, else on both decks"
                                             sfx_fx_autopan := PillButton{width: 78 text: "AUTOPAN"}
+                                            }
                                             sfx_fx_autopan_free := View{
                                                 width: Fit
                                                 height: Fit
+                                                Tip{ text: "Autopan speed in Hz while sync reads Hz; double-click resets"
                                                 sfx_fx_autopan_rate := Slider{
                                                     width: 170
                                                     text: "autopan rate"
@@ -3406,8 +3847,11 @@ script_mod! {
                                                     unit: "Hz"
                                                     precision: 2
                                                 }
+                                                }
                                             }
+                                            Tip{ text: "Lock the autopan to the grid, 1/8 to 64 cycles a beat; Hz runs free"
                                             sfx_fx_autopan_sync := VjBeatsDrop{width: 40 lfo_rows: true}
+                                            }
                                             sfx_fx_autopan_locked := View{
                                                 width: Fit
                                                 height: Fit
@@ -3415,6 +3859,7 @@ script_mod! {
                                                 spacing: 8
                                                 align: Align{x: 0.0, y: 0.5}
                                                 visible: false
+                                                Tip{ text: "Where in its cycle the beat-locked autopan starts; double-click resets"
                                                 sfx_fx_autopan_offset := Slider{
                                                     width: 170
                                                     text: "autopan offset"
@@ -3425,6 +3870,7 @@ script_mod! {
                                                     display_scale: 100.0
                                                     precision: 0
                                                 }
+                                                }
                                             }
                                         }
                                         View{
@@ -3434,17 +3880,38 @@ script_mod! {
                                             spacing: 8
                                             align: Align{x: 0.0, y: 0.5}
                                             FxRoute{
+                                                Tip{ text: "Width on the final bus"
                                                 fx_on_stereo_width_master := PillButton{width: 64 text: "MASTER"}
+                                                }
+                                                Tip{ text: "Width on the VIDEO strip"
                                                 fx_on_stereo_width_video := PillButton{width: 52 text: "VIDEO"}
+                                                }
+                                                Tip{ text: "Width on deck A"
                                                 fx_on_stereo_width_a := PillButton{width: 32 text: "A"}
+                                                }
+                                                Tip{ text: "Width on deck B"
                                                 fx_on_stereo_width_b := PillButton{width: 32 text: "B"}
+                                                }
+                                                Tip{ text: "Width on both decks; if only one has it, a press turns both on"
                                                 fx_on_stereo_width_both := PillButton{width: 48 text: "BOTH"}
+                                                }
+                                                Tip{ text: "Width on the SFX strip: the pads"
                                                 fx_on_stereo_width_sfx := PillButton{width: 40 text: "SFX"}
+                                                }
+                                                Tip{ text: "Width on the PIANO strip"
                                                 fx_on_stereo_width_piano := PillButton{width: 52 text: "PIANO"}
+                                                }
+                                                Tip{ text: "Width on the IRON strip"
                                                 fx_on_stereo_width_ironfish := PillButton{width: 44 text: "IRON"}
+                                                }
+                                                Tip{ text: "Width on the DRUMS strip"
                                                 fx_on_stereo_width_drums := PillButton{width: 56 text: "DRUMS"}
+                                                }
                                             }
+                                            Tip{ text: "Width master: off everywhere if on anywhere, else on both decks"
                                             sfx_fx_stereo_width := PillButton{width: 56 text: "WIDTH"}
+                                            }
+                                            Tip{ text: "Stereo width: 0 mono, 1 as recorded, 2 wider; double-click resets"
                                             sfx_fx_stereo_width_amount := Slider{
                                                 width: 170
                                                 text: "width"
@@ -3455,6 +3922,7 @@ script_mod! {
                                                 unit: "x"
                                                 precision: 2
                                             }
+                                            }
                                         }
                                         View{
                                             width: Fill
@@ -3463,17 +3931,38 @@ script_mod! {
                                             spacing: 8
                                             align: Align{x: 0.0, y: 0.5}
                                             FxRoute{
+                                                Tip{ text: "Reverb on the final bus"
                                                 fx_on_plate_reverb_master := PillButton{width: 64 text: "MASTER"}
+                                                }
+                                                Tip{ text: "Reverb on the VIDEO strip"
                                                 fx_on_plate_reverb_video := PillButton{width: 52 text: "VIDEO"}
+                                                }
+                                                Tip{ text: "Reverb on deck A"
                                                 fx_on_plate_reverb_a := PillButton{width: 32 text: "A"}
+                                                }
+                                                Tip{ text: "Reverb on deck B"
                                                 fx_on_plate_reverb_b := PillButton{width: 32 text: "B"}
+                                                }
+                                                Tip{ text: "Reverb on both decks; if only one has it, a press turns both on"
                                                 fx_on_plate_reverb_both := PillButton{width: 48 text: "BOTH"}
+                                                }
+                                                Tip{ text: "Reverb on the SFX strip: the pads"
                                                 fx_on_plate_reverb_sfx := PillButton{width: 40 text: "SFX"}
+                                                }
+                                                Tip{ text: "Reverb on the PIANO strip"
                                                 fx_on_plate_reverb_piano := PillButton{width: 52 text: "PIANO"}
+                                                }
+                                                Tip{ text: "Reverb on the IRON strip"
                                                 fx_on_plate_reverb_ironfish := PillButton{width: 44 text: "IRON"}
+                                                }
+                                                Tip{ text: "Reverb on the DRUMS strip"
                                                 fx_on_plate_reverb_drums := PillButton{width: 56 text: "DRUMS"}
+                                                }
                                             }
+                                            Tip{ text: "Reverb master: off everywhere if on anywhere, else on both decks"
                                             sfx_fx_plate_reverb := PillButton{width: 70 text: "REVERB"}
+                                            }
+                                            Tip{ text: "How long the plate tail rings; double-click resets"
                                             sfx_fx_plate_reverb_size := Slider{
                                                 width: 170
                                                 text: "reverb size"
@@ -3484,6 +3973,7 @@ script_mod! {
                                                 display_scale: 100.0
                                                 precision: 0
                                             }
+                                            }
                                         }
                                         View{
                                             width: Fill
@@ -3492,17 +3982,38 @@ script_mod! {
                                             spacing: 8
                                             align: Align{x: 0.0, y: 0.5}
                                             FxRoute{
+                                                Tip{ text: "Ladder filter on the final bus"
                                                 fx_on_moog_ladder_master := PillButton{width: 64 text: "MASTER"}
+                                                }
+                                                Tip{ text: "Ladder filter on the VIDEO strip"
                                                 fx_on_moog_ladder_video := PillButton{width: 52 text: "VIDEO"}
+                                                }
+                                                Tip{ text: "Ladder filter on deck A"
                                                 fx_on_moog_ladder_a := PillButton{width: 32 text: "A"}
+                                                }
+                                                Tip{ text: "Ladder filter on deck B"
                                                 fx_on_moog_ladder_b := PillButton{width: 32 text: "B"}
+                                                }
+                                                Tip{ text: "Ladder filter on both decks; if only one has it, a press turns both on"
                                                 fx_on_moog_ladder_both := PillButton{width: 48 text: "BOTH"}
+                                                }
+                                                Tip{ text: "Ladder filter on the SFX strip: the pads"
                                                 fx_on_moog_ladder_sfx := PillButton{width: 40 text: "SFX"}
+                                                }
+                                                Tip{ text: "Ladder filter on the PIANO strip"
                                                 fx_on_moog_ladder_piano := PillButton{width: 52 text: "PIANO"}
+                                                }
+                                                Tip{ text: "Ladder filter on the IRON strip"
                                                 fx_on_moog_ladder_ironfish := PillButton{width: 44 text: "IRON"}
+                                                }
+                                                Tip{ text: "Ladder filter on the DRUMS strip"
                                                 fx_on_moog_ladder_drums := PillButton{width: 56 text: "DRUMS"}
+                                                }
                                             }
+                                            Tip{ text: "Ladder master: off everywhere if on anywhere, else on both decks"
                                             sfx_fx_moog_ladder := PillButton{width: 70 text: "LADDER"}
+                                            }
+                                            Tip{ text: "Where the ladder rolls off, 60 Hz to 12 kHz; double-click resets"
                                             sfx_fx_moog_ladder_cutoff := Slider{
                                                 width: 170
                                                 text: "ladder cutoff"
@@ -3513,6 +4024,8 @@ script_mod! {
                                                 unit: "Hz"
                                                 precision: 0
                                             }
+                                            }
+                                            Tip{ text: "Ladder feedback: a peak at the cutoff; double-click resets"
                                             sfx_fx_moog_ladder_resonance := Slider{
                                                 width: 170
                                                 text: "ladder resonance"
@@ -3522,6 +4035,7 @@ script_mod! {
                                                 unit: "%"
                                                 display_scale: 100.0
                                                 precision: 0
+                                            }
                                             }
                                         }
                                         // The compressor has no row in the levels
@@ -3541,17 +4055,38 @@ script_mod! {
                                             spacing: 8
                                             align: Align{x: 0.0, y: 0.5}
                                             FxRoute{
+                                                Tip{ text: "Compressor on the final bus"
                                                 fx_on_compressor_master := PillButton{width: 64 text: "MASTER"}
+                                                }
+                                                Tip{ text: "Compressor on the VIDEO strip"
                                                 fx_on_compressor_video := PillButton{width: 52 text: "VIDEO"}
+                                                }
+                                                Tip{ text: "Compressor on deck A"
                                                 fx_on_compressor_a := PillButton{width: 32 text: "A"}
+                                                }
+                                                Tip{ text: "Compressor on deck B"
                                                 fx_on_compressor_b := PillButton{width: 32 text: "B"}
+                                                }
+                                                Tip{ text: "Compressor on both decks; if only one has it, a press turns both on"
                                                 fx_on_compressor_both := PillButton{width: 48 text: "BOTH"}
+                                                }
+                                                Tip{ text: "Compressor on the SFX strip: the pads"
                                                 fx_on_compressor_sfx := PillButton{width: 40 text: "SFX"}
+                                                }
+                                                Tip{ text: "Compressor on the PIANO strip"
                                                 fx_on_compressor_piano := PillButton{width: 52 text: "PIANO"}
+                                                }
+                                                Tip{ text: "Compressor on the IRON strip"
                                                 fx_on_compressor_ironfish := PillButton{width: 44 text: "IRON"}
+                                                }
+                                                Tip{ text: "Compressor on the DRUMS strip"
                                                 fx_on_compressor_drums := PillButton{width: 56 text: "DRUMS"}
+                                                }
                                             }
+                                            Tip{ text: "Comp master: off everywhere if on anywhere, else on both decks"
                                             sfx_fx_compressor := PillButton{width: 70 text: "COMP"}
+                                            }
+                                            Tip{ text: "Where this compressor starts, -40 to 0 dB; double-click resets"
                                             sfx_fx_compressor_threshold := Slider{
                                                 width: 170
                                                 text: "comp threshold"
@@ -3561,6 +4096,8 @@ script_mod! {
                                                 unit: "dB"
                                                 precision: 0
                                             }
+                                            }
+                                            Tip{ text: "How hard it works above that, 1:1 to 20:1; double-click resets"
                                             sfx_fx_compressor_ratio := Slider{
                                                 width: 170
                                                 text: "comp ratio"
@@ -3570,6 +4107,7 @@ script_mod! {
                                                 taper: Log
                                                 unit: ":1"
                                                 precision: 1
+                                            }
                                             }
                                         }
                                     }
@@ -3623,12 +4161,18 @@ script_mod! {
                                         draw_text.text_style: theme.font_bold{font_size: 11}
                                     }
                                     View{width: Fill height: 1}
+                                    Tip{ text: "Stop all: empty the queue and switch CONT off"
                                     gen_clear := ChromeButton{text: "Stop all"}
+                                    }
+                                    Tip{ text: "Fold the GEN drawer away or open it"
                                     gen_fold := ChromeButton{text: "⟨"}
+                                    }
                                 }
+                                Tip{ text: "What to generate; Enter queues a run"
                                 gen_prompt := TextInput{
                                     width: Fill
                                     empty_text: "prompt"
+                                }
                                 }
                                 View{
                                     width: Fill
@@ -3636,7 +4180,9 @@ script_mod! {
                                     flow: Right
                                     spacing: 6
                                     align: Align{x: 0.0, y: 0.5}
+                                    Tip{ text: "Pipe: which chain of steps makes the image, clip or music"
                                     gen_profile := DropDown{width: Fill labels: ["…"]}
+                                    }
                                 }
                                 // The pickers get their own row: a pipe
                                 // name is long ("DREAM: expand → image →
@@ -3648,11 +4194,17 @@ script_mod! {
                                     flow: Right
                                     spacing: 6
                                     align: Align{x: 0.0, y: 0.5}
+                                    Tip{ text: "Clip length; the canvas gives way if the pair will not run"
                                     gen_len := DropDown{labels: ["…"]}
+                                    }
+                                    Tip{ text: "Canvas size; the length gives way if the pair will not run"
                                     gen_res := DropDown{labels: ["…"]}
+                                    }
                                     // Which flux draws the still. Only ever
                                     // models the fleet advertised.
+                                    Tip{ text: "Which image model draws the still"
                                     gen_model := DropDown{labels: ["auto"]}
+                                    }
                                 }
                                 View{
                                     width: Fill
@@ -3660,14 +4212,22 @@ script_mod! {
                                     flow: Right
                                     spacing: 6
                                     align: Align{x: 0.0, y: 0.5}
+                                    Tip{ text: "Queue one run of the prompt under the chosen pipe"
                                     gen_go := ChromeButton{text: "Queue"}
+                                    }
+                                    Tip{ text: "Blast: a burst of runs at once; an empty prompt means surprise me"
                                     gen_blast := ChromeButton{text: "BLAST"}
+                                    }
                                     // Close the wrap of EVERY looping clip,
                                     // not just the ones this app dreamed.
+                                    Tip{ text: "Loop fix: close the wrap of every looping clip on its next cue"
                                     gen_closeall := CheckBox{text: "LOOP FIX"}
+                                    }
                                     // Keep the queue topped up from the same
                                     // prompt for as long as it is checked.
+                                    Tip{ text: "Continuous: keep the queue topped up from this prompt"
                                     gen_loop := CheckBox{text: "CONT"}
+                                    }
                                 }
                                 gen_status := PanelLabel{text: ""}
                                 gen_jobs := VjJobList{}
@@ -3688,8 +4248,12 @@ script_mod! {
                                         draw_text.text_style: theme.font_bold{font_size: 11}
                                     }
                                     View{width: Fill height: 1}
+                                    Tip{ text: "Stop the reply that is streaming"
                                     chat_cancel_btn := ChromeButton{text: "Stop" visible: false}
+                                    }
+                                    Tip{ text: "Clear the chat; the next message starts a fresh session"
                                     chat_clear_btn := ChromeButton{text: "Clear"}
+                                    }
                                 }
                                 chat_status := PanelLabel{
                                     width: Fill
@@ -3702,11 +4266,15 @@ script_mod! {
                                     flow: Right
                                     spacing: 6
                                     align: Align{y: 1.0}
+                                    Tip{ text: "Ask for content in words; Enter sends"
                                     chat_input := TextInput{
                                         width: Fill
                                         empty_text: "find me 20s of dark techno…"
                                     }
+                                    }
+                                    Tip{ text: "Send the message"
                                     chat_send_btn := ChromeButton{text: "Send"}
+                                    }
                                 }
                             }
                         }
@@ -3920,7 +4488,9 @@ script_mod! {
                                     spacing: 8
                                     align: Align{x: 0.0, y: 0.5}
                                     PanelLabel{width: 90 text: "OUTPUT"}
+                                    Tip{ text: "Output the cue and pre-listen go to; the main output is refused"
                                     phones_device := PhonesDrop{width: Fill labels: ["NONE"]}
+                                    }
                                 }
                                 View{
                                     width: Fill
@@ -3929,9 +4499,11 @@ script_mod! {
                                     spacing: 8
                                     align: Align{x: 0.0, y: 0.5}
                                     PanelLabel{width: 90 text: "VOLUME"}
+                                    Tip{ text: "How loud the phones are; the room does not change"
                                     phones_volume := ApcHSlider{
                                         min: 0.0
                                         max: 1.0
+                                    }
                                     }
                                 }
                                 View{
@@ -3941,7 +4513,9 @@ script_mod! {
                                     spacing: 8
                                     align: Align{x: 0.0, y: 0.5}
                                     PanelLabel{width: 90 text: "CUE SIGNAL"}
+                                    Tip{ text: "What the cue taps: PFL before the fader, POST after it, RAW before EQ"
                                     phones_mode := PhonesDrop{width: 110 labels: ["PFL" "POST-FADER" "RAW"]}
+                                    }
                                 }
                                 View{
                                     width: Fill
@@ -3950,9 +4524,11 @@ script_mod! {
                                     spacing: 8
                                     align: Align{x: 0.0, y: 0.5}
                                     PanelLabel{width: 90 text: "CUE / ROOM"}
+                                    Tip{ text: "Left is the cue alone, right the room alone; centre hears both"
                                     phones_mix := ApcHSlider{
                                         min: 0.0
                                         max: 1.0
+                                    }
                                     }
                                 }
                                 View{
@@ -3962,7 +4538,9 @@ script_mod! {
                                     spacing: 8
                                     align: Align{x: 0.0, y: 0.5}
                                     PanelLabel{width: 90 text: "EARS"}
+                                    Tip{ text: "SPLIT puts the cue in the left ear and the room in the right, in mono"
                                     phones_split := PhonesDrop{width: 110 labels: ["STEREO" "SPLIT"]}
+                                    }
                                 }
                                 View{
                                     width: Fill
@@ -3971,7 +4549,9 @@ script_mod! {
                                     spacing: 8
                                     align: Align{x: 0.0, y: 0.5}
                                     PanelLabel{width: 90 text: "PLAYER"}
+                                    Tip{ text: "Where the pre-listen player sits: docked, in the list row, or floating"
                                     phones_place := PhonesDrop{width: 110 labels: ["DOCKED" "INLINE" "FLOATING"]}
+                                    }
                                 }
                                 View{
                                     width: Fill
@@ -3980,7 +4560,9 @@ script_mod! {
                                     spacing: 8
                                     align: Align{x: 0.0, y: 0.5}
                                     PanelLabel{width: 90 text: "ROOM"}
+                                    Tip{ text: "Output the room hears; DEFAULT follows the system, phones refused"
                                     room_device := PhonesDrop{width: Fill labels: ["DEFAULT"]}
+                                    }
                                 }
                                 phones_status := Label{
                                     width: Fill
@@ -3993,7 +4575,9 @@ script_mod! {
                                     height: Fit
                                     flow: Right
                                     align: Align{x: 1.0, y: 0.5}
+                                    Tip{ text: "Close; every change here is already saved"
                                     phones_close := ChromeButton{width: 60 text: "Close"}
+                                    }
                                 }
                             }
                         }
@@ -4054,7 +4638,9 @@ script_mod! {
                                 spacing: 8
                                 align: Align{x: 0.0, y: 0.5}
                                 PanelLabel{width: 90 text: "SURFACE"}
+                                Tip{ text: "Hear the surface; off darkens its pads; the light desk goes unplayed"
                                 midi_surface_on := CheckBox{width: 26 text: ""}
+                                }
                                 midi_surface_name := Tick{width: Fill}
                             }
                             midi_surface_note := Label{
@@ -4078,7 +4664,9 @@ script_mod! {
                                 flow: Right
                                 spacing: 8
                                 align: Align{x: 0.0, y: 0.5}
+                                Tip{ text: "Hear this port for learned controls and clock in; sixteen at most"
                                 midi_dev_on0 := CheckBox{width: 26 text: ""}
+                                }
                                 midi_dev_name0 := Tick{width: Fill}
                                 midi_dev_state0 := Tick{width: 120}
                             }
@@ -4088,7 +4676,9 @@ script_mod! {
                                 flow: Right
                                 spacing: 8
                                 align: Align{x: 0.0, y: 0.5}
+                                Tip{ text: "Hear this port for learned controls and clock in; sixteen at most"
                                 midi_dev_on1 := CheckBox{width: 26 text: ""}
+                                }
                                 midi_dev_name1 := Tick{width: Fill}
                                 midi_dev_state1 := Tick{width: 120}
                             }
@@ -4098,7 +4688,9 @@ script_mod! {
                                 flow: Right
                                 spacing: 8
                                 align: Align{x: 0.0, y: 0.5}
+                                Tip{ text: "Hear this port for learned controls and clock in; sixteen at most"
                                 midi_dev_on2 := CheckBox{width: 26 text: ""}
+                                }
                                 midi_dev_name2 := Tick{width: Fill}
                                 midi_dev_state2 := Tick{width: 120}
                             }
@@ -4108,7 +4700,9 @@ script_mod! {
                                 flow: Right
                                 spacing: 8
                                 align: Align{x: 0.0, y: 0.5}
+                                Tip{ text: "Hear this port for learned controls and clock in; sixteen at most"
                                 midi_dev_on3 := CheckBox{width: 26 text: ""}
+                                }
                                 midi_dev_name3 := Tick{width: Fill}
                                 midi_dev_state3 := Tick{width: 120}
                             }
@@ -4118,7 +4712,9 @@ script_mod! {
                                 flow: Right
                                 spacing: 8
                                 align: Align{x: 0.0, y: 0.5}
+                                Tip{ text: "Hear this port for learned controls and clock in; sixteen at most"
                                 midi_dev_on4 := CheckBox{width: 26 text: ""}
+                                }
                                 midi_dev_name4 := Tick{width: Fill}
                                 midi_dev_state4 := Tick{width: 120}
                             }
@@ -4128,7 +4724,9 @@ script_mod! {
                                 flow: Right
                                 spacing: 8
                                 align: Align{x: 0.0, y: 0.5}
+                                Tip{ text: "Hear this port for learned controls and clock in; sixteen at most"
                                 midi_dev_on5 := CheckBox{width: 26 text: ""}
+                                }
                                 midi_dev_name5 := Tick{width: Fill}
                                 midi_dev_state5 := Tick{width: 120}
                             }
@@ -4138,7 +4736,9 @@ script_mod! {
                                 flow: Right
                                 spacing: 8
                                 align: Align{x: 0.0, y: 0.5}
+                                Tip{ text: "Hear this port for learned controls and clock in; sixteen at most"
                                 midi_dev_on6 := CheckBox{width: 26 text: ""}
+                                }
                                 midi_dev_name6 := Tick{width: Fill}
                                 midi_dev_state6 := Tick{width: 120}
                             }
@@ -4148,7 +4748,9 @@ script_mod! {
                                 flow: Right
                                 spacing: 8
                                 align: Align{x: 0.0, y: 0.5}
+                                Tip{ text: "Hear this port for learned controls and clock in; sixteen at most"
                                 midi_dev_on7 := CheckBox{width: 26 text: ""}
+                                }
                                 midi_dev_name7 := Tick{width: Fill}
                                 midi_dev_state7 := Tick{width: 120}
                             }
@@ -4177,7 +4779,9 @@ script_mod! {
                                 spacing: 8
                                 align: Align{x: 0.0, y: 0.5}
                                 PanelLabel{width: 90 text: "CROSSFADER"}
+                                Tip{ text: "Surface or learned crossfader must meet the value before moving it"
                                 midi_takeover := CheckBox{width: 26 text: ""}
+                                }
                                 Label{
                                     width: Fill text: "picks the value up before moving it; a fader left behind waits until it crosses back"
                                     draw_text.color: #x6f7b87
@@ -4191,7 +4795,9 @@ script_mod! {
                                 spacing: 8
                                 align: Align{x: 0.0, y: 0.5}
                                 PanelLabel{width: 90 text: "MONITOR"}
+                                Tip{ text: "Log every message in words; LAST HEARD shows the newest even when off"
                                 midi_monitor_on := CheckBox{width: 26 text: ""}
+                                }
                                 midi_monitor_note := Label{
                                     width: Fill text: "every message, in words, in the log"
                                     draw_text.color: #x6f7b87
@@ -4229,15 +4835,23 @@ script_mod! {
                                     midi_bind_name0 := Tick{width: Fill}
                                     midi_bind_src0 := Tick{width: 84}
                                     midi_bind_readbox0 := View{ width: Fit height: Fit
+                                        Tip{ text: "Plain, inverted, switch, two endless encoders, or a fader sprung at 64"
                                         midi_bind_read0 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                        }
                                     }
                                     midi_bind_sensbox0 := View{ width: Fit height: Fit
+                                        Tip{ text: "Steps per encoder tick, 1/4 to 4; only the RELATIVE readings use it"
                                         midi_bind_sens0 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                        }
                                     }
                                     midi_bind_pressbox0 := View{ width: Fit height: Fit
+                                        Tip{ text: "What a press does; TAP OR HOLD latches on a tap and holds on a hold"
                                         midi_bind_press0 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
+                                        }
                                     }
+                                    Tip{ text: "Forget this binding; same as alt-clicking the control twice"
                                     midi_bind_clear0 := ChromeButton{width: 26 text: "X"}
+                                    }
                                 }
                                 midi_bind_row1 := View{
                                     width: Fill
@@ -4248,15 +4862,23 @@ script_mod! {
                                     midi_bind_name1 := Tick{width: Fill}
                                     midi_bind_src1 := Tick{width: 84}
                                     midi_bind_readbox1 := View{ width: Fit height: Fit
+                                        Tip{ text: "Plain, inverted, switch, two endless encoders, or a fader sprung at 64"
                                         midi_bind_read1 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                        }
                                     }
                                     midi_bind_sensbox1 := View{ width: Fit height: Fit
+                                        Tip{ text: "Steps per encoder tick, 1/4 to 4; only the RELATIVE readings use it"
                                         midi_bind_sens1 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                        }
                                     }
                                     midi_bind_pressbox1 := View{ width: Fit height: Fit
+                                        Tip{ text: "What a press does; TAP OR HOLD latches on a tap and holds on a hold"
                                         midi_bind_press1 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
+                                        }
                                     }
+                                    Tip{ text: "Forget this binding; same as alt-clicking the control twice"
                                     midi_bind_clear1 := ChromeButton{width: 26 text: "X"}
+                                    }
                                 }
                                 midi_bind_row2 := View{
                                     width: Fill
@@ -4267,15 +4889,23 @@ script_mod! {
                                     midi_bind_name2 := Tick{width: Fill}
                                     midi_bind_src2 := Tick{width: 84}
                                     midi_bind_readbox2 := View{ width: Fit height: Fit
+                                        Tip{ text: "Plain, inverted, switch, two endless encoders, or a fader sprung at 64"
                                         midi_bind_read2 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                        }
                                     }
                                     midi_bind_sensbox2 := View{ width: Fit height: Fit
+                                        Tip{ text: "Steps per encoder tick, 1/4 to 4; only the RELATIVE readings use it"
                                         midi_bind_sens2 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                        }
                                     }
                                     midi_bind_pressbox2 := View{ width: Fit height: Fit
+                                        Tip{ text: "What a press does; TAP OR HOLD latches on a tap and holds on a hold"
                                         midi_bind_press2 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
+                                        }
                                     }
+                                    Tip{ text: "Forget this binding; same as alt-clicking the control twice"
                                     midi_bind_clear2 := ChromeButton{width: 26 text: "X"}
+                                    }
                                 }
                                 midi_bind_row3 := View{
                                     width: Fill
@@ -4286,15 +4916,23 @@ script_mod! {
                                     midi_bind_name3 := Tick{width: Fill}
                                     midi_bind_src3 := Tick{width: 84}
                                     midi_bind_readbox3 := View{ width: Fit height: Fit
+                                        Tip{ text: "Plain, inverted, switch, two endless encoders, or a fader sprung at 64"
                                         midi_bind_read3 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                        }
                                     }
                                     midi_bind_sensbox3 := View{ width: Fit height: Fit
+                                        Tip{ text: "Steps per encoder tick, 1/4 to 4; only the RELATIVE readings use it"
                                         midi_bind_sens3 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                        }
                                     }
                                     midi_bind_pressbox3 := View{ width: Fit height: Fit
+                                        Tip{ text: "What a press does; TAP OR HOLD latches on a tap and holds on a hold"
                                         midi_bind_press3 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
+                                        }
                                     }
+                                    Tip{ text: "Forget this binding; same as alt-clicking the control twice"
                                     midi_bind_clear3 := ChromeButton{width: 26 text: "X"}
+                                    }
                                 }
                                 midi_bind_row4 := View{
                                     width: Fill
@@ -4305,15 +4943,23 @@ script_mod! {
                                     midi_bind_name4 := Tick{width: Fill}
                                     midi_bind_src4 := Tick{width: 84}
                                     midi_bind_readbox4 := View{ width: Fit height: Fit
+                                        Tip{ text: "Plain, inverted, switch, two endless encoders, or a fader sprung at 64"
                                         midi_bind_read4 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                        }
                                     }
                                     midi_bind_sensbox4 := View{ width: Fit height: Fit
+                                        Tip{ text: "Steps per encoder tick, 1/4 to 4; only the RELATIVE readings use it"
                                         midi_bind_sens4 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                        }
                                     }
                                     midi_bind_pressbox4 := View{ width: Fit height: Fit
+                                        Tip{ text: "What a press does; TAP OR HOLD latches on a tap and holds on a hold"
                                         midi_bind_press4 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
+                                        }
                                     }
+                                    Tip{ text: "Forget this binding; same as alt-clicking the control twice"
                                     midi_bind_clear4 := ChromeButton{width: 26 text: "X"}
+                                    }
                                 }
                                 midi_bind_row5 := View{
                                     width: Fill
@@ -4324,15 +4970,23 @@ script_mod! {
                                     midi_bind_name5 := Tick{width: Fill}
                                     midi_bind_src5 := Tick{width: 84}
                                     midi_bind_readbox5 := View{ width: Fit height: Fit
+                                        Tip{ text: "Plain, inverted, switch, two endless encoders, or a fader sprung at 64"
                                         midi_bind_read5 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                        }
                                     }
                                     midi_bind_sensbox5 := View{ width: Fit height: Fit
+                                        Tip{ text: "Steps per encoder tick, 1/4 to 4; only the RELATIVE readings use it"
                                         midi_bind_sens5 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                        }
                                     }
                                     midi_bind_pressbox5 := View{ width: Fit height: Fit
+                                        Tip{ text: "What a press does; TAP OR HOLD latches on a tap and holds on a hold"
                                         midi_bind_press5 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
+                                        }
                                     }
+                                    Tip{ text: "Forget this binding; same as alt-clicking the control twice"
                                     midi_bind_clear5 := ChromeButton{width: 26 text: "X"}
+                                    }
                                 }
                                 midi_bind_row6 := View{
                                     width: Fill
@@ -4343,15 +4997,23 @@ script_mod! {
                                     midi_bind_name6 := Tick{width: Fill}
                                     midi_bind_src6 := Tick{width: 84}
                                     midi_bind_readbox6 := View{ width: Fit height: Fit
+                                        Tip{ text: "Plain, inverted, switch, two endless encoders, or a fader sprung at 64"
                                         midi_bind_read6 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                        }
                                     }
                                     midi_bind_sensbox6 := View{ width: Fit height: Fit
+                                        Tip{ text: "Steps per encoder tick, 1/4 to 4; only the RELATIVE readings use it"
                                         midi_bind_sens6 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                        }
                                     }
                                     midi_bind_pressbox6 := View{ width: Fit height: Fit
+                                        Tip{ text: "What a press does; TAP OR HOLD latches on a tap and holds on a hold"
                                         midi_bind_press6 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
+                                        }
                                     }
+                                    Tip{ text: "Forget this binding; same as alt-clicking the control twice"
                                     midi_bind_clear6 := ChromeButton{width: 26 text: "X"}
+                                    }
                                 }
                                 midi_bind_row7 := View{
                                     width: Fill
@@ -4362,15 +5024,23 @@ script_mod! {
                                     midi_bind_name7 := Tick{width: Fill}
                                     midi_bind_src7 := Tick{width: 84}
                                     midi_bind_readbox7 := View{ width: Fit height: Fit
+                                        Tip{ text: "Plain, inverted, switch, two endless encoders, or a fader sprung at 64"
                                         midi_bind_read7 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                        }
                                     }
                                     midi_bind_sensbox7 := View{ width: Fit height: Fit
+                                        Tip{ text: "Steps per encoder tick, 1/4 to 4; only the RELATIVE readings use it"
                                         midi_bind_sens7 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                        }
                                     }
                                     midi_bind_pressbox7 := View{ width: Fit height: Fit
+                                        Tip{ text: "What a press does; TAP OR HOLD latches on a tap and holds on a hold"
                                         midi_bind_press7 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
+                                        }
                                     }
+                                    Tip{ text: "Forget this binding; same as alt-clicking the control twice"
                                     midi_bind_clear7 := ChromeButton{width: 26 text: "X"}
+                                    }
                                 }
                                 midi_bind_row8 := View{
                                     width: Fill
@@ -4381,15 +5051,23 @@ script_mod! {
                                     midi_bind_name8 := Tick{width: Fill}
                                     midi_bind_src8 := Tick{width: 84}
                                     midi_bind_readbox8 := View{ width: Fit height: Fit
+                                        Tip{ text: "Plain, inverted, switch, two endless encoders, or a fader sprung at 64"
                                         midi_bind_read8 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                        }
                                     }
                                     midi_bind_sensbox8 := View{ width: Fit height: Fit
+                                        Tip{ text: "Steps per encoder tick, 1/4 to 4; only the RELATIVE readings use it"
                                         midi_bind_sens8 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                        }
                                     }
                                     midi_bind_pressbox8 := View{ width: Fit height: Fit
+                                        Tip{ text: "What a press does; TAP OR HOLD latches on a tap and holds on a hold"
                                         midi_bind_press8 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
+                                        }
                                     }
+                                    Tip{ text: "Forget this binding; same as alt-clicking the control twice"
                                     midi_bind_clear8 := ChromeButton{width: 26 text: "X"}
+                                    }
                                 }
                                 midi_bind_row9 := View{
                                     width: Fill
@@ -4400,15 +5078,23 @@ script_mod! {
                                     midi_bind_name9 := Tick{width: Fill}
                                     midi_bind_src9 := Tick{width: 84}
                                     midi_bind_readbox9 := View{ width: Fit height: Fit
+                                        Tip{ text: "Plain, inverted, switch, two endless encoders, or a fader sprung at 64"
                                         midi_bind_read9 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                        }
                                     }
                                     midi_bind_sensbox9 := View{ width: Fit height: Fit
+                                        Tip{ text: "Steps per encoder tick, 1/4 to 4; only the RELATIVE readings use it"
                                         midi_bind_sens9 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                        }
                                     }
                                     midi_bind_pressbox9 := View{ width: Fit height: Fit
+                                        Tip{ text: "What a press does; TAP OR HOLD latches on a tap and holds on a hold"
                                         midi_bind_press9 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
+                                        }
                                     }
+                                    Tip{ text: "Forget this binding; same as alt-clicking the control twice"
                                     midi_bind_clear9 := ChromeButton{width: 26 text: "X"}
+                                    }
                                 }
                                 midi_bind_row10 := View{
                                     width: Fill
@@ -4419,15 +5105,23 @@ script_mod! {
                                     midi_bind_name10 := Tick{width: Fill}
                                     midi_bind_src10 := Tick{width: 84}
                                     midi_bind_readbox10 := View{ width: Fit height: Fit
+                                        Tip{ text: "Plain, inverted, switch, two endless encoders, or a fader sprung at 64"
                                         midi_bind_read10 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                        }
                                     }
                                     midi_bind_sensbox10 := View{ width: Fit height: Fit
+                                        Tip{ text: "Steps per encoder tick, 1/4 to 4; only the RELATIVE readings use it"
                                         midi_bind_sens10 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                        }
                                     }
                                     midi_bind_pressbox10 := View{ width: Fit height: Fit
+                                        Tip{ text: "What a press does; TAP OR HOLD latches on a tap and holds on a hold"
                                         midi_bind_press10 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
+                                        }
                                     }
+                                    Tip{ text: "Forget this binding; same as alt-clicking the control twice"
                                     midi_bind_clear10 := ChromeButton{width: 26 text: "X"}
+                                    }
                                 }
                                 midi_bind_row11 := View{
                                     width: Fill
@@ -4438,15 +5132,23 @@ script_mod! {
                                     midi_bind_name11 := Tick{width: Fill}
                                     midi_bind_src11 := Tick{width: 84}
                                     midi_bind_readbox11 := View{ width: Fit height: Fit
+                                        Tip{ text: "Plain, inverted, switch, two endless encoders, or a fader sprung at 64"
                                         midi_bind_read11 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                        }
                                     }
                                     midi_bind_sensbox11 := View{ width: Fit height: Fit
+                                        Tip{ text: "Steps per encoder tick, 1/4 to 4; only the RELATIVE readings use it"
                                         midi_bind_sens11 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                        }
                                     }
                                     midi_bind_pressbox11 := View{ width: Fit height: Fit
+                                        Tip{ text: "What a press does; TAP OR HOLD latches on a tap and holds on a hold"
                                         midi_bind_press11 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
+                                        }
                                     }
+                                    Tip{ text: "Forget this binding; same as alt-clicking the control twice"
                                     midi_bind_clear11 := ChromeButton{width: 26 text: "X"}
+                                    }
                                 }
                                 midi_bind_row12 := View{
                                     width: Fill
@@ -4457,15 +5159,23 @@ script_mod! {
                                     midi_bind_name12 := Tick{width: Fill}
                                     midi_bind_src12 := Tick{width: 84}
                                     midi_bind_readbox12 := View{ width: Fit height: Fit
+                                        Tip{ text: "Plain, inverted, switch, two endless encoders, or a fader sprung at 64"
                                         midi_bind_read12 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                        }
                                     }
                                     midi_bind_sensbox12 := View{ width: Fit height: Fit
+                                        Tip{ text: "Steps per encoder tick, 1/4 to 4; only the RELATIVE readings use it"
                                         midi_bind_sens12 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                        }
                                     }
                                     midi_bind_pressbox12 := View{ width: Fit height: Fit
+                                        Tip{ text: "What a press does; TAP OR HOLD latches on a tap and holds on a hold"
                                         midi_bind_press12 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
+                                        }
                                     }
+                                    Tip{ text: "Forget this binding; same as alt-clicking the control twice"
                                     midi_bind_clear12 := ChromeButton{width: 26 text: "X"}
+                                    }
                                 }
                                 midi_bind_row13 := View{
                                     width: Fill
@@ -4476,15 +5186,23 @@ script_mod! {
                                     midi_bind_name13 := Tick{width: Fill}
                                     midi_bind_src13 := Tick{width: 84}
                                     midi_bind_readbox13 := View{ width: Fit height: Fit
+                                        Tip{ text: "Plain, inverted, switch, two endless encoders, or a fader sprung at 64"
                                         midi_bind_read13 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                        }
                                     }
                                     midi_bind_sensbox13 := View{ width: Fit height: Fit
+                                        Tip{ text: "Steps per encoder tick, 1/4 to 4; only the RELATIVE readings use it"
                                         midi_bind_sens13 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                        }
                                     }
                                     midi_bind_pressbox13 := View{ width: Fit height: Fit
+                                        Tip{ text: "What a press does; TAP OR HOLD latches on a tap and holds on a hold"
                                         midi_bind_press13 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
+                                        }
                                     }
+                                    Tip{ text: "Forget this binding; same as alt-clicking the control twice"
                                     midi_bind_clear13 := ChromeButton{width: 26 text: "X"}
+                                    }
                                 }
                                 midi_bind_row14 := View{
                                     width: Fill
@@ -4495,15 +5213,23 @@ script_mod! {
                                     midi_bind_name14 := Tick{width: Fill}
                                     midi_bind_src14 := Tick{width: 84}
                                     midi_bind_readbox14 := View{ width: Fit height: Fit
+                                        Tip{ text: "Plain, inverted, switch, two endless encoders, or a fader sprung at 64"
                                         midi_bind_read14 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                        }
                                     }
                                     midi_bind_sensbox14 := View{ width: Fit height: Fit
+                                        Tip{ text: "Steps per encoder tick, 1/4 to 4; only the RELATIVE readings use it"
                                         midi_bind_sens14 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                        }
                                     }
                                     midi_bind_pressbox14 := View{ width: Fit height: Fit
+                                        Tip{ text: "What a press does; TAP OR HOLD latches on a tap and holds on a hold"
                                         midi_bind_press14 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
+                                        }
                                     }
+                                    Tip{ text: "Forget this binding; same as alt-clicking the control twice"
                                     midi_bind_clear14 := ChromeButton{width: 26 text: "X"}
+                                    }
                                 }
                                 midi_bind_row15 := View{
                                     width: Fill
@@ -4514,15 +5240,23 @@ script_mod! {
                                     midi_bind_name15 := Tick{width: Fill}
                                     midi_bind_src15 := Tick{width: 84}
                                     midi_bind_readbox15 := View{ width: Fit height: Fit
+                                        Tip{ text: "Plain, inverted, switch, two endless encoders, or a fader sprung at 64"
                                         midi_bind_read15 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                        }
                                     }
                                     midi_bind_sensbox15 := View{ width: Fit height: Fit
+                                        Tip{ text: "Steps per encoder tick, 1/4 to 4; only the RELATIVE readings use it"
                                         midi_bind_sens15 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                        }
                                     }
                                     midi_bind_pressbox15 := View{ width: Fit height: Fit
+                                        Tip{ text: "What a press does; TAP OR HOLD latches on a tap and holds on a hold"
                                         midi_bind_press15 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
+                                        }
                                     }
+                                    Tip{ text: "Forget this binding; same as alt-clicking the control twice"
                                     midi_bind_clear15 := ChromeButton{width: 26 text: "X"}
+                                    }
                                 }
                                 midi_bind_row16 := View{
                                     width: Fill
@@ -4533,15 +5267,23 @@ script_mod! {
                                     midi_bind_name16 := Tick{width: Fill}
                                     midi_bind_src16 := Tick{width: 84}
                                     midi_bind_readbox16 := View{ width: Fit height: Fit
+                                        Tip{ text: "Plain, inverted, switch, two endless encoders, or a fader sprung at 64"
                                         midi_bind_read16 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                        }
                                     }
                                     midi_bind_sensbox16 := View{ width: Fit height: Fit
+                                        Tip{ text: "Steps per encoder tick, 1/4 to 4; only the RELATIVE readings use it"
                                         midi_bind_sens16 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                        }
                                     }
                                     midi_bind_pressbox16 := View{ width: Fit height: Fit
+                                        Tip{ text: "What a press does; TAP OR HOLD latches on a tap and holds on a hold"
                                         midi_bind_press16 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
+                                        }
                                     }
+                                    Tip{ text: "Forget this binding; same as alt-clicking the control twice"
                                     midi_bind_clear16 := ChromeButton{width: 26 text: "X"}
+                                    }
                                 }
                                 midi_bind_row17 := View{
                                     width: Fill
@@ -4552,15 +5294,23 @@ script_mod! {
                                     midi_bind_name17 := Tick{width: Fill}
                                     midi_bind_src17 := Tick{width: 84}
                                     midi_bind_readbox17 := View{ width: Fit height: Fit
+                                        Tip{ text: "Plain, inverted, switch, two endless encoders, or a fader sprung at 64"
                                         midi_bind_read17 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                        }
                                     }
                                     midi_bind_sensbox17 := View{ width: Fit height: Fit
+                                        Tip{ text: "Steps per encoder tick, 1/4 to 4; only the RELATIVE readings use it"
                                         midi_bind_sens17 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                        }
                                     }
                                     midi_bind_pressbox17 := View{ width: Fit height: Fit
+                                        Tip{ text: "What a press does; TAP OR HOLD latches on a tap and holds on a hold"
                                         midi_bind_press17 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
+                                        }
                                     }
+                                    Tip{ text: "Forget this binding; same as alt-clicking the control twice"
                                     midi_bind_clear17 := ChromeButton{width: 26 text: "X"}
+                                    }
                                 }
                                 midi_bind_row18 := View{
                                     width: Fill
@@ -4571,15 +5321,23 @@ script_mod! {
                                     midi_bind_name18 := Tick{width: Fill}
                                     midi_bind_src18 := Tick{width: 84}
                                     midi_bind_readbox18 := View{ width: Fit height: Fit
+                                        Tip{ text: "Plain, inverted, switch, two endless encoders, or a fader sprung at 64"
                                         midi_bind_read18 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                        }
                                     }
                                     midi_bind_sensbox18 := View{ width: Fit height: Fit
+                                        Tip{ text: "Steps per encoder tick, 1/4 to 4; only the RELATIVE readings use it"
                                         midi_bind_sens18 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                        }
                                     }
                                     midi_bind_pressbox18 := View{ width: Fit height: Fit
+                                        Tip{ text: "What a press does; TAP OR HOLD latches on a tap and holds on a hold"
                                         midi_bind_press18 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
+                                        }
                                     }
+                                    Tip{ text: "Forget this binding; same as alt-clicking the control twice"
                                     midi_bind_clear18 := ChromeButton{width: 26 text: "X"}
+                                    }
                                 }
                                 midi_bind_row19 := View{
                                     width: Fill
@@ -4590,15 +5348,23 @@ script_mod! {
                                     midi_bind_name19 := Tick{width: Fill}
                                     midi_bind_src19 := Tick{width: 84}
                                     midi_bind_readbox19 := View{ width: Fit height: Fit
+                                        Tip{ text: "Plain, inverted, switch, two endless encoders, or a fader sprung at 64"
                                         midi_bind_read19 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                        }
                                     }
                                     midi_bind_sensbox19 := View{ width: Fit height: Fit
+                                        Tip{ text: "Steps per encoder tick, 1/4 to 4; only the RELATIVE readings use it"
                                         midi_bind_sens19 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                        }
                                     }
                                     midi_bind_pressbox19 := View{ width: Fit height: Fit
+                                        Tip{ text: "What a press does; TAP OR HOLD latches on a tap and holds on a hold"
                                         midi_bind_press19 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
+                                        }
                                     }
+                                    Tip{ text: "Forget this binding; same as alt-clicking the control twice"
                                     midi_bind_clear19 := ChromeButton{width: 26 text: "X"}
+                                    }
                                 }
                                 midi_bind_row20 := View{
                                     width: Fill
@@ -4609,15 +5375,23 @@ script_mod! {
                                     midi_bind_name20 := Tick{width: Fill}
                                     midi_bind_src20 := Tick{width: 84}
                                     midi_bind_readbox20 := View{ width: Fit height: Fit
+                                        Tip{ text: "Plain, inverted, switch, two endless encoders, or a fader sprung at 64"
                                         midi_bind_read20 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                        }
                                     }
                                     midi_bind_sensbox20 := View{ width: Fit height: Fit
+                                        Tip{ text: "Steps per encoder tick, 1/4 to 4; only the RELATIVE readings use it"
                                         midi_bind_sens20 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                        }
                                     }
                                     midi_bind_pressbox20 := View{ width: Fit height: Fit
+                                        Tip{ text: "What a press does; TAP OR HOLD latches on a tap and holds on a hold"
                                         midi_bind_press20 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
+                                        }
                                     }
+                                    Tip{ text: "Forget this binding; same as alt-clicking the control twice"
                                     midi_bind_clear20 := ChromeButton{width: 26 text: "X"}
+                                    }
                                 }
                                 midi_bind_row21 := View{
                                     width: Fill
@@ -4628,15 +5402,23 @@ script_mod! {
                                     midi_bind_name21 := Tick{width: Fill}
                                     midi_bind_src21 := Tick{width: 84}
                                     midi_bind_readbox21 := View{ width: Fit height: Fit
+                                        Tip{ text: "Plain, inverted, switch, two endless encoders, or a fader sprung at 64"
                                         midi_bind_read21 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                        }
                                     }
                                     midi_bind_sensbox21 := View{ width: Fit height: Fit
+                                        Tip{ text: "Steps per encoder tick, 1/4 to 4; only the RELATIVE readings use it"
                                         midi_bind_sens21 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                        }
                                     }
                                     midi_bind_pressbox21 := View{ width: Fit height: Fit
+                                        Tip{ text: "What a press does; TAP OR HOLD latches on a tap and holds on a hold"
                                         midi_bind_press21 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
+                                        }
                                     }
+                                    Tip{ text: "Forget this binding; same as alt-clicking the control twice"
                                     midi_bind_clear21 := ChromeButton{width: 26 text: "X"}
+                                    }
                                 }
                                 midi_bind_row22 := View{
                                     width: Fill
@@ -4647,15 +5429,23 @@ script_mod! {
                                     midi_bind_name22 := Tick{width: Fill}
                                     midi_bind_src22 := Tick{width: 84}
                                     midi_bind_readbox22 := View{ width: Fit height: Fit
+                                        Tip{ text: "Plain, inverted, switch, two endless encoders, or a fader sprung at 64"
                                         midi_bind_read22 := PhonesDrop{width: 110 labels: ["PLAIN" "INVERTED" "SWITCH" "RELATIVE" "RELATIVE 64" "SPREAD 64"]}
+                                        }
                                     }
                                     midi_bind_sensbox22 := View{ width: Fit height: Fit
+                                        Tip{ text: "Steps per encoder tick, 1/4 to 4; only the RELATIVE readings use it"
                                         midi_bind_sens22 := PhonesDrop{width: 54 labels: ["1/4" "1/2" "1" "2" "4"]}
+                                        }
                                     }
                                     midi_bind_pressbox22 := View{ width: Fit height: Fit
+                                        Tip{ text: "What a press does; TAP OR HOLD latches on a tap and holds on a hold"
                                         midi_bind_press22 := PhonesDrop{width: 172 labels: ["PUSH" "TOGGLE" "TAP OR HOLD" "LONG PRESS" "TRIGGER"]}
+                                        }
                                     }
+                                    Tip{ text: "Forget this binding; same as alt-clicking the control twice"
                                     midi_bind_clear22 := ChromeButton{width: 26 text: "X"}
+                                    }
                                 }
                             }
                             midi_bind_note := Label{
@@ -4668,7 +5458,9 @@ script_mod! {
                                 height: Fit
                                 flow: Right
                                 align: Align{x: 1.0, y: 0.5}
+                                Tip{ text: "Close; every change here is already saved"
                                 midi_close := ChromeButton{width: 60 text: "Close"}
+                                }
                             }
                             }
                         }
@@ -4699,190 +5491,254 @@ script_mod! {
                                     width: Fit height: Fit flow: Right spacing: 8
                                     align: Align{x: 0.0, y: 0.5}
                                     PanelLabel{width: 84 text: "ALL"}
+                                    Tip{ text: "What every effect left on FOL does with its loudness"
                                     sfx_lvl_default := VjBeatsDrop{width: 48 level_rows: true}
+                                    }
                                     PanelLabel{text: "what every effect on FOL does"}
                                 }
                                 View{
                                     width: Fit height: Fit flow: Right spacing: 8
                                     align: Align{x: 0.0, y: 0.5}
                                     PanelLabel{width: 84 text: "ECHO"}
+                                    Tip{ text: "Echo loudness rule: FOL as ALL, OFF as is, MTCH match input, CAP cap"
                                     sfx_lvl_echo_mode := VjBeatsDrop{width: 48 level_rows: true}
+                                    }
+                                    Tip{ text: "How much echo is heard once engaged; double-click resets"
                                     sfx_lvl_echo_mix := Slider{
                                         width: 150
                                         text: "mix"
                                         min: 0.0 max: 1.0 default: 1.0
                                         unit: "%" display_scale: 100.0 precision: 0
                                     }
+                                    }
+                                    Tip{ text: "Level the echo is held under on CAP; double-click resets"
                                     sfx_lvl_echo_ceiling := Slider{
                                         width: 150
                                         text: "cap"
                                         min: 0.01 max: 1.0 default: 1.0
                                         unit: "%" display_scale: 100.0 precision: 0
                                     }
+                                    }
                                 }
                                 View{
                                     width: Fit height: Fit flow: Right spacing: 8
                                     align: Align{x: 0.0, y: 0.5}
                                     PanelLabel{width: 84 text: "FLANGER"}
+                                    Tip{ text: "Flanger loudness rule: FOL as ALL, OFF as is, MTCH match, CAP cap"
                                     sfx_lvl_flanger_mode := VjBeatsDrop{width: 48 level_rows: true}
+                                    }
+                                    Tip{ text: "How much flanger is heard once engaged; double-click resets"
                                     sfx_lvl_flanger_mix := Slider{
                                         width: 150
                                         text: "mix"
                                         min: 0.0 max: 1.0 default: 1.0
                                         unit: "%" display_scale: 100.0 precision: 0
                                     }
+                                    }
+                                    Tip{ text: "Level the flanger is held under on CAP; double-click resets"
                                     sfx_lvl_flanger_ceiling := Slider{
                                         width: 150
                                         text: "cap"
                                         min: 0.01 max: 1.0 default: 1.0
                                         unit: "%" display_scale: 100.0 precision: 0
                                     }
+                                    }
                                 }
                                 View{
                                     width: Fit height: Fit flow: Right spacing: 8
                                     align: Align{x: 0.0, y: 0.5}
                                     PanelLabel{width: 84 text: "BITCRUSH"}
+                                    Tip{ text: "Bitcrush loudness rule: FOL as ALL, OFF as is, MTCH match, CAP cap"
                                     sfx_lvl_bitcrusher_mode := VjBeatsDrop{width: 48 level_rows: true}
+                                    }
+                                    Tip{ text: "How much bitcrush is heard once engaged; double-click resets"
                                     sfx_lvl_bitcrusher_mix := Slider{
                                         width: 150
                                         text: "mix"
                                         min: 0.0 max: 1.0 default: 1.0
                                         unit: "%" display_scale: 100.0 precision: 0
                                     }
+                                    }
+                                    Tip{ text: "Level the bitcrush is held under on CAP; double-click resets"
                                     sfx_lvl_bitcrusher_ceiling := Slider{
                                         width: 150
                                         text: "cap"
                                         min: 0.01 max: 1.0 default: 1.0
                                         unit: "%" display_scale: 100.0 precision: 0
                                     }
+                                    }
                                 }
                                 View{
                                     width: Fit height: Fit flow: Right spacing: 8
                                     align: Align{x: 0.0, y: 0.5}
                                     PanelLabel{width: 84 text: "TREMOLO"}
+                                    Tip{ text: "Tremolo loudness rule: FOL as ALL, OFF as is, MTCH match, CAP cap"
                                     sfx_lvl_tremolo_mode := VjBeatsDrop{width: 48 level_rows: true}
+                                    }
+                                    Tip{ text: "How much tremolo is heard once engaged; double-click resets"
                                     sfx_lvl_tremolo_mix := Slider{
                                         width: 150
                                         text: "mix"
                                         min: 0.0 max: 1.0 default: 1.0
                                         unit: "%" display_scale: 100.0 precision: 0
                                     }
+                                    }
+                                    Tip{ text: "Level the tremolo is held under on CAP; double-click resets"
                                     sfx_lvl_tremolo_ceiling := Slider{
                                         width: 150
                                         text: "cap"
                                         min: 0.01 max: 1.0 default: 1.0
                                         unit: "%" display_scale: 100.0 precision: 0
                                     }
+                                    }
                                 }
                                 View{
                                     width: Fit height: Fit flow: Right spacing: 8
                                     align: Align{x: 0.0, y: 0.5}
                                     PanelLabel{width: 84 text: "DISTORT"}
+                                    Tip{ text: "Distortion loudness rule: FOL as ALL, OFF as is, MTCH match, CAP cap"
                                     sfx_lvl_distortion_mode := VjBeatsDrop{width: 48 level_rows: true}
+                                    }
+                                    Tip{ text: "How much distortion is heard once engaged; double-click resets"
                                     sfx_lvl_distortion_mix := Slider{
                                         width: 150
                                         text: "mix"
                                         min: 0.0 max: 1.0 default: 1.0
                                         unit: "%" display_scale: 100.0 precision: 0
                                     }
+                                    }
+                                    Tip{ text: "Level the distortion is held under on CAP; double-click resets"
                                     sfx_lvl_distortion_ceiling := Slider{
                                         width: 150
                                         text: "cap"
                                         min: 0.01 max: 1.0 default: 1.0
                                         unit: "%" display_scale: 100.0 precision: 0
                                     }
+                                    }
                                 }
                                 View{
                                     width: Fit height: Fit flow: Right spacing: 8
                                     align: Align{x: 0.0, y: 0.5}
                                     PanelLabel{width: 84 text: "PHASER"}
+                                    Tip{ text: "Phaser loudness rule: FOL as ALL, OFF as is, MTCH match, CAP cap"
                                     sfx_lvl_phaser_mode := VjBeatsDrop{width: 48 level_rows: true}
+                                    }
+                                    Tip{ text: "How much phaser is heard once engaged; double-click resets"
                                     sfx_lvl_phaser_mix := Slider{
                                         width: 150
                                         text: "mix"
                                         min: 0.0 max: 1.0 default: 1.0
                                         unit: "%" display_scale: 100.0 precision: 0
                                     }
+                                    }
+                                    Tip{ text: "Level the phaser is held under on CAP; double-click resets"
                                     sfx_lvl_phaser_ceiling := Slider{
                                         width: 150
                                         text: "cap"
                                         min: 0.01 max: 1.0 default: 1.0
                                         unit: "%" display_scale: 100.0 precision: 0
                                     }
+                                    }
                                 }
                                 View{
                                     width: Fit height: Fit flow: Right spacing: 8
                                     align: Align{x: 0.0, y: 0.5}
                                     PanelLabel{width: 84 text: "AUTOPAN"}
+                                    Tip{ text: "Autopan loudness rule: FOL as ALL, OFF as is, MTCH match, CAP cap"
                                     sfx_lvl_autopan_mode := VjBeatsDrop{width: 48 level_rows: true}
+                                    }
+                                    Tip{ text: "How much autopan is heard once engaged; double-click resets"
                                     sfx_lvl_autopan_mix := Slider{
                                         width: 150
                                         text: "mix"
                                         min: 0.0 max: 1.0 default: 1.0
                                         unit: "%" display_scale: 100.0 precision: 0
                                     }
+                                    }
+                                    Tip{ text: "Level the autopan is held under on CAP; double-click resets"
                                     sfx_lvl_autopan_ceiling := Slider{
                                         width: 150
                                         text: "cap"
                                         min: 0.01 max: 1.0 default: 1.0
                                         unit: "%" display_scale: 100.0 precision: 0
                                     }
+                                    }
                                 }
                                 View{
                                     width: Fit height: Fit flow: Right spacing: 8
                                     align: Align{x: 0.0, y: 0.5}
                                     PanelLabel{width: 84 text: "WIDTH"}
+                                    Tip{ text: "Width loudness rule: FOL as ALL, OFF as is, MTCH match, CAP cap"
                                     sfx_lvl_stereo_width_mode := VjBeatsDrop{width: 48 level_rows: true}
+                                    }
+                                    Tip{ text: "How much width is heard once engaged; double-click resets"
                                     sfx_lvl_stereo_width_mix := Slider{
                                         width: 150
                                         text: "mix"
                                         min: 0.0 max: 1.0 default: 1.0
                                         unit: "%" display_scale: 100.0 precision: 0
                                     }
+                                    }
+                                    Tip{ text: "Level the width is held under on CAP; double-click resets"
                                     sfx_lvl_stereo_width_ceiling := Slider{
                                         width: 150
                                         text: "cap"
                                         min: 0.01 max: 1.0 default: 1.0
                                         unit: "%" display_scale: 100.0 precision: 0
                                     }
+                                    }
                                 }
                                 View{
                                     width: Fit height: Fit flow: Right spacing: 8
                                     align: Align{x: 0.0, y: 0.5}
                                     PanelLabel{width: 84 text: "REVERB"}
+                                    Tip{ text: "Reverb loudness rule: FOL as ALL, OFF as is, MTCH match, CAP cap"
                                     sfx_lvl_plate_reverb_mode := VjBeatsDrop{width: 48 level_rows: true}
+                                    }
+                                    Tip{ text: "How much reverb is heard once engaged; double-click resets"
                                     sfx_lvl_plate_reverb_mix := Slider{
                                         width: 150
                                         text: "mix"
                                         min: 0.0 max: 1.0 default: 1.0
                                         unit: "%" display_scale: 100.0 precision: 0
                                     }
+                                    }
+                                    Tip{ text: "Level the reverb is held under on CAP; double-click resets"
                                     sfx_lvl_plate_reverb_ceiling := Slider{
                                         width: 150
                                         text: "cap"
                                         min: 0.01 max: 1.0 default: 1.0
                                         unit: "%" display_scale: 100.0 precision: 0
                                     }
+                                    }
                                 }
                                 View{
                                     width: Fit height: Fit flow: Right spacing: 8
                                     align: Align{x: 0.0, y: 0.5}
                                     PanelLabel{width: 84 text: "LADDER"}
+                                    Tip{ text: "Ladder loudness rule: FOL as ALL, OFF as is, MTCH match, CAP cap"
                                     sfx_lvl_moog_ladder_mode := VjBeatsDrop{width: 48 level_rows: true}
+                                    }
+                                    Tip{ text: "How much ladder is heard once engaged; double-click resets"
                                     sfx_lvl_moog_ladder_mix := Slider{
                                         width: 150
                                         text: "mix"
                                         min: 0.0 max: 1.0 default: 1.0
                                         unit: "%" display_scale: 100.0 precision: 0
                                     }
+                                    }
+                                    Tip{ text: "Level the ladder is held under on CAP; double-click resets"
                                     sfx_lvl_moog_ladder_ceiling := Slider{
                                         width: 150
                                         text: "cap"
                                         min: 0.01 max: 1.0 default: 1.0
                                         unit: "%" display_scale: 100.0 precision: 0
                                     }
+                                    }
                                 }
+                                Tip{ text: "Close the levels dialog"
                                 sfx_levels_close := PillButton{width: 60 text: "CLOSE"}
+                                }
                             }
                         }
                     }

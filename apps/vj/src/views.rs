@@ -739,7 +739,9 @@ script_mod! {
                         draw_text.color: #x73b9ef
                         draw_text.text_style.font_size: 8
                     }
+                    Tip{ text: "Cancel this job; only shown while it can still be stopped"
                     job_cancel := Button{text: "Stop"}
+                    }
                 }
                 job_chips := View{
                     visible: false
