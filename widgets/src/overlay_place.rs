@@ -1001,6 +1001,7 @@ mod lock_tests {
     use super::*;
     use crate::{
         makepad_draw::cx_draw::CxDraw,
+        pill_nav::{PillNavItem, PillNavLink, PillNavWidgetRefExt},
         view::{View, ViewOptimize},
         widget::*,
     };
@@ -1144,5 +1145,41 @@ mod lock_tests {
         drop(root);
         release_orphaned_sweep_locks(&mut cx);
         assert_eq!(cx.sweep_lock_area(), None, "its list went with it, and the lock with the list");
+    }
+
+    /// The case that turned the window away: a pill nav's panel open when the
+    /// page holding it is rebuilt. The bar had no `Drop` to hand its lock
+    /// over; the next event after the new page is drawn lets go of it.
+    #[test]
+    fn a_pill_nav_swapped_out_open_gives_the_pointer_back() {
+        let mut cx = drawn_cx();
+        let mut target = Target::new(&mut cx);
+        let old = cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{width: 800 height: 600 flow: Down nav := PillNav{}}
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        let nav = old.widget(&cx, ids!(nav)).as_pill_nav();
+        nav.set_items(
+            &mut cx,
+            vec![
+                PillNavItem::place(live_id!(overview), "Overview"),
+                PillNavItem::group(live_id!(build), "Build", vec![PillNavLink::new(live_id!(editor), "Editor")]),
+            ],
+        );
+        target.draw(&mut cx, &old);
+        nav.open(&mut cx, live_id!(build));
+        target.draw(&mut cx, &old);
+        assert!(nav.is_open());
+        assert!(cx.sweep_lock_area().is_some(), "the open panel holds the pointer");
+        drop(nav);
+        drop(old);
+        let new = page(&mut cx);
+        target.draw(&mut cx, &new);
+        release_orphaned_sweep_locks(&mut cx);
+        assert_eq!(cx.sweep_lock_area(), None, "the next page has the pointer");
     }
 }

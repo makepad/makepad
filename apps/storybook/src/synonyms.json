@@ -1965,6 +1965,35 @@
    ]
   },
   {
+   "component": "PillNav",
+   "aka": [
+    "navigation bar",
+    "top navigation",
+    "dropdown navigation",
+    "hover menu",
+    "mega menu",
+    "site header menu",
+    "pill navigation",
+    "pill nav",
+    "nav dropdown"
+   ],
+   "does": [
+    "panel grows out of the bar",
+    "sliding highlight under the item",
+    "open on hover with a delay",
+    "grace delay before closing",
+    "links in columns with headings",
+    "one line hint under a link",
+    "keyboard into the panel",
+    "fold into one pill when crowded",
+    "accordion when folded",
+    "reports the chosen link",
+    "current destination",
+    "flip above near the bottom",
+    "stay inside the window"
+   ]
+  },
+  {
    "component": "Placeholder",
    "aka": [
     "skeleton",

@@ -413,6 +413,7 @@ mod tests {
             &[
                 ("Toolbar", &["Overview", "Page header", "Window chrome", "Drop controls"]),
                 ("Tabs", &["Overview"]),
+                ("PillNav", &["Overview"]),
                 ("NavList", &["Overview"]),
                 ("HamburgerMenu", &["Overview"]),
                 ("Breadcrumb", &["Overview"]),
