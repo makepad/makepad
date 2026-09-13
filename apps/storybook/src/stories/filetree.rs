@@ -1,4 +1,6 @@
-//! The file tree stories: the working directory read into a file tree, ported from the widget zoo.
+//! The tree component's Files page: the working directory read into a
+//! file tree, ported from the widget zoo. The component's overview, the
+//! general tree, is `tree.rs`.
 use std::{
     cmp::Ordering,
     collections::HashMap,
@@ -23,9 +25,9 @@ script_mod! {
         file_tree: FileTree{}
     }
 
-    mod.stories.FileTreeOverview = StoryPage{
+    mod.stories.TreeFiles = StoryPage{
         StoryNote{text: "The working directory read into a tree. The status dots are cycled for the demonstration rather than read from the repository, so all five kinds are on screen: none, new, modified, deleted and mixed."}
-        mod.storybook.StoryFileTree{file_tree +: {width: Fill height: Fill}}
+        files := mod.storybook.StoryFileTree{file_tree +: {width: Fill height: Fill}}
     }
 }
 
@@ -359,17 +361,69 @@ impl Widget for StoryFileTree {
 }
 
 pub const STORIES: &[Story] = &[Story {
-    key: "data-display/filetree/overview",
+    key: "data-display/tree/files",
     category: "Data display",
-    component: "FileTree",
-    also: &["FileTreeNode"],
-    name: "Overview",
-    dsl: "FileTreeOverview",
+    component: "Tree",
+    also: &["FileTree", "FileTreeNode"],
+    name: "Files",
+    dsl: "TreeFiles",
     added: "2026-02-16",
     tags: &["ported"],
-    doc: "# FileTree\n\nFileTree displays a file system tree.",
+    doc: "# FileTree
+
+The file browser: folders that open and shut, files with a status dot, and the hover, selection and drag-start the navigator on the left is made of.
+
+**The tree is drawn, not declared.** A host walks its own model every draw pass, calling `begin_folder` and `end_folder` for a directory and `file` or `file_with_status` for a leaf. The widget keeps only what has to outlive a pass, keyed by the node id the host handed it: which folders are open, what is selected, and the scroll. What it reports back is a `FileTreeAction`: a file or folder clicked, a row hovered or left, and a file that should start a drag.
+
+**What the demo does.** It reads the working directory on the first draw rather than at startup, because a story is built long after startup; skips `target` and dot-prefixed entries; sorts directories before files and each alphabetically; and shows one error row if the directory cannot be read. Where there is no file system it draws a fixed three-folder sample instead.
+
+**The status dots are cycled by node id** so that all five kinds are on screen: none, new, modified, deleted and mixed. They are a demonstration, not a reading of the repository.
+
+The Overview page beside this one is the general tree, TreeView: an outline given as text, with fold marks, indent guides, checkboxes and a keyboard walk. Use that for a hierarchy of anything; use this one for files.",
     subject: "",
     feature: None,
     controls: &[],
     on_actions: None,
 }];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The page is built from the DSL, which the Rust compiler never reads,
+    /// and the widget on it is this file's own, registered here. The page
+    /// moved under a new component and its template was renamed with it, so
+    /// the record's template name is asked for, and the widget is checked
+    /// to be the demo and not yet to have read anything: the directory is
+    /// read on the first draw, and building a page draws nothing.
+    #[test]
+    fn the_page_builds_and_holds_the_demo_unread() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::theme::widgets_script_mod(vm);
+            crate::shell::script_mod(vm);
+            self::script_mod(vm);
+            let _ = makepad_platform::shader_error::take();
+        });
+        for story in STORIES {
+            let page = cx.with_vm(|vm| {
+                let stories = vm.module(id!(stories));
+                let value = vm.bx.heap.value(stories, LiveId::from_str(story.dsl).into(), NoTrap);
+                assert!(value.as_object().is_some(), "no template {}", story.dsl);
+                WidgetRef::script_from_value(vm, value)
+            });
+            assert!(!page.is_empty(), "{} built no widget", story.key);
+            assert_eq!(
+                makepad_platform::shader_error::take(),
+                None,
+                "{}: a draw shader failed to compile",
+                story.key
+            );
+            let files = page.widget(&cx, &[live_id!(files)]);
+            let demo = files.borrow::<StoryFileTree>();
+            let demo = demo.as_deref().expect("files is the story's file tree demo");
+            assert!(!demo.loaded, "{}: the directory was read while building", story.key);
+            assert!(demo.file_nodes.is_empty(), "{}: nodes exist before the first draw", story.key);
+        }
+    }
+}
