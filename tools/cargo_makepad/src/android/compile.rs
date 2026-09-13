@@ -1246,10 +1246,21 @@ fn build_dex(
     let d8_jar = d8_jar_path(sdk_dir, urls);
     let android_jar = android_jar_path(sdk_dir, urls);
 
+    // Without --min-api, D8 defaults to API 1 and desugars interface DEFAULT
+    // methods into `<Interface>$-CC` companion classes — which it cannot emit
+    // for platform (android.jar) interfaces like LocationListener, so the
+    // first GPS fix on Android 14+ crashes with NoClassDefFoundError
+    // (LocationListener$-CC). Pass the effective minSdkVersion (`urls` already
+    // carries any per-app override) so the dex matches the manifest; from API
+    // 24 the runtime dispatches interface defaults natively and D8 skips the
+    // desugaring altogether.
+    let min_api = urls.sdk_version.to_string();
     let mut args: Vec<&str> = vec![
         "-cp",
         d8_jar.to_str().unwrap(),
         "com.android.tools.r8.D8",
+        "--min-api",
+        &min_api,
         "--classpath",
         android_jar.to_str().unwrap(),
         "--output",
