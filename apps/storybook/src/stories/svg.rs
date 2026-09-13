@@ -1,5 +1,6 @@
-//! The svg story: a vector drawing as a widget, and the frame loop it runs
-//! unless you say otherwise.
+//! The svg story: a vector drawing as a widget, a document that animates
+//! itself with a shader per shape, and the frame loop it runs unless you say
+//! otherwise.
 use crate::makepad_widgets::*;
 use crate::registry::{Control, ControlKind, Story};
 
@@ -10,127 +11,10 @@ script_mod! {
 
     mod.stories.SvgOverview = StoryPage{
         StoryNote{text: "A vector drawing sized like any other widget. Seven places in this repository use one. It is not the Icon: an Icon wraps the same drawing in a background and its own icon_walk so it can sit inside a control, and this is the drawing on its own."}
+        StoryNote{text: "Which one to use, against Vector and Icon, is set out on the Docs tab."}
 
-        StoryHeading{text: "It takes the room you give it"}
-        StoryNote{text: "Fit by default, so it takes the drawing's own size. Given a width and a height it scales into them."}
-        StoryRow{
-            SolidView{
-                width: Fit height: Fit
-                padding: theme.mspace_2
-                show_bg: true
-                draw_bg +: {color: theme.color_surface_container_low}
-                subject := Svg{
-                    animating: false
-                    draw_svg +: {svg: crate_resource("self:resources/Icon_Favorite.svg")}
-                }
-            }
-            SolidView{
-                width: Fit height: Fit
-                padding: theme.mspace_2
-                show_bg: true
-                draw_bg +: {color: theme.color_surface_container_low}
-                Svg{
-                    width: 64. height: 64.
-                    animating: false
-                    draw_svg +: {svg: crate_resource("self:resources/Icon_Favorite.svg")}
-                }
-            }
-            SolidView{
-                width: Fit height: Fit
-                padding: theme.mspace_2
-                show_bg: true
-                draw_bg +: {color: theme.color_surface_container_low}
-                Svg{
-                    width: 96. height: 32.
-                    animating: false
-                    draw_svg +: {svg: crate_resource("self:resources/Icon_Favorite.svg")}
-                }
-            }
-        }
-
-        StoryHeading{text: "The document's colours, unless you say otherwise"}
-        StoryNote{text: "draw_svg.color carries a sentinel meaning leave the drawing alone, so by default you get the colours it was authored with. Give it a colour and that colour replaces them, keeping the per-vertex alpha — which is how the same file serves as a picture in one place and a tinted mark in another."}
-        StoryRow{
-            SolidView{
-                width: Fit height: Fit
-                padding: theme.mspace_2
-                show_bg: true
-                draw_bg +: {color: theme.color_surface_container_low}
-                Svg{
-                    width: 48. height: 48.
-                    animating: false
-                    draw_svg +: {svg: crate_resource("self:resources/Icon_Favorite.svg")}
-                }
-            }
-            SolidView{
-                width: Fit height: Fit
-                padding: theme.mspace_2
-                show_bg: true
-                draw_bg +: {color: theme.color_surface_container_low}
-                tinted := Svg{
-                    width: 48. height: 48.
-                    animating: false
-                    draw_svg +: {
-                        svg: crate_resource("self:resources/Icon_Favorite.svg")
-                        color: theme.color_text_meta
-                    }
-                }
-            }
-            Label{text: "as authored, then tinted" draw_text +: {color: theme.color_text_meta}}
-        }
-
-        StoryHeading{text: "animating is on by default, and it is not free"}
-        StoryNote{text: "An animating Svg asks for the next frame, every frame, for as long as it exists — that is how a drawing with time in it moves. A drawing with no time in it does exactly the same thing and shows exactly the same picture, so the only way to tell is a machine that never idles. The one caller in this repository that thought about it writes animating: false. Both of these look identical; the left one is spinning the frame loop."}
-        StoryRow{
-            SolidView{
-                width: Fit height: Fit
-                padding: theme.mspace_2
-                show_bg: true
-                draw_bg +: {color: theme.color_surface_container_low}
-                Svg{
-                    width: 48. height: 48.
-                    draw_svg +: {svg: crate_resource("self:resources/Icon_Favorite.svg")}
-                }
-            }
-            SolidView{
-                width: Fit height: Fit
-                padding: theme.mspace_2
-                show_bg: true
-                draw_bg +: {color: theme.color_surface_container_low}
-                Svg{
-                    width: 48. height: 48.
-                    animating: false
-                    draw_svg +: {svg: crate_resource("self:resources/Icon_Favorite.svg")}
-                }
-            }
-            Label{text: "left: animating (default). right: animating: false." draw_text +: {color: theme.color_text_meta}}
-        }
-
-        StoryHeading{text: "A document of real size"}
-        StoryNote{text: "One icon says little about the parser and the tessellator. This is two hundred and forty stroked and filled paths, each in a group that sets its own paint, all under one scaling transform, fitted into three hundred points. animating is false because nothing in it moves."}
-        StoryRow{
-            SolidView{
-                width: Fit height: Fit
-                padding: theme.mspace_2
-                show_bg: true
-                draw_bg +: {color: theme.color_surface_container_low}
-                Svg{
-                    width: 300. height: 300.
-                    animating: false
-                    draw_svg +: {svg: crate_resource("self:resources/tiger.svg")}
-                }
-            }
-        }
-    }
-
-    mod.stories.SvgAnimatedShaded = StoryPage{
-        StoryNote{text: "The two things an Svg can do that a still icon never asks of it: a document with time in it, and a shader of your own on the shapes the document names."}
-
-        StoryHeading{text: "A drawing that moves"}
+        StoryHeading{text: "A drawing that moves, under the controls"}
         StoryNote{text: "The file animates itself. Sixty animate and animateTransform elements drive its paths, positions and opacity, and three symbols are placed forty-nine times through use, each instance tinted through currentColor. This is the one case where animating: true is right: the frame loop is what advances the document's clock, and switching it off freezes the scene where it is."}
-
-        StoryHeading{text: "A shader per shape"}
-        StoryNote{text: "A shape carrying a data-shader-id attribute arrives in the pixel shader as v_shape_id, so a get_color override can treat each tagged shape differently. It has svg_time, the paint's parameters in v_param0 to v_param4, the position in v_world, the distance along a stroke in v_stroke_dist, and eval_gradient() for the colour the file asked for. Here seven ids become a pulsing halo, an iridescent dome, thin-film bubbles, plankton, caustic rays, the water column, and light running down the tentacles."}
         StoryRow{
             SolidView{
                 width: Fit height: Fit
@@ -397,76 +281,181 @@ script_mod! {
                 }
             }
         }
+
+        StoryHeading{text: "It takes the room you give it"}
+        StoryNote{text: "Fit by default, so it takes the drawing's own size. Given a width and a height it scales into them."}
+        StoryRow{
+            SolidView{
+                width: Fit height: Fit
+                padding: theme.mspace_2
+                show_bg: true
+                draw_bg +: {color: theme.color_surface_container_low}
+                Svg{
+                    animating: false
+                    draw_svg +: {svg: crate_resource("self:resources/Icon_Favorite.svg")}
+                }
+            }
+            SolidView{
+                width: Fit height: Fit
+                padding: theme.mspace_2
+                show_bg: true
+                draw_bg +: {color: theme.color_surface_container_low}
+                Svg{
+                    width: 64. height: 64.
+                    animating: false
+                    draw_svg +: {svg: crate_resource("self:resources/Icon_Favorite.svg")}
+                }
+            }
+            SolidView{
+                width: Fit height: Fit
+                padding: theme.mspace_2
+                show_bg: true
+                draw_bg +: {color: theme.color_surface_container_low}
+                Svg{
+                    width: 96. height: 32.
+                    animating: false
+                    draw_svg +: {svg: crate_resource("self:resources/Icon_Favorite.svg")}
+                }
+            }
+        }
+
+        StoryHeading{text: "The document's colours, unless you say otherwise"}
+        StoryNote{text: "draw_svg.color carries a sentinel meaning leave the drawing alone, so by default you get the colours it was authored with. Give it a colour and that colour replaces them, keeping the per-vertex alpha — which is how the same file serves as a picture in one place and a tinted mark in another."}
+        StoryRow{
+            SolidView{
+                width: Fit height: Fit
+                padding: theme.mspace_2
+                show_bg: true
+                draw_bg +: {color: theme.color_surface_container_low}
+                Svg{
+                    width: 48. height: 48.
+                    animating: false
+                    draw_svg +: {svg: crate_resource("self:resources/Icon_Favorite.svg")}
+                }
+            }
+            SolidView{
+                width: Fit height: Fit
+                padding: theme.mspace_2
+                show_bg: true
+                draw_bg +: {color: theme.color_surface_container_low}
+                tinted := Svg{
+                    width: 48. height: 48.
+                    animating: false
+                    draw_svg +: {
+                        svg: crate_resource("self:resources/Icon_Favorite.svg")
+                        color: theme.color_text_meta
+                    }
+                }
+            }
+            Label{text: "as authored, then tinted" draw_text +: {color: theme.color_text_meta}}
+        }
+
+        StoryHeading{text: "animating is on by default, and it is not free"}
+        StoryNote{text: "An animating Svg asks for the next frame, every frame, for as long as it exists — that is how a drawing with time in it moves. A drawing with no time in it does exactly the same thing and shows exactly the same picture, so the only way to tell is a machine that never idles. The one caller in this repository that thought about it writes animating: false. Both of these look identical; the left one is spinning the frame loop."}
+        StoryRow{
+            SolidView{
+                width: Fit height: Fit
+                padding: theme.mspace_2
+                show_bg: true
+                draw_bg +: {color: theme.color_surface_container_low}
+                Svg{
+                    width: 48. height: 48.
+                    draw_svg +: {svg: crate_resource("self:resources/Icon_Favorite.svg")}
+                }
+            }
+            SolidView{
+                width: Fit height: Fit
+                padding: theme.mspace_2
+                show_bg: true
+                draw_bg +: {color: theme.color_surface_container_low}
+                Svg{
+                    width: 48. height: 48.
+                    animating: false
+                    draw_svg +: {svg: crate_resource("self:resources/Icon_Favorite.svg")}
+                }
+            }
+            Label{text: "left: animating (default). right: animating: false." draw_text +: {color: theme.color_text_meta}}
+        }
+
+        StoryHeading{text: "A document of real size"}
+        StoryNote{text: "One icon says little about the parser and the tessellator. This is two hundred and forty stroked and filled paths, each in a group that sets its own paint, all under one scaling transform, fitted into three hundred points. animating is false because nothing in it moves."}
+        StoryRow{
+            SolidView{
+                width: Fit height: Fit
+                padding: theme.mspace_2
+                show_bg: true
+                draw_bg +: {color: theme.color_surface_container_low}
+                Svg{
+                    width: 300. height: 300.
+                    animating: false
+                    draw_svg +: {svg: crate_resource("self:resources/tiger.svg")}
+                }
+            }
+        }
+
+        StoryHeading{text: "A shader per shape"}
+        StoryNote{text: "A shape carrying a data-shader-id attribute arrives in the pixel shader as v_shape_id, so a get_color override can treat each tagged shape differently. It has svg_time, the paint's parameters in v_param0 to v_param4, the position in v_world, the distance along a stroke in v_stroke_dist, and eval_gradient() for the colour the file asked for. The drawing at the top of this page overrides it once, and seven ids become a pulsing halo, an iridescent dome, thin-film bubbles, plankton, caustic rays, the water column, and light running down the tentacles."}
     }
 }
 
-pub const STORIES: &[Story] = &[
-    Story {
-        key: "data-display/svg/overview",
-        category: "Data display",
-        component: "Svg",
-        also: &[],
-        name: "Overview",
-        dsl: "SvgOverview",
-        added: "2026-02-12",
-        tags: &[],
-        doc: "# Svg
+pub const STORIES: &[Story] = &[Story {
+    key: "media/svg/overview",
+    category: "Media",
+    component: "Svg",
+    also: &[],
+    name: "Overview",
+    dsl: "SvgOverview",
+    added: "2026-02-12",
+    tags: &["ported", "animation", "shader", "shader id"],
+    doc: "# Svg
 
 A vector document drawn as a widget. Seven places in this repository use one.
 
 It is not `Icon`, but the difference is not tinting — both draw through the same `DrawSvg`. An `Icon` wraps that drawing in a background quad and gives it an `icon_walk` and a `size`, so it can sit inside a button and be measured like a glyph. `Svg` is the drawing on its own, taking the widget's own walk.
 
+## Which one to use
+
+| Want | Use |
+|---|---|
+| artwork that already exists as a file | `Svg` |
+| a small drawing composed in the same DSL as the page, or one with a value that comes from somewhere else | `Vector`, on the Vector page |
+| a drawing inside a control, measured like a glyph | `Icon` |
+
+## Size and colour
+
 `draw_svg.svg` takes the resource. The widget is `Fit` by default, so it takes the drawing's own size; give it a width and a height and it scales into them, ignoring the drawing's aspect if you ask it to.
 
 `draw_svg.color` holds a sentinel that means *leave the drawing alone*, so the default is the colours the file was authored with. Setting a colour replaces them while keeping the per-vertex alpha, which is how one file serves as a picture in one place and a tinted mark in another.
 
+## Animating
+
 **`animating` is `true` by default and it costs a frame loop.** An animating `Svg` asks for the next frame on every frame, for as long as it exists, which is what makes a drawing with time in it move. A drawing with no time in it does the same thing and shows the same still picture, so nothing on screen tells you it is happening — the only symptom is a process that never goes idle. Of the callers in this repository, one sets `animating: false` deliberately; the rest take the default. Set it false unless the drawing actually moves.
 
-A document of real size costs nothing more at draw time than an icon: the file is parsed and tessellated once into cached geometry, and every frame after that is one draw of that geometry, however many paths it holds.",
-        subject: "subject",
-        feature: None,
-        controls: &[Control {
-            label: "animating",
-            target: "subject",
-            kind: ControlKind::Bool { prop: "animating", default: false },
-        }],
-        on_actions: None,
-    },
-    Story {
-        key: "data-display/svg/animated-and-shaded",
-        category: "Data display",
-        component: "Svg",
-        also: &[],
-        name: "Animated and shaded",
-        dsl: "SvgAnimatedShaded",
-        added: "2026-02-12",
-        tags: &["ported", "animation", "shader", "shader id"],
-        doc: "# Svg, animated and shaded
+**The document can carry its own time.** `animate` and `animateTransform` elements in the file drive its paths, positions, transforms and opacity, and a `symbol` placed through `use` is instanced as many times as the file asks, each instance taking its own tint through `currentColor`. Nothing in the DSL says any of this; the file does. What the DSL says is `animating: true`, and for the drawing at the top of the page that is the right setting: the widget asks for the next frame on every frame and hands the elapsed time to the document, and that is what moves it. The control switches it off, and the scene freezes where it is — the file's clock only runs while the widget's does.
 
-The overview shows a still drawing. This page shows the two things the widget does beyond that.
+A document of real size costs nothing more at draw time than an icon: the file is parsed and tessellated once into cached geometry, and every frame after that is one draw of that geometry, however many paths it holds.
 
-**The document can carry its own time.** `animate` and `animateTransform` elements in the file drive its paths, positions, transforms and opacity, and a `symbol` placed through `use` is instanced as many times as the file asks, each instance taking its own tint through `currentColor`. Nothing in the DSL says any of this; the file does. What the DSL says is `animating: true`, and here that is the right setting: the widget asks for the next frame on every frame and hands the elapsed time to the document, and that is what moves it. The control on this page switches it off, and the scene freezes where it is — the file's clock only runs while the widget's does.
+## A shader per shape
 
-**A shape can name a shader of its own.** A shape carrying a `data-shader-id` attribute keeps that number through tessellation and arrives in the pixel shader as `v_shape_id`, with its paint's parameters in `v_param0` to `v_param4` (the bounding box for a solid paint, the end points for a linear gradient, the centre and radii for a radial one), its position in `v_world`, its distance along the stroke in `v_stroke_dist`, the time in `svg_time`, and `eval_gradient()` for the colour the file asked for. A `get_color` override on `draw_svg` reads the id and does something different for each. This page overrides it once and handles seven ids: a pulsing halo, a lit and iridescent dome, glass bubbles with a thin-film rainbow, plankton that glow, caustic light rays, the water column, and pulses of light running down the tentacles. Untagged shapes fall through to the file's own colour.
+A shape carrying a `data-shader-id` attribute keeps that number through tessellation and arrives in the pixel shader as `v_shape_id`, with its paint's parameters in `v_param0` to `v_param4` (the bounding box for a solid paint, the end points for a linear gradient, the centre and radii for a radial one), its position in `v_world`, its distance along the stroke in `v_stroke_dist`, the time in `svg_time`, and `eval_gradient()` for the colour the file asked for. A `get_color` override on `draw_svg` reads the id and does something different for each. The drawing at the top of the page overrides it once and handles seven ids: a pulsing halo, a lit and iridescent dome, glass bubbles with a thin-film rainbow, plankton that glow, caustic light rays, the water column, and pulses of light running down the tentacles. Untagged shapes fall through to the file's own colour.
 
 The override is written in the shader language inside the DSL: helper functions (`hash21`, `voronoi`) are declared next to `get_color` and called through `self`. A shader that does not compile is not an error the compiler sees — the draw is skipped and the widget paints nothing — which is why this file's test builds the page and asks the shader compiler what it saw.",
-        subject: "ocean",
-        feature: None,
-        controls: &[Control {
-            label: "animating",
-            target: "ocean",
-            kind: ControlKind::Bool { prop: "animating", default: true },
-        }],
-        on_actions: None,
-    },
-];
+    subject: "ocean",
+    feature: None,
+    controls: &[Control {
+        label: "animating",
+        target: "ocean",
+        kind: ControlKind::Bool { prop: "animating", default: true },
+    }],
+    on_actions: None,
+}];
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Both pages are markup the compiler never reads, and the second one
-    /// carries a shader override of two hundred and fifty lines. A draw
+    /// The page is markup the compiler never reads, and it carries a shader
+    /// override of two hundred and fifty lines. A draw
     /// shader that fails to compile is not an error anywhere: the draw is
     /// skipped and the widget paints nothing, so the only way to find out
     /// is to build every page and ask the shader compiler what it saw. The

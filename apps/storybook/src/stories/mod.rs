@@ -28,13 +28,27 @@ pub mod glasspanel;
 pub mod glass_surfaces;
 pub mod glass_controls;
 pub mod splash;
+pub mod label;
+pub mod typography;
+pub mod text_flow;
+pub mod html;
+pub mod markdown;
+pub mod rich_text;
+pub mod code_block;
+pub mod marquee;
+pub mod icon;
+pub mod image;
+pub mod media;
+pub mod svg;
+pub mod vector;
+pub mod playback_bar;
+pub mod waveform;
 pub mod badge;
 pub mod placeholder;
 pub mod button_more;
 pub mod checkbox_more;
 pub mod alert;
 pub mod progress;
-pub mod playback_bar;
 pub mod level_meter;
 pub mod spinner;
 pub mod button_group;
@@ -51,7 +65,6 @@ pub mod button;
 pub mod checkbox;
 pub mod combobox;
 pub mod dropdown;
-pub mod label;
 pub mod number_field;
 pub mod calendar;
 pub mod date_picker;
@@ -61,18 +74,14 @@ pub mod tags;
 pub mod radio_group;
 pub mod kbd;
 pub mod wheel_picker;
-pub mod typography;
 pub mod tree;
 pub mod filetree;
 pub mod list_item;
 pub mod avatar;
-pub mod media;
-pub mod waveform;
 pub mod table;
 pub mod empty_state;
 pub mod timeline;
 pub mod chat;
-pub mod code_block;
 pub mod upload;
 pub mod form;
 pub mod color;
@@ -84,7 +93,6 @@ pub mod chart_more;
 pub mod toolbar;
 pub mod kanban;
 pub mod svg_select;
-pub mod rich_text;
 pub mod tour;
 pub mod range_slider;
 pub mod slider;
@@ -92,32 +100,19 @@ pub mod textinput;
 pub mod radiobutton;
 pub mod breadcrumb;
 pub mod field;
-pub mod animated_gif;
 pub mod chart;
 pub mod lists;
 pub mod value_input;
 pub mod window_chrome;
-pub mod text_flow;
 pub mod overlay_messages;
 pub mod drop_controls;
-pub mod vector;
 pub mod fab_controls;
-pub mod code_view;
 pub mod data_grid;
 pub mod modal;
-pub mod svg;
 pub mod floating_panel;
 pub mod nav_list;
 pub mod pagination;
-pub mod marquee;
-pub mod icon;
-pub mod iconset;
-pub mod image;
-pub mod imageblend;
-pub mod rotatedimage;
 pub mod linklabel;
-pub mod markdown;
-pub mod html;
 pub mod tabs;
 pub mod stacknavigation;
 pub mod portallist;
@@ -125,7 +120,6 @@ pub mod tile_list;
 pub mod item_grid;
 pub mod log_list;
 pub mod rotary;
-pub mod video;
 
 /// Registered in the order the navigator reads, the same order as
 /// [`tables`], though no story template leans on another file's.
@@ -157,15 +151,30 @@ pub fn script_mod(vm: &mut ScriptVm) {
     glass_surfaces::script_mod(vm);
     glass_controls::script_mod(vm);
     splash::script_mod(vm);
+    // 4 Text
+    label::script_mod(vm);
+    typography::script_mod(vm);
+    text_flow::script_mod(vm);
+    html::script_mod(vm);
+    markdown::script_mod(vm);
+    rich_text::script_mod(vm);
+    code_block::script_mod(vm);
+    marquee::script_mod(vm);
+    // 5 Media
+    icon::script_mod(vm);
+    image::script_mod(vm);
+    media::script_mod(vm);
+    svg::script_mod(vm);
+    vector::script_mod(vm);
+    playback_bar::script_mod(vm);
+    waveform::script_mod(vm);
     button::script_mod(vm);
     checkbox::script_mod(vm);
     combobox::script_mod(vm);
     dropdown::script_mod(vm);
-    label::script_mod(vm);
     slider::script_mod(vm);
     range_slider::script_mod(vm);
     tour::script_mod(vm);
-    rich_text::script_mod(vm);
     svg_select::script_mod(vm);
     kanban::script_mod(vm);
     toolbar::script_mod(vm);
@@ -177,18 +186,14 @@ pub fn script_mod(vm: &mut ScriptVm) {
     color::script_mod(vm);
     form::script_mod(vm);
     upload::script_mod(vm);
-    code_block::script_mod(vm);
     chat::script_mod(vm);
     timeline::script_mod(vm);
     empty_state::script_mod(vm);
     table::script_mod(vm);
-    media::script_mod(vm);
-    waveform::script_mod(vm);
     avatar::script_mod(vm);
     list_item::script_mod(vm);
     tree::script_mod(vm);
     filetree::script_mod(vm);
-    typography::script_mod(vm);
     wheel_picker::script_mod(vm);
     kbd::script_mod(vm);
     radio_group::script_mod(vm);
@@ -202,32 +207,19 @@ pub fn script_mod(vm: &mut ScriptVm) {
     radiobutton::script_mod(vm);
     breadcrumb::script_mod(vm);
     field::script_mod(vm);
-    animated_gif::script_mod(vm);
     chart::script_mod(vm);
     lists::script_mod(vm);
     value_input::script_mod(vm);
     window_chrome::script_mod(vm);
-    text_flow::script_mod(vm);
     overlay_messages::script_mod(vm);
     drop_controls::script_mod(vm);
-    vector::script_mod(vm);
     fab_controls::script_mod(vm);
-    code_view::script_mod(vm);
     data_grid::script_mod(vm);
     modal::script_mod(vm);
-    svg::script_mod(vm);
     floating_panel::script_mod(vm);
     nav_list::script_mod(vm);
     pagination::script_mod(vm);
-    marquee::script_mod(vm);
-    icon::script_mod(vm);
-    iconset::script_mod(vm);
-    image::script_mod(vm);
-    imageblend::script_mod(vm);
-    rotatedimage::script_mod(vm);
     linklabel::script_mod(vm);
-    markdown::script_mod(vm);
-    html::script_mod(vm);
     tabs::script_mod(vm);
     stacknavigation::script_mod(vm);
     portallist::script_mod(vm);
@@ -236,7 +228,6 @@ pub fn script_mod(vm: &mut ScriptVm) {
     log_list::script_mod(vm);
     spinner::script_mod(vm);
     rotary::script_mod(vm);
-    video::script_mod(vm);
     badge::script_mod(vm);
     placeholder::script_mod(vm);
     checkbox_more::script_mod(vm);
@@ -253,7 +244,6 @@ pub fn script_mod(vm: &mut ScriptVm) {
     toast::script_mod(vm);
     alert::script_mod(vm);
     progress::script_mod(vm);
-    playback_bar::script_mod(vm);
     level_meter::script_mod(vm);
 }
 
@@ -290,15 +280,30 @@ pub fn tables() -> &'static [&'static [Story]] {
         glass_surfaces::STORIES,
         glass_controls::STORIES,
         splash::STORIES,
+        // 4 Text
+        label::STORIES,
+        typography::STORIES,
+        text_flow::STORIES,
+        html::STORIES,
+        markdown::STORIES,
+        rich_text::STORIES,
+        code_block::STORIES,
+        marquee::STORIES,
+        // 5 Media
+        icon::STORIES,
+        image::STORIES,
+        media::STORIES,
+        svg::STORIES,
+        vector::STORIES,
+        playback_bar::STORIES,
+        waveform::STORIES,
         button::STORIES,
         checkbox::STORIES,
         combobox::STORIES,
         dropdown::STORIES,
-        label::STORIES,
         slider::STORIES,
         range_slider::STORIES,
         tour::STORIES,
-        rich_text::STORIES,
         svg_select::STORIES,
         kanban::STORIES,
         toolbar::STORIES,
@@ -310,18 +315,14 @@ pub fn tables() -> &'static [&'static [Story]] {
         color::STORIES,
         form::STORIES,
         upload::STORIES,
-        code_block::STORIES,
         chat::STORIES,
         timeline::STORIES,
         empty_state::STORIES,
         table::STORIES,
-        media::STORIES,
-        waveform::STORIES,
         avatar::STORIES,
         list_item::STORIES,
         tree::STORIES,
         filetree::STORIES,
-        typography::STORIES,
         wheel_picker::STORIES,
         kbd::STORIES,
         radio_group::STORIES,
@@ -335,32 +336,19 @@ pub fn tables() -> &'static [&'static [Story]] {
         radiobutton::STORIES,
         breadcrumb::STORIES,
         field::STORIES,
-        animated_gif::STORIES,
         chart::STORIES,
         lists::STORIES,
         value_input::STORIES,
         window_chrome::STORIES,
-        text_flow::STORIES,
         overlay_messages::STORIES,
         drop_controls::STORIES,
-        vector::STORIES,
         fab_controls::STORIES,
-        code_view::STORIES,
         data_grid::STORIES,
         modal::STORIES,
-        svg::STORIES,
         floating_panel::STORIES,
         nav_list::STORIES,
         pagination::STORIES,
-        marquee::STORIES,
-        icon::STORIES,
-        iconset::STORIES,
-        image::STORIES,
-        imageblend::STORIES,
-        rotatedimage::STORIES,
         linklabel::STORIES,
-        markdown::STORIES,
-        html::STORIES,
         tabs::STORIES,
         stacknavigation::STORIES,
         portallist::STORIES,
@@ -369,7 +357,6 @@ pub fn tables() -> &'static [&'static [Story]] {
         log_list::STORIES,
         spinner::STORIES,
         rotary::STORIES,
-        video::STORIES,
         badge::STORIES,
         placeholder::STORIES,
         checkbox_more::STORIES,
@@ -386,7 +373,6 @@ pub fn tables() -> &'static [&'static [Story]] {
         toast::STORIES,
         alert::STORIES,
         progress::STORIES,
-        playback_bar::STORIES,
         level_meter::STORIES,
     ]
 }

@@ -1,5 +1,6 @@
-//! The vector story: shapes written down rather than loaded, and the pieces
-//! that go inside one.
+//! The vector story: shapes written down rather than loaded, the pieces that
+//! go inside one, three icons beside the files they were copied from, and a
+//! whole layered icon.
 use crate::makepad_widgets::*;
 use crate::registry::Story;
 
@@ -219,66 +220,54 @@ script_mod! {
                 }
             }
         }
-    }
 
-    mod.stories.VectorFileAndDsl = StoryPage{
-        StoryNote{text: "The same drawing twice: on the left Svg reads it from a file, on the right a Path draws it from the file's own d string, copied out unchanged. So these are real authored paths, with relative commands, several subpaths and a Z, in the viewbox each file declares. Neither path sets a fill, and a shape without one paints opaque black, so both are tinted to the theme's text colour through draw_svg.color."}
-
-        StoryHeading{text: "A document"}
+        StoryHeading{text: "A file and its DSL twin"}
+        StoryNote{text: "Three icons, each twice: Svg reads it from a file, and beside it a Path draws it from the file's own d string, copied out unchanged. So these are real authored paths, with relative commands, several subpaths and a Z, in the viewbox each file declares. No path sets a fill, and a shape without one paints opaque black, so every tile is tinted to the theme's text colour through draw_svg.color."}
         StoryRow{
+            flow: Flow.Right{wrap: true}
             Tile{
-                caption: Label{text: "file"}
+                caption: Label{text: "document, file"}
                 Svg{width: 48 height: 48 animating: false
                     draw_svg +: {svg: crate_resource("makepad_widgets:resources/icons/icon_file.svg") color: theme.color_text}
                 }
             }
             Tile{
-                caption: Label{text: "DSL"}
+                caption: Label{text: "document, DSL"}
                 Vector{width: 48 height: 48 viewbox: vec4(0 0 49 49)
                     draw_svg +: {color: theme.color_text}
                     Path{d: "M12.069,11.678c-0,-2.23 1.813,-4.043 4.043,-4.043l10.107,0l-0,8.086c-0,1.118 0.903,2.021 2.021,2.021l8.086,0l-0,18.193c-0,2.23 -1.813,4.043 -4.043,4.043l-16.171,0c-2.23,0 -4.043,-1.813 -4.043,-4.043l-0,-24.257Zm24.257,4.043l-8.086,-0l0,-8.086l8.086,8.086Z"}
                 }
             }
-        }
-
-        StoryHeading{text: "A folder"}
-        StoryRow{
             Tile{
-                caption: Label{text: "file"}
+                caption: Label{text: "folder, file"}
                 Svg{width: 48 height: 48 animating: false
                     draw_svg +: {svg: crate_resource("makepad_widgets:resources/icons/icon_folder.svg") color: theme.color_text}
                 }
             }
             Tile{
-                caption: Label{text: "DSL"}
+                caption: Label{text: "folder, DSL"}
                 Vector{width: 48 height: 48 viewbox: vec4(0 0 49 49)
                     draw_svg +: {color: theme.color_text}
                     Path{d: "M11.884,37.957l24.257,-0c2.23,-0 4.043,-1.813 4.043,-4.043l-0,-16.172c-0,-2.23 -1.813,-4.042 -4.043,-4.042l-10.107,-0c-0.638,-0 -1.238,-0.297 -1.617,-0.809l-1.213,-1.617c-0.765,-1.017 -1.965,-1.617 -3.235,-1.617l-8.085,-0c-2.23,-0 -4.043,1.813 -4.043,4.043l-0,20.214c-0,2.23 1.813,4.043 4.043,4.043Z"}
                 }
             }
-        }
-
-        StoryHeading{text: "A pointer"}
-        StoryRow{
             Tile{
-                caption: Label{text: "file"}
+                caption: Label{text: "pointer, file"}
                 Svg{width: 48 height: 48 animating: false
                     draw_svg +: {svg: crate_resource("makepad_widgets:resources/icons/icon_select.svg") color: theme.color_text}
                 }
             }
             Tile{
-                caption: Label{text: "DSL"}
+                caption: Label{text: "pointer, DSL"}
                 Vector{width: 48 height: 48 viewbox: vec4(0 0 48 49)
                     draw_svg +: {color: theme.color_text}
                     Path{d: "M33.21,28.207l-6.865,-0l3.562,8.807c0.259,0.582 0,1.295 -0.583,1.554l-3.173,1.36c-0.583,0.259 -1.295,-0.065 -1.554,-0.648l-3.432,-8.354l-5.569,5.764c-0.777,0.777 -1.943,0.194 -1.943,-0.842l0,-27.781c0,-1.101 1.23,-1.619 1.943,-0.842l18.391,18.909c0.777,0.777 0.194,2.073 -0.777,2.073Z"}
                 }
             }
         }
-    }
 
-    mod.stories.VectorLayeredIcon = StoryPage{
-        StoryNote{text: "A whole icon written in the DSL, beside the file it was drawn from. It uses at once what the overview shows one piece at a time: gradients with several stops and an opacity per stop, a gradient used as a stroke, fill_opacity and stroke_opacity on a shape, rx with ry, a Group whose Translate and Scale place a 24-unit drawing on a card drawn in 256-unit coordinates, a Filter on a whole Group, and translucent layers over one another. The two boxes differ on purpose: Vector fits its 256-unit viewbox into 300 points, while Svg fits a document to the bounds of what it draws, the card, rather than to the viewBox it declares, so the file twin's box is 224/256 of 300 and the two cards come out the same size, and a margin of 18.75 points, the card's 16-unit inset at that scale, lines them up. The ground is a fixed dark grey in every theme, because the art is dark translucent glass and a light ground has nothing to show of it."}
-
+        StoryHeading{text: "A layered icon"}
+        StoryNote{text: "A whole icon written in the DSL, beside the file it was drawn from. It uses at once what the sections above show one piece at a time: gradients with several stops and an opacity per stop, a gradient used as a stroke, fill_opacity and stroke_opacity on a shape, rx with ry, a Group whose Translate and Scale place a 24-unit drawing on a card drawn in 256-unit coordinates, a Filter on a whole Group, and translucent layers over one another. The two boxes differ on purpose: Vector fits its 256-unit viewbox into 300 points, while Svg fits a document to the bounds of what it draws, the card, rather than to the viewBox it declares, so the file twin's box is 224/256 of 300 and the two cards come out the same size, and a margin of 18.75 points, the card's 16-unit inset at that scale, lines them up. The ground is a fixed dark grey in every theme, because the art is dark translucent glass and a light ground has nothing to show of it."}
         Ground{
             Twin{
                 TwinCaption{text: "written in the DSL"}
@@ -380,10 +369,11 @@ script_mod! {
 }
 
 pub const STORIES: &[Story] = &[Story {
-    key: "data-display/vector/overview",
-    category: "Data display",
-    component: "Vector",
+    key: "media/svg/vector",
+    category: "Media",
+    component: "Svg",
     also: &[
+        "Vector",
         "Path",
         "Rect",
         "Circle",
@@ -403,10 +393,10 @@ pub const STORIES: &[Story] = &[Story {
         "RadGradient",
         "Filter",
     ],
-    name: "Overview",
+    name: "Vector",
     dsl: "VectorOverview",
     added: "2025-05-06",
-    tags: &[],
+    tags: &["ported", "svg", "icon", "path", "gradient", "filter", "group", "transform", "opacity"],
     doc: "# Vector
 
 A drawing written in the DSL rather than loaded from a file.
@@ -417,45 +407,19 @@ Where `Svg` reads a document off disk, `Vector` *is* the document: `Path`, `Rect
 
 **The pieces that are not shapes are named and referred to.** A `Gradient` or `RadGradient` holds `Stop` children and is bound with a `let`; a shape then says `fill: that_name`. A `Filter` holding a `DropShadow` works the same way, and applies to a single shape or to a whole `Group`.
 
-**Transforms belong to a group, not to a shape.** `Group{transform: [...]}` carries its children through the list in order — `Translate`, `Rotate`, `Scale`, `SkewX`, `SkewY`. Rotating about a point other than the origin is the usual translate-rotate-translate sandwich, which the third tile below does.
+**Transforms belong to a group, not to a shape.** `Group{transform: [...]}` carries its children through the list in order — `Translate`, `Rotate`, `Scale`, `SkewX`, `SkewY`. Rotating about a point other than the origin is the usual translate-rotate-translate sandwich, which the Rotate tile does.
 
-Choose this over `Svg` when the drawing is small, when it has to be composed from the same DSL as the rest of the page, or when a value in it should come from somewhere else. Choose `Svg` when the artwork already exists as a file.",
-    subject: "",
-    feature: None,
-    controls: &[],
-    on_actions: None,
-}, Story {
-    key: "data-display/vector/file-and-dsl",
-    category: "Data display",
-    component: "Vector",
-    also: &["Svg"],
-    name: "A file and its DSL twin",
-    dsl: "VectorFileAndDsl",
-    added: "2025-05-06",
-    tags: &["ported", "svg", "icon", "path"],
-    doc: "# A file and its DSL twin
+## A file and its DSL twin
 
-The same three icons twice. `Svg` reads each one from the widget library's icon folder, and a `Vector` beside it draws the same shape from a `Path` whose `d` string was copied out of that file unchanged.
+Three icons, each twice. `Svg` reads each one from the widget library's icon folder, and a `Vector` beside it draws the same shape from a `Path` whose `d` string was copied out of that file unchanged.
 
 That is the point of `Path` taking SVG's own path syntax: a shape moves between a file and the DSL by copying one string, in either direction. These are real authored paths rather than hand-written ones — relative `c` and `l` commands, more than one subpath, a `Z` to close — and the `viewbox` is the one the file declares, `0 0 49 49` for the document and the folder and `0 0 48 49` for the pointer, so the shape lands at the same size and place on both sides.
 
-**A shape with no fill paints opaque black.** That is SVG's default and the DSL keeps it, so an untinted icon vanishes on a dark theme. Both twins here set `draw_svg.color`, which replaces every colour in the drawing with one; `Vector` carries the same `draw_svg` as `Svg`, so the tint is written the same way on both. Give the `Path` a `fill` instead when the drawing should keep colours of its own.",
-    subject: "",
-    feature: None,
-    controls: &[],
-    on_actions: None,
-}, Story {
-    key: "data-display/vector/layered-icon",
-    category: "Data display",
-    component: "Vector",
-    also: &["Svg"],
-    name: "A layered icon",
-    dsl: "VectorLayeredIcon",
-    added: "2025-05-06",
-    tags: &["ported", "gradient", "filter", "group", "transform", "opacity"],
-    doc: "# A layered icon
+**A shape with no fill paints opaque black.** That is SVG's default and the DSL keeps it, so an untinted icon vanishes on a dark theme. Every twin here sets `draw_svg.color`, which replaces every colour in the drawing with one; `Vector` carries the same `draw_svg` as `Svg`, so the tint is written the same way on both. Give the `Path` a `fill` instead when the drawing should keep colours of its own.
 
-A complete icon written in the DSL, with the file it was drawn from beside it. Everything the overview shows one piece at a time is here at once, in the layers a real icon needs.
+## A layered icon
+
+A complete icon written in the DSL, with the file it was drawn from beside it. Everything the sections above show one piece at a time is here at once, in the layers a real icon needs.
 
 - **Gradients with several stops, and an opacity per stop.** The glass card is a gradient from a slate at 45% to one at 35%; its border and the specular sweep are white fading to nothing. `Stop{offset: … color: … opacity: …}`.
 - **A gradient as a stroke.** The brain outline and the keyboard frame say `fill: false stroke: <gradient>`. A gradient is a paint, and either side of a shape can take it.

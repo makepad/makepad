@@ -1,61 +1,34 @@
-//! The image stories: one bitmap under every fit mode, ported from the widget
-//! zoo, and the page for a picture that rounds, strokes and crops itself.
+//! The image story: a picture that rounds, strokes and crops itself under
+//! the controls, one bitmap under every fit, a picture turned in its box, a
+//! crossfade between two pictures, and a gif that plays.
+use crate::makepad_widgets::animated_image_gif::AnimatedImageGif;
 use crate::makepad_widgets::*;
 use crate::registry::{Control, ControlKind, Story};
+
+/// A three-frame gif, eight pixels square, written out here rather than added
+/// to the repository as a file: the page needs something that actually moves,
+/// and a hundred and twenty-six bytes of it is cheaper than an asset.
+const TINY_GIF: &[u8] = &[
+    71, 73, 70, 56, 57, 97, 8, 0, 8, 0, 241, 0, 0, 79, 195, 247, 171, 71, 188, 102, 187, 106, 0, 0,
+    0, 33, 255, 11, 78, 69, 84, 83, 67, 65, 80, 69, 50, 46, 48, 3, 1, 0, 0, 0, 33, 249, 4, 4, 30, 0,
+    0, 0, 44, 0, 0, 0, 0, 8, 0, 8, 0, 0, 2, 6, 132, 143, 169, 203, 237, 93, 0, 33, 249, 4, 4, 30, 0,
+    0, 0, 44, 0, 0, 0, 0, 8, 0, 8, 0, 0, 2, 6, 140, 143, 169, 203, 237, 93, 0, 33, 249, 4, 4, 30, 0,
+    0, 0, 44, 0, 0, 0, 0, 8, 0, 8, 0, 0, 2, 6, 148, 143, 169, 203, 237, 93, 0, 59,
+];
 
 script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
     use mod.storybook.*
 
-    mod.stories.ImageOverview = StoryPage{
-        H4{text: "Default"}
-        // A plain View's pixel is transparent and never reads `color`: paint it here.
-        View{
-            show_bg: true draw_bg +: {color: uniform(theme.color_inset_1) pixel: fn() {return Pal.premul(self.color)}} width: Fill height: 150 flow: Down
-            Image{src: crate_resource("self:resources/ducky.png")}
-        }
+    mod.storybook.StoryGifBase = #(StoryGif::register_widget(vm))
 
-        Hr{}
-        H4{text: "fit: Stretch"}
-        View{
-            show_bg: true draw_bg +: {color: uniform(theme.color_inset_1) pixel: fn() {return Pal.premul(self.color)}} width: Fill height: 150
-            Image{width: Fill height: Fill src: crate_resource("self:resources/ducky.png") fit: ImageFit.Stretch}
-        }
-
-        Hr{}
-        H4{text: "fit: Horizontal"}
-        View{
-            show_bg: true draw_bg +: {color: uniform(theme.color_inset_1) pixel: fn() {return Pal.premul(self.color)}} width: Fill height: 150
-            Image{width: Fill height: Fill src: crate_resource("self:resources/ducky.png") fit: ImageFit.Horizontal}
-        }
-
-        Hr{}
-        H4{text: "fit: Vertical"}
-        View{
-            show_bg: true draw_bg +: {color: uniform(theme.color_inset_1) pixel: fn() {return Pal.premul(self.color)}} width: Fill height: 150
-            Image{width: Fill height: Fill src: crate_resource("self:resources/ducky.png") fit: ImageFit.Vertical}
-        }
-
-        Hr{}
-        H4{text: "fit: Smallest"}
-        View{
-            show_bg: true draw_bg +: {color: uniform(theme.color_inset_1) pixel: fn() {return Pal.premul(self.color)}} width: Fill height: 150
-            Image{width: Fill height: Fill src: crate_resource("self:resources/ducky.png") fit: ImageFit.Smallest}
-        }
-
-        Hr{}
-        H4{text: "fit: Biggest"}
-        View{
-            show_bg: true draw_bg +: {color: uniform(theme.color_inset_1) pixel: fn() {return Pal.premul(self.color)}} width: Fill height: 150
-            Image{width: Fill height: Fill src: crate_resource("self:resources/ducky.png") fit: ImageFit.Biggest}
-        }
-
-        Hr{}
-        H4{text: "fit: CropToFill"}
-        View{
-            show_bg: true draw_bg +: {color: uniform(theme.color_inset_1) pixel: fn() {return Pal.premul(self.color)}} width: Fill height: 150
-            Image{width: Fill height: Fill src: crate_resource("self:resources/ducky.png") fit: ImageFit.CropToFill}
+    mod.storybook.StoryGif = set_type_default() do mod.storybook.StoryGifBase{
+        width: 96. height: 96.
+        inner: Image{
+            fit: ImageFit.Stretch
+            width: Fill
+            height: Fill
         }
     }
 
@@ -78,12 +51,31 @@ script_mod! {
         draw_bg +: {color: #x2f4858}
     }
 
+    // Square and as wide as the turned picture's diagonal, so no angle
+    // carries a corner of it out of the box.
+    let TurnFrame = SolidView{
+        width: 120
+        height: 120
+        align: Align{x: 0.5 y: 0.5}
+        draw_bg +: {color: #x2f4858}
+    }
+
     let RoundFrame = RoundedView{
         width: 160
         height: 96
         padding: 0
         align: Align{x: 0.5 y: 0.5}
         draw_bg +: {color: #x2f4858 border_radius: 10.0}
+    }
+
+    // The box a fit is judged against: wider than the nearly square picture
+    // it holds, so a fit that keeps the picture's shape shows it. Plain
+    // values: the solid view declares its colour as an instance already.
+    let FitFrame = SolidView{
+        width: 100
+        height: 64
+        align: Align{x: 0.5 y: 0.5}
+        draw_bg +: {color: theme.color_inset_1}
     }
 
     let Step = View{
@@ -96,10 +88,19 @@ script_mod! {
 
     let Caption = Label{draw_text +: {color: theme.color_text_meta}}
 
-    mod.stories.ImageRoundedCrop = StoryPage{
-        StoryNote{text: "A picture rounds its own corners, strokes its own edge and dials between the whole of itself and a covering crop. All of it is the image's own shader, so the corners of a photograph are drawn by the thing that draws the photograph, and there is nothing left to line up."}
+    let GifTile = View{
+        width: Fit height: Fit flow: Down spacing: theme.space_1
+        align: Align{x: 0.5}
+        padding: theme.mspace_2
+        show_bg: true
+        draw_bg +: {color: theme.color_surface_container_low}
+    }
 
-        StoryHeading{text: "Every dial on one picture"}
+    mod.stories.ImageOverview = StoryPage{
+        StoryNote{text: "A bitmap sized like any other widget. A picture rounds its own corners, strokes its own edge and dials between the whole of itself and a covering crop. All of it is the image's own shader, so the corners of a photograph are drawn by the thing that draws the photograph, and there is nothing left to line up."}
+        StoryNote{text: "Which one to use: Image for a picture the app ships or already holds. Media, on Loading and fallback, for a picture that has to arrive and may not: it keeps the box's shape while it waits and tries a second source when the first fails. ImageBlend crossfades between two pictures, AnimatedImageGif plays a gif, and Svg is for a drawing rather than a bitmap."}
+
+        StoryHeading{text: "Every dial on one picture, under the controls"}
         StoryNote{text: "The radius is the number RoundedView takes, the stroke sits on the edge where a view's does, and the crop is a dial rather than a switch: one covers the box, zero puts the whole picture inside it, and in between the picture reads large without losing its middle. The bars left over take a colour of their own, clear here, so the ground shows through."}
         StoryRow{
             SolidView{
@@ -121,8 +122,41 @@ script_mod! {
             }
         }
 
+        StoryHeading{text: "One picture under every fit"}
+        StoryNote{text: "The fit decides how a picture meets the box it is given. Stretch, the default, fills the box and gives up the picture's shape. Horizontal keeps the width and sets the height from the picture, and Vertical keeps the height and sets the width. Smallest fits the whole picture inside, Biggest covers the box and runs past it, and CropToFill keeps the box and crops the picture in the shader. The boxes are wider than the nearly square picture, so Vertical and Smallest leave the ground showing at the sides. Horizontal, Biggest and CropToFill look alike here: the first two grow the widget past its box, which the box clips, and the third keeps the box and crops in the shader. An image given no size at all is a hundred points square."}
+        View{
+            width: Fill
+            height: Fit
+            flow: Flow.Right{wrap: true}
+            spacing: theme.space_2
+            Step{
+                FitFrame{ Image{width: Fill height: Fill src: crate_resource("self:resources/ducky.png") fit: ImageFit.Stretch} }
+                Caption{text: "Stretch"}
+            }
+            Step{
+                FitFrame{ Image{width: Fill height: Fill src: crate_resource("self:resources/ducky.png") fit: ImageFit.Horizontal} }
+                Caption{text: "Horizontal"}
+            }
+            Step{
+                FitFrame{ Image{width: Fill height: Fill src: crate_resource("self:resources/ducky.png") fit: ImageFit.Vertical} }
+                Caption{text: "Vertical"}
+            }
+            Step{
+                FitFrame{ Image{width: Fill height: Fill src: crate_resource("self:resources/ducky.png") fit: ImageFit.Smallest} }
+                Caption{text: "Smallest"}
+            }
+            Step{
+                FitFrame{ Image{width: Fill height: Fill src: crate_resource("self:resources/ducky.png") fit: ImageFit.Biggest} }
+                Caption{text: "Biggest"}
+            }
+            Step{
+                FitFrame{ Image{width: Fill height: Fill src: crate_resource("self:resources/ducky.png") fit: ImageFit.CropToFill} }
+                Caption{text: "CropToFill"}
+            }
+        }
+
         StoryHeading{text: "The corners are the picture's own"}
-        StoryNote{text: "A rounded ground with a square picture over it is what the library did until now, and the four corners are where it shows. The same number on the picture and on the view behind it rounds both alike, because both hand it to the same box function."}
+        StoryNote{text: "A rounded ground with a square picture over it shows at the four corners. The same number on the picture and on the view behind it rounds both alike, because both hand it to the same box function."}
         StoryRow{
             Step{
                 RoundFrame{ Photo{} }
@@ -190,6 +224,61 @@ script_mod! {
             }
         }
 
+        StoryHeading{text: "Turned"}
+        StoryNote{text: "rotation turns the picture, in degrees, once image_dim_w and image_dim_h say how large the picture is drawn inside its box. It turns whole about the box's middle and keeps its shape at every angle, and what it leaves uncovered is a bar, clear here. Without that size, rotation does nothing."}
+        StoryRow{
+            Step{
+                TurnFrame{ Photo{fit: ImageFit.Stretch draw_bg +: {rotation: 0.0 image_dim_w: 78.0 image_dim_h: 76.0}} }
+                Caption{text: "rotation: 0"}
+            }
+            Step{
+                TurnFrame{ Photo{fit: ImageFit.Stretch draw_bg +: {rotation: 30.0 image_dim_w: 78.0 image_dim_h: 76.0}} }
+                Caption{text: "rotation: 30"}
+            }
+            Step{
+                TurnFrame{ Photo{fit: ImageFit.Stretch draw_bg +: {rotation: -45.0 image_dim_w: 78.0 image_dim_h: 76.0}} }
+                Caption{text: "rotation: -45"}
+            }
+        }
+
+        StoryHeading{text: "Two pictures, crossfaded"}
+        StoryNote{text: "ImageBlend holds two images, one over the other, and fades the second in or out when it is told to switch. Press the button to fade between the two."}
+        StoryRow{
+            blendbutton := Button{text: "Blend Image"}
+        }
+        StoryRow{
+            blendimage := ImageBlend{
+                width: 320
+                height: 180
+                align: Align{x: 0.0 y: 0.0}
+                image_a +: {
+                    src: crate_resource("self:resources/ducky.png")
+                    fit: ImageFit.Smallest
+                    width: Fill
+                    height: Fill
+                }
+                image_b +: {
+                    src: crate_resource("self:resources/photo_landscape.jpg")
+                    fit: ImageFit.Smallest
+                    width: Fill
+                    height: Fill
+                }
+            }
+        }
+
+        StoryHeading{text: "A gif, played"}
+        StoryNote{text: "AnimatedImageGif takes the gif's bytes, not a source: it has no property to name a file with, so a host hands it the data in Rust. The frames and their delays come from the file; the widget decodes them, uploads each to a texture and steps through them on its own clock. Both of these hold the same three-frame gif. The one on the left plays it; the one on the right was given autoplay: false and sits on its first frame until something starts it."}
+        StoryRow{
+            GifTile{
+                playing := mod.storybook.StoryGif{}
+                Caption{text: "autoplay"}
+            }
+            GifTile{
+                halted := mod.storybook.StoryGif{autoplay: false}
+                Caption{text: "autoplay: false"}
+            }
+        }
+
         StoryHeading{text: "Whole texels"}
         StoryNote{text: "Both of these are the same thirty texels of the photograph blown up to the same size. The right one reads the texture one whole texel at a time, which is what pixel art and a close look want; the left one is filtered, which is what a photograph wants. It is done by snapping the read to the texel's centre rather than by asking the sampler for nearest, because only the filtered read has its channel order corrected on the web target — a nearest one comes back there with red and blue swapped."}
         StoryRow{
@@ -219,36 +308,83 @@ script_mod! {
     }
 }
 
+#[derive(Script, Widget)]
+pub struct StoryGif {
+    #[deref]
+    gif: AnimatedImageGif,
+}
+
+impl Widget for StoryGif {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        self.gif.draw_walk(cx, scope, walk)
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.gif.handle_event(cx, event, scope);
+    }
+}
+
+impl ScriptHook for StoryGif {
+    /// The gif arrives as bytes, and there is nowhere in the DSL to put them:
+    /// the widget has no source property, only `load_gif_from_data`. So a
+    /// host has to hand it the data itself, and this is the smallest place to
+    /// do that from.
+    fn on_after_new(&mut self, vm: &mut ScriptVm) {
+        vm.with_cx_mut(|cx| {
+            if let Err(e) = self.gif.load_gif_from_data(cx, TINY_GIF) {
+                error!("story gif did not decode: {e:?}");
+            }
+        });
+    }
+}
+
+/// The crossfade's button: the one thing on this page that reacts to a press.
+fn image_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
+    if root.button(cx, ids!(blendbutton)).clicked(actions) {
+        root.image_blend(cx, ids!(blendimage)).switch_image(cx);
+    }
+}
+
 pub const STORIES: &[Story] = &[Story {
     key: "media/image/overview",
     category: "Media",
     component: "Image",
-    also: &[],
+    also: &["ImageBlend", "AnimatedImageGif"],
     name: "Overview",
     dsl: "ImageOverview",
     added: "2026-06-04",
-    tags: &["ported"],
-    doc: "# Image\n\nImages display bitmap content.",
-    subject: "",
-    feature: None,
-    controls: &[],
-    on_actions: None,
-}, Story {
-    key: "media/image/rounded-and-cropped",
-    category: "Media",
-    component: "Image",
-    also: &[],
-    name: "Rounded and cropped",
-    dsl: "ImageRoundedCrop",
-    added: "2026-09-11",
-    tags: &["new", "rounded", "corner", "radius", "border", "stroke", "crop", "cover", "contain", "letterbox", "bar", "pixel", "texel"],
-    doc: "# A picture that rounds, strokes and crops itself
+    tags: &["ported", "rounded", "corner", "radius", "border", "stroke", "crop", "cover", "contain", "letterbox", "bar", "pixel", "texel", "rotation", "turned"],
+    doc: "# Image
 
-Until now a rounded photograph was somebody else's problem. The picture drew a square quad, and whatever wanted it rounded worked around that: a ground with a radius under a picture without one, a private mask shader copied into one widget, or a whole offscreen texture so the corners could be sampled out of it. Four widgets in the library carry four different answers, and the module note on one of them states the defect outright.
+A bitmap sized like any other widget. `src` takes the resource, `fit` decides how the picture meets the box, and `draw_bg` carries the picture's own shape: its corners, its stroke, the colour of the bars a fit leaves over, and how it is sampled.
 
-The image's own shader does it now. `border_radius`, `border_size`, `border_color` and `letterbox_color` sit beside the fit and the pan on `draw_bg`, and a picture left alone by all four draws the same picture it always drew, returned before any of the shape work.
+## Which one to use
+
+| Want | Use |
+|---|---|
+| a picture the app ships or already holds | `Image` |
+| a picture that has to arrive and may not | `Media`, on Loading and fallback |
+| a crossfade between two pictures | `ImageBlend` |
+| a gif that plays | `AnimatedImageGif` |
+| a drawing rather than a bitmap | `Svg` |
+
+## Fits
+
+| Fit | What it does |
+|---|---|
+| `Stretch` | the default: fills the box and gives up the picture's shape |
+| `Horizontal` | keeps the box's width and sets the height from the picture |
+| `Vertical` | keeps the box's height and sets the width from the picture |
+| `Smallest` | resizes the widget so the whole picture fits inside the box |
+| `Biggest` | resizes the widget so the picture covers the box, and may run past it |
+| `CropToFill` | keeps the box, and crops the long axis in the shader |
+| `Size` | ignores the box and takes the picture's own size |
+
+An image given no size is a hundred points square.
 
 ## The radius is the view's radius
+
+`border_radius`, `border_size`, `border_color` and `letterbox_color` sit beside the fit and the pan on `draw_bg`, and a picture left alone by all four draws the same picture it always did, returned before any of the shape work.
 
 `border_radius` is the number `RoundedView` takes, handed to the same box function, so the same number on a view and on the picture inside it rounds both alike — which is the only way the two edges can agree at the corner. As there, the visible radius is twice the number: a view at `10.0` and a picture at `10.0` both draw a twenty-pixel corner. The two part company only below one, which a view floors and the picture does not, and where no corner is visible either way.
 
@@ -256,7 +392,7 @@ The stroke is placed where a view's is: the box is inset by the stroke's width o
 
 ## The crop is a dial
 
-`crop` on the widget says how much of the overflow a `CropToFill` picture crops away. One is the crop this fit has always done, so it is the default and nothing that was written before this page changes. Zero puts the whole picture inside the same box and leaves the ends over. In between is genuinely in between, which is the setting worth knowing about: a wide clip cropped all the way to cover loses its subject off both sides, and the same clip at two thirds reads large and still has its middle.
+`crop` on the widget says how much of the overflow a `CropToFill` picture crops away. One is the crop this fit has always done, so it is the default. Zero puts the whole picture inside the same box and leaves the ends over. In between is genuinely in between, which is the setting worth knowing about: a wide clip cropped all the way to cover loses its subject off both sides, and the same clip at two thirds reads large and still has its middle.
 
 Halfway is drawn at a size halfway between the two, in the picture's own shape: the window narrows on one axis exactly as fast as it widens on the other, so the ratio between them never moves and no setting of the dial squashes anything. Part way along a wide box that means bars at the sides and a crop at the top and bottom at the same time, which is what being between contain and cover looks like.
 
@@ -266,11 +402,27 @@ The other fits read nothing here. They resize the rect around the picture instea
 
 What is left over is `letterbox_color`, and it is clear. A bar forced to black is a decision made on the caller's behalf, and it is the wrong one as often as it is right: over a coloured panel it is a black band nobody asked for. Clear means the ground behind shows through, which is what a page already has behind the picture; ask for a colour and the bar is that colour, inside the rounding along with everything else.
 
-The bars belong to the framing, not to the caller's own pan. `image_pan` is how a sprite sheet picks its cell and how a viewer moves a picture under its window, and both still read the edge texel past the edge exactly as they always did.
+The bars belong to the framing, not to the caller's own pan. `image_pan` is how a sprite sheet picks its cell and how a viewer moves a picture under its window, and both still read the edge texel past the edge.
+
+## Turned
+
+`rotation` on `draw_bg` turns the picture, in degrees. It applies only when `image_dim_w` and `image_dim_h` are set: they are the size, in points, the picture is drawn at inside the box. The picture turns whole about the box's middle and keeps its shape at every angle, and whatever it leaves uncovered is a bar in `letterbox_color`. With `image_dim_w` at zero, `rotation` does nothing. A box that has to hold the picture at every angle wants sides as long as the picture's diagonal.
+
+## ImageBlend
+
+Two images, `image_a` and `image_b`, one over the other. `switch_image` fades `image_b` in, or back out, over about half a second. `set_texture` does the same and puts the texture into the image it is fading to, so a host can crossfade to a picture it has just decoded.
+
+## AnimatedImageGif
+
+A gif, played. It decodes the file, uploads each frame to a texture, and steps through them on its own clock using the delays the file carries.
+
+**There is no source property.** Everything else that shows a picture takes a resource in the DSL; this one does not. The only way in is `load_gif_from_data(cx, &[u8])`, so a host has to hold the bytes and hand them over — from `include_bytes!`, from disk, or from the network.
+
+`inner` is the `Image` the frames are drawn into, so its `fit` is what decides how the gif sits in the space you gave it. A `loop_count` of zero loops for ever. `autoplay` is `true`; the second one here is `false` and holds its first frame.
 
 ## Whole texels
 
-`sample_mode` was declared on the draw struct and read by nothing; the picture always filtered. Below zero every read is now one whole texel, for pixel art and for a close look. Above zero it is the device pixel ratio, and the read stays filtered until a texel is drawn more than four device pixels wide.
+`sample_mode` below zero reads every texel whole, for pixel art and for a close look. Above zero it is the device pixel ratio, and the read stays filtered until a texel is drawn more than four device pixels wide. Zero, the default, always filters.
 
 It is done by snapping the read to the texel's centre and then filtering as usual, not by asking the sampler for a nearest read. That is not a detail: the filtered read is the one whose channel order the web backend corrects, and a nearest read on that target comes back with red and blue swapped.
 
@@ -280,7 +432,7 @@ It does not take a radius per corner. One number rounds all four, which is what 
 
 It does not clip anything but itself. The picture has no children, and rounding it rounds the picture — a panel that wants its contents clipped to a curve is still a different problem.
 
-It does not reach a vector source. An image given an SVG draws through its own vector call and never through this shader, so all four of these belong to the bitmap path and an SVG takes none of them — the markup will accept them there without a word.
+It does not reach a vector source. An image given an SVG draws through its own vector call and never through this shader, so the corner, stroke, bar and texel settings belong to the bitmap path and an SVG takes none of them — the markup will accept them there without a word.
 
 And it does not choose where a cropped picture is taken from. Centred, both axes, always.",
     subject: "subject",
@@ -293,7 +445,7 @@ And it does not choose where a cropped picture is taken from. Centred, both axes
         Control { label: "Bar colour", target: "subject", kind: ControlKind::Color { prop: "draw_bg.letterbox_color", default: 0x00000000 } },
         Control { label: "Texels", target: "subject", kind: ControlKind::Number { prop: "draw_bg.sample_mode", min: -1., max: 3., step: 1., default: 0. } },
     ],
-    on_actions: None,
+    on_actions: Some(image_actions),
 }];
 
 #[cfg(test)]
@@ -307,7 +459,7 @@ mod tests {
     /// struct, because the DSL takes a misspelled one just as happily and
     /// declares a shader prop of its own that nothing reads.
     #[test]
-    fn the_rounded_page_builds_and_its_subject_carries_every_dial() {
+    fn the_page_builds_and_its_subject_carries_every_dial() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(|vm| {
             crate::theme::widgets_script_mod(vm);
@@ -315,7 +467,7 @@ mod tests {
             self::script_mod(vm);
             let _ = makepad_platform::shader_error::take();
         });
-        let story = STORIES.iter().find(|story| story.dsl == "ImageRoundedCrop").unwrap();
+        let story = STORIES.iter().find(|story| story.key == "media/image/overview").unwrap();
         let page = cx.with_vm(|vm| {
             let stories = vm.module(id!(stories));
             let value = vm.bx.heap.value(stories, LiveId::from_str(story.dsl).into(), NoTrap);
@@ -326,6 +478,7 @@ mod tests {
         assert_eq!(makepad_platform::shader_error::take(), None, "a draw shader failed to compile");
         for target in std::iter::once(story.subject)
             .chain(story.controls.iter().map(|c| c.target))
+            .chain(["blendbutton", "blendimage", "playing", "halted"])
             .filter(|t| !t.is_empty())
         {
             assert!(!page.widget(&cx, &[LiveId::from_str(target)]).is_empty(), "no widget at {target}");
