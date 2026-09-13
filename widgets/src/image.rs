@@ -1,6 +1,7 @@
 use crate::{
     animator::{Animator, AnimatorAction, AnimatorImpl, Play},
     image_cache::*,
+    image_slice::*,
     makepad_derive_widget::*,
     makepad_draw::*,
     makepad_script::ScriptArrayStorage,
@@ -16,6 +17,9 @@ script_mod! {
     use mod.prelude.widgets_internal.*
 
     mod.widgets.ImageFit = #(ImageFit::script_api(vm))
+    mod.widgets.ImageSliceEdge = #(ImageSliceEdge::script_api(vm))
+    mod.widgets.ImageSliceCenter = #(ImageSliceCenter::script_api(vm))
+    mod.widgets.ImageSliceUnits = #(ImageSliceUnits::script_api(vm))
 
     set_type_default() do #(DrawImage::script_shader(vm)){
         ..mod.draw.DrawQuad
@@ -34,6 +38,9 @@ script_mod! {
         border_size: 0.0
         border_color: #0000
         letterbox_color: #0000
+        slice_inset: vec4(0.0, 0.0, 0.0, 0.0)
+        slice_texel_points: 1.0
+        slice_mode: vec2(0.0, 0.0)
 
         // The texture at `uv`, filtered or as one whole texel by `sample_mode`.
         // Whole texels are had by snapping to the texel's centre and reading
@@ -85,7 +92,83 @@ script_mod! {
             return self.sample_at(uv, scale)
         }
 
+        // One axis of a sliced picture: where along the window the point `p` of a
+        // box `len` long reads, in texels, and how many points a texel is drawn at
+        // there. `a` and `b` are the borders in texels and `s` the points per border
+        // texel after any shrink. `mode` is 1 stretch, 2 tile, 3 a whole number of
+        // tiles. Every read stays half a texel inside its own part, so a filtered
+        // read never borrows the texels of the part beside it. This is
+        // `image_slice::slice_axis`, line for line.
+        slice_axis: fn(p: float, len: float, texels: float, a: float, b: float, s: float, mode: float) -> vec2 {
+            let n = max(texels - a - b, 0.0)
+            let start = a * s
+            let end = len - b * s
+            if p < start {
+                return vec2(clamp(p / s, 0.5, max(a - 0.5, 0.5)), s)
+            }
+            if p >= end {
+                let first = texels - b
+                return vec2(clamp(first + (p - end) / s, first + 0.5, max(texels - 0.5, first + 0.5)), s)
+            }
+            let mid = max(end - start, 0.0001)
+            let lo = a + 0.5
+            let hi = max(a + n - 0.5, lo)
+            if mode >= 2.0 {
+                let mut tile = max(n * s, 0.0001)
+                if mode >= 3.0 {
+                    tile = mid / max(floor(mid / tile + 0.5), 1.0)
+                }
+                let t = fract((p - start - mid * 0.5) / tile + 0.5)
+                return vec2(clamp(a + t * n, lo, hi), tile / max(n, 0.0001))
+            }
+            return vec2(clamp(a + (p - start) / mid * n, lo, hi), mid / max(n, 0.0001))
+        }
+
+        // The sliced picture's colour here: the borders shrink together when the
+        // box cannot hold them, each axis picks the mode of the part it is in, and
+        // the read goes through `sample_at` like every other read of this texture.
+        // `at` is measured on the unclipped rect, so a panel a scroll view has half
+        // hidden keeps its corners where they belong.
+        slice_color: fn() -> vec4 {
+            let texture = max(self.image_texture.size(), vec2(1.0, 1.0))
+            let window = max(texture * self.image_scale, vec2(1.0, 1.0))
+            let size = max(self.rect_size, vec2(0.0001, 0.0001))
+            let at = self.pos * self.rect_size
+            let inset = self.slice_inset
+            let wide = (inset.x + inset.z) * self.slice_texel_points
+            let tall = (inset.y + inset.w) * self.slice_texel_points
+            let mut fit = 1.0
+            if wide > 0.0 {
+                fit = min(fit, size.x / wide)
+            }
+            if tall > 0.0 {
+                fit = min(fit, size.y / tall)
+            }
+            let s = max(self.slice_texel_points * fit, 0.0001)
+            let across = step(inset.x * s, at.x) * (1.0 - step(size.x - inset.z * s, at.x))
+            let down = step(inset.y * s, at.y) * (1.0 - step(size.y - inset.w * s, at.y))
+            if across * down > 0.5 && self.slice_mode.y == 0.0 {
+                return #0000
+            }
+            // A top or bottom edge fills across with the edges' mode and the
+            // middle with its own; the same holds down the left and right.
+            let mode_x = mix(self.slice_mode.x, self.slice_mode.y, down)
+            let mode_y = mix(self.slice_mode.x, self.slice_mode.y, across)
+            let x = self.slice_axis(at.x, size.x, window.x, inset.x, inset.z, s, mode_x)
+            let y = self.slice_axis(at.y, size.y, window.y, inset.y, inset.w, s, mode_y)
+            let read = self.image_pan + vec2(x.x, y.x) / texture
+            // The share `sample_at` measures texel density against, chosen so it
+            // works out the density this part is actually drawn at.
+            let share = size / (texture * max(vec2(x.y, y.y), vec2(0.0001, 0.0001)))
+            return self.sample_at(read, share)
+        }
+
         get_color: fn() {
+            // A sliced picture maps every pixel through its nine parts and is never
+            // framed: the widget only turns this on with the framing at rest.
+            if self.slice_mode.x > 0.0 {
+                return self.slice_color()
+            }
             // Where the FRAMING left the picture behind is a bar, not the edge
             // texel smeared across the rest of the box: a picture the box
             // cannot hold whole leaves its ends over, and `fit_scale` and
@@ -150,6 +233,16 @@ script_mod! {
         height: 100
         /** how much of a `CropToFill` picture's overflow is cropped away 0..1 step 0.05 */
         crop: 1.0
+        /** texels at each edge a sliced picture keeps at their own size 0..256 step 1 */
+        slice: 0
+        /** how a sliced picture's edges fill their length */
+        slice_edge: mod.widgets.ImageSliceEdge.Stretch
+        /** how a sliced picture's middle fills */
+        slice_center: mod.widgets.ImageSliceCenter.Stretch
+        /** size one border texel is drawn at 0.25..8 step 0.25 */
+        slice_scale: 1.0
+        /** whether slice_scale counts layout points or device pixels */
+        slice_units: mod.widgets.ImageSliceUnits.Points
     }
 }
 
@@ -212,6 +305,25 @@ pub struct DrawImage {
     /// by default, so the ground behind shows through.
     #[live]
     pub letterbox_color: Vec4f,
+    // The slice state below is what `Image` resolved for the shader on its
+    // last draw, not a setting: anything written here under `draw_bg +:` is
+    // overwritten on the next draw, and a `uniform(..)` or `instance(..)`
+    // declaration of one of these names in a `draw_bg +:` merge is dropped
+    // on the way in. Slicing is set on the widget: `fit: ImageFit.Slice`,
+    // `slice`, `slice_edge`, `slice_center`, `slice_scale`, `slice_units`.
+    /// Written by `Image` on every draw; not an input. The border widths in
+    /// texels of the window: left, top, right, bottom.
+    #[live]
+    pub slice_inset: Vec4f,
+    /// Written by `Image` on every draw; not an input. Layout points one
+    /// border texel is drawn at before the shader shrinks the borders to fit.
+    #[live]
+    pub slice_texel_points: f32,
+    /// Written by `Image` on every draw; not an input. x: 0 not sliced,
+    /// 1 edges stretch, 2 tile, 3 round. y: 0 middle hidden, 1 stretch,
+    /// 2 tile, 3 tile at the edges' rounded spacing.
+    #[live]
+    pub slice_mode: Vec2f,
 }
 
 #[derive(Copy, Clone, Debug, Default, Script, ScriptHook)]
@@ -273,6 +385,23 @@ pub struct Image {
     /// nothing here, because they change the rect instead of the picture in it.
     #[live(1.0)]
     pub crop: f64,
+    /// Texels of the window that belong to each border when `fit` is `Slice`.
+    /// The texture's own pixels, because that is where the cut is: the same
+    /// corner at every size the picture is drawn.
+    #[live]
+    pub slice: Inset,
+    /// How a sliced picture's four edges fill their length.
+    #[live]
+    pub slice_edge: ImageSliceEdge,
+    /// How a sliced picture's middle fills.
+    #[live]
+    pub slice_center: ImageSliceCenter,
+    /// Size one border texel is drawn at, in `slice_units`.
+    #[live(1.0)]
+    pub slice_scale: f64,
+    /// Whether `slice_scale` counts layout points or device pixels.
+    #[live]
+    pub slice_units: ImageSliceUnits,
     /// HTTP/file resource handle for loading image data (set via `http_resource()` or `crate_resource()`)
     #[live]
     src: Option<ScriptHandleRef>,
@@ -354,6 +483,41 @@ impl Image {
 
     pub fn fit(&self) -> ImageFit {
         self.fit
+    }
+
+    pub fn set_fit(&mut self, cx: &mut Cx, fit: ImageFit) {
+        self.fit = fit;
+        self.redraw(cx);
+    }
+
+    /// The border texels a sliced picture keeps, as the `slice` field says.
+    pub fn set_slice(&mut self, cx: &mut Cx, slice: Inset) {
+        self.slice = slice;
+        self.redraw(cx);
+    }
+
+    pub fn set_slice_modes(&mut self, cx: &mut Cx, edge: ImageSliceEdge, center: ImageSliceCenter) {
+        self.slice_edge = edge;
+        self.slice_center = center;
+        self.redraw(cx);
+    }
+
+    pub fn set_slice_scale(&mut self, cx: &mut Cx, scale: f64, units: ImageSliceUnits) {
+        self.slice_scale = scale;
+        self.slice_units = units;
+        self.redraw(cx);
+    }
+
+    pub fn slice(&self) -> Inset {
+        self.slice
+    }
+
+    pub fn slice_modes(&self) -> (ImageSliceEdge, ImageSliceCenter) {
+        (self.slice_edge, self.slice_center)
+    }
+
+    pub fn slice_scale(&self) -> (f64, ImageSliceUnits) {
+        (self.slice_scale, self.slice_units)
     }
 
     fn load_from_resource(&mut self, cx: &mut Cx) {
@@ -769,6 +933,10 @@ impl Image {
         // we change either nothing, or width or height
         let rect = cx.peek_walk_turtle(walk);
         let dpi = cx.current_dpi_factor();
+        // The bound texture's own size in texels, which a sliced picture
+        // measures its window in. The loading branch's size is the pending
+        // decode's, not the texture it keeps showing meanwhile.
+        let mut texture_texels: Option<Vec2d> = None;
 
         let (width, height) = if let Some((w, h)) = &self.async_image_size {
             // Still loading. Any texture present here is legitimate current content
@@ -778,12 +946,14 @@ impl Image {
             // occupant left in the draw vars.
             if let Some(image_texture) = &self.texture {
                 self.draw_bg.draw_vars.set_texture(0, image_texture);
+                texture_texels = texels_of(image_texture, cx);
             } else {
                 self.draw_bg.draw_vars.empty_texture(0);
             }
             (*w as f64, *h as f64)
         } else if let Some(image_texture) = &self.texture {
             self.draw_bg.draw_vars.set_texture(0, image_texture);
+            texture_texels = texels_of(image_texture, cx);
             let (width, height) = image_texture
                 .get_format(cx)
                 .vec_width_height()
@@ -817,6 +987,31 @@ impl Image {
             )
         };
 
+        // Slicing is resolved before the fit arm because a Fit axis of a sliced
+        // picture is its natural size, which needs the points per texel. The
+        // window is the part of the texture being drawn, so an animated cell
+        // or a sprite-sheet window is sliced inside itself. A rotated picture
+        // is the viewer's own mapping and is left to it.
+        self.draw_bg.slice_mode = vec2(0.0, 0.0);
+        let points_per_texel = slice_points_per_texel(self.slice_scale, self.slice_units, dpi);
+        let slice_window = texture_texels.map(|t| {
+            dvec2(
+                t.x * self.draw_bg.image_scale.x as f64,
+                t.y * self.draw_bg.image_scale.y as f64,
+            )
+        });
+        if let (ImageFit::Slice, Some(window)) = (self.fit, slice_window) {
+            if self.draw_bg.image_dim_w <= 0.0 {
+                let [left, top, right, bottom] = slice_texels(self.slice, window);
+                self.draw_bg.slice_inset = vec4(left as f32, top as f32, right as f32, bottom as f32);
+                self.draw_bg.slice_texel_points = points_per_texel as f32;
+                self.draw_bg.slice_mode = slice_modes(self.slice_edge, self.slice_center);
+            }
+        }
+        let slice_natural = slice_window
+            .map(|window| window * points_per_texel)
+            .unwrap_or(dvec2(width, height));
+
         let aspect = width / height;
         // A Fit height peeks as NaN, so use its effective content-box max
         // (including a Walk-level max) while preserving intrinsic aspect.
@@ -832,6 +1027,16 @@ impl Image {
             ImageFit::Size => {
                 walk.width = Size::Fixed(width);
                 walk.height = Size::Fixed(height);
+            }
+            // The box it is given, but an axis left to `Fit` is the picture at
+            // its natural size, as `Size` would draw it, corners included.
+            ImageFit::Slice => {
+                if walk.width.is_fit() {
+                    walk.width = Size::Fixed(slice_natural.x);
+                }
+                if walk.height.is_fit() {
+                    walk.height = Size::Fixed(slice_natural.y);
+                }
             }
             ImageFit::Stretch => {}
             ImageFit::CropToFill => {
@@ -1004,6 +1209,18 @@ impl Image {
     }
 }
 
+/// A texture's size in texels, where it has one: a vector texture, or a
+/// render target of a fixed size. The same read the draw path sizes the
+/// picture by, without its fallback to the placeholder size, which is not
+/// a texture a slice could be measured in.
+fn texels_of(texture: &Texture, cx: &mut Cx) -> Option<Vec2d> {
+    let format = texture.get_format(cx);
+    format
+        .vec_width_height()
+        .or_else(|| format.render_fixed_width_height())
+        .map(|(w, h)| dvec2(w as f64, h as f64))
+}
+
 pub enum AsyncLoad {
     Yes,
     No,
@@ -1015,6 +1232,56 @@ impl ImageRef {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_walk_and_fit(cx, walk, fit);
         }
+    }
+
+    /// See [`Image::fit()`]. `Stretch`, the default fit, when empty.
+    pub fn fit(&self) -> ImageFit {
+        self.borrow().map(|inner| inner.fit()).unwrap_or(ImageFit::Stretch)
+    }
+
+    /// See [`Image::set_fit`].
+    pub fn set_fit(&self, cx: &mut Cx, fit: ImageFit) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_fit(cx, fit);
+        }
+    }
+
+    /// See [`Image::set_slice`].
+    pub fn set_slice(&self, cx: &mut Cx, slice: Inset) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_slice(cx, slice);
+        }
+    }
+
+    /// See [`Image::set_slice_modes`].
+    pub fn set_slice_modes(&self, cx: &mut Cx, edge: ImageSliceEdge, center: ImageSliceCenter) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_slice_modes(cx, edge, center);
+        }
+    }
+
+    /// See [`Image::set_slice_scale`].
+    pub fn set_slice_scale(&self, cx: &mut Cx, scale: f64, units: ImageSliceUnits) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_slice_scale(cx, scale, units);
+        }
+    }
+
+    /// See [`Image::slice()`]. No inset when empty.
+    pub fn slice(&self) -> Inset {
+        self.borrow().map(|inner| inner.slice()).unwrap_or_default()
+    }
+
+    /// See [`Image::slice_modes()`]. The defaults when empty.
+    pub fn slice_modes(&self) -> (ImageSliceEdge, ImageSliceCenter) {
+        self.borrow().map(|inner| inner.slice_modes()).unwrap_or_default()
+    }
+
+    /// See [`Image::slice_scale()`]. The defaults when empty.
+    pub fn slice_scale(&self) -> (f64, ImageSliceUnits) {
+        self.borrow()
+            .map(|inner| inner.slice_scale())
+            .unwrap_or((1.0, ImageSliceUnits::Points))
     }
 
     /// Loads the image at the given `image_path` resource into this `ImageRef`.
@@ -1404,6 +1671,7 @@ mod framing_tests {
             ImageFit::Vertical,
             ImageFit::Smallest,
             ImageFit::Biggest,
+            ImageFit::Slice,
         ] {
             image.fit = fit;
             image.crop = 0.0;
@@ -1432,6 +1700,14 @@ mod framing_tests {
         assert_eq!(image.draw_bg.letterbox_color.w, 0.0);
         assert_eq!(image.draw_bg.sample_mode, 0.0);
         assert_eq!(image.crop, 1.0, "the crop it has always done is the one it still does");
+        assert_eq!(image.draw_bg.slice_mode, vec2(0.0, 0.0), "a picture nobody sliced asks the shader to slice");
+        let slice = image.slice();
+        assert!(
+            slice.left == 0.0 && slice.top == 0.0 && slice.right == 0.0 && slice.bottom == 0.0,
+            "a picture nobody sliced carries an inset: {slice:?}"
+        );
+        assert_eq!(image.slice_modes(), (ImageSliceEdge::Stretch, ImageSliceCenter::Stretch));
+        assert_eq!(image.slice_scale(), (1.0, ImageSliceUnits::Points));
     }
 
     /// The rounding, the stroke and the bar are read off the draw struct by
@@ -1451,6 +1727,11 @@ mod framing_tests {
                     width: Fill height: Fill
                     fit: ImageFit.CropToFill
                     crop: 0.4
+                    slice: Inset{left: 4 top: 5 right: 6 bottom: 7}
+                    slice_edge: ImageSliceEdge.Tile
+                    slice_center: ImageSliceCenter.Hidden
+                    slice_scale: 2.0
+                    slice_units: ImageSliceUnits.DevicePixels
                     draw_bg +: {
                         border_radius: 8.0
                         border_size: 1.5
@@ -1470,6 +1751,10 @@ mod framing_tests {
         assert_eq!(image.draw_bg.letterbox_color.w, 1.0);
         assert_eq!(image.draw_bg.sample_mode, -1.0);
         assert_eq!(image.crop, 0.4);
+        let slice = image.slice();
+        assert_eq!((slice.left, slice.top, slice.right, slice.bottom), (4.0, 5.0, 6.0, 7.0));
+        assert_eq!(image.slice_modes(), (ImageSliceEdge::Tile, ImageSliceCenter::Hidden));
+        assert_eq!(image.slice_scale(), (2.0, ImageSliceUnits::DevicePixels));
     }
 
     /// A dial that is not a number is the crop this fit has always done, and
@@ -1512,6 +1797,161 @@ mod framing_tests {
             close(scale.x, 1.0) && close(scale.y, 1.0) && close(pan.x, 0.0) && close(pan.y, 0.0),
             "a vector source reached the bitmap framing: window {scale:?} at {pan:?}"
         );
+    }
+
+    /// A plain texture of the given size, installed the way a caller installs
+    /// one. Slicing reads only its size; the draw binds it.
+    fn install_texture(cx: &mut Cx, image: &mut Image, width: usize, height: usize) {
+        let texture = Texture::new_with_format(
+            cx,
+            TextureFormat::VecBGRAu8_32 {
+                width,
+                height,
+                data: Some(vec![0xff80_8080; width * height]),
+                updated: TextureUpdated::Full,
+            },
+        );
+        ImageCacheImpl::set_texture(image, Some(texture), 0);
+    }
+
+    /// The catalogue's panel: sixteen texels of border, rounded edges and a
+    /// tiled middle, filling the box it is drawn in.
+    fn sliced_panel(cx: &mut Cx) -> Image {
+        cx.with_vm(|vm| {
+            let source = script! {
+                use mod.prelude.widgets.*
+                Image{
+                    width: Fill height: Fill
+                    fit: ImageFit.Slice
+                    slice: 16
+                    slice_edge: ImageSliceEdge.Round
+                    slice_center: ImageSliceCenter.Tile
+                }
+            };
+            let value = vm.eval(source);
+            Image::script_from_value(vm, value)
+        })
+    }
+
+    fn at_rest(scale: Vec2f, pan: Vec2f) -> bool {
+        close(scale.x, 1.0) && close(scale.y, 1.0) && close(pan.x, 0.0) && close(pan.y, 0.0)
+    }
+
+    /// A sliced picture takes the box it is given and is never framed: the
+    /// shader's slice branch returns before the framing test, so framing left
+    /// anywhere but at rest would be a bar nobody could see the cause of.
+    /// What reaches the shader is the inset in texels, the points one of
+    /// them is drawn at, and the two modes the markup asked for.
+    #[test]
+    fn a_sliced_picture_keeps_its_box_and_its_framing_at_rest() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let mut image = sliced_panel(&mut cx);
+        install_texture(&mut cx, &mut image, 64, 64);
+        let (scale, pan) = draw_once(&mut cx, &mut image);
+        assert!(at_rest(scale, pan), "a sliced picture was framed: window {scale:?} at {pan:?}");
+        assert_eq!(image.draw_bg.slice_inset, vec4(16.0, 16.0, 16.0, 16.0));
+        assert_eq!(image.draw_bg.slice_texel_points, 1.0);
+        assert_eq!(image.draw_bg.slice_mode, vec2(3.0, 3.0), "a tiled middle between rounded edges takes their spacing");
+        assert_eq!(image.draw_bg.rect_size, vec2(100.0, 100.0), "a sliced picture did not take its box");
+    }
+
+    /// The shader slices whenever `slice_mode.x` is above zero, so every
+    /// draw under any other fit has to put it back, or a picture switched
+    /// from slicing to another fit would keep drawing sliced.
+    #[test]
+    fn only_a_sliced_fit_asks_the_shader_to_slice() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let mut image = sliced_panel(&mut cx);
+        install_texture(&mut cx, &mut image, 64, 64);
+        draw_once(&mut cx, &mut image);
+        assert!(image.draw_bg.slice_mode.x > 0.0, "the sliced picture was not sliced");
+        for fit in [
+            ImageFit::Size,
+            ImageFit::Stretch,
+            ImageFit::Horizontal,
+            ImageFit::Vertical,
+            ImageFit::Smallest,
+            ImageFit::Biggest,
+            ImageFit::CropToFill,
+        ] {
+            image.fit = fit;
+            draw_once(&mut cx, &mut image);
+            assert_eq!(image.draw_bg.slice_mode.x, 0.0, "{fit:?} asked the shader to slice");
+        }
+    }
+
+    /// With nothing bound there is no texture to measure an inset in, and a
+    /// rotated picture is the viewer's own mapping, which slicing would
+    /// replace wholesale. Both draw the path they drew before.
+    #[test]
+    fn an_empty_or_rotated_picture_is_not_sliced() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let mut image = sliced_panel(&mut cx);
+        draw_once(&mut cx, &mut image);
+        assert_eq!(image.draw_bg.slice_mode.x, 0.0, "a picture with nothing loaded was sliced");
+        install_texture(&mut cx, &mut image, 64, 64);
+        image.draw_bg.image_dim_w = 10.0;
+        image.draw_bg.image_dim_h = 10.0;
+        draw_once(&mut cx, &mut image);
+        assert_eq!(image.draw_bg.slice_mode.x, 0.0, "a rotated picture was sliced");
+        image.draw_bg.image_dim_w = 0.0;
+        draw_once(&mut cx, &mut image);
+        assert!(image.draw_bg.slice_mode.x > 0.0, "the same picture unrotated was not sliced");
+    }
+
+    /// `Fit` on a sliced picture is the size `ImageFit::Size` would give it,
+    /// scaled by what one border texel is drawn at, so a panel that has not
+    /// been given a size is the texture as drawn, corners and all.
+    #[test]
+    fn a_fit_axis_is_the_sliced_picture_at_its_natural_size() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut image = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let source = script! {
+                use mod.prelude.widgets.*
+                Image{
+                    width: Fit height: Fit
+                    fit: ImageFit.Slice
+                    slice: 16
+                    slice_scale: 2.0
+                }
+            };
+            let value = vm.eval(source);
+            Image::script_from_value(vm, value)
+        });
+        install_texture(&mut cx, &mut image, 64, 48);
+        draw_once(&mut cx, &mut image);
+        assert_eq!(image.draw_bg.rect_size, vec2(128.0, 96.0));
+        assert_eq!(image.draw_bg.slice_texel_points, 2.0);
+    }
+
+    /// A sprite sheet's cell, or an animated texture's frame, is the part of
+    /// the texture being drawn, so the inset is measured inside that window:
+    /// here half the width of a 64 by 48 texture, where forty texels a side
+    /// cannot fit and both pairs are scaled down to the window they are in.
+    #[test]
+    fn a_sprite_window_is_sliced_inside_itself() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut image = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let source = script! {
+                use mod.prelude.widgets.*
+                Image{
+                    width: Fill height: Fill
+                    fit: ImageFit.Slice
+                    slice: 40
+                    draw_bg +: {image_scale: vec2(0.5, 1.0)}
+                }
+            };
+            let value = vm.eval(source);
+            Image::script_from_value(vm, value)
+        });
+        install_texture(&mut cx, &mut image, 64, 48);
+        draw_once(&mut cx, &mut image);
+        assert_eq!(image.draw_bg.slice_inset, vec4(16.0, 24.0, 16.0, 24.0));
     }
 }
 
@@ -1578,6 +2018,65 @@ mod shader_tests {
             .take(count)
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// The body of the emitted function whose signature line mentions
+    /// `needle`, found by counting braces, so an `if` block inside it does
+    /// not end it early.
+    fn function_body(source: &str, needle: &str) -> String {
+        let mut lines = source.lines().skip_while(|line| !line.contains(needle));
+        let head = lines
+            .next()
+            .unwrap_or_else(|| panic!("nothing in the compiled shader has {needle}"));
+        let mut depth = head.matches('{').count() as i64 - head.matches('}').count() as i64;
+        let mut body = Vec::new();
+        for line in lines {
+            if depth <= 0 {
+                break;
+            }
+            depth += line.matches('{').count() as i64 - line.matches('}').count() as i64;
+            body.push(line);
+        }
+        body.join("\n")
+    }
+
+    /// A sliced picture maps every pixel through its nine parts, and every
+    /// read it takes still goes through `sample_at`: the whole-texel snap and
+    /// the channel-order-corrected read are what a panel skin shown on the
+    /// web target needs just as much as a photograph does. The branch comes
+    /// first in `get_color`, before the framing test, which is what keeps a
+    /// sliced picture from ever drawing a bar. The tiling and the half-texel
+    /// clamp are the axis function's own, so they are pinned there.
+    #[test]
+    fn a_sliced_picture_reads_through_the_corrected_helper() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let source = fragment_source(&mut cx);
+        let branch = block_from(&source, "rustinst_slice_mode.x > 0.0", 3);
+        assert!(
+            branch.contains("io_slice_color()"),
+            "slicing turned on does not return the sliced colour: {branch}"
+        );
+        let get_color = function_body(&source, "vec4 io_get_color(");
+        let sliced = get_color.find("rustinst_slice_mode.x > 0.0");
+        let framed = get_color.find("rustinst_image_dim_w <= 0.0");
+        assert!(
+            matches!((sliced, framed), (Some(sliced), Some(framed)) if sliced < framed),
+            "the slice branch does not come before the framing test: {get_color}"
+        );
+        let colour = function_body(&source, "vec4 io_slice_color(");
+        assert!(
+            colour.contains("io_sample_at("),
+            "the sliced colour does not read through sample_at: {colour}"
+        );
+        assert!(!colour.contains("sample2d"), "the sliced colour reads the texture itself: {colour}");
+        let axis = function_body(&source, "vec2 io_slice_axis(");
+        for call in ["fract(", "floor(", "clamp("] {
+            assert!(axis.contains(call), "the slice axis has no {call}: {axis}");
+        }
+        assert!(
+            !source.contains("sample2d("),
+            "a read in the picture's shader skips the channel-order correction"
+        );
     }
 
     /// The headline behaviour: the picture clips itself to a rounded box and
@@ -1706,5 +2205,25 @@ mod shader_tests {
             !read.contains("rustinst_letterbox_color"),
             "the bar moved onto the final coordinate, where a pan would grow one: {read}"
         );
+    }
+
+    /// The module's markup names the slice enums, and a name the markup
+    /// cannot see is a logged error rather than a failure: the Rust
+    /// defaults happen to match, so nothing else would notice. Captured,
+    /// the module evaluates clean.
+    #[test]
+    fn the_image_markup_evaluates_without_script_errors() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            vm.bx.captured_errors = Some(Vec::new());
+            crate::script_mod(vm);
+            let errors = vm.take_errors();
+            assert!(errors.is_empty(), "{errors:#?}");
+            let value = crate::script_eval!(vm, {use mod.widgets.* Image{}});
+            let image = Image::script_from_value(vm, value);
+            assert_eq!(image.slice_edge, ImageSliceEdge::Stretch);
+            assert_eq!(image.slice_center, ImageSliceCenter::Stretch);
+            assert_eq!(image.slice_units, ImageSliceUnits::Points);
+        });
     }
 }

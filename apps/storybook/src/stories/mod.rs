@@ -39,6 +39,7 @@ pub mod marquee;
 pub mod icon;
 pub mod image;
 pub mod media;
+pub mod image_nine_slice;
 pub mod svg;
 pub mod vector;
 pub mod playback_bar;
@@ -154,6 +155,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     icon::script_mod(vm);
     image::script_mod(vm);
     media::script_mod(vm);
+    image_nine_slice::script_mod(vm);
     svg::script_mod(vm);
     vector::script_mod(vm);
     playback_bar::script_mod(vm);
@@ -281,6 +283,7 @@ pub fn tables() -> &'static [&'static [Story]] {
         icon::STORIES,
         image::STORIES,
         media::STORIES,
+        image_nine_slice::STORIES,
         svg::STORIES,
         vector::STORIES,
         playback_bar::STORIES,

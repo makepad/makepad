@@ -233,6 +233,12 @@ mod tests {
             ("typeahead", "Select"),
             ("switch", "CheckBox"),
             ("segmented", "ButtonGroup"),
+            // The pages added with the menus and the sliced picture.
+            ("9 slice", "Image"),
+            ("panel skin", "Image"),
+            ("stretchable frame", "Image"),
+            ("hollow frame", "Image"),
+            ("corners keep their size", "Image"),
         ] {
             let found: Vec<&str> = registry::all()
                 .filter(|s| registry::matches(s, query))
