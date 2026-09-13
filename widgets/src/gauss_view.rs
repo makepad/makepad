@@ -257,6 +257,43 @@ pub fn request_window_gauss(cx: &mut Cx2d) -> Option<GaussBlurSnapshot> {
     cx.global::<GaussWindowGlobal>().request(window_id)
 }
 
+/// Bind a snapshot's scene and pyramid to a shader that samples the window
+/// behind it, or clear the slots so it paints its fallback face. For shaders
+/// outside the glass family that sample the window themselves, such as a
+/// frosted ring menu, which cannot borrow a `GaussRoundedView` for it.
+///
+/// The body is `GaussRoundedView::bind_snapshot`'s, slot for slot: slot 0 is
+/// the scene, slots 1..=`GAUSS_VIEW_LEVELS` the mips, then `source_size`,
+/// `source_y_flip` and `has_gauss`. The two private copies (that one and the
+/// glass panel's) are left where they are, so this addition keeps the glass
+/// family out of the diff; a shader using this declares the same names.
+pub fn bind_gauss_snapshot(vars: &mut DrawVars, cx: &mut Cx2d, snapshot: Option<GaussBlurSnapshot>) {
+    if let Some(snapshot) = snapshot {
+        vars.set_texture(0, &snapshot.scene_texture);
+        for slot in 1..=GAUSS_VIEW_LEVELS {
+            if let Some(texture) = snapshot.mip_textures.get(slot - 1) {
+                vars.set_texture(slot, texture);
+            } else {
+                vars.empty_texture(slot);
+            }
+        }
+        vars.set_uniform(
+            cx,
+            live_id!(source_size),
+            &[snapshot.source_size.x as f32, snapshot.source_size.y as f32],
+        );
+        vars.set_uniform(cx, live_id!(source_y_flip), &[snapshot.source_y_flip]);
+        vars.set_uniform(cx, live_id!(has_gauss), &[1.0]);
+    } else {
+        for slot in 0..=GAUSS_VIEW_LEVELS {
+            vars.empty_texture(slot);
+        }
+        vars.set_uniform(cx, live_id!(source_size), &[1.0, 1.0]);
+        vars.set_uniform(cx, live_id!(source_y_flip), &[0.0]);
+        vars.set_uniform(cx, live_id!(has_gauss), &[0.0]);
+    }
+}
+
 /// A capture's own gauss pyramid — the blur an app hosted in a texture of
 /// its own gets when it asks for the window's ([`request_window_gauss`]):
 /// built from the APP'S frame, never the window's, and recorded into the

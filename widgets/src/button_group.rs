@@ -137,9 +137,22 @@ impl SlidingIndicator {
     pub fn is_empty(&self) -> bool {
         self.to.size.x == 0.0 && self.to.size.y == 0.0
     }
+
+    /// How far along the glide is, 0 at its start and 1 once it has
+    /// arrived. A caller that fades something with the glide reads this
+    /// rather than keeping a second clock that could drift from the first.
+    pub fn progress(&self) -> f64 {
+        self.t
+    }
+
+    /// Land on the target now. For motion that has been switched off: the
+    /// next `current` is the target, and `step` asks for no more frames.
+    pub fn settle(&mut self) {
+        self.t = 1.0;
+    }
 }
 
-fn ease_out_cubic(t: f64) -> f64 {
+pub(crate) fn ease_out_cubic(t: f64) -> f64 {
     let inv = 1.0 - t.clamp(0.0, 1.0);
     1.0 - inv * inv * inv
 }
@@ -1120,6 +1133,25 @@ mod tests {
         let mid = pill.current().pos.x;
         pill.aim(c, 0.2);
         assert_eq!(pill.current().pos.x, mid, "the new glide starts where the old one had got to");
+    }
+
+    /// Progress runs from 0 to 1 over the glide and settling lands at once,
+    /// so a fade tied to the glide ends exactly where the pill does.
+    #[test]
+    fn sliding_indicator_progress_reports_the_glide() {
+        let a = Rect { pos: dvec2(0.0, 0.0), size: dvec2(10.0, 4.0) };
+        let b = Rect { pos: dvec2(40.0, 0.0), size: dvec2(10.0, 4.0) };
+        let mut pill = SlidingIndicator::default();
+        pill.aim(a, 0.2);
+        assert_eq!(pill.progress(), 1.0, "a first target is already reached");
+        pill.aim(b, 0.2);
+        assert_eq!(pill.progress(), 0.0, "a new glide starts at nothing");
+        pill.step(0.05);
+        assert!((pill.progress() - 0.25).abs() < 1e-9, "a quarter of the time is a quarter of the way");
+        pill.settle();
+        assert_eq!(pill.progress(), 1.0);
+        assert_eq!(pill.current(), b, "settling lands on the target");
+        assert!(!pill.step(0.016), "and asks for no more frames");
     }
 
     /// Room for the control that shows the rest comes out of the same

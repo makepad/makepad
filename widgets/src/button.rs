@@ -980,6 +980,124 @@ script_mod! {
             }
         }
     }
+
+    /** The round face of a floating action: a plus drawn in the face shader
+     * that turns to a cross as open goes to 1, so the button that brings a
+     * set of actions out is also the one that puts them away. */
+    mod.widgets.ButtonFloating = mod.widgets.ButtonFlatIcon{
+        /** the disc's diameter in pixels 40..96 step 4 */
+        width: 56.
+        height: 56.
+        padding: 0.
+        margin: 0.
+        align: Center
+        draw_bg +: {
+            // The base declares these inputs, so they take plain values here.
+            color: theme.color_primary_container
+            color_hover: theme.color_primary_container
+            color_down: theme.color_primary_container
+            color_focus: theme.color_primary_container
+            color_disabled: theme.color_outset_disabled
+            /** the stroke the focus ring is drawn with, in pixels 0..4 step 0.5 */
+            border_size: 2.
+            border_radius: theme.radius_full
+            // No outline at rest: the ring appears only with key focus.
+            border_color: #0000
+            border_color_hover: #0000
+            border_color_down: #0000
+            border_color_focus: theme.color_primary
+            border_color_disabled: #0000
+            layer_color: theme.color_on_primary_container
+
+            /** 0 draws the plus, 1 the turned glyph; the open track drives it 0..1 step 0.01 */
+            open: instance(0.0)
+            /** how far the glyph turns when open, in radians 0..3.1416 step 0.01 */
+            turn: uniform(0.7853982)
+            /** plus span as a fraction of the shorter side 0.1..0.8 step 0.02 */
+            glyph_size: uniform(0.36)
+            /** glyph stroke in pixels 0.5..4 step 0.25 */
+            glyph_stroke: uniform(2.0)
+            /** glyph ink */
+            glyph_color: uniform(theme.color_on_primary_container)
+            /** glyph ink when disabled */
+            glyph_color_disabled: uniform(theme.color_label_inner_disabled)
+
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.box(
+                    self.border_size
+                    self.border_size
+                    self.rect_size.x - self.border_size * 2.
+                    self.rect_size.y - self.border_size * 2.
+                    self.border_radius
+                )
+                sdf.fill_keep(self.face_fill())
+                sdf.stroke(self.face_stroke(), self.border_size)
+
+                // One plus turned as a whole: a quarter turn of a plus is
+                // the same plus, so an eighth reads as the cross.
+                let mid = self.rect_size * 0.5
+                let half = min(self.rect_size.x, self.rect_size.y) * self.glyph_size * 0.5
+                let ink = self.glyph_color.mix(self.glyph_color_disabled, self.disabled)
+                sdf.rotate(self.open * self.turn, mid.x, mid.y)
+                sdf.move_to(mid.x - half, mid.y)
+                sdf.line_to(mid.x + half, mid.y)
+                sdf.move_to(mid.x, mid.y - half)
+                sdf.line_to(mid.x, mid.y + half)
+                sdf.stroke(ink, self.glyph_stroke)
+                return sdf.result
+            }
+        }
+        animator +: {
+            /** open track: the plus turns to the cross and back on the theme's motion eases, the same a floating action's set moves on; a floating action cuts this track and plays the turn on its own clock */
+            open: {
+                default: @off
+                off: AnimatorState{
+                    ease: theme.motion_ease_standard_accelerate
+                    from: {all: Forward {duration: theme.motion_short_3}}
+                    apply: {
+                        draw_bg: {open: 0.0}
+                    }
+                }
+                on: AnimatorState{
+                    ease: theme.motion_ease_emphasized_decelerate
+                    from: {all: Forward {duration: theme.motion_short_4}}
+                    apply: {
+                        draw_bg: {open: 1.0}
+                    }
+                }
+            }
+        }
+    }
+
+    /** The small round face of a sub-action: an icon, centred on the disc. */
+    mod.widgets.ButtonFloatingSm = mod.widgets.ButtonFlatIcon{
+        /** the disc's diameter in pixels 24..64 step 2 */
+        width: 40.
+        height: 40.
+        padding: 0.
+        margin: 0.
+        align: Center
+        icon_walk: Walk{/** icon width in pixels 8..48 step 1 */ width: 20., height: Fit}
+        draw_bg +: {
+            color: theme.color_surface_container_high
+            color_hover: theme.color_surface_container_high
+            color_down: theme.color_surface_container_high
+            color_focus: theme.color_surface_container_high
+            /** the stroke the focus ring is drawn with, in pixels 0..4 step 0.5 */
+            border_size: 2.
+            border_radius: theme.radius_full
+            border_color: #0000
+            border_color_hover: #0000
+            border_color_down: #0000
+            border_color_focus: theme.color_primary
+            border_color_disabled: #0000
+            layer_color: theme.color_on_surface
+        }
+        draw_icon +: {
+            color: theme.color_on_surface
+        }
+    }
 }
 
 /// Raised by a copy button once the text is on the clipboard.
@@ -1397,11 +1515,18 @@ impl Button {
 
     /// Turns a burger button's bars into the cross, or back.
     pub fn set_open(&mut self, cx: &mut Cx, open: bool) {
+        self.set_open_with(cx, open, Animate::Yes);
+    }
+
+    /// As [`Self::set_open`], choosing whether the turn animates. A host
+    /// with its motion switched off passes `Animate::No` to land on the end
+    /// state at once instead of playing the track.
+    pub fn set_open_with(&mut self, cx: &mut Cx, open: bool, animate: Animate) {
         if self.open == open {
             return;
         }
         self.open = open;
-        self.sync_open(cx, Animate::Yes);
+        self.sync_open(cx, animate);
         self.draw_bg.redraw(cx);
     }
 
@@ -1643,6 +1768,13 @@ impl ButtonRef {
         }
     }
 
+    /// See [`Button::set_open_with()`].
+    pub fn set_open_with(&self, cx: &mut Cx, open: bool, animate: Animate) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_open_with(cx, open, animate);
+        }
+    }
+
     /// Resets the hover state of this button.
     ///
     /// This is useful in certain cases where the hover state should be reset
@@ -1689,5 +1821,64 @@ impl ButtonSet {
         for item in self.iter() {
             item.set_enabled(cx, enabled)
         }
+    }
+}
+
+#[cfg(test)]
+mod open_tests {
+    use super::*;
+
+    /// The floating face carries the burger's open track. Without motion the
+    /// turn is cut to its end state, so nothing is left animating; with it,
+    /// the track plays.
+    #[test]
+    fn set_open_with_lands_at_once_without_motion() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let value = crate::script_eval!(vm, {use mod.widgets.* ButtonFloating{}});
+            let mut button = Button::script_from_value(vm, value);
+            vm.with_cx_mut(|cx| {
+                assert!(!button.open());
+                button.set_open_with(cx, true, Animate::No);
+                assert!(button.open());
+                assert!(button.animator_in_state(cx, ids!(open.on)));
+                assert!(!button.animator.is_track_animating(live_id!(open)), "cut, not played");
+                button.set_open_with(cx, false, Animate::Yes);
+                assert!(!button.open());
+                assert!(button.animator_in_state(cx, ids!(open.off)));
+                assert!(button.animator.is_track_animating(live_id!(open)), "played");
+            });
+        });
+    }
+
+    /// Both round faces compile: the floating face draws its glyph in a
+    /// pixel function of its own, and a shader error there would only show
+    /// as a blank disc at run time.
+    #[test]
+    fn the_round_faces_compile() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            for (name, value) in [
+                ("ButtonFloating", crate::script_eval!(vm, {
+                    mod.shader.test_compile_draw_source(mod.widgets.ButtonFloating.draw_bg, "glsl", false)
+                })),
+                ("ButtonFloatingSm", crate::script_eval!(vm, {
+                    mod.shader.test_compile_draw_source(mod.widgets.ButtonFloatingSm.draw_bg, "glsl", false)
+                })),
+            ] {
+                let text = vm
+                    .bx
+                    .heap
+                    .string_with(value, |_heap, text| text.to_string())
+                    .expect("the compiler answers with source");
+                assert!(!text.starts_with("ERRORS:"), "{name} did not compile: {text}");
+                assert!(!text.is_empty(), "{name} compiled to nothing");
+                if name == "ButtonFloating" {
+                    assert!(text.contains("glyph_stroke"), "{name} draws its glyph");
+                }
+            }
+        });
     }
 }
