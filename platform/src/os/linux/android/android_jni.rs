@@ -1303,6 +1303,42 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onDeepLink(
     crate::cx::Cx::post_action(crate::event::AndroidDeepLink { url });
 }
 
+/// Progress of a native streaming download (`MakepadActivity.downloadFile`,
+/// worker thread) → [`crate::event::AndroidDownloadProgress`] action.
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onDownloadProgress(
+    _env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jclass,
+    call_id: jni_sys::jlong,
+    done: jni_sys::jlong,
+    total: jni_sys::jlong,
+) {
+    crate::cx::Cx::post_action(crate::event::AndroidDownloadProgress {
+        call_id: call_id as i64,
+        done: done as i64,
+        total: total as i64,
+    });
+}
+
+/// Completion of a native streaming download → [`crate::event::AndroidDownloadComplete`]
+/// action. Java passes `null` for whichever of `path` / `error` does not apply.
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onDownloadComplete(
+    env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jclass,
+    call_id: jni_sys::jlong,
+    path: jni_sys::jstring,
+    error: jni_sys::jstring,
+) {
+    let path = if path.is_null() { String::new() } else { jstring_to_string(env, path) };
+    let error = if error.is_null() { String::new() } else { jstring_to_string(env, error) };
+    crate::cx::Cx::post_action(crate::event::AndroidDownloadComplete {
+        call_id: call_id as i64,
+        path,
+        error,
+    });
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onLocationUpdate(
     _: *mut jni_sys::JNIEnv,
@@ -1601,6 +1637,25 @@ pub unsafe fn to_java_show_notification(title: &str, body: &str) {
     );
     (**env).DeleteLocalRef.unwrap()(env, body);
     (**env).DeleteLocalRef.unwrap()(env, title);
+}
+
+/// Start a native streaming download (`MakepadActivity.downloadFile`); the
+/// results come back through `onDownloadProgress` / `onDownloadComplete`.
+pub unsafe fn to_java_download_file(call_id: i64, url: &str, dest: &str) {
+    let env = attach_jni_env();
+    let url = new_java_string(env, url);
+    let dest = new_java_string(env, dest);
+    ndk_utils::call_void_method!(
+        env,
+        get_activity(),
+        "downloadFile",
+        "(JLjava/lang/String;Ljava/lang/String;)V",
+        call_id as jni_sys::jlong,
+        url,
+        dest
+    );
+    (**env).DeleteLocalRef.unwrap()(env, dest);
+    (**env).DeleteLocalRef.unwrap()(env, url);
 }
 
 pub unsafe fn to_java_paste_from_clipboard() -> String {

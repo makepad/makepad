@@ -1167,6 +1167,29 @@ pub struct AndroidDeepLink {
     pub url: String,
 }
 
+/// Progress of a native streaming download started with
+/// [`Cx::download_file`], correlated by `call_id`. `total` is the
+/// `Content-Length`, or -1 when the server did not send one. Posted with
+/// [`Cx::post_action`]; currently only the Android backend posts it.
+#[derive(Clone, Debug, Default)]
+pub struct AndroidDownloadProgress {
+    pub call_id: i64,
+    pub done: i64,
+    pub total: i64,
+}
+
+/// Outcome of a native streaming download started with
+/// [`Cx::download_file`]. On success `error` is empty and `path` is the
+/// destination that was written; on failure `error` describes it and `path`
+/// is empty. Posted with [`Cx::post_action`]; currently only the Android
+/// backend posts it.
+#[derive(Clone, Debug, Default)]
+pub struct AndroidDownloadComplete {
+    pub call_id: i64,
+    pub path: String,
+    pub error: String,
+}
+
 #[cfg(target_arch = "wasm32")]
 #[derive(Clone, Debug)]
 pub struct ToWasmMsgEvent {
