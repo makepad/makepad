@@ -135,11 +135,11 @@ fn calendar_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
 }
 
 pub const STORIES: &[Story] = &[Story {
-    key: "inputs/calendar/overview",
+    key: "inputs/datepicker/calendar",
     category: "Inputs",
-    component: "Calendar",
-    also: &["MonthPicker", "YearPicker"],
-    name: "Overview",
+    component: "DatePicker",
+    also: &["Calendar", "MonthPicker", "YearPicker"],
+    name: "Calendar",
     dsl: "CalendarOverview",
     added: "2026-09-10",
     tags: &[
