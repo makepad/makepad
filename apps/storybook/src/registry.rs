@@ -371,7 +371,14 @@ mod tests {
                 ("Waveform", &["Overview"]),
             ],
         ),
-        ("Actions", &[("Button", &["Overview"]), ("ButtonGroup", &["Overview"])]),
+        (
+            "Actions",
+            &[
+                ("Button", &["Overview"]),
+                ("ButtonGroup", &["Overview"]),
+                ("FloatingAction", &["Overview", "Anchors and layouts"]),
+            ],
+        ),
         (
             "Inputs",
             &[
