@@ -202,8 +202,8 @@ fn tree_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
 }
 
 pub const STORIES: &[Story] = &[Story {
-    key: "data-display/tree/overview",
-    category: "Data display",
+    key: "collections/tree/overview",
+    category: "Collections",
     component: "Tree",
     also: &["TreeView"],
     name: "Overview",
