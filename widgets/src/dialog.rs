@@ -255,28 +255,28 @@ pub struct Dialog {
     pub confirm_text: String,
     #[live]
     pub cancel_text: String,
-    /// Where the keyboard was before this dialog took it.
-    #[rust]
-    restore: Area,
     /// Whether the chrome has been written from the props this open.
     #[rust]
     dressed: bool,
 }
 
 impl Dialog {
-    /// Show the dialog and take the keyboard, remembering where it was.
+    /// Show the dialog and take the keyboard. The modal under it remembers
+    /// where the keyboard was.
     pub fn open_dialog(&mut self, cx: &mut Cx) {
-        self.restore = cx.key_focus();
         self.dressed = false;
         self.modal.open(cx);
     }
 
     /// Close it and give the keyboard back to whatever had it.
+    ///
+    /// The modal does the giving back, and follows the place across the
+    /// redraws since the open. The dialog used to keep a handle of its own
+    /// from the open and hand the keyboard to it after the modal had: by then
+    /// the page had been drawn again, that handle named nothing, and the
+    /// keyboard reached no widget, so the next Tab started from nowhere.
     pub fn close_dialog(&mut self, cx: &mut Cx) {
         self.modal.close(cx);
-        // Back where it came from: a dialog that leaves the focus on
-        // nothing makes the next Tab start from the top of the page.
-        cx.set_key_focus(self.restore);
     }
 
     pub fn is_open(&self) -> bool {
@@ -455,6 +455,94 @@ impl DialogRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::makepad_draw::cx_draw::CxDraw;
+
+    const SIZE: DVec2 = DVec2 { x: 800.0, y: 600.0 };
+
+    /// Moves the key focus the way the event loop does between events.
+    fn settle_focus(cx: &mut Cx) {
+        cx.action(());
+        cx.handle_actions();
+    }
+
+    /// Draw `root` into a window-less pass with the overlay a window keeps.
+    fn draw(cx: &mut Cx, pass: &DrawPass, list: &mut DrawList2d, overlay: &mut Overlay, root: &WidgetRef) {
+        pass.set_size(cx, SIZE);
+        let event = DrawEvent::default();
+        let mut draw = CxDraw::new(cx, &event);
+        let mut cx2d = Cx2d::new(&mut draw);
+        cx2d.begin_pass(pass, None);
+        list.begin_always(&mut cx2d);
+        overlay.begin(&mut cx2d);
+        cx2d.begin_root_turtle(SIZE, Layout::flow_down());
+        root.draw_all(&mut cx2d, &mut Scope::empty());
+        cx2d.end_pass_sized_turtle();
+        overlay.end(&mut cx2d);
+        list.end(&mut cx2d);
+        cx2d.end_pass(pass);
+    }
+
+    /// Every way out of a dialog, Escape or a press on the scrim, gives the
+    /// keyboard back to the button that opened it, as that button is after
+    /// the page was drawn again while the dialog was up.
+    #[test]
+    fn the_keyboard_goes_back_to_the_opener_after_the_page_is_drawn_again() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        cx.with_vm(crate::script_mod);
+        let root = cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    flow: Overlay
+                    opener := Button{width: 200. height: 40. text: "Ask"}
+                    dialog := ConfirmDialog{title: "Sure?"}
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        let pass = DrawPass::new(&mut cx);
+        let mut list = DrawList2d::new(&mut cx);
+        let mut overlay = cx.with_vm(|vm| Overlay::script_new(vm));
+        draw(&mut cx, &pass, &mut list, &mut overlay, &root);
+        let opener = root.widget(&cx, ids!(opener));
+        let dialog = root.widget(&cx, ids!(dialog)).as_dialog();
+
+        let escape = Event::KeyDown(KeyEvent { key_code: KeyCode::Escape, ..Default::default() });
+        let scrim_up = Event::MouseUp(MouseUpEvent {
+            abs: dvec2(780.0, 580.0),
+            button: MouseButton::PRIMARY,
+            window_id: WindowId(1, 1),
+            modifiers: KeyModifiers::default(),
+            time: 0.0,
+        });
+        for (way, event) in [("Escape", escape), ("the scrim", scrim_up)] {
+            cx.set_key_focus(opener.area());
+            settle_focus(&mut cx);
+            let before = opener.area();
+            dialog.open(&mut cx);
+            draw(&mut cx, &pass, &mut list, &mut overlay, &root);
+            settle_focus(&mut cx);
+            root.redraw(&mut cx);
+            draw(&mut cx, &pass, &mut list, &mut overlay, &root);
+            assert_ne!(opener.area(), before, "the page was drawn again, so the opener's handle moved");
+
+            root.handle_event(&mut cx, &event, &mut Scope::empty());
+            settle_focus(&mut cx);
+            assert!(!dialog.is_open(), "{way} closed the dialog");
+            assert!(
+                cx.has_key_focus(opener.area()),
+                "after {way} the keyboard went to {:?}, not back to the opener at {:?}",
+                cx.key_focus(),
+                opener.area()
+            );
+            draw(&mut cx, &pass, &mut list, &mut overlay, &root);
+        }
+    }
 
     /// The rungs are the questions people ask, and they only go up. Full
     /// takes the room it is given rather than a width of its own.

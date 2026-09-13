@@ -28,6 +28,12 @@
 //! Escape and a press on the scrim both dismiss, through the same claim
 //! every other overlay uses, so a menu or a popover raised inside a drawer
 //! closes first and one press closes one thing.
+//!
+//! What stops the page and gives the keyboard back is the modal under it
+//! (modal.rs): a press on a row goes to the row even where the drawer lies
+//! over a list the event reaches first, and closing hands the keyboard back
+//! to what had it when the drawer opened, however often the page under it
+//! was drawn meanwhile.
 
 use crate::{
     button::ButtonWidgetRefExt,
@@ -112,6 +118,10 @@ pub enum SheetDetent {
     #[pick]
     Expanded = 2,
 }
+
+/// The shortest slide a drawer takes; a drawer given this or less is in
+/// place at once.
+const SLIDE_FLOOR_SECS: f64 = 0.01;
 
 /// How tall a collapsed sheet stands: enough for the grabber, the title and
 /// the first line under them. Below this it reads as a bar rather than a
@@ -316,9 +326,6 @@ pub struct Drawer {
     pub title: String,
     #[live(0.3)]
     pub slide_secs: f64,
-    /// Where the keyboard was before this drawer took it.
-    #[rust]
-    restore: Area,
     /// Whether the chrome has been written from the props this open.
     #[rust]
     dressed: bool,
@@ -349,15 +356,23 @@ pub struct Drawer {
 
 impl Drawer {
     pub fn open_drawer(&mut self, cx: &mut Cx) {
-        self.restore = cx.key_focus();
+        // The modal keeps where the keyboard was. A handle kept here went
+        // stale at the page's next redraw, and closing gave the keyboard to
+        // nothing: the button that opened the drawer no longer heard Return.
         self.dressed = false;
         // A sheet opens at its declared rung every time, rather than where
         // the last drag left it: reopening is a new question being asked,
         // not the same panel coming back.
         self.extent_dressed = false;
         self.drag_from = None;
-        self.slide = 0.0;
-        self.sliding = true;
+        // A drawer given no time to slide is in place from its first frame.
+        // Sliding from its edge over the one frame the floor still takes, it
+        // stood at its edge on that frame, and a press there was a press on
+        // the scrim; a host that moves the panel itself (HamburgerMenu) gives
+        // it exactly this floor.
+        let at_once = self.slide_secs <= SLIDE_FLOOR_SECS;
+        self.slide = if at_once { 1.0 } else { 0.0 };
+        self.sliding = !at_once;
         self.last_t = cx.seconds_since_app_start();
         self.next_frame = cx.new_next_frame();
         self.modal.open(cx);
@@ -371,7 +386,6 @@ impl Drawer {
         // that is leaving must not swallow the press that follows it.
         self.modal.close(cx);
         self.sliding = false;
-        cx.set_key_focus(self.restore);
     }
 
     pub fn is_open(&self) -> bool {
@@ -430,7 +444,7 @@ impl Drawer {
         let now = cx.seconds_since_app_start();
         let dt = (now - self.last_t).clamp(0.0, 0.1);
         self.last_t = now;
-        let secs = self.slide_secs.max(0.01);
+        let secs = self.slide_secs.max(SLIDE_FLOOR_SECS);
         self.slide = (self.slide + dt / secs).min(1.0);
         if self.slide >= 1.0 {
             self.sliding = false;
@@ -754,5 +768,203 @@ mod tests {
             settle_detent(48.0, 96.0, 450.0, 600.0).is_some(),
             "exactly at the threshold still settles: dismissing is the far side of it"
         );
+    }
+
+    use crate::button::ButtonAction;
+    use crate::makepad_draw::cx_draw::CxDraw;
+    use std::cell::Cell;
+
+    const SIZE: DVec2 = DVec2 { x: 800.0, y: 600.0 };
+
+    fn cx() -> Cx {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        cx.with_vm(crate::script_mod);
+        cx
+    }
+
+    /// A window-less pass with the overlay a window keeps.
+    struct Target {
+        pass: DrawPass,
+        draw_list: DrawList2d,
+        overlay: Overlay,
+    }
+
+    impl Target {
+        fn new(cx: &mut Cx) -> Self {
+            let overlay = cx.with_vm(|vm| Overlay::script_new(vm));
+            Target { pass: DrawPass::new(cx), draw_list: DrawList2d::new(cx), overlay }
+        }
+
+        fn draw(&mut self, cx: &mut Cx, root: &WidgetRef) {
+            self.pass.set_size(cx, SIZE);
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&self.pass, None);
+            self.draw_list.begin_always(&mut cx2d);
+            self.overlay.begin(&mut cx2d);
+            cx2d.begin_root_turtle(SIZE, Layout::flow_down());
+            root.draw_all(&mut cx2d, &mut Scope::empty());
+            cx2d.end_pass_sized_turtle();
+            self.overlay.end(&mut cx2d);
+            self.draw_list.end(&mut cx2d);
+            cx2d.end_pass(&self.pass);
+        }
+    }
+
+    /// A page filled by a list-like button, the button that opens the
+    /// drawer, and a drawer from the left with a row in its body.
+    fn page(cx: &mut Cx) -> WidgetRef {
+        cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    opener := Button{text: "open"}
+                    under := Button{width: Fill height: Fill text: "under"}
+                    drawer := Drawer{
+                        content +: {
+                            body +: {
+                                row := Button{width: Fill height: 40. text: "row"}
+                            }
+                        }
+                    }
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        })
+    }
+
+    /// Open, and put the panel in place without waiting out its slide.
+    fn open_in_place(cx: &mut Cx, target: &mut Target, root: &WidgetRef) {
+        let drawer = root.widget(cx, ids!(drawer));
+        drawer.as_drawer().open(cx);
+        if let Some(mut inner) = drawer.borrow_mut::<Drawer>() {
+            inner.slide = 1.0;
+            inner.sliding = false;
+        }
+        target.draw(cx, root);
+    }
+
+    fn press(abs: DVec2) -> Event {
+        Event::MouseDown(MouseDownEvent {
+            abs,
+            button: MouseButton::PRIMARY,
+            window_id: WindowId(1, 1),
+            modifiers: KeyModifiers::default(),
+            handled: Cell::new(Area::Empty),
+            time: 0.0,
+        })
+    }
+
+    fn release(abs: DVec2) -> Event {
+        Event::MouseUp(MouseUpEvent {
+            abs,
+            button: MouseButton::PRIMARY,
+            window_id: WindowId(1, 1),
+            modifiers: KeyModifiers::default(),
+            time: 0.0,
+        })
+    }
+
+    fn settle_focus(cx: &mut Cx) {
+        cx.action(());
+        cx.handle_actions();
+    }
+
+    fn pressed(actions: &Actions, button: &WidgetRef) -> bool {
+        actions
+            .iter()
+            .filter_map(|action| action.as_widget_action())
+            .any(|action| action.widget_uid == button.widget_uid() && matches!(action.cast::<ButtonAction>(), ButtonAction::Pressed(_)))
+    }
+
+    /// A drawer given no time to slide stands in place on the frame it
+    /// opens; one with time starts at its edge.
+    #[test]
+    fn a_drawer_given_no_time_to_slide_is_in_place_at_once() {
+        let mut cx = cx();
+        let root = page(&mut cx);
+        let mut target = Target::new(&mut cx);
+        target.draw(&mut cx, &root);
+        let drawer = root.widget(&cx, ids!(drawer));
+        for (secs, at) in [(SLIDE_FLOOR_SECS, 0.0), (0.0, 0.0), (0.3, -360.0)] {
+            if let Some(mut inner) = drawer.borrow_mut::<Drawer>() {
+                inner.slide_secs = secs;
+            }
+            drawer.as_drawer().open(&mut cx);
+            target.draw(&mut cx, &root);
+            let panel = drawer.widget(&cx, ids!(content)).area().rect(&cx);
+            assert_eq!(panel.pos.x, at, "a slide of {secs}s opens with the panel at {}", panel.pos.x);
+            drawer.as_drawer().close(&mut cx);
+            target.draw(&mut cx, &root);
+        }
+    }
+
+    /// The keyboard goes back to the button that opened the drawer, though
+    /// the page was drawn again while the drawer was out.
+    #[test]
+    fn closing_gives_the_keyboard_back_to_the_opener_after_the_page_redraws() {
+        let mut cx = cx();
+        let root = page(&mut cx);
+        let mut target = Target::new(&mut cx);
+        target.draw(&mut cx, &root);
+        let opener = root.widget(&cx, ids!(opener));
+        cx.set_key_focus(opener.area());
+        settle_focus(&mut cx);
+        let before = opener.area();
+
+        open_in_place(&mut cx, &mut target, &root);
+        settle_focus(&mut cx);
+        assert!(!cx.has_key_focus(opener.area()), "the drawer took the keyboard");
+        root.redraw(&mut cx);
+        target.draw(&mut cx, &root);
+        assert_ne!(opener.area(), before, "the page was drawn again");
+
+        root.widget(&cx, ids!(drawer)).as_drawer().close(&mut cx);
+        settle_focus(&mut cx);
+        assert!(cx.has_key_focus(opener.area()), "the keyboard went to {:?}, not the opener {:?}", cx.key_focus(), opener.area());
+    }
+
+    /// A press on a row in the drawer reaches the row, and a press on the
+    /// scrim sends the drawer back, even when the list the drawer lies over
+    /// is walked first; that list hears neither.
+    #[test]
+    fn a_press_in_the_drawer_never_reaches_the_list_under_it() {
+        let mut cx = cx();
+        let root = page(&mut cx);
+        let mut target = Target::new(&mut cx);
+        target.draw(&mut cx, &root);
+        open_in_place(&mut cx, &mut target, &root);
+        let under = root.widget(&cx, ids!(under));
+        let drawer = root.widget(&cx, ids!(drawer));
+        let row = root.widget(&cx, ids!(row));
+        let walk = |cx: &mut Cx, event: &Event| {
+            cx.capture_actions(|cx| {
+                under.handle_event(cx, event, &mut Scope::empty());
+                drawer.handle_event(cx, event, &mut Scope::empty());
+            })
+        };
+
+        let rect = row.area().rect(&cx);
+        assert!(rect.size.x > 0.0, "the row is drawn");
+        let on_row = rect.pos + rect.size * 0.5;
+        assert!(under.area().rect(&cx).contains(on_row), "the row lies over the list");
+        let actions = walk(&mut cx, &press(on_row));
+        assert!(pressed(&actions, &row), "the row did not hear its press");
+        assert!(!pressed(&actions, &under), "the list under the drawer took the press");
+        walk(&mut cx, &release(on_row));
+        assert!(drawer.as_drawer().is_open());
+
+        let on_scrim = dvec2(700.0, 300.0);
+        let actions = walk(&mut cx, &press(on_scrim));
+        assert!(!pressed(&actions, &under), "the list under the scrim took the press");
+        walk(&mut cx, &release(on_scrim));
+        assert!(!drawer.as_drawer().is_open(), "a press on the scrim sends the drawer back");
+        assert_eq!(cx.sweep_lock_area(), None, "and gives the pointer back");
     }
 }

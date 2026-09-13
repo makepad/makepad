@@ -1111,14 +1111,24 @@ impl Widget for Popover {
         self.view.handle_event(cx, event, scope);
         let claimed_after = event.pointer_claimed_area();
         let child_claimed = claimed_after != claimed_before && !claimed_after.is_empty();
+        // A closed popover holds no lock, so a lock held now is another
+        // overlay's: a modal or drawer whose scrim lies over this anchor, or
+        // a menu open elsewhere. The press and the pointer are that overlay's,
+        // the way `hits` turns them away from the anchor's own widgets. The
+        // anchor test below reads the raw rect, and without this it opened
+        // the popover under a drawer's scrim. An overlay whose content holds
+        // this popover lifts its own lock while it walks that content, so a
+        // popover inside a modal or another popover still opens.
+        let locked_out = !self.open && cx.sweep_lock_area().is_some();
 
         match event {
             Event::MouseDown(me) => {
                 if !self.open {
                     self.refresh_anchor(cx);
                 }
-                let on_anchor = child_claimed
-                    || (claimed_before.is_empty() && self.anchor().contains(me.abs));
+                let on_anchor = !locked_out
+                    && (child_claimed
+                        || (claimed_before.is_empty() && self.anchor().contains(me.abs)));
                 if self.press_at(
                     cx,
                     me.abs,
@@ -1145,8 +1155,9 @@ impl Widget for Popover {
                     if !self.open {
                         self.refresh_anchor(cx);
                     }
-                    let on_anchor = child_claimed
-                        || (claimed_before.is_empty() && self.anchor().contains(touch.abs));
+                    let on_anchor = !locked_out
+                        && (child_claimed
+                            || (claimed_before.is_empty() && self.anchor().contains(touch.abs)));
                     if self.press_at(cx, touch.abs, true, false, on_anchor, inner_held)
                         && touch.handled.get().is_empty()
                     {
@@ -1167,7 +1178,7 @@ impl Widget for Popover {
                 if !self.open {
                     self.refresh_anchor(cx);
                 }
-                self.pointer_at(cx, Some(me.abs));
+                self.pointer_at(cx, (!locked_out).then_some(me.abs));
             }
             Event::MouseLeave(_) | Event::ClearHover => {
                 self.pointer_at(cx, None);

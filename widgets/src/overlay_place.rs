@@ -113,6 +113,14 @@ thread_local! {
     static ORPHANED_LOCKS: std::cell::RefCell<Vec<Area>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
+/// Leave sweep locks for the next event to release, from a `Drop` that has
+/// no `Cx`. An overlay dropped while it held the pointer (its page rebuilt
+/// on a theme or story switch while it was open) would otherwise turn away
+/// every hit test in the window for good.
+pub(crate) fn orphan_sweep_locks(areas: &[Area]) {
+    let _ = ORPHANED_LOCKS.try_with(|orphans| orphans.borrow_mut().extend_from_slice(areas));
+}
+
 /// Release every lock a dropped overlay left behind: the ones it handed
 /// over from its `Drop`, and the ones held by an owner that had no `Drop` to
 /// hand them over with (see [`release_stale_sweep_locks`]). The window does
