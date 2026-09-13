@@ -5,7 +5,7 @@ use {
         makepad_derive_widget::*,
         makepad_draw::*,
         makepad_script::ScriptFnRef,
-        scroll_bars::ScrollBars,
+        scroll_bars::{ScrollBars, ScrollExtent},
         widget::*,
         widget_async::{
             CxWidgetToScriptCallExt, ScriptAsyncCalls, ScriptAsyncId, ScriptAsyncResult,
@@ -505,6 +505,12 @@ impl ViewRef {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_scroll_pos(cx, v)
         }
+    }
+
+    /// See [`View::scroll_extent`]. `None` when empty, as for a view
+    /// without scroll bars.
+    pub fn scroll_extent(&self) -> Option<ScrollExtent> {
+        self.borrow().and_then(|inner| inner.scroll_extent())
     }
 
     pub fn area(&self) -> Area {
@@ -1303,6 +1309,13 @@ impl View {
         } else {
             self.layout.scroll = v;
         }
+    }
+
+    /// Where this view is scrolled to and how far it can go. `None` for a
+    /// view without scroll bars: its `layout.scroll` is an offset someone
+    /// set, not a position a reader can move, so there is no extent to report.
+    pub fn scroll_extent(&self) -> Option<ScrollExtent> {
+        self.scroll_bars_obj.as_ref().map(|bars| bars.extent())
     }
 
     pub fn area(&self) -> Area {
