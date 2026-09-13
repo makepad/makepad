@@ -79,7 +79,7 @@ One daemon, every app attached:
 # 2. every client, told never to hold the root itself
 export ASSET_UI_ASSET_EMBED=never
 ./target/release/makepad-app-asset-ui
-./target/release/makepad-vj
+# ...and any other client app, started the same way
 ```
 
 `ASSET_UI_ASSET_EMBED=never` (aliases: `no`, `off`, `0`, `false`, `attach`,

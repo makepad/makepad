@@ -32,7 +32,6 @@ workspace.members = [
     "apps/flow-server",
     "libs/media_view",
     "apps/ai-hub",
-    "apps/vj",
     "apps/mixer",
     "apps/storybook",
     "libs/asset/importer",

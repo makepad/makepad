@@ -1,8 +1,8 @@
 //! Headless entry point for the VJ's native track analysis.
 //!
-//! The algorithm modules below are the app's source files, compiled here
-//! against their small value-type seam so command-line bakers run precisely
-//! the code a native deck runs without linking or starting the VJ UI.
+//! The algorithm modules below live in this crate, compiled against a small
+//! value-type seam so command-line bakers run the track analysis without
+//! linking or starting any UI.
 
 pub mod decks {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,10 +74,59 @@ pub mod clock {
     }
 }
 
+pub mod preprocess {
+    use std::path::PathBuf;
+
+    pub const WAVE_SUBDIR: &str = "wave-cache";
+
+    /// A headless baker has no operator-chosen cache root, so the sidecars
+    /// go where `VJ_WAVE_CACHE` or the data root says.
+    pub fn cache_subdir(_subdir: &str) -> Option<PathBuf> {
+        None
+    }
+}
+
+pub mod service {
+    use std::path::PathBuf;
+
+    /// `VJ_ASSET_CACHE` when it names a directory, otherwise `local/vj` at
+    /// the root of the checkout. An empty variable is not a choice.
+    pub fn data_root() -> PathBuf {
+        match std::env::var("VJ_ASSET_CACHE") {
+            Ok(dir) if !dir.trim().is_empty() => PathBuf::from(dir.trim()),
+            _ => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../local/vj"),
+        }
+    }
+}
+
 pub mod media {
     use crate::mixer::TrackPcm;
     use makepad_asset_data::MediaType;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+
+    /// The container a local path is decoded as, by its name alone; a name
+    /// no in-process decoder knows is handed on as `Mp4`.
+    pub fn local_media_type(path: &Path) -> MediaType {
+        let extension = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| value.to_ascii_lowercase());
+        match extension.as_deref() {
+            Some("wav" | "wave") => MediaType::Wav,
+            Some("ogg" | "oga") => MediaType::Ogg,
+            Some("mp3") => MediaType::Mp3,
+            _ => MediaType::Mp4,
+        }
+    }
+
+    /// Whether the sound of a container is cut to the edit its index
+    /// declares. Off unless `VJ_CONTAINER_EDIT_TRIM=1`.
+    pub fn container_trim_enabled() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| {
+            std::env::var("VJ_CONTAINER_EDIT_TRIM").map(|value| value.trim() == "1").unwrap_or(false)
+        })
+    }
 
     /// The headless baker already owns decoded PCM and never takes the VJ's
     /// platform-media fallback path.
@@ -90,9 +139,9 @@ pub mod media {
     }
 }
 
-#[path = "../../../apps/vj/src/beat_sync.rs"]
+pub mod dsp_math;
+pub mod loudness;
+pub mod track_key;
 pub mod beat_sync;
-#[path = "../../../apps/vj/src/wave_analysis.rs"]
 pub mod wave_analysis;
-#[path = "../../../apps/vj/src/loop_splat.rs"]
 pub mod loop_splat;

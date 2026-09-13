@@ -151,7 +151,6 @@ fn curated() -> Vec<AppDef> {
             "makepad-app-route",
             OrFocus,
         ),
-        AppDef::app("vj", "VJ", "makepad-vj", "apps/vj", "makepad-vj", OrFocus),
         {
             // Fab opens the pretty house when the converted model is
             // around (children run with cwd = repo root); the built-in
@@ -1169,7 +1168,6 @@ mod tests {
                 "Score",
                 "Video Player",
                 "Route",
-                "VJ",
                 "Fab",
                 "Studio",
                 "Scope",
@@ -1195,7 +1193,6 @@ mod tests {
         for (id, policy) in [
             ("terminal", LaunchPolicy::AlwaysNew),
             ("video", LaunchPolicy::AlwaysNew),
-            ("vj", LaunchPolicy::OrFocus),
             ("fab", LaunchPolicy::OrFocus),
             ("studio", LaunchPolicy::OrFocus),
         ] {
