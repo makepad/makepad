@@ -18,9 +18,10 @@
 //! matches one at a time; the folders on the way open as each match is
 //! selected. Either way the same set of stories matches, so the count
 //! means the same thing in both and the arrows step through the same
-//! list. The new-only switch hides rows in both modes, so it holds every
-//! folder open the way filtering does: a folder closed earlier would
-//! otherwise keep the new stories folded away.
+//! list. What the switches keep out of that list is reported too, so a
+//! search that finds nothing says why. The new-only switch hides rows in
+//! both modes, so it holds every folder open the way filtering does: a
+//! folder closed earlier would otherwise keep the new stories folded away.
 use crate::makepad_widgets::file_tree::*;
 use crate::makepad_widgets::*;
 use crate::registry::{self, Story};
@@ -45,6 +46,59 @@ pub enum NavigatorAction {
     Folded,
     #[default]
     None,
+}
+
+/// What the two switches keep out of the tree while there is search
+/// text. Each number is what turning that switch off would bring back.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Hidden {
+    /// Matches the New-only switch keeps out: they match the text but
+    /// their widget predates the baseline.
+    pub by_new_only: usize,
+    /// Stories the Filter switch keeps out: the ones that do not match.
+    pub by_filter: usize,
+}
+
+impl Hidden {
+    /// From the four counts a walk of the registry yields: how many
+    /// stories match the text, how many of those are new, how many are
+    /// new at all, and how many there are.
+    pub fn count(
+        matched: usize,
+        matched_new: usize,
+        new: usize,
+        total: usize,
+        new_only: bool,
+        filtering: bool,
+    ) -> Hidden {
+        let by_new_only = if new_only { matched - matched_new } else { 0 };
+        // With both switches on, the filter can only hide what the
+        // new-only switch let through.
+        let by_filter = match (filtering, new_only) {
+            (false, _) => 0,
+            (true, true) => new - matched_new,
+            (true, false) => total - matched,
+        };
+        Hidden { by_new_only, by_filter }
+    }
+
+    /// The note under the tree, one line for each switch that keeps
+    /// something out, so it never leans on wrapping in a narrow pane;
+    /// empty when nothing is kept out.
+    pub fn line(&self) -> String {
+        let mut parts = Vec::new();
+        match self.by_new_only {
+            0 => {}
+            1 => parts.push("1 match hidden by New only".to_string()),
+            n => parts.push(format!("{n} matches hidden by New only")),
+        }
+        match self.by_filter {
+            0 => {}
+            1 => parts.push("1 story hidden by Filter".to_string()),
+            n => parts.push(format!("{n} stories hidden by Filter")),
+        }
+        parts.join("\n")
+    }
 }
 
 #[derive(Script, ScriptHook, Widget)]
@@ -210,6 +264,25 @@ impl StoryNavigator {
             (n, None) => format!("{n} matches"),
             (n, Some(at)) => format!("{} of {}", at + 1, n),
         }
+    }
+
+    /// What the switches keep out of the tree for the search text in
+    /// the box. Nothing while the box is empty: there is no search for
+    /// them to be keeping anything out of.
+    pub fn hidden(&self) -> Hidden {
+        if self.filter.is_empty() {
+            return Hidden::default();
+        }
+        let (mut matched, mut matched_new, mut new, mut total) = (0, 0, 0, 0);
+        for story in registry::all() {
+            let is_match = registry::matches(story, &self.filter);
+            let is_new = registry::is_new(story, &self.baseline);
+            total += 1;
+            new += usize::from(is_new);
+            matched += usize::from(is_match);
+            matched_new += usize::from(is_match && is_new);
+        }
+        Hidden::count(matched, matched_new, new, total, self.new_only, self.filtering)
     }
 
     pub fn set_new_only(&mut self, cx: &mut Cx, on: bool) {
@@ -511,6 +584,11 @@ impl StoryNavigatorRef {
         self.borrow().map(|inner| inner.match_report()).unwrap_or_default()
     }
 
+    /// The line under the tree saying what the switches keep out.
+    pub fn hidden_line(&self) -> String {
+        self.borrow().map(|inner| inner.hidden().line()).unwrap_or_default()
+    }
+
     pub fn match_count(&self) -> usize {
         self.borrow().map(|inner| inner.match_keys().len()).unwrap_or(0)
     }
@@ -527,6 +605,43 @@ impl StoryNavigatorRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_switch_hides_what_turning_it_off_would_bring_back() {
+        // Two matches, neither new; twelve new; a hundred and twenty.
+        assert_eq!(
+            Hidden::count(2, 0, 12, 120, true, true),
+            Hidden { by_new_only: 2, by_filter: 12 }
+        );
+        assert_eq!(
+            Hidden::count(2, 1, 12, 120, true, true),
+            Hidden { by_new_only: 1, by_filter: 11 }
+        );
+        assert_eq!(
+            Hidden::count(2, 1, 12, 120, false, true),
+            Hidden { by_new_only: 0, by_filter: 118 }
+        );
+        assert_eq!(
+            Hidden::count(2, 1, 12, 120, true, false),
+            Hidden { by_new_only: 1, by_filter: 0 }
+        );
+        assert_eq!(Hidden::count(2, 1, 12, 120, false, false), Hidden::default());
+        // Every match is new: the new-only switch hides none of them.
+        assert_eq!(Hidden::count(3, 3, 12, 120, true, false), Hidden::default());
+    }
+
+    #[test]
+    fn the_hidden_line_names_the_switch_and_counts_in_english() {
+        assert_eq!(Hidden::default().line(), "");
+        assert_eq!(Hidden { by_new_only: 1, by_filter: 0 }.line(), "1 match hidden by New only");
+        assert_eq!(Hidden { by_new_only: 3, by_filter: 0 }.line(), "3 matches hidden by New only");
+        assert_eq!(Hidden { by_new_only: 0, by_filter: 1 }.line(), "1 story hidden by Filter");
+        assert_eq!(Hidden { by_new_only: 0, by_filter: 118 }.line(), "118 stories hidden by Filter");
+        assert_eq!(
+            Hidden { by_new_only: 3, by_filter: 118 }.line(),
+            "3 matches hidden by New only\n118 stories hidden by Filter"
+        );
+    }
 
     #[test]
     fn a_story_sits_under_its_category_and_its_component_folder() {
