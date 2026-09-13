@@ -587,7 +587,9 @@
     "inverse pair",
     "presence dots",
     "hex values",
-    "reads the live theme"
+    "reads the live theme",
+    "presence on an avatar",
+    "placeholder beside its content"
    ]
   },
   {
@@ -1443,6 +1445,28 @@
     "emoji and cjk",
     "hover in and hover out",
     "fit or fill width"
+   ]
+  },
+  {
+   "component": "Large text",
+   "aka": [
+    "large glyphs",
+    "big type",
+    "glyph rendering",
+    "font rendering"
+   ],
+   "does": [
+    "very large font sizes",
+    "render path comparison",
+    "msdf raster path",
+    "gradient labels at size",
+    "custom get_color shader",
+    "glyph shape probes",
+    "descenders and counters",
+    "theme colour source",
+    "theme color source",
+    "diagnostic probes",
+    "disappearing glyphs"
    ]
   },
   {
@@ -2390,7 +2414,10 @@
     "three heights",
     "token lengths",
     "bar per token",
-    "minimum tap area"
+    "minimum tap area",
+    "button size ladder",
+    "file tree row height",
+    "divider hairline"
    ]
   },
   {
@@ -2440,28 +2467,6 @@
    ]
   },
   {
-   "component": "Slug",
-   "aka": [
-    "large glyphs",
-    "big type",
-    "glyph rendering",
-    "font rendering"
-   ],
-   "does": [
-    "very large font sizes",
-    "render path comparison",
-    "msdf raster path",
-    "gradient labels at size",
-    "custom get_color shader",
-    "glyph shape probes",
-    "descenders and counters",
-    "theme colour source",
-    "theme color source",
-    "diagnostic probes",
-    "disappearing glyphs"
-   ]
-  },
-  {
    "component": "Spacing",
    "aka": [
     "gap",
@@ -2474,7 +2479,9 @@
     "bar per token",
     "token lengths",
     "gap sizes",
-    "ladder of gaps"
+    "ladder of gaps",
+    "padding and gap cards",
+    "tag stacks"
    ]
   },
   {
@@ -2626,7 +2633,9 @@
     "scrim opacity",
     "content over surface",
     "opacity tokens",
-    "tint preview"
+    "tint preview",
+    "state matrix",
+    "controls held in each state"
    ]
   },
   {

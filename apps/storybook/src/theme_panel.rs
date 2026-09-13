@@ -133,25 +133,25 @@ script_mod! {
 const GROUPS: &[&str] = &[
     "All",
     "Colour",
-    "Shape",
-    "Elevation",
-    "Motion",
+    "Type",
     "Spacing",
     "Size",
-    "Type",
+    "Shape",
+    "Elevation",
     "State",
+    "Motion",
     "Other",
 ];
 
 const G_ALL: usize = 0;
 const G_COLOUR: usize = 1;
-const G_SHAPE: usize = 2;
-const G_ELEVATION: usize = 3;
-const G_MOTION: usize = 4;
-const G_SPACING: usize = 5;
-const G_SIZE: usize = 6;
-const G_TYPE: usize = 7;
-const G_STATE: usize = 8;
+const G_TYPE: usize = 2;
+const G_SPACING: usize = 3;
+const G_SIZE: usize = 4;
+const G_SHAPE: usize = 5;
+const G_ELEVATION: usize = 6;
+const G_STATE: usize = 7;
+const G_MOTION: usize = 8;
 const G_OTHER: usize = 9;
 
 /// How long the preview column is, and so how long a full bar is.
@@ -575,6 +575,17 @@ mod tests {
         for name in ["color_a", "radius_s", "beveling", "nothing_like_it"] {
             assert!(group_of(name) < GROUPS.len());
         }
+    }
+
+    #[test]
+    fn the_groups_between_all_and_other_are_the_foundations_pages_in_order() {
+        let mut pages: Vec<&str> = Vec::new();
+        for story in crate::registry::all().filter(|story| story.category == "Foundations") {
+            if !pages.contains(&story.component) {
+                pages.push(story.component);
+            }
+        }
+        assert_eq!(&GROUPS[1..GROUPS.len() - 1], pages.as_slice());
     }
 
     #[test]
