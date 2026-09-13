@@ -361,6 +361,10 @@ pub enum CxOsOp {
     HideClipboardActions,
     CopyToClipboard(String),
     ShareText(String),
+    ShowNotification {
+        title: String,
+        body: String,
+    },
     SetPrimarySelection(String),
     ShowSelectionHandles {
         start: Vec2d,
@@ -529,6 +533,7 @@ impl std::fmt::Debug for CxOsOp {
             Self::HideClipboardActions => write!(f, "HideClipboardActions"),
             Self::CopyToClipboard(..) => write!(f, "CopyToClipboard"),
             Self::ShareText(..) => write!(f, "ShareText"),
+            Self::ShowNotification { .. } => write!(f, "ShowNotification"),
             Self::SetPrimarySelection(..) => write!(f, "SetPrimarySelection"),
             Self::ShowSelectionHandles { .. } => write!(f, "ShowSelectionHandles"),
             Self::UpdateSelectionHandles { .. } => write!(f, "UpdateSelectionHandles"),
@@ -1388,6 +1393,16 @@ impl Cx {
     pub fn share_text(&mut self, content: &str) {
         self.platform_ops
             .push_back(CxOsOp::ShareText(content.to_owned()));
+    }
+
+    /// Post a system notification (Android `NotificationManager`; tapping it
+    /// re-opens the app). No-op on platforms whose backend doesn't handle
+    /// `CxOsOp::ShowNotification`.
+    pub fn show_notification(&mut self, title: &str, body: &str) {
+        self.platform_ops.push_back(CxOsOp::ShowNotification {
+            title: title.to_owned(),
+            body: body.to_owned(),
+        });
     }
 
     /// Sets the primary selection (Linux middle-click paste).

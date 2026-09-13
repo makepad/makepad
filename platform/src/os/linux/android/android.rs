@@ -2547,6 +2547,9 @@ impl Cx {
                 CxOsOp::ShareText(content) => unsafe {
                     android_jni::to_java_share_text(content);
                 },
+                CxOsOp::ShowNotification { title, body } => unsafe {
+                    android_jni::to_java_show_notification(&title, &body);
+                },
                 CxOsOp::SetPrimarySelection(_) => {}
                 CxOsOp::ShowSelectionHandles { start, end } => unsafe {
                     // Rust positions are in Makepad layout points; Android overlay APIs expect physical pixels.
