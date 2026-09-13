@@ -52,8 +52,10 @@ script_mod! {
                         rect_size.y - (triangle_height * 2.0),
                         max(1.0, self.border_radius)
                     )
-                    sdf.fill(self.background_color);
 
+                    // The box and its triangle are ONE shape, filled once. Two
+                    // fills overlap along the triangle's base, and a colour
+                    // with any transparency shows that overlap as a darker bar.
                     let mut vertex1 = vec2(0.0, 0.0);
                     let mut vertex2 = vec2(0.0, 0.0);
                     let mut vertex3 = vec2(0.0, 0.0);
@@ -104,10 +106,18 @@ script_mod! {
                         vertex2 = vec2(vertex1.x + triangle_height, vertex1.y - triangle_height);
                         vertex3 = vec2(vertex1.x + triangle_height, vertex1.y + triangle_height);
                     }
-                    sdf.move_to(vertex1.x, vertex1.y);
-                    sdf.line_to(vertex2.x, vertex2.y);
-                    sdf.line_to(vertex3.x, vertex3.y);
-                    sdf.close_path();
+                    // Every triangle above is right-angled with its base twice
+                    // its height: the up and down cases list a base corner,
+                    // the point, then the other base corner, and the left and
+                    // right cases list the point first. The pointer primitive
+                    // takes the base's middle and the point.
+                    let mut base = (vertex1 + vertex3) * 0.5;
+                    let mut point = vertex2;
+                    if self.callout_position != 0.0 && self.callout_position != 180.0 {
+                        base = (vertex2 + vertex3) * 0.5;
+                        point = vertex1;
+                    }
+                    sdf.pointer(base.x, base.y, point.x, point.y);
                     sdf.fill(self.background_color);
                     return sdf.result;
                 }

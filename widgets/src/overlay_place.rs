@@ -24,6 +24,10 @@
 //!    inboard with the low edge winning when the popup is still too big.
 //! 5. `arrow_at` is where a pointer would sit: on the popup edge that faces
 //!    the anchor, under the anchor's centre, clamped to that edge.
+//! 6. [`pointer_on_edge`] turns that point into the pointer a popup draws as
+//!    part of its own outline, kept off the rounded corners, and
+//!    [`slide_for_pointer`] first moves a popup off an anchor too small for
+//!    that pointer to reach its middle otherwise.
 //!
 //! Nothing here panics: the clamps are `max`/`min` pairs, so a request with
 //! a negative size or an inside-out rect gives a degenerate answer, not a
@@ -273,6 +277,132 @@ pub fn place_overlay(req: &PlaceRequest) -> Placed {
         side,
         arrow_at,
     }
+}
+
+/** A pointer drawn as part of a popup's own outline, in the popup's local
+space: the popup's top-left corner is the origin. */
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pointer {
+    /** The middle of the pointer's base, on the popup's outline. */
+    pub base: DVec2,
+    /** The point, out from the base toward the anchor. */
+    pub tip: DVec2,
+}
+
+/// Put a pointer on the edge of a popup of `size` that faces its anchor.
+///
+/// `side` is the side of the anchor the popup was placed on
+/// ([`Placed::side`]), so the pointer is on the popup's opposite edge,
+/// aiming back. `at` is the point to aim at in the popup's local space —
+/// [`Placed::arrow_at`] less the placed rect's position — and only its
+/// coordinate along the edge is read, so the pointer slides along the edge
+/// to follow an anchor the popup was shifted away from. `length` is how far
+/// the point stands out; the base is twice that. `outline` is how far inside
+/// the popup's rect its outline runs, which is where the base goes. `corner`
+/// is how far a rounded corner reaches along the edge from each end: the
+/// whole base stays on the straight part between them, because a base that
+/// straddles a corner leaves a notch where the curve falls away under it.
+/// An edge too short for that holds the pointer at its middle.
+pub fn pointer_on_edge(side: Side, size: DVec2, at: DVec2, length: f64, outline: f64, corner: f64) -> Pointer {
+    let length = length.max(0.0);
+    let along = |v: f64, extent: f64| -> f64 {
+        let lo = corner + length;
+        let hi = extent - corner - length;
+        if hi < lo {
+            extent * 0.5
+        } else {
+            v.max(lo).min(hi)
+        }
+    };
+    match side {
+        // The popup is below the anchor: the pointer is on its top edge.
+        Side::Bottom => {
+            let x = along(at.x, size.x);
+            Pointer {
+                base: dvec2(x, outline),
+                tip: dvec2(x, outline - length),
+            }
+        }
+        Side::Top => {
+            let x = along(at.x, size.x);
+            Pointer {
+                base: dvec2(x, size.y - outline),
+                tip: dvec2(x, size.y - outline + length),
+            }
+        }
+        // The popup is right of the anchor: the pointer is on its left edge.
+        Side::Right => {
+            let y = along(at.y, size.y);
+            Pointer {
+                base: dvec2(outline, y),
+                tip: dvec2(outline - length, y),
+            }
+        }
+        Side::Left => {
+            let y = along(at.y, size.y);
+            Pointer {
+                base: dvec2(size.x - outline, y),
+                tip: dvec2(size.x - outline + length, y),
+            }
+        }
+    }
+}
+
+/// Slide a placed popup along the edge that faces its anchor, just far
+/// enough that a pointer kept `keep` in from each end of that edge (the
+/// `corner` plus the `length` given to [`pointer_on_edge`]) lands on the
+/// anchor's middle.
+///
+/// Only an anchor shorter than twice `keep` along that edge moves the popup,
+/// down to the one-point anchor a press at the pointer gives. Lined up with
+/// such an anchor's start or end, the popup puts the anchor's middle on the
+/// stretch of edge a pointer may not take, and the pointer would stop past
+/// that middle, or past the anchor altogether. A longer anchor leaves the
+/// popup where the placement put it: its middle is already within reach,
+/// or, when the anchor is longer than the popup, the slide it would take is
+/// as long as the anchor and would undo the alignment that was asked for,
+/// so the pointer takes the nearest end of the straight part, which is
+/// still over the anchor.
+///
+/// The slide stops at `bounds` and never pulls back a popup that is already
+/// past them; an axis with no extent is unbounded, as it is for
+/// [`place_overlay`]. `arrow_at` moves with the popup.
+pub fn slide_for_pointer(placed: Placed, anchor: Rect, bounds: Rect, keep: f64) -> Placed {
+    let vertical = placed.side.is_vertical();
+    let along = |v: DVec2| if vertical { v.x } else { v.y };
+    if along(anchor.size) >= keep * 2.0 {
+        return placed;
+    }
+    let (start, extent) = (along(placed.rect.pos), along(placed.rect.size));
+    let centre = along(anchor.center());
+    // Where on the edge the pointer can take the anchor's middle, by the
+    // rule `pointer_on_edge` places it with: the nearest point of the
+    // straight part, or the middle of an edge too short to have one.
+    let reach = if extent < keep * 2.0 {
+        extent * 0.5
+    } else {
+        (centre - start).max(keep).min(extent - keep)
+    };
+    let wanted = centre - reach;
+    let (lo, room) = (along(bounds.pos), along(bounds.size));
+    let moved = if room <= 0.0 {
+        wanted
+    } else if wanted < start {
+        wanted.max(start.min(lo))
+    } else {
+        wanted.min(start.max(lo + room - extent))
+    };
+    let mut rect = placed.rect;
+    let mut arrow_at = placed.arrow_at;
+    let point = centre.max(moved).min(moved + extent);
+    if vertical {
+        rect.pos.x = moved;
+        arrow_at.x = point;
+    } else {
+        rect.pos.y = moved;
+        arrow_at.y = point;
+    }
+    Placed { rect, side: placed.side, arrow_at }
 }
 
 #[cfg(test)]
@@ -679,5 +809,118 @@ mod tests {
             let old = x.clamp(m, (pass - m - w).max(m));
             assert_eq!(span_inboard(x, w, m, pass - m * 2.0), old, "x={x} w={w}");
         }
+    }
+
+    // -- pointer_on_edge -----------------------------------------------------
+
+    #[test]
+    fn a_pointer_stands_out_of_the_edge_that_faces_the_anchor() {
+        let size = dvec2(100.0, 60.0);
+        let at = dvec2(50.0, 30.0);
+        let below = pointer_on_edge(Side::Bottom, size, at, 7.0, 1.0, 10.0);
+        assert_eq!(below, Pointer { base: dvec2(50.0, 1.0), tip: dvec2(50.0, -6.0) });
+        let above = pointer_on_edge(Side::Top, size, at, 7.0, 1.0, 10.0);
+        assert_eq!(above, Pointer { base: dvec2(50.0, 59.0), tip: dvec2(50.0, 66.0) });
+        let right = pointer_on_edge(Side::Right, size, at, 7.0, 1.0, 10.0);
+        assert_eq!(right, Pointer { base: dvec2(1.0, 30.0), tip: dvec2(-6.0, 30.0) });
+        let left = pointer_on_edge(Side::Left, size, at, 7.0, 1.0, 10.0);
+        assert_eq!(left, Pointer { base: dvec2(99.0, 30.0), tip: dvec2(106.0, 30.0) });
+    }
+
+    #[test]
+    fn a_pointer_keeps_its_whole_base_off_the_corners() {
+        let size = dvec2(100.0, 60.0);
+        // Aimed past either end: the base's near end stops where the corner does.
+        let low = pointer_on_edge(Side::Bottom, size, dvec2(-40.0, 0.0), 7.0, 1.0, 10.0);
+        assert_eq!(low.tip.x, 17.0);
+        let high = pointer_on_edge(Side::Bottom, size, dvec2(400.0, 0.0), 7.0, 1.0, 10.0);
+        assert_eq!(high.tip.x, 83.0);
+        let side = pointer_on_edge(Side::Left, size, dvec2(0.0, 2.0), 7.0, 1.0, 10.0);
+        assert_eq!(side.tip.y, 17.0);
+    }
+
+    #[test]
+    fn a_pointer_on_an_edge_too_short_for_it_sits_in_the_middle() {
+        let p = pointer_on_edge(Side::Right, dvec2(80.0, 30.0), dvec2(0.0, 2.0), 7.0, 1.0, 10.0);
+        assert_eq!(p.base, dvec2(1.0, 15.0));
+        assert_eq!(p.tip, dvec2(-6.0, 15.0));
+    }
+
+    // -- slide_for_pointer ---------------------------------------------------
+
+    /// A pointer kept 18 in from each end, hung off `anchor` in the base
+    /// window: placed, slid, and pointed, the way a popup draws one. Gives
+    /// back the slid placement and where along the edge the point landed.
+    fn aimed(anchor: Rect, size: DVec2, placement: Placement) -> (Placed, f64) {
+        let req = PlaceRequest { anchor, size, placement, ..base() };
+        let slid = slide_for_pointer(place_overlay(&req), anchor, req.bounds, 18.0);
+        let pointer = pointer_on_edge(slid.side, size, slid.arrow_at - slid.rect.pos, 7.0, 1.0, 11.0);
+        let point = slid.rect.pos + pointer.tip;
+        (slid, if slid.side.is_vertical() { point.x } else { point.y })
+    }
+
+    #[test]
+    fn a_slide_brings_a_small_anchors_middle_into_reach_from_either_end() {
+        let anchor = r(300.0, 100.0, 20.0, 20.0);
+        let (slid, point) = aimed(anchor, dvec2(200.0, 60.0), Placement::BOTTOM_START);
+        assert_eq!(point, 310.0);
+        assert!(slid.rect.pos.x < anchor.pos.x);
+        assert_eq!(slid.arrow_at, dvec2(310.0, 124.0));
+        let (slid, point) = aimed(anchor, dvec2(200.0, 60.0), Placement::BOTTOM_END);
+        assert_eq!(point, 310.0);
+        assert!(slid.rect.pos.x + 200.0 > anchor.pos.x + anchor.size.x);
+        let (slid, point) = aimed(anchor, dvec2(160.0, 60.0), Placement::LEFT_START);
+        assert_eq!(slid.side, Side::Left);
+        assert_eq!(point, 110.0);
+        assert_eq!(slid.rect.size, dvec2(160.0, 60.0));
+    }
+
+    #[test]
+    fn a_slide_centres_an_edge_too_short_for_a_pointer_on_the_anchor() {
+        let anchor = r(300.0, 100.0, 20.0, 12.0);
+        let (slid, point) = aimed(anchor, dvec2(90.0, 30.0), Placement::RIGHT_START);
+        assert_eq!(point, 106.0);
+        assert_eq!(slid.rect.pos.y, 91.0);
+    }
+
+    #[test]
+    fn a_slide_aims_at_a_single_point() {
+        let press = r(400.0, 300.0, 0.0, 0.0);
+        let (_, point) = aimed(press, dvec2(200.0, 60.0), Placement::BOTTOM_START);
+        assert_eq!(point, 400.0);
+    }
+
+    #[test]
+    fn a_slide_leaves_an_anchor_long_enough_lined_up() {
+        // Long enough to hold the pointer from its own start: nothing moves.
+        let anchor = r(300.0, 100.0, 36.0, 20.0);
+        let req = PlaceRequest { anchor, size: dvec2(200.0, 60.0), ..base() };
+        let placed = place_overlay(&req);
+        assert_eq!(slide_for_pointer(placed, anchor, req.bounds, 18.0), placed);
+        // Longer than the popup: the popup keeps the edge it was lined up
+        // with, and the pointer stops over the anchor, short of its middle.
+        let anchor = r(300.0, 100.0, 80.0, 74.0);
+        let (slid, point) = aimed(anchor, dvec2(90.0, 40.0), Placement::RIGHT_START);
+        assert_eq!(slid.rect.pos.y, 100.0);
+        assert_eq!(point, 122.0);
+    }
+
+    #[test]
+    fn a_slide_stops_at_the_bounds() {
+        // Against the window's left edge the popup cannot move left, so the
+        // pointer stops at the end of the straight part.
+        let anchor = r(4.0, 100.0, 10.0, 20.0);
+        let (slid, point) = aimed(anchor, dvec2(200.0, 60.0), Placement::BOTTOM_START);
+        assert_eq!(slid.rect.pos.x, 0.0);
+        assert_eq!(point, 18.0);
+        // A popup already past the bounds goes no further, and is not pulled
+        // back either: the slide is for the pointer, not a second clamp.
+        let anchor = r(-30.0, 100.0, 10.0, 20.0);
+        let placed = Placed { rect: r(-30.0, 124.0, 200.0, 60.0), side: Side::Bottom, arrow_at: dvec2(-25.0, 124.0) };
+        let slid = slide_for_pointer(placed, anchor, r(0.0, 0.0, 800.0, 600.0), 18.0);
+        assert_eq!(slid.rect.pos.x, -30.0);
+        // An unbounded axis lets it go.
+        let slid = slide_for_pointer(placed, anchor, r(0.0, 0.0, 0.0, 600.0), 18.0);
+        assert_eq!(slid.rect.pos.x, -25.0 - 18.0);
     }
 }

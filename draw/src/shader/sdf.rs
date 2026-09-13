@@ -522,6 +522,34 @@ script_mod! {
                 self.shape = min(self.shape, self.dist);
             }
 
+            // A pointer: a square turned an eighth of a turn, centred on
+            // (x, y) with one corner on (tip_x, tip_y). Put the centre on the
+            // edge of the shape it hangs off and the half outside that edge is
+            // a right-angled triangle whose base is twice its height, while
+            // the half inside overlaps the shape. The overlap is the point:
+            // the union has no distance of zero along the base, so a stroke
+            // after it runs up one flank and down the other with no line
+            // across, and a fill or a shadow taken from it is one shape. A
+            // triangle that merely touched the edge would leave the base on
+            // the outline of both. A pointer of no length adds nothing, and
+            // says so without a branch, so every caller can draw one whether
+            // it has a pointer or not.
+            pointer: fn(x: float, y: float, tip_x: float, tip_y: float) {
+                let axis = vec2(tip_x - x, tip_y - y)
+                let reach = length(axis)
+                let n = axis / max(reach, 0.00001)
+                let q = self.pos - vec2(x, y)
+                let u = dot(q, n)
+                let v = q.x * n.y - q.y * n.x
+                let d = abs(vec2(u + v, u - v)) * 0.70710678 - vec2(reach * 0.70710678, reach * 0.70710678)
+                let square = min(max(d.x, d.y), 0.) + length(max(d, vec2(0., 0.)))
+                // Added, not mixed: a GPU lerp from 1e20 loses the distance
+                // to rounding and leaves zero, which strokes everything.
+                self.dist = square / self.scale_factor + (1.0 - step(0.00001, reach)) * 1e+20
+                self.old_shape = self.shape
+                self.shape = min(self.shape, self.dist)
+            }
+
             hexagon: fn(x: float, y: float, r: float) {
                 let dx = abs(x - self.pos.x) * 1.15;
                 let dy = abs(y - self.pos.y);

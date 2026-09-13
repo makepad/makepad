@@ -41,7 +41,9 @@ use crate::{
     badge::{BadgeIntent, BadgePalette},
     makepad_derive_widget::*,
     makepad_draw::{event::TouchState, *},
-    overlay_place::{place_overlay, PlaceAlign, PlaceRequest, Placement, Side},
+    overlay_place::{
+        place_overlay, pointer_on_edge, slide_for_pointer, PlaceAlign, PlaceRequest, Placed, Placement, Pointer, Side,
+    },
     view::*,
     widget::*,
 };
@@ -185,14 +187,31 @@ script_mod! {
     mod.widgets.TipLayer = set_type_default() do mod.widgets.TipLayerBase{
         width: Fill
         height: Fill
+        /** The bubble and its pointer, drawn as ONE shape and filled once,
+         * so nothing shows where the pointer meets the bubble. */
         draw_bg +: {
             color: #x10141bf2
-            border_color: #xffffff2e
+            quad_shift: varying(vec2(0))
+            quad_size: varying(vec2(0))
+            vertex: fn() {
+                // The bubble's rect, grown by the pointer past the edge it
+                // stands out of, and by a point all round for the edge
+                // smoothing that falls past the pointer's point.
+                let room = vec2(1.0)
+                let lead = room + max(-self.arrow_tip, vec2(0))
+                let trail = room + max(self.arrow_tip - self.rect_size, vec2(0))
+                self.quad_shift = -lead
+                self.quad_size = self.rect_size + lead + trail
+                return self.clip_and_transform_vertex(self.rect_pos - lead, self.quad_size)
+            }
             pixel: fn() {
-                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                // In the bubble's own points, where the layer put the pointer.
+                let p = self.pos * self.quad_size + self.quad_shift
+                let sdf = Sdf2d.viewport(p)
                 sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 4.0)
+                sdf.pointer(self.arrow_base.x, self.arrow_base.y, self.arrow_tip.x, self.arrow_tip.y)
+                // A fill and no outline, the way a tip bubble has always looked.
                 sdf.fill(self.color)
-                sdf.stroke(self.border_color, 1.0)
                 return sdf.result
             }
         }
@@ -200,54 +219,11 @@ script_mod! {
             color: #xdfe6ec
             text_style: theme.font_regular{font_size: 9}
         }
-        draw_arrow +: {
-            color: #x10141bf2
-            border_color: #xffffff2e
-            /** which way the pointer AIMS: 0 up, 1 down, 2 right, 3 left 0..3 step 1 */
-            side: 0.0
-            pixel: fn() {
-                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                // A square turned by a quarter turn, centred on the BASE
-                // edge — the one against the bubble. The half inside this
-                // quad is the triangle, narrowing to a point at the far
-                // edge, so the point is the end that aims at the control.
-                // Centring it on the near edge instead makes the pointer
-                // aim away from the thing it belongs to. The path fill the
-                // shape language offers does not fill here, which is why
-                // the popover draws its arrow the same way.
-                let w = self.rect_size.x
-                let h = self.rect_size.y
-                // The centre sits ON the base edge, not a pixel inside it:
-                // half the square is then clipped away and what is left is
-                // a full triangle, base the width of the quad and apex
-                // exactly on the far edge. A pixel of inset blunts the apex
-                // and shortens the base, which is what made the pointer
-                // read as a smear. The quad already overlaps the bubble by
-                // a pixel, so nothing is lost by putting the base flush.
-                let mut c = vec2(w * 0.5, h)
-                let mut r = w * 0.5
-                if self.side > 2.5 {
-                    c = vec2(w, h * 0.5)
-                    r = h * 0.5
-                } else if self.side > 1.5 {
-                    c = vec2(0.0, h * 0.5)
-                    r = h * 0.5
-                } else if self.side > 0.5 {
-                    c = vec2(w * 0.5, 0.0)
-                }
-                sdf.rotate(PI * 0.25, c.x, c.y)
-                let s = r * 1.41421356
-                sdf.rect(c.x - s * 0.5, c.y - s * 0.5, s, s)
-                sdf.fill_keep(self.color)
-                sdf.stroke(self.border_color, 1.0)
-                return sdf.result
-            }
-        }
     }
 }
 
-/// The tooltip bubble and its pointer: a quad that carries the colours the
-/// layer swaps per role.
+/// The tooltip bubble and its pointer, one shape: a quad that carries the
+/// colours the layer swaps per role and where the pointer stands.
 #[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawTipBg {
@@ -255,12 +231,13 @@ pub struct DrawTipBg {
     draw_super: DrawQuad,
     #[live]
     color: Vec4f,
+    /// The middle of the pointer's base, in the bubble's own points.
     #[live]
-    border_color: Vec4f,
-    /// Which way a pointer AIMS: 0 up, 1 down, 2 right, 3 left. The
-    /// bubble ignores it.
+    arrow_base: Vec2f,
+    /// The pointer's point, in the bubble's own points; the same as the base
+    /// when the tip has no pointer.
     #[live]
-    side: f32,
+    arrow_tip: Vec2f,
 }
 
 /// Hover dwell before a tip reveals.
@@ -272,12 +249,59 @@ const TIP_GRACE_SECS: f64 = 0.35;
 const TIP_GAP: f64 = 6.0;
 const TIP_PAD_X: f64 = 8.0;
 const TIP_PAD_Y: f64 = 5.0;
-/// Half the width of the pointer on a tip that asks for one.
+/// Half the width of the pointer on a tip that asks for one, and how far it
+/// stands out.
 const TIP_ARROW: f64 = 5.0;
 /// The bubble's visual corner radius. `sdf.box` draws twice the radius it
 /// is given, and the bubble asks for 4, so its corners eat 8 points off
 /// each end of every edge. A pointer has to stay clear of them.
 const TIP_BUBBLE_R: f64 = 8.0;
+/// Room kept past a pointer's point on the overlay for the edge smoothing
+/// that falls beyond it.
+const TIP_ROOM: f64 = 1.0;
+
+/// How far a rounded corner of a bubble of `size` reaches along its edges
+/// from each end, on the shape the bubble shader draws: a box half a point
+/// in, with corners [`TIP_BUBBLE_R`] long unless the bubble is too small to
+/// hold them.
+fn bubble_corner(size: DVec2) -> f64 {
+    0.5 + TIP_BUBBLE_R.min((size.x.min(size.y) - 1.0) * 0.5).max(0.0)
+}
+
+/// Hang a bubble of `size` off `anchor` in a pass of `pass`: where it goes,
+/// and the pointer it draws when `arrow` asks for one, in its own points.
+///
+/// The placement comes first, then the slide off a control too small for
+/// the pointer to reach its middle from where the bubble lines up, then the
+/// pointer, on the straight part of the edge that faces the control. The
+/// layer draws through here, and so do the tests.
+fn hang_bubble(anchor: Rect, size: DVec2, pass: DVec2, place: TipPlace, arrow: bool) -> (Placed, Option<Pointer>) {
+    // The room is the WHOLE PASS, which is what a tooltip may cover, and it
+    // is the space the anchor rects are measured in.
+    let bounds = Rect {
+        pos: dvec2(2.0, 2.0),
+        size: dvec2(pass.x - 4.0, pass.y - 4.0),
+    };
+    let placed = place_overlay(&PlaceRequest {
+        anchor,
+        size,
+        bounds,
+        gap: TIP_GAP,
+        placement: place.placement(),
+        match_anchor_width: false,
+    });
+    if !arrow {
+        return (placed, None);
+    }
+    let corner = bubble_corner(size);
+    let placed = slide_for_pointer(placed, anchor, bounds, corner + TIP_ARROW);
+    // The helper only clamps the point to the bubble's extent, and on a
+    // control wider than its tip that is a rounded corner, where the base
+    // would leave a notch as the curve falls away under it: the pointer
+    // keeps to the straight part.
+    let pointer = pointer_on_edge(placed.side, size, placed.arrow_at - placed.rect.pos, TIP_ARROW, 0.5, corner);
+    (placed, Some(pointer))
+}
 
 /// Transparent tooltip DECLARATION wrapper: lays its one child out as if
 /// the wrapper were not there, reports hover to the window's [`TipLayer`].
@@ -637,9 +661,6 @@ pub struct TipLayer {
     /// The role colours, shared with every other small mark.
     #[live]
     palette: BadgePalette,
-    /// The pointer on the bubble's edge, drawn when a tip asks for one.
-    #[live]
-    draw_arrow: DrawTipBg,
     #[rust]
     timer: Timer,
     /// While the last tip was visible more recently than the grace window,
@@ -738,8 +759,12 @@ impl Widget for TipLayer {
         // drawn from that origin onward, so it was simply clipped away.
         // Inset the bubble by the pointer's length and give the shift the
         // same amount back: there is then room on every side of it.
-        let inset = if tip.arrow { TIP_ARROW } else { 0.0 };
+        let inset = if tip.arrow { TIP_ARROW + TIP_ROOM } else { 0.0 };
         let pad = Inset { left: inset, top: inset, right: inset, bottom: inset };
+        // No pointer until the bubble is placed: its instance is written
+        // when it begins, before anything knows where it will land.
+        self.draw_bg.arrow_base = Vec2f::default();
+        self.draw_bg.arrow_tip = Vec2f::default();
         let bubble;
         let mut h = h;
         if lines > 1.0 {
@@ -761,6 +786,7 @@ impl Widget for TipLayer {
                     margin: pad,
                     ..Walk::default()
                 },
+                // Unclipped: the pointer is drawn outside the bubble's rect.
                 Layout {
                     flow: Flow::right_wrap(),
                     padding: Inset {
@@ -769,6 +795,8 @@ impl Widget for TipLayer {
                         top: TIP_PAD_Y,
                         bottom: TIP_PAD_Y,
                     },
+                    clip_x: false,
+                    clip_y: false,
                     ..Layout::default()
                 },
             );
@@ -789,7 +817,7 @@ impl Widget for TipLayer {
             self.draw_bg.begin(
                 cx,
                 Walk { margin: pad, ..Walk::fixed(w, h) },
-                Layout::default(),
+                Layout { clip_x: false, clip_y: false, ..Layout::default() },
             );
             bubble = cx.turtle().rect();
             self.draw_text.draw_abs(
@@ -801,76 +829,17 @@ impl Widget for TipLayer {
         }
         // One placement helper, the same one every anchored popup uses:
         // the wanted side, flipped when there is no room, shifted to stay
-        // inside the window. The room is the WHOLE PASS, which is what a
-        // tooltip may cover, and it is the space the anchor rects are
-        // measured in.
-        let placed = place_overlay(&PlaceRequest {
-            anchor,
-            size: dvec2(w, h),
-            bounds: Rect {
-                pos: dvec2(2.0, 2.0),
-                size: dvec2(pass.x - 4.0, pass.y - 4.0),
-            },
-            gap: TIP_GAP,
-            placement: tip.place.placement(),
-            match_anchor_width: false,
-        });
-        if tip.arrow {
-            // The pointer sits on the bubble's anchor-facing edge, at the
-            // point the helper worked out, so it aims at the control even
-            // after a flip or a shift.
-            self.draw_arrow.color = self.draw_bg.color;
-            let a = TIP_ARROW;
-            let at = placed.arrow_at;
-            // The pointer sits ON the bubble's anchor-facing edge, overlapping
-            // it by a pixel so its base covers the bubble's own outline.
-            // The anchor point, carried into the bubble's own space.
-            let local = dvec2(
-                bubble.pos.x + (at.x - placed.rect.pos.x),
-                bubble.pos.y + (at.y - placed.rect.pos.y),
-            );
-            // Keep the whole pointer on the FLAT part of the edge. The
-            // placement helper only clamps the anchor point to the bubble's
-            // extent, so on a control wider than its own tip the point lands
-            // on a rounded corner and one flank of the triangle is drawn over
-            // bare background, with a notch where the corner curves away.
-            let along = |v: f64, start: f64, extent: f64| -> f64 {
-                let lo = start + TIP_BUBBLE_R + a;
-                let hi = start + extent - TIP_BUBBLE_R - a;
-                if hi <= lo {
-                    start + extent * 0.5
-                } else {
-                    v.max(lo).min(hi)
-                }
-            };
-            let ax = along(local.x, bubble.pos.x, bubble.size.x);
-            let ay = along(local.y, bubble.pos.y, bubble.size.y);
-            let (rect, side) = match placed.side {
-                Side::Bottom => (
-                    Rect { pos: dvec2(ax - a, bubble.pos.y - a + 1.0), size: dvec2(a * 2.0, a) },
-                    0.0,
-                ),
-                Side::Top => (
-                    Rect {
-                        pos: dvec2(ax - a, bubble.pos.y + bubble.size.y - 1.0),
-                        size: dvec2(a * 2.0, a),
-                    },
-                    1.0,
-                ),
-                Side::Right => (
-                    Rect { pos: dvec2(bubble.pos.x - a + 1.0, ay - a), size: dvec2(a, a * 2.0) },
-                    3.0,
-                ),
-                Side::Left => (
-                    Rect {
-                        pos: dvec2(bubble.pos.x + bubble.size.x - 1.0, ay - a),
-                        size: dvec2(a, a * 2.0),
-                    },
-                    2.0,
-                ),
-            };
-            self.draw_arrow.side = side;
-            self.draw_arrow.draw_abs(cx, rect);
+        // inside the window.
+        let (placed, pointer) = hang_bubble(anchor, dvec2(w, h), pass, tip.place, tip.arrow);
+        if let Some(pointer) = pointer {
+            // The pointer is part of the bubble's own shape, so it goes into
+            // the instance the bubble has already written: on the edge that
+            // faces the control, at the point the helper worked out, so it
+            // aims at the control even after a flip or a shift.
+            self.draw_bg.arrow_base = pointer.base.into();
+            self.draw_bg.arrow_tip = pointer.tip.into();
+            self.draw_bg.update_instance_area_value(cx, ids!(arrow_base));
+            self.draw_bg.update_instance_area_value(cx, ids!(arrow_tip));
         }
         self.draw_bg.color = rest_bg;
         self.draw_text.color = rest_ink;
@@ -944,6 +913,8 @@ mod tests {
     //! A tipped control must sit exactly where the bare control sits. Each
     //! layout test draws the same row twice in one window-less pass, once
     //! bare and once tipped, one row-height apart, and compares the rects.
+    //! The pointer tests at the end draw nothing: they hang a bubble and
+    //! its pointer through the same function the layer draws with.
     use super::*;
     use crate::makepad_draw::cx_draw::CxDraw;
     use crate::makepad_draw::event::{LongPressEvent, TouchPoint, TouchState, TouchUpdateEvent};
@@ -1446,5 +1417,92 @@ mod tests {
             None,
             "lifted, gone"
         );
+    }
+
+    fn r(x: f64, y: f64, w: f64, h: f64) -> Rect {
+        Rect {
+            pos: dvec2(x, y),
+            size: dvec2(w, h),
+        }
+    }
+
+    /// Hang a bubble with a pointer off `anchor` in an 800x600 pass, and
+    /// give back where it went, the side it took, and its pointer's point,
+    /// window-absolute.
+    fn hang(anchor: Rect, size: DVec2, place: TipPlace) -> (Rect, Side, DVec2) {
+        let (placed, pointer) = hang_bubble(anchor, size, dvec2(800.0, 600.0), place, true);
+        (placed.rect, placed.side, placed.rect.pos + pointer.unwrap().tip)
+    }
+
+    #[test]
+    fn tip_pointer_aims_at_the_control_from_below_and_above() {
+        let anchor = r(300.0, 100.0, 80.0, 24.0);
+        let (_, side, point) = hang(anchor, dvec2(120.0, 24.0), TipPlace::Bottom);
+        assert_eq!(side, Side::Bottom);
+        assert_eq!(point, dvec2(340.0, 124.0 + TIP_GAP - TIP_ARROW + 0.5));
+        let (_, side, point) = hang(anchor, dvec2(120.0, 24.0), TipPlace::Top);
+        assert_eq!(side, Side::Top);
+        assert_eq!(point, dvec2(340.0, 100.0 - TIP_GAP + TIP_ARROW - 0.5));
+    }
+
+    #[test]
+    fn tip_pointer_turns_a_quarter_turn_beside_the_control() {
+        // A one-line bubble is too short for its corners and a pointer
+        // between them, so a side pointer sits at the middle of the edge.
+        let anchor = r(300.0, 100.0, 80.0, 24.0);
+        let (_, side, point) = hang(anchor, dvec2(100.0, 24.0), TipPlace::Left);
+        assert_eq!(side, Side::Left);
+        assert_eq!(point, dvec2(300.0 - TIP_GAP + TIP_ARROW - 0.5, 112.0));
+        let (_, side, point) = hang(anchor, dvec2(100.0, 24.0), TipPlace::Right);
+        assert_eq!(side, Side::Right);
+        assert_eq!(point, dvec2(380.0 + TIP_GAP - TIP_ARROW + 0.5, 112.0));
+    }
+
+    #[test]
+    fn tip_pointer_slides_along_the_bubble_the_window_pushed() {
+        // Too near the window's left edge to centre: the bubble is pushed
+        // right and the pointer still lands under the control's middle.
+        let anchor = r(0.0, 100.0, 40.0, 24.0);
+        let (rect, _, point) = hang(anchor, dvec2(120.0, 24.0), TipPlace::Bottom);
+        assert_eq!(rect.pos.x, 2.0);
+        assert_eq!(point.x, 20.0);
+        // With the control's middle off the straight part of the edge, the
+        // pointer stops where the corner starts.
+        let anchor = r(0.0, 100.0, 10.0, 24.0);
+        let (rect, _, point) = hang(anchor, dvec2(120.0, 24.0), TipPlace::Bottom);
+        assert_eq!(point.x, rect.pos.x + 0.5 + TIP_BUBBLE_R + TIP_ARROW);
+    }
+
+    #[test]
+    fn tip_pointer_stays_off_the_corner_of_a_short_tip_on_a_wide_control() {
+        let anchor = r(100.0, 100.0, 260.0, 24.0);
+        let (rect, _, point) = hang(anchor, dvec2(60.0, 24.0), TipPlace::BottomStart);
+        assert_eq!(rect.pos.x, 100.0);
+        assert_eq!(point.x, 160.0 - 0.5 - TIP_BUBBLE_R - TIP_ARROW);
+    }
+
+    #[test]
+    fn tip_beside_a_small_control_moves_to_aim_at_its_middle() {
+        // Lined up with the top of a control shorter than the bubble, the
+        // pointer's middle-of-the-edge would be below the control's middle:
+        // the bubble moves up until the two meet.
+        let anchor = r(300.0, 100.0, 16.0, 12.0);
+        let (rect, side, point) = hang(anchor, dvec2(100.0, 24.0), TipPlace::LeftStart);
+        assert_eq!(side, Side::Left);
+        assert_eq!(point.y, anchor.center().y);
+        assert!(rect.pos.y < anchor.pos.y);
+        // Below a small control, lined up with its start.
+        let (rect, side, point) = hang(anchor, dvec2(100.0, 24.0), TipPlace::BottomStart);
+        assert_eq!(side, Side::Bottom);
+        assert_eq!(point.x, anchor.center().x);
+        assert!(rect.pos.x < anchor.pos.x);
+    }
+
+    #[test]
+    fn tip_without_a_pointer_lines_up_with_the_control() {
+        let anchor = r(300.0, 100.0, 16.0, 12.0);
+        let (placed, pointer) = hang_bubble(anchor, dvec2(100.0, 24.0), dvec2(800.0, 600.0), TipPlace::BottomStart, false);
+        assert!(pointer.is_none());
+        assert_eq!(placed.rect.pos, dvec2(300.0, 112.0 + TIP_GAP));
     }
 }
