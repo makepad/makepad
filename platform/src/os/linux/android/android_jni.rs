@@ -1288,6 +1288,21 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onFileDialogResu
     );
 }
 
+/// The activity was launched or resumed via a deep link (`ACTION_VIEW` URL) or
+/// a share (`ACTION_SEND` text). Delivered to the app as an
+/// [`crate::event::AndroidDeepLink`] action through [`Cx::post_action`], the
+/// same cross-thread contract `onFileDialogResult` uses — no hop through the
+/// render-thread queue is needed.
+#[no_mangle]
+pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onDeepLink(
+    env: *mut jni_sys::JNIEnv,
+    _: jni_sys::jclass,
+    url: jni_sys::jstring,
+) {
+    let url = jstring_to_string(env, url);
+    crate::cx::Cx::post_action(crate::event::AndroidDeepLink { url });
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onLocationUpdate(
     _: *mut jni_sys::JNIEnv,

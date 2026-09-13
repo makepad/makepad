@@ -1156,6 +1156,17 @@ pub struct SelectionHandleDragEvent {
     pub time: f64,
 }
 
+/// The app was opened or resumed through a deep link or a share: an
+/// `ACTION_VIEW` URL or `ACTION_SEND` text handed to the activity (see
+/// `MakepadActivity.onNewIntent`). Posted with [`Cx::post_action`], so it
+/// arrives as a bare action in the app's `handle_actions`; the app decides how
+/// to route the URL. Defined on every platform so app code needs no `cfg`;
+/// currently only the Android backend posts it.
+#[derive(Clone, Debug, Default)]
+pub struct AndroidDeepLink {
+    pub url: String,
+}
+
 #[cfg(target_arch = "wasm32")]
 #[derive(Clone, Debug)]
 pub struct ToWasmMsgEvent {
