@@ -49,7 +49,7 @@ script_mod! {
             main_window := Window{
                 window.inner_size: vec2(560, 560)
                 body +: {
-                    probe := PbrProbe{}
+                    probe := mod.widgets.PbrProbe{}
                 }
             }
         }
