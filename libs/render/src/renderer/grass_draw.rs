@@ -91,7 +91,7 @@ impl Renderer {
             }
             draw.pbr.skinned.transform = Mat4f::identity();
             draw.pbr.skinned.lm_rect = Vec4f::default();
-            draw.pbr.skinned.morph_ctl = Vec4f::default();
+            draw.pbr.skinned.draw_vars.set_uniform(cx.cx, live_id!(morph_ctl), &[0.0, 0.0, 0.0, 0.0]);
             for (ring, patches) in rings.iter().enumerate() {
                 if patches.is_empty() { continue; }
                 let geometry = &grass.rings[ring];

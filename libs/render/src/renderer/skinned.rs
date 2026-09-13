@@ -278,15 +278,17 @@ impl Renderer {
         stats: &mut RenderStats,
         eye:Vec3f,
     ) {
-        batch.skinned.eye=eye;
+        // The eye, the sun and the fog are uniforms, written once per call:
+        // the vertex stage ran out of D3D11 input registers with them on the
+        // instance stream, and every character of a call shares them.
+        batch.skinned.draw_vars.set_uniform(cx.cx, live_id!(eye), &[eye.x, eye.y, eye.z]);
         self.clustered.bind(cx.cx, &mut batch.skinned.draw_vars, self.clustered_enabled);
         self.gi.bind(cx.cx, &mut batch.skinned.draw_vars);
-        sun.write_into(
-            &mut batch.skinned.light_dir,
-            &mut batch.skinned.sun_color,
-            &mut batch.skinned.sun_sky,
-            &mut batch.skinned.sun_ground,
-        );
+        sun.write_uniforms(cx.cx, &mut batch.skinned.draw_vars);
+        batch.skinned.draw_vars.set_uniform(cx.cx, live_id!(light_dir), &[sun.dir.x, sun.dir.y, sun.dir.z]);
+        batch.skinned.draw_vars.set_uniform(cx.cx, live_id!(depth_clip), &[1.0]);
+        batch.skinned.draw_vars.set_uniform(cx.cx, live_id!(fog_color), &[fog.0.x, fog.0.y, fog.0.z]);
+        batch.skinned.draw_vars.set_uniform(cx.cx, live_id!(fog_density), &[fog.1]);
         // Dynamic lights are PER-CHARACTER: each looks up its own
         // precomputed grid cell (O(1), hysteresis-stable — light_grid.rs)
         // inside the draw loop below, so a villager standing under a lamp
@@ -405,9 +407,6 @@ impl Renderer {
             batch.skinned.transform = item.transform;
             batch.skinned.tint = item.tint;
             batch.skinned.color_adjust_ctl = item.color_adjust;
-            batch.skinned.depth_clip = 1.0;
-            batch.skinned.fog_color = fog.0;
-            batch.skinned.fog_density = fog.1;
             // Clamp rather than index blindly: a bad texture index would
             // otherwise panic mid-frame, and a character wearing the wrong
             // atlas is a visible bug worth surviving to see.
@@ -443,12 +442,17 @@ impl Renderer {
                 for part in parts {
                     let definition=&part.surface.definition;
                     batch.skinned.fur = crate::material_surface::fur_params(definition.fur);
-                    batch.skinned.surface_on=1.0;batch.skinned.metallic=part.metallic;batch.skinned.roughness=part.roughness;
+                    // The part's material: uniforms, written beside the part's
+                    // own geometry and textures, so no two characters sharing a
+                    // draw item can disagree about them.
+                    let vars=&mut batch.skinned.draw_vars;
+                    vars.set_uniform(cx.cx,live_id!(surface_on),&[1.0]);vars.set_uniform(cx.cx,live_id!(metallic),&[part.metallic]);vars.set_uniform(cx.cx,live_id!(roughness),&[part.roughness]);
                     // Toy gloss (clear coat and rim) in the spare lane.
                     batch.skinned.fur_layer.y=definition.packed_shading();
-                    batch.skinned.material_alpha=definition.base_alpha;batch.skinned.alpha_mode=definition.alpha_mode as f32;batch.skinned.alpha_cutoff=definition.alpha_cutoff;
-                    batch.skinned.normal_scale=definition.normal_scale;batch.skinned.occlusion_strength=definition.occlusion_strength;
-                    batch.skinned.emissive=vec3f(definition.emissive[0],definition.emissive[1],definition.emissive[2]);batch.skinned.double_sided=if definition.double_sided{1.0}else{0.0};
+                    let vars=&mut batch.skinned.draw_vars;
+                    vars.set_uniform(cx.cx,live_id!(material_alpha),&[definition.base_alpha]);vars.set_uniform(cx.cx,live_id!(alpha_mode),&[definition.alpha_mode as f32]);vars.set_uniform(cx.cx,live_id!(alpha_cutoff),&[definition.alpha_cutoff]);
+                    vars.set_uniform(cx.cx,live_id!(normal_scale),&[definition.normal_scale]);vars.set_uniform(cx.cx,live_id!(occlusion_strength),&[definition.occlusion_strength]);
+                    vars.set_uniform(cx.cx,live_id!(emissive),&[definition.emissive[0],definition.emissive[1],definition.emissive[2]]);vars.set_uniform(cx.cx,live_id!(double_sided),&[if definition.double_sided{1.0}else{0.0}]);
                     batch.skinned.draw_vars.options.alpha_blend=definition.alpha_mode==2;batch.skinned.draw_vars.options.depth_write=definition.alpha_mode!=2;batch.skinned.draw_vars.options.backface_culling=!definition.double_sided;
                     batch.skinned.draw_vars.geometry_id=Some(part.geometry.geometry_id());
                     batch.skinned.draw_vars.set_texture(0,&part.base);
@@ -471,7 +475,7 @@ impl Renderer {
                 }
             } else {
                 batch.skinned.fur = Default::default(); batch.skinned.fur_layer.x = 0.0;
-                batch.skinned.surface_on=0.0;batch.skinned.fur_layer.y=0.0;batch.skinned.draw_vars.options.alpha_blend=false;batch.skinned.draw_vars.options.depth_write=true;batch.skinned.draw_vars.options.backface_culling=true;
+                batch.skinned.draw_vars.set_uniform(cx.cx,live_id!(surface_on),&[0.0]);batch.skinned.fur_layer.y=0.0;batch.skinned.draw_vars.options.alpha_blend=false;batch.skinned.draw_vars.options.depth_write=true;batch.skinned.draw_vars.options.backface_culling=true;
             if batch.skinned.draw_vars.can_instance() {
                 let new_area = cx.add_instance(&batch.skinned.draw_vars);
                 batch.skinned.draw_vars.area =
