@@ -1,7 +1,8 @@
 //! The glass surfaces gallery: the lensing backing and every preset of it,
-//! over something worth bending.
+//! over something worth bending — and a second page of four sheets that open
+//! over the page itself on the same material, one of which can be pressed.
 use crate::makepad_widgets::*;
-use crate::registry::Story;
+use crate::registry::{Control, ControlKind, Story};
 
 script_mod! {
     use mod.prelude.widgets.*
@@ -9,6 +10,32 @@ script_mod! {
     use mod.storybook.*
 
     let Cap = Label{draw_text +: {color: #ffffffcc}}
+    // A slider on a glass sheet. The sheet is dark in every theme, so the
+    // label and the value are white in every state, as the sheet titles
+    // are; the theme's text colour is dark in light and would not read.
+    let SheetSlider = Slider{
+        width: Fill
+        draw_text +: {
+            color: #fff
+            color_hover: #fff
+            color_drag: #fff
+            color_focus: #fff
+            color_disabled: #fff
+            color_empty: #fff
+        }
+        text_input +: {
+            draw_text +: {
+                color: #fff
+                color_hover: #fff
+                color_focus: #fff
+                color_down: #fff
+                color_disabled: #fff
+                color_empty: #fff
+                color_empty_hover: #fff
+                color_empty_focus: #fff
+            }
+        }
+    }
 
     mod.stories.GlassSurfacesOverview = StoryPage{
         StoryNote{text: "The lensing surface the glass family is built on, and the presets of it that each control uses. They all bend what is behind them, so they are shown over the same colourful ground — on a flat one they collapse to an outline."}
@@ -101,24 +128,581 @@ script_mod! {
             }
         }
     }
+
+    mod.storybook.StoryPressLensBase = #(StoryPressLens::register_widget(vm))
+
+    /** A lensed sheet that answers a press: a flat button with every face
+     * state erased lies over the glass, and this widget owns the clock that
+     * flattens the lens under the finger and lets it rebound. */
+    mod.storybook.StoryPressLens = set_type_default() do mod.storybook.StoryPressLensBase{
+        width: Fill
+        height: Fit
+
+        press_lens_popup := PopupNotification{
+            align: Align{x: 0.5 y: 0.5}
+            content +: {
+                width: 300
+                height: 92
+                flow: Overlay
+                clip_x: false
+                clip_y: false
+
+                press_lens := LensedRoundedView{
+                    width: Fill
+                    height: Fill
+                    draw_bg +: {
+                        blur_level: 0.25
+                        lensing_effect: 1.0
+                        lensing_strength: 38.0
+                        lensing_width: 13.0
+                        corner_radius: 23.0
+                        tint_color: #b8b8b8
+                        tint_alpha: 0.025
+                        border_alpha: 0.82
+                        specular_strength: 0.24
+                        noise_strength: 0.004
+                        shadow_color: #0009
+                        shadow_radius: 34.0
+                        shadow_offset: vec2(0.0, 14.0)
+                        diffraction_strength: 5.2
+                    }
+                }
+                /** the click target over the lens: label only, face erased */
+                press_lens_face := ButtonFlat{
+                    width: Fill
+                    height: Fill
+                    text: "Focus"
+                    draw_text +: {
+                        /** lens label ink, the same in every state: the
+                         * theme's hover and press inks are tuned for a
+                         * button face, and there is none under this label */
+                        color: #fff
+                        color_hover: #fff
+                        color_down: #fff
+                        color_focus: #fff
+                        /** lens label size in points 8..48 step 1 */
+                        text_style +: {font_size: 22}
+                    }
+                    /** every face state erased so the glass behind shows through */
+                    draw_bg +: {
+                        /** no bevel: the glass draws its own edge 0..4 step 0.5 */
+                        border_size: 0.0
+                        /** face transparent in every state */
+                        color: #0000
+                        color_hover: #0000
+                        color_down: #0000
+                        color_focus: #0000
+                        color_disabled: #0000
+                        /** bevel transparent in every state */
+                        border_color: #0000
+                        border_color_hover: #0000
+                        border_color_down: #0000
+                        border_color_focus: #0000
+                        border_color_disabled: #0000
+                    }
+                }
+            }
+        }
+    }
+
+    mod.stories.GlassSurfacesPopups = StoryPage{
+        StoryNote{text: "Four sheets that open over the page, each backed by one member of the glass family: a plain frosted one, one with a lens at its rim, one you can press, and one whose blur is sharper at its edge. They are window-centred popups, and a glass inside an overlay still samples what is under it, so each bends the page rather than a flat backdrop."}
+
+        StoryHeading{text: "Four sheets over the page"}
+        StoryNote{text: "Open one and the other three close. Each is a PopupNotification with the glass as its whole background and the content laid over it; the stage below is there to give the sheets something worth bending."}
+        StoryRow{
+            open_blur_sheet := Button{text: "Open blur sheet"}
+            open_lens_sheet := Button{text: "Open lens sheet"}
+            open_press_lens := Button{text: "Open pressable lens"}
+            open_gradient_sheet := Button{text: "Open gradient sheet"}
+        }
+        // A fixed height, never Fit: the sheets are window-centred and the
+        // ground has to reach under them from where the row leaves off.
+        GlassStage{
+            height: 440.
+            body +: {Cap{text: "The sheets open over this ground"}}
+        }
+
+        StoryHeading{text: "A blur sheet, no lens"}
+        StoryNote{text: "The raw GaussRoundedView, frosted with the lens off. The two sliders on it retune the surface that is already on screen through set_blurriness and set_lensing_effect; slide the second one up and it turns into the lens sheet next door."}
+
+        StoryHeading{text: "A lens sheet"}
+        StoryNote{text: "The same popup on LensedRoundedView with the lens at 0.75 instead of 0: the rim bends the ground under it where the blur sheet's does not. Its sliders drive the same two setters. Every other knob of the material — tint, seal, rim, shadow — is the family's, and is explained on the glass panel page."}
+
+        StoryHeading{text: "A lens you can press"}
+        StoryNote{text: "A lensed surface made pressable by a flat button laid over it with every face state erased, so only its label shows. This page owns the press clock and ticks NextFrame only while a press or its rebound is live, so the sheet costs no frames while it sits there. Hold it to watch the lens flatten; a click closes the sheet once the rebound has played."}
+
+        StoryHeading{text: "A sheet that is sharper at its edge"}
+        StoryNote{text: "GaussGradientRoundedView: the blur level ramps from gradient_blur_edge at the rim to blur_level in the middle, over gradient_blur_edge_width of the sheet's size and shaped by gradient_blur_power, with the lens off. The four knobs are in the controls panel. They write to the sheet whether or not it is open, so open it first."}
+
+        // Declared at the end deliberately: a PopupNotification takes a Fill
+        // slot in the column it is written in, so anywhere earlier it would
+        // push the sections after it down the page.
+        blur_popup := PopupNotification{
+            align: Align{x: 0.5 y: 0.5}
+            content +: {
+                width: 430
+                height: 300
+                flow: Overlay
+                clip_x: false
+                clip_y: false
+
+                blur_sheet := GaussRoundedView{
+                    width: Fill
+                    height: Fill
+                    draw_bg +: {
+                        blur_level: 5.0
+                        lensing_effect: 0.0
+                        corner_radius: 18.0
+                        tint_color: #b8b8b8
+                        tint_alpha: 0.07
+                        surface_alpha: 0.82
+                        border_alpha: 0.36
+                        specular_strength: 0.10
+                        shadow_color: #000b
+                        shadow_radius: 44.0
+                        shadow_offset: vec2(0.0, 18.0)
+                    }
+                }
+
+                blur_sheet_content := View{
+                    width: Fill
+                    height: Fill
+                    padding: 22
+                    flow: Down
+                    spacing: 12
+
+                    Label{
+                        text: "Blur sheet"
+                        draw_text +: {color: #fff text_style +: {font_size: 18}}
+                    }
+                    blur_sheet_blur := SheetSlider{text: "Blurriness" min: 0.0 max: 6.0 default: 5.0}
+                    blur_sheet_lensing := SheetSlider{text: "Lensing Effect" min: 0.0 max: 100.0 default: 0.0}
+                    View{
+                        width: Fill
+                        height: Fill
+                    }
+                    View{
+                        width: Fill
+                        height: 72
+                        flow: Right
+                        align: Align{x: 1.0 y: 0.5}
+                        close_blur_popup := ButtonFlat{text: "Close"}
+                    }
+                }
+            }
+        }
+
+        lens_popup := PopupNotification{
+            align: Align{x: 0.5 y: 0.5}
+            content +: {
+                width: 430
+                height: 300
+                flow: Overlay
+                clip_x: false
+                clip_y: false
+
+                lens_sheet := LensedRoundedView{
+                    width: Fill
+                    height: Fill
+                    draw_bg +: {
+                        blur_level: 5.2
+                        lensing_effect: 0.75
+                        corner_radius: 18.0
+                        tint_color: #b8b8b8
+                        tint_alpha: 0.08
+                        surface_alpha: 0.76
+                        border_alpha: 0.56
+                        specular_strength: 0.14
+                        shadow_color: #000c
+                        shadow_radius: 46.0
+                        shadow_offset: vec2(0.0, 20.0)
+                        diffraction_strength: 2.4
+                    }
+                }
+
+                lens_sheet_content := View{
+                    width: Fill
+                    height: Fill
+                    padding: 22
+                    flow: Down
+                    spacing: 12
+
+                    Label{
+                        text: "Lens glass"
+                        draw_text +: {color: #fff text_style +: {font_size: 18}}
+                    }
+                    lens_sheet_blur := SheetSlider{text: "Blurriness" min: 0.0 max: 6.0 default: 5.2}
+                    lens_sheet_lensing := SheetSlider{text: "Lensing Effect" min: 0.0 max: 100.0 default: 75.0}
+                    View{
+                        width: Fill
+                        height: Fill
+                    }
+                    View{
+                        width: Fill
+                        height: 72
+                        flow: Right
+                        align: Align{x: 1.0 y: 0.5}
+                        close_lens_popup := ButtonFlat{text: "Close"}
+                    }
+                }
+            }
+        }
+
+        gradient_popup := PopupNotification{
+            align: Align{x: 0.5 y: 0.5}
+            content +: {
+                width: 520
+                height: 280
+                flow: Overlay
+                clip_x: false
+                clip_y: false
+
+                // Written out in full although the template's defaults are
+                // the same, so the knobs the controls panel drives can be
+                // read off the page.
+                gradient_sheet := GaussGradientRoundedView{
+                    width: Fill
+                    height: Fill
+                    draw_bg +: {
+                        blur_level: 4.35
+                        gradient_blur_edge: 1.45
+                        gradient_blur_edge_width: 0.20
+                        gradient_blur_power: 0.75
+                        corner_radius: 18.0
+                        tint_color: #b8b8b8
+                        tint_alpha: 0.045
+                        border_alpha: 0.44
+                        specular_strength: 0.08
+                        shadow_color: #000b
+                        shadow_radius: 44.0
+                        shadow_offset: vec2(0.0, 18.0)
+                    }
+                }
+
+                gradient_sheet_content := View{
+                    width: Fill
+                    height: Fill
+                    padding: 22
+                    flow: Down
+                    spacing: 12
+
+                    Label{
+                        text: "Gradient blur"
+                        draw_text +: {color: #fff text_style +: {font_size: 18}}
+                    }
+                    View{
+                        width: Fill
+                        height: Fill
+                    }
+                    View{
+                        width: Fill
+                        height: 72
+                        flow: Right
+                        align: Align{x: 1.0 y: 0.5}
+                        close_gradient_popup := ButtonFlat{text: "Close"}
+                    }
+                }
+            }
+        }
+
+        press_demo := mod.storybook.StoryPressLens{}
+    }
 }
 
-pub const STORIES: &[Story] = &[Story {
-    key: "containers/glasssurfaces/overview",
-    category: "Containers",
-    component: "GlassSurfaces",
-    also: &[
-        "LensSurface", "ButtonSurface", "ProminentButtonSurface", "ChipSurface",
-        "IconSurface", "InputSurface", "RadioSurface",
-        "LensButton", "LensButtonProminent", "LensChip", "ClearPanel",
-        "List", "ListRow", "CutButton", "ProminentButton", "IconButton", "Body", "ButtonLabel",
-        "LensedRoundedView", "GaussGradientRoundedView",
-    ],
-    name: "Surfaces",
-    dsl: "GlassSurfacesOverview",
-    added: "2026-02-12",
-    tags: &[],
-    doc: "# Glass surfaces
+/// The ripple clock's value for "no ripple": the shader treats any age this
+/// far past the ring's life as none.
+const AT_REST: f32 = 1000.0;
+
+/// How long the lens takes to flatten under a press, in seconds.
+const PRESS_SETTLE: f64 = 0.78;
+/// How long the strength the host sends takes to fade to nothing, in
+/// seconds. The shader draws the ring itself for about a third of a second
+/// of ripple_age; this envelope only scales it.
+const RIPPLE_LIFE: f64 = 1.05;
+/// When the clock stops ticking, a little after the ring has gone.
+const CLOCK_STOPS: f64 = 1.08;
+
+/// The press curve, in seconds since the press or the release started: the
+/// flatten the shader gets, the ring's strength, and whether the clock has to
+/// tick again.
+///
+/// Pressing, the lens eases flat over `PRESS_SETTLE` and the ring's strength
+/// fades over `RIPPLE_LIFE`, a little weaker the flatter the lens is. Released, the lens
+/// rebounds by however far it had flattened (`restore`), sent as a negative
+/// flatten, which the shader clamps to 0, so the lens is back at rest on the
+/// first frame of the release, under a second, softer ring.
+fn press_curve(age: f64, pressing: bool, restore: f32) -> (f32, f32, bool) {
+    let live = age < CLOCK_STOPS;
+    let fade = (1.0 - age / RIPPLE_LIFE).max(0.0) as f32;
+    if pressing {
+        let t = (age / PRESS_SETTLE).min(1.0) as f32;
+        let flatten = t * t * (3.0 - 2.0 * t);
+        (flatten, fade * (1.0 - flatten * 0.10), live)
+    } else {
+        (-restore.clamp(0.0, 1.0), fade * 0.62, live)
+    }
+}
+
+/// The pressable lens: a popup holding a lensed surface with a face-erased
+/// button over it. The button reports the press; this widget owns the clock
+/// that drives the surface's press response, and it ticks NextFrame only
+/// while a press or a rebound is live, so an idle sheet costs no frames.
+#[derive(Script, ScriptHook, Widget)]
+pub struct StoryPressLens {
+    #[deref]
+    view: View,
+    #[rust]
+    next_frame: NextFrame,
+    #[rust]
+    press_started_at: f64,
+    #[rust]
+    release_started_at: f64,
+    /// How flat the lens is, 0..1, kept so the rebound knows how far to go.
+    #[rust]
+    flatten: f32,
+    #[rust]
+    pressing: bool,
+    #[rust]
+    animating: bool,
+    /// A click closes the sheet, but only once the rebound has played.
+    #[rust]
+    pending_close: bool,
+}
+
+impl StoryPressLens {
+    fn set_response(&self, cx: &mut Cx, flatten: f32, age: f32, strength: f32) {
+        // A LensedRoundedView is a template over the one Rust widget, so it
+        // borrows as that widget.
+        if let Some(mut glass) = self
+            .view
+            .widget(cx, ids!(press_lens))
+            .borrow_mut::<GaussRoundedView>()
+        {
+            glass.set_press_response(cx, flatten, age, strength);
+        }
+    }
+
+    /// The lens at rest, with nothing of a previous press left on it.
+    fn rest(&mut self, cx: &mut Cx) {
+        self.pressing = false;
+        self.animating = false;
+        self.pending_close = false;
+        self.flatten = 0.0;
+        self.press_started_at = 0.0;
+        self.release_started_at = 0.0;
+        self.set_response(cx, 0.0, AT_REST, 0.0);
+    }
+
+    pub fn open_fresh(&mut self, cx: &mut Cx) {
+        self.rest(cx);
+        // Arm the window's capture before the open: the first sheet a fresh
+        // process opens otherwise misses the frame it is painted in and
+        // draws nothing until something else asks for a frame.
+        arm_gauss_capture(cx);
+        self.view.popup_notification(cx, ids!(press_lens_popup)).open(cx);
+    }
+
+    pub fn close(&mut self, cx: &mut Cx) {
+        self.rest(cx);
+        self.view.popup_notification(cx, ids!(press_lens_popup)).close(cx);
+    }
+
+    pub fn press(&mut self, cx: &mut Cx) {
+        self.pressing = true;
+        self.animating = true;
+        self.press_started_at = 0.0;
+        self.release_started_at = 0.0;
+        self.flatten = 0.0;
+        self.pending_close = false;
+        self.set_response(cx, 0.0, AT_REST, 0.0);
+        self.next_frame = cx.new_next_frame();
+    }
+
+    pub fn release(&mut self, cx: &mut Cx, close_after: bool) {
+        self.pressing = false;
+        self.animating = true;
+        self.release_started_at = 0.0;
+        self.pending_close |= close_after;
+        self.next_frame = cx.new_next_frame();
+    }
+
+    /// One frame of the press or the rebound. The clock starts on the first
+    /// tick after the press or the release rather than in the handler, so
+    /// the curve's age is measured in the frame's own time.
+    fn tick(&mut self, cx: &mut Cx, time: f64) {
+        if !self.animating {
+            return;
+        }
+        let started = if self.pressing {
+            &mut self.press_started_at
+        } else {
+            &mut self.release_started_at
+        };
+        if *started <= 0.0 {
+            *started = time;
+        }
+        let age = (time - *started).max(0.0);
+        let (flatten, strength, live) = press_curve(age, self.pressing, self.flatten);
+        if live {
+            if self.pressing {
+                self.flatten = flatten;
+            }
+            self.set_response(cx, flatten, age as f32, strength);
+            self.next_frame = cx.new_next_frame();
+            return;
+        }
+        self.animating = false;
+        if self.pressing {
+            self.flatten = 1.0;
+            self.set_response(cx, 1.0, AT_REST, 0.0);
+        } else {
+            self.flatten = 0.0;
+            self.set_response(cx, 0.0, AT_REST, 0.0);
+            if self.pending_close {
+                self.pending_close = false;
+                self.view.popup_notification(cx, ids!(press_lens_popup)).close(cx);
+            }
+        }
+    }
+}
+
+impl Widget for StoryPressLens {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        self.view.draw_walk(cx, scope, walk)
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.view.handle_event(cx, event, scope);
+        if let Some(frame) = self.next_frame.is_event(event) {
+            self.tick(cx, frame.time);
+        }
+    }
+}
+
+/// The three plain sheets: the button that opens each, the one that closes
+/// it, and the popup. The fourth, the pressable lens, lives inside
+/// `press_demo` and opens and closes through it, so that a close puts the
+/// press state to rest along with the popup.
+const SHEETS: &[(LiveId, LiveId, LiveId)] = &[
+    (live_id!(open_blur_sheet), live_id!(close_blur_popup), live_id!(blur_popup)),
+    (live_id!(open_lens_sheet), live_id!(close_lens_popup), live_id!(lens_popup)),
+    (live_id!(open_gradient_sheet), live_id!(close_gradient_popup), live_id!(gradient_popup)),
+];
+
+fn glass_popups_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
+    // Every lookup first. A `borrow_mut` on the press demo is held while it
+    // works, and a lookup from the root walks through the demo to reach
+    // anything declared after it, which would ask for the same cell twice.
+    let sheets: Vec<(ButtonRef, ButtonRef, PopupNotificationRef)> = SHEETS
+        .iter()
+        .map(|(open, close, popup)| {
+            (
+                root.button(cx, &[*open]),
+                root.button(cx, &[*close]),
+                root.popup_notification(cx, &[*popup]),
+            )
+        })
+        .collect();
+    let open_press = root.button(cx, ids!(open_press_lens));
+    let face = root.button(cx, ids!(press_lens_face));
+    let blur_blur = root.slider(cx, ids!(blur_sheet_blur));
+    let blur_lensing = root.slider(cx, ids!(blur_sheet_lensing));
+    let lens_blur = root.slider(cx, ids!(lens_sheet_blur));
+    let lens_lensing = root.slider(cx, ids!(lens_sheet_lensing));
+    let blur_sheet = root.widget(cx, ids!(blur_sheet));
+    let lens_sheet = root.widget(cx, ids!(lens_sheet));
+    let demo = root.story_press_lens(cx, ids!(press_demo));
+
+    // One sheet at a time: an open closes the other three first.
+    for (i, (open, _, popup)) in sheets.iter().enumerate() {
+        if open.clicked(actions) {
+            for (j, (_, _, other)) in sheets.iter().enumerate() {
+                if j != i {
+                    other.close(cx);
+                }
+            }
+            if let Some(mut demo) = demo.borrow_mut() {
+                demo.close(cx);
+            }
+            // See open_fresh: the capture has to be armed before the open.
+            arm_gauss_capture(cx);
+            popup.open(cx);
+        }
+    }
+    if open_press.clicked(actions) {
+        for (_, _, popup) in &sheets {
+            popup.close(cx);
+        }
+        if let Some(mut demo) = demo.borrow_mut() {
+            demo.open_fresh(cx);
+        }
+    }
+    for (_, close, popup) in &sheets {
+        if close.clicked(actions) {
+            popup.close(cx);
+        }
+    }
+
+    // The face reports the press; the demo owns the clock. A click is a
+    // release as well, and it is the one that closes the sheet afterwards.
+    if face.pressed(actions) {
+        if let Some(mut demo) = demo.borrow_mut() {
+            demo.press(cx);
+        }
+    }
+    if face.released(actions) {
+        if let Some(mut demo) = demo.borrow_mut() {
+            demo.release(cx, false);
+        }
+    }
+    if face.clicked(actions) {
+        if let Some(mut demo) = demo.borrow_mut() {
+            demo.release(cx, true);
+        }
+    }
+
+    // The sliders retune the surface that is already drawn. The lensing
+    // sliders run 0..100 for the finer steps; the setter takes 0..1.
+    if let Some(value) = blur_blur.slided(actions) {
+        if let Some(mut glass) = blur_sheet.borrow_mut::<GaussRoundedView>() {
+            glass.set_blurriness(cx, value as f32);
+        }
+    }
+    if let Some(value) = blur_lensing.slided(actions) {
+        if let Some(mut glass) = blur_sheet.borrow_mut::<GaussRoundedView>() {
+            glass.set_lensing_effect(cx, value as f32 / 100.0);
+        }
+    }
+    if let Some(value) = lens_blur.slided(actions) {
+        if let Some(mut glass) = lens_sheet.borrow_mut::<GaussRoundedView>() {
+            glass.set_blurriness(cx, value as f32);
+        }
+    }
+    if let Some(value) = lens_lensing.slided(actions) {
+        if let Some(mut glass) = lens_sheet.borrow_mut::<GaussRoundedView>() {
+            glass.set_lensing_effect(cx, value as f32 / 100.0);
+        }
+    }
+}
+
+pub const STORIES: &[Story] = &[
+    Story {
+        key: "containers/glasssurfaces/overview",
+        category: "Containers",
+        component: "GlassSurfaces",
+        also: &[
+            "LensSurface", "ButtonSurface", "ProminentButtonSurface", "ChipSurface",
+            "IconSurface", "InputSurface", "RadioSurface",
+            "LensButton", "LensButtonProminent", "LensChip", "ClearPanel",
+            "List", "ListRow", "CutButton", "ProminentButton", "IconButton", "Body", "ButtonLabel",
+            "LensedRoundedView", "GaussGradientRoundedView",
+        ],
+        name: "Surfaces",
+        dsl: "GlassSurfacesOverview",
+        added: "2026-02-12",
+        tags: &[],
+        doc: "# Glass surfaces
 
 The lensing backing the glass family is built on, and every preset of it the library ships.
 
@@ -129,46 +713,160 @@ The lensing backing the glass family is built on, and every preset of it the lib
 `ClearPanel` is the plain sheet, and `List` with `ListRow` are the family's own rows — note that these live under `mod.widgets.glass` and are *not* general-purpose list views, which is a mistake worth making only once.
 
 **They are shown here over a coloured ground on purpose.** Every one of them draws what is behind it, so on a flat background the whole family collapses to a faint outline. If the page you are putting one on has nothing worth refracting, this is not the family you want — see the glass controls page for the same comparison made side by side.",
-    subject: "",
-    feature: None,
-    controls: &[],
-    on_actions: None,
-}];
+        subject: "",
+        feature: None,
+        controls: &[],
+        on_actions: None,
+    },
+    Story {
+        key: "containers/glasssurfaces/popups",
+        category: "Containers",
+        component: "GlassSurfaces",
+        also: &[
+            "GaussRoundedView", "LensedRoundedView", "GaussGradientRoundedView",
+            "PopupNotification", "ButtonFlat", "Slider",
+        ],
+        name: "Popups",
+        dsl: "GlassSurfacesPopups",
+        added: "2026-02-12",
+        tags: &["ported"],
+        doc: "# Glass popups
+
+Four sheets that open over the page, each backed by one member of the glass family, and each a window-centred `PopupNotification` with the glass as its whole background and the content laid over it in an `Overlay` flow.
+
+## They bend the page, not a backdrop
+
+A `GaussRoundedView` samples the scene behind itself. Inside an overlay it does not open a second one: a surface that finds itself already drawing in an overlay binds the window's capture and draws inline, so a sheet that opens over the page bends whatever is under it — the coloured stage on this one included — rather than a flat fallback. That is what the stage under the launcher row is for: with nothing worth bending underneath, every one of these reads as a grey rectangle with a shadow.
+
+## The four sheets
+
+- **Blur sheet** — the raw `GaussRoundedView`, frosted with the lens off (`lensing_effect: 0`).
+- **Lens sheet** — `LensedRoundedView`, the same material with the lens at 0.75, so the rim bends what is under it.
+- **Pressable lens** — a `LensedRoundedView` with a face-erased `ButtonFlat` laid over it, so a lens answers a press.
+- **Gradient sheet** — `GaussGradientRoundedView`, whose blur level ramps from the rim to the middle.
+
+Every template of the family is a DSL preset over the one Rust widget, so any of them borrows as a `GaussRoundedView`. That is how the sliders on the first two sheets retune a surface that is already drawn: `set_blurriness` (0..6) and `set_lensing_effect` (0..1) write uniforms on the retained draw call, and the change lands on the frame after, with no rebuild.
+
+## The press
+
+The shader never reads the frame clock. A press is three uniforms — `press_flatten`, `ripple_age`, `ripple_strength` — pushed by the host through `set_press_response` on a `NextFrame` chain the host runs only while a press or a rebound is live, so an idle sheet costs no frames. A shader that read `draw_pass.time` for this instead would pin the window at display rate for as long as the glass was visible. Here the host is a small story widget, `StoryPressLens`; the packaged version of the same idea, with the press built in, is `GlassButton` on the glass controls page under inputs.
+
+Two things about the numbers, because they are easy to overtune. The flatten clamps to 0..1 inside the shader, so the release, sent as a negative flatten, puts the lens straight back at rest instead of bulging past it; only the softer ring plays out. And a full press cuts the bend by about fifteen per cent and lifts the rim a little, which is a nudge, not a collapse. The ring lives about a third of a second.
+
+## The gradient sheet's knobs
+
+`blur_level` is the blur in the middle of the sheet and `gradient_blur_edge` the blur at its rim. `gradient_blur_edge_width` is how far in from the rim, as a fraction of the sheet's size, the ramp between them runs, and `gradient_blur_power` shapes that ramp — below 1 the sharp band hugs the rim, above 1 it reaches further in. The controls panel writes them to the sheet whether or not it is open, so open it first to watch.
+
+Every other knob of the material — tint, seal, rim, shadow — is the family's, and the glass panel page under containers explains each of them.",
+        subject: "",
+        feature: None,
+        controls: &[
+            // The two blur steps are 0.001 rather than 0.05. The panel's
+            // slider floors onto its step grid, and 4.35 / 0.05 comes out a
+            // hair under 87 in floating point, so at 0.05 the panel showed
+            // 4.30 and would have written it on the first touch. The test
+            // below pushes every default through that round trip.
+            Control { label: "Blur level", target: "gradient_sheet", kind: ControlKind::Number { prop: "draw_bg.blur_level",               min: 0.,   max: 6.,  step: 0.001, default: 4.35 } },
+            Control { label: "Edge blur",  target: "gradient_sheet", kind: ControlKind::Number { prop: "draw_bg.gradient_blur_edge",       min: 0.,   max: 6.,  step: 0.001, default: 1.45 } },
+            Control { label: "Edge width", target: "gradient_sheet", kind: ControlKind::Number { prop: "draw_bg.gradient_blur_edge_width", min: 0.01, max: 0.5, step: 0.01, default: 0.20 } },
+            Control { label: "Edge curve", target: "gradient_sheet", kind: ControlKind::Number { prop: "draw_bg.gradient_blur_power",      min: 0.1,  max: 3.,  step: 0.05, default: 0.75 } },
+        ],
+        on_actions: Some(glass_popups_actions),
+    },
+];
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The page is built from the DSL, which the Rust compiler never reads,
-    /// and a shader that fails to compile is not an error anywhere — the
-    /// draw is skipped and the widget paints nothing. All three bands moved
-    /// onto a shared stage that did not exist before, and the third one is
-    /// a ROW where the stage's slot flows Down, so the flow override is
-    /// checked as well as the build.
-    #[test]
-    fn the_page_builds_and_the_row_band_still_flows_right() {
+    /// A `Cx` with this crate's theme, the shared page templates and this
+    /// file's own stories registered, and nothing else: a failure here is
+    /// this page's, not some other story's.
+    fn shell() -> Cx {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(|vm| {
             crate::theme::widgets_script_mod(vm);
             crate::shell::script_mod(vm);
             self::script_mod(vm);
+            // Registering a template compiles nothing; making an instance
+            // out of one does. Clearing here keeps any other module's
+            // complaint out of these tests' answers.
             let _ = makepad_platform::shader_error::take();
         });
-        let story = &STORIES[0];
-        let page = cx.with_vm(|vm| {
+        cx
+    }
+
+    fn build(cx: &mut Cx, dsl: &str) -> WidgetRef {
+        cx.with_vm(|vm| {
             let stories = vm.module(id!(stories));
-            let value = vm.bx.heap.value(stories, LiveId::from_str(story.dsl).into(), NoTrap);
-            assert!(value.as_object().is_some(), "no template {}", story.dsl);
+            let value = vm.bx.heap.value(stories, LiveId::from_str(dsl).into(), NoTrap);
+            assert!(value.as_object().is_some(), "no template {dsl}");
             WidgetRef::script_from_value(vm, value)
-        });
-        assert!(!page.is_empty(), "{} built no widget", story.key);
-        assert_eq!(
-            makepad_platform::shader_error::take(),
-            None,
-            "a draw shader failed to compile"
-        );
-        // The last band is one row of four. The stage hands out a slot that
-        // flows Down, so a merge that silently failed would stack them.
+        })
+    }
+
+    /// Both pages are built from the DSL, which the Rust compiler never
+    /// reads, and a shader that fails to compile is not an error anywhere —
+    /// the draw is skipped and the widget paints nothing. Building each and
+    /// asking for every id the controls panel writes to is what turns either
+    /// mistake into a failed build. A Number control whose default lies
+    /// outside its own range would sit on a slider it cannot reach, and
+    /// one whose default is not on its step grid in floating point comes
+    /// back a step low: the panel's slider floors, and 4.35 at step 0.05
+    /// read 4.30 on the panel.
+    #[test]
+    fn every_page_builds_and_its_targets_can_be_reached() {
+        let mut cx = shell();
+        for story in STORIES {
+            let page = build(&mut cx, story.dsl);
+            assert!(!page.is_empty(), "{} built no widget", story.key);
+            assert_eq!(
+                makepad_platform::shader_error::take(),
+                None,
+                "{}: a draw shader failed to compile",
+                story.key
+            );
+            for target in std::iter::once(story.subject)
+                .chain(story.controls.iter().map(|c| c.target))
+                .filter(|t| !t.is_empty())
+            {
+                assert!(
+                    !page.widget(&cx, &[LiveId::from_str(target)]).is_empty(),
+                    "{}: no widget at {}",
+                    story.key,
+                    target
+                );
+            }
+            for control in story.controls {
+                if let ControlKind::Number { min, max, step, default, .. } = control.kind {
+                    assert!(
+                        (min..=max).contains(&default),
+                        "{}: {} defaults to {default}, outside {min}..{max}",
+                        story.key,
+                        control.label
+                    );
+                    // The panel hands the default to a Slider, whose Linear
+                    // taper floors onto the step grid on the way back out.
+                    let travel = taper_to_travel(SliderTaper::Linear, default, min, max, default, step);
+                    let shown = taper_to_value(SliderTaper::Linear, travel, min, max, default, step);
+                    assert!(
+                        (shown - default).abs() < 1e-9,
+                        "{}: {} defaults to {default} but the panel's slider would show {shown}",
+                        story.key,
+                        control.label
+                    );
+                }
+            }
+        }
+    }
+
+    /// The overview's last band is one row of four. The stage hands out a
+    /// slot that flows Down, so a merge that silently failed would stack
+    /// them.
+    #[test]
+    fn the_overview_row_band_still_flows_right() {
+        let mut cx = shell();
+        let page = build(&mut cx, "GlassSurfacesOverview");
         let stage = page.widget(&cx, &[live_id!(rounded)]);
         assert!(!stage.is_empty(), "the last band is named on the page");
         let slot = stage
@@ -186,5 +884,70 @@ mod tests {
             ),
             "the row band overrode the stage's Down flow"
         );
+    }
+
+    /// Every id the popups page's handler reaches, by the same single-segment
+    /// subtree search the handler uses. A PopupNotification derefs to a
+    /// View, so the search reaches inside a closed sheet as well; and the
+    /// press demo has to be its own widget, or the handler's `borrow_mut`
+    /// finds nothing and the lens never moves.
+    #[test]
+    fn the_popups_page_names_every_part_the_handler_reaches() {
+        let mut cx = shell();
+        let page = build(&mut cx, "GlassSurfacesPopups");
+        for id in [
+            "open_blur_sheet", "open_lens_sheet", "open_press_lens", "open_gradient_sheet",
+            "blur_popup", "blur_sheet", "blur_sheet_blur", "blur_sheet_lensing", "close_blur_popup",
+            "lens_popup", "lens_sheet", "lens_sheet_blur", "lens_sheet_lensing", "close_lens_popup",
+            "press_demo", "press_lens_popup", "press_lens", "press_lens_face",
+            "gradient_popup", "gradient_sheet", "close_gradient_popup",
+        ] {
+            assert!(
+                !page.widget(&cx, &[LiveId::from_str(id)]).is_empty(),
+                "no widget at {id}"
+            );
+        }
+        let demo = page.widget(&cx, &[live_id!(press_demo)]);
+        assert!(
+            demo.borrow::<StoryPressLens>().is_some(),
+            "press_demo does not borrow as a StoryPressLens"
+        );
+    }
+
+    /// The curve is pure so it can be read without a frame clock: a press
+    /// starts flat-less with the ring at full strength, settles flat by
+    /// `PRESS_SETTLE`, and stops the clock after `CLOCK_STOPS`; a release
+    /// rebounds by what was pressed under a softer ring, and stops the same
+    /// way.
+    #[test]
+    fn the_press_curve_settles_and_the_clock_stops() {
+        let (flatten, strength, live) = press_curve(0.0, true, 0.0);
+        assert_eq!(flatten, 0.0);
+        assert_eq!(strength, 1.0);
+        assert!(live);
+
+        let (flatten, _, live) = press_curve(PRESS_SETTLE, true, 0.0);
+        assert!((flatten - 1.0).abs() < 1e-6, "not flat by {PRESS_SETTLE} s: {flatten}");
+        assert!(live, "the ring outlives the settle");
+
+        let (flatten, strength, live) = press_curve(0.5, true, 0.0);
+        assert!(flatten > 0.0 && flatten < 1.0, "half way it is part way: {flatten}");
+        assert!(strength > 0.0 && strength < 1.0, "the ring is fading: {strength}");
+        assert!(live);
+
+        assert!(press_curve(CLOCK_STOPS - 0.01, true, 0.0).2, "still ticking just before the stop");
+        let (flatten, strength, live) = press_curve(CLOCK_STOPS, true, 0.0);
+        assert!(!live, "the clock keeps running after the ring is gone");
+        assert_eq!(flatten, 1.0);
+        assert_eq!(strength, 0.0);
+
+        let (flatten, strength, live) = press_curve(0.0, false, 0.7);
+        assert!((flatten + 0.7).abs() < 1e-6, "the rebound is the press undone: {flatten}");
+        assert!((strength - 0.62).abs() < 1e-6, "the release ring is softer: {strength}");
+        assert!(live);
+        assert!(!press_curve(CLOCK_STOPS, false, 0.7).2, "the rebound stops the clock too");
+
+        // A restore past the clamp cannot send the lens further than flat.
+        assert_eq!(press_curve(0.0, false, 3.0).0, -1.0);
     }
 }
