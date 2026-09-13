@@ -360,6 +360,16 @@ pub enum CxOsOp {
     },
     HideClipboardActions,
     CopyToClipboard(String),
+    ShareText(String),
+    ShowNotification {
+        title: String,
+        body: String,
+    },
+    DownloadFile {
+        call_id: i64,
+        url: String,
+        dest: String,
+    },
     SetPrimarySelection(String),
     ShowSelectionHandles {
         start: Vec2d,
@@ -527,6 +537,9 @@ impl std::fmt::Debug for CxOsOp {
             Self::ShowClipboardActions { .. } => write!(f, "ShowClipboardActions"),
             Self::HideClipboardActions => write!(f, "HideClipboardActions"),
             Self::CopyToClipboard(..) => write!(f, "CopyToClipboard"),
+            Self::ShareText(..) => write!(f, "ShareText"),
+            Self::ShowNotification { .. } => write!(f, "ShowNotification"),
+            Self::DownloadFile { .. } => write!(f, "DownloadFile"),
             Self::SetPrimarySelection(..) => write!(f, "SetPrimarySelection"),
             Self::ShowSelectionHandles { .. } => write!(f, "ShowSelectionHandles"),
             Self::UpdateSelectionHandles { .. } => write!(f, "UpdateSelectionHandles"),
@@ -1273,6 +1286,13 @@ impl Cx {
     pub fn text_ime_was_dismissed(&mut self) {
         self.publish_hosted_ime(crate::ime::HostedImeState::default());
         self.keyboard.set_text_ime_dismissed();
+        // A focused TextInput re-pushes ShowTextIME on every draw, so a show op
+        // queued by a frame drawn just before this dismissal landed can still be
+        // in platform_ops. If it drains after the backend forgets its last-shown
+        // config (e.g. Android's ResizeTextIME-closed clearing last_ime_config),
+        // it re-opens the keyboard the user just closed. Drop the stale shows.
+        self.platform_ops
+            .retain(|op| !matches!(op, CxOsOp::ShowTextIME(..)));
         self.platform_ops.push_back(CxOsOp::HideTextIME);
     }
 
@@ -1372,6 +1392,37 @@ impl Cx {
     pub fn copy_to_clipboard(&mut self, content: &str) {
         self.platform_ops
             .push_back(CxOsOp::CopyToClipboard(content.to_owned()));
+    }
+
+    /// Open the OS share sheet (Android `ACTION_SEND` chooser) with `content`.
+    /// No-op on platforms whose backend doesn't handle `CxOsOp::ShareText`.
+    pub fn share_text(&mut self, content: &str) {
+        self.platform_ops
+            .push_back(CxOsOp::ShareText(content.to_owned()));
+    }
+
+    /// Post a system notification (Android `NotificationManager`; tapping it
+    /// re-opens the app). No-op on platforms whose backend doesn't handle
+    /// `CxOsOp::ShowNotification`.
+    pub fn show_notification(&mut self, title: &str, body: &str) {
+        self.platform_ops.push_back(CxOsOp::ShowNotification {
+            title: title.to_owned(),
+            body: body.to_owned(),
+        });
+    }
+
+    /// Stream `url` to the file at `dest` (an absolute path the app may write
+    /// to) on a native background thread, in constant memory. Progress arrives
+    /// as [`crate::event::AndroidDownloadProgress`] actions and the outcome as
+    /// one [`crate::event::AndroidDownloadComplete`], both carrying `call_id`
+    /// so the app can correlate concurrent downloads. No-op on platforms whose
+    /// backend doesn't handle `CxOsOp::DownloadFile`.
+    pub fn download_file(&mut self, call_id: i64, url: &str, dest: &str) {
+        self.platform_ops.push_back(CxOsOp::DownloadFile {
+            call_id,
+            url: url.to_owned(),
+            dest: dest.to_owned(),
+        });
     }
 
     /// Sets the primary selection (Linux middle-click paste).
