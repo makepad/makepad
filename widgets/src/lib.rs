@@ -372,7 +372,7 @@ pub use crate::{
 
     view::*,
     widget::{
-        CreateAt, DrawStateWrap, DrawStep, DrawStepApi, OptionWidgetRefExt, Widget, WidgetAction,
+        CreateAt, DrawStateWrap, DrawStep, DrawStepApi, OptionWidgetRefExt, SnapshotPart, Widget, WidgetAction,
         WidgetActionCast, WidgetActionCxExt, WidgetActionOptionApi, WidgetActionTrait,
         WidgetActionsApi, WidgetFactory, WidgetNode, WidgetRef, WidgetRegister, WidgetRegistry,
         WidgetSet, WidgetSetIterator, WidgetUid,
