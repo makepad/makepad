@@ -1299,6 +1299,10 @@ fn walk_pick(
     if !widget.visible() {
         return;
     }
+    // The inspector's own panel is never a pick, wherever an app has put it.
+    if widget.widget_type_id() == Some(std::any::TypeId::of::<Tweaker>()) {
+        return;
+    }
     // Exploded view: the cursor is on ONE plane. A widget nested deeper than
     // that plane sits on another sheet, however its 2D rect overlaps the
     // un-projected point — that is what makes a covered parent selectable.
@@ -5384,6 +5388,53 @@ fn readable_paths(cx: &Cx) -> Vec<(u64, String)> {
     rows.iter().map(|row| row.uid).zip(full).collect()
 }
 
+/// The app's rows without one subtree: the inspector's own. Its panel is in
+/// the widget tree so a remote /snap can drive its fields, but a Tree tab
+/// that listed the panel would be listing itself. `flat_tree` is depth-first,
+/// so the subtree is the root's row and every row after it that sits deeper,
+/// up to the next row that does not; `has_children` is re-read from what is
+/// left, since the panel's parent may have had nothing else in it.
+///
+/// The root is found by its own uid, or failing that as the parent of a row
+/// with `inside`'s uid: the inspector reads its tree while it is drawing or
+/// handling an event, when it is itself borrowed and `flat_tree` can only
+/// call it uid 0 — but the panel it built is not, and sits right under it.
+/// 0 is never a key.
+fn rows_without_subtree(
+    rows: Vec<crate::widget_tree::FlatTreeRow>,
+    root: u64,
+    inside: u64,
+) -> Vec<crate::widget_tree::FlatTreeRow> {
+    let by_root = (root != 0).then(|| rows.iter().position(|row| row.uid == root)).flatten();
+    let by_child = || {
+        if inside == 0 {
+            return None;
+        }
+        let child = rows.iter().position(|row| row.uid == inside)?;
+        let depth = rows[child].depth;
+        rows[..child].iter().rposition(|row| row.depth + 1 == depth)
+    };
+    let Some(at) = by_root.or_else(by_child) else {
+        return rows;
+    };
+    let depth = rows[at].depth;
+    let end = rows[at + 1..]
+        .iter()
+        .position(|row| row.depth <= depth)
+        .map_or(rows.len(), |k| at + 1 + k);
+    let mut out: Vec<_> = rows
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| *i < at || *i >= end)
+        .map(|(_, row)| row)
+        .collect();
+    for i in 0..out.len() {
+        let next_depth = out.get(i + 1).map(|next| next.depth);
+        out[i].has_children = next_depth == Some(out[i].depth + 1);
+    }
+    out
+}
+
 /// The name the widget tree calls a widget, or empty when it has none worth
 /// the word: `-` for anonymous, and a bare index for a list item.
 fn tree_name_of(cx: &Cx, uid: u64) -> String {
@@ -9448,6 +9499,14 @@ impl Tweaker {
         self.redraw_sidebar(cx);
     }
 
+    /// The panel's own uid, 0 until it is built. The Tree tab reads the
+    /// tree from inside this widget's draw, where the widget itself is
+    /// borrowed and reads as uid 0; the panel under it is what identifies
+    /// the subtree to leave out.
+    fn sidebar_uid(&self) -> u64 {
+        self.sidebar.as_ref().map_or(0, |sidebar| sidebar.widget_uid().0)
+    }
+
     /// The lock and the view on it, as `ViewState` reads them.
     fn view_state(&self) -> ViewState {
         ViewState {
@@ -10314,7 +10373,12 @@ impl Tweaker {
         let Some(sel) = session().lock().unwrap().pinned.clone() else {
             return;
         };
-        let rows = cx.widget_tree().flat_tree(cx);
+        // The same hierarchy the Tree tab shows: the panel is not in it.
+        let rows = rows_without_subtree(
+            cx.widget_tree().flat_tree(cx),
+            self.uid.0,
+            self.sidebar_uid(),
+        );
         let Some(at) = rows.iter().position(|row| row.uid == sel.uid) else {
             return;
         };
@@ -11643,7 +11707,11 @@ impl Tweaker {
             // Tree tab data: refresh on generation change.
             if tab == PanelTab::Tree && self.tree_rows_gen != self.rows_gen.wrapping_add(1)
             {
-                self.tree_rows = cx.widget_tree().flat_tree(cx);
+                self.tree_rows = rows_without_subtree(
+                    cx.widget_tree().flat_tree(cx),
+                    self.uid.0,
+                    self.sidebar_uid(),
+                );
                 self.tree_rows_gen = self.rows_gen.wrapping_add(1);
                 // Parent links from the depth-first order: the nearest
                 // earlier row one level up.
@@ -16616,5 +16684,55 @@ line two");
         };
         assert_eq!(target_presence(unread), TargetPresence::Shown);
         assert_eq!(target_presence(TargetSighting { in_tree: false, ..unread }), TargetPresence::Gone);
+    }
+
+    #[test]
+    fn the_tree_leaves_out_the_inspector_and_what_is_inside_it() {
+        fn row(uid: u64, depth: u32, has_children: bool) -> crate::widget_tree::FlatTreeRow {
+            crate::widget_tree::FlatTreeRow {
+                uid,
+                name: format!("w{uid}"),
+                ty: "View".to_string(),
+                depth,
+                has_children,
+            }
+        }
+        let uids = |rows: &[crate::widget_tree::FlatTreeRow]| {
+            rows.iter().map(|row| row.uid).collect::<Vec<_>>()
+        };
+        // window(1) > body(2) > label(3); window > tweaker(4) > sidebar(5) >
+        // tab(6); window > after(7) > deep(8): the branch after the panel
+        // keeps its own depth-2 row.
+        let rows = vec![
+            row(1, 0, true),
+            row(2, 1, true),
+            row(3, 2, false),
+            row(4, 1, true),
+            row(5, 2, true),
+            row(6, 3, false),
+            row(7, 1, true),
+            row(8, 2, false),
+        ];
+        let out = rows_without_subtree(rows.clone(), 4, 5);
+        assert_eq!(uids(&out), vec![1, 2, 3, 7, 8]);
+        assert_eq!(
+            out.iter().map(|row| row.has_children).collect::<Vec<_>>(),
+            vec![true, true, false, true, false]
+        );
+        // The inspector borrowed while it reads: its own row says uid 0, and
+        // the panel under it (5) is what finds it.
+        let mut borrowed = rows.clone();
+        borrowed[3].uid = 0;
+        assert_eq!(uids(&rows_without_subtree(borrowed, 4, 5)), vec![1, 2, 3, 7, 8]);
+        // The panel as its parent's only child: the parent is a leaf now.
+        let out = rows_without_subtree(vec![row(1, 0, true), row(4, 1, true), row(5, 2, false)], 4, 5);
+        assert_eq!(uids(&out), vec![1]);
+        assert!(!out[0].has_children);
+        // Not in the tree yet (the panel is built on first open): untouched.
+        assert_eq!(uids(&rows_without_subtree(rows.clone(), 99, 98)), uids(&rows));
+        // 0 is never a key: a borrowed root row and no panel take nothing out.
+        let mut unread = rows.clone();
+        unread[0].uid = 0;
+        assert_eq!(uids(&rows_without_subtree(unread.clone(), 0, 0)), uids(&unread));
     }
 }
