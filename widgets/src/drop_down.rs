@@ -932,6 +932,17 @@ impl Widget for DropDown {
                 if !menu.menu_contains_pos(cx, e.abs) {
                     self.set_closed(cx);
                     self.animator_play(cx, ids!(hover.off));
+                    // The press that closes the list is the list's. What was
+                    // walked before this saw the lock and nothing else; what
+                    // is walked after would see no lock, now it is released,
+                    // and take the press as its own: a tab beside the page
+                    // switched as the list closed. Marked on the event as it
+                    // came in, which `transform_popup_event` copied.
+                    if let Event::MouseDown(e) = event {
+                        if e.handled.get().is_empty() {
+                            e.handled.set(self.draw_bg.area());
+                        }
+                    }
                     return;
                 }
             }
@@ -1138,6 +1149,155 @@ impl DropDownRef {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod outside_press_tests {
+    use super::*;
+    use crate::button::ButtonAction;
+    use crate::combo_box::ComboBoxWidgetRefExt;
+    use crate::makepad_draw::cx_draw::CxDraw;
+    use std::cell::Cell;
+
+    const SIZE: DVec2 = DVec2 { x: 800.0, y: 600.0 };
+
+    struct Target {
+        pass: DrawPass,
+        draw_list: DrawList2d,
+        overlay: Overlay,
+    }
+
+    impl Target {
+        fn new(cx: &mut Cx) -> Self {
+            let overlay = cx.with_vm(|vm| Overlay::script_new(vm));
+            Target { pass: DrawPass::new(cx), draw_list: DrawList2d::new(cx), overlay }
+        }
+
+        fn draw(&mut self, cx: &mut Cx, root: &WidgetRef) {
+            self.pass.set_size(cx, SIZE);
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&self.pass, None);
+            self.draw_list.begin_always(&mut cx2d);
+            self.overlay.begin(&mut cx2d);
+            cx2d.begin_root_turtle(SIZE, Layout::flow_down());
+            root.draw_all(&mut cx2d, &mut Scope::empty());
+            cx2d.end_pass_sized_turtle();
+            self.overlay.end(&mut cx2d);
+            self.draw_list.end(&mut cx2d);
+            cx2d.end_pass(&self.pass);
+        }
+    }
+
+    fn press(abs: DVec2) -> Event {
+        Event::MouseDown(MouseDownEvent {
+            abs,
+            button: MouseButton::PRIMARY,
+            window_id: WindowId(1, 1),
+            modifiers: KeyModifiers::default(),
+            handled: Cell::new(Area::Empty),
+            time: 0.0,
+        })
+    }
+
+    fn release(abs: DVec2) -> Event {
+        Event::MouseUp(MouseUpEvent {
+            abs,
+            button: MouseButton::PRIMARY,
+            window_id: WindowId(1, 1),
+            modifiers: KeyModifiers::default(),
+            time: 0.0,
+        })
+    }
+
+    /// A press and its release through the whole page, in tree order, and
+    /// whether the button heard the press.
+    fn click(cx: &mut Cx, root: &WidgetRef, at: DVec2, button: &WidgetRef) -> bool {
+        let mut heard = false;
+        for event in [press(at), release(at)] {
+            let actions = cx.capture_actions(|cx| root.handle_event(cx, &event, &mut Scope::empty()));
+            heard |= actions
+                .iter()
+                .filter_map(|action| action.as_widget_action())
+                .any(|action| {
+                    action.widget_uid == button.widget_uid()
+                        && matches!(action.cast::<ButtonAction>(), ButtonAction::Pressed(_))
+                });
+        }
+        heard
+    }
+
+    fn middle(cx: &Cx, widget: &WidgetRef) -> DVec2 {
+        let rect = widget.area().rect(cx);
+        assert!(rect.size.x > 0.0, "not drawn");
+        rect.pos + rect.size * 0.5
+    }
+
+    /// An open list, a drop-down's or a combo box's, closes on a press
+    /// outside it, and the press goes no further: a button walked after the
+    /// list does not hear it, though the list's lock is gone by the time
+    /// the button is walked. The next press reaches the button.
+    ///
+    /// Each list has a button of its own, and each opens from Rust: with no
+    /// event loop here to end a capture on release, a widget that once took
+    /// a press would take every later one.
+    #[test]
+    fn a_press_outside_an_open_list_closes_it_and_reaches_nothing_after_it() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        cx.with_vm(crate::script_mod);
+        let root = cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    spacing: 20.
+                    // The lists before the buttons, as a page is walked
+                    // before the side panel beside it.
+                    event_order: EventOrder.Down
+                    pick := DropDown{width: 150.}
+                    combo := ComboBox{width: 150.}
+                    after_pick := Button{width: 150. height: 40. margin: Inset{top: 200.} text: "after"}
+                    after_combo := Button{width: 150. height: 40. text: "after"}
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        let labels = || vec!["One".to_string(), "Two".to_string(), "Three".to_string()];
+        root.drop_down(&cx, ids!(pick)).set_labels(&mut cx, labels());
+        let combo = root.widget(&cx, ids!(combo)).as_combo_box();
+        combo.set_labels(&mut cx, labels());
+        let mut target = Target::new(&mut cx);
+        target.draw(&mut cx, &root);
+        let pick = root.widget(&cx, ids!(pick));
+        let is_active = |pick: &WidgetRef| pick.borrow::<DropDown>().unwrap().is_active;
+
+        let after = root.widget(&cx, ids!(after_pick));
+        let on_after = middle(&cx, &after);
+        pick.borrow_mut::<DropDown>().unwrap().set_active(&mut cx);
+        target.draw(&mut cx, &root);
+        assert!(is_active(&pick));
+        assert!(!click(&mut cx, &root, on_after, &after), "the button heard the press that closed the drop-down's list");
+        assert!(!is_active(&pick), "the press outside closed the drop-down's list");
+        assert_eq!(cx.sweep_lock_area(), None);
+        target.draw(&mut cx, &root);
+        assert!(click(&mut cx, &root, on_after, &after), "with the list closed the button hears its press");
+
+        let after = root.widget(&cx, ids!(after_combo));
+        let on_after = middle(&cx, &after);
+        combo.open_list(&mut cx);
+        target.draw(&mut cx, &root);
+        assert!(combo.is_open());
+        assert!(!click(&mut cx, &root, on_after, &after), "the button heard the press that closed the combo box's list");
+        assert!(!combo.is_open(), "the press outside closed the combo box's list");
+        assert_eq!(cx.sweep_lock_area(), None);
+        target.draw(&mut cx, &root);
+        assert!(click(&mut cx, &root, on_after, &after), "with the list closed the button hears its press");
     }
 }
 
