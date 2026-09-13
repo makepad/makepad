@@ -1279,6 +1279,44 @@ script_mod! {
         // atlas and adding it again would double-light every facade —
         // while dynamic instances (dl_apply = 1) sum everything.
         dl_split: uniform(0.0)
+        // ---- per-frame and per-draw-item values, off the vertex stream ----
+        // These were `#[live]` instance floats until the D3D11 vertex stage
+        // ran out of room: `vs_5_0` takes 32 input registers, and this family
+        // spent 35 of them, so the whole shader failed to compile and every
+        // model vanished. Each value below is CONSTANT for one draw item —
+        // the sun, the fog and the debug switches for a whole frame, the
+        // material and detail lanes for one layer whose geometry and textures
+        // are bound in the same breath — so a uniform says exactly what they
+        // are. A uniform difference opens a new draw item
+        // (`find_appendable_drawcall`), which is why anything that genuinely
+        // varies per instance stayed on the stream.
+        fog_density: uniform(0.0)
+        depth_clip: uniform(1.0)
+        // 1.0 = show the baked light alone (SANDBOX_LM_DEBUG=1).
+        lm_debug: uniform(0.0)
+        // 1.0 = show baked AO alone, contrast-stretched (SANDBOX_AO_DEBUG=1).
+        // No Rust writer: a host switches it on through this script hook.
+        ao_debug: uniform(0.0)
+        // 1.0 when this pack has a baked AO atlas bound. Follows the pack and
+        // the LOD, which are what pick the geometry, so it cannot differ
+        // between two instances of one draw item.
+        ao_enabled: uniform(0.0)
+        // Detail overlay UV scale. Zero disables the overlay.
+        detail_st: uniform(vec2(0.0, 0.0))
+        light_dir: uniform(vec3(0.35, 0.8, 0.45))
+        fog_color: uniform(vec3(0.75, 0.87, 0.96))
+        // Sun terms, written every frame from one [`crate::sun::SunLight`].
+        sun_color: uniform(vec3(0.72, 0.72, 0.72))
+        sun_sky: uniform(vec3(0.28, 0.28, 0.28))
+        sun_ground: uniform(vec3(0.28, 0.28, 0.28))
+        // Fur recipe for this LAYER (length, density, cell scale, seed). The
+        // shell FRACTION is per instance and stays on the stream as
+        // `fur_layer`, since one submit walks a layer's shells.
+        fur: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        // Morph source dimensions for this model LOD (width, height, vertex
+        // count, target count) — it selects the same `morph_map` texture the
+        // draw item binds. The per-instance weights stay on the stream.
+        morph_ctl: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         dl_pos0: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         dl_col0: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         dl_pos1: uniform(vec4(0.0, 0.0, 0.0, 0.0))
@@ -1313,16 +1351,18 @@ script_mod! {
         // uniforms, one receive path for every family). v_csm = (true world
         // position, N.L) for the pixel-stage compare.
         csm_map: texture_2d(float)
-        // Q3 / Unreal detail overlay. Last texture so CSM stays slot 4.
+        // Detail overlay. Last texture so CSM stays slot 4.
         detail_map: texture_2d(float)
-        // `detail_st` (the overlay's uv scale) and `prelit` (1 = COLOR_0 is a
-        // baked lightmap, so the analytic sun must not multiply it again) are
-        // the Rust struct's own #[live] instance fields — `script_shader`
-        // already declares them. Re-declaring them here as `instance(...)`
-        // applies a shader-descriptor OBJECT to a typed field, which fails
-        // the apply: it is what logged the two `type mismatch for property`
-        // errors every app on this shader printed at boot. See DrawHudShape
-        // below for the same rule stated once.
+        // `prelit` (1 = COLOR_0 is a baked lightmap, so the analytic sun must
+        // not multiply it again) is the Rust struct's own #[live] instance
+        // field — `script_shader` already declares it. Re-declaring it here
+        // as `instance(...)` applies a shader-descriptor OBJECT to a typed
+        // field, which fails the apply: it is what logged the two `type
+        // mismatch for property` errors every app on this shader printed at
+        // boot. See DrawHudShape below for the same rule stated once.
+        // (`detail_st` was an instance field under that same rule until it
+        // became a uniform above; the rule is why it is declared as one
+        // there and no longer listed in the Rust struct.)
         // ---- per-element lookup (CAD hosts) — slot 6, OFF by default ----
         // A viewer that hides, isolates or explodes PARTS of one merged
         // static model, every frame, without ever re-uploading its
@@ -2070,6 +2110,30 @@ script_mod! {
         // dynamic lights already use.
         eye: uniform(vec4(0.0, 0.0, 0.0, 0.0))
 
+        // ---- this layer's material, off the vertex stream ----
+        // Set once per layer by `ModelDraw::set_material`, in the same breath
+        // that binds that layer's geometry, ORM/normal/occlusion/emissive maps
+        // and blend options — so one draw item never holds two materials, and
+        // a uniform is what they always were. They rode the instance stream
+        // until the combined base + material payload passed the 32-input
+        // `vs_5_0` limit and the lane stopped compiling altogether.
+        emissive: uniform(vec3(0.0, 0.0, 0.0))
+        // glTF `metallicFactor`, multiplied by the ORM map's B channel.
+        metallic: uniform(0.0)
+        // glTF `roughnessFactor`, multiplied by the ORM map's G channel.
+        roughness: uniform(1.0)
+        // 1.0 when a metallicRoughness texture is bound on slot 6. Zero folds
+        // the sample out of both products, so a factors-only material costs
+        // one 1x1 fetch and nothing else.
+        orm_on: uniform(0.0)
+        surface_on: uniform(0.0)
+        material_alpha: uniform(1.0)
+        alpha_mode: uniform(0.0)
+        alpha_cutoff: uniform(0.5)
+        normal_scale: uniform(0.0)
+        occlusion_strength: uniform(0.0)
+        double_sided: uniform(0.0)
+
         // x^5, the Schlick exponent. Written out rather than pow(x, 5.0):
         // two multiplies and a square beat a transcendental on every tiler.
         pow5: fn(x: float) -> float {
@@ -2332,6 +2396,35 @@ script_mod! {
         lm_world: uniform(vec4(0.0, 0.0, 1.0, 1.0))
         // Decode for top_map: absolute blocked height = x + byte * y.
         lm_top_decode: uniform(vec4(0.0, 8.0, 0.0, 0.0))
+        // ---- per-call and per-part values, off the vertex stream ----
+        // The joint palette already costs this shader a texture and a wide
+        // instance record; with the sun, the fog and the material lanes on top
+        // it asked `vs_5_0` for 37 inputs against a limit of 32 and failed to
+        // compile, taking every character with it. The sun and fog are written
+        // once per call, before the character loop; the material values are
+        // written per material PART, in the same statements that bind that
+        // part's geometry and textures, so no two characters sharing a draw
+        // item can disagree about any of them.
+        surface_on: uniform(0.0)
+        material_alpha: uniform(1.0)
+        alpha_mode: uniform(0.0)
+        alpha_cutoff: uniform(0.5)
+        normal_scale: uniform(0.0)
+        occlusion_strength: uniform(0.0)
+        double_sided: uniform(0.0)
+        metallic: uniform(0.0)
+        roughness: uniform(1.0)
+        depth_clip: uniform(1.0)
+        fog_density: uniform(0.0)
+        // TRUE world camera position, for the specular lobe (read as a vec3).
+        eye: uniform(vec3(0.0, 0.0, 0.0))
+        light_dir: uniform(vec3(0.35, 0.8, 0.45))
+        fog_color: uniform(vec3(0.75, 0.87, 0.96))
+        // Sun terms, written every frame from one [`crate::sun::SunLight`].
+        sun_color: uniform(vec3(0.72, 0.72, 0.72))
+        sun_sky: uniform(vec3(0.28, 0.28, 0.28))
+        sun_ground: uniform(vec3(0.28, 0.28, 0.28))
+        emissive: uniform(vec3(0.0, 0.0, 0.0))
         // xy = ground-region uv, z = in-field gate, w = TRUE world height
         // of the vertex (for the shadow-top comparison).
         v_lmg: varying(vec4f)
@@ -6029,16 +6122,26 @@ pub struct DrawSceneSkyMap {
 }
 
 /// Skinned character mesh (PbrVertex layout, uv in ny_nz_uv.zw, textured).
+///
+/// The instance payload below is deliberately short. D3D11's `vs_5_0` accepts
+/// 32 vertex inputs and no more, and this family spends two of them on its
+/// geometry, so everything that is CONSTANT across one draw item — the sun,
+/// the fog, the debug switches, the layer's material and detail lanes — is a
+/// uniform declared in the script block above instead. What is left here is
+/// what genuinely differs between two instances that share geometry and
+/// textures; a uniform difference opens a new draw item, so moving any of it
+/// off the stream would silently split batches or, worse, hand one instance
+/// another's value.
 #[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawSceneSkinned {
     #[deref]
     pub draw_vars: DrawVars,
-    #[live(vec4(0.0,0.0,0.0,0.0))] pub fur: Vec4f,
     // Keep this base's instance payload a multiple of eight bytes so
     // derived material fields follow it without Rust tail padding.
+    /// Shell fraction of this fur pass (0 = the skin itself). The recipe it
+    /// is measured against is the `fur` uniform, one per layer.
     #[live(vec2(0.0,0.0))] pub fur_layer: Vec2f,
-    #[live(vec4(0.0,0.0,0.0,0.0))] pub morph_ctl:Vec4f,
     #[live(vec4(0.0,0.0,0.0,0.0))] pub morph_weights0:Vec4f,
     #[live(vec4(0.0,0.0,0.0,0.0))] pub morph_weights1:Vec4f,
     #[live(vec4(0.0,0.0,0.0,0.0))] pub morph_weights2:Vec4f,
@@ -6049,27 +6152,6 @@ pub struct DrawSceneSkinned {
     #[live(vec4(0.0,0.0,0.0,0.0))] pub morph_weights7:Vec4f,
     #[live]
     pub transform: Mat4f,
-    #[live(1.0)]
-    pub depth_clip: f32,
-    /// 1.0 = show baked AO alone, contrast-stretched (SANDBOX_AO_DEBUG=1).
-    #[live(0.0)]
-    pub ao_debug: f32,
-    /// 1.0 when this pack has a baked AO atlas bound.
-    #[live(0.0)]
-    pub ao_enabled: f32,
-    #[live(vec3(0.35, 0.8, 0.45))]
-    pub light_dir: Vec3f,
-    #[live(vec3(0.75, 0.87, 0.96))]
-    pub fog_color: Vec3f,
-    #[live(0.0)]
-    pub fog_density: f32,
-    /// Sun terms, written every frame from one [`crate::sun::SunLight`].
-    #[live(vec3(0.72, 0.72, 0.72))]
-    pub sun_color: Vec3f,
-    #[live(vec3(0.28, 0.28, 0.28))]
-    pub sun_sky: Vec3f,
-    #[live(vec3(0.28, 0.28, 0.28))]
-    pub sun_ground: Vec3f,
     /// Per-character wash over the vertex tint. One rig serves a whole village,
     /// so without this every passer-by is the same knight in the same colours —
     /// the identical-clones failure the prop variety work just fixed. Costs one
@@ -6085,9 +6167,6 @@ pub struct DrawSceneSkinned {
     /// dynamics and unbaked models render exactly as before.
     #[live(vec4(0.0, 0.0, 0.0, 0.0))]
     pub lm_rect: Vec4f,
-    /// 1.0 = show the baked light alone (SANDBOX_LM_DEBUG=1).
-    #[live(0.0)]
-    pub lm_debug: f32,
     /// Dynamic-light gate: 1.0 for dynamic instances (sum every light slot),
     /// 0.0 for statics (sum only the transient prefix — their lamp light is
     /// already baked into the atlas, and statics and dynamics of one model
@@ -6107,10 +6186,11 @@ pub struct DrawSceneSkinned {
     /// deterministically instead of being physically lifted off it.
     #[live(0.0)]
     pub depth_bias: f32,
-    /// Q3 / Unreal detail UV scale. Zero disables the overlay.
-    #[live(vec2(0.0, 0.0))]
-    pub detail_st: Vec2f,
     /// 1 = vertex COLOR_0 is baked lighting (do not multiply the sun).
+    /// Per draw item in practice, but it stays on the stream: it is the last
+    /// field, the layout assert below anchors on it, and dropping it would
+    /// make the base an odd number of f32 slots, so Rust tail padding would
+    /// shift every field a derived struct appends after it.
     #[live(0.0)]
     pub prelit: f32,
 }
@@ -6122,42 +6202,26 @@ pub struct DrawSceneSkinned {
 /// The deref chain is what makes the two lanes one code path: everything the
 /// renderer sets on a model draw — transform, lightmap window, dynamic-light
 /// gate, sun terms — is set through the inherited [`DrawSceneSkinned`], and
-/// only the three material lanes below are new. Instance-field rule as
-/// everywhere in this file: `#[live]` instance floats AFTER the deref only,
-/// so `DrawVars::as_slice` reads the base's lanes and then these.
+/// the material values the lobe adds are uniforms in its script block above.
+/// Nothing is appended to the instance stream here: the base alone already
+/// fills most of what `vs_5_0` allows a vertex stage, and every material
+/// value is fixed for the one layer a draw item covers. The struct is
+/// therefore deref-only, the same shape [`DrawSceneAlpha`] has.
 #[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawScenePbr {
     #[deref]
     pub skinned: DrawSceneSkinned,
-    /// glTF `metallicFactor`, multiplied by the ORM map's B channel.
-    #[live(0.0)]
-    pub metallic: f32,
-    /// glTF `roughnessFactor`, multiplied by the ORM map's G channel.
-    #[live(1.0)]
-    pub roughness: f32,
-    /// 1.0 when a metallicRoughness texture is bound on slot 6. Zero folds
-    /// the sample out of both products, so a factors-only material costs one
-    /// 1x1 fetch and nothing else.
-    #[live(0.0)]
-    pub orm_on: f32,
-    #[live(0.0)] pub surface_on:f32,
-    #[live(1.0)] pub material_alpha:f32,
-    #[live(0.0)] pub alpha_mode:f32,
-    #[live(0.5)] pub alpha_cutoff:f32,
-    #[live(0.0)] pub normal_scale:f32,
-    #[live(0.0)] pub occlusion_strength:f32,
-    #[live(vec3(0.0,0.0,0.0))] pub emissive:Vec3f,
-    #[live(0.0)] pub double_sided:f32,
-
 }
 
 // DrawVars reads inherited instance fields as one contiguous float slice.
-// Tail padding in the base shifts every PBR field (AO becomes red emission).
+// Tail padding in the base shifts every appended field (AO becomes red
+// emission). DrawSceneCustom is now the only struct that appends after the
+// base, so it is what pins the base's size.
 const _: () = {
     let end = std::mem::offset_of!(DrawSceneSkinned, prelit) + std::mem::size_of::<f32>();
     assert!(std::mem::size_of::<DrawSceneSkinned>() == end);
-    assert!(std::mem::offset_of!(DrawScenePbr, metallic) == end);
+    assert!(std::mem::offset_of!(crate::custom_material::DrawSceneCustom, params) == end);
 };
 
 /// Minimal camera-space held-model shader. The transform is the only instance
@@ -6269,6 +6333,15 @@ pub struct DrawSceneScreen {
 /// of one rig batch into a single draw item, so the whole crowd's state
 /// rides this stream. `joint_base` is the instance's first texel in the
 /// frame's palette texture.
+///
+/// "The whole crowd's state" is the point and also the limit: `vs_5_0` gives
+/// a vertex stage 32 inputs, this one already spends three on geometry, and
+/// the sun, the fog and the per-part material lanes pushed it to 37 — the
+/// shader stopped compiling and the characters disappeared. Those values are
+/// uniforms in the script block above now. They are written per CALL (sun,
+/// fog, eye) or per material PART, beside that part's own geometry and
+/// textures, so nothing that varies between two batched characters left the
+/// stream.
 #[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawSceneSkinnedGpu {
@@ -6287,34 +6360,8 @@ pub struct DrawSceneSkinnedGpu {
     #[live(vec4(0.0,0.0,0.0,0.0))] pub morph_weights5:Vec4f,
     #[live(vec4(0.0,0.0,0.0,0.0))] pub morph_weights6:Vec4f,
     #[live(vec4(0.0,0.0,0.0,0.0))] pub morph_weights7:Vec4f,
-    #[live(0.0)] pub surface_on:f32,
-    #[live(1.0)] pub material_alpha:f32,
-    #[live(0.0)] pub alpha_mode:f32,
-    #[live(0.5)] pub alpha_cutoff:f32,
-    #[live(0.0)] pub normal_scale:f32,
-    #[live(0.0)] pub occlusion_strength:f32,
-    #[live(vec3(0.0,0.0,0.0))] pub emissive:Vec3f,
-    #[live(vec3(0.0,0.0,0.0))] pub eye:Vec3f,
-    #[live(0.0)] pub double_sided:f32,
-    #[live(0.0)] pub metallic:f32,
-    #[live(1.0)] pub roughness:f32,
     #[live]
     pub transform: Mat4f,
-    #[live(1.0)]
-    pub depth_clip: f32,
-    #[live(vec3(0.35, 0.8, 0.45))]
-    pub light_dir: Vec3f,
-    #[live(vec3(0.75, 0.87, 0.96))]
-    pub fog_color: Vec3f,
-    #[live(0.0)]
-    pub fog_density: f32,
-    /// Sun terms, written every frame from one [`crate::sun::SunLight`].
-    #[live(vec3(0.72, 0.72, 0.72))]
-    pub sun_color: Vec3f,
-    #[live(vec3(0.28, 0.28, 0.28))]
-    pub sun_sky: Vec3f,
-    #[live(vec3(0.28, 0.28, 0.28))]
-    pub sun_ground: Vec3f,
     /// Per-character wash over the atlas colours (see DrawSceneSkinned::tint).
     #[live(vec4(1.0, 1.0, 1.0, 1.0))]
     pub tint: Vec4f,
@@ -7021,6 +7068,97 @@ mod shader_registration_tests {
             assert_eq!(textures[10].id, live_id!(local_shadow_map));
             assert!(textures.iter().any(|texture|texture.id==live_id!(orm_map)));
             assert!(textures.iter().any(|texture|texture.id==live_id!(morph_map)));
+        });
+    }
+
+    /// The two hard budgets this family sits against, pinned so that adding
+    /// one `#[live]` field or one uniform cannot silently cross either again.
+    ///
+    /// D3D11's `vs_5_0` accepts 32 vertex inputs and no more. An input is one
+    /// instance element (a Mat4f is four) plus the geometry's own vec4 lanes,
+    /// and fxc adds SV_VertexID and SV_InstanceID on top — which is how the
+    /// model and character shaders reached 37, failed to compile, and took
+    /// every model and every character off the screen on Windows. 30 is the
+    /// ceiling that leaves room for those two system values.
+    ///
+    /// The uniform block is a fixed `[f32; DRAW_CALL_DYN_UNIFORMS]` array and
+    /// `set_uniform` indexes straight into it, so one slot past the end is a
+    /// mid-frame panic rather than a clamp. How many slots a declaration list
+    /// costs depends on the PACKING, and the packing depends on the backend,
+    /// so all three sets of rules are replayed here over the same list.
+    #[test]
+    fn scene_shaders_stay_inside_the_vertex_input_and_uniform_budgets() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            vm.bx.captured_errors = Some(Vec::new());
+            makepad_draw::script_mod(vm);
+            vm.bx.heap.new_module(id!(prelude));
+            script_eval!(vm, {
+                mod.prelude.widgets_internal = {
+                    ..mod.std,
+                    ..mod.pod,
+                    ..mod.math,
+                    ..mod.sdf,
+                    ..mod.shader,
+                    draw:mod.draw,
+                }
+            });
+            vm.bx.heap.new_module(id!(widgets));
+            crate::local_shadows::sampling::script_mod(vm);
+            crate::clustered::script_mod(vm);
+            crate::fast_gi::script_mod(vm);
+            super::script_mod(vm);
+            crate::local_shadows::script_mod(vm);
+            crate::custom_material::register(vm);
+
+            let shaders = [
+                ("DrawSceneSkinned", DrawSceneSkinned::script_new_with_default(vm).draw_vars),
+                ("DrawScenePbr", DrawScenePbr::script_new_with_default(vm).skinned.draw_vars),
+                (
+                    "DrawSceneCustom",
+                    crate::custom_material::DrawSceneCustom::script_new_with_default(vm).skinned.draw_vars,
+                ),
+                ("DrawSceneSkinnedGpu", DrawSceneSkinnedGpu::script_new_with_default(vm).draw_vars),
+            ];
+            for (name, vars) in shaders {
+                // The array the uniform block is written into is the budget:
+                // reading its length here keeps this test true if the
+                // platform ever resizes it.
+                let uniform_budget = vars.dyn_uniforms.len();
+                let id = vars.draw_shader_id.unwrap_or_else(|| panic!("{name} registered"));
+                let mapping = &vm.cx().draw_shaders[id.index].mapping;
+                // One input register per element, and a matrix is one element
+                // per row — exactly what the vertex declaration spends.
+                let instance_elements: usize = mapping
+                    .instances
+                    .inputs
+                    .iter()
+                    .map(|input| if input.slots > 4 { input.slots.div_ceil(4) } else { 1 })
+                    .sum();
+                let geometry_elements = mapping.geometries.total_slots.div_ceil(4);
+                assert!(
+                    instance_elements + geometry_elements <= 30,
+                    "{name}: {instance_elements} instance + {geometry_elements} geometry vertex inputs, \
+                     and fxc adds two system values on top of a vs_5_0 limit of 32"
+                );
+                for packing in [
+                    DrawShaderInputPacking::UniformsHLSL,
+                    DrawShaderInputPacking::UniformsGLSL140,
+                    DrawShaderInputPacking::UniformsMetal,
+                ] {
+                    let mut packed = DrawShaderInputs::new(packing);
+                    for input in &mapping.dyn_uniforms.inputs {
+                        packed.push(input.id, input.slots, input.attr_format);
+                    }
+                    packed.finalize();
+                    assert!(
+                        packed.total_slots <= uniform_budget,
+                        "{name}: {} uniform slots under {packing:?}, past the {uniform_budget}-slot \
+                         draw-call block that set_uniform indexes into",
+                        packed.total_slots
+                    );
+                }
+            }
         });
     }
 }
