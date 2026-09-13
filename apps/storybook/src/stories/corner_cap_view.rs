@@ -181,11 +181,11 @@ script_mod! {
 }
 
 pub const STORIES: &[Story] = &[Story {
-    key: "containers/cornercapview/overview",
+    key: "containers/view/corner-caps",
     category: "Containers",
-    component: "CornerCapView",
-    also: &[],
-    name: "Overview",
+    component: "View",
+    also: &["CornerCapView", "CachedRoundedView"],
+    name: "Corner caps",
     dsl: "CornerCapViewOverview",
     added: "2026-09-10",
     tags: &["new", "layout", "rounded", "corners", "radius", "mask", "clip", "video", "surface"],

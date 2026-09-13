@@ -17,6 +17,17 @@ pub mod dock;
 pub mod align_scroll;
 pub mod scroll_more;
 pub mod divider;
+pub mod view;
+pub mod corner_cap_view;
+pub mod card;
+pub mod accordion;
+pub mod carousel;
+pub mod pageflip;
+pub mod moving_panels;
+pub mod glasspanel;
+pub mod glass_surfaces;
+pub mod glass_controls;
+pub mod splash;
 pub mod badge;
 pub mod placeholder;
 pub mod button_more;
@@ -29,7 +40,6 @@ pub mod spinner;
 pub mod button_group;
 pub mod chip;
 pub mod menu;
-pub mod accordion;
 pub mod dialog;
 pub mod drawer;
 pub mod overlay;
@@ -56,7 +66,6 @@ pub mod tree;
 pub mod filetree;
 pub mod list_item;
 pub mod avatar;
-pub mod card;
 pub mod media;
 pub mod waveform;
 pub mod table;
@@ -64,7 +73,6 @@ pub mod empty_state;
 pub mod timeline;
 pub mod chat;
 pub mod code_block;
-pub mod carousel;
 pub mod upload;
 pub mod form;
 pub mod color;
@@ -82,25 +90,18 @@ pub mod range_slider;
 pub mod slider;
 pub mod textinput;
 pub mod radiobutton;
-pub mod view;
 pub mod breadcrumb;
 pub mod field;
 pub mod animated_gif;
 pub mod chart;
-pub mod glass_surfaces;
-pub mod view_shapes;
-pub mod splash;
-pub mod surfaces;
 pub mod lists;
 pub mod value_input;
 pub mod window_chrome;
-pub mod moving_panels;
 pub mod text_flow;
 pub mod overlay_messages;
 pub mod drop_controls;
 pub mod vector;
 pub mod fab_controls;
-pub mod glass_controls;
 pub mod code_view;
 pub mod data_grid;
 pub mod modal;
@@ -114,15 +115,11 @@ pub mod iconset;
 pub mod image;
 pub mod imageblend;
 pub mod rotatedimage;
-pub mod corner_cap_view;
-pub mod glasspanel;
 pub mod linklabel;
 pub mod markdown;
 pub mod html;
-pub mod pageflip;
 pub mod tabs;
 pub mod stacknavigation;
-pub mod slidesview;
 pub mod portallist;
 pub mod tile_list;
 pub mod item_grid;
@@ -148,6 +145,18 @@ pub fn script_mod(vm: &mut ScriptVm) {
     align_scroll::script_mod(vm);
     scroll_more::script_mod(vm);
     divider::script_mod(vm);
+    // 3 Containers
+    view::script_mod(vm);
+    corner_cap_view::script_mod(vm);
+    card::script_mod(vm);
+    accordion::script_mod(vm);
+    carousel::script_mod(vm);
+    pageflip::script_mod(vm);
+    moving_panels::script_mod(vm);
+    glasspanel::script_mod(vm);
+    glass_surfaces::script_mod(vm);
+    glass_controls::script_mod(vm);
+    splash::script_mod(vm);
     button::script_mod(vm);
     checkbox::script_mod(vm);
     combobox::script_mod(vm);
@@ -168,7 +177,6 @@ pub fn script_mod(vm: &mut ScriptVm) {
     color::script_mod(vm);
     form::script_mod(vm);
     upload::script_mod(vm);
-    carousel::script_mod(vm);
     code_block::script_mod(vm);
     chat::script_mod(vm);
     timeline::script_mod(vm);
@@ -176,7 +184,6 @@ pub fn script_mod(vm: &mut ScriptVm) {
     table::script_mod(vm);
     media::script_mod(vm);
     waveform::script_mod(vm);
-    card::script_mod(vm);
     avatar::script_mod(vm);
     list_item::script_mod(vm);
     tree::script_mod(vm);
@@ -193,25 +200,18 @@ pub fn script_mod(vm: &mut ScriptVm) {
     number_field::script_mod(vm);
     textinput::script_mod(vm);
     radiobutton::script_mod(vm);
-    view::script_mod(vm);
     breadcrumb::script_mod(vm);
     field::script_mod(vm);
     animated_gif::script_mod(vm);
     chart::script_mod(vm);
-    glass_surfaces::script_mod(vm);
-    view_shapes::script_mod(vm);
-    splash::script_mod(vm);
-    surfaces::script_mod(vm);
     lists::script_mod(vm);
     value_input::script_mod(vm);
     window_chrome::script_mod(vm);
-    moving_panels::script_mod(vm);
     text_flow::script_mod(vm);
     overlay_messages::script_mod(vm);
     drop_controls::script_mod(vm);
     vector::script_mod(vm);
     fab_controls::script_mod(vm);
-    glass_controls::script_mod(vm);
     code_view::script_mod(vm);
     data_grid::script_mod(vm);
     modal::script_mod(vm);
@@ -225,15 +225,11 @@ pub fn script_mod(vm: &mut ScriptVm) {
     image::script_mod(vm);
     imageblend::script_mod(vm);
     rotatedimage::script_mod(vm);
-    corner_cap_view::script_mod(vm);
-    glasspanel::script_mod(vm);
     linklabel::script_mod(vm);
     markdown::script_mod(vm);
     html::script_mod(vm);
-    pageflip::script_mod(vm);
     tabs::script_mod(vm);
     stacknavigation::script_mod(vm);
-    slidesview::script_mod(vm);
     portallist::script_mod(vm);
     tile_list::script_mod(vm);
     item_grid::script_mod(vm);
@@ -250,7 +246,6 @@ pub fn script_mod(vm: &mut ScriptVm) {
     menu::script_mod(vm);
     select::script_mod(vm);
     tip::script_mod(vm);
-    accordion::script_mod(vm);
     dialog::script_mod(vm);
     drawer::script_mod(vm);
     overlay::script_mod(vm);
@@ -283,6 +278,18 @@ pub fn tables() -> &'static [&'static [Story]] {
         align_scroll::STORIES,
         scroll_more::STORIES,
         divider::STORIES,
+        // 3 Containers
+        view::STORIES,
+        corner_cap_view::STORIES,
+        card::STORIES,
+        accordion::STORIES,
+        carousel::STORIES,
+        pageflip::STORIES,
+        moving_panels::STORIES,
+        glasspanel::STORIES,
+        glass_surfaces::STORIES,
+        glass_controls::STORIES,
+        splash::STORIES,
         button::STORIES,
         checkbox::STORIES,
         combobox::STORIES,
@@ -303,7 +310,6 @@ pub fn tables() -> &'static [&'static [Story]] {
         color::STORIES,
         form::STORIES,
         upload::STORIES,
-        carousel::STORIES,
         code_block::STORIES,
         chat::STORIES,
         timeline::STORIES,
@@ -311,7 +317,6 @@ pub fn tables() -> &'static [&'static [Story]] {
         table::STORIES,
         media::STORIES,
         waveform::STORIES,
-        card::STORIES,
         avatar::STORIES,
         list_item::STORIES,
         tree::STORIES,
@@ -328,25 +333,18 @@ pub fn tables() -> &'static [&'static [Story]] {
         number_field::STORIES,
         textinput::STORIES,
         radiobutton::STORIES,
-        view::STORIES,
         breadcrumb::STORIES,
         field::STORIES,
         animated_gif::STORIES,
         chart::STORIES,
-        glass_surfaces::STORIES,
-        view_shapes::STORIES,
-        splash::STORIES,
-        surfaces::STORIES,
         lists::STORIES,
         value_input::STORIES,
         window_chrome::STORIES,
-        moving_panels::STORIES,
         text_flow::STORIES,
         overlay_messages::STORIES,
         drop_controls::STORIES,
         vector::STORIES,
         fab_controls::STORIES,
-        glass_controls::STORIES,
         code_view::STORIES,
         data_grid::STORIES,
         modal::STORIES,
@@ -360,15 +358,11 @@ pub fn tables() -> &'static [&'static [Story]] {
         image::STORIES,
         imageblend::STORIES,
         rotatedimage::STORIES,
-        corner_cap_view::STORIES,
-        glasspanel::STORIES,
         linklabel::STORIES,
         markdown::STORIES,
         html::STORIES,
-        pageflip::STORIES,
         tabs::STORIES,
         stacknavigation::STORIES,
-        slidesview::STORIES,
         portallist::STORIES,
         tile_list::STORIES,
         item_grid::STORIES,
@@ -385,7 +379,6 @@ pub fn tables() -> &'static [&'static [Story]] {
         menu::STORIES,
         select::STORIES,
         tip::STORIES,
-        accordion::STORIES,
         dialog::STORIES,
         drawer::STORIES,
         overlay::STORIES,

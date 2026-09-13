@@ -67,9 +67,9 @@ script_mod! {
 }
 
 pub const STORIES: &[Story] = &[Story {
-    key: "inputs/glass/controls",
-    category: "Inputs",
-    component: "GlassControls",
+    key: "containers/glass/controls",
+    category: "Containers",
+    component: "Glass",
     also: &["GlassButton", "GlassButtonProminent", "GlassRadio", "GlassSegmented", "GlassSlider", "OptionLabel"],
     name: "Controls",
     dsl: "GlassControlsOverview",
@@ -79,7 +79,7 @@ pub const STORIES: &[Story] = &[Story {
 
 A toggle, a button, a slider and a segmented row, all built on the same lensing the glass panel uses. They live under `mod.widgets.glass`, not at the top of the widget module, so they are written `glass.GlassButton` and so on.
 
-**They draw what is behind them, so something has to be behind them.** The lens refracts the scene underneath; over a flat colour there is nothing to bend and the effect collapses to a faint outline. The two rows on this page are the same four declarations over a colourful ground and over one colour, which is the comparison worth making before choosing this family for a page whose background is plain.
+The two rows on this page are the same four declarations over a colourful ground and over one colour. The lens refracts the scene underneath, so over one colour it has nothing to bend and each control collapses to a faint outline; Glass > Overview says when that makes the family the wrong choice.
 
 They must also be drawn in the same pass as what they refract. The glass example in this repository puts its content in the background pass rather than in a `glass.Layer` for exactly that reason — a layer would hide the base from the lens, and each toggle needs to refract its own track and knob.
 
