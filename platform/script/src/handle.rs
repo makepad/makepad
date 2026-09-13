@@ -1,6 +1,6 @@
 use crate::heap::*;
 use crate::value::*;
-use std::any::TypeId;
+use std::any::{Any, TypeId};
 use std::cell::RefCell;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
@@ -160,15 +160,9 @@ impl ScriptHandleData {
     }
 }
 
-pub trait ScriptHandleGc {
+pub trait ScriptHandleGc: Any {
     fn gc(&mut self);
     fn set_handle(&mut self, _handle: ScriptHandle) {}
-    fn ref_cast_type_id(&self) -> TypeId
-    where
-        Self: 'static,
-    {
-        TypeId::of::<Self>()
-    }
     fn debug_fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "ScriptHandleGc: No debug format")
     }
@@ -182,9 +176,9 @@ impl Debug for dyn ScriptHandleGc {
 
 impl dyn ScriptHandleGc {
     pub fn is<T: ScriptHandleGc + 'static>(&self) -> bool {
-        let t = TypeId::of::<T>();
-        let concrete = self.ref_cast_type_id();
-        t == concrete
+        // The concrete type comes from `Any`, which a handle implementation
+        // cannot override, so a forged trait method cannot fake a match.
+        Any::type_id(self) == TypeId::of::<T>()
     }
     pub fn downcast_ref<T: ScriptHandleGc + 'static>(&self) -> Option<&T> {
         if self.is::<T>() {
@@ -199,5 +193,33 @@ impl dyn ScriptHandleGc {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct FirstHandle;
+    struct SecondHandle;
+
+    impl ScriptHandleGc for FirstHandle {
+        fn gc(&mut self) {}
+    }
+
+    impl ScriptHandleGc for SecondHandle {
+        fn gc(&mut self) {}
+    }
+
+    #[test]
+    fn handle_downcasts_use_the_concrete_any_type() {
+        let mut handle: Box<dyn ScriptHandleGc> = Box::new(FirstHandle);
+
+        assert!(handle.is::<FirstHandle>());
+        assert!(!handle.is::<SecondHandle>());
+        assert!(handle.downcast_ref::<FirstHandle>().is_some());
+        assert!(handle.downcast_ref::<SecondHandle>().is_none());
+        assert!(handle.downcast_mut::<FirstHandle>().is_some());
+        assert!(handle.downcast_mut::<SecondHandle>().is_none());
     }
 }
