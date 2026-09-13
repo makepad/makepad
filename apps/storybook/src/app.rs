@@ -30,9 +30,12 @@ script_mod! {
             align: Align{x: 0. y: 0.5}
             padding: theme.mspace_2
 
-            H4{text: "Widget catalogue"}
+            // A stated width, not Fit. A label that can wrap shares the
+            // row's leftover with the Filler at the end, half each, so
+            // the title broke into lines as soon as the row filled up.
+            H4{text: "Widget catalogue" width: 200.}
             story_search := TextInput{
-                width: 240.
+                width: 160.
                 empty_text: "Search stories"
             }
             // The two ways of reading the search text sit next to it:
@@ -41,7 +44,20 @@ script_mod! {
             find_next := ButtonFlat{text: "▼"}
             match_count := Label{text: ""}
             search_filter := Toggle{text: "Filter"}
+            // New means the widget arrived within this many days of
+            // today. Once the person sets the number the marker moves
+            // with the calendar; until then the field shows the days
+            // since the catalogue was started, so the default marker
+            // stays on that date. The count after the field says the
+            // same thing in a sentence.
             new_only := Toggle{text: "New only"}
+            new_days := NumberField{
+                width: 84.
+                min: 1.0
+                max: 3650.0
+                step: 1.0
+                suffix: " days"
+            }
             new_count := Label{text: ""}
             theme_select := DropDown{
                 labels: ["Dark" "Light" "Skeleton"]
@@ -237,7 +253,26 @@ impl App {
         let n = navigator.new_count();
         self.ui
             .label(cx, ids!(new_count))
-            .set_text(cx, &format!("{} new since {}", n, settings::baseline()));
+            .set_text(cx, &new_count_line(n, settings::new_days()));
+    }
+
+    /// Show the reach in the field. Told on startup and again after a
+    /// live edit rebuilt the toolbar from its template.
+    fn refresh_new_days(&self, cx: &mut Cx) {
+        self.ui
+            .number_field(cx, ids!(new_days))
+            .set_value(cx, settings::new_days() as f64);
+    }
+
+    /// Move the reach: the baseline the navigator marks against is
+    /// today less this many days, and every count reads from it.
+    fn set_new_days(&mut self, cx: &mut Cx, days: u32) {
+        settings::set(settings::NEW_DAYS, &days.to_string());
+        self.ui
+            .story_navigator(cx, ids!(navigator))
+            .set_baseline(cx, &settings::baseline());
+        self.refresh_new_count(cx);
+        self.refresh_match_count(cx);
     }
 
     /// Write the closed folders down when they differ from what is
@@ -277,6 +312,7 @@ impl MatchEvent for App {
         let baseline = settings::baseline();
         let navigator = self.ui.story_navigator(cx, ids!(navigator));
         navigator.set_baseline(cx, &baseline);
+        self.refresh_new_days(cx);
         // Before the first draw, which is the one that sets the folders.
         navigator.set_folded(cx, &settings::get(settings::FOLDED).unwrap_or_default());
         // Filtering unless the person turned it off last time. Told to
@@ -351,6 +387,11 @@ impl MatchEvent for App {
             settings::set(settings::NEW_ONLY, if on { "1" } else { "0" });
             // It narrows what matches, so the count moves with it.
             self.refresh_match_count(cx);
+        }
+        if let Some(days) = self.ui.number_field(cx, ids!(new_days)).changed(actions) {
+            // The field bounds it at one already; the rounding is for a
+            // value that arrived by a route the field did not quantise.
+            self.set_new_days(cx, days.round().max(1.0) as u32);
         }
         if let Some(index) = self.ui.drop_down(cx, ids!(theme_select)).selected(actions) {
             theme::select(cx, index);
@@ -439,11 +480,32 @@ impl AppMain for App {
                     .set_text(cx, &format!("{} / {}", story.component, story.name));
                 self.ui.docs_panel(cx, ids!(docs)).set_story(cx, story);
             }
+            self.refresh_new_days(cx);
             self.refresh_new_count(cx);
             // The match count and the hidden-matches line under the
             // tree were rebuilt blank too; without this a filtered tree
             // says nothing about why after a theme switch.
             self.refresh_match_count(cx);
         }
+    }
+}
+
+/// The count beside the switch: how many are new, and over how long.
+fn new_count_line(new: usize, days: u32) -> String {
+    match days {
+        1 => format!("{new} new in the last day"),
+        days => format!("{new} new in the last {days} days"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_new_count_says_how_far_back_it_looked() {
+        assert_eq!(new_count_line(12, 30), "12 new in the last 30 days");
+        assert_eq!(new_count_line(0, 7), "0 new in the last 7 days");
+        assert_eq!(new_count_line(3, 1), "3 new in the last day");
     }
 }
