@@ -43,6 +43,7 @@ pub mod grid;
 pub mod animated_image_gif;
 pub mod badge;
 pub mod button_group;
+pub mod pill_nav;
 pub mod chip;
 pub mod menu;
 pub mod select;
@@ -241,6 +242,7 @@ pub use crate::{
     badge::*,
     breadcrumb::*,
     button_group::*,
+    pill_nav::*,
     chip::*,
     menu::*,
     select::*,
@@ -585,6 +587,8 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     // `MenuPlace`, and a block's `use` only sees what already exists.
     crate::menu::script_mod(vm);
     crate::button_group::script_mod(vm);
+    // After the popover, whose trigger and placement enums it takes.
+    crate::pill_nav::script_mod(vm);
     crate::select::script_mod(vm);
     crate::toast::script_mod(vm);
     crate::placeholder::script_mod(vm);
@@ -1179,6 +1183,26 @@ mod hamburger_menu_registration_tests {
         );
         assert!(hamburger.contains("mod.widgets.HamburgerMenuBase = #(HamburgerMenu::register_widget(vm))"));
         assert_eq!(hamburger.matches("set_type_default() do mod.widgets.HamburgerMenuBase").count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod pill_nav_registration_tests {
+    /// The bar registers directly after the segmented control whose sliding
+    /// pill it reuses, and after the popover whose trigger and placement
+    /// words it takes, with one type default.
+    #[test]
+    fn test_pill_nav_is_registered_after_its_bases() {
+        let lib = include_str!("lib.rs");
+        let pill = include_str!("pill_nav.rs");
+        assert!(lib.contains("\npub mod pill_nav;"));
+        assert!(lib.contains("\n    pill_nav::*,"));
+        crate::assert_registered_after(
+            "crate::pill_nav::script_mod(vm);",
+            &["crate::button_group::script_mod(vm);", "crate::popover::script_mod(vm);"],
+        );
+        assert!(pill.contains("mod.widgets.PillNavBase = #(PillNav::register_widget(vm))"));
+        assert_eq!(pill.matches("set_type_default() do mod.widgets.PillNavBase").count(), 1);
     }
 }
 

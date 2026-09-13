@@ -74,6 +74,7 @@ pub mod toolbar;
 pub mod window_chrome;
 pub mod drop_controls;
 pub mod tabs;
+pub mod pill_nav;
 pub mod nav_list;
 pub mod hamburger_menu;
 pub mod breadcrumb;
@@ -197,6 +198,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     window_chrome::script_mod(vm);
     drop_controls::script_mod(vm);
     tabs::script_mod(vm);
+    pill_nav::script_mod(vm);
     nav_list::script_mod(vm);
     hamburger_menu::script_mod(vm);
     breadcrumb::script_mod(vm);
@@ -328,6 +330,7 @@ pub fn tables() -> &'static [&'static [Story]] {
         window_chrome::STORIES,
         drop_controls::STORIES,
         tabs::STORIES,
+        pill_nav::STORIES,
         nav_list::STORIES,
         hamburger_menu::STORIES,
         breadcrumb::STORIES,

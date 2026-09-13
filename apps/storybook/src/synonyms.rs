@@ -242,6 +242,7 @@ mod tests {
             ("stretchable frame", "Image"),
             ("hollow frame", "Image"),
             ("corners keep their size", "Image"),
+            ("mega menu", "PillNav"),
             ("speed dial", "FloatingAction"),
         ] {
             let found: Vec<&str> = registry::all()
@@ -253,6 +254,27 @@ mod tests {
                 "{query:?} reached {found:?}, not {want}"
             );
         }
+    }
+
+    #[test]
+    fn a_name_one_widget_owns_is_not_filed_under_its_neighbour() {
+        // A pill bar folds when crowded, but it is not a hamburger menu, and
+        // a term on it hid the page that is. Likewise the pie menu's folder
+        // now holds the page with rings inside rings, so it cannot say it has
+        // none.
+        let found: Vec<&str> = registry::all()
+            .filter(|s| registry::matches(s, "hamburger menu"))
+            .map(|s| s.component)
+            .collect();
+        assert!(!found.contains(&"PillNav"), "\"hamburger menu\" reached {found:?}");
+        assert!(
+            !terms("PieMenu").iter().any(|t| t.starts_with("no nested")),
+            "PieMenu still says it has no nested rings"
+        );
+        assert!(
+            registry::all().any(|s| s.key == "overlay/pie-menu/radial-menu" && registry::matches(s, "nested rings")),
+            "\"nested rings\" does not reach the radial menu page"
+        );
     }
 
     #[test]
