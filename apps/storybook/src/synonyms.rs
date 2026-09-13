@@ -242,6 +242,7 @@ mod tests {
             ("stretchable frame", "Image"),
             ("hollow frame", "Image"),
             ("corners keep their size", "Image"),
+            ("table of contents", "LineMenu"),
             ("mega menu", "PillNav"),
             ("speed dial", "FloatingAction"),
         ] {

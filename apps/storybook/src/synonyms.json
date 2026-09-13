@@ -1528,6 +1528,34 @@
    ]
   },
   {
+   "component": "LineMenu",
+   "aka": [
+    "table of contents",
+    "contents",
+    "on this page",
+    "outline",
+    "section navigation",
+    "scroll spy",
+    "heading index",
+    "minimap of sections",
+    "toc",
+    "line menu"
+   ],
+   "does": [
+    "lines show heading levels",
+    "names appear on hover",
+    "lit section follows the scroll",
+    "press to scroll to a section",
+    "room left above the heading",
+    "last section lit at the end",
+    "parent sections tinted",
+    "hide deeper levels",
+    "names open to the left",
+    "keyboard picks a section",
+    "stays lit after a jump"
+   ]
+  },
+  {
    "component": "LinkLabel",
    "aka": [
     "hyperlink",
