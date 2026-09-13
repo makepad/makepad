@@ -15,20 +15,15 @@ impl<'a> ScriptVm<'a> {
 
     pub(crate) fn handle_not(&mut self) {
         let value = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
-        if let Some(v) = value.as_f64() {
-            self.bx
-                .threads
-                .cur()
-                .push_stack_unchecked(ScriptValue::from_f64(!(v as u64) as f64));
-            self.bx.threads.cur().trap.goto_next();
-        } else {
-            let v = self.bx.heap.cast_to_bool(value);
-            self.bx
-                .threads
-                .cur()
-                .push_stack_unchecked(ScriptValue::from_bool(!v));
-            self.bx.threads.cur().trap.goto_next();
-        }
+        // `!` always negates truth conversion. The old f64 path did a bitwise
+        // NOT (`!1` was 18446744073709551614, not false), so the result
+        // depended on whether a number was stored as f64 or as u40.
+        let v = self.bx.heap.cast_to_bool(value);
+        self.bx
+            .threads
+            .cur()
+            .push_stack_unchecked(ScriptValue::from_bool(!v));
+        self.bx.threads.cur().trap.goto_next();
     }
 
     pub(crate) fn handle_neg(&mut self) {
