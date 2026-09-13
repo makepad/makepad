@@ -1586,6 +1586,23 @@ pub unsafe fn to_java_share_text(content: String) {
     (**env).DeleteLocalRef.unwrap()(env, content);
 }
 
+/// Post a system notification (`MakepadActivity.showNotification`).
+pub unsafe fn to_java_show_notification(title: &str, body: &str) {
+    let env = attach_jni_env();
+    let title = new_java_string(env, title);
+    let body = new_java_string(env, body);
+    ndk_utils::call_void_method!(
+        env,
+        get_activity(),
+        "showNotification",
+        "(Ljava/lang/String;Ljava/lang/String;)V",
+        title,
+        body
+    );
+    (**env).DeleteLocalRef.unwrap()(env, body);
+    (**env).DeleteLocalRef.unwrap()(env, title);
+}
+
 pub unsafe fn to_java_paste_from_clipboard() -> String {
     let env = attach_jni_env();
     let result = ndk_utils::call_object_method!(
