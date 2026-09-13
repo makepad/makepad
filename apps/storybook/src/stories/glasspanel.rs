@@ -1,6 +1,5 @@
-//! The glass panel stories: the material over something worth bending, and
-//! the floating surface, which is that material with a frame you can take
-//! hold of.
+//! The glass family's first page: the panel, the material every other glass
+//! page is made of, over something worth bending and over nothing.
 use crate::makepad_widgets::*;
 use crate::registry::{Control, ControlKind, Story};
 
@@ -73,96 +72,35 @@ script_mod! {
             }
         }
     }
-
-    mod.stories.GlassFloatingSurfaceOverview = StoryPage{
-        StoryNote{text: "The panel's material with a frame you can take hold of. Drag the body to move it; drag any edge or any corner to size it. It floats over the window in window points, so it is already up when this page opens."}
-
-        StoryHeading{text: "Take it down and put it back"}
-        StoryNote{text: "The page declares shown: true, so the surface is here on arrival; these two buttons are open() and close(). A rebuild - a theme switch, a reload - brings back what the page declared, not what you last pressed."}
-        StoryRow{
-            show_surface := Button{text: "Show it"}
-            hide_surface := Button{text: "Hide it"}
-            surface_state := Label{text: "shown"}
-        }
-
-        StoryHeading{text: "Something worth bending"}
-        StoryNote{text: "Drag the surface across this band and back onto the plain page. The lens reads the scene BEHIND the surface, and it is re-read on every frame of a move or a resize - which is the whole difficulty of making a glass surface resizable, and the reason a naive one carries a picture of where the drag started."}
-        GlassStage{height: 200.}
-
-        StoryHeading{text: "Whose press it is"}
-        StoryNote{text: "The surface can be dragged over the navigator and the splitter bars, but a drag cannot be STARTED on the part of it that lies over them: those panes are asked about a press before the pane this page lives in, and a press belongs to whoever answered it first. Park the sheet over the file tree and the cost is plain - every attempt to pick it back up opens a different story instead, and takes this page down with it. Start the drag over the page and it carries on anywhere."}
-
-        StoryHeading{text: "What it reports"}
-        StoryNote{text: "Every drag reports the frame it is passing through and the frame it settles on. The size is held between min_size and max_size, and the surface is pulled back inside the window every draw - one whose frame had gone past an edge could never be dragged back."}
-        StoryRow{
-            surface_frame := Label{text: "not moved yet"}
-        }
-
-        floater := mod.widgets.glass.FloatingSurface{
-            shown: true
-            pos: vec2(470., 300.)
-            // Wide and tall enough for the heading, both paragraphs and the
-            // button below them at this body size: a sheet that hides the
-            // control its prose points at is demonstrating nothing.
-            size: vec2(360., 340.)
-            min_size: vec2(180., 120.)
-            max_size: vec2(560., 460.)
-            content +: {
-                body +: {
-                    mod.widgets.glass.H2{text: "A pane of glass"}
-                    mod.widgets.glass.Body{text: "The body moves it. The edges and the corners size it, and the corner mark says where the surest grip is."}
-                    mod.widgets.glass.Body{text: "The button below still takes its own press: the move is only claimed by what nothing inside wanted."}
-                    inside := Button{text: "A control on the glass"}
-                }
-            }
-        }
-    }
-}
-
-fn glass_floating_surface_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
-    let surface = root.glass_floating_surface(cx, ids!(floater));
-    if root.button(cx, ids!(show_surface)).clicked(actions) {
-        surface.open(cx);
-    }
-    if root.button(cx, ids!(hide_surface)).clicked(actions) {
-        surface.close(cx);
-    }
-    if root.button(cx, ids!(inside)).clicked(actions) {
-        let n = crate::stories::bump(live_id!(glass_surface_inside));
-        root.button(cx, ids!(inside))
-            .set_text(cx, &format!("pressed {n} times"));
-    }
-    // `framed` answers whichever kind of drag reported this pass, which is
-    // what a readout wants: the page cares about the frame, not about which
-    // handle is doing it.
-    if let Some((pos, size)) = surface.framed(actions) {
-        root.label(cx, ids!(surface_frame)).set_text(
-            cx,
-            &format!("at {:.0},{:.0} sized {:.0}x{:.0}", pos.x, pos.y, size.x, size.y),
-        );
-    }
-    let state = if surface.is_open() { "shown" } else { "hidden" };
-    let label = root.label(cx, ids!(surface_state));
-    if label.text() != state {
-        label.set_text(cx, state);
-    }
 }
 
 pub const STORIES: &[Story] = &[
     Story {
-        key: "containers/glasspanel/overview",
+        key: "containers/glass/overview",
         category: "Containers",
-        component: "GlassPanel",
-        also: &[],
+        component: "Glass",
+        also: &["GlassPanel"],
         name: "Overview",
         dsl: "GlassPanelOverview",
         added: "2026-03-12",
         tags: &["ported"],
-        doc: "# GlassPanel
+        doc: "# Glass
 
-A sheet of glass: it samples the window behind itself through a chain of mip textures, blurs it, and bends that through its own rounded edge.
+A family of surfaces that sample the window behind themselves through a chain of mip textures, blur it, and bend that through their own rounded edge. `GlassPanel`, the sheet on this page, is the plain one; every other member is the same material cut to a job.
 
 **It draws what is behind it, so something has to be behind it.** Over a flat page the refraction has nothing to work with and the panel is left as a border, a specular rim and a shadow — which is why every demo here stands on a coloured ground, and why the last one deliberately does not. The ground also has to reach PAST the glass: the rim samples along the outward normal by up to `lensing_strength` points, so a ground that stops at the edge hands the bend the page background instead.
+
+## Which one to use
+
+| You want | Use | Page |
+|---|---|---|
+| a still sheet with content on it | `GlassPanel` | this one |
+| a backing to build a glass control of your own on | `LensSurface` and its presets | Surfaces |
+| a sheet that opens over the page and closes again | a popup backed by `GaussRoundedView` | Sheets |
+| a sheet a person moves and sizes | `FloatingSurface` | Floating surface |
+| a button, toggle, slider or segmented row that is glass already | `GlassButton` and its siblings | Controls |
+
+None of them, if the page behind has nothing worth bending: over one colour every member is left as a border, a rim and a shadow, which a plain card draws without any of the cost set out below.
 
 ## The knobs
 
@@ -201,63 +139,6 @@ A window with any glass on it renders its own body to a texture and builds a blu
         ],
         on_actions: None,
     },
-    Story {
-        key: "containers/glassfloatingsurface/overview",
-        category: "Containers",
-        component: "GlassFloatingSurface",
-        also: &["FloatingSurface"],
-        name: "Floating surface",
-        dsl: "GlassFloatingSurfaceOverview",
-        added: "2026-09-10",
-        tags: &["new", "layout"],
-        doc: "# GlassFloatingSurface
-
-The panel's material with a frame you can take hold of: a sheet of glass that floats over the page, **moved by its body and sized by its edges and its corners**.
-
-## The two gestures are claimed at opposite ends
-
-The frame claims a press *before* the surface's own contents see it. The grab band is a few points wide and lies over whatever was put against the edge, so a resize that begins by dropping a caret into a field is a resize you then have to undo. `grab_margin` sets its width, and it reaches both ways from the edge — the surface is a rounded rectangle, and a band that stopped at the boundary would ask for a press on glass that is not there.
-
-The move is claimed the other way round, *after* the contents have had their turn. The press's handled mark is read once before the contents run and once after, and the only handler between those two reads is the surface's own subtree — so a press a button on the glass took is told apart from a press on a control sitting **behind** the glass, which had marked the event handled long before the surface was reached at all. The first leaves the surface where it is; the second still moves it. Only what nothing inside wanted moves the surface, which is why there is no title bar: a strip of chrome across the top is exactly what this family exists not to draw.
-
-**A press another widget already answered is not the surface's.** It floats in window points, so it can lie over panes that are asked about a press before the pane it lives in — a navigator, a splitter bar. The press belongs to whoever took it first, so a drag cannot be *started* on the part of the sheet that overlaps one; once a drag has begun it carries on anywhere, because nothing else holds the pointer. On this shell the cost is not just a drag that fails to start: the navigator answers that press by opening a different story, which tears down the page the surface is standing on. A sheet that let a press through would be answering with a widget nobody can see, so it claims a press on itself whether or not `movable` and `resizable` are on, and whichever button made it. Every press it answers also takes the key focus, so a search box elsewhere stops eating keys the moment the sheet is worked. Closing asks where the caret *is*, not who put it there: one anywhere the surface draws goes back to whatever the surface took it from, or is simply dropped where the surface never took it; one that has since moved off the surface is left where it is, which on this page is the button that just asked it to close.
-
-**The pointer and the wheel go with the press.** A hover over the sheet is claimed at the same two places a press is, so a field under the glass does not light up and offer a caret for a click it will never get; and a wheel is stopped once the surface's own body has had it, so the page underneath does not slide out from under a sheet that stays put.
-
-**The grab band costs a ring of page.** `grab_margin` reaches outward as well as inward, so presses that far outside the painted glass belong to the surface, with nothing drawn there to explain it. The outward half is not optional — a rounded rectangle's corners are unpainted, and a band that stopped at the boundary would ask for a press on glass that is not there — but it is a reason to keep the number small. And the gesture is mouse only: it is written against the mouse events rather than `Event::TouchUpdate`, so this widget is desktop only until a touch path is written.
-
-## Why a resizable glass surface is harder than a resizable panel
-
-The lens reads the scene **behind** the surface, from a capture the window takes only when a draw asks for one — and the ask happens inside the surface's own draw. A repaint that reuses the drawn content asks for nothing, the window stops capturing, and the glass goes on showing the page as it was when the drag began. So every frame of a move or a resize redraws the surface's whole subtree. Drag it across the coloured band on this page and the band bends through it as it crosses; that is the capture being re-taken, not a still picture being carried around.
-
-The same reasoning is why coming up is not just a redraw. The window decides whether to capture before any widget draws, so a surface that appears — `open()`, a `place()` while it is up, or a page writing `shown: true` — announces itself first; without that its first painted frame carries the flat fallback face and the window then redraws the whole UI to correct itself.
-
-## The frame
-
-`shown` is a live property, so a page can put one up by declaring it — and a theme switch or a live edit brings back what the page declared, not what you last pressed. `min_size` and `max_size` hold the size; a zero side of `max_size` means the window is the only ceiling. Dragging a near edge past the floor pins **that** edge and leaves the far one where it was — clamping the position instead would shove the far edge along, quietly moving a surface you were only trying to make smaller. Every draw pulls the whole frame back inside the window, because a surface whose frame had gone past an edge could never be dragged back.
-
-`Sizing` and `Moving` arrive on every frame of a drag and `Placed` once, when the hand comes off; `framed` answers whichever of the three came this pass. Position is reported, never stored — a caller that wants it back next run keeps the value itself.",
-        subject: "floater",
-        feature: None,
-        controls: &[
-            // `grab_margin` caps at 16, which is also the library's own
-            // exposed maximum: the band reaches that far OUTSIDE the glass
-            // as well as inside, and a ring of page that wide answering to a
-            // surface, with nothing drawn there to say so, is more than a
-            // reader will forgive.
-            Control { label: "Grab margin", target: "floater", kind: ControlKind::Number { prop: "grab_margin", min: 2.,  max: 16., step: 1., default: 8. } },
-            Control { label: "Corner mark", target: "floater", kind: ControlKind::Number { prop: "grip_size",   min: 0.,  max: 48., step: 1., default: 24. } },
-            Control { label: "Movable",     target: "floater", kind: ControlKind::Bool   { prop: "movable",   default: true } },
-            Control { label: "Resizable",   target: "floater", kind: ControlKind::Bool   { prop: "resizable", default: true } },
-            // The material, reached on the surface's own glass panel.
-            // `content` is one id segment, found by the same subtree search
-            // that already reaches `inside` three levels deeper.
-            Control { label: "Blur level",  target: "content", kind: ControlKind::Number { prop: "draw_bg.blur_level",   min: 0., max: 6.,   step: 0.1,   default: 5.2 } },
-            Control { label: "Tint amount", target: "content", kind: ControlKind::Number { prop: "draw_bg.tint_alpha",   min: 0., max: 0.30, step: 0.002, default: 0.08 } },
-            Control { label: "Shadow",      target: "content", kind: ControlKind::Number { prop: "draw_bg.shadow_alpha", min: 0., max: 1.,   step: 0.05,  default: 1.0 } },
-        ],
-        on_actions: Some(glass_floating_surface_actions),
-    },
 ];
 
 #[cfg(test)]
@@ -265,8 +146,8 @@ mod tests {
     use super::*;
 
     /// A `Cx` with this crate's theme, the shared page templates and this
-    /// file's own two stories registered, and nothing else: a failure here
-    /// is this page's, not some other story's.
+    /// file's own story registered, and nothing else: a failure here is
+    /// this page's, not some other story's.
     fn shell() -> Cx {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(|vm| {
@@ -290,16 +171,14 @@ mod tests {
         })
     }
 
-    /// Both pages are built from the DSL, which the Rust compiler never
-    /// reads: a mistake in a `script_mod!` block shows up only in a running
-    /// app's log, and a shader that fails to compile is not an error
-    /// anywhere — the draw is skipped and the widget paints nothing. These
-    /// two pages stand on a shared stage that did not exist before, and
-    /// they reach for a widget three levels inside another one, so building
-    /// both and asking for every id the controls panel addresses is what
-    /// turns either mistake into a failed build.
+    /// The page is built from the DSL, which the Rust compiler never reads:
+    /// a mistake in a `script_mod!` block shows up only in a running app's
+    /// log, and a shader that fails to compile is not an error anywhere —
+    /// the draw is skipped and the widget paints nothing. The page stands on
+    /// a shared stage, so building it and asking for every id the controls
+    /// panel addresses is what turns either mistake into a failed build.
     #[test]
-    fn both_pages_build_and_their_subjects_can_be_reached() {
+    fn the_page_builds_and_its_subject_can_be_reached() {
         let mut cx = shell();
         for story in STORIES {
             let page = build(&mut cx, story.dsl);
@@ -311,9 +190,7 @@ mod tests {
                 story.key
             );
             // Every id the controls panel writes to has to be findable, or
-            // the row moves a slider that reaches nothing. `content` is the
-            // one worth the trouble: it is three levels inside another
-            // widget, reached by the same single-segment subtree search.
+            // the row moves a slider that reaches nothing.
             for target in std::iter::once(story.subject)
                 .chain(story.controls.iter().map(|c| c.target))
                 .filter(|t| !t.is_empty())

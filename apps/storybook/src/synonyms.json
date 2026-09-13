@@ -1108,15 +1108,27 @@
    ]
   },
   {
-   "component": "GlassControls",
+   "component": "Glass",
    "aka": [
+    "frosted backings",
+    "lens presets",
+    "blur presets",
+    "refracting backdrop",
     "translucent button",
     "transparent slider"
    ],
    "does": [
+    "bends the background",
+    "lensing",
+    "gradient blur",
+    "rounded backing",
+    "button backing",
+    "chip backing",
+    "input backing",
+    "icon backing",
+    "toggle backing",
     "refraction",
     "refracts the background",
-    "lensing",
     "sliding knob",
     "filled variant",
     "needs a background",
@@ -1169,26 +1181,6 @@
     "translucency",
     "fallback colour",
     "fallback color"
-   ]
-  },
-  {
-   "component": "GlassSurfaces",
-   "aka": [
-    "frosted backings",
-    "lens presets",
-    "blur presets",
-    "refracting backdrop"
-   ],
-   "does": [
-    "bends the background",
-    "lensing",
-    "gradient blur",
-    "rounded backing",
-    "button backing",
-    "chip backing",
-    "input backing",
-    "icon backing",
-    "toggle backing"
    ]
   },
   {
@@ -1794,7 +1786,11 @@
   {
    "component": "MovingPanels",
    "aka": [
-    "slide out"
+    "slide out",
+    "auto height",
+    "animated height",
+    "smooth resize",
+    "self sizing wrapper"
    ],
    "does": [
     "slides from an edge",
@@ -1803,7 +1799,11 @@
     "initial offset",
     "reset position",
     "any side",
-    "sits over content"
+    "sits over content",
+    "eases its height",
+    "exponential smoothing",
+    "first draw snaps",
+    "content driven height"
    ]
   },
   {
@@ -2643,21 +2643,6 @@
    ]
   },
   {
-   "component": "Surfaces",
-   "aka": [
-    "auto height",
-    "animated height",
-    "smooth resize",
-    "self sizing wrapper"
-   ],
-   "does": [
-    "eases its height",
-    "exponential smoothing",
-    "first draw snaps",
-    "content driven height"
-   ]
-  },
-  {
    "component": "Svg",
    "aka": [
     "vector drawing",
@@ -3202,7 +3187,11 @@
   {
    "component": "View",
    "aka": [
-    "div"
+    "div",
+    "rounded rectangle",
+    "circle",
+    "hexagon",
+    "gradient fill"
    ],
    "does": [
     "background colour",
@@ -3210,29 +3199,12 @@
     "clip children",
     "cached drawing",
     "border",
-    "show background"
-   ]
-  },
-  {
-   "component": "ViewShapes",
-   "aka": [
-    "rounded rectangle",
-    "circle",
-    "hexagon",
-    "gradient fill"
-   ],
-   "does": [
+    "show background",
     "rounded corners",
     "round one pair of corners",
     "gradient along an axis",
     "drop shadow",
-    "horizontal rule",
-    "vertical rule",
-    "scroll one axis",
-    "scroll both axes",
-    "cache into a texture",
-    "property rows",
-    "level meter"
+    "cache into a texture"
    ]
   },
   {

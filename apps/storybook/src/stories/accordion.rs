@@ -204,8 +204,8 @@ fn accordion_all_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
 }
 
 pub const STORIES: &[Story] = &[Story {
-    key: "layout/accordion/overview",
-    category: "Layout",
+    key: "containers/accordion/overview",
+    category: "Containers",
     component: "Accordion",
     also: &["AccordionHover", "AccordionSweep", "FoldButton", "FoldHeader", "Filler"],
     name: "Overview",
