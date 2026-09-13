@@ -11,6 +11,22 @@ macro_rules! error {
     }
 }
 
+/// Structured parser feedback retained for hosts that need to validate source
+/// without executing it. Positions are zero-based and relative to the parser's
+/// configured source offsets.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScriptParserDiagnostic {
+    pub line: u32,
+    pub column: u32,
+    pub message: String,
+}
+
+/// Maximum retained diagnostics for one parser instance.
+///
+/// The parser still marks `had_error` after this limit so callers cannot treat
+/// a malformed source as valid just because feedback was bounded.
+pub const MAX_PARSER_DIAGNOSTICS: usize = 64;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum State {
     BeginStmt {
@@ -792,8 +808,18 @@ pub struct ScriptParser {
     /// recovered into an infinite empty loop and burned the whole
     /// instruction budget before this existed.
     pub parse_errors: Vec<String>,
+    /// Structured form of the same errors (zero-based line/column, message
+    /// without the `(from: file:line)` suffix), bounded by
+    /// `MAX_PARSER_DIAGNOSTICS`. Hosts that validate source without running
+    /// it read these instead of the formatted `parse_errors` strings.
+    pub diagnostics: Vec<ScriptParserDiagnostic>,
+    /// Set once `diagnostics` hit `MAX_PARSER_DIAGNOSTICS` and further errors
+    /// were dropped; `had_error` still reports the failure.
+    pub diagnostics_truncated: bool,
 
     state: Vec<State>,
+    /// Whether `report_error` also forwards to Makepad's global log.
+    emit_errors: bool,
     pub file: String,
     pub line_offset: usize,
     pub col_offset: usize,
@@ -836,6 +862,9 @@ impl Default for ScriptParser {
             source_map: Default::default(),
             had_error: false,
             parse_errors: Default::default(),
+            diagnostics: Default::default(),
+            diagnostics_truncated: false,
+            emit_errors: true,
             state: vec![State::BeginStmt {
                 last_was_sep: false,
             }],
@@ -874,29 +903,55 @@ pub struct ParserCheckpoint {
 }
 
 impl ScriptParser {
+    /// Controls whether parser errors are forwarded to Makepad's global log.
+    /// Diagnostics remain available through [`Self::diagnostics`] and
+    /// `parse_errors` either way.
+    pub fn set_emit_errors(&mut self, emit_errors: bool) {
+        self.emit_errors = emit_errors;
+    }
+
+    /// Structured diagnostics collected so far (bounded; see
+    /// [`Self::diagnostics_truncated`]).
+    pub fn diagnostics(&self) -> &[ScriptParserDiagnostic] {
+        &self.diagnostics
+    }
+
+    /// True when more errors occurred than `diagnostics` retains.
+    pub fn diagnostics_truncated(&self) -> bool {
+        self.diagnostics_truncated
+    }
+
     pub fn report_error(&mut self, tokenizer: &ScriptTokenizer, msg: String) {
         self.had_error = true;
         let (line, col) = tokenizer
             .token_index_to_row_col(self.index)
             .unwrap_or((0, 0));
+        let line = line as u32 + self.line_offset as u32;
+        let column = col as u32 + self.col_offset as u32;
         if self.parse_errors.len() < 16 {
             self.parse_errors.push(format!(
                 "{}:{}:{}: {}",
                 self.file,
-                line as usize + self.line_offset + 1,
-                col as usize + self.col_offset + 1,
+                line as usize + 1,
+                column as usize + 1,
                 msg
             ));
         }
-        log_with_level(
-            &self.file,
-            line as u32 + self.line_offset as u32,
-            col as u32 + self.col_offset as u32,
-            line as u32 + self.line_offset as u32,
-            col as u32 + self.col_offset as u32,
-            msg,
-            LogLevel::Error,
-        );
+        if self.diagnostics.len() < MAX_PARSER_DIAGNOSTICS {
+            let message = msg
+                .split_once(" (from: ")
+                .map_or_else(|| msg.clone(), |(message, _)| message.to_owned());
+            self.diagnostics.push(ScriptParserDiagnostic {
+                line,
+                column,
+                message,
+            });
+        } else {
+            self.diagnostics_truncated = true;
+        }
+        if self.emit_errors {
+            log_with_level(&self.file, line, column, line, column, msg, LogLevel::Error);
+        }
     }
 
     /// Identifiers that may never be bound by `let`/`var`, function arguments,
@@ -5287,6 +5342,51 @@ mod tests {
         let mut parser = ScriptParser::default();
         parser.parse(&tokenizer, "parser_test.octoscript", (0, 0), &[]);
         parser
+    }
+
+    #[test]
+    fn diagnostics_are_structured_and_kept_alongside_parse_errors() {
+        let mut heap = crate::heap::ScriptHeap::default();
+        let mut tokenizer = ScriptTokenizer::default();
+        tokenizer.tokenize("let x = 1\n@(+", &mut heap);
+        tokenizer.tokenize("\n;", &mut heap);
+        let mut parser = ScriptParser::default();
+        parser.set_emit_errors(false);
+        parser.parse(&tokenizer, "diag.octoscript", (10, 5), &[]);
+
+        assert!(parser.had_error);
+        assert!(!parser.diagnostics_truncated());
+        let diagnostic = parser
+            .diagnostics()
+            .iter()
+            .find(|d| d.message.contains("Rust value index 0 is unavailable"))
+            .expect("structured diagnostic");
+        // Zero-based, offset-adjusted, and without the `(from: ...)` suffix.
+        assert_eq!(diagnostic.line, 11);
+        assert_eq!(diagnostic.column, 5 + 3);
+        assert!(!diagnostic.message.contains("(from:"));
+        // The formatted sink still carries the same error (one-based).
+        assert!(parser
+            .parse_errors
+            .iter()
+            .any(|e| e.starts_with("diag.octoscript:12:9: Rust value index 0 is unavailable")));
+        assert_eq!(parser.diagnostics.len(), parser.diagnostics().len());
+    }
+
+    #[test]
+    fn diagnostics_are_bounded_but_had_error_survives() {
+        let mut heap = crate::heap::ScriptHeap::default();
+        let mut tokenizer = ScriptTokenizer::default();
+        tokenizer.tokenize(&"let = 1\n".repeat(MAX_PARSER_DIAGNOSTICS * 2), &mut heap);
+        tokenizer.tokenize("\n;", &mut heap);
+        let mut parser = ScriptParser::default();
+        parser.set_emit_errors(false);
+        parser.parse(&tokenizer, "bounded.octoscript", (0, 0), &[]);
+
+        assert!(parser.had_error);
+        assert_eq!(parser.diagnostics().len(), MAX_PARSER_DIAGNOSTICS);
+        assert!(parser.diagnostics_truncated());
+        assert!(parser.parse_errors.len() <= 16);
     }
 
     #[test]
