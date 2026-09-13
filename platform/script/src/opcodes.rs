@@ -238,29 +238,7 @@ impl<'a> ScriptVm<'a> {
             Opcode::LET_DESTRUCT_ARRAY_EL => self.handle_let_destruct_array_el(opargs),
             Opcode::LET_DESTRUCT_OBJECT_EL => self.handle_let_destruct_object_el(),
 
-            opcode => {
-                let ip = self.bx.threads.cur_ref().trap.ip;
-                let loc = self.bx.code.ip_to_loc(ip);
-                if let Some(loc) = loc {
-                    eprintln!(
-                        "UNDEFINED OPCODE {} (raw={}) at {} (ip body={}, index={})",
-                        opcode,
-                        opcode.raw(),
-                        loc,
-                        ip.body,
-                        ip.index
-                    );
-                } else {
-                    eprintln!(
-                        "UNDEFINED OPCODE {} (raw={}) at ip body={}, index={}",
-                        opcode,
-                        opcode.raw(),
-                        ip.body,
-                        ip.index
-                    );
-                }
-                self.bx.threads.cur().trap.goto_next();
-            }
+            _ => self.bail("undefined VM opcode"),
         }
         if opargs.is_pop_to_me() {
             self.pop_to_me();

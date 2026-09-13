@@ -20,6 +20,7 @@ macro_rules! script_eval {
 pub mod colorhex;
 mod clock;
 pub mod docs;
+pub mod equality;
 pub mod gen_index;
 pub mod heap;
 pub mod mod_gc;

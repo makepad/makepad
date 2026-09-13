@@ -779,7 +779,27 @@ impl<'a> ScriptVm<'a> {
                 .trap
                 .goto(try_frame.start_ip + try_frame.jump);
         } else {
+            // An uncaught error terminates this evaluation before another
+            // instruction (and therefore another host effect) can execute.
+            // The diagnostic is drained first so it reaches the captured
+            // sink or the log exactly once; the error value then rides the
+            // Bail back to the host as the evaluation result.
+            let error = self
+                .bx
+                .threads
+                .cur_ref()
+                .trap
+                .err_borrow()
+                .front()
+                .map(|e| e.value);
             self.drain_errors();
+            if let Some(error) = error {
+                self.bx
+                    .threads
+                    .cur()
+                    .trap
+                    .set_on(Some(ScriptTrapOn::Bail(error)));
+            }
         }
     }
 
@@ -907,6 +927,10 @@ impl<'a> ScriptVm<'a> {
                             self.bx.threads.cur().trap.pass(),
                             "script time budget exceeded"
                         );
+                        // A hard budget hit is an uncatchable VM bail. Move its
+                        // diagnostic out of the thread queue before unwinding so
+                        // a later run cannot observe it as a script error.
+                        self.drain_errors();
                         self.bx
                             .threads
                             .cur()
@@ -1573,6 +1597,11 @@ pub struct ScriptVmBase {
     pub is_reload: bool,
     pub debug_trace: bool,
     pub silence_errors: bool,
+    /// Whether script-directed debug output (the `~` LOG operator and
+    /// `ScriptVm::log`) may reach the host log. Raw Makepad hosts keep it on;
+    /// a standalone sandboxed runtime turns it off before any source runs,
+    /// which makes `~` a catchable script error instead of an output path.
+    pub allow_debug_output: bool,
     /// When Some, drained errors are pushed here (formatted) instead of being
     /// logged or dropped — even under `silence_errors`. Install before an
     /// eval/call, take after, to feed diagnostics back to a host (e.g. an AI
@@ -1598,6 +1627,7 @@ impl ScriptVmBase {
             is_reload: false,
             debug_trace: false,
             silence_errors: false,
+            allow_debug_output: true,
             captured_errors: None,
             run_budget: None,
             last_limit_consumed: 0,
@@ -1633,6 +1663,7 @@ impl ScriptVmBase {
             is_reload: false,
             debug_trace: false,
             silence_errors: false,
+            allow_debug_output: true,
             captured_errors: None,
             run_budget: None,
             last_limit_consumed: 0,
