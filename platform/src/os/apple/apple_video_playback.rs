@@ -165,6 +165,12 @@ impl AppleVideoPlayer {
             // Add output to player item
             let _: () = msg_send![player_item, addOutput: video_output];
 
+            // Preserve pitch when `setRate:` ≠ 1 (default Varispeed chipmunks).
+            // Spectral is higher quality; TimeDomain is lower-latency if Spectral fails.
+            let pitch_algo: ObjcId =
+                Self::to_nsstring("AVAudioTimePitchAlgorithmSpectral");
+            let _: () = msg_send![player_item, setAudioTimePitchAlgorithm: pitch_algo];
+
             // Create AVPlayer
             let player: ObjcId = msg_send![
                 class!(AVPlayer),

@@ -19,6 +19,19 @@ pub enum SystemBarAppearance {
     LightIcons,
 }
 
+/// Locks the device screen to a given orientation on mobile (Android / iOS).
+/// Desktop backends ignore this request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ScreenOrientation {
+    /// Follow the sensor / user (no lock).
+    #[default]
+    Auto,
+    /// Lock to portrait (either way up on Android sensor-portrait).
+    Portrait,
+    /// Lock to landscape (either way on Android sensor-landscape).
+    Landscape,
+}
+
 /// The current context data relevant to adaptive views.
 /// Later to be expanded with more context data like platfrom information, accessibility settings, etc.
 #[derive(Clone, Debug, Default)]
@@ -34,6 +47,9 @@ pub struct DisplayContext {
     /// Set via [`crate::Cx::set_system_bar_appearance`]; resolved and applied
     /// by the `Window` widget.
     pub system_bar_appearance: SystemBarAppearance,
+    /// Last requested screen-orientation lock. Honored on Android and iOS;
+    /// desktop backends ignore it. Updated by [`crate::Cx::set_screen_orientation`].
+    pub screen_orientation: ScreenOrientation,
 }
 
 impl DisplayContext {

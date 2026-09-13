@@ -123,7 +123,7 @@ pub use {
         cursor::MouseCursor,
         cx::{Cx, CxRef, LinuxWindowParams, OsType},
         cx_api::{AccessibilityUpdatePayload, CxOsApi, CxOsOp, CxThreadPriority, OpenUrlInPlace},
-        display_context::{DisplayContext, SystemBarAppearance},
+        display_context::{DisplayContext, ScreenOrientation, SystemBarAppearance},
         draw_list::{CxDrawCall, CxDrawItem, CxDrawListPool, CxRectArea, DrawList, DrawListId},
         draw_matrix::DrawMatrix,
         draw_pass::{
