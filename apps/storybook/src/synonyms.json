@@ -984,35 +984,6 @@
    ]
   },
   {
-   "component": "FabControls",
-   "aka": [
-    "property panel",
-    "number scrubber",
-    "drag number",
-    "colour swatch",
-    "color swatch",
-    "colour picker",
-    "color picker",
-    "property row"
-   ],
-   "does": [
-    "drag sideways",
-    "scrub a number",
-    "type a number",
-    "step per pixel",
-    "unit suffix",
-    "wrap around",
-    "fill bar",
-    "colour wheel",
-    "color wheel",
-    "hex entry",
-    "recent swatches",
-    "commit on release",
-    "fine drag",
-    "section header"
-   ]
-  },
-  {
    "component": "FieldWell",
    "aka": [
     "input group",
@@ -2141,7 +2112,15 @@
     "settings sidebar",
     "reflection panel",
     "value editor list",
-    "name and value rows"
+    "name and value rows",
+    "property panel",
+    "number scrubber",
+    "drag number",
+    "colour swatch",
+    "color swatch",
+    "colour picker",
+    "color picker",
+    "property row"
    ],
    "does": [
     "rows of a name and an editor",
@@ -2158,7 +2137,22 @@
     "text is the one channel in both directions",
     "it reports and never writes",
     "changed follows a gesture and committed ends it",
-    "a double click asks for a default"
+    "a double click asks for a default",
+    "drag sideways",
+    "scrub a number",
+    "type a number",
+    "step per pixel",
+    "unit suffix",
+    "wrap around",
+    "fill bar",
+    "colour wheel",
+    "color wheel",
+    "hex entry",
+    "recent swatches",
+    "commit on release",
+    "fine drag",
+    "section header",
+    "property rows"
    ]
   },
   {

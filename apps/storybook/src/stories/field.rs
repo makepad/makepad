@@ -99,11 +99,11 @@ fn field_actions(cx: &mut Cx, root: &WidgetRef, _actions: &Actions) {
 }
 
 pub const STORIES: &[Story] = &[Story {
-    key: "inputs/field-well/overview",
+    key: "inputs/textinput/field-well",
     category: "Inputs",
-    component: "FieldWell",
-    also: &["WellInput"],
-    name: "Overview",
+    component: "TextInput",
+    also: &["FieldWell", "WellInput"],
+    name: "Field well",
     dsl: "FieldWellOverview",
     added: "2026-09-08",
     tags: &["new"],

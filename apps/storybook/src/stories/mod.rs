@@ -43,15 +43,30 @@ pub mod svg;
 pub mod vector;
 pub mod playback_bar;
 pub mod waveform;
+pub mod button;
+pub mod button_group;
+pub mod textinput;
+pub mod field;
+pub mod number_field;
+pub mod slider;
+pub mod range_slider;
+pub mod rotary;
+pub mod rating;
+pub mod tags;
+pub mod date_picker;
+pub mod calendar;
+pub mod time_picker;
+pub mod color;
+pub mod upload;
+pub mod form;
+pub mod drag_number;
 pub mod badge;
 pub mod placeholder;
-pub mod button_more;
 pub mod checkbox_more;
 pub mod alert;
 pub mod progress;
 pub mod level_meter;
 pub mod spinner;
-pub mod button_group;
 pub mod chip;
 pub mod menu;
 pub mod dialog;
@@ -61,16 +76,9 @@ pub mod popover;
 pub mod toast;
 pub mod select;
 pub mod tip;
-pub mod button;
 pub mod checkbox;
 pub mod combobox;
 pub mod dropdown;
-pub mod number_field;
-pub mod calendar;
-pub mod date_picker;
-pub mod time_picker;
-pub mod rating;
-pub mod tags;
 pub mod radio_group;
 pub mod kbd;
 pub mod wheel_picker;
@@ -82,44 +90,32 @@ pub mod table;
 pub mod empty_state;
 pub mod timeline;
 pub mod chat;
-pub mod upload;
-pub mod form;
-pub mod color;
 pub mod column_picker;
 pub mod command_palette;
 pub mod pie_menu;
-pub mod drag_number;
 pub mod chart_more;
 pub mod toolbar;
 pub mod kanban;
 pub mod svg_select;
 pub mod tour;
-pub mod range_slider;
-pub mod slider;
-pub mod textinput;
 pub mod radiobutton;
 pub mod breadcrumb;
-pub mod field;
 pub mod chart;
 pub mod lists;
-pub mod value_input;
 pub mod window_chrome;
 pub mod overlay_messages;
 pub mod drop_controls;
-pub mod fab_controls;
 pub mod data_grid;
 pub mod modal;
 pub mod floating_panel;
 pub mod nav_list;
 pub mod pagination;
-pub mod linklabel;
 pub mod tabs;
 pub mod stacknavigation;
 pub mod portallist;
 pub mod tile_list;
 pub mod item_grid;
 pub mod log_list;
-pub mod rotary;
 
 /// Registered in the order the navigator reads, the same order as
 /// [`tables`], though no story template leans on another file's.
@@ -168,24 +164,36 @@ pub fn script_mod(vm: &mut ScriptVm) {
     vector::script_mod(vm);
     playback_bar::script_mod(vm);
     waveform::script_mod(vm);
+    // 6 Actions
     button::script_mod(vm);
+    button_group::script_mod(vm);
+    // 7 Inputs
+    textinput::script_mod(vm);
+    field::script_mod(vm);
+    number_field::script_mod(vm);
+    slider::script_mod(vm);
+    range_slider::script_mod(vm);
+    rotary::script_mod(vm);
+    rating::script_mod(vm);
+    tags::script_mod(vm);
+    date_picker::script_mod(vm);
+    calendar::script_mod(vm);
+    time_picker::script_mod(vm);
+    color::script_mod(vm);
+    upload::script_mod(vm);
+    form::script_mod(vm);
+    drag_number::script_mod(vm);
     checkbox::script_mod(vm);
     combobox::script_mod(vm);
     dropdown::script_mod(vm);
-    slider::script_mod(vm);
-    range_slider::script_mod(vm);
     tour::script_mod(vm);
     svg_select::script_mod(vm);
     kanban::script_mod(vm);
     toolbar::script_mod(vm);
     chart_more::script_mod(vm);
-    drag_number::script_mod(vm);
     pie_menu::script_mod(vm);
     command_palette::script_mod(vm);
     column_picker::script_mod(vm);
-    color::script_mod(vm);
-    form::script_mod(vm);
-    upload::script_mod(vm);
     chat::script_mod(vm);
     timeline::script_mod(vm);
     empty_state::script_mod(vm);
@@ -197,29 +205,18 @@ pub fn script_mod(vm: &mut ScriptVm) {
     wheel_picker::script_mod(vm);
     kbd::script_mod(vm);
     radio_group::script_mod(vm);
-    tags::script_mod(vm);
-    rating::script_mod(vm);
-    time_picker::script_mod(vm);
-    date_picker::script_mod(vm);
-    calendar::script_mod(vm);
-    number_field::script_mod(vm);
-    textinput::script_mod(vm);
     radiobutton::script_mod(vm);
     breadcrumb::script_mod(vm);
-    field::script_mod(vm);
     chart::script_mod(vm);
     lists::script_mod(vm);
-    value_input::script_mod(vm);
     window_chrome::script_mod(vm);
     overlay_messages::script_mod(vm);
     drop_controls::script_mod(vm);
-    fab_controls::script_mod(vm);
     data_grid::script_mod(vm);
     modal::script_mod(vm);
     floating_panel::script_mod(vm);
     nav_list::script_mod(vm);
     pagination::script_mod(vm);
-    linklabel::script_mod(vm);
     tabs::script_mod(vm);
     stacknavigation::script_mod(vm);
     portallist::script_mod(vm);
@@ -227,13 +224,10 @@ pub fn script_mod(vm: &mut ScriptVm) {
     item_grid::script_mod(vm);
     log_list::script_mod(vm);
     spinner::script_mod(vm);
-    rotary::script_mod(vm);
     badge::script_mod(vm);
     placeholder::script_mod(vm);
     checkbox_more::script_mod(vm);
-    button_more::script_mod(vm);
     chip::script_mod(vm);
-    button_group::script_mod(vm);
     menu::script_mod(vm);
     select::script_mod(vm);
     tip::script_mod(vm);
@@ -297,24 +291,36 @@ pub fn tables() -> &'static [&'static [Story]] {
         vector::STORIES,
         playback_bar::STORIES,
         waveform::STORIES,
+        // 6 Actions
         button::STORIES,
+        button_group::STORIES,
+        // 7 Inputs
+        textinput::STORIES,
+        field::STORIES,
+        number_field::STORIES,
+        slider::STORIES,
+        range_slider::STORIES,
+        rotary::STORIES,
+        rating::STORIES,
+        tags::STORIES,
+        date_picker::STORIES,
+        calendar::STORIES,
+        time_picker::STORIES,
+        color::STORIES,
+        upload::STORIES,
+        form::STORIES,
+        drag_number::STORIES,
         checkbox::STORIES,
         combobox::STORIES,
         dropdown::STORIES,
-        slider::STORIES,
-        range_slider::STORIES,
         tour::STORIES,
         svg_select::STORIES,
         kanban::STORIES,
         toolbar::STORIES,
         chart_more::STORIES,
-        drag_number::STORIES,
         pie_menu::STORIES,
         command_palette::STORIES,
         column_picker::STORIES,
-        color::STORIES,
-        form::STORIES,
-        upload::STORIES,
         chat::STORIES,
         timeline::STORIES,
         empty_state::STORIES,
@@ -326,29 +332,18 @@ pub fn tables() -> &'static [&'static [Story]] {
         wheel_picker::STORIES,
         kbd::STORIES,
         radio_group::STORIES,
-        tags::STORIES,
-        rating::STORIES,
-        time_picker::STORIES,
-        date_picker::STORIES,
-        calendar::STORIES,
-        number_field::STORIES,
-        textinput::STORIES,
         radiobutton::STORIES,
         breadcrumb::STORIES,
-        field::STORIES,
         chart::STORIES,
         lists::STORIES,
-        value_input::STORIES,
         window_chrome::STORIES,
         overlay_messages::STORIES,
         drop_controls::STORIES,
-        fab_controls::STORIES,
         data_grid::STORIES,
         modal::STORIES,
         floating_panel::STORIES,
         nav_list::STORIES,
         pagination::STORIES,
-        linklabel::STORIES,
         tabs::STORIES,
         stacknavigation::STORIES,
         portallist::STORIES,
@@ -356,13 +351,10 @@ pub fn tables() -> &'static [&'static [Story]] {
         item_grid::STORIES,
         log_list::STORIES,
         spinner::STORIES,
-        rotary::STORIES,
         badge::STORIES,
         placeholder::STORIES,
         checkbox_more::STORIES,
-        button_more::STORIES,
         chip::STORIES,
-        button_group::STORIES,
         menu::STORIES,
         select::STORIES,
         tip::STORIES,

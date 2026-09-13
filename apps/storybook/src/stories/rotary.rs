@@ -1,4 +1,5 @@
-//! The rotary stories: the standard, gradient and flat dials with their gap, size and padding variants, ported from the widget zoo.
+//! The rotary stories: a dial with a centre, its faces, sizes and styling
+//! on the overview, and the panel knob on a page of its own.
 use crate::makepad_widgets::*;
 use crate::registry::{Control, ControlKind, Story};
 
@@ -8,32 +9,73 @@ script_mod! {
     use mod.storybook.*
 
     mod.stories.RotaryOverview = StoryPage{
-        H4{text: "Rotary"}
+        StoryNote{text: "A dial that picks one number from a range. It is a slider drawn as an arc, for one control read on its own in a form. For a row of small dials on a panel, the knob has a page of its own."}
+
+        StoryHeading{text: "A centre, not a floor"}
+        StoryNote{text: "A pan or a tone control has a CENTRE, not a floor. arc_from_origin fills the arc from the default outward instead of from the stop, so a cut and a boost point opposite ways and zero shows as nothing at all rather than as a half-filled ring that looks like a setting."}
+        StoryRow{
+            set_cut := Button{text: "Cut"}
+            set_centre := Button{text: "Centre"}
+            set_boost := Button{text: "Boost"}
+            bip_note := Label{text: "both dials at 0.00"}
+        }
+        StoryNote{text: "The same value in both. The left one fills from the centre, so the sign is in the picture; the right one fills from the stop, where a cut and a boost of the same size look nothing like each other and zero looks like half of something."}
         StoryRow{
             align: Align{x: 0. y: 0.}
+            spacing: theme.space_4
+            from_origin := Rotary{width: 120. height: 120. text: "from origin" min: -1. max: 1. default: 0.0 arc_from_origin: true}
+            from_stop := Rotary{width: 120. height: 120. text: "from stop" min: -1. max: 1. default: 0.0}
+        }
 
-            Rotary{text: "Label"}
+        StoryHeading{text: "Faces"}
+        StoryNote{text: "The standard dial, the dial with a two-stop track, and the flat dial without the theme bevel."}
+        StoryRow{
+            align: Align{x: 0. y: 0.}
+            Rotary{width: 120. height: 120. text: "Rotary"}
+            RotaryGradientY{width: 150. height: 120. text: "RotaryGradientY"}
+            RotaryFlat{width: 120. height: 120. text: "RotaryFlat"}
+        }
 
+        StoryHeading{text: "Sizes"}
+        StoryNote{text: "The dial is drawn to the box it is given, so a larger box gives a larger dial."}
+        StoryRow{
+            align: Align{x: 0. y: 0.}
             Rotary{
-                text: "Label"
+                width: Fill
+                height: 150
+                text: "Rotary"
                 draw_bg +: {
                     val_size: 10.
-                    val_padding: 2.
-                    gap: 0.
+                    val_padding: 5.
                 }
             }
-
-            Rotary{
-                text: "Label"
+            RotaryGradientY{
+                width: Fill
+                height: 150
+                text: "RotaryGradientY"
                 draw_bg +: {
-                    val_size: 5.
-                    val_padding: 2.5
-                    gap: 180.
+                    val_size: 10.
+                    val_padding: 5.
                 }
             }
+            RotaryFlat{
+                width: Fill
+                height: 150
+                text: "RotaryFlat"
+                draw_bg +: {
+                    val_size: 10.
+                    val_padding: 8.
+                }
+            }
+        }
 
+        StoryHeading{text: "Disabled"}
+        StoryRow{
+            align: Align{x: 0. y: 0.}
             Rotary{
-                text: "Label"
+                width: 120.
+                height: 120.
+                text: "Rotary"
                 draw_bg +: {
                     val_size: 5.
                     val_padding: 0.
@@ -45,33 +87,10 @@ script_mod! {
                     }
                 }
             }
-
-            Rotary{
-                width: Fill
-                height: 150
-                text: "Label"
-                draw_bg +: {
-                    val_size: 10.
-                    val_padding: 5.
-                }
-            }
-        }
-
-        Hr{}
-        H4{text: "RotaryGradientY"}
-        StoryRow{
-            align: Align{x: 0. y: 0.}
-            RotaryGradientY{text: "Label"}
             RotaryGradientY{
-                text: "Label"
-                draw_bg +: {gap: 0.}
-            }
-            RotaryGradientY{
-                text: "Label"
-                draw_bg +: {gap: 180.}
-            }
-            RotaryGradientY{
-                text: "Label"
+                width: 150.
+                height: 120.
+                text: "RotaryGradientY"
                 animator +: {
                     disabled: {
                         default: @on
@@ -79,32 +98,10 @@ script_mod! {
                 }
                 draw_bg +: {val_size: 20.}
             }
-            RotaryGradientY{
-                width: Fill
-                height: 150
-                text: "Label"
-                draw_bg +: {
-                    val_size: 10.
-                    val_padding: 5.
-                }
-            }
-        }
-
-        Hr{}
-        H4{text: "RotaryFlat"}
-        StoryRow{
-            align: Align{x: 0. y: 0.}
-            RotaryFlat{text: "Label"}
             RotaryFlat{
-                text: "Label"
-                draw_bg +: {gap: 0.}
-            }
-            RotaryFlat{
-                text: "Label"
-                draw_bg +: {gap: 180.}
-            }
-            RotaryFlat{
-                text: "Label"
+                width: 120.
+                height: 120.
+                text: "RotaryFlat"
                 animator +: {
                     disabled: {
                         default: @on
@@ -112,34 +109,59 @@ script_mod! {
                 }
                 draw_bg +: {val_size: 10.}
             }
-            RotaryFlat{
-                width: Fill
-                height: 150
-                text: "Label"
-                draw_bg +: {
-                    val_size: 10.
-                    val_padding: 8.
-                }
-            }
-        }
-    }
-    mod.stories.RotaryBipolar = StoryPage{
-        StoryNote{text: "A pan or a tone control has a CENTRE, not a floor. arc_from_origin fills the arc from the default outward instead of from the stop, so a cut and a boost point opposite ways and zero shows as nothing at all rather than as a half-filled ring that looks like a setting."}
-
-        StoryRow{
-            set_cut := Button{text: "Cut"}
-            set_centre := Button{text: "Centre"}
-            set_boost := Button{text: "Boost"}
-            bip_note := Label{text: "both knobs at 0.00"}
         }
 
-        StoryHeading{text: "From the origin, and from the stop"}
-        StoryNote{text: "The same value in both. The left one fills from the centre, so the sign is in the picture; the right one fills from the stop, where a cut and a boost of the same size look nothing like each other and zero looks like half of something."}
+        StoryHeading{text: "Styling reference"}
+        StoryNote{text: "`gap` is the opening at the bottom of the arc in degrees, `val_size` the thickness of the value arc, and `val_padding` its inset. The first row is Rotary and RotaryGradientY, the second RotaryFlat."}
         StoryRow{
             align: Align{x: 0. y: 0.}
-            spacing: theme.space_4
-            from_origin := Rotary{text: "from origin" min: -1. max: 1. default: 0.0 arc_from_origin: true}
-            from_stop := Rotary{text: "from stop" min: -1. max: 1. default: 0.0}
+            Rotary{
+                width: 120.
+                height: 135.
+                text: "gap 0"
+                draw_bg +: {
+                    val_size: 10.
+                    val_padding: 2.
+                    gap: 0.
+                }
+            }
+            Rotary{
+                width: 120.
+                height: 135.
+                text: "gap 180"
+                draw_bg +: {
+                    val_size: 5.
+                    val_padding: 2.5
+                    gap: 180.
+                }
+            }
+            RotaryGradientY{
+                width: 120.
+                height: 135.
+                text: "gap 0"
+                draw_bg +: {gap: 0.}
+            }
+            RotaryGradientY{
+                width: 120.
+                height: 135.
+                text: "gap 180"
+                draw_bg +: {gap: 180.}
+            }
+        }
+        StoryRow{
+            align: Align{x: 0. y: 0.}
+            RotaryFlat{
+                width: 120.
+                height: 135.
+                text: "gap 0"
+                draw_bg +: {gap: 0.}
+            }
+            RotaryFlat{
+                width: 120.
+                height: 135.
+                text: "gap 180"
+                draw_bg +: {gap: 180.}
+            }
         }
     }
 
@@ -189,18 +211,17 @@ script_mod! {
         }
 
         StoryHeading{text: "Centre, and where the arc says it is"}
-        StoryNote{text: "Both controls hold the same value and both fill from their default. There is no separate centre mark and none is needed: the arc runs BETWEEN the resting angle and the value, so one of its ends is always at rest, and at rest the arc collapses to a single round cap sitting exactly on that angle. Press the three buttons and watch which end stays put."}
+        StoryNote{text: "The knob fills from its default. There is no separate centre mark and none is needed: the arc runs BETWEEN the resting angle and the value, so one of its ends is always at rest, and at rest the arc collapses to a single round cap sitting exactly on that angle. Press the three buttons and watch which end stays put."}
         StoryRow{
             set_cut := Button{text: "Cut"}
             set_home := Button{text: "Centre"}
             set_boost := Button{text: "Boost"}
-            knob_note := Label{text: "both at 0.00"}
+            knob_note := Label{text: "at 0.00"}
         }
         StoryRow{
             align: Align{x: 0. y: 1.}
             spacing: theme.space_4
             tone_knob := RotaryKnob{text: "TONE" min: -1. max: 1. default: 0. arc_from_origin: true}
-            tone_dial := Rotary{text: "Tone" min: -1. max: 1. default: 0. arc_from_origin: true}
         }
 
         StoryHeading{text: "The three numbers, and the material"}
@@ -241,28 +262,30 @@ pub const STORIES: &[Story] = &[Story {
     name: "Overview",
     dsl: "RotaryOverview",
     added: "2026-02-16",
-    tags: &["ported"],
-    doc: "# Rotary\n\nRotary controls allow selecting values with a circular dial.",
-    subject: "",
-    feature: None,
-    controls: &[],
-    on_actions: None,
-}, Story {
-    key: "inputs/rotary/bipolar",
-    category: "Inputs",
-    component: "Rotary",
-    also: &[],
-    name: "Bipolar",
-    dsl: "RotaryBipolar",
-    added: "2026-09-05",
-    tags: &["new"],
-    doc: "# Bipolar
+    tags: &["ported", "bipolar"],
+    doc: "# Rotary
+
+A dial that picks one number from a range. It is a slider drawn as an arc, with the same `min`, `max`, `step` and `default`, and it reports the same way.
+
+## Rotary or RotaryKnob
+
+A `Rotary` is a dial with its label and its readout in a row ABOVE it, drawn for a 65 by 95 well: one control, read one at a time, in a form. A `RotaryKnob` is the panel version of the same slider: one dark disc with the value cut into a groove near its edge, meant to be built into a row of twenty at 24 pixels a side, where nobody reads any single one of them and the SHAPE of the row is the reading. The knob has a page of its own.
+
+## A centre, not a floor
 
 Some controls have a CENTRE rather than a floor. Pan, pitch, a tone control: zero is not \"none of it\", it is \"neither way\", and the two directions mean opposite things.
 
 `arc_from_origin` fills the arc from the DEFAULT outward instead of from the stop. Three things follow, and all three are the point. A cut and a boost of the same size point opposite ways, so the sign is in the picture. Zero shows as nothing at all rather than as a half-filled ring that looks like a setting. And the eye reads distance from centre, which is the quantity that matters, instead of distance from a stop nobody cares about.
 
-The second row is the same three values without it, where all three fill from the same end and the sign is simply absent.",
+The dial beside it holds the same value without it: it fills from the stop, and the sign is simply absent.
+
+## Faces
+
+`RotaryFlat` is an arc track with an opening at the bottom and a bevelled rim. `Rotary` adds the theme's inset bevel and value gradient, and `RotaryGradientY` fills the track with two stops.
+
+## Styling
+
+`gap` is the opening at the bottom of the arc in degrees, `val_size` the thickness of the value arc, and `val_padding` its inset from the track.",
     subject: "from_origin",
     feature: None,
     controls: &[],
@@ -278,7 +301,7 @@ The second row is the same three values without it, where all three fill from th
     tags: &["new", "controls"],
     doc: "# Knob
 
-A `Rotary` is a dial with its label and its readout in a row ABOVE it, drawn for a 65 by 95 well: one control, read one at a time, in a form. A `RotaryKnob` is the panel version of the same slider. One dark disc with the value cut into a groove near its edge, meant to be built into a row of twenty at 24 pixels a side, where nobody reads any single one of them and the SHAPE of the row is the reading.
+A `RotaryKnob` is the panel version of the slider. One dark disc with the value cut into a groove near its edge, meant to be built into a row of twenty at 24 pixels a side, where nobody reads any single one of them and the SHAPE of the row is the reading. When to use it rather than a `Rotary` is on the Rotary overview.
 
 Everything else about it follows from that.
 
@@ -325,7 +348,7 @@ fn bipolar_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
         if root.button(cx, id).clicked(actions) {
             root.slider(cx, ids!(from_origin)).set_value(cx, v);
             root.slider(cx, ids!(from_stop)).set_value(cx, v);
-            root.label(cx, ids!(bip_note)).set_text(cx, &format!("both knobs at {v:.2}"));
+            root.label(cx, ids!(bip_note)).set_text(cx, &format!("both dials at {v:.2}"));
         }
     }
 }
@@ -343,8 +366,7 @@ fn knob_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
             // the readout own repaint, which was the only one a caller
             // ever got, would have dirtied nothing at all.
             root.slider(cx, ids!(tone_knob)).set_value(cx, v);
-            root.slider(cx, ids!(tone_dial)).set_value(cx, v);
-            root.label(cx, ids!(knob_note)).set_text(cx, &format!("both at {v:.2}"));
+            root.label(cx, ids!(knob_note)).set_text(cx, &format!("at {v:.2}"));
         }
     }
 }

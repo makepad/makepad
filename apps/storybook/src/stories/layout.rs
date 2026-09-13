@@ -291,8 +291,9 @@ script_mod! {
 
             CellLabel{text: "Steps: under 440 points of room the side goes above the body"}
             // The variants keep the default selector's names, Desktop and
-            // Mobile: that selector picks on the window until the page's
-            // handler installs one that reads the room this frame gives.
+            // Mobile, so the window rule always has one to pick; the page's
+            // handler installs a selector that reads the room this frame
+            // gives as the page opens.
             adaptive := AdaptiveView{
                 width: Fill
                 height: Fit
@@ -366,7 +367,7 @@ root.adaptive_view(cx, ids!(adaptive)).set_variant_selector(|_cx, parent| {
 
 The selector runs when the view is drawn at a new parent size, and when the window changes. It may return the name of any template the view declares, so three steps are three templates. `set_default_variant_selector` puts the window rule back.
 
-Because the handler installs the selector, the first frame after the page opens is picked by the window rule. The demo's templates keep the default names for that reason, and the frame starts wide enough that in a window 860 points or wider both rules pick the same one.",
+The handler installs the selector as the page opens, before its first frame. The demo's templates keep the default names all the same, so the window rule always has a template to pick, and the frame starts wide enough that in a window 860 points or wider both rules pick the same one.",
     subject: "frame",
     feature: None,
     controls: &[],

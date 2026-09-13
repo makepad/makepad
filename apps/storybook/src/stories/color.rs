@@ -1,5 +1,5 @@
-//! The colour stories: the picker panel, the same panel under a swatch, the
-//! four controls it is made of, the strips, and the text field that repairs
+//! The colour story: the picker panel, the same panel under a swatch, the
+//! controls it is made of, the strips, and the text field that repairs
 //! itself.
 use crate::makepad_widgets::color::{
     format_color_hex, ColorAlphaWidgetRefExt, ColorAreaWidgetRefExt, ColorFieldWidgetRefExt,
@@ -92,7 +92,7 @@ script_mod! {
         palette_read := Readout{text: "no cell chosen yet"}
 
         StoryHeading{text: "Written down"}
-        StoryNote{text: "The field takes either spelling whichever one it shows — a short hex, a long one, one with alpha on the end, or the numeric form — and when the keyboard leaves it, it rewrites what is in it: the colour it understood, or the colour it already had if it understood nothing. Type something that is not a colour into one of these and click away."}
+        StoryNote{text: "The field takes either spelling whichever one it shows: a short hex, a long one, one with alpha on the end, or the numeric form. Only the third was given with_alpha, so only it writes the alpha down and takes one that is typed."}
         StoryRow{
             flow: Down
             spacing: theme.space_1
@@ -102,44 +102,21 @@ script_mod! {
         }
         field_read := Readout{text: "no colour typed yet"}
 
-        StoryHeading{text: "It follows the theme"}
-        StoryNote{text: "Every border, every panel face and both squares of every checker come from the theme, so the whole family follows a light page, a dark one and the skeleton grade. The only colours held back are the two the pucks are drawn in: a puck sits on the colour being chosen rather than on a surface, so it has to stay legible over red, over white and over black, and a dark outline with a light ring inside is the shape that manages that."}
-    }
-
-
-    mod.stories.ColorFieldOverview = StoryPage{
-        StoryNote{text: "A colour written down, next to the colour itself. This is the control for a place where the colour usually arrives from somewhere else — a brand sheet, a screenshot, a message — and the panel would be four gestures where a paste is one."}
-
-        StoryHeading{text: "Both spellings"}
-        StoryNote{text: "The notation decides how the field WRITES a colour. It always READS both, because a person pasting from elsewhere has whatever they had."}
-        StoryRow{
-            flow: Down
-            spacing: theme.space_1
-            as_hex := ColorField{width: 280. color: #xE6A294FF}
-            as_rgb := ColorField{width: 280. color: #xE6A294FF notation: ColorNotation.Rgb}
-        }
-        wrote := Label{text: "nothing typed yet"}
-
-        StoryHeading{text: "Alpha is opt-in"}
-        StoryNote{text: "Most fields choose a colour, not a transparency, and eight hex digits where six were expected is a good way to paste something wrong. A field with alpha turned on shows it and takes it; one without keeps the alpha it already had, whatever you type."}
-        StoryRow{
-            flow: Down
-            spacing: theme.space_1
-            opaque_only := ColorField{width: 280. color: #x2FB344FF}
-            alpha_shown := ColorField{width: 280. color: #x2FB34466 with_alpha: true}
-        }
-
         StoryHeading{text: "It repairs itself"}
         StoryNote{text: "Type a half-finished hex, or a word, into the field below and then click anywhere else. Losing the keyboard is treated exactly like pressing Enter: the field is read, and then rewritten from the colour that is actually held. A field that silently kept unparseable text would be a field that lies about what the document contains."}
         StoryRow{
             spacing: theme.space_2
             repair := ColorField{width: 280. color: #x8EBAEBFF}
-            repair_read := Label{text: "still #8ebaeb"}
+            repair_read := Readout{text: "still #8ebaeb"}
         }
+
+        StoryHeading{text: "It follows the theme"}
+        StoryNote{text: "Every border, every panel face and both squares of every checker come from the theme, so the whole family follows a light page, a dark one and the skeleton grade. The only colours held back are the two the pucks are drawn in: a puck sits on the colour being chosen rather than on a surface, so it has to stay legible over red, over white and over black, and a dark outline with a light ring inside is the shape that manages that."}
     }
+
 }
 
-/// A colour as the pages say it: the hex, and the alpha when there is any to
+/// A colour as the page says it: the hex, and the alpha when there is any to
 /// speak of.
 fn say(c: Vec4f) -> String {
     format_color_hex([c.x, c.y, c.z, c.w], c.w < 0.999)
@@ -202,16 +179,16 @@ fn color_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
 }
 
 fn color_field_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
-    for (name, id) in [("hex", ids!(as_hex)), ("numeric", ids!(as_rgb))] {
-        if let Some(c) = root.color_field(cx, id).ended(actions) {
-            root.label(cx, ids!(wrote))
-                .set_text(cx, &format!("the {name} field took {}", say(c)));
-        }
-    }
     if let Some(c) = root.color_field(cx, ids!(repair)).ended(actions) {
         root.label(cx, ids!(repair_read))
             .set_text(cx, &format!("now {}", say(c)));
     }
+}
+
+/// The page's one handler: the picker and its pieces, then the repair field.
+fn color_page_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
+    color_actions(cx, root, actions);
+    color_field_actions(cx, root, actions);
 }
 
 pub const STORIES: &[Story] = &[
@@ -223,6 +200,7 @@ pub const STORIES: &[Story] = &[
             "ColorAlpha",
             "ColorArea",
             "ColorField",
+            "ColorNotation",
             "ColorPickerButton",
             "ColorSwatch",
             "ColorSwatchWide",
@@ -233,7 +211,7 @@ pub const STORIES: &[Story] = &[
         dsl: "ColorOverview",
         added: "2026-09-10",
         tags: &["new"],
-        doc: "# ColorPicker\n\nOne colour, and the several ways a person reaches for it: a hue ring, a saturation/value square, an alpha strip, rows of numbers, and the last few colours committed in this session.\n\n`ColorPicker` stands inline on a page. `ColorPickerButton` is the same widget with `popover: true`: the swatch is the whole control at rest and the panel opens over the page under it, flipping above when the bottom would run off the window. A press outside commits; Escape puts back the colour that was there when it opened.\n\nEvery piece is also a widget on its own — `ColorWheel` (the ring), `ColorArea` (the square), `ColorAlpha` (the strip), `ColorSwatch` (a colour as a block), `PaletteStrip` (a wrapped grid of cells) and `ColorField` (a colour written down). The picker places the square inside the ring's hole rather than the ring nesting it, so neither depends on the other.\n\n**Hue is the state, not red-green-blue.** Each control holds hue, saturation, value and alpha, and derives the RGBA from that. Round-tripping through RGBA loses the hue of a grey and the hue of black, and a picker whose ring swings back to red the moment the value reaches zero is the classic way this control goes wrong.\n\nEverything reports twice: `Changed` while the colour moves under the hand, and `Ended` once when the gesture finishes. Follow the first, record the second.\n\n**What it is not.** There is no eyedropper — nothing here can read a screen pixel, and an OS capture path is a host's business. There is no colour space beyond sRGB and HSV. And a palette strip binds to nothing: it reports the cell that was picked and the colour in it, and what that cell means is known only to whoever filled the strip.",
+        doc: "# ColorPicker\n\nOne colour, and the several ways a person reaches for it: a hue ring, a saturation/value square, an alpha strip, rows of numbers, and the last few colours committed in this session.\n\n`ColorPicker` stands inline on a page. `ColorPickerButton` is the same widget with `popover: true`: the swatch is the whole control at rest and the panel opens over the page under it, flipping above when the bottom would run off the window. A press outside commits; Escape puts back the colour that was there when it opened.\n\nEvery piece is also a widget on its own — `ColorWheel` (the ring), `ColorArea` (the square), `ColorAlpha` (the strip), `ColorSwatch` (a colour as a block), `PaletteStrip` (a wrapped grid of cells) and `ColorField` (a colour written down). The picker places the square inside the ring's hole rather than the ring nesting it, so neither depends on the other.\n\n**Hue is the state, not red-green-blue.** Each control holds hue, saturation, value and alpha, and derives the RGBA from that. Round-tripping through RGBA loses the hue of a grey and the hue of black, and a picker whose ring swings back to red the moment the value reaches zero is the classic way this control goes wrong.\n\nEverything reports twice: `Changed` while the colour moves under the hand, and `Ended` once when the gesture finishes. Follow the first, record the second.\n\n**What it is not.** There is no eyedropper — nothing here can read a screen pixel, and an OS capture path is a host's business. There is no colour space beyond sRGB and HSV. And a palette strip binds to nothing: it reports the cell that was picked and the colour in it, and what that cell means is known only to whoever filled the strip.\n\n## ColorField\n\nA colour written down, next to the colour itself. The control for a place where the colour usually arrives from somewhere else — a style sheet, a screenshot, a message — and a wheel would be four gestures where a paste is one.\n\n`notation` decides how the field WRITES a colour: `ColorNotation.Hex` gives `#ff8000`, `ColorNotation.Rgb` gives `rgb(255, 128, 0)`. It always READS both, plus the short `#f80` form and the eight-digit form with alpha, because a person pasting from elsewhere has whatever they had.\n\n`with_alpha` is off by default. Most fields choose a colour and not a transparency, and eight hex digits where six were expected is a good way to paste something wrong; a field without it keeps the alpha it already had.\n\n**It repairs itself.** Losing the keyboard is treated exactly like pressing Enter: the text is read, and then rewritten from the colour that is actually held. A field that silently kept unparseable text would be lying about what the document contains.",
         subject: "inline",
         feature: None,
         controls: &[
@@ -241,22 +219,6 @@ pub const STORIES: &[Story] = &[
             Control { label: "Alpha strip", target: "subject", kind: ControlKind::Bool { prop: "with_alpha", default: true } },
             Control { label: "Recent colours", target: "subject", kind: ControlKind::Bool { prop: "with_recent", default: true } },
         ],
-        on_actions: Some(color_actions),
-    },
-    
-    Story {
-        key: "inputs/color-field/overview",
-        category: "Inputs",
-        component: "ColorField",
-        also: &["ColorNotation", "ColorSwatch"],
-        name: "Overview",
-        dsl: "ColorFieldOverview",
-        added: "2026-09-10",
-        tags: &["new"],
-        doc: "# ColorField\n\nA colour written down, next to the colour itself. The control for a place where the colour usually arrives from somewhere else — a brand sheet, a screenshot, a message — and a wheel would be four gestures where a paste is one.\n\n`notation` decides how the field WRITES a colour: `ColorNotation.Hex` gives `#ff8000`, `ColorNotation.Rgb` gives `rgb(255, 128, 0)`. It always READS both, plus the short `#f80` form and the eight-digit form with alpha, because a person pasting from elsewhere has whatever they had.\n\n`with_alpha` is off by default. Most fields choose a colour and not a transparency, and eight hex digits where six were expected is a good way to paste something wrong; a field without it keeps the alpha it already had.\n\n**It repairs itself.** Losing the keyboard is treated exactly like pressing Enter: the text is read, and then rewritten from the colour that is actually held. A field that silently kept unparseable text would be lying about what the document contains.",
-        subject: "as_hex",
-        feature: None,
-        controls: &[],
-        on_actions: Some(color_field_actions),
+        on_actions: Some(color_page_actions),
     },
 ];

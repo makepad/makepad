@@ -122,11 +122,11 @@ fn range_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
 }
 
 pub const STORIES: &[Story] = &[Story {
-    key: "inputs/rangeslider/overview",
+    key: "inputs/slider/range-slider",
     category: "Inputs",
-    component: "RangeSlider",
-    also: &["RangeSliderFlat"],
-    name: "Overview",
+    component: "Slider",
+    also: &["RangeSlider", "RangeSliderFlat"],
+    name: "Range slider",
     dsl: "RangeSliderOverview",
     added: "2026-09-10",
     tags: &["new", "controls", "range", "span", "min", "max", "two handles", "slider"],

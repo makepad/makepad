@@ -177,6 +177,7 @@ impl App {
         }
         self.current = Some(story.key.to_string());
         self.ui.story_canvas(cx, ids!(canvas)).open(cx, story.dsl);
+        self.settle_story(cx);
         // Selecting the row opens the folders over it; one the person
         // had closed is closed no longer, and the settings say so.
         if self.ui.story_navigator(cx, ids!(navigator)).select(cx, story.key) {
@@ -200,10 +201,26 @@ impl App {
                 remote::Request::Theme(index) => theme::select(cx, index),
                 remote::Request::Reset => {
                     self.ui.story_canvas(cx, ids!(canvas)).reset(cx);
+                    self.settle_story(cx);
                     self.ui.controls_panel(cx, ids!(controls)).reset(cx);
                     self.ui.actions_panel(cx, ids!(actions)).clear(cx);
                 }
             }
+        }
+    }
+
+    /// Run the story's handler once with no actions, straight after its page
+    /// is built. What only a host can put on a page, such as the rows an
+    /// inspector lists or the value a toolbar number starts at, is put there
+    /// on this pass, so the page opens with it rather than waiting for the
+    /// first action anything on it happens to raise. A handler reads
+    /// actions, so with none it only does that setting up.
+    fn settle_story(&self, cx: &mut Cx) {
+        let Some(on_actions) = self.current().and_then(|story| story.on_actions) else {
+            return;
+        };
+        if let Some(root) = self.ui.story_canvas(cx, ids!(canvas)).shown_root() {
+            on_actions(cx, &root, &[]);
         }
     }
 
@@ -422,6 +439,7 @@ impl MatchEvent for App {
         }
         if self.ui.button(cx, ids!(reset)).clicked(actions) {
             self.ui.story_canvas(cx, ids!(canvas)).reset(cx);
+            self.settle_story(cx);
             self.ui.controls_panel(cx, ids!(controls)).reset(cx);
             self.ui.actions_panel(cx, ids!(actions)).clear(cx);
         }
@@ -488,6 +506,9 @@ impl AppMain for App {
                     .set_text(cx, &format!("{} / {}", story.component, story.name));
                 self.ui.docs_panel(cx, ids!(docs)).set_story(cx, story);
             }
+            // The canvas rebuilt the page from its template in the tree's
+            // pass above, blank of what its handler had put on it.
+            self.settle_story(cx);
             self.refresh_new_days(cx);
             self.refresh_new_count(cx);
             // The match count and the hidden-matches line under the
