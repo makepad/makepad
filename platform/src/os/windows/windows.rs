@@ -470,6 +470,39 @@ impl Cx {
         }
     }
 
+    /// `MAKEPAD_DEBUG_UPLOAD_BUDGET=1`: once a second, the numbers an upload
+    /// refusal would come from — resident bytes against the limit, the
+    /// records carrying them, the serials the collector waits on, and what
+    /// it freed since the last line. Enough to tell a completion poll that
+    /// never ran from a producer the collector cannot keep up with.
+    fn upload_budget_line(&mut self) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static LAST_SECOND: AtomicU64 = AtomicU64::new(u64::MAX);
+        let second = self.seconds_since_app_start() as u64;
+        if LAST_SECOND.swap(second, Ordering::Relaxed) == second {
+            return;
+        }
+        let serials = &self.textures.1.serials;
+        let submitted = serials.submitted.load(Ordering::Acquire);
+        let completed = serials.completed.load(Ordering::Acquire);
+        let allocations = &mut self.draw_lists.1.allocations;
+        let (freed, inline_drops) = allocations.take_collection_counts();
+        let (bytes, limit) = (allocations.bytes(), allocations.limit());
+        crate::log!(
+            "upload-budget t={}s bytes={}/{} ({:.2}%) records={} refusals={} submitted={} completed={} freed={} inline_drops={}",
+            second,
+            bytes,
+            limit,
+            bytes as f64 * 100.0 / limit.max(1) as f64,
+            allocations.record_count(),
+            allocations.refusals(),
+            submitted,
+            completed,
+            freed,
+            inline_drops,
+        );
+    }
+
     /// One paint tick: advance the frame, redraw what is dirty, and present.
     ///
     /// `time_now` is the timestamp the WHOLE frame is stamped with — the beat
@@ -581,7 +614,23 @@ impl Cx {
         }
         // ok here we send out to all our childprocesses
 
+        // Frame completion is polled by this loop, not by the application.
+        // The collector in `render_view` frees a draw item's previous buffer
+        // only once the event query says the GPU is past its last draw, so a
+        // serial that never completes turns the allocation budget into a
+        // count of every upload ever made (measured: `completed=0` for the
+        // whole session, every record pending, the limit reached after a few
+        // minutes of animation, every upload refused from then on — the
+        // window painting nothing but its clear colour). Once before the
+        // repaint, so this frame's collection sees the last frame's
+        // completion; once after, so this frame's query is opened and
+        // flushed at once, whether or not anything presented.
+        self.poll_texture_lifetimes();
         let presented = self.handle_repaint(d3d11_windows, d3d11_cx);
+        self.poll_texture_lifetimes();
+        if upload_budget_debug() {
+            self.upload_budget_line();
+        }
         // A presenting pass blocks in the frame-latency wait or Present, pacing
         // the Poll loop to the display. A pass that presents nothing has no
         // blocking call at all, so a NextFrame listener that re-arms without
@@ -1333,6 +1382,15 @@ fn windows_window_vsync() -> bool {
     use std::sync::OnceLock;
     static V: OnceLock<bool> = OnceLock::new();
     *V.get_or_init(|| std::env::var_os("MAKEPAD_NO_VSYNC").is_none())
+}
+
+/// `MAKEPAD_DEBUG_UPLOAD_BUDGET=1`: the paint tick logs the upload budget
+/// once a second (`Cx::upload_budget_line`). One flag read per tick is all
+/// the loop pays for it.
+fn upload_budget_debug() -> bool {
+    use std::sync::OnceLock;
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| std::env::var_os("MAKEPAD_DEBUG_UPLOAD_BUDGET").is_some_and(|v| v == "1"))
 }
 
 impl CxGameInputApi for Cx {

@@ -125,6 +125,10 @@ pub struct RetainedAllocationBudget {
     refusals: usize,
     cache_pressure: std::cell::Cell<bool>,
     pending_backend_retirements: usize,
+    /// Since the paint tick's diagnostic line last took them: records
+    /// freed, and records dropped here for want of worker inventory.
+    freed: usize,
+    inline_drops: usize,
 }
 #[derive(Debug)]
 pub(crate) struct RetainedAllocationRecord {
@@ -262,6 +266,8 @@ impl RetainedAllocationBudget {
             refusals: 0,
             cache_pressure: std::cell::Cell::new(false),
             pending_backend_retirements: 0,
+            freed: 0,
+            inline_drops: 0,
         }
     }
     pub fn set_limit(&mut self, limit: usize) {
@@ -298,6 +304,14 @@ impl RetainedAllocationBudget {
     }
     pub(crate) fn take_metadata_disposal(&mut self) -> Option<Arc<RetainedAllocationRecord>> {
         self.metadata_disposals.pop()
+    }
+    #[cfg(test)]
+    fn metadata_disposals_len(&self) -> usize {
+        self.metadata_disposals.len()
+    }
+    #[cfg(test)]
+    fn metadata_disposals_capacity(&self) -> usize {
+        self.metadata_disposals.capacity()
     }
     pub fn record_count(&self) -> usize {
         self.records.len()
@@ -340,13 +354,29 @@ impl RetainedAllocationBudget {
         self.bytes += bytes;
         RetainedAllocation(record)
     }
+    /// Free the released records whose last submission the GPU has
+    /// completed. A released record is freed within a bounded number of
+    /// calls, not always this one: a call visits at most
+    /// `max(256, 4 * released)` records of the ring, and none while nothing
+    /// is released. A fixed count (it was 64) was a UI-stall fix that the
+    /// producer does not respect — a redraw retires one record per drawn
+    /// item every frame, and past 64 items the garbage outran the collector
+    /// while the budget still counted it, until every upload was refused.
+    /// Four visits per released record outpaces any producer: the garbage
+    /// settles at a level a rotation covers, however many live records
+    /// share the ring, without a rotation over them all on every animated
+    /// frame — the cost the cap was put in for. The stragglers: every
+    /// `swap_remove` behind a cursor that has wrapped brings an already
+    /// visited tail record back for a second look, and each such hit leaves
+    /// one more record just short of the start cursor to the next call.
     pub fn collect(&mut self, completed: u64) {
-        for _ in 0..self.records.len().min(64) {
-            // A full worker-disposal inventory retains the record for retry.
-            // Never free its last Arc (or grow this queue) on the UI thread.
-            if self.metadata_disposals.len() == self.metadata_disposals.capacity() {
-                break;
-            }
+        let released = self.released.load(Ordering::Acquire);
+        if released == 0 {
+            return;
+        }
+        let mut visits = self.records.len().min(released.saturating_mul(4).max(256));
+        while visits != 0 {
+            visits -= 1;
             if self.collect_cursor >= self.records.len() {
                 self.collect_cursor = 0;
             }
@@ -355,13 +385,31 @@ impl RetainedAllocationBudget {
                 && record.submitted.load(Ordering::Acquire) <= completed
             {
                 self.bytes -= record.bytes;
-                self.released.fetch_sub(1, Ordering::AcqRel);
-                self.metadata_disposals
-                    .push(self.records.swap_remove(self.collect_cursor));
+                self.freed += 1;
+                let record = self.records.swap_remove(self.collect_cursor);
+                // The workers dispose of the record's words when they have
+                // room; when the inventory is full it is dropped here rather
+                // than kept on the books — a collector that stopped on a full
+                // inventory never caught up again.
+                if self.metadata_disposals.len() < self.metadata_disposals.capacity() {
+                    self.metadata_disposals.push(record);
+                } else {
+                    self.inline_drops += 1;
+                    drop(record);
+                }
+                if self.released.fetch_sub(1, Ordering::AcqRel) == 1 {
+                    return;
+                }
             } else {
                 self.collect_cursor += 1;
             }
         }
+    }
+    /// What `collect` freed since the last call here: records, and records
+    /// dropped on this thread for want of worker inventory. The paint
+    /// tick's diagnostic line reads and clears them.
+    pub fn take_collection_counts(&mut self) -> (usize, usize) {
+        (std::mem::take(&mut self.freed), std::mem::take(&mut self.inline_drops))
     }
     pub fn collect_for_frame(&mut self, frame: u64, completed: u64) {
         if self.collected_frame == Some(frame) {
@@ -871,16 +919,99 @@ mod upload_tests {
         allocations.collect(7);
         assert_eq!(
             allocations.bytes(),
-            960,
-            "one collection services at most 64 allocation records"
+            0,
+            "a collection with every record released covers the whole ring"
         );
-        for _ in 0..15 {
-            allocations.collect(7);
+    }
+
+    /// A redraw retires one record per drawn item, every frame. A collector
+    /// that serviced 64 records a call fell behind at 65 items a frame, and
+    /// the budget then refused uploads for garbage it had not looked at yet.
+    #[test]
+    fn a_collection_frees_every_retired_allocation_the_gpu_is_done_with() {
+        let mut allocations = RetainedAllocationBudget::new(4096);
+        let held = allocations.reserve(1).unwrap();
+        held.submitted(3);
+        for _ in 0..1024 {
+            let charge = allocations.reserve(1).unwrap();
+            charge.submitted(3);
+            drop(charge);
         }
+        assert_eq!(allocations.bytes(), 1025);
+        allocations.collect(2);
         assert_eq!(
             allocations.bytes(),
-            0,
-            "bounded collection eventually visits every retired allocation"
+            1025,
+            "command completion still gates every retirement"
         );
+        allocations.collect(3);
+        assert_eq!(allocations.bytes(), 1, "one collection frees all 1024");
+        assert_eq!(allocations.record_count(), 1, "the held record survives the sweep");
+        drop(held);
+        allocations.collect(3);
+        assert_eq!(allocations.record_count(), 0);
+    }
+
+    /// The worker inventory of freed records is bounded; when it is full the
+    /// collector frees on this thread rather than stop. A record is a few
+    /// words with no payload, so that costs nothing — and a collector that
+    /// stopped left the budget counting garbage until nothing could upload.
+    #[test]
+    fn a_full_disposal_inventory_never_stops_freeing() {
+        let mut allocations = RetainedAllocationBudget::new(usize::MAX);
+        let capacity = allocations.metadata_disposals_capacity();
+        for _ in 0..capacity + 64 {
+            drop(allocations.reserve(1).unwrap());
+        }
+        for _ in 0..capacity / 64 + 2 {
+            allocations.collect(0);
+        }
+        assert_eq!(
+            allocations.metadata_disposals_len(),
+            capacity,
+            "the worker inventory is full"
+        );
+        assert_eq!(allocations.bytes(), 0, "the overflow is freed here, not retained");
+        assert_eq!(allocations.record_count(), 0);
+        while allocations.take_metadata_disposal().is_some() {}
+        drop(allocations.reserve(1).unwrap());
+        allocations.collect(0);
+        assert_eq!(allocations.metadata_disposals_len(), 1, "with room, disposal goes to the workers again");
+        assert_eq!(allocations.bytes(), 0);
+    }
+
+    /// The visit budget follows the producer. A redraw retiring 200 records
+    /// a frame, three times the old cap of 64, among 4096 live records:
+    /// the garbage in the ring stays a few frames deep for the whole run,
+    /// and is gone a few calls after the producer stops. The cap of 64
+    /// spent the whole run on the live records ahead of its cursor and
+    /// freed nothing.
+    #[test]
+    fn a_collection_keeps_up_with_a_producer_past_the_old_cap() {
+        let mut allocations = RetainedAllocationBudget::new(usize::MAX);
+        let live: Vec<_> = (0..4096).map(|_| allocations.reserve(1).unwrap()).collect();
+        let mut peak = 0;
+        for _ in 0..40 {
+            for _ in 0..200 {
+                let charge = allocations.reserve(1).unwrap();
+                charge.submitted(1);
+                drop(charge);
+            }
+            allocations.collect(1);
+            peak = peak.max(allocations.bytes() - live.len());
+        }
+        assert!(peak <= 3 * 200, "garbage stays a few frames deep, not the run's: {peak}");
+        let mut calls = 0;
+        while allocations.bytes() != live.len() {
+            allocations.collect(1);
+            calls += 1;
+            assert!(calls <= 4, "{} records still counted after {calls} calls", allocations.bytes() - live.len());
+        }
+        assert_eq!(allocations.record_count(), live.len());
+        let (freed, inline_drops) = allocations.take_collection_counts();
+        assert_eq!(freed, 40 * 200, "every retired record was freed once");
+        assert_eq!(freed - inline_drops, allocations.metadata_disposals_len(), "the rest went to the workers");
+        assert_eq!(allocations.take_collection_counts(), (0, 0), "the counts are taken");
+        drop(live);
     }
 }

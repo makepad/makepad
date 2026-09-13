@@ -340,7 +340,12 @@ impl Cx {
                     self.hlsl_compile_shaders(d3d11_cx);
                 }
 
+                // The completion poll `paint_tick` (windows.rs) makes around
+                // its repaint: this loop submits serials the same way, and
+                // nothing else would ever complete them.
+                self.poll_texture_lifetimes();
                 self.stdin_handle_repaint(d3d11_cx, stdin_windows, time);
+                self.poll_texture_lifetimes();
                 self.run_live_edit_if_needed("windows-stdin");
 
                 let gc_start = self.seconds_since_app_start();
