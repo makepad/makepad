@@ -144,7 +144,9 @@ script_mod! {
             rotation_angle: uniform(0.0)
 
             transform_svg_point: fn(pos: vec2) -> vec2 {
-                 let center = self.rect_pos + self.rect_size * 0.5;
+                 // The hook works in the rect's own space: DrawSvg adds
+                 // rect_pos after it, so the pivot is the local centre.
+                 let center = self.rect_size * 0.5;
                  let scaled = pos - center;
                  let cs = cos(self.rotation_angle);
                  let sn = sin(self.rotation_angle);
