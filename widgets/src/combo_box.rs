@@ -59,6 +59,7 @@
 use crate::{
     animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
     drop_down::PopupAnchorTransform,
+    event::TouchState,
     makepad_derive_widget::*,
     makepad_draw::*,
     overlay_place::{place_overlay, span_inboard, PlaceRequest, Placement, Side},
@@ -1240,6 +1241,13 @@ impl Widget for ComboBox {
             if matches!(popup_event, Event::MouseDown(_) | Event::TouchUpdate(_)) {
                 self.revert(cx);
                 dismissed = true;
+                // A press anywhere but on this box is the list's, as a press
+                // outside the list is for a plain drop-down: the lock is
+                // released by now, and whatever is walked after would
+                // otherwise take it. One on the box itself goes on to the
+                // field and the arrow below.
+                let field = self.aligned_rect.unwrap_or_else(|| self.draw_bg.area().rect(cx));
+                claim_press_outside(event, field, self.draw_bg.area());
             } else {
                 self.handle_popup_pointer(cx, popup_event);
             }
@@ -1473,6 +1481,27 @@ impl ComboBoxRef {
             inner.max_visible_items = rows.max(1);
             inner.draw_list.redraw(cx);
         }
+    }
+}
+
+/// Mark a press that starts outside `field` as handled by `owner`, unless
+/// something already claimed it, so no widget walked after takes it.
+fn claim_press_outside(event: &Event, field: Rect, owner: Area) {
+    match event {
+        Event::MouseDown(e) if !field.contains(e.abs) && e.handled.get().is_empty() => {
+            e.handled.set(owner);
+        }
+        Event::TouchUpdate(e) => {
+            for touch in &e.touches {
+                if touch.state == TouchState::Start
+                    && !field.contains(touch.abs)
+                    && touch.handled.get().is_empty()
+                {
+                    touch.handled.set(owner);
+                }
+            }
+        }
+        _ => {}
     }
 }
 
