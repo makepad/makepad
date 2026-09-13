@@ -19,6 +19,7 @@ script_mod! {
 
     mod.stories.TextFlowOverview = StoryPage{
         StoryNote{text: "A paragraph is not a Label. A Label draws one string in one style; this lays out a run of text that wraps, changes style part way through, and can hold a quote or a block of code inside the same flow. It is what the markdown and html widgets are made of, and the pdf view too."}
+        StoryNote{text: "Which one to use, against Markdown and Html, is set out on the Docs tab."}
 
         StoryHeading{text: "One paragraph, several styles"}
         StoryNote{text: "The styles below are pushed and popped around pieces of one continuous run — there is no separate widget per style. Drag across the text: the selection crosses the style boundaries because it is one flow, not four labels in a row."}
@@ -131,7 +132,15 @@ A paragraph is not a `Label`. A label draws one string in one style. `TextFlow` 
 
 `draw_link` is the one place a real child appears mid-paragraph: the flow instantiates a `TextFlowLink` from a template and lays it out inline with the text either side of it, which is how markdown and html put a link in a sentence.
 
-`begin_quote`/`end_quote` and `begin_code`/`end_code` open blocks inside the same flow, and markdown's tables and list items work the same way — but **a block does not begin its own line.** The flow keeps laying out where it left off until the host breaks it with `new_line_collapsed_with_spacing`, which is why markdown breaks the line before every block it opens. Leave it out and the quote runs on at the end of the paragraph, which is how this page first drew it.
+`begin_quote`/`end_quote` and `begin_code`/`end_code` open blocks inside the same flow, and markdown's tables and list items work the same way — but **a block does not begin its own line.** The flow keeps laying out where it left off until the host breaks it with `new_line_collapsed_with_spacing`, which is why markdown breaks the line before every block it opens. Leave it out and the quote runs on at the end of the paragraph.
+
+## Which one to use
+
+| Want | Use |
+|---|---|
+| text written in markdown | `Markdown`, on the Markdown page |
+| text written in html, or a widget of your own placed inline by a tag | `Html`, on the Html page |
+| a run pushed from Rust by a widget of your own | `TextFlow` itself |
 
 ## MathView
 

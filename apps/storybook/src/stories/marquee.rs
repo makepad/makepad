@@ -62,8 +62,8 @@ script_mod! {
 }
 
 pub const STORIES: &[Story] = &[Story {
-    key: "containers/marquee/overview",
-    category: "Containers",
+    key: "text/marquee/overview",
+    category: "Text",
     component: "Marquee",
     also: &[],
     name: "Overview",

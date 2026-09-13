@@ -1,4 +1,5 @@
-//! The html stories: inline pills bounded by width and by line, the chat-style wrapping cases, ellipsis clamps, tables and collapsible sections, ported from the widget zoo.
+//! The html story: inline pills bounded by width and by line, the chat-style
+//! wrapping cases, ellipsis clamps, tables and collapsible sections.
 use crate::makepad_widgets::*;
 use crate::registry::Story;
 
@@ -413,7 +414,7 @@ script_mod! {
         }
         Hr{}
 
-        H4{text: "REPRO: timeline message, pills + text, no line clamp"}
+        H4{text: "A message of pills and text, with no line clamp"}
         P{text: "Rows starting with regular text after a pill-heavy row must keep the text and the pills on one center line, pill tops must never be cut, and inter-line spacing must be uniform."}
         View{
             width: Fill, height: Fit, flow: Down, spacing: 6
@@ -426,7 +427,7 @@ script_mod! {
         }
         Hr{}
 
-        H4{text: "REPRO: sender + wrapped text + trailing pill, chat-preview style"}
+        H4{text: "A sender, wrapped text and a trailing pill, clamped to two lines"}
         P{text: "Bold sender, small text with 1.32 line spacing, RowAlign.Center, and a pill whose background overdraws its layout rect via negative padding. Five widths walk the pill from inline, to wrapped, to sharing a row with wrapped text, to overrunning the last line."}
         View{
             width: Fill, height: Fit, flow: Down, spacing: 6
@@ -623,19 +624,6 @@ script_mod! {
         }
 
         Hr{}
-        H4{text: "Html with ellipsis, inline code, and a narrow width (2 lines)"}
-        P{text: "An inline code span too wide for the remaining room wraps to its own line. That wrap must consume one of the two allowed lines, so the text below must never exceed two rows at any window width."}
-        View{
-            width: 320, height: Fit
-            Html{
-                width: Fill height: Fit
-                max_lines: 2
-                text_overflow: Ellipsis
-                body: "Sam Carter: and <code>&lt;details&gt;</code> / <code>&lt;summary&gt;</code> is fully working (see: https://example.com/doc/inline-code-demo for the full writeup)"
-            }
-        }
-
-        Hr{}
         H4{text: "Html with ellipsis and emoji (1 line)"}
         P{text: "Html with multi-byte emoji mixed into styled text."}
         Html{
@@ -647,6 +635,7 @@ script_mod! {
 
         Hr{}
         H4{text: "Plain HTML table (no alignment)"}
+        P{text: "Tables belong to the text flow underneath, so a table element here and a pipe table in Markdown lay out through the same table code. The three tables are shown once, on this page."}
         P{text: "Default left-aligned cells. Exercises bold, italic, code, links, sub/sup, emoji, entities, and strikethrough inside cells."}
         Html{
             width: Fill height: Fit
@@ -680,15 +669,15 @@ script_mod! {
 }
 
 pub const STORIES: &[Story] = &[Story {
-    key: "text/html/overview",
+    key: "text/textflow/html",
     category: "Text",
-    component: "Html",
-    also: &["HtmlLink"],
-    name: "Overview",
+    component: "TextFlow",
+    also: &["Html", "HtmlLink"],
+    name: "Html",
     dsl: "HtmlOverview",
     added: "2026-08-10",
     tags: &["ported"],
-    doc: "# Html\n\nThe Html widget renders HTML content.",
+    doc: "# Html\n\n`Html` lays out a `body` of html through `TextFlow`: headings, bold, italic, underline, strike through, code, links, lists, quotes, sub and superscript, tables, and `<details>` with a `<summary>` that folds.\n\n**A tag of your own places a widget inline.** A child declared on the widget, such as `pill := View{...}`, is drawn wherever the body says `<pill></pill>`, and it is laid out as one unit in the same wrapping flow as the words around it. A pill too wide for what is left of its row moves whole to the next row.\n\n**`max_lines` counts every row, whatever opened it.** A row opened by a wrapped word, by an inline code span or by a widget that moved down all count the same, and once the budget is spent nothing further draws. On the last allowed row wrapping is switched off, so a widget that no longer fits is held there and clipped rather than opening a row the clamp does not allow. `text_overflow: Ellipsis` ends the clamp with an ellipsis.\n\n**A label inside a pill can be bounded.** `width: Fit{max: FitBound.Rel{base: Base.Full, factor: 0.6}}` caps it at a fraction of the enclosing width; `Base.Line` caps it at the room actually left on its line, so a long name ellipsizes at the line's edge.\n\nTables belong to the text flow, so the three tables here stand for Markdown's pipe tables too. Column alignment comes from the `align` attribute or an inline `text-align` style.",
     subject: "",
     feature: None,
     controls: &[],

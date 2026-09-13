@@ -1,4 +1,4 @@
-//! The markdown stories: a block of every construct and three table alignments, ported from the widget zoo.
+//! The markdown story: a block of every construct the widget draws.
 use crate::makepad_widgets::*;
 use crate::registry::Story;
 
@@ -14,41 +14,21 @@ script_mod! {
         }
 
         Hr{}
-        H4{text: "Plain Markdown table (no alignment)"}
-        P{text: "Default left-aligned cells. Exercises bold, italic, code, links, sub/sup, emoji, and entities inside cells."}
-        Markdown{
-            width: Fill height: Fit
-            body: "| Element | Symbol | Notes |\n| --- | --- | --- |\n| Hydrogen | **H** | *Lightest* gas |\n| Water | H<sub>2</sub>O | Covers ~71% of Earth \u{1F30A} |\n| Carbon-14 | <sup>14</sup>C | Used in `dating`; see [docs](https://example.com/) |\n| Caffeine | C<sub>8</sub>H<sub>10</sub>N<sub>4</sub>O<sub>2</sub> | \u{2615} keeps you awake |\n| Specials | a &amp; b &lt; c | ~~struck~~ / **bold** / *em* |"
-        }
-
-        Hr{}
-        H4{text: "Aligned Markdown table (left / center / right)"}
-        P{text: "Column alignments set by the separator row. Mixes wide and narrow cells with formatting, links, and sub/sup."}
-        Markdown{
-            width: Fill height: Fit
-            body: "| Task | Status | Due |\n|:-----|:------:|----:|\n| Ship feature **X** | `WIP` | **Fri** |\n| Review [PR #42](https://example.com) | *Pending* | Mon |\n| Fix ~~critical~~ bug | Done \u{2705} | Yesterday |\n| Write spec for H<sub>2</sub>O sync | 50% | 2026-05-15 |\n| Ship Widgets<sup>TM</sup> release | Blocked | TBD |"
-        }
-
-        Hr{}
-        H4{text: "Numeric Markdown table (right-aligned)"}
-        P{text: "Typical use-case: every column right-aligned for numeric data. Wide-ish column widths expose the row-by-row alignment."}
-        Markdown{
-            width: Fill height: Fit
-            body: "| Region | Q1 | Q2 | Q3 | YoY |\n| ---:| ---:| ---:| ---:| ---:|\n| **North America** | $1.2M | $1.5M | $1.8M | +12% |\n| *Europe* | $0.9M | $1.1M | $1.3M | +8% |\n| Asia Pacific | $0.7M | $0.8M | $1.0M | +15% |\n| LATAM | $0.2M | $0.3M | $0.4M | +22% |\n| **Total** | **$3.0M** | **$3.7M** | **$4.5M** | **+13%** |"
-        }
+        H4{text: "Tables"}
+        P{text: "A pipe table lays out through the text flow's own table code, the same code an html table element uses. Plain, aligned and numeric tables are shown once, on the Html page; the separator row's colons set a column's alignment here the way the align attribute does there."}
     }
 }
 
 pub const STORIES: &[Story] = &[Story {
-    key: "text/markdown/overview",
+    key: "text/textflow/markdown",
     category: "Text",
-    component: "Markdown",
-    also: &["MarkdownLink"],
-    name: "Overview",
+    component: "TextFlow",
+    also: &["Markdown", "MarkdownLink"],
+    name: "Markdown",
     dsl: "MarkdownOverview",
     added: "2026-04-18",
     tags: &["ported"],
-    doc: "# Markdown\n\nThe Markdown widget renders markdown content.",
+    doc: "# Markdown\n\n`Markdown` lays out a `body` written in markdown through `TextFlow`: headings, emphasis, bullet and numbered lists, quotes, inline code, fenced code blocks, links and pipe tables.\n\nThe parser runs with tables and maths switched on and strike through off, so `~~struck~~` shows as written, tildes and all, as it does in the block on this page.\n\nEvery block it opens starts on a line of its own, because the flow underneath keeps laying out where it left off until the host breaks the line. A link is a `MarkdownLink`, a widget the flow places inline with the words either side of it.\n\nTables are the flow's too. `:---`, `:---:` and `---:` in the separator row align a column left, centre or right, and the three tables on the Html page show the same layout.",
     subject: "",
     feature: None,
     controls: &[],

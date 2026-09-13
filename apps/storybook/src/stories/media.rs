@@ -1,5 +1,5 @@
-//! The media story: the three answers a picture needs around it when the
-//! app did not author the picture.
+//! The loading and fallback story: Media, the three answers a picture needs
+//! around it when the app did not author the picture.
 use crate::makepad_widgets::*;
 use crate::registry::{Control, ControlKind, Story};
 
@@ -114,17 +114,17 @@ fn media_actions(cx: &mut Cx, root: &WidgetRef, _actions: &Actions) {
 }
 
 pub const STORIES: &[Story] = &[Story {
-    key: "media/media/overview",
+    key: "media/image/loading-and-fallback",
     category: "Media",
-    component: "Media",
-    also: &["MediaFigure", "MediaCaption"],
-    name: "Overview",
+    component: "Image",
+    also: &["Media", "MediaFigure", "MediaCaption"],
+    name: "Loading and fallback",
     dsl: "MediaOverview",
     added: "2026-09-10",
     tags: &["new"],
-    doc: "# Media
+    doc: "# Loading and fallback
 
-A picture that copes with not having arrived yet, or not existing.
+`Media` is a picture that copes with not having arrived yet, or not existing.
 
 An `Image` is honest about exactly one thing: the picture. It has no size until the bytes are decoded, so the row it sits in reflows the moment they land; it has nothing to show while they are on their way; and a source that is absent, unreadable, or not a picture at all leaves a hole with no way to say so. Every screen that shows pictures it did not author — a feed, a gallery, a wall of covers — writes the same three answers around it, and writes them differently each time.
 

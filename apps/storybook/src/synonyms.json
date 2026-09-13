@@ -1278,7 +1278,11 @@
     "bitmap",
     "png",
     "jpeg",
-    "raster"
+    "raster",
+    "turned picture",
+    "tilted picture",
+    "angled photo",
+    "picture at an angle"
    ],
    "does": [
     "stretch to fit",
@@ -2311,20 +2315,6 @@
     "mouse wheel",
     "unit suffix",
     "decimal precision"
-   ]
-  },
-  {
-   "component": "RotatedImage",
-   "aka": [
-    "turned picture",
-    "tilted picture",
-    "angled photo",
-    "picture at an angle"
-   ],
-   "does": [
-    "not available",
-    "unavailable",
-    "unimplemented"
    ]
   },
   {
