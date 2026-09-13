@@ -2550,7 +2550,9 @@ impl WidgetTree {
 
     /// The live widget hierarchy flattened depth-first for the tweaker's
     /// tree tab: (uid, name, type, depth). Every alive node appears; depth
-    /// is the tree distance from its window root.
+    /// is the tree distance from its window root. A row whose widget is an
+    /// inspector says so, read from its type rather than its name, so the
+    /// tree tab can leave every inspector out without guessing.
     pub fn flat_tree(&self, cx: &Cx) -> Vec<FlatTreeRow> {
         self.sync_dirty();
         let inner = self.inner.borrow();
@@ -2574,8 +2576,8 @@ impl WidgetTree {
                 continue;
             };
             let name = inner.names[index];
-            let ty = widget
-                .widget_type_id()
+            let type_id = widget.widget_type_id();
+            let ty = type_id
                 .and_then(|type_id| widget_type_names.get(&type_id).copied())
                 .unwrap_or(LiveId(0));
             out.push(FlatTreeRow {
@@ -2584,6 +2586,7 @@ impl WidgetTree {
                 ty: live_id_token(ty),
                 depth,
                 has_children: !children[index].is_empty(),
+                inspector: type_id == Some(TypeId::of::<crate::tweaker::Tweaker>()),
             });
             for child in children[index].iter().rev() {
                 stack.push((*child, depth + 1));
@@ -2881,6 +2884,9 @@ pub struct FlatTreeRow {
     pub ty: String,
     pub depth: u32,
     pub has_children: bool,
+    /// The widget is an inspector (a `Tweaker`). False when its type could
+    /// not be read, which is the case while it is borrowed.
+    pub inspector: bool,
 }
 
 pub fn set_ui_root(cx: &mut Cx, ui: &WidgetRef) {
@@ -4897,5 +4903,54 @@ mod tests {
             },
         );
         assert_eq!(button.text.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn flat_tree_marks_every_tweaker_as_an_inspector_by_its_type() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let tree = WidgetTree::default();
+        // Two windows, each carrying a real inspector, and in each an app
+        // widget that only shares the inspector's name. The nodes are weak,
+        // so every widget is held to the end.
+        let mut held = Vec::new();
+        let mut inspectors = Vec::new();
+        for window in ["out_window", "main_window"] {
+            let tweaker = WidgetRef::new_with_inner(Box::new(
+                cx.with_vm(crate::tweaker::Tweaker::script_new),
+            ));
+            let namesake_uid = WidgetUid::new();
+            let namesake = make_widget(namesake_uid, vec![]);
+            let body_uid = WidgetUid::new();
+            let body = make_widget(body_uid, vec![(name("tweaker"), namesake.clone())]);
+            let window_uid = WidgetUid::new();
+            let root = make_widget(
+                window_uid,
+                vec![(name("body"), body.clone()), (name("tweaker"), tweaker.clone())],
+            );
+            tree.observe_node(window_uid, name(window), root.clone(), None);
+            tree.observe_node(body_uid, name("body"), body.clone(), Some(window_uid));
+            tree.observe_node(namesake_uid, name("tweaker"), namesake.clone(), Some(body_uid));
+            tree.observe_node(tweaker.widget_uid(), name("tweaker"), tweaker.clone(), Some(window_uid));
+            inspectors.push(tweaker.clone());
+            held.extend([root, body, namesake, tweaker]);
+        }
+        let inspector_uids: Vec<u64> = inspectors.iter().map(|w| w.widget_uid().0).collect();
+        let rows = tree.flat_tree(&cx);
+        assert_eq!(rows.len(), 8);
+        for row in &rows {
+            assert_eq!(row.inspector, inspector_uids.contains(&row.uid), "row {} {}", row.uid, row.name);
+        }
+        // Borrowed, as the one hosting a read is: neither its type nor its
+        // uid can be read, so nothing marks it and it reads uid 0. The other
+        // window's inspector is still marked.
+        let host = inspectors[1].borrow_mut::<crate::tweaker::Tweaker>().unwrap();
+        let rows = tree.flat_tree(&cx);
+        assert_eq!(
+            rows.iter().filter(|row| row.inspector).map(|row| row.uid).collect::<Vec<_>>(),
+            vec![inspector_uids[0]]
+        );
+        assert!(rows.iter().any(|row| row.uid == 0 && !row.inspector));
+        drop(host);
     }
 }
