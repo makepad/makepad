@@ -163,6 +163,7 @@ pub mod splitter_more;
 pub mod svg_select;
 pub mod rich_text;
 pub mod scroll_more;
+pub mod line_menu;
 pub mod tour;
 pub mod wheel_picker;
 pub mod portal_list;
@@ -340,6 +341,7 @@ pub use crate::{
     svg_select::*,
     rich_text::*,
     scroll_more::*,
+    line_menu::*,
     tour::*,
     wheel_picker::*,
     portal_list::*,
@@ -637,6 +639,9 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::kanban::script_mod(vm);
     crate::splitter_more::script_mod(vm);
     crate::scroll_more::script_mod(vm);
+    // After the pill nav, whose surface shader draws its card, and the nav
+    // list, whose ground is its hit rect.
+    crate::line_menu::script_mod(vm);
     crate::svg_select::script_mod(vm);
     crate::rich_text::script_mod(vm);
     crate::reorder_list::script_mod(vm);
@@ -1203,6 +1208,30 @@ mod pill_nav_registration_tests {
         );
         assert!(pill.contains("mod.widgets.PillNavBase = #(PillNav::register_widget(vm))"));
         assert_eq!(pill.matches("set_type_default() do mod.widgets.PillNavBase").count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod line_menu_registration_tests {
+    /// The stack registers directly after the scroll views it follows, and
+    /// after the nav list and pill nav whose ground and surface it draws
+    /// with, with one type default.
+    #[test]
+    fn test_line_menu_is_registered_after_its_bases() {
+        let lib = include_str!("lib.rs");
+        let line = include_str!("line_menu.rs");
+        assert!(lib.contains("\npub mod line_menu;"));
+        assert!(lib.contains("\n    line_menu::*,"));
+        crate::assert_registered_after(
+            "crate::line_menu::script_mod(vm);",
+            &[
+                "crate::scroll_more::script_mod(vm);",
+                "crate::nav_list::script_mod(vm);",
+                "crate::pill_nav::script_mod(vm);",
+            ],
+        );
+        assert!(line.contains("mod.widgets.LineMenuBase = #(LineMenu::register_widget(vm))"));
+        assert_eq!(line.matches("set_type_default() do mod.widgets.LineMenuBase").count(), 1);
     }
 }
 

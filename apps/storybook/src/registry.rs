@@ -417,6 +417,7 @@ mod tests {
                 ("NavList", &["Overview"]),
                 ("HamburgerMenu", &["Overview"]),
                 ("Breadcrumb", &["Overview"]),
+                ("LineMenu", &["Overview"]),
                 ("Pagination", &["Overview"]),
                 ("StackNavigation", &["Overview"]),
             ],

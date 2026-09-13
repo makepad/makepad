@@ -78,6 +78,7 @@ pub mod pill_nav;
 pub mod nav_list;
 pub mod hamburger_menu;
 pub mod breadcrumb;
+pub mod line_menu;
 pub mod pagination;
 pub mod stacknavigation;
 pub mod tip;
@@ -202,6 +203,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     nav_list::script_mod(vm);
     hamburger_menu::script_mod(vm);
     breadcrumb::script_mod(vm);
+    line_menu::script_mod(vm);
     pagination::script_mod(vm);
     stacknavigation::script_mod(vm);
     // 10 Overlay
@@ -334,6 +336,7 @@ pub fn tables() -> &'static [&'static [Story]] {
         nav_list::STORIES,
         hamburger_menu::STORIES,
         breadcrumb::STORIES,
+        line_menu::STORIES,
         pagination::STORIES,
         stacknavigation::STORIES,
         // 10 Overlay
