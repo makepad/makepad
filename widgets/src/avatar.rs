@@ -623,7 +623,25 @@ impl Widget for Avatar {
         self.draw_bg.mark = if has_picture || !letters.is_empty() { 0.0 } else { 1.0 };
         self.draw_bg.mark_color = dimmed(family.on_container, opacity);
         self.draw_bg.radius = (self.visual_radius(guess) * 0.5) as f32;
-        let rect = self.draw_bg.draw_walk(cx, walk);
+        // The plate is a box of its own, and the picture and the presence dot
+        // are placed inside it. Each of them is an absolute walk, and an
+        // absolute walk drawn straight into the parent joins the parent's
+        // row: a row that centres its children vertically centred the dot
+        // too, which put a top corner's dot at the plate's middle and a
+        // bottom corner's below the plate, out of the row's clip, leaving
+        // only the disc behind it. Inside a box that aligns nothing they stay
+        // where they were put, and the row moves the whole avatar as one.
+        // No clip, so a dot hanging off a corner is not cut off.
+        cx.begin_turtle(
+            walk,
+            Layout {
+                flow: Flow::Overlay,
+                clip_x: false,
+                clip_y: false,
+                ..Default::default()
+            },
+        );
+        let rect = self.draw_bg.draw_walk(cx, Walk::fill());
         let size = rect.size.x.min(rect.size.y);
 
         // The picture sits inside the ring, so the ring is not painted over
@@ -712,6 +730,7 @@ impl Widget for Avatar {
                 },
             );
         }
+        cx.end_turtle();
         DrawStep::done()
     }
 
@@ -1090,5 +1109,69 @@ mod tests {
         let host = dvec2(40.0, 40.0);
         let at = presence_offset(BadgeCorner::TopLeft, AvatarShape::Square, host, 12.0);
         assert_eq!(at, corner_offset(BadgeCorner::TopLeft, host, dvec2(12.0, 12.0), 0.25));
+    }
+
+    /// The dot is placed against the plate wherever the row puts the plate.
+    /// Drawn straight into a row that centres its children, the dot's
+    /// absolute walk was centred with them: a bottom corner's dot fell below
+    /// the plate and out of the row's clip, and a top corner's sat at the
+    /// plate's middle. The row here is taller than the plates and centres
+    /// them, which is the row that did it.
+    #[test]
+    fn the_presence_dot_keeps_its_corner_in_a_row_that_centres() {
+        use crate::makepad_draw::cx_draw::CxDraw;
+        use crate::makepad_script::script;
+
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let mut row = cx.with_vm(|vm| {
+            let value = vm.eval(script! {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: 300 height: 120
+                    flow: Right
+                    align: Align{x: 0. y: 0.5}
+                    Avatar{plate: 40. name: "Mira Okafor" presence: Online presence_corner: BadgeCorner.BottomRight}
+                    Avatar{plate: 40. name: "Jun Park" shape: Square presence: Busy presence_corner: BadgeCorner.TopLeft}
+                }
+            });
+            View::script_from_value(vm, value)
+        });
+
+        let size = dvec2(300.0, 120.0);
+        let pass = DrawPass::new(&mut cx);
+        pass.set_size(&mut cx, size);
+        let mut draw_list = DrawList2d::new(&mut cx);
+        {
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(&mut cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&pass, None);
+            draw_list.begin_always(&mut cx2d);
+            cx2d.begin_root_turtle(size, Layout::flow_overlay());
+            let walk = row.walk;
+            row.draw_walk_all(&mut cx2d, &mut Scope::empty(), walk);
+            cx2d.end_pass_sized_turtle();
+            draw_list.end(&mut cx2d);
+            cx2d.end_pass(&pass);
+        }
+
+        for (index, corner) in [(0, BadgeCorner::BottomRight), (1, BadgeCorner::TopLeft)] {
+            let child = row.children[index].1.clone();
+            let avatar = child.borrow::<Avatar>().expect("an avatar");
+            let plate = child.area().rect(&cx);
+            let dot = avatar.presence_dot.area().rect(&cx);
+            assert_eq!(plate.size, dvec2(40.0, 40.0), "plate {index}");
+            assert!((plate.pos.y - 40.0).abs() < 1e-3, "the row centres plate {index}");
+            let want = plate.pos + presence_offset(corner, avatar.shape, plate.size, dot.size.x);
+            assert!(
+                (dot.pos - want).length() < 1e-3,
+                "the dot of plate {index} is at {:?}, not {:?} on its {:?} corner",
+                dot.pos,
+                want,
+                corner
+            );
+        }
     }
 }
