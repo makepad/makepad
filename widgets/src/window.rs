@@ -1339,6 +1339,8 @@ impl Widget for Window {
         // Before anything under the window can hit-test this event against a
         // lock whose owner no longer exists.
         crate::overlay_place::release_orphaned_sweep_locks(cx);
+        // And the scroll blocks of a modal dropped while it was open.
+        crate::modal::release_orphaned_scroll_blocks(cx);
         self.handle_direct_mouse_cursor(cx, event);
         crate::desktop_style::handle_event(cx, event);
         if let Event::Custom(json) = event {
