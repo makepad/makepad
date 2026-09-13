@@ -1596,6 +1596,23 @@ impl PortalList {
         self.caught_fling = None;
     }
 
+    /// Whether this list keeps a scroll delta it is about to apply (positive
+    /// toward the start), judged from where it rests now; see
+    /// [`list_keeps_scroll_delta`]. `finger_driven` is a trackpad gesture with
+    /// the fingers down, the only input that stretches a rubber band.
+    fn keeps_scroll_delta(&self, delta: f64, finger_driven: bool) -> bool {
+        let empty = self.range_start == self.range_end;
+        let at_start = empty || (self.first_id == self.range_start && self.first_scroll >= 0.0);
+        let at_end = empty || self.at_end;
+        let band = finger_driven
+            && !empty
+            && ((delta > 0.0 && self.bounce_at_start)
+                || (delta < 0.0 && self.bounce_at_end)
+                || (self.first_id == self.range_start && self.first_scroll > 0.0)
+                || self.bounce_overshoot > 0.0);
+        list_keeps_scroll_delta(delta, at_start, at_end, band)
+    }
+
     /// Whether a press at `time` belongs to a touch that just stopped live motion.
     fn press_is_catch(&self, time: f64) -> bool {
         self.touch_caught_motion_at
@@ -2785,7 +2802,14 @@ impl Widget for PortalList {
         if !self.scroll_bar.is_area_captured(cx) || is_scroll {
             let hit = event.hits_with_capture_overload(cx, self.area, self.capture_overload);
             match hit {
+                // A scroll view in one of the rows already moved by this delta.
+                Hit::FingerScroll(_) if event.scroll_handled(vi) => {}
                 Hit::FingerScroll(e) => {
+                    // Whatever this list moves by is its own: the event is marked
+                    // handled, so the scroll views around the list, which see it
+                    // after, don't move by it as well. A delta pointing past an edge
+                    // the list rests on is left for them (`keeps_scroll_delta`).
+                    //
                     // Trackpad scrolling on macOS is a gesture with phases: user-driven deltas
                     // while the fingers move (`Began`/`Changed`), then the OS's own decaying
                     // `Momentum` deltas after they lift. Both are applied exactly as delivered,
@@ -2843,6 +2867,10 @@ impl Widget for PortalList {
                                 {
                                     self.area.redraw(cx);
                                 }
+                                // Pinned, the coast chains on to the scroll view around.
+                                if !matches!(self.momentum, MomentumStream::Pinned { .. }) {
+                                    event.set_scroll_handled(vi);
+                                }
                             }
                         }
                         ScrollPhase::MomentumEnded => {
@@ -2884,6 +2912,9 @@ impl Widget for PortalList {
                             // Fingers lifted. Apply the final delta; the OS momentum stream
                             // that may follow is now expected. A stretched rubber band
                             // springs back from here instead (and takes no momentum).
+                            // The final delta clips at the edges like a wheel's; a stretch
+                            // left showing is the list's, and its spring starts below.
+                            let keeps = self.keeps_scroll_delta(delta, false);
                             self.was_scrolling = false;
                             self.scroll_state = ScrollState::Stopped;
                             self.momentum = MomentumStream::Expected { since: e.time };
@@ -2918,6 +2949,9 @@ impl Widget for PortalList {
                                 self.delta_top_scroll(cx, delta, true, false, 0.0, false, true);
                                 self.area.redraw(cx);
                             }
+                            if keeps || matches!(self.scroll_state, ScrollState::Pulldown { .. }) {
+                                event.set_scroll_handled(vi);
+                            }
                         }
                         // Finger-driven deltas apply directly, stretching the rubber band
                         // past an edge. A user-driven delta also stops any in-progress
@@ -2932,11 +2966,17 @@ impl Widget for PortalList {
                                 self.last_finger_scroll_time = Some(e.time);
                             }
                             self.scroll_state = ScrollState::Stopped;
+                            if self.keeps_scroll_delta(delta, true) {
+                                event.set_scroll_handled(vi);
+                            }
                             self.delta_top_scroll(cx, delta, false, false, 0.0, false, true);
                             self.area.redraw(cx);
                         }
                         // `None` (wheels) applies the delta directly and clips at the edges.
                         _ => {
+                            if self.keeps_scroll_delta(delta, false) {
+                                event.set_scroll_handled(vi);
+                            }
                             self.tail_range = false;
                             self.detect_tail_in_draw = true;
                             self.was_scrolling = false;
@@ -3662,6 +3702,34 @@ impl PortalListRef {
 
 type ItemsWithActions = Vec<(usize, WidgetRef)>;
 
+/// Whether a list keeps a scroll delta it is handed, which makes the delta
+/// spent: the event is marked handled, and no scroll view around the list
+/// moves by it as well. `delta` is positive toward the list's start.
+///
+/// A delta the list has room for is kept, even when the room is smaller than
+/// the delta. So is one a rubber band takes (`band`: the fingers are on the
+/// trackpad and the edge stretches, or a stretch is showing that the delta may
+/// unwind). A delta pointing past an edge the list already rests on is not, and
+/// the scroll view around the list moves by it instead — the rule a
+/// `ScrollBar` pinned at its limit follows, so nested scroll views and lists
+/// hand a wheel on the same way.
+///
+/// The list is judged before the delta is applied, and `at_end` comes from its
+/// last draw: a delta toward the end is added to the scroll even when the last
+/// row already sits on the bottom, and only the next draw pins it back, so the
+/// scroll changing is no proof the list moved.
+fn list_keeps_scroll_delta(delta: f64, at_start: bool, at_end: bool, band: bool) -> bool {
+    if delta == 0.0 {
+        false
+    } else if band {
+        true
+    } else if delta > 0.0 {
+        !at_start
+    } else {
+        !at_end
+    }
+}
+
 impl PortalListSet {
     pub fn set_first_id(&self, id: usize) {
         for list in self.iter() {
@@ -3675,5 +3743,156 @@ impl PortalListSet {
             list.items_with_actions_vec(actions, &mut set);
         }
         set
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::event::ScrollEvent;
+    use crate::log_list::LogList;
+    use crate::makepad_draw::cx_draw::CxDraw;
+    use std::cell::Cell;
+
+    // Deltas are positive toward the start: a wheel rolled up.
+    const UP: f64 = 60.0;
+    const DOWN: f64 = -60.0;
+
+    /// Between its edges a list keeps every wheel, whichever way it rolls, so
+    /// the page around it stays put.
+    #[test]
+    fn a_list_between_its_edges_keeps_the_wheel_both_ways() {
+        assert!(list_keeps_scroll_delta(UP, false, false, false));
+        assert!(list_keeps_scroll_delta(DOWN, false, false, false));
+    }
+
+    /// At the top, a wheel rolled up has nowhere to take the list and goes on
+    /// to the page; rolled down it still moves the list and stays.
+    #[test]
+    fn at_the_top_only_the_wheel_toward_the_top_passes_on() {
+        assert!(!list_keeps_scroll_delta(UP, true, false, false));
+        assert!(list_keeps_scroll_delta(DOWN, true, false, false));
+    }
+
+    /// The same at the bottom, the other way round.
+    #[test]
+    fn at_the_bottom_only_the_wheel_toward_the_bottom_passes_on() {
+        assert!(!list_keeps_scroll_delta(DOWN, false, true, false));
+        assert!(list_keeps_scroll_delta(UP, false, true, false));
+    }
+
+    /// A list whose rows all fit rests on both edges and never scrolls, so
+    /// it takes no wheel from the page it sits on.
+    #[test]
+    fn a_list_that_fits_passes_every_wheel_on() {
+        assert!(!list_keeps_scroll_delta(UP, true, true, false));
+        assert!(!list_keeps_scroll_delta(DOWN, true, true, false));
+    }
+
+    /// A rubber band past an edge is the list moving: fingers stretching it
+    /// keep the delta even at that edge.
+    #[test]
+    fn a_rubber_band_keeps_what_it_stretches_by() {
+        assert!(list_keeps_scroll_delta(UP, true, true, true));
+        assert!(list_keeps_scroll_delta(DOWN, true, true, true));
+    }
+
+    /// No delta along the list's axis is nothing to keep: the other axis of
+    /// the same event stays free for a scroll view that runs across it.
+    #[test]
+    fn no_delta_is_never_kept() {
+        assert!(!list_keeps_scroll_delta(0.0, false, false, false));
+        assert!(!list_keeps_scroll_delta(0.0, false, false, true));
+    }
+
+    const PANE: DVec2 = dvec2(300.0, 120.0);
+
+    /// One draw of the pane, in the pass and draw list the test keeps.
+    fn frame(cx: &mut Cx, log: &mut LogList, pass: &DrawPass, draw_list: &mut DrawList2d) {
+        let event = DrawEvent::default();
+        let mut draw = CxDraw::new(cx, &event);
+        let mut cx2d = Cx2d::new(&mut draw);
+        cx2d.begin_pass(pass, None);
+        draw_list.begin_always(&mut cx2d);
+        cx2d.begin_root_turtle(PANE, Layout::flow_down());
+        let _ = log.draw_walk(&mut cx2d, &mut Scope::empty(), Walk::fixed(PANE.x, PANE.y));
+        cx2d.end_pass_sized_turtle();
+        draw_list.end(&mut cx2d);
+        cx2d.end_pass(pass);
+    }
+
+    /// A wheel rolled over the middle of the pane, `dy` toward the end, and
+    /// whether the list kept it — which is all a scroll view around the list
+    /// reads before moving by the same wheel.
+    fn wheel(cx: &mut Cx, log: &mut LogList, dy: f64, handled: bool) -> bool {
+        let event = Event::Scroll(ScrollEvent {
+            window_id: WindowId(1, 1),
+            scroll: dvec2(0.0, dy),
+            abs: PANE * 0.5,
+            modifiers: KeyModifiers::default(),
+            handled_x: Cell::new(false),
+            handled_y: Cell::new(handled),
+            is_mouse: true,
+            time: 0.0,
+            phase: ScrollPhase::None,
+        });
+        log.handle_event(cx, &event, &mut Scope::empty());
+        event.scroll_handled(Vec2Index::Y)
+    }
+
+    /// The first row showing and how far it is scrolled, to a hundredth of a
+    /// point: a draw re-measures the rows, and that alone moves the scroll by
+    /// millionths.
+    fn place(cx: &Cx, log: &LogList) -> (usize, f64) {
+        let list = log.portal_list(cx, ids!(list));
+        let list = list.borrow().expect("the log holds no portal list");
+        (list.first_id(), (list.first_scroll() * 100.0).round() / 100.0)
+    }
+
+    /// The wheel over a list inside a scrolling page: the list keeps every
+    /// wheel it moves by, so the page stays put, and hands on the one that
+    /// points past the edge it rests on, so the page moves instead. A log
+    /// follows its newest line, which puts this one at its bottom to start.
+    #[test]
+    fn a_list_keeps_the_wheel_it_moves_by_and_hands_on_the_wheel_past_its_edge() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let mut log = cx.with_vm(LogList::script_new_with_default);
+        log.lines = (0..200).map(|n| format!("log | line {n}")).collect();
+        let pass = DrawPass::new(&mut cx);
+        pass.set_size(&mut cx, PANE);
+        let mut draw_list = DrawList2d::new(&mut cx);
+        for _ in 0..3 {
+            frame(&mut cx, &mut log, &pass, &mut draw_list);
+        }
+        let bottom = place(&cx, &log);
+        assert!(bottom.0 > 150, "the log did not open on its newest lines: {bottom:?}");
+
+        assert!(!wheel(&mut cx, &mut log, 60.0, false), "a wheel past the bottom was kept");
+        // The draw is what pins the list back on its bottom.
+        frame(&mut cx, &mut log, &pass, &mut draw_list);
+        assert_eq!(place(&cx, &log), bottom, "the list moved past its bottom");
+        assert!(wheel(&mut cx, &mut log, -60.0, false), "a wheel up the list was handed on");
+        frame(&mut cx, &mut log, &pass, &mut draw_list);
+        assert_ne!(place(&cx, &log), bottom, "the kept wheel did not move the list");
+        assert!(wheel(&mut cx, &mut log, 30.0, false), "off the bottom, a wheel down is the list's");
+        frame(&mut cx, &mut log, &pass, &mut draw_list);
+
+        // A wheel a row's own scroll view already used moves nothing here.
+        let before = place(&cx, &log);
+        assert!(wheel(&mut cx, &mut log, -60.0, true));
+        frame(&mut cx, &mut log, &pass, &mut draw_list);
+        assert_eq!(place(&cx, &log), before, "the list moved by a wheel already used");
+
+        for _ in 0..200 {
+            if place(&cx, &log) == (0, 0.0) {
+                break;
+            }
+            wheel(&mut cx, &mut log, -600.0, false);
+            frame(&mut cx, &mut log, &pass, &mut draw_list);
+        }
+        assert_eq!(place(&cx, &log), (0, 0.0), "the wheel never reached the top");
+        assert!(!wheel(&mut cx, &mut log, -60.0, false), "a wheel past the top was kept");
+        assert!(wheel(&mut cx, &mut log, 60.0, false), "a wheel down from the top was handed on");
     }
 }

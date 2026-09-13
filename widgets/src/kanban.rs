@@ -865,21 +865,24 @@ impl KanbanBoard {
         ))
     }
 
-    fn scroll_column(&mut self, cx: &mut Cx, column: usize, delta: f64) {
+    /// Scroll one column by `delta`, clamped to its cards; whether it moved.
+    fn scroll_column(&mut self, cx: &mut Cx, column: usize, delta: f64) -> bool {
         let room = {
             let Some(geom) = self.geom.get(column) else {
-                return;
+                return false;
             };
             (geom.content - geom.body.size.y).max(0.0)
         };
         let Some(scroll) = self.scroll.get_mut(column) else {
-            return;
+            return false;
         };
         let next = (*scroll + delta).clamp(0.0, room);
         if next != *scroll {
             *scroll = next;
             self.draw_bg.redraw(cx);
+            return true;
         }
+        false
     }
 
     /// A drag held near a column's top or bottom edge crawls it, so a column
@@ -904,9 +907,7 @@ impl KanbanBoard {
         } else {
             return;
         };
-        let before = self.scroll.get(column).copied().unwrap_or(0.0);
-        self.scroll_column(cx, column, delta);
-        if self.scroll.get(column).copied().unwrap_or(0.0) != before {
+        if self.scroll_column(cx, column, delta) {
             // Still moving, so ask for another frame: the pointer is being
             // held still and nothing else will come.
             self.scroll_pump = cx.new_next_frame();
@@ -1170,15 +1171,22 @@ impl Widget for KanbanBoard {
         }
 
         match event.hits(cx, self.draw_bg.area()) {
+            Hit::FingerScroll(_) if event.scroll_handled(Vec2Index::Y) => {}
             Hit::FingerScroll(e) => {
                 // A live drag is modal for the columns: a wheel would slide
-                // the cards away under the pointer mid-gesture.
+                // the cards away under the pointer mid-gesture, and so would a
+                // page around the board scrolling by it.
                 if self.drag.is_some() {
+                    event.set_scroll_handled(Vec2Index::Y);
                     return;
                 }
+                // A column the wheel moves keeps it, so the page stays put; a
+                // column resting on the edge the wheel points past hands it on.
                 let bands = self.column_bands();
                 if let Some(column) = kanban_column_at(&bands, e.abs.x) {
-                    self.scroll_column(cx, column, e.scroll.y);
+                    if self.scroll_column(cx, column, e.scroll.y) {
+                        event.set_scroll_handled(Vec2Index::Y);
+                    }
                 }
             }
             Hit::FingerHoverIn(e) | Hit::FingerHoverOver(e) => {

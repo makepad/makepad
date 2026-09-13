@@ -1026,10 +1026,16 @@ impl Widget for Table {
                     self.redraw(cx);
                 }
             }
-            Hit::FingerScroll(fe) if self.scroll_max > 0.0 => {
+            // A wheel a cell's own scroll view already used is left alone. One
+            // the rows move by is the table's, so the page around it stays put;
+            // one pointing past the edge the rows rest on goes on to the page.
+            Hit::FingerScroll(fe)
+                if self.scroll_max > 0.0 && !event.scroll_handled(Vec2Index::Y) =>
+            {
                 let next = (self.scroll + fe.scroll.y).clamp(0.0, self.scroll_max);
                 if next != self.scroll {
                     self.scroll = next;
+                    event.set_scroll_handled(Vec2Index::Y);
                     self.redraw(cx);
                 }
             }
