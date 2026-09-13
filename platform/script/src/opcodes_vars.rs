@@ -658,6 +658,15 @@ impl<'a> ScriptVm<'a> {
     // Log handler
 
     pub(crate) fn handle_log(&mut self) {
+        if !self.bx.allow_debug_output {
+            let error = script_err_not_allowed!(
+                self.bx.threads.cur_ref().trap,
+                "direct script logging is disabled by this host"
+            );
+            self.bx.threads.cur().push_stack_unchecked(error);
+            self.bx.threads.cur().trap.goto_next();
+            return;
+        }
         let value = self.bx.threads.cur().peek_stack_resolved(&self.bx.heap);
         self.log(value);
         self.bx.threads.cur().trap.goto_next();
@@ -696,6 +705,9 @@ impl<'a> ScriptVm<'a> {
     // Log implementation
 
     pub fn log(&self, value: ScriptValue) {
+        if !self.bx.allow_debug_output {
+            return;
+        }
         if let Some(loc) = self.bx.code.ip_to_loc(self.bx.threads.cur_ref().trap.ip) {
             if value != NIL {
                 if let Some(err_ptr) = value.as_err() {

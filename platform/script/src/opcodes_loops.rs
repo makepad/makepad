@@ -449,8 +449,7 @@ impl<'a> ScriptVm<'a> {
             self.bx.threads.cur().trap.goto(start_ip);
             return;
         }
-        println!("For end unknown state");
-        self.bx.threads.cur().trap.goto_next();
+        self.bail("unknown loop state");
     }
 
     pub fn break_for_loop(&mut self) {
