@@ -340,6 +340,56 @@ impl<'a> ScriptVm<'a> {
         result
     }
 
+    /// Runs an operation with a cap on live VM operand values.
+    ///
+    /// Nested caps can only narrow the current limit. A paused continuation
+    /// retains the cap that began its evaluation, matching instruction-limit
+    /// behavior.
+    pub fn with_stack_value_limit<R>(
+        &mut self,
+        stack_value_limit: usize,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let previous_limit = self.bx.threads.cur_ref().stack_limit;
+        self.bx.threads.cur().stack_limit = previous_limit.min(stack_value_limit);
+        let result = f(self);
+        if !self.bx.threads.cur_ref().is_paused() {
+            self.bx.threads.cur().stack_limit = previous_limit;
+        }
+        result
+    }
+
+    /// Runs an operation with a cap on active VM call frames.
+    ///
+    /// The count includes a root evaluation frame. The raw Makepad VM has no
+    /// call-frame cap, while nested bounded executions retain the narrower
+    /// cap. A paused continuation retains its starting cap.
+    pub fn with_call_frame_limit<R>(
+        &mut self,
+        call_frame_limit: usize,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        let previous_limit = self.bx.threads.cur_ref().call_frame_limit;
+        self.bx.threads.cur().call_frame_limit = Some(
+            previous_limit
+                .map(|previous| previous.min(call_frame_limit))
+                .unwrap_or(call_frame_limit),
+        );
+        let result = f(self);
+        if !self.bx.threads.cur_ref().is_paused() {
+            self.bx.threads.cur().call_frame_limit = previous_limit;
+        }
+        result
+    }
+
+    /// Clears resource-limit signals that did not belong to an active VM
+    /// instruction. Hosts normally do not need this: `run_core` consumes its
+    /// own failures, and Octoscript clears stale signals before a fresh eval.
+    pub fn clear_execution_limit_failures(&mut self) {
+        self.bx.threads.cur().take_stack_limit_exceeded();
+        self.bx.threads.cur().take_call_frame_limit_exceeded();
+    }
+
     /// Run one untrusted evaluation/callback under a logical heap-allocation
     /// ceiling. The default VM has no ceiling; callers opt in explicitly, so
     /// trusted widget, shader and Studio script execution is unchanged.
@@ -528,8 +578,12 @@ impl<'a> ScriptVm<'a> {
                         return_ip: None,
                         prev_slot_base: self.bx.threads.cur_ref().slot_base,
                     };
+                    if !self.bx.threads.cur().push_call_frame(call) {
+                        return self
+                            .handle_execution_limit_failure()
+                            .expect("a rejected call frame raises a limit failure");
+                    }
                     self.bx.threads.cur().scopes.push(scope);
-                    self.bx.threads.cur().calls.push(call);
                     if let Some(me) = self.script_me_from_value(me) {
                         self.bx.threads.cur().mes.push(me);
                     }
@@ -762,7 +816,27 @@ impl<'a> ScriptVm<'a> {
     #[inline(never)]
     #[cold]
     fn handle_errors(&mut self) {
-        if self.bx.threads.cur().call_has_try() {
+        if self.bx.threads.cur_ref().call_stack_has_try() {
+            // Discard younger script calls until the active frame owns a try
+            // frame, restoring that frame's instruction body. Hard VM bails
+            // (ScriptTrapOn::Bail) never enter this path.
+            while !self.bx.threads.cur_ref().call_has_try() {
+                let Some(call) = self.bx.threads.cur().calls.pop() else {
+                    self.bail("calls empty while unwinding to a try frame");
+                    return;
+                };
+                let return_ip = call.return_ip;
+                self.bx.threads.cur().slot_base = call.prev_slot_base;
+                self.bx
+                    .threads
+                    .cur()
+                    .truncate_bases(call.bases, &mut self.bx.heap);
+                let Some(return_ip) = return_ip else {
+                    self.bail("root call reached while unwinding to a try frame");
+                    return;
+                };
+                self.bx.threads.cur().trap.ip = return_ip;
+            }
             // pop all errors
             self.bx.threads.cur().trap.err_clear();
             let try_frame = self.bx.threads.cur().tries.pop().unwrap();
@@ -779,7 +853,37 @@ impl<'a> ScriptVm<'a> {
                 .trap
                 .goto(try_frame.start_ip + try_frame.jump);
         } else {
+            // An uncaught error terminates this evaluation before another
+            // instruction (and therefore another host effect) can execute.
+            // The diagnostic is drained first so it reaches the captured
+            // sink or the log exactly once; the error value then rides the
+            // Bail back to the host as the evaluation result.
+            //
+            // Incremental (streaming) evaluation is the one exception: the
+            // host set `silence_errors` because incomplete source inevitably
+            // raises errors that are meaningless until the rest arrives, and
+            // Splash's live widget tree relies on the evaluation continuing
+            // past them. Those evals keep the historical drain-and-continue
+            // behaviour; every other eval terminates.
+            let error = self
+                .bx
+                .threads
+                .cur_ref()
+                .trap
+                .err_borrow()
+                .front()
+                .map(|e| e.value);
             self.drain_errors();
+            if self.bx.silence_errors {
+                return;
+            }
+            if let Some(error) = error {
+                self.bx
+                    .threads
+                    .cur()
+                    .trap
+                    .set_on(Some(ScriptTrapOn::Bail(error)));
+            }
         }
     }
 
@@ -797,6 +901,34 @@ impl<'a> ScriptVm<'a> {
         }
         if now >= budget.soft_deadline {
             return Some(ScriptRunBudgetHit::Soft);
+        }
+        None
+    }
+
+    #[inline(never)]
+    #[cold]
+    fn bail_resource_limit(&mut self, message: &'static str) -> ScriptValue {
+        let err = script_err_limit!(self.bx.threads.cur_ref().trap, "{message}");
+        // Resource-limit failures are uncatchable. Drain pre-existing script
+        // errors before the Bail unwinds to a clean root state.
+        self.drain_errors();
+        self.bx
+            .threads
+            .cur()
+            .trap
+            .set_on(Some(ScriptTrapOn::Bail(err)));
+        self.handle_trap_on()
+            .expect("resource-limit Bail must return a VM value")
+    }
+
+    fn handle_execution_limit_failure(&mut self) -> Option<ScriptValue> {
+        let stack_limit_exceeded = self.bx.threads.cur().take_stack_limit_exceeded();
+        let call_frame_limit_exceeded = self.bx.threads.cur().take_call_frame_limit_exceeded();
+        if stack_limit_exceeded {
+            return Some(self.bail_resource_limit("script operand stack limit exceeded"));
+        }
+        if call_frame_limit_exceeded {
+            return Some(self.bail_resource_limit("script call frame limit exceeded"));
         }
         None
     }
@@ -841,12 +973,10 @@ impl<'a> ScriptVm<'a> {
     }
 
     pub fn run_core(&mut self) -> ScriptValue {
-        // Cache opcodes pointer to avoid RefCell borrow on every iteration
-        let mut cached_body_index: usize = usize::MAX;
-        let mut opcodes_ptr: *const ScriptValue = std::ptr::null();
-        let mut opcodes_len: usize = 0;
-
         loop {
+            if let Some(value) = self.handle_execution_limit_failure() {
+                return value;
+            }
             // Heap growth paths cannot own the interpreter trap (many are
             // shared with parsers/native bindings), so they record one hard
             // refusal on the heap. Turn it into the same uncatchable Bail as
@@ -912,6 +1042,10 @@ impl<'a> ScriptVm<'a> {
                             self.bx.threads.cur().trap.pass(),
                             "script time budget exceeded"
                         );
+                        // A hard budget hit is an uncatchable VM bail. Move its
+                        // diagnostic out of the thread queue before unwinding so
+                        // a later run cannot observe it as a script error.
+                        self.drain_errors();
                         self.bx
                             .threads
                             .cur()
@@ -928,28 +1062,23 @@ impl<'a> ScriptVm<'a> {
             let body_index = thread.trap.ip.body as usize;
             let ip_index = thread.trap.ip.index as usize;
 
-            // Only re-borrow bodies when body changes
-            if body_index != cached_body_index {
+            // Copy the opcode while the body borrow is live. Native calls may
+            // re-enter the VM and replace a body's parser, so a cached pointer
+            // into its opcode buffer cannot outlive this iteration.
+            let opcode = {
                 let bodies = self.bx.code.bodies.borrow();
                 let body = &bodies[body_index];
-                opcodes_ptr = body.parser.opcodes.as_ptr();
-                opcodes_len = body.parser.opcodes.len();
-                cached_body_index = body_index;
-            }
+                body.parser.opcodes.get(ip_index).copied()
+            };
 
-            if ip_index >= opcodes_len {
+            let Some(opcode) = opcode else {
                 // If there's a value on the stack, return it (for expression-style scripts)
                 let stack_len = self.bx.threads.cur().stack.len();
                 if stack_len > 0 {
-                    log!("run_core: returning stack value, stack_len={}", stack_len);
                     return self.bx.threads.cur().pop_stack_value();
                 }
-                log!("run_core: stack empty, returning NIL");
                 return NIL;
-            }
-
-            // SAFETY: opcodes_ptr is valid as long as bodies isn't mutated during execution
-            let opcode = unsafe { *opcodes_ptr.add(ip_index) };
+            };
 
             if self.bx.debug_trace {
                 let stack_len = self.bx.threads.cur_ref().stack.len();
@@ -962,6 +1091,9 @@ impl<'a> ScriptVm<'a> {
 
             if let Some((opcode, args)) = opcode.as_opcode() {
                 self.opcode(opcode, args);
+                if let Some(value) = self.handle_execution_limit_failure() {
+                    return value;
+                }
                 // single-load poll for both interrupt sources (errors + traps)
                 let pending = self.bx.threads.cur().trap.pending();
                 if pending != 0 {
@@ -992,7 +1124,7 @@ impl<'a> ScriptVm<'a> {
 
         let root_slots = self.bx.threads.cur_ref().slots.len();
         let root_slot_base = self.bx.threads.cur_ref().slot_base;
-        self.bx.threads.cur().calls.push(CallFrame {
+        if !self.bx.threads.cur().push_call_frame(CallFrame {
             bases: StackBases {
                 tries: 0,
                 loops: 0,
@@ -1006,7 +1138,11 @@ impl<'a> ScriptVm<'a> {
             args: Default::default(),
             return_ip: None,
             prev_slot_base: root_slot_base,
-        });
+        }) {
+            return self
+                .handle_execution_limit_failure()
+                .expect("a rejected root frame raises a limit failure");
+        }
 
         self.bx.threads.cur().scopes.push(scope);
         self.bx.threads.cur().mes.push(ScriptMe::Object(me));
@@ -1583,6 +1719,11 @@ pub struct ScriptVmBase {
     pub is_reload: bool,
     pub debug_trace: bool,
     pub silence_errors: bool,
+    /// Whether script-directed debug output (the `~` LOG operator and
+    /// `ScriptVm::log`) may reach the host log. Raw Makepad hosts keep it on;
+    /// a standalone sandboxed runtime turns it off before any source runs,
+    /// which makes `~` a catchable script error instead of an output path.
+    pub allow_debug_output: bool,
     /// When Some, drained errors are pushed here (formatted) instead of being
     /// logged or dropped — even under `silence_errors`. Install before an
     /// eval/call, take after, to feed diagnostics back to a host (e.g. an AI
@@ -1608,6 +1749,7 @@ impl ScriptVmBase {
             is_reload: false,
             debug_trace: false,
             silence_errors: false,
+            allow_debug_output: true,
             captured_errors: None,
             run_budget: None,
             last_limit_consumed: 0,
@@ -1643,6 +1785,7 @@ impl ScriptVmBase {
             is_reload: false,
             debug_trace: false,
             silence_errors: false,
+            allow_debug_output: true,
             captured_errors: None,
             run_budget: None,
             last_limit_consumed: 0,
@@ -1736,5 +1879,227 @@ mod tests {
         assert!(!parse_reports_error("let {x} = {x: 1}"));
         // `me:` as an OBJECT KEY is data, not a binding.
         assert!(!parse_reports_error("let o = {me: 1}"));
+    }
+
+    #[test]
+    fn reentrant_reload_of_the_active_body_does_not_keep_an_opcode_pointer() {
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = ScriptVm {
+            host: &mut host,
+            bx: Box::new(ScriptVmBase::new()),
+        };
+
+        let reentrant = vm.bx.heap.new_module(id!(reentrant));
+        vm.add_method(reentrant, id!(reload), &[], |vm, _| {
+            vm.eval(ScriptMod {
+                file: "reentrant-reload.octoscript".to_owned(),
+                code: "41\n;".to_owned(),
+                ..Default::default()
+            })
+        });
+
+        let _ = vm.eval(ScriptMod {
+            file: "reentrant-reload.octoscript".to_owned(),
+            code: "use mod.reentrant\nreentrant.reload()\n;".to_owned(),
+            ..Default::default()
+        });
+
+        // The replacement body intentionally makes the outer VM result
+        // unspecified. Under Miri or ASan this path used to dereference the
+        // old parser's freed opcode allocation before it could return.
+    }
+
+    fn plain_vm(host: &mut ScriptVmHost<(), ()>) -> ScriptVm<'_> {
+        ScriptVm {
+            host,
+            bx: Box::new(ScriptVmBase::new()),
+        }
+    }
+
+    #[test]
+    fn streaming_try_catch_restores_the_contextual_separator_state() {
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = plain_vm(&mut host);
+        let script_mod = || ScriptMod {
+            file: "streaming-try-catch.octoscript".to_owned(),
+            ..Default::default()
+        };
+        // The trailing space makes the tokenizer emit the separator in the
+        // first pass, so the checkpoint must retain that it was consumed and
+        // the appended identifier `catch` must parse as the fallback.
+        let prefix = "use mod.std.assert\n\
+                      let catch = 41\n\
+                      try {\n\
+                          assert(false)\n\
+                      } catch ";
+
+        let _ = vm.eval_with_append_source(script_mod(), prefix, ScriptObject::ZERO);
+        let result = vm.eval_with_append_source(
+            script_mod(),
+            &format!("{prefix}catch + 1\n;"),
+            ScriptObject::ZERO,
+        );
+
+        assert_eq!(result.as_f64(), Some(42.0));
+    }
+
+    #[test]
+    fn streaming_logical_precedence_repatches_pending_short_circuits() {
+        for (prefix, suffix, expected) in [
+            ("true || false ", "&& false", true),
+            ("false && true ", "|| true", true),
+            ("true == 2 ", "> 1", true),
+        ] {
+            let mut host = ScriptVmHost::new((), ());
+            let mut vm = plain_vm(&mut host);
+            let module = || ScriptMod {
+                file: "streaming-precedence.octoscript".into(),
+                ..Default::default()
+            };
+            let partial = vm.with_instruction_limit(1000, |vm| {
+                vm.eval_with_append_source(module(), prefix, ScriptObject::ZERO)
+            });
+            assert!(
+                !partial.is_err(),
+                "unfinished logical expression must terminate: {prefix}"
+            );
+            let result = vm.with_instruction_limit(1000, |vm| {
+                vm.eval_with_append_source(
+                    module(),
+                    &format!("{prefix}{suffix}\n;"),
+                    ScriptObject::ZERO,
+                )
+            });
+            assert_eq!(result.as_bool(), Some(expected), "{prefix}{suffix}");
+        }
+    }
+
+    #[test]
+    fn streaming_legacy_try_ok_repatches_the_success_jump() {
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = plain_vm(&mut host);
+        let script_mod = || ScriptMod {
+            file: "streaming-try-ok.octoscript".to_owned(),
+            ..Default::default()
+        };
+        let prefix = "let marker = 0\ntry { 7 } { marker = 1 }";
+
+        let _ = vm.eval_with_append_source(script_mod(), prefix, ScriptObject::ZERO);
+        let result = vm.eval_with_append_source(
+            script_mod(),
+            &format!("{prefix} ok {{ marker = 2 }}\nreturn marker\n;"),
+            ScriptObject::ZERO,
+        );
+
+        assert_eq!(result.as_u40(), Some(2));
+    }
+
+    #[test]
+    fn hard_time_budget_drains_its_uncatchable_error() {
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = plain_vm(&mut host);
+        vm.bx.captured_errors = Some(Vec::new());
+        vm.bx.run_budget = Some(ScriptRunBudget::from_durations(
+            Duration::ZERO,
+            Duration::ZERO,
+            1,
+        ));
+
+        let result = vm.eval(ScriptMod {
+            file: "hard-time-budget.octoscript".to_owned(),
+            code: "try { loop {} } catch { 42 }\n;".to_owned(),
+            ..Default::default()
+        });
+
+        assert!(result.is_err());
+        assert!(vm.bx.threads.cur_ref().trap.err_is_empty());
+        assert!(vm
+            .take_errors()
+            .iter()
+            .any(|diagnostic| diagnostic.contains("script time budget exceeded")));
+    }
+
+    #[test]
+    fn return_does_not_pop_to_me_after_an_operand_stack_limit() {
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = plain_vm(&mut host);
+        let receiver = vm.heap_mut().new_object();
+        let pop_to_me = OpcodeArgs(OpcodeArgs::POP_TO_ME_FLAG);
+
+        {
+            let thread = vm.thread_mut();
+            thread.stack.push(7.into());
+            thread.mes.push(ScriptMe::Object(receiver));
+            assert!(thread.push_call_frame(CallFrame {
+                bases: StackBases::default(),
+                args: OpcodeArgs::NONE,
+                return_ip: None,
+                prev_slot_base: 0,
+            }));
+            assert!(thread.push_call_frame(CallFrame {
+                bases: StackBases {
+                    stack: 1,
+                    mes: 1,
+                    ..Default::default()
+                },
+                args: pop_to_me,
+                return_ip: Some(ScriptIp::default()),
+                prev_slot_base: 0,
+            }));
+        }
+
+        vm.with_stack_value_limit(1, |vm| {
+            vm.opcode(
+                Opcode::RETURN,
+                OpcodeArgs(OpcodeArgs::NIL.0 | OpcodeArgs::POP_TO_ME_FLAG),
+            );
+        });
+
+        assert!(vm.thread().has_execution_limit_exceeded());
+        assert_eq!(vm.thread().stack.len(), 1);
+        assert_eq!(vm.thread().stack[0].as_f64(), Some(7.0));
+        assert_eq!(vm.bx.heap.vec_len(receiver), 0);
+    }
+
+    #[test]
+    fn uncaught_error_terminates_a_plain_eval_but_not_a_silenced_streaming_eval() {
+        // `f()` on a number raises an uncaught script error; `42` follows it.
+        let source = "let f = 1\nf()\n42";
+
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = plain_vm(&mut host);
+        vm.bx.captured_errors = Some(Vec::new());
+        let plain = vm.eval(ScriptMod {
+            file: "uncaught-plain.octoscript".to_owned(),
+            code: format!("{source}\n;"),
+            ..Default::default()
+        });
+        assert!(plain.is_err(), "{plain:?}");
+        assert!(!vm.take_errors().is_empty());
+
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = plain_vm(&mut host);
+        let streaming = vm.eval_with_append_source(
+            ScriptMod {
+                file: "uncaught-streaming.octoscript".to_owned(),
+                ..Default::default()
+            },
+            &format!("{source}\n;"),
+            ScriptObject::ZERO,
+        );
+        assert_eq!(streaming.as_number(), Some(42.0), "{streaming:?}");
+    }
+
+    #[test]
+    fn malformed_ok_end_bails_instead_of_ignoring_the_missing_try_frame() {
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = plain_vm(&mut host);
+
+        vm.handle_ok_end();
+
+        assert!(matches!(
+            vm.bx.threads.cur_ref().trap.get_on(),
+            Some(ScriptTrapOn::Bail(_))
+        ));
     }
 }

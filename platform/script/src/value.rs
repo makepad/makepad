@@ -1128,6 +1128,14 @@ impl ScriptValue {
         self.0 < Self::TYPE_NAN
     }
 
+    /// Checked index for language reads and writes; unlike `as_index`, this
+    /// cannot truncate, saturate, or turn a non-number into item zero.
+    pub fn checked_index(&self) -> Option<usize> {
+        let value = self.as_number()?;
+        (value.is_finite() && value >= 0.0 && value.fract() == 0.0 && value < usize::MAX as f64)
+            .then_some(value as usize)
+    }
+
     pub const fn as_index(&self) -> usize {
         if let Some(f) = self.as_f64() {
             return f as usize;
