@@ -392,7 +392,7 @@ pub struct PieMenu {
 
 /// The wedge a key names, counting from one, or nothing. The digits pick by
 /// POSITION, which is the only keyboard a ring can honestly have.
-fn key_number(code: KeyCode) -> Option<usize> {
+pub(crate) fn key_number(code: KeyCode) -> Option<usize> {
     match code {
         KeyCode::Key1 | KeyCode::Numpad1 => Some(1),
         KeyCode::Key2 | KeyCode::Numpad2 => Some(2),

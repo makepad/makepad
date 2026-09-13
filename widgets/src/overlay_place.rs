@@ -106,6 +106,69 @@ pub fn claim_escape(cx: &mut Cx) -> bool {
     true
 }
 
+thread_local! {
+    /// Sweep locks whose owners were dropped still holding them. A widget is
+    /// dropped where no `Cx` is at hand to release anything, so the areas
+    /// wait here for the next event.
+    static ORPHANED_LOCKS: std::cell::RefCell<Vec<Area>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Release every lock a dropped overlay left behind: the ones it handed
+/// over from its `Drop`, and the ones held by an owner that had no `Drop` to
+/// hand them over with (see [`release_stale_sweep_locks`]). The window does
+/// this as each event reaches it, so a tree left with no overlay of the kind
+/// that was dropped still gets its input back; an overlay does it too before
+/// taking a lock of its own, for a tree with no window above it.
+pub(crate) fn release_orphaned_sweep_locks(cx: &mut Cx) {
+    let orphans = ORPHANED_LOCKS
+        .try_with(|orphans| std::mem::take(&mut *orphans.borrow_mut()))
+        .unwrap_or_default();
+    for area in orphans {
+        cx.sweep_unlock(area);
+    }
+    release_stale_sweep_locks(cx);
+}
+
+/// Let go of every lock whose area names nothing drawn any more: its draw
+/// list was dropped along with the page it belonged to, or has been drawn
+/// again without the owner drawing into it. An owner that is still drawn
+/// never reads as gone, because each draw moves the lock to the fresh handle
+/// together with the owner's own area.
+///
+/// Why here and not only in each overlay's `Drop`: most widgets that take
+/// the lock have no `Drop`, and one dropped open (its page rebuilt on a story
+/// or theme switch) turned away every press in the window until the app was
+/// restarted. This catches all of them, once the list is drawn again or
+/// freed; a `Drop` that orphans its lock only lets go a frame sooner.
+///
+/// The stack is taken apart and the living owners put back in their order,
+/// so a stale lock under a living one goes too and the nesting is kept.
+fn release_stale_sweep_locks(cx: &mut Cx) {
+    if cx.sweep_lock_area().is_none() {
+        return;
+    }
+    let mut held = Vec::new();
+    while let Some(top) = cx.sweep_lock_area() {
+        held.push(top);
+        cx.sweep_unlock(top);
+    }
+    for area in held.into_iter().rev() {
+        if !names_nothing_drawn(cx, area) {
+            cx.sweep_lock(area);
+        }
+    }
+}
+
+/// True when an area's draw list has been freed, or drawn again since the
+/// area was handed out. An empty area names no list, so it is never judged
+/// here.
+fn names_nothing_drawn(cx: &Cx, area: Area) -> bool {
+    match area.draw_list_id() {
+        Some(list) => cx.draw_lists.is_id_freed(list) || !area.is_valid(cx),
+        None => false,
+    }
+}
+
 /** A side and an alignment: one of the twelve places a popup can hang. */
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Placement {
@@ -922,5 +985,156 @@ mod tests {
         // An unbounded axis lets it go.
         let slid = slide_for_pointer(placed, anchor, r(0.0, 0.0, 0.0, 600.0), 18.0);
         assert_eq!(slid.rect.pos.x, -25.0 - 18.0);
+    }
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::*;
+    use crate::{
+        makepad_draw::cx_draw::CxDraw,
+        view::{View, ViewOptimize},
+        widget::*,
+    };
+
+    /// A pass and a list to draw a page into, the way a window holds one.
+    struct Target {
+        pass: DrawPass,
+        draw_list: DrawList2d,
+        overlay: Overlay,
+    }
+
+    impl Target {
+        fn new(cx: &mut Cx) -> Self {
+            let overlay = cx.with_vm(|vm| Overlay::script_new(vm));
+            Target { pass: DrawPass::new(cx), draw_list: DrawList2d::new(cx), overlay }
+        }
+
+        fn draw(&mut self, cx: &mut Cx, root: &WidgetRef) {
+            let size = dvec2(800.0, 600.0);
+            self.pass.set_size(cx, size);
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&self.pass, None);
+            self.draw_list.begin_always(&mut cx2d);
+            self.overlay.begin(&mut cx2d);
+            cx2d.begin_root_turtle(size, Layout::flow_down());
+            root.draw_all(&mut cx2d, &mut Scope::empty());
+            cx2d.end_pass_sized_turtle();
+            self.overlay.end(&mut cx2d);
+            self.draw_list.end(&mut cx2d);
+            cx2d.end_pass(&self.pass);
+        }
+    }
+
+    fn drawn_cx() -> Cx {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        cx.with_vm(crate::script_mod);
+        cx
+    }
+
+    /// A page of three buttons, the stand-in for any widget that takes the
+    /// pointer with one of its areas.
+    fn page(cx: &mut Cx) -> WidgetRef {
+        cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: 800
+                    height: 600
+                    flow: Down
+                    a := Button{text: "A"}
+                    b := Button{text: "B"}
+                    c := Button{text: "C"}
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        })
+    }
+
+    /// The page swapped out from under an owner that had no `Drop` to hand
+    /// its lock over: the list it drew in is drawn again with the next page,
+    /// the lock names nothing drawn, and the next event lets go of it.
+    #[test]
+    fn a_lock_whose_owner_was_swapped_out_goes_with_the_next_event() {
+        let mut cx = drawn_cx();
+        let mut target = Target::new(&mut cx);
+        let old = page(&mut cx);
+        target.draw(&mut cx, &old);
+        let held = old.widget(&cx, ids!(b)).area();
+        cx.sweep_lock(held);
+        drop(old);
+        let new = page(&mut cx);
+        target.draw(&mut cx, &new);
+        assert_eq!(cx.sweep_lock_area(), Some(held), "nothing let go of it when its page went");
+        release_orphaned_sweep_locks(&mut cx);
+        assert_eq!(cx.sweep_lock_area(), None, "the next event does");
+    }
+
+    /// An owner that is still drawn keeps its lock: each draw moves the lock
+    /// to the area's fresh handle, so it never reads as left behind.
+    #[test]
+    fn a_lock_whose_owner_still_draws_is_kept() {
+        let mut cx = drawn_cx();
+        let mut target = Target::new(&mut cx);
+        let root = page(&mut cx);
+        target.draw(&mut cx, &root);
+        cx.sweep_lock(root.widget(&cx, ids!(b)).area());
+        for _ in 0..3 {
+            target.draw(&mut cx, &root);
+            release_orphaned_sweep_locks(&mut cx);
+        }
+        let owner = root.widget(&cx, ids!(b)).area();
+        assert_eq!(cx.sweep_lock_area(), Some(owner), "held by the area the last draw gave it");
+    }
+
+    /// Only the lock that names nothing goes. One left under a living lock
+    /// goes too, and the living ones keep their order, so the inner overlay
+    /// still has the pointer and the outer gets it back when that one lets go.
+    #[test]
+    fn only_the_locks_that_name_nothing_go_and_the_rest_keep_their_order() {
+        let mut cx = drawn_cx();
+        let mut target = Target::new(&mut cx);
+        let root = page(&mut cx);
+        target.draw(&mut cx, &root);
+        // The middle of the stack is the last button drawn, so hiding it
+        // moves no living area onto the slot its lock names.
+        for id in [ids!(a), ids!(c), ids!(b)] {
+            let area = root.widget(&cx, id).area();
+            cx.sweep_lock(area);
+        }
+        root.widget(&cx, ids!(c)).set_visible(&mut cx, false);
+        target.draw(&mut cx, &root);
+        release_orphaned_sweep_locks(&mut cx);
+        let a = root.widget(&cx, ids!(a)).area();
+        let b = root.widget(&cx, ids!(b)).area();
+        assert_eq!(cx.sweep_lock_area(), Some(b), "the innermost living lock is still on top");
+        cx.sweep_unlock(b);
+        assert_eq!(cx.sweep_lock_area(), Some(a), "the one under it went, the outer one did not");
+        cx.sweep_unlock(a);
+        assert_eq!(cx.sweep_lock_area(), None);
+    }
+
+    /// A lock taken in a list of the owner's own goes as soon as that list is
+    /// dropped with it, without waiting for anything to be drawn again.
+    #[test]
+    fn a_lock_in_a_dropped_draw_list_goes_before_any_redraw() {
+        let mut cx = drawn_cx();
+        let mut target = Target::new(&mut cx);
+        let root = page(&mut cx);
+        if let Some(mut view) = root.borrow_mut::<View>() {
+            view.set_optimize(&mut cx, ViewOptimize::DrawList);
+        }
+        target.draw(&mut cx, &root);
+        let held = root.widget(&cx, ids!(a)).area();
+        cx.sweep_lock(held);
+        release_orphaned_sweep_locks(&mut cx);
+        assert_eq!(cx.sweep_lock_area(), Some(held), "a drawn owner keeps it");
+        drop(root);
+        release_orphaned_sweep_locks(&mut cx);
+        assert_eq!(cx.sweep_lock_area(), None, "its list went with it, and the lock with the list");
     }
 }

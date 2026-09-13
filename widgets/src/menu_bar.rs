@@ -617,7 +617,7 @@ impl ScriptHook for MenuBar {
 
 /// Walk a script array, whether it arrived as an array value or as an
 /// object carrying a vec (both spellings reach a `#[live] ScriptValue`).
-fn for_each_element(
+pub(crate) fn for_each_element(
     vm: &mut ScriptVm,
     value: ScriptValue,
     f: &mut dyn FnMut(&mut ScriptVm, ScriptValue),
@@ -640,7 +640,7 @@ fn for_each_element(
     }
 }
 
-fn obj_field(vm: &mut ScriptVm, object: ScriptObject, key: LiveId) -> ScriptValue {
+pub(crate) fn obj_field(vm: &mut ScriptVm, object: ScriptObject, key: LiveId) -> ScriptValue {
     let value = vm.bx.heap.value(object, key.into(), NoTrap);
     if value.is_err() {
         ScriptValue::NIL
@@ -649,7 +649,7 @@ fn obj_field(vm: &mut ScriptVm, object: ScriptObject, key: LiveId) -> ScriptValu
     }
 }
 
-fn obj_string(vm: &mut ScriptVm, object: ScriptObject, key: LiveId) -> Option<String> {
+pub(crate) fn obj_string(vm: &mut ScriptVm, object: ScriptObject, key: LiveId) -> Option<String> {
     let value = obj_field(vm, object, key);
     if value.is_nil() {
         return None;
@@ -657,7 +657,7 @@ fn obj_string(vm: &mut ScriptVm, object: ScriptObject, key: LiveId) -> Option<St
     vm.string_with(value, |_, s| s.to_string())
 }
 
-fn obj_bool(vm: &mut ScriptVm, object: ScriptObject, key: LiveId) -> Option<bool> {
+pub(crate) fn obj_bool(vm: &mut ScriptVm, object: ScriptObject, key: LiveId) -> Option<bool> {
     obj_field(vm, object, key).as_bool()
 }
 

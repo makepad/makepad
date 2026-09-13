@@ -247,13 +247,13 @@ const ROOT_MARGIN: f64 = 48.0;
 /// the borrow has to be tested before the question is asked — and
 /// `try_widget_uid` answers None for exactly the widgets that cannot be
 /// asked anything else either.
-fn askable_area(widget: &WidgetRef) -> Option<Area> {
+pub(crate) fn askable_area(widget: &WidgetRef) -> Option<Area> {
     widget.try_widget_uid()?;
     Some(widget.area())
 }
 
 /// Turn a dotted id path into the ids a widget lookup takes.
-fn id_path(path: &str) -> Vec<LiveId> {
+pub(crate) fn id_path(path: &str) -> Vec<LiveId> {
     path.split('.')
         .filter(|part| !part.is_empty())
         .map(LiveId::from_str)
