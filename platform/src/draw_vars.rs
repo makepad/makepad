@@ -653,11 +653,12 @@ impl DrawVars {
         touched
     }
 
-    /// Writes one uniform into EVERY retained draw call of this shader in
-    /// `list`'s draw list, and marks the pass for repaint. A widget whose
-    /// instances batch into many calls (texture changes split them) can move
-    /// its camera between redraws with this: the standing buffers re-present
-    /// under fresh uniforms — nothing is rebuilt.
+    /// Writes one uniform into every retained draw call of this shader in
+    /// `list`. Identical stored bits leave those calls and the pass untouched;
+    /// a real change issues a new uniform generation and marks the pass dirty.
+    /// A widget whose instances batch into many calls (texture changes split
+    /// them) can move its camera between redraws with this: the standing
+    /// buffers re-present under fresh uniforms — nothing is rebuilt.
     pub fn set_uniform_on_draw_list(&mut self, cx: &mut Cx, list: Area, id: LiveId, value: &[f32]) {
         let Some(draw_shader_id) = self.draw_shader_id else { return };
         let Some(draw_list_id) = list.draw_list_id() else { return };
@@ -672,16 +673,15 @@ impl DrawVars {
         let draw_list = &mut cx.draw_lists[draw_list_id];
         let mut touched = false;
         for item in 0..draw_list.draw_items.len() {
-            let draw_item = &mut draw_list.draw_items[item];
-            let Some(draw_call) = draw_item.kind.draw_call_mut() else { continue };
-            if draw_call.draw_shader_id != draw_shader_id {
-                continue;
+            if draw_list.draw_items.set_dyn_uniform(
+                item,
+                draw_shader_id,
+                offset,
+                &value[..slots],
+                uniform_gen,
+            ) {
+                touched = true;
             }
-            for i in 0..slots {
-                draw_call.dyn_uniforms[offset + i] = value[i];
-            }
-            draw_call.mark_uniforms_dirty(Cx::next_uniform_gen_from(uniform_gen));
-            touched = true;
         }
         if touched {
             if let Some(pass_id) = draw_list.draw_pass_id {

@@ -161,6 +161,11 @@ pub struct ToWasmRedrawAll {}
 /// so `Cx::draw_shaders_pending` can say whether draws are still being
 /// dropped for a program that has not linked yet.
 #[derive(ToWasm)]
+pub struct ToWasmRetainedUploadFailed {
+    pub buffer_id: usize,
+}
+
+#[derive(ToWasm)]
 pub struct ToWasmWebGLShadersDone {
     pub count: usize,
 }

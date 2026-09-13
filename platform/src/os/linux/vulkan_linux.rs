@@ -295,6 +295,9 @@ impl DesktopInit {
             pipelines: HashMap::new(),
             offscreen_render_passes: HashMap::new(),
             geometries: HashMap::new(),
+            retained_instances: HashMap::new(),
+            retained_prune_repaint: u64::MAX,
+            retained_transfer_generation: 0,
             textures: HashMap::new(),
             frame_resources: FrameResources::default(),
             command_pool: vk::CommandPool::null(),
@@ -5032,7 +5035,8 @@ impl CxVulkan {
             .as_ref()
             .is_some_and(|sample| sample.wrote_timestamps)
         {
-            self.profile.end_timestamps(&self.device, self.command_buffer);
+            self.profile
+                .end_timestamps(&self.device, self.command_buffer);
         }
         unsafe {
             self.device

@@ -281,81 +281,82 @@ impl Cx {
                 }
                 let shp = &self.draw_shaders.os_shaders[sh.os_shader_id.unwrap()];
 
-                if (draw_call.instance_dirty || draw_item.retained_gpu_evicted)
-                    && !(draw_item.retained_gpu_evicted
-                        && draw_item.retained_instances.is_some()
-                        && draw_item.retained_instance_count == 0)
-                {
-                    upload_budget.allocations.collect_for_frame(
-                        self.repaint_id,
-                        self.textures
-                            .1
-                            .serials
-                            .completed
-                            .load(std::sync::atomic::Ordering::Acquire),
-                    );
-                    let slots = draw_item.retained_instances.as_ref().map_or_else(
-                        || draw_item.instances.as_ref().map_or(0, |v| v.len()),
-                        |p| p.data().len(),
-                    );
-                    let replaces = draw_item.retained_instances.is_none()
-                        || draw_item.retained_upload_range.start == 0
-                        || draw_item.os.inst_vbuf.buffer.is_none()
-                        || slots > draw_item.os.inst_vbuf.last_size;
-                    if replaces {
-                        let capacity = if draw_item.retained_instances.is_none() {
-                            slots * 4
-                        } else if draw_item.os.inst_vbuf.buffer.is_none()
-                            || slots > draw_item.os.inst_vbuf.last_size
-                        {
-                            slots.next_power_of_two().max(64) * 4
-                        } else {
-                            draw_item.os.inst_vbuf.last_size * 4
-                        };
-                        let Some(charge) = upload_budget.allocations.reserve(capacity) else {
-                            draw_item.instance_upload_pending = true;
-                            self.demo_time_repaint = true;
-                            continue;
-                        };
-                        draw_item.os.inst_vbuf.charge = Some(charge);
-                    }
-                    draw_item.instance_upload_pending = false;
-                    draw_call.instance_dirty = false;
-                    draw_item.retained_instance_id =
-                        draw_item.retained_instances.as_ref().map_or(0, |v| v.id());
-                    draw_item.resident_schema = draw_item.retained_schema;
-                    draw_item.retained_gpu_evicted = false;
-                    if draw_item
-                        .retained_instances
-                        .as_ref()
-                        .map(|v| v.data())
-                        .unwrap_or_else(|| draw_item.instances.as_deref().unwrap())
-                        .len()
-                        == 0
+                'instance_upload: {
+                    if (draw_call.instance_dirty || draw_item.retained_gpu_evicted)
+                        && !(draw_item.retained_gpu_evicted
+                            && draw_item.retained_instances.is_some()
+                            && draw_item.retained_instance_count == 0)
                     {
-                        continue;
-                    }
-                    // update the instance buffer data; what the copy costs
-                    // feeds the producers' pacing (contract §8), recorded
-                    // at the pass's end.
-                    let copy_started = std::time::Instant::now();
-                    if let Some(retained) = &draw_item.retained_instances {
-                        draw_item.os.inst_vbuf.update_retained_instances(
-                            d3d11_cx,
-                            retained.data(),
-                            draw_item.retained_upload_range.clone(),
+                        upload_budget.allocations.collect_for_frame(
+                            self.repaint_id,
+                            self.textures
+                                .1
+                                .serials
+                                .completed
+                                .load(std::sync::atomic::Ordering::Acquire),
                         );
-                    } else {
-                        draw_item.os.inst_vbuf.update_with_f32_vertex_data(
-                            d3d11_cx,
-                            draw_item.instances.as_deref().unwrap(),
+                        let slots = draw_item.retained_instances.as_ref().map_or_else(
+                            || draw_item.instances.as_ref().map_or(0, |v| v.len()),
+                            |p| p.float_len(),
                         );
+                        let replaces =
+                            draw_item
+                                .retained_instances
+                                .as_ref()
+                                .is_none_or(|publication| {
+                                    draw_item.os.inst_vbuf.retained_replaces(publication)
+                                });
+                        let charge = if replaces {
+                            let capacity = if draw_item.retained_instances.is_some() {
+                                slots.next_power_of_two().max(64) * 4
+                            } else {
+                                slots * 4
+                            };
+                            let charge = upload_budget.allocations.reserve_visible(capacity);
+                            Some(charge)
+                        } else {
+                            None
+                        };
+                        // update the instance buffer data; what the copy costs
+                        // feeds the producers' pacing (contract §8), recorded
+                        // at the pass's end.
+                        let copy_started = std::time::Instant::now();
+                        let uploaded = if let Some(retained) = &draw_item.retained_instances {
+                            let Some(uploaded) = draw_item
+                                .os
+                                .inst_vbuf
+                                .update_retained_instances(d3d11_cx, retained)
+                            else {
+                                draw_item.instance_upload_pending = true;
+                                self.demo_time_repaint = true;
+                                break 'instance_upload;
+                            };
+                            uploaded
+                        } else {
+                            draw_item.os.inst_vbuf.update_with_f32_vertex_data(
+                                d3d11_cx,
+                                draw_item.instances.as_deref().unwrap(),
+                            );
+                            slots * 4
+                        };
+                        if let Some(charge) = charge {
+                            draw_item.os.inst_vbuf.charge = Some(charge);
+                        }
+                        draw_item.instance_upload_pending = false;
+                        draw_call.instance_dirty = false;
+                        draw_item.retained_instance_id = draw_item
+                            .retained_instances
+                            .as_ref()
+                            .map_or(0, |value| value.id());
+                        draw_item.resident_schema = draw_item.retained_schema;
+                        draw_item.retained_gpu_evicted = false;
+                        upload_budget.stats.bytes =
+                            upload_budget.stats.bytes.saturating_add(uploaded);
+                        upload_budget.stats.install_us =
+                            upload_budget.stats.install_us.saturating_add(
+                                copy_started.elapsed().as_micros().min(u64::MAX as u128) as u64,
+                            );
                     }
-                    upload_budget.stats.bytes = upload_budget.stats.bytes.saturating_add(slots * 4);
-                    upload_budget.stats.install_us = upload_budget
-                        .stats
-                        .install_us
-                        .saturating_add(copy_started.elapsed().as_micros().min(u64::MAX as u128) as u64);
                 }
                 if draw_call.dyn_uniforms.len() != 0 {
                     draw_item
@@ -364,13 +365,18 @@ impl Cx {
                         .update_with_f32_constant_data(d3d11_cx, &mut draw_call.dyn_uniforms);
                 }
 
-                let instances = if draw_item.retained_instances.is_some() {
+                let instances = if draw_item.instance_upload_pending {
+                    draw_item.os.inst_vbuf.retained_count as u64
+                } else if draw_item.retained_instances.is_some() {
                     draw_item.retained_instance_count as u64
                 } else {
                     (draw_item.instances.as_ref().map_or(0, |v| v.len())
                         / sh.mapping.instances.total_slots) as u64
                 };
 
+                if !draw_item.instance_upload_pending {
+                    draw_item.os.inst_vbuf.retained_count = instances as usize;
+                }
                 if instances == 0 {
                     continue;
                 }
@@ -684,7 +690,10 @@ impl Cx {
                     receipt.mark_encoded(draw_item.consumed_serial);
                     receipt.mark_submitted(
                         draw_item.consumed_serial,
-                        draw_item.kind.draw_call().map_or(0, |call| call.uniforms_gen),
+                        draw_item
+                            .kind
+                            .draw_call()
+                            .map_or(0, |call| call.uniforms_gen),
                     );
                 }
                 draw_item.consumed_uniforms_gen = draw_item
@@ -2686,63 +2695,117 @@ pub struct CxOsUniformBuffer {
 pub struct D3d11Buffer {
     pub last_size: usize,
     pub buffer: Option<ID3D11Buffer>,
+    pub retained_publication: Option<crate::retained_instances::RetainedInstances>,
+    pub retained_count: usize,
     pub charge: Option<crate::retained_instances::RetainedAllocation>,
 }
 
 impl D3d11Buffer {
+    fn retained_replaces(
+        &self,
+        publication: &crate::retained_instances::RetainedInstances,
+    ) -> bool {
+        self.buffer.is_none()
+            || self.last_size < publication.float_len()
+            || self.retained_publication.as_ref().is_none_or(|previous| {
+                publication
+                    .upload_plan(previous)
+                    .copies
+                    .iter()
+                    .any(|copy| copy.source.start != copy.destination)
+            })
+    }
+
     fn update_retained_instances(
         &mut self,
         cx: &D3d11Cx,
-        data: &[f32],
-        range: std::ops::Range<usize>,
-    ) {
-        if data.is_empty() {
-            return;
-        }
-        let mut start = range.start;
-        if self.buffer.is_none() || self.last_size < data.len() {
-            let capacity = data.len().next_power_of_two().max(64);
+        publication: &crate::retained_instances::RetainedInstances,
+    ) -> Option<usize> {
+        let plan = self
+            .buffer
+            .as_ref()
+            .and(self.retained_publication.as_ref())
+            .map(|previous| publication.upload_plan(previous));
+        let replaces = self.retained_replaces(publication);
+        let capacity = publication.float_len().next_power_of_two().max(64);
+        let destination = if replaces {
             let desc = D3D11_BUFFER_DESC {
-                Usage: D3D11_USAGE_DYNAMIC,
-                ByteWidth: (capacity * 4) as u32,
+                Usage: D3D11_USAGE_DEFAULT,
+                ByteWidth: (capacity * 4).try_into().ok()?,
                 BindFlags: D3D11_BIND_VERTEX_BUFFER.0 as u32,
-                CPUAccessFlags: D3D11_CPU_ACCESS_WRITE.0 as u32,
+                CPUAccessFlags: 0,
                 MiscFlags: 0,
                 StructureByteStride: 0,
             };
             let mut buffer = None;
-            if let Err(e) = unsafe { cx.device.CreateBuffer(&desc, None, Some(&mut buffer)) } {
-                cx.note_error("retained instance allocation", &e);
-                return;
+            if let Err(error) = unsafe { cx.device.CreateBuffer(&desc, None, Some(&mut buffer)) } {
+                cx.note_error("retained instance allocation", &error);
+                return None;
             }
-            self.buffer = buffer;
-            self.last_size = capacity;
-            start = 0;
-        }
-        let buffer = self.buffer.as_ref().unwrap();
-        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-        // NO_OVERWRITE is only used for a proven immutable append; replacements
-        // DISCARD so the driver retains the old GPU-visible backing allocation.
-        let mode = if start == 0 {
-            D3D11_MAP_WRITE_DISCARD
+            buffer?
         } else {
-            D3D11_MAP(5) // D3D11_MAP_WRITE_NO_OVERWRITE (stripped bindings omit it)
+            self.buffer.as_ref()?.clone()
         };
+        let mut uploaded = 0;
         unsafe {
-            if let Err(e) = cx.context.Map(buffer, 0, mode, 0, Some(&mut mapped)) {
-                cx.note_error("retained instance upload", &e);
-                return;
+            if replaces {
+                if let (Some(previous), Some(plan)) = (&self.buffer, &plan) {
+                    for copy in &plan.copies {
+                        let source_box = D3D11_BOX {
+                            left: (copy.source.start * 4) as u32,
+                            right: (copy.source.end * 4) as u32,
+                            top: 0,
+                            bottom: 1,
+                            front: 0,
+                            back: 1,
+                        };
+                        cx.context.CopySubresourceRegion(
+                            &destination,
+                            0,
+                            (copy.destination * 4) as u32,
+                            0,
+                            0,
+                            previous,
+                            0,
+                            Some(&source_box),
+                        );
+                    }
+                }
             }
-            for offset in (start..data.len()).step_by(64 * 1024) {
-                let count = (data.len() - offset).min(64 * 1024);
-                std::ptr::copy_nonoverlapping(
-                    data.as_ptr().add(offset),
-                    (mapped.pData as *mut f32).add(offset),
-                    count,
-                );
+            let full = vec![0..publication.float_len()];
+            let writes = plan
+                .as_ref()
+                .map_or(full.as_slice(), |plan| plan.writes.as_slice());
+            for range in writes {
+                for (offset, data) in publication.data_slices(range.clone()) {
+                    let target_box = D3D11_BOX {
+                        left: (offset * 4) as u32,
+                        right: ((offset + data.len()) * 4) as u32,
+                        top: 0,
+                        bottom: 1,
+                        front: 0,
+                        back: 1,
+                    };
+                    // DEFAULT resource updates are command ordered; the driver
+                    // stages writes if prior draws still read this range.
+                    cx.context.UpdateSubresource(
+                        &destination,
+                        0,
+                        Some(&target_box),
+                        data.as_ptr().cast(),
+                        0,
+                        0,
+                    );
+                    uploaded += std::mem::size_of_val(data);
+                }
             }
-            cx.context.Unmap(buffer, 0);
         }
+        if replaces {
+            self.last_size = capacity;
+        }
+        self.buffer = Some(destination);
+        self.retained_publication = Some(publication.clone());
+        Some(uploaded)
     }
 
     fn create_buffer_or_update(
@@ -2752,6 +2815,11 @@ impl D3d11Buffer {
         len_slots: usize,
         data: *const std::ffi::c_void,
     ) {
+        // Dynamic/uniform buffers cannot inherit the DEFAULT retained path.
+        if self.retained_publication.take().is_some() {
+            self.buffer = None;
+            self.last_size = 0;
+        }
         // Keep original churn behavior (replace when size changes), but avoid
         // leaking the old COM buffer by creating into a temporary out variable.
         if self.buffer.is_none() || self.last_size != len_slots {

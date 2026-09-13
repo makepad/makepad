@@ -559,76 +559,83 @@ impl Cx {
                 };
                 let trace_draw = crate::makepad_error_log::trace_enabled("gl.draw");
 
-                if (draw_call.instance_dirty
-                    || draw_item.os.inst_vb.gl_buffer.is_none()
-                    || draw_item.retained_gpu_evicted)
-                    && !(draw_item.retained_gpu_evicted
-                        && draw_item.retained_instances.is_some()
-                        && draw_item.retained_instance_count == 0)
-                {
-                    upload_budget.allocations.collect_for_frame(
-                        self.repaint_id,
-                        self.textures
-                            .1
-                            .serials
-                            .completed
-                            .load(std::sync::atomic::Ordering::Acquire),
-                    );
-                    let bytes = draw_item.retained_instances.as_ref().map_or_else(
-                        || draw_item.instances.as_ref().map_or(0, |v| v.len() * 4),
-                        |p| p.byte_len(),
-                    );
-                    let replaces = draw_item.retained_instances.is_none()
-                        || draw_item.retained_upload_range.start == 0
+                'instance_upload: {
+                    if (draw_call.instance_dirty
                         || draw_item.os.inst_vb.gl_buffer.is_none()
-                        || bytes > draw_item.os.inst_vb.retained_capacity;
-                    let charge = if replaces {
-                        let capacity = if draw_item.retained_instances.is_some() {
-                            bytes.next_power_of_two().max(256)
+                        || draw_item.retained_gpu_evicted)
+                        && !(draw_item.retained_gpu_evicted
+                            && draw_item.retained_instances.is_some()
+                            && draw_item.retained_instance_count == 0)
+                    {
+                        upload_budget.allocations.collect_for_frame(
+                            self.repaint_id,
+                            self.textures
+                                .1
+                                .serials
+                                .completed
+                                .load(std::sync::atomic::Ordering::Acquire),
+                        );
+                        let bytes = draw_item.retained_instances.as_ref().map_or_else(
+                            || draw_item.instances.as_ref().map_or(0, |v| v.len() * 4),
+                            |p| p.byte_len(),
+                        );
+                        let replaces =
+                            draw_item
+                                .retained_instances
+                                .as_ref()
+                                .is_none_or(|publication| {
+                                    draw_item.os.inst_vb.retained_replaces(publication)
+                                });
+                        let charge = if replaces {
+                            let capacity = if draw_item.retained_instances.is_some() {
+                                bytes.next_power_of_two().max(256)
+                            } else {
+                                bytes
+                            };
+                            let charge = upload_budget.allocations.reserve_visible(capacity);
+                            Some(charge)
                         } else {
+                            None
+                        };
+                        // What this copy costs feeds the producers' pacing
+                        // (contract §8): summed per frame, recorded at the
+                        // pass's end.
+                        let copy_started = std::time::Instant::now();
+                        let uploaded = if let Some(retained) = &draw_item.retained_instances {
+                            let Some(uploaded) =
+                                draw_item.os.inst_vb.update_retained_array(gl, retained)
+                            else {
+                                draw_item.instance_upload_pending = true;
+                                self.demo_time_repaint = true;
+                                break 'instance_upload;
+                            };
+                            uploaded
+                        } else {
+                            draw_item
+                                .os
+                                .inst_vb
+                                .update_array_buffer(gl, draw_item.instances.as_deref().unwrap());
                             bytes
                         };
-                        let Some(charge) = upload_budget.allocations.reserve(capacity) else {
-                            draw_item.instance_upload_pending = true;
-                            self.demo_time_repaint = true;
-                            continue;
-                        };
-                        Some(charge)
-                    } else {
-                        None
-                    };
-                    draw_call.instance_dirty = false;
-                    draw_item.retained_instance_id =
-                        draw_item.retained_instances.as_ref().map_or(0, |v| v.id());
-                    draw_item.resident_schema = draw_item.retained_schema;
-                    draw_item.retained_gpu_evicted = false;
-                    if let Some(charge) = charge {
-                        draw_item.os.inst_vb.charge = Some(charge);
+                        if let Some(charge) = charge {
+                            draw_item.os.inst_vb.charge = Some(charge);
+                        }
+                        draw_call.instance_dirty = false;
+                        draw_item.retained_instance_id = draw_item
+                            .retained_instances
+                            .as_ref()
+                            .map_or(0, |value| value.id());
+                        draw_item.resident_schema = draw_item.retained_schema;
+                        draw_item.retained_gpu_evicted = false;
+                        draw_item.instance_upload_pending = false;
+                        upload_budget.stats.bytes =
+                            upload_budget.stats.bytes.saturating_add(uploaded);
+                        upload_budget.stats.install_us =
+                            upload_budget.stats.install_us.saturating_add(
+                                copy_started.elapsed().as_micros().min(u64::MAX as u128) as u64,
+                            );
                     }
-                    draw_item.instance_upload_pending = false;
-                    // What this copy costs feeds the producers' pacing
-                    // (contract §8): summed per frame, recorded at the
-                    // pass's end.
-                    let copy_started = std::time::Instant::now();
-                    if let Some(retained) = &draw_item.retained_instances {
-                        draw_item.os.inst_vb.update_retained_array(
-                            gl,
-                            retained.data(),
-                            draw_item.retained_upload_range.clone(),
-                        );
-                    } else {
-                        draw_item
-                            .os
-                            .inst_vb
-                            .update_array_buffer(gl, draw_item.instances.as_deref().unwrap());
-                    }
-                    upload_budget.stats.bytes = upload_budget.stats.bytes.saturating_add(bytes);
-                    upload_budget.stats.install_us = upload_budget
-                        .stats
-                        .install_us
-                        .saturating_add(copy_started.elapsed().as_micros().min(u64::MAX as u128) as u64);
                 }
-
                 // update the zbias uniform if we have it.
                 draw_call.resolve_zbias(*zbias, sploded, uniforms_gen);
                 *zbias += zbias_step;
@@ -638,13 +645,18 @@ impl Cx {
                     .draw_call_uniforms
                     .update_uniform_buffer(gl, draw_call.draw_call_uniforms.as_slice());
 
-                let instances = if draw_item.retained_instances.is_some() {
+                let instances = if draw_item.instance_upload_pending {
+                    draw_item.os.inst_vb.retained_count as u64
+                } else if draw_item.retained_instances.is_some() {
                     draw_item.retained_instance_count as u64
                 } else {
                     (draw_item.instances.as_ref().map_or(0, |v| v.len())
                         / sh.mapping.instances.total_slots) as u64
                 };
 
+                if !draw_item.instance_upload_pending {
+                    draw_item.os.inst_vb.retained_count = instances as usize;
+                }
                 if instances == 0 {
                     continue;
                 }
@@ -872,12 +884,6 @@ impl Cx {
                 unsafe {
                     (gl.glUseProgram)(shgl.program);
                     (gl.glBindVertexArray)(draw_item.os.vao.as_ref().unwrap().vao.unwrap());
-                    let instances = if draw_item.retained_instances.is_some() {
-                        draw_item.retained_instance_count as u64
-                    } else {
-                        (draw_item.instances.as_ref().map_or(0, |v| v.len())
-                            / sh.mapping.instances.total_slots) as u64
-                    };
                     (gl.glDepthMask)(if draw_call.options.depth_write {
                         gl_sys::TRUE
                     } else {
@@ -3649,45 +3655,118 @@ impl CxOsPass {
 pub struct OpenglBuffer {
     pub gl_buffer: Option<u32>,
     pub retained_capacity: usize,
+    pub retained_publication: Option<crate::retained_instances::RetainedInstances>,
+    pub retained_count: usize,
     pub charge: Option<crate::retained_instances::RetainedAllocation>,
 }
 
 impl OpenglBuffer {
+    fn retained_replaces(
+        &self,
+        publication: &crate::retained_instances::RetainedInstances,
+    ) -> bool {
+        self.gl_buffer.is_none()
+            || publication.byte_len() > self.retained_capacity
+            || self.retained_publication.as_ref().is_none_or(|previous| {
+                let plan = publication.upload_plan(previous);
+                !plan.can_update_in_place()
+                    || plan
+                        .writes
+                        .iter()
+                        .any(|range| range.start < previous.float_len())
+            })
+    }
+
     pub fn update_retained_array(
         &mut self,
         gl: &LibGl,
-        data: &[f32],
-        range: std::ops::Range<usize>,
-    ) {
-        let bytes = std::mem::size_of_val(data);
-        let mut start = range.start * 4;
-        if self.gl_buffer.is_none() {
-            self.alloc_gl_buffer(gl);
-            start = 0;
-        }
+        publication: &crate::retained_instances::RetainedInstances,
+    ) -> Option<usize> {
+        let plan = self
+            .gl_buffer
+            .and(self.retained_publication.as_ref())
+            .map(|previous| publication.upload_plan(previous));
+        let replaces = self.retained_replaces(publication);
+        let previous = self.gl_buffer;
+        let previous_capacity = self.retained_capacity;
+        let mut uploaded = 0;
         unsafe {
-            (gl.glBindBuffer)(gl_sys::ARRAY_BUFFER, self.gl_buffer.unwrap());
-            // Orphaning delegates old GPU-reader ownership to the GL driver.
-            if start == 0 || bytes > self.retained_capacity {
-                self.retained_capacity = bytes.next_power_of_two().max(256);
+            if replaces {
+                self.alloc_gl_buffer(gl);
+                self.retained_capacity = publication.byte_len().next_power_of_two().max(256);
+                (gl.glBindBuffer)(gl_sys::COPY_WRITE_BUFFER, self.gl_buffer.unwrap());
                 (gl.glBufferData)(
-                    gl_sys::ARRAY_BUFFER,
+                    gl_sys::COPY_WRITE_BUFFER,
                     self.retained_capacity as _,
                     std::ptr::null(),
                     gl_sys::STATIC_DRAW,
                 );
-                start = 0;
+                let allocation_error = (gl.glGetError)();
+                if allocation_error != 0 {
+                    let failed = self.gl_buffer.take().unwrap();
+                    (gl.glBindBuffer)(gl_sys::COPY_WRITE_BUFFER, 0);
+                    (gl.glDeleteBuffers)(1, &failed);
+                    self.gl_buffer = previous;
+                    self.retained_capacity = previous_capacity;
+                    crate::error!("retained GL buffer allocation failed: {allocation_error:#x}");
+                    return None;
+                }
+                if let (Some(previous), Some(plan)) = (previous, &plan) {
+                    (gl.glBindBuffer)(gl_sys::COPY_READ_BUFFER, previous);
+                    for copy in &plan.copies {
+                        (gl.glCopyBufferSubData)(
+                            gl_sys::COPY_READ_BUFFER,
+                            gl_sys::COPY_WRITE_BUFFER,
+                            (copy.source.start * 4) as _,
+                            (copy.destination * 4) as _,
+                            (copy.source.len() * 4) as _,
+                        );
+                    }
+                    (gl.glBindBuffer)(gl_sys::COPY_READ_BUFFER, 0);
+                }
+            } else {
+                (gl.glBindBuffer)(gl_sys::COPY_WRITE_BUFFER, self.gl_buffer.unwrap());
             }
-            for offset in (start..bytes).step_by(256 * 1024) {
-                (gl.glBufferSubData)(
-                    gl_sys::ARRAY_BUFFER,
-                    offset as _,
-                    (bytes - offset).min(256 * 1024) as _,
-                    (data.as_ptr() as *const u8).add(offset) as *const _,
-                );
+            let full = vec![0..publication.float_len()];
+            let writes = plan
+                .as_ref()
+                .map_or(full.as_slice(), |plan| plan.writes.as_slice());
+            for range in writes {
+                for (offset, data) in publication.data_slices(range.clone()) {
+                    for (chunk_index, chunk) in data.chunks(64 * 1024).enumerate() {
+                        (gl.glBufferSubData)(
+                            gl_sys::COPY_WRITE_BUFFER,
+                            ((offset + chunk_index * 64 * 1024) * 4) as _,
+                            std::mem::size_of_val(chunk) as _,
+                            chunk.as_ptr().cast(),
+                        );
+                        uploaded += std::mem::size_of_val(chunk);
+                    }
+                }
             }
-            (gl.glBindBuffer)(gl_sys::ARRAY_BUFFER, 0);
+            let upload_error = (gl.glGetError)();
+            (gl.glBindBuffer)(gl_sys::COPY_WRITE_BUFFER, 0);
+            if upload_error != 0 {
+                if replaces {
+                    let failed = self.gl_buffer.take().unwrap();
+                    (gl.glDeleteBuffers)(1, &failed);
+                    self.gl_buffer = previous;
+                    self.retained_capacity = previous_capacity;
+                }
+                // Suffix failures leave the previous published prefix intact.
+                crate::error!("retained GL buffer upload failed: {upload_error:#x}");
+                return None;
+            }
+            // GL orders copies and subdata after earlier draws. Deleting the
+            // old name keeps its storage alive until those commands finish.
+            if replaces {
+                if let Some(previous) = previous {
+                    (gl.glDeleteBuffers)(1, &previous);
+                }
+            }
         }
+        self.retained_publication = Some(publication.clone());
+        Some(uploaded)
     }
 
     pub fn alloc_gl_buffer(&mut self, gl: &LibGl) {
@@ -3708,6 +3787,7 @@ impl OpenglBuffer {
     /// the f32-lane path's bytes).
     pub fn update_array_buffer_bytes(&mut self, gl: &LibGl, data: &[u8]) {
         self.retained_capacity = 0;
+        self.retained_publication = None;
         if self.gl_buffer.is_none() {
             self.alloc_gl_buffer(gl);
         }

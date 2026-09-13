@@ -3,9 +3,6 @@
 #[cfg(target_os = "linux")]
 #[path = "vulkan_linux.rs"]
 mod desktop;
-#[cfg(target_os = "linux")]
-#[path = "vulkan_shared.rs"]
-mod shared;
 #[cfg(all(target_os = "linux", linux_direct))]
 #[path = "vulkan_dma_buf.rs"]
 mod dma_buf;
@@ -13,14 +10,17 @@ mod dma_buf;
 #[path = "vulkan_gpu_bridge.rs"]
 mod gpu_bridge;
 #[cfg(all(target_os = "linux", linux_direct))]
+#[path = "vulkan_hosted_route.rs"]
+mod hosted_route;
+#[cfg(all(target_os = "linux", linux_direct))]
 #[path = "vulkan_migrate.rs"]
 mod migrate;
+#[cfg(target_os = "linux")]
+#[path = "vulkan_shared.rs"]
+mod shared;
 #[cfg(all(target_os = "linux", linux_direct))]
 #[path = "vulkan_transition.rs"]
 mod transition;
-#[cfg(all(target_os = "linux", linux_direct))]
-#[path = "vulkan_hosted_route.rs"]
-mod hosted_route;
 #[cfg(target_os = "linux")]
 #[path = "vulkan_profile.rs"]
 mod vulkan_profile;
@@ -29,6 +29,16 @@ mod vulkan_profile;
 #[cfg(all(target_os = "linux", linux_direct))]
 pub(crate) use desktop::DirectWait;
 
+#[cfg(target_os = "android")]
+use crate::os::linux::{
+    android::ndk_sys,
+    openxr_sys::{
+        LibOpenXr, VkDeviceCreateInfo, VkInstanceCreateInfo, XrInstance, XrResult, XrSystemId,
+        XrVulkanDeviceCreateInfoKHR, XrVulkanGraphicsDeviceGetInfoKHR,
+        XrVulkanInstanceCreateInfoKHR,
+    },
+};
+use crate::retained_instances::{RetainedAllocation, RetainedInstances};
 use crate::{
     cx::Cx,
     draw_list::DrawListId,
@@ -39,23 +49,15 @@ use crate::{
     makepad_script::shader::TextureType,
     texture::{TextureCategory, TextureFormat, TextureId, TexturePixel, TextureUpdated},
 };
-#[cfg(target_os = "android")]
-use crate::os::linux::{
-        android::ndk_sys,
-        openxr_sys::{
-            LibOpenXr, VkDeviceCreateInfo, VkInstanceCreateInfo, XrInstance, XrResult, XrSystemId,
-            XrVulkanDeviceCreateInfoKHR, XrVulkanGraphicsDeviceGetInfoKHR,
-            XrVulkanInstanceCreateInfoKHR,
-        },
-    };
 use ash::vk;
 #[cfg(target_os = "android")]
 use ash::vk::Handle;
 use std::collections::{HashMap, HashSet};
 use std::ffi::CStr;
-use std::os::raw::c_void;
 #[cfg(target_os = "android")]
 use std::os::raw::c_char;
+use std::os::raw::c_void;
+use std::sync::Arc;
 use std::time::Instant;
 
 #[cfg(target_os = "android")]
@@ -134,6 +136,47 @@ struct VulkanBuffer {
     size: vk::DeviceSize,
 }
 
+struct VulkanRetainedAllocation {
+    device: ash::Device,
+    buffer: VulkanBuffer,
+    // Frame-owned Arcs retain this lease until the real GPU fence completes.
+    // No repaint serial is needed: XR has a separate per-frame frontier.
+    _charge: RetainedAllocation,
+}
+
+impl Drop for VulkanRetainedAllocation {
+    fn drop(&mut self) {
+        // Every recorded use pins this allocation in its fence-owned frame.
+        unsafe {
+            self.device.destroy_buffer(self.buffer.buffer, None);
+            self.device.free_memory(self.buffer.memory, None);
+        }
+    }
+}
+
+struct VulkanRetainedEntry {
+    publication: RetainedInstances,
+    allocation: Arc<VulkanRetainedAllocation>,
+    pending_copy: Option<(vk::CommandBuffer, u64)>,
+}
+
+struct VulkanRetainedTransfers {
+    device: ash::Device,
+    pool: vk::CommandPool,
+    command_buffer: vk::CommandBuffer,
+    generation: u64,
+    ended: bool,
+}
+
+impl Drop for VulkanRetainedTransfers {
+    fn drop(&mut self) {
+        unsafe {
+            self.device
+                .free_command_buffers(self.pool, &[self.command_buffer]);
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct VulkanGeometryResource {
     vertex_buffer: VulkanBuffer,
@@ -142,6 +185,9 @@ struct VulkanGeometryResource {
 
 #[derive(Default)]
 struct FrameResources {
+    retained: Vec<Arc<VulkanRetainedAllocation>>,
+    retained_transfers: Option<VulkanRetainedTransfers>,
+    retained_updates: Vec<((DrawListId, usize), u64)>,
     buffers: Vec<VulkanBuffer>,
     descriptor_pools: Vec<vk::DescriptorPool>,
     descriptor_pool_cursor: usize,
@@ -183,7 +229,11 @@ struct VulkanRenderPassKey {
 }
 
 impl VulkanRenderPassKey {
-    fn new(color_formats: &[vk::Format], depth_format: Option<vk::Format>, kind: VulkanRenderPassKind) -> Self {
+    fn new(
+        color_formats: &[vk::Format],
+        depth_format: Option<vk::Format>,
+        kind: VulkanRenderPassKind,
+    ) -> Self {
         Self {
             color_formats: color_formats.iter().map(|format| format.as_raw()).collect(),
             depth_format: depth_format.map(|format| format.as_raw()),
@@ -220,9 +270,13 @@ struct VulkanDrawPacket {
     alpha_blend: bool,
     backface_culling: bool,
     instances: Vec<f32>,
+    retained_instances: Option<RetainedInstances>,
+    retained_owner: (DrawListId, usize),
+    instance_ranges: Vec<std::ops::Range<u32>>,
     draw_call_uniforms: Vec<f32>,
     dyn_uniforms: Vec<f32>,
     scope_uniforms: Vec<f32>,
+    custom_uniforms: Vec<(u32, Vec<u8>)>,
     uniform_bindings: Vec<(LiveId, usize)>,
     dyn_uniform_binding: u32,
     scope_uniform_binding: Option<usize>,
@@ -275,7 +329,7 @@ impl std::hash::Hash for VulkanTextureKey {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         // Slot generations compare through TextureId::eq. Hash collisions for
         // successive occupants of a slot are harmless and avoid exposing its internals.
-        std::hash::Hash::hash(&self.0.0, state);
+        std::hash::Hash::hash(&self.0 .0, state);
     }
 }
 
@@ -446,6 +500,9 @@ pub struct CxVulkan {
     pipelines: HashMap<VulkanPipelineKey, VulkanPipeline>,
     offscreen_render_passes: HashMap<VulkanRenderPassKey, vk::RenderPass>,
     geometries: HashMap<GeometryId, VulkanGeometryResource>,
+    retained_instances: HashMap<(DrawListId, usize), VulkanRetainedEntry>,
+    retained_prune_repaint: u64,
+    retained_transfer_generation: u64,
     textures: HashMap<VulkanTextureKey, VulkanTextureResource>,
     frame_resources: FrameResources,
     command_pool: vk::CommandPool,
@@ -531,11 +588,17 @@ impl CxVulkan {
             // The desktop renderer has one submit fence shared by all windows;
             // callers poll/wait it before reclaiming cached resources. Including
             // the pool generation prevents a reused slot sampling an old image.
-            let stale = self.textures.keys().copied().filter(|key| {
-                cx.textures.0.pool.get(key.0.0).is_none_or(|slot| {
-                    TextureId::from_pool_slot(key.0.0, slot.generation) != key.0 || cx.textures.0.is_free(key.0.0)
+            let stale = self
+                .textures
+                .keys()
+                .copied()
+                .filter(|key| {
+                    cx.textures.0.pool.get(key.0 .0).is_none_or(|slot| {
+                        TextureId::from_pool_slot(key.0 .0, slot.generation) != key.0
+                            || cx.textures.0.is_free(key.0 .0)
+                    })
                 })
-            }).collect::<Vec<_>>();
+                .collect::<Vec<_>>();
             for key in stale {
                 self.retire_shared_texture(key);
                 if let Some(resource) = self.textures.remove(&key) {
@@ -810,6 +873,9 @@ impl CxVulkan {
             pipelines: HashMap::new(),
             offscreen_render_passes: HashMap::new(),
             geometries: HashMap::new(),
+            retained_instances: HashMap::new(),
+            retained_prune_repaint: u64::MAX,
+            retained_transfer_generation: 0,
             textures: HashMap::new(),
             frame_resources: FrameResources::default(),
             command_pool,
@@ -1212,6 +1278,9 @@ impl CxVulkan {
             pipelines: HashMap::new(),
             offscreen_render_passes: HashMap::new(),
             geometries: HashMap::new(),
+            retained_instances: HashMap::new(),
+            retained_prune_repaint: u64::MAX,
+            retained_transfer_generation: 0,
             textures: HashMap::new(),
             frame_resources: FrameResources::default(),
             command_pool,
@@ -1353,6 +1422,9 @@ impl CxVulkan {
                 device.free_memory(buffer.memory, None);
             }
         }
+        frame_resources.retained.clear();
+        frame_resources.retained_transfers = None;
+        frame_resources.retained_updates.clear();
         frame_resources.packet_buffer_used = 0;
         frame_resources.descriptor_pool_cursor = 0;
     }
@@ -1373,6 +1445,9 @@ impl CxVulkan {
                 self.device.free_memory(buffer.memory, None);
             }
         }
+        frame_resources.retained.clear();
+        frame_resources.retained_transfers = None;
+        frame_resources.retained_updates.clear();
         frame_resources.packet_buffer_used = 0;
         frame_resources.descriptor_pool_cursor = 0;
         Ok(())
@@ -1442,6 +1517,15 @@ impl CxVulkan {
         &mut self,
         frame: &mut VulkanXrInFlightFrame,
     ) -> Result<(), String> {
+        if frame.fence == vk::Fence::null() {
+            frame.fence = unsafe {
+                self.device.create_fence(
+                    &vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED),
+                    None,
+                )
+            }
+            .map_err(|error| format!("recover openxr frame fence: {error:?}"))?;
+        }
         unsafe {
             self.device
                 .wait_for_fences(&[frame.fence], true, u64::MAX)
@@ -1483,9 +1567,6 @@ impl CxVulkan {
         self.recycle_owned_frame_resources(&mut frame.frame_resources)?;
 
         unsafe {
-            self.device
-                .reset_fences(&[frame.fence])
-                .map_err(|e| format!("reset_fences(openxr inflight) failed: {e:?}"))?;
             self.device
                 .reset_command_buffer(frame.command_buffer, vk::CommandBufferResetFlags::empty())
                 .map_err(|e| format!("reset_command_buffer(openxr inflight) failed: {e:?}"))?;
@@ -2203,8 +2284,8 @@ impl CxVulkan {
         }
 
         let to_transfer = vk::ImageMemoryBarrier::default()
-                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .src_access_mask(vk::AccessFlags::SHADER_READ)
             .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
             .old_layout(vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL)
@@ -2236,8 +2317,8 @@ impl CxVulkan {
                 depth: 1,
             });
         let to_read_only = vk::ImageMemoryBarrier::default()
-                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .src_access_mask(vk::AccessFlags::TRANSFER_READ)
             .dst_access_mask(vk::AccessFlags::SHADER_READ)
             .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
@@ -2252,8 +2333,8 @@ impl CxVulkan {
                     .layer_count(1),
             );
         let buffer_ready = vk::BufferMemoryBarrier::default()
-                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
             .dst_access_mask(vk::AccessFlags::HOST_READ)
             .buffer(staging.buffer)
@@ -2355,8 +2436,8 @@ impl CxVulkan {
         }
 
         let to_transfer = vk::ImageMemoryBarrier::default()
-                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
             .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
             .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
@@ -2388,8 +2469,8 @@ impl CxVulkan {
                 depth: 1,
             });
         let to_color_attachment = vk::ImageMemoryBarrier::default()
-                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .src_access_mask(vk::AccessFlags::TRANSFER_READ)
             .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
             .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
@@ -2404,8 +2485,8 @@ impl CxVulkan {
                     .layer_count(1),
             );
         let buffer_ready = vk::BufferMemoryBarrier::default()
-                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
             .dst_access_mask(vk::AccessFlags::HOST_READ)
             .buffer(staging.buffer)
@@ -2749,14 +2830,9 @@ impl CxVulkan {
                 self.device
                     .end_command_buffer(self.command_buffer)
                     .map_err(|e| format!("end_command_buffer(openxr) failed: {e:?}"))?;
-                self.device
-                    .queue_submit(
-                        self.queue,
-                        &[vk::SubmitInfo::default().command_buffers(&[self.command_buffer])],
-                        self.in_flight_fence,
-                    )
-                    .map_err(|e| format!("queue_submit(openxr) failed: {e:?}"))?;
             }
+            let command_buffers = [self.command_buffer];
+            self.submit_frame(&vk::SubmitInfo::default().command_buffers(&command_buffers))?;
             stats.submit_ms = submit_started.elapsed().as_secs_f64() * 1000.0;
             Ok(())
         })();
@@ -2813,16 +2889,24 @@ impl CxVulkan {
                 .wait_semaphores(&waits)
                 .wait_dst_stage_mask(&stages);
             unsafe {
-                if self.device.queue_submit(self.queue, &[submit], vk::Fence::null()).is_ok() {
+                if self
+                    .device
+                    .queue_submit(self.queue, &[submit], vk::Fence::null())
+                    .is_ok()
+                {
                     self.device_wait_idle();
                     self.destroy_swapchain();
                     // No work references this fence after device idle, including a
                     // failed submission which had already reset it.
                     self.device.destroy_fence(self.in_flight_fence, None);
                     self.in_flight_fence = vk::Fence::null();
-                    self.in_flight_fence = self.device.create_fence(
-                        &vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED), None,
-                    ).map_err(|e| format!("restore Vulkan frame fence: {e:?}"))?;
+                    self.in_flight_fence = self
+                        .device
+                        .create_fence(
+                            &vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED),
+                            None,
+                        )
+                        .map_err(|e| format!("restore Vulkan frame fence: {e:?}"))?;
                 }
             }
             self.acquired_image_pending = false;
@@ -2848,8 +2932,11 @@ impl CxVulkan {
         if self.desktop.direct.is_some() || self.desktop.routed.is_some() {
             return self.direct_draw_pass_and_present(cx, draw_pass_id, before_present);
         }
-        if self.surface != vk::SurfaceKHR::null() && self.swapchain == vk::SwapchainKHR::null()
-            && self.requested_width > 0 && self.requested_height > 0 {
+        if self.surface != vk::SurfaceKHR::null()
+            && self.swapchain == vk::SwapchainKHR::null()
+            && self.requested_width > 0
+            && self.requested_height > 0
+        {
             self.recreate_swapchain()?;
         }
         if self.surface == vk::SurfaceKHR::null() || self.swapchain == vk::SwapchainKHR::null() {
@@ -2892,8 +2979,11 @@ impl CxVulkan {
 
         unsafe {
             #[cfg(target_os = "linux")]
-            if !self.device.get_fence_status(self.in_flight_fence)
-                .map_err(|e| format!("get_fence_status failed: {e:?}"))? {
+            if !self
+                .device
+                .get_fence_status(self.in_flight_fence)
+                .map_err(|e| format!("get_fence_status failed: {e:?}"))?
+            {
                 return Ok(false);
             }
             #[cfg(target_os = "android")]
@@ -2915,7 +3005,11 @@ impl CxVulkan {
         let (image_index, acquire_suboptimal) = match unsafe {
             self.swapchain_loader.acquire_next_image(
                 self.swapchain,
-                if cfg!(target_os = "linux") { 0 } else { u64::MAX },
+                if cfg!(target_os = "linux") {
+                    0
+                } else {
+                    u64::MAX
+                },
                 self.image_available_semaphore,
                 vk::Fence::null(),
             )
@@ -2938,8 +3032,12 @@ impl CxVulkan {
         if self.swapchain_images.get(image_index as usize).is_none() {
             return Err(format!("invalid swapchain image index {image_index}"));
         }
-        let window_id = cx.get_pass_window_id(draw_pass_id).map(|window| window.id()).unwrap_or(0);
-        let screenshot_request_ids = cx.take_studio_screenshot_request_ids_for_window(0, Some(window_id));
+        let window_id = cx
+            .get_pass_window_id(draw_pass_id)
+            .map(|window| window.id())
+            .unwrap_or(0);
+        let screenshot_request_ids =
+            cx.take_studio_screenshot_request_ids_for_window(0, Some(window_id));
         let run_view_request = cx.take_studio_run_view_frame_request(window_id);
         // A continuous capture sink (the ScreenCap recorder) is standing
         // permission rather than a queued request, so it is asked separately.
@@ -3163,7 +3261,11 @@ impl CxVulkan {
         self.submit_frame(&submit_info)?;
         // The frame serial IS the repaint id here (the receipts and the
         // items' consumed serials are stamped with it above); one writer.
-        cx.textures.1.serials.submitted.store(cx.repaint_id, std::sync::atomic::Ordering::Release);
+        cx.textures
+            .1
+            .serials
+            .submitted
+            .store(cx.repaint_id, std::sync::atomic::Ordering::Release);
         self.frame_serial_in_flight = cx.repaint_id;
         self.acquired_image_pending = false;
 
@@ -3206,7 +3308,12 @@ impl CxVulkan {
                 let height = self.swapchain_extent.height.max(1);
                 let rgba = self.read_swapchain_color_image_rgba(image_index as usize)?;
 
-                crate::screen_capture::deliver_capture_frame(capture_window_id, width, height, &rgba);
+                crate::screen_capture::deliver_capture_frame(
+                    capture_window_id,
+                    width,
+                    height,
+                    &rgba,
+                );
 
                 if !screenshot_request_ids.is_empty() {
                     let png = Cx::encode_rgba_as_png(width, height, &rgba)?;
@@ -3227,9 +3334,13 @@ impl CxVulkan {
             self.recreate_swapchain()?;
         }
 
-        crate::trace!("gpu.present", "present time={:.6}", crate::cx_api::CxOsApi::seconds_since_app_start(cx));
+        crate::trace!(
+            "gpu.present",
+            "present time={:.6}",
+            crate::cx_api::CxOsApi::seconds_since_app_start(cx)
+        );
         cx.passes[draw_pass_id].paint_dirty = false;
-        // the bake transaction's paint receipt (whole draws: ranges ignored)
+        // The bake transaction's paint receipt, after all selected ranges.
         cx.passes[draw_pass_id].painted_serial = cx.repaint_id;
         Ok(true)
     }
@@ -3346,15 +3457,24 @@ impl CxVulkan {
             if let Some(old_resource) = self.textures.remove(&texture_key) {
                 self.destroy_texture_resource(old_resource);
             }
-            let resource = self.create_depth_target_layers_usage(target_width, target_height, format, 1,
-                cx.textures[texture_id].format.is_sampled_depth())?;
+            let resource = self.create_depth_target_layers_usage(
+                target_width,
+                target_height,
+                format,
+                1,
+                cx.textures[texture_id].format.is_sampled_depth(),
+            )?;
             self.textures.insert(texture_key, resource);
         }
         Ok(())
     }
 
     fn main_render_pass_key(&self) -> VulkanRenderPassKey {
-        VulkanRenderPassKey::new(&[self.swapchain_format], Some(self.depth_format), VulkanRenderPassKind::Main)
+        VulkanRenderPassKey::new(
+            &[self.swapchain_format],
+            Some(self.depth_format),
+            VulkanRenderPassKind::Main,
+        )
     }
 
     fn get_or_create_pipeline_render_pass(
@@ -3578,6 +3698,22 @@ impl CxVulkan {
             self.ensure_pass_depth_target(cx, texture_id, target_width, target_height)?;
         }
 
+        // Fixed-size targets can be smaller than the pass's pixel-rounded
+        // rectangle (the tile-progress pass deliberately uses one texel).
+        // Vulkan requires the framebuffer and render area to fit every
+        // attachment. Keep the viewport's projection, and clip to storage.
+        let mut framebuffer_width = target_width as u32;
+        let mut framebuffer_height = target_height as u32;
+        for texture_id in color_targets
+            .iter()
+            .map(|target| target.0)
+            .chain(depth_target)
+        {
+            let resource = &self.textures[&Self::texture_key(texture_id)];
+            framebuffer_width = framebuffer_width.min(resource.width);
+            framebuffer_height = framebuffer_height.min(resource.height);
+        }
+
         unsafe {
             self.device
                 .reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())
@@ -3738,7 +3874,11 @@ impl CxVulkan {
                     } else {
                         vk::AttachmentLoadOp::LOAD
                     })
-                    .store_op(if depth.sampled { vk::AttachmentStoreOp::STORE } else { vk::AttachmentStoreOp::DONT_CARE })
+                    .store_op(if depth.sampled {
+                        vk::AttachmentStoreOp::STORE
+                    } else {
+                        vk::AttachmentStoreOp::DONT_CARE
+                    })
                     .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
                     .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
                     .initial_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
@@ -3794,8 +3934,8 @@ impl CxVulkan {
         let framebuffer_info = vk::FramebufferCreateInfo::default()
             .render_pass(render_pass)
             .attachments(&framebuffer_attachments)
-            .width(target_width as u32)
-            .height(target_height as u32)
+            .width(framebuffer_width)
+            .height(framebuffer_height)
             .layers(1);
         let framebuffer = unsafe { self.device.create_framebuffer(&framebuffer_info, None) }
             .map_err(|e| format!("create_framebuffer(offscreen) failed: {e:?}"))?;
@@ -3810,8 +3950,8 @@ impl CxVulkan {
                     .render_area(vk::Rect2D {
                         offset: vk::Offset2D { x: 0, y: 0 },
                         extent: vk::Extent2D {
-                            width: target_width as u32,
-                            height: target_height as u32,
+                            width: framebuffer_width,
+                            height: framebuffer_height,
                         },
                     })
                     .clear_values(&clear_values),
@@ -3869,9 +4009,13 @@ impl CxVulkan {
             self.device.cmd_end_render_pass(self.command_buffer);
         }
         if let Some(depth) = depth_attachment.filter(|depth| depth.sampled) {
-            self.transition_image_layout(depth.image, vk::ImageAspectFlags::DEPTH, 1,
+            self.transition_image_layout(
+                depth.image,
+                vk::ImageAspectFlags::DEPTH,
+                1,
                 vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+                vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+            );
         }
         for attachment in &color_attachments {
             self.transition_image_layout(
@@ -3889,7 +4033,8 @@ impl CxVulkan {
             .as_ref()
             .is_some_and(|sample| sample.wrote_timestamps)
         {
-            self.profile.end_timestamps(&self.device, self.command_buffer);
+            self.profile
+                .end_timestamps(&self.device, self.command_buffer);
         }
         unsafe {
             self.device
@@ -3934,15 +4079,23 @@ impl CxVulkan {
             {
                 resource.layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
                 #[cfg(target_os = "linux")]
-                if self.desktop.shared.enabled && self.is_external_shared_image(attachment.texture_id) {
-                    self.textures.get_mut(&Self::texture_key(attachment.texture_id)).unwrap().layout = vk::ImageLayout::GENERAL;
+                if self.desktop.shared.enabled
+                    && self.is_external_shared_image(attachment.texture_id)
+                {
+                    self.textures
+                        .get_mut(&Self::texture_key(attachment.texture_id))
+                        .unwrap()
+                        .layout = vk::ImageLayout::GENERAL;
                 }
             }
         }
         if let Some(depth) = depth_attachment {
             if let Some(resource) = self.textures.get_mut(&Self::texture_key(depth.texture_id)) {
-                resource.layout = if depth.sampled { vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL }
-                    else { vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
+                resource.layout = if depth.sampled {
+                    vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL
+                } else {
+                    vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+                };
             }
         }
 
@@ -4327,7 +4480,11 @@ impl CxVulkan {
             .array_layers(layers.max(1))
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
-            .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST | migration_image_usage())
+            .usage(
+                vk::ImageUsageFlags::SAMPLED
+                    | vk::ImageUsageFlags::TRANSFER_DST
+                    | migration_image_usage(),
+            )
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
         let image = unsafe { self.device.create_image(&image_info, None) }
@@ -4448,11 +4605,21 @@ impl CxVulkan {
         format: vk::Format,
         is_cube: bool,
     ) -> Result<VulkanTextureResource, String> {
-        self.create_color_target_resource_with_usage(width, height, format, is_cube, vk::ImageUsageFlags::empty())
+        self.create_color_target_resource_with_usage(
+            width,
+            height,
+            format,
+            is_cube,
+            vk::ImageUsageFlags::empty(),
+        )
     }
 
     fn create_color_target_resource_with_usage(
-        &self, width: u32, height: u32, format: vk::Format, is_cube: bool,
+        &self,
+        width: u32,
+        height: u32,
+        format: vk::Format,
+        is_cube: bool,
         extra_usage: vk::ImageUsageFlags,
     ) -> Result<VulkanTextureResource, String> {
         let image_info = vk::ImageCreateInfo::default()
@@ -4467,7 +4634,13 @@ impl CxVulkan {
             .array_layers(if is_cube { 6 } else { 1 })
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
-            .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_SRC | extra_usage | migration_image_usage())
+            .usage(
+                vk::ImageUsageFlags::COLOR_ATTACHMENT
+                    | vk::ImageUsageFlags::SAMPLED
+                    | vk::ImageUsageFlags::TRANSFER_SRC
+                    | extra_usage
+                    | migration_image_usage(),
+            )
             .flags(if is_cube {
                 vk::ImageCreateFlags::CUBE_COMPATIBLE
             } else {
@@ -4586,8 +4759,8 @@ impl CxVulkan {
         let (src_stage, src_access) = Self::layout_stage_access(old_layout);
         let (dst_stage, dst_access) = Self::layout_stage_access(new_layout);
         let barrier = vk::ImageMemoryBarrier::default()
-                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .old_layout(old_layout)
             .new_layout(new_layout)
             .src_access_mask(src_access)
@@ -4662,7 +4835,12 @@ impl CxVulkan {
     }
 
     fn create_depth_target_layers_usage(
-        &self, width: u32, height: u32, format: vk::Format, layers: u32, sampled: bool,
+        &self,
+        width: u32,
+        height: u32,
+        format: vk::Format,
+        layers: u32,
+        sampled: bool,
     ) -> Result<VulkanTextureResource, String> {
         let image_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
@@ -4676,8 +4854,15 @@ impl CxVulkan {
             .array_layers(layers.max(1))
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
-            .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | migration_image_usage()
-                | if sampled { vk::ImageUsageFlags::SAMPLED } else { vk::ImageUsageFlags::empty() })
+            .usage(
+                vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
+                    | migration_image_usage()
+                    | if sampled {
+                        vk::ImageUsageFlags::SAMPLED
+                    } else {
+                        vk::ImageUsageFlags::empty()
+                    },
+            )
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
 
@@ -4793,7 +4978,11 @@ impl CxVulkan {
             .array_layers(layers.max(1))
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
-            .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
+            .usage(
+                vk::ImageUsageFlags::SAMPLED
+                    | vk::ImageUsageFlags::TRANSFER_DST
+                    | vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+            )
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
 
@@ -4893,61 +5082,110 @@ impl CxVulkan {
         #[cfg(target_os = "android")]
         self.ensure_xr_depth_dummy_multiview()?;
         unsafe {
-            self.device.begin_command_buffer(self.command_buffer,
-                &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT))
+            self.device
+                .begin_command_buffer(
+                    self.command_buffer,
+                    &vk::CommandBufferBeginInfo::default()
+                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+                )
                 .map_err(|e| format!("begin dummy depth initialization: {e:?}"))?;
         }
         let resources = std::iter::once(self.xr_depth_dummy.as_ref().unwrap());
         #[cfg(target_os = "android")]
         let resources = resources.chain(self.xr_depth_dummy_multiview.as_ref());
         for resource in resources {
-            self.transition_image_layout(resource.image, vk::ImageAspectFlags::DEPTH, resource.layers,
-                vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
-            let range = vk::ImageSubresourceRange::default().aspect_mask(vk::ImageAspectFlags::DEPTH)
-                .level_count(1).layer_count(resource.layers);
+            self.transition_image_layout(
+                resource.image,
+                vk::ImageAspectFlags::DEPTH,
+                resource.layers,
+                vk::ImageLayout::UNDEFINED,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            );
+            let range = vk::ImageSubresourceRange::default()
+                .aspect_mask(vk::ImageAspectFlags::DEPTH)
+                .level_count(1)
+                .layer_count(resource.layers);
             unsafe {
-                self.device.cmd_clear_depth_stencil_image(self.command_buffer, resource.image,
+                self.device.cmd_clear_depth_stencil_image(
+                    self.command_buffer,
+                    resource.image,
                     vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                    &vk::ClearDepthStencilValue { depth: 1.0, stencil: 0 }, &[range]);
+                    &vk::ClearDepthStencilValue {
+                        depth: 1.0,
+                        stencil: 0,
+                    },
+                    &[range],
+                );
             }
-            self.transition_image_layout(resource.image, vk::ImageAspectFlags::DEPTH, resource.layers,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+            self.transition_image_layout(
+                resource.image,
+                vk::ImageAspectFlags::DEPTH,
+                resource.layers,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+            );
         }
         unsafe {
-            self.device.end_command_buffer(self.command_buffer)
+            self.device
+                .end_command_buffer(self.command_buffer)
                 .map_err(|e| format!("end dummy depth initialization: {e:?}"))?;
         }
         let buffers = [self.command_buffer];
         self.submit_frame(&vk::SubmitInfo::default().command_buffers(&buffers))?;
         unsafe {
-            self.device.wait_for_fences(&[self.in_flight_fence], true, u64::MAX)
+            self.device
+                .wait_for_fences(&[self.in_flight_fence], true, u64::MAX)
                 .map_err(|e| format!("wait for dummy depth initialization: {e:?}"))?;
-            self.device.reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())
+            self.device
+                .reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())
                 .map_err(|e| format!("reset dummy depth command buffer: {e:?}"))?;
         }
         Ok(())
     }
 
     fn submit_frame(&mut self, info: &vk::SubmitInfo<'_>) -> Result<(), String> {
+        let mut command_buffers = Vec::new();
+        if let Some(transfer) = self.finish_retained_transfers()? {
+            command_buffers.push(transfer);
+        }
+        if info.command_buffer_count != 0 {
+            command_buffers.extend_from_slice(unsafe {
+                std::slice::from_raw_parts(
+                    info.p_command_buffers,
+                    info.command_buffer_count as usize,
+                )
+            });
+        }
+        let info = &(*info).command_buffers(&command_buffers);
         unsafe {
-            self.device.reset_fences(&[self.in_flight_fence])
+            self.device
+                .reset_fences(&[self.in_flight_fence])
                 .map_err(|e| format!("reset Vulkan frame fence: {e:?}"))?;
             #[cfg(target_os = "linux")]
             let result = self.shared_submit(info);
             #[cfg(not(target_os = "linux"))]
-            let result = self.device.queue_submit(self.queue, &[*info], self.in_flight_fence);
+            let result = self
+                .device
+                .queue_submit(self.queue, &[*info], self.in_flight_fence);
             if let Err(err) = result {
                 // An unsuccessful submission does not signal its reset fence.
                 // Restore it so retrying a recoverable allocation error cannot hang.
                 self.device_wait_idle();
                 self.device.destroy_fence(self.in_flight_fence, None);
                 self.in_flight_fence = vk::Fence::null();
-                self.in_flight_fence = self.device.create_fence(
-                    &vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED), None,
-                ).map_err(|e| format!("Vulkan submit failed ({err:?}); fence recovery failed: {e:?}"))?;
+                self.in_flight_fence = self
+                    .device
+                    .create_fence(
+                        &vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED),
+                        None,
+                    )
+                    .map_err(|e| {
+                        format!("Vulkan submit failed ({err:?}); fence recovery failed: {e:?}")
+                    })?;
                 return Err(format!("Vulkan queue submission failed: {err:?}"));
             }
         }
+        self.retained_transfers_submitted();
         Ok(())
     }
 
@@ -5450,8 +5688,8 @@ impl CxVulkan {
                 biplanar,
                 full_range: false,
                 rotation_steps: 0.0,
-            external: false,
-            array: false,
+                external: false,
+                array: false,
             });
         }
 
@@ -5706,8 +5944,8 @@ impl CxVulkan {
             biplanar: plane_layout.biplanar,
             full_range: false,
             rotation_steps: 0.0,
-        external: false,
-        array: false,
+            external: false,
+            array: false,
         })
     }
 
@@ -5777,7 +6015,8 @@ impl CxVulkan {
                 vk::PipelineStageFlags::TRANSFER,
                 vk::AccessFlags::TRANSFER_WRITE,
             ),
-            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL | vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL => (
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
+            | vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL => (
                 vk::PipelineStageFlags::FRAGMENT_SHADER | vk::PipelineStageFlags::VERTEX_SHADER,
                 vk::AccessFlags::SHADER_READ,
             ),
@@ -5885,8 +6124,8 @@ impl CxVulkan {
         let (src_stage, src_access) = Self::layout_stage_access(old_layout);
 
         let to_transfer = vk::ImageMemoryBarrier::default()
-                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .src_access_mask(src_access)
             .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
             .old_layout(old_layout)
@@ -5922,8 +6161,8 @@ impl CxVulkan {
                 depth: 1,
             });
         let to_shader = vk::ImageMemoryBarrier::default()
-                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
             .dst_access_mask(vk::AccessFlags::SHADER_READ)
             .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
@@ -5982,6 +6221,24 @@ impl CxVulkan {
         draw_stats: &mut VulkanDrawStats,
         xr_depth_view: vk::ImageView,
     ) -> Result<(), String> {
+        if self.retained_prune_repaint != cx.repaint_id {
+            self.retained_prune_repaint = cx.repaint_id;
+            let transfer = self
+                .frame_resources
+                .retained_transfers
+                .as_ref()
+                .filter(|commands| !commands.ended)
+                .map(|commands| (commands.command_buffer, commands.generation));
+            self.retained_instances.retain(|&(list, item), entry| {
+                (entry.pending_copy.is_none() || entry.pending_copy == transfer)
+                    && !cx.draw_lists.is_id_freed(list)
+                    && item < cx.draw_lists[list].draw_items.len()
+                    && cx.draw_lists[list].draw_items[item]
+                        .retained_instances
+                        .is_some()
+                    && !cx.draw_lists[list].draw_items[item].retained_gpu_evicted
+            });
+        }
         let draw_order_len = cx.draw_lists[draw_list_id].draw_item_order_len();
         // Exploded z-layer view: z is the call's nesting depth, not paint order.
         let sploded = cx.passes[draw_pass_id].sploded.is_some();
@@ -6080,47 +6337,66 @@ impl CxVulkan {
                     draw_stats.skipped_no_instance_slots += 1;
                     continue;
                 }
-                // The fallback draw of a shared-instance block (contract §10):
-                // this backend has no per-publication backing yet, so an
-                // attached item copies `data()[range]` into this frame's ink —
-                // the item's ranges when it holds several, else its lease's
-                // slice — and draws it like frame ink. Before this an attached
-                // or adapter-retained item drew nothing on Vulkan.
+                // Keep original instance indices: the shader uses them to
+                // address sidecar/filter tables. Compacting selected ranges
+                // silently renumbers those lookups. Upload the backing prefix
+                // and select each range with Vulkan's firstInstance instead.
                 let slots = sh.mapping.instances.total_slots;
-                let instances = if let Some(block) = draw_item.retained_instances.as_ref() {
-                    let data = block.data();
-                    let count = draw_item.retained_instance_count.min(data.len() / slots);
-                    if draw_item.instance_ranges.is_empty() {
-                        data[..count * slots].to_vec()
-                    } else {
-                        let mut ink = Vec::new();
-                        for range in &draw_item.instance_ranges {
-                            let start = (range.start as usize).min(count);
-                            let end = (range.end as usize).min(count);
-                            if end > start {
-                                ink.extend_from_slice(&data[start * slots..end * slots]);
-                            }
-                        }
-                        ink
-                    }
+                let retained_instances = draw_item.retained_instances.clone();
+                let (data, count, default_range) = if let Some(block) = &retained_instances {
+                    let count = draw_item
+                        .retained_instance_count
+                        .min(block.float_len() / slots);
+                    (&[][..], count, 0..count as u32)
                 } else if let Some((block, range)) = draw_item.shared.as_ref() {
-                    block.data()[range.start * slots..range.end * slots].to_vec()
+                    (
+                        block.data(),
+                        block.data().len() / slots,
+                        range.start as u32..range.end as u32,
+                    )
                 } else if let Some(instances) = draw_item.instances.as_ref() {
-                    instances.to_vec()
+                    let count = instances.len() / slots;
+                    (instances.as_slice(), count, 0..count as u32)
                 } else {
                     draw_stats.skipped_no_instances_buffer += 1;
                     continue;
                 };
-                if instances.len() < slots {
+                if count == 0 {
                     draw_stats.skipped_instances_too_short += 1;
                     continue;
                 }
-                let instance_count = instances.len() / slots;
+                let requested = if draw_item.instance_ranges.is_empty() {
+                    std::slice::from_ref(&default_range)
+                } else {
+                    &draw_item.instance_ranges
+                };
+                let instance_ranges: Vec<_> = requested
+                    .iter()
+                    .filter_map(|range| {
+                        let start = range.start.min(count as u32);
+                        let end = range.end.min(count as u32);
+                        (start < end).then_some(start..end)
+                    })
+                    .collect();
+                let instance_count: u64 = instance_ranges
+                    .iter()
+                    .map(|range| (range.end - range.start) as u64)
+                    .sum();
                 if instance_count == 0 {
                     draw_stats.skipped_zero_instances += 1;
                     continue;
                 }
-                draw_stats.instances += instance_count as u64;
+                draw_stats.instances += instance_count;
+                let uploaded_count = instance_ranges
+                    .iter()
+                    .map(|range| range.end as usize)
+                    .max()
+                    .unwrap();
+                let instances = if retained_instances.is_some() {
+                    Vec::new()
+                } else {
+                    data[..uploaded_count * slots].to_vec()
+                };
                 // Consumed like the other backends: the item's proofs read
                 // these, and a lease's receipt learns its draw.
                 draw_item.instance_upload_pending = false;
@@ -6179,6 +6455,9 @@ impl CxVulkan {
                     alpha_blend: draw_call.options.alpha_blend,
                     backface_culling: draw_call.options.backface_culling,
                     instances,
+                    retained_instances,
+                    retained_owner: (draw_list_id, draw_item_id),
+                    instance_ranges,
                     draw_call_uniforms: draw_call.draw_call_uniforms.as_slice().to_vec(),
                     dyn_uniforms: draw_call.dyn_uniforms[..sh
                         .mapping
@@ -6187,6 +6466,25 @@ impl CxVulkan {
                         .min(draw_call.dyn_uniforms.len())]
                         .to_vec(),
                     scope_uniforms: sh.mapping.scope_uniforms_buf.clone(),
+                    // Custom uniform blocks are part of the shader's layout
+                    // too: CodeView supplies its per-file and font tables here.
+                    // Preserve their raw bytes, including integer fields.
+                    custom_uniforms: sh
+                        .mapping
+                        .uniform_buffers
+                        .iter()
+                        .enumerate()
+                        .map(|(slot, input)| {
+                            let mut data = draw_call.uniform_buffer_slots[slot]
+                                .as_ref()
+                                .map(|buffer| {
+                                    cx.uniform_buffers[buffer.uniform_buffer_id()].data.clone()
+                                })
+                                .unwrap_or_default();
+                            data.resize(data.len().max(input.size).max(16), 0);
+                            (input.buffer_index as u32, data)
+                        })
+                        .collect(),
                     uniform_bindings: sh.mapping.uniform_buffer_bindings.bindings.clone(),
                     dyn_uniform_binding: vk_shader.dyn_uniform_binding,
                     scope_uniform_binding: sh
@@ -6261,7 +6559,7 @@ impl CxVulkan {
 
     fn record_draw_packet(
         &mut self,
-        cx: &Cx,
+        cx: &mut Cx,
         packet: &VulkanDrawPacket,
         render_pass_key: &VulkanRenderPassKey,
         geometry_resource: VulkanGeometryResource,
@@ -6271,6 +6569,11 @@ impl CxVulkan {
         draw_list_uniforms: &[f32],
         xr_depth_view: vk::ImageView,
     ) -> Result<(), String> {
+        let retained_buffer = if let Some(publication) = &packet.retained_instances {
+            Some(self.ensure_retained_instances(cx, packet.retained_owner, publication)?)
+        } else {
+            None
+        };
         self.ensure_pipeline(
             cx,
             packet.shader_index,
@@ -6325,7 +6628,12 @@ impl CxVulkan {
         if geometry_stride == 0 || instance_stride == 0 {
             return Ok(());
         }
-        let instance_count = (packet.instances.len() as u64
+        let instance_count = (packet
+            .retained_instances
+            .as_ref()
+            .map_or(packet.instances.len(), |publication| {
+                publication.float_len()
+            }) as u64
             / (instance_stride / std::mem::size_of::<f32>() as u64))
             as u32;
         if instance_count == 0 || index_count == 0 {
@@ -6334,9 +6642,17 @@ impl CxVulkan {
 
         struct UniformUpload<'a> {
             binding: u32,
-            src: &'a [f32],
+            src: &'a [u8],
             offset: vk::DeviceSize,
             size: vk::DeviceSize,
+        }
+
+        fn uniform_bytes(values: &[f32]) -> &[u8] {
+            // f32 has no padding, and the returned view shares the slice's
+            // lifetime. Do not numerically convert packed uniform words.
+            unsafe {
+                std::slice::from_raw_parts(values.as_ptr().cast(), std::mem::size_of_val(values))
+            }
         }
 
         let mut uniform_uploads: Vec<UniformUpload<'_>> = Vec::new();
@@ -6355,7 +6671,7 @@ impl CxVulkan {
             }
             uniform_uploads.push(UniformUpload {
                 binding: *binding_idx as u32,
-                src,
+                src: uniform_bytes(src),
                 offset: 0,
                 size: 0,
             });
@@ -6363,7 +6679,7 @@ impl CxVulkan {
         if !packet.dyn_uniforms.is_empty() {
             uniform_uploads.push(UniformUpload {
                 binding: packet.dyn_uniform_binding,
-                src: packet.dyn_uniforms.as_slice(),
+                src: uniform_bytes(&packet.dyn_uniforms),
                 offset: 0,
                 size: 0,
             });
@@ -6372,11 +6688,19 @@ impl CxVulkan {
             if !packet.scope_uniforms.is_empty() {
                 uniform_uploads.push(UniformUpload {
                     binding: scope_binding as u32,
-                    src: packet.scope_uniforms.as_slice(),
+                    src: uniform_bytes(&packet.scope_uniforms),
                     offset: 0,
                     size: 0,
                 });
             }
+        }
+        for (binding, data) in &packet.custom_uniforms {
+            uniform_uploads.push(UniformUpload {
+                binding: *binding,
+                src: data,
+                offset: 0,
+                size: 0,
+            });
         }
         uniform_uploads.sort_by_key(|uniform| uniform.binding);
         uniform_uploads.dedup_by_key(|uniform| uniform.binding);
@@ -6567,8 +6891,18 @@ impl CxVulkan {
         } else {
             None
         };
-        let vertex_buffers = [geometry_resource.vertex_buffer.buffer, packet_buffer.buffer];
-        let vertex_offsets = [0, packet_base_offset + instances_offset];
+        let vertex_buffers = [
+            geometry_resource.vertex_buffer.buffer,
+            retained_buffer.map_or(packet_buffer.buffer, |buffer| buffer.buffer),
+        ];
+        let vertex_offsets = [
+            0,
+            if retained_buffer.is_some() {
+                0
+            } else {
+                packet_base_offset + instances_offset
+            },
+        ];
 
         unsafe {
             self.device.cmd_bind_pipeline(
@@ -6598,8 +6932,20 @@ impl CxVulkan {
                 0,
                 index_type,
             );
-            self.device
-                .cmd_draw_indexed(self.command_buffer, index_count, instance_count, 0, 0, 0);
+            for range in &packet.instance_ranges {
+                let start = range.start.min(instance_count);
+                let end = range.end.min(instance_count);
+                if start < end {
+                    self.device.cmd_draw_indexed(
+                        self.command_buffer,
+                        index_count,
+                        end - start,
+                        0,
+                        0,
+                        start,
+                    );
+                }
+            }
         }
 
         Ok(())
@@ -6661,6 +7007,7 @@ impl CxVulkan {
         }
 
         let has_descriptors = !sh.mapping.uniform_buffer_bindings.bindings.is_empty()
+            || !sh.mapping.uniform_buffers.is_empty()
             || !sh.mapping.dyn_uniforms.inputs.is_empty()
             || !sh.mapping.scope_uniforms.inputs.is_empty()
             || !sh.mapping.textures.is_empty()
@@ -6670,6 +7017,12 @@ impl CxVulkan {
         let mut descriptor_bindings: Vec<(u32, vk::DescriptorType)> = Vec::new();
         for (_, idx) in &sh.mapping.uniform_buffer_bindings.bindings {
             descriptor_bindings.push((*idx as u32, vk::DescriptorType::UNIFORM_BUFFER));
+        }
+        for input in &sh.mapping.uniform_buffers {
+            descriptor_bindings.push((
+                input.buffer_index as u32,
+                vk::DescriptorType::UNIFORM_BUFFER,
+            ));
         }
         if !sh.mapping.dyn_uniforms.inputs.is_empty() {
             descriptor_bindings.push((
@@ -6859,7 +7212,8 @@ impl CxVulkan {
             .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
             .alpha_blend_op(vk::BlendOp::ADD)
             .color_write_mask(vk::ColorComponentFlags::RGBA);
-        let color_blend_attachments = vec![color_blend_attachment; render_pass_key.color_formats.len()];
+        let color_blend_attachments =
+            vec![color_blend_attachment; render_pass_key.color_formats.len()];
         let color_blend =
             vk::PipelineColorBlendStateCreateInfo::default().attachments(&color_blend_attachments);
         let has_depth = render_pass_key.depth_format.is_some();
@@ -7082,6 +7436,247 @@ impl CxVulkan {
         }
     }
 
+    fn retained_transfer_commands(&mut self) -> Result<vk::CommandBuffer, String> {
+        if self.frame_resources.retained_transfers.is_none() {
+            let command_buffer = unsafe {
+                self.device.allocate_command_buffers(
+                    &vk::CommandBufferAllocateInfo::default()
+                        .command_pool(self.command_pool)
+                        .level(vk::CommandBufferLevel::PRIMARY)
+                        .command_buffer_count(1),
+                )
+            }
+            .map_err(|error| format!("allocate retained transfer commands: {error:?}"))?[0];
+            self.retained_transfer_generation = self.retained_transfer_generation.wrapping_add(1);
+            let commands = VulkanRetainedTransfers {
+                device: self.device.clone(),
+                pool: self.command_pool,
+                command_buffer,
+                generation: self.retained_transfer_generation,
+                ended: false,
+            };
+            unsafe {
+                self.device.begin_command_buffer(
+                    command_buffer,
+                    &vk::CommandBufferBeginInfo::default()
+                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+                )
+            }
+            .map_err(|error| format!("begin retained transfer commands: {error:?}"))?;
+            self.frame_resources.retained_transfers = Some(commands);
+        }
+        let commands = self.frame_resources.retained_transfers.as_ref().unwrap();
+        if commands.ended {
+            return Err("retained transfer commands already submitted".into());
+        }
+        Ok(commands.command_buffer)
+    }
+
+    fn finish_retained_transfers(&mut self) -> Result<Option<vk::CommandBuffer>, String> {
+        let Some(commands) = self.frame_resources.retained_transfers.as_mut() else {
+            return Ok(None);
+        };
+        if commands.ended {
+            return Ok(None);
+        }
+        if !commands.ended {
+            unsafe {
+                self.device.cmd_pipeline_barrier(
+                    commands.command_buffer,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::VERTEX_INPUT,
+                    vk::DependencyFlags::empty(),
+                    &[vk::MemoryBarrier::default()
+                        .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                        .dst_access_mask(vk::AccessFlags::VERTEX_ATTRIBUTE_READ)],
+                    &[],
+                    &[],
+                );
+                self.device
+                    .end_command_buffer(commands.command_buffer)
+                    .map_err(|error| format!("end retained transfer commands: {error:?}"))?;
+            }
+            commands.ended = true;
+        }
+        Ok(Some(commands.command_buffer))
+    }
+
+    fn retained_transfers_submitted(&mut self) {
+        for (owner, publication_id) in self.frame_resources.retained_updates.drain(..) {
+            if let Some(entry) = self.retained_instances.get_mut(&owner) {
+                if entry.publication.id() == publication_id {
+                    entry.pending_copy = None;
+                }
+            }
+        }
+    }
+
+    fn ensure_retained_instances(
+        &mut self,
+        cx: &mut Cx,
+        owner: (DrawListId, usize),
+        publication: &RetainedInstances,
+    ) -> Result<VulkanBuffer, String> {
+        // Repaint ids do not identify a submission: another pass may retry
+        // within the same repaint after a transfer command was abandoned.
+        // Validate the live command generation on every lookup, including
+        // publications used as sources for a later delta.
+        let live_transfer = self
+            .frame_resources
+            .retained_transfers
+            .as_ref()
+            .filter(|commands| !commands.ended)
+            .map(|commands| (commands.command_buffer, commands.generation));
+        if self.retained_instances.get(&owner).is_some_and(|entry| {
+            entry.pending_copy.is_some() && entry.pending_copy != live_transfer
+        }) {
+            self.retained_instances.remove(&owner);
+        }
+        if let Some(entry) = self.retained_instances.get(&owner) {
+            if entry.publication.id() == publication.id() {
+                self.frame_resources.retained.push(entry.allocation.clone());
+                return Ok(entry.allocation.buffer);
+            }
+        }
+        let started = Instant::now();
+        let previous = self.retained_instances.get(&owner);
+        let plan = previous.map(|entry| publication.upload_plan(&entry.publication));
+        let in_place = previous.is_some_and(|entry| {
+            // Arc leases exist until every referencing frame fence completes.
+            Arc::strong_count(&entry.allocation) == 1
+                && entry.allocation.buffer.size >= publication.byte_len() as u64
+                && plan.as_ref().unwrap().can_update_in_place()
+        });
+        let allocation = if in_place {
+            previous.unwrap().allocation.clone()
+        } else {
+            let capacity = publication.byte_len().next_power_of_two().max(256);
+            cx.draw_lists.1.allocations.collect_for_frame(
+                cx.repaint_id,
+                cx.textures
+                    .1
+                    .serials
+                    .completed
+                    .load(std::sync::atomic::Ordering::Acquire),
+            );
+            let charge = cx.draw_lists.1.allocations.reserve_visible(capacity);
+            Arc::new(VulkanRetainedAllocation {
+                device: self.device.clone(),
+                buffer: self.create_host_buffer(
+                    vk::BufferUsageFlags::VERTEX_BUFFER
+                        | vk::BufferUsageFlags::TRANSFER_SRC
+                        | vk::BufferUsageFlags::TRANSFER_DST,
+                    capacity as u64,
+                )?,
+                _charge: charge,
+            })
+        };
+        let mut uploaded = 0;
+        let full = vec![0..publication.float_len()];
+        let writes = plan
+            .as_ref()
+            .map_or(full.as_slice(), |plan| plan.writes.as_slice());
+        if !writes.is_empty() {
+            unsafe {
+                let mapped = self
+                    .device
+                    .map_memory(
+                        allocation.buffer.memory,
+                        0,
+                        allocation.buffer.size,
+                        vk::MemoryMapFlags::empty(),
+                    )
+                    .map_err(|error| format!("map retained instances: {error:?}"))?
+                    as *mut f32;
+                for range in writes {
+                    for (offset, data) in publication.data_slices(range.clone()) {
+                        std::ptr::copy_nonoverlapping(
+                            data.as_ptr(),
+                            mapped.add(offset),
+                            data.len(),
+                        );
+                        uploaded += std::mem::size_of_val(data);
+                    }
+                }
+                self.device.unmap_memory(allocation.buffer.memory);
+            }
+        }
+        let mut pending_copy = None;
+        if !in_place {
+            if let (Some(previous), Some(plan)) = (self.retained_instances.get(&owner), &plan) {
+                let source = previous.allocation.clone();
+                let copies: Vec<_> = plan
+                    .copies
+                    .iter()
+                    .map(|copy| {
+                        vk::BufferCopy::default()
+                            .src_offset((copy.source.start * 4) as u64)
+                            .dst_offset((copy.destination * 4) as u64)
+                            .size((copy.source.len() * 4) as u64)
+                    })
+                    .collect();
+                if !copies.is_empty() {
+                    let commands = self.retained_transfer_commands()?;
+                    pending_copy = Some((
+                        commands,
+                        self.frame_resources
+                            .retained_transfers
+                            .as_ref()
+                            .unwrap()
+                            .generation,
+                    ));
+                    unsafe {
+                        // Source can itself have been produced by a preceding
+                        // delta in this transfer command buffer.
+                        self.device.cmd_pipeline_barrier(
+                            commands,
+                            vk::PipelineStageFlags::TRANSFER | vk::PipelineStageFlags::HOST,
+                            vk::PipelineStageFlags::TRANSFER,
+                            vk::DependencyFlags::empty(),
+                            &[vk::MemoryBarrier::default()
+                                .src_access_mask(
+                                    vk::AccessFlags::TRANSFER_WRITE | vk::AccessFlags::HOST_WRITE,
+                                )
+                                .dst_access_mask(vk::AccessFlags::TRANSFER_READ)],
+                            &[],
+                            &[],
+                        );
+                        self.device.cmd_copy_buffer(
+                            commands,
+                            source.buffer.buffer,
+                            allocation.buffer.buffer,
+                            &copies,
+                        );
+                    }
+                    self.frame_resources.retained.push(source);
+                }
+            }
+        }
+        self.frame_resources.retained.push(allocation.clone());
+        let buffer = allocation.buffer;
+        self.retained_instances.insert(
+            owner,
+            VulkanRetainedEntry {
+                publication: publication.clone(),
+                allocation,
+                pending_copy,
+            },
+        );
+        if pending_copy.is_some() {
+            self.frame_resources
+                .retained_updates
+                .push((owner, publication.id()));
+        }
+        cx.draw_lists.1.stats.bytes = cx.draw_lists.1.stats.bytes.saturating_add(uploaded);
+        cx.draw_lists.1.stats.install_us = cx
+            .draw_lists
+            .1
+            .stats
+            .install_us
+            .saturating_add(started.elapsed().as_micros().min(u64::MAX as u128) as u64);
+        Ok(buffer)
+    }
+
     fn create_host_buffer(
         &self,
         usage: vk::BufferUsageFlags,
@@ -7297,9 +7892,7 @@ impl CxVulkan {
                 >= self.frame_resources.descriptor_pools.len()
             {
                 if created_pool {
-                    return Err(
-                        "allocate_descriptor_sets failed: ERROR_OUT_OF_POOL_MEMORY".into(),
-                    );
+                    return Err("allocate_descriptor_sets failed: ERROR_OUT_OF_POOL_MEMORY".into());
                 }
                 let pool = self.create_frame_descriptor_pool()?;
                 self.frame_resources.descriptor_pools.push(pool);
@@ -7593,8 +8186,9 @@ impl CxVulkan {
             unsafe { self.swapchain_loader.destroy_swapchain(old_swapchain, None) };
         }
         self.swapchain = new_swapchain.map_err(|e| format!("create_swapchain failed: {e:?}"))?;
-        self.swapchain_images = unsafe { self.swapchain_loader.get_swapchain_images(self.swapchain) }
-            .map_err(|e| format!("get_swapchain_images failed: {e:?}"))?;
+        self.swapchain_images =
+            unsafe { self.swapchain_loader.get_swapchain_images(self.swapchain) }
+                .map_err(|e| format!("get_swapchain_images failed: {e:?}"))?;
         self.swapchain_format = format.format;
         self.depth_format = self.pick_depth_format()?;
         self.swapchain_extent = extent;
@@ -7661,12 +8255,18 @@ impl CxVulkan {
         self.xr_render_pass = unsafe { self.device.create_render_pass(&xr_render_pass_info, None) }
             .map_err(|e| format!("create_render_pass(openxr) failed: {e:?}"))?;
         #[cfg(target_os = "android")]
-        { self.xr_render_pass_uses_fragment_density_map = false; }
+        {
+            self.xr_render_pass_uses_fragment_density_map = false;
+        }
 
         for _ in &self.swapchain_images {
-            self.render_finished_semaphores.push(unsafe {
-                self.device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
-            }.map_err(|e| format!("create_semaphore(present) failed: {e:?}"))?);
+            self.render_finished_semaphores.push(
+                unsafe {
+                    self.device
+                        .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)
+                }
+                .map_err(|e| format!("create_semaphore(present) failed: {e:?}"))?,
+            );
         }
 
         for image in &self.swapchain_images {
@@ -7769,6 +8369,9 @@ impl CxVulkan {
                     .map_err(|e| format!("reset_descriptor_pool(completed frame) failed: {e:?}"))?;
             }
         }
+        frame_resources.retained.clear();
+        frame_resources.retained_transfers = None;
+        frame_resources.retained_updates.clear();
         frame_resources.packet_buffer_used = 0;
         frame_resources.descriptor_pool_cursor = 0;
         Ok(())
@@ -7901,6 +8504,7 @@ impl Drop for CxVulkan {
         let destroy_parents = true;
         #[cfg(target_os = "android")]
         self.destroy_xr_in_flight_frames();
+        self.retained_instances.clear();
         self.destroy_geometry_resources();
         #[cfg(target_os = "linux")]
         self.destroy_shared_state();

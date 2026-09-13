@@ -41,6 +41,31 @@ impl CodeDocument {
     }
 
     pub fn prepare_cancellable(text: Text, cancel: &impl Fn() -> bool) -> Result<PreparedDocument, crate::tokenizer::TokenizeCancelled> {
+        Self::prepare_cancellable_for_language(makepad_code_language::LanguageId::Rust, text, cancel)
+    }
+
+    /// Path-aware preparation for file-backed callers. Text-only `prepare`
+    /// remains a Rust-default wrapper.
+    pub fn prepare_for_path(path: &str, text: Text) -> PreparedDocument {
+        let language = makepad_code_language::detect_path(path, None).language;
+        Self::prepare_cancellable_for_language(language, text, &|| false)
+            .expect("non-cancellable preparation")
+    }
+
+    pub fn prepare_cancellable_for_path(
+        path: &str,
+        text: Text,
+        cancel: &impl Fn() -> bool,
+    ) -> Result<PreparedDocument, crate::tokenizer::TokenizeCancelled> {
+        let language = makepad_code_language::detect_path(path, None).language;
+        Self::prepare_cancellable_for_language(language, text, cancel)
+    }
+
+    pub fn prepare_cancellable_for_language(
+        language: makepad_code_language::LanguageId,
+        text: Text,
+        cancel: &impl Fn() -> bool,
+    ) -> Result<PreparedDocument, crate::tokenizer::TokenizeCancelled> {
         if cancel() { return Err(crate::tokenizer::TokenizeCancelled); }
         let text = if text.as_lines().is_empty() {
             Text::new()
@@ -55,7 +80,7 @@ impl CodeDocument {
             block_inlays: Vec::new(),
         };
         update_indent_state(&text, &mut layout.indent_state);
-        let mut tokenizer = Tokenizer::new(line_count);
+        let mut tokenizer = Tokenizer::for_language(language, line_count);
         tokenizer.update_cancellable(&text, &mut layout.tokens, cancel)?;
         Ok(PreparedDocument {
             byte_len:text.as_lines().iter().map(|line|line.len()+1).sum(),
@@ -92,6 +117,16 @@ impl CodeDocument {
         rows: &[DiffRowSpec], old_text: &str, new_text: &str,
     ) -> Result<PreparedDiffDocument, PrepareDiffError> {
         crate::diff::prepare(rows, old_text, new_text)
+    }
+
+    pub fn prepare_diff_for_path(
+        path: &str,
+        rows: &[DiffRowSpec],
+        old_text: &str,
+        new_text: &str,
+    ) -> Result<PreparedDiffDocument, PrepareDiffError> {
+        let language = makepad_code_language::detect_path(path, None).language;
+        crate::diff::prepare_for_language(rows, old_text, new_text, language)
     }
 
     /// Move all diff allocations into an immutable document in O(1).

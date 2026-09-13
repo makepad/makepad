@@ -3,6 +3,7 @@ workspace.members = [
     "apps/browser",
     "apps/terminal",
     "apps/wm",
+    "apps/wm-all",
     "apps/aichat",
     "apps/finance",
     "apps/sheets",
@@ -26,6 +27,7 @@ workspace.members = [
     "libs/diskmap",
     "libs/workspace",
     "libs/code_arch",
+    "libs/code_language",
     "apps/route",
     "apps/asset-ui",
     "apps/asset-server",
@@ -59,6 +61,7 @@ workspace.members = [
     "libs/bounded_http",
     "libs/flow",
     "libs/strict_json",
+    "libs/unescaper",
     # === remesh (FaithC port) / xatlas (jpcy port) ===
     "libs/remesh",
     "libs/xatlas",

@@ -1,11 +1,11 @@
 //! Immutable instance publications. Recording pins CPU storage; renderer-owned
 //! buffers remain subject to each backend's real submission/completion law.
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     ops::Range,
     sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+        Arc, OnceLock,
     },
 };
 
@@ -49,7 +49,9 @@ impl RetainedMaintenance {
         bytes <= limit.saturating_sub(self.bytes) || self.buffers == 0
     }
     pub fn admit(&mut self, bytes: usize, limit: usize) -> bool {
-        if !self.can_admit(bytes, limit) { return false; }
+        if !self.can_admit(bytes, limit) {
+            return false;
+        }
         self.bytes = self.bytes.saturating_add(bytes);
         self.buffers += 1;
         self.largest_unit = self.largest_unit.max(bytes);
@@ -103,7 +105,12 @@ pub struct RetainedMemoryBudgets {
 impl RetainedMemoryBudgets {
     pub fn from_process(process: usize) -> Self {
         let cpu = process / 8;
-        Self { cpu, preparation: cpu / 3, recording: process / 16, gpu: process / 4 }
+        Self {
+            cpu,
+            preparation: cpu / 3,
+            recording: process / 16,
+            gpu: process / 4,
+        }
     }
 }
 
@@ -244,7 +251,12 @@ impl<P> RetainedBufferPool<P> {
         None
     }
     pub fn largest_buffer_bytes(&self) -> Option<usize> {
-        self.classes.iter().enumerate().rev().find(|(_, items)| !items.is_empty()).map(|(class, _)| 1usize << class)
+        self.classes
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, items)| !items.is_empty())
+            .map(|(class, _)| 1usize << class)
     }
 }
 impl RetainedAllocationBudget {
@@ -284,8 +296,12 @@ impl RetainedAllocationBudget {
     pub fn evicted(&mut self, bytes: usize) {
         self.evicted_bytes = self.evicted_bytes.saturating_add(bytes);
     }
-    pub fn pressure_high(&self) -> usize { self.limit() / 4 * 3 }
-    pub fn pressure_low(&self) -> usize { self.limit() / 8 * 5 }
+    pub fn pressure_high(&self) -> usize {
+        self.limit() / 4 * 3
+    }
+    pub fn pressure_low(&self) -> usize {
+        self.limit() / 8 * 5
+    }
     pub fn has_pending_retirements(&self) -> bool {
         self.pending_backend_retirements != 0
             || self.released.load(Ordering::Acquire) != 0
@@ -436,6 +452,150 @@ impl RetainedUploadBudget {
     }
 }
 
+/// Segment payload ownership across current, queued, and backend-retained
+/// publications. Clones and prefix views share one counted owner. These are
+/// payload-owner bytes, not process RSS: separately wrapping the same external
+/// Arc creates distinct owners, and external Arc references can outlive them.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct InstanceSegmentMemoryStats {
+    pub live_bytes: usize,
+    pub peak_bytes: usize,
+    pub live_segments: usize,
+    pub peak_segments: usize,
+}
+static INSTANCE_SEGMENT_BYTES: AtomicUsize = AtomicUsize::new(0);
+static INSTANCE_SEGMENT_PEAK_BYTES: AtomicUsize = AtomicUsize::new(0);
+static INSTANCE_SEGMENTS: AtomicUsize = AtomicUsize::new(0);
+static INSTANCE_SEGMENT_PEAK_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Lock-free diagnostic counters. Individual atomic values may reflect adjacent
+/// instants while workers publish or retire; no renderer waits for a snapshot.
+pub fn instance_segment_memory_stats() -> InstanceSegmentMemoryStats {
+    InstanceSegmentMemoryStats {
+        live_bytes: INSTANCE_SEGMENT_BYTES.load(Ordering::Relaxed),
+        peak_bytes: INSTANCE_SEGMENT_PEAK_BYTES.load(Ordering::Relaxed),
+        live_segments: INSTANCE_SEGMENTS.load(Ordering::Relaxed),
+        peak_segments: INSTANCE_SEGMENT_PEAK_COUNT.load(Ordering::Relaxed),
+    }
+}
+
+#[derive(Debug)]
+struct InstanceSegmentStorage {
+    id: u64,
+    data: Arc<[f32]>,
+}
+impl Drop for InstanceSegmentStorage {
+    fn drop(&mut self) {
+        INSTANCE_SEGMENT_BYTES.fetch_sub(std::mem::size_of_val(&*self.data), Ordering::Relaxed);
+        INSTANCE_SEGMENTS.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// An immutable piece of an instance stream. Clone this handle when republishing
+/// a group: identity, CPU storage, and the corresponding GPU bytes stay reusable.
+/// A prefix view keeps the same identity and only shortens the visible range.
+#[derive(Clone, Debug)]
+pub struct InstanceSegment {
+    storage: Arc<InstanceSegmentStorage>,
+    len: usize,
+}
+impl InstanceSegment {
+    pub fn new(data: Arc<[f32]>) -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let bytes = std::mem::size_of_val(&*data);
+        let len = data.len();
+        let storage = Arc::new(InstanceSegmentStorage {
+            id: NEXT.fetch_add(1, Ordering::Relaxed),
+            data,
+        });
+        let live_bytes = INSTANCE_SEGMENT_BYTES.fetch_add(bytes, Ordering::Relaxed) + bytes;
+        let live_segments = INSTANCE_SEGMENTS.fetch_add(1, Ordering::Relaxed) + 1;
+        INSTANCE_SEGMENT_PEAK_BYTES.fetch_max(live_bytes, Ordering::Relaxed);
+        INSTANCE_SEGMENT_PEAK_COUNT.fetch_max(live_segments, Ordering::Relaxed);
+        Self { storage, len }
+    }
+    pub fn id(&self) -> u64 {
+        self.storage.id
+    }
+    pub fn data(&self) -> &[f32] {
+        &self.storage.data[..self.len]
+    }
+    pub fn float_len(&self) -> usize {
+        self.len
+    }
+    pub fn byte_len(&self) -> usize {
+        self.len * 4
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+/// A copy from the previous complete GPU publication to the next one.
+/// Offsets and lengths are in float slots, not bytes or instance records.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InstanceCopy {
+    pub source: Range<usize>,
+    pub destination: usize,
+}
+
+/// Complete coverage of a new publication, in two disjoint classes: reusable
+/// previous GPU ranges and changed CPU ranges. Copy ranges always refer to the
+/// previous immutable snapshot. A backend must not overwrite that snapshot
+/// while it is submitted, nor apply overlapping relocation copies in-place.
+/// Use a separate target allocation for relocation, retaining the source until
+/// its copies and earlier readers have completed. Publication becomes drawable
+/// only once every range is ready; this contract never drops missing segments.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct InstanceUploadPlan {
+    pub copies: Vec<InstanceCopy>,
+    pub writes: Vec<Range<usize>>,
+}
+impl InstanceUploadPlan {
+    /// No old bytes need to move. The backend must additionally establish
+    /// capacity and its own submission/completion rules before patching.
+    pub fn can_update_in_place(&self) -> bool {
+        self.copies
+            .iter()
+            .all(|copy| copy.source.start == copy.destination)
+    }
+    pub fn copy_float_len(&self) -> usize {
+        self.copies.iter().map(|copy| copy.source.len()).sum()
+    }
+    pub fn write_float_len(&self) -> usize {
+        self.writes.iter().map(|range| range.len()).sum()
+    }
+    fn copy(&mut self, source: Range<usize>, destination: usize) {
+        if source.is_empty() {
+            return;
+        }
+        if let Some(last) = self.copies.last_mut() {
+            if last.source.end == source.start
+                && last.destination + last.source.len() == destination
+            {
+                last.source.end = source.end;
+                return;
+            }
+        }
+        self.copies.push(InstanceCopy {
+            source,
+            destination,
+        });
+    }
+    fn write(&mut self, range: Range<usize>) {
+        if range.is_empty() {
+            return;
+        }
+        if let Some(last) = self.writes.last_mut() {
+            if last.end == range.start {
+                last.end = range.end;
+                return;
+            }
+        }
+        self.writes.push(range);
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct RetainedInstances(Arc<InstancePublication>);
 /// Observes storage held by independently retained draw recordings without
@@ -457,33 +617,87 @@ impl WeakRetainedInstances {
 #[derive(Debug)]
 struct InstancePublication {
     id: u64,
-    parent: Option<Arc<InstanceStamp>>,
     slots: usize,
-    data: Arc<[f32]>,
+    segments: Arc<[InstanceSegment]>,
+    offsets: Arc<[usize]>,
     len: usize,
+    // Only legacy contiguous consumers materialize this. Backend paths use
+    // data_slices, so publication, append and replacement never copy a prefix.
+    contiguous: OnceLock<Arc<[f32]>>,
+    // Legacy id-only suffix receipts, bounded by the current segment count.
+    // These store no publication/payload owners and form no ancestor chain.
+    append_checkpoints: Arc<[(u64, usize)]>,
     // Prefix recordings still own the producer's entire CPU allocation.
     // Preserve its weak accounting receipt until the last view is retired.
     source: Option<Arc<InstancePublication>>,
 }
-#[derive(Debug)]
-struct InstanceStamp {
-    id: u64,
-    len: usize,
-    parent: Option<Arc<InstanceStamp>>,
+
+pub struct InstanceDataSlices<'a> {
+    publication: &'a InstancePublication,
+    range: Range<usize>,
+    index: usize,
 }
+impl<'a> Iterator for InstanceDataSlices<'a> {
+    type Item = (usize, &'a [f32]);
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.range.is_empty() {
+            return None;
+        }
+        let segment = self.publication.segments.get(self.index)?;
+        let offset = self.publication.offsets[self.index];
+        let start = offset.max(self.range.start);
+        let end = (offset + segment.len).min(self.range.end);
+        if start >= end {
+            return None;
+        }
+        self.index += 1;
+        Some((start, &segment.data()[start - offset..end - offset]))
+    }
+}
+
 impl RetainedInstances {
     /// Worker-side construction. No UI copy and no mutable alias of the payload.
     pub fn new(slots: usize, data: Arc<[f32]>) -> Result<Self, &'static str> {
-        if slots == 0 || data.len() % slots != 0 {
+        let result = Self::from_segments(slots, vec![InstanceSegment::new(data.clone())])?;
+        // Preserve the original Arc for existing shared-instance publishers,
+        // including the empty-publication case.
+        let _ = result.0.contiguous.set(data);
+        Ok(result)
+    }
+    /// Publish an ordered segment directory. Only metadata is inspected/copied;
+    /// each segment must contain whole instance records of this stride.
+    pub fn from_segments(
+        slots: usize,
+        mut segments: Vec<InstanceSegment>,
+    ) -> Result<Self, &'static str> {
+        if slots == 0 || segments.iter().any(|segment| segment.len % slots != 0) {
             return Err("invalid instance stride");
+        }
+        segments.retain(|segment| !segment.is_empty());
+        let mut offsets = Vec::with_capacity(segments.len());
+        let mut len = 0usize;
+        for segment in &segments {
+            offsets.push(len);
+            len = len
+                .checked_add(segment.len)
+                .ok_or("instance stream too large")?;
+        }
+        if len > usize::MAX / 4 {
+            return Err("instance stream too large");
+        }
+        let contiguous = OnceLock::new();
+        if segments.len() == 1 {
+            let _ = contiguous.set(segments[0].storage.data.clone());
         }
         static NEXT: AtomicU64 = AtomicU64::new(1);
         Ok(Self(Arc::new(InstancePublication {
             id: NEXT.fetch_add(1, Ordering::Relaxed),
-            parent: None,
             slots,
-            len: data.len(),
-            data,
+            segments: segments.into(),
+            offsets: offsets.into(),
+            len,
+            contiguous,
+            append_checkpoints: Arc::from([]),
             source: None,
         })))
     }
@@ -496,73 +710,158 @@ impl RetainedInstances {
             bytes: self.byte_len(),
         }
     }
-    /// A pending copy can follow an append without restarting its immutable
-    /// prefix. Unrelated replacements must never inherit partially copied data.
+    /// Compatibility for id-only append uploads. New backends retain the last
+    /// publication and use upload_plan, which also handles replacement/reorder.
     pub fn can_continue_upload(&self, previous: u64, copied_bytes: usize) -> bool {
         copied_bytes <= self.byte_len()
             && (self.id() == previous
                 || self.upload_since(previous).start.saturating_mul(4) >= copied_bytes)
     }
-    /// Worker-side append. Existing records are immutable. Backends may upload
-    /// only the suffix when their last resident publication is an ancestor.
+    /// Append copies only the caller's new suffix into immutable storage. The
+    /// directory reuses every old segment; no CPU prefix or ancestor is copied.
     pub fn append(&self, suffix: &[f32]) -> Result<Self, &'static str> {
         if suffix.len() % self.slots() != 0 {
             return Err("invalid instance stride");
         }
-        let mut data = Vec::with_capacity(self.data().len() + suffix.len());
-        data.extend_from_slice(self.data());
-        data.extend_from_slice(suffix);
-        let mut result = Self::new(self.slots(), data.into())?;
-        Arc::get_mut(&mut result.0).unwrap().parent = Some(Arc::new(InstanceStamp {
-            id: self.id(),
-            len: self.data().len(),
-            parent: self.0.parent.clone(),
-        }));
+        if suffix.is_empty() {
+            return Ok(self.clone());
+        }
+        let mut segments = self.0.segments.to_vec();
+        segments.push(InstanceSegment::new(Arc::from(suffix)));
+        let mut result = Self::from_segments(self.slots(), segments)?;
+        let mut checkpoints = self.0.append_checkpoints.to_vec();
+        checkpoints.push((self.id(), self.float_len()));
+        Arc::get_mut(&mut result.0).unwrap().append_checkpoints = checkpoints.into();
         Ok(result)
     }
     pub fn upload_since(&self, resident: u64) -> Range<usize> {
         if self.id() == resident {
-            return self.data().len()..self.data().len();
+            return self.float_len()..self.float_len();
         }
-        let mut current = self.0.parent.as_deref();
-        while let Some(stamp) = current {
-            if stamp.id == resident {
-                return stamp.len..self.data().len();
-            }
-            current = stamp.parent.as_deref();
+        match self
+            .0
+            .append_checkpoints
+            .iter()
+            .find(|(id, _)| *id == resident)
+        {
+            Some((_, len)) => *len..self.float_len(),
+            None => 0..self.float_len(),
         }
-        0..self.data().len()
     }
     pub fn slots(&self) -> usize {
         self.0.slots
     }
-    /// The producer's `Arc` this publication was built over — the same
-    /// allocation, no copy — so a merged block can be published on the
-    /// shared-instance registry (`Cx::publish_instances`) without a second
-    /// copy of the bytes (DL-4's glyph block).
+    pub fn segments(&self) -> &[InstanceSegment] {
+        &self.0.segments
+    }
+    pub fn float_len(&self) -> usize {
+        self.0.len
+    }
+    /// Iterate only the segment slices intersecting a global float range.
+    /// Each item carries its destination offset in the complete publication.
+    pub fn data_slices(&self, range: Range<usize>) -> InstanceDataSlices<'_> {
+        assert!(range.start <= range.end && range.end <= self.float_len());
+        let index = self
+            .0
+            .offsets
+            .partition_point(|offset| *offset <= range.start)
+            .saturating_sub(1);
+        InstanceDataSlices {
+            publication: &self.0,
+            range,
+            index,
+        }
+    }
+    /// Diff immutable identities and lengths, never the float payloads. A
+    /// repeated segment may reuse any valid previous occurrence; an occurrence
+    /// at the same offset is preferred when it covers the reusable range.
+    pub fn upload_plan(&self, previous: &Self) -> InstanceUploadPlan {
+        let mut result = InstanceUploadPlan::default();
+        if self.slots() != previous.slots() {
+            result.write(0..self.float_len());
+            return result;
+        }
+        if self.id() == previous.id() {
+            result.copy(0..self.float_len(), 0);
+            return result;
+        }
+        let mut previous_segments = HashMap::with_capacity(previous.segments().len());
+        for (segment, &offset) in previous.0.segments.iter().zip(previous.0.offsets.iter()) {
+            let longest: &mut (usize, usize) = previous_segments
+                .entry(segment.id())
+                .or_insert((offset, segment.len));
+            if segment.len > longest.1 {
+                *longest = (offset, segment.len);
+            }
+        }
+        for (segment, &destination) in self.0.segments.iter().zip(self.0.offsets.iter()) {
+            let Some(&(mut source, previous_len)) = previous_segments.get(&segment.id()) else {
+                result.write(destination..destination + segment.len);
+                continue;
+            };
+            let reusable = previous_len.min(segment.len);
+            if let Ok(index) = previous.0.offsets.binary_search(&destination) {
+                let at_destination = &previous.0.segments[index];
+                if at_destination.id() == segment.id() && at_destination.len >= reusable {
+                    source = destination;
+                }
+            }
+            result.copy(source..source + reusable, destination);
+            result.write(destination + reusable..destination + segment.len);
+        }
+        result
+    }
+    /// Legacy contiguous access. Single-segment publications return their
+    /// original Arc. Multiple segments are explicitly materialized on first
+    /// use and cached. Do not call this from a renderer/upload hot path: use
+    /// data_slices instead to preserve incremental publication and memory use.
     pub fn shared_data(&self) -> Arc<[f32]> {
-        self.0.data.clone()
+        self.contiguous_data().clone()
     }
+    /// Legacy contiguous access, with the same materialization cost described
+    /// by shared_data. Backend uploads and metadata queries must use slices and
+    /// float_len; this compatibility accessor is not an incremental upload API.
     pub fn data(&self) -> &[f32] {
-        &self.0.data[..self.0.len]
+        &self.contiguous_data()[..self.float_len()]
     }
-    /// A view of an immutable CPU prefix. The backend sees only these records;
-    /// creating an LOD view never copies the file's geometry on the UI thread.
-    /// Keep the full publication with the producer until retirement.
+    fn contiguous_data(&self) -> &Arc<[f32]> {
+        self.0.contiguous.get_or_init(|| {
+            let mut data = Vec::with_capacity(self.float_len());
+            for segment in self.segments() {
+                data.extend_from_slice(segment.data());
+            }
+            data.into()
+        })
+    }
+    /// A view of an immutable CPU prefix. Only segment descriptors are copied;
+    /// the producer's entire storage remains pinned for existing accounting.
     pub fn prefix(&self, count: usize) -> Self {
         let len = count.min(self.count()) * self.slots();
-        if len == self.0.len { return self.clone(); }
-        let mut result = Self::new(self.slots(), self.0.data.clone()).unwrap();
+        if len == self.float_len() {
+            return self.clone();
+        }
+        let mut remaining = len;
+        let mut segments = Vec::new();
+        for segment in self.segments() {
+            if remaining == 0 {
+                break;
+            }
+            let mut part = segment.clone();
+            part.len = part.len.min(remaining);
+            remaining -= part.len;
+            segments.push(part);
+        }
+        let mut result = Self::from_segments(self.slots(), segments).unwrap();
         let view = Arc::get_mut(&mut result.0).unwrap();
-        view.len = len;
         view.source = Some(self.0.source.as_ref().unwrap_or(&self.0).clone());
+        // A prefix is a new view, not a historical append receipt.
         result
     }
     pub fn count(&self) -> usize {
-        self.data().len() / self.slots()
+        self.float_len() / self.slots()
     }
     pub fn byte_len(&self) -> usize {
-        std::mem::size_of_val(self.data())
+        self.float_len() * 4
     }
     pub fn readers(&self) -> usize {
         Arc::strong_count(&self.0)
@@ -570,9 +869,9 @@ impl RetainedInstances {
     /// Bounded upload ranges, in float slots; never split an instance record.
     pub fn upload_ranges(&self, max_bytes: usize) -> impl Iterator<Item = Range<usize>> + '_ {
         let batch = (max_bytes / (self.slots() * 4)).max(1) * self.slots();
-        (0..self.data().len())
+        (0..self.float_len())
             .step_by(batch)
-            .map(move |start| start..(start + batch).min(self.data().len()))
+            .map(move |start| start..start.saturating_add(batch).min(self.float_len()))
     }
 }
 
@@ -674,12 +973,18 @@ mod upload_tests {
             assert_eq!(budget.pressure_high(), limit * 3 / 4);
             assert_eq!(budget.pressure_low(), limit * 5 / 8);
             let near = budget.reserve(limit * 11 / 16).unwrap();
-            assert!(!budget.reclaim_needed(), "below 3/4 is a cache, not garbage");
+            assert!(
+                !budget.reclaim_needed(),
+                "below 3/4 is a cache, not garbage"
+            );
             let crossing = budget.reserve(limit / 8).unwrap();
             assert!(budget.reclaim_needed());
             drop(crossing);
             budget.collect(0);
-            assert!(budget.reclaim_needed(), "hold pressure through the hysteresis band");
+            assert!(
+                budget.reclaim_needed(),
+                "hold pressure through the hysteresis band"
+            );
             drop(near);
             budget.collect(0);
             assert!(!budget.reclaim_needed());
@@ -710,7 +1015,7 @@ mod upload_tests {
             RetainedInstances::new(16, vec![0.25; 50 * 1024 * 1024 / 4].into()).unwrap();
         let mut copied = vec![0.0; publication.data().len()];
         let mut budget = RetainedUploadBudget::default();
-        let mut offset = 0;
+        let offset;
         let mut frames = 0;
         // The whole block is copied in the frame that owes it (contract §7):
         // one copy, complete, counted once. The bounded, frame-shared pacing
@@ -737,10 +1042,19 @@ mod upload_tests {
         short.begin_frame(99);
         assert!(short.retirement.admit(1024, short.limit));
         short.begin_frame(99);
-        assert!(!short.retirement.admit(1, short.limit), "another pass cannot renew maintenance credit");
+        assert!(
+            !short.retirement.admit(1, short.limit),
+            "another pass cannot renew maintenance credit"
+        );
         short.begin_frame(100);
-        assert!(short.retirement.admit(4096, short.limit), "indivisible oversized allocation must eventually retire");
-        assert!(!short.retirement.admit(1, short.limit), "oversized allocation must run alone");
+        assert!(
+            short.retirement.admit(4096, short.limit),
+            "indivisible oversized allocation must eventually retire"
+        );
+        assert!(
+            !short.retirement.admit(1, short.limit),
+            "oversized allocation must run alone"
+        );
         assert_eq!(short.retirement.largest_unit, 4096);
         for frame in 0..2 {
             short.begin_frame(frame);

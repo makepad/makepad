@@ -7,13 +7,11 @@ use {
         event::{
             DragEvent, DragItem, DragResponse, DropEvent, Event, KeyModifiers, MouseDownEvent,
             MouseMoveEvent, MouseUpEvent, NetworkResponse, ScrollEvent, TextClipboardEvent,
-            TimerEvent, ToWasmMsgEvent, TouchUpdateEvent,
-            VideoDecodingErrorEvent, VideoPlaybackCompletedEvent, VideoPlaybackPreparedEvent,
+            TimerEvent, ToWasmMsgEvent, TouchUpdateEvent, VideoDecodingErrorEvent,
+            VideoPlaybackCompletedEvent, VideoPlaybackPreparedEvent,
             VideoPlaybackResourcesReleasedEvent, VideoSource, VideoTextureUpdatedEvent, WindowGeom,
         },
-        file_dialogs::{
-            assemble_virtual_files, FileDialog, FileDialogAction, VirtualFileData,
-        },
+        file_dialogs::{assemble_virtual_files, FileDialog, FileDialogAction, VirtualFileData},
         makepad_live_id::*,
         makepad_wasm_bridge::{FromWasm, FromWasmMsg, ToWasm, ToWasmMsg, WasmDataU8},
         permission::{Permission, PermissionResult, PermissionStatus},
@@ -37,14 +35,24 @@ impl Cx {
         if !self.textures.1.readbacks.slots.is_empty() {
             // Let JS report device loss even for tickets awaiting a producer
             // whose render commands have not reached the bridge yet.
-            let registrations: Vec<_> = self.textures.1.readbacks.slots.iter()
+            let registrations: Vec<_> = self
+                .textures
+                .1
+                .readbacks
+                .slots
+                .iter()
                 .filter(|slot| slot.result.ticket.0 > self.os.readback_registered_until)
-                .map(|slot| slot.result.ticket).collect();
+                .map(|slot| slot.result.ticket)
+                .collect();
             for ticket in registrations {
                 self.os.readback_registered_until = self.os.readback_registered_until.max(ticket.0);
                 self.os.from_wasm(FromWasmRequestRenderTextureCapture {
-                    texture_id: 0, register_only: true, ticket_lo: ticket.0 as u32,
-                    ticket_hi: (ticket.0 >> 32) as u32, width: 0, height: 0,
+                    texture_id: 0,
+                    register_only: true,
+                    ticket_lo: ticket.0 as u32,
+                    ticket_hi: (ticket.0 >> 32) as u32,
+                    width: 0,
+                    height: 0,
                 });
             }
             self.web_capture_texture_readbacks(None);
@@ -54,22 +62,29 @@ impl Cx {
     pub(crate) fn web_capture_texture_readbacks(&mut self, pass: Option<crate::DrawPassId>) {
         use crate::texture::{ReadbackChannelOrder, ReadbackError, ReadbackOrigin};
         if self.os.readback_device_lost {
-            self.fail_pending_readbacks(ReadbackError::DeviceLost); return;
+            self.fail_pending_readbacks(ReadbackError::DeviceLost);
+            return;
         }
-        let work = self.take_readback_work(pass, ReadbackChannelOrder::Rgba, ReadbackOrigin::TopLeft);
+        let work =
+            self.take_readback_work(pass, ReadbackChannelOrder::Rgba, ReadbackOrigin::TopLeft);
         for work in work {
             if work.width * work.height * 4 > work.reserved_bytes {
-                work.completion.finish(Err(ReadbackError::Backpressure)); continue;
+                work.completion.finish(Err(ReadbackError::Backpressure));
+                continue;
             }
             let ticket = work.ticket;
             let request = FromWasmRequestRenderTextureCapture {
                 register_only: false,
-                texture_id: work.texture_id.0, ticket_lo: ticket.0 as u32, ticket_hi: (ticket.0 >> 32) as u32,
-                width: work.width, height: work.height,
+                texture_id: work.texture_id.0,
+                ticket_lo: ticket.0 as u32,
+                ticket_hi: (ticket.0 >> 32) as u32,
+                width: work.width,
+                height: work.height,
             };
             self.os.texture_readbacks.push(WebTextureReadback {
                 bytes: Arc::<[u8]>::new_uninit_slice(work.width * work.height * 4),
-                received: 0, work,
+                received: 0,
+                work,
             });
             self.os.from_wasm(request);
         }
@@ -82,33 +97,68 @@ impl Cx {
             self.os.readback_device_lost = true;
             self.fail_pending_readbacks(ReadbackError::DeviceLost);
             for capture in self.os.texture_readbacks.drain(..) {
-                capture.work.completion.finish(Err(ReadbackError::DeviceLost));
+                capture
+                    .work
+                    .completion
+                    .finish(Err(ReadbackError::DeviceLost));
             }
             self.call_event_handler(&Event::Signal);
             return;
         }
-        let Some(index) = self.os.texture_readbacks.iter().position(|capture| capture.work.ticket == ticket) else { return; };
+        let Some(index) = self
+            .os
+            .texture_readbacks
+            .iter()
+            .position(|capture| capture.work.ticket == ticket)
+        else {
+            return;
+        };
         let capture = &mut self.os.texture_readbacks[index];
         let data = tw.data.into_vec_u8();
         let error = if !tw.error.is_empty() {
-            Some(if tw.error == "allocation changed" { ReadbackError::AllocationChanged } else { ReadbackError::Failed })
-        } else if tw.width != capture.work.width || tw.height != capture.work.height || tw.offset != capture.received
-            || data.len() > 256 * 1024 || data.len() > capture.bytes.len().saturating_sub(capture.received) {
+            Some(if tw.error == "allocation changed" {
+                ReadbackError::AllocationChanged
+            } else {
+                ReadbackError::Failed
+            })
+        } else if tw.width != capture.work.width
+            || tw.height != capture.work.height
+            || tw.offset != capture.received
+            || data.len() > 256 * 1024
+            || data.len() > capture.bytes.len().saturating_sub(capture.received)
+        {
             Some(ReadbackError::Failed)
-        } else { None };
+        } else {
+            None
+        };
         if let Some(error) = error {
-            self.os.texture_readbacks.remove(index).work.completion.finish(Err(error));
+            self.os
+                .texture_readbacks
+                .remove(index)
+                .work
+                .completion
+                .finish(Err(error));
             self.call_event_handler(&Event::Signal);
             return;
         }
         // JS bounds the total bridge traffic per animation frame, including
         // this copy into the final allocation. Never build a second full Vec.
         let target = Arc::get_mut(&mut capture.bytes).unwrap();
-        unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), target.as_mut_ptr().add(capture.received).cast::<u8>(), data.len()); }
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                data.as_ptr(),
+                target.as_mut_ptr().add(capture.received).cast::<u8>(),
+                data.len(),
+            );
+        }
         capture.received += data.len();
         if tw.complete {
             let capture = self.os.texture_readbacks.remove(index);
-            let result = if capture.received == capture.bytes.len() { Ok(unsafe { capture.bytes.assume_init() }) } else { Err(ReadbackError::Failed) };
+            let result = if capture.received == capture.bytes.len() {
+                Ok(unsafe { capture.bytes.assume_init() })
+            } else {
+                Err(ReadbackError::Failed)
+            };
             capture.work.completion.finish(result);
             self.call_event_handler(&Event::Signal);
         }
@@ -144,12 +194,18 @@ impl Cx {
         let mut accept = Vec::<String>::new();
         for filter in &dialog.filters {
             for extension in &filter.extensions {
-                let extension = extension.trim().trim_start_matches('*').trim_start_matches('.');
+                let extension = extension
+                    .trim()
+                    .trim_start_matches('*')
+                    .trim_start_matches('.');
                 if extension.is_empty() {
                     return String::new();
                 }
                 let extension = format!(".{extension}");
-                if !accept.iter().any(|item| item.eq_ignore_ascii_case(&extension)) {
+                if !accept
+                    .iter()
+                    .any(|item| item.eq_ignore_ascii_case(&extension))
+                {
                     accept.push(extension);
                 }
             }
@@ -169,8 +225,17 @@ impl Cx {
     /// Queue a WebGL2 PBO/fence readback. The bridge polls the fence on later
     /// animation frames and returns raw RGBA8 bytes without blocking this call.
     pub fn request_render_texture_capture(&mut self, texture: &crate::texture::Texture) -> bool {
-        let Ok(ticket) = texture.read_back(self, Default::default()) else { return false; };
-        self.textures.1.readbacks.slots.iter_mut().find(|slot| slot.result.ticket == ticket).unwrap().legacy = true;
+        let Ok(ticket) = texture.read_back(self, Default::default()) else {
+            return false;
+        };
+        self.textures
+            .1
+            .readbacks
+            .slots
+            .iter_mut()
+            .find(|slot| slot.result.ticket == ticket)
+            .unwrap()
+            .legacy = true;
         true
     }
 
@@ -178,12 +243,13 @@ impl Cx {
     pub fn take_render_texture_captures(
         &mut self,
     ) -> Vec<(crate::texture::TextureId, usize, usize, Vec<u8>)> {
-        self.take_texture_readback_results(true).into_iter().map(|(texture_id, result)| {
-            match result.data {
+        self.take_texture_readback_results(true)
+            .into_iter()
+            .map(|(texture_id, result)| match result.data {
                 Ok(bytes) => (texture_id, result.width, result.height, bytes.to_vec()),
                 Err(_) => (texture_id, 0, 0, Vec::new()),
-            }
-        }).collect()
+            })
+            .collect()
     }
 
     fn normalize_web_pathname(pathname: &str) -> String {
@@ -318,7 +384,8 @@ impl Cx {
                 }
 
                 live_id!(ToWasmTouchUpdate) => {
-                    let mut e: TouchUpdateEvent = ToWasmTouchUpdate::read_to_wasm(&mut to_wasm).into();
+                    let mut e: TouchUpdateEvent =
+                        ToWasmTouchUpdate::read_to_wasm(&mut to_wasm).into();
                     let window_id = e.window_id;
                     for touch in e.touches.iter_mut() {
                         self.dpi_override_scale(&mut touch.abs, window_id);
@@ -416,38 +483,38 @@ impl Cx {
                         })
                     } else {
                         Ok(match op {
-                            StorageOp::Get | StorageOp::GetRange => StorageResult::Value(
-                                tw.found.then(|| tw.value.into_vec_u8()),
-                            ),
+                            StorageOp::Get | StorageOp::GetRange => {
+                                StorageResult::Value(tw.found.then(|| tw.value.into_vec_u8()))
+                            }
                             StorageOp::Set | StorageOp::Delete => StorageResult::Unit,
                             StorageOp::List => StorageResult::List(StorageList {
                                 keys: tw.keys,
                                 next_cursor: tw.has_next.then_some(tw.next),
                             }),
-                            StorageOp::Stat => StorageResult::Stat(tw.found.then_some(
-                                StorageStat {
-                                    len: tw.length_lo as u64
-                                        | ((tw.length_hi as u64) << 32),
-                                },
-                            )),
+                            StorageOp::Stat => {
+                                StorageResult::Stat(tw.found.then_some(StorageStat {
+                                    len: tw.length_lo as u64 | ((tw.length_hi as u64) << 32),
+                                }))
+                            }
                             StorageOp::Estimate => StorageResult::Estimate(StorageEstimate {
                                 usage: tw.usage_lo as u64 | ((tw.usage_hi as u64) << 32),
                                 quota: tw.quota_lo as u64 | ((tw.quota_hi as u64) << 32),
                             }),
                         })
                     };
-                    if let Some(response) =
-                        self.finish_web_storage_request(request_id, op, result)
+                    if let Some(response) = self.finish_web_storage_request(request_id, op, result)
                     {
                         storage_responses.push(response);
                     }
                 }
                 live_id!(ToWasmGpuCompletion) => {
-                    let tw=ToWasmGpuCompletion::read_to_wasm(&mut to_wasm);
-                    let serial=tw.serial_lo as u64|((tw.serial_hi as u64)<<32);
-                    if self.os.completion_pending==serial {
-                        self.os.completion_pending=0;
-                        if tw.success {self.textures.1.serials.complete(serial);}
+                    let tw = ToWasmGpuCompletion::read_to_wasm(&mut to_wasm);
+                    let serial = tw.serial_lo as u64 | ((tw.serial_hi as u64) << 32);
+                    if self.os.completion_pending == serial {
+                        self.os.completion_pending = 0;
+                        if tw.success {
+                            self.textures.1.serials.complete(serial);
+                        }
                         self.call_event_handler(&Event::Signal);
                     }
                 }
@@ -472,12 +539,9 @@ impl Cx {
                         if let Some(texture_id) = self.textures.id_at_index(tw.texture_id) {
                             // Wake the waiting owner immediately. Zero geometry is
                             // the existing capture tuple's unambiguous failure form.
-                            self.os.render_texture_captures.push((
-                                texture_id,
-                                0,
-                                0,
-                                Vec::new(),
-                            ));
+                            self.os
+                                .render_texture_captures
+                                .push((texture_id, 0, 0, Vec::new()));
                             self.redraw_all();
                         }
                     }
@@ -541,6 +605,29 @@ impl Cx {
                 }
 
                 live_id!(ToWasmRedrawAll) => {
+                    self.redraw_all();
+                }
+
+                live_id!(ToWasmRetainedUploadFailed) => {
+                    let failed = ToWasmRetainedUploadFailed::read_to_wasm(&mut to_wasm);
+                    let lists: Vec<_> = self.draw_lists.id_iter().collect();
+                    for list in lists {
+                        for index in 0..self.draw_lists[list].draw_items.len() {
+                            let item = &mut self.draw_lists[list].draw_items[index];
+                            if item.os.inst_vb_id == Some(failed.buffer_id) {
+                                // The browser keeps the last complete GPU buffer.
+                                // Retry from CPU segments, never from a failed delta.
+                                item.os.retained_publication = None;
+                                item.os.inst_capacity = 0;
+                                item.retained_instance_id = 0;
+                                item.consumed_instance_id = 0;
+                                item.instance_upload_pending = true;
+                                if let Some(call) = item.kind.draw_call_mut() {
+                                    call.instance_dirty = true;
+                                }
+                            }
+                        }
+                    }
                     self.redraw_all();
                 }
 
@@ -835,10 +922,10 @@ impl Cx {
                                 biplanar: false,
                                 full_range: false,
                                 rotation_steps: 0.0,
-                            external: false,
-                            array: false,
+                                external: false,
+                                array: false,
                             },
-                        rgba_gl_2d: false,
+                            rgba_gl_2d: false,
                         },
                     ));
                     self.redraw_all();
@@ -995,7 +1082,11 @@ impl Cx {
                     // and that is said once. `OsType::is_single_window` says
                     // it up front, so an app hosts that surface in-page
                     // instead of asking.
-                    if self.windows.current_id_zero().is_some_and(|zero| zero != window_id) {
+                    if self
+                        .windows
+                        .current_id_zero()
+                        .is_some_and(|zero| zero != window_id)
+                    {
                         if !self.os.second_window_reported {
                             self.os.second_window_reported = true;
                             crate::log!(
@@ -1183,11 +1274,7 @@ impl Cx {
                                 limit,
                             });
                         }
-                        StorageRequestKind::GetRange {
-                            key,
-                            offset,
-                            len,
-                        } => {
+                        StorageRequestKind::GetRange { key, offset, len } => {
                             self.os.from_wasm(FromWasmStorageGetRange {
                                 request_id_lo,
                                 request_id_hi,
@@ -1395,7 +1482,9 @@ impl Cx {
                     });
                 }
                 CxOsOp::SaveFileDialog(dialog) => {
-                    crate::error!("web save file dialogs are not supported; download support is pending");
+                    crate::error!(
+                        "web save file dialogs are not supported; download support is pending"
+                    );
                     self.action(FileDialogAction::FileCancelled { id: dialog.id });
                     self.handle_actions();
                 }
@@ -1458,6 +1547,7 @@ impl CxOsApi for Cx {
             ToWasmPaintDirty::to_js_code(),
             ToWasmRedrawAll::to_js_code(),
             ToWasmWebGLShadersDone::to_js_code(),
+            ToWasmRetainedUploadFailed::to_js_code(),
             ToWasmLiveFileChange::to_js_code(),
             ToWasmLocationChange::to_js_code(),
             ToWasmWindowGotFocus::to_js_code(),
@@ -1523,6 +1613,7 @@ impl CxOsApi for Cx {
             FromWasmCompileWebGLShader::to_js_code(),
             FromWasmAllocArrayBuffer::to_js_code(),
             FromWasmRetainedArrayBuffer::to_js_code(),
+            FromWasmRetainedArrayUpdate::to_js_code(),
             FromWasmAllocIndexBuffer::to_js_code(),
             FromWasmAllocVao::to_js_code(),
             FromWasmFreeWebGLResources::to_js_code(),
@@ -1651,8 +1742,7 @@ pub struct CxOs {
     pub(crate) from_wasm_js: Vec<String>,
 
     pub(crate) media: CxWebMedia,
-    pub(crate) render_texture_captures:
-        Vec<(crate::texture::TextureId, usize, usize, Vec<u8>)>,
+    pub(crate) render_texture_captures: Vec<(crate::texture::TextureId, usize, usize, Vec<u8>)>,
     texture_readbacks: Vec<WebTextureReadback>,
     readback_device_lost: bool,
     readback_registered_until: u64,

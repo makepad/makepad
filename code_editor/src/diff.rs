@@ -196,6 +196,15 @@ pub(crate) fn prepare(
     old_text: &str,
     new_text: &str,
 ) -> Result<PreparedDiffDocument, PrepareDiffError> {
+    prepare_for_language(specs, old_text, new_text, makepad_code_language::LanguageId::Rust)
+}
+
+pub(crate) fn prepare_for_language(
+    specs: &[DiffRowSpec],
+    old_text: &str,
+    new_text: &str,
+    language: makepad_code_language::LanguageId,
+) -> Result<PreparedDiffDocument, PrepareDiffError> {
     let old = source_lines(old_text);
     let new = source_lines(new_text);
     let mut rows = Vec::with_capacity(specs.len());
@@ -254,16 +263,26 @@ pub(crate) fn prepare(
         return Err(PrepareDiffError::IncompleteEndpoints);
     }
     // Tokenize the endpoints independently, never the combined display stream.
-    let old_document = CodeDocument::prepare(Text::from_display_lines(
-        old.iter()
-            .map(|line| old_text[line.bytes.clone()].to_owned())
-            .collect(),
-    ));
-    let new_document = CodeDocument::prepare(Text::from_display_lines(
-        new.iter()
-            .map(|line| new_text[line.bytes.clone()].to_owned())
-            .collect(),
-    ));
+    let old_document = CodeDocument::prepare_cancellable_for_language(
+        language,
+        Text::from_display_lines(
+            old.iter()
+                .map(|line| old_text[line.bytes.clone()].to_owned())
+                .collect(),
+        ),
+        &|| false,
+    )
+    .expect("non-cancellable diff preparation");
+    let new_document = CodeDocument::prepare_cancellable_for_language(
+        language,
+        Text::from_display_lines(
+            new.iter()
+                .map(|line| new_text[line.bytes.clone()].to_owned())
+                .collect(),
+        ),
+        &|| false,
+    )
+    .expect("non-cancellable diff preparation");
     if rows.is_empty() {
         rows.push(DiffRow {
             kind: None,

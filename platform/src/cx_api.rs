@@ -599,6 +599,48 @@ pub(crate) fn defer_platform_op(platform_ops: &mut VecDeque<CxOsOp>, op: CxOsOp)
 }
 
 impl Cx {
+    /// Update a named dynamic uniform on one retained draw item without
+    /// invalidating its immutable instance publication.
+    pub fn set_draw_item_uniform(
+        &mut self,
+        list: DrawListId,
+        item: usize,
+        name: LiveId,
+        value: &[f32],
+    ) -> bool {
+        let Some(shader) = self.draw_lists[list].draw_items[item]
+            .draw_call()
+            .map(|call| call.draw_shader_id)
+        else {
+            return false;
+        };
+        let Some(input) = self.draw_shaders[shader.index]
+            .mapping
+            .dyn_uniforms
+            .inputs
+            .iter()
+            .find(|input| input.id == name)
+        else {
+            return false;
+        };
+        let offset = input.offset;
+        let len = input.slots.min(value.len());
+        let draw_list = &mut self.draw_lists[list];
+        let changed = draw_list.draw_items.set_dyn_uniform(
+            item,
+            shader,
+            offset,
+            &value[..len],
+            &mut self.uniform_gen,
+        );
+        if changed {
+            if let Some(pass) = draw_list.draw_pass_id {
+                self.passes[pass].paint_dirty = true;
+            }
+        }
+        changed
+    }
+
     pub fn in_draw_event(&self) -> bool {
         self.in_draw_event
     }
@@ -941,7 +983,10 @@ impl Cx {
         // Loaded yet, allow direct dependency lookup as a synchronous fallback.
         if self.os_type().is_web() {
             let resources = self.script_data.resources.resources.borrow();
-            if let Some(res) = resources.iter().find(|res| res.has_handle(heap_key, handle)) {
+            if let Some(res) = resources
+                .iter()
+                .find(|res| res.has_handle(heap_key, handle))
+            {
                 if let Some(dep_path) = res.dependency_path.as_deref() {
                     if let Ok(data) = self.get_dependency(dep_path) {
                         return Some(data);
@@ -967,7 +1012,11 @@ impl Cx {
     ///
     /// This reads local file-backed resources directly, then falls back to
     /// already-loaded resource bytes (required for wasm/network-backed assets).
-    pub fn get_resource_font_bytes(&mut self, heap_key: usize, handle: ScriptHandle) -> Option<SharedBytes> {
+    pub fn get_resource_font_bytes(
+        &mut self,
+        heap_key: usize,
+        handle: ScriptHandle,
+    ) -> Option<SharedBytes> {
         let path = self.get_resource_abs_path(heap_key, handle)?;
         self.get_resource_font_bytes_by_path(&path)
     }
@@ -1195,7 +1244,8 @@ impl Cx {
         }
         self.platform_ops
             .retain(|op| !matches!(op, CxOsOp::DeferSystemGestures(_)));
-        self.platform_ops.push_back(CxOsOp::DeferSystemGestures(edges));
+        self.platform_ops
+            .push_back(CxOsOp::DeferSystemGestures(edges));
     }
     pub fn push_unique_platform_op(&mut self, op: CxOsOp) {
         if self.platform_ops.iter().find(|o| **o == op).is_none() {
@@ -1674,7 +1724,11 @@ impl Cx {
     /// GPU backends allocate 4 bytes, the gpusim raster keeps float colour
     /// (16 bytes). Caches that budget render targets charge this.
     pub fn render_target_bytes_per_texel(&self) -> usize {
-        if cfg!(gpusim) { 16 } else { 4 }
+        if cfg!(gpusim) {
+            16
+        } else {
+            4
+        }
     }
 
     /// What one texel of a `DepthD32` attachment costs (4 bytes everywhere).
@@ -2597,7 +2651,8 @@ impl Cx {
         slots: usize,
         data: std::sync::Arc<[f32]>,
         hints: crate::shared_instances::PublishHints,
-    ) -> Result<crate::shared_instances::SharedInstances, crate::shared_instances::PublishError> {
+    ) -> Result<crate::shared_instances::SharedInstances, crate::shared_instances::PublishError>
+    {
         self.publications.publish(slots, data, hints)
     }
 
@@ -2628,7 +2683,11 @@ impl Cx {
     /// Last observed completed prefix, without polling the backend. Progress
     /// timers use `frame_completion_serial` to refresh this nonblocking snapshot.
     pub fn frame_completed_serial(&self) -> u64 {
-        self.textures.1.serials.completed.load(std::sync::atomic::Ordering::Acquire)
+        self.textures
+            .1
+            .serials
+            .completed
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Poll without waiting, collect finished texture retirements, and return

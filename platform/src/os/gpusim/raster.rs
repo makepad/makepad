@@ -1046,7 +1046,8 @@ impl Cx {
         // handle's slot keeps the flag until reuse, and its backing must go.
         let live = &self.textures.0;
         let retained = |texture_index: usize| {
-            pool.get(texture_index).is_some_and(|slot| slot.item.retained_render_target)
+            pool.get(texture_index)
+                .is_some_and(|slot| slot.item.retained_render_target)
                 && !live.is_free(texture_index)
         };
         render_targets.framebuffers.retain(|texture_index, _| {
@@ -1069,7 +1070,8 @@ impl Cx {
         // may keep the store over budget for a beat; that costs memory
         // briefly, never pixels.
         const RENDER_TARGET_EVICT_GUARD_FRAMES: u64 = 3;
-        let budget = render_target_budget_bytes(self.memory_budget(), render_targets.budget_override);
+        let budget =
+            render_target_budget_bytes(self.memory_budget(), render_targets.budget_override);
         if budget > 0 && render_targets.bytes() > budget {
             let mut by_age: Vec<(u64, usize)> = render_targets
                 .framebuffers
@@ -1545,12 +1547,8 @@ impl Cx {
                     let texture_id = texture.texture_id();
                     let cxtexture = &self.textures[texture_id];
                     let __tex_t0 = std::time::Instant::now();
-                    let __info = gpusim_texture_info(
-                        texture_id.0,
-                        cxtexture,
-                        texture_cache,
-                        render_targets,
-                    );
+                    let __info =
+                        gpusim_texture_info(texture_id.0, cxtexture, texture_cache, render_targets);
                     if let Some(p) = profile.as_deref_mut() {
                         p.texture_ms += __tex_t0.elapsed().as_secs_f64() * 1000.0;
                     }
@@ -1612,15 +1610,11 @@ impl Cx {
                 sh.mapping.geometry_stride_bytes()
             };
 
-            let instances_data = match draw_item
-                .retained_instances
-                .as_ref()
-                .map(|v| v.data())
-                .or(draw_item.instances.as_deref())
-            {
-                Some(data) => data,
-                None => continue,
-            };
+            let instances_data = draw_item.instances.as_deref().unwrap_or(&[]);
+            let retained_instances = draw_item.retained_instances.as_ref();
+            if retained_instances.is_none() && instances_data.is_empty() {
+                continue;
+            }
 
             let total_instance_slots = sh.mapping.instances.total_slots;
             if total_instance_slots == 0 {
@@ -1636,11 +1630,17 @@ impl Cx {
                 item.instance_upload_pending = false;
                 item.retained_gpu_evicted = false;
                 item.retained_instance_id = item.retained_instances.as_ref().map_or(0, |v| v.id());
-            item.resident_schema = item.retained_schema;
-            item.consumed_instance_id = item.retained_instance_id;
-                    item.consumed_schema = item.resident_schema;
-            item.consumed_serial=self.textures.1.serials.submitted.load(std::sync::atomic::Ordering::Acquire);
-            item.consumed_uniforms_gen=item.kind.draw_call().map_or(0,|call|call.uniforms_gen);
+                item.resident_schema = item.retained_schema;
+                item.consumed_instance_id = item.retained_instance_id;
+                item.consumed_schema = item.resident_schema;
+                item.consumed_serial = self
+                    .textures
+                    .1
+                    .serials
+                    .submitted
+                    .load(std::sync::atomic::Ordering::Acquire);
+                item.consumed_uniforms_gen =
+                    item.kind.draw_call().map_or(0, |call| call.uniforms_gen);
                 if let Some(call) = item.kind.draw_call_mut() {
                     call.instance_dirty = false;
                 }
@@ -1652,7 +1652,15 @@ impl Cx {
                     draw_item_id,
                     sh,
                     draw_call,
-                    instances_data,
+                    &retained_instances.map_or_else(
+                        || instances_data.to_vec(),
+                        |publication| {
+                            publication
+                                .data_slices(0..publication.float_len())
+                                .flat_map(|(_, data)| data.iter().copied())
+                                .collect()
+                        },
+                    ),
                     instance_count,
                 );
             }
@@ -1689,7 +1697,9 @@ impl Cx {
                 draw_item
                     .instance_ranges
                     .iter()
-                    .flat_map(|r| (r.start as usize).min(instance_count)..(r.end as usize).min(instance_count))
+                    .flat_map(|r| {
+                        (r.start as usize).min(instance_count)..(r.end as usize).min(instance_count)
+                    })
                     .collect()
             };
             if submitted.is_empty() {
@@ -1708,7 +1718,17 @@ impl Cx {
 
             for (slot, &inst_idx) in submitted.iter().enumerate() {
                 let inst_offset = inst_idx * total_instance_slots;
-                let inst_slice = &instances_data[inst_offset..inst_offset + total_instance_slots];
+                let inst_slice = if let Some(publication) = retained_instances {
+                    // Segment boundaries are whole instance records. Read the
+                    // record directly without materializing the publication.
+                    publication
+                        .data_slices(inst_offset..inst_offset + total_instance_slots)
+                        .next()
+                        .unwrap()
+                        .1
+                } else {
+                    &instances_data[inst_offset..inst_offset + total_instance_slots]
+                };
                 let inst_base = slot * vertex_count;
 
                 let mut decoded_geom = vec![0.0f32; geom_slots.max(1)];
@@ -1854,8 +1874,13 @@ impl Cx {
             item.resident_schema = item.retained_schema;
             item.consumed_instance_id = item.retained_instance_id;
             item.consumed_schema = item.resident_schema;
-            item.consumed_serial=self.textures.1.serials.submitted.load(std::sync::atomic::Ordering::Acquire);
-            item.consumed_uniforms_gen=item.kind.draw_call().map_or(0,|call|call.uniforms_gen);
+            item.consumed_serial = self
+                .textures
+                .1
+                .serials
+                .submitted
+                .load(std::sync::atomic::Ordering::Acquire);
+            item.consumed_uniforms_gen = item.kind.draw_call().map_or(0, |call| call.uniforms_gen);
             if let Some(call) = item.kind.draw_call_mut() {
                 call.instance_dirty = false;
             }
@@ -1955,7 +1980,6 @@ impl Cx {
             if let Some(p) = profile.as_deref_mut() {
                 p.raster_ms += raster_start.elapsed().as_secs_f64() * 1000.0;
             }
-
         }
     }
 }
