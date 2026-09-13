@@ -46,7 +46,7 @@ use crate::{
     makepad_derive_widget::*,
     makepad_draw::*,
     scroll_bar::{ScrollAxis, ScrollBar, ScrollBarAction},
-    scroll_bars::ScrollBars,
+    scroll_bars::{ScrollBars, ScrollExtent},
     view::View,
     widget::*,
 };
@@ -694,6 +694,12 @@ impl ScrollShadowView {
         self.view.redraw(cx);
     }
 
+    /// Where the box is scrolled to and how far it can go. Read from the
+    /// bars out here, because the inner view has none of its own.
+    pub fn scroll_extent(&self) -> ScrollExtent {
+        self.bars.extent()
+    }
+
     /// The four fades, drawn inside the scroll turtle so the turtle's own clip
     /// holds them to the visible box.
     fn draw_fades(&mut self, cx: &mut Cx2d) {
@@ -822,6 +828,11 @@ impl ScrollShadowViewRef {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_scroll(cx, pos);
         }
+    }
+
+    /// See [`ScrollShadowView::scroll_extent`]. Zero on every axis when empty.
+    pub fn scroll_extent(&self) -> ScrollExtent {
+        self.borrow().map(|inner| inner.scroll_extent()).unwrap_or_default()
     }
 }
 

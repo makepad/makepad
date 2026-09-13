@@ -344,7 +344,7 @@ pub use crate::{
     rubber_view::*,
     // Ordered to match script_mod calls
     scroll_bar::ScrollBar,
-    scroll_bars::ScrollBars,
+    scroll_bars::{ScrollBars, ScrollExtent},
     scroll_shadow::*,
     slide_panel::*,
     number_field::*,

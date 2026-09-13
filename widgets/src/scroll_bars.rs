@@ -46,6 +46,39 @@ pub enum ScrollBarsAction {
     None,
 }
 
+/// Where a scrolling box is and how far it can go, per axis, in the box's
+/// own points. An axis that does not scroll reads zero on all three, so a
+/// caller asking "is there more below" never has to know which axes the box
+/// was built with.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ScrollExtent {
+    /// How far the content has been moved under the box.
+    pub pos: Vec2d,
+    /// The size of everything the box holds.
+    pub total: Vec2d,
+    /// The size of the part the box shows.
+    pub visible: Vec2d,
+}
+
+impl ScrollExtent {
+    /// The furthest the offset can go on each axis, never negative: content
+    /// smaller than its box cannot be scrolled at all.
+    pub fn max(&self) -> Vec2d {
+        dvec2(
+            (self.total.x - self.visible.x).max(0.0),
+            (self.total.y - self.visible.y).max(0.0),
+        )
+    }
+
+    /// True when the vertical axis can scroll and is within `slack` of its
+    /// end. Content that fits is never "at the end": there is no end to have
+    /// reached, and a follower would otherwise light the last row on a short
+    /// page before the reader got anywhere.
+    pub fn at_end_y(&self, slack: f64) -> bool {
+        self.total.y - self.visible.y > 0.5 && self.pos.y >= self.total.y - self.visible.y - slack
+    }
+}
+
 impl ScrollBars {
     pub fn set_scroll_x(&mut self, _cx: &mut Cx, value: f64) {
         self.scroll.x = value;
@@ -251,6 +284,27 @@ impl ScrollBars {
         changed
     }
 
+    /// Read straight from the two bars. `get_scroll_view_total` and
+    /// `get_scroll_view_visible` take `&mut self` for no reason, and this is
+    /// read from places that only hold `&self`: a snapshot, a follower
+    /// polling the page it tracks.
+    pub fn extent(&self) -> ScrollExtent {
+        let axis = |on: bool, bar: &ScrollBar, pos: f64| {
+            if on {
+                (pos, bar.get_scroll_view_total(), bar.get_scroll_view_visible())
+            } else {
+                (0.0, 0.0, 0.0)
+            }
+        };
+        let (pos_x, total_x, visible_x) = axis(self.show_scroll_x, &self.scroll_bar_x, self.scroll.x);
+        let (pos_y, total_y, visible_y) = axis(self.show_scroll_y, &self.scroll_bar_y, self.scroll.y);
+        ScrollExtent {
+            pos: dvec2(pos_x, pos_y),
+            total: dvec2(total_x, total_y),
+            visible: dvec2(visible_x, visible_y),
+        }
+    }
+
     pub fn get_scroll_view_total(&mut self) -> Vec2d {
         Vec2d {
             x: if self.show_scroll_x {
@@ -436,5 +490,48 @@ mod style_reapply_tests {
                 assert_eq!(bars.scroll_bar_x.get_scroll_pos(), 0.0, "{}", style.id());
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod extent_tests {
+    use super::*;
+
+    /// The extent is what the bars hold, and an axis the box was built
+    /// without reads zero rather than whatever its idle bar last kept.
+    #[test]
+    fn an_extent_reads_what_the_bars_hold() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let value = crate::script_eval!(vm, {use mod.widgets.* ScrollBars{show_scroll_x: false}});
+            let mut bars = ScrollBars::script_from_value(vm, value);
+            vm.with_cx_mut(|cx| {
+                bars.set_scroll_pos_no_clip(cx, dvec2(0.0, 120.0));
+                bars.scroll_bar_y.set_scroll_view_total(cx, 900.0);
+                // A hidden axis is never read, whatever its bar was told.
+                bars.scroll_bar_x.set_scroll_view_total(cx, 700.0);
+                bars.set_scroll_x(cx, 40.0);
+            });
+            let extent = bars.extent();
+            assert_eq!(extent.pos, dvec2(0.0, 120.0));
+            assert_eq!(extent.total, dvec2(0.0, 900.0));
+            assert_eq!(extent.visible.x, 0.0, "the hidden axis reads zero");
+        });
+
+        let extent = |pos: f64, total: f64, visible: f64| ScrollExtent {
+            pos: dvec2(0.0, pos),
+            total: dvec2(0.0, total),
+            visible: dvec2(0.0, visible),
+        };
+        let fits = extent(0.0, 300.0, 400.0);
+        assert!(!fits.at_end_y(8.0), "content that fits has no end to reach");
+        assert_eq!(fits.max(), dvec2(0.0, 0.0), "and nowhere to scroll to");
+        let middle = extent(250.0, 1000.0, 400.0);
+        assert!(!middle.at_end_y(8.0));
+        assert_eq!(middle.max(), dvec2(0.0, 600.0));
+        assert!(extent(600.0, 1000.0, 400.0).at_end_y(0.0), "at the end");
+        assert!(extent(594.0, 1000.0, 400.0).at_end_y(8.0), "within the slack");
+        assert!(!extent(590.0, 1000.0, 400.0).at_end_y(8.0), "short of the slack");
     }
 }
