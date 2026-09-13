@@ -231,6 +231,40 @@ pub fn format_folded(folded: &BTreeSet<String>) -> String {
     folded.iter().map(String::as_str).collect::<Vec<_>>().join(",")
 }
 
+/// The closed folders a settings file holds, as folders of the tree drawn
+/// now. `moved` is the registry's table of old keys and the keys they went
+/// to, and `live` every folder the tree draws.
+///
+/// A folder the tree still draws stays closed. A component folder whose
+/// pages moved is closed where they went: its old path is the first two
+/// segments of the old keys under it, and the new one the first two
+/// segments of the keys they lead to. It is forgotten when those pages
+/// went to more than one folder, or to a component with one page, which
+/// has no folder to close; so is any other path the tree does not draw.
+pub fn carry_folded(
+    folded: &BTreeSet<String>,
+    moved: &[(&str, &str)],
+    live: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    fn component_path(key: &str) -> &str {
+        key.rsplit_once('/').map_or(key, |(path, _)| path)
+    }
+    folded
+        .iter()
+        .filter_map(|path| {
+            if live.contains(path) {
+                return Some(path.clone());
+            }
+            let mut went = moved
+                .iter()
+                .filter(|(old, _)| component_path(old) == path)
+                .map(|(_, new)| component_path(new));
+            let first = went.next()?;
+            (went.all(|other| other == first) && live.contains(first)).then(|| first.to_string())
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,5 +382,28 @@ mod tests {
         assert!(parse_folded("").is_empty());
         assert_eq!(format_folded(&BTreeSet::new()), "");
         assert!(!line.contains('\t') && !line.contains('\n'));
+    }
+
+    #[test]
+    fn a_closed_folder_follows_its_pages_and_a_folder_that_is_gone_is_forgotten() {
+        let moved = [
+            ("old/pair/overview", "new/pair/overview"),
+            ("old/pair/more", "new/pair/more"),
+            ("old/split/one", "new/pair/overview"),
+            ("old/split/two", "new/other/overview"),
+            ("old/folded/overview", "new/single/overview"),
+        ];
+        let live: BTreeSet<String> =
+            ["old", "new", "new/pair", "new/other", "kept/folder"].iter().map(|s| s.to_string()).collect();
+        let carry = |line: &str| format_folded(&carry_folded(&parse_folded(line), &moved, &live));
+        assert_eq!(carry("old/pair"), "new/pair");
+        assert_eq!(carry("kept/folder,old"), "kept/folder,old");
+        // Its pages went two ways: there is no one folder to close.
+        assert_eq!(carry("old/split"), "");
+        // Its pages went to a component with one page, which has no folder.
+        assert_eq!(carry("old/folded"), "");
+        assert_eq!(carry("never/was,gone"), "");
+        assert_eq!(carry("old/pair,new/pair"), "new/pair");
+        assert_eq!(carry(""), "");
     }
 }

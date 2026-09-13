@@ -175,12 +175,14 @@ fn folder_id(path: &str) -> LiveId {
 
 /// The slug paths of the folders a story sits under: its category, and
 /// its component when the component has a folder at all. A component
-/// with one page has none: the row IS the page.
+/// with one page has none: the row IS the page. A key that moved sits
+/// under the folders of the page it moved to, so the path is split from
+/// the live key rather than from the key asked about.
 fn folders_of(key: &str) -> Vec<String> {
     let Some(story) = registry::find(key) else {
         return Vec::new();
     };
-    let mut segments = key.splitn(3, '/');
+    let mut segments = story.key.splitn(3, '/');
     let (Some(category), Some(component)) = (segments.next(), segments.next()) else {
         return Vec::new();
     };
@@ -192,6 +194,12 @@ fn folders_of(key: &str) -> Vec<String> {
         out.push(format!("{category}/{component}"));
     }
     out
+}
+
+/// Every folder the tree draws, by slug path: each category, and each
+/// component with more than one page.
+fn live_folders() -> BTreeSet<String> {
+    registry::all().flat_map(|story| folders_of(story.key)).collect()
 }
 
 impl StoryNavigator {
@@ -305,9 +313,16 @@ impl StoryNavigator {
     }
 
     /// Close the folders a previous run left closed. Told before the
-    /// first draw, which is the draw that sets every folder.
+    /// first draw, which is the draw that sets every folder. A folder
+    /// whose pages moved is closed where they went, and one the tree no
+    /// longer draws is forgotten; [`Self::folded`] then says what is
+    /// really closed, for the app to write down.
     pub fn set_folded(&mut self, cx: &mut Cx, folded: &str) {
-        self.closed = settings::parse_folded(folded);
+        self.closed = settings::carry_folded(
+            &settings::parse_folded(folded),
+            registry::MOVED,
+            &live_folders(),
+        );
         self.seen.clear();
         self.file_tree.redraw(cx);
     }
@@ -316,6 +331,9 @@ impl StoryNavigator {
     /// Returns whether a closed folder had to be opened to show it, so
     /// the app knows the closed set moved.
     pub fn select(&mut self, cx: &mut Cx, key: &str) -> bool {
+        // A key that moved selects the row of the page it moved to: row
+        // ids are built from live keys.
+        let key = registry::find(key).map_or(key, |story| story.key);
         self.selected = Some(key.to_string());
         let mut unfolded = false;
         for path in folders_of(key) {
@@ -666,5 +684,44 @@ mod tests {
             }
         }
         assert!(folders_of("no/such/story").is_empty());
+    }
+
+    #[test]
+    fn an_old_key_sits_under_the_folders_of_the_page_it_moved_to() {
+        for (old, new) in registry::MOVED {
+            assert!(!folders_of(old).is_empty(), "{old}");
+            assert_eq!(folders_of(old), folders_of(new), "{old} -> {new}");
+        }
+    }
+
+    #[test]
+    fn closed_folders_from_before_the_regroup_close_where_their_pages_went() {
+        let live = live_folders();
+        let carry = |line: &str| {
+            settings::format_folded(&settings::carry_folded(
+                &settings::parse_folded(line),
+                registry::MOVED,
+                &live,
+            ))
+        };
+        assert_eq!(carry("containers/layout"), "layout/layout");
+        assert_eq!(carry("containers/glasssurfaces"), "containers/glass");
+        assert_eq!(carry("inputs/glass"), "containers/glass");
+        assert_eq!(carry("data-display/svg,data-display/vector"), "media/svg");
+        assert_eq!(carry("data-display/tree"), "collections/tree");
+        // Components that are a single row now have no folder to close.
+        assert_eq!(carry("actions/button,inputs/checkbox,data-display/datagrid,media/icon"), "");
+        // Folders that did not move stay closed, and so do categories.
+        assert_eq!(carry("containers,foundations/colour,inputs/rotary"), "containers,foundations/colour,inputs/rotary");
+        // Nothing an earlier build wrote can close a new category, so they
+        // start open; and every folder carried over is one the tree draws.
+        assert_eq!(carry(""), "");
+        let everything: Vec<String> = registry::MOVED
+            .iter()
+            .map(|(old, _)| old.rsplit_once('/').unwrap().0.to_string())
+            .collect();
+        for path in settings::parse_folded(&carry(&everything.join(","))) {
+            assert!(live.contains(&path), "{path} is no folder");
+        }
     }
 }
