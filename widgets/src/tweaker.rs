@@ -1071,6 +1071,9 @@ pub struct TweakStroke {
 pub(crate) struct TweakSession {
     /// Guards against N windows toggling N times on one Shift+F10 event.
     toggle_event_id: u64,
+    /// The same guard for an arrow key walking the selection: every window's
+    /// inspector hears the key, and one press is one step.
+    walk_event_id: u64,
     /// The pinned selection (click pins; remote applies re-pin by path).
     pinned: Option<TweakPick>,
     hover: Option<TweakPick>,
@@ -5736,19 +5739,22 @@ fn readable_paths(cx: &Cx) -> Vec<(u64, String)> {
     rows.iter().map(|row| row.uid).zip(full).collect()
 }
 
-/// The app's rows without one subtree: the inspector's own. Its panel is in
-/// the widget tree so a remote /snap can drive its fields, but a Tree tab
-/// that listed the panel would be listing itself. `flat_tree` is depth-first,
-/// so the subtree is the root's row and every row after it that sits deeper,
-/// up to the next row that does not; `has_children` is re-read from what is
-/// left, since the panel's parent may have had nothing else in it.
+/// The app's rows without the inspectors: every inspector's subtree, in every
+/// window. A panel is in the widget tree so a remote /snap can drive its
+/// fields, but a Tree tab that listed one would be listing itself — and every
+/// window carries an inspector of its own, so the one hosting this read is
+/// not the only panel in the tree. `flat_tree` is depth-first, so a subtree
+/// is its root's row and every row after it that sits deeper, up to the next
+/// row that does not; `has_children` is re-read from what is left, since a
+/// panel's parent may have had nothing else in it.
 ///
-/// The root is found by its own uid, or failing that as the parent of a row
-/// with `inside`'s uid: the inspector reads its tree while it is drawing or
-/// handling an event, when it is itself borrowed and `flat_tree` can only
-/// call it uid 0 — but the panel it built is not, and sits right under it.
-/// 0 is never a key.
-fn rows_without_subtree(
+/// A root is any row `flat_tree` marked as an inspector by its type. The
+/// hosting one needs more: the inspector reads its tree while it is drawing
+/// or handling an event, when it is itself borrowed and `flat_tree` can read
+/// neither its type nor its uid (0). So it is also found by its own uid,
+/// `root`, or failing that as the parent of a row with `inside`'s uid — the
+/// panel it built is not borrowed, and sits right under it. 0 is never a key.
+fn rows_without_inspectors(
     rows: Vec<crate::widget_tree::FlatTreeRow>,
     root: u64,
     inside: u64,
@@ -5762,20 +5768,23 @@ fn rows_without_subtree(
         let depth = rows[child].depth;
         rows[..child].iter().rposition(|row| row.depth + 1 == depth)
     };
-    let Some(at) = by_root.or_else(by_child) else {
-        return rows;
-    };
-    let depth = rows[at].depth;
-    let end = rows[at + 1..]
-        .iter()
-        .position(|row| row.depth <= depth)
-        .map_or(rows.len(), |k| at + 1 + k);
-    let mut out: Vec<_> = rows
-        .into_iter()
-        .enumerate()
-        .filter(|(i, _)| *i < at || *i >= end)
-        .map(|(_, row)| row)
-        .collect();
+    let host = by_root.or_else(by_child);
+    let mut out = Vec::with_capacity(rows.len());
+    // The depth of the subtree being cut, while inside one.
+    let mut cutting: Option<u32> = None;
+    for (i, row) in rows.into_iter().enumerate() {
+        if let Some(depth) = cutting {
+            if row.depth > depth {
+                continue;
+            }
+            cutting = None;
+        }
+        if row.inspector || host == Some(i) {
+            cutting = Some(row.depth);
+            continue;
+        }
+        out.push(row);
+    }
     for i in 0..out.len() {
         let next_depth = out.get(i + 1).map(|next| next.depth);
         out[i].has_children = next_depth == Some(out[i].depth + 1);
@@ -10860,11 +10869,27 @@ impl Tweaker {
     /// the previous/next sibling. Only ever reached with something selected
     /// — with nothing selected the arrows still orbit the exploded view.
     fn walk_selection(&mut self, cx: &mut Cx, dir: KeyCode) {
-        let Some(sel) = session().lock().unwrap().pinned.clone() else {
+        // Every window carries an inspector and each one hears the key, so
+        // the first to hear it walks and the rest stand down. One that has
+        // never drawn its panel leaves the walk to one that has: it reads
+        // the tree while it is borrowed, and only its panel can find its own
+        // row in it.
+        if self.sidebar.is_none() {
             return;
+        }
+        let sel = {
+            let mut s = session().lock().unwrap();
+            if s.walk_event_id == cx.event_id() {
+                return;
+            }
+            s.walk_event_id = cx.event_id();
+            let Some(sel) = s.pinned.clone() else {
+                return;
+            };
+            sel
         };
-        // The same hierarchy the Tree tab shows: the panel is not in it.
-        let rows = rows_without_subtree(
+        // The same hierarchy the Tree tab shows: no inspector is in it.
+        let rows = rows_without_inspectors(
             cx.widget_tree().flat_tree(cx),
             self.uid.0,
             self.sidebar_uid(),
@@ -12198,7 +12223,7 @@ impl Tweaker {
             // Tree tab data: refresh on generation change.
             if tab == PanelTab::Tree && self.tree_rows_gen != self.rows_gen.wrapping_add(1)
             {
-                self.tree_rows = rows_without_subtree(
+                self.tree_rows = rows_without_inspectors(
                     cx.widget_tree().flat_tree(cx),
                     self.uid.0,
                     self.sidebar_uid(),
@@ -17229,10 +17254,22 @@ line two");
                 ty: "View".to_string(),
                 depth,
                 has_children,
+                inspector: false,
+            }
+        }
+        fn inspector(uid: u64, depth: u32) -> crate::widget_tree::FlatTreeRow {
+            crate::widget_tree::FlatTreeRow {
+                name: "tweaker".to_string(),
+                ty: "Tweaker".to_string(),
+                inspector: true,
+                ..row(uid, depth, true)
             }
         }
         let uids = |rows: &[crate::widget_tree::FlatTreeRow]| {
             rows.iter().map(|row| row.uid).collect::<Vec<_>>()
+        };
+        let has_children = |rows: &[crate::widget_tree::FlatTreeRow]| {
+            rows.iter().map(|row| row.has_children).collect::<Vec<_>>()
         };
         // window(1) > body(2) > label(3); window > tweaker(4) > sidebar(5) >
         // tab(6); window > after(7) > deep(8): the branch after the panel
@@ -17247,27 +17284,83 @@ line two");
             row(7, 1, true),
             row(8, 2, false),
         ];
-        let out = rows_without_subtree(rows.clone(), 4, 5);
+        let out = rows_without_inspectors(rows.clone(), 4, 5);
         assert_eq!(uids(&out), vec![1, 2, 3, 7, 8]);
-        assert_eq!(
-            out.iter().map(|row| row.has_children).collect::<Vec<_>>(),
-            vec![true, true, false, true, false]
-        );
+        assert_eq!(has_children(&out), vec![true, true, false, true, false]);
         // The inspector borrowed while it reads: its own row says uid 0, and
         // the panel under it (5) is what finds it.
         let mut borrowed = rows.clone();
         borrowed[3].uid = 0;
-        assert_eq!(uids(&rows_without_subtree(borrowed, 4, 5)), vec![1, 2, 3, 7, 8]);
+        assert_eq!(uids(&rows_without_inspectors(borrowed, 4, 5)), vec![1, 2, 3, 7, 8]);
         // The panel as its parent's only child: the parent is a leaf now.
-        let out = rows_without_subtree(vec![row(1, 0, true), row(4, 1, true), row(5, 2, false)], 4, 5);
+        let out = rows_without_inspectors(vec![row(1, 0, true), row(4, 1, true), row(5, 2, false)], 4, 5);
         assert_eq!(uids(&out), vec![1]);
         assert!(!out[0].has_children);
         // Not in the tree yet (the panel is built on first open): untouched.
-        assert_eq!(uids(&rows_without_subtree(rows.clone(), 99, 98)), uids(&rows));
+        assert_eq!(uids(&rows_without_inspectors(rows.clone(), 99, 98)), uids(&rows));
         // 0 is never a key: a borrowed root row and no panel take nothing out.
         let mut unread = rows.clone();
         unread[0].uid = 0;
-        assert_eq!(uids(&rows_without_subtree(unread.clone(), 0, 0)), uids(&unread));
+        assert_eq!(uids(&rows_without_inspectors(unread.clone(), 0, 0)), uids(&unread));
+
+        // Two windows, an inspector in each. out_window(10) > stage(11) >
+        // deck(12); out_window > tweaker(13) > sidebar(14) > tab(15);
+        // main_window(20) > body(21) > tweaker(22, an app View that only
+        // shares the name); main_window > tweaker(23) > sidebar(24) >
+        // filter(25); main_window > footer(26), after the inspector.
+        let windows = vec![
+            row(10, 0, true),
+            row(11, 1, true),
+            row(12, 2, false),
+            inspector(13, 1),
+            row(14, 2, true),
+            row(15, 3, false),
+            row(20, 0, true),
+            row(21, 1, true),
+            crate::widget_tree::FlatTreeRow { name: "tweaker".to_string(), ..row(22, 2, false) },
+            inspector(23, 1),
+            row(24, 2, true),
+            row(25, 3, false),
+            row(26, 1, false),
+        ];
+        let kept = vec![10, 11, 12, 20, 21, 22, 26];
+        let kept_children = vec![true, true, false, true, true, false, false];
+        // Opened on the main window: its own inspector is borrowed, so its
+        // row reads uid 0 and no type, and the one in the other window is
+        // known only by its type.
+        let mut from_main = windows.clone();
+        from_main[9].uid = 0;
+        from_main[9].inspector = false;
+        let out = rows_without_inspectors(from_main, 23, 24);
+        assert_eq!(uids(&out), kept);
+        assert_eq!(has_children(&out), kept_children);
+        // Opened on the output window: the same rows go, the other way round.
+        let mut from_output = windows.clone();
+        from_output[3].uid = 0;
+        from_output[3].inspector = false;
+        let out = rows_without_inspectors(from_output, 13, 14);
+        assert_eq!(uids(&out), kept);
+        assert_eq!(has_children(&out), kept_children);
+        // Read between events, nothing borrowed and no host named: the type
+        // alone takes both out.
+        let out = rows_without_inspectors(windows.clone(), 0, 0);
+        assert_eq!(uids(&out), kept);
+        assert_eq!(has_children(&out), kept_children);
+        // An inspector that is its window's only child leaves a leaf window,
+        // and the next window's rows are untouched.
+        let out = rows_without_inspectors(
+            vec![
+                row(30, 0, true),
+                inspector(31, 1),
+                row(32, 2, false),
+                row(40, 0, true),
+                row(41, 1, false),
+            ],
+            0,
+            0,
+        );
+        assert_eq!(uids(&out), vec![30, 40, 41]);
+        assert_eq!(has_children(&out), vec![false, true, false]);
     }
 
     fn layout_ask(reference: &str, from: &str, to: &str) -> TweakConvert {
