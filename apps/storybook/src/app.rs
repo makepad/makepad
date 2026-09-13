@@ -170,6 +170,11 @@ impl App {
             log!("storybook: no story {}", key);
             return;
         };
+        // An old key opens the page its content went to; the settings, the
+        // navigator and the remote state all take the live key from here on.
+        if story.key != key {
+            log!("storybook: {} has moved to {}", key, story.key);
+        }
         self.current = Some(story.key.to_string());
         self.ui.story_canvas(cx, ids!(canvas)).open(cx, story.dsl);
         // Selecting the row opens the folders over it; one the person
@@ -314,7 +319,10 @@ impl MatchEvent for App {
         navigator.set_baseline(cx, &baseline);
         self.refresh_new_days(cx);
         // Before the first draw, which is the one that sets the folders.
+        // Folders a moved page left behind are closed where it went, and
+        // the line is written again when that changed it.
         navigator.set_folded(cx, &settings::get(settings::FOLDED).unwrap_or_default());
+        self.persist_folds(cx);
         // Filtering unless the person turned it off last time. Told to
         // the switch as well as the navigator, for the reason the
         // new-only switch below says at length.
