@@ -75,6 +75,7 @@ pub mod window_chrome;
 pub mod drop_controls;
 pub mod tabs;
 pub mod nav_list;
+pub mod hamburger_menu;
 pub mod breadcrumb;
 pub mod pagination;
 pub mod stacknavigation;
@@ -197,6 +198,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     drop_controls::script_mod(vm);
     tabs::script_mod(vm);
     nav_list::script_mod(vm);
+    hamburger_menu::script_mod(vm);
     breadcrumb::script_mod(vm);
     pagination::script_mod(vm);
     stacknavigation::script_mod(vm);
@@ -327,6 +329,7 @@ pub fn tables() -> &'static [&'static [Story]] {
         drop_controls::STORIES,
         tabs::STORIES,
         nav_list::STORIES,
+        hamburger_menu::STORIES,
         breadcrumb::STORIES,
         pagination::STORIES,
         stacknavigation::STORIES,

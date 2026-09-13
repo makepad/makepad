@@ -234,6 +234,7 @@ mod tests {
             ("switch", "CheckBox"),
             ("segmented", "ButtonGroup"),
             // The pages added with the menus and the sliced picture.
+            ("hamburger menu", "HamburgerMenu"),
             ("nested rings", "PieMenu"),
             ("context ring", "PieMenu"),
             ("9 slice", "Image"),

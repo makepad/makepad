@@ -1181,6 +1181,23 @@
    ]
   },
   {
+   "component": "HamburgerMenu",
+   "aka": [
+    "hamburger menu",
+    "burger menu",
+    "mobile menu",
+    "burger button",
+    "collapsed navigation",
+    "mobile navigation",
+    "navigation drawer"
+   ],
+   "does": [
+    "fold navigation into a button",
+    "destinations in a drawer",
+    "drop panel under the button"
+   ]
+  },
+  {
    "component": "Html",
    "aka": [
     "markup",
