@@ -1905,7 +1905,10 @@
     "ring of actions",
     "marking wheel",
     "gesture ring",
-    "flick to choose"
+    "flick to choose",
+    "nested ring menu",
+    "context ring menu",
+    "frosted ring menu"
    ],
    "does": [
     "opens around the point it was raised at",
@@ -1920,7 +1923,12 @@
     "angles clockwise from straight up",
     "pinned so it stays up as a control",
     "labels drawn at their measured width",
-    "no nested rings",
+    "nested rings",
+    "an outer ring opens the way its parent points",
+    "one flick picks two or three rings deep",
+    "right press or long touch opens the rings",
+    "frosted rings show the page behind",
+    "three rings at most",
     "it remembers nothing"
    ]
   },
@@ -2128,6 +2136,15 @@
     "section header",
     "property rows"
    ]
+  },
+  {
+   "component": "RadialMenu",
+   "aka": [
+    "radial menu",
+    "ring menu",
+    "nested ring"
+   ],
+   "does": []
   },
   {
    "component": "RadioButton",
