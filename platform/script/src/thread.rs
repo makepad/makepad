@@ -7,7 +7,7 @@ use crate::trap::*;
 use crate::value::*;
 use crate::*;
 
-#[derive(Debug, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct StackBases {
     pub loops: usize,
     pub tries: usize,
@@ -178,6 +178,16 @@ impl ScriptThread {
         self.slots.truncate(bases.slots);
     }
 
+    /// Loop back-edge cleanup: discard iteration-local try frames, operand
+    /// values and call-builder (`mes`) state. The loop frame itself and the
+    /// scopes are left to the loop's own iteration-scope reset so a plain
+    /// `loop` keeps its iteration scope and `for` can reuse its scope object.
+    pub fn truncate_loop_iteration_bases(&mut self, bases: StackBases) {
+        self.tries.truncate(bases.tries);
+        self.stack.truncate(bases.stack);
+        self.mes.truncate(bases.mes);
+    }
+
     /// Read a slot of the current frame. Bounds-checked: the parser only
     /// emits in-frame indices, but stay safe and trap instead of panicking.
     #[inline]
@@ -294,6 +304,15 @@ impl ScriptThread {
             .last()
             .map(|call| self.tries.len() > call.bases.tries)
             .unwrap_or(false)
+    }
+
+    /// Whether any active call frame (not just the innermost) owns a try
+    /// frame, so an error in a nested script call can unwind to it.
+    pub(crate) fn call_stack_has_try(&self) -> bool {
+        self.calls
+            .iter()
+            .rev()
+            .any(|call| self.tries.len() > call.bases.tries)
     }
 
     // lets resolve an id to a ScriptValue
