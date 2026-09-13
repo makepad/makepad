@@ -60,45 +60,42 @@ pub mod color;
 pub mod upload;
 pub mod form;
 pub mod drag_number;
-pub mod badge;
-pub mod placeholder;
-pub mod checkbox_more;
+pub mod checkbox;
+pub mod radio_group;
+pub mod select;
+pub mod combobox;
+pub mod chip;
+pub mod wheel_picker;
+pub mod column_picker;
+pub mod svg_select;
 pub mod alert;
+pub mod toast;
 pub mod progress;
 pub mod level_meter;
 pub mod spinner;
-pub mod chip;
+pub mod placeholder;
+pub mod empty_state;
+pub mod badge;
 pub mod menu;
 pub mod dialog;
 pub mod drawer;
 pub mod overlay;
 pub mod popover;
-pub mod toast;
-pub mod select;
 pub mod tip;
-pub mod checkbox;
-pub mod combobox;
-pub mod dropdown;
-pub mod radio_group;
 pub mod kbd;
-pub mod wheel_picker;
 pub mod tree;
 pub mod filetree;
 pub mod list_item;
 pub mod avatar;
 pub mod table;
-pub mod empty_state;
 pub mod timeline;
 pub mod chat;
-pub mod column_picker;
 pub mod command_palette;
 pub mod pie_menu;
 pub mod chart_more;
 pub mod toolbar;
 pub mod kanban;
-pub mod svg_select;
 pub mod tour;
-pub mod radiobutton;
 pub mod breadcrumb;
 pub mod chart;
 pub mod lists;
@@ -183,29 +180,37 @@ pub fn script_mod(vm: &mut ScriptVm) {
     upload::script_mod(vm);
     form::script_mod(vm);
     drag_number::script_mod(vm);
+    // 8 Selection
     checkbox::script_mod(vm);
+    radio_group::script_mod(vm);
+    select::script_mod(vm);
     combobox::script_mod(vm);
-    dropdown::script_mod(vm);
-    tour::script_mod(vm);
+    chip::script_mod(vm);
+    wheel_picker::script_mod(vm);
+    column_picker::script_mod(vm);
     svg_select::script_mod(vm);
+    // 11 Feedback
+    alert::script_mod(vm);
+    toast::script_mod(vm);
+    progress::script_mod(vm);
+    level_meter::script_mod(vm);
+    spinner::script_mod(vm);
+    placeholder::script_mod(vm);
+    empty_state::script_mod(vm);
+    tour::script_mod(vm);
     kanban::script_mod(vm);
     toolbar::script_mod(vm);
     chart_more::script_mod(vm);
     pie_menu::script_mod(vm);
     command_palette::script_mod(vm);
-    column_picker::script_mod(vm);
     chat::script_mod(vm);
     timeline::script_mod(vm);
-    empty_state::script_mod(vm);
     table::script_mod(vm);
     avatar::script_mod(vm);
     list_item::script_mod(vm);
     tree::script_mod(vm);
     filetree::script_mod(vm);
-    wheel_picker::script_mod(vm);
     kbd::script_mod(vm);
-    radio_group::script_mod(vm);
-    radiobutton::script_mod(vm);
     breadcrumb::script_mod(vm);
     chart::script_mod(vm);
     lists::script_mod(vm);
@@ -223,22 +228,13 @@ pub fn script_mod(vm: &mut ScriptVm) {
     tile_list::script_mod(vm);
     item_grid::script_mod(vm);
     log_list::script_mod(vm);
-    spinner::script_mod(vm);
     badge::script_mod(vm);
-    placeholder::script_mod(vm);
-    checkbox_more::script_mod(vm);
-    chip::script_mod(vm);
     menu::script_mod(vm);
-    select::script_mod(vm);
     tip::script_mod(vm);
     dialog::script_mod(vm);
     drawer::script_mod(vm);
     overlay::script_mod(vm);
     popover::script_mod(vm);
-    toast::script_mod(vm);
-    alert::script_mod(vm);
-    progress::script_mod(vm);
-    level_meter::script_mod(vm);
 }
 
 /// Every story table, in navigator order: the categories run in the order
@@ -310,29 +306,37 @@ pub fn tables() -> &'static [&'static [Story]] {
         upload::STORIES,
         form::STORIES,
         drag_number::STORIES,
+        // 8 Selection
         checkbox::STORIES,
+        radio_group::STORIES,
+        select::STORIES,
         combobox::STORIES,
-        dropdown::STORIES,
-        tour::STORIES,
+        chip::STORIES,
+        wheel_picker::STORIES,
+        column_picker::STORIES,
         svg_select::STORIES,
+        // 11 Feedback
+        alert::STORIES,
+        toast::STORIES,
+        progress::STORIES,
+        level_meter::STORIES,
+        spinner::STORIES,
+        placeholder::STORIES,
+        empty_state::STORIES,
+        tour::STORIES,
         kanban::STORIES,
         toolbar::STORIES,
         chart_more::STORIES,
         pie_menu::STORIES,
         command_palette::STORIES,
-        column_picker::STORIES,
         chat::STORIES,
         timeline::STORIES,
-        empty_state::STORIES,
         table::STORIES,
         avatar::STORIES,
         list_item::STORIES,
         tree::STORIES,
         filetree::STORIES,
-        wheel_picker::STORIES,
         kbd::STORIES,
-        radio_group::STORIES,
-        radiobutton::STORIES,
         breadcrumb::STORIES,
         chart::STORIES,
         lists::STORIES,
@@ -350,22 +354,13 @@ pub fn tables() -> &'static [&'static [Story]] {
         tile_list::STORIES,
         item_grid::STORIES,
         log_list::STORIES,
-        spinner::STORIES,
         badge::STORIES,
-        placeholder::STORIES,
-        checkbox_more::STORIES,
-        chip::STORIES,
         menu::STORIES,
-        select::STORIES,
         tip::STORIES,
         dialog::STORIES,
         drawer::STORIES,
         overlay::STORIES,
         popover::STORIES,
-        toast::STORIES,
-        alert::STORIES,
-        progress::STORIES,
-        level_meter::STORIES,
     ]
 }
 

@@ -151,8 +151,8 @@ fn wheel_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
 }
 
 pub const STORIES: &[Story] = &[Story {
-    key: "inputs/wheelpicker/overview",
-    category: "Inputs",
+    key: "selection/wheelpicker/overview",
+    category: "Selection",
     component: "WheelPicker",
     also: &["WheelPickerFlat"],
     name: "Overview",

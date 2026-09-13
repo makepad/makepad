@@ -1,5 +1,7 @@
 //! Alerts, banners, inline tips and callouts: the message that sits in the
-//! page. One overview of every shape and a controlled instance.
+//! page. One overview of every shape, a controlled instance, and the host
+//! that shows one banner at a time.
+use crate::makepad_widgets::alert::AlertIntent;
 use crate::makepad_widgets::*;
 use crate::registry::{Control, ControlKind, Story};
 
@@ -17,8 +19,6 @@ script_mod! {
     }
 
     mod.stories.AlertOverview = StoryPage{
-        StoryHeading{text: "Four intents, three appearances"}
-        StoryNote{text: "The intent picks the palette; the appearance decides how the face wears it. Light tints, Filled paints, Outline strokes."}
         StoryHeading{text: "One alert, under the controls"}
         StoryNote{text: "One alert. The controls write its title, description, intent, appearance and close cross; the button brings it back after the cross folds it away."}
         subject := Alert{
@@ -26,6 +26,9 @@ script_mod! {
             description: "A description of what happened and what to do about it."
             closable: true
         }
+
+        StoryHeading{text: "Four intents, three appearances"}
+        StoryNote{text: "The intent picks the palette; the appearance decides how the face wears it. Light tints, Filled paints, Outline strokes."}
         Alert{title: "Information", description: "A neutral note about the state of things.", intent: AlertIntent.Info}
         Alert{title: "Saved", description: "Your changes are on the server.", intent: AlertIntent.Success}
         Alert{title: "Check the date", description: "The end date is before the start date.", intent: AlertIntent.Warning}
@@ -52,13 +55,22 @@ script_mod! {
 
         StoryHeading{text: "Banner"}
         StoryNote{text: "Full width, square corners, one or two actions and no cross: it stays until one of them is taken."}
-        banner := Banner{
+        offline := Banner{
             title: "You are offline"
             description: "Changes are kept on this device until the connection is back."
             intent: AlertIntent.Warning
             action: ButtonFlat{text: "Retry"}
             secondary: LinkLabel{text: "Keep working offline"}
         }
+
+        StoryHeading{text: "A banner that waits for its message"}
+        StoryNote{text: "BannerHost is a place under a toolbar for the one banner that matters now. It holds a single Banner, folded away and taking no room until show fills it with an intent, a title and a line of detail. A second show replaces the text in place, so only the latest message is ever on screen, and dismiss folds it away again."}
+        StoryRow{
+            banner_info := Button{text: "Info"}
+            banner_warn := Button{text: "Warning"}
+            banner_off := Button{text: "Dismiss"}
+        }
+        banner_host := BannerHost{}
 
         StoryHeading{text: "Inline tip"}
         StoryNote{text: "A guide banner: folded guidance, a media slot and a dismiss key the host persists."}
@@ -100,7 +112,7 @@ fn overview_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
     let closables = [
         ids!(closable),
         ids!(with_action),
-        ids!(banner),
+        ids!(offline),
         ids!(tip),
         ids!(callout),
     ];
@@ -123,9 +135,28 @@ fn overview_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
             root.label(cx, ids!(closed_count)).set_text(cx, &text);
         }
     }
-    if root.alert(cx, ids!(banner)).action(actions) {
-        root.alert(cx, ids!(banner)).close(cx);
+    if root.alert(cx, ids!(offline)).action(actions) {
+        root.alert(cx, ids!(offline)).close(cx);
     }
+}
+
+fn banner_host_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
+    let host = root.banner_host(cx, ids!(banner_host));
+    if root.button(cx, ids!(banner_info)).clicked(actions) {
+        host.show(cx, AlertIntent::Info, "Rendering", "Three of nine frames are done.");
+    }
+    if root.button(cx, ids!(banner_warn)).clicked(actions) {
+        host.show(cx, AlertIntent::Warning, "Disconnected", "The device stopped answering.");
+    }
+    if root.button(cx, ids!(banner_off)).clicked(actions) {
+        host.dismiss(cx);
+    }
+}
+
+/// The page's one handler: the alerts, then the banner host.
+fn alert_page_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
+    overview_actions(cx, root, actions);
+    banner_host_actions(cx, root, actions);
 }
 
 pub const STORIES: &[Story] = &[
@@ -133,12 +164,12 @@ pub const STORIES: &[Story] = &[
         key: "feedback/alert/overview",
         category: "Feedback",
         component: "Alert",
-        also: &["Banner", "Callout", "InlineTip"],
+        also: &["Banner", "Callout", "InlineTip", "BannerHost"],
         name: "Overview",
         dsl: "AlertOverview",
         added: "2026-09-05",
         tags: &["controls", "new"],
-        doc: "# Alert\n\nA message that sits in the page: an intent icon, a bold title, a description, an action slot and a close cross on a face coloured by intent. `Alert` is the bevelled standard, `AlertFlat` the plain face, `Banner` the full-width strip, `InlineTip` the guide banner with folded guidance and a media slot, `Callout` the card nudge with an accent bar.\n\nClosing folds the alert away over `motion_medium_1` and raises `Closed`; a tip with a `dismiss_key` also raises `Dismissed(key)`. A click on the widget in an action slot raises `Action`. `open` brings a closed alert back.\n\nWhile the title, the description and the actions fit on one line they share it; when the width shrinks the text stacks and the actions drop under it.",
+        doc: "# Alert\n\nA message that sits in the page: an intent icon, a bold title, a description, an action slot and a close cross on a face coloured by intent. `Alert` is the bevelled standard, `AlertFlat` the plain face, `Banner` the full-width strip, `InlineTip` the guide banner with folded guidance and a media slot, `Callout` the card nudge with an accent bar.\n\nClosing folds the alert away over `motion_medium_1` and raises `Closed`; a tip with a `dismiss_key` also raises `Dismissed(key)`. A click on the widget in an action slot raises `Action`. `open` brings a closed alert back.\n\nWhile the title, the description and the actions fit on one line they share it; when the width shrinks the text stacks and the actions drop under it.\n\n## BannerHost\n\n`BannerHost` is the place under a toolbar for the one banner that matters now. It holds a single `Banner`, folded away and taking no room until `show(cx, intent, title, description)` fills and unfolds it. A second `show` replaces the text in place, so only the latest message is ever on screen; `dismiss` folds it away and `is_showing` asks. `banner()` hands over the inner banner for a host that reads its actions, and the host's `banner` property is where the banner is styled.",
         subject: "closable",
         feature: None,
         controls: &[
@@ -169,6 +200,6 @@ pub const STORIES: &[Story] = &[
             Control { label: "Closable", target: "subject", kind: ControlKind::Bool { prop: "closable", default: true } },
             Control { label: "Disabled", target: "subject", kind: ControlKind::Disabled { default: false } },
         ],
-        on_actions: Some(overview_actions),
+        on_actions: Some(alert_page_actions),
     },
 ];

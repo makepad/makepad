@@ -73,15 +73,15 @@ fn combobox_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
 }
 
 pub const STORIES: &[Story] = &[Story {
-    key: "inputs/combobox/overview",
-    category: "Inputs",
-    component: "ComboBox",
-    also: &["ComboBoxFlat"],
-    name: "Overview",
+    key: "selection/select/combo-box",
+    category: "Selection",
+    component: "Select",
+    also: &["ComboBox", "ComboBoxFlat"],
+    name: "Combo box",
     dsl: "ComboBoxOverview",
     added: "2026-09-10",
     tags: &["new", "dropdown", "autocomplete", "typeahead", "filter", "picker"],
-    doc: "# ComboBox\n\nA text field with a list behind it, over a **closed set**. Typing filters the list; it does not author a value. Only items from `labels` are ever committed, so a host reading `changed` never has to decide what a half-typed word meant.\n\nThat one rule settles the awkward cases. Leaving the field with unmatched text in it restores the last committed item rather than keeping the text or clearing the box, because an empty box is not a member of the set either. Return with no match does nothing and leaves the filter editable, which is the state where the person can still fix a typo.\n\n## Keyboard\n\nKey focus lives in the embedded field the whole time; the highlight in the popup is drawn, not focused.\n\n| Key | Closed | Open |\n|---|---|---|\n| a printable key | opens and filters, highlights the top match | filters, highlights the top match |\n| Down / Up | opens, highlights the first / last item | walks the highlight, wrapping |\n| PageDown / PageUp | caret to start / end | moves a page |\n| Return | nothing | commits the highlight and closes |\n| Escape | restores the committed label | closes and restores it |\n| Tab | moves on | commits the highlight, then moves on |\n\n## Beside the other pickers\n\nUse a `Select` when the list is short enough to read and a filter would be ceremony. Use a `DropDown` when the field should not look editable at all. Use a ComboBox when the list is long enough that typing three letters beats scrolling — a font, a colour, a key signature.\n\n`max_visible_items` sets how tall the popup gets before it scrolls; `no_match_text` is what it says when the filter matches nothing.",
+    doc: "# ComboBox\n\nA text field with a list behind it, over a **closed set**. Typing filters the list; it does not author a value. Only items from `labels` are ever committed, so a host reading `changed` never has to decide what a half-typed word meant.\n\nThat one rule settles the awkward cases. Leaving the field with unmatched text in it restores the last committed item rather than keeping the text or clearing the box, because an empty box is not a member of the set either. Return with no match does nothing and leaves the filter editable, which is the state where the person can still fix a typo.\n\n## Keyboard\n\nKey focus lives in the embedded field the whole time; the highlight in the popup is drawn, not focused.\n\n| Key | Closed | Open |\n|---|---|---|\n| a printable key | opens and filters, highlights the top match | filters, highlights the top match |\n| Down / Up | opens, highlights the first / last item | walks the highlight, wrapping |\n| PageDown / PageUp | caret to start / end | moves a page |\n| Return | nothing | commits the highlight and closes |\n| Escape | restores the committed label | closes and restores it |\n| Tab | moves on | commits the highlight, then moves on |\n\n## The popup\n\n`max_visible_items` sets how tall the popup gets before it scrolls; `no_match_text` is what it says when the filter matches nothing.\n\nThe Select overview says when a combo box is the one to reach for, rather than a select, a multi-select or a dropdown.",
     subject: "subject",
     feature: None,
     controls: &[],

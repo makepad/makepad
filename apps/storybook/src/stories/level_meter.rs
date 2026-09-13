@@ -1,5 +1,6 @@
-//! The level meter: a bar for a value that falls, both ways round, with the
-//! high-water mark, the latching lamp and the display taper.
+//! The level meter page under Progress: a bar for a value that falls, both
+//! ways round, with the high-water mark, the latching lamp and the display
+//! taper.
 use crate::makepad_widgets::*;
 use crate::registry::{Control, ControlKind, Story};
 
@@ -9,7 +10,7 @@ script_mod! {
     use mod.storybook.*
 
     mod.stories.LevelMeterOverview = StoryPage{
-        StoryNote{text: "The one readout in the library that is read by its FALL. The bars and rings under Progress ease forward only and snap on any value set below the one on screen, on purpose. The Gauge beside them does ease down, but it eases a needle toward a target at one speed: no instant attack, no high-water mark, no repaint gate — a dial, not a meter. Load, throughput, latency and headroom want all three, so they get this. The bar takes a rise the instant it lands and gives it up on a schedule, a mark holds the highest recent reading, and a lamp latches when the host says a ceiling was passed."}
+        StoryNote{text: "The one readout in the library that is read by its FALL. The bar takes a rise the instant it lands and gives it up on a schedule, a mark holds the highest recent reading, and a lamp latches when the host says a ceiling was passed. The Overview page says when to reach for it rather than a bar or the gauge."}
         StoryHeading{text: "One meter, under the controls"}
         StoryNote{text: "A standing reading, not a live one: nothing is feeding this meter, so the controls are what move it. Level stands the bar and the mark where you put them, and Taper moves where that reading is drawn. Release is ballistics, and ballistics have nothing to act on until a meter is being fed — so that one control is pointed at the fed meter below. Drag it, then press Hit."}
         StoryRow{
@@ -66,6 +67,19 @@ script_mod! {
             LevelMeter{width: 220. height: 20. level: 0.7 draw_bg.border_radius: 6. draw_bg.mark_size: 3. draw_bg.lamp_size: 12.}
         }
 
+        StoryHeading{text: "A ring around a talk button"}
+        StoryNote{text: "VoiceWave is the level readout of a voice input: a round button whose ring traces the last second of the microphone's signal while the microphone is open, so a person can see they are being heard. A press, F1 held down, or Control with 1 opens and closes the microphone. It is built only when the widget library is compiled with its voice feature; without it, as in this catalogue, VoiceWave is an empty view that is never shown, and the tile below is only its caption."}
+        StoryRow{
+            View{
+                width: Fit height: Fit
+                flow: Down
+                spacing: theme.space_1
+                align: Align{x: 0.5}
+                VoiceWave{width: 48. height: 48.}
+                Label{text: "VoiceWave" draw_text +: {color: theme.color_text_meta}}
+            }
+        }
+
         StoryHeading{text: "Not live"}
         StoryNote{text: "Dimmed rather than emptied: a channel that has been taken out of service still has a last reading, and blanking it would claim the reading was zero."}
         StoryRow{
@@ -106,15 +120,15 @@ fn level_meter_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
 
 pub const STORIES: &[Story] = &[
     Story {
-        key: "feedback/level-meter/overview",
+        key: "feedback/progress/level-meter",
         category: "Feedback",
-        component: "LevelMeter",
-        also: &["LevelMeterColumn"],
-        name: "Overview",
+        component: "Progress",
+        also: &["LevelMeter", "LevelMeterColumn", "VoiceWave"],
+        name: "Level meter",
         dsl: "LevelMeterOverview",
         added: "2026-09-10",
         tags: &["controls", "new"],
-        doc: "# LevelMeter\n\nA bar for a live value that FALLS. The bars and rings under Progress ease forward only — that file says outright that a bar sliding backwards looks like a bar that is lying — and snap on any value set below the one on screen, so load, throughput, latency, temperature and headroom had nothing to reach for. `Gauge`, in the same file, is the one member of that family allowed to fall, and it eases a needle toward a target at one speed in both directions: no instant attack, no high-water mark, no repaint gate. A dial, not a meter. This is the widget for the rest, and the disagreement about what a falling number means is why it is a separate one rather than a flag on that family.\n\n- `feed(cx, reading)` is the live path: the highest value seen since the last one, as a share of full scale. The bar takes a rise the tick it arrives and gives it up over `release_secs` — the fall's TIME CONSTANT, not the time a fall takes: a tick covers `1 - e^(-dt/release_secs)` of what is left, so nine tenths of a fall is about 2.3 of them and the default 0.74 s is a nine-tenths fall in 1.7 s. A mark holds the highest recent reading for `hold_secs` and then follows the bar down rather than dropping to meet it.\n- `level` is a STANDING reading for a meter nothing is feeding — a page being laid out, a catalogue row, a controls panel. Writing it again stands the bar and the mark there. It is not where a fed meter is, and it does not run anything: `release_secs` and `hold_secs` have nothing to act on until something feeds the meter.\n- `set_over(cx, true)` latches the lamp. Handing it a false does nothing on purpose: the event that lit it was over before the frame was. `clear` puts it out, and so does a press on the meter while `clear_on_press`, which raises `Cleared`. Writing the `over` property is a different thing from calling `set_over` — it lands straight on the field, past the guard that drops a false, which is why this page's Lamp lit (property) switch can put a lit lamp out without clearing anything, and a host handing `set_over` a false cannot.\n- `taper` is the exponent the reading is drawn on. One is linear; below one lifts the quiet end of the scale. It moves where a reading is drawn and never what `value` reports.\n- `vertical` turns the same widget into a column — `LevelMeterColumn` is that and no lamp. Give a column a real height: `Fill` inside a page that scrolls lays it out and never paints it.\n\n`MeterBallistics` beside the widget is the arithmetic on its own, for a host that draws its own meter: `tick(reading, dt)`, `level()`, `hold()` and `take_push()`, the deadband that decides whether anything has moved enough to be worth a repaint. It takes `dt` rather than reading a clock, so the fall is the same speed on a machine that is servicing it late — and so it can be held to its own arithmetic in a test.\n\nA reading past full scale is pinned, not remembered: one spike would otherwise hold the bar at the end through a second and a half of decay nobody can see. That a ceiling was passed is the lamp's news to carry.\n\nThe meter runs frames only while there is something left to animate, and asks for a redraw only when the drawn value has moved far enough to see. A settled meter costs nothing until the next reading arrives.",
+        doc: "# LevelMeter\n\nA bar for a live value that FALLS: load, throughput, latency, temperature, headroom. The bars and rings on the Overview page ease forward only and snap on any value set below the one on screen, because a bar sliding backwards looks like a bar that is lying. The `Gauge` does fall, but it eases a needle toward a target at one speed in both directions: no instant attack, no high-water mark, no repaint gate. A dial, not a meter. What a falling number means is the disagreement, and it is why this is a widget of its own rather than a flag on the bar.\n\n- `feed(cx, reading)` is the live path: the highest value seen since the last one, as a share of full scale. The bar takes a rise the tick it arrives and gives it up over `release_secs` — the fall's TIME CONSTANT, not the time a fall takes: a tick covers `1 - e^(-dt/release_secs)` of what is left, so nine tenths of a fall is about 2.3 of them and the default 0.74 s is a nine-tenths fall in 1.7 s. A mark holds the highest recent reading for `hold_secs` and then follows the bar down rather than dropping to meet it.\n- `level` is a STANDING reading for a meter nothing is feeding — a page being laid out, a catalogue row, a controls panel. Writing it again stands the bar and the mark there. It is not where a fed meter is, and it does not run anything: `release_secs` and `hold_secs` have nothing to act on until something feeds the meter.\n- `set_over(cx, true)` latches the lamp. Handing it a false does nothing on purpose: the event that lit it was over before the frame was. `clear` puts it out, and so does a press on the meter while `clear_on_press`, which raises `Cleared`. Writing the `over` property is a different thing from calling `set_over` — it lands straight on the field, past the guard that drops a false, which is why this page's Lamp lit (property) switch can put a lit lamp out without clearing anything, and a host handing `set_over` a false cannot.\n- `taper` is the exponent the reading is drawn on. One is linear; below one lifts the quiet end of the scale. It moves where a reading is drawn and never what `value` reports.\n- `vertical` turns the same widget into a column — `LevelMeterColumn` is that and no lamp. Give a column a real height: `Fill` inside a page that scrolls lays it out and never paints it.\n\n`MeterBallistics` beside the widget is the arithmetic on its own, for a host that draws its own meter: `tick(reading, dt)`, `level()`, `hold()` and `take_push()`, the deadband that decides whether anything has moved enough to be worth a repaint. It takes `dt` rather than reading a clock, so the fall is the same speed on a machine that is servicing it late — and so it can be held to its own arithmetic in a test.\n\nA reading past full scale is pinned, not remembered: one spike would otherwise hold the bar at the end through a second and a half of decay nobody can see. That a ceiling was passed is the lamp's news to carry.\n\nThe meter runs frames only while there is something left to animate, and asks for a redraw only when the drawn value has moved far enough to see. A settled meter costs nothing until the next reading arrives.\n\n`VoiceWave` is the readout a voice input draws: a round talk button whose ring traces the last second of the microphone's signal while it is open, pressed, held on F1 or toggled with Control and 1. It exists only in a build of the widget library with the `voice` feature; without that feature it is an empty view that is never shown.",
         subject: "subject",
         feature: None,
         controls: &[
