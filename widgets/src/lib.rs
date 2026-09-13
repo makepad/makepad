@@ -150,6 +150,7 @@ pub mod command_palette;
 pub mod pie_menu;
 pub mod radial_menu;
 pub mod floating_action;
+pub mod hamburger_menu;
 pub mod drag_number;
 pub mod chart_more;
 pub mod toolbar;
@@ -325,6 +326,7 @@ pub use crate::{
     pie_menu::*,
     radial_menu::*,
     floating_action::*,
+    hamburger_menu::*,
     drag_number::*,
     chart_more::*,
     toolbar::*,
@@ -653,6 +655,9 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::modal::script_mod(vm);
     crate::dialog::script_mod(vm);
     crate::drawer::script_mod(vm);
+    // After the drawer: the menu is built from a drawer, a popover, a nav
+    // list and a burger button, and this is the last of the four to land.
+    crate::hamburger_menu::script_mod(vm);
     crate::tooltip::script_mod(vm);
     crate::callout_tooltip::script_mod(vm);
     crate::popup_notification::script_mod(vm);
@@ -1149,6 +1154,31 @@ mod floating_action_registration_tests {
         assert!(floating.contains("mod.widgets.FloatingActionItemBase = #(FloatingActionItem::register_widget(vm))"));
         assert_eq!(floating.matches("set_type_default() do mod.widgets.FloatingActionBase").count(), 1);
         assert_eq!(floating.matches("set_type_default() do mod.widgets.FloatingActionItemBase").count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod hamburger_menu_registration_tests {
+    /// The menu is composed of a drawer, a popover, a nav list and a burger
+    /// button, so it registers after all four, directly after the drawer,
+    /// which lands last.
+    #[test]
+    fn test_hamburger_menu_is_registered_after_its_bases() {
+        let lib = include_str!("lib.rs");
+        let hamburger = include_str!("hamburger_menu.rs");
+        assert!(lib.contains("\npub mod hamburger_menu;"));
+        assert!(lib.contains("\n    hamburger_menu::*,"));
+        crate::assert_registered_after(
+            "crate::hamburger_menu::script_mod(vm);",
+            &[
+                "crate::drawer::script_mod(vm);",
+                "crate::popover::script_mod(vm);",
+                "crate::nav_list::script_mod(vm);",
+                "crate::button::script_mod(vm);",
+            ],
+        );
+        assert!(hamburger.contains("mod.widgets.HamburgerMenuBase = #(HamburgerMenu::register_widget(vm))"));
+        assert_eq!(hamburger.matches("set_type_default() do mod.widgets.HamburgerMenuBase").count(), 1);
     }
 }
 
