@@ -12,10 +12,10 @@ script_mod! {
     let Box = RoundedView{
         show_bg: true
         draw_bg +: {
-            color: #x3a4a3aff
+            color: theme.color_surface_container_high
             border_size: 1.
             border_radius: 0.
-            border_color: #xfff8
+            border_color: theme.color_outline_variant
         }
         padding: 3.
         align: Align{x: 0.5 y: 0.5}

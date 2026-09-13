@@ -129,6 +129,20 @@ script_mod! {
                 GCell{GLabel{text: "auto"}}
                 GCell{GLabel{text: "auto"}}
             }
+
+            GNote{text: "All at once: a named span with empty cells beside it, a pinned cell and an auto span in one grid, with padding on the grid itself"}
+            Grid{
+                width: Fill height: 160.
+                padding: 6.
+                column_gap: 8. row_gap: 8.
+                columns: ["70px", "20%", "minmax(60px, 1fr)", "repeat(2, minmax(50px, 1fr))"]
+                rows: ["48px", "1fr"]
+                areas: ["hero hero . . .", ". . . . ."]
+                GAccent{cell: CellPlacement{area: @hero} GLabel{text: "named span"}}
+                GCell{cell: CellPlacement{col: 4 row: 1} GLabel{text: "explicit"}}
+                GCell{cell: CellPlacement{col_span: 2} GLabel{text: "auto span"}}
+                GCell{GLabel{text: "auto"}}
+            }
         }
     }
 }
@@ -151,7 +165,7 @@ pub const STORIES: &[Story] = &[Story {
     dsl: "GridOverview",
     added: "2026-09-05",
     tags: &["new"],
-    doc: "# Grid\n\nA grid is told its TRACKS and the cells fall into them. That is the whole idea, and it is why a grid answers a changing width without anyone recomputing anything.\n\n**A track is one of four things.** A length, `\"90px\"`. A share of the container, `\"20%\"`. A share of what is left after the fixed ones are paid, `\"1fr\"`. Or a range, `\"minmax(80px, 1fr)\"`, which is a share that refuses to go under a floor. `repeat(n, ...)` writes the same track several times.\n\n**`repeat(auto-fit, minmax(150px, 1fr))` is the responsive one**, and it is worth understanding rather than copying. It does not mean \"150 wide\". It means: fit as many columns as will hold 150, then let them share the remainder equally. So the cells stay legible and the COLUMN COUNT is what changes, which is what a catalogue of cards wants and what a fixed column count never gives.\n\n**`areas` draws the shape in words.** One string per row, one name per cell, `.` for an empty one, and a child says `cell: CellPlacement{area: @body}`. A name repeated across neighbouring cells is a span, so a header across the top is `\"head head\"` and nothing else.\n\n**Placement is explicit, spanning, or automatic.** `CellPlacement{col: 3 row: 1}` puts a child exactly there, `col_span` widens it, and a child that says nothing takes the next free cell in `auto_flow` order. Mixing the three is normal: pin what matters and let the rest fall in.",
+    doc: "# Grid\n\nA grid is told its TRACKS and the cells fall into them. That is the whole idea, and it is why a grid answers a changing width without anyone recomputing anything.\n\n**A track is one of four things.** A length, `\"90px\"`. A share of the container, `\"20%\"`. A share of what is left after the fixed ones are paid, `\"1fr\"`. Or a range, `\"minmax(80px, 1fr)\"`, which is a share that refuses to go under a floor. `repeat(n, ...)` writes the same track several times.\n\n**`repeat(auto-fit, minmax(150px, 1fr))` is the responsive one**, and it is worth understanding rather than copying. It does not mean \"150 wide\". It means: fit as many columns as will hold 150, then let them share the remainder equally. So the cells stay legible and the COLUMN COUNT is what changes, which is what a catalogue of cards wants and what a fixed column count never gives.\n\n**`areas` draws the shape in words.** One string per row, one name per cell, `.` for an empty one, and a child says `cell: CellPlacement{area: @body}`. A name repeated across neighbouring cells is a span, so a header across the top is `\"head head\"` and nothing else.\n\n**Placement is explicit, spanning, or automatic.** `CellPlacement{col: 3 row: 1}` puts a child exactly there, `col_span` widens it, and a child that says nothing takes the next free cell in `auto_flow` order. Mixing the three is normal: pin what matters and let the rest fall in. The last example is where they meet: a named span with `.` holes beside it, a pinned cell, an automatic span and a plain automatic cell in one padded grid.",
     subject: "gframe",
     feature: None,
     controls: &[],
