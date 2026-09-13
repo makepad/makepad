@@ -418,7 +418,7 @@ mod tests {
                 ("Tip", &["Overview"]),
                 ("Popover", &["Overview"]),
                 ("Menu", &["Overview"]),
-                ("PieMenu", &["Overview"]),
+                ("PieMenu", &["Overview", "Radial menu"]),
                 ("CommandPalette", &["Overview"]),
                 ("Dialog", &["Overview", "Modal"]),
                 ("Drawer", &["Overview"]),

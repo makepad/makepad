@@ -148,6 +148,7 @@ pub mod color;
 pub mod column_picker;
 pub mod command_palette;
 pub mod pie_menu;
+pub mod radial_menu;
 pub mod drag_number;
 pub mod chart_more;
 pub mod toolbar;
@@ -321,6 +322,7 @@ pub use crate::{
     column_picker::*,
     command_palette::*,
     pie_menu::*,
+    radial_menu::*,
     drag_number::*,
     chart_more::*,
     toolbar::*,
@@ -615,6 +617,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::column_picker::script_mod(vm);
     crate::command_palette::script_mod(vm);
     crate::pie_menu::script_mod(vm);
+    crate::radial_menu::script_mod(vm);
     crate::drag_number::script_mod(vm);
     crate::tour::script_mod(vm);
     crate::chart_more::script_mod(vm);
@@ -1081,6 +1084,47 @@ fn widgets_mod_source() -> &'static str {
     let start = lib.find("pub fn widgets_mod(vm: &mut ScriptVm)").expect("widgets_mod");
     let end = lib.find("pub fn script_mod(vm: &mut ScriptVm)").expect("script_mod");
     &lib[start..end]
+}
+
+/// Asserts `call` is registered after every one of `bases`, and directly
+/// after the first of them, so each new widget keeps the slot its bases
+/// give it and no later edit slides another registration in between.
+#[cfg(test)]
+fn assert_registered_after(call: &str, bases: &[&str]) {
+    let calls = widgets_mod_source();
+    let at = calls.find(call).unwrap_or_else(|| panic!("{call} is not registered"));
+    for base in bases {
+        let base_at = calls.find(base).unwrap_or_else(|| panic!("{base} is not registered"));
+        assert!(base_at < at, "{base} must register before {call}");
+    }
+    let first = bases[0];
+    let after_first = &calls[calls.find(first).unwrap() + first.len()..];
+    let next = after_first
+        .lines()
+        .map(str::trim)
+        .find(|line| line.ends_with("::script_mod(vm);"))
+        .unwrap_or_default();
+    assert_eq!(next, call, "{call} must follow {first} directly");
+}
+
+#[cfg(test)]
+mod radial_menu_registration_tests {
+    /// The ring menu registers directly after the pie menu whose angle
+    /// measure and keys it shares, after the glass it samples, with one type
+    /// default.
+    #[test]
+    fn test_radial_menu_is_registered_after_its_bases() {
+        let lib = include_str!("lib.rs");
+        let radial = include_str!("radial_menu.rs");
+        assert!(lib.contains("\npub mod radial_menu;"));
+        assert!(lib.contains("\n    radial_menu::*,"));
+        crate::assert_registered_after(
+            "crate::radial_menu::script_mod(vm);",
+            &["crate::pie_menu::script_mod(vm);", "crate::gauss_view::script_mod(vm);", "crate::badge::script_mod(vm);"],
+        );
+        assert!(radial.contains("mod.widgets.RadialMenuBase = #(RadialMenu::register_widget(vm))"));
+        assert_eq!(radial.matches("set_type_default() do mod.widgets.RadialMenuBase").count(), 1);
+    }
 }
 
 #[cfg(test)]

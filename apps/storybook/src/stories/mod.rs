@@ -81,6 +81,7 @@ pub mod tip;
 pub mod popover;
 pub mod menu;
 pub mod pie_menu;
+pub mod radial_menu;
 pub mod command_palette;
 pub mod dialog;
 pub mod modal;
@@ -202,6 +203,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     popover::script_mod(vm);
     menu::script_mod(vm);
     pie_menu::script_mod(vm);
+    radial_menu::script_mod(vm);
     command_palette::script_mod(vm);
     dialog::script_mod(vm);
     modal::script_mod(vm);
@@ -330,6 +332,7 @@ pub fn tables() -> &'static [&'static [Story]] {
         popover::STORIES,
         menu::STORIES,
         pie_menu::STORIES,
+        radial_menu::STORIES,
         command_palette::STORIES,
         dialog::STORIES,
         modal::STORIES,
