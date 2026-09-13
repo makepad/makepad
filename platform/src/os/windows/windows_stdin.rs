@@ -337,6 +337,10 @@ impl Cx {
 
                 if self.need_redrawing() {
                     self.call_draw_event(time_now);
+                }
+                // Also between draws, so a shader an earlier draw queued is
+                // adopted and redrawn (see `hlsl_compiles_waiting`).
+                if self.hlsl_compiles_waiting() {
                     self.hlsl_compile_shaders(d3d11_cx);
                 }
 

@@ -429,12 +429,7 @@ impl Cx {
                 if d3d11_cx.device_lost.get() {
                     return EventFlow::Wait;
                 }
-                if self.any_passes_dirty()
-                    || self.need_redrawing()
-                    || self.new_next_frames.len() != 0
-                    || !self.screenshot_requests.is_empty()
-                    || self.os.video_players.values().any(|p| p.keep_polling())
-                {
+                if self.has_frame_work() {
                     return EventFlow::Poll;
                 }
                 return EventFlow::Wait;
@@ -456,18 +451,29 @@ impl Cx {
         if d3d11_cx.device_lost.get() {
             return EventFlow::Wait;
         }
-        if self.any_passes_dirty()
-            || self.need_redrawing()
-            || self.new_next_frames.len() != 0
-            // A pending screenshot must never be left asleep in `GetMessageW`:
-            // nothing else would wake the loop to render the frame it needs.
-            || !self.screenshot_requests.is_empty()
-            || self.os.video_players.values().any(|p| p.keep_polling())
-        {
+        if self.has_frame_work() {
             EventFlow::Poll
         } else {
             EventFlow::Wait
         }
+    }
+
+    /// Whether there is work a paint tick has to do, so the loop keeps
+    /// ticking (`Poll`) instead of sleeping in `GetMessageW` (`Wait`): a dirty
+    /// pass, a redraw, a queued NextFrame, a pending screenshot, a video that
+    /// is preparing or playing, or a shader an earlier draw queued that has
+    /// not reached the GPU yet.
+    ///
+    /// A pending screenshot must never be left asleep: nothing else would
+    /// wake the loop to render the frame it needs. Neither may a compiling
+    /// shader, for the same reason; see [`Cx::hlsl_compiles_waiting`].
+    pub(crate) fn has_frame_work(&self) -> bool {
+        self.any_passes_dirty()
+            || self.need_redrawing()
+            || self.new_next_frames.len() != 0
+            || !self.screenshot_requests.is_empty()
+            || self.os.video_players.values().any(|p| p.keep_polling())
+            || self.hlsl_compiles_waiting()
     }
 
     /// `MAKEPAD_DEBUG_UPLOAD_BUDGET=1`: once a second, the numbers an upload
@@ -610,6 +616,11 @@ impl Cx {
         }
         if self.need_redrawing() {
             self.call_draw_event(time_now);
+        }
+        // Not only after a draw: a shader queued by an earlier draw is adopted
+        // here, and adopting it is what draws the calls it held back. See
+        // `hlsl_compiles_waiting`.
+        if self.hlsl_compiles_waiting() {
             self.hlsl_compile_shaders(&d3d11_cx);
         }
         // ok here we send out to all our childprocesses
@@ -1489,4 +1500,26 @@ pub struct CxOs {
     pub(crate) d3d11_test_loss_next: Option<Instant>,
     /// Recreate the device even though it reports itself alive. Set only by fault injection.
     pub(crate) d3d11_force_recreate: bool,
+}
+
+#[cfg(test)]
+mod frame_work_tests {
+    use crate::cx::Cx;
+
+    /// A shader a draw queued keeps the loop ticking after that draw, with
+    /// nothing else to do, so the calls it held back are drawn once it is
+    /// ready instead of at the next input.
+    #[test]
+    fn a_shader_on_its_way_to_the_gpu_keeps_the_loop_ticking() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        assert!(!cx.has_frame_work(), "an idle app sleeps");
+
+        cx.draw_shaders.compile_set.insert(0);
+        assert!(cx.hlsl_compiles_waiting());
+        assert!(cx.has_frame_work(), "a queued shader is work for the next tick");
+
+        cx.draw_shaders.compile_set.clear();
+        assert!(!cx.hlsl_compiles_waiting());
+        assert!(!cx.has_frame_work());
+    }
 }

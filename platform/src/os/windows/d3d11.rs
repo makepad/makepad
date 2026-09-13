@@ -1004,6 +1004,22 @@ impl Cx {
         }
     }
 
+    /// Whether a shader a draw asked for has not reached the GPU yet: it is
+    /// still compiling on a worker, or waiting for a worker to take it.
+    ///
+    /// A draw call whose shader is not ready is skipped when the pass paints,
+    /// and only `hlsl_compile_shaders` puts it back, by adopting the finished
+    /// shader and redrawing everything. So the loop must keep calling that
+    /// while this holds, whether or not anything draws in the meantime. It
+    /// used to be called only right after a draw. A drop-down opened on a
+    /// click and then left alone drew its rows once, with their shaders still
+    /// compiling, and nothing drew again until the next input, so the list
+    /// stood empty until then.
+    pub(crate) fn hlsl_compiles_waiting(&self) -> bool {
+        !self.os.async_hlsl_compile.pending.is_empty()
+            || !self.draw_shaders.compile_set.is_empty()
+    }
+
     pub(crate) fn hlsl_compile_shaders(&mut self, d3d11_cx: &D3d11Cx) {
         let pending = &mut self.os.async_hlsl_compile.pending;
         let mut adopted = false;
