@@ -224,12 +224,13 @@ mod tests {
         // module, because what matters is that the SEARCH answers — whether
         // it answers from a synonym, a tag or the name is its business.
         for (query, want) in [
-            // ValueInput is a section of the NumberField page: the search
-            // lands on the page, filed under its component.
+            // ValueInput is a section of the NumberField page, and the combo
+            // box a page of Select: the search lands on the page, filed under
+            // its component.
             ("stepper", "NumberField"),
             ("spinbox", "NumberField"),
-            ("autocomplete", "ComboBox"),
-            ("typeahead", "ComboBox"),
+            ("autocomplete", "Select"),
+            ("typeahead", "Select"),
             ("switch", "CheckBox"),
             ("segmented", "ButtonGroup"),
         ] {

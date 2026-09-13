@@ -124,8 +124,8 @@ fn svg_select_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
 }
 
 pub const STORIES: &[Story] = &[Story {
-    key: "inputs/svg-select/overview",
-    category: "Inputs",
+    key: "selection/svg-select/overview",
+    category: "Selection",
     component: "SvgSelect",
     also: &["SvgSelectFlat"],
     name: "Overview",

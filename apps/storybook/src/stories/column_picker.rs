@@ -165,8 +165,8 @@ fn picker_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
 }
 
 pub const STORIES: &[Story] = &[Story {
-    key: "inputs/column-picker/overview",
-    category: "Inputs",
+    key: "selection/column-picker/overview",
+    category: "Selection",
     component: "ColumnPicker",
     also: &["TreeSelect", "Transfer"],
     name: "Overview",

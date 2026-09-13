@@ -80,7 +80,11 @@
     "text reflow",
     "remember dismissal",
     "accent bar",
-    "intent icon"
+    "intent icon",
+    "full width banner",
+    "intent colours",
+    "intent colors",
+    "title and detail"
    ]
   },
   {
@@ -2961,7 +2965,8 @@
     "toaster",
     "temporary message",
     "corner message",
-    "notification stack"
+    "notification stack",
+    "notification popup"
    ],
    "does": [
     "auto dismiss",
@@ -2979,7 +2984,9 @@
     "errors stay",
     "slides in",
     "second line body",
-    "raise from anywhere"
+    "raise from anywhere",
+    "corner popup",
+    "stays until closed"
    ]
   },
   {

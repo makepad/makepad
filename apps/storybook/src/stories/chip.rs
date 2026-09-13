@@ -202,8 +202,8 @@ fn chip_subject_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
 
 pub const STORIES: &[Story] = &[
     Story {
-        key: "inputs/chip/overview",
-        category: "Inputs",
+        key: "selection/chip/overview",
+        category: "Selection",
         component: "Chip",
         also: &["ChipGroup", "FilterSummary", "Tag"],
         name: "Overview",
