@@ -6,7 +6,9 @@
 use crate::numeric::NumericValue;
 use crate::opcode::*;
 use crate::value::*;
+use crate::trap::ScriptTrapOn;
 use crate::vm::ScriptVm;
+use crate::*;
 
 impl<'a> ScriptVm<'a> {
     // ARITHMETIC handlers
@@ -100,23 +102,68 @@ impl<'a> ScriptVm<'a> {
     // EQUALITY handlers
 
     pub(crate) fn handle_eq(&mut self) {
-        let b = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
-        let a = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
-        self.bx
-            .threads
-            .cur()
-            .push_stack_unchecked(self.bx.heap.deep_eq(a, b).into());
-        self.bx.threads.cur().trap.goto_next();
+        self.handle_structural_equality(false);
     }
 
     pub(crate) fn handle_neq(&mut self) {
+        self.handle_structural_equality(true);
+    }
+
+    /// Structural `==` / `!=`. Every unit of native comparison work charges
+    /// one instruction of VM fuel, the hard deadline is sampled while the
+    /// comparison runs, and `MAX_EQUALITY_WORK` caps a single comparison.
+    /// Exhaustion is an uncatchable bail, exactly like the instruction limit.
+    fn handle_structural_equality(&mut self, negate: bool) {
+        /// Work units between clock reads. A trivial comparison never
+        /// touches the clock; a long one checks the hard deadline often.
+        const DEADLINE_SAMPLE_UNITS: u32 = 256;
         let b = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
         let a = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
-        self.bx
-            .threads
-            .cur()
-            .push_stack_unchecked((!self.bx.heap.deep_eq(a, b)).into());
-        self.bx.threads.cur().trap.goto_next();
+        let deadline = self.bx.run_budget.as_ref().map(|budget| budget.hard_deadline);
+        let thread = self.bx.threads.cur();
+        let mut units_until_clock = DEADLINE_SAMPLE_UNITS;
+        let result = self
+            .bx
+            .heap
+            .deep_eq_bounded(a, b, crate::equality::MAX_EQUALITY_WORK, || {
+                if let Some(remaining) = thread.instruction_limit_remaining.as_mut() {
+                    if *remaining == 0 {
+                        return false;
+                    }
+                    *remaining -= 1;
+                }
+                let Some(deadline) = deadline else {
+                    return true;
+                };
+                units_until_clock -= 1;
+                if units_until_clock > 0 {
+                    return true;
+                }
+                units_until_clock = DEADLINE_SAMPLE_UNITS;
+                crate::clock::monotonic_now() < deadline
+            });
+        match result {
+            Some(equal) => {
+                self.bx
+                    .threads
+                    .cur()
+                    .push_stack_unchecked((equal != negate).into());
+                self.bx.threads.cur().trap.goto_next();
+            }
+            None => {
+                let error = script_err_limit!(
+                    self.bx.threads.cur_ref().trap,
+                    "script equality work, instruction, or time limit exceeded"
+                );
+                // Native work exhaustion is uncatchable just like VM fuel.
+                self.drain_errors();
+                self.bx
+                    .threads
+                    .cur()
+                    .trap
+                    .set_on(Some(ScriptTrapOn::Bail(error)));
+            }
+        }
     }
 
     pub(crate) fn handle_shallow_eq(&mut self) {
