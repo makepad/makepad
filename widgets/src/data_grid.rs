@@ -327,6 +327,41 @@ pub enum DataGridAction {
         row: usize,
         col: usize,
     },
+    /// A primary press on a cell came back up without the pointer ever
+    /// going further than `drag_threshold` from where it went down: a
+    /// click, finished. Raised after the press's `CellClicked`, whatever
+    /// `row_drag` says, with the keys held as it came up. A host that acts
+    /// on the release — opening what was clicked, say — reads this, so a
+    /// press that turns into a drag never acts.
+    ///
+    /// `row` is the line pressed, as the rows stood at the press. The grid
+    /// holds no data, so a host whose rows can move under a held press,
+    /// sorted again or filled in, acts on the item it found on that line
+    /// at `CellClicked`, not on whatever the line draws now. A line the
+    /// rows no longer reach raises no release.
+    CellReleased {
+        row: usize,
+        col: usize,
+        modifiers: KeyModifiers,
+    },
+    /// With `row_drag` on, a press on a cell travelled past
+    /// `drag_threshold`: the row is being carried out of the grid. Raised
+    /// once per press, with `abs` where the pointer is as the carry
+    /// begins and the keys held at the press. From then on the grid leaves
+    /// the press alone: it selects nothing, does not scroll, and raises no
+    /// `CellReleased` when the press comes up. Where the row goes is the
+    /// host's to follow.
+    ///
+    /// `row` is the line pressed, as the rows stood at the press, like
+    /// `CellReleased`'s: a host whose rows moved since `CellClicked` carries
+    /// the item it found then. A line the rows no longer reach carries
+    /// nothing.
+    RowDragStarted {
+        row: usize,
+        col: usize,
+        abs: DVec2,
+        modifiers: KeyModifiers,
+    },
     /// A heading was pressed and the sort moved on. `ascending` is
     /// `None` when the column has cycled back to unsorted.
     ///
@@ -466,7 +501,20 @@ enum Interact {
         cur_abs: DVec2,
         insert_at: usize,
     },
-    CellDrag,
+    /// A primary press on a cell, until it comes up.
+    CellPress {
+        row: usize,
+        display_col: usize,
+        down_abs: DVec2,
+        modifiers: KeyModifiers,
+        /// The press drags out a selection as the pointer moves.
+        rubber_band: bool,
+        /// The pointer has been further than `drag_threshold` from where
+        /// it went down, so the press is no longer a click.
+        travelled: bool,
+        /// The press is carrying its row out (`row_drag`).
+        carrying: bool,
+    },
 }
 
 impl Default for Interact {
@@ -580,6 +628,16 @@ pub struct DataGrid {
     /// Cells, whole rows, or nothing. See [`GridSelectMode`].
     #[live]
     selection: GridSelectMode,
+    /// How far, in points, a press on a cell may travel and still be a
+    /// click that raises `CellReleased`. Past it, a `row_drag` grid starts
+    /// carrying the row.
+    #[live(5.0)]
+    drag_threshold: f64,
+    /// A press on a cell that travels past `drag_threshold` carries its
+    /// row out (`RowDragStarted`) instead of dragging out a selection:
+    /// for a list whose rows are dragged somewhere else. Off by default.
+    #[live(false)]
+    row_drag: bool,
     #[live(100usize)]
     rows: usize,
     #[live(26usize)]
@@ -2026,16 +2084,27 @@ impl DataGrid {
         cx: &mut Cx,
         row: usize,
         display_col: usize,
+        abs: DVec2,
         modifiers: KeyModifiers,
         tap_count: u32,
     ) {
         let uid = self.uid;
         // With the selection off there is nothing to select and nothing to
-        // rubber-band; the press is reported and that is all.
-        if self.selection != GridSelectMode::Off {
+        // rubber-band, and a row that can be carried never rubber-bands:
+        // the press is held only to tell a click from a drag.
+        let selects = self.selection != GridSelectMode::Off;
+        if selects {
             self.select_cell(cx, row, display_col, modifiers.shift);
-            self.interact = Interact::CellDrag;
         }
+        self.interact = Interact::CellPress {
+            row,
+            display_col,
+            down_abs: abs,
+            modifiers,
+            rubber_band: selects && !self.row_drag,
+            travelled: false,
+            carrying: false,
+        };
         let col = self.display_to_data(display_col);
         cx.widget_action(
             uid,
@@ -2061,6 +2130,109 @@ impl DataGrid {
                 },
             );
         }
+    }
+
+    /// The pointer moved while a cell was pressed. Past `drag_threshold`
+    /// the press stops being a click; with `row_drag` on it starts
+    /// carrying its row, once, and otherwise it drags out the selection as
+    /// a press always has.
+    fn move_cell_press(&mut self, cx: &mut Cx, abs: DVec2) {
+        let threshold = self.drag_threshold;
+        let row_drag = self.row_drag;
+        let Interact::CellPress {
+            row,
+            display_col,
+            down_abs,
+            modifiers,
+            rubber_band,
+            travelled,
+            carrying,
+        } = &mut self.interact
+        else {
+            return;
+        };
+        if *carrying {
+            return;
+        }
+        if (abs - *down_abs).length() > threshold {
+            *travelled = true;
+        }
+        if row_drag {
+            if *travelled && *row < self.rows {
+                *carrying = true;
+                let (row, display_col, modifiers) = (*row, *display_col, *modifiers);
+                let col = self.display_to_data(display_col);
+                cx.widget_action(
+                    self.uid,
+                    DataGridAction::RowDragStarted {
+                        row,
+                        col,
+                        abs,
+                        modifiers,
+                    },
+                );
+            }
+            return;
+        }
+        if !*rubber_band {
+            return;
+        }
+        let (row, col) = self.cell_at_clamped(abs);
+        let changed = match &self.selected {
+            Some(sel) => sel.head != (row, col),
+            None => true,
+        };
+        if changed {
+            let kind = self.press_kind();
+            if let Some(sel) = &mut self.selected {
+                sel.head = (row, col);
+                sel.kind = kind;
+            } else {
+                self.selected = Some(self.selection_at(row, col));
+            }
+            // drag auto-scroll
+            let dr = self.vp.data_rect;
+            if abs.x > dr.pos.x + dr.size.x {
+                self.scroll.x += (abs.x - dr.pos.x - dr.size.x).min(40.0);
+            } else if abs.x < dr.pos.x {
+                self.scroll.x = (self.scroll.x - (dr.pos.x - abs.x).min(40.0)).max(0.0);
+            }
+            if abs.y > dr.pos.y + dr.size.y {
+                self.scroll.y += (abs.y - dr.pos.y - dr.size.y).min(40.0);
+            } else if abs.y < dr.pos.y {
+                self.scroll.y = (self.scroll.y - (dr.pos.y - abs.y).min(40.0)).max(0.0);
+            }
+            self.emit_selection_changed(cx);
+        }
+    }
+
+    /// The press on a cell came up at `abs` with `modifiers` held. One
+    /// that never went further than `drag_threshold` was a click and says
+    /// so; one that carried its row or dragged out a selection is over.
+    fn release_cell_press(&mut self, cx: &mut Cx, abs: DVec2, modifiers: KeyModifiers) {
+        let Interact::CellPress {
+            row,
+            display_col,
+            down_abs,
+            travelled,
+            carrying,
+            ..
+        } = std::mem::take(&mut self.interact)
+        else {
+            return;
+        };
+        if carrying || travelled || row >= self.rows || (abs - down_abs).length() > self.drag_threshold {
+            return;
+        }
+        let col = self.display_to_data(display_col);
+        cx.widget_action(
+            self.uid,
+            DataGridAction::CellReleased {
+                row,
+                col,
+                modifiers,
+            },
+        );
     }
 
     /// A press and release on a heading that did not become a column
@@ -2495,7 +2667,7 @@ impl Widget for DataGrid {
                         }
                     }
                     HitZone::Cell { row, display_col } => {
-                        self.press_cell(cx, row, display_col, fe.modifiers, fe.tap_count);
+                        self.press_cell(cx, row, display_col, fe.abs, fe.modifiers, fe.tap_count);
                     }
                     HitZone::Corner | HitZone::Outside => (),
                 }
@@ -2556,35 +2728,7 @@ impl Widget for DataGrid {
                     }
                     self.area.redraw(cx);
                 }
-                Interact::CellDrag => {
-                    let (row, col) = self.cell_at_clamped(fe.abs);
-                    let changed = match &self.selected {
-                        Some(sel) => sel.head != (row, col),
-                        None => true,
-                    };
-                    if changed {
-                        let kind = self.press_kind();
-                        if let Some(sel) = &mut self.selected {
-                            sel.head = (row, col);
-                            sel.kind = kind;
-                        } else {
-                            self.selected = Some(self.selection_at(row, col));
-                        }
-                        // drag auto-scroll
-                        let dr = self.vp.data_rect;
-                        if fe.abs.x > dr.pos.x + dr.size.x {
-                            self.scroll.x += (fe.abs.x - dr.pos.x - dr.size.x).min(40.0);
-                        } else if fe.abs.x < dr.pos.x {
-                            self.scroll.x = (self.scroll.x - (dr.pos.x - fe.abs.x).min(40.0)).max(0.0);
-                        }
-                        if fe.abs.y > dr.pos.y + dr.size.y {
-                            self.scroll.y += (fe.abs.y - dr.pos.y - dr.size.y).min(40.0);
-                        } else if fe.abs.y < dr.pos.y {
-                            self.scroll.y = (self.scroll.y - (dr.pos.y - fe.abs.y).min(40.0)).max(0.0);
-                        }
-                        self.emit_selection_changed(cx);
-                    }
-                }
+                Interact::CellPress { .. } => self.move_cell_press(cx, fe.abs),
                 Interact::None => (),
             },
             Hit::FingerUp(fe) => {
@@ -2626,8 +2770,12 @@ impl Widget for DataGrid {
                         self.move_column(cx, display_col, insert_at);
                         cx.set_cursor(MouseCursor::Default);
                     }
-                    Interact::CellDrag => {
-                        let _ = fe;
+                    // Only the button that pressed ends the press.
+                    press @ Interact::CellPress { .. } => {
+                        self.interact = press;
+                        if fe.is_primary_hit() {
+                            self.release_cell_press(cx, fe.abs, fe.modifiers);
+                        }
                     }
                     Interact::None => (),
                 }
@@ -3203,6 +3351,24 @@ mod tests {
         }
     }
 
+    /// A grid laid out the way a draw lays it out, 300 by 200 points at
+    /// the origin, so the pointer steps can find its cells with no window.
+    fn laid_out(cx: &mut Cx) -> DataGrid {
+        let mut grid = grid(cx);
+        grid.vp.widget_rect = Rect {
+            pos: dvec2(0.0, 0.0),
+            size: dvec2(300.0, 200.0),
+        };
+        grid.compute_viewport();
+        grid
+    }
+
+    /// The middle of a cell, where a pointer presses it.
+    fn middle(grid: &DataGrid, row: usize, display_col: usize) -> DVec2 {
+        let rect = grid.cell_rect(row, display_col);
+        rect.pos + rect.size * 0.5
+    }
+
     /// What one step of the grid raised, for the steps a test takes by
     /// hand: a press, a heading click, a key.
     fn raised(
@@ -3238,14 +3404,18 @@ mod tests {
     #[test]
     fn a_press_with_the_selection_off_selects_nothing_and_reports_the_modifiers() {
         let mut cx = cx();
-        let mut grid = grid(&mut cx);
+        let mut grid = laid_out(&mut cx);
         grid.selection = GridSelectMode::Off;
+        let (at, away) = (middle(&grid, 3, 1), middle(&grid, 6, 2));
         for held in [mods(false, true), mods(true, false)] {
-            let out = raised(&mut cx, &mut grid, |cx, grid| grid.press_cell(cx, 3, 1, held, 1));
+            let out = raised(&mut cx, &mut grid, |cx, grid| {
+                grid.press_cell(cx, 3, 1, at, held, 1);
+                grid.move_cell_press(cx, away);
+                grid.release_cell_press(cx, away, held);
+            });
             assert_eq!(clicked(&out), vec![(3, 1, held)]);
-            assert!(!selection_changed(&out), "{out:?}");
+            assert!(!selection_changed(&out), "a rubber band started: {out:?}");
             assert_eq!(grid.selection(), None);
-            assert!(matches!(grid.interact, Interact::None), "a rubber band started");
         }
         let out = raised(&mut cx, &mut grid, |cx, grid| {
             grid.handle_key_down(cx, &key(KeyCode::ArrowDown, mods(true, false)));
@@ -3263,7 +3433,7 @@ mod tests {
         let mut cx = cx();
         let mut grid = grid(&mut cx);
         grid.selection = GridSelectMode::Rows;
-        grid.press_cell(&mut cx, 3, 1, KeyModifiers::default(), 1);
+        grid.press_cell(&mut cx, 3, 1, DVec2::default(), KeyModifiers::default(), 1);
         assert!(grid.selection().is_some());
         grid.selection = GridSelectMode::Off;
         assert_eq!(grid.selection(), None, "left over from rows");
@@ -3274,7 +3444,7 @@ mod tests {
         assert_eq!(grid.selection(), None, "a selection set while off was kept");
 
         grid.selection = GridSelectMode::Rows;
-        grid.press_cell(&mut cx, 3, 1, KeyModifiers::default(), 1);
+        grid.press_cell(&mut cx, 3, 1, DVec2::default(), KeyModifiers::default(), 1);
         grid.selection = GridSelectMode::Off;
         let none = KeyModifiers::default();
         let out = raised(&mut cx, &mut grid, |cx, grid| {
@@ -3294,7 +3464,7 @@ mod tests {
         let mut grid = grid(&mut cx);
         grid.selection = GridSelectMode::Rows;
         let out = raised(&mut cx, &mut grid, |cx, grid| {
-            grid.press_cell(cx, 4, 2, KeyModifiers::default(), 1)
+            grid.press_cell(cx, 4, 2, DVec2::default(), KeyModifiers::default(), 1)
         });
         assert_eq!(clicked(&out), vec![(4, 2, KeyModifiers::default())]);
         let sel = grid.selection().expect("the press selected nothing");
@@ -3302,7 +3472,7 @@ mod tests {
         assert_eq!(sel.row_range(), (4, 4));
         assert!(sel.contains(4, 0) && sel.contains(4, 2) && !sel.contains(5, 2));
 
-        grid.press_cell(&mut cx, 7, 0, mods(true, false), 1);
+        grid.press_cell(&mut cx, 7, 0, DVec2::default(), mods(true, false), 1);
         let sel = grid.selection().unwrap();
         assert_eq!((sel.kind, sel.row_range()), (GridSelectKind::Rows, (4, 7)));
 
@@ -3321,7 +3491,7 @@ mod tests {
             let mut grid = grid(&mut cx);
             grid.sortable = true;
             grid.selection = mode;
-            grid.press_cell(&mut cx, 2, 0, KeyModifiers::default(), 1);
+            grid.press_cell(&mut cx, 2, 0, DVec2::default(), KeyModifiers::default(), 1);
             let before = grid.selection();
             let out = raised(&mut cx, &mut grid, |cx, grid| {
                 grid.click_header(cx, 1, KeyModifiers::default())
@@ -3342,5 +3512,131 @@ mod tests {
         grid.click_header(&mut cx, 1, KeyModifiers::default());
         let sel = grid.selection().expect("the spreadsheet lost its column pick");
         assert_eq!((sel.kind, sel.col_range()), (GridSelectKind::Cols, (1, 1)));
+    }
+
+    fn released(actions: &[DataGridAction]) -> Vec<(usize, usize, KeyModifiers)> {
+        actions
+            .iter()
+            .filter_map(|a| match a {
+                DataGridAction::CellReleased { row, col, modifiers } => Some((*row, *col, *modifiers)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn carried(actions: &[DataGridAction]) -> Vec<(usize, usize, DVec2, KeyModifiers)> {
+        actions
+            .iter()
+            .filter_map(|a| match a {
+                DataGridAction::RowDragStarted {
+                    row,
+                    col,
+                    abs,
+                    modifiers,
+                } => Some((*row, *col, *abs, *modifiers)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A press that comes up where it went down is a click, reported as
+    /// it goes down and again as it comes up, with the keys held then.
+    #[test]
+    fn a_press_and_release_in_place_is_clicked_then_released() {
+        let mut cx = cx();
+        let mut grid = laid_out(&mut cx);
+        let at = middle(&grid, 2, 1);
+        let out = raised(&mut cx, &mut grid, |cx, grid| {
+            grid.press_cell(cx, 2, 1, at, KeyModifiers::default(), 1);
+            grid.release_cell_press(cx, at, mods(true, false));
+        });
+        let down = out.iter().position(|a| matches!(a, DataGridAction::CellClicked { .. }));
+        let up = out.iter().position(|a| matches!(a, DataGridAction::CellReleased { .. }));
+        assert!(matches!((down, up), (Some(down), Some(up)) if down < up), "{out:?}");
+        assert_eq!(released(&out), vec![(2, 1, mods(true, false))]);
+        assert!(matches!(grid.interact, Interact::None), "the press outlived its release");
+    }
+
+    /// Four points of wobble between down and up is still a click, in a
+    /// grid that carries rows and in one that does not.
+    #[test]
+    fn four_points_of_travel_is_still_a_click() {
+        for row_drag in [false, true] {
+            let mut cx = cx();
+            let mut grid = laid_out(&mut cx);
+            grid.row_drag = row_drag;
+            let at = middle(&grid, 2, 1);
+            let wobble = at + dvec2(0.0, 4.0);
+            let out = raised(&mut cx, &mut grid, |cx, grid| {
+                grid.press_cell(cx, 2, 1, at, KeyModifiers::default(), 1);
+                grid.move_cell_press(cx, wobble);
+                grid.release_cell_press(cx, wobble, KeyModifiers::default());
+            });
+            assert_eq!(released(&out).len(), 1, "row_drag {row_drag}: {out:?}");
+            assert!(carried(&out).is_empty(), "row_drag {row_drag}: {out:?}");
+        }
+    }
+
+    /// Six points with `row_drag` on carries the row, and the grid says so
+    /// once and then leaves the press alone: coming back to where it went
+    /// down is no click, the selection does not follow the pointer, and
+    /// the view does not scroll however far past the edge it goes.
+    #[test]
+    fn six_points_with_row_drag_carries_the_row_and_does_nothing_else() {
+        let mut cx = cx();
+        let mut grid = laid_out(&mut cx);
+        grid.row_drag = true;
+        let at = middle(&grid, 2, 1);
+        let (six, other_cell) = (at + dvec2(0.0, 6.0), middle(&grid, 5, 2));
+        let out = raised(&mut cx, &mut grid, |cx, grid| {
+            grid.press_cell(cx, 2, 1, at, mods(false, true), 1);
+            grid.move_cell_press(cx, six);
+            grid.move_cell_press(cx, other_cell);
+            grid.move_cell_press(cx, at + dvec2(400.0, 400.0));
+            grid.release_cell_press(cx, at, KeyModifiers::default());
+        });
+        assert_eq!(carried(&out), vec![(2, 1, six, mods(false, true))], "{out:?}");
+        assert!(released(&out).is_empty(), "{out:?}");
+        assert_eq!(grid.selection(), Some(GridSelection::single(2, 1)));
+        assert_eq!(grid.scroll, DVec2::default(), "the carry scrolled the grid");
+    }
+
+    /// The rows cut short under a held press leave the line pressed
+    /// behind: coming up is no click on it, and travelling carries nothing.
+    #[test]
+    fn a_press_on_a_line_the_rows_no_longer_reach_neither_releases_nor_carries() {
+        for (row_drag, travel) in [(false, 0.0), (true, 0.0), (true, 6.0)] {
+            let mut cx = cx();
+            let mut grid = laid_out(&mut cx);
+            grid.row_drag = row_drag;
+            let at = middle(&grid, 5, 1);
+            let to = at + dvec2(0.0, travel);
+            let out = raised(&mut cx, &mut grid, |cx, grid| {
+                grid.press_cell(cx, 5, 1, at, KeyModifiers::default(), 1);
+                grid.set_grid_size(3, 3);
+                grid.move_cell_press(cx, to);
+                grid.release_cell_press(cx, to, KeyModifiers::default());
+            });
+            assert!(released(&out).is_empty(), "row_drag {row_drag}, {travel}: {out:?}");
+            assert!(carried(&out).is_empty(), "row_drag {row_drag}, {travel}: {out:?}");
+        }
+    }
+
+    /// With `row_drag` off a press still drags out a rectangle, as it
+    /// always has, and a drag is not a click.
+    #[test]
+    fn without_row_drag_a_drag_still_selects_a_rectangle() {
+        let mut cx = cx();
+        let mut grid = laid_out(&mut cx);
+        let (from, to) = (middle(&grid, 1, 0), middle(&grid, 3, 2));
+        let out = raised(&mut cx, &mut grid, |cx, grid| {
+            grid.press_cell(cx, 1, 0, from, KeyModifiers::default(), 1);
+            grid.move_cell_press(cx, to);
+            grid.release_cell_press(cx, to, KeyModifiers::default());
+        });
+        let sel = grid.selection().expect("the drag selected nothing");
+        assert_eq!((sel.kind, sel.anchor, sel.head), (GridSelectKind::Cells, (1, 0), (3, 2)));
+        assert!(carried(&out).is_empty(), "{out:?}");
+        assert!(released(&out).is_empty(), "{out:?}");
     }
 }

@@ -87,6 +87,9 @@ script_mod! {
                 // reports each press with the keys held, and this page
                 // does the picking.
                 selection: GridSelectMode.Off
+                // A press that travels past drag_threshold carries its row
+                // rather than being a click.
+                row_drag: true
                 show_row_headers: false
                 allow_row_resize: false
                 zebra_stripes: true
@@ -111,6 +114,7 @@ script_mod! {
             }
         }
         picked := Label{text: "nothing picked"}
+        log := Label{text: "press a row and let go, or drag it"}
     }
 
     mod.stories.DataGridOverview = StoryPage{
@@ -137,6 +141,9 @@ script_mod! {
         StoryHeading{text: "Picks the host keeps"}
         StoryNote{text: "Click a row to pick it alone, Ctrl-click to add a row or drop it, Shift-click to pick everything from the row last clicked. The grid selects nothing here. It reports each press with the keys that were held, and this page decides what is picked, tints those rows and outlines the row clicked last."}
         list := mod.storybook.StoryDataGridList{}
+
+        StoryHeading{text: "A click, or a carry"}
+        StoryNote{text: "The press picks, and letting go where it went down finishes the click: the line under the list says released. Move more than five points first and the grid reports that the row is being carried instead, and never reports the release, so a list that opens a row when it is let go never opens one that was dragged away."}
 
         StoryHeading{text: "Three ways to select"}
         StoryNote{text: "Cells is the spreadsheet on the Overview page. Rows picks a whole row with a press or an arrow key, and a heading press only sorts. Off, used here, picks nothing and draws nothing, for a host whose picks are its own."}
@@ -478,16 +485,29 @@ fn data_grid_list_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
     let grid = root.data_grid(cx, ids!(list.grid));
     let host = root.widget(cx, ids!(list));
     for action in grid.actions(actions) {
-        // With the selection off this is the only thing a press raises,
-        // and it carries the keys that were held.
-        if let DataGridAction::CellClicked { row, modifiers, .. } = action {
-            let said = host
-                .borrow_mut::<StoryDataGridList>()
-                .map(|mut inner| inner.press(row, modifiers));
-            if let Some(said) = said {
-                host.redraw(cx);
-                root.label(cx, ids!(list.picked)).set_text(cx, &said);
+        match action {
+            // With the selection off the grid picks nothing: the press
+            // says which row and which keys, and the picking is done here.
+            DataGridAction::CellClicked { row, modifiers, .. } => {
+                let said = host
+                    .borrow_mut::<StoryDataGridList>()
+                    .map(|mut inner| inner.press(row, modifiers));
+                if let Some(said) = said {
+                    host.redraw(cx);
+                    root.label(cx, ids!(list.picked)).set_text(cx, &said);
+                }
             }
+            // The press came up within the threshold: a finished click,
+            // the moment to act on a row.
+            DataGridAction::CellReleased { row, .. } => {
+                root.label(cx, ids!(list.log)).set_text(cx, &format!("released row {row}"));
+            }
+            // The press travelled: the row is on its way somewhere, and
+            // no release will follow.
+            DataGridAction::RowDragStarted { row, .. } => {
+                root.label(cx, ids!(list.log)).set_text(cx, &format!("carrying row {row}"));
+            }
+            _ => {}
         }
     }
 }
@@ -665,6 +685,12 @@ The grid on the Overview page is a spreadsheet. This one is a list: no row numbe
 
 This page keeps a set of picked items and an anchor. A plain click picks one row, Ctrl adds or drops a row, Shift picks from the anchor to the row clicked. The picks are held **by item, not by line**, so they stay on their rows wherever those rows are drawn. A picked row is nothing more than a row the page draws with `cell_text_styled` and another background.
 
+## A click, or a carry
+
+A press raises `CellClicked` as it goes down. When it comes back up without the pointer having gone further than `drag_threshold` (5 points unless declared otherwise), the grid raises `CellReleased { row, col, modifiers }`, in every selection mode. A host that acts on a finished click — opening a row, loading it — reads the release rather than the press.
+
+With `row_drag: true`, a press that travels past the threshold raises `RowDragStarted { row, col, abs, modifiers }` once, with `abs` where the pointer is as the carry begins. From then on the grid leaves that press alone: it selects nothing, does not scroll at the edge, and raises no `CellReleased` when the press comes up. Where the row goes is the host's to follow. Without `row_drag` a drag across cells drags out a selection, as it always has, and is not a click either.
+
 ## The outline
 
 `outline_row(row, color)` draws a 1.5 point outline round a row's visible cells: a keyboard cursor, a row being carried, anything a host marks without selecting it. Call it from the draw loop, as the cells are. It is drawn when the frame ends, over every cell, so the row's own cells may come before the call or after it; and it lasts one frame, so ask for it again on every draw. This page outlines the row clicked last.",
@@ -812,7 +838,11 @@ mod tests {
     fn both_pages_build_and_hold_the_grids_their_handlers_address() {
         let (mut cx, errors) = shell();
         assert!(errors.is_empty(), "{errors:?}");
-        for (story, path) in STORIES.iter().zip([ids!(demo.grid), ids!(list.grid)]) {
+        let addressed: [(&[LiveId], &[&[LiveId]]); 2] = [
+            (ids!(demo.grid), &[ids!(demo.reported), ids!(demo.edited)]),
+            (ids!(list.grid), &[ids!(list.picked), ids!(list.log)]),
+        ];
+        for (story, (path, labels)) in STORIES.iter().zip(addressed) {
             let page = cx.with_vm(|vm| {
                 let stories = vm.module(id!(stories));
                 let value = vm.bx.heap.value(stories, LiveId::from_str(story.dsl).into(), NoTrap);
@@ -821,6 +851,9 @@ mod tests {
             });
             assert!(!page.is_empty(), "{} built no widget", story.key);
             assert!(page.data_grid(&cx, path).borrow().is_some(), "{}: no grid", story.key);
+            for label in labels {
+                assert!(page.label(&cx, label).borrow().is_some(), "{}: no label {label:?}", story.key);
+            }
             let subject = page.widget(&cx, &[LiveId::from_str(story.subject)]);
             assert!(!subject.is_empty(), "{}: no {}", story.key, story.subject);
         }
