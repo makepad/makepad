@@ -1,7 +1,7 @@
 //! The glass controls story: four controls that show you what is behind
 //! them, and therefore need something to be behind them.
 use crate::makepad_widgets::*;
-use crate::registry::Story;
+use crate::registry::{Control, ControlKind, Story};
 
 script_mod! {
     use mod.prelude.widgets.*
@@ -27,8 +27,12 @@ script_mod! {
                     radio_two := mod.widgets.glass.GlassRadio{}
                     mod.widgets.glass.OptionLabel{text: "Water"}
                 }
+                // Unclipped, so the buttons' shadows show in full: a row that
+                // clips at its Fit height leaves them no room under the
+                // buttons, and the shadow thins out to nothing there.
                 View{
                     width: Fill height: Fit flow: Right spacing: theme.space_2
+                    clip_x: false clip_y: false
                     mod.widgets.glass.GlassButtonProminent{text: "Continue"}
                     subject := mod.widgets.glass.GlassButton{text: "Cancel"}
                 }
@@ -36,6 +40,37 @@ script_mod! {
                 mod.widgets.glass.GlassSegmented{
                     width: Fill
                     labels: ["Day" "Week" "Month"]
+                }
+            }
+        }
+
+        StoryHeading{text: "A lens you press"}
+        StoryNote{text: "The button's glass is a water lens. Hold one and the lens lies flat under the finger behind a ring that crosses it; let go and it springs back behind a softer ring, a little past rest, before it settles. The click is sent when you let go, and the rebound plays after it. This one is 300 by 92 and carries the lens button's own numbers, written on draw_glass under the names the glass surfaces use, to compare with the pressable lens on Glass > Sheets."}
+        GlassStage{
+            height: 240.
+            body +: {
+                align: Align{x: 0.5 y: 0.5}
+                focus_lens := mod.widgets.glass.GlassButton{
+                    width: 300
+                    height: 92
+                    text: "Focus"
+                    draw_text +: {text_style: theme.font_regular{font_size: 22}}
+                    draw_glass +: {
+                        blur_level: 0.25
+                        lensing_effect: 1.0
+                        lensing_strength: 38.0
+                        lensing_width: 13.0
+                        corner_radius: 23.0
+                        tint_color: #b8b8b8
+                        tint_alpha: 0.025
+                        border_alpha: 0.82
+                        specular_strength: 0.24
+                        noise_strength: 0.004
+                        shadow_color: #0009
+                        shadow_radius: 34.0
+                        shadow_offset: vec2(0.0, 14.0)
+                        diffraction_strength: 5.2
+                    }
                 }
             }
         }
@@ -53,6 +88,7 @@ script_mod! {
                 }
                 View{
                     width: Fill height: Fit flow: Right spacing: theme.space_2
+                    clip_x: false clip_y: false
                     mod.widgets.glass.GlassButtonProminent{text: "Continue"}
                     mod.widgets.glass.GlassButton{text: "Cancel"}
                 }
@@ -79,14 +115,33 @@ pub const STORIES: &[Story] = &[Story {
 
 A toggle, a button, a slider and a segmented row, all built on the same lensing the glass panel uses. They live under `mod.widgets.glass`, not at the top of the widget module, so they are written `glass.GlassButton` and so on.
 
-The two rows on this page are the same four declarations over a colourful ground and over one colour. The lens refracts the scene underneath, so over one colour it has nothing to bend and each control collapses to a faint outline; Glass > Overview says when that makes the family the wrong choice.
+The first and last bands on this page are the same four declarations over a colourful ground and over one colour. The lens refracts the scene underneath, so over one colour it has nothing to bend and each control collapses to a faint outline; Glass > Overview says when that makes the family the wrong choice.
 
 They must also be drawn in the same pass as what they refract. The glass example in this repository puts its content in the background pass rather than in a `glass.Layer` for exactly that reason — a layer would hide the base from the lens, and each toggle needs to refract its own track and knob.
 
-`GlassButtonProminent` is the filled variant of `GlassButton`; the rest take the shapes you would expect — `labels` on the segmented row, a value on the slider.",
+`GlassButtonProminent` is the filled variant of `GlassButton`; the rest take the shapes you would expect — `labels` on the segmented row, a value on the slider.
+
+## What a press does
+
+`GlassButton` is drawn on the water lens, `RippleLensRoundedView`: a sheen toward the rim and the top, a bright seal, a colour split at the rim and a soft shadow under it. Its glass is that preset's own draw rather than a copy, so every knob of the lens is written on `draw_glass` under the name it has on the surface, and the numbers of one paste onto the other.
+
+- **Press.** The lens lies flat under the finger over `press_secs` (0.78 s), behind a ring that crosses it in 0.88 s and fades over `ripple_secs` (1.05 s). Held on after that, the lens stays flat and still.
+- **Release.** The lens springs back from as flat as it got, behind a second ring `release_ripple` (0.62) as strong, lifting a little past rest just behind the ring before it settles about a second later.
+- **Click.** `clicked` and `on_click` fire on the release, at the same moment they always did; the rebound plays after them, not before.
+- **Label.** The label and the icon dim to `hover_ink` (0.65 of their alpha) under the pointer and to `down_ink` (0.25) while held, as the lens button's label does. The glass itself does not light up.
+- **Disabled.** A button put out of use with `set_disabled` takes no press and sends no click, and shows its label and icon at `disabled_ink` (0.4).
+- **Cost.** The clock runs only while the lens is flattening or rebounding, so a button at rest, or one held down after its ring has gone, asks for no frames.
+- **`reduced_motion: true`.** The lens goes flat on the press and back on the release at once, with no ring and no clock. The controls panel has a switch for it on the Cancel button and on the 300 by 92 one.
+
+A 44 point button carries the lens button's numbers scaled to its height, 44/92 of everything measured in points: an 18 point bend over a 6.2 point band, a 2.5 point colour split, a shadow 16 points wide and 6.7 points down. Nothing shrinks under the finger; the flatten and the ring are the press. The label is 13 point bold and white. The 300 by 92 button on this page carries the unscaled numbers.
+
+Like every glass surface, the button paints past its own rect: the shadow below it and the rim's bend around it. A container clips what is drawn in it, so the shadow keeps to the room its container leaves under the button. In a row only as tall as its buttons it thins out to nothing rather than being cut into a slab with hard edges, and wherever a clip still crosses it, it fades out before the edge. The rows on this page switch `clip_x` and `clip_y` off so the shadow shows in full.",
     subject: "subject",
     feature: None,
-    controls: &[],
+    controls: &[
+        Control { label: "Reduced motion", target: "subject",    kind: ControlKind::Bool { prop: "reduced_motion", default: false } },
+        Control { label: "Lens reduced motion", target: "focus_lens", kind: ControlKind::Bool { prop: "reduced_motion", default: false } },
+    ],
     on_actions: None,
 }];
 
@@ -122,10 +177,12 @@ mod tests {
             None,
             "a draw shader failed to compile"
         );
-        assert!(
-            !page.widget(&cx, &[LiveId::from_str(story.subject)]).is_empty(),
-            "no widget at {}",
-            story.subject
-        );
+        for target in std::iter::once(story.subject).chain(story.controls.iter().map(|c| c.target)) {
+            assert!(
+                !page.widget(&cx, &[LiveId::from_str(target)]).is_empty(),
+                "no widget at {}",
+                target
+            );
+        }
     }
 }
