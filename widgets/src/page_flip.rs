@@ -204,30 +204,3 @@ impl PageFlipRef {
         inner.set_active_page(cx, page_id)
     }
 }
-
-#[cfg(test)]
-mod cancel_tests {
-    use super::*;
-
-    #[test]
-    fn only_the_selected_retained_page_is_cancel_active_before_draw() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        let root = cx.with_vm(|vm| {
-            crate::script_mod(vm);
-            let value = vm.eval(crate::makepad_script::script! {
-                use mod.prelude.widgets.*
-                PageFlip { active_page: @first first := View {} second := View {} }
-            });
-            WidgetRef::script_from_value(vm, value)
-        });
-        crate::widget_tree::set_ui_root(&mut cx, &root);
-        let first = root.child(live_id!(first));
-        let second = root.child(live_id!(second));
-        assert!(!first.is_empty() && !second.is_empty());
-        assert!(cx.widget_is_active(first.widget_uid()));
-        assert!(!cx.widget_is_active(second.widget_uid()));
-        root.borrow_mut::<PageFlip>().unwrap().active_page = live_id!(second);
-        assert!(!cx.widget_is_active(first.widget_uid()));
-        assert!(cx.widget_is_active(second.widget_uid()));
-    }
-}

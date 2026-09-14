@@ -411,19 +411,12 @@ impl Cx {
     /// [`Self::begin_widget_cancel_scope()`] so visibility and ancestry are handled
     /// automatically. Global scopes are ordered by activation and have no widget
     /// visibility check; end or drop one when its operation stops being active.
-    ///
-    /// Set `MAKEPAD_CANCEL_TRACE=1` to log every scope begun and ended, and which one each
-    /// `Escape`/back press was stamped to, each named by the call site that began it. A
-    /// scope held by a global operation that has stopped being active can block the
-    /// gesture for everything behind it; the trace names that scope.
-    #[track_caller]
     pub fn begin_cancel_scope(&mut self) -> CancelScope {
         self.cancel_scopes.begin()
     }
 
     /// Begins a global scope for only the specified gestures. For widget operations,
     /// use [`Self::begin_widget_cancel_scope()`] with the desired gesture kind.
-    #[track_caller]
     pub fn begin_cancel_scope_for(&mut self, kind: CancelScopeKind) -> CancelScope {
         self.cancel_scopes.begin_for(kind)
     }
@@ -434,7 +427,6 @@ impl Cx {
     /// its page is hidden. `owner` is the widget's nonzero UID, not its reusable named
     /// ID. Zero is reserved for global scopes. A widgets resolver must be installed
     /// for a bound scope to receive input.
-    #[track_caller]
     pub fn begin_widget_cancel_scope(&mut self, owner: u64, kind: CancelScopeKind) -> CancelScope {
         self.cancel_scopes.begin_widget(owner, kind)
     }

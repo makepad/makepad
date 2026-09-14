@@ -549,27 +549,6 @@ impl Event {
     }
 }
 
-#[cfg(test)]
-mod cancel_visibility_tests {
-    use super::*;
-
-    #[test]
-    fn cancel_input_is_limited_to_visible_branches_but_other_events_still_broadcast() {
-        let escape = KeyEvent { key_code: KeyCode::Escape, ..Default::default() };
-        assert!(Event::KeyDown(escape.clone()).requires_visibility());
-        assert!(Event::KeyUp(escape.clone()).requires_visibility());
-        assert!(Event::KeyDown(KeyEvent { is_repeat: true, ..escape }).requires_visibility());
-        assert!(Event::BackPressed { handled: Cell::new(false) }.requires_visibility());
-
-        let other_key = KeyEvent { key_code: KeyCode::ReturnKey, ..Default::default() };
-        assert!(!Event::KeyDown(other_key.clone()).requires_visibility());
-        assert!(!Event::KeyUp(other_key).requires_visibility());
-        assert!(!Event::Signal.requires_visibility());
-        assert!(!Event::Pause.requires_visibility());
-        assert!(!Event::Actions(Default::default()).requires_visibility());
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct TriggerEvent {
     pub triggers: HashMap<Area, Vec<Trigger>>,

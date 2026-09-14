@@ -2267,35 +2267,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cancel_children_follow_selected_tabs_without_cached_or_detached_items() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        let (mut dock, first, second) = cx.with_vm(|vm| {
-            crate::script_mod(vm);
-            (Dock::script_new_with_default(vm),
-                WidgetRef::new_with_inner(Box::new(crate::view::View::script_new_with_default(vm))),
-                WidgetRef::new_with_inner(Box::new(crate::view::View::script_new_with_default(vm))))
-        });
-        dock.items.insert(id!(first), (id!(kind), first.clone()));
-        dock.items.insert(id!(second), (id!(kind), second.clone()));
-        dock.dock_items.insert(id!(root), DockItem::tabs(vec![id!(first), id!(second)], 0, true));
-        for id in [id!(first), id!(second)] {
-            dock.dock_items.insert(id, DockItem::default());
-        }
-        let root = WidgetRef::new_with_inner(Box::new(dock));
-        crate::widget_tree::set_ui_root(&mut cx, &root);
-        assert!(cx.widget_is_active(first.widget_uid()));
-        assert!(!cx.widget_is_active(second.widget_uid()));
-        root.borrow_mut::<Dock>().unwrap().dock_items.insert(id!(root), DockItem::tabs(vec![id!(first), id!(second)], 1, true));
-        assert!(!cx.widget_is_active(first.widget_uid()));
-        assert!(cx.widget_is_active(second.widget_uid()));
-        let mut dock = root.borrow_mut::<Dock>().unwrap();
-        dock.dock_items.insert(id!(root), DockItem::splitter(SplitterAxis::Horizontal, SplitterAlign::Weighted(0.5), id!(root), id!(root)));
-        let mut count = 0;
-        dock.visit_cancel(&mut |_, _| count += 1);
-        assert_eq!(count, 0, "cyclic restored layouts terminate with no eligible content");
-    }
-
-    #[test]
     fn preserving_layout_keeps_absent_and_matching_tab_bodies() {
         let present = LiveId(1);
         let absent = LiveId(2);

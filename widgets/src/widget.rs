@@ -39,11 +39,9 @@ pub trait WidgetNode: ScriptApply {
         self.children(visit);
         true
     }
-    #[track_caller]
     fn begin_cancel_scope(&self, cx: &mut Cx) -> CancelScope {
         self.begin_cancel_scope_for(cx, CancelScopeKind::Both)
     }
-    #[track_caller]
     fn begin_cancel_scope_for(&self, cx: &mut Cx, kind: CancelScopeKind) -> CancelScope {
         cx.begin_widget_cancel_scope(self.widget_uid().0, kind)
     }

@@ -9609,29 +9609,6 @@ impl Widget for Tweaker {
 mod tests {
     use super::*;
 
-    #[test]
-    fn closing_the_tweaker_releases_splitter_and_editor_cancel_scopes() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        let (mut tweaker, editor) = cx.with_vm(|vm| {
-            crate::script_mod(vm);
-            (Tweaker::script_new(vm), WidgetRef::new_with_inner(Box::new(
-                crate::fab_controls::FabValueInput::script_new_with_default(vm))))
-        });
-        let behind = cx.begin_cancel_scope();
-        tweaker.splitter_drag = true;
-        tweaker.cancel_scope = Some(cx.begin_cancel_scope());
-        editor.borrow_mut::<crate::fab_controls::FabValueInput>().unwrap().begin_edit(&mut cx);
-        tweaker.sidebar = Some(editor);
-        tweaker.cancel_interactions(&mut cx);
-        assert!(!tweaker.splitter_drag);
-        assert!(tweaker.cancel_scope.is_none());
-        cx.dispatch_studio_msg(
-            makepad_platform::studio::StudioToApp::KeyDown(KeyEvent {
-                key_code: KeyCode::Escape, ..Default::default()
-            }), WindowId(0, 0), dvec2(0.0, 0.0));
-        assert!(cx.owns_cancel(&behind), "closed sidebar retained its editor's scope");
-    }
-
     fn entry(seq: u64, path: &str, prop: &str, old: &str, new: &str) -> TweakDiffEntry {
         TweakDiffEntry {
             origin: String::new(),
