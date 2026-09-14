@@ -46,6 +46,8 @@ script_mod! {
         color_header: #f1f3f4
         color_header_active: #xd7e3fc
         color_header_text: #444444
+        // Transparent: the sorted heading is drawn like the others.
+        color_header_sorted: #x00000000
         color_selection: #x4285f41f
         color_selection_border: #x1a73e8
         color_drag_marker: #x1a73e8
@@ -58,6 +60,11 @@ script_mod! {
         draw_text_bold +: {
             text_style: theme.font_bold{font_size: 9.0}
             color: #202020
+        }
+        // Size 0: the headings are drawn in draw_text's style. A size of
+        // its own gives them a face and size of their own.
+        draw_text_header +: {
+            text_style: theme.font_regular{font_size: 0.0}
         }
         scroll_bar_h: mod.widgets.ScrollBar{
             draw_bg +: {
@@ -490,6 +497,33 @@ impl Default for CellStyle {
     }
 }
 
+/// How one column heading is drawn.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct HeaderLook {
+    /// The label's colour, and the marks'.
+    color: Vec4f,
+    /// Where the label sits across the heading, 0.0 left to 1.0 right.
+    align: f64,
+    /// The sort marks after the label, and whether they are worn faded.
+    mark: Option<(&'static str, bool)>,
+}
+
+/// Where a heading label `tw` wide starts in `rect`: `align` of the way
+/// across the room inside the padding. Past the middle the room loses
+/// `reserve` at the right, the space the sort marks take, a little more
+/// the further right the label goes and all of it at 1.0, so a label
+/// aligned right ends before the marks and the centred default is where
+/// it always was. A label with no room starts at the left padding, as a
+/// cell's does.
+fn header_label_x(rect: Rect, pad: f64, tw: f64, align: f64, reserve: f64) -> f64 {
+    let room = rect.size.x - 2.0 * pad - reserve * ((align - 0.5) * 2.0).clamp(0.0, 1.0);
+    if tw >= room {
+        rect.pos.x + pad
+    } else {
+        rect.pos.x + pad + (room - tw) * align
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum HitZone {
     Corner,
@@ -652,6 +686,17 @@ pub struct DataGrid {
     min_row_height: f64,
     #[live(6.0)]
     cell_pad_x: f64,
+    /// Where a column heading's label sits across the heading, from 0.0 at
+    /// the left to 1.0 at the right; centred unless declared. Past the
+    /// middle the label keeps clear of the sort marks, all the way clear at
+    /// 1.0. Row numbers stay centred.
+    #[live(0.5)]
+    header_align: f64,
+    /// The pointer over a cell: `Default` unless declared, as it has always
+    /// been. A list whose rows open when clicked says so with `Hand`.
+    /// Edges and a heading that can be dragged keep their own shapes.
+    #[live]
+    cell_cursor: MouseCursor,
     #[live(true)]
     grab_key_focus: bool,
     /// Cells, whole rows, or nothing. See [`GridSelectMode`].
@@ -686,6 +731,10 @@ pub struct DataGrid {
     color_header_active: Vec4f,
     #[live]
     color_header_text: Vec4f,
+    /// The sorted column's heading label and marks. Transparent, the
+    /// default, draws them in `color_header_text` like the rest.
+    #[live]
+    color_header_sorted: Vec4f,
     #[live]
     color_selection: Vec4f,
     #[live]
@@ -705,6 +754,14 @@ pub struct DataGrid {
     draw_text: DrawText,
     #[live]
     draw_text_bold: DrawText,
+    /// The headings' text: labels, sort marks and row numbers. With a font
+    /// size of 0, the default, they are drawn with `draw_text` instead, as
+    /// they always have been, so a grid that restyles its cells restyles
+    /// its headings with them. Any size above 0 gives the headings their
+    /// own face and size. Their colour comes from `color_header_text` or
+    /// `color_header_sorted` either way.
+    #[live]
+    draw_text_header: DrawText,
     #[live]
     scroll_bar_h: ScrollBar,
     #[live]
@@ -1597,26 +1654,7 @@ impl DataGrid {
                 self.draw_cell.draw_abs(cx, rect);
                 let data_col = self.display_to_data(display_col);
                 let label = self.col_label(data_col);
-                // A column that CAN be sorted says so before it is. Without
-                // it there is nothing on screen to tell a sortable heading
-                // from a plain one, and the only way to find out is to press
-                // every heading in the row.
-                //
-                // Drawn at the right edge in its own pass rather than stuck
-                // on the end of the label: appended, it drags the heading
-                // off centre and the marks land in a different place in
-                // every column.
-                let can_sort = self.sortable && !self.unsortable_cols.contains(&data_col);
-                let mark = match self.sort_indicator {
-                    Some((c, asc)) if c == data_col => Some((if asc { "▲" } else { "▼" }, false)),
-                    // The filled pair, not the hollow one: the hollow
-                    // triangles are only in faces this chain does not carry
-                    // and rendered as tofu, so an unsorted column is the
-                    // same marks worn lighter. Two means either way from
-                    // here; one means this way.
-                    _ if can_sort => Some(("▲▼", true)),
-                    _ => None,
-                };
+                let look = self.header_look(data_col);
                 if w >= 15.0 {
                     let cell = GridCell {
                         row: 0,
@@ -1624,9 +1662,17 @@ impl DataGrid {
                         display_col,
                         rect,
                     };
-                    self.header_text(cx, &cell, &label);
-                    if let Some((mark, faded)) = mark {
-                        self.header_mark(cx, &cell, mark, faded);
+                    // Only a label past the middle comes near the marks, so
+                    // only then are they measured for it to keep clear of.
+                    let reserve = match look.mark {
+                        Some((mark, _)) if look.align > 0.5 => {
+                            Self::RESIZE_MARGIN + self.cell_pad_x + self.header_text_width(cx, mark)
+                        }
+                        _ => 0.0,
+                    };
+                    self.header_text(cx, &cell, &label, look.color, look.align, reserve);
+                    if let Some((mark, faded)) = look.mark {
+                        self.header_mark(cx, &cell, mark, faded, look.color);
                     }
                 }
             }
@@ -1657,7 +1703,7 @@ impl DataGrid {
                         rect,
                     };
                     let label = (row + 1).to_string();
-                    self.header_text(cx, &cell, &label);
+                    self.header_text(cx, &cell, &label, self.color_header_text, 0.5, 0.0);
                 }
                 y += h;
             }
@@ -1669,56 +1715,113 @@ impl DataGrid {
         }
     }
 
-    fn header_text(&mut self, cx: &mut Cx2d, cell: &GridCell, text: &str) {
+    /// How the heading of data column `data_col` is drawn: its colour, where
+    /// its label sits, and the sort marks after it. With nothing declared
+    /// this is the stock heading, the sorted one included.
+    fn header_look(&self, data_col: usize) -> HeaderLook {
+        let sorted = matches!(self.sort_indicator, Some((c, _)) if c == data_col);
+        let color = if sorted && self.color_header_sorted.w > 0.0 {
+            self.color_header_sorted
+        } else {
+            self.color_header_text
+        };
+        // A column that CAN be sorted says so before it is. Without it
+        // there is nothing on screen to tell a sortable heading from a
+        // plain one, and the only way to find out is to press every
+        // heading in the row.
+        //
+        // Drawn at the right edge in its own pass rather than stuck on the
+        // end of the label: appended, it drags the heading off centre and
+        // the marks land in a different place in every column.
+        let can_sort = self.sortable && !self.unsortable_cols.contains(&data_col);
+        let mark = match self.sort_indicator {
+            Some((c, asc)) if c == data_col => Some((if asc { "▲" } else { "▼" }, false)),
+            // The filled pair, not the hollow one: the hollow triangles are
+            // only in faces this chain does not carry and rendered as tofu,
+            // so an unsorted column is the same marks worn lighter. Two
+            // means either way from here; one means this way.
+            _ if can_sort => Some(("▲▼", true)),
+            _ => None,
+        };
+        HeaderLook {
+            color,
+            align: self.header_align.clamp(0.0, 1.0),
+            mark,
+        }
+    }
+
+    /// Whether the headings have a text style of their own, or borrow the
+    /// cells'.
+    fn headers_have_own_text(&self) -> bool {
+        self.draw_text_header.text_style.font_size > 0.0
+    }
+
+    fn header_draw_text(&mut self) -> &mut DrawText {
+        if self.headers_have_own_text() {
+            &mut self.draw_text_header
+        } else {
+            &mut self.draw_text
+        }
+    }
+
+    fn header_text_width(&mut self, cx: &mut Cx2d, text: &str) -> f64 {
+        let dt = self.header_draw_text();
+        let laidout = dt.layout(cx, 0.0, 0.0, None, false, Align::default(), text);
+        laidout.size_in_lpxs.width as f64
+    }
+
+    /// A heading's label in `color`, placed by [`header_label_x`].
+    fn header_text(
+        &mut self,
+        cx: &mut Cx2d,
+        cell: &GridCell,
+        text: &str,
+        color: Vec4f,
+        align: f64,
+        reserve: f64,
+    ) {
         let pad = self.cell_pad_x;
-        self.draw_text.color = self.color_header_text;
-        let laidout = self
-            .draw_text
-            .layout(cx, 0.0, 0.0, None, false, Align::default(), text);
+        let dt = self.header_draw_text();
+        dt.color = color;
+        let laidout = dt.layout(cx, 0.0, 0.0, None, false, Align::default(), text);
         let tw = laidout.size_in_lpxs.width as f64;
         let th = laidout.size_in_lpxs.height as f64;
-        let avail = cell.rect.size.x - 2.0 * pad;
-        let x = if tw >= avail {
-            cell.rect.pos.x + pad
-        } else {
-            cell.rect.pos.x + pad + (avail - tw) * 0.5
-        };
+        let x = header_label_x(cell.rect, pad, tw, align, reserve);
         let y = cell.rect.pos.y + (cell.rect.size.y - th) * 0.5;
-        let overflow = tw > avail;
+        let overflow = tw > cell.rect.size.x - 2.0 * pad;
         if overflow {
             cx.push_clip_rect(Rect {
                 pos: cell.rect.pos,
                 size: cell.rect.size - dvec2(1.0, 0.0),
             });
         }
-        self.draw_text.draw_abs(cx, dvec2(x, y), text);
+        dt.draw_abs(cx, dvec2(x, y), text);
         if overflow {
             cx.pop_clip_rect();
         }
     }
 
-    /// The sort marks, against the right edge of a heading. Faded while
-    /// the column is only sortable, full once it is sorted, so the row
-    /// reads as one lit column among several offers.
-    fn header_mark(&mut self, cx: &mut Cx2d, cell: &GridCell, mark: &str, faded: bool) {
-        let rest = self.draw_text.color;
-        self.draw_text.color = if faded {
-            Vec4f { w: rest.w * 0.45, ..rest }
+    /// The sort marks, against the right edge of a heading, in the
+    /// heading's `color`. Faded while the column is only sortable, full
+    /// once it is sorted, so the row reads as one lit column among several
+    /// offers.
+    fn header_mark(&mut self, cx: &mut Cx2d, cell: &GridCell, mark: &str, faded: bool, color: Vec4f) {
+        let pad = self.cell_pad_x;
+        let dt = self.header_draw_text();
+        dt.color = if faded {
+            Vec4f { w: color.w * 0.45, ..color }
         } else {
-            rest
+            color
         };
-        let laidout = self
-            .draw_text
-            .layout(cx, 0.0, 0.0, None, false, Align::default(), mark);
+        let laidout = dt.layout(cx, 0.0, 0.0, None, false, Align::default(), mark);
         let mw = laidout.size_in_lpxs.width as f64;
         let mh = laidout.size_in_lpxs.height as f64;
         // Clear of the resize grab zone as well as of the padding: the
         // marks are the part of a heading people aim at, and the last few
         // points of a column belong to the edge drag.
-        let x = cell.rect.pos.x + cell.rect.size.x - Self::RESIZE_MARGIN - self.cell_pad_x - mw;
+        let x = cell.rect.pos.x + cell.rect.size.x - Self::RESIZE_MARGIN - pad - mw;
         let y = cell.rect.pos.y + (cell.rect.size.y - mh) * 0.5;
-        self.draw_text.draw_abs(cx, dvec2(x, y), mark);
-        self.draw_text.color = rest;
+        dt.draw_abs(cx, dvec2(x, y), mark);
     }
 
     fn draw_interact_overlay(&mut self, cx: &mut Cx2d) {
@@ -1756,7 +1859,8 @@ impl DataGrid {
                     display_col,
                     rect,
                 };
-                self.header_text(cx, &cell, &label);
+                let color = self.header_look(data_col).color;
+                self.header_text(cx, &cell, &label, color, self.header_align.clamp(0.0, 1.0), 0.0);
             }
             Interact::ColResize { display_col, .. } => {
                 let x = self.vp.data_rect.pos.x
@@ -2106,6 +2210,19 @@ impl DataGrid {
             }
         }
         HitZone::Outside
+    }
+
+    /// The pointer's shape at `abs`: an edge that can be dragged and a
+    /// heading that can be carried say so, a cell wears `cell_cursor`, and
+    /// anywhere else is the default.
+    fn hover_cursor(&self, abs: DVec2) -> MouseCursor {
+        match self.hit_zone(abs) {
+            HitZone::ColHeader { resize_edge: Some(_), .. } if self.allow_col_resize => MouseCursor::ColResize,
+            HitZone::RowHeader { resize_edge: Some(_), .. } if self.allow_row_resize => MouseCursor::RowResize,
+            HitZone::ColHeader { .. } if self.allow_col_reorder => MouseCursor::Grab,
+            HitZone::Cell { .. } => self.cell_cursor,
+            _ => MouseCursor::Default,
+        }
     }
 
     fn cell_at(&self, pos: DVec2) -> Option<(usize, usize)> {
@@ -2736,20 +2853,7 @@ impl Widget for DataGrid {
                 }
             }
             Hit::FingerHoverIn(fe) | Hit::FingerHoverOver(fe) => {
-                match self.hit_zone(fe.abs) {
-                    HitZone::ColHeader { resize_edge: Some(_), .. } if self.allow_col_resize => {
-                        cx.set_cursor(MouseCursor::ColResize);
-                    }
-                    HitZone::RowHeader { resize_edge: Some(_), .. } if self.allow_row_resize => {
-                        cx.set_cursor(MouseCursor::RowResize);
-                    }
-                    HitZone::ColHeader { .. } if self.allow_col_reorder => {
-                        cx.set_cursor(MouseCursor::Grab);
-                    }
-                    _ => {
-                        cx.set_cursor(MouseCursor::Default);
-                    }
-                }
+                cx.set_cursor(self.hover_cursor(fe.abs));
             }
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 if self.grab_key_focus {
@@ -4129,5 +4233,93 @@ mod tests {
         grid.set_col_widths(&mut cx, &[5.0]);
         assert_eq!(grid.col_widths(), vec![grid.min_col_width, 96.0, 96.0]);
         assert_eq!(grid.hit_zone(at), HitZone::Cell { row, display_col: 1 });
+    }
+
+    /// With nothing declared every heading is the stock one: centred, in
+    /// the heading colour, the sorted one too, in the cells' text style;
+    /// the marks are as they were; and the pointer over a cell is the
+    /// default one.
+    #[test]
+    fn a_heading_and_the_pointer_look_as_they_always_have_until_declared() {
+        let mut cx = cx();
+        let mut grid = laid_out(&mut cx);
+        grid.sortable = true;
+        grid.set_unsortable_cols(vec![2]);
+        grid.set_sort_indicator(Some((1, true)));
+        let stock = |mark| HeaderLook {
+            color: grid.color_header_text,
+            align: 0.5,
+            mark,
+        };
+        assert_eq!(grid.header_look(0), stock(Some(("▲▼", true))));
+        assert_eq!(grid.header_look(1), stock(Some(("▲", false))));
+        assert_eq!(grid.header_look(2), stock(None));
+        assert!(!grid.headers_have_own_text());
+        assert_eq!(grid.hover_cursor(middle(&grid, 2, 1)), MouseCursor::Default);
+    }
+
+    /// Declared in the markup, the sorted heading takes its own colour and
+    /// the rest keep theirs, every label sits where `header_align` puts it,
+    /// the headings get their own text style, and a cell wears the declared
+    /// pointer while an edge still offers the drag.
+    #[test]
+    fn a_declared_heading_look_and_pointer_are_what_the_grid_uses() {
+        let mut cx = cx();
+        let declared = cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                DataGrid{
+                    rows: 0
+                    cols: 3
+                    sortable: true
+                    header_align: 0.0
+                    color_header_text: #x808080ff
+                    color_header_sorted: #xffffffff
+                    cell_cursor: MouseCursor.Hand
+                    draw_text_header +: {text_style +: {font_size: 8.0}}
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        let declared = declared.as_data_grid();
+        let mut grid = declared.borrow_mut().expect("the markup built no grid");
+        grid.set_grid_size(20, 3);
+        grid.vp.widget_rect = Rect {
+            pos: dvec2(0.0, 0.0),
+            size: dvec2(300.0, 200.0),
+        };
+        grid.compute_viewport();
+        grid.set_sort_indicator(Some((1, false)));
+        let white = vec4(1.0, 1.0, 1.0, 1.0);
+        assert_eq!(grid.header_look(1).color, white);
+        assert_ne!(grid.header_look(0).color, white);
+        assert_eq!(grid.header_look(0).color, grid.color_header_text);
+        assert_eq!(grid.header_look(2).align, 0.0);
+        assert!(grid.headers_have_own_text());
+        assert_eq!(grid.hover_cursor(middle(&grid, 2, 1)), MouseCursor::Hand);
+        let (_, x, w) = grid.vp.vis_cols[0];
+        let edge = dvec2(x + w, heading(&grid, 0).y);
+        assert_eq!(grid.hover_cursor(edge), MouseCursor::ColResize);
+        assert_eq!(grid.hover_cursor(heading(&grid, 0)), MouseCursor::Default);
+    }
+
+    /// The label's place: centred with the marks ignored, as ever; at the
+    /// left padding at 0.0; ending clear of the marks at 1.0; and a label
+    /// with no room starts at the padding whatever the alignment.
+    #[test]
+    fn a_label_sits_across_its_heading_and_clear_of_the_marks_on_the_right() {
+        let rect = Rect {
+            pos: dvec2(100.0, 0.0),
+            size: dvec2(120.0, 28.0),
+        };
+        let (pad, tw, marks) = (6.0, 40.0, 20.0);
+        assert_eq!(header_label_x(rect, pad, tw, 0.5, marks), 100.0 + 6.0 + (108.0 - 40.0) * 0.5);
+        assert_eq!(header_label_x(rect, pad, tw, 0.0, marks), 106.0);
+        let right = header_label_x(rect, pad, tw, 1.0, marks);
+        assert_eq!(right + tw, 220.0 - pad - marks, "the label runs into the marks");
+        let between = header_label_x(rect, pad, tw, 0.75, marks);
+        assert!(between > header_label_x(rect, pad, tw, 0.5, marks) && between < right);
+        assert_eq!(header_label_x(rect, pad, 200.0, 1.0, marks), 106.0);
     }
 }
