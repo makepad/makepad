@@ -188,7 +188,7 @@ impl DropSlider {
         if self.open != open {
             self.open = open;
             if open {
-                self.cancel_scope = Some(cx.begin_cancel_scope());
+                self.cancel_scope = Some(self.begin_cancel_scope(cx));
             } else if let Some(scope) = self.cancel_scope.take() {
                 cx.end_cancel_scope(scope);
             }

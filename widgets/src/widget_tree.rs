@@ -2787,6 +2787,7 @@ impl WidgetTree {
 #[derive(Default)]
 pub struct WidgetTreeState {
     pub tree: WidgetTree,
+    ui_root: WidgetWeakRef,
 }
 
 impl WidgetTreeState {
@@ -2805,6 +2806,10 @@ impl WidgetTreeState {
 
 pub trait CxWidgetExt {
     fn widget_tree(&self) -> &WidgetTree;
+    /// Inspect current branches eligible for interaction, including window focus.
+    /// Call outside widget dispatch/draw, while the UI root is unborrowed;
+    /// this does not use cached geometry or tree indices.
+    fn widget_is_active(&self, uid: WidgetUid) -> bool;
     fn widget_tree_mark_dirty(&mut self, uid: WidgetUid);
     fn widget_tree_insert_child(&mut self, parent_uid: WidgetUid, name: LiveId, widget: WidgetRef);
     fn widget_tree_insert_child_deep(
@@ -2841,9 +2846,23 @@ pub struct FlatTreeRow {
     pub has_children: bool,
 }
 
+fn live_ui_root(cx: &Cx) -> Option<WidgetRef> {
+    if cx.widget_tree_ptr.is_null() {
+        return None;
+    }
+    let state = unsafe { &*(cx.widget_tree_ptr as *const WidgetTreeState) };
+    state.ui_root.upgrade()
+}
+
+fn cancel_scope_resolver(cx: &Cx, candidate: &dyn Fn(u64) -> Option<u64>) -> Option<u64> {
+    live_ui_root(cx)?.resolve_cancel_scope(candidate)
+}
+
 pub fn set_ui_root(cx: &mut Cx, ui: &WidgetRef) {
     let state = get_or_init_state(cx);
     state.tree.set_root_widget(ui.clone());
+    state.ui_root = ui.downgrade();
+    cx.cancel_scope_resolver = Some(cancel_scope_resolver);
     cx.widget_tree_dump_callback = Some(compact_widget_tree_dump_callback);
     cx.widget_query_callback = Some(widget_query_callback);
     cx.widget_snapshot_callback = Some(widget_snapshot_callback);
@@ -2853,6 +2872,10 @@ pub fn set_ui_root(cx: &mut Cx, ui: &WidgetRef) {
 }
 
 impl CxWidgetExt for Cx {
+    fn widget_is_active(&self, uid: WidgetUid) -> bool {
+        live_ui_root(self).is_some_and(|root| root.contains_active_widget(uid))
+    }
+
     fn widget_tree(&self) -> &WidgetTree {
         if self.widget_tree_ptr.is_null() {
             static EMPTY: std::sync::OnceLock<WidgetTree> = std::sync::OnceLock::new();
@@ -2884,6 +2907,10 @@ impl CxWidgetExt for Cx {
 }
 
 impl<'a, 'b> CxWidgetExt for Cx2d<'a, 'b> {
+    fn widget_is_active(&self, uid: WidgetUid) -> bool {
+        { let cx: &Cx = self; cx.widget_is_active(uid) }
+    }
+
     fn widget_tree(&self) -> &WidgetTree {
         let cx: &Cx = self;
         if cx.widget_tree_ptr.is_null() {
@@ -2919,6 +2946,10 @@ impl<'a, 'b> CxWidgetExt for Cx2d<'a, 'b> {
 }
 
 impl<'a, 'b> CxWidgetExt for Cx3d<'a, 'b> {
+    fn widget_is_active(&self, uid: WidgetUid) -> bool {
+        { let cx: &Cx = self; cx.widget_is_active(uid) }
+    }
+
     fn widget_tree(&self) -> &WidgetTree {
         let cx: &Cx = self;
         if cx.widget_tree_ptr.is_null() {
@@ -2962,6 +2993,98 @@ mod tests {
     use super::*;
     use crate::widget::{DrawStepApi, WidgetRef, WidgetUid};
     use crate::{DrawStep, Widget, WidgetNode};
+
+    fn cancel_fixture() -> (Cx, WidgetRef, WidgetRef, WidgetRef, WidgetRef) {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let root = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let value = vm.eval(crate::makepad_script::script! {
+                use mod.prelude.widgets.*
+                View {
+                    branch := View { leaf := View {} }
+                    sibling := View {}
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        set_ui_root(&mut cx, &root);
+        let branch = root.child(live_id!(branch));
+        let leaf = branch.child(live_id!(leaf));
+        let sibling = root.child(live_id!(sibling));
+        (cx, root, branch, leaf, sibling)
+    }
+
+    fn cancel_key(cx: &mut Cx, down: bool, repeat: bool) {
+        use makepad_platform::studio::StudioToApp;
+        let key = KeyEvent { key_code: KeyCode::Escape, is_repeat: repeat, ..Default::default() };
+        let event = if down { StudioToApp::KeyDown(key) } else { StudioToApp::KeyUp(key) };
+        cx.dispatch_studio_msg(event, WindowId(0, 0), dvec2(0.0, 0.0));
+    }
+
+    #[test]
+    fn cancel_uses_live_visibility_before_draw_and_descendants_shadow_newer_ancestors() {
+        let (mut cx, root, branch, leaf, sibling) = cancel_fixture();
+        let child = cx.begin_widget_cancel_scope(leaf.widget_uid().0, CancelScopeKind::Both);
+        let parent = cx.begin_widget_cancel_scope(root.widget_uid().0, CancelScopeKind::Both);
+        assert!(leaf.area().is_empty());
+        cancel_key(&mut cx, true, false);
+        assert!(cx.owns_cancel(&child));
+        cancel_key(&mut cx, false, false);
+        let other = cx.begin_widget_cancel_scope(sibling.widget_uid().0, CancelScopeKind::Both);
+        let newest_parent = cx.begin_widget_cancel_scope(root.widget_uid().0, CancelScopeKind::Both);
+        cancel_key(&mut cx, true, false);
+        assert!(cx.owns_cancel(&other), "sibling activation wins even when its ancestor is newer than both branches");
+        cancel_key(&mut cx, false, false);
+        drop(newest_parent);
+        sibling.set_visible(&mut cx, false);
+        branch.set_visible(&mut cx, false);
+        assert!(!cx.widget_is_active(leaf.widget_uid()));
+        cancel_key(&mut cx, true, false);
+        assert!(cx.owns_cancel(&parent), "hidden descendants cannot shadow a visible ancestor");
+        cancel_key(&mut cx, false, false);
+        branch.set_visible(&mut cx, true);
+        cancel_key(&mut cx, true, false);
+        assert!(cx.owns_cancel(&child), "retained scopes resume without app bookkeeping");
+    }
+
+    #[test]
+    fn cancel_snapshot_survives_hiding_and_drop_until_the_next_press() {
+        let (mut cx, root, branch, leaf, _) = cancel_fixture();
+        let parent = cx.begin_widget_cancel_scope(root.widget_uid().0, CancelScopeKind::Both);
+        let child = cx.begin_widget_cancel_scope(leaf.widget_uid().0, CancelScopeKind::Both);
+        cancel_key(&mut cx, true, false);
+        assert!(cx.owns_cancel(&child));
+        branch.set_visible(&mut cx, false);
+        drop(child);
+        cancel_key(&mut cx, true, true);
+        assert!(cx.has_cancel_owner());
+        assert!(!cx.owns_cancel(&parent));
+        cancel_key(&mut cx, false, false);
+        assert!(cx.has_cancel_owner());
+        assert!(!cx.owns_cancel(&parent));
+        cancel_key(&mut cx, true, false);
+        assert!(cx.owns_cancel(&parent));
+    }
+
+    #[test]
+    fn cancel_ignores_stale_tree_parents_and_follows_live_reparenting() {
+        let (mut cx, root, branch, leaf, sibling) = cancel_fixture();
+        let parent = cx.begin_widget_cancel_scope(root.widget_uid().0, CancelScopeKind::Both);
+        let child = cx.begin_widget_cancel_scope(leaf.widget_uid().0, CancelScopeKind::Both);
+        cx.widget_tree().observe_node(leaf.widget_uid(), live_id!(leaf), leaf.clone(), Some(branch.widget_uid()));
+        branch.borrow_mut::<crate::view::View>().unwrap().children.clear();
+        assert!(!cx.widget_is_active(leaf.widget_uid()));
+        cancel_key(&mut cx, true, false);
+        assert!(cx.owns_cancel(&parent));
+        cancel_key(&mut cx, false, false);
+        sibling.borrow_mut::<crate::view::View>().unwrap().children.push((live_id!(leaf), leaf.clone()));
+        assert!(cx.widget_is_active(leaf.widget_uid()));
+        cancel_key(&mut cx, true, false);
+        assert!(cx.owns_cancel(&child));
+        let borrowed = sibling.borrow_mut::<crate::view::View>().unwrap();
+        assert!(!cx.widget_is_active(leaf.widget_uid()), "queries during a borrow must be safe");
+        drop(borrowed);
+    }
 
     // Minimal Widget impl for testing
     struct TestWidget {

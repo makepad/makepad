@@ -1015,6 +1015,7 @@ impl SsaaStack {
 }
 
 impl Window {
+
     fn sync_caption_bar_state(&mut self, cx: &mut Cx) {
         // Hosted inside studio: the studio chrome owns the window, never
         // show our own caption bar (a DSL hot-reload re-runs this sync).
@@ -1445,6 +1446,62 @@ impl Window {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::widget_tree::CxWidgetExt;
+
+    #[derive(Script, ScriptHook, Widget)]
+    struct CancelWindowWrapper {
+        #[deref]
+        window: Window,
+    }
+    impl Widget for CancelWindowWrapper {}
+
+    #[derive(Script, ScriptHook, Widget)]
+    struct CancelDoubleWindowWrapper {
+        #[deref]
+        inner: CancelWindowWrapper,
+    }
+    impl Widget for CancelDoubleWindowWrapper {}
+
+    #[test]
+    fn cancel_window_focus_propagates_through_nested_wrappers() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let root = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            WidgetRef::new_with_inner(Box::new(CancelDoubleWindowWrapper::script_new_with_default(vm)))
+        });
+        crate::widget_tree::set_ui_root(&mut cx, &root);
+        let uid = root.widget_uid();
+        let lookup = |owner| (owner == uid.0).then_some(1);
+        assert!(!cx.widget_is_active(uid));
+        assert_eq!(root.resolve_cancel_scope(&lookup), None);
+        root.borrow_mut::<CancelDoubleWindowWrapper>().unwrap().inner.window.has_focus = true;
+        assert!(cx.widget_is_active(uid));
+        assert_eq!(root.resolve_cancel_scope(&lookup), Some(1));
+    }
+
+    #[test]
+    fn cancel_resolves_only_the_focused_window_and_deactivates_blurred_sources() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let root = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let value = vm.eval(crate::makepad_script::script! {
+                use mod.prelude.widgets.*
+                View { first := Window {} second := Window {} }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        crate::widget_tree::set_ui_root(&mut cx, &root);
+        let first = root.child(live_id!(first));
+        let second = root.child(live_id!(second));
+        first.borrow_mut::<Window>().unwrap().has_focus = true;
+        second.borrow_mut::<Window>().unwrap().has_focus = false;
+        let lookup = |uid| if uid == first.widget_uid().0 { Some(1) } else if uid == second.widget_uid().0 { Some(2) } else { None };
+        assert_eq!(root.resolve_cancel_scope(&lookup), Some(1));
+        assert!(!cx.widget_is_active(second.widget_uid()));
+        first.borrow_mut::<Window>().unwrap().has_focus = false;
+        second.borrow_mut::<Window>().unwrap().has_focus = true;
+        assert_eq!(root.resolve_cancel_scope(&lookup), Some(2));
+    }
 
     #[test]
     fn gauss_render_texture_y_flip_is_platform_specific() {
@@ -1642,6 +1699,10 @@ impl WindowRef {
 }
 
 impl Widget for Window {
+    fn cancel_visible(&self) -> bool {
+        self.view.visible && self.has_focus
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if let Event::Draw(e) = event {
             let mut cx_draw = CxDraw::new(cx, e);

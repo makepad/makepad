@@ -68,6 +68,10 @@ impl ScriptHook for PopupNotification {
 }
 
 impl Widget for PopupNotification {
+    fn cancel_visible(&self) -> bool {
+        self.opened && self.view.visible
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if !self.opened {
             return;

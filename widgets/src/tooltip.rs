@@ -87,6 +87,10 @@ impl ScriptHook for Tooltip {
 }
 
 impl Widget for Tooltip {
+    fn cancel_visible(&self) -> bool {
+        self.opened && self.view.visible
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if !self.opened {
             return;
@@ -143,6 +147,38 @@ impl Widget for Tooltip {
     fn set_text(&mut self, cx: &mut Cx, text: &str) {
         self.label(cx, ids!(content.tooltip_label))
             .set_text(cx, text);
+    }
+}
+
+#[cfg(test)]
+mod cancel_tests {
+    use super::*;
+    use crate::widget_tree::CxWidgetExt;
+
+    #[test]
+    fn closed_overlay_hosts_cannot_retain_cancel_ownership() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.widget_tree_mark_dirty(WidgetUid(0));
+        let (tooltip, notification) = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            (
+                WidgetRef::new_with_inner(Box::new(Tooltip::script_new_with_default(vm))),
+                WidgetRef::new_with_inner(Box::new(crate::popup_notification::PopupNotification::script_new_with_default(vm))),
+            )
+        });
+        let tooltip_uid = tooltip.widget_uid().0;
+        let notification_uid = notification.widget_uid().0;
+        let candidate = |uid| (uid == tooltip_uid || uid == notification_uid).then_some(1);
+        assert_eq!(tooltip.resolve_cancel_scope(&candidate), None);
+        assert_eq!(notification.resolve_cancel_scope(&candidate), None);
+        tooltip.borrow_mut::<Tooltip>().unwrap().show(&mut cx);
+        notification.borrow_mut::<crate::popup_notification::PopupNotification>().unwrap().open(&mut cx);
+        assert_eq!(tooltip.resolve_cancel_scope(&candidate), Some(1));
+        assert_eq!(notification.resolve_cancel_scope(&candidate), Some(1));
+        tooltip.borrow_mut::<Tooltip>().unwrap().hide(&mut cx);
+        notification.borrow_mut::<crate::popup_notification::PopupNotification>().unwrap().close(&mut cx);
+        assert_eq!(tooltip.resolve_cancel_scope(&candidate), None);
+        assert_eq!(notification.resolve_cancel_scope(&candidate), None);
     }
 }
 

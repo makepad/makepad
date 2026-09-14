@@ -72,6 +72,14 @@ pub enum SlidePanelAction {
 }
 
 impl Widget for SlidePanel {
+    fn cancel_visible(&self) -> bool {
+        self.frame.visible && if self.animator.groups.contains_key(&id!(active)) {
+            self.animator.in_state_id(ids!(active.on))
+        } else {
+            self.active < 1.0
+        }
+    }
+
     fn script_call(
         &mut self,
         vm: &mut ScriptVm,
@@ -102,7 +110,11 @@ impl Widget for SlidePanel {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        self.frame.handle_event(cx, event, scope);
+        let cancel = matches!(event, Event::BackPressed { .. })
+            || matches!(event, Event::KeyDown(key) | Event::KeyUp(key) if key.key_code == KeyCode::Escape);
+        if !cancel || self.cancel_visible() {
+            self.frame.handle_event(cx, event, scope);
+        }
         self.widget_match_event(cx, event, scope);
 
         if self.animator_handle_event(cx, event).must_redraw() {

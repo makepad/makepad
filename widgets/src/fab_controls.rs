@@ -1095,7 +1095,7 @@ impl FabValueInput {
     pub fn begin_edit(&mut self, cx: &mut Cx) {
         self.drag = None;
         if self.cancel_scope.is_none() {
-            self.cancel_scope = Some(cx.begin_cancel_scope());
+            self.cancel_scope = Some(self.begin_cancel_scope(cx));
         }
         self.editing = true;
         let full = self.format_full();
@@ -1392,7 +1392,7 @@ impl Widget for FabValueInput {
                 });
                 // The next event may already be Escape; ownership is captured
                 // before dispatch, so the scope must exist before this returns.
-                self.cancel_scope = Some(cx.begin_cancel_scope());
+                self.cancel_scope = Some(self.begin_cancel_scope(cx));
                 self.animator_play(cx, ids!(hover.down));
             }
             Hit::FingerMove(fe) => {
@@ -2045,7 +2045,7 @@ impl FabColorPick {
             return;
         }
         self.open = true;
-        self.cancel_scope = Some(cx.begin_cancel_scope());
+        self.cancel_scope = Some(self.begin_cancel_scope(cx));
         self.opened_value = self.rgba();
         self.draw_swatch.open = 1.0;
         self.sync_pending = true;
@@ -2378,12 +2378,13 @@ impl FabColorPickRef {
 mod tests {
     use super::*;
 
-    fn cancel_test_input() -> (Cx, FabValueInput) {
+    fn cancel_test_input() -> (Cx, WidgetRef) {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         let input = cx.with_vm(|vm| {
             crate::script_mod(vm);
-            FabValueInput::script_new_with_default(vm)
+            WidgetRef::new_with_inner(Box::new(FabValueInput::script_new_with_default(vm)))
         });
+        crate::widget_tree::set_ui_root(&mut cx, &input);
         (cx, input)
     }
 
@@ -2401,14 +2402,16 @@ mod tests {
 
     #[test]
     fn editing_cancel_spends_the_escape_before_the_parent_can_dismiss() {
-        let (mut cx, mut input) = cancel_test_input();
+        let (mut cx, input_ref) = cancel_test_input();
         let parent = cx.begin_cancel_scope();
-        input.begin_edit(&mut cx);
+        input_ref.borrow_mut::<FabValueInput>().unwrap().begin_edit(&mut cx);
         let event = cancel_test_escape(&mut cx, true);
+        let mut input = input_ref.borrow_mut::<FabValueInput>().unwrap();
         assert!(cx.owns_cancel(input.cancel_scope.as_ref().unwrap()));
         input.handle_event(&mut cx, &event, &mut Scope::empty());
         assert!(!input.editing);
         assert!(input.cancel_scope.is_none());
+        drop(input);
         cancel_test_escape(&mut cx, false);
         assert!(!cx.owns_cancel(&parent), "the parent must not inherit the release");
         cancel_test_escape(&mut cx, true);
@@ -2417,7 +2420,8 @@ mod tests {
 
     #[test]
     fn focus_loss_cancels_an_interrupted_drag_and_restores_the_value() {
-        let (mut cx, mut input) = cancel_test_input();
+        let (mut cx, input_ref) = cancel_test_input();
+        let mut input = input_ref.borrow_mut::<FabValueInput>().unwrap();
         input.value = 9.0;
         input.drag = Some(DragState {
             press_x: 0.0, press_value: 3.0, width: 100.0, engaged: true,
@@ -2432,11 +2436,12 @@ mod tests {
 
     #[test]
     fn editing_does_not_cancel_when_a_newer_popup_owns_escape() {
-        let (mut cx, mut input) = cancel_test_input();
-        input.begin_edit(&mut cx);
+        let (mut cx, input_ref) = cancel_test_input();
+        input_ref.borrow_mut::<FabValueInput>().unwrap().begin_edit(&mut cx);
         let popup = cx.begin_cancel_scope();
         let event = cancel_test_escape(&mut cx, true);
         assert!(cx.owns_cancel(&popup));
+        let mut input = input_ref.borrow_mut::<FabValueInput>().unwrap();
         input.handle_event(&mut cx, &event, &mut Scope::empty());
         assert!(input.editing);
     }

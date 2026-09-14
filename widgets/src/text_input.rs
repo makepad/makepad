@@ -2820,8 +2820,9 @@ impl Widget for TextInput {
 
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Escape,
+                is_repeat: false,
                 ..
-            }) => {
+            }) if !cx.has_cancel_owner() => {
                 cx.widget_action(uid, TextInputAction::Escaped);
             }
             Hit::KeyDown(KeyEvent {
@@ -3977,6 +3978,39 @@ mod tests {
         });
         input.set_text(&mut cx, text);
         (cx, input, changes)
+    }
+
+    #[test]
+    fn cancel_escaped_action_requires_a_fresh_unowned_escape_press() {
+        use makepad_platform::studio::StudioToApp;
+        let (mut cx, input, _) = field("draft");
+        let draw_list = cx.draw_lists.alloc();
+        let draw_list_id = draw_list.draw_list_id();
+        cx.draw_lists[draw_list_id].rect_areas.push(CxRectArea {
+            rect: Rect { pos: dvec2(0.0, 0.0), size: dvec2(100.0, 30.0) },
+            draw_clip: (dvec2(0.0, 0.0), dvec2(100.0, 30.0)),
+        });
+        let area = Area::Rect(RectArea {
+            draw_list_id, rect_id: 0, redraw_id: cx.draw_lists[draw_list_id].redraw_id,
+        });
+        input.borrow_mut().unwrap().draw_bg.draw_vars.area = area;
+        cx.set_key_focus(area);
+        cx.dispatch_studio_msg(StudioToApp::KeyUp(KeyEvent::default()), WindowId(0, 0), dvec2(0.0, 0.0));
+        assert!(cx.has_key_focus(area));
+        let press = |cx: &mut Cx, repeat: bool| {
+            let key = KeyEvent { key_code: KeyCode::Escape, is_repeat: repeat, ..Default::default() };
+            cx.dispatch_studio_msg(StudioToApp::KeyDown(key.clone()), WindowId(0, 0), dvec2(0.0, 0.0));
+            cx.capture_actions(|cx| input.handle_event(cx, &Event::KeyDown(key), &mut Scope::empty()))
+        };
+        let escaped = |actions: &Actions| actions.iter().any(|action|
+            matches!(action.as_widget_action().cast::<TextInputAction>(), TextInputAction::Escaped));
+        assert!(escaped(&press(&mut cx, false)));
+        assert!(!escaped(&press(&mut cx, true)), "held Escape cannot cancel the next focused state");
+        let owner = cx.begin_cancel_scope();
+        assert!(!escaped(&press(&mut cx, false)), "scoped cancellation must suppress legacy Escaped handlers");
+        drop(owner);
+        assert!(!escaped(&press(&mut cx, true)), "dropping the scoped owner does not free its repeat");
+        assert_eq!(input.text(), "draft");
     }
 
     fn caret(cx: &mut Cx, input: &TextInputRef, index: usize) {

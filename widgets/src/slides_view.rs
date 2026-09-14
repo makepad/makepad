@@ -193,6 +193,16 @@ impl WidgetNode for SlidesView {
         }
     }
 
+    fn visible_children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
+        let first = self.current_slide.floor() as usize;
+        let count = if self.current_slide.fract() > 0.0 { 2 } else { 1 };
+        for id in self.draw_order.iter().skip(first).take(count) {
+            if let Some(slide) = self.slides.get(id) {
+                visit(*id, slide.clone());
+            }
+        }
+    }
+
     fn redraw(&mut self, cx: &mut Cx) {
         self.area.redraw(cx)
     }
@@ -378,6 +388,35 @@ impl SlidesViewRef {
         if let Some(mut inner) = self.borrow_mut() {
             inner.prev_slide(cx);
         }
+    }
+}
+
+#[cfg(test)]
+mod cancel_tests {
+    use super::*;
+
+    #[test]
+    fn retained_slides_only_participate_while_current_or_transitioning() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.widget_tree_mark_dirty(WidgetUid(0));
+        let (slides, uids) = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let mut slides = SlidesView::script_new_with_default(vm);
+            let mut uids = Vec::new();
+            for id in [id!(first), id!(second), id!(third)] {
+                let child = WidgetRef::new_with_inner(Box::new(crate::view::View::script_new_with_default(vm)));
+                uids.push(child.widget_uid().0);
+                slides.draw_order.push(id);
+                slides.slides.insert(id, child);
+            }
+            (WidgetRef::new_with_inner(Box::new(slides)), uids)
+        });
+        let candidate = |uid| uids.iter().position(|owner| *owner == uid).map(|index| index as u64 + 1);
+        assert_eq!(slides.resolve_cancel_scope(&candidate), Some(1));
+        slides.borrow_mut::<SlidesView>().unwrap().current_slide = 0.5;
+        assert_eq!(slides.resolve_cancel_scope(&candidate), Some(2));
+        slides.borrow_mut::<SlidesView>().unwrap().current_slide = 2.0;
+        assert_eq!(slides.resolve_cancel_scope(&candidate), Some(3));
     }
 }
 

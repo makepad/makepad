@@ -1108,7 +1108,10 @@ impl Cx {
         let intercepted = self.sploded_intercept(event);
         // Settle ownership before widget dispatch, including presses consumed by a
         // platform overlay so their release cannot cancel a second thing underneath.
-        self.cancel_scopes.handle_event(event, intercepted);
+        let widget_owner = self.cancel_scopes.resolve_widget_owner(event, intercepted, |lookup| {
+            self.cancel_scope_resolver.and_then(|resolve| resolve(self, lookup))
+        });
+        self.cancel_scopes.handle_event(event, intercepted, widget_owner);
         if intercepted {
             return;
         }

@@ -25,9 +25,10 @@ pub enum CancelScopeKind {
 /// and the back gesture — for as long as it is the active thing: an open modal, a
 /// running dictation session, a drag in progress.
 ///
-/// Scopes nest, and the most recently begun one that is still alive and accepts the
-/// gesture is in front. [`Cx::begin_cancel_scope_for()`](crate::cx::Cx::begin_cancel_scope_for)
-/// can restrict a scope to Escape or Back; the default scope accepts both. A
+/// Widget scopes follow the current widget hierarchy: hidden branches are ignored,
+/// descendants take priority over ancestors, and the newest scope wins across
+/// unrelated branches. [`Cx::begin_widget_cancel_scope()`](crate::cx::Cx::begin_widget_cancel_scope)
+/// binds a scope to its widget and can restrict it to Escape or Back. A
 /// press belongs to whichever scope was in front when the press began, and keeps
 /// belonging to it for the key's repeats and its release. Drop the scope, or pass it
 /// to [`Cx::end_cancel_scope()`](crate::cx::Cx::end_cancel_scope), to give it up;
@@ -64,12 +65,13 @@ impl Drop for CancelScope {
 /// One live scope, as the stack holds it.
 struct ScopeEntry {
     id: u64,
+    owner: u64,
     kind: CancelScopeKind,
     alive: Rc<Cell<bool>>,
     origin: &'static Location<'static>,
 }
 
-/// The stack of live cancel scopes, back to front.
+/// Cancel scopes in activation order; widget ancestry determines their priority.
 #[derive(Default)]
 pub(crate) struct CxCancelScopes {
     next_id: u64,
@@ -93,15 +95,20 @@ impl CxCancelScopes {
 
     #[track_caller]
     pub(crate) fn begin_for(&mut self, kind: CancelScopeKind) -> CancelScope {
+        self.begin_widget(0, kind)
+    }
+
+    #[track_caller]
+    pub(crate) fn begin_widget(&mut self, owner: u64, kind: CancelScopeKind) -> CancelScope {
         self.prune();
         // Ids start at 1, so `press_owner: 0` is an owner no scope can match.
         self.next_id += 1;
         let alive = Rc::new(Cell::new(true));
         let origin = Location::caller();
-        self.stack.push(ScopeEntry { id: self.next_id, kind, alive: alive.clone(), origin });
+        self.stack.push(ScopeEntry { id: self.next_id, owner, kind, alive: alive.clone(), origin });
         if tracing_enabled() {
-            log!("[cancel] begin #{} at {}:{} ({:?}, in front of {} others)",
-                self.next_id, origin.file(), origin.line(), kind, self.stack.len() - 1);
+            log!("[cancel] begin #{} at {}:{} ({:?}, widget {}, {} other live scopes)",
+                self.next_id, origin.file(), origin.line(), kind, owner, self.stack.len() - 1);
         }
         CancelScope { id: self.next_id, alive, origin }
     }
@@ -113,7 +120,7 @@ impl CxCancelScopes {
 
     /// Records ownership before dispatch. Follow-up actions keep the producing event's
     /// owner, but unrelated events must not inherit the last cancel gesture.
-    pub(crate) fn handle_event(&mut self, event: &Event, intercepted: bool) {
+    pub(crate) fn handle_event(&mut self, event: &Event, intercepted: bool, widget_owner: Option<u64>) {
         self.press_owner = 0;
         match event {
             Event::KeyDown(key) if key.key_code == KeyCode::Escape => {
@@ -122,7 +129,7 @@ impl CxCancelScopes {
                     // must not dismiss the application underneath it.
                     self.escape_owner = 0;
                 } else if !key.is_repeat {
-                    self.begin_press(CancelScopeKind::Escape);
+                    self.begin_press(CancelScopeKind::Escape, widget_owner);
                     self.escape_owner = self.press_owner;
                 }
                 self.press_owner = self.escape_owner;
@@ -133,7 +140,7 @@ impl CxCancelScopes {
                 }
                 self.escape_owner = 0;
             }
-            Event::BackPressed { .. } if !intercepted => self.begin_press(CancelScopeKind::Back),
+            Event::BackPressed { .. } if !intercepted => self.begin_press(CancelScopeKind::Back, widget_owner),
             // A release may be lost when the application stops receiving input.
             Event::WindowLostFocus(_) | Event::Pause | Event::Background => {
                 self.escape_owner = 0;
@@ -142,10 +149,39 @@ impl CxCancelScopes {
         }
     }
 
-    fn begin_press(&mut self, kind: CancelScopeKind) {
+    /// Resolve current widget visibility only at the start of an independent press.
+    /// The resolver receives a lookup rather than a copied list of live scopes.
+    pub(crate) fn resolve_widget_owner(
+        &self,
+        event: &Event,
+        intercepted: bool,
+        resolve: impl FnOnce(&dyn Fn(u64) -> Option<u64>) -> Option<u64>,
+    ) -> Option<u64> {
+        if intercepted {
+            return None;
+        }
+        let kind = match event {
+            Event::KeyDown(key) if key.key_code == KeyCode::Escape && !key.is_repeat => CancelScopeKind::Escape,
+            Event::BackPressed { .. } => CancelScopeKind::Back,
+            _ => return None,
+        };
+        if !self.stack.iter().any(|e| e.owner != 0 && e.alive.get()
+            && (e.kind == CancelScopeKind::Both || e.kind == kind))
+        {
+            return None;
+        }
+        resolve(&|owner| {
+            self.stack.iter().rev().find(|e| owner != 0 && e.owner == owner && e.alive.get()
+                && (e.kind == CancelScopeKind::Both || e.kind == kind))
+                .map(|e| e.id)
+        })
+    }
+
+    fn begin_press(&mut self, kind: CancelScopeKind, widget_owner: Option<u64>) {
         self.prune();
         let owner = self.stack.iter().rev()
-            .find(|e| e.kind == CancelScopeKind::Both || e.kind == kind);
+            .find(|e| (e.owner == 0 || Some(e.id) == widget_owner)
+                && (e.kind == CancelScopeKind::Both || e.kind == kind));
         self.press_owner = owner.map_or(0, |e| e.id);
         if tracing_enabled() {
             match owner {
@@ -158,6 +194,10 @@ impl CxCancelScopes {
 
     pub(crate) fn owns_press(&self, scope: &CancelScope) -> bool {
         scope.id == self.press_owner
+    }
+
+    pub(crate) fn has_press_owner(&self) -> bool {
+        self.press_owner != 0
     }
 
     fn prune(&mut self) {
@@ -185,20 +225,119 @@ mod tests {
     }
 
     #[test]
+    fn widget_lookup_filters_gestures_dead_scopes_and_global_scopes() {
+        let mut scopes = CxCancelScopes::default();
+        let both = scopes.begin_widget(10, CancelScopeKind::Both);
+        let escape = scopes.begin_widget(10, CancelScopeKind::Escape);
+        let back = scopes.begin_widget(10, CancelScopeKind::Back);
+        drop(scopes.begin_widget(10, CancelScopeKind::Both));
+        let _global = scopes.begin();
+        let owner = scopes.resolve_widget_owner(&escape_down(false), false, |lookup| {
+            assert_eq!(lookup(0), None);
+            assert_eq!(lookup(99), None);
+            lookup(10)
+        });
+        assert_eq!(owner, Some(escape.id));
+        let owner = scopes.resolve_widget_owner(&Event::BackPressed { handled: Cell::new(false) }, false,
+            |lookup| lookup(10));
+        assert_eq!(owner, Some(back.id));
+        drop(escape);
+        let owner = scopes.resolve_widget_owner(&escape_down(false), false, |lookup| lookup(10));
+        assert_eq!(owner, Some(both.id));
+    }
+
+    #[test]
+    fn widget_resolution_only_runs_for_new_matching_presses() {
+        let mut scopes = CxCancelScopes::default();
+        let unexpected = |_: &dyn Fn(u64) -> Option<u64>| -> Option<u64> {
+            panic!("this event must not traverse the widget hierarchy")
+        };
+        scopes.resolve_widget_owner(&escape_down(false), false, unexpected);
+        let _global = scopes.begin();
+        scopes.resolve_widget_owner(&escape_down(false), false, unexpected);
+        let bound = scopes.begin_widget(10, CancelScopeKind::Escape);
+        scopes.resolve_widget_owner(&Event::BackPressed { handled: Cell::new(false) }, false, unexpected);
+        scopes.resolve_widget_owner(&escape_down(false), true, unexpected);
+        scopes.resolve_widget_owner(&escape_down(true), false, unexpected);
+        scopes.resolve_widget_owner(&escape_up(), false, unexpected);
+        scopes.resolve_widget_owner(&Event::Signal, false, unexpected);
+        scopes.resolve_widget_owner(&Event::Draw(Default::default()), false, unexpected);
+        drop(bound);
+        scopes.resolve_widget_owner(&escape_down(false), false, unexpected);
+    }
+
+    #[test]
+    fn hidden_widget_scopes_do_not_block_global_scopes_or_unowned_presses() {
+        let mut scopes = CxCancelScopes::default();
+        let global = scopes.begin();
+        let _hidden = scopes.begin_widget(10, CancelScopeKind::Both);
+        let owner = scopes.resolve_widget_owner(&escape_down(false), false, |_| None);
+        scopes.handle_event(&escape_down(false), false, owner);
+        assert!(scopes.owns_press(&global));
+        drop(global);
+        scopes.handle_event(&escape_down(false), false, None);
+        assert!(!scopes.has_press_owner(), "a missing resolver cannot authorize a bound scope");
+    }
+
+    #[test]
+    fn global_and_resolved_widget_scopes_keep_activation_order() {
+        let mut scopes = CxCancelScopes::default();
+        let global = scopes.begin();
+        let widget = scopes.begin_widget(10, CancelScopeKind::Both);
+        scopes.begin_press(CancelScopeKind::Escape, Some(widget.id));
+        assert!(scopes.owns_press(&widget));
+        let newer_global = scopes.begin();
+        scopes.begin_press(CancelScopeKind::Escape, Some(widget.id));
+        assert!(scopes.owns_press(&newer_global));
+        drop(newer_global);
+        scopes.begin_press(CancelScopeKind::Escape, Some(u64::MAX));
+        assert!(scopes.owns_press(&global), "only a real matching scope can be resolved");
+    }
+
+    #[test]
+    fn cx_resolves_widget_owners_before_dispatch_and_keeps_press_snapshots() {
+        let mut cx = crate::cx::Cx::new(Box::new(|cx, event| {
+            if matches!(event, Event::KeyDown(_) | Event::KeyUp(_) | Event::BackPressed { .. }) {
+                assert!(cx.has_cancel_owner(), "ownership must exist before the app receives input");
+            }
+        }));
+        cx.cancel_scope_resolver = Some(|cx, lookup| lookup(cx.keyboard_shift as u64));
+        cx.keyboard_shift = 10.0;
+        let first = cx.begin_widget_cancel_scope(10, CancelScopeKind::Both);
+        let second = cx.begin_widget_cancel_scope(20, CancelScopeKind::Both);
+        cx.call_event_handler(&escape_down(false));
+        assert!(cx.owns_cancel(&first));
+        cx.keyboard_shift = 20.0;
+        drop(first);
+        cx.call_event_handler(&Event::BackPressed { handled: Cell::new(false) });
+        assert!(cx.owns_cancel(&second), "an independent Back resolves current eligibility");
+        cx.call_event_handler(&escape_down(true));
+        assert!(!cx.owns_cancel(&second), "a held Escape does not change owner with visibility");
+        assert!(cx.has_cancel_owner(), "dropping the owner leaves this press spent");
+        cx.call_event_handler(&escape_up());
+        assert!(!cx.owns_cancel(&second));
+        assert!(cx.has_cancel_owner());
+        cx.call_event_handler(&Event::Signal);
+        assert!(!cx.has_cancel_owner(), "unrelated events cannot inherit cancellation");
+        cx.call_event_handler(&escape_down(false));
+        assert!(cx.owns_cancel(&second));
+    }
+
+    #[test]
     fn escape_only_scopes_pass_back_to_the_view_behind_them() {
         let mut scopes = CxCancelScopes::default();
         let view = scopes.begin();
         let dictation = scopes.begin_for(CancelScopeKind::Escape);
-        scopes.handle_event(&escape_down(false), false);
+        scopes.handle_event(&escape_down(false), false, None);
         assert!(scopes.owns_press(&dictation));
         assert!(!scopes.owns_press(&view));
-        scopes.handle_event(&Event::BackPressed { handled: Cell::new(false) }, false);
+        scopes.handle_event(&Event::BackPressed { handled: Cell::new(false) }, false, None);
         assert!(scopes.owns_press(&view));
         assert!(!scopes.owns_press(&dictation));
-        scopes.handle_event(&escape_up(), false);
+        scopes.handle_event(&escape_up(), false, None);
         assert!(scopes.owns_press(&dictation), "Back does not change Escape's owner");
         scopes.end(dictation);
-        scopes.handle_event(&escape_down(false), false);
+        scopes.handle_event(&escape_down(false), false, None);
         assert!(scopes.owns_press(&view));
     }
 
@@ -207,10 +346,10 @@ mod tests {
         let mut scopes = CxCancelScopes::default();
         let behind = scopes.begin();
         let navigation = scopes.begin_for(CancelScopeKind::Back);
-        scopes.handle_event(&escape_down(false), false);
+        scopes.handle_event(&escape_down(false), false, None);
         assert!(scopes.owns_press(&behind));
         assert!(!scopes.owns_press(&navigation));
-        scopes.handle_event(&Event::BackPressed { handled: Cell::new(false) }, false);
+        scopes.handle_event(&Event::BackPressed { handled: Cell::new(false) }, false, None);
         assert!(scopes.owns_press(&navigation));
         assert!(!scopes.owns_press(&behind));
     }
@@ -219,13 +358,13 @@ mod tests {
     fn a_scope_for_the_other_gesture_does_not_claim_an_unowned_press() {
         let mut scopes = CxCancelScopes::default();
         let escape = scopes.begin_for(CancelScopeKind::Escape);
-        scopes.handle_event(&Event::BackPressed { handled: Cell::new(false) }, false);
+        scopes.handle_event(&Event::BackPressed { handled: Cell::new(false) }, false, None);
         assert!(!scopes.owns_press(&escape));
         scopes.end(escape);
         let back = scopes.begin_for(CancelScopeKind::Back);
-        scopes.handle_event(&escape_down(false), false);
+        scopes.handle_event(&escape_down(false), false, None);
         assert!(!scopes.owns_press(&back));
-        scopes.handle_event(&escape_up(), false);
+        scopes.handle_event(&escape_up(), false, None);
         assert!(!scopes.owns_press(&back));
     }
 
@@ -234,15 +373,15 @@ mod tests {
         let mut scopes = CxCancelScopes::default();
         let behind = scopes.begin();
         let in_front = scopes.begin();
-        scopes.handle_event(&escape_down(false), false);
+        scopes.handle_event(&escape_down(false), false, None);
         scopes.end(in_front);
-        scopes.handle_event(&Event::BackPressed { handled: Cell::new(false) }, false);
+        scopes.handle_event(&Event::BackPressed { handled: Cell::new(false) }, false, None);
         assert!(scopes.owns_press(&behind));
-        scopes.handle_event(&escape_down(true), false);
+        scopes.handle_event(&escape_down(true), false, None);
         assert!(!scopes.owns_press(&behind), "Back must not transfer the held Escape");
-        scopes.handle_event(&escape_up(), false);
+        scopes.handle_event(&escape_up(), false, None);
         assert!(!scopes.owns_press(&behind));
-        scopes.handle_event(&escape_down(false), false);
+        scopes.handle_event(&escape_down(false), false, None);
         assert!(scopes.owns_press(&behind), "the next press is independent");
     }
 
@@ -250,13 +389,13 @@ mod tests {
     fn intercepted_escape_keeps_its_repeats_and_release_from_the_application() {
         let mut scopes = CxCancelScopes::default();
         let scope = scopes.begin();
-        scopes.handle_event(&escape_down(false), true);
+        scopes.handle_event(&escape_down(false), true, None);
         assert!(!scopes.owns_press(&scope));
-        scopes.handle_event(&escape_down(true), false);
+        scopes.handle_event(&escape_down(true), false, None);
         assert!(!scopes.owns_press(&scope));
-        scopes.handle_event(&escape_up(), false);
+        scopes.handle_event(&escape_up(), false, None);
         assert!(!scopes.owns_press(&scope));
-        scopes.handle_event(&escape_down(false), false);
+        scopes.handle_event(&escape_down(false), false, None);
         assert!(scopes.owns_press(&scope));
     }
 
@@ -264,12 +403,12 @@ mod tests {
     fn unrelated_events_do_not_own_cancel_and_escape_release_keeps_its_owner() {
         let mut scopes = CxCancelScopes::default();
         let scope = scopes.begin();
-        scopes.handle_event(&escape_down(false), false);
-        scopes.handle_event(&Event::Signal, false);
+        scopes.handle_event(&escape_down(false), false, None);
+        scopes.handle_event(&Event::Signal, false, None);
         assert!(!scopes.owns_press(&scope));
-        scopes.handle_event(&escape_up(), false);
+        scopes.handle_event(&escape_up(), false, None);
         assert!(scopes.owns_press(&scope));
-        scopes.handle_event(&escape_up(), false);
+        scopes.handle_event(&escape_up(), false, None);
         assert!(!scopes.owns_press(&scope), "an unmatched release has no owner");
     }
 
@@ -277,12 +416,12 @@ mod tests {
     fn losing_input_focus_ends_the_held_escape_press() {
         let mut scopes = CxCancelScopes::default();
         let scope = scopes.begin();
-        scopes.handle_event(&escape_down(false), false);
-        scopes.handle_event(&Event::Pause, false);
+        scopes.handle_event(&escape_down(false), false, None);
+        scopes.handle_event(&Event::Pause, false, None);
         assert!(!scopes.owns_press(&scope));
-        scopes.handle_event(&escape_down(true), false);
+        scopes.handle_event(&escape_down(true), false, None);
         assert!(!scopes.owns_press(&scope));
-        scopes.handle_event(&escape_up(), false);
+        scopes.handle_event(&escape_up(), false, None);
         assert!(!scopes.owns_press(&scope));
     }
 
@@ -291,7 +430,7 @@ mod tests {
         let mut scopes = CxCancelScopes::default();
         let behind = scopes.begin();
         let in_front = scopes.begin();
-        scopes.begin_press(CancelScopeKind::Escape);
+        scopes.begin_press(CancelScopeKind::Escape, None);
         assert!(scopes.owns_press(&in_front));
         assert!(!scopes.owns_press(&behind), "only the front may act on a press");
     }
@@ -302,7 +441,7 @@ mod tests {
         // Escape is held does not inherit that press.
         let mut scopes = CxCancelScopes::default();
         let owner = scopes.begin();
-        scopes.begin_press(CancelScopeKind::Escape);
+        scopes.begin_press(CancelScopeKind::Escape, None);
         let latecomer = scopes.begin();
         assert!(scopes.owns_press(&owner));
         assert!(!scopes.owns_press(&latecomer));
@@ -315,11 +454,11 @@ mod tests {
         let mut scopes = CxCancelScopes::default();
         let behind = scopes.begin();
         let in_front = scopes.begin();
-        scopes.begin_press(CancelScopeKind::Escape);
+        scopes.begin_press(CancelScopeKind::Escape, None);
         scopes.end(in_front);
         assert!(!scopes.owns_press(&behind), "the press is spent, not inherited");
         // The next press belongs to whatever is in front by then.
-        scopes.begin_press(CancelScopeKind::Escape);
+        scopes.begin_press(CancelScopeKind::Escape, None);
         assert!(scopes.owns_press(&behind));
     }
 
@@ -330,7 +469,7 @@ mod tests {
         let mut scopes = CxCancelScopes::default();
         let behind = scopes.begin();
         drop(scopes.begin());
-        scopes.begin_press(CancelScopeKind::Escape);
+        scopes.begin_press(CancelScopeKind::Escape, None);
         assert!(scopes.owns_press(&behind));
     }
 
@@ -343,7 +482,7 @@ mod tests {
         scopes.end(later);
         let fresh = scopes.begin();
         scopes.end(fresh);
-        scopes.begin_press(CancelScopeKind::Escape);
+        scopes.begin_press(CancelScopeKind::Escape, None);
         let probe = scopes.begin();
         assert!(!scopes.owns_press(&probe), "an empty stack leaves the press unowned");
     }
@@ -365,7 +504,7 @@ mod tests {
         let mut scopes = CxCancelScopes::default();
         let behind = scopes.begin();
         let _in_front = scopes.begin();
-        scopes.begin_press(CancelScopeKind::Escape);
+        scopes.begin_press(CancelScopeKind::Escape, None);
         assert!(!scopes.owns_press(&behind));
         // Asking again does not change the answer: a press has one owner for its life.
         assert!(!scopes.owns_press(&behind));

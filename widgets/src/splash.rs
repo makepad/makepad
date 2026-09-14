@@ -352,6 +352,10 @@ impl WidgetNode for Splash {
     fn children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
         self.view.children(visit);
     }
+
+    fn visible_children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
+        self.view.visible_children(visit);
+    }
 }
 
 impl Drop for Splash {

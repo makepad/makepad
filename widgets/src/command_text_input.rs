@@ -530,7 +530,7 @@ impl CommandTextInput {
         self.view(cx, ids!(popup)).set_visible(cx, true);
         self.view(cx, ids!(popup)).redraw(cx);
         if self.cancel_scope.is_none() {
-            self.cancel_scope = Some(cx.begin_cancel_scope());
+            self.cancel_scope = Some(self.begin_cancel_scope(cx));
         }
     }
 

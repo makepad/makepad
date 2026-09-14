@@ -649,6 +649,20 @@ impl WidgetNode for View {
         }
     }
 
+    fn visible_children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
+        if !self.visible {
+            return;
+        }
+        for (id, child) in &self.children {
+            if let EventOrder::List(order) = &self.event_order {
+                if !order.contains(id) {
+                    continue;
+                }
+            }
+            visit(*id, child.clone());
+        }
+    }
+
     fn skip_widget_tree_search(&self) -> bool {
         self.skip_widget_tree_search
     }

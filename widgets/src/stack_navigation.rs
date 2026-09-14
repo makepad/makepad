@@ -169,9 +169,6 @@ pub struct StackNavigationView {
     /// before the animation keeps popups opened during the slide in front.
     #[rust]
     cancel_scope: Option<CancelScope>,
-    /// An enclosing screen can suspend navigation while retaining this view's state.
-    #[rust]
-    cancel_inactive: bool,
 
     /// The UID of the parent navigation.
     #[rust]
@@ -317,7 +314,7 @@ impl StackNavigationView {
             event.back_pressed();
             return;
         }
-        if matches!(self.state, StackNavigationViewState::Active) && !self.cancel_inactive {
+        if matches!(self.state, StackNavigationViewState::Active) {
             // Ownership decides, so a modal or pane opened over this view keeps the press
             // and this view stays put. Checked before `back_pressed()`, which consumes.
             let owns_back = self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s));
@@ -376,8 +373,8 @@ impl StackNavigationView {
     fn set_nav_state(&mut self, cx: &mut Cx, state: StackNavigationViewState) {
         match state {
             StackNavigationViewState::Active => {
-                if !self.cancel_inactive && self.cancel_scope.is_none() {
-                    self.cancel_scope = Some(cx.begin_cancel_scope_for(CancelScopeKind::Back));
+                if self.cancel_scope.is_none() {
+                    self.cancel_scope = Some(self.begin_cancel_scope_for(cx, CancelScopeKind::Back));
                 }
             }
             StackNavigationViewState::Inactive => {
@@ -395,29 +392,12 @@ impl StackNavigationView {
 }
 
 impl StackNavigationViewRef {
-    /// Suspend cancel handling without changing the navigation state or its contents.
-    pub fn set_cancel_active(&self, cx: &mut Cx, active: bool) {
-        if let Some(mut inner) = self.borrow_mut() {
-            inner.cancel_inactive = !active;
-            if !active {
-                inner.cancel_scope = None;
-            } else if inner.view.visible && inner.cancel_scope.is_none()
-                && (inner.state == StackNavigationViewState::Active
-                    || inner.animator.in_state(cx, ids!(slide.show)))
-            {
-                inner.cancel_scope = Some(cx.begin_cancel_scope_for(CancelScopeKind::Back));
-            }
-        }
-    }
-
     pub fn show(&self, cx: &mut Cx, view_width: f64) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.view.visible = true;
             inner.offset_to_hide = view_width;
             inner.set_nav_state(cx, StackNavigationViewState::Inactive);
-            if !inner.cancel_inactive {
-                inner.cancel_scope = Some(cx.begin_cancel_scope_for(CancelScopeKind::Back));
-            }
+            inner.cancel_scope = Some(inner.begin_cancel_scope_for(cx, CancelScopeKind::Back));
 
             // Force-reset the animator by cutting to show (offset=0) first,
             // then cutting to hide, then playing show. This ensures the animator
@@ -632,6 +612,22 @@ impl WidgetNode for StackNavigation {
         self.view.children(visit);
         for (id, widget_ref) in self.dynamic_views.iter() {
             visit(*id, widget_ref.clone());
+        }
+    }
+
+    fn visible_children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
+        if !self.view.visible {
+            return;
+        }
+        let active = match self.transition {
+            Some(StackNavigationTransition::Push { incoming, .. }) => incoming,
+            Some(StackNavigationTransition::Pop { outgoing, .. }) => outgoing,
+            None => self.current_view.unwrap_or(id!(root_view)),
+        };
+        if let Some(widget) = self.dynamic_views.get(&active) {
+            visit(active, widget.clone());
+        } else if let Some((_, widget)) = self.view.children.iter().find(|(id, _)| *id == active) {
+            visit(active, widget.clone());
         }
     }
 
@@ -1227,6 +1223,7 @@ mod cancel_tests {
             });
             WidgetRef::script_from_value(vm, value).as_stack_navigation_view()
         });
+        crate::widget_tree::set_ui_root(&mut cx, &view.0);
         (cx, view)
     }
 
@@ -1249,21 +1246,6 @@ mod cancel_tests {
         let view = view.borrow().unwrap();
         assert!(!view.view.visible);
         assert!(view.cancel_scope.is_none());
-    }
-
-    #[test]
-    fn suspending_cancel_preserves_navigation_and_survives_animation_completion() {
-        let (mut cx, view) = stack_view();
-        view.show(&mut cx, 300.0);
-        view.set_cancel_active(&mut cx, false);
-        assert!(view.borrow().unwrap().cancel_scope.is_none());
-        view.show_at_rest(&mut cx, 300.0);
-        assert!(view.borrow().unwrap().cancel_scope.is_none(), "completion must not resume a hidden screen");
-        assert_eq!(view.borrow().unwrap().state, StackNavigationViewState::Active);
-        view.set_cancel_active(&mut cx, true);
-        assert!(view.borrow().unwrap().cancel_scope.is_some());
-        assert_eq!(view.borrow().unwrap().state, StackNavigationViewState::Active);
-        assert!(view.borrow().unwrap().view.visible);
     }
 
     #[test]
@@ -1301,6 +1283,44 @@ mod cancel_tests {
             }
             assert!(!modal.is_open(), "hidden stack view retained an open modal");
         }
+    }
+
+    #[test]
+    fn cancel_children_follow_only_the_front_navigation_branch_during_transitions() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let root = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let value = vm.eval(crate::makepad_script::script! {
+                use mod.prelude.widgets.*
+                StackNavigation {
+                    root_view := View {}
+                    first := StackNavigationView {}
+                    second := StackNavigationView {}
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        crate::widget_tree::set_ui_root(&mut cx, &root);
+        let base = root.child(live_id!(root_view));
+        let first = root.child(live_id!(first)).as_stack_navigation_view();
+        let second = root.child(live_id!(second)).as_stack_navigation_view();
+        first.show_at_rest(&mut cx, 300.0);
+        second.show_at_rest(&mut cx, 300.0);
+        assert!(cx.widget_is_active(base.widget_uid()));
+        assert!(!cx.widget_is_active(first.widget_uid()));
+        for transition in [
+            StackNavigationTransition::Push { incoming: live_id!(second), outgoing: Some(live_id!(first)) },
+            StackNavigationTransition::Pop { incoming: Some(live_id!(first)), outgoing: live_id!(second) },
+        ] {
+            root.borrow_mut::<StackNavigation>().unwrap().transition = Some(transition);
+            assert!(cx.widget_is_active(second.widget_uid()));
+            assert!(!cx.widget_is_active(first.widget_uid()));
+            assert!(!cx.widget_is_active(base.widget_uid()));
+        }
+        root.borrow_mut::<StackNavigation>().unwrap().transition = None;
+        root.borrow_mut::<StackNavigation>().unwrap().current_view = Some(live_id!(first));
+        assert!(cx.widget_is_active(first.widget_uid()));
+        assert!(!cx.widget_is_active(second.widget_uid()));
     }
 
     #[test]

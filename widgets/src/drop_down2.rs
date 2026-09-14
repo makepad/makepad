@@ -520,7 +520,7 @@ impl DropDown2 {
     pub fn set_active(&mut self, cx: &mut Cx) {
         self.clamp_selected();
         self.is_active = true;
-        self.cancel_scope = Some(cx.begin_cancel_scope());
+        self.cancel_scope = Some(self.begin_cancel_scope(cx));
         self.opening_click = true;
         self.hover_item = Some(self.selected_item);
         self.scroll = None;

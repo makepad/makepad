@@ -8754,6 +8754,21 @@ impl Tweaker {
 }
 
 impl Widget for Tweaker {
+    fn cancel_visible(&self) -> bool {
+        tweak_is_on()
+    }
+
+    fn cancel_children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
+        if let Some(sidebar) = &self.sidebar {
+            visit(id!(sidebar), sidebar.clone());
+        }
+        if self.note_open {
+            if let Some(note) = &self.note_ui {
+                visit(id!(note), note.clone());
+            }
+        }
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         // Above the early return on purpose: F12 turns the panel off without
         // clearing splitter_drag, and a stranded scope would wedge Escape app-wide.
@@ -8934,7 +8949,7 @@ impl Widget for Tweaker {
                     && e.abs.y >= self.band.pos.y
                 {
                     self.splitter_drag = true;
-                    self.cancel_scope = Some(cx.begin_cancel_scope());
+                    self.cancel_scope = Some(self.begin_cancel_scope(cx));
                 } else if e.abs.x > x
                     && !self
                         .open_popup

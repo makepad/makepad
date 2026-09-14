@@ -365,7 +365,7 @@ impl ReorderList {
         }
         if let Some((from, y)) = start {
             self.drag = Some(ReorderDrag::press(from, y));
-            self.cancel_scope = Some(cx.begin_cancel_scope());
+            self.cancel_scope = Some(self.begin_cancel_scope(cx));
             return true;
         }
         false

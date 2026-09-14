@@ -2259,6 +2259,17 @@ impl WidgetNode for PortalList {
         }
     }
 
+    fn visible_children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
+        let end = self.first_id.saturating_add(self.visible_items).min(self.range_end);
+        for row in &self.draw_align_list {
+            if row.index >= self.first_id.max(self.range_start) && row.index < end {
+                if let Some(item) = self.items.get(&row.index) {
+                    visit(LiveId(row.index as u64), item.widget.clone());
+                }
+            }
+        }
+    }
+
     fn skip_widget_tree_search(&self) -> bool {
         self.skip_widget_tree_search
     }
@@ -3645,5 +3656,39 @@ impl PortalListSet {
             list.items_with_actions_vec(actions, &mut set);
         }
         set
+    }
+}
+
+#[cfg(test)]
+mod cancel_tests {
+    use super::*;
+
+    #[test]
+    fn retained_and_selected_rows_outside_the_visible_range_are_not_cancel_active() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (mut list, visible, retained) = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            (PortalList::script_new_with_default(vm),
+                WidgetRef::new_with_inner(Box::new(crate::view::View::script_new_with_default(vm))),
+                WidgetRef::new_with_inner(Box::new(crate::view::View::script_new_with_default(vm))))
+        });
+        list.keep_invisible = true;
+        list.first_id = 10;
+        list.visible_items = 1;
+        list.items.insert(10, WidgetItem { widget: visible.clone(), template: id!(row) });
+        list.items.insert(2, WidgetItem { widget: retained.clone(), template: id!(row) });
+        for index in [2, 10] {
+            list.draw_align_list.push(AlignItem {
+                align_range: TurtleAlignRange { start: 0, end: 0 },
+                size: dvec2(100.0, 30.0), shift: 0.0, index,
+            });
+        }
+        let root = WidgetRef::new_with_inner(Box::new(list));
+        crate::widget_tree::set_ui_root(&mut cx, &root);
+        assert!(cx.widget_is_active(visible.widget_uid()));
+        assert!(!cx.widget_is_active(retained.widget_uid()));
+        root.borrow_mut::<PortalList>().unwrap().first_id = 2;
+        assert!(!cx.widget_is_active(visible.widget_uid()));
+        assert!(cx.widget_is_active(retained.widget_uid()));
     }
 }

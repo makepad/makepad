@@ -131,6 +131,10 @@ impl ScriptHook for Modal {
 }
 
 impl Widget for Modal {
+    fn cancel_visible(&self) -> bool {
+        self.is_open && self.view.visible
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if !self.is_open {
             return;
@@ -217,7 +221,7 @@ impl Modal {
         self.is_open = true;
         // Assigning drops any previous scope, which matters because `open()` has no
         // already-open guard and callers re-open freely.
-        self.cancel_scope = Some(cx.begin_cancel_scope());
+        self.cancel_scope = Some(self.begin_cancel_scope(cx));
         // Redraw the overlay draw_list directly so the first open is visible
         // even before the overlay content has refreshed its draw area.
         if let Some(draw_list) = &self.draw_list {
@@ -309,6 +313,37 @@ mod cancel_tests {
     use super::*;
     use crate::{combo_box::ComboBox, drop_down2::DropDown2, fab_controls::FabValueInput};
 
+    #[derive(Script, ScriptHook, Widget)]
+    struct CancelWrappedModal {
+        #[deref]
+        modal: Modal,
+    }
+
+    impl Widget for CancelWrappedModal {}
+
+    #[test]
+    fn closed_wrapped_modal_excludes_its_retained_scope_before_draw() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let root = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            WidgetRef::new_with_inner(Box::new(CancelWrappedModal::script_new_with_default(vm)))
+        });
+        crate::widget_tree::set_ui_root(&mut cx, &root);
+        let retained = cx.begin_widget_cancel_scope(root.widget_uid().0, CancelScopeKind::Both);
+        escape(&mut cx, true);
+        assert!(!cx.owns_cancel(&retained));
+        escape(&mut cx, false);
+        root.borrow_mut::<CancelWrappedModal>().unwrap().modal.open(&mut cx);
+        assert!(root.cancel_visible());
+        escape(&mut cx, true);
+        assert!(cx.has_cancel_owner());
+        root.borrow_mut::<CancelWrappedModal>().unwrap().modal.close(&mut cx);
+        assert!(!root.cancel_visible());
+        escape(&mut cx, false);
+        escape(&mut cx, true);
+        assert!(!cx.has_cancel_owner(), "the wrapper must propagate its inner runtime visibility");
+    }
+
     fn escape(cx: &mut Cx, down: bool) {
         use makepad_platform::studio::StudioToApp;
         let key = KeyEvent { key_code: KeyCode::Escape, ..Default::default() };
@@ -330,6 +365,7 @@ mod cancel_tests {
             });
             WidgetRef::script_from_value(vm, value)
         });
+        crate::widget_tree::set_ui_root(&mut cx, &popups);
         let behind = cx.begin_cancel_scope();
         for id in [live_id!(combo), live_id!(dropdown)] {
             let popup = popups.child(id);
@@ -369,6 +405,7 @@ mod cancel_tests {
             });
             WidgetRef::script_from_value(vm, value).as_modal()
         });
+        crate::widget_tree::set_ui_root(&mut cx, &modal.0);
         let content = modal.borrow().unwrap().view.child(live_id!(content));
         let behind = cx.begin_cancel_scope();
         for id in [live_id!(combo), live_id!(dropdown), live_id!(number), live_id!(nested)] {
