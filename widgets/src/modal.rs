@@ -162,6 +162,8 @@ impl Widget for Modal {
             // * If this modal owns the back navigational action/gesture (e.g., on Android),
             // * If an `Escape` press this modal owns was released. Ownership, not key
             //   focus, is what keeps a widget behind the modal from acting on the press.
+            // * If this modal owns a click of the mouse's back button, the desktop
+            //   equivalent of that gesture.
             // * If there was a click/tap in the background area, outside of the inner `content` view.
             let should_close = back_pressed
                 || match bg_area_hit {
@@ -169,7 +171,8 @@ impl Widget for Modal {
                     _ => false,
                 }
                 || matches!(event, Event::KeyUp(key) if key.key_code == KeyCode::Escape
-                    && owns_cancel);
+                    && owns_cancel)
+                || (owns_cancel && matches!(event, Event::MouseUp(e) if e.button.is_back()));
             if should_close {
                 // Tagged with the MODAL's uid: `ModalRef::dismissed` looks the
                 // action up by `self.widget_uid()`, so the content view's uid
