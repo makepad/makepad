@@ -409,6 +409,12 @@ impl Cx {
     ///
     /// Begin one when the widget becomes the active thing (a modal opens, a drag starts,
     /// a dictation session begins) and end it when it stops being.
+    ///
+    /// Set `MAKEPAD_CANCEL_TRACE=1` to log every scope begun and ended, and which one each
+    /// `Escape`/back press was stamped to, each named by the call site that began it. A
+    /// scope held by a widget that has stopped being the active thing wedges the gesture
+    /// for everything behind it, and that trace is what names the culprit.
+    #[track_caller]
     pub fn begin_cancel_scope(&mut self) -> CancelScope {
         self.cancel_scopes.begin()
     }

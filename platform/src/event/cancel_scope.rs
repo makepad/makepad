@@ -1,4 +1,17 @@
-use std::{cell::Cell, rc::Rc};
+use std::{cell::Cell, panic::Location, rc::Rc, sync::OnceLock};
+
+use crate::log;
+
+/// Whether `MAKEPAD_CANCEL_TRACE` asks for cancel-gesture tracing.
+///
+/// A runtime switch rather than a `debug_assertions` build flag, because a wedged
+/// `Escape` is usually met in a release build. Read once; free when unset.
+fn tracing_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var_os("MAKEPAD_CANCEL_TRACE").is_some_and(|v| !v.is_empty() && v != "0")
+    })
+}
 
 /// A widget's standing as the foreground owner of cancel gestures — the `Escape` key
 /// and the back gesture — for as long as it is the active thing: an open modal, a
@@ -16,25 +29,40 @@ use std::{cell::Cell, rc::Rc};
 pub struct CancelScope {
     id: u64,
     alive: Rc<Cell<bool>>,
+    /// Where [`Cx::begin_cancel_scope()`](crate::cx::Cx::begin_cancel_scope) was called,
+    /// captured with `#[track_caller]` so a trace can name the widget holding this scope.
+    origin: &'static Location<'static>,
 }
 
 impl std::fmt::Debug for CancelScope {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "CancelScope({})", self.id)
+        write!(f, "CancelScope(#{} from {}:{})", self.id, self.origin.file(), self.origin.line())
     }
 }
 
 impl Drop for CancelScope {
     fn drop(&mut self) {
         self.alive.set(false);
+        // Logged here rather than in `end()` so that giving a scope up by dropping it —
+        // including a widget being torn down — is reported exactly once, like ending it.
+        if tracing_enabled() {
+            log!("[cancel] end #{} (begun at {}:{})", self.id, self.origin.file(), self.origin.line());
+        }
     }
+}
+
+/// One live scope, as the stack holds it.
+struct ScopeEntry {
+    id: u64,
+    alive: Rc<Cell<bool>>,
+    origin: &'static Location<'static>,
 }
 
 /// The stack of live cancel scopes, back to front.
 #[derive(Default)]
 pub(crate) struct CxCancelScopes {
     next_id: u64,
-    stack: Vec<(u64, Rc<Cell<bool>>)>,
+    stack: Vec<ScopeEntry>,
     /// The scope that was in front when the press being delivered began, or 0 for none.
     ///
     /// Deliberately kept even once that scope has gone: a scope that ends part-way
@@ -43,17 +71,25 @@ pub(crate) struct CxCancelScopes {
 }
 
 impl CxCancelScopes {
+    /// `#[track_caller]` here and on `Cx::begin_cancel_scope` together make `caller()`
+    /// the widget that began the scope, rather than either of these two frames.
+    #[track_caller]
     pub(crate) fn begin(&mut self) -> CancelScope {
         self.prune();
         // Ids start at 1, so `press_owner: 0` is an owner no scope can match.
         self.next_id += 1;
         let alive = Rc::new(Cell::new(true));
-        self.stack.push((self.next_id, alive.clone()));
-        CancelScope { id: self.next_id, alive }
+        let origin = Location::caller();
+        self.stack.push(ScopeEntry { id: self.next_id, alive: alive.clone(), origin });
+        if tracing_enabled() {
+            log!("[cancel] begin #{} at {}:{} ({} in front of {} others)",
+                self.next_id, origin.file(), origin.line(), self.next_id, self.stack.len() - 1);
+        }
+        CancelScope { id: self.next_id, alive, origin }
     }
 
     pub(crate) fn end(&mut self, scope: CancelScope) {
-        drop(scope); // its `Drop` marks it dead
+        drop(scope); // its `Drop` marks it dead, and does the tracing
         self.prune();
     }
 
@@ -61,7 +97,14 @@ impl CxCancelScopes {
     /// per cancel gesture, before dispatching it, and not for a key's repeats.
     pub(crate) fn begin_press(&mut self) {
         self.prune();
-        self.press_owner = self.stack.last().map_or(0, |(id, _)| *id);
+        self.press_owner = self.stack.last().map_or(0, |e| e.id);
+        if tracing_enabled() {
+            match self.stack.last() {
+                Some(e) => log!("[cancel] press -> #{}, begun at {}:{}; exactly one widget should act on it",
+                    e.id, e.origin.file(), e.origin.line()),
+                None => log!("[cancel] press -> nobody in front; nothing should act on it"),
+            }
+        }
     }
 
     pub(crate) fn owns_press(&self, scope: &CancelScope) -> bool {
@@ -69,7 +112,7 @@ impl CxCancelScopes {
     }
 
     fn prune(&mut self) {
-        self.stack.retain(|(_, alive)| alive.get());
+        self.stack.retain(|e| e.alive.get());
     }
 }
 
@@ -137,6 +180,18 @@ mod tests {
         scopes.begin_press();
         let probe = scopes.begin();
         assert!(!scopes.owns_press(&probe), "an empty stack leaves the press unowned");
+    }
+
+    #[test]
+    fn a_scope_remembers_where_it_was_begun() {
+        // What lets a trace name the widget that leaked a scope, rather than only
+        // reporting that one did. The location is this call site, not `begin`'s.
+        let mut scopes = CxCancelScopes::default();
+        let scope = scopes.begin();
+        assert!(
+            format!("{scope:?}").contains("cancel_scope.rs"),
+            "expected the caller's location, got {scope:?}"
+        );
     }
 
     #[test]

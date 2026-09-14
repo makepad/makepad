@@ -165,6 +165,11 @@ pub struct StackNavigationView {
     #[rust]
     state: StackNavigationViewState,
 
+    /// Held while this view is `Active`, so the back gesture pops it only when nothing
+    /// is in front of it. Kept in step with `state` by `set_nav_state`.
+    #[rust]
+    cancel_scope: Option<CancelScope>,
+
     /// The UID of the parent navigation.
     #[rust]
     parent_navigation_uid: Option<WidgetUid>,
@@ -295,7 +300,10 @@ impl StackNavigationView {
         // * the left_button was clicked,
         // * the "back" button on the mouse was clicked.
         if matches!(self.state, StackNavigationViewState::Active) {
-            if event.back_pressed()
+            // Ownership decides, so a modal or pane opened over this view keeps the press
+            // and this view stays put. Checked before `back_pressed()`, which consumes.
+            let owns_back = self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s));
+            if (owns_back && event.back_pressed())
                 || matches!(event, Event::Actions(actions) if self.button(cx, ids!(left_button)).clicked(&actions))
                 || matches!(event, Event::MouseUp(mouse) if mouse.button.is_back())
             {
@@ -326,7 +334,7 @@ impl StackNavigationView {
                 cx.widget_action(self.widget_uid(), hide_end_action);
 
                 self.animator_cut(cx, ids!(slide.hide));
-                self.state = StackNavigationViewState::Inactive;
+                self.set_nav_state(cx, StackNavigationViewState::Inactive);
             }
         }
     }
@@ -338,9 +346,28 @@ impl StackNavigationView {
             const OPENING_OFFSET_THRESHOLD: f64 = 0.5;
             if self.offset < OPENING_OFFSET_THRESHOLD {
                 cx.widget_action(self.widget_uid(), StackNavigationTransitionAction::ShowDone);
-                self.state = StackNavigationViewState::Active;
+                self.set_nav_state(cx, StackNavigationViewState::Active);
             }
         }
+    }
+
+    /// The single place `state` changes, so the cancel scope this view holds while
+    /// `Active` is acquired and released with it — before the next gesture picks an owner.
+    fn set_nav_state(&mut self, cx: &mut Cx, state: StackNavigationViewState) {
+        if self.state == state {
+            return;
+        }
+        match state {
+            StackNavigationViewState::Active => {
+                self.cancel_scope = Some(cx.begin_cancel_scope());
+            }
+            StackNavigationViewState::Inactive => {
+                if let Some(scope) = self.cancel_scope.take() {
+                    cx.end_cancel_scope(scope);
+                }
+            }
+        }
+        self.state = state;
     }
 
     fn is_animating(&self) -> bool {
@@ -353,7 +380,7 @@ impl StackNavigationViewRef {
         if let Some(mut inner) = self.borrow_mut() {
             inner.view.visible = true;
             inner.offset_to_hide = view_width;
-            inner.state = StackNavigationViewState::Inactive;
+            inner.set_nav_state(cx, StackNavigationViewState::Inactive);
 
             // Force-reset the animator by cutting to show (offset=0) first,
             // then cutting to hide, then playing show. This ensures the animator
@@ -399,7 +426,7 @@ impl StackNavigationViewRef {
             inner.view.visible = true;
             inner.offset_to_hide = view_width;
             inner.offset = 0.0;
-            inner.state = StackNavigationViewState::Active;
+            inner.set_nav_state(cx, StackNavigationViewState::Active);
             inner.animator_cut(cx, ids!(slide.show));
             inner.redraw(cx);
         }
@@ -410,7 +437,7 @@ impl StackNavigationViewRef {
             inner.offset_to_hide = view_width;
             inner.offset = view_width;
             inner.view.visible = false;
-            inner.state = StackNavigationViewState::Inactive;
+            inner.set_nav_state(cx, StackNavigationViewState::Inactive);
             inner.animator_cut(cx, ids!(slide.hide));
             inner.redraw(cx);
         }
