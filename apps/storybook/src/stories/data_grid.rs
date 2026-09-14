@@ -164,14 +164,19 @@ script_mod! {
         StoryHeading{text: "Headings and the pointer"}
         StoryNote{text: "The headings sit on the left in a face of their own, and the one the list is sorted by is brighter than the rest. Press a heading to sort by it, again to turn it round, and a third time for the order the seeds were written in; carrying a row, or moving one from its menu, ends the sort. Over a row the pointer is a hand."}
 
+        StoryHeading{text: "Tips on the headings"}
+        StoryNote{text: "Rest the pointer on a heading and a tip says what its column holds. The grid reports the heading and its text the way a Tip wrapper reports a control, to the window's one TipLayer, which this page declares at its end."}
+
         StoryHeading{text: "The first column takes what is left"}
         StoryNote{text: "The page sets every column's width at once from its draw loop, and the Seed column fills whatever the others leave, so the list always ends at its right edge however wide the page is. Drag a column edge and the page stops fitting: the widths stay where they were dragged for as long as the page is open."}
 
         StoryHeading{text: "Three ways to select"}
         StoryNote{text: "Cells is the spreadsheet on the Overview page. Rows picks a whole row with a press or an arrow key, and a heading press only sorts. Off, used here, picks nothing and draws nothing, for a host whose picks are its own."}
 
-        // Declared last, so the menus it raises draw over the page.
+        // Declared last, so the menus and the tips they raise draw over
+        // the page.
         menus := MenuLayer{}
+        tips := TipLayer{}
     }
 }
 
@@ -225,6 +230,14 @@ fn sorted_order<S: AsRef<str>>(rows: &[[S; 3]], col: usize, ascending: Option<bo
 
 /// The list page's columns.
 const SEED_COLUMNS: [&str; 4] = ["Seed", "Kind", "Sow", "Days"];
+
+/// What each list column holds, shown as a tip on its heading.
+const SEED_TIPS: [&str; 4] = [
+    "The name of the variety",
+    "What it grows into",
+    "The month to sow it outdoors",
+    "Days from sowing to the first harvest",
+];
 
 const MONTHS: [&str; 12] = [
     "January", "February", "March", "April", "May", "June", "July", "August", "September", "October",
@@ -665,6 +678,7 @@ impl Widget for StoryDataGridList {
                 continue;
             };
             grid.set_col_labels(SEED_COLUMNS.iter().map(|s| s.to_string()).collect());
+            grid.set_header_tips(SEED_TIPS.iter().map(|s| s.to_string()).collect());
             let lines = self.order().len();
             grid.set_grid_size(lines, SEED_COLUMNS.len());
             // Measured for this frame already, and set before the first
@@ -1037,6 +1051,10 @@ Four declarations change how the headings and the pointer look, and each leaves 
 
 This list declares all four: left-aligned headings in a bold face, the sorted one in the text colour against the quieter rest, and a hand over the rows. It is also `sortable`, and sorts its own seeds when `SortChanged` arrives, as the Overview page does. Carrying a row, or moving one from its menu, makes the order a hand-made one, so the page clears the heading with `set_sort_indicator(None)`.
 
+## Tips on the headings
+
+`set_header_tips(Vec<String>)` gives each column heading a tip, by data column as `set_col_labels` does, so a tip stays with its column when the column is dragged elsewhere. An empty string, or a column past the end of the list, has no tip. When the pointer comes to rest on a heading that has one, the grid raises `TipAction::HoverIn` with the text and the heading's rectangle, cut to the part that shows; when the pointer leaves that heading, for a heading without a tip, a cell or outside the grid, it raises `TipAction::HoverOut`. Those are the reports a `Tip` wrapper makes, and the window's one `TipLayer` does the dwell, the placement and the drawing, so a page with no `TipLayer` shows nothing. A grid given no tips raises neither. This page declares its `TipLayer` last.
+
 ## Column widths set by the host
 
 `set_col_widths(cx, &[f64])` sets every column's width at once, in display order. Columns past the end of the list go back to `default_col_width`, and a width below `min_col_width` is raised to it. The grid measures the frame again straight away, so widths set from the draw loop before the first `next_cell` land in the frame being drawn, where one `set_col_width` lands in the next. `data_width()` is the width the columns share in that frame, and `col_widths()` reads every width back.
@@ -1192,7 +1210,7 @@ mod tests {
         assert!(errors.is_empty(), "{errors:?}");
         let addressed: [(&[LiveId], &[&[LiveId]], &[&[LiveId]]); 2] = [
             (ids!(demo.grid), &[ids!(demo.reported), ids!(demo.edited)], &[]),
-            (ids!(list.grid), &[ids!(list.picked), ids!(list.log)], &[ids!(menus)]),
+            (ids!(list.grid), &[ids!(list.picked), ids!(list.log)], &[ids!(menus), ids!(tips)]),
         ];
         for (story, (path, labels, layers)) in STORIES.iter().zip(addressed) {
             let page = cx.with_vm(|vm| {
@@ -1207,7 +1225,7 @@ mod tests {
                 assert!(page.label(&cx, label).borrow().is_some(), "{}: no label {label:?}", story.key);
             }
             for layer in layers {
-                assert!(page.menu_layer(&cx, layer).borrow().is_some(), "{}: no menu layer {layer:?}", story.key);
+                assert!(!page.widget(&cx, layer).is_empty(), "{}: no layer {layer:?}", story.key);
             }
             let subject = page.widget(&cx, &[LiveId::from_str(story.subject)]);
             assert!(!subject.is_empty(), "{}: no {}", story.key, story.subject);

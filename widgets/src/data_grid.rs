@@ -6,6 +6,7 @@ use {
         makepad_draw::*,
         scroll_bar::{ScrollAxis, ScrollBar, ScrollBarAction},
         text_input::TextInputWidgetRefExt,
+        tip::TipAction,
         widget::*,
         widget_async::CxSplashVmExt,
         widget_tree::CxWidgetExt,
@@ -837,6 +838,13 @@ pub struct DataGrid {
     /// every cell when the frame ends.
     #[rust]
     outlines: Vec<(usize, Vec4f)>,
+    /// A tip for each column heading, by data column; empty for none.
+    #[rust]
+    header_tips: Vec<String>,
+    /// The heading whose tip was last raised, as (display col, data col),
+    /// until the pointer leaves it.
+    #[rust]
+    tip_head: Option<(usize, usize)>,
 }
 
 pub type CopyProvider = Box<dyn FnMut(&GridSelection) -> String>;
@@ -1048,6 +1056,18 @@ impl DataGrid {
 
     pub fn set_col_labels(&mut self, labels: Vec<String>) {
         self.col_labels = labels;
+    }
+
+    /// A tip for each column heading, in data columns like
+    /// [`Self::set_col_labels`], so a tip stays with its column when the
+    /// column is dragged somewhere else. An empty tip, or a column past the
+    /// end of the list, has none. The pointer resting on a heading with a
+    /// tip raises [`TipAction::HoverIn`] with the text and the heading's
+    /// rectangle, and leaving it raises [`TipAction::HoverOut`], for the
+    /// window's `TipLayer` to show and hide; with no tips set the grid
+    /// raises neither.
+    pub fn set_header_tips(&mut self, tips: Vec<String>) {
+        self.header_tips = tips;
     }
 
     /// Columns that will not sort, whatever `sortable` says.
@@ -2225,6 +2245,45 @@ impl DataGrid {
         }
     }
 
+    /// The pointer is at `abs`, or has left the grid with `None`: raise the
+    /// tip of the heading it rests on, or take the last one down. Once per
+    /// heading entered and once per heading left, so a pointer moving
+    /// about inside one heading says nothing more.
+    fn hover_tip(&mut self, cx: &mut Cx, abs: Option<DVec2>) {
+        let over = abs.and_then(|abs| match self.hit_zone(abs) {
+            HitZone::ColHeader { display_col, .. } => {
+                let col = self.display_to_data(display_col);
+                let has_tip = self.header_tips.get(col).is_some_and(|tip| !tip.is_empty());
+                has_tip.then_some((display_col, col))
+            }
+            _ => None,
+        });
+        if over == self.tip_head {
+            return;
+        }
+        self.tip_head = over;
+        let action = match over {
+            Some((display_col, col)) => {
+                TipAction::HoverIn(self.header_tips[col].clone(), self.heading_rect(display_col))
+            }
+            None => TipAction::HoverOut,
+        };
+        cx.widget_action(self.uid, action);
+    }
+
+    /// Where a column heading is drawn, cut to the heading strip: of a
+    /// heading scrolled half out of view, only the half that shows.
+    fn heading_rect(&self, display_col: usize) -> Rect {
+        let strip = self.vp.col_header_rect;
+        let x0 = self.vp.data_rect.pos.x + self.col_sizes.offset_of(display_col) - self.scroll.x;
+        let x1 = x0 + self.col_sizes.size_of(display_col);
+        let (x0, x1) = (x0.max(strip.pos.x), x1.min(strip.pos.x + strip.size.x));
+        Rect {
+            pos: dvec2(x0, strip.pos.y),
+            size: dvec2((x1 - x0).max(0.0), strip.size.y),
+        }
+    }
+
     fn cell_at(&self, pos: DVec2) -> Option<(usize, usize)> {
         if self.rows == 0 || self.cols == 0 {
             return None;
@@ -2819,6 +2878,11 @@ impl Widget for DataGrid {
         if let Event::Actions(actions) = event {
             self.handle_editor_actions(cx, actions);
         }
+        // The pointer gone from the window, or an overlay clearing every
+        // hover as it opens: a heading's tip goes with it.
+        if matches!(event, Event::MouseLeave(_) | Event::ClearHover) {
+            self.hover_tip(cx, None);
+        }
 
         match event.hits(cx, self.area) {
             Hit::KeyFocus(_) | Hit::KeyFocusLost(_) => {
@@ -2854,7 +2918,9 @@ impl Widget for DataGrid {
             }
             Hit::FingerHoverIn(fe) | Hit::FingerHoverOver(fe) => {
                 cx.set_cursor(self.hover_cursor(fe.abs));
+                self.hover_tip(cx, Some(fe.abs));
             }
+            Hit::FingerHoverOut(_) => self.hover_tip(cx, None),
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 if self.grab_key_focus {
                     cx.set_key_focus(self.area);
@@ -3140,6 +3206,13 @@ impl DataGridRef {
 
     pub fn sort(&self) -> Option<(usize, bool)> {
         self.borrow().and_then(|inner| inner.sort())
+    }
+
+    /// See [`DataGrid::set_header_tips`].
+    pub fn set_header_tips(&self, tips: Vec<String>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_header_tips(tips);
+        }
     }
 
     pub fn set_unsortable_cols(&self, cols: Vec<usize>) {
@@ -4321,5 +4394,83 @@ mod tests {
         let between = header_label_x(rect, pad, tw, 0.75, marks);
         assert!(between > header_label_x(rect, pad, tw, 0.5, marks) && between < right);
         assert_eq!(header_label_x(rect, pad, 200.0, 1.0, marks), 106.0);
+    }
+
+    fn tips_raised(
+        cx: &mut Cx,
+        grid: &mut DataGrid,
+        step: impl FnOnce(&mut Cx, &mut DataGrid),
+    ) -> Vec<TipAction> {
+        let uid = grid.widget_uid();
+        let emitted = cx.capture_actions(|cx| step(cx, grid));
+        emitted.filter_widget_actions_cast::<TipAction>(uid).collect()
+    }
+
+    /// The pointer resting on a heading with a tip raises it once, with the
+    /// part of the heading that shows; moving inside that heading says
+    /// nothing more; a heading without a tip, a cell, or leaving the grid
+    /// takes it down; and a tip belongs to its data column wherever that
+    /// column is dragged.
+    #[test]
+    fn a_heading_with_a_tip_raises_it_and_leaving_takes_it_down() {
+        let mut cx = cx();
+        let mut grid = laid_out(&mut cx);
+        grid.set_header_tips(vec!["the first".into(), String::new(), "the third".into()]);
+        let strip = grid.vp.col_header_rect;
+        let (first, second, third) = (heading(&grid, 0), heading(&grid, 1), heading(&grid, 2));
+
+        let out = tips_raised(&mut cx, &mut grid, |cx, grid| grid.hover_tip(cx, Some(middle(grid, 3, 0))));
+        assert!(out.is_empty(), "a cell raised a tip: {out:?}");
+        let out = tips_raised(&mut cx, &mut grid, |cx, grid| {
+            grid.hover_tip(cx, Some(first));
+            grid.hover_tip(cx, Some(first + dvec2(20.0, 3.0)));
+        });
+        let rect = Rect {
+            pos: dvec2(strip.pos.x, strip.pos.y),
+            size: dvec2(96.0, strip.size.y),
+        };
+        assert_eq!(out, vec![TipAction::HoverIn("the first".into(), rect)]);
+        let out = tips_raised(&mut cx, &mut grid, |cx, grid| {
+            grid.hover_tip(cx, Some(second));
+            grid.hover_tip(cx, Some(second + dvec2(10.0, 0.0)));
+        });
+        assert_eq!(out, vec![TipAction::HoverOut], "a heading without a tip");
+
+        // The third heading runs past the right edge; its tip hangs off
+        // the part that shows.
+        let out = tips_raised(&mut cx, &mut grid, |cx, grid| {
+            grid.hover_tip(cx, Some(third));
+            grid.hover_tip(cx, None);
+        });
+        let shown = Rect {
+            pos: dvec2(strip.pos.x + 192.0, strip.pos.y),
+            size: dvec2(strip.size.x - 192.0, strip.size.y),
+        };
+        assert_eq!(
+            out,
+            vec![TipAction::HoverIn("the third".into(), shown), TipAction::HoverOut]
+        );
+
+        // The first column moved to the end: its tip went with it.
+        grid.move_column(&mut cx, 0, 3);
+        let out = tips_raised(&mut cx, &mut grid, |cx, grid| {
+            grid.hover_tip(cx, Some(first));
+            grid.hover_tip(cx, Some(third));
+        });
+        assert_eq!(out, vec![TipAction::HoverIn("the first".into(), shown)], "{out:?}");
+    }
+
+    /// A grid given no tips raises nothing from its headings at all.
+    #[test]
+    fn a_grid_without_tips_raises_none() {
+        let mut cx = cx();
+        let mut grid = laid_out(&mut cx);
+        let (first, second) = (heading(&grid, 0), heading(&grid, 1));
+        let out = tips_raised(&mut cx, &mut grid, |cx, grid| {
+            grid.hover_tip(cx, Some(first));
+            grid.hover_tip(cx, Some(second));
+            grid.hover_tip(cx, None);
+        });
+        assert!(out.is_empty(), "{out:?}");
     }
 }
