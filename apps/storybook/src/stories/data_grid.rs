@@ -75,6 +75,7 @@ script_mod! {
         color_picked: theme.color_secondary_container
         color_picked_text: theme.color_on_secondary_container
         color_cursor: theme.color_primary
+        color_carried: theme.color_tertiary
 
         View{
             width: Fill height: 260.
@@ -144,6 +145,9 @@ script_mod! {
 
         StoryHeading{text: "A click, or a carry"}
         StoryNote{text: "The press picks, and letting go where it went down finishes the click: the line under the list says released. Move more than five points first and the grid reports that the row is being carried instead, and never reports the release, so a list that opens a row when it is let go never opens one that was dragged away."}
+
+        StoryHeading{text: "Carrying a row moves it"}
+        StoryNote{text: "Drag a row up or down the list and the rows move out of its way under the pointer; let go and it stays there. The grid moves nothing. It says where the carry began, and this page follows the pointer, asks the grid which row is level with it and where that row is drawn, and reorders its own lines."}
 
         StoryHeading{text: "Three ways to select"}
         StoryNote{text: "Cells is the spreadsheet on the Overview page. Rows picks a whole row with a press or an arrow key, and a heading press only sorts. Off, used here, picks nothing and draws nothing, for a host whose picks are its own."}
@@ -274,6 +278,22 @@ impl Picks {
             }
         }
         self.cursor = Some(item);
+    }
+}
+
+/// The line a carried row belongs on, as the pointer moves: `from` is
+/// where it is now, `under` the line level with the pointer, drawn at
+/// `under_rect`, and `y` the pointer's height. The row takes a line once
+/// the pointer is past that line's middle, so rows of different heights
+/// cannot trade places back and forth under a pointer that holds still.
+fn carry_to(from: usize, under: usize, under_rect: Rect, y: f64) -> usize {
+    let middle = under_rect.pos.y + under_rect.size.y * 0.5;
+    if under > from {
+        if y >= middle { under } else { under - 1 }
+    } else if under < from {
+        if y <= middle { under } else { under + 1 }
+    } else {
+        from
     }
 }
 
@@ -408,11 +428,17 @@ pub struct StoryDataGridList {
     color_picked_text: Vec4f,
     #[live]
     color_cursor: Vec4f,
+    #[live]
+    color_carried: Vec4f,
     /// Which item each line draws. Filled the first time it is asked for.
     #[rust]
     order: Vec<usize>,
     #[rust]
     picks: Picks,
+    /// The item being carried, from the grid's word that a carry began
+    /// until the button comes up.
+    #[rust]
+    carrying: Option<usize>,
 }
 
 impl StoryDataGridList {
@@ -421,6 +447,32 @@ impl StoryDataGridList {
             self.order = (0..SEEDS.len()).collect();
         }
         &self.order
+    }
+
+    /// The grid says the row on `line` is being carried.
+    fn carry(&mut self, line: usize) {
+        self.carrying = self.order().get(line).copied();
+    }
+
+    /// The pointer moved while a row is carried: move the row to the line
+    /// it belongs on. Returns whether anything moved.
+    fn follow(&mut self, grid: &DataGridRef, abs: DVec2) -> bool {
+        let Some(item) = self.carrying else {
+            return false;
+        };
+        let (Some(under), Some(from)) = (grid.row_at(abs), self.order.iter().position(|&i| i == item)) else {
+            return false;
+        };
+        let Some(under_rect) = grid.row_rect(under) else {
+            return false;
+        };
+        let to = carry_to(from, under, under_rect, abs.y);
+        if to == from {
+            return false;
+        }
+        let item = self.order.remove(from);
+        self.order.insert(to, item);
+        true
     }
 
     /// A row was clicked. Returns what to say about the picks now.
@@ -467,10 +519,13 @@ impl Widget for StoryDataGridList {
                 grid.cell_text_styled(cx, &cell, SEEDS[item][cell.col], style);
             }
             // Asked for on every draw, like the cells: an outline lasts
-            // one frame.
-            let cursor = self.picks.cursor.and_then(|c| self.order.iter().position(|&i| i == c));
-            if let Some(line) = cursor {
-                grid.outline_row(line, self.color_cursor);
+            // one frame. The carried row wears its own colour.
+            let (marked, color) = match self.carrying {
+                Some(item) => (Some(item), self.color_carried),
+                None => (self.picks.cursor, self.color_cursor),
+            };
+            if let Some(line) = marked.and_then(|m| self.order.iter().position(|&i| i == m)) {
+                grid.outline_row(line, color);
             }
         }
         DrawStep::done()
@@ -478,6 +533,27 @@ impl Widget for StoryDataGridList {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.view.handle_event(cx, event, scope);
+        if self.carrying.is_none() {
+            return;
+        }
+        // The grid leaves a carry to its host, so the pointer is followed
+        // from the window's own events, wherever it goes.
+        match event {
+            Event::MouseMove(e) => {
+                let grid = self.view.data_grid(cx, ids!(grid));
+                if self.follow(&grid, e.abs) {
+                    self.view.redraw(cx);
+                }
+            }
+            Event::MouseUp(_) => {
+                let item = self.carrying.take();
+                if let Some(line) = item.and_then(|i| self.order.iter().position(|&o| o == i)) {
+                    self.view.label(cx, ids!(log)).set_text(cx, &format!("dropped on row {line}"));
+                }
+                self.view.redraw(cx);
+            }
+            _ => {}
+        }
     }
 }
 
@@ -505,6 +581,10 @@ fn data_grid_list_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
             // The press travelled: the row is on its way somewhere, and
             // no release will follow.
             DataGridAction::RowDragStarted { row, .. } => {
+                if let Some(mut inner) = host.borrow_mut::<StoryDataGridList>() {
+                    inner.carry(row);
+                }
+                host.redraw(cx);
                 root.label(cx, ids!(list.log)).set_text(cx, &format!("carrying row {row}"));
             }
             _ => {}
@@ -691,6 +771,15 @@ A press raises `CellClicked` as it goes down. When it comes back up without the 
 
 With `row_drag: true`, a press that travels past the threshold raises `RowDragStarted { row, col, abs, modifiers }` once, with `abs` where the pointer is as the carry begins. From then on the grid leaves that press alone: it selects nothing, does not scroll at the edge, and raises no `CellReleased` when the press comes up. Where the row goes is the host's to follow. Without `row_drag` a drag across cells drags out a selection, as it always has, and is not a click either.
 
+## Moving a carried row
+
+The grid never reorders anything: the rows are the host's. This page keeps a list of lines, each naming an item, and moves one entry of it while a row is carried. It follows the pointer from the window's `MouseMove` and `MouseUp` events, since a carry can leave the grid, and on each move asks two things:
+
+- `row_at(abs)` — the row level with the pointer. Only the height counts, so a pointer wandering sideways past the columns still finds its row; above the rows or below them there is none.
+- `row_rect(row)` — where that row is drawn, in the same coordinates. A row takes a line once the pointer passes that line's middle, which keeps rows of different heights from trading places under a still pointer.
+
+Both are measured against the last drawn frame and the scroll as it is now, and both are on `DataGridRef`, as are `set_scroll` and `scroll_pos` for a host that scrolls the list while a row is carried near an edge, and `set_row_height` and `clear_row_heights` for a host whose rows are not all one height. The picks and the outline follow the item, not the line, so they move with it; the carried row is outlined in its own colour.
+
 ## The outline
 
 `outline_row(row, color)` draws a 1.5 point outline round a row's visible cells: a keyboard cursor, a row being carried, anything a host marks without selecting it. Call it from the draw loop, as the cells are. It is drawn when the frame ends, over every cell, so the row's own cells may come before the call or after it; and it lasts one frame, so ask for it again on every draw. This page outlines the row clicked last.",
@@ -857,5 +946,49 @@ mod tests {
             let subject = page.widget(&cx, &[LiveId::from_str(story.subject)]);
             assert!(!subject.is_empty(), "{}: no {}", story.key, story.subject);
         }
+    }
+
+    fn line(y: f64, height: f64) -> Rect {
+        Rect {
+            pos: dvec2(0.0, y),
+            size: dvec2(100.0, height),
+        }
+    }
+
+    /// A carried row takes the line under the pointer once the pointer is
+    /// past that line's middle, going down or going up.
+    #[test]
+    fn a_carried_row_takes_a_line_past_its_middle() {
+        // Carried from line 2; line 3 is drawn from 60 to 80.
+        assert_eq!(carry_to(2, 3, line(60.0, 20.0), 65.0), 2, "not yet past the middle");
+        assert_eq!(carry_to(2, 3, line(60.0, 20.0), 72.0), 3);
+        // Line 1 is drawn from 20 to 40.
+        assert_eq!(carry_to(2, 1, line(20.0, 20.0), 35.0), 2);
+        assert_eq!(carry_to(2, 1, line(20.0, 20.0), 28.0), 1);
+        assert_eq!(carry_to(2, 2, line(40.0, 20.0), 41.0), 2);
+    }
+
+    /// A pointer that jumps several lines in one move takes the row as
+    /// far as the lines it is past the middle of.
+    #[test]
+    fn a_fast_pointer_takes_the_row_as_far_as_it_has_passed() {
+        assert_eq!(carry_to(1, 5, line(100.0, 20.0), 102.0), 4);
+        assert_eq!(carry_to(1, 5, line(100.0, 20.0), 115.0), 5);
+        assert_eq!(carry_to(6, 2, line(40.0, 20.0), 55.0), 3);
+    }
+
+    /// A tall row under a short carried one does not send it back and
+    /// forth: once it has taken the tall row's line, the short row it left
+    /// is not past its own middle for the same pointer.
+    #[test]
+    fn rows_of_different_heights_do_not_trade_places_under_a_still_pointer() {
+        // Line 0 is 20 high, line 1 is 60 high. The pointer at 55 is past
+        // line 1's middle (50), so line 0's row moves down to line 1.
+        let tall = line(20.0, 60.0);
+        assert_eq!(carry_to(0, 1, tall, 55.0), 1);
+        // Now the carried row is line 1, drawn from 60 to 80, and the tall
+        // row is line 0, from 0 to 60. The same pointer is level with line
+        // 0 but not above its middle (30): it stays.
+        assert_eq!(carry_to(1, 0, line(0.0, 60.0), 55.0), 1);
     }
 }
