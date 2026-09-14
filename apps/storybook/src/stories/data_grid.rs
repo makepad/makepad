@@ -134,6 +134,7 @@ script_mod! {
         StoryNote{text: "Click a cell, shift-click another for a rectangle, click a row number for the row, a column header for the column. Arrow keys move and shift extends. Drag a column edge to resize it, and a column header to move it somewhere else."}
         StoryNote{text: "Press a heading to sort by it: once for up, again for down, a third time back to the order the rows arrived in. The grid does not do this — it reports the press and this page reorders its own rows, which is the whole arrangement."}
         demo := mod.storybook.StoryDataGrid{}
+        StoryNote{text: "Turn on Drag to scroll and a drag across the cells moves the table with the pointer instead of selecting a rectangle, the way a finger moves a list on a phone. A press that stays where it went down still selects its cell."}
 
         StoryHeading{text: "Editing"}
         StoryNote{text: "The grid seats its own editor. Type over a selected cell to replace what it says, or press F2, Return or double-click to amend it. Return keeps the value and steps down a row, shift-Return steps up, Tab steps sideways, Escape puts the cell back as it was, and a click anywhere else keeps the value where it stands."}
@@ -930,6 +931,7 @@ const CONTROLS: &[Control] = &[
     Control { label: "Zebra stripes", target: "demo.grid", kind: ControlKind::Bool { prop: "zebra_stripes", default: false } },
     Control { label: "Sortable headings", target: "demo.grid", kind: ControlKind::Bool { prop: "sortable", default: true } },
     Control { label: "Drag columns", target: "demo.grid", kind: ControlKind::Bool { prop: "allow_col_reorder", default: true } },
+    Control { label: "Drag to scroll", target: "demo.grid", kind: ControlKind::Bool { prop: "drag_scrolling", default: false } },
     Control { label: "Header align", target: "demo.grid", kind: ControlKind::Number { prop: "header_align", min: 0., max: 1., step: 0.25, default: 0.5 } },
     Control { label: "Selection", target: "demo.grid", kind: ControlKind::Choice { prop: "selection", options: &["GridSelectMode.Cells", "GridSelectMode.Rows", "GridSelectMode.Off"], default: 0 } },
 ];
@@ -957,6 +959,8 @@ The consequence is the trap: **a `DataGrid` with no host behind it is not empty,
 Its own: column and row headers, resizing a column or a row by dragging its edge, reordering columns by dragging a header (`allow_col_reorder`, off by default while both resize flags are on), the whole selection model — single cell, rectangle, row, column, everything — and keyboard navigation with arrows, the page keys, Home, End, and shift to extend.
 
 What a press selects is `selection:`. `GridSelectMode.Cells`, the default, is the spreadsheet described here. `GridSelectMode.Rows` picks whole rows with a press or an arrow key, and a heading press only sorts. `GridSelectMode.Off` selects nothing at all and still reports every press with its modifiers, for a list that keeps its own picks; the List page beside this one is that.
+
+`drag_scrolling: true` makes a press on a cell that travels past `drag_threshold` scroll the grid with the pointer, both ways, as a finger scrolls a list on a phone, instead of dragging out a selection or carrying a row. The point pressed stays under the pointer, the scroll stops at the ends, and the press is no click, so it raises no `CellReleased`. It is off by default; the Drag to scroll control turns it on here, and `set_drag_scrolling` turns it on or off from code, for a list that scrolls under a finger in one layout and not in another.
 
 How the headings look is declared too: `header_align` places the labels, from the left at 0 to the right at 1 (the Header align control), `color_header_sorted` lights the sorted heading, `draw_text_header` gives the headings a face of their own, and `cell_cursor` is the pointer over a cell. The List page uses all four.
 
