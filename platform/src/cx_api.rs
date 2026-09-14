@@ -1903,6 +1903,15 @@ impl Cx {
         res
     }
 
+    /// The frame `next_frame` asked for has not been sent yet. Once it has,
+    /// this is false whether or not the asker heard it: a container that
+    /// stops passing events on (a closed modal) swallows it, and a widget
+    /// running an animation on a frame chain can tell that way that its
+    /// chain was cut.
+    pub fn next_frame_is_pending(&self, next_frame: NextFrame) -> bool {
+        self.new_next_frames.contains(&next_frame)
+    }
+
     pub fn send_trigger(&mut self, area: Area, trigger: Trigger) {
         if let Some(triggers) = self.triggers.get_mut(&area) {
             triggers.push(trigger);
