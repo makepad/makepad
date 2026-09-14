@@ -469,6 +469,8 @@ script_mod! {
             diffraction_strength: uniform(0.0)
             // Press: 0..1 flattens the lens to 85% and lifts the rim by 0.06;
             // driven by the widget's own clock, never `draw_pass.time`.
+            // RippleLensRoundedView reads it differently, and reads a
+            // negative value too: see there.
             press_flatten: uniform(0.0)
             // PERF LAW: the click ripple's clock is fed by the widget, NOT by
             // `draw_pass.time`. Any shader that reads `draw_pass.time` is flagged
@@ -819,6 +821,204 @@ script_mod! {
     // thing, which this repository does not do, and two examples outside
     // the library still write it.
     mod.widgets.AppleGlassRoundedView = mod.widgets.LensedRoundedView{}
+
+    // The water lens: a surface meant to be pressed. It is the family's
+    // earlier, livelier material, kept as a preset of its own because the
+    // restrained glass above is right for a dock or a panel and wrong for a
+    // lens whose whole point is the press. Against that glass it has:
+    //
+    // - a milky sheen, brightest toward the rim, the ends and the top
+    //   (`specular_strength`), and a bright 1 pt seal;
+    // - a rim lens that falls off as `pow(1 - depth / width, 1.45)` over a
+    //   band capped at 35% of the short side, so what is behind it bends
+    //   and crowds into the edge instead of scribbling along it;
+    // - a real red/blue split at the rim, `diffraction_strength` points
+    //   deep, with no cap on it;
+    // - one blur level everywhere (`blur_level`), and a shadow whose sigma
+    //   is half its radius unless `shadow_sigma` says otherwise. The shadow
+    //   keeps to the room its container leaves it (`shadow_room`): where a
+    //   clip would cut it, it thins out before the cut instead;
+    // - the press: `ripple_age` drives a ring that crosses the lens in
+    //   0.88 s and fades over 1.05 s, pushes the scene up to
+    //   `ripple_reach()` points along its radius, splits its colour and
+    //   lights its crest. `press_flatten` 0..1 lays the lens flat behind
+    //   the ring, down to a tenth of its bend; a negative flatten is a
+    //   rebound from that much flat, which lifts the lens past rest just
+    //   behind a second ring before it settles.
+    //
+    // The clock is the host's (`set_press_response`, `LensPress`), never
+    // `draw_pass.time`. Reduce Transparency (`opaque_surface`) drops the
+    // lens, the ring and the sheen and keeps a hairline seal, as the base
+    // does.
+    //
+    // Three hooks let a control lie on the lens without a second copy of
+    // this shader: `face` recolours the material (a filled button's tint),
+    // `glow` adds to the sheen (a hover), and `ripple_reach` sizes the
+    // ring's push to the control. `GlassButton` overrides all three.
+    mod.widgets.RippleLensRoundedView = mod.widgets.GaussRoundedView{
+        draw_bg +: {
+            blur_level: 5.0
+            corner_radius: 14.0
+            tint_color: #b8b8b8
+            tint_alpha: 0.10
+            surface_alpha: 0.74
+            border_width: 1.0
+            border_alpha: 0.62
+            specular_strength: 0.16
+            noise_strength: 0.012
+            lensing_effect: 0.75
+            lensing_strength: 14.0
+            lensing_width: 22.0
+            diffraction_strength: 2.4
+            shadow_color: #0007
+            shadow_radius: 14.0
+            shadow_sigma: 0.0
+            shadow_offset: vec2(0.0, 5.0)
+
+            // How far the ring pushes the scene at its steepest, in points.
+            ripple_reach: fn() -> float {
+                return 22.0
+            }
+
+            // The material as a control lying on the lens wants it; as it is here.
+            face: fn(material: vec3) -> vec3 {
+                return material
+            }
+
+            // Light a control adds to the sheen; none here.
+            glow: fn() -> float {
+                return 0.0
+            }
+
+            // How much of its shadow the pixel at `p` paints. The shadow
+            // reaches past the surface, and a container that clips at the
+            // surface's own edge, a row only as tall as a button, would cut
+            // it into a dark slab with hard edges. So the shadow thins out
+            // with the room left under the surface, to nothing where there is
+            // none, and fades out over half its radius before any clip edge
+            // instead of stopping at it. Unclipped, it is all there.
+            shadow_room: fn(p: vec2) -> float {
+                let reach = max(self.shadow_radius + max(self.shadow_offset.y, 0.0), 1.0)
+                let below = clamp((self.draw_clip.w - self.rect_pos.y - self.rect_size.y) / reach, 0.0, 1.0)
+                let inside = min(min(p.x - self.draw_clip.x, self.draw_clip.z - p.x), min(p.y - self.draw_clip.y, self.draw_clip.w - p.y))
+                return below * below * (3.0 - 2.0 * below) * smoothstep(0.0, max(self.shadow_radius * 0.5, 1.0), inside)
+            }
+
+            // The rim band, never wider than 35% of the short side: past
+            // that a small surface becomes all edge.
+            water_band: fn() -> float {
+                let cap = max(min(self.sdf_rect_size.x, self.sdf_rect_size.y) * 0.35, 1.0)
+                return min(max(self.lensing_width, 1.0), cap)
+            }
+
+            // A capped band bends proportionally less.
+            water_scale: fn() -> float {
+                return self.water_band() / max(self.lensing_width, 1.0)
+            }
+
+            // 1 at the boundary, 0 a band inside it (and a band outside it,
+            // which only the antialiased edge ever reads).
+            water_edge: fn(shape: float) -> float {
+                let edge = clamp(1.0 - abs(shape) / self.water_band(), 0.0, 1.0)
+                let live = clamp(self.lensing_effect, 0.0, 1.0) * clamp(self.lens_amplitude, 0.0, 1.0)
+                return pow(edge, 1.45) * live * (1.0 - self.opaque_surface)
+            }
+
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size3)
+                sdf.box(
+                    self.sdf_rect_pos.x
+                    self.sdf_rect_pos.y
+                    self.sdf_rect_size.x
+                    self.sdf_rect_size.y
+                    max(1.0, self.corner_radius)
+                )
+                if sdf.shape > -1.0 {
+                    let m = self.shadow_radius
+                    let o = self.shadow_offset + self.rect_shift
+                    let sigma = mix(self.shadow_radius * 0.5, self.shadow_sigma, step(0.001, self.shadow_sigma))
+                    let v = GaussShadow.rounded_box_shadow(
+                        vec2(m) + o
+                        self.rect_size2 + o
+                        self.pos * (self.rect_size3 + vec2(m))
+                        max(sigma, 0.5)
+                        self.corner_radius * 2.0
+                    )
+                    let room = self.shadow_room(self.rect_pos2 + self.pos * self.rect_size3)
+                    sdf.clear(self.shadow_color * (v * self.shadow_alpha * room))
+                }
+
+                let clear = 1.0 - self.opaque_surface
+                let src = max(self.source_size, vec2(1.0, 1.0))
+                let screen_pos = self.rect_pos2 + self.pos * self.rect_size3
+                let uv = screen_pos / src
+
+                // The ring. `lens_pos` spans the whole quad, shadow padding
+                // included, so when the ring meets the rim depends on the
+                // shadow as well as on the size.
+                let ripple_age = max(self.ripple_age, 0.0)
+                let ripple_life = clamp(1.0 - ripple_age / 1.05, 0.0, 1.0)
+                let lens_pos = self.pos * 2.0 - 1.0
+                let ripple_dist = length(lens_pos)
+                let wave_t = clamp(ripple_age / 0.88, 0.0, 1.0)
+                let wave_center = mix(0.0, 1.25, wave_t * wave_t * (3.0 - 2.0 * wave_t))
+                let wave_width = 0.24
+                let wave_delta = ripple_dist - wave_center
+                let wave = exp(-(wave_delta * wave_delta) / (wave_width * wave_width))
+                let wave_mask = smoothstep(0.0, 0.10, ripple_age) * (1.0 - smoothstep(1.16, 1.44, ripple_dist))
+                let ripple_wave = wave * ripple_life * ripple_life * clamp(self.ripple_strength, 0.0, 1.0) * wave_mask * clear
+                let ripple_slope = (-wave_delta / wave_width) * ripple_wave
+                let ripple_dir = lens_pos / max(ripple_dist, 0.001)
+
+                // The flatten sweeps out behind the ring; a rebound undoes
+                // it the same way and overshoots just behind the front.
+                let press = clamp(self.press_flatten, 0.0, 1.0)
+                let restore = clamp(-self.press_flatten, 0.0, 1.0)
+                let wave_flatten = smoothstep(ripple_dist - 0.14, ripple_dist + 0.26, wave_center)
+                let flatten = clamp(press * wave_flatten + restore * (1.0 - wave_flatten), 0.0, 1.0)
+                let lift = restore * wave_flatten * (1.0 - wave_t) * 0.45
+                let ripple_surface = ripple_slope * 0.85 + ripple_wave * 0.20
+                let lens_depth = clamp(1.0 - flatten * 0.90 + lift * 0.55 + ripple_wave * 0.18, 0.0, 1.55)
+                let diffraction_depth = clamp(1.0 - flatten * 0.76 + lift * 0.70 + (abs(ripple_surface) + ripple_wave) * 1.15, 0.0, 2.10)
+
+                let edge = self.water_edge(sdf.shape)
+                let lens = edge * lens_depth
+                let normal = self.rounded_edge_normal(sdf.shape)
+                let water_offset = ripple_dir * (ripple_surface * self.ripple_reach()) / src
+                let base_offset = normal * (lens * self.lensing_strength * self.water_scale()) / src + water_offset
+                let color_offset = normal * (lens * self.diffraction_strength * diffraction_depth) / src
+                    + ripple_dir * ((ripple_surface + ripple_wave * 0.65) * self.diffraction_strength * 4.5) / src
+                let uv_g = clamp(uv + base_offset, vec2(0.0, 0.0), vec2(1.0, 1.0))
+                let uv_r = clamp(uv_g + color_offset, vec2(0.0, 0.0), vec2(1.0, 1.0))
+                let uv_b = clamp(uv_g - color_offset, vec2(0.0, 0.0), vec2(1.0, 1.0))
+                let sample_r = self.sample_gauss(uv_r)
+                let sample_g = self.sample_gauss(uv_g)
+                let sample_b = self.sample_gauss(uv_b)
+                let refracted = vec4(sample_r.r, sample_g.g, sample_b.b, (sample_r.a + sample_g.a + sample_b.a) * 0.3333333)
+                let fallback = vec4(self.fallback_color.rgb, 1.0)
+                let base = fallback.mix(refracted, self.has_gauss * clear)
+                let material = self.face(base.rgb.mix(self.tint_color.rgb, self.tint_alpha))
+
+                // The sheen: brighter toward the ends, at the rim and at the
+                // top, dimmed a little while the lens lies flat.
+                let edge_uv = abs(self.pos * 2.0 - 1.0)
+                let edge_gradient = clamp((edge_uv.x + edge_uv.y) * 0.5, 0.0, 1.0)
+                let sparkle = edge * self.diffraction_strength * 0.004 * (1.0 - flatten * 0.45)
+                let sheen = self.specular_strength * (0.45 * edge_gradient + 0.55 * edge + 0.30 * (1.0 - self.pos.y)) * (1.0 - flatten * 0.28)
+                let highlight = (sheen + ripple_wave * 0.11 + self.glow()) * clear
+                // Static banding dither - see the note in GaussRoundedView's pixel().
+                let noise = (Math.random_2d(screen_pos) - 0.5) * self.noise_strength
+                let fill_alpha = mix(self.surface_alpha, 1.0, max(self.has_gauss, self.opaque_surface))
+                sdf.fill_keep(vec4(material + highlight + sparkle + noise, fill_alpha))
+                if self.border_width > 0.0 {
+                    let seal = mix(self.border_alpha, max(self.border_alpha, 0.14), self.opaque_surface)
+                    sdf.stroke(vec4(self.border_color.rgb, seal), self.border_width)
+                }
+                return sdf.result * self.layer_opacity
+            }
+        }
+    }
+
     mod.widgets.GaussGradientRoundedView = mod.widgets.GaussRoundedView{
         draw_bg +: {
             blur_level: 4.35
@@ -1026,10 +1226,18 @@ impl GaussRoundedView {
     }
 
     /// Drive the press/ripple response. `ripple_age` is elapsed seconds since the
-    /// press started (1000.0 = no ripple). The caller owns the clock and must only
+    /// press started (`RIPPLE_AT_REST` = no ripple). The caller owns the clock and must only
     /// keep ticking (NextFrame) while the ripple is live - the shader deliberately
     /// does not read `draw_pass.time`, because that would pin the window at display
     /// rate for as long as the glass is visible.
+    ///
+    /// What the numbers do depends on the preset. On `RippleLensRoundedView`
+    /// the ring crosses the lens in 0.88 s and lives about 1.05 s, a flatten of
+    /// 0..1 lays the lens flat behind it, and a negative flatten is a rebound
+    /// from that much flat that overshoots before it settles; `LensPress` is a
+    /// clock-free host for exactly that. The restrained presets draw a 0.8 pt
+    /// ring for about a third of a second, flatten the lens by at most 15%,
+    /// and ignore a negative flatten.
     pub fn set_press_response(
         &mut self,
         cx: &mut Cx,
@@ -1075,6 +1283,247 @@ impl GaussRoundedView {
             .draw_vars
             .set_uniform_on_area(cx, id, &[value]);
         self.redraw(cx);
+    }
+}
+
+/// The ripple clock's value for "no ripple": every surface of the family
+/// treats an age this far past a ring's life as none.
+pub const RIPPLE_AT_REST: f32 = 1000.0;
+
+/// One frame of a press, in the three numbers `set_press_response` takes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PressResponse {
+    /// 0..1 lays the lens flat. Below zero is a rebound from that much flat,
+    /// which only `RippleLensRoundedView` draws; the restrained presets
+    /// clamp it to 0.
+    pub flatten: f32,
+    /// Seconds since the press or the release began, or `RIPPLE_AT_REST`.
+    pub ripple_age: f32,
+    /// 0..1, how strong the ring is on this frame.
+    pub ripple_strength: f32,
+}
+
+impl PressResponse {
+    /// Nothing pressed, no ring.
+    pub const REST: Self = Self { flatten: 0.0, ripple_age: RIPPLE_AT_REST, ripple_strength: 0.0 };
+    /// Held down after the ring has gone: flat and still.
+    pub const HELD: Self = Self { flatten: 1.0, ripple_age: RIPPLE_AT_REST, ripple_strength: 0.0 };
+}
+
+impl Default for PressResponse {
+    fn default() -> Self {
+        Self::REST
+    }
+}
+
+/// How a water lens answers a press, in seconds. The defaults are the lens
+/// button's: flat in 0.78 s, a ring that fades over 1.05 s, and a release
+/// ring at 62% of the press ring. How fast the ring travels is the shader's
+/// (0.88 s across), and so is how long it is drawn at all (1.05 s); this
+/// says how flat the lens is and how strong the ring is on each frame, and
+/// the clock runs until the shader has nothing left to move.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LensPressCurve {
+    /// How long the lens takes to lie flat under a press.
+    pub press_secs: f64,
+    /// How long a ring takes to fade to nothing.
+    pub ripple_secs: f64,
+    /// The release ring's strength, as a share of the press ring's.
+    pub release_ripple: f32,
+}
+
+impl Default for LensPressCurve {
+    fn default() -> Self {
+        Self { press_secs: 0.78, ripple_secs: 1.05, release_ripple: 0.62 }
+    }
+}
+
+impl LensPressCurve {
+    /// How long the clock runs on after a ring has faded, so the last frame
+    /// it draws has no ring left in it.
+    pub const TAIL_SECS: f64 = 0.03;
+    /// How long the shader's ring takes to cross the lens. The flatten, and
+    /// the rebound, sweep the lens behind its front, so neither is done
+    /// before this, however soon the ring fades.
+    pub const RING_TRAVEL_SECS: f64 = 0.88;
+    /// How long the shader draws a ring at all. Past this age it draws none,
+    /// however strong the curve still says the ring is.
+    pub const RING_LIFE_SECS: f64 = 1.05;
+
+    /// When the ring has nothing left to show: it has crossed the lens, and
+    /// it has faded or the shader has stopped drawing it.
+    fn ring_done(&self) -> f64 {
+        Self::RING_TRAVEL_SECS.max(self.ripple_secs.max(0.0).min(Self::RING_LIFE_SECS))
+    }
+
+    /// When the clock stops on a press, in seconds after it: the lens is
+    /// flat and the ring is done.
+    pub fn press_stops_at(&self) -> f64 {
+        self.press_secs.max(0.0).max(self.ring_done()) + Self::TAIL_SECS
+    }
+
+    /// When the clock stops on a release, in seconds after it: the rebound
+    /// has swept the lens and the ring is done.
+    pub fn release_stops_at(&self) -> f64 {
+        self.ring_done() + Self::TAIL_SECS
+    }
+
+    /// `age` seconds into a press: the frame, and whether the clock has to
+    /// tick again. The lens eases flat over `press_secs` while the ring fades
+    /// over `ripple_secs`, a tenth weaker the flatter the lens is. Once the
+    /// clock stops the lens is held flat with no ring.
+    pub fn pressed(&self, age: f64) -> (PressResponse, bool) {
+        let age = age.max(0.0);
+        if age >= self.press_stops_at() {
+            return (PressResponse::HELD, false);
+        }
+        let t = if self.press_secs > 0.0 { (age / self.press_secs).min(1.0) as f32 } else { 1.0 };
+        let flatten = t * t * (3.0 - 2.0 * t);
+        let response = PressResponse {
+            flatten,
+            ripple_age: age as f32,
+            ripple_strength: self.fade(age) * (1.0 - 0.10 * flatten),
+        };
+        (response, true)
+    }
+
+    /// `age` seconds into a release from `restore` flat: the lens rebounds
+    /// from there under a ring `release_ripple` as strong as a press's, and
+    /// is at rest once the clock stops.
+    pub fn released(&self, age: f64, restore: f32) -> (PressResponse, bool) {
+        let age = age.max(0.0);
+        if age >= self.release_stops_at() {
+            return (PressResponse::REST, false);
+        }
+        let response = PressResponse {
+            flatten: -restore.clamp(0.0, 1.0),
+            ripple_age: age as f32,
+            ripple_strength: self.fade(age) * self.release_ripple.clamp(0.0, 1.0),
+        };
+        (response, true)
+    }
+
+    fn fade(&self, age: f64) -> f32 {
+        if self.ripple_secs > 0.0 {
+            (1.0 - age / self.ripple_secs).clamp(0.0, 1.0) as f32
+        } else {
+            0.0
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+enum LensPressPhase {
+    #[default]
+    Rest,
+    Pressing,
+    Held,
+    Releasing,
+}
+
+/// What a host does with one step of a press: push `response` through
+/// `set_press_response` when there is one, and ask for a frame when `tick`
+/// says so.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LensPressStep {
+    pub response: Option<PressResponse>,
+    pub tick: bool,
+}
+
+/// A press on a water lens, with the clock left to its host. The host
+/// forwards the finger going down and coming up, and the time of each
+/// `NextFrame` it asked for; it gets back what to push and whether to ask
+/// for another. The clock runs only while the lens is flattening or
+/// rebounding, so a long hold and an idle lens cost no frames.
+///
+/// A press that lands during a rebound starts over from a lens at rest.
+/// With `reduced_motion` the lens goes flat on the press and back on the
+/// release, with no ring and no clock.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LensPress {
+    phase: LensPressPhase,
+    /// The first tick's time in this phase, once it has come.
+    started: Option<f64>,
+    /// How flat the lens is, 0..1: what a release rebounds from.
+    flatten: f32,
+}
+
+impl LensPress {
+    /// The finger went down on the lens.
+    pub fn down(&mut self, reduced_motion: bool) -> LensPressStep {
+        self.started = None;
+        if reduced_motion {
+            self.phase = LensPressPhase::Held;
+            self.flatten = 1.0;
+            return LensPressStep { response: Some(PressResponse::HELD), tick: false };
+        }
+        self.phase = LensPressPhase::Pressing;
+        self.flatten = 0.0;
+        LensPressStep { response: Some(PressResponse::REST), tick: true }
+    }
+
+    /// The finger came up. Nothing happens unless the lens was pressed, so
+    /// a host that hears one release twice does not restart the rebound.
+    pub fn up(&mut self, reduced_motion: bool) -> LensPressStep {
+        if !matches!(self.phase, LensPressPhase::Pressing | LensPressPhase::Held) {
+            return LensPressStep { response: None, tick: false };
+        }
+        self.started = None;
+        if reduced_motion {
+            self.phase = LensPressPhase::Rest;
+            self.flatten = 0.0;
+            return LensPressStep { response: Some(PressResponse::REST), tick: false };
+        }
+        self.phase = LensPressPhase::Releasing;
+        LensPressStep { response: None, tick: true }
+    }
+
+    /// A frame the host asked for came, at `time` seconds. `None` when
+    /// nothing is moving, so a stale frame asks for nothing.
+    pub fn tick(&mut self, time: f64, curve: &LensPressCurve) -> Option<LensPressStep> {
+        let pressing = match self.phase {
+            LensPressPhase::Pressing => true,
+            LensPressPhase::Releasing => false,
+            _ => return None,
+        };
+        let age = time - *self.started.get_or_insert(time);
+        let (response, live) = if pressing {
+            let (response, live) = curve.pressed(age);
+            self.flatten = response.flatten;
+            if !live {
+                self.phase = LensPressPhase::Held;
+            }
+            (response, live)
+        } else {
+            let step = curve.released(age, self.flatten);
+            if !step.1 {
+                self.phase = LensPressPhase::Rest;
+                self.flatten = 0.0;
+            }
+            step
+        };
+        Some(LensPressStep { response: Some(response), tick: live })
+    }
+
+    /// Forget the press: the lens is at rest, and the response says so.
+    pub fn rest(&mut self) -> PressResponse {
+        *self = Self::default();
+        PressResponse::REST
+    }
+
+    /// No press, no rebound.
+    pub fn is_at_rest(&self) -> bool {
+        self.phase == LensPressPhase::Rest
+    }
+
+    /// The finger is down: the lens is flattening, or flat and still.
+    pub fn is_held(&self) -> bool {
+        matches!(self.phase, LensPressPhase::Pressing | LensPressPhase::Held)
+    }
+
+    /// The lens is flattening or rebounding, so the clock is running.
+    pub fn is_animating(&self) -> bool {
+        matches!(self.phase, LensPressPhase::Pressing | LensPressPhase::Releasing)
     }
 }
 
@@ -1457,5 +1906,214 @@ mod material_tests {
         assert!(flat.opaque && flat.rim_alpha == 0.0 && flat.tint_alpha == 1.0);
         assert_eq!(flat.corner_radius, light.corner_radius);
         assert!(flat.seal_alpha >= 0.14);
+    }
+}
+
+#[cfg(test)]
+mod press_tests {
+    use super::*;
+
+    fn close(a: f32, b: f32) -> bool {
+        (a - b).abs() < 1e-4
+    }
+
+    /// Frames at 60 Hz from `start` until the lens stops asking for one,
+    /// returning every step and the time of the last tick.
+    fn run(press: &mut LensPress, curve: &LensPressCurve, start: f64) -> (Vec<LensPressStep>, f64) {
+        let mut steps = Vec::new();
+        let mut time = start;
+        loop {
+            let step = press.tick(time, curve).expect("a frame was asked for, so the lens is moving");
+            steps.push(step);
+            if !step.tick {
+                return (steps, time);
+            }
+            time += 1.0 / 60.0;
+            assert!(time < start + 10.0, "the clock never stopped");
+        }
+    }
+
+    #[test]
+    fn a_press_eases_the_lens_flat_over_the_settle_time() {
+        let curve = LensPressCurve::default();
+        let (at_zero, live) = curve.pressed(0.0);
+        assert!(live);
+        assert_eq!(at_zero.flatten, 0.0);
+        assert_eq!(at_zero.ripple_strength, 1.0, "the ring starts at full strength");
+
+        let (half, live) = curve.pressed(0.39);
+        assert!(live);
+        assert!(close(half.flatten, 0.5), "half the settle time is half flat on a smoothstep: {}", half.flatten);
+
+        let (settled, live) = curve.pressed(0.78);
+        assert!(close(settled.flatten, 1.0), "flat by {} s: {}", curve.press_secs, settled.flatten);
+        assert!(live, "the ring outlives the settle");
+        assert!(close(curve.pressed(0.95).0.flatten, 1.0), "and it stays flat");
+
+        let (held, live) = curve.pressed(1.1);
+        assert!(!live, "the clock is still running after the ring has gone");
+        assert_eq!(held, PressResponse::HELD);
+    }
+
+    #[test]
+    fn the_ring_fades_over_its_life() {
+        let curve = LensPressCurve::default();
+        let mut last = f32::MAX;
+        for i in 0..=21 {
+            let age = i as f64 * 0.05;
+            let (response, live) = curve.pressed(age);
+            assert!(live, "{age} s is inside the ring's life and its tail");
+            assert!(response.ripple_strength <= last, "the ring grew back at {age} s");
+            assert_eq!(response.ripple_age, age as f32, "the shader's clock is the press's age");
+            last = response.ripple_strength;
+        }
+        let (gone, live) = curve.pressed(curve.ripple_secs);
+        assert_eq!(gone.ripple_strength, 0.0, "nothing left at {} s", curve.ripple_secs);
+        assert!(live, "one more frame draws the lens with no ring in it");
+        assert!(!curve.pressed(curve.press_stops_at()).1);
+        assert!(close(curve.press_stops_at() as f32, 1.08));
+        assert!(close(curve.release_stops_at() as f32, 1.08));
+    }
+
+    /// The curve's knobs have wide ranges, but the shader has fixed times of
+    /// its own: the ring takes 0.88 s to cross the lens and is drawn for
+    /// 1.05 s at most. The clock follows whichever ends last, so a slow press
+    /// does not snap flat, a short ring does not cut the rebound off half
+    /// way across, and a long one does not tick on with nothing to draw.
+    #[test]
+    fn the_clock_runs_until_the_shader_has_nothing_left_to_move() {
+        let slow = LensPressCurve { press_secs: 2.0, ..LensPressCurve::default() };
+        assert!(close(slow.press_stops_at() as f32, 2.03));
+        let (last, live) = slow.pressed(2.02);
+        assert!(live);
+        assert!(last.flatten > 0.999, "the last frame of a slow press is not flat: {}", last.flatten);
+        assert_eq!(slow.release_stops_at(), LensPressCurve::default().release_stops_at(), "a release does not wait on the press");
+
+        let short = LensPressCurve { ripple_secs: 0.3, ..LensPressCurve::default() };
+        assert!(short.released(0.8, 1.0).1, "a short ring stopped the rebound before it crossed the lens");
+        assert!(short.pressed(0.8).1, "a short ring stopped the flatten before it crossed the lens");
+        assert!(!short.released(LensPressCurve::RING_TRAVEL_SECS + LensPressCurve::TAIL_SECS, 1.0).1);
+        assert_eq!(short.pressed(0.5).0.ripple_strength, 0.0, "the ring itself is gone at 0.3 s");
+
+        let long = LensPressCurve { ripple_secs: 3.0, ..LensPressCurve::default() };
+        assert!(close(long.press_stops_at() as f32, 1.08), "ticked on past the shader's ring: {}", long.press_stops_at());
+        assert!(close(long.release_stops_at() as f32, 1.08));
+    }
+
+    #[test]
+    fn a_release_rebounds_under_a_weaker_ring() {
+        let curve = LensPressCurve::default();
+        let (release, live) = curve.released(0.0, 0.7);
+        assert!(live);
+        assert!(close(release.flatten, -0.7), "the rebound starts from as flat as the lens was: {}", release.flatten);
+        for age in [0.0, 0.3, 0.6, 0.9] {
+            let pressed = curve.pressed(age).0.ripple_strength;
+            let released = curve.released(age, 1.0).0.ripple_strength;
+            assert!(released < pressed, "the release ring is not weaker at {age} s");
+        }
+        assert!(close(curve.released(0.0, 1.0).0.ripple_strength, 0.62));
+
+        let (rest, live) = curve.released(1.1, 0.7);
+        assert!(!live, "the rebound stops the clock too");
+        assert_eq!(rest, PressResponse::REST);
+        assert_eq!(curve.released(0.0, 3.0).0.flatten, -1.0, "a restore past flat is flat");
+    }
+
+    #[test]
+    fn the_clock_stops_after_the_ring_is_gone_held_or_released() {
+        let curve = LensPressCurve::default();
+        let mut press = LensPress::default();
+        assert!(press.is_at_rest());
+        assert_eq!(press.tick(0.0, &curve), None, "an idle lens asks for no frame");
+
+        let down = press.down(false);
+        assert_eq!(down, LensPressStep { response: Some(PressResponse::REST), tick: true });
+        assert!(press.is_held());
+        let (steps, stopped) = run(&mut press, &curve, 5.0);
+        assert!(stopped - 5.0 >= curve.press_stops_at() && stopped - 5.0 < curve.press_stops_at() + 1.0 / 60.0);
+        assert_eq!(steps.last().unwrap().response, Some(PressResponse::HELD));
+        assert!(!press.is_animating() && !press.is_at_rest(), "held, and still");
+        assert!(press.is_held());
+        assert_eq!(press.tick(9.0, &curve), None, "a long hold costs no frames");
+
+        let up = press.up(false);
+        assert_eq!(up, LensPressStep { response: None, tick: true });
+        assert!(!press.is_held() && press.is_animating());
+        let (steps, stopped) = run(&mut press, &curve, 20.0);
+        let first = steps[0].response.unwrap();
+        assert_eq!(first.flatten, -1.0, "released from flat, it rebounds from flat");
+        assert!(stopped - 20.0 < curve.release_stops_at() + 1.0 / 60.0);
+        assert_eq!(steps.last().unwrap().response, Some(PressResponse::REST));
+        assert!(press.is_at_rest());
+        assert_eq!(press.tick(30.0, &curve), None);
+        assert_eq!(press.up(false), LensPressStep { response: None, tick: false }, "a second release does nothing");
+    }
+
+    #[test]
+    fn a_quick_click_rebounds_from_as_flat_as_it_got() {
+        let curve = LensPressCurve::default();
+        let mut press = LensPress::default();
+        press.down(false);
+        press.tick(1.0, &curve);
+        let partway = press.tick(1.2, &curve).unwrap().response.unwrap();
+        assert!(partway.flatten > 0.0 && partway.flatten < 1.0);
+        press.up(false);
+        let rebound = press.tick(1.25, &curve).unwrap().response.unwrap();
+        assert!(close(rebound.flatten, -partway.flatten));
+        assert_eq!(rebound.ripple_age, 0.0, "the release ring has its own clock");
+
+        // Pressed again mid-rebound, it starts over from rest.
+        assert_eq!(press.down(false).response, Some(PressResponse::REST));
+        assert_eq!(press.tick(1.5, &curve).unwrap().response.unwrap().flatten, 0.0);
+    }
+
+    #[test]
+    fn reduced_motion_skips_the_ring_and_the_clock() {
+        let curve = LensPressCurve::default();
+        let mut press = LensPress::default();
+        assert_eq!(press.down(true), LensPressStep { response: Some(PressResponse::HELD), tick: false });
+        assert_eq!(press.tick(1.0, &curve), None);
+        assert_eq!(press.up(true), LensPressStep { response: Some(PressResponse::REST), tick: false });
+        assert_eq!(press.tick(2.0, &curve), None);
+        assert!(press.is_at_rest());
+    }
+
+    /// The water lens is DSL, which the Rust compiler never reads, and a
+    /// shader that fails to compile is not an error anywhere: the draw is
+    /// skipped and the surface paints nothing. Building one of each preset
+    /// and reading the shader-error slot back turns that into a failure.
+    #[test]
+    fn the_water_lens_preset_builds_and_its_shader_compiles() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let built = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let _ = crate::makepad_draw::makepad_platform::shader_error::take();
+            let widgets = vm.module(id!(widgets));
+            ["RippleLensRoundedView", "LensedRoundedView", "GaussRoundedView"]
+                .iter()
+                .map(|name| {
+                    let value = vm.bx.heap.value(widgets, LiveId::from_str(name).into(), NoTrap);
+                    assert!(value.as_object().is_some(), "no template {name}");
+                    WidgetRef::script_from_value(vm, value)
+                })
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            crate::makepad_draw::makepad_platform::shader_error::take(),
+            None,
+            "a draw shader failed to compile"
+        );
+        for view in &built {
+            assert!(view.borrow::<GaussRoundedView>().is_some(), "every preset is the one Rust widget");
+        }
+        // And the water lens compiled a draw of its own: the press inputs, the
+        // colour split and the base's Reduce Transparency switch are all in it.
+        let lens = built[0].borrow::<GaussRoundedView>().unwrap();
+        for id in [live_id!(ripple_age), live_id!(press_flatten), live_id!(diffraction_strength), live_id!(opaque_surface)] {
+            assert!(
+                lens.view.draw_bg.draw_vars.uniform_range(&cx, id).is_some(),
+                "the water lens has no {id} input"
+            );
+        }
     }
 }

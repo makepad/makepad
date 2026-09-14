@@ -1,6 +1,9 @@
 use crate::{
     animator::Animate,
-    gauss_view::{arm_gauss_capture, request_window_gauss, GaussBlurSnapshot, GAUSS_VIEW_LEVELS},
+    gauss_view::{
+        arm_gauss_capture, request_window_gauss, GaussBlurSnapshot, LensPress, LensPressCurve,
+        LensPressStep, PressResponse, GAUSS_VIEW_LEVELS,
+    },
     makepad_derive_widget::*,
     makepad_draw::*,
     makepad_script::ScriptFnRef,
@@ -231,154 +234,108 @@ script_mod! {
         label_walk: Walk{width: Fit, height: Fit}
         // No icon unless one is given; then it sizes to its own drawing.
         icon_walk: Walk{width: Fit, height: Fit}
+        /** how long the lens takes to lie flat under a press, in seconds 0..2 step 0.01 */
+        press_secs: 0.78
+        /** how long a press's ring takes to fade, in seconds 0..3 step 0.01 */
+        ripple_secs: 1.05
+        /** how strong the release's ring is, as a share of the press's 0..1 step 0.01 */
+        release_ripple: 0.62
+        /** the lens goes flat on a press and back on the release at once, with no ring */
+        reduced_motion: false
+        /** the label's and the icon's ink under the pointer, as a share of their alpha 0..1 step 0.01 */
+        hover_ink: 0.65
+        /** the label's and the icon's ink while held, as a share of their alpha 0..1 step 0.01 */
+        down_ink: 0.25
+        /** the label's and the icon's ink while the button is disabled, as a share of their alpha 0..1 step 0.01 */
+        disabled_ink: 0.4
 
+        // The label dims under the pointer and further under the finger, as
+        // the lens button's label does, and the glass does not light up.
+        // `ink` is that share of the colour's alpha, pushed from Rust, so a
+        // colour set here keeps its hue in every state.
         draw_text +: {
             color: #xffffffff
+            ink: uniform(1.0)
             text_style: theme.font_bold{font_size: 13}
+            get_color: fn() {
+                return vec4(self.color.rgb, self.color.a * self.ink)
+            }
+        }
+
+        // The icon dims with the label: on a button with no label it is the
+        // only thing a hover changes.
+        draw_icon +: {
+            ink: uniform(1.0)
+            get_color: fn() {
+                let base = self.eval_gradient()
+                if self.color.x >= 0.0 {
+                    return vec4(self.color.rgb * self.color.a * base.a, self.color.a * base.a) * (self.opacity * self.ink)
+                }
+                return base * (self.opacity * self.ink)
+            }
         }
 
         // Transparent base: nothing is captured here, so the glass overlay refracts the
         // real background (clean glass) instead of muddying a semi-transparent fill.
+        // It is the hit area; the glass may paint past it (the shadow, the rim's bend).
         draw_bg +: {
-            hover: uniform(0.0)
-            down: uniform(0.0)
-            press: uniform(0.0)
             pixel: fn() {
                 return vec4(0.0, 0.0, 0.0, 0.0)
             }
         }
 
-        draw_glass +: {
-            /** The face it shows before there is a scene to refract. The
-             * surfaces it stands next to fall back to the same colour, and
-             * they used to disagree: pale white here, dark slate there, side
-             * by side on the same unready frame. Declared per shader because
-             * these three are hand-written quads rather than derivatives of
-             * the rounded surface, so there is no shared place to put it. */
-            fallback_color: uniform(mix(theme.color_bg_app, theme.color_text, 0.30))
-            scene_texture: texture_2d(float)
-            mip0_texture: texture_2d(float)
-            mip1_texture: texture_2d(float)
-            mip2_texture: texture_2d(float)
-            mip3_texture: texture_2d(float)
-            mip4_texture: texture_2d(float)
-            mip5_texture: texture_2d(float)
-            has_gauss: uniform(0.0)
-            source_size: uniform(vec2(1.0, 1.0))
-            source_y_flip: uniform(0.0)
+        // The glass is the water lens's own draw (gauss_view.rs,
+        // RippleLensRoundedView), not a copy of it, so the button and the
+        // surface cannot drift apart. The names are the surface's, so a
+        // lens tuned on one pastes onto the other. The quad grows past the
+        // button by the shadow, as the surface's does.
+        //
+        // The numbers are the 300x92 lens button's scaled to this 44 pt
+        // pill, 44/92 for everything measured in points: an 18 pt bend over
+        // a 6.2 pt band, a 2.5 pt colour split, a shadow 16 pt wide and 6.7
+        // pt down. The press is the button's own (`press_secs` and
+        // friends); nothing shrinks, the flatten and the ring are the cue.
+        // The shadow keeps to the room its row leaves it (`shadow_room`),
+        // so a row only as tall as the button shows none rather than a slab.
+        draw_glass: mod.widgets.RippleLensRoundedView.draw_bg{
+            // 1 under the pointer. Nothing here reads it, since the lens
+            // button's glass does not light up on a hover; a `glow` of your
+            // own can.
             hover: uniform(0.0)
-            down: uniform(0.0)
-            press: uniform(0.0)
+            /** a colour laid over the lens, alpha for how much: the prominent button's fill */
             tint: uniform(vec4(0.0, 0.0, 0.0, 0.0))
-            // Press response (ported from the examples/splash focus lens). `press_flatten` is the
-            // smoothstep flatten amount (>0 while pressing, <0 = un-flatten/restore on release).
-            // ripple_age / ripple_strength drive a single flattening WAVE that sweeps the lens, and
-            // the refraction is RGB-split for chromatic diffraction. `press` is a separate smooth
-            // shrink amount (the primary press indicator).
-            press_flatten: uniform(0.0)
-            ripple_age: uniform(1000.0)
-            ripple_strength: uniform(0.0)
-            // The glass material, control profile (gauss_view.rs, design
-            // §3): a short edge lens, a lit rim, a clear fill. Kept in step
-            // with `GaussRoundedView`; the numbers are the toolbar row.
-            lens_band: uniform(6.0)
-            lens_strength: uniform(3.0)
-            interior_level: uniform(1.0)
-            edge_level: uniform(0.25)
-            rim_alpha: uniform(0.40)
-            rim_width: uniform(1.0)
-            inner_shadow_alpha: uniform(0.03)
-            seal_alpha: uniform(0.06)
-            // Lens corner radius (visual radius is 2x this, Sdf2d convention).
-            corner_radius: uniform(11.0)
+            blur_level: 0.25
+            lensing_effect: 1.0
+            lensing_strength: 18.0
+            lensing_width: 6.2
+            // The visible radius is twice this, which rounds a 44 pt button
+            // into a pill.
+            corner_radius: 11.0
+            tint_color: #b8b8b8
+            tint_alpha: 0.025
+            border_alpha: 0.82
+            specular_strength: 0.24
+            noise_strength: 0.004
+            shadow_color: #0009
+            shadow_radius: 16.0
+            shadow_offset: vec2(0.0, 6.7)
+            diffraction_strength: 2.5
 
-            sample_level: fn(level: float, uv: vec2) -> vec4 {
-                let source_uv = vec2(uv.x, mix(uv.y, 1.0 - uv.y, self.source_y_flip))
-                let safe_uv = clamp(source_uv, vec2(0.0, 0.0), vec2(1.0, 1.0))
-                if level < 0.5 {
-                    return self.scene_texture.sample_as_bgra(safe_uv)
-                }
-                if level < 1.5 {
-                    return self.mip0_texture.sample_as_bgra(safe_uv)
-                }
-                if level < 2.5 {
-                    return self.mip1_texture.sample_as_bgra(safe_uv)
-                }
-                if level < 3.5 {
-                    return self.mip2_texture.sample_as_bgra(safe_uv)
-                }
-                return self.mip3_texture.sample_as_bgra(safe_uv)
+            // The ring's push, scaled with the button from the 22 points a
+            // 92 pt lens takes.
+            ripple_reach: fn() -> float {
+                return 22.0 * min(self.rect_size.x, self.rect_size.y) / 92.0
             }
 
-            sample_blur: fn(level: float, uv: vec2) -> vec4 {
-                let safe = clamp(level, 0.0, 4.0)
-                let base = floor(safe)
-                let t = safe - base
-                let blend = t * t * (3.0 - 2.0 * t)
-                return self.sample_level(base, uv).mix(self.sample_level(min(base + 1.0, 4.0), uv), blend)
-            }
-
-            pixel: fn() {
-                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                let w = self.rect_size.x
-                let h = self.rect_size.y
-                // NOTE: Sdf2d.box renders a VISUAL corner radius of 2*r.
-                let r = self.corner_radius
-                // Smooth shrink is the primary press indicator (eased in Rust, no jiggle).
-                let shrink = clamp(self.press, 0.0, 1.0)
-                let ins = 2.0 + shrink * 2.6
-                sdf.box(ins, ins, w - ins * 2.0, h - ins * 2.0, r)
-
-                let shape = sdf.shape
-                let depth = max(-shape, 0.0)
-                let screen_pos = self.rect_pos + self.pos * self.rect_size
-                let src = max(self.source_size, vec2(1.0, 1.0))
-                // Rounded box has a flat interior (gradient 0 -> normalize = NaN); branch explicitly.
-                let gradient = vec2(dFdx(shape), dFdy(shape))
-                let glen = length(gradient)
-                var normal = vec2(0.0, 1.0)
-                if glen > 0.0001 {
-                    normal = gradient / glen
-                }
-
-                // The lens band, capped at 22% of the short side; a press
-                // flattens the lens to 85% and lifts the rim.
-                let band = min(max(self.lens_band, 1.0), max(min(w, h) * 0.22, 1.0))
-                let edge = 1.0 - smoothstep(0.0, band, depth)
-                let press = clamp(self.press_flatten, 0.0, 1.0)
-                let strength = self.lens_strength * (band / max(self.lens_band, 1.0)) * (1.0 - 0.15 * press)
-                // The press ripple: one soft ring, at most 0.8 pt.
-                let age = max(self.ripple_age, 0.0)
-                let life = 1.0 - smoothstep(0.0, 0.32, age)
-                let lens_pos = self.pos * 2.0 - 1.0
-                let dist = length(lens_pos)
-                let delta = dist - smoothstep(0.0, 0.32, age) * 1.2
-                let wave = exp(-(delta * delta) / 0.02) * life * clamp(self.ripple_strength, 0.0, 1.0)
-                let ripple = (lens_pos / max(dist, 0.001)) * (wave * 0.8)
-
-                let q = clamp((screen_pos + normal * (edge * strength) + ripple) / src, vec2(0.0, 0.0), vec2(1.0, 1.0))
-                let level = mix(self.interior_level, self.edge_level, edge)
-                let sampled = self.sample_blur(level, q).rgb
-                let fallback = self.fallback_color.rgb
-                let transmitted = fallback.mix(sampled, self.has_gauss)
-                let material = transmitted.mix(self.tint.rgb, self.tint.a + self.hover * 0.03)
-
-                let inner = (1.0 - smoothstep(0.0, 2.5, depth)) * (0.25 + 0.75 * max(normal.y, 0.0)) * self.inner_shadow_alpha
-                let light = normalize(vec2(-0.18, -1.0))
-                let facing = pow(max(dot(normal, light), 0.0), 0.8)
-                let rim = (1.0 - smoothstep(0.0, max(self.rim_width, 0.01), depth)) * facing * (self.rim_alpha + 0.06 * press + self.hover * 0.04)
-                let shaded = (material * (1.0 - inner)).mix(vec3(1.0, 1.0, 1.0), clamp(rim, 0.0, 1.0))
-                // Opaque glass: the "transparent" look is the transmitted scene itself.
-                sdf.fill_keep(vec4(shaded, 1.0))
-                sdf.stroke(vec4(1.0, 1.0, 1.0, self.seal_alpha), 0.5)
-                return sdf.result
+            face: fn(material: vec3) -> vec3 {
+                return material.mix(self.tint.rgb, self.tint.a)
             }
         }
     }
 
     mod.widgets.glass.GlassButtonProminent = mod.widgets.glass.GlassButton{
         draw_glass +: {
-            tint: uniform(vec4(0.16, 0.46, 0.92, 0.34))
+            tint: vec4(0.16, 0.46, 0.92, 0.34)
         }
     }
 
@@ -411,7 +368,7 @@ script_mod! {
              * surfaces it stands next to fall back to the same colour, and
              * they used to disagree: pale white here, dark slate there, side
              * by side on the same unready frame. Declared per shader because
-             * these three are hand-written quads rather than derivatives of
+             * these two are hand-written quads rather than derivatives of
              * the rounded surface, so there is no shared place to put it. */
             fallback_color: uniform(mix(theme.color_bg_app, theme.color_text, 0.30))
             scene_texture: texture_2d(float)
@@ -512,7 +469,7 @@ script_mod! {
              * surfaces it stands next to fall back to the same colour, and
              * they used to disagree: pale white here, dark slate there, side
              * by side on the same unready frame. Declared per shader because
-             * these three are hand-written quads rather than derivatives of
+             * these two are hand-written quads rather than derivatives of
              * the rounded surface, so there is no shared place to put it. */
             fallback_color: uniform(mix(theme.color_bg_app, theme.color_text, 0.30))
             scene_texture: texture_2d(float)
@@ -1592,6 +1549,21 @@ pub enum GlassButtonAction {
 /// A clickable glass button that draws its solid base in the background pass and a
 /// self-managed lensing glass overlay on top (same approach as GlassRadio), so it
 /// refracts the scene and composes anywhere in normal flow.
+///
+/// The glass is the water lens, the draw of `RippleLensRoundedView`, and the
+/// button presses it itself: the lens lies flat under the finger behind a ring,
+/// and on the release rebounds behind a softer one. `Clicked` still goes out on
+/// the release, not after the rebound. The clock runs only while the lens is
+/// flattening or rebounding; `reduced_motion` drops the ring and the clock.
+///
+/// The label and the icon dim under the pointer (`hover_ink`) and further while
+/// held (`down_ink`), as the lens button's label does; the glass does not light
+/// up. A disabled button shows them at `disabled_ink` and takes no press.
+///
+/// The glass paints past the button's rect by its shadow, as a surface does. A
+/// container that clips does not cut the shadow into a slab: it thins out with
+/// the room left under the button, so a row only as tall as the button shows
+/// none of it and a row with `clip_x`/`clip_y` off shows all of it.
 #[derive(Script, Widget)]
 pub struct GlassButton {
     #[uid]
@@ -1636,28 +1608,39 @@ pub struct GlassButton {
     #[rust]
     action_data: WidgetActionData,
 
+    /// Seconds the lens takes to lie flat under a press.
+    #[live(0.78)]
+    pub press_secs: f64,
+    /// Seconds a press's ring takes to fade.
+    #[live(1.05)]
+    pub ripple_secs: f64,
+    /// The release ring's strength, as a share of the press ring's.
+    #[live(0.62)]
+    pub release_ripple: f32,
+    /// The lens goes flat and back at once, with no ring and no clock.
+    #[live]
+    pub reduced_motion: bool,
+    /// The label's and the icon's ink under the pointer, as a share of their alpha.
+    #[live(0.65)]
+    pub hover_ink: f32,
+    /// The label's and the icon's ink while held, as a share of their alpha.
+    #[live(0.25)]
+    pub down_ink: f32,
+    /// The label's and the icon's ink while disabled, as a share of their alpha.
+    #[live(0.4)]
+    pub disabled_ink: f32,
+    #[rust]
+    disabled: bool,
+
     #[rust]
     draw_list: Option<DrawList2d>,
     #[rust]
     hover: f32,
     #[rust]
-    down: f32,
+    press: LensPress,
+    /// What the glass was last told about the press.
     #[rust]
-    press: f32,
-    #[rust]
-    pressing: bool,
-    #[rust]
-    press_started_at: f64,
-    #[rust]
-    release_started_at: f64,
-    #[rust]
-    release_flatten: f32,
-    #[rust]
-    press_flatten: f32,
-    #[rust]
-    ripple_age: f32,
-    #[rust]
-    ripple_strength: f32,
+    response: PressResponse,
     #[rust]
     next_frame: NextFrame,
 }
@@ -1677,6 +1660,9 @@ impl ScriptHook for GlassButton {
         if self.draw_list.is_none() {
             self.draw_list = Some(DrawList2d::script_new(vm));
         }
+        // A rebuild drops whatever press was under way, so a lens left flat by it
+        // never shows; a frame still on its way then asks for nothing.
+        self.response = self.press.rest();
         vm.with_cx_mut(|cx| {
             // Built (or rebuilt by a live reload) and not drawn yet: ask for the scene to
             // be captured on the frame this first paints in, rather than the one after it.
@@ -1725,17 +1711,98 @@ impl GlassButton {
     }
 
     fn push_state(&mut self, cx: &mut Cx) {
-        for draw in [&mut self.draw_bg, &mut self.draw_glass] {
-            draw.draw_vars.set_uniform(cx, live_id!(hover), &[self.hover]);
-            draw.draw_vars.set_uniform(cx, live_id!(down), &[self.down]);
-            draw.draw_vars.set_uniform(cx, live_id!(press), &[self.press]);
-        }
-        // The press response lives on the lens only. `press` (set above) is the smooth shrink; the
-        // flattening wave is driven by press_flatten + ripple_age + ripple_strength.
         let glass = &mut self.draw_glass.draw_vars;
-        glass.set_uniform(cx, live_id!(press_flatten), &[self.press_flatten]);
-        glass.set_uniform(cx, live_id!(ripple_age), &[self.ripple_age]);
-        glass.set_uniform(cx, live_id!(ripple_strength), &[self.ripple_strength]);
+        glass.set_uniform(cx, live_id!(hover), &[self.hover]);
+        glass.set_uniform(cx, live_id!(press_flatten), &[self.response.flatten.clamp(-1.0, 1.0)]);
+        glass.set_uniform(cx, live_id!(ripple_age), &[self.response.ripple_age]);
+        glass.set_uniform(cx, live_id!(ripple_strength), &[self.response.ripple_strength.clamp(0.0, 1.0)]);
+        let ink = self.ink();
+        self.draw_text.draw_vars.set_uniform(cx, live_id!(ink), &[ink]);
+        self.draw_icon.draw_vars.set_uniform(cx, live_id!(ink), &[ink]);
+    }
+
+    /// How much of their alpha the label and the icon show right now.
+    fn ink(&self) -> f32 {
+        if self.disabled {
+            self.disabled_ink
+        } else if self.press.is_held() {
+            self.down_ink
+        } else if self.hover > 0.0 {
+            self.hover_ink
+        } else {
+            1.0
+        }
+    }
+
+    fn press_curve(&self) -> LensPressCurve {
+        LensPressCurve {
+            press_secs: self.press_secs,
+            ripple_secs: self.ripple_secs,
+            release_ripple: self.release_ripple,
+        }
+    }
+
+    /// One step of the press: keep what the glass is to be told, ask for the
+    /// next frame if the lens is still moving, and draw.
+    fn step_press(&mut self, cx: &mut Cx, step: LensPressStep) {
+        if let Some(response) = step.response {
+            self.response = response;
+        }
+        if step.tick {
+            self.next_frame = cx.new_next_frame();
+        }
+        self.redraw(cx);
+    }
+
+    /// The finger went down on the button.
+    fn finger_down(&mut self, cx: &mut Cx) {
+        if self.disabled {
+            return;
+        }
+        let step = self.press.down(self.reduced_motion);
+        self.step_press(cx, step);
+    }
+
+    /// The finger came up, `over` the button or not. Over it, that is a
+    /// click, and the click goes out now; the rebound plays after it.
+    fn finger_up(&mut self, cx: &mut Cx, over: bool) {
+        if self.disabled {
+            return;
+        }
+        let step = self.press.up(self.reduced_motion);
+        self.step_press(cx, step);
+        if over {
+            let uid = self.widget_uid();
+            cx.widget_action_with_data(&self.action_data, uid, GlassButtonAction::Clicked);
+            // Fire the splash `on_click: || ...` handler so lensing glass buttons are
+            // interactive in runsplash blocks (not just visual flourish).
+            cx.widget_to_script_call(uid, NIL, self.source.clone(), self.on_click.clone(), &[]);
+        }
+    }
+
+    /// A frame the button asked for came, at `time` seconds.
+    fn frame(&mut self, cx: &mut Cx, time: f64) {
+        let curve = self.press_curve();
+        if let Some(step) = self.press.tick(time, &curve) {
+            self.step_press(cx, step);
+        }
+    }
+
+    /// Put the lens at rest if its press can no longer finish, rather than
+    /// show it frozen where it stopped: a lens still moving whose next frame
+    /// is not on its way (`frame_pending`), or a lens held down by a finger
+    /// that no longer holds the button (`finger_held`). True if it did.
+    ///
+    /// Both happen when events stop reaching the button while it is pressed.
+    /// A modal or a popup that closes on this button's click stops passing
+    /// events on, the frame the rebound asked for among them; one that
+    /// closes under a held finger never passes on the release.
+    fn settle_lost_press(&mut self, frame_pending: bool, finger_held: bool) -> bool {
+        let lost = (self.press.is_animating() && !frame_pending) || (self.press.is_held() && !finger_held);
+        if lost {
+            self.response = self.press.rest();
+        }
+        lost
     }
 
     pub fn clicked(&self, actions: &Actions) -> bool {
@@ -1750,66 +1817,22 @@ impl GlassButton {
 impl Widget for GlassButton {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         if !self.visible {
+            // Hidden mid-press, it will not hear the release: put the lens at
+            // rest now, so it is not shown flat when it comes back.
+            if !self.press.is_at_rest() {
+                self.response = self.press.rest();
+            }
             return;
         }
-        let uid = self.widget_uid();
-
-        // Drive the press response (ported from examples/splash). `press` smoothly eases toward
-        // `down` for the shrink (critically damped -> no jiggle). A flattening WAVE sweeps the lens
-        // on press (press_flatten 0 -> 1, smoothstep over ~0.95s) and inverts on release; the wave
-        // age/strength fade out over ~1.35s.
         if let Some(time) = self.next_frame.is_event(event).map(|ne| ne.time) {
-            let d = self.down - self.press;
-            let mut keep = false;
-            if d.abs() > 0.002 {
-                self.press += d * 0.28;
-                keep = true;
-            } else {
-                self.press = self.down;
-            }
-
-            if self.pressing {
-                if self.press_started_at <= 0.0 {
-                    self.press_started_at = time;
-                }
-                let age = (time - self.press_started_at).max(0.0);
-                let t = (age / 0.95).min(1.0) as f32;
-                let flatten = t * t * (3.0 - 2.0 * t);
-                self.press_flatten = flatten;
-                self.ripple_age = age as f32;
-                self.ripple_strength = (1.0 - age / 1.30).max(0.0) as f32 * (1.0 - flatten * 0.10);
-                if age < 1.35 {
-                    keep = true;
-                }
-            } else if self.press_started_at > 0.0 {
-                if self.release_started_at <= 0.0 {
-                    self.release_started_at = time;
-                }
-                let age = (time - self.release_started_at).max(0.0);
-                // Hold the captured flatten as a negative value -> the wave un-flattens the lens.
-                self.press_flatten = -self.release_flatten.clamp(0.0, 1.0);
-                self.ripple_age = age as f32;
-                self.ripple_strength = (1.0 - age / 1.30).max(0.0) as f32 * 0.62;
-                if age < 1.35 {
-                    keep = true;
-                } else {
-                    self.press_started_at = 0.0;
-                    self.release_started_at = 0.0;
-                    self.press_flatten = 0.0;
-                    self.ripple_strength = 0.0;
-                }
-            }
-
-            self.push_state(cx);
-            if keep {
-                self.next_frame = cx.new_next_frame();
-            }
-            self.redraw(cx);
+            self.frame(cx, time);
         }
 
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
-                cx.set_cursor(MouseCursor::Hand);
+                if !self.disabled {
+                    cx.set_cursor(MouseCursor::Hand);
+                }
                 self.hover = 1.0;
                 self.redraw(cx);
             }
@@ -1819,39 +1842,26 @@ impl Widget for GlassButton {
                 self.redraw(cx);
             }
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
-                self.down = 1.0;
-                // Start the press flattening wave.
-                self.pressing = true;
-                self.press_started_at = 0.0;
-                self.release_started_at = 0.0;
-                self.ripple_strength = 0.0;
-                self.next_frame = cx.new_next_frame();
-                self.set_key_focus(cx);
-                self.redraw(cx);
-            }
-            Hit::FingerUp(fe) => {
-                self.down = 0.0;
-                // Release: capture the current flatten and run the inverse (un-flatten) wave.
-                self.pressing = false;
-                self.release_flatten = self.press_flatten.max(0.0);
-                self.release_started_at = 0.0;
-                self.next_frame = cx.new_next_frame();
-                if fe.is_over {
-                    cx.widget_action_with_data(&self.action_data, uid, GlassButtonAction::Clicked);
-                    // Fire the splash `on_click: || ...` handler so lensing glass buttons are
-                    // interactive in runsplash blocks (not just visual flourish).
-                    cx.widget_to_script_call(uid, NIL, self.source.clone(), self.on_click.clone(), &[]);
+                if !self.disabled {
+                    self.set_key_focus(cx);
                 }
-                self.redraw(cx);
+                self.finger_down(cx);
             }
+            Hit::FingerUp(fe) => self.finger_up(cx, fe.is_over),
             _ => {}
         }
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         if !self.visible {
+            if !self.press.is_at_rest() {
+                self.response = self.press.rest();
+            }
             return DrawStep::done();
         }
+        let frame_pending = cx.next_frame_is_pending(self.next_frame);
+        let finger_held = cx.fingers.is_area_captured(self.draw_bg.area());
+        self.settle_lost_press(frame_pending, finger_held);
 
         // Draw the WHOLE button into a self-managed overlay so nothing (especially the label)
         // is captured by the gauss scene - a captured label refracts into a dark bar. The
@@ -1942,6 +1952,23 @@ impl Widget for GlassButton {
     fn set_text(&mut self, cx: &mut Cx, v: &str) {
         self.text.set(v);
         self.redraw(cx);
+    }
+
+    /// A disabled button takes no press and sends no click. A press under way
+    /// when it is disabled is dropped, not finished.
+    fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
+        if self.disabled == disabled {
+            return;
+        }
+        self.disabled = disabled;
+        if disabled {
+            self.response = self.press.rest();
+        }
+        self.redraw(cx);
+    }
+
+    fn disabled(&self, _cx: &Cx) -> bool {
+        self.disabled
     }
 
     // Scripts can read and change the button label (e.g. a play/pause toggle),
@@ -3629,10 +3656,156 @@ mod tests {
         assert_eq!(surface.grab_margin, 8.0);
         assert_eq!(surface.grip_size, 24.0);
         assert_eq!(surface.size, dvec2(320.0, 220.0));
-        // And the three hand-written quads reached their own presets.
+        // And the three controls reached their own presets.
         assert_eq!(button.walk.height.to_fixed(), Some(44.0));
+        // The press is the lens button's, and it moves unless told not to.
+        assert_eq!(
+            (button.press_secs, button.ripple_secs, button.release_ripple),
+            (0.78, 1.05, 0.62)
+        );
+        assert!(!button.reduced_motion);
+        // And its glass is the water lens's draw, not a quad of its own: the
+        // button's shader has the lens's inputs as well as its own.
+        for id in [live_id!(diffraction_strength), live_id!(ripple_age), live_id!(tint), live_id!(hover)] {
+            assert!(
+                button.draw_glass.draw_vars.uniform_range(&cx, id).is_some(),
+                "the button's glass has no {id} input"
+            );
+        }
+        // The label and the icon take the ink the button pushes.
+        assert!(button.draw_text.draw_vars.uniform_range(&cx, live_id!(ink)).is_some(), "the label has no ink input");
+        assert_eq!((button.hover_ink, button.down_ink, button.disabled_ink), (0.65, 0.25, 0.4));
         assert_eq!(slider.walk.height.to_fixed(), Some(32.0));
         assert_eq!(segmented.walk.height.to_fixed(), Some(38.0));
+    }
+
+    fn glass_button() -> (Cx, GlassButton) {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let button = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            GlassButton::script_new_with_default(vm)
+        });
+        (cx, button)
+    }
+
+    /// Frames at 60 Hz from `start` until the lens is at rest.
+    fn play_out(button: &mut GlassButton, cx: &mut Cx, start: f64) {
+        let mut time = start;
+        while !button.press.is_at_rest() {
+            button.frame(cx, time);
+            time += 1.0 / 60.0;
+            assert!(time < start + 5.0, "the rebound never settled");
+        }
+    }
+
+    /// The press is what the finger does to the lens; the click is still the
+    /// release. It goes out on the up, while the rebound has all of its
+    /// second still to play, and the rebound adds no second click.
+    #[test]
+    fn a_click_goes_out_on_the_release_not_after_the_rebound() {
+        let (mut cx, mut button) = glass_button();
+        let actions = cx.capture_actions(|cx| button.finger_down(cx));
+        assert!(!button.clicked(&actions), "a press is not a click");
+        assert!(cx.next_frame_is_pending(button.next_frame), "the press asked for no frame");
+        assert_eq!(button.ink(), button.down_ink, "the label does not dim under the finger");
+        let actions = cx.capture_actions(|cx| {
+            button.frame(cx, 1.0);
+            button.frame(cx, 1.2);
+        });
+        assert!(!button.clicked(&actions));
+        assert!(button.response.flatten > 0.0, "the lens is not flattening");
+
+        let actions = cx.capture_actions(|cx| button.finger_up(cx, true));
+        assert!(button.clicked(&actions), "the click did not go out on the release");
+        assert!(button.press.is_animating(), "and the rebound is still to play");
+        assert_eq!(button.ink(), 1.0);
+
+        let actions = cx.capture_actions(|cx| play_out(&mut button, cx, 1.25));
+        assert!(!button.clicked(&actions), "the rebound sent a second click");
+        assert_eq!(button.response, PressResponse::REST);
+
+        // Let go away from the button, the lens rebounds and nothing is clicked.
+        button.finger_down(&mut cx);
+        let actions = cx.capture_actions(|cx| button.finger_up(cx, false));
+        assert!(!button.clicked(&actions));
+        assert!(button.press.is_animating());
+    }
+
+    /// A disabled button takes no press and sends no click, and one disabled
+    /// while it is held lets the press go rather than finish it.
+    #[test]
+    fn a_disabled_button_takes_no_press_and_sends_no_click() {
+        let (mut cx, mut button) = glass_button();
+        button.set_disabled(&mut cx, true);
+        assert!(button.disabled(&cx));
+        let actions = cx.capture_actions(|cx| {
+            button.finger_down(cx);
+            button.finger_up(cx, true);
+        });
+        assert!(!button.clicked(&actions), "a disabled button clicked");
+        assert!(button.press.is_at_rest(), "a disabled button's lens moved");
+        assert_eq!(button.ink(), button.disabled_ink);
+
+        button.set_disabled(&mut cx, false);
+        button.finger_down(&mut cx);
+        button.frame(&mut cx, 1.0);
+        button.frame(&mut cx, 1.3);
+        assert!(button.response.flatten > 0.0);
+        button.set_disabled(&mut cx, true);
+        assert!(button.press.is_at_rest());
+        assert_eq!(button.response, PressResponse::REST);
+        let actions = cx.capture_actions(|cx| button.finger_up(cx, true));
+        assert!(!button.clicked(&actions), "the release of a press it dropped clicked");
+    }
+
+    /// A container that stops passing events on leaves a press that cannot
+    /// finish: a sheet closed by this button's click never passes on the
+    /// rebound's frame, and one closed under a held finger never passes on
+    /// the release. The next draw puts such a lens at rest instead of showing
+    /// it frozen, and leaves a live press alone.
+    #[test]
+    fn a_press_whose_events_stopped_coming_is_put_at_rest() {
+        let (mut cx, mut button) = glass_button();
+        button.finger_down(&mut cx);
+        button.frame(&mut cx, 1.0);
+        button.frame(&mut cx, 1.4);
+        assert!(!button.settle_lost_press(true, true), "a live press is not lost");
+        assert!(button.settle_lost_press(true, false), "a press whose finger is gone is lost");
+        assert_eq!(button.response, PressResponse::REST);
+
+        button.finger_down(&mut cx);
+        button.frame(&mut cx, 2.0);
+        button.frame(&mut cx, 2.4);
+        button.finger_up(&mut cx, true);
+        button.frame(&mut cx, 2.45);
+        let frozen = button.response;
+        assert!(frozen.flatten < 0.0 && frozen.ripple_strength > 0.0, "not mid rebound: {frozen:?}");
+        assert!(!button.settle_lost_press(true, false), "a rebound whose frame is on its way is not lost");
+        assert_eq!(button.response, frozen);
+        assert!(button.settle_lost_press(false, false), "a rebound whose frame was swallowed is lost");
+        assert_eq!(button.response, PressResponse::REST);
+        assert!(button.press.is_at_rest());
+
+        // Held flat and still, the lens asks for no frames, so only the
+        // finger says whether the press is still there.
+        button.finger_down(&mut cx);
+        play_out_held(&mut button, &mut cx, 3.0);
+        assert!(!button.settle_lost_press(false, true), "a still, held lens is not lost for want of a frame");
+        assert_eq!(button.response, PressResponse::HELD);
+        assert!(button.settle_lost_press(false, false));
+        assert_eq!(button.response, PressResponse::REST);
+        assert!(!button.settle_lost_press(false, false), "a lens at rest has nothing to lose");
+    }
+
+    /// Frames at 60 Hz from `start` until a held lens stops asking for them.
+    fn play_out_held(button: &mut GlassButton, cx: &mut Cx, start: f64) {
+        let mut time = start;
+        while button.press.is_animating() {
+            button.frame(cx, time);
+            time += 1.0 / 60.0;
+            assert!(time < start + 5.0, "the press never settled");
+        }
+        assert!(button.press.is_held());
     }
 
     /// A press someone answered before this widget was reached is not this
