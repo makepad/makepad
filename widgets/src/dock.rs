@@ -363,7 +363,7 @@ impl WidgetNode for Dock {
         }
     }
 
-    fn visible_children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
+    fn cancel_children_impl(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
         fn walk(dock: &Dock, id: LiveId, remaining: &mut usize, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
             // Malformed restored layouts can contain cycles.
             if *remaining == 0 {
@@ -398,6 +398,7 @@ impl WidgetNode for Dock {
             }
         }
         walk(self, id!(root), &mut self.dock_items.len(), visit);
+        true
     }
 
     fn redraw(&mut self, cx: &mut Cx) {
@@ -2290,7 +2291,7 @@ mod tests {
         let mut dock = root.borrow_mut::<Dock>().unwrap();
         dock.dock_items.insert(id!(root), DockItem::splitter(SplitterAxis::Horizontal, SplitterAlign::Weighted(0.5), id!(root), id!(root)));
         let mut count = 0;
-        dock.visible_children(&mut |_, _| count += 1);
+        dock.visit_cancel(&mut |_, _| count += 1);
         assert_eq!(count, 0, "cyclic restored layouts terminate with no eligible content");
     }
 

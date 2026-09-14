@@ -101,11 +101,15 @@ pub struct FoldHeader {
 }
 
 impl Widget for FoldHeader {
-    fn cancel_children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
+    fn visit_cancel(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
+        if !self.visible() {
+            return false;
+        }
         visit(id!(header), self.header.clone());
         if self.body_is_active() {
             visit(id!(body), self.body.clone());
         }
+        true
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
@@ -311,7 +315,7 @@ mod cancel_tests {
             WidgetRef::script_from_value(vm, value)
         });
         let mut a_uid = WidgetUid(0);
-        split.visible_children(&mut |name, widget| {
+        split.visit_cancel(&mut |name, widget| {
             if name == id!(a) { a_uid = widget.widget_uid(); }
         });
         assert_ne!(a_uid, WidgetUid(0));

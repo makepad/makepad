@@ -615,9 +615,9 @@ impl WidgetNode for StackNavigation {
         }
     }
 
-    fn visible_children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
+    fn cancel_children_impl(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
         if !self.view.visible {
-            return;
+            return false;
         }
         let active = match self.transition {
             Some(StackNavigationTransition::Push { incoming, .. }) => incoming,
@@ -629,6 +629,7 @@ impl WidgetNode for StackNavigation {
         } else if let Some((_, widget)) = self.view.children.iter().find(|(id, _)| *id == active) {
             visit(active, widget.clone());
         }
+        true
     }
 
     fn redraw(&mut self, cx: &mut Cx) {
@@ -1321,6 +1322,10 @@ mod cancel_tests {
         root.borrow_mut::<StackNavigation>().unwrap().current_view = Some(live_id!(first));
         assert!(cx.widget_is_active(first.widget_uid()));
         assert!(!cx.widget_is_active(second.widget_uid()));
+        let root_uid = root.widget_uid();
+        root.borrow_mut::<StackNavigation>().unwrap().view.visible = false;
+        assert!(!cx.widget_is_active(root_uid));
+        assert_eq!(root.resolve_cancel_scope(&|uid| (uid == root_uid.0).then_some(1)), None);
     }
 
     #[test]

@@ -8754,11 +8754,10 @@ impl Tweaker {
 }
 
 impl Widget for Tweaker {
-    fn cancel_visible(&self) -> bool {
-        tweak_is_on()
-    }
-
-    fn cancel_children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
+    fn visit_cancel(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
+        if !tweak_is_on() {
+            return false;
+        }
         if let Some(sidebar) = &self.sidebar {
             visit(id!(sidebar), sidebar.clone());
         }
@@ -8767,6 +8766,7 @@ impl Widget for Tweaker {
                 visit(id!(note), note.clone());
             }
         }
+        true
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {

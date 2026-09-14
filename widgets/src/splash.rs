@@ -353,8 +353,8 @@ impl WidgetNode for Splash {
         self.view.children(visit);
     }
 
-    fn visible_children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
-        self.view.visible_children(visit);
+    fn cancel_children_impl(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
+        self.view.visit_cancel(visit)
     }
 }
 

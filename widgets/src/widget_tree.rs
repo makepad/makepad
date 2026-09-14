@@ -2787,7 +2787,6 @@ impl WidgetTree {
 #[derive(Default)]
 pub struct WidgetTreeState {
     pub tree: WidgetTree,
-    ui_root: WidgetWeakRef,
 }
 
 impl WidgetTreeState {
@@ -2809,6 +2808,8 @@ pub trait CxWidgetExt {
     /// Inspect current branches eligible for interaction, including window focus.
     /// Call outside widget dispatch/draw, while the UI root is unborrowed;
     /// this does not use cached geometry or tree indices.
+    /// This searches active branches, so its worst-case cost is linear in the active
+    /// hierarchy. Use for occasional checks, not once per widget on every frame.
     fn widget_is_active(&self, uid: WidgetUid) -> bool;
     fn widget_tree_mark_dirty(&mut self, uid: WidgetUid);
     fn widget_tree_insert_child(&mut self, parent_uid: WidgetUid, name: LiveId, widget: WidgetRef);
@@ -2846,22 +2847,17 @@ pub struct FlatTreeRow {
     pub has_children: bool,
 }
 
-fn live_ui_root(cx: &Cx) -> Option<WidgetRef> {
-    if cx.widget_tree_ptr.is_null() {
-        return None;
-    }
-    let state = unsafe { &*(cx.widget_tree_ptr as *const WidgetTreeState) };
-    state.ui_root.upgrade()
-}
+#[derive(Default)]
+struct UiRoot(WidgetWeakRef);
 
 fn cancel_scope_resolver(cx: &Cx, candidate: &dyn Fn(u64) -> Option<u64>) -> Option<u64> {
-    live_ui_root(cx)?.resolve_cancel_scope(candidate)
+    cx.get_global_ref::<UiRoot>()?.0.upgrade()?.resolve_cancel_scope(candidate)
 }
 
 pub fn set_ui_root(cx: &mut Cx, ui: &WidgetRef) {
     let state = get_or_init_state(cx);
     state.tree.set_root_widget(ui.clone());
-    state.ui_root = ui.downgrade();
+    cx.global::<UiRoot>().0 = ui.downgrade();
     cx.cancel_scope_resolver = Some(cancel_scope_resolver);
     cx.widget_tree_dump_callback = Some(compact_widget_tree_dump_callback);
     cx.widget_query_callback = Some(widget_query_callback);
@@ -2873,7 +2869,8 @@ pub fn set_ui_root(cx: &mut Cx, ui: &WidgetRef) {
 
 impl CxWidgetExt for Cx {
     fn widget_is_active(&self, uid: WidgetUid) -> bool {
-        live_ui_root(self).is_some_and(|root| root.contains_active_widget(uid))
+        self.get_global_ref::<UiRoot>().and_then(|root| root.0.upgrade())
+            .is_some_and(|root| root.contains_active_widget(uid))
     }
 
     fn widget_tree(&self) -> &WidgetTree {
@@ -3019,6 +3016,25 @@ mod tests {
         let key = KeyEvent { key_code: KeyCode::Escape, is_repeat: repeat, ..Default::default() };
         let event = if down { StudioToApp::KeyDown(key) } else { StudioToApp::KeyUp(key) };
         cx.dispatch_studio_msg(event, WindowId(0, 0), dvec2(0.0, 0.0));
+    }
+
+    #[test]
+    fn cancel_root_is_context_local_replaceable_and_weak() {
+        let mut empty = Cx::new(Box::new(|_, _| {}));
+        assert!(!empty.widget_is_active(WidgetUid(1)));
+        let (mut cx, root, _, _, _) = cancel_fixture();
+        assert!(cx.widget_is_active(root.widget_uid()));
+        assert!(!empty.widget_is_active(root.widget_uid()));
+        set_ui_root(&mut empty, &root);
+        let replacement = cx.with_vm(|vm| WidgetRef::new_with_inner(Box::new(
+            crate::view::View::script_new_with_default(vm))));
+        let replacement_uid = replacement.widget_uid();
+        set_ui_root(&mut cx, &replacement);
+        assert!(!cx.widget_is_active(root.widget_uid()));
+        assert!(empty.widget_is_active(root.widget_uid()));
+        assert!(cx.widget_is_active(replacement_uid));
+        drop(replacement);
+        assert!(!cx.widget_is_active(replacement_uid));
     }
 
     #[test]

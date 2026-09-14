@@ -87,8 +87,8 @@ impl ScriptHook for Tooltip {
 }
 
 impl Widget for Tooltip {
-    fn cancel_visible(&self) -> bool {
-        self.opened && self.view.visible
+    fn visit_cancel(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
+        self.opened && self.cancel_children_impl(visit)
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {

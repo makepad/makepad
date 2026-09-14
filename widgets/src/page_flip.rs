@@ -136,10 +136,11 @@ impl WidgetNode for PageFlip {
         }
     }
 
-    fn visible_children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
+    fn cancel_children_impl(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
         if let Some(page) = self.pages.get(&self.active_page) {
             visit(self.active_page, page.clone());
         }
+        true
     }
 
     fn redraw(&mut self, cx: &mut Cx) {

@@ -193,7 +193,7 @@ impl WidgetNode for SlidesView {
         }
     }
 
-    fn visible_children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
+    fn cancel_children_impl(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
         let first = self.current_slide.floor() as usize;
         let count = if self.current_slide.fract() > 0.0 { 2 } else { 1 };
         for id in self.draw_order.iter().skip(first).take(count) {
@@ -201,6 +201,7 @@ impl WidgetNode for SlidesView {
                 visit(*id, slide.clone());
             }
         }
+        true
     }
 
     fn redraw(&mut self, cx: &mut Cx) {

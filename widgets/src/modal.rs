@@ -131,8 +131,8 @@ impl ScriptHook for Modal {
 }
 
 impl Widget for Modal {
-    fn cancel_visible(&self) -> bool {
-        self.is_open && self.view.visible
+    fn visit_cancel(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
+        self.is_open && self.cancel_children_impl(visit)
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
@@ -334,11 +334,11 @@ mod cancel_tests {
         assert!(!cx.owns_cancel(&retained));
         escape(&mut cx, false);
         root.borrow_mut::<CancelWrappedModal>().unwrap().modal.open(&mut cx);
-        assert!(root.cancel_visible());
+        assert!(root.visit_cancel(&mut |_, _| {}));
         escape(&mut cx, true);
         assert!(cx.has_cancel_owner());
         root.borrow_mut::<CancelWrappedModal>().unwrap().modal.close(&mut cx);
-        assert!(!root.cancel_visible());
+        assert!(!root.visit_cancel(&mut |_, _| {}));
         escape(&mut cx, false);
         escape(&mut cx, true);
         assert!(!cx.has_cancel_owner(), "the wrapper must propagate its inner runtime visibility");

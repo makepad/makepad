@@ -29,16 +29,15 @@ pub trait WidgetNode: ScriptApply {
     fn widget_uid(&self) -> WidgetUid;
     /// Enumerate direct children for widget-tree indexing.
     fn children(&self, _visit: &mut dyn FnMut(LiveId, WidgetRef)) {}
-    /// Enumerate the current active branches, including those not drawn yet.
-    /// Unlike `children`, this excludes retained inactive pages and tabs.
-    fn visible_children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
-        if self.visible() {
-            self.children(visit);
+    /// Forwarding hook generated for widget fields. Runtime overrides belong in
+    /// [`Widget::visit_cancel`]. Structural `children` still includes cached branches.
+    #[doc(hidden)]
+    fn cancel_children_impl(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
+        if !self.visible() {
+            return false;
         }
-    }
-    /// Preserve runtime visibility when a derived wrapper shares its inner widget's UID.
-    fn visible_for_cancel(&self) -> bool {
-        self.visible()
+        self.children(visit);
+        true
     }
     #[track_caller]
     fn begin_cancel_scope(&self, cx: &mut Cx) -> CancelScope {
@@ -242,13 +241,11 @@ pub trait WidgetNode: ScriptApply {
 }
 
 pub trait Widget: WidgetNode {
-    /// Runtime visibility for widgets whose open state differs from `View.visible`.
-    fn cancel_visible(&self) -> bool {
-        self.visible_for_cancel()
-    }
-    /// Override only when runtime children are not represented by derived fields.
-    fn cancel_children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
-        self.visible_children(visit);
+    /// Visit the current active children and report whether this widget can own
+    /// cancel input. Return false without visiting when inactive. Override this
+    /// for runtime open states or children not represented by derived fields.
+    fn visit_cancel(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
+        self.cancel_children_impl(visit)
     }
 
     fn handle_event_with(
@@ -887,50 +884,39 @@ impl WidgetRef {
         let _ = self.try_children(visit);
     }
 
-    pub fn cancel_visible(&self) -> bool {
-        self.0.try_borrow().ok().is_some_and(|inner|
-            inner.as_ref().is_some_and(|inner| inner.widget.cancel_visible()))
-    }
-
-    pub fn visible_children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
+    pub fn visit_cancel(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
         if let Ok(inner) = self.0.try_borrow() {
             if let Some(inner) = inner.as_ref() {
-                if inner.widget.cancel_visible() {
-                    inner.widget.cancel_children(visit);
-                }
+                return inner.widget.visit_cancel(visit);
             }
         }
+        false
     }
 
     pub(crate) fn resolve_cancel_scope(&self, candidate: &dyn Fn(u64) -> Option<u64>) -> Option<u64> {
         let inner = self.0.try_borrow().ok()?;
         let inner = inner.as_ref()?;
-        if !inner.widget.cancel_visible() {
-            return None;
-        }
         let mut descendant = None;
-        inner.widget.cancel_children(&mut |_, child| {
+        let active = inner.widget.visit_cancel(&mut |_, child| {
             descendant = descendant.max(child.resolve_cancel_scope(candidate));
         });
-        descendant.or_else(|| candidate(inner.widget.widget_uid().0))
+        if active {
+            descendant.or_else(|| candidate(inner.widget.widget_uid().0))
+        } else {
+            None
+        }
     }
 
     pub(crate) fn contains_active_widget(&self, uid: WidgetUid) -> bool {
         let Ok(inner) = self.0.try_borrow() else { return false; };
         let Some(inner) = inner.as_ref() else { return false; };
-        if !inner.widget.cancel_visible() {
-            return false;
-        }
-        if inner.widget.widget_uid() == uid {
-            return true;
-        }
-        let mut found = false;
-        inner.widget.cancel_children(&mut |_, child| {
+        let mut found = inner.widget.widget_uid() == uid;
+        let active = inner.widget.visit_cancel(&mut |_, child| {
             if !found {
                 found = child.contains_active_widget(uid);
             }
         });
-        found
+        active && found
     }
 
     pub fn layer_areas(&self) -> Vec<(&'static str, Area)> {
