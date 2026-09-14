@@ -909,6 +909,12 @@ impl DataGrid {
         self.row_sizes.set(row, height.max(self.min_row_height));
     }
 
+    /// Every row back to the default height: the overrides from
+    /// [`Self::set_row_height`] and from dragging row edges, all at once.
+    pub fn clear_row_heights(&mut self) {
+        self.row_sizes.clear_overrides();
+    }
+
     pub fn set_col_labels(&mut self, labels: Vec<String>) {
         self.col_labels = labels;
     }
@@ -1056,6 +1062,44 @@ impl DataGrid {
             pos: dvec2(x, y),
             size: dvec2(self.col_sizes.size_of(display_col), self.row_sizes.size_of(row)),
         }
+    }
+
+    /// The row drawn level with `abs`, in the pointer's own coordinates:
+    /// what a host reordering rows under a carried pointer asks. Only the
+    /// height counts, so a pointer carried sideways past the columns still
+    /// finds the row it is level with. `None` above the rows (in the
+    /// heading strip or above the grid), below the last row, and below
+    /// the grid.
+    ///
+    /// Measured against the frame last drawn and the scroll as it is now,
+    /// with the row heights as they are now.
+    pub fn row_at(&self, abs: DVec2) -> Option<usize> {
+        let data = self.vp.data_rect;
+        if self.rows == 0 || abs.y < data.pos.y || abs.y >= data.pos.y + data.size.y {
+            return None;
+        }
+        let dy = abs.y - data.pos.y + self.scroll.y;
+        if dy >= self.row_sizes.total(self.rows) {
+            return None;
+        }
+        Some(self.row_sizes.index_at(dy, self.rows).0)
+    }
+
+    /// Where a row is drawn, in the pointer's coordinates: from the left of
+    /// the data area across the columns in view, at the row's own height.
+    /// A row scrolled out of view still has a rectangle, above the grid or
+    /// below it, so a host can tell how far away it is; a row the grid
+    /// does not have has none. Measured as [`Self::row_at`] measures.
+    pub fn row_rect(&self, row: usize) -> Option<Rect> {
+        if row >= self.rows {
+            return None;
+        }
+        let data = self.vp.data_rect;
+        let width = (self.col_sizes.total(self.cols) - self.scroll.x).clamp(0.0, data.size.x);
+        Some(Rect {
+            pos: dvec2(data.pos.x, data.pos.y + self.row_sizes.offset_of(row) - self.scroll.y),
+            size: dvec2(width, self.row_sizes.size_of(row)),
+        })
     }
 
     // ---------------------------------------------------------------
@@ -2815,6 +2859,45 @@ impl DataGridRef {
         }
     }
 
+    /// See [`DataGrid::set_row_height`]; redraws.
+    pub fn set_row_height(&self, cx: &mut Cx, row: usize, height: f64) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_row_height(row, height);
+            inner.area.redraw(cx);
+        }
+    }
+
+    /// See [`DataGrid::clear_row_heights`]; redraws.
+    pub fn clear_row_heights(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.clear_row_heights();
+            inner.area.redraw(cx);
+        }
+    }
+
+    /// See [`DataGrid::row_at`].
+    pub fn row_at(&self, abs: DVec2) -> Option<usize> {
+        self.borrow().and_then(|inner| inner.row_at(abs))
+    }
+
+    /// See [`DataGrid::row_rect`].
+    pub fn row_rect(&self, row: usize) -> Option<Rect> {
+        self.borrow().and_then(|inner| inner.row_rect(row))
+    }
+
+    /// See [`DataGrid::set_scroll`]. The grid clamps it to what there is
+    /// to scroll on its next draw.
+    pub fn set_scroll(&self, cx: &mut Cx, scroll: DVec2) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_scroll(cx, scroll);
+        }
+    }
+
+    /// See [`DataGrid::scroll_pos`].
+    pub fn scroll_pos(&self) -> DVec2 {
+        self.borrow().map(|inner| inner.scroll_pos()).unwrap_or_default()
+    }
+
     /// The sort a heading press just asked for, if it changed this pass.
     /// `Some((col, None))` means that column went back to unsorted.
     ///
@@ -3638,5 +3721,72 @@ mod tests {
         assert_eq!((sel.kind, sel.anchor, sel.head), (GridSelectKind::Cells, (1, 0), (3, 2)));
         assert!(carried(&out).is_empty(), "{out:?}");
         assert!(released(&out).is_empty(), "{out:?}");
+    }
+
+    /// Rows of three heights, scrolled part way: every row on screen is
+    /// found at its own rectangle, top edge, middle and last point alike,
+    /// so a host that asks which row is under the pointer and where that
+    /// row is gets one answer from both.
+    #[test]
+    fn row_rect_and_row_at_give_back_each_others_answer() {
+        let mut cx = cx();
+        let mut grid = laid_out(&mut cx);
+        grid.set_row_height(1, 40.0);
+        grid.set_row_height(3, 15.0);
+        grid.set_row_height(6, 60.0);
+        grid.set_scroll(&mut cx, dvec2(0.0, 30.0));
+        let data = grid.vp.data_rect;
+        let mut seen = 0;
+        for row in 0..20 {
+            let rect = grid.row_rect(row).expect("a row the grid has has a rectangle");
+            assert_eq!(rect.size.y, grid.row_sizes.size_of(row));
+            for y in [rect.pos.y, rect.pos.y + rect.size.y * 0.5, rect.pos.y + rect.size.y - 0.01] {
+                if y < data.pos.y || y >= data.pos.y + data.size.y {
+                    continue;
+                }
+                seen += 1;
+                assert_eq!(grid.row_at(dvec2(rect.pos.x + 10.0, y)), Some(row), "row {row} at {y}");
+                // Level with the row is enough; the columns do not matter.
+                assert_eq!(grid.row_at(dvec2(-500.0, y)), Some(row), "row {row} off to the side");
+            }
+        }
+        assert!(seen > 6, "the test looked at almost nothing ({seen})");
+        assert_eq!(grid.row_rect(20), None);
+    }
+
+    /// Clearing the overrides puts every row back on the default pitch.
+    #[test]
+    fn clearing_the_row_heights_restores_uniform_rows() {
+        let mut cx = cx();
+        let mut grid = laid_out(&mut cx);
+        grid.set_row_height(0, 50.0);
+        grid.set_row_height(4, 14.0);
+        grid.clear_row_heights();
+        let pitch = grid.default_row_height;
+        let top = grid.vp.data_rect.pos.y;
+        for row in 0..20 {
+            let rect = grid.row_rect(row).unwrap();
+            assert_eq!((rect.pos.y, rect.size.y), (top + pitch * row as f64, pitch), "row {row}");
+        }
+        assert_eq!(grid.row_at(dvec2(60.0, top + pitch * 2.5)), Some(2));
+    }
+
+    /// Above the rows — the heading strip, or above the grid — and below
+    /// the last row or below the grid, there is no row.
+    #[test]
+    fn a_point_above_or_below_the_rows_has_no_row() {
+        let mut cx = cx();
+        let mut grid = laid_out(&mut cx);
+        let data = grid.vp.data_rect;
+        assert_eq!(grid.row_at(dvec2(60.0, data.pos.y - 1.0)), None, "in the headings");
+        assert_eq!(grid.row_at(dvec2(60.0, -10.0)), None, "above the grid");
+        assert_eq!(grid.row_at(dvec2(60.0, data.pos.y + data.size.y + 5.0)), None, "below the grid");
+        assert_eq!(grid.row_at(dvec2(60.0, data.pos.y)), Some(0));
+        // Three rows in a grid with room for more: the space under them
+        // is inside the grid and still not a row.
+        grid.set_grid_size(3, 3);
+        let below_last = grid.row_rect(2).map(|r| r.pos.y + r.size.y + 1.0).unwrap();
+        assert!(below_last < data.pos.y + data.size.y);
+        assert_eq!(grid.row_at(dvec2(60.0, below_last)), None, "under the last row");
     }
 }
