@@ -149,8 +149,14 @@ script_mod! {
         StoryHeading{text: "Carrying a row moves it"}
         StoryNote{text: "Drag a row up or down the list and the rows move out of its way under the pointer; let go and it stays there. The grid moves nothing. It says where the carry began, and this page follows the pointer, asks the grid which row is level with it and where that row is drawn, and reorders its own lines."}
 
+        StoryHeading{text: "A menu on the right button"}
+        StoryNote{text: "Right-click a row for a menu that moves it to the top or the bottom, or a heading for one that picks every row or none. The right button asks for a menu and does nothing else: the picks stay as they were until a menu row is chosen. Ctrl with the left button is still a click that adds or drops a pick."}
+
         StoryHeading{text: "Three ways to select"}
         StoryNote{text: "Cells is the spreadsheet on the Overview page. Rows picks a whole row with a press or an arrow key, and a heading press only sorts. Off, used here, picks nothing and draws nothing, for a host whose picks are its own."}
+
+        // Declared last, so the menus it raises draw over the page.
+        menus := MenuLayer{}
     }
 }
 
@@ -278,6 +284,19 @@ impl Picks {
             }
         }
         self.cursor = Some(item);
+    }
+}
+
+/// Move `item` to the first line, or to the last.
+fn move_to_end(order: &mut Vec<usize>, item: usize, to_top: bool) {
+    let Some(from) = order.iter().position(|&i| i == item) else {
+        return;
+    };
+    order.remove(from);
+    if to_top {
+        order.insert(0, item);
+    } else {
+        order.push(item);
     }
 }
 
@@ -439,6 +458,9 @@ pub struct StoryDataGridList {
     /// until the button comes up.
     #[rust]
     carrying: Option<usize>,
+    /// The item a row menu was opened on, until one of its rows is chosen.
+    #[rust]
+    menu_item: Option<usize>,
 }
 
 impl StoryDataGridList {
@@ -479,6 +501,39 @@ impl StoryDataGridList {
     fn press(&mut self, line: usize, held: KeyModifiers) -> String {
         self.order();
         self.picks.press(&self.order, line, held);
+        self.picks_said()
+    }
+
+    /// The right button went down on `line`: the menu about to open is for
+    /// the item drawn there. Returns that item's name.
+    fn menu_on(&mut self, line: usize) -> Option<&'static str> {
+        self.menu_item = self.order().get(line).copied();
+        self.menu_item.map(|item| SEEDS[item][0])
+    }
+
+    /// A row of one of this page's menus was chosen. Returns what to say
+    /// about it, for the log line.
+    fn menu_chosen(&mut self, id: LiveId) -> Option<String> {
+        self.order();
+        if id == live_id!(to_top) || id == live_id!(to_bottom) {
+            let item = self.menu_item.take()?;
+            let to_top = id == live_id!(to_top);
+            move_to_end(&mut self.order, item, to_top);
+            let end = if to_top { "top" } else { "bottom" };
+            Some(format!("moved {} to the {end}", SEEDS[item][0]))
+        } else if id == live_id!(pick_all) {
+            self.picks.items = self.order.iter().copied().collect();
+            Some("picked every row".to_string())
+        } else if id == live_id!(pick_none) {
+            self.picks.items.clear();
+            Some("picked no rows".to_string())
+        } else {
+            None
+        }
+    }
+
+    /// What to say about the picks, in the order the lines are drawn.
+    fn picks_said(&self) -> String {
         let names: Vec<&str> = self
             .order
             .iter()
@@ -587,7 +642,51 @@ fn data_grid_list_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
                 host.redraw(cx);
                 root.label(cx, ids!(list.log)).set_text(cx, &format!("carrying row {row}"));
             }
+            // The right button: a menu at the pointer, and nothing else.
+            // The picks are left alone until a row of the menu is chosen.
+            DataGridAction::CellContextMenu { row, abs, .. } => {
+                let name = host
+                    .borrow_mut::<StoryDataGridList>()
+                    .and_then(|mut inner| inner.menu_on(row));
+                if let Some(name) = name {
+                    let rows = vec![
+                        MenuRow::section(name),
+                        MenuRow::new(live_id!(to_top), "Move to the top"),
+                        MenuRow::new(live_id!(to_bottom), "Move to the bottom"),
+                    ];
+                    let at = Rect { pos: abs, size: dvec2(0.0, 0.0) };
+                    root.menu_layer(cx, ids!(menus)).open(cx, live_id!(seed_row), rows, at, MenuPlace::At);
+                    root.label(cx, ids!(list.log)).set_text(cx, &format!("menu on row {row}"));
+                }
+            }
+            DataGridAction::HeaderContextMenu { col, abs } => {
+                let name = SEED_COLUMNS.get(col).copied().unwrap_or("?");
+                let rows = vec![
+                    MenuRow::section(name),
+                    MenuRow::new(live_id!(pick_all), "Pick every row"),
+                    MenuRow::new(live_id!(pick_none), "Pick no rows"),
+                ];
+                let at = Rect { pos: abs, size: dvec2(0.0, 0.0) };
+                root.menu_layer(cx, ids!(menus)).open(cx, live_id!(seed_heading), rows, at, MenuPlace::At);
+                root.label(cx, ids!(list.log)).set_text(cx, &format!("menu on the {name} heading"));
+            }
             _ => {}
+        }
+    }
+    for action in menu_actions(actions) {
+        let MenuAction::Picked { owner, id } = action else {
+            continue;
+        };
+        if *owner != live_id!(seed_row) && *owner != live_id!(seed_heading) {
+            continue;
+        }
+        let said = host
+            .borrow_mut::<StoryDataGridList>()
+            .and_then(|mut inner| inner.menu_chosen(*id).map(|said| (said, inner.picks_said())));
+        if let Some((said, picked)) = said {
+            host.redraw(cx);
+            root.label(cx, ids!(list.log)).set_text(cx, &said);
+            root.label(cx, ids!(list.picked)).set_text(cx, &picked);
         }
     }
 }
@@ -780,6 +879,10 @@ The grid never reorders anything: the rows are the host's. This page keeps a lis
 
 Both are measured against the last drawn frame and the scroll as it is now, and both are on `DataGridRef`, as are `set_scroll` and `scroll_pos` for a host that scrolls the list while a row is carried near an edge, and `set_row_height` and `clear_row_heights` for a host whose rows are not all one height. The picks and the outline follow the item, not the line, so they move with it; the carried row is outlined in its own colour.
 
+## A menu on the right button
+
+A secondary press on a cell raises `CellContextMenu { row, col, abs }`, and on a column heading `HeaderContextMenu { col, abs }`, with `abs` where it went down and `col` the data column. Only the secondary button asks: Ctrl with the primary button is a primary press, because that is how a list toggles its picks. The press selects nothing, sorts nothing and takes no keyboard focus, so a menu opened on a row finds the picks as they were; a secondary press while a row is being carried or a column dragged belongs to that gesture and asks for nothing. This page opens a `MenuLayer` menu at `abs`: on a row, moving it to either end; on a heading, picking every row or none.
+
 ## The outline
 
 `outline_row(row, color)` draws a 1.5 point outline round a row's visible cells: a keyboard cursor, a row being carried, anything a host marks without selecting it. Call it from the draw loop, as the cells are. It is drawn when the frame ends, over every cell, so the row's own cells may come before the call or after it; and it lasts one frame, so ask for it again on every draw. This page outlines the row clicked last.",
@@ -927,11 +1030,11 @@ mod tests {
     fn both_pages_build_and_hold_the_grids_their_handlers_address() {
         let (mut cx, errors) = shell();
         assert!(errors.is_empty(), "{errors:?}");
-        let addressed: [(&[LiveId], &[&[LiveId]]); 2] = [
-            (ids!(demo.grid), &[ids!(demo.reported), ids!(demo.edited)]),
-            (ids!(list.grid), &[ids!(list.picked), ids!(list.log)]),
+        let addressed: [(&[LiveId], &[&[LiveId]], &[&[LiveId]]); 2] = [
+            (ids!(demo.grid), &[ids!(demo.reported), ids!(demo.edited)], &[]),
+            (ids!(list.grid), &[ids!(list.picked), ids!(list.log)], &[ids!(menus)]),
         ];
-        for (story, (path, labels)) in STORIES.iter().zip(addressed) {
+        for (story, (path, labels, layers)) in STORIES.iter().zip(addressed) {
             let page = cx.with_vm(|vm| {
                 let stories = vm.module(id!(stories));
                 let value = vm.bx.heap.value(stories, LiveId::from_str(story.dsl).into(), NoTrap);
@@ -943,9 +1046,25 @@ mod tests {
             for label in labels {
                 assert!(page.label(&cx, label).borrow().is_some(), "{}: no label {label:?}", story.key);
             }
+            for layer in layers {
+                assert!(page.menu_layer(&cx, layer).borrow().is_some(), "{}: no menu layer {layer:?}", story.key);
+            }
             let subject = page.widget(&cx, &[LiveId::from_str(story.subject)]);
             assert!(!subject.is_empty(), "{}: no {}", story.key, story.subject);
         }
+    }
+
+    /// The row menu moves its item to either end and leaves every other
+    /// line in the order it had.
+    #[test]
+    fn the_row_menu_moves_its_item_to_either_end() {
+        let mut order = vec![4, 2, 7, 1];
+        move_to_end(&mut order, 7, true);
+        assert_eq!(order, vec![7, 4, 2, 1]);
+        move_to_end(&mut order, 7, false);
+        assert_eq!(order, vec![4, 2, 1, 7]);
+        move_to_end(&mut order, 9, true);
+        assert_eq!(order, vec![4, 2, 1, 7], "an item that is not there moves nothing");
     }
 
     fn line(y: f64, height: f64) -> Rect {
