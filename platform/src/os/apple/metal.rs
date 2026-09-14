@@ -295,28 +295,9 @@ impl Cx {
                 .is_some_and(|(next, pending)| {
                     next.can_continue_upload(pending.publication, pending.copied)
                 });
-            // A re-recorded immediate payload with unchanged bytes (a camera move
-            // re-emitting world-space geometry) keeps its resident copy: no upload.
-            let immediate_hash = if publication.is_none() && call.instance_dirty {
-                crate::draw_list::immediate_payload_hash(data)
-            } else {
-                0
-            };
-            if immediate_hash != 0
-                && immediate_hash == item.immediate_hash
-                && item.os.instance_buffer.pending.is_none()
-                && item
-                    .os
-                    .instance_buffer
-                    .inner
-                    .as_ref()
-                    .is_some_and(|inner| inner.len == data.len() * 4)
-            {
-                call.instance_dirty = false;
-                item.instance_upload_pending = false;
-                budget.stats.identical_skips += 1;
-                continue;
-            }
+            // Immediate payloads follow their producer's dirty flag. Retained
+            // publications carry explicit identities for reuse below; never
+            // rescan payload bytes here to infer whether they changed.
             let before = budget.stats.bytes;
             // One hard allowance for the whole repaint, including first and
             // immediate publications. Keep the previous complete buffer until
@@ -350,9 +331,6 @@ impl Cx {
                 self.os.instance_bytes_uploaded.saturating_add(bytes as u64);
             item.instance_upload_pending = remaining != 0;
             call.instance_dirty = false;
-            if remaining == 0 && immediate_hash != 0 {
-                item.immediate_hash = immediate_hash;
-            }
             if remaining == 0
                 || (item.retained_progressive
                     && item.os.instance_buffer.pending.as_ref().is_some_and(|p| {
