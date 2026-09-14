@@ -338,7 +338,11 @@ impl Widget for XrSceneView {
         } else {
             rect
         };
-        self.camera.set_desktop_viewport_rect(render_rect);
+        // The pointer orbits the view where it is drawn. A fixed render
+        // size behind a small placeholder would otherwise claim a render
+        // sized stretch of the window from the placeholder's corner, and
+        // take the cursor from every control under it.
+        self.camera.set_desktop_viewport_rect(rect);
         self.pass.set_size(cx, render_rect.size);
         self.pass.set_color_texture(
             cx,
