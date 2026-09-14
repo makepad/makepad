@@ -558,6 +558,22 @@ fn header_label_x(rect: Rect, pad: f64, tw: f64, align: f64, reserve: f64) -> f6
     }
 }
 
+/// The clip for a cell's text `tw` wide that is wider than its room, the
+/// cell less the padding either side. A text that still ends a point short
+/// of the next column is not cut: it shows whole, as it always has, and
+/// an amount in a tight column keeps its last digit. A text that has to be
+/// cut is cut the padding short of the next column, as far short as a text
+/// that fits stops. A grid without padding keeps one point off the next
+/// column either way, and a cell narrower than its padding shows nothing.
+fn cell_text_clip(rect: Rect, pad: f64, tw: f64) -> Rect {
+    let whole = pad + tw <= rect.size.x - 1.0;
+    let off = if whole { 1.0 } else { pad.max(1.0) };
+    Rect {
+        pos: rect.pos,
+        size: dvec2((rect.size.x - off).max(0.0), rect.size.y),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum HitZone {
     Corner,
@@ -1554,10 +1570,7 @@ impl DataGrid {
         let y = cell.rect.pos.y + (cell.rect.size.y - th) * 0.5;
         let overflow = tw > avail;
         if overflow {
-            cx.push_clip_rect(Rect {
-                pos: cell.rect.pos,
-                size: cell.rect.size - dvec2(1.0, 0.0),
-            });
+            cx.push_clip_rect(cell_text_clip(cell.rect, pad, tw));
         }
         dt.draw_abs(cx, dvec2(x, y), text);
         if overflow {
@@ -4810,6 +4823,39 @@ mod tests {
         let between = header_label_x(rect, pad, tw, 0.75, marks);
         assert!(between > header_label_x(rect, pad, tw, 0.5, marks) && between < right);
         assert_eq!(header_label_x(rect, pad, 200.0, 1.0, marks), 106.0);
+    }
+
+    /// A cell text too wide for its cell is cut the padding short of the
+    /// next column, the same gap a text that fits leaves, over the whole
+    /// height of the cell; a text over its room that still ends a point
+    /// short of the next column shows whole; no padding still keeps a
+    /// point, and a cell narrower than its padding clips to nothing rather
+    /// than to a negative width.
+    #[test]
+    fn a_cut_cell_text_stops_the_padding_short_of_the_next_column() {
+        let rect = Rect {
+            pos: dvec2(100.0, 40.0),
+            size: dvec2(80.0, 22.0),
+        };
+        let pad = 6.0;
+        let next_column = rect.pos.x + rect.size.x;
+        // 73 points of text end at 179, a point short of the next column:
+        // past its 68 of room, and still shown whole.
+        let clip = cell_text_clip(rect, pad, 73.0);
+        assert_eq!(clip.pos, rect.pos);
+        assert_eq!(clip.size.y, rect.size.y);
+        assert_eq!(next_column - (clip.pos.x + clip.size.x), 1.0);
+        assert!(rect.pos.x + pad + 73.0 <= clip.pos.x + clip.size.x, "the text ends inside the clip");
+        // Half a point more, and it is cut the padding short.
+        let clip = cell_text_clip(rect, pad, 73.5);
+        assert_eq!(clip.pos, rect.pos);
+        assert_eq!(clip.size.y, rect.size.y);
+        assert_eq!(next_column - (clip.pos.x + clip.size.x), pad);
+        let fitting_text_end = rect.pos.x + pad + (rect.size.x - 2.0 * pad);
+        assert_eq!(clip.pos.x + clip.size.x, fitting_text_end);
+        assert_eq!(cell_text_clip(rect, pad, 200.0).size.x, 74.0);
+        assert_eq!(cell_text_clip(rect, 0.0, 200.0).size.x, 79.0);
+        assert_eq!(cell_text_clip(Rect { pos: rect.pos, size: dvec2(4.0, 22.0) }, pad, 30.0).size.x, 0.0);
     }
 
     fn tips_raised(
