@@ -220,17 +220,6 @@ script_mod! {
                 }
             }
         }
-
-        StoryHeading{text: "With nothing behind it"}
-        StoryNote{text: "A floating action with no set is just the action: it reports a press and never turns."}
-        StoryRow{
-            Screen{
-                height: 200.
-                single := FloatingAction{
-                    anchor: FloatingAnchor.BottomCenter
-                }
-            }
-        }
     }
 
     mod.stories.FloatingActionAnchors = StoryPage{
@@ -491,9 +480,6 @@ fn overview_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
             root.label(cx, ids!(picked)).set_text(cx, id_word(id));
         }
     }
-    if root.floating_action(cx, ids!(single)).pressed(actions) {
-        root.label(cx, ids!(picked)).set_text(cx, "the action itself");
-    }
     for set in [ids!(bar_action), ids!(window_action)] {
         if let Some(id) = root.floating_action(cx, set).picked(actions) {
             root.label(cx, ids!(bar_picked)).set_text(cx, id_word(id));
@@ -689,7 +675,7 @@ mod tests {
         load(&mut cx);
         let _ = makepad_platform::shader_error::take();
         let extra: [&[&str]; 2] = [
-            &["picked", "single", "star", "eight", "later", "bar", "bar_action", "bar_picked", "window_toggle", "window_action", "compose"],
+            &["picked", "star", "eight", "later", "bar", "bar_action", "bar_picked", "window_toggle", "window_action", "compose"],
             &["anchors_picked", "to_radial", "to_row", "to_column", "count_host", "driven", "twelve"],
         ];
         assert_eq!(STORIES.len(), extra.len());
