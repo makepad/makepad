@@ -217,6 +217,16 @@ impl AxisSizes {
         true
     }
 
+    /// Move every override to the index `to` gives it, for a host that
+    /// puts the columns in another order at once.
+    fn remap(&mut self, to: impl Fn(usize) -> usize) {
+        for (idx, _) in self.overrides.iter_mut() {
+            *idx = to(*idx);
+        }
+        self.overrides.sort_by_key(|(idx, _)| *idx);
+        self.rebuild_cum();
+    }
+
     /// Remap override indices after a column move: the entry at `from` lands
     /// at `to`, entries between shift by one.
     fn apply_move(&mut self, from: usize, to: usize) {
@@ -426,6 +436,14 @@ pub enum DataGridAction {
     ColumnMoved {
         from_display: usize,
         to_display: usize,
+    },
+    /// A heading was dragged somewhere else and dropped: `order` is the
+    /// data column now drawn at each display position, left to right.
+    /// Raised after `ColumnMoved`, and only for a drag, never for
+    /// [`DataGrid::set_col_order`]. It is what a host keeps to put the
+    /// columns back later with `set_col_order`.
+    ColumnOrderChanged {
+        order: Vec<usize>,
     },
     SelectionChanged {
         selection: Option<GridSelection>,
@@ -669,6 +687,9 @@ pub struct DataGrid {
     allow_col_resize: bool,
     #[live(true)]
     allow_row_resize: bool,
+    /// A column heading can be dragged along the headings and dropped
+    /// between two others, with a bar showing where it will land; the grid
+    /// then raises `ColumnMoved` and `ColumnOrderChanged`. Off by default.
     #[live(false)]
     allow_col_reorder: bool,
     /// Pressing a column heading cycles that column's sort. Off by
@@ -684,6 +705,11 @@ pub struct DataGrid {
     /// side that owns the rows knows anyway.
     #[rust]
     unsortable_cols: Vec<usize>,
+    /// Columns, by data column, that stay where they are drawn when
+    /// columns are dragged: a column of row badges on the left, a column of
+    /// controls on the right. Set from the host, like `unsortable_cols`.
+    #[rust]
+    unmovable_cols: Vec<usize>,
     #[live(24.0)]
     min_col_width: f64,
     #[live(14.0)]
@@ -1010,7 +1036,10 @@ impl DataGrid {
     }
 
     /// Every column's width at once, in display order: the first width is
-    /// the column drawn leftmost now. A column past the end of `widths`
+    /// the column drawn leftmost now. Once headings can be dragged that is
+    /// not the order of the host's own columns, so a host that keeps its
+    /// widths by column hands them over through [`Self::col_order`], the
+    /// width of `order[0]` first. A column past the end of `widths`
     /// goes back to `default_col_width`, so a shorter list clears what a
     /// longer one set, and a width below `min_col_width` is raised to it,
     /// as a dragged edge is. A width for a column the grid does not have
@@ -1041,7 +1070,8 @@ impl DataGrid {
     }
 
     /// Every column's width, in display order: what a host keeps to put
-    /// the widths back later with [`Self::set_col_widths`].
+    /// the widths back later with [`Self::set_col_widths`]. The width of
+    /// data column `col_order()[i]` is the `i`th.
     pub fn col_widths(&self) -> Vec<f64> {
         (0..self.cols).map(|c| self.col_sizes.size_of(c)).collect()
     }
@@ -1083,6 +1113,73 @@ impl DataGrid {
     /// Columns that will not sort, whatever `sortable` says.
     pub fn set_unsortable_cols(&mut self, cols: Vec<usize>) {
         self.unsortable_cols = cols;
+    }
+
+    /// Columns, by data column, that keep their place when headings are
+    /// dragged, whatever `allow_col_reorder` says: their own headings do
+    /// not drag, and no other column can be dropped on the far side of
+    /// one. A column of row badges stays first and a column of controls
+    /// stays last this way.
+    pub fn set_unmovable_cols(&mut self, cols: Vec<usize>) {
+        self.unmovable_cols = cols;
+    }
+
+    /// The data column drawn at each display position, left to right: the
+    /// order `ColumnOrderChanged` reports, and what
+    /// [`Self::set_col_order`] takes back.
+    pub fn col_order(&self) -> Vec<usize> {
+        (0..self.cols).map(|d| self.display_to_data(d)).collect()
+    }
+
+    /// Draw the columns in `order`, the data column for each display
+    /// position from the left: how a host puts back an order it kept from
+    /// `ColumnOrderChanged`. It has to name every column once, and an order
+    /// that does not is refused and changes nothing; the answer says which.
+    /// The grid raises nothing for it, since the host already knows.
+    ///
+    /// It does what dropping a dragged heading does: widths already set go
+    /// with their columns, and a selection, which is held in display
+    /// positions, is cleared when the order changes. The order the grid
+    /// already has changes nothing, so it can be pushed on every draw. Like
+    /// [`Self::set_col_widths`] the frame is measured again at once, so from
+    /// the draw loop it lands in the frame being drawn. A change in the
+    /// number of columns puts them back in their own order, so a host that
+    /// changes the count sets its order after it.
+    pub fn set_col_order(&mut self, cx: &mut Cx, order: &[usize]) -> bool {
+        let cols = self.cols;
+        let mut seen = vec![false; cols];
+        let every_column_once = order.len() == cols
+            && order
+                .iter()
+                .all(|&c| c < cols && !std::mem::replace(&mut seen[c], true));
+        if !every_column_once {
+            return false;
+        }
+        let old = self.col_order();
+        if old == order {
+            return true;
+        }
+        let mut lands_at = vec![0; cols];
+        for (display_col, &col) in order.iter().enumerate() {
+            lands_at[col] = display_col;
+        }
+        // A width waiting for a column the grid does not have, from a
+        // longer list of widths or from before the columns were cut, stays
+        // where it waits: only the columns there are change places.
+        self.col_sizes.remap(|display_col| match old.get(display_col) {
+            Some(&col) => lands_at[col],
+            None => display_col,
+        });
+        let identity = order.iter().enumerate().all(|(d, &c)| d == c);
+        self.col_order = (!identity).then(|| order.iter().map(|&c| c as u32).collect());
+        self.selected = None;
+        self.compute_viewport();
+        if self.iter.is_some() {
+            self.reset_iter();
+        } else {
+            self.area.redraw(cx);
+        }
+        true
     }
 
     /// The column being sorted and which way, or nothing.
@@ -1859,18 +1956,10 @@ impl DataGrid {
             Interact::ColDrag {
                 display_col,
                 cur_abs,
-                insert_at,
+                ..
             } => {
                 let display_col = *display_col;
-                let insert_at = *insert_at;
                 let cur_abs = *cur_abs;
-                // insertion marker
-                let x = self.vp.data_rect.pos.x + self.col_sizes.offset_of(insert_at) - self.scroll.x;
-                self.draw_overlay.color = self.color_drag_marker;
-                self.draw_overlay.draw_abs(cx, Rect {
-                    pos: dvec2(x - 1.0, self.vp.widget_rect.pos.y),
-                    size: dvec2(2.0, self.vp.widget_rect.size.y),
-                });
                 // ghost header following the pointer
                 let w = self.col_sizes.size_of(display_col).min(220.0);
                 let rect = Rect {
@@ -1891,6 +1980,12 @@ impl DataGrid {
                 };
                 let color = self.header_look(data_col).color;
                 self.header_text(cx, &cell, &label, color, self.header_align.clamp(0.0, 1.0), 0.0);
+                // The bar where it will land, over the ghost: the gap is
+                // most often right under the pointer.
+                if let Some(marker) = self.col_drop_marker() {
+                    self.draw_overlay.color = self.color_drag_marker;
+                    self.draw_overlay.draw_abs(cx, marker);
+                }
             }
             Interact::ColResize { display_col, .. } => {
                 let x = self.vp.data_rect.pos.x
@@ -2264,7 +2359,7 @@ impl DataGrid {
         match self.hit_zone(abs) {
             HitZone::ColHeader { resize_edge: Some(_), .. } if self.allow_col_resize => MouseCursor::ColResize,
             HitZone::RowHeader { resize_edge: Some(_), .. } if self.allow_row_resize => MouseCursor::RowResize,
-            HitZone::ColHeader { .. } if self.allow_col_reorder => MouseCursor::Grab,
+            HitZone::ColHeader { display_col, .. } if self.can_move_col(display_col) => MouseCursor::Grab,
             HitZone::Cell { .. } => self.cell_cursor,
             _ => MouseCursor::Default,
         }
@@ -2335,18 +2430,50 @@ impl DataGrid {
         (row, col)
     }
 
-    fn col_drag_insert_at(&self, abs_x: f64) -> usize {
+    /// Whether the heading at `display_col` can be dragged somewhere else.
+    fn can_move_col(&self, display_col: usize) -> bool {
+        self.allow_col_reorder && !self.unmovable_cols.contains(&self.display_to_data(display_col))
+    }
+
+    /// The gap between headings, from 0 before the first to `cols` after
+    /// the last, that a heading dragged from `from` drops into with the
+    /// pointer at `abs_x`: in front of the heading under the pointer left
+    /// of its middle, behind it right of it. Kept between the unmovable
+    /// columns on either side of `from`, so those stay where they are.
+    fn col_drag_insert_at(&self, from: usize, abs_x: f64) -> usize {
         let dx = abs_x - self.vp.data_rect.pos.x + self.scroll.x;
-        if dx <= 0.0 {
-            return 0;
-        }
-        let (col, within) = self.col_sizes.index_at(dx, self.cols);
-        let w = self.col_sizes.size_of(col);
-        if within > w * 0.5 {
-            (col + 1).min(self.cols)
+        let gap = if dx <= 0.0 {
+            0
         } else {
-            col
-        }
+            let (col, within) = self.col_sizes.index_at(dx, self.cols);
+            let w = self.col_sizes.size_of(col);
+            if within > w * 0.5 {
+                (col + 1).min(self.cols)
+            } else {
+                col
+            }
+        };
+        let fixed = |d: usize| self.unmovable_cols.contains(&self.display_to_data(d));
+        let lo = (0..from).rev().find(|&d| fixed(d)).map_or(0, |d| d + 1);
+        let hi = (from + 1..self.cols).find(|&d| fixed(d)).unwrap_or(self.cols);
+        gap.clamp(lo, hi)
+    }
+
+    /// The bar showing where a dragged heading will land: across the
+    /// headings and the rows at the gap it would drop into, kept inside the
+    /// columns' strip so a gap at either end still shows.
+    fn col_drop_marker(&self) -> Option<Rect> {
+        let Interact::ColDrag { insert_at, .. } = self.interact else {
+            return None;
+        };
+        let data = self.vp.data_rect;
+        let widget = self.vp.widget_rect;
+        let x = data.pos.x + self.col_sizes.offset_of(insert_at) - self.scroll.x;
+        let right = (data.pos.x + data.size.x - 2.0).max(data.pos.x);
+        Some(Rect {
+            pos: dvec2((x - 1.0).clamp(data.pos.x, right), widget.pos.y),
+            size: dvec2(2.0, widget.size.y),
+        })
     }
 
     // ---------------------------------------------------------------
@@ -2686,11 +2813,20 @@ impl DataGrid {
         order.insert(to, moved);
         self.col_sizes.apply_move(from, to);
         self.selected = None;
+        // A pointer that comes back before the redraw finds the columns
+        // where they are now.
+        self.compute_viewport();
         cx.widget_action(
             self.uid,
             DataGridAction::ColumnMoved {
                 from_display: from,
                 to_display: to,
+            },
+        );
+        cx.widget_action(
+            self.uid,
+            DataGridAction::ColumnOrderChanged {
+                order: self.col_order(),
             },
         );
         self.area.redraw(cx);
@@ -3059,9 +3195,11 @@ impl Widget for DataGrid {
                     down_abs,
                     ..
                 } => {
-                    if self.allow_col_reorder && (fe.abs - *down_abs).length() > 5.0 {
-                        let display_col = *display_col;
-                        let insert_at = self.col_drag_insert_at(fe.abs.x);
+                    let (display_col, down_abs) = (*display_col, *down_abs);
+                    if (fe.abs - down_abs).length() > self.drag_threshold
+                        && self.can_move_col(display_col)
+                    {
+                        let insert_at = self.col_drag_insert_at(display_col, fe.abs.x);
                         self.interact = Interact::ColDrag {
                             display_col,
                             cur_abs: fe.abs,
@@ -3071,8 +3209,9 @@ impl Widget for DataGrid {
                         self.area.redraw(cx);
                     }
                 }
-                Interact::ColDrag { .. } => {
-                    let insert = self.col_drag_insert_at(fe.abs.x);
+                Interact::ColDrag { display_col, .. } => {
+                    let from = *display_col;
+                    let insert = self.col_drag_insert_at(from, fe.abs.x);
                     if let Interact::ColDrag {
                         cur_abs, insert_at, ..
                     } = &mut self.interact
@@ -3080,12 +3219,14 @@ impl Widget for DataGrid {
                         *cur_abs = fe.abs;
                         *insert_at = insert;
                     }
-                    // edge auto-scroll while dragging a header
+                    // edge auto-scroll while dragging a header, held to
+                    // what there is to scroll so the next gap is measured
+                    // against columns that are really there
                     let dr = self.vp.data_rect;
                     if fe.abs.x > dr.pos.x + dr.size.x - 30.0 {
-                        self.scroll.x += 14.0;
+                        self.scroll = self.scroll_clamped(self.scroll + dvec2(14.0, 0.0));
                     } else if fe.abs.x < dr.pos.x + 30.0 {
-                        self.scroll.x = (self.scroll.x - 14.0).max(0.0);
+                        self.scroll = self.scroll_clamped(self.scroll - dvec2(14.0, 0.0));
                     }
                     self.area.redraw(cx);
                 }
@@ -3270,6 +3411,25 @@ impl DataGridRef {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_unsortable_cols(cols);
         }
+    }
+
+    /// See [`DataGrid::set_unmovable_cols`].
+    pub fn set_unmovable_cols(&self, cols: Vec<usize>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_unmovable_cols(cols);
+        }
+    }
+
+    /// See [`DataGrid::col_order`].
+    pub fn col_order(&self) -> Vec<usize> {
+        self.borrow().map(|inner| inner.col_order()).unwrap_or_default()
+    }
+
+    /// See [`DataGrid::set_col_order`].
+    pub fn set_col_order(&self, cx: &mut Cx, order: &[usize]) -> bool {
+        self.borrow_mut()
+            .map(|mut inner| inner.set_col_order(cx, order))
+            .unwrap_or(false)
     }
 
     pub fn set_sort_indicator(&self, sort: Option<(usize, bool)>) {
@@ -4632,5 +4792,191 @@ mod tests {
                 assert_eq!((sel.anchor, sel.head), ((5, 1), (3, 1)));
             }
         }
+    }
+
+    /// The columns as a frame hands them out, left to right: each one's
+    /// data column and width.
+    fn drawn_columns(cells: &[GridCell]) -> Vec<(usize, f64)> {
+        cells.iter().filter(|c| c.row == 0).map(|c| (c.col, c.rect.size.x)).collect()
+    }
+
+    fn order_changes(actions: &[DataGridAction]) -> Vec<Vec<usize>> {
+        actions
+            .iter()
+            .filter_map(|a| match a {
+                DataGridAction::ColumnOrderChanged { order } => Some(order.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn header_clicks(actions: &[DataGridAction]) -> usize {
+        actions
+            .iter()
+            .filter(|a| matches!(a, DataGridAction::HeaderClicked { .. }))
+            .count()
+    }
+
+    /// A heading carried right of the last heading's middle shows a bar at
+    /// the gap after it while it is held, and dropped there it moves its
+    /// column to the end: the grid says which column went where and then
+    /// the whole order, the column takes its width with it, and nothing is
+    /// sorted or clicked on the way.
+    #[test]
+    fn a_heading_dropped_past_another_moves_its_column_and_reports_the_order() {
+        let mut cx = cx();
+        let mut grid = grid(&mut cx);
+        grid.allow_col_reorder = true;
+        grid.sortable = true;
+        grid.set_col_widths(&mut cx, &[100.0, 60.0, 80.0]);
+        let mut frame = Frame::new(&mut cx, dvec2(300.0, 200.0));
+        frame.draw(&mut cx, &mut grid, |_, _| {});
+        let (first, third) = (heading(&grid, 0), heading(&grid, 2));
+        let past = third + dvec2(10.0, 0.0);
+        let none = KeyModifiers::default();
+
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WindowId(1, 1)));
+        let mut out = sent(&mut cx, &mut grid, mouse_down(first, MouseButton::PRIMARY, none));
+        out.extend(sent(&mut cx, &mut grid, mouse_move(past)));
+        let marker = grid.col_drop_marker().expect("no bar while the heading is held");
+        let after_last = grid.vp.data_rect.pos.x + 240.0;
+        assert_eq!((marker.pos.x, marker.size.x), (after_last - 1.0, 2.0));
+        assert_eq!((marker.pos.y, marker.size.y), (0.0, 200.0), "the bar runs the height of the grid");
+        frame.draw(&mut cx, &mut grid, |_, _| {});
+        let up = sent(&mut cx, &mut grid, mouse_up(past, MouseButton::PRIMARY, none));
+        cx.fingers.first_mouse_button = None;
+        out.extend(up.iter().cloned());
+
+        let moved = up.iter().position(|a| {
+            matches!(a, DataGridAction::ColumnMoved { from_display: 0, to_display: 2 })
+        });
+        let ordered = up.iter().position(|a| matches!(a, DataGridAction::ColumnOrderChanged { .. }));
+        assert!(matches!((moved, ordered), (Some(m), Some(o)) if m < o), "{up:?}");
+        assert_eq!(order_changes(&out), vec![vec![1, 2, 0]]);
+        assert_eq!(header_clicks(&out), 0, "{out:?}");
+        assert_eq!(grid.sort(), None);
+        assert_eq!(grid.col_drop_marker(), None, "the bar outlived the drop");
+        assert_eq!(grid.col_order(), vec![1, 2, 0]);
+        assert_eq!(grid.col_widths(), vec![60.0, 80.0, 100.0]);
+        let cells = frame.draw(&mut cx, &mut grid, |_, _| {});
+        assert_eq!(drawn_columns(&cells), vec![(1, 60.0), (2, 80.0), (0, 100.0)]);
+    }
+
+    /// Four points of travel on a heading is a press, which sorts, and
+    /// moves nothing; and with `allow_col_reorder` off, the default, a
+    /// heading dragged all the way across is still only a press.
+    #[test]
+    fn a_heading_that_does_not_travel_or_may_not_move_is_only_pressed() {
+        for (allow, travel) in [(true, 4.0), (false, 200.0)] {
+            let mut cx = cx();
+            let mut grid = grid(&mut cx);
+            grid.allow_col_reorder = allow;
+            grid.sortable = true;
+            grid.set_col_widths(&mut cx, &[80.0, 80.0, 80.0]);
+            let mut frame = Frame::new(&mut cx, dvec2(300.0, 200.0));
+            frame.draw(&mut cx, &mut grid, |_, _| {});
+            let at = heading(&grid, 0);
+            let out = primary_drag(&mut cx, &mut grid, &[at, at + dvec2(travel, 0.0)]).concat();
+            assert_eq!(header_clicks(&out), 1, "allow {allow}: {out:?}");
+            assert!(order_changes(&out).is_empty(), "allow {allow}: {out:?}");
+            assert_eq!(grid.col_order(), vec![0, 1, 2]);
+            assert_eq!(grid.sort(), Some((0, true)));
+        }
+    }
+
+    /// The host puts the columns in an order of its own: the grid draws
+    /// them that way at once, the widths go with their columns, the
+    /// selection is cleared and nothing is raised. An order that does not
+    /// name every column once is refused, the order the grid already has
+    /// changes nothing, and their own order puts the columns back.
+    #[test]
+    fn the_host_sets_the_order_and_the_widths_go_with_their_columns() {
+        let mut cx = cx();
+        let mut grid = laid_out(&mut cx);
+        grid.set_col_widths(&mut cx, &[100.0, 60.0, 80.0]);
+        grid.set_selection(&mut cx, Some(GridSelection::single(2, 1)));
+        let out = raised(&mut cx, &mut grid, |cx, grid| {
+            assert!(grid.set_col_order(cx, &[2, 0, 1]));
+        });
+        assert!(out.is_empty(), "{out:?}");
+        assert_eq!(grid.col_order(), vec![2, 0, 1]);
+        assert_eq!(grid.display_to_data(0), 2);
+        assert_eq!(grid.col_widths(), vec![80.0, 100.0, 60.0]);
+        let measured: Vec<f64> = grid.vp.vis_cols.iter().map(|(_, _, w)| *w).collect();
+        assert_eq!(measured, vec![80.0, 100.0, 60.0], "the frame was not measured again");
+        assert_eq!(grid.selection(), None);
+
+        for refused in [&[0, 1][..], &[0, 0, 1], &[0, 1, 3], &[0, 1, 2, 3]] {
+            assert!(!grid.set_col_order(&mut cx, refused), "{refused:?}");
+            assert_eq!(grid.col_order(), vec![2, 0, 1], "{refused:?}");
+        }
+        grid.set_selection(&mut cx, Some(GridSelection::single(1, 1)));
+        assert!(grid.set_col_order(&mut cx, &[2, 0, 1]));
+        assert_eq!(grid.selection(), Some(GridSelection::single(1, 1)), "the same order cleared it");
+
+        assert!(grid.set_col_order(&mut cx, &[0, 1, 2]));
+        assert!(grid.col_order.is_none());
+        assert_eq!(grid.col_widths(), vec![100.0, 60.0, 80.0]);
+    }
+
+    /// Unmovable columns keep their place: a badge column first and a
+    /// column of controls last. Their headings do not drag, and a heading
+    /// between them dropped beyond either lands next to it instead.
+    #[test]
+    fn unmovable_columns_keep_their_place() {
+        let mut cx = cx();
+        let mut grid = grid(&mut cx);
+        grid.set_grid_size(20, 4);
+        grid.allow_col_reorder = true;
+        grid.set_unmovable_cols(vec![0, 3]);
+        grid.set_col_widths(&mut cx, &[40.0, 60.0, 60.0, 60.0]);
+        let mut frame = Frame::new(&mut cx, dvec2(300.0, 200.0));
+        frame.draw(&mut cx, &mut grid, |_, _| {});
+        let left_edge = grid.vp.data_rect.pos.x + 2.0;
+        let right_edge = grid.vp.data_rect.pos.x + 218.0;
+        assert_eq!(grid.hover_cursor(heading(&grid, 0)), MouseCursor::Default);
+        assert_eq!(grid.hover_cursor(heading(&grid, 1)), MouseCursor::Grab);
+
+        let badges = heading(&grid, 0);
+        let out = primary_drag(&mut cx, &mut grid, &[badges, dvec2(right_edge, 14.0)]).concat();
+        assert!(order_changes(&out).is_empty(), "the badge column moved: {out:?}");
+        assert_eq!(header_clicks(&out), 1);
+
+        let third = heading(&grid, 2);
+        let out = primary_drag(&mut cx, &mut grid, &[third, dvec2(left_edge, 14.0)]).concat();
+        assert_eq!(order_changes(&out), vec![vec![0, 2, 1, 3]], "dropped past the badges, it lands behind them");
+        frame.draw(&mut cx, &mut grid, |_, _| {});
+
+        let none = KeyModifiers::default();
+        let from = heading(&grid, 1);
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WindowId(1, 1)));
+        sent(&mut cx, &mut grid, mouse_down(from, MouseButton::PRIMARY, none));
+        sent(&mut cx, &mut grid, mouse_move(dvec2(right_edge, 14.0)));
+        let marker = grid.col_drop_marker().unwrap();
+        assert_eq!(marker.pos.x, grid.vp.data_rect.pos.x + 160.0 - 1.0, "the bar stops in front of the controls");
+        let out = sent(&mut cx, &mut grid, mouse_up(dvec2(right_edge, 14.0), MouseButton::PRIMARY, none));
+        cx.fingers.first_mouse_button = None;
+        assert_eq!(order_changes(&out), vec![vec![0, 1, 2, 3]], "dropped past the controls, it lands in front of them");
+    }
+
+    /// Widths waiting for columns the grid does not have, from a longer
+    /// list of widths or left when the columns were cut, stay where they
+    /// wait when the host orders the columns there are.
+    #[test]
+    fn an_order_leaves_the_widths_past_the_last_column_where_they_are() {
+        let mut cx = cx();
+        let mut grid = laid_out(&mut cx);
+        grid.set_col_widths(&mut cx, &[100.0, 60.0, 80.0, 70.0]);
+        assert!(grid.set_col_order(&mut cx, &[0, 2, 1]));
+        assert_eq!(grid.col_widths(), vec![100.0, 80.0, 60.0]);
+        assert_eq!(grid.col_width(3), 70.0, "the width waiting for a fourth column moved");
+
+        let mut grid = laid_out(&mut cx);
+        grid.set_grid_size(20, 4);
+        grid.set_col_widths(&mut cx, &[140.0, 120.0, 100.0, 70.0]);
+        grid.set_grid_size(20, 3);
+        assert!(grid.set_col_order(&mut cx, &[0, 2, 1]));
+        assert_eq!(grid.col_widths(), vec![140.0, 100.0, 120.0]);
+        assert_eq!(grid.col_width(3), 70.0, "the width the fourth column left moved");
     }
 }

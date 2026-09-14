@@ -96,6 +96,9 @@ script_mod! {
                 zebra_stripes: true
                 default_col_width: 150.0
                 default_row_height: 24.0
+                // A heading dragged along the headings moves its column;
+                // this page keeps the order.
+                allow_col_reorder: true
                 // A heading press sorts; this page does the sorting.
                 sortable: true
                 // Headings on the left, in a face of their own, the sorted
@@ -116,7 +119,9 @@ script_mod! {
                 color_header_text: theme.color_text_meta
                 color_selection: theme.color_selection
                 color_selection_border: theme.color_bevel_focus
-                color_drag_marker: theme.color_bevel_focus
+                // The bar a dragged heading drops at, in the accent so it
+                // stands out from the gridlines.
+                color_drag_marker: theme.color_primary
                 color_resize_guide: theme.color_bevel_focus
                 draw_cell +: {border_color: uniform(theme.color_bevel)}
                 draw_text +: {color: theme.color_text}
@@ -160,13 +165,16 @@ script_mod! {
         StoryNote{text: "Drag a row up or down the list and the rows move out of its way under the pointer; let go and it stays there. The grid moves nothing. It says where the carry began, and this page follows the pointer, asks the grid which row is level with it and where that row is drawn, and reorders its own lines."}
 
         StoryHeading{text: "A menu on the right button"}
-        StoryNote{text: "Right-click a row for a menu that moves it to the top or the bottom, or a heading for one that picks every row or none. The right button asks for a menu and does nothing else: the picks stay as they were until a menu row is chosen. Ctrl with the left button is still a click that adds or drops a pick."}
+        StoryNote{text: "Right-click a row for a menu that moves it to the top or the bottom, or a heading for one that picks every row or none or puts the columns back. The right button asks for a menu and does nothing else: the picks stay as they were until a menu row is chosen. Ctrl with the left button is still a click that adds or drops a pick."}
 
         StoryHeading{text: "Headings and the pointer"}
         StoryNote{text: "The headings sit on the left in a face of their own, and the one the list is sorted by is brighter than the rest. Press a heading to sort by it, again to turn it round, and a third time for the order the seeds were written in; carrying a row, or moving one from its menu, ends the sort. Over a row the pointer is a hand."}
 
         StoryHeading{text: "Tips on the headings"}
         StoryNote{text: "Rest the pointer on a heading and a tip says what its column holds. The grid reports the heading and its text the way a Tip wrapper reports a control, to the window's one TipLayer, which this page declares at its end."}
+
+        StoryHeading{text: "Moving columns"}
+        StoryNote{text: "Drag a heading along the others and a bar shows where the column will land; let go and it moves there, taking its width with it. Seed stays first, because the page tells the grid it is unmovable, and nothing can be dropped in front of it. The grid reports the new order and this page keeps it with the widths; Put the columns back, on the heading menu, hands the grid their own order again."}
 
         StoryHeading{text: "The first column takes what is left"}
         StoryNote{text: "The page sets every column's width at once from its draw loop, and the Seed column fills whatever the others leave, so the list always ends at its right edge however wide the page is. Drag a column edge and the page stops fitting: the widths stay where they were dragged for as long as the page is open."}
@@ -284,28 +292,44 @@ fn fit_seed_widths(data_width: f64) -> Vec<f64> {
     widths
 }
 
-/// The list's column widths, all kept here. They are fitted to the list
-/// until someone drags a column edge, and from then on they are what the
-/// edges were dragged to, for as long as the page is open. Keeping them
-/// past that is writing `by_hand` out and reading it back in.
-#[derive(Default, Debug)]
-struct ListWidths {
-    /// The widths the columns were dragged to, once one has been.
+/// The list's columns as they have been arranged, all kept here: the
+/// order they are drawn in and their widths. The widths are fitted to the
+/// list until someone drags a column edge, and from then on they are what
+/// the edges were dragged to. Both last as long as the page is open;
+/// keeping them past that is writing `order` and `by_hand` out and reading
+/// them back in.
+#[derive(Debug)]
+struct ListColumns {
+    /// The column drawn at each position, from the left.
+    order: Vec<usize>,
+    /// The width each column was dragged to, by column, once one has been.
     by_hand: Option<Vec<f64>>,
-    /// The widths last handed to the grid.
+    /// The widths last handed to the grid, from the left.
     pushed: Vec<f64>,
 }
 
-impl ListWidths {
-    /// What to hand the grid for a list `data_width` wide, or nothing when
-    /// it already has it. Asked on every draw, it hands over nothing while
-    /// an edge is dragged: the width fitted to has not changed, so the
-    /// drag is not undone under the pointer.
-    fn to_push(&mut self, data_width: f64) -> Option<Vec<f64>> {
-        let widths = match &self.by_hand {
+impl Default for ListColumns {
+    fn default() -> Self {
+        ListColumns {
+            order: (0..SEED_COLUMNS.len()).collect(),
+            by_hand: None,
+            pushed: Vec::new(),
+        }
+    }
+}
+
+impl ListColumns {
+    /// The widths to hand the grid for a list `data_width` wide, from the
+    /// left in the order the columns are drawn, or nothing when it already
+    /// has them. Asked on every draw, it hands over nothing while an edge
+    /// is dragged: the width fitted to has not changed, so the drag is not
+    /// undone under the pointer.
+    fn widths_to_push(&mut self, data_width: f64) -> Option<Vec<f64>> {
+        let by_column = match &self.by_hand {
             Some(by_hand) => by_hand.clone(),
             None => fit_seed_widths(data_width),
         };
+        let widths: Vec<f64> = self.order.iter().map(|&col| by_column[col]).collect();
         if widths == self.pushed {
             return None;
         }
@@ -313,10 +337,33 @@ impl ListWidths {
         Some(widths)
     }
 
-    /// An edge was dragged, and `widths` are the grid's now.
+    /// An edge was dragged, and `widths`, from the left, are the grid's now.
     fn dragged(&mut self, widths: Vec<f64>) {
-        self.pushed = widths.clone();
-        self.by_hand = Some(widths);
+        let mut by_column = vec![0.0; self.order.len()];
+        for (&col, &width) in self.order.iter().zip(&widths) {
+            by_column[col] = width;
+        }
+        self.pushed = widths;
+        self.by_hand = Some(by_column);
+    }
+
+    /// A heading was dropped somewhere else, and `order` is the grid's now.
+    fn moved(&mut self, order: Vec<usize>) {
+        if order.len() == self.order.len() {
+            self.order = order;
+        }
+    }
+
+    /// Every column back in its own place; the grid is handed the order on
+    /// the next draw.
+    fn put_back(&mut self) {
+        self.order = (0..self.order.len()).collect();
+    }
+
+    /// The columns named in the order they are drawn, for the log line.
+    fn said(&self) -> String {
+        let names: Vec<&str> = self.order.iter().map(|&col| SEED_COLUMNS[col]).collect();
+        format!("columns now {}", names.join(", "))
     }
 }
 
@@ -571,7 +618,7 @@ pub struct StoryDataGridList {
     #[rust]
     menu_item: Option<usize>,
     #[rust]
-    widths: ListWidths,
+    columns: ListColumns,
 }
 
 impl StoryDataGridList {
@@ -650,6 +697,9 @@ impl StoryDataGridList {
         } else if id == live_id!(pick_none) {
             self.picks.items.clear();
             Some("picked no rows".to_string())
+        } else if id == live_id!(columns_back) {
+            self.columns.put_back();
+            Some(self.columns.said())
         } else {
             None
         }
@@ -682,10 +732,15 @@ impl Widget for StoryDataGridList {
             grid.set_header_tips(SEED_TIPS.iter().map(|s| s.to_string()).collect());
             let lines = self.order().len();
             grid.set_grid_size(lines, SEED_COLUMNS.len());
+            // The seed names stay first. The order is this page's and is
+            // handed over on every draw; the one the grid already has
+            // changes nothing.
+            grid.set_unmovable_cols(vec![0]);
+            grid.set_col_order(cx, &self.columns.order);
             // Measured for this frame already, and set before the first
             // cell, so a list that changes width is fitted in the same
             // frame.
-            if let Some(widths) = self.widths.to_push(grid.data_width()) {
+            if let Some(widths) = self.columns.widths_to_push(grid.data_width()) {
                 grid.set_col_widths(cx, &widths);
             }
             while let Some(cell) = grid.next_cell(cx) {
@@ -779,9 +834,20 @@ fn data_grid_list_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
             DataGridAction::ColumnResized { .. } => {
                 let widths = grid.col_widths();
                 if let Some(mut inner) = host.borrow_mut::<StoryDataGridList>() {
-                    inner.widths.dragged(widths);
+                    inner.columns.dragged(widths);
                 }
                 root.label(cx, ids!(list.log)).set_text(cx, "column widths set by hand");
+            }
+            // A heading was dropped somewhere else: the grid has moved the
+            // column and its width, and the order is kept here from now on.
+            DataGridAction::ColumnOrderChanged { order } => {
+                let said = host.borrow_mut::<StoryDataGridList>().map(|mut inner| {
+                    inner.columns.moved(order);
+                    inner.columns.said()
+                });
+                if let Some(said) = said {
+                    root.label(cx, ids!(list.log)).set_text(cx, &said);
+                }
             }
             // The right button: a menu at the pointer, and nothing else.
             // The picks are left alone until a row of the menu is chosen.
@@ -806,6 +872,7 @@ fn data_grid_list_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
                     MenuRow::section(name),
                     MenuRow::new(live_id!(pick_all), "Pick every row"),
                     MenuRow::new(live_id!(pick_none), "Pick no rows"),
+                    MenuRow::new(live_id!(columns_back), "Put the columns back"),
                 ];
                 let at = Rect { pos: abs, size: dvec2(0.0, 0.0) };
                 root.menu_layer(cx, ids!(menus)).open(cx, live_id!(seed_heading), rows, at, MenuPlace::At);
@@ -956,7 +1023,7 @@ The consequence is the trap: **a `DataGrid` with no host behind it is not empty,
 
 ## What it does, and what is yours
 
-Its own: column and row headers, resizing a column or a row by dragging its edge, reordering columns by dragging a header (`allow_col_reorder`, off by default while both resize flags are on), the whole selection model — single cell, rectangle, row, column, everything — and keyboard navigation with arrows, the page keys, Home, End, and shift to extend.
+Its own: column and row headers, resizing a column or a row by dragging its edge, reordering columns by dragging a header (`allow_col_reorder`, off by default while both resize flags are on; the List page keeps the order it reports), the whole selection model — single cell, rectangle, row, column, everything — and keyboard navigation with arrows, the page keys, Home, End, and shift to extend.
 
 What a press selects is `selection:`. `GridSelectMode.Cells`, the default, is the spreadsheet described here. `GridSelectMode.Rows` picks whole rows with a press or an arrow key, and a heading press only sorts. `GridSelectMode.Off` selects nothing at all and still reports every press with its modifiers, for a list that keeps its own picks; the List page beside this one is that.
 
@@ -1042,7 +1109,7 @@ Both are measured against the last drawn frame and the scroll as it is now, and 
 
 ## A menu on the right button
 
-A secondary press on a cell raises `CellContextMenu { row, col, abs }`, and on a column heading `HeaderContextMenu { col, abs }`, with `abs` where it went down and `col` the data column. Only the secondary button asks: Ctrl with the primary button is a primary press, because that is how a list toggles its picks. The press selects nothing, sorts nothing and takes no keyboard focus, so a menu opened on a row finds the picks as they were; a secondary press while a row is being carried or a column dragged belongs to that gesture and asks for nothing. This page opens a `MenuLayer` menu at `abs`: on a row, moving it to either end; on a heading, picking every row or none.
+A secondary press on a cell raises `CellContextMenu { row, col, abs }`, and on a column heading `HeaderContextMenu { col, abs }`, with `abs` where it went down and `col` the data column. Only the secondary button asks: Ctrl with the primary button is a primary press, because that is how a list toggles its picks. The press selects nothing, sorts nothing and takes no keyboard focus, so a menu opened on a row finds the picks as they were; a secondary press while a row is being carried or a column dragged belongs to that gesture and asks for nothing. This page opens a `MenuLayer` menu at `abs`: on a row, moving it to either end; on a heading, picking every row or none, or putting the columns back in their own order.
 
 ## Headings and the pointer
 
@@ -1059,11 +1126,19 @@ This list declares all four: left-aligned headings in a bold face, the sorted on
 
 `set_header_tips(Vec<String>)` gives each column heading a tip, by data column as `set_col_labels` does, so a tip stays with its column when the column is dragged elsewhere. An empty string, or a column past the end of the list, has no tip. When the pointer comes to rest on a heading that has one, the grid raises `TipAction::HoverIn` with the text and the heading's rectangle, cut to the part that shows; when the pointer leaves that heading, for a heading without a tip, a cell or outside the grid, it raises `TipAction::HoverOut`. Those are the reports a `Tip` wrapper makes, and the window's one `TipLayer` does the dwell, the placement and the drawing, so a page with no `TipLayer` shows nothing. A grid given no tips raises neither. This page declares its `TipLayer` last.
 
+## Moving columns
+
+With `allow_col_reorder: true` a heading dragged past `drag_threshold` follows the pointer along the headings, and a bar across the headings and rows shows the gap it will drop into: in front of the heading under the pointer left of that heading's middle, behind it right of it. Dropped, the column moves there and takes its width with it. The grid raises `ColumnMoved { from_display, to_display }` and then `ColumnOrderChanged { order }`, where `order` is the data column drawn at each position from the left. A heading that travels less than the threshold is a press, and sorts as one.
+
+`set_unmovable_cols(Vec<usize>)` names data columns that keep their place: their headings do not drag, and no other column can be dropped on the far side of one, so a column of badges stays first and a column of controls stays last. This page keeps Seed first.
+
+The order is the host's to keep. `col_order()` reads it and `set_col_order(cx, &order)` puts it back: it must name every column once, or it is refused and changes nothing; widths go with their columns and a selection is cleared, as for a drop; the order the grid already has changes nothing, so it can be pushed on every draw; and like `set_col_widths` it lands in the frame it is called from. Changing the number of columns puts them back in their own order. This page keeps the order it is told with its widths, hands it back on every draw, and puts the columns back from the heading menu.
+
 ## Column widths set by the host
 
 `set_col_widths(cx, &[f64])` sets every column's width at once, in display order. Columns past the end of the list go back to `default_col_width`, and a width below `min_col_width` is raised to it. The grid measures the frame again straight away, so widths set from the draw loop before the first `next_cell` land in the frame being drawn, where one `set_col_width` lands in the next. `data_width()` is the width the columns share in that frame, and `col_widths()` reads every width back.
 
-This page keeps its widths in one place. Until an edge is dragged it fits them to `data_width()`, with the Seed column taking what the others leave. When `ColumnResized` arrives it keeps `col_widths()` and stops fitting. It hands the grid widths only when they differ from the last ones it handed over: pushed on every draw, the fit would put a dragged edge back under the pointer. The widths last as long as the page is open, and saving them would be writing that one value out and reading it back.
+This page keeps its widths in one place, with the column order, and by column rather than by position, so a width stays with its column wherever the column is dragged. Until an edge is dragged it fits them to `data_width()`, with the Seed column taking what the others leave. When `ColumnResized` arrives it keeps `col_widths()` and stops fitting. It hands the grid widths only when they differ from the last ones it handed over: pushed on every draw, the fit would put a dragged edge back under the pointer. The widths and the order last as long as the page is open, and saving them would be writing that one value out and reading it back.
 
 ## The outline
 
@@ -1284,15 +1359,40 @@ mod tests {
     /// the list is.
     #[test]
     fn a_dragged_edge_ends_the_fit() {
-        let mut widths = ListWidths::default();
-        assert_eq!(widths.to_push(700.0), Some(fit_seed_widths(700.0)));
-        assert_eq!(widths.to_push(700.0), None, "the same fit twice, or a drag undone");
-        assert_eq!(widths.to_push(800.0), Some(fit_seed_widths(800.0)));
+        let mut columns = ListColumns::default();
+        assert_eq!(columns.widths_to_push(700.0), Some(fit_seed_widths(700.0)));
+        assert_eq!(columns.widths_to_push(700.0), None, "the same fit twice, or a drag undone");
+        assert_eq!(columns.widths_to_push(800.0), Some(fit_seed_widths(800.0)));
         let dragged = vec![300.0, 80.0, 100.0, 70.0];
-        widths.dragged(dragged.clone());
-        assert_eq!(widths.to_push(800.0), None, "the grid already has the dragged widths");
-        assert_eq!(widths.to_push(500.0), None, "a narrower list fitted over a drag");
-        assert_eq!(widths.by_hand, Some(dragged));
+        columns.dragged(dragged.clone());
+        assert_eq!(columns.widths_to_push(800.0), None, "the grid already has the dragged widths");
+        assert_eq!(columns.widths_to_push(500.0), None, "a narrower list fitted over a drag");
+        assert_eq!(columns.by_hand, Some(dragged));
+    }
+
+    /// Widths belong to their columns. Moved, the columns are handed over
+    /// in their new places with their own widths; an edge dragged in that
+    /// order is kept for its column; and put back, every column is where
+    /// it started with the width it has now.
+    #[test]
+    fn widths_go_with_their_columns_wherever_they_are_drawn() {
+        let mut columns = ListColumns::default();
+        let fitted = fit_seed_widths(700.0);
+        columns.widths_to_push(700.0);
+        columns.moved(vec![0, 3, 1, 2]);
+        assert_eq!(columns.said(), "columns now Seed, Days, Kind, Sow");
+        assert_eq!(
+            columns.widths_to_push(700.0),
+            Some(vec![fitted[0], fitted[3], fitted[1], fitted[2]])
+        );
+        // Days, drawn second, dragged to 90.
+        columns.dragged(vec![fitted[0], 90.0, fitted[1], fitted[2]]);
+        assert_eq!(columns.by_hand, Some(vec![fitted[0], fitted[1], fitted[2], 90.0]));
+        columns.put_back();
+        assert_eq!(columns.order, vec![0, 1, 2, 3]);
+        assert_eq!(columns.widths_to_push(700.0), Some(vec![fitted[0], fitted[1], fitted[2], 90.0]));
+        columns.moved(vec![1, 0]);
+        assert_eq!(columns.order, vec![0, 1, 2, 3], "an order for other columns was kept");
     }
 
     fn line(y: f64, height: f64) -> Rect {
