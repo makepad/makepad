@@ -202,7 +202,7 @@ script_mod! {
         }
 
         StoryHeading{text: "Eight behind one button"}
-        StoryNote{text: "A set is not always three. The arc grows before two actions would touch, and in a window too small for it the actions go on round a second arc further out, the inner one filled first. Only the chip of the action under the pointer shows, straight out past the arcs. Later is switched off and is drawn dimmed. The anchors page has a set whose size goes from one to twelve."}
+        StoryNote{text: "A set is not always three. The arc grows before two actions would touch, but only as far as the furthest radius: past it, as in a window too small for the arc, the actions go on round a second arc further out, the inner one filled first, so eight rest on two arcs rather than one wide one. Only the chip of the action under the pointer shows, straight out past the arcs. Later is switched off and is drawn dimmed. The anchors page has a set whose size goes from one to twelve."}
         StoryRow{
             Screen{
                 height: 400.
@@ -335,7 +335,7 @@ script_mod! {
         }
 
         StoryHeading{text: "Any number of actions"}
-        StoryNote{text: "Twelve actions are declared on this set and Count shows the first so many; a hidden action leaves no gap. Pick an anchor and a layout, raise the count and make the window smaller. An arc that would leave the window goes on round a second arc further out, filling the inner one first, and a row or a column folds into a second line one step further in. Nothing scrolls and nothing shrinks. Once a line has folded, a chip shows only for the action under the pointer or with the focus, and it is carried out past the other lines so it covers none of them."}
+        StoryNote{text: "Twelve actions are declared on this set and Count shows the first so many; a hidden action leaves no gap. Pick an anchor and a layout, raise the count and make the window smaller. An arc that would leave the window goes on round a second arc further out, filling the inner one first, and so does an arc that would reach past Max radius, the furthest radius: lower it to bring the set in onto more arcs, or set it to 0 to let one arc grow as far as the window allows. A set no arcs inside Max radius can hold rests as near the button as its spacing allows, just past it. A row or a column folds into a second line one step further in. Nothing scrolls and nothing shrinks. Once a line has folded, a chip shows only for the action under the pointer or with the focus, and it is carried out past the other lines so it covers none of them."}
         StoryRow{
             // By its full name: the glob at the top was taken before this
             // file declared it.
@@ -573,7 +573,7 @@ The one action a screen exists for, as a round button pinned to a corner or an e
 
 `anchor` picks one of eight places, and the same choice decides which way the set opens: always into the container, away from the edges the button touches. `edge_margin` is read only on those edges. `pin_to` is the container the button is declared in or the whole window.
 
-`dial` lays the set out. `Radial` fans a quarter circle from a corner and a half circle from an edge, and the arc grows before two actions would touch. `Horizontal` and `Vertical` run from the button inward along their own axis; one with no inward run on its axis is centred on the button, one step in.
+`dial` lays the set out. `Radial` fans a quarter circle from a corner and a half circle from an edge, and the arc grows from `radial_radius` before two actions would touch, but no further than `radial_max_radius`, the furthest radius: a set that would reach past it goes on round more arcs inside it, so eight from a corner rest on two arcs inside 200 rather than one 252 out, and 0 lifts the limit. A set no arcs inside it can hold rests as near the button as its spacing allows, just past it. `Horizontal` and `Vertical` run from the button inward along their own axis; one with no inward run on its axis is centred on the button, one step in.
 
 A set can hold any number of actions, and none leaves the window. An arc that would leave it is already as wide as its anchor lets it open, so the actions go on round a second arc further out, the inner arc filled first; a row or a column folds into a second line one step further in. Nothing scrolls and nothing shrinks. Only a window too small for the whole set is overrun.
 
@@ -599,6 +599,7 @@ Keyboard: Return or Space on the button opens the set and moves focus to the fir
             Control { label: "Size", target: "subject", kind: ControlKind::Number { prop: "size", min: 40., max: 96., step: 4., default: 56. } },
             Control { label: "Item size", target: "subject", kind: ControlKind::Number { prop: "item_size", min: 24., max: 64., step: 2., default: 40. } },
             Control { label: "Gap", target: "subject", kind: ControlKind::Number { prop: "item_gap", min: 0., max: 32., step: 1., default: 12. } },
+            Control { label: "Max radius", target: "subject", kind: ControlKind::Number { prop: "radial_max_radius", min: 0., max: 400., step: 2., default: 200. } },
             Control { label: "Enter ease", target: "subject", kind: ControlKind::Choice { prop: "enter_ease", options: EASES, default: 3 } },
             Control { label: "Enter time", target: "subject", kind: ControlKind::Number { prop: "enter_secs", min: 0., max: 0.6, step: 0.01, default: 0.2 } },
             Control { label: "Exit ease", target: "subject", kind: ControlKind::Choice { prop: "exit_ease", options: EASES, default: 2 } },
@@ -629,7 +630,7 @@ A pinned set holds no pointer grab and ignores Escape and presses outside, so it
 
 ## Any number of actions
 
-The set below declares twelve actions; Count shows the first so many by setting `visible` on the rest, and the set closes up around a hidden one. Anchor, Layout, Labels and Gap drive the same set. The layout keeps every action inside the window and no two actions' squares overlapping: an arc grows by the chord rule, and past it until no two squares meet, and once it would leave the window goes on round a second arc a step further out with the inner arc filled first, and a row or a column folds into lines a step further in, the lines from the middle of a side centred on the button. Make the window small to see both. On an arc the arrows walk the actions in order, round the inner arc and then the outer; on folded lines they move along a line and across to the next.",
+The set below declares twelve actions; Count shows the first so many by setting `visible` on the rest, and the set closes up around a hidden one. Anchor, Layout, Labels, Gap and Max radius drive the same set. The layout keeps every action inside the window and no two actions' squares overlapping: an arc grows by the chord rule, and past it until no two squares meet, and once it would leave the window goes on round a second arc a step further out with the inner arc filled first, and a row or a column folds into lines a step further in, the lines from the middle of a side centred on the button. Make the window small to see both. An arc is also held inside `radial_max_radius`, the furthest radius, 200 by default, the least that holds all twelve from a corner: with it, eight from a corner rest on an arc of five and one of three a step further out, and twelve on arcs of five and seven, where the window alone would have let eight spread along one arc 252 out and twelve along one 396 out. Lower Max radius and a set no arcs inside it can hold is neither shrunk nor cut: it rests on the arcs of the least room past it that holds it, so lowering it never moves an action further out. 0 is no limit. On an arc the arrows walk the actions in order, round the inner arc and then the outer; on folded lines they move along a line and across to the next.",
         subject: "driven",
         feature: None,
         controls: &[
@@ -638,6 +639,7 @@ The set below declares twelve actions; Count shows the first so many by setting 
             Control { label: "Layout", target: "driven", kind: ControlKind::Choice { prop: "dial", options: LAYOUTS, default: 0 } },
             Control { label: "Labels", target: "driven", kind: ControlKind::Choice { prop: "labels", options: LABELS, default: 0 } },
             Control { label: "Gap", target: "driven", kind: ControlKind::Number { prop: "item_gap", min: 0., max: 32., step: 1., default: 12. } },
+            Control { label: "Max radius", target: "driven", kind: ControlKind::Number { prop: "radial_max_radius", min: 0., max: 400., step: 2., default: 200. } },
         ],
         on_actions: Some(anchors_actions),
     },
@@ -820,6 +822,31 @@ mod tests {
             let set = set.borrow::<FloatingAction>().expect("the subject");
             let own = if prop == "enter_secs" { set.enter_secs } else { set.exit_secs };
             assert!((own - default).abs() < 1e-9, "{label} starts on the set's own time");
+        }
+    }
+
+    /// Both pages offer Max radius on their set, writing the furthest
+    /// radius and starting on the one the set already has, so the panel
+    /// never shows a limit the set is not held to.
+    #[test]
+    fn the_max_radius_controls_start_on_the_sets_own_radius() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        load(&mut cx);
+        for story in STORIES {
+            let control = story
+                .controls
+                .iter()
+                .find(|control| control.label == "Max radius")
+                .unwrap_or_else(|| panic!("{}: no Max radius control", story.key));
+            let ControlKind::Number { prop, min, default, .. } = &control.kind else {
+                panic!("{}: Max radius is a number", story.key);
+            };
+            assert_eq!(*prop, "radial_max_radius");
+            assert_eq!(*min, 0.0, "{}: 0, no limit, is on the control", story.key);
+            let page = build(&mut cx, story.dsl);
+            let set = page.widget(&cx, &id_path(control.target));
+            let set = set.borrow::<FloatingAction>().expect("the target is a floating action");
+            assert_eq!(set.radial_max_radius, *default, "{}: Max radius starts on the set's own", story.key);
         }
     }
 }
