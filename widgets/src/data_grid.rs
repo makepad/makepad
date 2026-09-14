@@ -578,6 +578,9 @@ enum Interact {
         travelled: bool,
         /// The press is carrying its row out (`row_drag`).
         carrying: bool,
+        /// The scroll as the press went down, which a `drag_scrolling`
+        /// press moves away from by the pointer's travel.
+        scroll_at_press: DVec2,
     },
 }
 
@@ -713,6 +716,13 @@ pub struct DataGrid {
     /// for a list whose rows are dragged somewhere else. Off by default.
     #[live(false)]
     row_drag: bool,
+    /// A press on a cell that travels past `drag_threshold` scrolls the
+    /// grid with the pointer, as a finger scrolls a list on a phone,
+    /// instead of dragging out a selection or carrying its row: the point
+    /// pressed stays under the pointer. It is no click, so it raises no
+    /// `CellReleased`. Off by default.
+    #[live(false)]
+    drag_scrolling: bool,
     #[live(100usize)]
     rows: usize,
     #[live(26usize)]
@@ -1948,6 +1958,21 @@ impl DataGrid {
         self.scroll
     }
 
+    /// `scroll` held to what there is to scroll: from nothing to the rows
+    /// and columns past the data area, as the frame last drawn measured it.
+    fn scroll_clamped(&self, scroll: DVec2) -> DVec2 {
+        let data = self.vp.data_rect.size;
+        let max_x = (self.col_sizes.total(self.cols) - data.x).max(0.0);
+        let max_y = (self.row_sizes.total(self.rows) - data.y).max(0.0);
+        dvec2(scroll.x.clamp(0.0, max_x), scroll.y.clamp(0.0, max_y))
+    }
+
+    /// Turn `drag_scrolling` on or off from code, for a host whose list
+    /// scrolls under a finger in one layout and not in another.
+    pub fn set_drag_scrolling(&mut self, on: bool) {
+        self.drag_scrolling = on;
+    }
+
     /// (visible rows, visible cols) from the last drawn frame.
     pub fn visible_counts(&self) -> (usize, usize) {
         (self.vp.row1 - self.vp.row0.min(self.vp.row1), self.vp.vis_cols.len())
@@ -2384,8 +2409,9 @@ impl DataGrid {
     ) {
         let uid = self.uid;
         // With the selection off there is nothing to select and nothing to
-        // rubber-band, and a row that can be carried never rubber-bands:
-        // the press is held only to tell a click from a drag.
+        // rubber-band, and a row that can be carried, or a grid dragged to
+        // scroll, never rubber-bands: the press is held only to tell a
+        // click from a drag.
         let selects = self.selection != GridSelectMode::Off;
         if selects {
             self.select_cell(cx, row, display_col, modifiers.shift);
@@ -2395,9 +2421,10 @@ impl DataGrid {
             display_col,
             down_abs: abs,
             modifiers,
-            rubber_band: selects && !self.row_drag,
+            rubber_band: selects && !self.row_drag && !self.drag_scrolling,
             travelled: false,
             carrying: false,
+            scroll_at_press: self.scroll,
         };
         let col = self.display_to_data(display_col);
         cx.widget_action(
@@ -2427,12 +2454,14 @@ impl DataGrid {
     }
 
     /// The pointer moved while a cell was pressed. Past `drag_threshold`
-    /// the press stops being a click; with `row_drag` on it starts
-    /// carrying its row, once, and otherwise it drags out the selection as
+    /// the press stops being a click. With `drag_scrolling` on it scrolls
+    /// the grid by the pointer's travel; with `row_drag` on it starts
+    /// carrying its row, once; and otherwise it drags out the selection as
     /// a press always has.
     fn move_cell_press(&mut self, cx: &mut Cx, abs: DVec2) {
         let threshold = self.drag_threshold;
         let row_drag = self.row_drag;
+        let drag_scrolling = self.drag_scrolling;
         let Interact::CellPress {
             row,
             display_col,
@@ -2441,6 +2470,7 @@ impl DataGrid {
             rubber_band,
             travelled,
             carrying,
+            scroll_at_press,
         } = &mut self.interact
         else {
             return;
@@ -2450,6 +2480,20 @@ impl DataGrid {
         }
         if (abs - *down_abs).length() > threshold {
             *travelled = true;
+        }
+        if drag_scrolling {
+            // Measured from where the press went down, not from where it
+            // passed the threshold, so the point pressed stays under the
+            // pointer.
+            let target = travelled.then(|| *scroll_at_press - (abs - *down_abs));
+            if let Some(target) = target {
+                let scroll = self.scroll_clamped(target);
+                if scroll != self.scroll {
+                    self.scroll = scroll;
+                    self.area.redraw(cx);
+                }
+            }
+            return;
         }
         if row_drag {
             if *travelled && *row < self.rows {
@@ -3186,6 +3230,13 @@ impl DataGridRef {
     /// See [`DataGrid::scroll_pos`].
     pub fn scroll_pos(&self) -> DVec2 {
         self.borrow().map(|inner| inner.scroll_pos()).unwrap_or_default()
+    }
+
+    /// See [`DataGrid::set_drag_scrolling`].
+    pub fn set_drag_scrolling(&self, on: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_drag_scrolling(on);
+        }
     }
 
     /// The sort a heading press just asked for, if it changed this pass.
@@ -4221,6 +4272,35 @@ mod tests {
         })
     }
 
+    /// A primary drag along `path` through the grid's own pointer
+    /// handling: down at the first point, a move to each of the rest, and
+    /// up at the last, with the button recorded as held in between the way
+    /// the platform records it. What each event raised, in order.
+    fn primary_drag(cx: &mut Cx, grid: &mut DataGrid, path: &[DVec2]) -> Vec<Vec<DataGridAction>> {
+        let none = KeyModifiers::default();
+        let (first, last) = (path[0], path[path.len() - 1]);
+        let mut out = Vec::new();
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WindowId(1, 1)));
+        out.push(sent(cx, grid, mouse_down(first, MouseButton::PRIMARY, none)));
+        for at in &path[1..] {
+            out.push(sent(cx, grid, mouse_move(*at)));
+        }
+        out.push(sent(cx, grid, mouse_up(last, MouseButton::PRIMARY, none)));
+        cx.fingers.first_mouse_button = None;
+        out
+    }
+
+    fn mouse_move(abs: DVec2) -> Event {
+        Event::MouseMove(MouseMoveEvent {
+            abs,
+            lock_delta: DVec2::default(),
+            window_id: WindowId(1, 1),
+            modifiers: KeyModifiers::default(),
+            time: 0.0,
+            handled: std::cell::Cell::new(Area::Empty),
+        })
+    }
+
     /// What one pointer event raised, with the key focus it asked for
     /// settled the way the event loop settles it between events.
     fn sent(cx: &mut Cx, grid: &mut DataGrid, event: Event) -> Vec<DataGridAction> {
@@ -4472,5 +4552,85 @@ mod tests {
             grid.hover_tip(cx, None);
         });
         assert!(out.is_empty(), "{out:?}");
+    }
+
+    fn selections(actions: &[DataGridAction]) -> usize {
+        actions
+            .iter()
+            .filter(|a| matches!(a, DataGridAction::SelectionChanged { .. }))
+            .count()
+    }
+
+    /// With `drag_scrolling` a press that travels scrolls the grid by the
+    /// travel, both ways, so the point pressed stays under the pointer. It
+    /// stops at what there is to scroll, drags out no selection, carries
+    /// no row even in a grid whose rows can be carried, and coming up is
+    /// no click.
+    #[test]
+    fn a_drag_to_scroll_moves_the_grid_by_the_travel_and_nothing_else() {
+        let mut cx = cx();
+        let mut grid = laid_out(&mut cx);
+        grid.drag_scrolling = true;
+        grid.row_drag = true;
+        let at = middle(&grid, 5, 1);
+        grid.press_cell(&mut cx, 5, 1, at, KeyModifiers::default(), 1);
+        let pressed = grid.selection();
+        assert!(pressed.is_some(), "the press itself still selects");
+        // 300 by 200 with row numbers and headings: 248 points across 288
+        // of columns and 172 down 520 of rows.
+        let (max_x, max_y) = (288.0 - 248.0, 520.0 - 172.0);
+        let out = raised(&mut cx, &mut grid, |cx, grid| {
+            grid.move_cell_press(cx, at + dvec2(0.0, -4.0));
+            assert_eq!(grid.scroll, DVec2::default(), "four points scrolled");
+            let travelled = at + dvec2(-30.0, -60.0);
+            grid.move_cell_press(cx, travelled);
+            assert_eq!(grid.scroll, dvec2(30.0, 60.0));
+            assert_eq!(grid.row_at(travelled), Some(5), "the row pressed left the pointer");
+            grid.move_cell_press(cx, at + dvec2(-500.0, -1000.0));
+            assert_eq!(grid.scroll, dvec2(max_x, max_y), "scrolled past the end");
+            grid.move_cell_press(cx, at + dvec2(0.0, 10.0));
+            assert_eq!(grid.scroll, DVec2::default(), "scrolled before the start");
+            grid.release_cell_press(cx, at, KeyModifiers::default());
+        });
+        assert_eq!(selections(&out), 0, "{out:?}");
+        assert!(carried(&out).is_empty(), "{out:?}");
+        assert!(released(&out).is_empty(), "{out:?}");
+        assert_eq!(grid.selection(), pressed);
+
+        // A press that stays inside the threshold is still a click.
+        let out = raised(&mut cx, &mut grid, |cx, grid| {
+            grid.press_cell(cx, 2, 0, at, KeyModifiers::default(), 1);
+            grid.move_cell_press(cx, at + dvec2(4.0, 0.0));
+            grid.release_cell_press(cx, at + dvec2(4.0, 0.0), KeyModifiers::default());
+        });
+        assert_eq!(released(&out).len(), 1, "{out:?}");
+        assert_eq!(grid.scroll, DVec2::default());
+    }
+
+    /// The same through the grid's own pointer handling, and off by
+    /// default: without the flag the same drag drags out a selection and
+    /// leaves the view where it was.
+    #[test]
+    fn a_drag_on_a_drawn_grid_scrolls_only_when_asked() {
+        for drag_scrolling in [false, true] {
+            let mut cx = cx();
+            let mut grid = grid(&mut cx);
+            let mut frame = Frame::new(&mut cx, dvec2(300.0, 200.0));
+            frame.draw(&mut cx, &mut grid, |_, _| {});
+            grid.set_drag_scrolling(drag_scrolling);
+            let at = middle(&grid, 5, 1);
+            let up = at + dvec2(0.0, -52.0);
+            let out = primary_drag(&mut cx, &mut grid, &[at, up]);
+            let out = out[1..].concat();
+            if drag_scrolling {
+                assert_eq!(grid.scroll, dvec2(0.0, 52.0));
+                assert_eq!(selections(&out), 0, "{out:?}");
+                assert_eq!(grid.selection(), Some(GridSelection::single(5, 1)));
+            } else {
+                assert_eq!(grid.scroll, DVec2::default());
+                let sel = grid.selection().expect("the drag selected nothing");
+                assert_eq!((sel.anchor, sel.head), ((5, 1), (3, 1)));
+            }
+        }
     }
 }
