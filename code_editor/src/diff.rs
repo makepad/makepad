@@ -196,14 +196,14 @@ pub(crate) fn prepare(
     old_text: &str,
     new_text: &str,
 ) -> Result<PreparedDiffDocument, PrepareDiffError> {
-    prepare_for_language(specs, old_text, new_text, makepad_code_language::LanguageId::Rust)
+    prepare_for_detection(specs, old_text, new_text, makepad_code_language::detect_path("source.rs", None))
 }
 
-pub(crate) fn prepare_for_language(
+pub(crate) fn prepare_for_detection(
     specs: &[DiffRowSpec],
     old_text: &str,
     new_text: &str,
-    language: makepad_code_language::LanguageId,
+    detection: makepad_code_language::Detection,
 ) -> Result<PreparedDiffDocument, PrepareDiffError> {
     let old = source_lines(old_text);
     let new = source_lines(new_text);
@@ -263,8 +263,8 @@ pub(crate) fn prepare_for_language(
         return Err(PrepareDiffError::IncompleteEndpoints);
     }
     // Tokenize the endpoints independently, never the combined display stream.
-    let old_document = CodeDocument::prepare_cancellable_for_language(
-        language,
+    let old_document = CodeDocument::prepare_cancellable_for_detection(
+        detection,
         Text::from_display_lines(
             old.iter()
                 .map(|line| old_text[line.bytes.clone()].to_owned())
@@ -273,8 +273,8 @@ pub(crate) fn prepare_for_language(
         &|| false,
     )
     .expect("non-cancellable diff preparation");
-    let new_document = CodeDocument::prepare_cancellable_for_language(
-        language,
+    let new_document = CodeDocument::prepare_cancellable_for_detection(
+        detection,
         Text::from_display_lines(
             new.iter()
                 .map(|line| new_text[line.bytes.clone()].to_owned())

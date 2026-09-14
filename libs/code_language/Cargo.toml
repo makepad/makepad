@@ -8,3 +8,6 @@ license = "MIT OR Apache-2.0"
 [lib]
 name = "makepad_code_language"
 path = "src/lib.rs"
+
+[dependencies]
+pulldown-cmark = { path = "../pulldown-cmark", default-features = false }

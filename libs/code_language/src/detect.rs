@@ -3,12 +3,13 @@
 
 use crate::id::{Detection, DetectionSource, Dialect, LanguageId};
 
-/// Extensions that belong in a mixed-language source inventory. Includes
-/// languages without a compiled-in frontend (Python) so they remain visible.
+/// Extensions that belong in a mixed-language source inventory.
 pub fn inventory_extensions() -> &'static [&'static str] {
     &[
         "rs", "toml", "cc", "cpp", "cxx", "c++", "h", "hh", "hpp", "hxx", "inl", "ipp", "tpp", "c",
-        "m", "mm", "py",
+        "m", "mm", "py", "js", "mjs", "cjs", "jsx", "ts", "mts", "cts", "tsx", "cs", "csx", "html",
+        "htm", "xhtml", "css", "pyi", "pyw", "java", "splash", "xml", "xsd", "xsl", "xslt", "plist",
+        "svg", "md", "markdown",
     ]
 }
 
@@ -36,25 +37,15 @@ fn dialect(language: LanguageId, name: &'static str) -> Dialect {
 /// caller already has a bounded prefix.
 pub fn detect_path(path: &str, bytes: Option<&[u8]>) -> Detection {
     let ext = extension_of(path);
-    let ext_l = if ext.bytes().all(|b| b.is_ascii()) {
-        let mut buf = [0u8; 8];
-        let n = ext.len().min(8);
-        for (i, b) in ext.bytes().take(n).enumerate() {
-            buf[i] = b.to_ascii_lowercase();
-        }
-        // compared via str from the original when ascii
-        Some(ext)
-    } else {
-        None
-    };
-    let lower_eq = |want: &str| {
-        ext.len() == want.len()
-            && ext
-                .bytes()
-                .zip(want.bytes())
-                .all(|(a, b)| a.eq_ignore_ascii_case(&b))
-    };
-    let _ = (ext_l, lower_eq);
+    // `*.d.ts` is TypeScript dialect "dts"; checked before the generic `.ts` match.
+    if filename_ends_ignore(path, ".d.ts") {
+        return Detection {
+            language: LanguageId::TypeScript,
+            dialect: dialect(LanguageId::TypeScript, "dts"),
+            source: DetectionSource::Extension,
+            note: "typescript declaration file",
+        };
+    }
 
     if eq_ignore(ext, "rs") {
         return Detection {
@@ -130,12 +121,148 @@ pub fn detect_path(path: &str, bytes: Option<&[u8]>) -> Detection {
             note: "objective-c++ source",
         };
     }
-    if eq_ignore(ext, "py") {
+    if eq_ignore(ext, "pyi") {
+        return Detection {
+            language: LanguageId::Python,
+            dialect: dialect(LanguageId::Python, "stub"),
+            source: DetectionSource::Extension,
+            note: "python stub",
+        };
+    }
+    if eq_ignore(ext, "py") || eq_ignore(ext, "pyw") {
         return Detection {
             language: LanguageId::Python,
             dialect: Dialect::default_for(LanguageId::Python),
             source: DetectionSource::Extension,
-            note: "python source; no frontend is compiled in",
+            note: "python source",
+        };
+    }
+    if eq_ignore(ext, "js") || eq_ignore(ext, "mjs") || eq_ignore(ext, "cjs") {
+        return Detection {
+            language: LanguageId::JavaScript,
+            dialect: Dialect::default_for(LanguageId::JavaScript),
+            source: DetectionSource::Extension,
+            note: "javascript source",
+        };
+    }
+    if eq_ignore(ext, "jsx") {
+        return Detection {
+            language: LanguageId::JavaScript,
+            dialect: dialect(LanguageId::JavaScript, "jsx"),
+            source: DetectionSource::Extension,
+            note: "javascript jsx",
+        };
+    }
+    if eq_ignore(ext, "ts") || eq_ignore(ext, "mts") || eq_ignore(ext, "cts") {
+        return Detection {
+            language: LanguageId::TypeScript,
+            dialect: Dialect::default_for(LanguageId::TypeScript),
+            source: DetectionSource::Extension,
+            note: "typescript source",
+        };
+    }
+    if eq_ignore(ext, "tsx") {
+        return Detection {
+            language: LanguageId::TypeScript,
+            dialect: dialect(LanguageId::TypeScript, "tsx"),
+            source: DetectionSource::Extension,
+            note: "typescript tsx",
+        };
+    }
+    if eq_ignore(ext, "cs") {
+        return Detection {
+            language: LanguageId::CSharp,
+            dialect: Dialect::default_for(LanguageId::CSharp),
+            source: DetectionSource::Extension,
+            note: "csharp source",
+        };
+    }
+    if eq_ignore(ext, "csx") {
+        return Detection {
+            language: LanguageId::CSharp,
+            dialect: dialect(LanguageId::CSharp, "script"),
+            source: DetectionSource::Extension,
+            note: "csharp script",
+        };
+    }
+    if eq_ignore(ext, "html") || eq_ignore(ext, "htm") {
+        return Detection {
+            language: LanguageId::Html,
+            dialect: Dialect::default_for(LanguageId::Html),
+            source: DetectionSource::Extension,
+            note: "html document",
+        };
+    }
+    if eq_ignore(ext, "xhtml") {
+        return Detection {
+            language: LanguageId::Html,
+            dialect: dialect(LanguageId::Html, "xhtml"),
+            source: DetectionSource::Extension,
+            note: "xhtml document",
+        };
+    }
+    if eq_ignore(ext, "css") {
+        return Detection {
+            language: LanguageId::Css,
+            dialect: Dialect::default_for(LanguageId::Css),
+            source: DetectionSource::Extension,
+            note: "css stylesheet",
+        };
+    }
+    if filename_ends_ignore(path, "module-info.java") {
+        let name = path.rsplit('/').next().unwrap_or(path);
+        if name.len() == "module-info.java".len() {
+            return Detection {
+                language: LanguageId::Java,
+                dialect: dialect(LanguageId::Java, "module"),
+                source: DetectionSource::Extension,
+                note: "java module descriptor",
+            };
+        }
+    }
+    if eq_ignore(ext, "java") {
+        return Detection {
+            language: LanguageId::Java,
+            dialect: Dialect::default_for(LanguageId::Java),
+            source: DetectionSource::Extension,
+            note: "java source",
+        };
+    }
+    if eq_ignore(ext, "splash") {
+        return Detection {
+            language: LanguageId::Splash,
+            dialect: Dialect::default_for(LanguageId::Splash),
+            source: DetectionSource::Extension,
+            note: "splash script",
+        };
+    }
+    if eq_ignore(ext, "xml")
+        || eq_ignore(ext, "xsd")
+        || eq_ignore(ext, "xsl")
+        || eq_ignore(ext, "xslt")
+        || eq_ignore(ext, "plist")
+    {
+        return Detection {
+            language: LanguageId::Xml,
+            dialect: Dialect::default_for(LanguageId::Xml),
+            source: DetectionSource::Extension,
+            note: "xml document",
+        };
+    }
+    if eq_ignore(ext, "svg") {
+        return Detection {
+            language: LanguageId::Svg,
+            dialect: Dialect::default_for(LanguageId::Svg),
+            source: DetectionSource::Extension,
+            note: "svg document (source)",
+        };
+    }
+    if eq_ignore(ext, "md") || eq_ignore(ext, "markdown") {
+        return Detection {
+            language: LanguageId::Markdown,
+            dialect: Dialect::default_for(LanguageId::Markdown),
+            source: DetectionSource::Extension,
+            note: "markdown document",
         };
     }
     if let Some(bytes) = bytes {
@@ -148,6 +275,17 @@ pub fn detect_path(path: &str, bytes: Option<&[u8]>) -> Detection {
 
 fn eq_ignore(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.bytes().zip(b.bytes()).all(|(x, y)| x.eq_ignore_ascii_case(&y))
+}
+
+fn filename_ends_ignore(path: &str, suffix: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let nb = name.as_bytes();
+    let sb = suffix.as_bytes();
+    nb.len() >= sb.len()
+        && nb[nb.len() - sb.len()..]
+            .iter()
+            .zip(sb)
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
 }
 
 /// Bounded content detection used only when the filename is not decisive.
@@ -174,6 +312,10 @@ pub fn is_cpp_family(language: LanguageId) -> bool {
     )
 }
 
+pub fn is_script_family(language: LanguageId) -> bool {
+    matches!(language, LanguageId::JavaScript | LanguageId::TypeScript)
+}
+
 pub fn has_compiled_frontend(language: LanguageId) -> bool {
     matches!(
         language,
@@ -183,5 +325,22 @@ pub fn has_compiled_frontend(language: LanguageId) -> bool {
             | LanguageId::C
             | LanguageId::ObjectiveC
             | LanguageId::ObjectiveCpp
+            | LanguageId::Python
+            | LanguageId::JavaScript
+            | LanguageId::TypeScript
+            | LanguageId::CSharp
+            | LanguageId::Html
+            | LanguageId::Css
+            | LanguageId::Java
+    )
+}
+
+/// Text formats that are inventory-eligible and have a tokens-only frontend.
+/// Distinct from [`has_compiled_frontend`]: these languages produce tokens and
+/// line summaries but no declarations, imports, calls or joins.
+pub fn is_text_format(language: LanguageId) -> bool {
+    matches!(
+        language,
+        LanguageId::Splash | LanguageId::Xml | LanguageId::Svg | LanguageId::Markdown
     )
 }

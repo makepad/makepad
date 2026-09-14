@@ -60,9 +60,11 @@ use current source for API signatures and working examples.
   commit the exact eligible source to `local`, release binary build, existing
   native tests, then launch. Record the checkpoint hash with the binary and
   its evidence. Reuse bounded worktrees; never create one per build.
-- Agents may code the next revision while its previous app is running. The
-  next compilation/check waits until the person closes that flow's app and
-  Studio observes its exit. Standalone evaluations obey the same gate.
+- Agents may code, check, and build the next revision while its previous app
+  is running. When the replacement is ready, gracefully close and restart
+  that workflow's app without asking the user to close it. Verify the old
+  process exits and launch the replacement with the same workspace and state.
+  This applies to Studio flows and standalone evaluations.
 - A validated revision requires `cargo check` for its supported platforms with
   zero warnings/errors, the existing native tests on the current host, and a
   release build/runtime check when applicable. Use the repository's actual
@@ -115,8 +117,10 @@ use current source for API signatures and working examples.
 ## App ownership, focus, and screenshots
 
 - Launch any app you intend to inspect or drive with `--remote`.
-- Never stop, drive, or replace an instance the user is running. Before a
-  fresh launch, gracefully close only older instances you launched.
+- Do not drive or stop unrelated user instances. For an app in the active
+  development workflow, close and restart it when the replacement is ready;
+  no separate user-close confirmation is required. Before a fresh launch,
+  gracefully close the previous workflow instance and verify its exit.
 - Remote windows stay visible but unfocused. Do not activate them or use
   `MAKEPAD_FOCUS=1` unless the user explicitly asks to bring one forward.
 - Subagent verification runs use `MAKEPAD_HIDE_WINDOWS=1 <bin> --remote`.

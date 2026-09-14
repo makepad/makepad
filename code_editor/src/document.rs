@@ -47,8 +47,7 @@ impl CodeDocument {
     /// Path-aware preparation for file-backed callers. Text-only `prepare`
     /// remains a Rust-default wrapper.
     pub fn prepare_for_path(path: &str, text: Text) -> PreparedDocument {
-        let language = makepad_code_language::detect_path(path, None).language;
-        Self::prepare_cancellable_for_language(language, text, &|| false)
+        Self::prepare_cancellable_for_path(path, text, &|| false)
             .expect("non-cancellable preparation")
     }
 
@@ -57,14 +56,37 @@ impl CodeDocument {
         text: Text,
         cancel: &impl Fn() -> bool,
     ) -> Result<PreparedDocument, crate::tokenizer::TokenizeCancelled> {
-        let language = makepad_code_language::detect_path(path, None).language;
-        Self::prepare_cancellable_for_language(language, text, cancel)
+        Self::prepare_cancellable_for_detection(
+            makepad_code_language::detect_path(path, None),
+            text,
+            cancel,
+        )
+    }
+
+    pub fn prepare_cancellable_for_detection(
+        detection: makepad_code_language::Detection,
+        text: Text,
+        cancel: &impl Fn() -> bool,
+    ) -> Result<PreparedDocument, crate::tokenizer::TokenizeCancelled> {
+        Self::prepare_cancellable_with(text, cancel, |line_count| {
+            Tokenizer::for_detection(detection, line_count)
+        })
     }
 
     pub fn prepare_cancellable_for_language(
         language: makepad_code_language::LanguageId,
         text: Text,
         cancel: &impl Fn() -> bool,
+    ) -> Result<PreparedDocument, crate::tokenizer::TokenizeCancelled> {
+        Self::prepare_cancellable_with(text, cancel, |line_count| {
+            Tokenizer::for_language(language, line_count)
+        })
+    }
+
+    fn prepare_cancellable_with(
+        text: Text,
+        cancel: &impl Fn() -> bool,
+        make_tokenizer: impl FnOnce(usize) -> Tokenizer,
     ) -> Result<PreparedDocument, crate::tokenizer::TokenizeCancelled> {
         if cancel() { return Err(crate::tokenizer::TokenizeCancelled); }
         let text = if text.as_lines().is_empty() {
@@ -80,7 +102,7 @@ impl CodeDocument {
             block_inlays: Vec::new(),
         };
         update_indent_state(&text, &mut layout.indent_state);
-        let mut tokenizer = Tokenizer::for_language(language, line_count);
+        let mut tokenizer = make_tokenizer(line_count);
         tokenizer.update_cancellable(&text, &mut layout.tokens, cancel)?;
         Ok(PreparedDocument {
             byte_len:text.as_lines().iter().map(|line|line.len()+1).sum(),
@@ -125,8 +147,8 @@ impl CodeDocument {
         old_text: &str,
         new_text: &str,
     ) -> Result<PreparedDiffDocument, PrepareDiffError> {
-        let language = makepad_code_language::detect_path(path, None).language;
-        crate::diff::prepare_for_language(rows, old_text, new_text, language)
+        let detection = makepad_code_language::detect_path(path, None);
+        crate::diff::prepare_for_detection(rows, old_text, new_text, detection)
     }
 
     /// Move all diff allocations into an immutable document in O(1).

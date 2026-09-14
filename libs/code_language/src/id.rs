@@ -15,12 +15,27 @@ pub enum LanguageId {
     C = 4,
     ObjectiveC = 5,
     ObjectiveCpp = 6,
-    /// Detected for inventory only. No frontend is compiled in.
+    /// Python source. A compiled frontend is registered.
     Python = 7,
+    JavaScript = 8,
+    TypeScript = 9,
+    CSharp = 10,
+    Html = 11,
+    Css = 12,
+    /// Java source; compiled frontend registered.
+    Java = 13,
+    /// Splash script source. Tokens and line summaries only; no semantic frontend.
+    Splash = 14,
+    /// XML document. Tokens and line summaries only; no semantic frontend.
+    Xml = 15,
+    /// SVG document shown as source text, never rendered. Tokens and line summaries only.
+    Svg = 16,
+    /// Markdown document. Tokens and line summaries only; no semantic frontend.
+    Markdown = 17,
 }
 
 impl LanguageId {
-    pub const ALL: [LanguageId; 8] = [
+    pub const ALL: [LanguageId; 18] = [
         LanguageId::Unknown,
         LanguageId::Rust,
         LanguageId::Toml,
@@ -29,6 +44,16 @@ impl LanguageId {
         LanguageId::ObjectiveC,
         LanguageId::ObjectiveCpp,
         LanguageId::Python,
+        LanguageId::JavaScript,
+        LanguageId::TypeScript,
+        LanguageId::CSharp,
+        LanguageId::Html,
+        LanguageId::Css,
+        LanguageId::Java,
+        LanguageId::Splash,
+        LanguageId::Xml,
+        LanguageId::Svg,
+        LanguageId::Markdown,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -41,6 +66,16 @@ impl LanguageId {
             LanguageId::ObjectiveC => "objc",
             LanguageId::ObjectiveCpp => "objcpp",
             LanguageId::Python => "python",
+            LanguageId::JavaScript => "javascript",
+            LanguageId::TypeScript => "typescript",
+            LanguageId::CSharp => "csharp",
+            LanguageId::Html => "html",
+            LanguageId::Css => "css",
+            LanguageId::Java => "java",
+            LanguageId::Splash => "splash",
+            LanguageId::Xml => "xml",
+            LanguageId::Svg => "svg",
+            LanguageId::Markdown => "markdown",
         }
     }
 

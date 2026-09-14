@@ -3,7 +3,9 @@ use crate::{
     token::TokenKind,
     Token,
 };
-use makepad_code_language::{lexical_provider, LanguageId, LexContinuation, TokenRole};
+use makepad_code_language::{
+    lexical_provider, provider_for_detection, Detection, LanguageId, LexContinuation, TokenRole,
+};
 
 /// One line of provider-owned continuation. Rust keeps its richer editor
 /// lexer in this slot; every other language uses `LexContinuation`.
@@ -16,6 +18,7 @@ enum LineSlot {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Tokenizer {
     language: LanguageId,
+    initial: LexContinuation,
     lines: Vec<Option<LineSlot>>,
 }
 
@@ -27,6 +30,17 @@ impl Tokenizer {
     pub fn for_language(language: LanguageId, line_count: usize) -> Self {
         Self {
             language,
+            initial: lexical_provider(language).initial(),
+            lines: (0..line_count).map(|_| None).collect(),
+        }
+    }
+
+    /// Dialect-aware initial continuation from a finished path detection.
+    pub fn for_detection(detection: Detection, line_count: usize) -> Self {
+        let (_provider, initial) = provider_for_detection(detection);
+        Self {
+            language: detection.language,
+            initial,
             lines: (0..line_count).map(|_| None).collect(),
         }
     }
@@ -36,12 +50,14 @@ impl Tokenizer {
     }
 
     /// Changing language invalidates every line; same bytes in another language
-    /// must not keep the previous classification.
+    /// must not keep the previous classification. Dialect is reset to the
+    /// language default.
     pub fn set_language(&mut self, language: LanguageId) {
         if self.language == language {
             return;
         }
         self.language = language;
+        self.initial = lexical_provider(language).initial();
         for slot in &mut self.lines {
             *slot = None;
         }
@@ -168,7 +184,7 @@ impl Tokenizer {
         cancel: &impl Fn() -> bool,
     ) -> Result<(), TokenizeCancelled> {
         let provider = lexical_provider(self.language);
-        let mut state = provider.initial();
+        let mut state = self.initial.clone();
         for line in 0..text.as_lines().len() {
             if line % TOKENIZE_BATCH_LINES == 0 && cancel() {
                 return Err(TokenizeCancelled);
