@@ -1,6 +1,7 @@
 pub mod attribution;
-pub mod clone;
+pub mod blob_read;
 mod bounded_read;
+pub mod clone;
 pub mod commit;
 pub mod diff;
 pub mod error;
@@ -24,9 +25,9 @@ pub use clone::{local_clone_depth1, CloneTimings};
 pub use commit::{Commit, Signature};
 pub use diff::{
     diff_blobs, diff_lines, diff_lines_bounded, diff_lines_with_limits, diff_trees,
-    format_unified_diff, BoundedDiff, DiffLimits, DiffOp, Exhaustion, FileDiff, LineEnding,
-    LineIndex, LineRecord, TreeChange, UnavailableHunk, BoundedTreeDiff, TreeChangeKind,
-    TreeChangeRecord, TreeDiffCounters, TreeDiffExhaustion, TreeDiffLimits,
+    format_unified_diff, BoundedDiff, BoundedTreeDiff, DiffLimits, DiffOp, Exhaustion, FileDiff,
+    LineEnding, LineIndex, LineRecord, TreeChange, TreeChangeKind, TreeChangeRecord,
+    TreeDiffCounters, TreeDiffExhaustion, TreeDiffLimits, UnavailableHunk,
 };
 pub use error::GitError;
 pub use http_sync::{
