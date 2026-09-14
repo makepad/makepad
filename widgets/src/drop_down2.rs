@@ -731,8 +731,13 @@ impl Widget for DropDown2 {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         self.animator_handle_event(cx, event);
+        if self.is_active && crate::modal::ModalAction::is_dismissal(event) {
+            self.set_closed(cx);
+            return;
+        }
         if self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s))
-            && event.back_pressed()
+            && (matches!(event, Event::KeyDown(ke) if ke.key_code == KeyCode::Escape)
+                || event.back_pressed())
         {
             self.set_closed(cx);
             return;

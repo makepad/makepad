@@ -447,6 +447,12 @@ impl ReorderList {
 
 impl Widget for ReorderList {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if self.drag.is_some()
+            && (crate::modal::ModalAction::is_dismissal(event)
+                || matches!(event, Event::WindowLostFocus(_)))
+        {
+            self.cancel_drag(cx);
+        }
         if self.handle_drag(cx, event) {
             return;
         }

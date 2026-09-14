@@ -645,6 +645,15 @@ pub fn window_intercept(
             if flip {
                 set_tweak_on(cx, !tweak_is_on());
             }
+            if !tweak_is_on() {
+                if let Some((_, tweaker)) = window_view.children.iter()
+                    .find(|(id, _)| *id == live_id!(tweaker))
+                {
+                    if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
+                        tw.cancel_interactions(cx);
+                    }
+                }
+            }
             return true;
         }
         return false;
@@ -777,6 +786,7 @@ pub fn window_intercept(
                 log!("TWEAK press {:.0},{:.0} with a stale splitter drag: ended, picking", abs.x, abs.y);
                 if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
                     tw.splitter_drag = false;
+                    tw.cancel_scope = None;
                 }
             } else {
                 if kind == PointerKind::Move {
@@ -4825,8 +4835,8 @@ pub struct Tweaker {
     saved_body_right: Option<f64>,
     #[rust]
     splitter_drag: bool,
-    /// Held for as long as `splitter_drag` is. Reconciled below `tweak_is_on`'s
-    /// early return, so closing the panel with F12 mid-drag cannot strand it.
+    /// Held for as long as `splitter_drag` is, including the event that starts it.
+    #[rust]
     cancel_scope: Option<CancelScope>,
 }
 
@@ -8730,6 +8740,19 @@ impl Tweaker {
     }
 }
 
+impl Tweaker {
+    fn cancel_interactions(&mut self, cx: &mut Cx) {
+        self.splitter_drag = false;
+        self.cancel_scope = None;
+        self.open_popup = None;
+        if let Some(sidebar) = &self.sidebar {
+            sidebar.handle_event(cx,
+                &Event::Actions(vec![Box::new(crate::modal::ModalAction::Dismissed)]),
+                &mut Scope::empty());
+        }
+    }
+}
+
 impl Widget for Tweaker {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         // Above the early return on purpose: F12 turns the panel off without
@@ -8740,6 +8763,7 @@ impl Widget for Tweaker {
             }
         }
         if !tweak_is_on() {
+            self.splitter_drag = false;
             return;
         }
         // An eyedropper sample in flight: apply it the moment the frame
@@ -8910,6 +8934,7 @@ impl Widget for Tweaker {
                     && e.abs.y >= self.band.pos.y
                 {
                     self.splitter_drag = true;
+                    self.cancel_scope = Some(cx.begin_cancel_scope());
                 } else if e.abs.x > x
                     && !self
                         .open_popup
@@ -9233,15 +9258,17 @@ impl Widget for Tweaker {
             }
             // ANY up releases the drag, wherever it lands — the capture
             // must never outlive the press.
-            Event::MouseUp(_) => {
+            Event::MouseUp(_) | Event::WindowLostFocus(_) => {
                 self.splitter_drag = false;
+                self.cancel_scope = None;
             }
-            // Safeties: focus loss or Escape frees the pointer too.
-            Event::WindowLostFocus(_) => {
+            _ if self.splitter_drag
+                && self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s))
+                && (matches!(event, Event::KeyDown(ke) if ke.key_code == KeyCode::Escape)
+                    || event.back_pressed()) =>
+            {
                 self.splitter_drag = false;
-            }
-            Event::KeyDown(ke) if ke.key_code == KeyCode::Escape && self.splitter_drag => {
-                self.splitter_drag = false;
+                self.cancel_scope = None;
             }
             _ => {}
         }
@@ -9333,6 +9360,9 @@ impl Widget for Tweaker {
         if on && !self.was_on {
             // Opening the panel lands the caret in the filter.
             self.focus_search_pending = true;
+        }
+        if !on && self.was_on {
+            self.cancel_interactions(cx);
         }
         self.was_on = on;
         let window_id = cx.get_current_window_id().map(|id| id.id());
@@ -9563,6 +9593,29 @@ impl Widget for Tweaker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn closing_the_tweaker_releases_splitter_and_editor_cancel_scopes() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (mut tweaker, editor) = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            (Tweaker::script_new(vm), WidgetRef::new_with_inner(Box::new(
+                crate::fab_controls::FabValueInput::script_new_with_default(vm))))
+        });
+        let behind = cx.begin_cancel_scope();
+        tweaker.splitter_drag = true;
+        tweaker.cancel_scope = Some(cx.begin_cancel_scope());
+        editor.borrow_mut::<crate::fab_controls::FabValueInput>().unwrap().begin_edit(&mut cx);
+        tweaker.sidebar = Some(editor);
+        tweaker.cancel_interactions(&mut cx);
+        assert!(!tweaker.splitter_drag);
+        assert!(tweaker.cancel_scope.is_none());
+        cx.dispatch_studio_msg(
+            makepad_platform::studio::StudioToApp::KeyDown(KeyEvent {
+                key_code: KeyCode::Escape, ..Default::default()
+            }), WindowId(0, 0), dvec2(0.0, 0.0));
+        assert!(cx.owns_cancel(&behind), "closed sidebar retained its editor's scope");
+    }
 
     fn entry(seq: u64, path: &str, prop: &str, old: &str, new: &str) -> TweakDiffEntry {
         TweakDiffEntry {

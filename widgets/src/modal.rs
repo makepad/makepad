@@ -55,6 +55,15 @@ pub enum ModalAction {
     None,
 }
 
+impl ModalAction {
+    /// Sent directly through a closing host's descendants, unlike the
+    /// widget-tagged dismissal action observed by the application.
+    pub(crate) fn is_dismissal(event: &Event) -> bool {
+        matches!(event, Event::Actions(actions) if actions.iter().any(|action|
+            matches!(action.downcast_ref::<Self>(), Some(Self::Dismissed))))
+    }
+}
+
 #[derive(Script, Widget)]
 pub struct Modal {
     #[source]
@@ -124,6 +133,10 @@ impl ScriptHook for Modal {
 impl Widget for Modal {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if !self.is_open {
+            return;
+        }
+        if ModalAction::is_dismissal(event) {
+            self.close(cx);
             return;
         }
 
@@ -287,6 +300,98 @@ impl ModalRef {
             inner.dismissed(actions)
         } else {
             false
+        }
+    }
+}
+
+#[cfg(test)]
+mod cancel_tests {
+    use super::*;
+    use crate::{combo_box::ComboBox, drop_down2::DropDown2, fab_controls::FabValueInput};
+
+    fn escape(cx: &mut Cx, down: bool) {
+        use makepad_platform::studio::StudioToApp;
+        let key = KeyEvent { key_code: KeyCode::Escape, ..Default::default() };
+        let msg = if down { StudioToApp::KeyDown(key) } else { StudioToApp::KeyUp(key) };
+        cx.dispatch_studio_msg(msg, WindowId(0, 0), dvec2(0.0, 0.0));
+    }
+
+    #[test]
+    fn open_popups_cancel_even_before_their_input_has_key_focus() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let popups = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let value = vm.eval(crate::makepad_script::script! {
+                use mod.prelude.widgets.*
+                View {
+                    combo := ComboBox {}
+                    dropdown := DropDown2 {}
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        let behind = cx.begin_cancel_scope();
+        for id in [live_id!(combo), live_id!(dropdown)] {
+            let popup = popups.child(id);
+            if let Some(mut combo) = popup.borrow_mut::<ComboBox>() {
+                combo.set_active(&mut cx);
+            } else if let Some(mut dropdown) = popup.borrow_mut::<DropDown2>() {
+                dropdown.set_active(&mut cx);
+            } else {
+                panic!("missing test popup {id}");
+            }
+            escape(&mut cx, true);
+            popup.handle_event(&mut cx,
+                &Event::KeyDown(KeyEvent { key_code: KeyCode::Escape, ..Default::default() }),
+                &mut Scope::empty());
+            escape(&mut cx, false);
+            escape(&mut cx, true);
+            assert!(cx.owns_cancel(&behind), "popup {id} ignored its owned Escape");
+            escape(&mut cx, false);
+        }
+    }
+
+    #[test]
+    fn closing_a_modal_releases_retained_descendant_cancel_scopes() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let modal = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let value = vm.eval(crate::makepad_script::script! {
+                use mod.prelude.widgets.*
+                Modal {
+                    content +: {
+                        combo := ComboBox {}
+                        dropdown := DropDown2 {}
+                        number := FabValueInput {}
+                        nested := Modal {}
+                    }
+                }
+            });
+            WidgetRef::script_from_value(vm, value).as_modal()
+        });
+        let content = modal.borrow().unwrap().view.child(live_id!(content));
+        let behind = cx.begin_cancel_scope();
+        for id in [live_id!(combo), live_id!(dropdown), live_id!(number), live_id!(nested)] {
+            modal.open(&mut cx);
+            let child = content.child(id);
+            if let Some(mut combo) = child.borrow_mut::<ComboBox>() {
+                combo.set_active(&mut cx);
+            } else if let Some(mut dropdown) = child.borrow_mut::<DropDown2>() {
+                dropdown.set_active(&mut cx);
+            } else if let Some(mut number) = child.borrow_mut::<FabValueInput>() {
+                number.begin_edit(&mut cx);
+            } else if let Some(mut nested) = child.borrow_mut::<Modal>() {
+                nested.open(&mut cx);
+            } else {
+                panic!("missing test widget {id}");
+            }
+            escape(&mut cx, true);
+            assert!(!cx.owns_cancel(&behind));
+            escape(&mut cx, false);
+            modal.close(&mut cx);
+            escape(&mut cx, true);
+            assert!(cx.owns_cancel(&behind), "hidden child {id} kept its cancel scope");
+            escape(&mut cx, false);
         }
     }
 }

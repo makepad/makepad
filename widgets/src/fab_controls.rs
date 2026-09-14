@@ -920,8 +920,8 @@ pub struct FabValueInput {
     #[layout]
     layout: Layout,
 
-    /// Acquired when the drag starts and released when it ends, before the
-    /// next event's cancel owner is selected.
+    /// Held during either a drag or text editing, so cancel never also
+    /// dismisses the surrounding popup or modal.
     #[rust]
     cancel_scope: Option<CancelScope>,
 
@@ -1094,7 +1094,9 @@ impl FabValueInput {
 
     pub fn begin_edit(&mut self, cx: &mut Cx) {
         self.drag = None;
-        self.cancel_scope = None;
+        if self.cancel_scope.is_none() {
+            self.cancel_scope = Some(cx.begin_cancel_scope());
+        }
         self.editing = true;
         let full = self.format_full();
         self.text_input.set_is_numeric_only(cx, true);
@@ -1108,6 +1110,7 @@ impl FabValueInput {
 
     fn end_edit(&mut self, cx: &mut Cx) {
         self.editing = false;
+        self.cancel_scope = None;
         self.text_input.set_is_read_only(cx, true);
         self.text_input.set_is_numeric_only(cx, false);
         self.sync_text(cx);
@@ -1212,6 +1215,15 @@ impl Widget for FabValueInput {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
+        if (self.editing || self.drag.is_some())
+            && crate::modal::ModalAction::is_dismissal(event)
+        {
+            self.cancel_drag(cx, uid);
+            if self.editing {
+                self.end_edit(cx);
+            }
+            return;
+        }
 
         // Double-click = RESET, detected on the raw press so it works in
         // every state (the second press of a double-click lands while the
@@ -1253,6 +1265,16 @@ impl Widget for FabValueInput {
             }
         }
 
+        if self.editing
+            && self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s))
+            && (matches!(event, Event::KeyDown(ke) if ke.key_code == KeyCode::Escape)
+                || event.back_pressed())
+        {
+            self.end_edit(cx);
+            cx.revert_key_focus();
+            return;
+        }
+
         // Escape, Back or a right-button press cancels an in-flight drag and
         // restores the pressed value.
         if self.drag.is_some() {
@@ -1272,6 +1294,10 @@ impl Widget for FabValueInput {
                     return;
                 }
                 Event::MouseDown(me) if me.button.is_secondary() => {
+                    self.cancel_drag(cx, uid);
+                    return;
+                }
+                Event::WindowLostFocus(_) => {
                     self.cancel_drag(cx, uid);
                     return;
                 }
@@ -1310,7 +1336,9 @@ impl Widget for FabValueInput {
                         }
                     }
                     TextInputAction::Escaped => {
-                        if self.editing {
+                        if self.editing
+                            && self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s))
+                        {
                             self.end_edit(cx);
                             cx.revert_key_focus();
                         }
@@ -1948,6 +1976,9 @@ impl FabColorPick {
             return;
         }
         let uid = self.widget_uid();
+        self.popover.handle_event(cx,
+            &Event::Actions(vec![Box::new(crate::modal::ModalAction::Dismissed)]),
+            &mut Scope::empty());
         self.open = false;
         self.cancel_scope = None;
         self.draw_swatch.open = 0.0;
@@ -2039,6 +2070,9 @@ impl FabColorPick {
         if !self.open {
             return;
         }
+        self.popover.handle_event(cx,
+            &Event::Actions(vec![Box::new(crate::modal::ModalAction::Dismissed)]),
+            &mut Scope::empty());
         let uid = self.widget_uid();
         if revert {
             let original = self.opened_value;
@@ -2150,6 +2184,10 @@ impl Widget for FabColorPick {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
+        if self.open && crate::modal::ModalAction::is_dismissal(event) {
+            self.close_popover(cx, true);
+            return;
+        }
 
         if self.open {
             // Only the owner can consume Back or act on Escape.
@@ -2339,6 +2377,69 @@ impl FabColorPickRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cancel_test_input() -> (Cx, FabValueInput) {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let input = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            FabValueInput::script_new_with_default(vm)
+        });
+        (cx, input)
+    }
+
+    fn cancel_test_escape(cx: &mut Cx, down: bool) -> Event {
+        use makepad_platform::studio::StudioToApp;
+        let key = KeyEvent { key_code: KeyCode::Escape, ..Default::default() };
+        let (msg, event) = if down {
+            (StudioToApp::KeyDown(key.clone()), Event::KeyDown(key))
+        } else {
+            (StudioToApp::KeyUp(key.clone()), Event::KeyUp(key))
+        };
+        cx.dispatch_studio_msg(msg, WindowId(0, 0), dvec2(0.0, 0.0));
+        event
+    }
+
+    #[test]
+    fn editing_cancel_spends_the_escape_before_the_parent_can_dismiss() {
+        let (mut cx, mut input) = cancel_test_input();
+        let parent = cx.begin_cancel_scope();
+        input.begin_edit(&mut cx);
+        let event = cancel_test_escape(&mut cx, true);
+        assert!(cx.owns_cancel(input.cancel_scope.as_ref().unwrap()));
+        input.handle_event(&mut cx, &event, &mut Scope::empty());
+        assert!(!input.editing);
+        assert!(input.cancel_scope.is_none());
+        cancel_test_escape(&mut cx, false);
+        assert!(!cx.owns_cancel(&parent), "the parent must not inherit the release");
+        cancel_test_escape(&mut cx, true);
+        assert!(cx.owns_cancel(&parent));
+    }
+
+    #[test]
+    fn focus_loss_cancels_an_interrupted_drag_and_restores_the_value() {
+        let (mut cx, mut input) = cancel_test_input();
+        input.value = 9.0;
+        input.drag = Some(DragState {
+            press_x: 0.0, press_value: 3.0, width: 100.0, engaged: true,
+            anchor: DragAnchor { x: 0.0, value: 3.0 }, shift: false, raw_value: 9.0,
+        });
+        input.cancel_scope = Some(cx.begin_cancel_scope());
+        input.handle_event(&mut cx, &Event::WindowLostFocus(WindowId(0, 0)), &mut Scope::empty());
+        assert!(input.drag.is_none());
+        assert!(input.cancel_scope.is_none());
+        assert_eq!(input.value, 3.0);
+    }
+
+    #[test]
+    fn editing_does_not_cancel_when_a_newer_popup_owns_escape() {
+        let (mut cx, mut input) = cancel_test_input();
+        input.begin_edit(&mut cx);
+        let popup = cx.begin_cancel_scope();
+        let event = cancel_test_escape(&mut cx, true);
+        assert!(cx.owns_cancel(&popup));
+        input.handle_event(&mut cx, &event, &mut Scope::empty());
+        assert!(input.editing);
+    }
 
     fn bounded(min: f64, max: f64, wrap: bool) -> DragParams {
         DragParams {

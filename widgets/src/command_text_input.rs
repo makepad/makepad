@@ -248,8 +248,16 @@ impl Widget for CommandTextInput {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if crate::modal::ModalAction::is_dismissal(event) {
+            self.hide_popup(cx);
+            self.is_search_input_focus_pending = false;
+            self.is_text_input_focus_pending = false;
+            self.deref.handle_event(cx, event, scope);
+            return;
+        }
         if self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s))
-            && event.back_pressed()
+            && (matches!(event, Event::KeyDown(ke) if ke.key_code == KeyCode::Escape)
+                || event.back_pressed())
         {
             self.is_text_input_focus_pending = true;
             self.hide_popup(cx);
@@ -521,7 +529,9 @@ impl CommandTextInput {
         }
         self.view(cx, ids!(popup)).set_visible(cx, true);
         self.view(cx, ids!(popup)).redraw(cx);
-        self.cancel_scope = Some(cx.begin_cancel_scope());
+        if self.cancel_scope.is_none() {
+            self.cancel_scope = Some(cx.begin_cancel_scope());
+        }
     }
 
     fn hide_popup(&mut self, cx: &mut Cx) {

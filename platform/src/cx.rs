@@ -12,7 +12,7 @@ use {
         draw_pass::CxDrawPassPool,
         draw_shader::CxDrawShaders,
         event::{
-            CancelScope, CxCancelScopes, CxDragDrop, CxFingers, CxKeyboard, DrawEvent, Event,
+            CancelScope, CancelScopeKind, CxCancelScopes, CxDragDrop, CxFingers, CxKeyboard, DrawEvent, Event,
             NextFrame, Trigger, WindowGeomChangeEvent,
         },
         geometry::CxGeometryPool,
@@ -417,6 +417,13 @@ impl Cx {
     #[track_caller]
     pub fn begin_cancel_scope(&mut self) -> CancelScope {
         self.cancel_scopes.begin()
+    }
+
+    /// Begins a scope for only the specified gestures. For example, dictation can
+    /// handle `Escape` while allowing Android Back to reach the view underneath it.
+    #[track_caller]
+    pub fn begin_cancel_scope_for(&mut self, kind: CancelScopeKind) -> CancelScope {
+        self.cancel_scopes.begin_for(kind)
     }
 
     /// Gives up a scope from [`Self::begin_cancel_scope()`]. Dropping it does the same.
