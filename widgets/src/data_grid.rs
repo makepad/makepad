@@ -362,6 +362,23 @@ pub enum DataGridAction {
         abs: DVec2,
         modifiers: KeyModifiers,
     },
+    /// A secondary press, the right button, on a cell, with `abs` where it
+    /// went down: where a host opens a menu for the row. Only the secondary
+    /// button asks. Ctrl with the primary button is still a primary press,
+    /// since that is how a list toggles its picks. The press selects
+    /// nothing and takes no keyboard focus, so a menu opened on a row
+    /// finds the selection, and the picks a host keeps, as they were.
+    CellContextMenu {
+        row: usize,
+        col: usize,
+        abs: DVec2,
+    },
+    /// The same, on a column heading: `col` is the data column. Nothing is
+    /// sorted.
+    HeaderContextMenu {
+        col: usize,
+        abs: DVec2,
+    },
     /// A heading was pressed and the sort moved on. `ascending` is
     /// `None` when the column has cycled back to unsorted.
     ///
@@ -2279,6 +2296,30 @@ impl DataGrid {
         );
     }
 
+    /// A secondary press at `abs`: a menu asked for on a cell or on a
+    /// heading, and anywhere else nothing. It selects nothing, sorts
+    /// nothing and leaves the keyboard where it is. A press that lands
+    /// while another gesture holds the pointer, a row being carried or a
+    /// column being dragged, belongs to that gesture and asks for no menu.
+    fn context_press(&mut self, cx: &mut Cx, abs: DVec2) {
+        if !matches!(self.interact, Interact::None) {
+            return;
+        }
+        let action = match self.hit_zone(abs) {
+            HitZone::Cell { row, display_col } => DataGridAction::CellContextMenu {
+                row,
+                col: self.display_to_data(display_col),
+                abs,
+            },
+            HitZone::ColHeader { display_col, .. } => DataGridAction::HeaderContextMenu {
+                col: self.display_to_data(display_col),
+                abs,
+            },
+            _ => return,
+        };
+        cx.widget_action(self.uid, action);
+    }
+
     /// A press and release on a heading that did not become a column
     /// drag. The spreadsheet selects the column; a list sorts and leaves
     /// its selection alone, since a heading is not something a list picks.
@@ -2715,6 +2756,11 @@ impl Widget for DataGrid {
                     }
                     HitZone::Corner | HitZone::Outside => (),
                 }
+            }
+            // The right button asks for a menu, and does nothing else: no
+            // key focus, no selection, no sort.
+            Hit::FingerDown(fe) if fe.mouse_button().is_some_and(|b| b.is_secondary()) => {
+                self.context_press(cx, fe.abs);
             }
             Hit::FingerMove(fe) => match &mut self.interact {
                 Interact::ColResize {
@@ -3788,5 +3834,180 @@ mod tests {
         let below_last = grid.row_rect(2).map(|r| r.pos.y + r.size.y + 1.0).unwrap();
         assert!(below_last < data.pos.y + data.size.y);
         assert_eq!(grid.row_at(dvec2(60.0, below_last)), None, "under the last row");
+    }
+
+    /// The middle of a column heading, where a pointer presses it.
+    fn heading(grid: &DataGrid, display_col: usize) -> DVec2 {
+        let strip = grid.vp.col_header_rect;
+        let (_, x, w) = grid.vp.vis_cols[display_col];
+        dvec2(x + w * 0.5, strip.pos.y + strip.size.y * 0.5)
+    }
+
+    fn menus(actions: &[DataGridAction]) -> Vec<DataGridAction> {
+        actions
+            .iter()
+            .filter(|a| {
+                matches!(
+                    a,
+                    DataGridAction::CellContextMenu { .. } | DataGridAction::HeaderContextMenu { .. }
+                )
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// A secondary press asks for a menu on the cell or the heading under
+    /// it, where it went down, by data column, and changes nothing: the
+    /// selection stays, no sort moves, and a row number, the corner or a
+    /// press while a row is held asks for nothing.
+    #[test]
+    fn a_secondary_press_on_a_cell_or_a_heading_asks_for_a_menu_and_changes_nothing() {
+        let mut cx = cx();
+        let mut grid = laid_out(&mut cx);
+        grid.sortable = true;
+        // The first column moved to the end: data columns 1, 2, 0.
+        grid.move_column(&mut cx, 0, 3);
+        grid.press_cell(&mut cx, 3, 1, middle(&grid, 3, 1), KeyModifiers::default(), 1);
+        grid.release_cell_press(&mut cx, middle(&grid, 3, 1), KeyModifiers::default());
+        let before = grid.selection();
+        assert!(before.is_some());
+
+        let (cell, head) = (middle(&grid, 6, 2), heading(&grid, 0));
+        let out = raised(&mut cx, &mut grid, |cx, grid| grid.context_press(cx, cell));
+        assert!(
+            matches!(menus(&out)[..], [DataGridAction::CellContextMenu { row: 6, col: 0, abs }] if abs == cell),
+            "{out:?}"
+        );
+        assert_eq!(out.len(), 1, "{out:?}");
+        let out = raised(&mut cx, &mut grid, |cx, grid| grid.context_press(cx, head));
+        assert!(
+            matches!(menus(&out)[..], [DataGridAction::HeaderContextMenu { col: 1, abs }] if abs == head),
+            "{out:?}"
+        );
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!(grid.selection(), before);
+        assert_eq!(grid.sort(), None);
+
+        let row_number = dvec2(10.0, middle(&grid, 4, 0).y);
+        let corner = dvec2(10.0, 10.0);
+        let out = raised(&mut cx, &mut grid, |cx, grid| {
+            grid.context_press(cx, row_number);
+            grid.context_press(cx, corner);
+            grid.press_cell(cx, 2, 0, middle(grid, 2, 0), KeyModifiers::default(), 1);
+            grid.context_press(cx, cell);
+        });
+        assert!(menus(&out).is_empty(), "{out:?}");
+    }
+
+    /// A grid drawn into a window-less pass, so real pointer events can
+    /// find it: `host` runs where a page's draw loop does, after the grid
+    /// has measured the frame and before the cells are handed out, and the
+    /// cells it hands out are returned.
+    struct Frame {
+        pass: DrawPass,
+        draw_list: DrawList2d,
+        size: DVec2,
+    }
+
+    impl Frame {
+        fn new(cx: &mut Cx, size: DVec2) -> Self {
+            let pass = DrawPass::new(cx);
+            pass.set_size(cx, size);
+            Frame {
+                pass,
+                draw_list: DrawList2d::new(cx),
+                size,
+            }
+        }
+
+        fn draw(
+            &mut self,
+            cx: &mut Cx,
+            grid: &mut DataGrid,
+            mut host: impl FnMut(&mut Cx2d, &mut DataGrid),
+        ) -> Vec<GridCell> {
+            use crate::makepad_draw::cx_draw::CxDraw;
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&self.pass, None);
+            self.draw_list.begin_always(&mut cx2d);
+            cx2d.begin_root_turtle(self.size, Layout::flow_overlay());
+            let mut cells = Vec::new();
+            let walk = Walk::fixed(self.size.x, self.size.y);
+            while !grid.draw_walk(&mut cx2d, &mut Scope::empty(), walk).is_done() {
+                host(&mut cx2d, grid);
+                while let Some(cell) = grid.next_cell(&mut cx2d) {
+                    grid.cell_text(&mut cx2d, &cell, "-");
+                    cells.push(cell);
+                }
+            }
+            cx2d.end_pass_sized_turtle();
+            self.draw_list.end(&mut cx2d);
+            cx2d.end_pass(&self.pass);
+            cells
+        }
+    }
+
+    fn mouse_down(abs: DVec2, button: MouseButton, modifiers: KeyModifiers) -> Event {
+        Event::MouseDown(MouseDownEvent {
+            abs,
+            button,
+            window_id: WindowId(1, 1),
+            modifiers,
+            handled: std::cell::Cell::new(Area::Empty),
+            time: 0.0,
+        })
+    }
+
+    fn mouse_up(abs: DVec2, button: MouseButton, modifiers: KeyModifiers) -> Event {
+        Event::MouseUp(MouseUpEvent {
+            abs,
+            button,
+            window_id: WindowId(1, 1),
+            modifiers,
+            time: 0.0,
+        })
+    }
+
+    /// What one pointer event raised, with the key focus it asked for
+    /// settled the way the event loop settles it between events.
+    fn sent(cx: &mut Cx, grid: &mut DataGrid, event: Event) -> Vec<DataGridAction> {
+        let out = raised(cx, grid, |cx, grid| grid.handle_event(cx, &event, &mut Scope::empty()));
+        cx.action(());
+        cx.handle_actions();
+        out
+    }
+
+    /// Through the grid's own pointer handling: the right button asks for
+    /// a menu and leaves the keyboard where it was, and Ctrl with the left
+    /// button, which is how a list toggles a pick, is a press like any
+    /// other, never a menu.
+    #[test]
+    fn only_the_secondary_button_asks_for_a_menu_and_it_takes_no_focus() {
+        let mut cx = cx();
+        let mut grid = grid(&mut cx);
+        let mut frame = Frame::new(&mut cx, dvec2(300.0, 200.0));
+        frame.draw(&mut cx, &mut grid, |_, _| {});
+        let at = middle(&grid, 2, 1);
+        let ctrl = mods(false, true);
+
+        let out = sent(&mut cx, &mut grid, mouse_down(at, MouseButton::SECONDARY, ctrl));
+        assert!(
+            matches!(menus(&out)[..], [DataGridAction::CellContextMenu { row: 2, col: 1, .. }]),
+            "{out:?}"
+        );
+        assert!(clicked(&out).is_empty(), "the right button pressed the cell: {out:?}");
+        assert_eq!(grid.selection(), None);
+        assert!(!cx.has_key_focus(grid.area), "the right button took the keyboard");
+        let out = sent(&mut cx, &mut grid, mouse_up(at, MouseButton::SECONDARY, ctrl));
+        assert!(released(&out).is_empty() && menus(&out).is_empty(), "{out:?}");
+
+        let out = sent(&mut cx, &mut grid, mouse_down(at, MouseButton::PRIMARY, ctrl));
+        assert_eq!(clicked(&out), vec![(2, 1, ctrl)]);
+        assert!(menus(&out).is_empty(), "Ctrl-click asked for a menu: {out:?}");
+        assert!(cx.has_key_focus(grid.area), "a primary press still takes the keyboard");
+        let out = sent(&mut cx, &mut grid, mouse_up(at, MouseButton::PRIMARY, ctrl));
+        assert_eq!(released(&out), vec![(2, 1, ctrl)]);
     }
 }
