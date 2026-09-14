@@ -96,6 +96,15 @@ script_mod! {
                 zebra_stripes: true
                 default_col_width: 150.0
                 default_row_height: 24.0
+                // A heading press sorts; this page does the sorting.
+                sortable: true
+                // Headings on the left, in a face of their own, the sorted
+                // one brighter than the rest.
+                header_align: 0.0
+                color_header_sorted: theme.color_text
+                draw_text_header +: {text_style: theme.font_bold{font_size: 8.5}}
+                // A row is something to press.
+                cell_cursor: MouseCursor.Hand
 
                 // Restated from theme tokens, as on the Overview page.
                 color_bg: theme.color_surface_container_low
@@ -151,6 +160,9 @@ script_mod! {
 
         StoryHeading{text: "A menu on the right button"}
         StoryNote{text: "Right-click a row for a menu that moves it to the top or the bottom, or a heading for one that picks every row or none. The right button asks for a menu and does nothing else: the picks stay as they were until a menu row is chosen. Ctrl with the left button is still a click that adds or drops a pick."}
+
+        StoryHeading{text: "Headings and the pointer"}
+        StoryNote{text: "The headings sit on the left in a face of their own, and the one the list is sorted by is brighter than the rest. Press a heading to sort by it, again to turn it round, and a third time for the order the seeds were written in; carrying a row, or moving one from its menu, ends the sort. Over a row the pointer is a hand."}
 
         StoryHeading{text: "The first column takes what is left"}
         StoryNote{text: "The page sets every column's width at once from its draw loop, and the Seed column fills whatever the others leave, so the list always ends at its right edge however wide the page is. Drag a column edge and the page stops fitting: the widths stay where they were dragged for as long as the page is open."}
@@ -213,6 +225,36 @@ fn sorted_order<S: AsRef<str>>(rows: &[[S; 3]], col: usize, ascending: Option<bo
 
 /// The list page's columns.
 const SEED_COLUMNS: [&str; 4] = ["Seed", "Kind", "Sow", "Days"];
+
+const MONTHS: [&str; 12] = [
+    "January", "February", "March", "April", "May", "June", "July", "August", "September", "October",
+    "November", "December",
+];
+
+/// The seeds in the order a heading press asks for, as indices into
+/// `SEEDS`: by that column, with months in calendar order and days as
+/// numbers, or as written when the sort is off. Stable, so seeds that tie
+/// keep the order they were written in.
+fn sorted_seeds(col: usize, ascending: Option<bool>) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..SEEDS.len()).collect();
+    let Some(ascending) = ascending else {
+        return order;
+    };
+    let key = |item: usize| {
+        let text = SEEDS[item][col];
+        let rank = match col {
+            2 => MONTHS.iter().position(|m| *m == text).unwrap_or(12) as u32,
+            3 => text.parse().unwrap_or(0),
+            _ => 0,
+        };
+        (rank, text)
+    };
+    order.sort_by(|a, b| {
+        let ord = key(*a).cmp(&key(*b));
+        if ascending { ord } else { ord.reverse() }
+    });
+    order
+}
 
 /// The widths of every list column but the first, which takes what these
 /// leave, down to `SEED_FIRST_MIN`.
@@ -559,6 +601,18 @@ impl StoryDataGridList {
         self.picks_said()
     }
 
+    /// A heading was pressed and the sort moved on. Returns what to say
+    /// about it.
+    fn sort(&mut self, col: usize, ascending: Option<bool>) -> String {
+        self.order = sorted_seeds(col, ascending);
+        let name = SEED_COLUMNS.get(col).copied().unwrap_or("?");
+        match ascending {
+            Some(true) => format!("sorted by {name}, up"),
+            Some(false) => format!("sorted by {name}, down"),
+            None => "back to the order the seeds were written in".to_string(),
+        }
+    }
+
     /// The right button went down on `line`: the menu about to open is for
     /// the item drawn there. Returns that item's name.
     fn menu_on(&mut self, line: usize) -> Option<&'static str> {
@@ -700,6 +754,8 @@ fn data_grid_list_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
                 if let Some(mut inner) = host.borrow_mut::<StoryDataGridList>() {
                     inner.carry(row);
                 }
+                // The order is being made by hand now, so no heading is lit.
+                grid.set_sort_indicator(None);
                 host.redraw(cx);
                 root.label(cx, ids!(list.log)).set_text(cx, &format!("carrying row {row}"));
             }
@@ -754,9 +810,23 @@ fn data_grid_list_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
             .borrow_mut::<StoryDataGridList>()
             .and_then(|mut inner| inner.menu_chosen(*id).map(|said| (said, inner.picks_said())));
         if let Some((said, picked)) = said {
+            if *owner == live_id!(seed_row) {
+                grid.set_sort_indicator(None);
+            }
             host.redraw(cx);
             root.label(cx, ids!(list.log)).set_text(cx, &said);
             root.label(cx, ids!(list.picked)).set_text(cx, &picked);
+        }
+    }
+    // The grid lights the heading and says which way; the seeds are put
+    // in that order here.
+    if let Some((col, ascending)) = grid.sort_changed(actions) {
+        let said = host
+            .borrow_mut::<StoryDataGridList>()
+            .map(|mut inner| inner.sort(col, ascending));
+        if let Some(said) = said {
+            host.redraw(cx);
+            root.label(cx, ids!(list.log)).set_text(cx, &said);
         }
     }
 }
@@ -846,6 +916,7 @@ const CONTROLS: &[Control] = &[
     Control { label: "Zebra stripes", target: "demo.grid", kind: ControlKind::Bool { prop: "zebra_stripes", default: false } },
     Control { label: "Sortable headings", target: "demo.grid", kind: ControlKind::Bool { prop: "sortable", default: true } },
     Control { label: "Drag columns", target: "demo.grid", kind: ControlKind::Bool { prop: "allow_col_reorder", default: true } },
+    Control { label: "Header align", target: "demo.grid", kind: ControlKind::Number { prop: "header_align", min: 0., max: 1., step: 0.25, default: 0.5 } },
     Control { label: "Selection", target: "demo.grid", kind: ControlKind::Choice { prop: "selection", options: &["GridSelectMode.Cells", "GridSelectMode.Rows", "GridSelectMode.Off"], default: 0 } },
 ];
 
@@ -872,6 +943,8 @@ The consequence is the trap: **a `DataGrid` with no host behind it is not empty,
 Its own: column and row headers, resizing a column or a row by dragging its edge, reordering columns by dragging a header (`allow_col_reorder`, off by default while both resize flags are on), the whole selection model — single cell, rectangle, row, column, everything — and keyboard navigation with arrows, the page keys, Home, End, and shift to extend.
 
 What a press selects is `selection:`. `GridSelectMode.Cells`, the default, is the spreadsheet described here. `GridSelectMode.Rows` picks whole rows with a press or an arrow key, and a heading press only sorts. `GridSelectMode.Off` selects nothing at all and still reports every press with its modifiers, for a list that keeps its own picks; the List page beside this one is that.
+
+How the headings look is declared too: `header_align` places the labels, from the left at 0 to the right at 1 (the Header align control), `color_header_sorted` lights the sorted heading, `draw_text_header` gives the headings a face of their own, and `cell_cursor` is the pointer over a cell. The List page uses all four.
 
 Yours, despite the name: **it does not sort the rows** — with `sortable: true` a heading press cycles unsorted, up, down and back, draws the mark and raises `SortChanged { col, ascending }`; the rows themselves are yours to reorder, because the grid never held them. This page keeps a list of indices and draws through it, which is all it takes. **It does not copy** — Cmd+C does nothing until you install a `set_copy_provider`. **Editing is shared** — the grid seats the editor and reads its keys, you answer `EditCell` with the text to start from and `CellEdited` with a yes or a no; the next section is about that. And row headers cannot be labelled: that strip always prints the row number, so names down the left belong in column zero with `show_row_headers: false`.
 
@@ -952,6 +1025,17 @@ Both are measured against the last drawn frame and the scroll as it is now, and 
 ## A menu on the right button
 
 A secondary press on a cell raises `CellContextMenu { row, col, abs }`, and on a column heading `HeaderContextMenu { col, abs }`, with `abs` where it went down and `col` the data column. Only the secondary button asks: Ctrl with the primary button is a primary press, because that is how a list toggles its picks. The press selects nothing, sorts nothing and takes no keyboard focus, so a menu opened on a row finds the picks as they were; a secondary press while a row is being carried or a column dragged belongs to that gesture and asks for nothing. This page opens a `MenuLayer` menu at `abs`: on a row, moving it to either end; on a heading, picking every row or none.
+
+## Headings and the pointer
+
+Four declarations change how the headings and the pointer look, and each leaves the stock look alone until it is declared:
+
+- `header_align` places a heading's label from `0.0`, the left, to `1.0`, the right; centred unless declared. Past the middle the label keeps clear of the sort marks, and at `1.0` it ends before them. Row numbers stay centred.
+- `color_header_sorted` is the colour of the sorted column's label and marks. Transparent, the default, draws that heading in `color_header_text` like the rest.
+- `draw_text_header` is the headings' text: labels, marks and row numbers. With a font size of 0, the default, the headings are drawn with `draw_text`, so a grid that restyles its cells restyles its headings too. Give it a size, `draw_text_header +: {text_style: theme.font_bold{font_size: 8.5}}`, and the headings get that face and size. The colour still comes from the two heading colours.
+- `cell_cursor` is the pointer over a cell, `MouseCursor.Default` unless declared. A column edge that can be dragged, and a heading that can be carried, keep their own pointers.
+
+This list declares all four: left-aligned headings in a bold face, the sorted one in the text colour against the quieter rest, and a hand over the rows. It is also `sortable`, and sorts its own seeds when `SortChanged` arrives, as the Overview page does. Carrying a row, or moving one from its menu, makes the order a hand-made one, so the page clears the heading with `set_sort_indicator(None)`.
 
 ## Column widths set by the host
 
@@ -1141,6 +1225,25 @@ mod tests {
         assert_eq!(order, vec![4, 2, 1, 7]);
         move_to_end(&mut order, 9, true);
         assert_eq!(order, vec![4, 2, 1, 7], "an item that is not there moves nothing");
+    }
+
+    /// A heading press on the list orders the seeds by that column, months
+    /// by the calendar and days by number, turns round on the second press
+    /// and goes back to the order they were written in on the third.
+    #[test]
+    fn the_list_sorts_months_by_the_calendar_and_days_by_number() {
+        let days = |order: Vec<usize>| -> Vec<u32> { order.iter().map(|i| SEEDS[*i][3].parse().unwrap()).collect() };
+        let up = days(sorted_seeds(3, Some(true)));
+        assert!(up.windows(2).all(|w| w[0] <= w[1]), "{up:?}");
+        let mut down = days(sorted_seeds(3, Some(false)));
+        down.reverse();
+        assert_eq!(up, down);
+        let months: Vec<usize> = sorted_seeds(2, Some(true))
+            .iter()
+            .map(|i| MONTHS.iter().position(|m| *m == SEEDS[*i][2]).expect("a month the list does not know"))
+            .collect();
+        assert!(months.windows(2).all(|w| w[0] <= w[1]), "{months:?}");
+        assert_eq!(sorted_seeds(0, None), (0..SEEDS.len()).collect::<Vec<_>>());
     }
 
     /// The first column fills what the others leave, and stops shrinking
