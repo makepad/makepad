@@ -453,7 +453,7 @@ mod tests {
                 ("Lists", &["Overview", "List item"]),
                 ("Table", &["Overview"]),
                 ("Tree", &["Overview", "Files"]),
-                ("DataGrid", &["Overview"]),
+                ("DataGrid", &["Overview", "List"]),
                 ("TileList", &["Overview", "Item grid"]),
                 ("KanbanBoard", &["Overview"]),
                 ("LogList", &["Overview"]),
