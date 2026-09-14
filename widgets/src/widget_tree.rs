@@ -2808,8 +2808,11 @@ pub trait CxWidgetExt {
     /// Inspect current branches eligible for interaction, including window focus.
     /// Call outside widget dispatch/draw, while the UI root is unborrowed;
     /// this does not use cached geometry or tree indices.
-    /// This searches active branches, so its worst-case cost is linear in the active
-    /// hierarchy. Use for occasional checks, not once per widget on every frame.
+    /// Repeated queries for the same widget reuse one weak path, checking current
+    /// eligibility and child membership at each ancestor. A new or changed path
+    /// falls back to a live search.
+    /// Warm queries enumerate only children along that path; worst-case searches
+    /// remain linear in the active hierarchy.
     fn widget_is_active(&self, uid: WidgetUid) -> bool;
     fn widget_tree_mark_dirty(&mut self, uid: WidgetUid);
     fn widget_tree_insert_child(&mut self, parent_uid: WidgetUid, name: LiveId, widget: WidgetRef);
@@ -2848,16 +2851,20 @@ pub struct FlatTreeRow {
 }
 
 #[derive(Default)]
-struct UiRoot(WidgetWeakRef);
+struct UiRoot {
+    widget: WidgetWeakRef,
+    // Cache a route, never visibility: every query validates the live path.
+    active_path: RefCell<Vec<WidgetWeakRef>>,
+}
 
 fn cancel_scope_resolver(cx: &Cx, candidate: &dyn Fn(u64) -> Option<u64>) -> Option<u64> {
-    cx.get_global_ref::<UiRoot>()?.0.upgrade()?.resolve_cancel_scope(candidate)
+    cx.get_global_ref::<UiRoot>()?.widget.upgrade()?.resolve_cancel_scope(candidate)
 }
 
 pub fn set_ui_root(cx: &mut Cx, ui: &WidgetRef) {
     let state = get_or_init_state(cx);
     state.tree.set_root_widget(ui.clone());
-    cx.global::<UiRoot>().0 = ui.downgrade();
+    *cx.global::<UiRoot>() = UiRoot { widget: ui.downgrade(), ..Default::default() };
     cx.cancel_scope_resolver = Some(cancel_scope_resolver);
     cx.widget_tree_dump_callback = Some(compact_widget_tree_dump_callback);
     cx.widget_query_callback = Some(widget_query_callback);
@@ -2869,8 +2876,16 @@ pub fn set_ui_root(cx: &mut Cx, ui: &WidgetRef) {
 
 impl CxWidgetExt for Cx {
     fn widget_is_active(&self, uid: WidgetUid) -> bool {
-        self.get_global_ref::<UiRoot>().and_then(|root| root.0.upgrade())
-            .is_some_and(|root| root.contains_active_widget(uid))
+        let Some(ui) = self.get_global_ref::<UiRoot>() else { return false; };
+        let Some(root) = ui.widget.upgrade() else { return false; };
+        let mut uncached = Vec::new();
+        let mut cached = ui.active_path.try_borrow_mut().ok();
+        let path = cached.as_deref_mut().unwrap_or(&mut uncached);
+        if root.active_path_is_valid(uid, path) {
+            return true;
+        }
+        path.clear();
+        root.find_active_widget(uid, path)
     }
 
     fn widget_tree(&self) -> &WidgetTree {
@@ -3052,6 +3067,7 @@ mod tests {
         assert!(cx.owns_cancel(&other), "sibling activation wins even when its ancestor is newer than both branches");
         cancel_key(&mut cx, false, false);
         drop(newest_parent);
+        assert!(cx.widget_is_active(leaf.widget_uid()));
         sibling.set_visible(&mut cx, false);
         branch.set_visible(&mut cx, false);
         assert!(!cx.widget_is_active(leaf.widget_uid()));
@@ -3088,6 +3104,7 @@ mod tests {
         let parent = cx.begin_widget_cancel_scope(root.widget_uid().0, CancelScopeKind::Both);
         let child = cx.begin_widget_cancel_scope(leaf.widget_uid().0, CancelScopeKind::Both);
         cx.widget_tree().observe_node(leaf.widget_uid(), live_id!(leaf), leaf.clone(), Some(branch.widget_uid()));
+        assert!(cx.widget_is_active(leaf.widget_uid()));
         branch.borrow_mut::<crate::view::View>().unwrap().children.clear();
         assert!(!cx.widget_is_active(leaf.widget_uid()));
         cancel_key(&mut cx, true, false);
@@ -3100,6 +3117,142 @@ mod tests {
         let borrowed = sibling.borrow_mut::<crate::view::View>().unwrap();
         assert!(!cx.widget_is_active(leaf.widget_uid()), "queries during a borrow must be safe");
         drop(borrowed);
+        assert!(cx.widget_is_active(leaf.widget_uid()));
+    }
+
+    #[test]
+    fn cancel_cached_path_finds_an_alternative_live_parent() {
+        let (mut cx, _root, branch, leaf, sibling) = cancel_fixture();
+        sibling.borrow_mut::<crate::view::View>().unwrap().children.push((live_id!(shared), leaf.clone()));
+        assert!(cx.widget_is_active(leaf.widget_uid()));
+        branch.set_visible(&mut cx, false);
+        assert!(cx.widget_is_active(leaf.widget_uid()), "a hidden cached path must not hide another active path");
+        sibling.borrow_mut::<crate::view::View>().unwrap().children.clear();
+        assert!(!cx.widget_is_active(leaf.widget_uid()));
+        branch.set_visible(&mut cx, true);
+        assert!(cx.widget_is_active(leaf.widget_uid()));
+    }
+
+    #[test]
+    fn cancel_cached_path_rechecks_container_state_before_draw() {
+        use crate::window::WindowWidgetRefExt;
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let root = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let value = vm.eval(crate::makepad_script::script! {
+                use mod.prelude.widgets.*
+                View {
+                    pages := PageFlip { active_page: @first first := View {} second := View {} }
+                    modal := Modal {}
+                    window := Window {}
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        set_ui_root(&mut cx, &root);
+        let pages = root.child(live_id!(pages));
+        let first = pages.child(live_id!(first));
+        assert!(cx.widget_is_active(first.widget_uid()));
+        pages.borrow_mut::<crate::page_flip::PageFlip>().unwrap().set_active_page(&mut cx, live_id!(second));
+        assert!(!cx.widget_is_active(first.widget_uid()));
+        let modal = root.child(live_id!(modal));
+        modal.borrow_mut::<crate::modal::Modal>().unwrap().open(&mut cx);
+        assert!(cx.widget_is_active(modal.widget_uid()));
+        modal.borrow_mut::<crate::modal::Modal>().unwrap().close(&mut cx);
+        assert!(!cx.widget_is_active(modal.widget_uid()));
+        let window = root.child(live_id!(window));
+        let window_id = window.as_window().window_id().unwrap();
+        window.handle_event(&mut cx, &Event::WindowGotFocus(window_id), &mut Scope::empty());
+        assert!(cx.widget_is_active(window.widget_uid()));
+        window.handle_event(&mut cx, &Event::WindowLostFocus(window_id), &mut Scope::empty());
+        assert!(!cx.widget_is_active(window.widget_uid()));
+    }
+
+    #[test]
+    fn cancel_cached_path_handles_inner_replacement_and_new_children() {
+        let (mut cx, _root, branch, mut leaf, sibling) = cancel_fixture();
+        let old_uid = leaf.widget_uid();
+        assert!(cx.widget_is_active(old_uid));
+        cx.with_vm(|vm| {
+            let value = vm.eval(crate::makepad_script::script! {
+                use mod.prelude.widgets.*
+                Label {}
+            });
+            ScriptApply::script_apply(&mut leaf, vm, &Apply::New, &mut Scope::empty(), value);
+        });
+        assert_ne!(leaf.widget_uid(), old_uid);
+        assert!(!cx.widget_is_active(old_uid));
+        assert!(cx.widget_is_active(leaf.widget_uid()));
+        assert!(branch.child(live_id!(leaf)) == leaf);
+
+        let added = make_widget(WidgetUid(70001), vec![]);
+        assert!(!cx.widget_is_active(added.widget_uid()));
+        sibling.borrow_mut::<crate::view::View>().unwrap().children.push((live_id!(added), added.clone()));
+        assert!(cx.widget_is_active(added.widget_uid()), "missing results must not be cached");
+    }
+
+    #[test]
+    fn cancel_cached_path_is_weak_and_safe_while_borrowed() {
+        let (cx, _root, branch, leaf, _) = cancel_fixture();
+        let uid = leaf.widget_uid();
+        assert!(cx.widget_is_active(uid));
+        let cache = cx.get_global_ref::<UiRoot>().unwrap().active_path.borrow_mut();
+        assert!(cx.widget_is_active(uid), "a borrowed cache must fall back to a live search");
+        drop(cache);
+        let borrowed = leaf.borrow_mut::<crate::view::View>().unwrap();
+        assert!(!cx.widget_is_active(uid));
+        drop(borrowed);
+        assert!(cx.widget_is_active(uid));
+        let weak = leaf.downgrade();
+        branch.borrow_mut::<crate::view::View>().unwrap().children.clear();
+        drop(leaf);
+        assert!(weak.upgrade().is_none(), "a cached path must not retain detached widgets");
+        assert!(!cx.widget_is_active(uid));
+    }
+
+    struct CancelVisitCounter {
+        inner: TestWidget,
+        visits: std::rc::Rc<std::cell::Cell<usize>>,
+    }
+
+    impl ScriptApply for CancelVisitCounter {
+        fn script_apply(&mut self, _vm: &mut ScriptVm, _apply: &Apply, _scope: &mut Scope, _value: ScriptValue) {}
+    }
+
+    impl WidgetNode for CancelVisitCounter {
+        fn widget_uid(&self) -> WidgetUid { self.inner.uid }
+        fn children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) { self.inner.children(visit); }
+        fn walk(&mut self, _cx: &mut Cx) -> Walk { Walk::default() }
+        fn area(&self) -> Area { Area::Empty }
+        fn redraw(&mut self, _cx: &mut Cx) {}
+    }
+
+    impl Widget for CancelVisitCounter {
+        fn visit_cancel(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
+            self.visits.set(self.visits.get() + 1);
+            self.children(visit);
+            true
+        }
+    }
+
+    #[test]
+    fn cancel_cached_path_skips_unrelated_subtrees_on_repeated_queries() {
+        let visits = std::rc::Rc::new(std::cell::Cell::new(0));
+        let unrelated = WidgetRef::new_with_inner(Box::new(CancelVisitCounter {
+            inner: TestWidget { uid: WidgetUid(70002), children: vec![], skip_search: false },
+            visits: visits.clone(),
+        }));
+        let leaf = make_widget(WidgetUid(70003), vec![]);
+        let branch = make_widget(WidgetUid(70004), vec![(live_id!(leaf), leaf.clone())]);
+        let root = make_widget(WidgetUid(70005), vec![(live_id!(unrelated), unrelated), (live_id!(branch), branch)]);
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        set_ui_root(&mut cx, &root);
+        assert!(cx.widget_is_active(leaf.widget_uid()));
+        assert_eq!(visits.replace(0), 1, "the cold query searches the preceding branch");
+        for _ in 0..8 {
+            assert!(cx.widget_is_active(leaf.widget_uid()));
+        }
+        assert_eq!(visits.get(), 0, "warm queries must visit only the successful path");
     }
 
     // Minimal Widget impl for testing

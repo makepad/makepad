@@ -907,16 +907,47 @@ impl WidgetRef {
         }
     }
 
-    pub(crate) fn contains_active_widget(&self, uid: WidgetUid) -> bool {
+    pub(crate) fn find_active_widget(&self, uid: WidgetUid, path: &mut Vec<WidgetWeakRef>) -> bool {
         let Ok(inner) = self.0.try_borrow() else { return false; };
         let Some(inner) = inner.as_ref() else { return false; };
         let mut found = inner.widget.widget_uid() == uid;
         let active = inner.widget.visit_cancel(&mut |_, child| {
             if !found {
-                found = child.contains_active_widget(uid);
+                found = child.find_active_widget(uid, path);
             }
         });
-        active && found
+        if active && found {
+            // Record only the successful path, from the target back to the root.
+            path.push(self.downgrade());
+            true
+        } else {
+            if found {
+                path.clear();
+            }
+            false
+        }
+    }
+
+    pub(crate) fn active_path_is_valid(&self, uid: WidgetUid, path: &[WidgetWeakRef]) -> bool {
+        if !path.last().is_some_and(|root| root == self) {
+            return false;
+        }
+        let Some(mut child) = path[0].upgrade() else { return false; };
+        if child.try_widget_uid() != Some(uid) || !child.visit_cancel(&mut |_, _| {}) {
+            return false;
+        }
+        for parent in &path[1..] {
+            let Some(parent) = parent.upgrade() else { return false; };
+            let mut attached = false;
+            let active = parent.visit_cancel(&mut |_, candidate| {
+                attached |= candidate == child;
+            });
+            if !active || !attached {
+                return false;
+            }
+            child = parent;
+        }
+        true
     }
 
     pub fn layer_areas(&self) -> Vec<(&'static str, Area)> {
