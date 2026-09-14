@@ -133,9 +133,10 @@ script_mod! {
 
     mod.storybook.StoryPressLensBase = #(StoryPressLens::register_widget(vm))
 
-    /** A lensed sheet that answers a press: a flat button with every face
-     * state erased lies over the glass, and this widget owns the clock that
-     * flattens the lens under the finger and lets it rebound. */
+    /** A water lens that answers a press: a flat button with every face
+     * state erased lies over the glass, and this widget forwards the press
+     * to the library's press model, which flattens the lens under the finger
+     * and lets it rebound. */
     mod.storybook.StoryPressLens = set_type_default() do mod.storybook.StoryPressLensBase{
         width: Fill
         height: Fit
@@ -149,7 +150,7 @@ script_mod! {
                 clip_x: false
                 clip_y: false
 
-                press_lens := LensedRoundedView{
+                press_lens := RippleLensRoundedView{
                     width: Fill
                     height: Fill
                     draw_bg +: {
@@ -175,12 +176,12 @@ script_mod! {
                     height: Fill
                     text: "Focus"
                     draw_text +: {
-                        /** lens label ink, the same in every state: the
-                         * theme's hover and press inks are tuned for a
-                         * button face, and there is none under this label */
+                        /** lens label ink: white, dimming to 65% under the
+                         * pointer and to 25% while held, as the lens
+                         * button's label does */
                         color: #fff
-                        color_hover: #fff
-                        color_down: #fff
+                        color_hover: #ffffffa6
+                        color_down: #ffffff40
                         color_focus: #fff
                         /** lens label size in points 8..48 step 1 */
                         text_style +: {font_size: 22}
@@ -232,7 +233,7 @@ script_mod! {
         StoryNote{text: "The same popup on LensedRoundedView with the lens at 0.75 instead of 0: the rim bends the ground under it where the blur sheet's does not. Its sliders drive the same two setters. Every other knob of the material — tint, seal, rim, shadow — is the family's, and is explained on Glass > Overview."}
 
         StoryHeading{text: "A lens you can press"}
-        StoryNote{text: "A lensed surface made pressable by a flat button laid over it with every face state erased, so only its label shows. This page owns the press clock and ticks NextFrame only while a press or its rebound is live, so the sheet costs no frames while it sits there. Hold it to watch the lens flatten; a click closes the sheet once the rebound has played."}
+        StoryNote{text: "A water lens made pressable by a flat button laid over it with every face state erased, so only its label shows. Hold it and the lens lies flat behind a ring that crosses it; let go and it springs back behind a softer ring, a little past rest before it settles. The clock ticks only while the lens moves, so the sheet costs no frames while it sits there or while it is held. A click closes the sheet once the rebound has played."}
 
         StoryHeading{text: "A sheet that is sharper at its edge"}
         StoryNote{text: "GaussGradientRoundedView: the blur level ramps from gradient_blur_edge at the rim to blur_level in the middle, over gradient_blur_edge_width of the sheet's size and shaped by gradient_blur_power, with the lens off. The four knobs are in the controls panel. They write to the sheet whether or not it is open, so open it first."}
@@ -456,44 +457,13 @@ script_mod! {
     }
 }
 
-/// The ripple clock's value for "no ripple": the shader treats any age this
-/// far past the ring's life as none.
-const AT_REST: f32 = 1000.0;
-
-/// How long the lens takes to flatten under a press, in seconds.
-const PRESS_SETTLE: f64 = 0.78;
-/// How long the strength the host sends takes to fade to nothing, in
-/// seconds. The shader draws the ring itself for about a third of a second
-/// of ripple_age; this envelope only scales it.
-const RIPPLE_LIFE: f64 = 1.05;
-/// When the clock stops ticking, a little after the ring has gone.
-const CLOCK_STOPS: f64 = 1.08;
-
-/// The press curve, in seconds since the press or the release started: the
-/// flatten the shader gets, the ring's strength, and whether the clock has to
-/// tick again.
-///
-/// Pressing, the lens eases flat over `PRESS_SETTLE` and the ring's strength
-/// fades over `RIPPLE_LIFE`, a little weaker the flatter the lens is. Released, the lens
-/// rebounds by however far it had flattened (`restore`), sent as a negative
-/// flatten, which the shader clamps to 0, so the lens is back at rest on the
-/// first frame of the release, under a second, softer ring.
-fn press_curve(age: f64, pressing: bool, restore: f32) -> (f32, f32, bool) {
-    let live = age < CLOCK_STOPS;
-    let fade = (1.0 - age / RIPPLE_LIFE).max(0.0) as f32;
-    if pressing {
-        let t = (age / PRESS_SETTLE).min(1.0) as f32;
-        let flatten = t * t * (3.0 - 2.0 * t);
-        (flatten, fade * (1.0 - flatten * 0.10), live)
-    } else {
-        (-restore.clamp(0.0, 1.0), fade * 0.62, live)
-    }
-}
-
-/// The pressable lens: a popup holding a lensed surface with a face-erased
-/// button over it. The button reports the press; this widget owns the clock
-/// that drives the surface's press response, and it ticks NextFrame only
-/// while a press or a rebound is live, so an idle sheet costs no frames.
+/// The pressable lens: a popup holding a water lens with a face-erased
+/// button over it. The button reports the press; this widget forwards it to
+/// the library's `LensPress`, which is the same press `GlassButton` has built
+/// in, and pushes what comes back through the surface's press response. It
+/// ticks NextFrame only while the lens is flattening or rebounding, so an
+/// idle sheet, or a long hold, costs no frames. What it adds is the close: a
+/// click puts the sheet away once the rebound has played.
 #[derive(Script, ScriptHook, Widget)]
 pub struct StoryPressLens {
     #[deref]
@@ -501,43 +471,39 @@ pub struct StoryPressLens {
     #[rust]
     next_frame: NextFrame,
     #[rust]
-    press_started_at: f64,
-    #[rust]
-    release_started_at: f64,
-    /// How flat the lens is, 0..1, kept so the rebound knows how far to go.
-    #[rust]
-    flatten: f32,
-    #[rust]
-    pressing: bool,
-    #[rust]
-    animating: bool,
+    press: LensPress,
     /// A click closes the sheet, but only once the rebound has played.
     #[rust]
     pending_close: bool,
 }
 
 impl StoryPressLens {
-    fn set_response(&self, cx: &mut Cx, flatten: f32, age: f32, strength: f32) {
-        // A LensedRoundedView is a template over the one Rust widget, so it
-        // borrows as that widget.
+    fn set_response(&self, cx: &mut Cx, response: PressResponse) {
+        // A RippleLensRoundedView is a template over the one Rust widget, so
+        // it borrows as that widget.
         if let Some(mut glass) = self
             .view
             .widget(cx, ids!(press_lens))
             .borrow_mut::<GaussRoundedView>()
         {
-            glass.set_press_response(cx, flatten, age, strength);
+            glass.set_press_response(cx, response.flatten, response.ripple_age, response.ripple_strength);
+        }
+    }
+
+    fn step(&mut self, cx: &mut Cx, step: LensPressStep) {
+        if let Some(response) = step.response {
+            self.set_response(cx, response);
+        }
+        if step.tick {
+            self.next_frame = cx.new_next_frame();
         }
     }
 
     /// The lens at rest, with nothing of a previous press left on it.
     fn rest(&mut self, cx: &mut Cx) {
-        self.pressing = false;
-        self.animating = false;
         self.pending_close = false;
-        self.flatten = 0.0;
-        self.press_started_at = 0.0;
-        self.release_started_at = 0.0;
-        self.set_response(cx, 0.0, AT_REST, 0.0);
+        let response = self.press.rest();
+        self.set_response(cx, response);
     }
 
     pub fn open_fresh(&mut self, cx: &mut Cx) {
@@ -555,60 +521,32 @@ impl StoryPressLens {
     }
 
     pub fn press(&mut self, cx: &mut Cx) {
-        self.pressing = true;
-        self.animating = true;
-        self.press_started_at = 0.0;
-        self.release_started_at = 0.0;
-        self.flatten = 0.0;
         self.pending_close = false;
-        self.set_response(cx, 0.0, AT_REST, 0.0);
-        self.next_frame = cx.new_next_frame();
+        let step = self.press.down(false);
+        self.step(cx, step);
     }
 
+    /// The face was released, and `close_after` says whether it was a click.
+    /// The face reports a click as a release as well, and the second report
+    /// changes nothing but the close.
     pub fn release(&mut self, cx: &mut Cx, close_after: bool) {
-        self.pressing = false;
-        self.animating = true;
-        self.release_started_at = 0.0;
         self.pending_close |= close_after;
-        self.next_frame = cx.new_next_frame();
+        let step = self.press.up(false);
+        self.step(cx, step);
+        if self.pending_close && self.press.is_at_rest() {
+            // Nothing is left to play: a press this sheet never saw.
+            self.close(cx);
+        }
     }
 
-    /// One frame of the press or the rebound. The clock starts on the first
-    /// tick after the press or the release rather than in the handler, so
-    /// the curve's age is measured in the frame's own time.
+    /// One frame of the press or the rebound.
     fn tick(&mut self, cx: &mut Cx, time: f64) {
-        if !self.animating {
+        let Some(step) = self.press.tick(time, &LensPressCurve::default()) else {
             return;
-        }
-        let started = if self.pressing {
-            &mut self.press_started_at
-        } else {
-            &mut self.release_started_at
         };
-        if *started <= 0.0 {
-            *started = time;
-        }
-        let age = (time - *started).max(0.0);
-        let (flatten, strength, live) = press_curve(age, self.pressing, self.flatten);
-        if live {
-            if self.pressing {
-                self.flatten = flatten;
-            }
-            self.set_response(cx, flatten, age as f32, strength);
-            self.next_frame = cx.new_next_frame();
-            return;
-        }
-        self.animating = false;
-        if self.pressing {
-            self.flatten = 1.0;
-            self.set_response(cx, 1.0, AT_REST, 0.0);
-        } else {
-            self.flatten = 0.0;
-            self.set_response(cx, 0.0, AT_REST, 0.0);
-            if self.pending_close {
-                self.pending_close = false;
-                self.view.popup_notification(cx, ids!(press_lens_popup)).close(cx);
-            }
+        self.step(cx, step);
+        if !step.tick && self.pending_close && self.press.is_at_rest() {
+            self.close(cx);
         }
     }
 }
@@ -798,8 +736,8 @@ They are shown over a coloured ground because every one of them draws what is be
         category: "Containers",
         component: "Glass",
         also: &[
-            "GaussRoundedView", "LensedRoundedView", "GaussGradientRoundedView",
-            "PopupNotification", "ButtonFlat", "Slider",
+            "GaussRoundedView", "LensedRoundedView", "RippleLensRoundedView", "GaussGradientRoundedView",
+            "PopupNotification", "ButtonFlat", "Slider", "LensPress",
         ],
         name: "Sheets",
         dsl: "GlassSurfacesPopups",
@@ -817,16 +755,22 @@ A `GaussRoundedView` samples the scene behind itself. Inside an overlay it does 
 
 - **Blur sheet** — the raw `GaussRoundedView`, frosted with the lens off (`lensing_effect: 0`).
 - **Lens sheet** — `LensedRoundedView`, the same material with the lens at 0.75, so the rim bends what is under it.
-- **Pressable lens** — a `LensedRoundedView` with a face-erased `ButtonFlat` laid over it, so a lens answers a press.
+- **Pressable lens** — a `RippleLensRoundedView`, the water lens, with a face-erased `ButtonFlat` laid over it, so a lens answers a press.
 - **Gradient sheet** — `GaussGradientRoundedView`, whose blur level ramps from the rim to the middle.
 
 Every template of the family is a DSL preset over the one Rust widget, so any of them borrows as a `GaussRoundedView`. That is how the sliders on the first two sheets retune a surface that is already drawn: `set_blurriness` (0..6) and `set_lensing_effect` (0..1) write uniforms on the retained draw call, and the change lands on the frame after, with no rebuild.
 
 ## The press
 
-The shader never reads the frame clock. A press is three uniforms — `press_flatten`, `ripple_age`, `ripple_strength` — pushed by the host through `set_press_response` on a `NextFrame` chain the host runs only while a press or a rebound is live, so an idle sheet costs no frames. A shader that read `draw_pass.time` for this instead would pin the window at display rate for as long as the glass was visible. Here the host is a small story widget, `StoryPressLens`; the packaged version of the same idea, with the press built in, is `GlassButton` on Glass > Controls.
+The pressable lens is on `RippleLensRoundedView`, the water lens: the material the lens button is drawn with, livelier than the rest of the family, with a sheen toward the rim and the top, a colour split at the rim, and a press it can show. Its numbers are the lens button's: a 300 by 92 pill, a 38 point bend over a 13 point band, a 5.2 point colour split, and a soft shadow 34 points wide.
 
-Two things about the numbers, because they are easy to overtune. The flatten clamps to 0..1 inside the shader, so the release, sent as a negative flatten, puts the lens straight back at rest instead of bulging past it; only the softer ring plays out. And a full press cuts the bend by about fifteen per cent and lifts the rim a little, which is a nudge, not a collapse. The ring lives about a third of a second.
+The shader never reads the frame clock. A press is three uniforms — `press_flatten`, `ripple_age`, `ripple_strength` — pushed through `set_press_response` on a `NextFrame` chain that runs only while the lens is flattening or rebounding, so an idle sheet and a long hold cost no frames. A shader that read `draw_pass.time` for this instead would pin the window at display rate for as long as the glass was visible.
+
+The numbers come from the library's `LensPress`, the same press `GlassButton` has built in. The story widget here, `StoryPressLens`, forwards the face's press and release to it and adds one thing a button has no action for: a click closes the sheet once the rebound has played.
+
+Held, the lens eases flat over 0.78 s behind a ring that crosses it in 0.88 s and fades over 1.05 s, and once the ring has gone it stays flat without asking for frames. Let go, it is sent a negative flatten: the lens springs back from as flat as it got behind a second ring at 62% strength, lifts a little past rest just behind the front, and settles about a second later. The restrained presets clamp a negative flatten to nothing and draw a ring of under a point, which is why this sheet is not on `LensedRoundedView`.
+
+The label is the face's, and it answers the pointer as the lens button's does: white at rest, 65% of that under the pointer and 25% while held. The glass under it does not light up.
 
 ## The gradient sheet's knobs
 
@@ -1048,40 +992,33 @@ mod tests {
         );
     }
 
-    /// The curve is pure so it can be read without a frame clock: a press
-    /// starts flat-less with the ring at full strength, settles flat by
-    /// `PRESS_SETTLE`, and stops the clock after `CLOCK_STOPS`; a release
-    /// rebounds by what was pressed under a softer ring, and stops the same
-    /// way.
+    /// The host adds one thing to the library's press: a click puts the sheet
+    /// away, but only once the rebound has played. The face reports the click
+    /// as a release too, and neither report may close the sheet early or
+    /// start the rebound over.
     #[test]
-    fn the_press_curve_settles_and_the_clock_stops() {
-        let (flatten, strength, live) = press_curve(0.0, true, 0.0);
-        assert_eq!(flatten, 0.0);
-        assert_eq!(strength, 1.0);
-        assert!(live);
+    fn a_click_closes_the_sheet_once_the_rebound_has_played() {
+        let mut cx = shell();
+        let page = build(&mut cx, "GlassSurfacesPopups");
+        let demo_ref = page.widget(&cx, &[live_id!(press_demo)]);
+        let mut demo = demo_ref.borrow_mut::<StoryPressLens>().expect("press_demo is the host");
+        let open = |demo: &StoryPressLens, cx: &Cx| demo.view.popup_notification(cx, ids!(press_lens_popup)).is_open();
 
-        let (flatten, _, live) = press_curve(PRESS_SETTLE, true, 0.0);
-        assert!((flatten - 1.0).abs() < 1e-6, "not flat by {PRESS_SETTLE} s: {flatten}");
-        assert!(live, "the ring outlives the settle");
+        demo.open_fresh(&mut cx);
+        assert!(open(&demo, &cx));
+        demo.press(&mut cx);
+        demo.tick(&mut cx, 1.0);
+        demo.tick(&mut cx, 1.3);
+        demo.release(&mut cx, false);
+        demo.release(&mut cx, true);
+        assert!(open(&demo, &cx), "closed on the click instead of after the rebound");
 
-        let (flatten, strength, live) = press_curve(0.5, true, 0.0);
-        assert!(flatten > 0.0 && flatten < 1.0, "half way it is part way: {flatten}");
-        assert!(strength > 0.0 && strength < 1.0, "the ring is fading: {strength}");
-        assert!(live);
-
-        assert!(press_curve(CLOCK_STOPS - 0.01, true, 0.0).2, "still ticking just before the stop");
-        let (flatten, strength, live) = press_curve(CLOCK_STOPS, true, 0.0);
-        assert!(!live, "the clock keeps running after the ring is gone");
-        assert_eq!(flatten, 1.0);
-        assert_eq!(strength, 0.0);
-
-        let (flatten, strength, live) = press_curve(0.0, false, 0.7);
-        assert!((flatten + 0.7).abs() < 1e-6, "the rebound is the press undone: {flatten}");
-        assert!((strength - 0.62).abs() < 1e-6, "the release ring is softer: {strength}");
-        assert!(live);
-        assert!(!press_curve(CLOCK_STOPS, false, 0.7).2, "the rebound stops the clock too");
-
-        // A restore past the clamp cannot send the lens further than flat.
-        assert_eq!(press_curve(0.0, false, 3.0).0, -1.0);
+        let stops = LensPressCurve::default().release_stops_at();
+        demo.tick(&mut cx, 1.35);
+        demo.tick(&mut cx, 1.35 + stops * 0.5);
+        assert!(open(&demo, &cx), "closed half way through the rebound");
+        demo.tick(&mut cx, 1.35 + stops);
+        assert!(!open(&demo, &cx), "the rebound played out and the sheet stayed");
+        assert!(demo.press.is_at_rest());
     }
 }
