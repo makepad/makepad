@@ -55,7 +55,13 @@
 //! when the grown arc would leave the window it is already as wide as its
 //! anchor lets it open (a quarter from a corner, a half from the middle of
 //! an edge), so the actions go on round a second arc further out, the inner
-//! one filled first. A row or a column that would leave the window folds
+//! one filled first. The arcs also stay inside a furthest radius,
+//! `radial_max_radius`, however much window is left: an action a long reach
+//! from the button is a slow one to hit, so a set that would reach past it
+//! goes on round further arcs inside it just as it does in a small window.
+//! A set no arcs inside it can hold rests on the arcs of the least room
+//! past it that does, as near the button as the spacing allows. A row or a
+//! column that would leave the window folds
 //! into a second line one step further in. Nothing scrolls and nothing
 //! shrinks: a scrolling set hides the actions it exists to show, and a
 //! smaller target is a worse target. Only a window too small for the set at
@@ -217,6 +223,8 @@ script_mod! {
         item_gap: 12.
         /** the least radius of the arc; it grows before neighbours would touch 48..200 step 2 */
         radial_radius: 88.
+        /** the furthest radius of the arcs: a set that would reach past it goes on round more arcs inside it; 0 is no limit 0..400 step 2 */
+        radial_max_radius: 200.
         /** picking an action puts the set away 0..1 step 1 */
         close_on_pick: true
         /** shows the set and keeps it out: no pointer grab, no outside or Escape close 0..1 step 1 */
@@ -252,6 +260,7 @@ script_mod! {
         item_size: 32.
         item_gap: 8.
         radial_radius: 64.
+        radial_max_radius: 156.
         main +: {width: 40. height: 40.}
     }
 
@@ -261,6 +270,7 @@ script_mod! {
         item_size: 48.
         item_gap: 14.
         radial_radius: 108.
+        radial_max_radius: 238.
         main +: {width: 72. height: 72.}
     }
 }
@@ -592,7 +602,8 @@ pub fn arc_step(item: f64, gap: f64) -> f64 {
 
 /// Where each of `n` actions sits, as an offset from the main button's
 /// centre, in the order they were declared, when nothing is in the way: the
-/// layout a window large enough for the whole set gets.
+/// layout a window large enough for the whole set gets. An arc still keeps
+/// inside `max_r` when that is above 0, as [`arc_counts`] lays it out.
 ///
 /// A row or a column runs from the button toward the interior along its own
 /// axis when that axis leads inward. When it does not (a row from the
@@ -607,8 +618,9 @@ pub fn dial_offsets(
     item: f64,
     gap: f64,
     min_r: f64,
+    max_r: f64,
 ) -> Vec<DVec2> {
-    dial_plan(anchor, dial, n, main, item, gap, min_r, dvec2(0.0, 0.0), UNBOUNDED).offsets
+    dial_plan(anchor, dial, n, main, item, gap, min_r, max_r, dvec2(0.0, 0.0), UNBOUNDED).offsets
 }
 
 /// A set laid out inside a window: where each action rests, and which arc
@@ -637,11 +649,15 @@ impl DialPlan {
 /// inside `window` whenever the window can hold the set at all.
 ///
 /// An arc grows with its count by the chord rule, and further so no two
-/// squares meet, and once it would leave the window goes on round further
-/// arcs a step apart, the inner ones filled first. A row or a column folds
+/// squares meet, and once it would leave the window, or reach past `max_r`
+/// when that is above 0, goes on round further arcs a step apart, the inner
+/// ones filled first. A row or a column folds
 /// into parallel lines a step further in. A window that cannot hold the set
 /// is overrun rather than the set being cut: an action that cannot be
 /// reached is worse than one partly under the window's edge.
+///
+/// `max_r` is measured from `centre`, the button's middle, even when a
+/// small button close to the window's edge moves its set in.
 pub fn dial_plan(
     anchor: FloatingAnchor,
     dial: SpeedDialLayout,
@@ -650,14 +666,15 @@ pub fn dial_plan(
     item: f64,
     gap: f64,
     min_r: f64,
+    max_r: f64,
     centre: DVec2,
     window: Rect,
 ) -> DialPlan {
-    let lay_out = |centre: DVec2| match dial {
-        SpeedDialLayout::Radial => radial_plan(anchor, n, main, item, gap, min_r, centre, window),
+    let lay_out = |centre: DVec2, max_r: f64| match dial {
+        SpeedDialLayout::Radial => radial_plan(anchor, n, main, item, gap, min_r, max_r, centre, window),
         _ => line_plan(anchor, dial, n, main, item, gap, centre, window),
     };
-    let plan = lay_out(centre);
+    let plan = lay_out(centre, max_r);
     // The actions level with the button, the ends of an arc and the first
     // line of a row or a column, reach half an action past its middle
     // toward the edges it is pinned to. A small button close to the window's
@@ -667,7 +684,15 @@ pub fn dial_plan(
     if shift.x == 0.0 && shift.y == 0.0 {
         return plan;
     }
-    let mut plan = lay_out(centre + shift);
+    // The arcs are laid around the moved centre, so they are held that much
+    // nearer for no action to rest past the furthest radius from the
+    // button's own middle.
+    let held = if max_r > 0.0 {
+        (max_r - shift.length()).max(f64::MIN_POSITIVE)
+    } else {
+        max_r
+    };
+    let mut plan = lay_out(centre + shift, held);
     for offset in &mut plan.offsets {
         *offset += shift;
     }
@@ -715,21 +740,18 @@ fn radial_plan(
     item: f64,
     gap: f64,
     min_r: f64,
+    max_r: f64,
     centre: DVec2,
     window: Rect,
 ) -> DialPlan {
     let (start, dir, span) = radial_arc(anchor);
-    let mut plan = DialPlan::default();
-    for (row, count) in arc_counts(anchor, n, main, item, gap, min_r, centre, window).into_iter().enumerate() {
-        // Each arc as tight as its own count lets it be, and a whole arc
-        // step clear of the arc inside it, so neither a face nor a square on
-        // one touches one on the other whatever their angles.
-        let least = arc_radius(count, span, item, gap, main, min_r);
-        let r = match plan.radii.last() {
-            Some(inner) => least.max(inner + arc_step(item, gap)),
-            None => least,
-        };
-        plan.radii.push(r);
+    let counts = arc_counts(anchor, n, main, item, gap, min_r, max_r, centre, window);
+    let mut plan = DialPlan {
+        radii: arc_radii(&counts, span, item, gap, main, min_r),
+        ..DialPlan::default()
+    };
+    for (row, &count) in counts.iter().enumerate() {
+        let r = plan.radii[row];
         for i in 0..count {
             let a = if count >= 2 {
                 start + dir * span * i as f64 / (count - 1) as f64
@@ -743,15 +765,40 @@ fn radial_plan(
     plan
 }
 
+/// Each arc's radius, innermost first, for arcs holding `counts` actions:
+/// each as tight as its own count lets it be, and a whole arc step clear of
+/// the arc inside it, so neither a face nor a square on one touches one on
+/// the other whatever their angles.
+fn arc_radii(counts: &[usize], span: f64, item: f64, gap: f64, main: f64, min_r: f64) -> Vec<f64> {
+    let mut radii: Vec<f64> = Vec::with_capacity(counts.len());
+    for &count in counts {
+        let least = arc_radius(count, span, item, gap, main, min_r);
+        radii.push(match radii.last() {
+            Some(inner) => least.max(inner + arc_step(item, gap)),
+            None => least,
+        });
+    }
+    radii
+}
+
 /// How many of `n` actions each arc holds, innermost first.
 ///
 /// One arc whenever one fits. Otherwise the outermost arc goes as far out
-/// as the window allows, as few arcs as the set needs go inside it a step
+/// as the room allows, as few arcs as the set needs go inside it a step
 /// apart, and each takes all the spacing lets it hold before the next one
 /// out takes any: the actions nearest the button are the ones reached
-/// first, and a half-empty inner arc spends its room on nothing. A window
-/// that cannot hold the set gets arcs from the least radius out, and they
-/// overrun it.
+/// first, and a half-empty inner arc spends its room on nothing. The room
+/// is what the window leaves, and no more than `max_r` when that is above
+/// 0: left to the window alone one arc grows until the far actions are a
+/// long reach from the button.
+///
+/// A set no number of arcs inside the room can hold is laid out as it
+/// would be in the least room further out that does hold it: no action is
+/// made smaller, none is left out, and none rests further from the button
+/// than the set needs. Past `max_r` that room still keeps inside the
+/// window whenever the window can hold the set. A window that cannot gets
+/// arcs from the least radius out, as tight as they go, and they overrun
+/// it.
 pub fn arc_counts(
     anchor: FloatingAnchor,
     n: usize,
@@ -759,6 +806,7 @@ pub fn arc_counts(
     item: f64,
     gap: f64,
     min_r: f64,
+    max_r: f64,
     centre: DVec2,
     window: Rect,
 ) -> Vec<usize> {
@@ -766,13 +814,67 @@ pub fn arc_counts(
         return Vec::new();
     }
     let (_, _, span) = radial_arc(anchor);
-    let room = arc_room(anchor, centre, item, window);
+    let window_room = arc_room(anchor, centre, item, window);
+    let room = window_room.min(furthest_radius(max_r));
+    if let Some(counts) = arcs_within(n, span, main, item, gap, min_r, room) {
+        return counts;
+    }
+    let least = least_room(n, span, main, item, gap, min_r, room);
+    if least <= window_room + 1e-9 {
+        if let Some(counts) = arcs_within(n, span, main, item, gap, min_r, least) {
+            return counts;
+        }
+    }
+    let step = arc_step(item, gap);
+    let mut counts = Vec::new();
+    let mut left = n;
+    let mut r = arc_radius(1, span, item, gap, main, min_r);
+    while left > 0 {
+        let held = arc_capacity(r, span, item, gap, main, min_r, left);
+        counts.push(held);
+        left -= held;
+        r += step;
+    }
+    counts
+}
+
+/// The least room past `room` inside which some number of arcs holds all
+/// `n` actions.
+///
+/// An arc's capacity only changes where its radius reaches the least
+/// radius of an arc of some count, and the arcs inside a room lie whole
+/// steps in from it, so the least room is one of those radii a whole number
+/// of steps further out. A set that fits in a room fits in any larger one,
+/// so the least is the first of them, in order, that holds it. `n` arcs of
+/// one a step apart always do.
+fn least_room(n: usize, span: f64, main: f64, item: f64, gap: f64, min_r: f64, room: f64) -> f64 {
+    let step = arc_step(item, gap);
+    let mut rooms: Vec<f64> = (1..=n)
+        .map(|count| arc_radius(count, span, item, gap, main, min_r))
+        .flat_map(|r| (0..n).map(move |k| r + k as f64 * step))
+        .filter(|r| *r > room)
+        .collect();
+    rooms.sort_by(f64::total_cmp);
+    let first = rooms.partition_point(|r| arcs_within(n, span, main, item, gap, min_r, *r).is_none());
+    rooms.get(first).copied().unwrap_or(f64::INFINITY)
+}
+
+/// How many of `n` actions each arc holds with every arc inside `room`:
+/// one arc when it fits, and otherwise the fewest arcs a step apart with
+/// the outermost at `room`, each filled before the next one out takes any.
+/// `None` when no number of arcs inside `room` holds the set.
+fn arcs_within(n: usize, span: f64, main: f64, item: f64, gap: f64, min_r: f64, room: f64) -> Option<Vec<usize>> {
     if n == 1 || arc_radius(n, span, item, gap, main, min_r) <= room + 1e-9 {
-        return vec![n];
+        return Some(vec![n]);
     }
     let step = arc_step(item, gap);
     let least = arc_radius(1, span, item, gap, main, min_r);
-    let fill = |first: f64, arcs: usize| -> Vec<usize> {
+    let mut arcs = 2;
+    loop {
+        let first = room - (arcs - 1) as f64 * step;
+        if first < least - 1e-9 {
+            return None;
+        }
         let mut left = n;
         let mut counts = Vec::new();
         for k in 0..arcs {
@@ -783,30 +885,21 @@ pub fn arc_counts(
             counts.push(held);
             left -= held;
         }
-        counts
-    };
-    let mut arcs = 2;
-    loop {
-        let first = room - (arcs - 1) as f64 * step;
-        if first < least - 1e-9 {
-            break;
-        }
-        let counts = fill(first, arcs);
-        if counts.iter().sum::<usize>() == n {
-            return counts;
+        if left == 0 {
+            return Some(counts);
         }
         arcs += 1;
     }
-    let mut counts = Vec::new();
-    let mut left = n;
-    let mut r = least;
-    while left > 0 {
-        let held = arc_capacity(r, span, item, gap, main, min_r, left);
-        counts.push(held);
-        left -= held;
-        r += step;
+}
+
+/// The furthest an arc may be laid for a furthest radius of `max_r`: that
+/// radius, or no limit at all when it is 0.
+fn furthest_radius(max_r: f64) -> f64 {
+    if max_r > 0.0 {
+        max_r
+    } else {
+        f64::INFINITY
     }
-    counts
 }
 
 /// How many actions an arc of radius `r` spanning `span` holds end to end
@@ -1910,6 +2003,17 @@ pub struct FloatingAction {
     pub item_gap: f64,
     #[live(88.0)]
     pub radial_radius: f64,
+    /// The furthest an arc is laid from the button's middle; 0 is no limit.
+    /// Left to the window alone a large set grows one arc as wide as the
+    /// window lets it be, and eight from a corner rest four and a half
+    /// buttons away from the hand that opened them. Held inside this radius
+    /// the set goes on round further arcs a step apart, the inner filled
+    /// first, as it does in a window that small. The default holds up to
+    /// twelve from a corner. A set no arcs inside it can hold is neither
+    /// shrunk nor cut: it rests on the arcs of the least room past this
+    /// radius that holds it.
+    #[live(200.0)]
+    pub radial_max_radius: f64,
     #[live(true)]
     pub close_on_pick: bool,
     /// Out from the first draw and kept out: no pointer grab, no outside
@@ -2767,6 +2871,7 @@ impl FloatingAction {
             self.item_size,
             self.item_gap,
             self.radial_radius,
+            self.radial_max_radius,
             centre,
             window,
         );
@@ -3258,6 +3363,10 @@ mod tests {
     const ITEM: f64 = 40.0;
     const GAP: f64 = 12.0;
     const MIN_R: f64 = 88.0;
+    /// The widget's own furthest radius.
+    const MAX_R: f64 = 200.0;
+    /// A furthest radius of 0: the arcs are bounded by the window alone.
+    const NO_MAX: f64 = 0.0;
 
     const LAYOUTS: [SpeedDialLayout; 3] = [
         SpeedDialLayout::Radial,
@@ -3358,7 +3467,7 @@ mod tests {
             assert_eq!(d, dir, "{anchor:?} direction");
             assert!((w - f64::to_radians(span)).abs() < 1e-12, "{anchor:?} span");
         }
-        let offsets = dial_offsets(FloatingAnchor::BottomRight, SpeedDialLayout::Radial, 3, MAIN, ITEM, GAP, MIN_R);
+        let offsets = dial_offsets(FloatingAnchor::BottomRight, SpeedDialLayout::Radial, 3, MAIN, ITEM, GAP, MIN_R, NO_MAX);
         for (got, want) in offsets.iter().zip([
             dvec2(0.0, -88.0),
             dvec2(-62.23, -62.23),
@@ -3400,7 +3509,7 @@ mod tests {
             for (anchor, span) in [(FloatingAnchor::BottomRight, quarter), (FloatingAnchor::TopCenter, half)] {
                 for n in 1..=12usize {
                     let r = arc_radius(n, span, item, gap, main, min_r);
-                    let offsets = dial_offsets(anchor, SpeedDialLayout::Radial, n, main, item, gap, min_r);
+                    let offsets = dial_offsets(anchor, SpeedDialLayout::Radial, n, main, item, gap, min_r, NO_MAX);
                     for (i, a) in offsets.iter().enumerate() {
                         assert!((a.length() - r).abs() < 1e-9, "n {n}: one arc");
                         assert!(a.x.abs().max(a.y.abs()) >= (main + item) * 0.5 - 1e-9, "n {n}: {i} meets the button");
@@ -3426,7 +3535,7 @@ mod tests {
             let inward = interior(anchor);
             for dial in LAYOUTS {
                 for n in 1..=6usize {
-                    for offset in dial_offsets(anchor, dial, n, MAIN, ITEM, GAP, MIN_R) {
+                    for offset in dial_offsets(anchor, dial, n, MAIN, ITEM, GAP, MIN_R, NO_MAX) {
                         let along = offset.x * inward.x + offset.y * inward.y;
                         assert!(along >= -1e-9, "{anchor:?} {dial:?} n {n}: {offset:?}");
                         let strict = anchor.is_corner()
@@ -3444,7 +3553,7 @@ mod tests {
     /// run along its own axis is centred on the button, one step in.
     #[test]
     fn rows_and_columns_step_by_size_and_gap() {
-        let run = |anchor, dial| dial_offsets(anchor, dial, 3, MAIN, ITEM, GAP, MIN_R);
+        let run = |anchor, dial| dial_offsets(anchor, dial, 3, MAIN, ITEM, GAP, MIN_R, NO_MAX);
         assert_eq!(
             run(FloatingAnchor::BottomRight, SpeedDialLayout::Horizontal),
             vec![dvec2(-60.0, 0.0), dvec2(-112.0, 0.0), dvec2(-164.0, 0.0)]
@@ -3610,7 +3719,7 @@ mod tests {
         assert_eq!(arrow_target(&column, Some(1), origin, down), Some(0));
         assert_eq!(arrow_target(&column, Some(1), origin, left), None);
 
-        let arc = dial_offsets(FloatingAnchor::BottomRight, SpeedDialLayout::Radial, 3, MAIN, ITEM, GAP, MIN_R);
+        let arc = dial_offsets(FloatingAnchor::BottomRight, SpeedDialLayout::Radial, 3, MAIN, ITEM, GAP, MIN_R, NO_MAX);
         assert_eq!(arrow_target(&arc, None, origin, left), Some(2));
         assert_eq!(arrow_target(&arc, None, origin, up), Some(0));
     }
@@ -3649,6 +3758,7 @@ mod tests {
         item: f64,
         gap: f64,
         min_r: f64,
+        max_r: f64,
         margin: Inset,
     }
 
@@ -3657,6 +3767,7 @@ mod tests {
         item: ITEM,
         gap: GAP,
         min_r: MIN_R,
+        max_r: NO_MAX,
         margin: MARGIN,
     };
 
@@ -3668,7 +3779,7 @@ mod tests {
 
     fn plan_sized(s: Sizes, anchor: FloatingAnchor, dial: SpeedDialLayout, n: usize, host: Rect, window: Rect) -> (DVec2, DialPlan) {
         let centre = main_rect(anchor, host, s.main, s.margin).center();
-        (centre, dial_plan(anchor, dial, n, s.main, s.item, s.gap, s.min_r, centre, window))
+        (centre, dial_plan(anchor, dial, n, s.main, s.item, s.gap, s.min_r, s.max_r, centre, window))
     }
 
     fn resting_rect(centre: DVec2, offset: DVec2) -> Rect {
@@ -3755,6 +3866,7 @@ mod tests {
             item: 32.0,
             gap: 8.0,
             min_r: 64.0,
+            max_r: NO_MAX,
             margin: flush,
         };
         let big_actions = Sizes {
@@ -3762,6 +3874,7 @@ mod tests {
             item: 64.0,
             gap: 12.0,
             min_r: 88.0,
+            max_r: NO_MAX,
             margin: MARGIN,
         };
         for (s, w, h) in [(small, 480.0, 360.0), (small, 1400.0, 900.0), (big_actions, 1400.0, 900.0)] {
@@ -3778,7 +3891,7 @@ mod tests {
         // Where there is room the set is not moved at all.
         let (host, window) = small_window(1400.0, 900.0);
         let (_, plan) = plan_in(FloatingAnchor::BottomRight, SpeedDialLayout::Vertical, 3, host, window);
-        assert_eq!(plan.offsets, dial_offsets(FloatingAnchor::BottomRight, SpeedDialLayout::Vertical, 3, MAIN, ITEM, GAP, MIN_R));
+        assert_eq!(plan.offsets, dial_offsets(FloatingAnchor::BottomRight, SpeedDialLayout::Vertical, 3, MAIN, ITEM, GAP, MIN_R, NO_MAX));
     }
 
     /// The window the live checks force: eight and twelve on a corner arc
@@ -3801,7 +3914,7 @@ mod tests {
         // Three still take the single arc of the spec.
         let (centre, plan) = plan_in(FloatingAnchor::BottomRight, SpeedDialLayout::Radial, 3, host, window);
         assert_eq!(plan.row_count(), 1);
-        assert_eq!(plan.offsets, dial_offsets(FloatingAnchor::BottomRight, SpeedDialLayout::Radial, 3, MAIN, ITEM, GAP, MIN_R));
+        assert_eq!(plan.offsets, dial_offsets(FloatingAnchor::BottomRight, SpeedDialLayout::Radial, 3, MAIN, ITEM, GAP, MIN_R, NO_MAX));
         assert!(plan.offsets.iter().all(|offset| inside(resting_rect(centre, *offset), window)));
     }
 
@@ -3816,7 +3929,7 @@ mod tests {
         let centre = main_rect(anchor, host, MAIN, MARGIN).center();
         let room = arc_room(anchor, centre, ITEM, window);
         for n in [8usize, 12] {
-            let counts = arc_counts(anchor, n, MAIN, ITEM, GAP, MIN_R, centre, window);
+            let counts = arc_counts(anchor, n, MAIN, ITEM, GAP, MIN_R, NO_MAX, centre, window);
             assert_eq!(counts.iter().sum::<usize>(), n);
             let arcs = counts.len();
             assert!(arcs >= 2, "n {n}: {counts:?}");
@@ -3825,13 +3938,331 @@ mod tests {
                 let one_more = arc_radius(count + 1, span, ITEM, GAP, MAIN, MIN_R);
                 assert!(one_more > widest, "n {n}: arc {k} of {counts:?} had room for another");
             }
-            let plan = dial_plan(anchor, SpeedDialLayout::Radial, n, MAIN, ITEM, GAP, MIN_R, centre, window);
+            let plan = dial_plan(anchor, SpeedDialLayout::Radial, n, MAIN, ITEM, GAP, MIN_R, NO_MAX, centre, window);
             for (k, count) in counts.iter().enumerate() {
                 assert_eq!(plan.rows.iter().filter(|row| **row == k).count(), *count, "n {n}: arc {k}");
             }
             assert!(plan.radii.windows(2).all(|w| w[1] >= w[0] + arc_step(ITEM, GAP) - 1e-9), "n {n}: {:?}", plan.radii);
             assert!(*plan.radii.last().unwrap() <= room + 1e-9, "n {n}: the outer arc leaves the window");
         }
+    }
+
+    /// How many actions rest on each arc or line, innermost first.
+    fn per_row(plan: &DialPlan) -> Vec<usize> {
+        (0..plan.row_count()).map(|k| plan.rows.iter().filter(|row| **row == k).count()).collect()
+    }
+
+    /// Held to a furthest radius, a set the arcs inside it can hold lies
+    /// wholly inside it, from every anchor and at every count, no two
+    /// squares overlapping and the arcs filled in order. Whether those arcs
+    /// can hold the set is counted apart from the layout: the arcs a step
+    /// apart from the least radius out to the furthest, each holding all
+    /// its spacing allows.
+    #[test]
+    fn a_furthest_radius_holds_every_arc_inside_it() {
+        let mut spread = 0;
+        for max_r in [MAX_R, 120.0, 156.0, 260.0] {
+            for anchor in FloatingAnchor::ALL {
+                let (_, _, span) = radial_arc(anchor);
+                let step = arc_step(ITEM, GAP);
+                let mut held_inside = 0;
+                let mut r = arc_radius(1, span, ITEM, GAP, MAIN, MIN_R);
+                while r <= max_r + 1e-9 {
+                    held_inside += arc_capacity(r, span, ITEM, GAP, MAIN, MIN_R, usize::MAX);
+                    r += step;
+                }
+                for n in 1..=16usize {
+                    let what = format!("max {max_r} {anchor:?} n {n}");
+                    let plan = dial_plan(anchor, SpeedDialLayout::Radial, n, MAIN, ITEM, GAP, MIN_R, max_r, dvec2(0.0, 0.0), UNBOUNDED);
+                    assert_laid_out(&what, dvec2(0.0, 0.0), &plan, n, UNBOUNDED);
+                    if n > held_inside {
+                        continue;
+                    }
+                    for (i, offset) in plan.offsets.iter().enumerate() {
+                        assert!(offset.length() <= max_r + 1e-9, "{what}: action {i} rests {} out", offset.length());
+                    }
+                    assert!(plan.radii.iter().all(|r| *r <= max_r + 1e-9), "{what}: {:?}", plan.radii);
+                    if arc_radius(n, span, ITEM, GAP, MAIN, MIN_R) > max_r + 1e-9 {
+                        spread += 1;
+                    }
+                }
+            }
+        }
+        assert!(spread > 0, "no set here would have reached past its furthest radius on one arc");
+    }
+
+    /// The small preset's sizes and furthest radius.
+    const SMALL_SIZES: Sizes = Sizes {
+        main: 40.0,
+        item: 32.0,
+        gap: 8.0,
+        min_r: 64.0,
+        max_r: 156.0,
+        margin: MARGIN,
+    };
+
+    /// The large preset's sizes and furthest radius.
+    const LARGE_SIZES: Sizes = Sizes {
+        main: 72.0,
+        item: 48.0,
+        gap: 14.0,
+        min_r: 108.0,
+        max_r: 238.0,
+        margin: MARGIN,
+    };
+
+    /// Each preset's furthest radius is the least a step of 2 reaches that
+    /// holds twelve from a corner, the most the anchors page shows, so
+    /// every count up to twelve rests inside it from every anchor. From a
+    /// corner three keep their one arc at the least radius, eight take arcs
+    /// of five and three and twelve arcs of five and seven. Left to a large
+    /// window, eight of the default size would rest on one arc 252.6 out
+    /// and twelve on one 396.5 out.
+    #[test]
+    fn the_default_furthest_radius_holds_twelve_from_a_corner() {
+        let (host, window) = small_window(1400.0, 900.0);
+        let default = Sizes {
+            max_r: MAX_R,
+            ..DEFAULT_SIZES
+        };
+        let quarter = f64::to_radians(90.0);
+        for s in [default, SMALL_SIZES, LARGE_SIZES] {
+            let twelve = least_room(12, quarter, s.main, s.item, s.gap, s.min_r, 0.0);
+            assert!(twelve <= s.max_r && s.max_r < twelve + 2.0, "{s:?}: twelve need {twelve}");
+            for anchor in FloatingAnchor::ALL {
+                for n in 1..=12usize {
+                    let what = format!("{s:?} {anchor:?} n {n}");
+                    let (centre, plan) = plan_sized(s, anchor, SpeedDialLayout::Radial, n, host, window);
+                    assert_laid_out_sized(&what, s, centre, &plan, n, window);
+                    for (i, offset) in plan.offsets.iter().enumerate() {
+                        assert!(offset.length() <= s.max_r + 1e-9, "{what}: action {i} rests {} out", offset.length());
+                    }
+                }
+            }
+            for (n, counts) in [(3usize, vec![3usize]), (8, vec![5, 3]), (12, vec![5, 7])] {
+                let (_, plan) = plan_sized(s, FloatingAnchor::BottomRight, SpeedDialLayout::Radial, n, host, window);
+                assert_eq!(per_row(&plan), counts, "{s:?} n {n}: {:?}", plan.radii);
+                if n == 3 {
+                    assert!((plan.radii[0] - s.min_r).abs() < 1e-9, "{s:?}: {:?}", plan.radii);
+                }
+            }
+        }
+        for (n, r) in [(8usize, 252.62), (12, 396.48)] {
+            let (_, wide) = plan_in(FloatingAnchor::BottomRight, SpeedDialLayout::Radial, n, host, window);
+            assert_eq!(wide.row_count(), 1, "n {n}");
+            assert!((wide.radii[0] - r).abs() < 0.01, "n {n}: {:?}", wide.radii);
+        }
+    }
+
+    /// Held to a furthest radius as to a small window, a set takes more
+    /// than one arc exactly when one arc would reach past it, and an arc
+    /// takes all it can hold before the arc outside it takes any: every arc
+    /// but the last could not hold one more at the widest the furthest
+    /// radius lets it be with the arcs outside it still inside. Twelve from
+    /// a corner and sixteen from an edge fit inside the default.
+    #[test]
+    fn inside_a_furthest_radius_the_inner_arc_fills_first() {
+        let step = arc_step(ITEM, GAP);
+        for (anchor, most) in [(FloatingAnchor::BottomRight, 12usize), (FloatingAnchor::TopCenter, 16)] {
+            let (_, _, span) = radial_arc(anchor);
+            for n in 1..=most {
+                let what = format!("{anchor:?} n {n}");
+                let counts = arc_counts(anchor, n, MAIN, ITEM, GAP, MIN_R, MAX_R, dvec2(0.0, 0.0), UNBOUNDED);
+                assert_eq!(counts.iter().sum::<usize>(), n, "{what}");
+                let one_arc_fits = arc_radius(n, span, ITEM, GAP, MAIN, MIN_R) <= MAX_R + 1e-9;
+                assert_eq!(counts.len() == 1, one_arc_fits, "{what}: {counts:?}");
+                let arcs = counts.len();
+                for (k, count) in counts.iter().enumerate().take(arcs - 1) {
+                    let widest = MAX_R - (arcs - 1 - k) as f64 * step;
+                    let one_more = arc_radius(count + 1, span, ITEM, GAP, MAIN, MIN_R);
+                    assert!(one_more > widest, "{what}: arc {k} of {counts:?} had room for another");
+                }
+                let plan = dial_plan(anchor, SpeedDialLayout::Radial, n, MAIN, ITEM, GAP, MIN_R, MAX_R, dvec2(0.0, 0.0), UNBOUNDED);
+                assert_eq!(per_row(&plan), counts, "{what}");
+                assert!(plan.rows.windows(2).all(|w| w[0] <= w[1]), "{what}: {:?}", plan.rows);
+                assert!(plan.radii.iter().all(|r| *r <= MAX_R + 1e-9), "{what}: {:?}", plan.radii);
+            }
+        }
+    }
+
+    /// A furthest radius of 0 is no limit: the layout is the one a radius
+    /// past anything the set would reach gives, at every count, and eight
+    /// from a corner go back to the one wide arc a large window allows,
+    /// where the widget's own furthest radius takes two.
+    #[test]
+    fn a_furthest_radius_of_zero_is_no_limit() {
+        let (host, window) = small_window(1400.0, 900.0);
+        let quarter = f64::to_radians(90.0);
+        let laid = |max_r: f64, n: usize| {
+            let s = Sizes {
+                max_r,
+                ..DEFAULT_SIZES
+            };
+            plan_sized(s, FloatingAnchor::BottomRight, SpeedDialLayout::Radial, n, host, window).1
+        };
+        for n in 1..=12usize {
+            assert_eq!(laid(NO_MAX, n), laid(1.0e6, n), "n {n}");
+        }
+        let wide = laid(NO_MAX, 8);
+        assert_eq!(wide.row_count(), 1);
+        assert!((wide.radii[0] - arc_radius(8, quarter, ITEM, GAP, MAIN, MIN_R)).abs() < 1e-9, "{:?}", wide.radii);
+        assert_eq!(laid(MAX_R, 8).row_count(), 2);
+        assert_eq!(
+            dial_offsets(FloatingAnchor::BottomRight, SpeedDialLayout::Radial, 8, MAIN, ITEM, GAP, MIN_R, NO_MAX),
+            dial_offsets(FloatingAnchor::BottomRight, SpeedDialLayout::Radial, 8, MAIN, ITEM, GAP, MIN_R, 1.0e6)
+        );
+    }
+
+    /// Lowering the furthest radius never moves an action further out,
+    /// past what the arcs inside it can hold as well: every count to
+    /// sixteen, from a corner and from an edge, with each preset's sizes,
+    /// at every furthest radius the Max radius control can set.
+    #[test]
+    fn lowering_the_furthest_radius_never_moves_the_set_out() {
+        let furthest = |offsets: Vec<DVec2>| offsets.iter().map(|offset| offset.length()).fold(0.0, f64::max);
+        for s in [DEFAULT_SIZES, SMALL_SIZES, LARGE_SIZES] {
+            for anchor in [FloatingAnchor::BottomRight, FloatingAnchor::TopCenter] {
+                for n in 1..=16usize {
+                    let mut nearer: Option<(f64, f64)> = None;
+                    for twos in 1..=200 {
+                        let max_r = twos as f64 * 2.0;
+                        let reach = furthest(dial_offsets(anchor, SpeedDialLayout::Radial, n, s.main, s.item, s.gap, s.min_r, max_r));
+                        if let Some((lower, was)) = nearer {
+                            assert!(
+                                reach >= was - 1e-9,
+                                "{s:?} {anchor:?} n {n}: held to {lower} the set reaches {was}, held to {max_r} only {reach}"
+                            );
+                        }
+                        nearer = Some((max_r, reach));
+                    }
+                }
+            }
+        }
+    }
+
+    /// A set more than the arcs inside its furthest radius can hold keeps
+    /// every action, each at its full size and none over another, and rests
+    /// as near the button as its spacing allows: on the arcs of the least
+    /// room past the furthest radius that holds it, never further out than
+    /// arcs laid tight from the least radius, and each arc filled before the
+    /// next. From a corner held to 156, nine take arcs of four and five
+    /// 165.9 out, where arcs from the least radius out would leave one
+    /// action alone on a third arc 201.1 out. In a window that holds the set
+    /// only past the furthest radius, nothing leaves the window.
+    #[test]
+    fn a_set_too_large_for_its_furthest_radius_rests_as_near_as_it_can_past_it() {
+        let step = arc_step(ITEM, GAP);
+        let (host, window) = small_window(1400.0, 900.0);
+        for max_r in [156.0, 100.0, 40.0] {
+            let s = Sizes {
+                max_r,
+                ..DEFAULT_SIZES
+            };
+            for anchor in FloatingAnchor::ALL {
+                let (_, _, span) = radial_arc(anchor);
+                let least = arc_radius(1, span, ITEM, GAP, MAIN, MIN_R);
+                for n in [20usize, 30] {
+                    let what = format!("max {max_r} {anchor:?} n {n}");
+                    let (centre, plan) = plan_sized(s, anchor, SpeedDialLayout::Radial, n, host, window);
+                    assert_laid_out(&what, centre, &plan, n, window);
+                    assert!(plan.radii.iter().any(|r| *r > max_r + 1e-9), "{what}: squeezed inside {:?}", plan.radii);
+                    // Arcs a step apart from the least radius out, each
+                    // holding all its spacing allows, reach this far.
+                    let mut tight = least;
+                    let mut left = n;
+                    loop {
+                        left -= arc_capacity(tight, span, ITEM, GAP, MAIN, MIN_R, left);
+                        if left == 0 {
+                            break;
+                        }
+                        tight += step;
+                    }
+                    let outer = *plan.radii.last().unwrap();
+                    assert!(outer <= tight + 1e-9, "{what}: the outer arc at {outer} is further out than tight arcs reach, {tight}");
+                    let counts = per_row(&plan);
+                    for k in 0..counts.len() - 1 {
+                        let one_more = arc_radius(counts[k] + 1, span, ITEM, GAP, MAIN, MIN_R);
+                        let tightest = least + k as f64 * step;
+                        assert!(one_more > tightest, "{what}: arc {k} of {counts:?} had room for another");
+                    }
+                }
+            }
+        }
+        let quarter = f64::to_radians(90.0);
+        for (n, counts, reach) in [(9usize, vec![4usize, 5], 165.9), (12, vec![5, 7], 199.2), (16, vec![4, 5, 7], 222.4)] {
+            let offsets = dial_offsets(FloatingAnchor::BottomRight, SpeedDialLayout::Radial, n, MAIN, ITEM, GAP, MIN_R, 156.0);
+            let room = least_room(n, quarter, MAIN, ITEM, GAP, MIN_R, 156.0);
+            let plan = dial_plan(FloatingAnchor::BottomRight, SpeedDialLayout::Radial, n, MAIN, ITEM, GAP, MIN_R, 156.0, dvec2(0.0, 0.0), UNBOUNDED);
+            assert_eq!(per_row(&plan), counts, "n {n}: {:?}", plan.radii);
+            let outer = *plan.radii.last().unwrap();
+            assert!((outer - reach).abs() < 0.05, "n {n}: {:?}", plan.radii);
+            assert!((room - reach).abs() < 0.05, "n {n}: the least room is {room}");
+            // Held to that least room, the set is laid out the same.
+            let at_least = dial_offsets(FloatingAnchor::BottomRight, SpeedDialLayout::Radial, n, MAIN, ITEM, GAP, MIN_R, room);
+            assert_eq!(offsets, at_least, "n {n}");
+        }
+        // Sixteen from a corner of a window 310 high: the least room that
+        // holds them, 222.4, is past the furthest radius and inside the 240
+        // the window leaves.
+        let (host, window) = small_window(1400.0, 310.0);
+        let s = Sizes {
+            max_r: MAX_R,
+            ..DEFAULT_SIZES
+        };
+        let centre = main_rect(FloatingAnchor::BottomRight, host, MAIN, MARGIN).center();
+        assert!((arc_room(FloatingAnchor::BottomRight, centre, ITEM, window) - 240.0).abs() < 1e-9);
+        let (centre, plan) = plan_sized(s, FloatingAnchor::BottomRight, SpeedDialLayout::Radial, 16, host, window);
+        assert_laid_out("sixteen under a low window", centre, &plan, 16, window);
+        assert_eq!(per_row(&plan), vec![4, 5, 7], "{:?}", plan.radii);
+        assert!((plan.radii[2] - 222.4).abs() < 0.05, "{:?}", plan.radii);
+    }
+
+    /// A small button pinned flush to a corner or an edge moves its set in
+    /// off the window's edge, and the furthest radius is still measured
+    /// from the button's own middle: every set that fits inside it that far
+    /// nearer rests inside it, where laying the arcs around the moved
+    /// centre alone would have left some of them past it.
+    #[test]
+    fn a_set_moved_in_off_the_edge_keeps_inside_its_furthest_radius() {
+        let flush = Inset {
+            left: 0.0,
+            top: 0.0,
+            right: 0.0,
+            bottom: 0.0,
+        };
+        let (host, window) = small_window(1400.0, 900.0);
+        let mut would_have_passed = 0;
+        for anchor in FloatingAnchor::ALL {
+            let (_, _, span) = radial_arc(anchor);
+            for max_r in [150.0, 210.0, 266.0, 300.0] {
+                let s = Sizes {
+                    main: 40.0,
+                    item: 64.0,
+                    gap: 12.0,
+                    min_r: 88.0,
+                    max_r,
+                    margin: flush,
+                };
+                for n in 1..=8usize {
+                    let what = format!("{anchor:?} max {max_r} n {n}");
+                    let (centre, plan) = plan_sized(s, anchor, SpeedDialLayout::Radial, n, host, window);
+                    assert_laid_out_sized(&what, s, centre, &plan, n, window);
+                    let unmoved = radial_plan(anchor, n, s.main, s.item, s.gap, s.min_r, max_r, centre, window);
+                    let shift = pinned_overrun(anchor, &unmoved.offsets, centre, s.item, window);
+                    if least_room(n, span, s.main, s.item, s.gap, s.min_r, 0.0) > max_r - shift.length() {
+                        continue;
+                    }
+                    for (i, offset) in plan.offsets.iter().enumerate() {
+                        assert!(offset.length() <= max_r + 1e-9, "{what}: action {i} rests {} from the button", offset.length());
+                    }
+                    let around_moved = radial_plan(anchor, n, s.main, s.item, s.gap, s.min_r, max_r, centre + shift, window);
+                    if around_moved.offsets.iter().any(|offset| (*offset + shift).length() > max_r + 1e-9) {
+                        would_have_passed += 1;
+                    }
+                }
+            }
+        }
+        assert!(would_have_passed > 0, "no set here was moved past its furthest radius");
     }
 
     /// The arrows walk an arc in order: from the button onto the inner arc,
@@ -4157,6 +4588,7 @@ mod tests {
             }});
             let widget = FloatingAction::script_from_value(vm, value);
             assert_eq!(widget.size, 72.0);
+            assert_eq!(widget.radial_max_radius, LARGE_SIZES.max_r);
             assert_eq!(widget.anchor, FloatingAnchor::BottomRight);
             assert_eq!(widget.dial, SpeedDialLayout::Radial);
             assert_eq!(widget.labels, SpeedDialLabels::Auto);
@@ -4694,11 +5126,107 @@ mod tests {
             assert_eq!(set.shown_items(), vec![0, 2]);
             assert_eq!(
                 set.plan.offsets,
-                dial_offsets(set.anchor, set.dial, 2, set.size, set.item_size, set.item_gap, set.radial_radius)
+                dial_offsets(set.anchor, set.dial, 2, set.size, set.item_size, set.item_gap, set.radial_radius, set.radial_max_radius)
             );
             assert_eq!(set.item_at(set.plan_centre + set.plan.offsets[1]), Some(2), "Later rests where Two did");
         });
         assert!(!has_size(action_area(&root, &cx, 1).rect(&cx)), "Two is not drawn once hidden");
+    }
+
+    /// Drawn with the widget's own furthest radius, eight from the corner
+    /// of a box with room for one wide arc rest on two arcs inside that
+    /// radius, and everything that reads the layout reads those two arcs:
+    /// the arrow keys walk the inner arc and then the outer one, the chip of
+    /// an action on the inner arc is carried out past the outer, and a press
+    /// and release on each resting place picks the action resting there.
+    #[test]
+    fn a_set_held_inside_its_furthest_radius_is_walked_labelled_and_picked_where_it_rests() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        cx.with_vm(crate::script_mod);
+        let root = cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.widgets.*
+                View{
+                    width: 600
+                    height: 400
+                    fab := FloatingAction{
+                        reduced_motion: true
+                        one := FloatingActionItem{label: "One"}
+                        two := FloatingActionItem{label: "Two"}
+                        three := FloatingActionItem{label: "Three"}
+                        four := FloatingActionItem{label: "Four"}
+                        five := FloatingActionItem{label: "Five"}
+                        six := FloatingActionItem{label: "Six"}
+                        seven := FloatingActionItem{label: "Seven"}
+                        eight := FloatingActionItem{label: "Eight"}
+                    }
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        let ids = [
+            live_id!(one),
+            live_id!(two),
+            live_id!(three),
+            live_id!(four),
+            live_id!(five),
+            live_id!(six),
+            live_id!(seven),
+            live_id!(eight),
+        ];
+        let mut target = Target::new(&mut cx);
+        target.draw(&mut cx, &root);
+        let fab = root.widget(&cx, ids!(fab)).as_floating_action();
+        fab.open(&mut cx);
+        target.draw(&mut cx, &root);
+        let (max_r, plan, centre) = with_set(&root, &cx, |set| (set.radial_max_radius, set.plan.clone(), set.plan_centre));
+        assert_eq!(max_r, MAX_R, "the widget's own furthest radius");
+        assert_eq!(plan.rows, vec![0, 0, 0, 0, 0, 1, 1, 1], "{:?}", plan.radii);
+        assert!(plan.offsets.iter().all(|offset| offset.length() <= max_r + 1e-9), "{:?}", plan.offsets);
+
+        let origin = dvec2(0.0, 0.0);
+        let arrows = [
+            (KeyCode::ArrowUp, dvec2(0.0, -1.0)),
+            (KeyCode::ArrowDown, dvec2(0.0, 1.0)),
+            (KeyCode::ArrowLeft, dvec2(-1.0, 0.0)),
+            (KeyCode::ArrowRight, dvec2(1.0, 0.0)),
+        ];
+        cx.set_key_focus(action_area(&root, &cx, 0));
+        settle_focus(&mut cx);
+        for at in 0..7 {
+            let (code, _) = arrows
+                .iter()
+                .find(|(_, dir)| arc_walk_target(&plan.offsets, 5, Some(at), origin, *dir) == Some(at + 1))
+                .unwrap_or_else(|| panic!("no arrow moves on from {at}"));
+            deliver(&mut cx, &root, &key(*code, false));
+            assert!(cx.has_key_focus(action_area(&root, &cx, at + 1)), "{code:?} from {at} did not move on");
+        }
+
+        cx.set_key_focus(action_area(&root, &cx, 0));
+        settle_focus(&mut cx);
+        target.draw(&mut cx, &root);
+        let chip = root
+            .widget(&cx, ids!(one))
+            .borrow::<FloatingActionItem>()
+            .and_then(|item| item.chip_rect)
+            .expect("the focused action shows its chip");
+        assert!(
+            chip.pos.y + chip.size.y <= centre.y - plan.radii[1] - ITEM * 0.5 + 1e-6,
+            "the chip at {chip:?} lies over the outer arc {:?}",
+            plan.radii
+        );
+
+        for (k, id) in ids.iter().enumerate() {
+            if !is_open(&root, &cx) {
+                fab.open(&mut cx);
+                target.draw(&mut cx, &root);
+            }
+            let resting = centre + plan.offsets[k];
+            deliver(&mut cx, &root, &press(resting));
+            let reported = deliver(&mut cx, &root, &release(resting));
+            assert!(reported.contains(&FloatingActionAction::Picked(*id)), "action {k}: {reported:?}");
+        }
     }
 
     /// Shown for the first time while the set is out, an action that was
