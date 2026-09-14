@@ -375,12 +375,12 @@ pub enum DataGridAction {
         modifiers: KeyModifiers,
     },
     /// With `row_drag` on, a press on a cell travelled past
-    /// `drag_threshold`: the row is being carried out of the grid. Raised
-    /// once per press, with `abs` where the pointer is as the carry
-    /// begins and the keys held at the press. From then on the grid leaves
-    /// the press alone: it selects nothing, does not scroll, and raises no
-    /// `CellReleased` when the press comes up. Where the row goes is the
-    /// host's to follow.
+    /// `drag_threshold`: the row is being carried. Raised once per press,
+    /// with `abs` where the pointer is as the carry begins and the keys
+    /// held at the press. From then on the grid leaves the press alone: it
+    /// selects nothing, does not scroll unless `row_drag_scroll` is on, and
+    /// raises no `CellReleased` when the press comes up. Where the row goes
+    /// is the host's to follow, from `RowDragMoved` and `RowDragEnded`.
     ///
     /// `row` is the line pressed, as the rows stood at the press, like
     /// `CellReleased`'s: a host whose rows moved since `CellClicked` carries
@@ -389,6 +389,21 @@ pub enum DataGridAction {
     RowDragStarted {
         row: usize,
         col: usize,
+        abs: DVec2,
+        modifiers: KeyModifiers,
+    },
+    /// A carried row's pointer is at `abs`, in the pointer's coordinates,
+    /// wherever it has gone: raised for every move after the one that
+    /// started the carry, and for every step `row_drag_scroll` scrolls the
+    /// rows under a pointer that holds still, with the pointer where it
+    /// is. A host that reorders its rows under the pointer asks
+    /// [`DataGrid::row_gap_at`] where the row belongs now.
+    RowDragMoved {
+        abs: DVec2,
+    },
+    /// The carried row was let go at `abs`, with the keys held as the press
+    /// came up. Raised once, and only for a press that carried its row.
+    RowDragEnded {
         abs: DVec2,
         modifiers: KeyModifiers,
     },
@@ -599,6 +614,9 @@ enum Interact {
         /// The scroll as the press went down, which a `drag_scrolling`
         /// press moves away from by the pointer's travel.
         scroll_at_press: DVec2,
+        /// Where the pointer is now: where a carry near an edge that
+        /// scrolls under a still pointer says the pointer is.
+        at: DVec2,
     },
 }
 
@@ -742,6 +760,15 @@ pub struct DataGrid {
     /// for a list whose rows are dragged somewhere else. Off by default.
     #[live(false)]
     row_drag: bool,
+    /// While a row is carried, a pointer in the top or bottom row's height
+    /// of the rows scrolls the grid that way, faster the nearer the edge,
+    /// and keeps scrolling while the pointer holds still, raising
+    /// `RowDragMoved` for each step: for a list whose rows are reordered
+    /// inside it. A pointer taken off the rows, over the headings or out
+    /// of the grid, scrolls nothing. Off by default, since a row carried
+    /// out of a list to somewhere else must not scroll it.
+    #[live(false)]
+    row_drag_scroll: bool,
     /// A press on a cell that travels past `drag_threshold` scrolls the
     /// grid with the pointer, as a finger scrolls a list on a phone,
     /// instead of dragging out a selection or carrying its row: the point
@@ -881,6 +908,12 @@ pub struct DataGrid {
     /// until the pointer leaves it.
     #[rust]
     tip_head: Option<(usize, usize)>,
+    /// The frame a carry near an edge scrolls on next, while it scrolls,
+    /// and when the step before it was taken.
+    #[rust]
+    row_drag_frame: Option<NextFrame>,
+    #[rust]
+    row_drag_frame_time: Option<f64>,
 }
 
 pub type CopyProvider = Box<dyn FnMut(&GridSelection) -> String>;
@@ -1358,6 +1391,46 @@ impl DataGrid {
             pos: dvec2(data.pos.x, data.pos.y + self.row_sizes.offset_of(row) - self.scroll.y),
             size: dvec2(width, self.row_sizes.size_of(row)),
         })
+    }
+
+    /// The gap a carried row let go at `abs` would drop into, from 0 in
+    /// front of the first row to `rows` behind the last: in front of the
+    /// row level with the pointer while the pointer is above that row's
+    /// middle, behind it once it is below. A host that reorders its rows
+    /// while one is carried moves the row from line `from` to this gap, or
+    /// to one line less when the gap is past `from`, since the gap counts
+    /// the carried row itself. Halfway points keep rows of different
+    /// heights from trading places under a pointer that holds still.
+    ///
+    /// Only the height counts while the pointer is over the rows, the row
+    /// numbers included, and under the last row, where the rows do not
+    /// fill the grid, is the gap behind it. Anywhere else, over the
+    /// headings or above, below or beside the grid, there is no gap, so a
+    /// host leaves the row where it is: a carry that strays over something
+    /// else moves nothing, and `row_drag_scroll` scrolls from just inside
+    /// the top and bottom edges of the rows. A grid with no rows has no
+    /// gap either. Measured as [`Self::row_at`] measures.
+    pub fn row_gap_at(&self, abs: DVec2) -> Option<usize> {
+        if self.rows == 0 || !self.over_rows(abs) {
+            return None;
+        }
+        let dy = abs.y - self.vp.data_rect.pos.y + self.scroll.y;
+        if dy >= self.row_sizes.total(self.rows) {
+            return Some(self.rows);
+        }
+        let (row, within) = self.row_sizes.index_at(dy, self.rows);
+        Some(if within < self.row_sizes.size_of(row) * 0.5 { row } else { row + 1 })
+    }
+
+    /// Whether `abs` is over the rows: level with the data area, inside
+    /// the grid's width, the row numbers included.
+    fn over_rows(&self, abs: DVec2) -> bool {
+        let widget = self.vp.widget_rect;
+        let data = self.vp.data_rect;
+        abs.x >= widget.pos.x
+            && abs.x < widget.pos.x + widget.size.x
+            && abs.y >= data.pos.y
+            && abs.y < data.pos.y + data.size.y
     }
 
     // ---------------------------------------------------------------
@@ -2068,6 +2141,90 @@ impl DataGrid {
         self.drag_scrolling = on;
     }
 
+    /// Rows a second a carry on the very edge of the rows scrolls.
+    const ROW_DRAG_SCROLL_ROWS: f64 = 10.0;
+
+    /// How fast, in points a second, a carried row's pointer at `abs`
+    /// scrolls the grid, up below zero and down above it: nothing until
+    /// the pointer is within a row's height inside the top or bottom edge
+    /// of the rows, then faster the nearer the edge. Nothing with
+    /// `row_drag_scroll` off, and nothing for a pointer that is not over
+    /// the rows, where [`Self::row_gap_at`] has no gap either: a carry
+    /// taken off the list, to somewhere else or over the headings, stops
+    /// the scroll.
+    fn row_drag_scroll_speed(&self, abs: DVec2) -> f64 {
+        if !self.row_drag_scroll || !self.over_rows(abs) {
+            return 0.0;
+        }
+        let data = self.vp.data_rect;
+        let band = self.default_row_height.max(8.0).min(data.size.y * 0.5);
+        let top = band - (abs.y - data.pos.y);
+        let bottom = band - (data.pos.y + data.size.y - abs.y);
+        let rows_per_second = Self::ROW_DRAG_SCROLL_ROWS * self.default_row_height;
+        if top > 0.0 {
+            -rows_per_second * top / band
+        } else if bottom > 0.0 {
+            rows_per_second * bottom / band
+        } else {
+            0.0
+        }
+    }
+
+    /// The carried row's pointer moved, or the carry began: if it is now
+    /// where the grid scrolls, scroll on the next frame.
+    fn start_row_drag_scroll(&mut self, cx: &mut Cx) {
+        let Interact::CellPress { at, carrying: true, .. } = self.interact else {
+            return;
+        };
+        if self.row_drag_frame.is_none() && self.row_drag_scroll_speed(at) != 0.0 {
+            self.row_drag_frame_time = None;
+            self.row_drag_frame = Some(cx.new_next_frame());
+        }
+    }
+
+    /// One step of a carry scrolling at an edge, `dt` seconds long, with
+    /// the pointer where it last was. Scrolls no further than there is to
+    /// scroll, and when the rows moved says so with `RowDragMoved`, since
+    /// the row under the pointer is another one now. Returns whether the
+    /// rows moved.
+    fn step_row_drag_scroll(&mut self, cx: &mut Cx, dt: f64) -> bool {
+        let Interact::CellPress { at, carrying: true, .. } = self.interact else {
+            return false;
+        };
+        let speed = self.row_drag_scroll_speed(at);
+        let scroll = self.scroll_clamped(self.scroll + dvec2(0.0, speed * dt));
+        if speed == 0.0 || scroll == self.scroll {
+            return false;
+        }
+        self.scroll = scroll;
+        self.area.redraw(cx);
+        cx.widget_action(self.uid, DataGridAction::RowDragMoved { abs: at });
+        true
+    }
+
+    /// The frame a carry at an edge asked for came, at `time`. Steps as
+    /// far as the time since the last step, or a sixtieth of a second for
+    /// the first, and asks for another frame while there is still room to
+    /// scroll the way the pointer asks. Once the rows reach the end, or
+    /// the pointer leaves the edge, the frames stop until it moves again.
+    fn row_drag_scroll_frame(&mut self, cx: &mut Cx, time: f64) {
+        let dt = match self.row_drag_frame_time {
+            Some(last) => (time - last).clamp(0.0, 0.05),
+            None => 1.0 / 60.0,
+        };
+        self.row_drag_frame = None;
+        self.row_drag_frame_time = Some(time);
+        self.step_row_drag_scroll(cx, dt);
+        let Interact::CellPress { at, carrying: true, .. } = self.interact else {
+            return;
+        };
+        let speed = self.row_drag_scroll_speed(at);
+        let room = self.scroll_clamped(self.scroll + dvec2(0.0, speed.signum())) != self.scroll;
+        if speed != 0.0 && room {
+            self.row_drag_frame = Some(cx.new_next_frame());
+        }
+    }
+
     /// (visible rows, visible cols) from the last drawn frame.
     pub fn visible_counts(&self) -> (usize, usize) {
         (self.vp.row1 - self.vp.row0.min(self.vp.row1), self.vp.vis_cols.len())
@@ -2552,6 +2709,7 @@ impl DataGrid {
             travelled: false,
             carrying: false,
             scroll_at_press: self.scroll,
+            at: abs,
         };
         let col = self.display_to_data(display_col);
         cx.widget_action(
@@ -2598,11 +2756,15 @@ impl DataGrid {
             travelled,
             carrying,
             scroll_at_press,
+            at,
         } = &mut self.interact
         else {
             return;
         };
+        *at = abs;
         if *carrying {
+            cx.widget_action(self.uid, DataGridAction::RowDragMoved { abs });
+            self.start_row_drag_scroll(cx);
             return;
         }
         if (abs - *down_abs).length() > threshold {
@@ -2636,6 +2798,7 @@ impl DataGrid {
                         modifiers,
                     },
                 );
+                self.start_row_drag_scroll(cx);
             }
             return;
         }
@@ -2686,7 +2849,12 @@ impl DataGrid {
         else {
             return;
         };
-        if carrying || travelled || row >= self.rows || (abs - down_abs).length() > self.drag_threshold {
+        if carrying {
+            self.row_drag_frame = None;
+            cx.widget_action(self.uid, DataGridAction::RowDragEnded { abs, modifiers });
+            return;
+        }
+        if travelled || row >= self.rows || (abs - down_abs).length() > self.drag_threshold {
             return;
         }
         let col = self.display_to_data(display_col);
@@ -3058,6 +3226,9 @@ impl Widget for DataGrid {
         if let Event::Actions(actions) = event {
             self.handle_editor_actions(cx, actions);
         }
+        if let Some(ne) = self.row_drag_frame.and_then(|frame| frame.is_event(event)) {
+            self.row_drag_scroll_frame(cx, ne.time);
+        }
         // The pointer gone from the window, or an overlay clearing every
         // hover as it opens: a heading's tip goes with it.
         if matches!(event, Event::MouseLeave(_) | Event::ClearHover) {
@@ -3358,6 +3529,11 @@ impl DataGridRef {
     /// See [`DataGrid::row_rect`].
     pub fn row_rect(&self, row: usize) -> Option<Rect> {
         self.borrow().and_then(|inner| inner.row_rect(row))
+    }
+
+    /// See [`DataGrid::row_gap_at`].
+    pub fn row_gap_at(&self, abs: DVec2) -> Option<usize> {
+        self.borrow().and_then(|inner| inner.row_gap_at(abs))
     }
 
     /// See [`DataGrid::set_scroll`]. The grid clamps it to what there is
@@ -4978,5 +5154,214 @@ mod tests {
         assert!(grid.set_col_order(&mut cx, &[0, 2, 1]));
         assert_eq!(grid.col_widths(), vec![140.0, 100.0, 120.0]);
         assert_eq!(grid.col_width(3), 70.0, "the width the fourth column left moved");
+    }
+
+    fn carry_moves(actions: &[DataGridAction]) -> Vec<DVec2> {
+        actions
+            .iter()
+            .filter_map(|a| match a {
+                DataGridAction::RowDragMoved { abs } => Some(*abs),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn carry_ends(actions: &[DataGridAction]) -> Vec<(DVec2, KeyModifiers)> {
+        actions
+            .iter()
+            .filter_map(|a| match a {
+                DataGridAction::RowDragEnded { abs, modifiers } => Some((*abs, *modifiers)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A carried row reports every move after the one that started the
+    /// carry, wherever the pointer goes, and where it was let go with the
+    /// keys held then, once. A press that carried nothing reports neither.
+    #[test]
+    fn a_carried_row_reports_every_move_and_where_it_was_let_go() {
+        let mut cx = cx();
+        let mut grid = laid_out(&mut cx);
+        grid.row_drag = true;
+        let at = middle(&grid, 2, 1);
+        let (start, on, away) = (at + dvec2(0.0, 6.0), middle(&grid, 5, 1), dvec2(-300.0, 900.0));
+        let out = raised(&mut cx, &mut grid, |cx, grid| {
+            grid.press_cell(cx, 2, 1, at, KeyModifiers::default(), 1);
+            grid.move_cell_press(cx, start);
+            grid.move_cell_press(cx, on);
+            grid.move_cell_press(cx, away);
+            grid.release_cell_press(cx, away, mods(true, false));
+        });
+        assert_eq!(carried(&out).len(), 1, "{out:?}");
+        assert_eq!(carry_moves(&out), vec![on, away]);
+        assert_eq!(carry_ends(&out), vec![(away, mods(true, false))]);
+        assert!(released(&out).is_empty(), "{out:?}");
+        let started = out.iter().position(|a| matches!(a, DataGridAction::RowDragStarted { .. }));
+        let moved = out.iter().position(|a| matches!(a, DataGridAction::RowDragMoved { .. }));
+        let ended = out.iter().position(|a| matches!(a, DataGridAction::RowDragEnded { .. }));
+        assert!(matches!((started, moved, ended), (Some(s), Some(m), Some(e)) if s < m && m < e), "{out:?}");
+        assert_eq!(grid.scroll, DVec2::default(), "a carry scrolled with row_drag_scroll off");
+
+        for row_drag in [false, true] {
+            grid.row_drag = row_drag;
+            let out = raised(&mut cx, &mut grid, |cx, grid| {
+                grid.press_cell(cx, 2, 1, at, KeyModifiers::default(), 1);
+                grid.move_cell_press(cx, at + dvec2(0.0, 3.0));
+                if !row_drag {
+                    grid.move_cell_press(cx, on);
+                }
+                grid.release_cell_press(cx, at, KeyModifiers::default());
+            });
+            assert!(carry_moves(&out).is_empty() && carry_ends(&out).is_empty(), "{out:?}");
+        }
+    }
+
+    /// The gap is in front of the row level with the pointer above that
+    /// row's middle and behind it below, with rows of any height, so rows
+    /// of different heights do not trade places under a still pointer;
+    /// behind the last row under the rows; at the rows in view on their
+    /// top and bottom edges when scrolled; and nowhere for a pointer over
+    /// the headings, above, below or beside the grid, or a grid with no
+    /// rows.
+    #[test]
+    fn the_gap_for_a_carried_row_is_either_side_of_the_middle_of_the_row_level_with_it() {
+        let mut cx = cx();
+        let mut grid = laid_out(&mut cx);
+        // Rows 26 high, but row 1 is 60: row 0 from 0 to 26, row 1 from 26
+        // to 86, row 2 from 86 to 112, and on at 26.
+        grid.set_row_height(1, 60.0);
+        let data = grid.vp.data_rect;
+        let at = |y: f64| dvec2(100.0, data.pos.y + y);
+        assert_eq!(grid.row_gap_at(at(5.0)), Some(0));
+        assert_eq!(grid.row_gap_at(at(12.9)), Some(0));
+        assert_eq!(grid.row_gap_at(at(13.0)), Some(1));
+        assert_eq!(grid.row_gap_at(at(55.9)), Some(1), "above the tall row's middle");
+        assert_eq!(grid.row_gap_at(at(56.0)), Some(2));
+        assert_eq!(grid.row_gap_at(dvec2(10.0, data.pos.y + 5.0)), Some(0), "over the row numbers");
+
+        grid.set_scroll(&mut cx, dvec2(0.0, 40.0));
+        // The top of the view is 14 into the tall row, above its middle.
+        assert_eq!(grid.row_gap_at(dvec2(100.0, data.pos.y)), Some(1), "on the top edge, scrolled");
+        // The bottom of the view is at 172 + 40 = 212, 22 into row 6.
+        let bottom = data.pos.y + data.size.y;
+        assert_eq!(grid.row_gap_at(dvec2(100.0, bottom - 0.5)), Some(7), "on the bottom edge, scrolled");
+        for (away, said) in [
+            (dvec2(100.0, 10.0), "over the headings"),
+            (dvec2(100.0, -500.0), "above the grid"),
+            (dvec2(100.0, bottom), "just below the rows"),
+            (dvec2(100.0, 900.0), "below the grid"),
+        ] {
+            assert_eq!(grid.row_gap_at(away), None, "{said}");
+        }
+
+        assert_eq!(grid.row_gap_at(dvec2(-1.0, data.pos.y + 5.0)), None, "left of the grid");
+        assert_eq!(grid.row_gap_at(dvec2(300.0, data.pos.y + 5.0)), None, "right of the grid");
+
+        grid.set_scroll(&mut cx, DVec2::default());
+        // A carried row 26 high on line 0 over the tall row on line 1: past
+        // the tall row's middle the carried row belongs behind it, and once
+        // the host has swapped them the same still pointer leaves it there.
+        let line_for = |from: usize, gap: usize| if gap > from { gap - 1 } else { gap };
+        let still = at(57.0);
+        assert_eq!(grid.row_gap_at(still).map(|gap| line_for(0, gap)), Some(1));
+        grid.set_row_height(0, 60.0);
+        grid.set_row_height(1, 26.0);
+        assert_eq!(grid.row_gap_at(still).map(|gap| line_for(1, gap)), Some(1), "the rows traded back");
+
+        grid.set_grid_size(3, 3);
+        assert_eq!(grid.row_gap_at(at(150.0)), Some(3), "under the last row");
+        grid.set_grid_size(0, 3);
+        assert_eq!(grid.row_gap_at(at(5.0)), None, "no rows");
+    }
+
+    fn next_frame(frame: NextFrame, time: f64) -> Event {
+        Event::NextFrame(NextFrameEvent {
+            frame: 1,
+            time,
+            set: [frame].into_iter().collect(),
+        })
+    }
+
+    /// With `row_drag_scroll` a carry in the top or bottom row's height of
+    /// the rows scrolls that way, faster the nearer the edge, and goes on
+    /// scrolling frame by frame under a still pointer, saying so each
+    /// step. It stops at the end of the rows, when the pointer is taken
+    /// off the rows and when the row is let go, and scrolls nothing with
+    /// the flag off, away from the edges, or anywhere off the rows: over
+    /// the headings, above, below or beside the grid.
+    #[test]
+    fn a_carry_at_an_edge_scrolls_only_when_asked_and_faster_nearer_the_edge() {
+        let mut cx = cx();
+        let mut grid = laid_out(&mut cx);
+        grid.row_drag = true;
+        let data = grid.vp.data_rect;
+        let bottom = data.pos.y + data.size.y;
+        let (x, row) = (150.0, grid.default_row_height);
+        let near_bottom = dvec2(x, bottom - row * 0.5);
+        let near_top = dvec2(x, data.pos.y + row * 0.5);
+        assert_eq!(grid.row_drag_scroll_speed(near_bottom), 0.0, "scrolls with the flag off");
+
+        grid.row_drag_scroll = true;
+        let full = DataGrid::ROW_DRAG_SCROLL_ROWS * row;
+        assert_eq!(grid.row_drag_scroll_speed(dvec2(x, data.pos.y + 86.0)), 0.0);
+        assert_eq!(grid.row_drag_scroll_speed(near_bottom), full * 0.5);
+        assert_eq!(grid.row_drag_scroll_speed(near_top), -full * 0.5);
+        assert_eq!(grid.row_drag_scroll_speed(dvec2(x, data.pos.y)), -full, "on the top edge");
+        for (away, said) in [
+            (dvec2(x, bottom), "just below the rows"),
+            (dvec2(x, bottom + row), "a row below the grid"),
+            (dvec2(x, bottom + 500.0), "far below the grid"),
+            (dvec2(x, data.pos.y - 1.0), "over the headings"),
+            (dvec2(x, -500.0), "far above the grid"),
+            (dvec2(400.0, bottom - 1.0), "beside the grid"),
+        ] {
+            assert_eq!(grid.row_drag_scroll_speed(away), 0.0, "{said}");
+        }
+
+        let at = middle(&grid, 2, 1);
+        grid.press_cell(&mut cx, 2, 1, at, KeyModifiers::default(), 1);
+        grid.move_cell_press(&mut cx, near_bottom);
+        let out = raised(&mut cx, &mut grid, |cx, grid| {
+            let frame = grid.row_drag_frame.expect("no frame asked for at the edge");
+            grid.handle_event(cx, &next_frame(frame, 1.0), &mut Scope::empty());
+            let frame = grid.row_drag_frame.expect("the scroll stopped under a still pointer");
+            grid.handle_event(cx, &next_frame(frame, 1.02), &mut Scope::empty());
+        });
+        let expected = full * 0.5 * (1.0 / 60.0 + 0.02);
+        assert!((grid.scroll.y - expected).abs() < 1e-9, "{} against {expected}", grid.scroll.y);
+        assert_eq!(carry_moves(&out), vec![near_bottom, near_bottom]);
+
+        // At the end of the rows there is nothing to scroll: no step, no
+        // report, and no more frames until the pointer moves again.
+        let max_y = 20.0 * row - data.size.y;
+        grid.scroll.y = max_y;
+        let out = raised(&mut cx, &mut grid, |cx, grid| {
+            let frame = grid.row_drag_frame.expect("stopped before the end");
+            grid.handle_event(cx, &next_frame(frame, 1.04), &mut Scope::empty());
+        });
+        assert!(out.is_empty(), "{out:?}");
+        assert_eq!(grid.scroll.y, max_y);
+        assert_eq!(grid.row_drag_frame, None);
+
+        let below = dvec2(x, bottom + 40.0);
+        let out = raised(&mut cx, &mut grid, |cx, grid| {
+            grid.move_cell_press(cx, near_top);
+            let frame = grid.row_drag_frame.expect("no frame asked for at the top");
+            grid.handle_event(cx, &next_frame(frame, 2.0), &mut Scope::empty());
+            assert!(grid.scroll.y < max_y, "the top edge did not scroll up");
+            // Taken off the list, the carry stops scrolling: the frame
+            // already asked for steps nothing and asks for no other.
+            let scrolled = grid.scroll.y;
+            grid.move_cell_press(cx, below);
+            let frame = grid.row_drag_frame.expect("the scroll stopped under a still pointer");
+            grid.handle_event(cx, &next_frame(frame, 2.02), &mut Scope::empty());
+            assert_eq!(grid.scroll.y, scrolled, "the scroll went on off the list");
+            assert_eq!(grid.row_drag_frame, None, "a frame was asked for off the list");
+            grid.release_cell_press(cx, below, KeyModifiers::default());
+        });
+        assert_eq!(carry_moves(&out), vec![near_top, near_top, below]);
+        assert_eq!(carry_ends(&out).len(), 1);
+        assert_eq!(grid.row_drag_frame, None, "a frame outlived the carry");
     }
 }
