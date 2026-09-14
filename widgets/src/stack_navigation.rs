@@ -318,9 +318,11 @@ impl StackNavigationView {
             // Ownership decides, so a modal or pane opened over this view keeps the press
             // and this view stays put. Checked before `back_pressed()`, which consumes.
             let owns_back = self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s));
-            if (owns_back && event.back_pressed())
+            if (owns_back && (event.back_pressed()
+                    || matches!(event, Event::MouseUp(mouse) if mouse.button.is_back())))
+                // The left button is an explicit click on this view's own header, not a
+                // gesture something in front of it could have a better claim to.
                 || matches!(event, Event::Actions(actions) if self.button(cx, ids!(left_button)).clicked(&actions))
-                || matches!(event, Event::MouseUp(mouse) if mouse.button.is_back())
             {
                 cx.widget_action(self.widget_uid(), StackNavigationAction::Pop);
             }

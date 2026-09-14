@@ -111,6 +111,11 @@ impl CxCancelScopes {
                 self.escape_owner = 0;
             }
             Event::BackPressed { .. } if !intercepted => self.begin_press(CancelScopeKind::Back, widget_owner),
+            // The mouse's back button is the same navigation gesture, so it is arbitrated the
+            // same way. It arrives as one event, with no repeats or release to carry ownership.
+            Event::MouseUp(e) if e.button.is_back() && !intercepted => {
+                self.begin_press(CancelScopeKind::Back, widget_owner)
+            }
             // A release may be lost when the application stops receiving input.
             Event::WindowLostFocus(_) | Event::Pause | Event::Background => {
                 self.escape_owner = 0;
@@ -133,6 +138,7 @@ impl CxCancelScopes {
         let kind = match event {
             Event::KeyDown(key) if key.key_code == KeyCode::Escape && !key.is_repeat => CancelScopeKind::Escape,
             Event::BackPressed { .. } => CancelScopeKind::Back,
+            Event::MouseUp(e) if e.button.is_back() => CancelScopeKind::Back,
             _ => return None,
         };
         if !self.stack.iter().any(|e| e.owner != 0 && e.alive.get()
