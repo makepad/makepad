@@ -31,6 +31,8 @@ script_mod! {
         }
     }
 
+    mod.widgets.GridSelectMode = #(GridSelectMode::script_api(vm))
+
     mod.widgets.DataGridBase = #(DataGrid::register_widget(vm))
 
     mod.widgets.DataGrid = set_type_default() do mod.widgets.DataGridBase {
@@ -285,6 +287,29 @@ impl GridSelection {
             _ => display_col >= c0 && display_col <= c1,
         }
     }
+}
+
+/// What the grid selects when it is pressed or steered with the keys,
+/// declared as `selection:`. A list is not a spreadsheet: its rows are
+/// picked whole, and a list whose host keeps the picks itself wants the
+/// grid to pick nothing at all.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Script, ScriptHook)]
+pub enum GridSelectMode {
+    /// The spreadsheet: a press selects a cell and a drag a rectangle,
+    /// a row number selects its row and a heading its column.
+    #[pick]
+    #[default]
+    Cells,
+    /// A press or an arrow key selects the whole row, and shift extends
+    /// by rows. A heading press sorts but never selects a column, and no
+    /// cell is drawn as the active one.
+    Rows,
+    /// The grid never selects: no overlay, no rubber band, no heading
+    /// lit. A press still raises `CellClicked` with its modifiers, for a
+    /// host that keeps its own picks and outlines its own cursor. Nor does
+    /// it hold a selection: one left from another mode, or set from code,
+    /// is dropped, so Delete, typing and copying find nothing to act on.
+    Off,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -552,6 +577,9 @@ pub struct DataGrid {
     cell_pad_x: f64,
     #[live(true)]
     grab_key_focus: bool,
+    /// Cells, whole rows, or nothing. See [`GridSelectMode`].
+    #[live]
+    selection: GridSelectMode,
     #[live(100usize)]
     rows: usize,
     #[live(26usize)]
@@ -611,7 +639,7 @@ pub struct DataGrid {
     #[rust]
     scroll: DVec2,
     #[rust]
-    selection: Option<GridSelection>,
+    selected: Option<GridSelection>,
     #[rust]
     interact: Interact,
     #[rust]
@@ -661,6 +689,10 @@ pub struct DataGrid {
     /// when there is a context to say it with.
     #[rust]
     edit_dropped: Option<(usize, usize)>,
+    /// Rows the host outlined during this frame's cell loop, drawn over
+    /// every cell when the frame ends.
+    #[rust]
+    outlines: Vec<(usize, Vec4f)>,
 }
 
 pub type CopyProvider = Box<dyn FnMut(&GridSelection) -> String>;
@@ -715,6 +747,10 @@ impl ScriptHook for DataGrid {
             self.col_sizes.set_default(self.default_col_width);
             self.row_sizes.set_default(self.default_row_height);
         }
+        // A grid switched to selecting nothing lets go of what it held.
+        if self.selection == GridSelectMode::Off {
+            self.selected = None;
+        }
     }
 }
 
@@ -753,11 +789,11 @@ impl DataGrid {
                 self.col_order = None;
             }
         }
-        if let Some(sel) = &mut self.selection {
+        if let Some(sel) = &mut self.selected {
             if sel.anchor.0 >= rows || sel.head.0 >= rows {
-                self.selection = None;
+                self.selected = None;
             } else if sel.anchor.1 >= cols || sel.head.1 >= cols {
-                self.selection = None;
+                self.selected = None;
             }
         }
         // A cell that is no longer there cannot be edited. The editor
@@ -833,18 +869,25 @@ impl DataGrid {
         self.sort_indicator = sort;
     }
 
+    /// What is selected, or nothing. With `selection: Off` it is always
+    /// nothing.
     pub fn selection(&self) -> Option<GridSelection> {
-        self.selection
+        match self.selection {
+            GridSelectMode::Off => None,
+            _ => self.selected,
+        }
     }
 
+    /// Select `selection`, or nothing. With `selection: Off` the grid holds
+    /// no selection, and one set here is dropped.
     pub fn set_selection(&mut self, cx: &mut Cx, selection: Option<GridSelection>) {
-        self.selection = selection;
+        self.selected = selection.filter(|_| self.selection != GridSelectMode::Off);
         self.area.redraw(cx);
     }
 
     /// The active (head) cell as (row, data col).
     pub fn active_cell(&self) -> Option<(usize, usize)> {
-        self.selection
+        self.selection()
             .map(|s| (s.head.0, self.display_to_data(s.head.1)))
     }
 
@@ -973,6 +1016,7 @@ impl DataGrid {
         self.draw_bg.draw_abs(cx, self.vp.widget_rect);
         cx.push_clip_rect(self.vp.data_rect);
         self.editor_drawn = false;
+        self.outlines.clear();
         self.reset_iter();
     }
 
@@ -1224,6 +1268,7 @@ impl DataGrid {
         }
         cx.pop_clip_rect();
         self.draw_selection_overlay(cx);
+        self.draw_row_outlines(cx);
         self.draw_headers(cx);
         self.draw_interact_overlay(cx);
         self.draw_scroll_bars(cx);
@@ -1263,10 +1308,10 @@ impl DataGrid {
     }
 
     fn draw_selection_overlay(&mut self, cx: &mut Cx2d) {
-        let Some(sel) = self.selection else {
+        let Some(sel) = self.selected else {
             return;
         };
-        if self.rows == 0 || self.cols == 0 {
+        if self.rows == 0 || self.cols == 0 || self.selection == GridSelectMode::Off {
             return;
         }
         cx.push_clip_rect(self.vp.data_rect);
@@ -1287,19 +1332,67 @@ impl DataGrid {
             pos: dvec2(rect.pos.x + rect.size.x - b, rect.pos.y),
             size: dvec2(b, rect.size.y),
         });
-        // active cell border, slightly thicker
-        let head = self.cell_rect(sel.head.0, sel.head.1);
-        let b = 2.0;
-        self.draw_overlay.draw_abs(cx, Rect { pos: head.pos, size: dvec2(head.size.x, b) });
+        // active cell border, slightly thicker. A list that selects rows
+        // has no active cell: the border would sit on whichever column
+        // happened to be pressed.
+        if self.selection != GridSelectMode::Rows {
+            let head = self.cell_rect(sel.head.0, sel.head.1);
+            self.draw_frame(cx, head, 2.0);
+        }
+        cx.pop_clip_rect();
+    }
+
+    /// Four edges `b` thick, inside `rect`, in the overlay's colour.
+    fn draw_frame(&mut self, cx: &mut Cx2d, rect: Rect, b: f64) {
+        self.draw_overlay.draw_abs(cx, Rect { pos: rect.pos, size: dvec2(rect.size.x, b) });
         self.draw_overlay.draw_abs(cx, Rect {
-            pos: dvec2(head.pos.x, head.pos.y + head.size.y - b),
-            size: dvec2(head.size.x, b),
+            pos: dvec2(rect.pos.x, rect.pos.y + rect.size.y - b),
+            size: dvec2(rect.size.x, b),
         });
-        self.draw_overlay.draw_abs(cx, Rect { pos: head.pos, size: dvec2(b, head.size.y) });
+        self.draw_overlay.draw_abs(cx, Rect { pos: rect.pos, size: dvec2(b, rect.size.y) });
         self.draw_overlay.draw_abs(cx, Rect {
-            pos: dvec2(head.pos.x + head.size.x - b, head.pos.y),
-            size: dvec2(b, head.size.y),
+            pos: dvec2(rect.pos.x + rect.size.x - b, rect.pos.y),
+            size: dvec2(b, rect.size.y),
         });
+    }
+
+    /// Outline a row across its visible cells, [`Self::ROW_OUTLINE`]
+    /// points thick, in `color`: a keyboard cursor, a row being carried,
+    /// anything a host marks on a row without the grid selecting it.
+    ///
+    /// Called from the draw loop, as the cells are. The outline itself is
+    /// drawn when the frame ends, over every cell, so it does not matter
+    /// whether the row's own cells have been drawn yet; a row that is not
+    /// on screen draws nothing. Outlines last one frame, so a host asks
+    /// for them again on every draw, the way it draws its cells.
+    pub fn outline_row(&mut self, row: usize, color: Vec4f) {
+        if row < self.rows {
+            self.outlines.push((row, color));
+        }
+    }
+
+    pub const ROW_OUTLINE: f64 = 1.5;
+
+    fn draw_row_outlines(&mut self, cx: &mut Cx2d) {
+        let outlines = std::mem::take(&mut self.outlines);
+        let (Some(first), Some(last)) = (self.vp.vis_cols.first(), self.vp.vis_cols.last()) else {
+            return;
+        };
+        let x0 = first.1;
+        let x1 = last.1 + last.2;
+        cx.push_clip_rect(self.vp.data_rect);
+        for (row, color) in outlines {
+            if row < self.vp.row0 || row >= self.vp.row1 {
+                continue;
+            }
+            let y = self.vp.data_rect.pos.y + self.row_sizes.offset_of(row) - self.scroll.y;
+            let rect = Rect {
+                pos: dvec2(x0, y),
+                size: dvec2(x1 - x0, self.row_sizes.size_of(row)),
+            };
+            self.draw_overlay.color = color;
+            self.draw_frame(cx, rect, Self::ROW_OUTLINE);
+        }
         cx.pop_clip_rect();
     }
 
@@ -1308,10 +1401,14 @@ impl DataGrid {
         if self.show_col_headers && vp.col_header_rect.size.y > 0.0 {
             cx.push_clip_rect(vp.col_header_rect);
             for (display_col, x, w) in vp.vis_cols.iter().copied() {
-                let selected = self
-                    .selection
-                    .map(|s| s.contains_col(display_col))
-                    .unwrap_or(false);
+                // Only a spreadsheet lights its headings. A selected row
+                // contains every column, so a list would light the whole
+                // strip for every row it picked.
+                let selected = self.selection == GridSelectMode::Cells
+                    && self
+                        .selected
+                        .map(|s| s.contains_col(display_col))
+                        .unwrap_or(false);
                 let rect = Rect {
                     pos: dvec2(x, vp.col_header_rect.pos.y),
                     size: dvec2(w, vp.col_header_rect.size.y),
@@ -1364,7 +1461,8 @@ impl DataGrid {
             let mut y = vp.row0_y;
             for row in vp.row0..vp.row1 {
                 let h = self.row_sizes.size_of(row);
-                let selected = self.selection.map(|s| s.contains_row(row)).unwrap_or(false);
+                let selected = self.selection != GridSelectMode::Off
+                    && self.selected.map(|s| s.contains_row(row)).unwrap_or(false);
                 let rect = Rect {
                     pos: dvec2(vp.row_header_rect.pos.x, y),
                     size: dvec2(vp.row_header_rect.size.x, h),
@@ -1625,8 +1723,8 @@ impl DataGrid {
         self.editing = Some((row, col));
         self.edit_focus_pending = true;
         let display_col = self.data_to_display(col);
-        if self.active_cell() != Some((row, col)) {
-            self.selection = Some(GridSelection::single(row, display_col));
+        if self.selection != GridSelectMode::Off && self.active_cell() != Some((row, col)) {
+            self.selected = Some(self.selection_at(row, display_col));
             self.emit_selection_changed(cx);
         }
         self.scroll_cell_into_view(cx, row, display_col);
@@ -1687,9 +1785,11 @@ impl DataGrid {
         self.take_keys_back(cx, row, col);
         cx.widget_action(self.uid, DataGridAction::CellEdited { row, col, text });
         if let Some((dr, dc)) = step {
-            let display_col = self.data_to_display(col);
-            self.selection = Some(GridSelection::single(row, display_col));
-            self.move_head(cx, dr, dc, false);
+            if self.selection != GridSelectMode::Off {
+                let display_col = self.data_to_display(col);
+                self.selected = Some(self.selection_at(row, display_col));
+                self.move_head(cx, dr, dc, false);
+            }
             // The keyboard came from the grid and goes back to it, so the
             // arrows work from the cell the selection just landed on.
             cx.set_key_focus(self.area);
@@ -1880,44 +1980,161 @@ impl DataGrid {
         cx.widget_action(
             self.uid,
             DataGridAction::SelectionChanged {
-                selection: self.selection,
+                selection: self.selected,
             },
         );
         self.area.redraw(cx);
     }
 
+    /// What a press or a key selects in this mode: cells, or rows. `Off`
+    /// never gets this far.
+    fn press_kind(&self) -> GridSelectKind {
+        match self.selection {
+            GridSelectMode::Rows => GridSelectKind::Rows,
+            _ => GridSelectKind::Cells,
+        }
+    }
+
+    /// A fresh selection at one cell, of the kind this mode selects.
+    fn selection_at(&self, row: usize, display_col: usize) -> GridSelection {
+        GridSelection {
+            kind: self.press_kind(),
+            anchor: (row, display_col),
+            head: (row, display_col),
+        }
+    }
+
     fn select_cell(&mut self, cx: &mut Cx, row: usize, display_col: usize, extend: bool) {
-        match (&mut self.selection, extend) {
+        let kind = self.press_kind();
+        match (&mut self.selected, extend) {
             (Some(sel), true) => {
                 sel.head = (row, display_col);
-                sel.kind = GridSelectKind::Cells;
+                sel.kind = kind;
             }
             _ => {
-                self.selection = Some(GridSelection::single(row, display_col));
+                self.selected = Some(self.selection_at(row, display_col));
             }
         }
         self.emit_selection_changed(cx);
     }
 
+    /// A primary press on a cell: what it selects in this mode, the drag
+    /// it starts, and what it reports. The pointer handler calls this and
+    /// so do the tests, which have no window to press in.
+    fn press_cell(
+        &mut self,
+        cx: &mut Cx,
+        row: usize,
+        display_col: usize,
+        modifiers: KeyModifiers,
+        tap_count: u32,
+    ) {
+        let uid = self.uid;
+        // With the selection off there is nothing to select and nothing to
+        // rubber-band; the press is reported and that is all.
+        if self.selection != GridSelectMode::Off {
+            self.select_cell(cx, row, display_col, modifiers.shift);
+            self.interact = Interact::CellDrag;
+        }
+        let col = self.display_to_data(display_col);
+        cx.widget_action(
+            uid,
+            DataGridAction::CellClicked {
+                row,
+                col,
+                modifiers,
+            },
+        );
+        if tap_count > 1 {
+            cx.widget_action(uid, DataGridAction::CellDoubleClicked { row, col });
+            // And the same request F2 makes, so a host that
+            // seats the grid's editor answers one action for
+            // the keys and the mouse alike. A double-click on
+            // the cell being edited lands on the editor, not
+            // here.
+            cx.widget_action(
+                uid,
+                DataGridAction::EditCell {
+                    row,
+                    col,
+                    replace: None,
+                },
+            );
+        }
+    }
+
+    /// A press and release on a heading that did not become a column
+    /// drag. The spreadsheet selects the column; a list sorts and leaves
+    /// its selection alone, since a heading is not something a list picks.
+    fn click_header(&mut self, cx: &mut Cx, display_col: usize, modifiers: KeyModifiers) {
+        let uid = self.uid;
+        if self.selection == GridSelectMode::Cells {
+            let extend = modifiers.shift;
+            match (&mut self.selected, extend) {
+                (Some(sel), true) if sel.kind == GridSelectKind::Cols => {
+                    sel.head = (sel.head.0, display_col);
+                }
+                _ => {
+                    self.selected = Some(GridSelection {
+                        kind: GridSelectKind::Cols,
+                        anchor: (0, display_col),
+                        head: (self.rows.saturating_sub(1), display_col),
+                    });
+                }
+            }
+            self.emit_selection_changed(cx);
+        }
+        let col = self.display_to_data(display_col);
+        // Unsorted, then up, then down, then unsorted
+        // again. The third press has to be able to get
+        // back to the order the data arrived in, which a
+        // two-state toggle can never do.
+        if self.sortable && !self.unsortable_cols.contains(&col) {
+            let next = match self.sort_indicator {
+                Some((c, true)) if c == col => Some((col, false)),
+                Some((c, false)) if c == col => None,
+                _ => Some((col, true)),
+            };
+            self.sort_indicator = next;
+            self.redraw(cx);
+            cx.widget_action(
+                uid,
+                DataGridAction::SortChanged {
+                    col,
+                    ascending: next.map(|(_, asc)| asc),
+                },
+            );
+        }
+        cx.widget_action(
+            uid,
+            DataGridAction::HeaderClicked {
+                col,
+                display_col,
+                modifiers,
+            },
+        );
+    }
+
     fn move_head(&mut self, cx: &mut Cx, dr: isize, dc: isize, extend: bool) {
-        if self.rows == 0 || self.cols == 0 {
+        if self.rows == 0 || self.cols == 0 || self.selection == GridSelectMode::Off {
             return;
         }
-        let (row, col) = match self.selection {
+        let (row, col) = match self.selected {
             Some(sel) => sel.head,
             None => (0, 0),
         };
         let row = (row as isize + dr).clamp(0, self.rows as isize - 1) as usize;
         let col = (col as isize + dc).clamp(0, self.cols as isize - 1) as usize;
+        let kind = self.press_kind();
         if extend {
-            if let Some(sel) = &mut self.selection {
+            if let Some(sel) = &mut self.selected {
                 sel.head = (row, col);
-                sel.kind = GridSelectKind::Cells;
+                sel.kind = kind;
             } else {
-                self.selection = Some(GridSelection::single(row, col));
+                self.selected = Some(self.selection_at(row, col));
             }
         } else {
-            self.selection = Some(GridSelection::single(row, col));
+            self.selected = Some(self.selection_at(row, col));
         }
         self.scroll_cell_into_view(cx, row, col);
         self.emit_selection_changed(cx);
@@ -1934,7 +2151,7 @@ impl DataGrid {
         let moved = order.remove(from);
         order.insert(to, moved);
         self.col_sizes.apply_move(from, to);
-        self.selection = None;
+        self.selected = None;
         cx.widget_action(
             self.uid,
             DataGridAction::ColumnMoved {
@@ -2028,12 +2245,12 @@ impl DataGrid {
                 }
             }
             KeyCode::Delete | KeyCode::Backspace => {
-                if self.selection.is_some() {
+                if self.selection().is_some() {
                     cx.widget_action(uid, DataGridAction::ClearCells);
                 }
             }
-            KeyCode::KeyA if cmd => {
-                self.selection = Some(GridSelection {
+            KeyCode::KeyA if cmd && self.selection != GridSelectMode::Off => {
+                self.selected = Some(GridSelection {
                     kind: GridSelectKind::All,
                     anchor: (0, 0),
                     head: (0, 0),
@@ -2045,20 +2262,23 @@ impl DataGrid {
     }
 
     fn move_head_to(&mut self, cx: &mut Cx, row: Option<usize>, col: Option<usize>, extend: bool) {
-        let (cur_row, cur_col) = match self.selection {
+        if self.selection == GridSelectMode::Off {
+            return;
+        }
+        let (cur_row, cur_col) = match self.selected {
             Some(sel) => sel.head,
             None => (0, 0),
         };
         let row = row.unwrap_or(cur_row).min(self.rows.saturating_sub(1));
         let col = col.unwrap_or(cur_col).min(self.cols.saturating_sub(1));
         if extend {
-            if let Some(sel) = &mut self.selection {
+            if let Some(sel) = &mut self.selected {
                 sel.head = (row, col);
             } else {
-                self.selection = Some(GridSelection::single(row, col));
+                self.selected = Some(self.selection_at(row, col));
             }
         } else {
-            self.selection = Some(GridSelection::single(row, col));
+            self.selected = Some(self.selection_at(row, col));
         }
         self.scroll_cell_into_view(cx, row, col);
         self.emit_selection_changed(cx);
@@ -2197,8 +2417,8 @@ impl Widget for DataGrid {
                 }
             }
             Hit::TextCopy(te) => {
-                if let (Some(provider), Some(sel)) = (&mut self.copy_provider, &self.selection) {
-                    *te.response.borrow_mut() = Some(provider(sel));
+                if let (Some(sel), Some(provider)) = (self.selection(), &mut self.copy_provider) {
+                    *te.response.borrow_mut() = Some(provider(&sel));
                 }
             }
             Hit::FingerHoverIn(fe) | Hit::FingerHoverOver(fe) => {
@@ -2222,8 +2442,8 @@ impl Widget for DataGrid {
                     cx.set_key_focus(self.area);
                 }
                 match self.hit_zone(fe.abs) {
-                    HitZone::Corner => {
-                        self.selection = Some(GridSelection {
+                    HitZone::Corner if self.selection != GridSelectMode::Off => {
+                        self.selected = Some(GridSelection {
                             kind: GridSelectKind::All,
                             anchor: (0, 0),
                             head: (0, 0),
@@ -2257,14 +2477,14 @@ impl Widget for DataGrid {
                                 start_abs: fe.abs.y,
                             };
                             cx.set_cursor(MouseCursor::RowResize);
-                        } else {
+                        } else if self.selection != GridSelectMode::Off {
                             let extend = fe.modifiers.shift;
-                            match (&mut self.selection, extend) {
+                            match (&mut self.selected, extend) {
                                 (Some(sel), true) if sel.kind == GridSelectKind::Rows => {
                                     sel.head = (row, sel.head.1);
                                 }
                                 _ => {
-                                    self.selection = Some(GridSelection {
+                                    self.selected = Some(GridSelection {
                                         kind: GridSelectKind::Rows,
                                         anchor: (row, 0),
                                         head: (row, self.cols.saturating_sub(1)),
@@ -2275,35 +2495,9 @@ impl Widget for DataGrid {
                         }
                     }
                     HitZone::Cell { row, display_col } => {
-                        self.select_cell(cx, row, display_col, fe.modifiers.shift);
-                        self.interact = Interact::CellDrag;
-                        let col = self.display_to_data(display_col);
-                        cx.widget_action(
-                            uid,
-                            DataGridAction::CellClicked {
-                                row,
-                                col,
-                                modifiers: fe.modifiers,
-                            },
-                        );
-                        if fe.tap_count > 1 {
-                            cx.widget_action(uid, DataGridAction::CellDoubleClicked { row, col });
-                            // And the same request F2 makes, so a host that
-                            // seats the grid's editor answers one action for
-                            // the keys and the mouse alike. A double-click on
-                            // the cell being edited lands on the editor, not
-                            // here.
-                            cx.widget_action(
-                                uid,
-                                DataGridAction::EditCell {
-                                    row,
-                                    col,
-                                    replace: None,
-                                },
-                            );
-                        }
+                        self.press_cell(cx, row, display_col, fe.modifiers, fe.tap_count);
                     }
-                    HitZone::Outside => (),
+                    HitZone::Corner | HitZone::Outside => (),
                 }
             }
             Hit::FingerMove(fe) => match &mut self.interact {
@@ -2364,16 +2558,17 @@ impl Widget for DataGrid {
                 }
                 Interact::CellDrag => {
                     let (row, col) = self.cell_at_clamped(fe.abs);
-                    let changed = match &self.selection {
+                    let changed = match &self.selected {
                         Some(sel) => sel.head != (row, col),
                         None => true,
                     };
                     if changed {
-                        if let Some(sel) = &mut self.selection {
+                        let kind = self.press_kind();
+                        if let Some(sel) = &mut self.selected {
                             sel.head = (row, col);
-                            sel.kind = GridSelectKind::Cells;
+                            sel.kind = kind;
                         } else {
-                            self.selection = Some(GridSelection::single(row, col));
+                            self.selected = Some(self.selection_at(row, col));
                         }
                         // drag auto-scroll
                         let dr = self.vp.data_rect;
@@ -2419,51 +2614,9 @@ impl Widget for DataGrid {
                         modifiers,
                         ..
                     } => {
-                        // A press-and-release on a header: select the column and
-                        // report the click (sorting etc.).
-                        let extend = modifiers.shift;
-                        match (&mut self.selection, extend) {
-                            (Some(sel), true) if sel.kind == GridSelectKind::Cols => {
-                                sel.head = (sel.head.0, display_col);
-                            }
-                            _ => {
-                                self.selection = Some(GridSelection {
-                                    kind: GridSelectKind::Cols,
-                                    anchor: (0, display_col),
-                                    head: (self.rows.saturating_sub(1), display_col),
-                                });
-                            }
-                        }
-                        self.emit_selection_changed(cx);
-                        let col = self.display_to_data(display_col);
-                        // Unsorted, then up, then down, then unsorted
-                        // again. The third press has to be able to get
-                        // back to the order the data arrived in, which a
-                        // two-state toggle can never do.
-                        if self.sortable && !self.unsortable_cols.contains(&col) {
-                            let next = match self.sort_indicator {
-                                Some((c, true)) if c == col => Some((col, false)),
-                                Some((c, false)) if c == col => None,
-                                _ => Some((col, true)),
-                            };
-                            self.sort_indicator = next;
-                            self.redraw(cx);
-                            cx.widget_action(
-                                uid,
-                                DataGridAction::SortChanged {
-                                    col,
-                                    ascending: next.map(|(_, asc)| asc),
-                                },
-                            );
-                        }
-                        cx.widget_action(
-                            uid,
-                            DataGridAction::HeaderClicked {
-                                col,
-                                display_col,
-                                modifiers,
-                            },
-                        );
+                        // A press-and-release on a header: the sort and the
+                        // click, and the column too in a spreadsheet.
+                        self.click_header(cx, display_col, modifiers);
                     }
                     Interact::ColDrag {
                         display_col,
@@ -3032,5 +3185,162 @@ mod tests {
         let out = deliver(&mut cx, &mut grid, lost);
         assert_eq!(edited(&out), vec![(4, 1, "abc".to_string())]);
         assert_eq!(grid.editing(), None);
+    }
+
+    fn mods(shift: bool, control: bool) -> KeyModifiers {
+        KeyModifiers {
+            shift,
+            control,
+            ..Default::default()
+        }
+    }
+
+    fn key(key_code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent {
+            key_code,
+            modifiers,
+            ..Default::default()
+        }
+    }
+
+    /// What one step of the grid raised, for the steps a test takes by
+    /// hand: a press, a heading click, a key.
+    fn raised(
+        cx: &mut Cx,
+        grid: &mut DataGrid,
+        step: impl FnOnce(&mut Cx, &mut DataGrid),
+    ) -> Vec<DataGridAction> {
+        let uid = grid.widget_uid();
+        let emitted = cx.capture_actions(|cx| step(cx, grid));
+        emitted.filter_widget_actions_cast::<DataGridAction>(uid).collect()
+    }
+
+    fn clicked(actions: &[DataGridAction]) -> Vec<(usize, usize, KeyModifiers)> {
+        actions
+            .iter()
+            .filter_map(|a| match a {
+                DataGridAction::CellClicked { row, col, modifiers } => Some((*row, *col, *modifiers)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn selection_changed(actions: &[DataGridAction]) -> bool {
+        actions
+            .iter()
+            .any(|a| matches!(a, DataGridAction::SelectionChanged { .. }))
+    }
+
+    /// A host that keeps its own picks turns the grid's off. A press then
+    /// selects nothing and starts no rubber band, and still says which
+    /// cell it was and what was held, since Ctrl and Shift are how the
+    /// host's picks are made. The keys select nothing either.
+    #[test]
+    fn a_press_with_the_selection_off_selects_nothing_and_reports_the_modifiers() {
+        let mut cx = cx();
+        let mut grid = grid(&mut cx);
+        grid.selection = GridSelectMode::Off;
+        for held in [mods(false, true), mods(true, false)] {
+            let out = raised(&mut cx, &mut grid, |cx, grid| grid.press_cell(cx, 3, 1, held, 1));
+            assert_eq!(clicked(&out), vec![(3, 1, held)]);
+            assert!(!selection_changed(&out), "{out:?}");
+            assert_eq!(grid.selection(), None);
+            assert!(matches!(grid.interact, Interact::None), "a rubber band started");
+        }
+        let out = raised(&mut cx, &mut grid, |cx, grid| {
+            grid.handle_key_down(cx, &key(KeyCode::ArrowDown, mods(true, false)));
+            grid.handle_key_down(cx, &key(KeyCode::KeyA, mods(false, true)));
+        });
+        assert!(out.is_empty(), "{out:?}");
+        assert_eq!(grid.selection(), None);
+    }
+
+    /// A grid switched off holds no selection, whether one was left from
+    /// the mode before or the host sets one: none is reported, and Delete,
+    /// Return and typing, which act on a selection, raise nothing.
+    #[test]
+    fn a_grid_with_the_selection_off_holds_none_and_its_keys_find_none() {
+        let mut cx = cx();
+        let mut grid = grid(&mut cx);
+        grid.selection = GridSelectMode::Rows;
+        grid.press_cell(&mut cx, 3, 1, KeyModifiers::default(), 1);
+        assert!(grid.selection().is_some());
+        grid.selection = GridSelectMode::Off;
+        assert_eq!(grid.selection(), None, "left over from rows");
+        assert_eq!(grid.active_cell(), None);
+        grid.set_selection(&mut cx, Some(GridSelection::single(5, 0)));
+        assert_eq!(grid.selection(), None, "set by the host");
+        grid.selection = GridSelectMode::Cells;
+        assert_eq!(grid.selection(), None, "a selection set while off was kept");
+
+        grid.selection = GridSelectMode::Rows;
+        grid.press_cell(&mut cx, 3, 1, KeyModifiers::default(), 1);
+        grid.selection = GridSelectMode::Off;
+        let none = KeyModifiers::default();
+        let out = raised(&mut cx, &mut grid, |cx, grid| {
+            for code in [KeyCode::Delete, KeyCode::Backspace, KeyCode::ReturnKey, KeyCode::F2] {
+                grid.handle_key_down(cx, &key(code, none));
+            }
+        });
+        assert!(out.is_empty(), "{out:?}");
+    }
+
+    /// A list picks rows. A press anywhere in one selects all of it, shift
+    /// carries the pick down to another row, and the arrows move a row
+    /// selection rather than a cell.
+    #[test]
+    fn a_press_with_rows_selects_the_whole_row() {
+        let mut cx = cx();
+        let mut grid = grid(&mut cx);
+        grid.selection = GridSelectMode::Rows;
+        let out = raised(&mut cx, &mut grid, |cx, grid| {
+            grid.press_cell(cx, 4, 2, KeyModifiers::default(), 1)
+        });
+        assert_eq!(clicked(&out), vec![(4, 2, KeyModifiers::default())]);
+        let sel = grid.selection().expect("the press selected nothing");
+        assert_eq!(sel.kind, GridSelectKind::Rows);
+        assert_eq!(sel.row_range(), (4, 4));
+        assert!(sel.contains(4, 0) && sel.contains(4, 2) && !sel.contains(5, 2));
+
+        grid.press_cell(&mut cx, 7, 0, mods(true, false), 1);
+        let sel = grid.selection().unwrap();
+        assert_eq!((sel.kind, sel.row_range()), (GridSelectKind::Rows, (4, 7)));
+
+        grid.handle_key_down(&mut cx, &key(KeyCode::ArrowDown, KeyModifiers::default()));
+        let sel = grid.selection().unwrap();
+        assert_eq!((sel.kind, sel.row_range()), (GridSelectKind::Rows, (8, 8)));
+    }
+
+    /// A heading press on a list sorts and says so, and that is all: the
+    /// rows picked before it stay picked and no column is selected. The
+    /// spreadsheet still selects the column, as it always has.
+    #[test]
+    fn a_heading_press_with_rows_or_off_changes_only_the_sort() {
+        for mode in [GridSelectMode::Rows, GridSelectMode::Off] {
+            let mut cx = cx();
+            let mut grid = grid(&mut cx);
+            grid.sortable = true;
+            grid.selection = mode;
+            grid.press_cell(&mut cx, 2, 0, KeyModifiers::default(), 1);
+            let before = grid.selection();
+            let out = raised(&mut cx, &mut grid, |cx, grid| {
+                grid.click_header(cx, 1, KeyModifiers::default())
+            });
+            assert_eq!(grid.selection(), before, "{mode:?}");
+            assert!(!selection_changed(&out), "{mode:?}: {out:?}");
+            assert_eq!(grid.sort(), Some((1, true)), "{mode:?}");
+            assert!(out.iter().any(|a| matches!(
+                a,
+                DataGridAction::SortChanged { col: 1, ascending: Some(true) }
+            )));
+            assert!(out
+                .iter()
+                .any(|a| matches!(a, DataGridAction::HeaderClicked { col: 1, .. })));
+        }
+        let mut cx = cx();
+        let mut grid = grid(&mut cx);
+        grid.click_header(&mut cx, 1, KeyModifiers::default());
+        let sel = grid.selection().expect("the spreadsheet lost its column pick");
+        assert_eq!((sel.kind, sel.col_range()), (GridSelectKind::Cols, (1, 1)));
     }
 }

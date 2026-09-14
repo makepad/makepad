@@ -1,8 +1,9 @@
-//! The data grid story: a grid that draws cells the host hands it, one at a
-//! time, and holds none of them, and a host that says what may be written
-//! into them.
+//! The data grid stories: a grid that draws cells the host hands it, one at
+//! a time, and holds none of them, and a host that says what may be written
+//! into them; then the same grid shaped as a list whose picks the host keeps.
 use crate::makepad_widgets::*;
 use crate::registry::{Control, ControlKind, Story};
+use std::collections::BTreeSet;
 
 script_mod! {
     use mod.prelude.widgets.*
@@ -61,6 +62,57 @@ script_mod! {
         edited := Label{text: "nothing edited yet"}
     }
 
+    mod.storybook.StoryDataGridListBase = #(StoryDataGridList::register_widget(vm))
+
+    mod.storybook.StoryDataGridList = set_type_default() do mod.storybook.StoryDataGridListBase{
+        width: Fill
+        height: Fit
+        flow: Down
+        spacing: theme.space_2
+
+        // The picks and the cursor are this page's, so their colours are
+        // too: the grid is never told a row is picked.
+        color_picked: theme.color_secondary_container
+        color_picked_text: theme.color_on_secondary_container
+        color_cursor: theme.color_primary
+
+        View{
+            width: Fill height: 260.
+            grid := DataGrid{
+                width: Fill
+                height: Fill
+                rows: 0
+                cols: 4
+                // The grid selects nothing: no overlay, no rubber band. It
+                // reports each press with the keys held, and this page
+                // does the picking.
+                selection: GridSelectMode.Off
+                show_row_headers: false
+                allow_row_resize: false
+                zebra_stripes: true
+                default_col_width: 150.0
+                default_row_height: 24.0
+
+                // Restated from theme tokens, as on the Overview page.
+                color_bg: theme.color_surface_container_low
+                color_cell: theme.color_surface
+                color_cell_alt: theme.color_surface_container
+                color_text: theme.color_text
+                color_header: theme.color_surface_container
+                color_header_active: theme.color_surface_container_high
+                color_header_text: theme.color_text_meta
+                color_selection: theme.color_selection
+                color_selection_border: theme.color_bevel_focus
+                color_drag_marker: theme.color_bevel_focus
+                color_resize_guide: theme.color_bevel_focus
+                draw_cell +: {border_color: uniform(theme.color_bevel)}
+                draw_text +: {color: theme.color_text}
+                draw_text_bold +: {color: theme.color_text}
+            }
+        }
+        picked := Label{text: "nothing picked"}
+    }
+
     mod.stories.DataGridOverview = StoryPage{
         StoryNote{text: "A spreadsheet-shaped table over a very large number of rows. Eleven places in this repository use one. It holds none of your data: it works out which cells are on screen and asks for them, one at a time, while you draw them."}
 
@@ -77,6 +129,17 @@ script_mod! {
 
         StoryHeading{text: "An edit survives a scroll"}
         StoryNote{text: "Start an edit, wheel the row off the bottom and back, and the text is still there. The grid keeps the live editor out of the pool its other cells are recycled through; a host that draws its own editor into a cell loses the text the moment the wheel moves."}
+    }
+
+    mod.stories.DataGridList = StoryPage{
+        StoryNote{text: "The same grid shaped as a list: no row numbers, rows picked whole, and the picks kept by the page rather than by the grid."}
+
+        StoryHeading{text: "Picks the host keeps"}
+        StoryNote{text: "Click a row to pick it alone, Ctrl-click to add a row or drop it, Shift-click to pick everything from the row last clicked. The grid selects nothing here. It reports each press with the keys that were held, and this page decides what is picked, tints those rows and outlines the row clicked last."}
+        list := mod.storybook.StoryDataGridList{}
+
+        StoryHeading{text: "Three ways to select"}
+        StoryNote{text: "Cells is the spreadsheet on the Overview page. Rows picks a whole row with a press or an arrow key, and a heading press only sorts. Off, used here, picks nothing and draws nothing, for a host whose picks are its own."}
     }
 }
 
@@ -126,6 +189,85 @@ fn sorted_order<S: AsRef<str>>(rows: &[[S; 3]], col: usize, ascending: Option<bo
         if ascending { x.cmp(y) } else { y.cmp(x) }
     });
     order
+}
+
+/// The list page's columns.
+const SEED_COLUMNS: [&str; 4] = ["Seed", "Kind", "Sow", "Days"];
+
+/// The list page's rows: made up, and more than fit, so a pick can be
+/// scrolled away from.
+const SEEDS: &[[&str; 4]] = &[
+    ["Amber Runner", "bean", "May", "70"],
+    ["Blue Lake Pole", "bean", "May", "65"],
+    ["Early Round", "beet", "March", "55"],
+    ["Winter Keeper", "beet", "June", "80"],
+    ["Purple Sprouting", "broccoli", "April", "120"],
+    ["Little Gem", "lettuce", "March", "50"],
+    ["Red Oak Leaf", "lettuce", "April", "45"],
+    ["Paris Market", "carrot", "March", "60"],
+    ["Long Autumn", "carrot", "May", "90"],
+    ["Green Globe", "artichoke", "February", "150"],
+    ["Snow Crown", "cauliflower", "April", "85"],
+    ["Golden Ball", "turnip", "July", "55"],
+    ["White Lisbon", "onion", "March", "60"],
+    ["Stuttgart Giant", "onion", "March", "110"],
+    ["Sugar Snap", "pea", "March", "65"],
+    ["Early Onward", "pea", "April", "70"],
+    ["Cherry Belle", "radish", "April", "25"],
+    ["Black Spanish", "radish", "July", "55"],
+    ["Bright Lights", "chard", "April", "60"],
+    ["Perpetual", "spinach", "April", "50"],
+    ["Crown Prince", "squash", "May", "100"],
+    ["Golden Acorn", "squash", "May", "85"],
+    ["Long Green Ridge", "cucumber", "May", "65"],
+    ["Garden Pearl", "tomato", "March", "75"],
+];
+
+/// The picks a list's host keeps. They are held by item, not by line, so
+/// a pick stays with its row wherever the row is drawn.
+#[derive(Default, Debug)]
+struct Picks {
+    items: BTreeSet<usize>,
+    /// The item a Shift-click measures from: the last one clicked without
+    /// Shift.
+    anchor: Option<usize>,
+    /// The item the cursor outline sits on: the last one clicked.
+    cursor: Option<usize>,
+}
+
+impl Picks {
+    /// A click on `line` with `held` down, where `order` says which item
+    /// each line draws. A plain click picks that row alone, Ctrl (or the
+    /// logo key) adds it or drops it, and Shift picks every line from the
+    /// anchor to it, on top of the picks when Ctrl is held as well.
+    fn press(&mut self, order: &[usize], line: usize, held: KeyModifiers) {
+        let Some(&item) = order.get(line) else {
+            return;
+        };
+        let toggle = held.control || held.logo;
+        let anchor_line = self.anchor.and_then(|a| order.iter().position(|&i| i == a));
+        match anchor_line {
+            Some(from) if held.shift => {
+                if !toggle {
+                    self.items.clear();
+                }
+                let (lo, hi) = (from.min(line), from.max(line));
+                self.items.extend(order[lo..=hi].iter().copied());
+            }
+            _ if toggle => {
+                if !self.items.remove(&item) {
+                    self.items.insert(item);
+                }
+                self.anchor = Some(item);
+            }
+            _ => {
+                self.items.clear();
+                self.items.insert(item);
+                self.anchor = Some(item);
+            }
+        }
+        self.cursor = Some(item);
+    }
 }
 
 /// What this page will write into a cell of `col`: the text tidied, or
@@ -249,6 +391,107 @@ impl Widget for StoryDataGrid {
     }
 }
 
+#[derive(Script, ScriptHook, Widget)]
+pub struct StoryDataGridList {
+    #[deref]
+    view: View,
+    #[live]
+    color_picked: Vec4f,
+    #[live]
+    color_picked_text: Vec4f,
+    #[live]
+    color_cursor: Vec4f,
+    /// Which item each line draws. Filled the first time it is asked for.
+    #[rust]
+    order: Vec<usize>,
+    #[rust]
+    picks: Picks,
+}
+
+impl StoryDataGridList {
+    fn order(&mut self) -> &[usize] {
+        if self.order.len() != SEEDS.len() {
+            self.order = (0..SEEDS.len()).collect();
+        }
+        &self.order
+    }
+
+    /// A row was clicked. Returns what to say about the picks now.
+    fn press(&mut self, line: usize, held: KeyModifiers) -> String {
+        self.order();
+        self.picks.press(&self.order, line, held);
+        let names: Vec<&str> = self
+            .order
+            .iter()
+            .filter(|item| self.picks.items.contains(item))
+            .map(|item| SEEDS[*item][0])
+            .collect();
+        match names.len() {
+            0 => "nothing picked".to_string(),
+            1 => format!("picked {}", names[0]),
+            n => format!("{n} picked: {}", names.join(", ")),
+        }
+    }
+}
+
+impl Widget for StoryDataGridList {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        while let Some(step) = self.view.draw_walk(cx, scope, walk).step() {
+            let grid_ref = step.as_data_grid();
+            let Some(mut grid) = grid_ref.borrow_mut() else {
+                continue;
+            };
+            grid.set_col_labels(SEED_COLUMNS.iter().map(|s| s.to_string()).collect());
+            let lines = self.order().len();
+            grid.set_grid_size(lines, SEED_COLUMNS.len());
+            while let Some(cell) = grid.next_cell(cx) {
+                let item = self.order[cell.row];
+                // The grid holds no picks, so a picked row is nothing but
+                // a row this page draws in other colours.
+                let style = if self.picks.items.contains(&item) {
+                    CellStyle {
+                        bg: Some(self.color_picked),
+                        color: Some(self.color_picked_text),
+                        ..Default::default()
+                    }
+                } else {
+                    CellStyle::default()
+                };
+                grid.cell_text_styled(cx, &cell, SEEDS[item][cell.col], style);
+            }
+            // Asked for on every draw, like the cells: an outline lasts
+            // one frame.
+            let cursor = self.picks.cursor.and_then(|c| self.order.iter().position(|&i| i == c));
+            if let Some(line) = cursor {
+                grid.outline_row(line, self.color_cursor);
+            }
+        }
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.view.handle_event(cx, event, scope);
+    }
+}
+
+fn data_grid_list_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
+    let grid = root.data_grid(cx, ids!(list.grid));
+    let host = root.widget(cx, ids!(list));
+    for action in grid.actions(actions) {
+        // With the selection off this is the only thing a press raises,
+        // and it carries the keys that were held.
+        if let DataGridAction::CellClicked { row, modifiers, .. } = action {
+            let said = host
+                .borrow_mut::<StoryDataGridList>()
+                .map(|mut inner| inner.press(row, modifiers));
+            if let Some(said) = said {
+                host.redraw(cx);
+                root.label(cx, ids!(list.picked)).set_text(cx, &said);
+            }
+        }
+    }
+}
+
 fn data_grid_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
     let grid = root.data_grid(cx, ids!(demo.grid));
     let host = root.widget(cx, ids!(demo));
@@ -302,6 +545,11 @@ fn data_grid_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
     // the keyboard as well as the mouse, and a label that only heard about
     // clicks would fall behind the arrow keys.
     let text = match grid.selection() {
+        // A row selection covers every column, so it is counted in rows.
+        Some(sel) if sel.kind == GridSelectKind::Rows => match sel.row_range() {
+            (r0, r1) if r0 == r1 => format!("row {r0}"),
+            (r0, r1) => format!("rows {r0}-{r1}"),
+        },
         Some(sel) => {
             let (r0, r1) = (sel.anchor.0.min(sel.head.0), sel.anchor.0.max(sel.head.0));
             let (c0, c1) = (sel.anchor.1.min(sel.head.1), sel.anchor.1.max(sel.head.1));
@@ -329,6 +577,7 @@ const CONTROLS: &[Control] = &[
     Control { label: "Zebra stripes", target: "demo.grid", kind: ControlKind::Bool { prop: "zebra_stripes", default: false } },
     Control { label: "Sortable headings", target: "demo.grid", kind: ControlKind::Bool { prop: "sortable", default: true } },
     Control { label: "Drag columns", target: "demo.grid", kind: ControlKind::Bool { prop: "allow_col_reorder", default: true } },
+    Control { label: "Selection", target: "demo.grid", kind: ControlKind::Choice { prop: "selection", options: &["GridSelectMode.Cells", "GridSelectMode.Rows", "GridSelectMode.Off"], default: 0 } },
 ];
 
 pub const STORIES: &[Story] = &[
@@ -352,6 +601,8 @@ The consequence is the trap: **a `DataGrid` with no host behind it is not empty,
 ## What it does, and what is yours
 
 Its own: column and row headers, resizing a column or a row by dragging its edge, reordering columns by dragging a header (`allow_col_reorder`, off by default while both resize flags are on), the whole selection model — single cell, rectangle, row, column, everything — and keyboard navigation with arrows, the page keys, Home, End, and shift to extend.
+
+What a press selects is `selection:`. `GridSelectMode.Cells`, the default, is the spreadsheet described here. `GridSelectMode.Rows` picks whole rows with a press or an arrow key, and a heading press only sorts. `GridSelectMode.Off` selects nothing at all and still reports every press with its modifiers, for a list that keeps its own picks; the List page beside this one is that.
 
 Yours, despite the name: **it does not sort the rows** — with `sortable: true` a heading press cycles unsorted, up, down and back, draws the mark and raises `SortChanged { col, ascending }`; the rows themselves are yours to reorder, because the grid never held them. This page keeps a list of indices and draws through it, which is all it takes. **It does not copy** — Cmd+C does nothing until you install a `set_copy_provider`. **Editing is shared** — the grid seats the editor and reads its keys, you answer `EditCell` with the text to start from and `CellEdited` with a yes or a no; the next section is about that. And row headers cannot be labelled: that strip always prints the row number, so names down the left belong in column zero with `show_row_headers: false`.
 
@@ -390,6 +641,37 @@ Every surface it paints is a literal light-mode colour — `color_bg: #fafafa`, 
         feature: None,
         controls: CONTROLS,
         on_actions: Some(data_grid_actions),
+    },
+    Story {
+        key: "collections/datagrid/list",
+        category: "Collections",
+        component: "DataGrid",
+        also: &[],
+        name: "List",
+        dsl: "DataGridList",
+        added: "2025-05-06",
+        tags: &["list", "picks"],
+        doc: "# DataGrid as a list
+
+The grid on the Overview page is a spreadsheet. This one is a list: no row numbers, rows picked whole, and **the picks kept by the host**. A list's picks usually mean something to the rest of the app and have to survive its rows being rebuilt, sorted and moved, so the grid is told to keep out of the way.
+
+## `selection:`
+
+- `GridSelectMode.Cells` — the default and the spreadsheet: a press selects a cell, a drag a rectangle, a row number its row and a heading its column.
+- `GridSelectMode.Rows` — a press or an arrow key selects the whole row, shift extends by rows, and a heading press sorts without selecting a column. No cell is drawn as the active one, and a row pick does not light the headings.
+- `GridSelectMode.Off` — the grid never selects: no overlay, no rubber band, no keys that move a selection. A press still raises `CellClicked { row, col, modifiers }`, and that is what a host with picks of its own reads. This page is declared this way.
+
+## The picks are the page's
+
+This page keeps a set of picked items and an anchor. A plain click picks one row, Ctrl adds or drops a row, Shift picks from the anchor to the row clicked. The picks are held **by item, not by line**, so they stay on their rows wherever those rows are drawn. A picked row is nothing more than a row the page draws with `cell_text_styled` and another background.
+
+## The outline
+
+`outline_row(row, color)` draws a 1.5 point outline round a row's visible cells: a keyboard cursor, a row being carried, anything a host marks without selecting it. Call it from the draw loop, as the cells are. It is drawn when the frame ends, over every cell, so the row's own cells may come before the call or after it; and it lasts one frame, so ask for it again on every draw. This page outlines the row clicked last.",
+        subject: "list",
+        feature: None,
+        controls: &[],
+        on_actions: Some(data_grid_list_actions),
     },
 ];
 
@@ -449,5 +731,98 @@ mod tests {
     fn a_name_is_anything_but_blank() {
         assert_eq!(accept(0, " Ada "), Ok("Ada".to_string()));
         assert_eq!(accept(1, "   "), Err("a name cannot be blank"));
+    }
+
+    fn held(shift: bool, control: bool) -> KeyModifiers {
+        KeyModifiers {
+            shift,
+            control,
+            ..Default::default()
+        }
+    }
+
+    fn picked(picks: &Picks) -> Vec<usize> {
+        picks.items.iter().copied().collect()
+    }
+
+    #[test]
+    fn a_plain_click_picks_one_row_and_ctrl_adds_or_drops() {
+        let order: Vec<usize> = (0..10).collect();
+        let mut picks = Picks::default();
+        picks.press(&order, 3, held(false, false));
+        assert_eq!(picked(&picks), vec![3]);
+        picks.press(&order, 6, held(false, true));
+        assert_eq!(picked(&picks), vec![3, 6]);
+        picks.press(&order, 3, held(false, true));
+        assert_eq!(picked(&picks), vec![6]);
+        assert_eq!(picks.cursor, Some(3), "the cursor is on the row clicked last");
+        picks.press(&order, 8, held(false, false));
+        assert_eq!(picked(&picks), vec![8]);
+    }
+
+    /// Shift measures from the last row clicked without it, and a second
+    /// Shift-click moves the far end rather than the anchor.
+    #[test]
+    fn shift_picks_every_line_from_the_anchor() {
+        let order: Vec<usize> = (0..10).collect();
+        let mut picks = Picks::default();
+        picks.press(&order, 4, held(false, false));
+        picks.press(&order, 7, held(true, false));
+        assert_eq!(picked(&picks), vec![4, 5, 6, 7]);
+        picks.press(&order, 2, held(true, false));
+        assert_eq!(picked(&picks), vec![2, 3, 4]);
+        assert_eq!(picks.cursor, Some(2));
+    }
+
+    /// Picks are items: drawn in another order the same items stay
+    /// picked, and a Shift range runs over the lines as they are drawn now.
+    #[test]
+    fn picks_follow_their_items_through_another_order() {
+        let order: Vec<usize> = (0..6).collect();
+        let reversed: Vec<usize> = (0..6).rev().collect();
+        let mut picks = Picks::default();
+        picks.press(&order, 1, held(false, false));
+        // Item 1 is on line 4 now. Shift-clicking line 2, item 3, picks
+        // lines 2 to 4: items 3, 2 and 1.
+        picks.press(&reversed, 2, held(true, false));
+        assert_eq!(picked(&picks), vec![1, 2, 3]);
+    }
+
+    /// A `Cx` with the theme, the shared page templates and this file's
+    /// stories, and nothing else, with the script errors this file's own
+    /// DSL raised while it was read.
+    fn shell() -> (Cx, Vec<String>) {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let errors = cx.with_vm(|vm| {
+            crate::theme::widgets_script_mod(vm);
+            crate::shell::script_mod(vm);
+            vm.bx.captured_errors = Some(Vec::new());
+            self::script_mod(vm);
+            let _ = makepad_platform::shader_error::take();
+            vm.take_errors()
+        });
+        (cx, errors)
+    }
+
+    /// Both pages read without a script error, and each holds the grid its
+    /// action handler addresses. Nothing the compiler checks reads the DSL:
+    /// a misspelt `selection:` value is one log line and a spreadsheet
+    /// where a list was meant.
+    #[test]
+    fn both_pages_build_and_hold_the_grids_their_handlers_address() {
+        let (mut cx, errors) = shell();
+        assert!(errors.is_empty(), "{errors:?}");
+        for (story, path) in STORIES.iter().zip([ids!(demo.grid), ids!(list.grid)]) {
+            let page = cx.with_vm(|vm| {
+                let stories = vm.module(id!(stories));
+                let value = vm.bx.heap.value(stories, LiveId::from_str(story.dsl).into(), NoTrap);
+                assert!(value.as_object().is_some(), "no template {}", story.dsl);
+                WidgetRef::script_from_value(vm, value)
+            });
+            assert!(!page.is_empty(), "{} built no widget", story.key);
+            assert!(page.data_grid(&cx, path).borrow().is_some(), "{}: no grid", story.key);
+            let subject = page.widget(&cx, &[LiveId::from_str(story.subject)]);
+            assert!(!subject.is_empty(), "{}: no {}", story.key, story.subject);
+        }
     }
 }
