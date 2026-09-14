@@ -152,6 +152,9 @@ script_mod! {
         StoryHeading{text: "A menu on the right button"}
         StoryNote{text: "Right-click a row for a menu that moves it to the top or the bottom, or a heading for one that picks every row or none. The right button asks for a menu and does nothing else: the picks stay as they were until a menu row is chosen. Ctrl with the left button is still a click that adds or drops a pick."}
 
+        StoryHeading{text: "The first column takes what is left"}
+        StoryNote{text: "The page sets every column's width at once from its draw loop, and the Seed column fills whatever the others leave, so the list always ends at its right edge however wide the page is. Drag a column edge and the page stops fitting: the widths stay where they were dragged for as long as the page is open."}
+
         StoryHeading{text: "Three ways to select"}
         StoryNote{text: "Cells is the spreadsheet on the Overview page. Rows picks a whole row with a press or an arrow key, and a heading press only sorts. Off, used here, picks nothing and draws nothing, for a host whose picks are its own."}
 
@@ -210,6 +213,56 @@ fn sorted_order<S: AsRef<str>>(rows: &[[S; 3]], col: usize, ascending: Option<bo
 
 /// The list page's columns.
 const SEED_COLUMNS: [&str; 4] = ["Seed", "Kind", "Sow", "Days"];
+
+/// The widths of every list column but the first, which takes what these
+/// leave, down to `SEED_FIRST_MIN`.
+const SEED_WIDTHS: [f64; 3] = [120.0, 100.0, 70.0];
+const SEED_FIRST_MIN: f64 = 140.0;
+
+/// The list's widths fitted to `data_width`: the first column fills
+/// whatever the others leave, and past its minimum the list scrolls.
+fn fit_seed_widths(data_width: f64) -> Vec<f64> {
+    let rest: f64 = SEED_WIDTHS.iter().sum();
+    let mut widths = vec![(data_width - rest).max(SEED_FIRST_MIN)];
+    widths.extend(SEED_WIDTHS);
+    widths
+}
+
+/// The list's column widths, all kept here. They are fitted to the list
+/// until someone drags a column edge, and from then on they are what the
+/// edges were dragged to, for as long as the page is open. Keeping them
+/// past that is writing `by_hand` out and reading it back in.
+#[derive(Default, Debug)]
+struct ListWidths {
+    /// The widths the columns were dragged to, once one has been.
+    by_hand: Option<Vec<f64>>,
+    /// The widths last handed to the grid.
+    pushed: Vec<f64>,
+}
+
+impl ListWidths {
+    /// What to hand the grid for a list `data_width` wide, or nothing when
+    /// it already has it. Asked on every draw, it hands over nothing while
+    /// an edge is dragged: the width fitted to has not changed, so the
+    /// drag is not undone under the pointer.
+    fn to_push(&mut self, data_width: f64) -> Option<Vec<f64>> {
+        let widths = match &self.by_hand {
+            Some(by_hand) => by_hand.clone(),
+            None => fit_seed_widths(data_width),
+        };
+        if widths == self.pushed {
+            return None;
+        }
+        self.pushed = widths.clone();
+        Some(widths)
+    }
+
+    /// An edge was dragged, and `widths` are the grid's now.
+    fn dragged(&mut self, widths: Vec<f64>) {
+        self.pushed = widths.clone();
+        self.by_hand = Some(widths);
+    }
+}
 
 /// The list page's rows: made up, and more than fit, so a pick can be
 /// scrolled away from.
@@ -461,6 +514,8 @@ pub struct StoryDataGridList {
     /// The item a row menu was opened on, until one of its rows is chosen.
     #[rust]
     menu_item: Option<usize>,
+    #[rust]
+    widths: ListWidths,
 }
 
 impl StoryDataGridList {
@@ -558,6 +613,12 @@ impl Widget for StoryDataGridList {
             grid.set_col_labels(SEED_COLUMNS.iter().map(|s| s.to_string()).collect());
             let lines = self.order().len();
             grid.set_grid_size(lines, SEED_COLUMNS.len());
+            // Measured for this frame already, and set before the first
+            // cell, so a list that changes width is fitted in the same
+            // frame.
+            if let Some(widths) = self.widths.to_push(grid.data_width()) {
+                grid.set_col_widths(cx, &widths);
+            }
             while let Some(cell) = grid.next_cell(cx) {
                 let item = self.order[cell.row];
                 // The grid holds no picks, so a picked row is nothing but
@@ -641,6 +702,15 @@ fn data_grid_list_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
                 }
                 host.redraw(cx);
                 root.label(cx, ids!(list.log)).set_text(cx, &format!("carrying row {row}"));
+            }
+            // An edge was dragged: the widths are the person's from now on,
+            // and the page stops fitting them.
+            DataGridAction::ColumnResized { .. } => {
+                let widths = grid.col_widths();
+                if let Some(mut inner) = host.borrow_mut::<StoryDataGridList>() {
+                    inner.widths.dragged(widths);
+                }
+                root.label(cx, ids!(list.log)).set_text(cx, "column widths set by hand");
             }
             // The right button: a menu at the pointer, and nothing else.
             // The picks are left alone until a row of the menu is chosen.
@@ -829,7 +899,7 @@ The stock editor fills the cell in the grid's type size from `theme.font_regular
 
 ## Two things that will bite
 
-**Declare `rows: 0`.** `set_grid_size` returns early when the counts already match, and the early return skips the geometry pass. Declare the real count in the DSL and your first `set_grid_size` does nothing, so a width set in the same frame lands a frame late with nothing scheduling that frame. Every caller here declares zero.
+**Declare `rows: 0`.** `set_grid_size` returns early when the counts already match, and the early return skips the geometry pass. Declare the real count in the DSL and your first `set_grid_size` does nothing, so a width set in the same frame lands a frame late with nothing scheduling that frame. Every caller here declares zero. `set_col_widths`, which sets all of them at once, measures the frame again itself and lands in the frame it is called from.
 
 **Index with `cell.col`, not `cell.display_col`.** The data index survives a column being dragged elsewhere; the display index is where it currently sits. Widths and selection coordinates are in display space, while `HeaderClicked` and the sort indicator are in data space — mix them and you get the wrong column silently, one drag later.
 
@@ -882,6 +952,12 @@ Both are measured against the last drawn frame and the scroll as it is now, and 
 ## A menu on the right button
 
 A secondary press on a cell raises `CellContextMenu { row, col, abs }`, and on a column heading `HeaderContextMenu { col, abs }`, with `abs` where it went down and `col` the data column. Only the secondary button asks: Ctrl with the primary button is a primary press, because that is how a list toggles its picks. The press selects nothing, sorts nothing and takes no keyboard focus, so a menu opened on a row finds the picks as they were; a secondary press while a row is being carried or a column dragged belongs to that gesture and asks for nothing. This page opens a `MenuLayer` menu at `abs`: on a row, moving it to either end; on a heading, picking every row or none.
+
+## Column widths set by the host
+
+`set_col_widths(cx, &[f64])` sets every column's width at once, in display order. Columns past the end of the list go back to `default_col_width`, and a width below `min_col_width` is raised to it. The grid measures the frame again straight away, so widths set from the draw loop before the first `next_cell` land in the frame being drawn, where one `set_col_width` lands in the next. `data_width()` is the width the columns share in that frame, and `col_widths()` reads every width back.
+
+This page keeps its widths in one place. Until an edge is dragged it fits them to `data_width()`, with the Seed column taking what the others leave. When `ColumnResized` arrives it keeps `col_widths()` and stops fitting. It hands the grid widths only when they differ from the last ones it handed over: pushed on every draw, the fit would put a dragged edge back under the pointer. The widths last as long as the page is open, and saving them would be writing that one value out and reading it back.
 
 ## The outline
 
@@ -1065,6 +1141,33 @@ mod tests {
         assert_eq!(order, vec![4, 2, 1, 7]);
         move_to_end(&mut order, 9, true);
         assert_eq!(order, vec![4, 2, 1, 7], "an item that is not there moves nothing");
+    }
+
+    /// The first column fills what the others leave, and stops shrinking
+    /// at its minimum.
+    #[test]
+    fn the_first_column_takes_what_the_others_leave() {
+        let rest: f64 = SEED_WIDTHS.iter().sum();
+        let wide = fit_seed_widths(rest + 400.0);
+        assert_eq!(wide, vec![400.0, SEED_WIDTHS[0], SEED_WIDTHS[1], SEED_WIDTHS[2]]);
+        assert_eq!(wide.iter().sum::<f64>(), rest + 400.0, "the list ends at its edge");
+        assert_eq!(fit_seed_widths(rest + 10.0)[0], SEED_FIRST_MIN);
+    }
+
+    /// The fit is handed over when the width changes and not otherwise,
+    /// and once an edge is dragged the dragged widths stay, whatever width
+    /// the list is.
+    #[test]
+    fn a_dragged_edge_ends_the_fit() {
+        let mut widths = ListWidths::default();
+        assert_eq!(widths.to_push(700.0), Some(fit_seed_widths(700.0)));
+        assert_eq!(widths.to_push(700.0), None, "the same fit twice, or a drag undone");
+        assert_eq!(widths.to_push(800.0), Some(fit_seed_widths(800.0)));
+        let dragged = vec![300.0, 80.0, 100.0, 70.0];
+        widths.dragged(dragged.clone());
+        assert_eq!(widths.to_push(800.0), None, "the grid already has the dragged widths");
+        assert_eq!(widths.to_push(500.0), None, "a narrower list fitted over a drag");
+        assert_eq!(widths.by_hand, Some(dragged));
     }
 
     fn line(y: f64, height: f64) -> Rect {

@@ -197,6 +197,18 @@ impl AxisSizes {
         self.cum.clear();
     }
 
+    /// Replace every override with `sizes`, one per index from zero.
+    /// Returns whether anything changed.
+    fn set_all(&mut self, sizes: impl Iterator<Item = f64>) -> bool {
+        let overrides: Vec<(usize, f64)> = sizes.enumerate().collect();
+        if overrides == self.overrides {
+            return false;
+        }
+        self.overrides = overrides;
+        self.rebuild_cum();
+        true
+    }
+
     /// Remap override indices after a column move: the entry at `from` lands
     /// at `to`, entries between shift by one.
     fn apply_move(&mut self, from: usize, to: usize) {
@@ -920,6 +932,51 @@ impl DataGrid {
 
     pub fn col_width(&self, display_col: usize) -> f64 {
         self.col_sizes.size_of(display_col)
+    }
+
+    /// Every column's width at once, in display order: the first width is
+    /// the column drawn leftmost now. A column past the end of `widths`
+    /// goes back to `default_col_width`, so a shorter list clears what a
+    /// longer one set, and a width below `min_col_width` is raised to it,
+    /// as a dragged edge is. A width for a column the grid does not have
+    /// yet waits for it.
+    ///
+    /// Unlike [`Self::set_col_width`] the frame is measured again at once.
+    /// Called from the draw loop before the first [`Self::next_cell`], the
+    /// widths land in the frame being drawn, not the next one; called from
+    /// event code, a pointer finds the new columns at once and the grid
+    /// redraws. Widths the grid already has change
+    /// nothing, so pushing them again on every draw costs nothing. A host
+    /// that fits the columns to [`Self::data_width`] and also lets people
+    /// drag an edge pushes only when the width it fits to changes: a push
+    /// during the drag would put the edge back under the pointer.
+    pub fn set_col_widths(&mut self, cx: &mut Cx, widths: &[f64]) {
+        let min = self.min_col_width;
+        if !self.col_sizes.set_all(widths.iter().map(|w| w.max(min))) {
+            return;
+        }
+        // Hit testing reads the frame's geometry too, so it is measured
+        // again whether or not a draw is under way.
+        self.compute_viewport();
+        if self.iter.is_some() {
+            self.reset_iter();
+        } else {
+            self.area.redraw(cx);
+        }
+    }
+
+    /// Every column's width, in display order: what a host keeps to put
+    /// the widths back later with [`Self::set_col_widths`].
+    pub fn col_widths(&self) -> Vec<f64> {
+        (0..self.cols).map(|c| self.col_sizes.size_of(c)).collect()
+    }
+
+    /// The width the columns share: the grid's width less the row-number
+    /// strip, in the frame being drawn when read from the draw loop and in
+    /// the last one drawn otherwise, and nothing before the first draw.
+    /// The vertical scroll bar is drawn over the columns, not beside them.
+    pub fn data_width(&self) -> f64 {
+        self.vp.data_rect.size.x
     }
 
     pub fn set_row_height(&mut self, row: usize, height: f64) {
@@ -2905,6 +2962,23 @@ impl DataGridRef {
         }
     }
 
+    /// See [`DataGrid::set_col_widths`].
+    pub fn set_col_widths(&self, cx: &mut Cx, widths: &[f64]) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_col_widths(cx, widths);
+        }
+    }
+
+    /// See [`DataGrid::col_widths`].
+    pub fn col_widths(&self) -> Vec<f64> {
+        self.borrow().map(|inner| inner.col_widths()).unwrap_or_default()
+    }
+
+    /// See [`DataGrid::data_width`].
+    pub fn data_width(&self) -> f64 {
+        self.borrow().map(|inner| inner.data_width()).unwrap_or(0.0)
+    }
+
     /// See [`DataGrid::set_row_height`]; redraws.
     pub fn set_row_height(&self, cx: &mut Cx, row: usize, height: f64) {
         if let Some(mut inner) = self.borrow_mut() {
@@ -4009,5 +4083,51 @@ mod tests {
         assert!(cx.has_key_focus(grid.area), "a primary press still takes the keyboard");
         let out = sent(&mut cx, &mut grid, mouse_up(at, MouseButton::PRIMARY, ctrl));
         assert_eq!(released(&out), vec![(2, 1, ctrl)]);
+    }
+
+    /// Widths a host sets from its draw loop, fitted to the width the grid
+    /// measured for this frame, are the widths this frame's cells are
+    /// handed out at, and the columns they bring into view are handed out
+    /// too, rather than a frame later.
+    #[test]
+    fn widths_set_in_the_draw_loop_land_in_the_frame_being_drawn() {
+        let mut cx = cx();
+        let mut grid = grid(&mut cx);
+        grid.set_grid_size(20, 6);
+        let mut frame = Frame::new(&mut cx, dvec2(300.0, 200.0));
+        let cells = frame.draw(&mut cx, &mut grid, |_, _| {});
+        let first_row = |cells: &[GridCell]| -> Vec<f64> {
+            cells.iter().filter(|c| c.row == 0).map(|c| c.rect.size.x).collect()
+        };
+        assert_eq!(first_row(&cells), vec![96.0; 3], "the stock widths show three columns");
+
+        let mut measured = 0.0;
+        let cells = frame.draw(&mut cx, &mut grid, |cx, grid| {
+            measured = grid.data_width();
+            let each = (measured / 6.0).floor();
+            grid.set_col_widths(cx, &[each; 6]);
+        });
+        assert_eq!(measured, 300.0 - grid.row_header_width);
+        assert_eq!(first_row(&cells), vec![(measured / 6.0).floor(); 6]);
+        assert_eq!(grid.visible_counts().1, 6);
+        assert_eq!(cells.len(), 6 * grid.visible_counts().0, "a cell was handed out twice or not at all");
+    }
+
+    /// Every push replaces all the widths: a shorter list puts the columns
+    /// it leaves out back on the default, a width below the minimum is
+    /// raised to it, and from event code the columns under the pointer
+    /// move at once.
+    #[test]
+    fn a_shorter_list_of_widths_puts_the_rest_back_on_the_default() {
+        let mut cx = cx();
+        let mut grid = laid_out(&mut cx);
+        grid.set_col_widths(&mut cx, &[200.0, 100.0, 100.0]);
+        assert_eq!(grid.col_widths(), vec![200.0, 100.0, 100.0]);
+        let at = dvec2(grid.vp.data_rect.pos.x + 100.0, 100.0);
+        let row = grid.row_at(at).unwrap();
+        assert_eq!(grid.hit_zone(at), HitZone::Cell { row, display_col: 0 });
+        grid.set_col_widths(&mut cx, &[5.0]);
+        assert_eq!(grid.col_widths(), vec![grid.min_col_width, 96.0, 96.0]);
+        assert_eq!(grid.hit_zone(at), HitZone::Cell { row, display_col: 1 });
     }
 }
