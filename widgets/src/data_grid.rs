@@ -53,6 +53,7 @@ script_mod! {
         color_selection_border: #x1a73e8
         color_drag_marker: #x1a73e8
         color_resize_guide: #x1a73e866
+        color_header_edge: #x9aa0a6
 
         draw_text +: {
             text_style: theme.font_regular{font_size: 9.0}
@@ -719,6 +720,13 @@ pub struct DataGrid {
     zebra_stripes: bool,
     #[live(true)]
     allow_col_resize: bool,
+    /// A thin line in `color_header_edge` at the edge between two column
+    /// headings, the middle half of the heading's height, so the edge a
+    /// pointer drags to resize a column can be seen before it is found. For
+    /// a grid whose headings are the colour of the lines under its cells,
+    /// where the cells' own edges show nothing up there. Off by default.
+    #[live(false)]
+    header_edges: bool,
     #[live(true)]
     allow_row_resize: bool,
     /// A column heading can be dragged along the headings and dropped
@@ -823,6 +831,9 @@ pub struct DataGrid {
     color_drag_marker: Vec4f,
     #[live]
     color_resize_guide: Vec4f,
+    /// The line `header_edges` draws between two headings.
+    #[live]
+    color_header_edge: Vec4f,
 
     #[live]
     draw_cell: DrawDataGridCell,
@@ -1716,6 +1727,7 @@ impl DataGrid {
         self.draw_selection_overlay(cx);
         self.draw_row_outlines(cx);
         self.draw_headers(cx);
+        self.draw_header_edges(cx);
         self.draw_interact_overlay(cx);
         self.draw_scroll_bars(cx);
 
@@ -1926,6 +1938,43 @@ impl DataGrid {
             self.draw_cell.color = self.color_header;
             self.draw_cell.draw_abs(cx, vp.corner_rect);
         }
+    }
+
+    /// Where `header_edges` draws its lines: one point wide on the right
+    /// edge of every heading but the last column's, over the middle half of
+    /// the heading's height, where the cells' own edge lines fall, and only
+    /// those in the heading strip. Nothing with `header_edges` off.
+    fn header_edge_rects(&self) -> Vec<Rect> {
+        let strip = self.vp.col_header_rect;
+        if !self.header_edges || !self.show_col_headers || strip.size.y <= 0.0 {
+            return Vec::new();
+        }
+        let inset = (strip.size.y * 0.25).round();
+        self.vp
+            .vis_cols
+            .iter()
+            .copied()
+            .filter(|&(display_col, _, _)| display_col + 1 < self.cols)
+            .map(|(_, x, w)| x + w)
+            .filter(|&edge| edge > strip.pos.x && edge <= strip.pos.x + strip.size.x)
+            .map(|edge| Rect {
+                pos: dvec2(edge - 1.0, strip.pos.y + inset),
+                size: dvec2(1.0, strip.size.y - 2.0 * inset),
+            })
+            .collect()
+    }
+
+    fn draw_header_edges(&mut self, cx: &mut Cx2d) {
+        let rects = self.header_edge_rects();
+        if rects.is_empty() {
+            return;
+        }
+        cx.push_clip_rect(self.vp.col_header_rect);
+        self.draw_overlay.color = self.color_header_edge;
+        for rect in rects {
+            self.draw_overlay.draw_abs(cx, rect);
+        }
+        cx.pop_clip_rect();
     }
 
     /// How the heading of data column `data_col` is drawn: its colour, where
@@ -2467,6 +2516,10 @@ impl DataGrid {
     // ---------------------------------------------------------------
 
     const RESIZE_MARGIN: f64 = 4.0;
+    /// How far either side of a column's edge a pointer takes hold of it,
+    /// in points, and never more than a third of the column on that side,
+    /// so a narrow column keeps a middle to press and carry.
+    const RESIZE_GRAB: f64 = 6.0;
 
     fn hit_zone(&self, pos: DVec2) -> HitZone {
         let vp = &self.vp;
@@ -2478,9 +2531,14 @@ impl DataGrid {
         }
         if self.show_col_headers && vp.col_header_rect.contains(pos) {
             let mut resize_edge = None;
+            let mut nearest = f64::INFINITY;
             let mut display_col = None;
-            for (dc, x, w) in vp.vis_cols.iter().copied() {
-                if (pos.x - (x + w)).abs() <= Self::RESIZE_MARGIN {
+            let grab = |w: f64| Self::RESIZE_GRAB.min(w / 3.0);
+            for (at, (dc, x, w)) in vp.vis_cols.iter().copied().enumerate() {
+                let off = pos.x - (x + w);
+                let past = vp.vis_cols.get(at + 1).map_or(Self::RESIZE_GRAB, |&(_, _, next)| grab(next));
+                if off >= -grab(w) && off <= past && off.abs() < nearest {
+                    nearest = off.abs();
                     resize_edge = Some(dc);
                 }
                 if pos.x >= x && pos.x < x + w {
@@ -2539,15 +2597,15 @@ impl DataGrid {
     /// tip of the heading it rests on, or take the last one down. Once per
     /// heading entered and once per heading left, so a pointer moving
     /// about inside one heading says nothing more.
+    ///
+    /// A pointer on an edge it could drag raises none, and while a press is
+    /// under way, a resize, a carry or a press not yet either, the grid
+    /// raises nothing at all.
     fn hover_tip(&mut self, cx: &mut Cx, abs: Option<DVec2>) {
-        let over = abs.and_then(|abs| match self.hit_zone(abs) {
-            HitZone::ColHeader { display_col, .. } => {
-                let col = self.display_to_data(display_col);
-                let has_tip = self.header_tips.get(col).is_some_and(|tip| !tip.is_empty());
-                has_tip.then_some((display_col, col))
-            }
-            _ => None,
-        });
+        if !matches!(self.interact, Interact::None) {
+            return;
+        }
+        let over = abs.and_then(|abs| self.tip_at(abs));
         if over == self.tip_head {
             return;
         }
@@ -2559,6 +2617,35 @@ impl DataGrid {
             None => TipAction::HoverOut,
         };
         cx.widget_action(self.uid, action);
+    }
+
+    /// The heading whose tip a pointer at `abs` would raise, as (display
+    /// col, data col): none on a cell, on a heading without a tip, or on an
+    /// edge that can be dragged, where the hand is about to resize and a
+    /// bubble would only get in its way.
+    fn tip_at(&self, abs: DVec2) -> Option<(usize, usize)> {
+        match self.hit_zone(abs) {
+            HitZone::ColHeader { resize_edge: Some(_), .. } if self.allow_col_resize => None,
+            HitZone::ColHeader { display_col, .. } => {
+                let col = self.display_to_data(display_col);
+                let has_tip = self.header_tips.get(col).is_some_and(|tip| !tip.is_empty());
+                has_tip.then_some((display_col, col))
+            }
+            _ => None,
+        }
+    }
+
+    /// A press on a heading at `abs` takes any heading tip down at once,
+    /// one on screen or one still waiting to show (a tip raised by the move
+    /// that brought the pointer there can reach the tip layer after the
+    /// press has cleared it), and the heading pressed stays quiet until the
+    /// pointer leaves it, so a tip does not come back over a hand that has
+    /// just sorted or resized.
+    fn press_takes_tip_down(&mut self, cx: &mut Cx, abs: DVec2) {
+        if self.header_tips.iter().any(|tip| !tip.is_empty()) {
+            cx.widget_action(self.uid, TipAction::HoverOut);
+        }
+        self.tip_head = self.tip_at(abs);
     }
 
     /// Where a column heading is drawn, cut to the heading strip: of a
@@ -3302,6 +3389,7 @@ impl Widget for DataGrid {
                         display_col,
                         resize_edge,
                     } => {
+                        self.press_takes_tip_down(cx, fe.abs);
                         if let (Some(edge), true) = (resize_edge, self.allow_col_resize) {
                             self.interact = Interact::ColResize {
                                 display_col: edge,
@@ -5409,5 +5497,148 @@ mod tests {
         assert_eq!(carry_moves(&out), vec![near_top, near_top, below]);
         assert_eq!(carry_ends(&out).len(), 1);
         assert_eq!(grid.row_drag_frame, None, "a frame outlived the carry");
+    }
+
+    /// What one pointer event raised, the heading tips and the grid's own
+    /// actions apart.
+    fn sent_with_tips(cx: &mut Cx, grid: &mut DataGrid, event: Event) -> (Vec<TipAction>, Vec<DataGridAction>) {
+        let uid = grid.widget_uid();
+        let emitted = cx.capture_actions(|cx| grid.handle_event(cx, &event, &mut Scope::empty()));
+        let tips = emitted
+            .filter_widget_actions_cast::<TipAction>(uid)
+            .filter(|tip| *tip != TipAction::None)
+            .collect();
+        let grid_actions = emitted
+            .filter_widget_actions_cast::<DataGridAction>(uid)
+            .filter(|action| !matches!(action, DataGridAction::None))
+            .collect();
+        cx.action(());
+        cx.handle_actions();
+        (tips, grid_actions)
+    }
+
+    /// Through the grid's own pointer handling: a pointer on an edge raises
+    /// no tip and one moving onto an edge takes the tip down; a press on an
+    /// edge with a tip up takes it down and still resizes, raising nothing
+    /// while the edge is dragged; a press in a heading with a tip up takes
+    /// it down and still presses the heading, which stays quiet after the
+    /// release until the pointer leaves it.
+    #[test]
+    fn a_tip_keeps_off_an_edge_and_a_press_takes_it_down_and_still_resizes() {
+        let mut cx = cx();
+        let mut grid = grid(&mut cx);
+        grid.set_grid_size(20, 4);
+        grid.set_header_tips(vec!["tip".into(); 4]);
+        let mut frame = Frame::new(&mut cx, dvec2(500.0, 200.0));
+        frame.draw(&mut cx, &mut grid, |_, _| {});
+        let none = KeyModifiers::default();
+        let y = heading(&grid, 0).y;
+        let (_, x, w) = grid.vp.vis_cols[0];
+        let edge = dvec2(x + w, y);
+
+        for at in [edge, edge - dvec2(5.0, 0.0), edge + dvec2(5.0, 0.0)] {
+            let (tips, _) = sent_with_tips(&mut cx, &mut grid, mouse_move(at));
+            assert!(tips.is_empty(), "a tip on the edge at {at:?}: {tips:?}");
+        }
+        let first = heading(&grid, 0);
+        let (tips, _) = sent_with_tips(&mut cx, &mut grid, mouse_move(first));
+        assert!(matches!(tips[..], [TipAction::HoverIn(..)]), "{tips:?}");
+        let (tips, _) = sent_with_tips(&mut cx, &mut grid, mouse_move(edge));
+        assert_eq!(tips, vec![TipAction::HoverOut], "onto the edge");
+
+        // The tip up again, then a press on the edge.
+        sent_with_tips(&mut cx, &mut grid, mouse_move(first));
+        let near = edge - dvec2(2.0, 0.0);
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WindowId(1, 1)));
+        let (tips, _) = sent_with_tips(&mut cx, &mut grid, mouse_down(near, MouseButton::PRIMARY, none));
+        assert_eq!(tips, vec![TipAction::HoverOut], "the press left the tip up");
+        assert!(matches!(grid.interact, Interact::ColResize { display_col: 0, .. }));
+        let (tips, _) = sent_with_tips(&mut cx, &mut grid, mouse_move(near + dvec2(40.0, 0.0)));
+        assert!(tips.is_empty(), "{tips:?}");
+        assert_eq!(grid.col_width(0), w + 40.0);
+        grid.hover_tip(&mut cx, Some(heading(&grid, 1)));
+        assert_eq!(grid.tip_head, None, "a tip was raised during the resize");
+        let up = mouse_up(near + dvec2(40.0, 0.0), MouseButton::PRIMARY, none);
+        let (tips, out) = sent_with_tips(&mut cx, &mut grid, up);
+        cx.fingers.first_mouse_button = None;
+        assert!(tips.is_empty(), "{tips:?}");
+        assert!(matches!(out[..], [DataGridAction::ColumnResized { col: 0, .. }]), "{out:?}");
+
+        // A press in the middle of a heading with its tip up.
+        let second = heading(&grid, 1);
+        let (tips, _) = sent_with_tips(&mut cx, &mut grid, mouse_move(second));
+        assert!(matches!(tips[..], [TipAction::HoverIn(..)]), "{tips:?}");
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WindowId(1, 1)));
+        let (tips, _) = sent_with_tips(&mut cx, &mut grid, mouse_down(second, MouseButton::PRIMARY, none));
+        assert_eq!(tips, vec![TipAction::HoverOut]);
+        assert!(matches!(grid.interact, Interact::ColDragPending { display_col: 1, .. }));
+        let (_, out) = sent_with_tips(&mut cx, &mut grid, mouse_up(second, MouseButton::PRIMARY, none));
+        cx.fingers.first_mouse_button = None;
+        assert!(out.iter().any(|a| matches!(a, DataGridAction::HeaderClicked { col: 1, .. })), "{out:?}");
+        let (tips, _) = sent_with_tips(&mut cx, &mut grid, mouse_move(second + dvec2(3.0, 0.0)));
+        assert!(tips.is_empty(), "the pressed heading raised its tip again: {tips:?}");
+        let third = heading(&grid, 2);
+        let (tips, _) = sent_with_tips(&mut cx, &mut grid, mouse_move(third));
+        assert!(matches!(tips[..], [TipAction::HoverIn(..)]), "{tips:?}");
+    }
+
+    /// An edge takes hold six points either side of it, the nearest edge
+    /// winning, and never more than a third of the column on either side,
+    /// so a narrow column keeps a middle.
+    #[test]
+    fn an_edge_takes_hold_six_points_either_side_and_leaves_a_narrow_column_a_middle() {
+        let mut cx = cx();
+        let mut grid = laid_out(&mut cx);
+        grid.min_col_width = 8.0;
+        grid.set_col_widths(&mut cx, &[96.0, 96.0, 12.0]);
+        let y = heading(&grid, 0).y;
+        let edge_of = |grid: &DataGrid, dc: usize| {
+            let (_, x, w) = grid.vp.vis_cols[dc];
+            x + w
+        };
+        let zone = |grid: &DataGrid, x: f64| match grid.hit_zone(dvec2(x, y)) {
+            HitZone::ColHeader { resize_edge, .. } => resize_edge,
+            other => panic!("not a heading: {other:?}"),
+        };
+        let first = edge_of(&grid, 0);
+        assert_eq!(zone(&grid, first - 5.5), Some(0));
+        assert_eq!(zone(&grid, first + 5.5), Some(0));
+        assert_eq!(zone(&grid, first - 6.5), None);
+        assert_eq!(zone(&grid, first + 6.5), None);
+        let second = edge_of(&grid, 1);
+        assert_eq!(zone(&grid, second + 3.5), Some(1));
+        assert_eq!(zone(&grid, second + 6.0), None, "the narrow column's middle");
+        assert_eq!(zone(&grid, second + 12.0 - 3.5), Some(2));
+    }
+
+    /// Off by default, `header_edges` draws nothing; on, a line one point
+    /// wide ends on the right edge of each heading in the strip, over the
+    /// middle half of its height, and the last column has none.
+    #[test]
+    fn heading_edges_fall_on_the_column_edges_and_the_last_column_has_none() {
+        let mut cx = cx();
+        let mut grid = laid_out(&mut cx);
+        assert!(grid.header_edge_rects().is_empty());
+        grid.header_edges = true;
+        let strip = grid.vp.col_header_rect;
+        let rects = grid.header_edge_rects();
+        let edges: Vec<f64> = grid
+            .vp
+            .vis_cols
+            .iter()
+            .map(|&(_, x, w)| x + w)
+            .filter(|&e| e <= strip.pos.x + strip.size.x)
+            .collect();
+        assert!(!edges.is_empty());
+        assert_eq!(rects.iter().map(|r| r.pos.x + r.size.x).collect::<Vec<_>>(), edges);
+        let inset = (strip.size.y * 0.25).round();
+        for rect in &rects {
+            assert_eq!(rect.size.x, 1.0);
+            assert_eq!(rect.pos.y, strip.pos.y + inset);
+            assert_eq!(rect.size.y, strip.size.y - 2.0 * inset);
+        }
+        grid.set_grid_size(20, 2);
+        grid.compute_viewport();
+        assert_eq!(grid.header_edge_rects().len(), 1, "the last column drew an edge");
     }
 }
