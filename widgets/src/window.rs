@@ -1015,6 +1015,7 @@ impl SsaaStack {
 }
 
 impl Window {
+
     fn sync_caption_bar_state(&mut self, cx: &mut Cx) {
         // Hosted inside studio: the studio chrome owns the window, never
         // show our own caption bar (a DSL hot-reload re-runs this sync).
@@ -1642,6 +1643,10 @@ impl WindowRef {
 }
 
 impl Widget for Window {
+    fn visit_cancel(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
+        self.has_focus && self.cancel_children_impl(visit)
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if let Event::Draw(e) = event {
             let mut cx_draw = CxDraw::new(cx, e);

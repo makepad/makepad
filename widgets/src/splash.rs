@@ -352,6 +352,10 @@ impl WidgetNode for Splash {
     fn children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
         self.view.children(visit);
     }
+
+    fn cancel_children_impl(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
+        self.view.visit_cancel(visit)
+    }
 }
 
 impl Drop for Splash {

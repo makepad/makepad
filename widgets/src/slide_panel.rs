@@ -72,6 +72,10 @@ pub enum SlidePanelAction {
 }
 
 impl Widget for SlidePanel {
+    fn visit_cancel(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
+        self.is_active_for_cancel() && self.cancel_children_impl(visit)
+    }
+
     fn script_call(
         &mut self,
         vm: &mut ScriptVm,
@@ -102,7 +106,11 @@ impl Widget for SlidePanel {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        self.frame.handle_event(cx, event, scope);
+        let cancel = matches!(event, Event::BackPressed { .. })
+            || matches!(event, Event::KeyDown(key) | Event::KeyUp(key) if key.key_code == KeyCode::Escape);
+        if !cancel || self.is_active_for_cancel() {
+            self.frame.handle_event(cx, event, scope);
+        }
         self.widget_match_event(cx, event, scope);
 
         if self.animator_handle_event(cx, event).must_redraw() {
@@ -144,6 +152,14 @@ impl WidgetMatchEvent for SlidePanel {
 }
 
 impl SlidePanel {
+    fn is_active_for_cancel(&self) -> bool {
+        self.frame.visible && if self.animator.groups.contains_key(&id!(active)) {
+            self.animator.in_state_id(ids!(active.on))
+        } else {
+            self.active < 1.0
+        }
+    }
+
     pub fn open(&mut self, cx: &mut Cx) {
         self.animator_play(cx, ids!(active.on));
         self.frame.redraw(cx);

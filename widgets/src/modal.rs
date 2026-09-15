@@ -55,6 +55,15 @@ pub enum ModalAction {
     None,
 }
 
+impl ModalAction {
+    /// Sent directly through a closing host's descendants, unlike the
+    /// widget-tagged dismissal action observed by the application.
+    pub(crate) fn is_dismissal(event: &Event) -> bool {
+        matches!(event, Event::Actions(actions) if actions.iter().any(|action|
+            matches!(action.downcast_ref::<Self>(), Some(Self::Dismissed))))
+    }
+}
+
 #[derive(Script, Widget)]
 pub struct Modal {
     #[source]
@@ -122,8 +131,16 @@ impl ScriptHook for Modal {
 }
 
 impl Widget for Modal {
+    fn visit_cancel(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
+        self.is_open && self.cancel_children_impl(visit)
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if !self.is_open {
+            return;
+        }
+        if ModalAction::is_dismissal(event) {
+            self.close(cx);
             return;
         }
 
@@ -137,22 +154,27 @@ impl Widget for Modal {
         let bg_area_hit = event.hits(cx, bg_area);
 
         let owns_cancel = self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s));
-        // Check ownership before consuming Back. A non-dismissible foreground
-        // modal still blocks navigation behind it, without dismissing itself.
+        // This needs to be done here such that a non-dismissable modal (`can_dismiss` = false)
+        // will still block back-navigation handling for widgets that are behind it.
         let back_pressed = owns_cancel && event.back_pressed();
+
         if self.can_dismiss {
             // Close the modal if any of the following conditions occur:
             // * If this modal owns the back navigational action/gesture (e.g., on Android),
             // * If an `Escape` press this modal owns was released. Ownership, not key
             //   focus, is what keeps a widget behind the modal from acting on the press.
+            // * If this modal owns a click of the mouse's back button, the desktop
+            //   equivalent of that gesture.
             // * If there was a click/tap in the background area, outside of the inner `content` view.
             let should_close = back_pressed
                 || match bg_area_hit {
                     Hit::FingerUp(fe) => !content.area().rect(cx).contains(fe.abs),
                     _ => false,
                 }
-                || matches!(event, Event::KeyUp(key) if key.key_code == KeyCode::Escape
-                    && owns_cancel);
+                || (owns_cancel && (
+                    matches!(event, Event::KeyUp(key) if key.key_code == KeyCode::Escape)
+                    || matches!(event, Event::MouseUp(e) if e.button.is_back())
+                ));
             if should_close {
                 // Tagged with the MODAL's uid: `ModalRef::dismissed` looks the
                 // action up by `self.widget_uid()`, so the content view's uid
@@ -204,7 +226,7 @@ impl Modal {
         self.is_open = true;
         // Assigning drops any previous scope, which matters because `open()` has no
         // already-open guard and callers re-open freely.
-        self.cancel_scope = Some(cx.begin_cancel_scope());
+        self.cancel_scope = Some(self.begin_cancel_scope(cx));
         // Redraw the overlay draw_list directly so the first open is visible
         // even before the overlay content has refreshed its draw area.
         if let Some(draw_list) = &self.draw_list {
