@@ -23,7 +23,67 @@ fn obj(json_text: &str) -> Value {
     json::parse(json_text.as_bytes()).expect("test json")
 }
 
+#[test]
+fn editable_model_tools_preserve_heads_ids_and_separate_publication_preconditions() {
+    use makepad_asset_chat::context::ClientProfile;
+    use makepad_asset_chat::sandbox_effect::SandboxEffect;
+    let head = json::obj(vec![("generation", json::s("18446744073709551615")), ("content", json::s("a".repeat(64)))]);
+    let apply = json::obj(vec![("document", json::s("chair")), ("request_id", json::s("one")), ("expected", head.clone()),
+        ("operations", obj(r#"[{"op":"extrude","object":"seat","face":"9007199254740993","offset":[0,0.5,0]}]"#))]);
+    let call = parse("model.apply", apply.clone()).unwrap();
+    assert_eq!(encode_args(&call), apply);
+    assert!(ClientProfile::Game.client_executes(&call));
+    assert!(!ClientProfile::Gen.client_executes(&call));
+    assert_eq!(call.sandbox_effect(), Some(SandboxEffect::ContentMutation));
+    let publish = json::obj(vec![("document", json::s("chair")), ("title", json::s("Chair")), ("alias", json::s("gen/models/chair")),
+        ("expected", head.clone()), ("expected_alias", json::s("absent")), ("request_id", json::s("publish-one"))]);
+    assert_eq!(encode_args(&parse("model.publish", publish.clone()).unwrap()), publish);
+    let mut missing_alias_guard = publish.clone();
+    if let Value::Obj(fields) = &mut missing_alias_guard { fields.retain(|(key, _)| key != "expected_alias"); }
+    assert!(parse("model.publish", missing_alias_guard).is_err());
+    for invalid in [Value::Int(1), json::s("01"), json::s("18446744073709551616")] {
+        let mut changed = apply.clone();
+        if let Value::Obj(fields) = &mut changed {
+            fields.iter_mut().find(|(key, _)| key == "expected").unwrap().1 = json::obj(vec![("generation", invalid), ("content", json::s("a".repeat(64)))]);
+        }
+        assert!(parse("model.apply", changed).is_err());
+    }
+    assert!(parse("model.close", obj(r#"{"document":"chair"}"#)).is_err());
+    let inspect = parse("model.inspect", obj(r#"{"document":"chair","object":"seat","domain":"corners","offset":0,"limit":128}"#)).unwrap();
+    assert_eq!(inspect.sandbox_effect(), Some(SandboxEffect::Read));
+    assert!(parse("model.inspect", obj(r#"{"document":"chair","object":"seat","domain":"weights","limit":128}"#)).is_ok());
+    assert!(parse("model.inspect", obj(r#"{"document":"chair","limit":129}"#)).is_err());
+    assert!(parse("model.inspect", obj(r#"{"document":"chair","domain":"unknown"}"#)).is_err());
+    for domain in ["objects", "materials", "joints", "clips", "clip_keys"] {
+        let args = json::obj(vec![("document", json::s("chair")), ("domain", json::s(domain)), ("limit", Value::Int(128))]);
+        assert!(parse("model.inspect", args).is_ok());
+    }
+    assert!(parse("model.jobs", obj(r#"{"job":"edit_1","cancel":true}"#)).is_err());
+    let cancel = parse("model.cancel", obj(r#"{"job":"edit_1"}"#)).unwrap();
+    assert_eq!(cancel.sandbox_effect(), Some(SandboxEffect::ContentMutation));
+    assert!(parse("model.cancel", obj(r#"{"job":"edit_1","force":true}"#)).is_err());
+}
+
 // ---------------------------------------------------------------- parsing
+
+#[test]
+fn world_api_is_a_bounded_read_only_game_tool_with_native_name_roundtrip() {
+    use makepad_asset_chat::context::ClientProfile;
+    use makepad_asset_chat::sandbox_effect::SandboxEffect;
+    for args in ["{}", r#"{"query":"game.ui","limit":20,"cursor":12}"#] {
+        let call = parse("world.api", obj(args)).unwrap();
+        assert_eq!(parse(call.name(), encode_args(&call)).unwrap(), call);
+        assert_eq!(call.sandbox_effect(), Some(SandboxEffect::Read));
+        assert!(ClientProfile::Game.client_executes(&call));
+        assert!(!ClientProfile::General.client_executes(&call));
+    }
+    assert_eq!(canonical_from_api_name("world_api"), Some("world.api"));
+    for bad in [r#"{"query":12}"#, r#"{"limit":0}"#, r#"{"limit":21}"#,
+        r#"{"cursor":-1}"#, r#"{"cursor":1000001}"#, r#"{"path":"/etc/passwd"}"#] {
+        assert!(parse("world.api", obj(bad)).is_err(), "{bad}");
+    }
+    assert!(parse("world.api", json::obj(vec![("query", json::s("x".repeat(161)))])).is_err());
+}
 
 #[test]
 fn content_generate_roundtrips_and_refuses_unbounded_jobs() {
@@ -372,7 +432,9 @@ fn world_source_tools_roundtrip_and_bound() {
 fn sandbox_definitions_are_consistent_and_disjoint_from_the_base() {
     let base = definitions();
     let extra = sandbox_definitions();
-    assert_eq!(extra.len(), 16);
+    assert_eq!(extra.len(), 31);
+    assert!(extra.iter().any(|d| d.name == "world.get_plan"));
+    assert!(extra.iter().any(|d| d.name == "world.set_plan"));
     for def in &extra {
         assert_eq!(
             canonical_from_api_name(def.api_name),
@@ -403,6 +465,63 @@ fn base_args_docs_still_name_only_base_tools() {
     assert!(!names.contains(&"assets.query"));
     assert!(!names.contains(&"world.place"));
     assert!(!names.contains(&"content.generate"));
+}
+
+
+#[test]
+fn plan_schema_guides_required_routes_and_rejects_unsupported_nested_input() {
+    let args = obj(r#"{"revision":0,"plan":{"v":1,"terrain":{"size":220,"relief":"flat"},"corridors":[{"id":"loop","kind":"rail","closed":true,"size":80}]}}"#);
+    let call = parse("world.set_plan", args).unwrap();
+    let ContentToolCall::WorldSetPlan { plan, .. } = &call else { panic!("plan variant") };
+    assert_eq!(plan.get("corridors").unwrap().as_arr().unwrap()[0].get("required").and_then(Value::as_bool), Some(true));
+    assert_eq!(parse(call.name(), encode_args(&call)).unwrap(), call);
+    let optional = parse("world.set_plan", obj(r#"{"revision":0,"plan":{"corridors":[{"id":"loop","kind":"rail","closed":true,"required":false}]}}"#)).unwrap();
+    let ContentToolCall::WorldSetPlan { plan, .. } = optional else { panic!("plan variant") };
+    assert_eq!(plan.get("corridors").unwrap().as_arr().unwrap()[0].get("required").and_then(Value::as_bool), Some(false));
+    for plan in [
+        r#"{"terrain":{"size":601}}"#, r#"{"terrain":{"amp":"flat"}}"#,
+        r#"{"corridors":[{"id":"x","kind":"rail","required":"yes"}]}"#,
+        r#"{"corridors":[{"id":"x","kind":"tunnel","closed":true}]}"#,
+        r#"{"corridors":[{"id":"x","kind":"road","path":"west"}]}"#,
+        r#"{"corridors":[{"id":"x","kind":"road","path":[[1,2]]}]}"#,
+        r#"{"corridors":[{"id":"x","kind":"road","from":"up","to":"east"}]}"#,
+        r#"{"corridors":[{"id":"x","kind":"road","through":["loop@1.2"]}]}"#,
+        r#"{"corridors":[{"id":"x","kind":"road","widht":9}]}"#,
+        r#"{"corridors":[{"id":"x","kind":"rail"},{"id":"x","kind":"road"}]}"#,
+        r#"{"corridors":[{"id":"bad:id","kind":"road"}]}"#,
+        r#"{"water":[{"id":"brook","kind":"river","depth":0}]}"#,
+        r#"{"dressing":{"forest":1.1}}"#, r#"{"biome":"volcanic"}"#,
+    ] {
+        let args = json::obj(vec![("revision", Value::Int(0)), ("plan", obj(plan))]);
+        assert!(parse("world.set_plan", args).is_err(), "{plan}");
+    }
+}
+
+#[test]
+fn plan_schema_publishes_the_nested_contract() {
+    fn non_null(v: &Value) -> &Value {
+        v.get("anyOf").and_then(Value::as_arr).map_or(v, |v| &v[0])
+    }
+    let defs = sandbox_definitions();
+    let def = defs.iter().find(|d| d.name == "world.set_plan").unwrap();
+    let schema = def.parameters.get("properties").unwrap().get("plan").unwrap();
+    assert_eq!(schema.get("additionalProperties").and_then(Value::as_bool), Some(false));
+    let props = schema.get("properties").unwrap();
+    let corridors = non_null(props.get("corridors").unwrap()).get("items").unwrap();
+    assert_eq!(corridors.get("required").unwrap().as_arr().unwrap(), &[json::s("id")]);
+    let fields = corridors.get("properties").unwrap();
+    let requirement = non_null(fields.get("required").unwrap());
+    assert_eq!(requirement.get("type").and_then(Value::as_str), Some("boolean"));
+    assert_eq!(requirement.get("default").and_then(Value::as_bool), Some(true));
+    let kinds = non_null(fields.get("kind").unwrap()).get("enum").unwrap().as_arr().unwrap();
+    assert_eq!(kinds, &["road", "highway", "rail", "monorail", "path", "coaster"].map(json::s));
+    let radius = non_null(fields.get("radius").unwrap());
+    assert_eq!(radius.get("minimum"), Some(&Value::F64(4.0)));
+    assert_eq!(radius.get("maximum"), Some(&Value::F64(60.0)));
+    for key in ["biomes", "landforms", "water", "corridors", "places"] {
+        let item = non_null(props.get(key).unwrap()).get("items").unwrap();
+        assert_eq!(item.get("additionalProperties").and_then(Value::as_bool), Some(false));
+    }
 }
 
 // ------------------------------------------------- session advertisement
@@ -834,8 +953,8 @@ fn the_system_prompt_lists_exactly_what_the_executor_advertises() {
         Session::new("test", Box::new(OneTurn { turns: turns2.clone() }));
     session2.send("hello", &[], &mut DefaultExec).unwrap();
     let system2 = turns2.borrow()[0].system.clone();
-    assert!(!system2.contains("world.place"), "broker prompt must not grow world tools");
-    assert!(!system2.contains("assets.query"));
+    assert!(!system2.contains("- world.place:"), "broker prompt must not advertise world tools");
+    assert!(!system2.contains("- assets.query:"), "a guidance example is not an advertised tool");
 }
 
 #[test]
@@ -853,14 +972,39 @@ fn world_tools_accept_and_roundtrip_an_explicit_sub_world() {
 }
 
 #[test]
-fn per_turn_world_manifest_is_system_context_not_transcript_text() {
+fn model_review_motion_samples_roundtrip_and_refuse_unbounded_or_unknown_inputs() {
+    let head = format!(r#"{{"generation":"1","content":"{}"}}"#, "0".repeat(64));
+    let args = |motion:&str| obj(&format!(r#"{{"document":"car","request_id":"review","expected":{head},"motion":{motion}}}"#));
+    let motion=r#"[{"kind":"vehicle","steer":0.55,"suspension":0.28},{"kind":"pose","name":"crouch"},{"kind":"clip","name":"walk","time":0.25}]"#;
+    let original=args(motion);
+    let call=parse("model.render",original.clone()).unwrap();
+    assert_eq!(encode_args(&call),original);
+    for motion in [r#"[{"kind":"vehicle","steer":9,"suspension":0}]"#,r#"[{"kind":"clip","name":"walk","time":-1}]"#,r#"[{"kind":"pose","name":"crouch","ignored":true}]"#,r#"[{"kind":"pose","name":"a"},{"kind":"pose","name":"a"},{"kind":"pose","name":"a"},{"kind":"pose","name":"a"},{"kind":"pose","name":"a"}]"#] {
+        assert!(parse("model.render",args(motion)).is_err(),"accepted {motion}");
+    }
+}
+
+#[test]
+fn model_open_preview_scale_is_optional_bounded_and_roundtrips() {
+    let native=obj(r#"{"document":"car"}"#);
+    assert_eq!(encode_args(&parse("model.open",native.clone()).unwrap()),native);
+    let hand=obj(r#"{"document":"car","preview_scale":0.05}"#);
+    assert_eq!(encode_args(&parse("model.open",hand.clone()).unwrap()),hand);
+    for scale in ["0","-1","101","0.0001","\"small\""] {
+        assert!(parse("model.open",obj(&format!(r#"{{"document":"car","preview_scale":{scale}}}"#))).is_err());
+    }
+}
+
+#[test]
+fn per_turn_world_manifest_is_volatile_context_not_transcript_text() {
     let turns = Rc::new(RefCell::new(Vec::new()));
     let mut session = Session::new("test", Box::new(OneTurn { turns: turns.clone() }));
     let context = "WORLD MANIFEST: asset ast_x; worlds: `main`, `dogshop`\nthe player is currently in: `dogshop`";
     session
         .send_with_context("add a chair", &[], context, &mut SandboxExec)
         .unwrap();
-    assert!(turns.borrow()[0].system.contains(context));
+    assert_eq!(turns.borrow()[0].dynamic_context, context);
+    assert!(!turns.borrow()[0].system.contains(context), "the stable KV prefix must not churn each turn");
     assert_eq!(session.history()[0].text, "add a chair");
     assert!(!session.history()[0].text.contains("WORLD MANIFEST"));
 }

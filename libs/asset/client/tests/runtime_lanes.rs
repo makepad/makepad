@@ -11,6 +11,9 @@
 //!   partial file,
 //! - shutdown drains what was accepted and joins every worker.
 
+// Native threaded runtime test: std deadlines cannot enter the wasm library.
+#![allow(clippy::disallowed_types, clippy::disallowed_methods)]
+
 mod common;
 
 use common::*;
@@ -413,8 +416,8 @@ fn two_lanes_fetching_one_blob_download_it_once() {
     assert!(rec.failures.is_empty(), "unexpected failures: {:?}", rec.failures);
     for id in [a, b] {
         match rec.outputs.get(&id) {
-            Some(ClientOutput::Blob { path, .. }) => {
-                assert_eq!(std::fs::read(path).unwrap(), bytes);
+            Some(ClientOutput::Blob { content, .. }) => {
+                assert_eq!(std::fs::read(content.as_path().unwrap()).unwrap(), bytes);
             }
             other => panic!("wrong output for {id}: {other:?}"),
         }

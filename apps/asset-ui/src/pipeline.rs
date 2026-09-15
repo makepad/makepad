@@ -218,16 +218,16 @@ impl Preset {
 /// Python rigger, or another arbitrary model merely because it is resident.
 // This is the warm, local Makepad-Llama model advertised by the Mac fleet
 // node. Keeping it as fallback avoids an accidental large-model cold pull.
-const CHARACTER_LLM_MODEL: &str = "qwen3.5-9b";
+use makepad_asset_creator::character::CHARACTER_LLM_MODEL;
 /// Fleet-wide default for text expansion once a node has the audited weights
 /// ready. This is a preference, not a hard pin: first-run provisioning stays
 /// explicit and the warm 9B lane remains immediately usable.
 const PREFERRED_EXPAND_MODEL: &str = "qwen3.8-27b";
-const CHARACTER_IMAGE_MODEL: &str = "flux1-dev";
-const CHARACTER_MATTE_MODEL: &str = "birefnet-hr";
-const CHARACTER_MESH_MODEL: &str = "trellis-2";
-const CHARACTER_RIG_MODEL: &str = "skintokens";
-const CHARACTER_MOTION_MODEL: &str = "hy-motion";
+use makepad_asset_creator::character::CHARACTER_IMAGE_MODEL;
+use makepad_asset_creator::character::CHARACTER_MATTE_MODEL;
+use makepad_asset_creator::character::CHARACTER_MESH_MODEL;
+use makepad_asset_creator::character::CHARACTER_RIG_MODEL;
+use makepad_asset_creator::character::CHARACTER_MOTION_MODEL;
 /// Instruction image editing (reference image + "change …" prompt).
 const EDIT_MODEL: &str = "flux2-klein-4b";
 /// Sprite enhancement runs on the 32B dev DiT, NOT the 4-step distilled
@@ -257,7 +257,7 @@ const SPLAT_MODEL: &str = "triposplat";
 /// A character expansion substantially shorter than the 40-90 words asked
 /// for by `expand_rig.txt` is not a usable rig-safe brief.  Refuse to quietly
 /// continue with it; the user can see and retry the failed LLM stage.
-const CHARACTER_EXPANSION_MIN_WORDS: usize = 24;
+// The shared character contract owns brief validation.
 
 /// A character reconstruction gets two deterministic second chances when the
 /// rig or animated-skin quality gate rejects it. The matte/image are
@@ -544,7 +544,7 @@ pub const PRESETS: &[Preset] = &[
     // (idle/walk/jump locomotion, see mesh_view play mode).
     Preset::linear(
         "character (playable)",
-        &["text", "image", "matte", "mesh", "rig", "motion"],
+        makepad_asset_creator::character::CHARACTER_DOMAINS,
         // Character geometry is downstream of this one image: Schnell's
         // four-step distillation is useful for previews, but it is the wrong
         // silent affinity fallback for the rig master.  Pin the validated
@@ -1329,21 +1329,7 @@ impl Pipeline {
                     return unusable("was empty");
                 }
                 if self.is_character_pipeline() {
-                    let words = text.split_whitespace().count();
-                    if words < CHARACTER_EXPANSION_MIN_WORDS {
-                        return Err(format!(
-                            "LLM character brief is too short ({words} words, need at least {CHARACTER_EXPANSION_MIN_WORDS}); refusing to start image generation"
-                        ));
-                    }
-                    if !text
-                        .to_lowercase()
-                        .contains(&self.prompt.trim().to_lowercase())
-                    {
-                        return Err(format!(
-                            "LLM character brief dropped identity anchor {:?}; refusing to start image generation",
-                            self.prompt.trim()
-                        ));
-                    }
+                    makepad_asset_creator::character::validate_brief(&self.prompt, text)?;
                 }
                 return Ok(text.to_string());
             }
@@ -1501,16 +1487,7 @@ impl Pipeline {
                 let is_music_target = target == "music";
                 request.target_domain = Some(target);
                 if self.is_character_pipeline() {
-                    request.identity_anchor = Some(self.prompt.trim().to_string());
-                    // Named-character identity and rig-safe presentation are
-                    // constraints, not a variant hunt.  Keep this expansion
-                    // low-temperature and deterministic enough to avoid
-                    // inventing conflicting signature traits.
-                    request.temperature = Some(0.0);
-                    request.style = Some(
-                        "When the intent names an established character, preserve the exact named identity and canonical official design unchanged. Do not redesign, genericize, or guess traits. If a visual trait is uncertain, omit it instead of inventing it; it is better to say 'canonical official design unchanged' and spend the remaining prompt on full-body framing, a relaxed wide A-pose with straight diagonal arms and hands clear above the hips, visible gaps between every limb and the torso, even studio light, a uniform plain background, and a clean separated silhouette. Rigging constraints may change pose and spacing but never delete canonical anatomy or worn pieces."
-                            .to_string(),
-                    );
+                    makepad_asset_creator::character::configure_expansion(&mut request, &self.prompt);
                 }
                 // Music expansion carries a compact structured production
                 // brief AND original section-tagged lyrics. Scale its budget
@@ -3381,7 +3358,7 @@ impl Pipeline {
             } => {
                 let bytes = response
                     .filter(|response| !failed && response.status_code == 200)
-                    .and_then(|response| response.body.clone());
+                    .and_then(|response| response.body.as_deref().map(<[u8]>::to_vec));
                 let Some(bytes) = bytes else {
                     return self.candidate_failed(
                         cx,
@@ -3589,7 +3566,7 @@ impl Pipeline {
             Req::Artifact(stage, artifact) => {
                 let bytes = response
                     .filter(|r| !failed && r.status_code == 200)
-                    .and_then(|r| r.body.clone());
+                    .and_then(|r| r.body.as_deref().map(<[u8]>::to_vec));
                 let Some(bytes) = bytes else {
                     return self.fail_stage_or_skip_expander(
                         cx,
@@ -3950,12 +3927,13 @@ mod tests {
         use makepad_ai_hub::protocol::{HealthJson, ModelInfoJson, MODEL_STATE_LOADED};
         BoxSnapshot {
             base_url: url.to_string(),
-            health: Some(HealthJson { realtime: None,
+            health: Some(HealthJson { realtime: None, activity: None,
                 service: "test".to_string(),
                 version: "1".to_string(),
                 gpu: Some("GPU".to_string()),
                 vram_free_mb: Some(24_000),
                 vram_total_mb: Some(24_000),
+                vram_usable_mb: None,
                 models_loaded: vec!["flux1-schnell".to_string()],
                 jobs_pending: Some(0),
                 node_id: Some(1),
@@ -3964,6 +3942,7 @@ mod tests {
                 capabilities: Some(vec!["image".to_string()]),
                 vram_reserve_mb: Some(0),
                 queue_limit: Some(8),
+                max_job_body_bytes: None,
                 fleet: None,
                 lanes: None,
             }),
@@ -3995,12 +3974,13 @@ mod tests {
         use makepad_ai_hub::protocol::{HealthJson, ModelInfoJson, MODEL_STATE_LOADED};
         BoxSnapshot {
             base_url: url.to_string(),
-            health: Some(HealthJson { realtime: None,
+            health: Some(HealthJson { realtime: None, activity: None,
                 service: "test".to_string(),
                 version: "1".to_string(),
                 gpu: Some("24 GB GPU".to_string()),
                 vram_free_mb: Some(24 * 1024),
                 vram_total_mb: Some(24 * 1024),
+                vram_usable_mb: None,
                 models_loaded: models
                     .iter()
                     .filter(|(_, state)| *state == MODEL_STATE_LOADED)
@@ -4013,6 +3993,7 @@ mod tests {
                 capabilities: Some(vec!["text".to_string()]),
                 vram_reserve_mb: Some(0),
                 queue_limit: Some(8),
+                max_job_body_bytes: None,
                 fleet: None,
                 lanes: None,
             }),
@@ -4957,7 +4938,10 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
         let mut want: Vec<(String, String)> = [
             ("audio", "moss-sfx"),
             ("audio", "sa3-sfx"),
+            ("audio", "salamander-drumkit"),
             ("audio", "woosh-sfx"),
+            ("beats", "beat-this"),
+            ("body", "sam3dbody"),
             ("control", "flux1-canny-dev"),
             ("control", "flux1-depth-dev"),
             ("depth", "da3-metric-large"),
@@ -4975,6 +4959,8 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             ("music", "minimax-music3"),
             ("music", "minimax-music3-q4"),
             ("music", "ace-step-1.5-xl"),
+            ("notes", "basic-pitch"),
+            ("ocr", "chandra-ocr-2"),
             ("paint", "hunyuan3d-paint-2.1"),
             ("rig", "skintokens"),
             ("rig", "skintokens-oracle"),
@@ -4982,6 +4968,8 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
             ("splat", "triposplat"),
             ("speech", "indextts-2.5"),
             ("speech", "kokoro"),
+            ("stems", "bs-roformer-4stem"),
+            ("stt", "whisper-large-v3-turbo"),
             ("text", "qwen3.8-27b"),
             ("upscale", "realesrgan-x4plus"),
             ("vision", "qwen3.8-27b-vision"),
@@ -5042,7 +5030,7 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
     /// fails visibly as a service gap instead of rerouting.
     const DOCUMENTED_OVERRIDE_PINS: &[(&str, &str)] = &[("text", CHARACTER_LLM_MODEL)];
 
-    /// Every pin must reference a model the registry actually has in the
+    /// Every pin must reference a model the registry can serve for the
     /// pinned domain — or be a documented cache-registry override above.
     /// Catches typos and silent registry drift.
     #[test]
@@ -5057,7 +5045,13 @@ Arrangement: Pulsing bass, gated drums and widening analog pads."
                     registry
                         .models
                         .iter()
-                        .any(|entry| entry.id == *model && entry.domain.as_str() == *domain),
+                        .any(|entry| {
+                            entry.id == *model
+                                && (entry.domain.as_str() == *domain
+                                    || (*domain == "edit"
+                                        && entry.domain.as_str() == "image"
+                                        && model.starts_with("flux2-dev")))
+                        }),
                     "preset {:?} pins unknown model {domain}/{model}",
                     preset.name
                 );

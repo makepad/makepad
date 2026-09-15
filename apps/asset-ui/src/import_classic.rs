@@ -30,7 +30,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
-use std::thread;
 
 use crate::import::{KENNEY_MODULE, KAYKIT_MODULE, NASA_SKY_MODULE, PackModule};
 use makepad_asset_importer::tdm_zipsync::{
@@ -306,6 +305,7 @@ pub struct ClassicImportCard {
     /// a classic pack publishes real thumbnails and its staging can be
     /// reclaimed the moment publish succeeds. See [`IconResumeGate`].
     icon_resume: IconResumeGate,
+    pool: Option<TaskPool>,
 }
 
 struct IsoSync {
@@ -358,6 +358,7 @@ impl ClassicImportCard {
             tdm: None,
             iso: None,
             icon_resume: IconResumeGate::default(),
+            pool: None,
         }
     }
 
@@ -658,6 +659,7 @@ impl ClassicImportCard {
         path_override: String,
         server: Option<ServerSession>,
     ) -> Result<(), String> {
+        self.pool = Some(cx.task_pool());
         if self.compiling() {
             return Err(format!(
                 "a {} import is already running",
@@ -1540,9 +1542,10 @@ impl ClassicImportCard {
         // until the UI has taken every landing for icon rendering.
         let (gate, icon_resume_rx) = IconResumeGate::armed();
         self.icon_resume = gate;
-        thread::Builder::new()
-            .name(format!("asset-ui-{}-import", source.id()))
-            .spawn(move || {
+        self.pool
+            .as_ref()
+            .ok_or("runtime task pool is not configured")?
+            .submit(Lane::Heavy, move || {
                 let phase = run_classic_import(
                     &dir,
                     &out,
@@ -1555,7 +1558,8 @@ impl ClassicImportCard {
                 );
                 let _ = tx.send(phase);
             })
-            .map_err(|e| format!("failed to start classic import thread: {e}"))?;
+            .map(|handle| handle.detach())
+            .map_err(|e| format!("failed to submit classic import job: {e}"))?;
         Ok(())
     }
 
@@ -2267,6 +2271,12 @@ fn publish_classic_pack(
             categories: vec![source.id().into(), pack_name.to_string()],
             tags,
             creator: source.credits().to_string(),
+            artist: String::new(),
+            artist_url: String::new(),
+            album: String::new(),
+            source_url: String::new(),
+            license: String::new(),
+            license_url: String::new(),
             generator: "classic_import".into(),
             backend: "asset-ui".into(),
             model: pack_name.to_string(),

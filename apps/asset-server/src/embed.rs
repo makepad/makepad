@@ -74,41 +74,23 @@ pub fn embed_policy(prefix: &str) -> EmbedPolicy {
     }
 }
 
-/// The checkout this binary was built in — every default root hangs off it.
-fn checkout_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
-
-/// Where asset-ui keeps the user's main store.
+/// The shared catalog/CAS root used by every app in this checkout.
 pub fn main_store_root() -> PathBuf {
-    checkout_root().join("local/asset-ui/asset-server")
+    makepad_asset_client::paths::store_root()
 }
 
-/// The ai-content library this checkout generates into — the same default
-/// the standalone asset-server and asset-ui use.
+/// The generated payload library watched by the shared publisher.
 fn library_root() -> PathBuf {
-    checkout_root().join("local/ai_content_library")
+    makepad_asset_client::paths::library_root()
 }
 
-/// The root the app hosts over when it hosts.
-///
-/// `<PREFIX>_ASSET_ROOT` pins it. Otherwise the user's MAIN library —
-/// asset-ui's store root — whenever it holds a catalog: hosting only happens
-/// after the probe found nobody serving, and `AssetServer::start` takes the
-/// same `server.lock` the daemon would, so losing the race resolves to
-/// "attach instead", never to two servers over one WAL. The private seed
-/// root is only for a machine with no main library at all — self-hosting a
-/// fresh empty root next to a full library reads as "the app lost my
-/// content".
-pub fn default_store_root(prefix: &str, seed_dir: &str) -> PathBuf {
-    if let Ok(root) = std::env::var(format!("{prefix}_ASSET_ROOT")) {
-        return PathBuf::from(root);
-    }
-    let main = main_store_root();
-    if main.join("catalog.sqlite3").exists() {
-        return main;
-    }
-    checkout_root().join("local").join(seed_dir)
+/// Explicit app roots remain isolated. Every default uses the shared store,
+/// including the first launch before its catalog exists. The legacy seed
+/// argument remains source-compatible but never creates a second library.
+pub fn default_store_root(prefix: &str, _seed_dir: &str) -> PathBuf {
+    std::env::var(format!("{prefix}_ASSET_ROOT"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| main_store_root())
 }
 
 /// Does something on the other end of `addr` answer `GET /v1/health` like an
@@ -191,7 +173,7 @@ pub fn external_store_reachable(hinted: Option<ApiEndpoints>) -> bool {
     main_store_lock_held()
 }
 
-/// True when another process holds the main (asset-ui) store's server
+/// True when another process holds the shared store's server
 /// lock — i.e. the user's library is hosted right now, whatever its ports.
 fn main_store_lock_held() -> bool {
     let root = main_store_root();
@@ -324,7 +306,7 @@ pub fn resolve(
 ///
 /// This is the standalone asset-server's own [`Host`] — catalog + CAS plus
 /// the ai-content LIBRARY PUBLISHER, so a self-hosted app sees the same
-/// `local/ai_content_library` rows asset-ui and the standalone server
+/// `local/asset-library` rows asset-ui and the standalone server
 /// publish, not a bare seed store. Two deployment defaults are overridden,
 /// deliberately, and both stay: LOOPBACK ONLY, and NO discovery beacon.
 fn host_at(root: &Path, prefix: &str) -> Result<LocalStore, String> {

@@ -34,7 +34,7 @@ pub const DEATHMATCH: &str = "deathmatch";
 /// consumer of these anchors reads — the map walker, `player_nav`, and the
 /// importer's own `world_preview`. It is NOT the sim's entity heading, whose
 /// forward is `(−sin yaw, 0, −cos yaw)`; the two agree only at yaw 0, and
-/// `makepad_game_sim::heading_to_camera_yaw` negates between them.
+/// `makepad_scene::heading_to_camera_yaw` negates between them.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NavStart {
     pub name: String,
@@ -117,8 +117,8 @@ pub struct WorldNav {
     pub eye_height: Option<f32>,
     /// Doors the exporter turned into animated `door_N` nodes.
     pub doors: Vec<NavDoor>,
-    /// Lifts, same shape as doors: `closed_y` is the UP floor it rests at,
-    /// `open_y` the DOWN floor it travels to (so travel is negative).
+    /// Lifts, same shape as doors: `closed_y` is the authored starting
+    /// floor and `open_y` the activated destination (travel may rise or fall).
     pub lifts: Vec<NavDoor>,
     /// Teleport pads and where they land.
     pub teleports: Vec<NavTeleport>,

@@ -349,7 +349,7 @@ impl CatalogReader {
 
 /// Advisory notes the model gets with the generated schema. They describe
 /// the well-known catalog tables; the generated part above is the truth.
-const SCHEMA_NOTES: &str = "\nNotes:\n\
+pub const SCHEMA_NOTES: &str = "\nNotes:\n\
 - search_annotations is the main listing: one row per asset with \
 canon_alias (the readable id you place with), kind, title, description, \
 prompt, live (1 = current). Always filter live=1.\n\

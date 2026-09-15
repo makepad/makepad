@@ -140,7 +140,10 @@ pub fn dispatch(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult<
         // The literal batch route MUST precede the alias catch-all below, or
         // `status` is parsed as a (perfectly legal) one-segment alias — the
         // same ordering hazard `blob_batch` guards on the data plane.
-        ["v1", "publish", "batch"] if m == Method::Post => publish_batch(conn, head, rc),
+        ["v1", "publish", "batch"] if m == Method::Post => publish_batch(conn, head, rc, false),
+        ["v1", "publish", "batch", "guarded"] if m == Method::Post => {
+            publish_batch(conn, head, rc, true)
+        }
 
         ["v1", "aliases", "status"] if m == Method::Post => alias_status_batch(conn, head, rc),
         ["v1", "aliases", rest @ ..] if !rest.is_empty() => {
@@ -317,8 +320,8 @@ fn model_preview(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult
                 .ok_or(Fail::Http(400, "malformed model preview alias"))?;
             let alias = AssetAlias::new(text.to_string())
                 .map_err(|_| Fail::Http(400, "malformed model preview alias"))?;
-            if !alias.as_str().starts_with("gen/csg/") {
-                return Err(Fail::Http(400, "model preview alias must be gen/csg/*"));
+            if !alias.as_str().starts_with("gen/csg/") && !alias.as_str().starts_with("gen/drafts/") {
+                return Err(Fail::Http(400, "model preview alias must be gen/csg/* or gen/drafts/*"));
             }
             Some(alias)
         }
@@ -349,7 +352,7 @@ fn model_preview(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult
                     .as_str()
                     .ok_or(Fail::Http(400, "malformed model preview part name"))?;
                 if name.is_empty()
-                    || name.len() > 24
+                    || name.len() > 32
                     || !name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
                 {
                     return Err(Fail::Http(400, "malformed model preview part name"));
@@ -374,7 +377,7 @@ fn model_preview(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult
                 let to = body_str(row, "to")?.to_string();
                 for name in [&from, &to] {
                     if name.is_empty()
-                        || name.len() > 24
+                        || name.len() > 32
                         || !name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
                     {
                         return Err(Fail::Http(400, "malformed model preview rename"));
@@ -1333,6 +1336,32 @@ fn alias_get(head: &Head, rc: &RouteCtx, alias: AssetAlias) -> RouteResult<Outco
 /// in mind: each item is a hex manifest (a few KB) plus its annotation.
 const MAX_PUBLISH_BATCH_ITEMS: usize = 64;
 
+fn parse_publish_head(value: &Value) -> RouteResult<crate::PublishExpectedHead> {
+    use crate::PublishExpectedHead;
+    let Value::Obj(fields) = value else {
+        return Err(Fail::Http(400, "malformed expected_head"));
+    };
+    let state = body_str(value, "state")?;
+    let expected = match state {
+        "any" => PublishExpectedHead::Any,
+        "absent" => PublishExpectedHead::Absent,
+        "exact" => PublishExpectedHead::Exact(AssetRevisionRef {
+            asset_id: ast_of(body_str(value, "asset_id")?)?,
+            revision: arev_of(body_str(value, "revision")?)?,
+        }),
+        _ => return Err(Fail::Http(400, "unsupported expected_head state")),
+    };
+    let allowed: &[&str] = if state == "exact" {
+        &["state", "asset_id", "revision"]
+    } else {
+        &["state"]
+    };
+    if fields.iter().any(|(key, _)| !allowed.contains(&key.as_str())) {
+        return Err(Fail::Http(400, "unsupported expected_head field"));
+    }
+    Ok(expected)
+}
+
 /// BATCH PUBLISH — N complete assets in ONE request, ONE state-thread visit,
 /// ONE catalog transaction (one WAL fsync for the lot).
 ///
@@ -1346,13 +1375,16 @@ const MAX_PUBLISH_BATCH_ITEMS: usize = 64;
 /// All-or-nothing: either every item is published (with annotation and alias
 /// landed atomically alongside) or nothing is. Replaying a landed page is
 /// idempotent — already-published revisions refresh their annotation/alias
-/// and report `already_published`.
+/// and report `already_published`. Guarded current-target retries instead
+/// preserve the committed annotation and emit no duplicate catalog events.
+/// The guarded route requires `expected_head: {state: any|absent|exact}`;
+/// exact adds both `asset_id` and `revision`. No guard is silently ignored.
 ///
 /// Why it exists: publishing one bundle costs ~10 round trips, each with its
 /// own state-thread visit and commit. Bulk publication (seeding a bundled
 /// preset library into a virgin store) paid that ceremony hundreds of times;
 /// this route pays it once per page.
-fn publish_batch(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult<Outcome> {
+fn publish_batch(conn: &mut Conn, head: &mut Head, rc: &RouteCtx, guarded: bool) -> RouteResult<Outcome> {
     let secret = secret_of(head)?;
     let body = json_body!(conn, head, rc);
     let items = body
@@ -1370,12 +1402,19 @@ fn publish_batch(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult
         namespace: String,
         manifest_bytes: Vec<u8>,
         alias: Option<AssetAlias>,
+        expected_head: crate::PublishExpectedHead,
         title: String,
         description: String,
         kind: Option<AssetKind>,
         categories: Vec<String>,
         tags: Vec<String>,
         creator: String,
+        artist: String,
+        artist_url: String,
+        album: String,
+        source_url: String,
+        license: String,
+        license_url: String,
         generator: String,
         backend: String,
         model: String,
@@ -1386,6 +1425,17 @@ fn publish_batch(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult
     let max_manifest = rc.cfg.budgets.max_manifest_bytes as usize;
     let mut parsed: Vec<Parsed> = Vec::with_capacity(items.len());
     for item in items {
+        let expected_head = if guarded {
+            parse_publish_head(item.get("expected_head")
+                .ok_or(Fail::Http(400, "missing expected_head"))?)?
+        } else {
+            // New servers also reject guards on the old endpoint, so hand-built
+            // clients cannot accidentally invoke unconditional publication.
+            if item.get("expected_head").is_some() {
+                return Err(Fail::Http(400, "expected_head requires guarded publication route"));
+            }
+            crate::PublishExpectedHead::Any
+        };
         let namespace = item
             .get("namespace")
             .and_then(Value::as_str)
@@ -1396,6 +1446,9 @@ fn publish_batch(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult
             .and_then(Value::as_str)
             .and_then(|t| from_hex_bounded(t, max_manifest))
             .ok_or(Fail::Http(400, "malformed manifest hex"))?;
+        if guarded && item.get("alias").is_some_and(|a| a.as_str().is_none()) {
+            return Err(Fail::Http(400, "malformed alias"));
+        }
         let alias = match item.get("alias").and_then(Value::as_str) {
             None => None,
             Some(t) => Some(
@@ -1420,12 +1473,19 @@ fn publish_batch(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult
             namespace,
             manifest_bytes,
             alias,
+            expected_head,
             title: body_str(ann, "title")?.to_string(),
             description: opt_str(ann, "description")?,
             kind,
             categories: body_labels(ann, "categories")?,
             tags: body_labels(ann, "tags")?,
             creator: opt_str(ann, "creator")?,
+            artist: opt_str(ann, "artist")?,
+            artist_url: opt_str(ann, "artist_url")?,
+            album: opt_str(ann, "album")?,
+            source_url: opt_str(ann, "source_url")?,
+            license: opt_str(ann, "license")?,
+            license_url: opt_str(ann, "license_url")?,
             generator: opt_str(ann, "generator")?,
             backend: opt_str(ann, "backend")?,
             model: opt_str(ann, "model")?,
@@ -1477,6 +1537,12 @@ fn publish_batch(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult
                     categories: item.categories.clone(),
                     tags: item.tags.clone(),
                     creator: item.creator.clone(),
+                    artist: item.artist.clone(),
+                    artist_url: item.artist_url.clone(),
+                    album: item.album.clone(),
+                    source_url: item.source_url.clone(),
+                    license: item.license.clone(),
+                    license_url: item.license_url.clone(),
                     owner: Some(p),
                     generator: item.generator.clone(),
                     backend: item.backend.clone(),
@@ -1488,10 +1554,17 @@ fn publish_batch(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult
                 alias: item.alias.clone(),
             });
         }
-        let outcomes = ctx.core.publish_batch(&batch, now)?;
+        let outcomes = if guarded {
+            let guards: Vec<_> = parsed.iter().map(|item| item.expected_head).collect();
+            ctx.core.publish_batch_guarded(&batch, &guards, now)?
+        } else {
+            ctx.core.publish_batch(&batch, now)?
+        };
         // Transport mirror for the browse listing, one transaction.
         ctx.tdb.tx(|_| {
             for (item, outcome) in parsed.iter().zip(&outcomes) {
+                // INSERT OR IGNORE is a no-op for a landed retry, and repairs
+                // the mirror if an earlier request lost it after core commit.
                 ctx.asset_index_insert(outcome.asset_id.as_bytes(), &item.namespace, now)?;
             }
             Ok(())
@@ -1499,6 +1572,9 @@ fn publish_batch(conn: &mut Conn, head: &mut Head, rc: &RouteCtx) -> RouteResult
         // Events after commit, in commit order, mirroring the split flow:
         // annotation_set, asset_published, alias_set per item.
         for (item, outcome) in parsed.iter().zip(&outcomes) {
+            if outcome.unchanged {
+                continue;
+            }
             let content_kind = item.kind.map(kind_name);
             hub.publish(
                 EventBody::asset(
@@ -2317,13 +2393,9 @@ fn events_route(head: &Head, rc: &RouteCtx) -> RouteResult<Outcome> {
     };
 
     let Some(cursor_text) = head.query_get("cursor") else {
-        let tail = rc.events.tail_cursor();
-        let previews = if vocabulary >= 4 {
-            rc.events.active_model_previews(kind, limit)
-        } else {
-            Vec::new()
-        };
-        return Ok(Outcome::Resp(events_resp(&previews, &tail, false, vocabulary)));
+        let snapshot = rc.events.model_preview_snapshot(kind);
+        let previews = if vocabulary >= 4 { snapshot.events } else { Vec::new() };
+        return Ok(Outcome::Resp(events_resp(&previews, &snapshot.cursor, false, vocabulary)));
     };
     let mut cursor =
         EventCursor::parse(cursor_text).ok_or(Fail::Http(400, "malformed cursor"))?;
@@ -2369,6 +2441,7 @@ struct SearchParams {
     model: Option<String>,
     owner_me: bool,
     live_only: bool,
+    newest: bool,
     /// Literal words only: no synonym or plural expansion (`exact=1`).
     exact: bool,
     page_size: u32,
@@ -2430,6 +2503,7 @@ fn search_params_from_query(head: &Head, rc: &RouteCtx) -> RouteResult<SearchPar
             Some(_) => return Err(Fail::Http(400, "owner filter must be me")),
         },
         live_only: head.query_get("live").map(parse_flag).transpose()?.unwrap_or(false),
+        newest: head.query_get("newest").map(parse_flag).transpose()?.unwrap_or(false),
         exact: head.query_get("exact").map(parse_flag).transpose()?.unwrap_or(false),
         page_size,
         cursor: head.query_get("cursor").map(parse_cursor).transpose()?,
@@ -2483,6 +2557,10 @@ fn search_params_from_body(body: &Value, rc: &RouteCtx) -> RouteResult<SearchPar
             None => false,
             Some(v) => v.as_bool().ok_or(Fail::Http(400, "malformed flag"))?,
         },
+        newest: match body.get("newest") {
+            None => false,
+            Some(v) => v.as_bool().ok_or(Fail::Http(400, "malformed flag"))?,
+        },
         exact: match body.get("exact") {
             None => false,
             Some(v) => v.as_bool().ok_or(Fail::Http(400, "malformed flag"))?,
@@ -2523,6 +2601,7 @@ fn run_search(head: &Head, rc: &RouteCtx, params: SearchParams) -> RouteResult<O
             expand: !params.exact,
             page_size: params.page_size,
             facets: params.facets,
+            newest: params.newest,
         };
         // Read policy: every authenticated principal browses the whole
         // catalog; private annotation fields are still owner-only via the
@@ -2542,6 +2621,13 @@ fn run_search(head: &Head, rc: &RouteCtx, params: SearchParams) -> RouteResult<O
                     None => Value::Null,
                 }),
                 ("title", s(h.title.clone())),
+                ("creator", s(h.creator.clone())),
+                ("artist", s(h.artist.clone())),
+                ("artist_url", s(h.artist_url.clone())),
+                ("album", s(h.album.clone())),
+                ("source_url", s(h.source_url.clone())),
+                ("license", s(h.license.clone())),
+                ("license_url", s(h.license_url.clone())),
                 ("snippet", s(h.snippet.clone())),
                 ("score", Value::Int(h.score as i64)),
                 ("live", Value::Bool(h.live)),
@@ -2626,6 +2712,12 @@ fn annotation_put(conn: &mut Conn, head: &mut Head, rc: &RouteCtx, ast: AssetId)
     let categories = body_labels(&body, "categories")?;
     let tags = body_labels(&body, "tags")?;
     let creator = opt_str(&body, "creator")?;
+    let artist = opt_str(&body, "artist")?;
+    let artist_url = opt_str(&body, "artist_url")?;
+    let album = opt_str(&body, "album")?;
+    let source_url = opt_str(&body, "source_url")?;
+    let license = opt_str(&body, "license")?;
+    let license_url = opt_str(&body, "license_url")?;
     let generator = opt_str(&body, "generator")?;
     let backend = opt_str(&body, "backend")?;
     let model = opt_str(&body, "model")?;
@@ -2666,6 +2758,12 @@ fn annotation_put(conn: &mut Conn, head: &mut Head, rc: &RouteCtx, ast: AssetId)
             categories,
             tags,
             creator,
+            artist,
+            artist_url,
+            album,
+            source_url,
+            license,
+            license_url,
             owner: Some(p),
             generator,
             backend,
@@ -2723,6 +2821,12 @@ fn annotation_get(head: &Head, rc: &RouteCtx, ast: AssetId) -> RouteResult<Outco
         ("categories", labels(&ann.categories)),
         ("tags", labels(&ann.tags)),
         ("creator", s(ann.creator)),
+        ("artist", s(ann.artist)),
+        ("artist_url", s(ann.artist_url)),
+        ("album", s(ann.album)),
+        ("source_url", s(ann.source_url)),
+        ("license", s(ann.license)),
+        ("license_url", s(ann.license_url)),
         ("generator", s(ann.generator)),
         ("backend", s(ann.backend)),
         ("model", s(ann.model)),

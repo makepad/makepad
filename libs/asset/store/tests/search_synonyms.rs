@@ -23,6 +23,12 @@ fn ann(title: &str, description: &str) -> AssetAnnotation {
         categories: Vec::new(),
         tags: Vec::new(),
         creator: String::new(),
+        artist: String::new(),
+        artist_url: String::new(),
+        album: String::new(),
+        source_url: String::new(),
+        license: String::new(),
+        license_url: String::new(),
         owner: None,
         generator: String::new(),
         backend: String::new(),
@@ -40,6 +46,7 @@ fn q(text: &str) -> SearchQuery<'_> {
         filters: SearchFilters::default(),
         expand: true,
         page_size: 10,
+        newest: false,
         facets: 0,
     }
 }

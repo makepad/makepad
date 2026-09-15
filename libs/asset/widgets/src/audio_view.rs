@@ -243,7 +243,7 @@ impl AudioView {
     pub fn set_clip(&mut self, cx: &mut Cx, bytes: Vec<u8>, format: ClipFormat) {
         self.fft = None;
         self.wave = None;
-        self.decoder.start(bytes, format);
+        self.decoder.start(cx, bytes, format);
         self.show_face(cx);
         cx.new_next_frame();
     }

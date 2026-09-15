@@ -11,11 +11,15 @@
 //!   exactly what was refused.
 
 use makepad_asset_data::AssetDataError;
+use crate::location::ClientMode;
 
 pub type ClientResult<T> = Result<T, ClientError>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClientError {
+    /// The selected client mode deliberately does not provide this
+    /// capability. This is a local refusal and performs no I/O.
+    Unavailable { capability: &'static str, mode: ClientMode },
     /// Socket / filesystem failure.
     Io { op: &'static str, kind: std::io::ErrorKind },
     /// A wall-clock deadline expired before the operation finished.
@@ -101,6 +105,9 @@ impl std::fmt::Display for ClientError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         use ClientError::*;
         match self {
+            Unavailable { capability, mode } => {
+                write!(f, "capability unavailable in {mode:?} mode: {capability}")
+            }
             Io { op, kind } => write!(f, "io failure during {op}: {kind:?}"),
             Timeout { op } => write!(f, "timeout during {op}"),
             Protocol { what } => write!(f, "protocol violation: {what}"),

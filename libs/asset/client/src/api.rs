@@ -18,6 +18,7 @@ use crate::error::{ClientError, ClientResult};
 use crate::http::{self, HttpLimits, Request, Response};
 use crate::json::{self, Value};
 use crate::wire;
+pub use crate::location::ApiEndpoints;
 use makepad_asset_data::{
     AssetAlias, AssetId, AssetKind, AssetRevisionId, AssetRevisionRef, BlobId, ClientProfile,
     DerivedVariantId, DeviceTier, FileRole, GameAlias, GameId, GameRevisionId, ImportManifest,
@@ -35,12 +36,6 @@ const MAX_REFUSAL_BODY_BYTES: u64 = 16 * 1024;
 pub const MAX_SEARCH_LIMIT: u32 = 100;
 /// Listing page cap.
 pub const MAX_LIST_LIMIT: u64 = 500;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ApiEndpoints {
-    pub control: SocketAddr,
-    pub data: SocketAddr,
-}
 
 /// One item of an ordered batch pull. `max_bytes` is the caller's own cap —
 /// a thumbnail batch says "nothing over 512 KB here", and the server refuses
@@ -133,6 +128,9 @@ pub struct CatalogQuery {
     pub creator: Option<String>,
     /// Only assets currently referenced by an alias head.
     pub live_only: bool,
+    /// Browse mode ordering: newest indexed assets first. Text searches keep
+    /// their score ordering regardless of this flag.
+    pub newest: bool,
     /// 1..=[`MAX_SEARCH_LIMIT`].
     pub page_size: u32,
     /// Ask the server to count the labels of this result set and return the
@@ -151,7 +149,7 @@ impl CatalogQuery {
         Self { text: text.into(), page_size, ..Self::default() }
     }
 
-    fn validate(&self) -> ClientResult<()> {
+    pub(crate) fn validate(&self) -> ClientResult<()> {
         if self.page_size == 0 || self.page_size > MAX_SEARCH_LIMIT {
             return Err(ClientError::InvalidInput { what: "search page_size" });
         }
@@ -198,6 +196,9 @@ impl CatalogQuery {
         }
         if self.live_only {
             pairs.push(("live", Value::Bool(true)));
+        }
+        if self.newest {
+            pairs.push(("newest", Value::Bool(true)));
         }
         pairs.push(("limit", Value::Int(self.page_size as i64)));
         if self.facets > 0 {
@@ -267,6 +268,12 @@ pub struct AnnotationUpload {
     pub categories: Vec<String>,
     pub tags: Vec<String>,
     pub creator: String,
+    pub artist: String,
+    pub artist_url: String,
+    pub album: String,
+    pub source_url: String,
+    pub license: String,
+    pub license_url: String,
     pub generator: String,
     pub backend: String,
     pub model: String,
@@ -292,7 +299,18 @@ impl AnnotationUpload {
         if self.title.is_empty() || self.title.len() > wire::MAX_TITLE_BYTES {
             return Err(ClientError::InvalidInput { what: "annotation title" });
         }
-        for text in [&self.title, &self.description, &self.prompt, &self.provenance] {
+        for text in [
+            &self.title,
+            &self.description,
+            &self.artist,
+            &self.artist_url,
+            &self.album,
+            &self.source_url,
+            &self.license,
+            &self.license_url,
+            &self.prompt,
+            &self.provenance,
+        ] {
             if text.chars().any(char::is_control) {
                 return Err(ClientError::InvalidInput { what: "annotation control chars" });
             }
@@ -1305,15 +1323,16 @@ impl Api {
         self.upload_blob_with_digest(ns, bytes, local)
     }
 
-    /// Announce one in-memory LocalGen preview session. Mesh parts follow on
-    /// the data plane; none of these calls create a durable blob/revision.
+    /// Announce an empty in-memory preview immediately (`gen/csg/*` or
+    /// `gen/drafts/*`). Mesh parts follow on the data plane; no call here
+    /// creates a durable blob/revision. The server activity lease is 120s.
     pub fn open_model_preview(
         &self,
         alias: &AssetAlias,
         session: &str,
         program: &str,
     ) -> ClientResult<()> {
-        if !alias.as_str().starts_with("gen/csg/") {
+        if !alias.as_str().starts_with("gen/csg/") && !alias.as_str().starts_with("gen/drafts/") {
             return Err(ClientError::InvalidInput { what: "model preview alias" });
         }
         validate_preview_session(session)?;
@@ -1335,6 +1354,8 @@ impl Api {
         Ok(())
     }
 
+    /// A delta with no program, removals or renames is an event-free lease
+    /// heartbeat. Active producers should send one every 30s.
     pub fn update_model_preview(
         &self,
         session: &str,
@@ -1451,7 +1472,7 @@ impl Api {
             self.pool(),
         )?;
         let response = self.accept(response, &[200])?;
-        const MAX_PREVIEW_MESH_BYTES: u64 = 16 * 1024 * 1024;
+        const MAX_PREVIEW_MESH_BYTES: u64 = 256 * 1024 * 1024;
         if response.head().content_length > MAX_PREVIEW_MESH_BYTES {
             return Err(ClientError::OverBudget {
                 what: "model preview mesh",
@@ -1614,13 +1635,34 @@ impl Api {
         &self,
         items: &[PublishBatchWireItem],
     ) -> ClientResult<Vec<(AssetId, AssetRevisionId, bool)>> {
+        self.publish_batch_inner(items, None)
+    }
+
+    /// Atomic alias-scoped publication. Every item has an explicit guard;
+    /// no fallback to the unguarded route is permitted on older servers.
+    pub fn publish_batch_guarded(
+        &self,
+        items: &[PublishBatchWireItem],
+        guards: &[crate::PublishExpectedHead],
+    ) -> ClientResult<Vec<(AssetId, AssetRevisionId, bool)>> {
+        if guards.len() != items.len() {
+            return Err(ClientError::InvalidInput { what: "publish guard count" });
+        }
+        self.publish_batch_inner(items, Some(guards))
+    }
+
+    fn publish_batch_inner(
+        &self,
+        items: &[PublishBatchWireItem],
+        guards: Option<&[crate::PublishExpectedHead]>,
+    ) -> ClientResult<Vec<(AssetId, AssetRevisionId, bool)>> {
         if items.is_empty() || items.len() > wire::MAX_PUBLISH_BATCH_ITEMS {
             return Err(ClientError::InvalidInput { what: "publish batch size" });
         }
         let labels =
             |v: &[String]| Value::Arr(v.iter().map(|s| json::s(s.clone())).collect());
         let mut rows: Vec<Value> = Vec::with_capacity(items.len());
-        for item in items {
+        for (index, item) in items.iter().enumerate() {
             item.annotation.validate()?;
             let ann = &item.annotation;
             let mut ann_pairs: Vec<(&str, Value)> = vec![
@@ -1629,6 +1671,12 @@ impl Api {
                 ("categories", labels(&ann.categories)),
                 ("tags", labels(&ann.tags)),
                 ("creator", json::s(ann.creator.clone())),
+                ("artist", json::s(ann.artist.clone())),
+                ("artist_url", json::s(ann.artist_url.clone())),
+                ("album", json::s(ann.album.clone())),
+                ("source_url", json::s(ann.source_url.clone())),
+                ("license", json::s(ann.license.clone())),
+                ("license_url", json::s(ann.license_url.clone())),
                 ("generator", json::s(ann.generator.clone())),
                 ("backend", json::s(ann.backend.clone())),
                 ("model", json::s(ann.model.clone())),
@@ -1650,12 +1698,29 @@ impl Api {
             if let Some(alias) = &item.alias {
                 pairs.push(("alias", json::s(alias.as_str().to_string())));
             }
+            if let Some(guards) = guards {
+                use crate::PublishExpectedHead;
+                let guard = match guards[index] {
+                    PublishExpectedHead::Any => json::obj(vec![("state", json::s("any"))]),
+                    PublishExpectedHead::Absent => json::obj(vec![("state", json::s("absent"))]),
+                    PublishExpectedHead::Exact(target) => json::obj(vec![
+                        ("state", json::s("exact")),
+                        ("asset_id", json::s(target.asset_id.to_string())),
+                        ("revision", json::s(target.revision.to_string())),
+                    ]),
+                };
+                pairs.push(("expected_head", guard));
+            }
             rows.push(json::obj(pairs));
         }
         let body = json::obj(vec![("items", Value::Arr(rows))])
             .to_json()
             .into_bytes();
-        let path = wire::path_publish_batch();
+        let path = if guards.is_some() {
+            wire::path_publish_batch_guarded()
+        } else {
+            wire::path_publish_batch()
+        };
         let mut req = Request::post(&path, &body);
         req.bearer = self.bearer();
         let v = self.call_json_accept(self.endpoints.control, req, &[200])?;
@@ -2138,6 +2203,12 @@ impl Api {
             ("categories", labels(&ann.categories)),
             ("tags", labels(&ann.tags)),
             ("creator", json::s(ann.creator.clone())),
+            ("artist", json::s(ann.artist.clone())),
+            ("artist_url", json::s(ann.artist_url.clone())),
+            ("album", json::s(ann.album.clone())),
+            ("source_url", json::s(ann.source_url.clone())),
+            ("license", json::s(ann.license.clone())),
+            ("license_url", json::s(ann.license_url.clone())),
             ("generator", json::s(ann.generator.clone())),
             ("backend", json::s(ann.backend.clone())),
             ("model", json::s(ann.model.clone())),
@@ -2713,7 +2784,7 @@ fn validate_preview_session(value: &str) -> ClientResult<()> {
 
 fn validate_preview_part(value: &str) -> ClientResult<()> {
     let valid = !value.is_empty()
-        && value.len() <= 24
+        && value.len() <= 32
         && value
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
@@ -2979,7 +3050,7 @@ mod tests {
             data: "127.0.0.1:2".parse().unwrap(),
         };
         let api = Api::new(endpoints, HttpLimits::default_v1(), None).unwrap();
-        let start = std::time::Instant::now();
+        let start = makepad_platform::Cx::monotonic_now();
         match api.source_collections_page(None, 501) {
             Err(ClientError::InvalidInput { what }) => assert_eq!(what, "source page limit"),
             other => panic!("501 must refuse locally, got {other:?}"),
@@ -2993,7 +3064,7 @@ mod tests {
             other => panic!("bad cursor must refuse locally, got {other:?}"),
         }
         assert!(
-            start.elapsed() < std::time::Duration::from_millis(50),
+            makepad_platform::Cx::monotonic_now() - start < 0.05,
             "must not touch the network"
         );
     }
@@ -3025,7 +3096,7 @@ mod tests {
             data: "127.0.0.1:2".parse().unwrap(),
         };
         let api = Api::new(endpoints, HttpLimits::default_v1(), None).unwrap();
-        let start = std::time::Instant::now();
+        let start = makepad_platform::Cx::monotonic_now();
         match api.resolve_variant_set(&VariantSetId::from_bytes([1; 32]), &too_big) {
             Err(ClientError::InvalidInput { what }) => {
                 assert_eq!(what, "profile max_variant_bytes")
@@ -3033,7 +3104,7 @@ mod tests {
             other => panic!("must refuse locally, got {other:?}"),
         }
         assert!(
-            start.elapsed() < std::time::Duration::from_millis(50),
+            makepad_platform::Cx::monotonic_now() - start < 0.05,
             "must not touch the network"
         );
     }

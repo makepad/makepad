@@ -19,6 +19,7 @@ makepad-render = { path = "../../libs/render" }
 makepad-gltf = { path = "../../libs/gltf" }
 # Splat viewer: ViewSplat + XrSceneView desktop host.
 makepad-xr = { path = "../../xr" }
+makepad-media-view = { path = "../../libs/media_view" }
 # REAL Asset Server frontend: shared session lifecycle (discovery/auth/
 # retry), catalog runtimes, committed-event subscriber, verified cache. The
 # VJ worker owns these crates; this app consumes the public API only.

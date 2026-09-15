@@ -18,13 +18,13 @@ use makepad_asset_client::{
     AnnotationUpload, ApiEndpoints, AssetClient, ClientConfig,
 };
 use makepad_asset_data::{sha256, AssetKind, BlobId};
+use makepad_widgets::makepad_platform::thread::{Lane, TaskPool};
 use makepad_widgets::{log, vec3f};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
-use std::thread;
 
 /// Import-card preview strip size.
 /// How many imported items the LOAD grid remembers a picture for. A grid,
@@ -835,6 +835,7 @@ pub struct ImportPage {
     /// status prefix — without it the bar restarted per pack, which over a
     /// 38-pack run read as noise.
     all_run: Option<(usize, usize)>,
+    pool: Option<TaskPool>,
 }
 
 impl Default for ImportPage {
@@ -854,11 +855,16 @@ impl Default for ImportPage {
             rx: None,
             icon_resume: IconResumeGate::default(),
             all_run: None,
+            pool: None,
         }
     }
 }
 
 impl ImportPage {
+    pub fn set_task_pool(&mut self, pool: TaskPool) {
+        self.pool = Some(pool);
+    }
+
     /// Selected full Kenney kit (name, official page).
     pub fn selected_pack_id(&self) -> (String, String) {
         let packs = on_disk_kenney_packs();
@@ -1532,9 +1538,10 @@ impl ImportPage {
         self.icon_resume = icon_resume;
         self.kenney_phase = ImportPhase::compiling(pack_name.clone());
         let cancel = self.cancel.clone();
-        thread::Builder::new()
-            .name("asset-ui-kenney-import".into())
-            .spawn(move || {
+        self.pool
+            .as_ref()
+            .ok_or("runtime task pool is not configured")?
+            .submit(Lane::Heavy, move || {
                 let phase = run_kenney_import(
                     &dir,
                     &out,
@@ -1548,7 +1555,8 @@ impl ImportPage {
                 );
                 let _ = tx.send(phase);
             })
-            .map_err(|e| format!("failed to start compile thread: {e}"))?;
+            .map(|handle| handle.detach())
+            .map_err(|e| format!("failed to submit compile job: {e}"))?;
         Ok(())
     }
 
@@ -1580,13 +1588,15 @@ impl ImportPage {
         self.icon_resume = icon_resume;
         self.kenney_phase = ImportPhase::compiling("kaykit");
         let cancel = self.cancel.clone();
-        thread::Builder::new()
-            .name("asset-ui-kaykit-import".into())
-            .spawn(move || {
+        self.pool
+            .as_ref()
+            .ok_or("runtime task pool is not configured")?
+            .submit(Lane::Heavy, move || {
                 let phase = run_kaykit_import(&dir, &out, spec, server, &tx, &cancel, &icon_resume_rx);
                 let _ = tx.send(phase);
             })
-            .map_err(|e| format!("failed to start KayKit import thread: {e}"))?;
+            .map(|handle| handle.detach())
+            .map_err(|e| format!("failed to submit KayKit import job: {e}"))?;
         Ok(())
     }
 
@@ -1619,9 +1629,10 @@ impl ImportPage {
         self.kenney_phase = ImportPhase::compiling("all");
         self.all_run = Some((0, present.len()));
         let cancel = self.cancel.clone();
-        thread::Builder::new()
-            .name("asset-ui-kenney-import-all".into())
-            .spawn(move || {
+        self.pool
+            .as_ref()
+            .ok_or("runtime task pool is not configured")?
+            .submit(Lane::Heavy, move || {
                 let total = present.len();
                 let mut ok = Vec::new();
                 let mut failed = Vec::new();
@@ -1749,7 +1760,8 @@ impl ImportPage {
                     skipped,
                 });
             })
-            .map_err(|e| format!("failed to start import-all thread: {e}"))?;
+            .map(|handle| handle.detach())
+            .map_err(|e| format!("failed to submit import-all job: {e}"))?;
         Ok(())
     }
 
@@ -4003,6 +4015,12 @@ fn publish_compiled_pack(
             categories: vec!["kenney".into(), pack_name.to_string()],
             tags,
             creator: KENNEY_CREDITS.to_string(),
+            artist: String::new(),
+            artist_url: String::new(),
+            album: String::new(),
+            source_url: String::new(),
+            license: String::new(),
+            license_url: String::new(),
             generator: "pack_import".into(),
             backend: "asset-ui".into(),
             model: pack_name.to_string(),

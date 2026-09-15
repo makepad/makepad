@@ -399,8 +399,8 @@ mod tests {
 
     #[test]
     fn the_work_root_defaults_beside_the_server_root() {
-        let config = HostConfig::new(PathBuf::from("/store/local/asset-ui/asset-server"));
-        assert_eq!(config.work_root, PathBuf::from("/store/local/asset-ui"));
+        let config = HostConfig::new(PathBuf::from("/checkout/local/asset-library/store"));
+        assert_eq!(config.work_root, PathBuf::from("/checkout/local/asset-library"));
         assert!(config.beacon, "a fleet host is discoverable by default");
         assert_eq!(config.namespace, DEFAULT_NAMESPACE);
         assert_eq!(

@@ -12,11 +12,11 @@
 use crate::import::{ImportPhase, ServerSession};
 use makepad_asset_client::{AssetClient, ClientConfig};
 use makepad_asset_importer::music_import::{self, MusicReport};
+use makepad_widgets::makepad_platform::thread::{Lane, TaskPool};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
-use std::thread;
 
 /// The card's whole state: which folder, what the worker is doing, and the
 /// one-line result of the last run.
@@ -44,6 +44,7 @@ pub struct MusicImportPage {
     /// Aliases the finished run landed, waiting to be handed to the
     /// analysis queue. Non-empty only when `split_layers` was on.
     pending_analysis: Vec<String>,
+    pool: Option<TaskPool>,
 }
 
 /// What the worker sends back: live progress, then exactly one verdict.
@@ -65,6 +66,7 @@ impl Default for MusicImportPage {
             split_layers: false,
             bake_lyrics: false,
             pending_analysis: Vec::new(),
+            pool: None,
         }
     }
 }
@@ -74,6 +76,10 @@ impl Default for MusicImportPage {
 pub const MUSIC_NAMESPACE: &str = "music";
 
 impl MusicImportPage {
+    pub fn set_task_pool(&mut self, pool: TaskPool) {
+        self.pool = Some(pool);
+    }
+
     /// The job this card would enqueue right now, or `None` while no folder
     /// has been picked.
     pub fn job(&self) -> Option<crate::import::ImportJob> {
@@ -209,13 +215,18 @@ impl MusicImportPage {
             total: 0,
             current: String::new(),
         };
-        thread::Builder::new()
-            .name("asset-ui-music-import".into())
-            .spawn(move || {
+        let Some(pool) = self.pool.clone() else {
+            return Err(self.refuse("runtime task pool is not configured".into()));
+        };
+        match pool.submit(Lane::Heavy, move || {
                 let msg = run_music_import(&dir, server, &tx, &cancel);
                 let _ = tx.send(msg);
-            })
-            .map_err(|e| self.refuse(format!("failed to start music import thread: {e}")))?;
+            }) {
+            Ok(handle) => handle.detach(),
+            Err(error) => {
+                return Err(self.refuse(format!("failed to submit music import job: {error}")));
+            }
+        }
         Ok(())
     }
 

@@ -276,12 +276,13 @@ mod tests {
     fn snapshot(url: &str, total_mb: u64, models: Vec<ModelInfoJson>) -> BoxSnapshot {
         BoxSnapshot {
             base_url: url.to_string(),
-            health: Some(HealthJson {
+            health: Some(HealthJson { activity: None,
                 service: "makepad-asset-ai".to_string(),
                 version: "test".to_string(),
                 gpu: None,
                 vram_free_mb: Some(total_mb),
                 vram_total_mb: Some(total_mb),
+                vram_usable_mb: None,
                 models_loaded: Vec::new(),
                 jobs_pending: Some(0),
                 node_id: None,
@@ -290,6 +291,7 @@ mod tests {
                 capabilities: None,
                 vram_reserve_mb: Some(2048),
                 queue_limit: Some(8),
+                max_job_body_bytes: None,
                 fleet: None,
                 lanes: None,
                 realtime: None,
