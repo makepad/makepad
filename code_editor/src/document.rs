@@ -14,13 +14,13 @@ use {
         tokenizer::Tokenizer,
     },
     std::{
-        cell::{Ref, RefCell},
+        cell::{Cell, Ref, RefCell},
         cmp::Ordering,
         collections::HashMap,
         iter,
         ops::Range,
         rc::Rc,
-        sync::mpsc::Sender,
+        sync::{atomic::{AtomicU64, Ordering as AtomicOrdering}, mpsc::Sender},
     },
 };
 
@@ -29,28 +29,96 @@ pub struct CodeDocument(Rc<DocumentInner>);
 
 impl CodeDocument {
     pub fn new(text: Text, decorations: DecorationSet) -> Self {
+        let document = Self::from_prepared(Self::prepare(text));
+        *document.0.decorations.borrow_mut() = decorations;
+        document
+    }
+
+    /// Tokenize and compute indentation without a Cx. The result can cross threads.
+    pub fn prepare(text: Text) -> PreparedDocument {
+        let text = if text.as_lines().is_empty() {
+            Text::new()
+        } else {
+            text
+        };
         let line_count = text.as_lines().len();
-        let tokens: Vec<_> = (0..line_count)
-            .map(|line| tokenize(&text.as_lines()[line]).collect::<Vec<_>>())
-            .collect();
-        let inner = Self(Rc::new(DocumentInner {
-            history: RefCell::new(History::from(text)),
-            layout: RefCell::new(DocumentLayout {
-                indent_state: (0..line_count).map(|_| None).collect(),
-                tokens,
-                inline_inlays: (0..line_count).map(|_| Vec::new()).collect(),
-                block_inlays: Vec::new(),
-            }),
-            tokenizer: RefCell::new(Tokenizer::new(line_count)),
-            decorations: RefCell::new(decorations),
+        let mut layout = DocumentLayout {
+            indent_state: vec![None; line_count],
+            tokens: vec![Vec::new(); line_count],
+            inline_inlays: vec![Vec::new(); line_count],
+            block_inlays: Vec::new(),
+        };
+        update_indent_state(&text, &mut layout.indent_state);
+        let mut tokenizer = Tokenizer::new(line_count);
+        tokenizer.update(&text, &mut layout.tokens);
+        PreparedDocument {
+            digest: text_digest(&text),
+            version: 0,
+            text,
+            layout,
+            tokenizer,
+        }
+    }
+
+    /// Attach prepared allocations without rescanning or tokenizing the source.
+    pub fn from_prepared(prepared: PreparedDocument) -> Self {
+        static ID: AtomicU64 = AtomicU64::new(1);
+        Self(Rc::new(DocumentInner {
+            id: ID.fetch_add(1, AtomicOrdering::Relaxed),
+            next_anchor: Cell::new(0),
+            anchors: RefCell::new(HashMap::new()),
+            digest: Cell::new(Some(prepared.digest)),
+            version: Cell::new(prepared.version),
+            history: RefCell::new(History::from(prepared.text)),
+            layout: RefCell::new(prepared.layout),
+            tokenizer: RefCell::new(prepared.tokenizer),
+            decorations: RefCell::new(DecorationSet::default()),
             edit_senders: RefCell::new(HashMap::new()),
-        }));
-        inner.update_indent_state();
-        inner.0.tokenizer.borrow_mut().update(
-            &inner.0.history.borrow().as_text(),
-            &mut inner.0.layout.borrow_mut().tokens,
+        }))
+    }
+
+    pub fn version(&self) -> u64 {
+        self.0.version.get()
+    }
+
+    /// Content digest, recomputed lazily after edits. Prepared attachment is O(1).
+    pub fn digest(&self) -> u64 {
+        self.0.digest.get().unwrap_or_else(|| {
+            let digest = text_digest(&self.as_text());
+            self.0.digest.set(Some(digest));
+            digest
+        })
+    }
+
+    /// Anchor a valid UTF-8 boundary. Before stays before an insertion at the
+    /// boundary; After follows it. Deletion collapses covered anchors to its start.
+    /// Panics for a position outside the document or inside a UTF-8 character.
+    pub fn create_anchor(&self, position: Position, drift: Drift) -> TextAnchor {
+        assert!(
+            valid_position(&self.as_text(), position),
+            "invalid anchor position"
         );
-        inner
+        let id = self.0.next_anchor.get();
+        self.0.next_anchor.set(id + 1);
+        self.0.anchors.borrow_mut().insert(id, (position, drift));
+        TextAnchor {
+            document: self.0.id,
+            id,
+        }
+    }
+
+    pub fn resolve_anchor(&self, anchor: TextAnchor) -> Option<Position> {
+        if anchor.document != self.0.id {
+            return None;
+        }
+        self.0.anchors.borrow().get(&anchor.id).map(|entry| entry.0)
+    }
+
+    /// Release an anchor once no retained view or source link needs it.
+    pub fn remove_anchor(&self, anchor: TextAnchor) {
+        if anchor.document == self.0.id {
+            self.0.anchors.borrow_mut().remove(&anchor.id);
+        }
     }
 
     pub fn replace(&self, new_text: Text) {
@@ -238,7 +306,7 @@ impl CodeDocument {
     ) {
         fn next_line_indent_column_count(line: &str, tab_column_count: usize) -> Option<usize> {
             if let Some(indent) = line.indent() {
-                let mut indent_column_count = indent.column_count();
+                let mut indent_column_count = indent.column_count_at(0, tab_column_count);
                 if line
                     .chars()
                     .rev()
@@ -380,6 +448,21 @@ impl CodeDocument {
         selections: Option<SelectionSet>,
         edits: &[Edit],
     ) {
+        if !edits.is_empty() {
+            self.0.version.set(self.version().checked_add(1).expect("document version overflow"));
+            self.0.digest.set(None);
+            for (position, drift) in self.0.anchors.borrow_mut().values_mut() {
+                for edit in edits {
+                    *position = match &edit.change {
+                        Change::Insert(at, text) if *at == *position => match drift {
+                            Drift::Before => *position,
+                            Drift::After => *position + text.length(),
+                        },
+                        _ => position.apply_edit(edit),
+                    };
+                }
+            }
+        }
         let mut layout = self.0.layout.borrow_mut();
         for edit in edits {
             match edit.change {
@@ -638,49 +721,12 @@ impl CodeDocument {
     }
 
     fn update_indent_state(&self) {
-        let mut layout = self.0.layout.borrow_mut();
-        let indent_state = &mut layout.indent_state;
-        let history = self.0.history.borrow();
-        let lines = history.as_text().as_lines();
-        let mut current_indent_column_count = 0;
-        for line_index in 0..lines.len() {
-            match indent_state[line_index] {
-                Some(IndentState::NonEmpty(_, next_indent_column_count)) => {
-                    current_indent_column_count = next_indent_column_count;
-                }
-                _ => {
-                    indent_state[line_index] = Some(match lines[line_index].indent() {
-                        Some(indent) => {
-                            let indent_column_count = indent.column_count();
-                            let mut next_indent_column_count = indent_column_count;
-                            if lines[line_index]
-                                .chars()
-                                .rev()
-                                .find_map(|char| {
-                                    if char.is_opening_delimiter() {
-                                        return Some(true);
-                                    }
-                                    if char.is_closing_delimiter() {
-                                        return Some(false);
-                                    }
-                                    None
-                                })
-                                .unwrap_or(false)
-                            {
-                                next_indent_column_count += 4;
-                            }
-                            current_indent_column_count = next_indent_column_count;
-                            IndentState::NonEmpty(indent_column_count, next_indent_column_count)
-                        }
-                        None => IndentState::Empty(current_indent_column_count),
-                    })
-                }
-            }
-        }
+        update_indent_state(&self.as_text(), &mut self.0.layout.borrow_mut().indent_state);
     }
+
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct DocumentLayout {
     pub indent_state: Vec<Option<IndentState>>,
     pub tokens: Vec<Vec<Token>>,
@@ -713,6 +759,11 @@ impl<'a> Editor<'a> {
 
 #[derive(Debug)]
 struct DocumentInner {
+    id: u64,
+    next_anchor: Cell<u64>,
+    anchors: RefCell<HashMap<u64, (Position, Drift)>>,
+    digest: Cell<Option<u64>>,
+    version: Cell<u64>,
     history: RefCell<History>,
     layout: RefCell<DocumentLayout>,
     tokenizer: RefCell<Tokenizer>,
@@ -729,4 +780,99 @@ fn tokenize(text: &str) -> impl Iterator<Item = Token> + '_ {
             TokenKind::Unknown
         },
     })
+}
+
+/// An opaque, document-scoped anchor; copies share the same lifetime until removal.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct TextAnchor {
+    document: u64,
+    id: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct AnchorRange {
+    pub start: TextAnchor,
+    pub end: TextAnchor,
+}
+
+/// Immutable worker output. Fields are private so callers cannot forge a stamp.
+#[derive(Clone, Debug)]
+pub struct PreparedDocument {
+    pub(crate) text: Text,
+    layout: DocumentLayout,
+    tokenizer: Tokenizer,
+    digest: u64,
+    version: u64,
+}
+
+impl PreparedDocument {
+    pub fn as_text(&self) -> &Text {
+        &self.text
+    }
+    pub fn digest(&self) -> u64 {
+        self.digest
+    }
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+}
+
+pub(crate) fn valid_position(text: &Text, position: Position) -> bool {
+    text.as_lines()
+        .get(position.line_index)
+        .is_some_and(|line| line.is_char_boundary(position.byte_index))
+}
+
+fn text_digest(text: &Text) -> u64 {
+    // FNV-1a over canonical UTF-8 including line separators, independent of Hash seeds.
+    let mut hash = 0xcbf29ce484222325u64;
+    for (index, line) in text.as_lines().iter().enumerate() {
+        if index != 0 {
+            hash = (hash ^ 10).wrapping_mul(0x100000001b3);
+        }
+        for byte in line.bytes() {
+            hash = (hash ^ byte as u64).wrapping_mul(0x100000001b3);
+        }
+    }
+    hash
+}
+
+fn update_indent_state(text: &Text, indent_state: &mut [Option<IndentState>]) {
+    let lines = text.as_lines();
+    let mut current_indent_column_count = 0;
+    for line_index in 0..lines.len() {
+        match indent_state[line_index] {
+            Some(IndentState::NonEmpty(_, next_indent_column_count)) => {
+                current_indent_column_count = next_indent_column_count;
+            }
+            _ => {
+                indent_state[line_index] = Some(match lines[line_index].indent() {
+                    Some(indent) => {
+                        let indent_column_count =
+                            indent.column_count_at(0, Settings::default().tab_column_count);
+                        let mut next_indent_column_count = indent_column_count;
+                        if lines[line_index]
+                            .chars()
+                            .rev()
+                            .find_map(|char| {
+                                if char.is_opening_delimiter() {
+                                    return Some(true);
+                                }
+                                if char.is_closing_delimiter() {
+                                    return Some(false);
+                                }
+                                None
+                            })
+                            .unwrap_or(false)
+                        {
+                            next_indent_column_count += 4;
+                        }
+                        current_indent_column_count = next_indent_column_count;
+                        IndentState::NonEmpty(indent_column_count, next_indent_column_count)
+                    }
+                    None => IndentState::Empty(current_indent_column_count),
+                })
+            }
+        }
+    }
 }

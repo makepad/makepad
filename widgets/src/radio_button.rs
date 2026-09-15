@@ -343,6 +343,7 @@ pub struct RadioButton {
 
     #[visible]
     #[live(true)]
+    #[apply_state]
     pub visible: bool,
 
     #[live]
@@ -515,6 +516,38 @@ impl RadioButtonRef {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_active(cx, value, animate);
         }
+    }
+}
+
+#[cfg(test)]
+mod style_reapply_tests {
+    use super::*;
+    use crate::desktop_style::{install, DesktopStyle, StyleSheet};
+
+    /// The selection lives in the animator's `active` group; the derive
+    /// re-applies the animator's current state on `ScriptReapply`, so a style
+    /// change keeps the selected radio selected.
+    #[test]
+    fn style_reapply_preserves_radio_selection() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let original = crate::script_eval!(vm, {use mod.widgets.* RadioButton{text: "Option"}});
+            let mut radio = RadioButton::script_from_value(vm, original);
+            vm.with_cx_mut(|cx| {
+                assert!(!radio.active(cx));
+                radio.set_active(cx, true, Animate::No);
+                assert!(radio.active(cx));
+            });
+            for (style, dark) in [(DesktopStyle::Windows2000, false), (DesktopStyle::Macos, true), (DesktopStyle::Omarchy, false)] {
+                install(vm, StyleSheet::load_with_appearance(style, dark));
+                vm.with_reload(crate::script_mod);
+                radio.script_apply(vm, &Apply::ScriptReapply, &mut Scope::empty(), original);
+                vm.with_cx(|cx| {
+                    assert!(radio.active(cx), "{}: a selected radio must stay selected across a style change", style.id());
+                });
+            }
+        });
     }
 }
 

@@ -1,4 +1,64 @@
 use crate::makepad_script::*;
+use makepad_micro_serde::*;
+
+/// Text-input intent for a compositor hosting this application. Key focus alone
+/// is insufficient: canvases, lists and terminal command shortcuts also own it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, SerJson, DeJson)]
+pub struct HostedImeState {
+    pub visible: bool,
+    pub input_mode: InputMode,
+    pub return_key: ReturnKeyType,
+    pub multiline: bool,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+#[derive(SerJson, DeJson)]
+struct ImeEnvelope { makepad_ime: HostedImeState }
+impl HostedImeState {
+    pub fn to_json(&self) -> String {
+        ImeEnvelope { makepad_ime: self.clone() }.serialize_json()
+    }
+    pub fn parse(json: &str) -> Option<Self> {
+        if !json.contains("\"makepad_ime\"") { return None; }
+        ImeEnvelope::deserialize_json(json).ok().map(|e| e.makepad_ime)
+    }
+}
+
+#[derive(Clone, Debug, Default, SerJson, DeJson)]
+pub struct HostedKeyboard {
+    pub height: f64,
+    pub dismiss: bool,
+}
+#[derive(SerJson, DeJson)]
+struct KeyboardEnvelope { makepad_keyboard: HostedKeyboard }
+impl HostedKeyboard {
+    pub fn to_json(&self) -> String {
+        KeyboardEnvelope { makepad_keyboard: self.clone() }.serialize_json()
+    }
+    pub fn parse(json: &str) -> Option<Self> {
+        if !json.contains("\"makepad_keyboard\"") { return None; }
+        let state = KeyboardEnvelope::deserialize_json(json).ok()?.makepad_keyboard;
+        (state.height.is_finite() && state.height >= 0.0).then_some(state)
+    }
+}
+
+/// A hosted system Back gesture uses the same handled event as native Android.
+/// `None` requests navigation; `Some` reports whether the app consumed it.
+#[derive(Clone, Debug, Default, SerJson, DeJson)]
+pub struct HostedBack { pub handled: Option<bool> }
+#[derive(SerJson, DeJson)]
+struct BackEnvelope { makepad_back: HostedBack }
+impl HostedBack {
+    pub fn to_json(&self) -> String {
+        BackEnvelope { makepad_back: self.clone() }.serialize_json()
+    }
+    pub fn parse(json: &str) -> Option<Self> {
+        if !json.contains("\"makepad_back\"") { return None; }
+        BackEnvelope::deserialize_json(json).ok().map(|e| e.makepad_back)
+    }
+}
 
 script_mod! {
     mod.ime = {
@@ -18,7 +78,7 @@ script_mod! {
 /// Input mode hint for soft keyboards (matches web standard `inputmode` attribute).
 ///
 /// Supported on iOS and Android. On desktop platforms, this has no effect.
-#[derive(Script, ScriptHook, Clone, Copy, Debug, PartialEq)]
+#[derive(Script, ScriptHook, Clone, Copy, Debug, PartialEq, SerJson, DeJson)]
 pub enum InputMode {
     None,
     #[pick]
@@ -58,7 +118,7 @@ pub enum AutoCorrect {
 /// Return key type - controls the visual appearance and action of the return key.
 ///
 /// Supported on iOS and Android. On desktop platforms, this has no effect.
-#[derive(Script, ScriptHook, Clone, Copy, Debug, PartialEq)]
+#[derive(Script, ScriptHook, Clone, Copy, Debug, PartialEq, SerJson, DeJson)]
 pub enum ReturnKeyType {
     #[pick]
     Default,

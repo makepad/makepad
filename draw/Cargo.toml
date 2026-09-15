@@ -16,6 +16,9 @@ makepad-svg = { path = "../libs/svg", version = "1.0.0" }
 makepad-live-id = { path = "../libs/live_id", version = "1.0.0" }
 
 rustybuzz = { version = "0.18.0", path = "../libs/rustybuzz" }
+# Multi-axis UI fonts such as Roboto Flex exceed the 32-tuple stack buffer.
+# Enable the parser's heap fallback so valid glyph outlines are not discarded.
+ttf-parser = { version = "0.24.1", path = "../libs/ttf-parser", features = ["gvar-alloc"] }
 unicode-bidi = { version = "0.3", path = "../libs/unicode/unicode-bidi" }
 ab_glyph_rasterizer = { version = "0.1.8", path = "../libs/ab_glyph_rasterizer"}
 sdfer = { path = "../libs/sdfer", version = "0.2.1" }

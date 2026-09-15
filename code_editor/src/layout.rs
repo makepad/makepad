@@ -10,7 +10,7 @@ use {
         wrap::WrapData,
         Token,
     },
-    std::{cell::Ref, slice::Iter},
+    std::{cell::Ref, ops::Range, slice::Iter},
 };
 
 #[derive(Debug)]
@@ -18,6 +18,8 @@ pub struct Layout<'a> {
     pub text: Ref<'a, Text>,
     pub document_layout: Ref<'a, DocumentLayout>,
     pub session_layout: Ref<'a, SessionLayout>,
+    pub view_range: Option<Range<Position>>,
+    pub tab_column_count: usize,
 }
 
 impl<'a> Layout<'a> {
@@ -27,32 +29,125 @@ impl<'a> Layout<'a> {
 
     pub fn width(&self) -> f64 {
         let mut width: f64 = 0.0;
-        for line in self.lines(0, self.as_text().as_lines().len()) {
-            width = width.max(line.width());
+        for index in self.view_line_range() {
+            let line = self.line(index);
+            let bytes = self.line_byte_range(index);
+            if bytes.start == 0 && bytes.end == line.text.len() {
+                width = width.max(line.width());
+                continue;
+            }
+            let (mut byte, mut row, mut column) = (0, 0, 0);
+            for element in line.wrapped_elements() {
+                match element {
+                    WrappedElement::Text {
+                        is_inlay: false,
+                        text,
+                    } => {
+                        for grapheme in text.graphemes() {
+                            column += grapheme.column_count_at(column, line.tab_column_count);
+                            if bytes.contains(&byte) {
+                                width = width.max(line.grid_to_normalized_position(row, column).0);
+                            }
+                            byte += grapheme.len();
+                        }
+                    }
+                    WrappedElement::Text {
+                        is_inlay: true,
+                        text,
+                    } => {
+                        column += text.column_count_at(column, line.tab_column_count);
+                    }
+                    WrappedElement::Widget(widget) => {
+                        column += widget.column_count;
+                    }
+                    WrappedElement::Wrap => {
+                        row += 1;
+                        column = line.wrap_indent_column_count();
+                    }
+                }
+            }
         }
         width
     }
 
     pub fn height(&self) -> f64 {
-        *self.session_layout.y.last().unwrap()
+        if self.view_range.is_none() {
+            return *self.session_layout.y.last().unwrap();
+        }
+        let range = self.view_line_range();
+        let line = self.line(range.end - 1);
+        if self
+            .view_range
+            .as_ref()
+            .is_some_and(|range| range.is_empty())
+        {
+            return line.scale();
+        }
+        let bytes = self.line_byte_range(range.end - 1);
+        let last_byte = line.text[..bytes.end]
+            .graphemes()
+            .last()
+            .map_or(0, |g| bytes.end - g.len());
+        let (row, _) = line.logical_to_grid_position(last_byte, Affinity::After);
+        (line.y() + (row + 1) as f64 * line.scale()).max(0.0)
+    }
+
+    pub fn view_line_range(&self) -> Range<usize> {
+        match &self.view_range {
+            Some(range) => {
+                range.start.line_index
+                    ..(range.end.line_index
+                        + usize::from(
+                            range.end.byte_index > 0
+                                || range.start.line_index == range.end.line_index,
+                        ))
+            }
+            None => 0..self.text.as_lines().len(),
+        }
+    }
+
+    pub fn line_byte_range(&self, index: usize) -> Range<usize> {
+        let mut bytes = 0..self.text.as_lines()[index].len();
+        if let Some(range) = &self.view_range {
+            if index < range.start.line_index || index > range.end.line_index {
+                return 0..0;
+            }
+            if index == range.start.line_index {
+                bytes.start = range.start.byte_index;
+            }
+            if index == range.end.line_index {
+                bytes.end = range.end.byte_index;
+            }
+        }
+        bytes
+    }
+
+    fn view_y_origin(&self) -> f64 {
+        let Some(range) = &self.view_range else {
+            return 0.0;
+        };
+        let mut line = self.line_without_view(range.start.line_index);
+        line.y = Some(0.0);
+        let (row, _) = line.logical_to_grid_position(range.start.byte_index, Affinity::After);
+        self.session_layout
+            .y
+            .get(range.start.line_index)
+            .copied()
+            .unwrap_or(0.0)
+            + row as f64 * line.scale()
     }
 
     pub fn find_first_line_ending_after_y(&self, y: f64) -> usize {
-        match self.session_layout.y[..self.session_layout.y.len() - 1]
-            .binary_search_by(|current_y| current_y.partial_cmp(&y).unwrap())
-        {
-            Ok(line) => line,
-            Err(line) => line.saturating_sub(1),
-        }
+        let range = self.view_line_range();
+        let y = y + self.view_y_origin();
+        let index = self.session_layout.y[range.clone()].partition_point(|current| *current <= y);
+        (range.start + index.saturating_sub(1)).min(range.end - 1)
     }
 
     pub fn find_first_line_starting_after_y(&self, y: f64) -> usize {
-        match self.session_layout.y[..self.session_layout.y.len() - 1]
-            .binary_search_by(|current_y| current_y.partial_cmp(&y).unwrap())
-        {
-            Ok(line) => line + 1,
-            Err(line) => line,
-        }
+        let range = self.view_line_range();
+        let y = y + self.view_y_origin();
+        range.start + self.session_layout.y[range].partition_point(|current| *current <= y)
     }
 
     pub fn logical_to_normalized_position(
@@ -68,6 +163,12 @@ impl<'a> Layout<'a> {
     }
 
     pub fn line(&self, index: usize) -> Line<'_> {
+        let mut line = self.line_without_view(index);
+        line.y = line.y.map(|y| y - self.view_y_origin());
+        line
+    }
+
+    fn line_without_view(&self, index: usize) -> Line<'_> {
         Line {
             y: self.session_layout.y.get(index).copied(),
             column_count: self.session_layout.column_count[index],
@@ -78,11 +179,13 @@ impl<'a> Layout<'a> {
             tokens: &self.document_layout.tokens[index],
             inlays: &self.document_layout.inline_inlays[index],
             wrap_data: self.session_layout.wrap_data[index].as_ref(),
+            tab_column_count: self.tab_column_count,
         }
     }
 
     pub fn lines(&self, start: usize, end: usize) -> Lines<'_> {
         Lines {
+            y_offset: self.view_y_origin(),
             y: self.session_layout.y
                 [start.min(self.session_layout.y.len())..end.min(self.session_layout.y.len())]
                 .iter(),
@@ -94,6 +197,7 @@ impl<'a> Layout<'a> {
             tokens: self.document_layout.tokens[start..end].iter(),
             inline_inlays: self.document_layout.inline_inlays[start..end].iter(),
             wrap_data: self.session_layout.wrap_data[start..end].iter(),
+            tab_column_count: self.tab_column_count,
         }
     }
 
@@ -116,6 +220,7 @@ impl<'a> Layout<'a> {
 
 #[derive(Clone, Debug)]
 pub struct Lines<'a> {
+    y_offset: f64,
     y: Iter<'a, f64>,
     column_count: Iter<'a, Option<usize>>,
     fold: Iter<'a, usize>,
@@ -125,6 +230,7 @@ pub struct Lines<'a> {
     tokens: Iter<'a, Vec<Token>>,
     inline_inlays: Iter<'a, Vec<(usize, InlineInlay)>>,
     wrap_data: Iter<'a, Option<WrapData>>,
+    tab_column_count: usize,
 }
 
 impl<'a> Iterator for Lines<'a> {
@@ -133,7 +239,7 @@ impl<'a> Iterator for Lines<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         let text = self.text.next()?;
         Some(Line {
-            y: self.y.next().copied(),
+            y: self.y.next().map(|y| y - self.y_offset),
             column_count: *self.column_count.next().unwrap(),
             fold: *self.fold.next().unwrap(),
             scale: *self.scale.next().unwrap(),
@@ -142,6 +248,7 @@ impl<'a> Iterator for Lines<'a> {
             tokens: self.tokens.next().unwrap(),
             inlays: self.inline_inlays.next().unwrap(),
             wrap_data: self.wrap_data.next().unwrap().as_ref(),
+            tab_column_count: self.tab_column_count,
         })
     }
 }
@@ -157,6 +264,7 @@ pub struct Line<'a> {
     pub tokens: &'a [Token],
     pub inlays: &'a [(usize, InlineInlay)],
     pub wrap_data: Option<&'a WrapData>,
+    pub tab_column_count: usize,
 }
 
 impl<'a> Line<'a> {
@@ -207,7 +315,8 @@ impl<'a> Line<'a> {
                             return (current_row_index, current_column_index);
                         }
                         current_byte_index += grapheme.len();
-                        current_column_index += grapheme.column_count();
+                        current_column_index +=
+                            grapheme.column_count_at(current_column_index, self.tab_column_count);
                         if current_byte_index == byte_index && affinity == Affinity::Before {
                             return (current_row_index, current_column_index);
                         }
@@ -217,7 +326,8 @@ impl<'a> Line<'a> {
                     is_inlay: true,
                     text,
                 } => {
-                    current_column_index += text.column_count();
+                    current_column_index +=
+                        text.column_count_at(current_column_index, self.tab_column_count);
                 }
                 WrappedElement::Widget(widget) => {
                     current_column_index += widget.column_count;
@@ -249,7 +359,8 @@ impl<'a> Line<'a> {
                     text,
                 } => {
                     for grapheme in text.graphemes() {
-                        let next_column = current_column_index + grapheme.column_count();
+                        let next_column = current_column_index
+                            + grapheme.column_count_at(current_column_index, self.tab_column_count);
                         if current_row_index == row_index
                             && (current_column_index..next_column).contains(&column_index)
                         {
@@ -263,7 +374,8 @@ impl<'a> Line<'a> {
                     is_inlay: true,
                     text,
                 } => {
-                    let next_column = current_column_index + text.column_count();
+                    let next_column = current_column_index
+                        + text.column_count_at(current_column_index, self.tab_column_count);
                     if current_row_index == row_index
                         && (current_column_index..next_column).contains(&column_index)
                     {

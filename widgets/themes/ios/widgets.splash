@@ -1,0 +1,10 @@
+mod.widgets.Button.min_height = 44.0
+mod.widgets.Button.padding = mod.turtle.Inset{left: 18.0 right: 18.0 top: 10.0 bottom: 10.0}
+mod.widgets.Button.draw_bg.border_radius = 22.0
+mod.widgets.Button.draw_bg.border_size = 0.0
+mod.widgets.TextInput.min_height = 44.0
+mod.widgets.TextInput.padding = mod.turtle.Inset{left: 14.0 right: 14.0 top: 10.0 bottom: 10.0}
+mod.widgets.TextInput.draw_bg.border_radius = 14.0
+mod.widgets.TextInput.draw_bg.border_size = 0.0
+mod.widgets.Window.pass.clear_color = #f2f2f7
+true

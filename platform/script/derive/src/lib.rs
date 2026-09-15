@@ -33,6 +33,7 @@ pub fn script_err_gen(input: TokenStream) -> TokenStream {
     Script,
     attributes(
         apply_default,
+        apply_state,
         source,
         new,
         live,

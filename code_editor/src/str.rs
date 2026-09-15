@@ -2,6 +2,7 @@ use crate::char::CharExt;
 
 pub trait StrExt {
     fn column_count(&self) -> usize;
+    fn column_count_at(&self, column: usize, tab_column_count: usize) -> usize;
     fn indent_level(&self, indent_column_count: usize) -> usize;
     fn next_indent_level(&self, indent_column_count: usize) -> usize;
     fn prev_indent_level(&self, indent_column_count: usize) -> usize;
@@ -19,16 +20,35 @@ impl StrExt for str {
         self.chars().map(|char| char.column_count()).sum()
     }
 
+    fn column_count_at(&self, column: usize, tab_column_count: usize) -> usize {
+        let mut current = column;
+        for ch in self.chars() {
+            current += ch.column_count_at(current, tab_column_count);
+        }
+        current - column
+    }
+
     fn indent_level(&self, indent_column_count: usize) -> usize {
-        self.indent().unwrap_or("").column_count() / indent_column_count
+        self.indent()
+            .unwrap_or("")
+            .column_count_at(0, indent_column_count)
+            / indent_column_count.max(1)
     }
 
     fn next_indent_level(&self, indent_column_count: usize) -> usize {
-        (self.indent().unwrap_or("").column_count() + indent_column_count) / indent_column_count
+        (self.indent()
+            .unwrap_or("")
+            .column_count_at(0, indent_column_count)
+            + indent_column_count)
+            / indent_column_count.max(1)
     }
 
     fn prev_indent_level(&self, indent_column_count: usize) -> usize {
-        self.indent().unwrap_or("").column_count().saturating_sub(1) / indent_column_count
+        self.indent()
+            .unwrap_or("")
+            .column_count_at(0, indent_column_count)
+            .saturating_sub(1)
+            / indent_column_count.max(1)
     }
 
     fn find_next_word_boundary(&self, index: usize, word_separators: &[char]) -> usize {

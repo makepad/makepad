@@ -11,6 +11,46 @@ pub struct KeyEvent {
     pub time: f64,
 }
 
+impl KeyEvent {
+    /// The one cross-platform shortcut for the design tweaker.
+    pub fn is_tweaker_toggle(&self) -> bool {
+        self.key_code == KeyCode::F10
+            && self.modifiers.shift
+            && !self.modifiers.control
+            && !self.modifiers.alt
+            && !self.modifiers.logo
+    }
+}
+
+#[cfg(test)]
+mod key_event_tests {
+    use super::*;
+
+    fn f10(modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent {
+            key_code: KeyCode::F10,
+            modifiers,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn tweaker_toggle_is_shift_f10_only() {
+        assert!(f10(KeyModifiers {
+            shift: true,
+            ..Default::default()
+        })
+        .is_tweaker_toggle());
+        assert!(!f10(KeyModifiers::default()).is_tweaker_toggle());
+        assert!(!f10(KeyModifiers {
+            shift: true,
+            control: true,
+            ..Default::default()
+        })
+        .is_tweaker_toggle());
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextInputEvent {
     /// Text to insert or replace

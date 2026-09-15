@@ -1,6 +1,7 @@
 pub trait CharExt {
     fn is_opening_delimiter(self) -> bool;
     fn is_closing_delimiter(self) -> bool;
+    fn column_count_at(self, column: usize, tab_column_count: usize) -> usize;
     fn column_count(self) -> usize;
     fn opposite_delimiter(&self) -> Option<char>;
 }
@@ -17,6 +18,15 @@ impl CharExt for char {
         match self {
             ')' | ']' | '}' => true,
             _ => false,
+        }
+    }
+
+    fn column_count_at(self, column: usize, tab_column_count: usize) -> usize {
+        if self == '\t' {
+            let tab_column_count = tab_column_count.max(1);
+            tab_column_count - (column % tab_column_count)
+        } else {
+            self.column_count()
         }
     }
 
