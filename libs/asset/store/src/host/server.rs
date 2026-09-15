@@ -99,7 +99,7 @@ impl AssetServer {
             server_id,
             events: events.clone(),
             rooms: std::sync::Arc::new(super::rooms::RoomRegistry::new()),
-            cas: std::sync::Arc::new(crate::cas::Cas::open(
+            cas: std::sync::Arc::new(crate::FsCas::open(
                 &cfg.root.join("cas"),
                 &cfg.budgets,
             )?),
@@ -136,7 +136,7 @@ impl AssetServer {
             );
         }
 
-        let janitor = Some(spawn_janitor(state.clone(),
+        let janitor = Some(spawn_janitor(state.clone(), events.clone(),
             cfg.janitor_interval_ms,
             cfg.gc_janitor_steps,
         )?);
@@ -432,6 +432,7 @@ fn serve_conn(stream: TcpStream, rc: &RouteCtx, plane: Plane, stop: &AtomicBool)
 
 fn spawn_janitor(
     state: StateHandle,
+    events: Arc<super::events::EventHub>,
     interval_ms: u64,
     gc_steps: u32,
 ) -> ServerResult<(mpsc::Sender<()>, JoinHandle<()>)> {
@@ -442,6 +443,7 @@ fn spawn_janitor(
         .spawn(move || loop {
             match rx.recv_timeout(interval) {
                 Err(mpsc::RecvTimeoutError::Timeout) => {
+                    events.expire_model_previews();
                     let now = now_ms();
                     // Poisoned state returns None; keep ticking, health
                     // reports the outage.

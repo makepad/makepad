@@ -57,10 +57,7 @@ struct SavedFastFile {
 }
 
 pub fn store_path() -> PathBuf {
-    PathBuf::from(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../local/ai_content_library/fast_presets.json"
-    ))
+    makepad_asset_client::paths::library_root().join("fast_presets.json")
 }
 
 pub fn load(path: &Path) -> Vec<SavedFastPreset> {

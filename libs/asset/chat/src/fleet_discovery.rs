@@ -11,6 +11,9 @@
 //!   matches the wanted name (missing fleet on old beacons = `default`)
 
 use std::collections::HashMap;
+use makepad_platform::thread::{CancellationToken, ThreadOptions, ThreadSpawner};
+use makepad_platform::Cx;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -68,6 +71,7 @@ impl Roster {
 const LISTENER_WARMUP: Duration = Duration::from_secs(8);
 
 static ROSTER: OnceLock<Arc<Mutex<Roster>>> = OnceLock::new();
+static LISTENER_STARTED: AtomicBool = AtomicBool::new(false);
 
 fn roster() -> Arc<Mutex<Roster>> {
     ROSTER
@@ -78,7 +82,6 @@ fn roster() -> Arc<Mutex<Roster>> {
                 beacons: HashMap::new(),
                 started: Instant::now(),
             }));
-            start_listener(shared.clone());
             shared
         })
         .clone()
@@ -89,8 +92,17 @@ fn roster() -> Arc<Mutex<Roster>> {
 /// chat from an empty set — nothing can have been heard yet — and cached
 /// the "unavailable" for its probe TTL, so the first message after every
 /// launch failed on a healthy fleet.
-pub fn start_listening() {
-    let _ = roster();
+pub fn start_listening(spawner: ThreadSpawner) {
+    let shared = roster();
+    if std::env::var_os("MAKEPAD_AI_NO_BEACON").is_some_and(|v| v == "1") {
+        return;
+    }
+    if LISTENER_STARTED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    if start_listener(shared, &spawner).is_err() {
+        LISTENER_STARTED.store(false, Ordering::Release);
+    }
 }
 
 /// How long the listener has been up; `None` before it was started.
@@ -175,7 +187,7 @@ fn wait_for_bases(budget: Duration, mut bases: impl FnMut() -> Vec<String>) -> V
         if !found.is_empty() || Instant::now() >= deadline {
             return found;
         }
-        std::thread::sleep(Duration::from_millis(100).min(deadline - Instant::now()));
+        worker_wait(Duration::from_millis(100).min(deadline - Instant::now()));
     }
 }
 
@@ -209,13 +221,11 @@ fn normalize(url: &str) -> String {
 const BIND_RETRY_START: Duration = Duration::from_secs(2);
 const BIND_RETRY_CAP: Duration = Duration::from_secs(60);
 
-fn start_listener(shared: Arc<Mutex<Roster>>) {
-    if std::env::var_os("MAKEPAD_AI_NO_BEACON").is_some_and(|v| v == "1") {
-        return;
-    }
-    std::thread::Builder::new()
-        .name("asset-ai-fleet-listen".into())
-        .spawn(move || {
+fn start_listener(shared: Arc<Mutex<Roster>>, spawner: &ThreadSpawner) -> Result<(), ()> {
+    spawner
+        .spawn_worker(
+            ThreadOptions { name: Some("asset-ai-fleet-listen".into()), ..Default::default() },
+            move || {
             // Reuse-group bind: the VJ, the Asset UI and a game all listen
             // for the same fleet beacons on one machine. An exclusive bind
             // left every app but the first without a fleet (the asset-ui
@@ -239,7 +249,7 @@ fn start_listener(shared: Arc<Mutex<Roster>>) {
                              retrying in {}s (seeded fleet nodes keep working meanwhile)",
                             backoff.as_secs()
                         );
-                        std::thread::sleep(backoff);
+                        worker_wait(backoff);
                         backoff = (backoff * 2).min(BIND_RETRY_CAP);
                     }
                 }
@@ -268,8 +278,15 @@ fn start_listener(shared: Arc<Mutex<Roster>>) {
                     slot.beacons.insert(node_id, Beacon { url, fleet, seen: Instant::now() });
                 }
             }
-        })
-        .ok();
+            },
+        )
+        .map(|handle| handle.detach())
+        .map_err(|_| ())
+}
+
+fn worker_wait(duration: Duration) {
+    let wait = CancellationToken::new();
+    let _ = wait.wait_until(Cx::monotonic_now() + duration.as_secs_f64());
 }
 
 fn beacon_port(text: &str) -> Option<u16> {

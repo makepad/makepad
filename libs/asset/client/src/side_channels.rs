@@ -13,9 +13,13 @@
 //! addressing makes the double-publish race benign: two writers of the same
 //! bytes stage the same revision.
 
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 use crate::client::AssetClient;
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 use crate::error::{ClientError, ClientResult};
-use makepad_asset_data::{AssetFile, AssetId, AssetRevisionId, FileRole, MediaType};
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
+use makepad_asset_data::{AssetFile, AssetId};
+use makepad_asset_data::{AssetRevisionId, FileRole, MediaType};
 
 /// One derived file to attach.
 #[derive(Clone, Debug)]
@@ -33,6 +37,7 @@ pub enum SideChannelOutcome {
     AlreadyPresent { revision: AssetRevisionId },
 }
 
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "web")))]
 impl AssetClient {
     /// Attach `files` to the asset's latest published revision, as a new
     /// revision reusing every existing blob. Files whose `(role, tier 0,

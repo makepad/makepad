@@ -210,16 +210,17 @@ fn completion_validates_against_the_recipe_and_the_store() {
         core.variants().complete_derivation(&dkey, &job, "w-1", &missing_blob, NOW + 1),
         Err(ServerError::NotFound { what: "variant thumbnail blob" })
     ));
-    // A worker without the lease cannot publish.
-    let good = thumb_result(&core, NOW);
-    assert!(matches!(
-        core.variants().complete_derivation(&dkey, &job, "w-2", &good, NOW + 1),
-        Err(ServerError::LeaseLost { .. })
-    ));
     let status = core.variants().derivation_status(&dkey).unwrap().unwrap();
     assert_eq!(status.state, "pending");
 
-    // The holding worker with valid facts still lands it.
+    // Client-driven derivation is authorized by the exact deterministic job
+    // id; the worker label is attribution, not a second lease identity.
+    let good = thumb_result(&core, NOW);
+    core.variants()
+        .complete_derivation(&dkey, &job, "w-2", &good, NOW + 1)
+        .unwrap();
+
+    // An identical late completion under another label is idempotent.
     core.variants()
         .complete_derivation(&dkey, &job, "w-1", &good, NOW + 2)
         .unwrap();
@@ -261,36 +262,38 @@ fn late_duplicate_completion_cannot_replace_the_winner() {
 }
 
 #[test]
-fn terminal_failure_rearms_with_a_fresh_deterministic_job() {
-    let (_root, core) = open_core("variants_rearm");
+fn pending_derivation_keeps_one_deterministic_job_until_completion() {
+    let (_root, core) = open_core("variants_pending");
     let base = watchtower_base(&core, NOW);
     let recipe_bytes = lod_recipe().to_canonical_bytes().unwrap();
     let (dkey, job0) = arm_and_claim(&core, &base, &lod_recipe(), "w-1", NOW);
 
-    // max_attempts=1: one failure is terminal.
-    // Status reads failed by joining the job state.
+    // Client-driven work has no separate queue lease to expire: the pending
+    // row and deterministic job id remain the single-flight marker.
     let status = core.variants().derivation_status(&dkey).unwrap().unwrap();
-    assert_eq!(status.state, "failed");
+    assert_eq!(status.state, "pending");
 
-    // A new request re-arms round 1 with a different deterministic job id.
     let outcome = core
         .variants()
         .begin_derivation(&base, &recipe_bytes, NOW + 2)
         .unwrap();
-    let DerivationOutcome::NeedsJob { job_id: job1, .. } = outcome else {
-        panic!("expected NeedsJob, got {outcome:?}");
+    let DerivationOutcome::InFlight { job_id: job1, .. } = outcome else {
+        panic!("expected InFlight, got {outcome:?}");
     };
-    assert_ne!(job0, job1);
-    // A late completion on the SUPERSEDED job refuses.
+    assert_eq!(job0, job1);
+
+    // A report for any other job identity refuses.
+    let wrong_job = JobId([0x55; 16]);
     let result = lod_result(&core, NOW + 2);
     assert!(matches!(
-        core.variants().complete_derivation(&dkey, &job0, "w-1", &result, NOW + 3),
+        core.variants().complete_derivation(&dkey, &wrong_job, "w-1", &result, NOW + 3),
         Err(ServerError::LeaseLost { what: "superseded derivation job" })
     ));
-    // The live round completes normally and dedupes thereafter.
+
+    // The live identity completes normally and dedupes thereafter.
     let variant = core
         .variants()
-        .complete_derivation(&dkey, &job1, "w-1", &result, NOW + 3)
+        .complete_derivation(&dkey, &job0, "w-1", &result, NOW + 3)
         .unwrap();
     match core.variants().begin_derivation(&base, &recipe_bytes, NOW + 4).unwrap() {
         DerivationOutcome::Ready { variant: v, .. } => assert_eq!(v, variant),
@@ -299,7 +302,7 @@ fn terminal_failure_rearms_with_a_fresh_deterministic_job() {
 }
 
 #[test]
-fn crash_between_arm_and_enqueue_reoffers_the_same_job() {
+fn repeated_begin_observes_the_same_inflight_job() {
     let (_root, core) = open_core("variants_crash_repair");
     let base = watchtower_base(&core, NOW);
     let recipe_bytes = thumb_recipe().to_canonical_bytes().unwrap();
@@ -311,13 +314,13 @@ fn crash_between_arm_and_enqueue_reoffers_the_same_job() {
     else {
         panic!("expected NeedsJob");
     };
-    // Repair: the exact same deterministic job id is offered again.
-    let DerivationOutcome::NeedsJob { job_id: second, .. } = core
+    // The exact same deterministic job id is observed as in flight.
+    let DerivationOutcome::InFlight { job_id: second, .. } = core
         .variants()
         .begin_derivation(&base, &recipe_bytes, NOW + 1)
         .unwrap()
     else {
-        panic!("expected NeedsJob again");
+        panic!("expected InFlight");
     };
     assert_eq!(first, second);
 }

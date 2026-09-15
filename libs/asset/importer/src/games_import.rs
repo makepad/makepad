@@ -1003,6 +1003,7 @@ mod tests {
                     live_only: true,
                     page_size: 50,
                     facets: 0,
+                    newest: false,
                 },
                 None,
             )
