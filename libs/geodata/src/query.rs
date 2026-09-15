@@ -8,14 +8,29 @@
 use crate::sidecar::{CELL_AXIS, FEATURES_TABLE};
 use makepad_mbtile_reader::{MbtilesReader, Value};
 use makepad_map_nav::geo::{haversine_m, LonLat};
+use makepad_micro_serde::{DeJson, JsonValue};
 use std::path::Path;
+
+/// Prevent callers on the interactive app path from accidentally scanning an
+/// unbounded dense cell. Services with a whole-request budget use
+/// `query_radius_with_budget` directly.
+pub const DEFAULT_RADIUS_SCAN_BUDGET: usize = 50_000;
+pub const MAX_RADIUS_RESULTS: usize = 50_000;
+
+fn radius_result_capacity(limit: usize, candidate_budget: usize) -> Result<usize, String> {
+    if limit > MAX_RADIUS_RESULTS {
+        return Err(format!("radius result limit exceeds {MAX_RADIUS_RESULTS}"));
+    }
+    Ok(limit.min(candidate_budget))
+}
 
 #[derive(Debug)]
 pub struct FeatureHit {
     pub layer: String,
     pub name: Option<String>,
-    /// Feature attributes as parsed JSON.
-    pub attrs: serde_json::Value,
+    /// Feature attributes as parsed JSON (an object, or `Null` when the row
+    /// carries none).
+    pub attrs: JsonValue,
     /// Feature bbox center.
     pub center: (f64, f64),
     pub bbox: (f64, f64, f64, f64),
@@ -97,47 +112,153 @@ impl LayerDb {
         radius_m: f64,
         limit: usize,
     ) -> Result<Vec<FeatureHit>, String> {
+        let mut budget = DEFAULT_RADIUS_SCAN_BUDGET;
+        self.query_radius_with_budget(lon, lat, radius_m, limit, &mut budget)
+    }
+
+    /// Bounded nearest-neighbor selection. At most `candidate_budget` feature
+    /// rows are decoded across all calls sharing that mutable budget, and only
+    /// the nearest `limit` hits are retained in memory.
+    pub fn query_radius_with_budget(
+        &mut self,
+        lon: f64,
+        lat: f64,
+        radius_m: f64,
+        limit: usize,
+        candidate_budget: &mut usize,
+    ) -> Result<Vec<FeatureHit>, String> {
+        let result_capacity = radius_result_capacity(limit, *candidate_budget)?;
+        if result_capacity == 0 {
+            return Ok(Vec::new());
+        }
         // Convert the radius to a degree bbox (safe overestimate at NL lat).
         let dlat = radius_m / 111_320.0;
         let dlon = radius_m / (111_320.0 * lat.to_radians().cos().max(0.2));
-        let mut hits = self.query_bbox(
-            lon - dlon,
-            lat - dlat,
-            lon + dlon,
-            lat + dlat,
-            usize::MAX,
-        )?;
+        let min_lon = lon - dlon;
+        let min_lat = lat - dlat;
+        let max_lon = lon + dlon;
+        let max_lat = lat + dlat;
+        let (nx0, ny0) = crate::geo::wgs84_to_norm(min_lon, max_lat);
+        let (nx1, ny1) = crate::geo::wgs84_to_norm(max_lon, min_lat);
+        let clamp = |value: f64| (value * f64::from(CELL_AXIS)) as i64;
+        let cx0 = clamp(nx0).clamp(0, i64::from(CELL_AXIS) - 1) as u32;
+        let cx1 = clamp(nx1).clamp(0, i64::from(CELL_AXIS) - 1) as u32;
+        let cy0 = clamp(ny0).clamp(0, i64::from(CELL_AXIS) - 1) as u32;
+        let cy1 = clamp(ny1).clamp(0, i64::from(CELL_AXIS) - 1) as u32;
         let origin = LonLat::new(lon, lat);
-        for hit in &mut hits {
-            let distance = haversine_m(origin, LonLat::new(hit.center.0, hit.center.1));
-            hit.distance_m = Some(distance);
+        let mut hits: Vec<FeatureHit> = Vec::with_capacity(result_capacity);
+        'cells: for cy in cy0..=cy1 {
+            for cx in cx0..=cx1 {
+                if *candidate_budget == 0 {
+                    break 'cells;
+                }
+                let lo = (i64::from(cy * CELL_AXIS + cx)) << 24;
+                let hi = lo | ((*candidate_budget - 1).min(0x00ff_ffff) as i64);
+                let mut scan_error = None;
+                self.db
+                    .for_each_row_in_range(FEATURES_TABLE, lo, hi, |_rowid, values| {
+                        if *candidate_budget == 0 {
+                            return;
+                        }
+                        *candidate_budget -= 1;
+                        let mut hit = match parse_hit(&values) {
+                            Ok(hit) => hit,
+                            Err(error) => {
+                                scan_error = Some(error);
+                                return;
+                            }
+                        };
+                        let bbox = hit.bbox;
+                        if bbox.0 > max_lon
+                            || bbox.2 < min_lon
+                            || bbox.1 > max_lat
+                            || bbox.3 < min_lat
+                        {
+                            return;
+                        }
+                        let distance = haversine_m(
+                            origin,
+                            LonLat::new(hit.center.0, hit.center.1),
+                        );
+                        if distance > radius_m {
+                            return;
+                        }
+                        hit.distance_m = Some(distance);
+                        if hits.len() < limit {
+                            hits.push(hit);
+                        } else if let Some((farthest, farthest_distance)) = hits
+                            .iter()
+                            .enumerate()
+                            .max_by(|(_, a), (_, b)| {
+                                a.distance_m.unwrap().total_cmp(&b.distance_m.unwrap())
+                            })
+                            .map(|(index, hit)| (index, hit.distance_m.unwrap()))
+                        {
+                            if distance < farthest_distance {
+                                hits[farthest] = hit;
+                            }
+                        }
+                    })
+                    .map_err(|error| format!("range scan: {error:?}"))?;
+                if let Some(error) = scan_error {
+                    return Err(error);
+                }
+            }
         }
-        hits.retain(|h| h.distance_m.unwrap_or(f64::MAX) <= radius_m);
         hits.sort_by(|a, b| a.distance_m.unwrap().total_cmp(&b.distance_m.unwrap()));
-        hits.truncate(limit);
         Ok(hits)
     }
 
     /// Features covering a point. Exact for layers that store rings (and for
     /// grid layers whose bbox equals the cell); bbox containment otherwise.
     pub fn query_point(&mut self, lon: f64, lat: f64, limit: usize) -> Result<Vec<FeatureHit>, String> {
+        if limit > MAX_RADIUS_RESULTS {
+            return Err(format!("point result limit exceeds {MAX_RADIUS_RESULTS}"));
+        }
         let epsilon = 1e-9;
         let mut hits = self.query_bbox(
             lon - epsilon,
             lat - epsilon,
             lon + epsilon,
             lat + epsilon,
-            usize::MAX,
+            MAX_RADIUS_RESULTS,
         )?;
         for hit in &mut hits {
             hit.contains_point = match hit.attrs.get("__ring") {
-                Some(serde_json::Value::Array(ring)) => point_in_ring(lon, lat, ring),
+                Some(JsonValue::Array(ring)) => point_in_ring(lon, lat, ring),
                 _ => true, // bbox containment already established
             };
         }
         hits.retain(|h| h.contains_point);
         hits.truncate(limit);
         Ok(hits)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sidecar::SidecarBuilder;
+    use makepad_mbtile_reader::MbtilesWriter;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn radius_limit_is_capped_before_allocation() {
+        assert_eq!(radius_result_capacity(8, 3).unwrap(), 3);
+        assert!(radius_result_capacity(usize::MAX, DEFAULT_RADIUS_SCAN_BUDGET).is_err());
+
+        let path = std::env::temp_dir().join(format!(
+            "makepad-radius-limit-{}-{}.mbtiles",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let mut writer = MbtilesWriter::create(&path).unwrap();
+        SidecarBuilder::new().write(&mut writer).unwrap();
+        writer.finish().unwrap();
+        let mut database = LayerDb::open(&path).unwrap();
+        assert!(database.query_radius(4.9, 52.3, 1_000.0, usize::MAX).is_err());
+        assert!(database.query_point(4.9, 52.3, usize::MAX).is_err());
+        std::fs::remove_file(path).unwrap();
     }
 }
 
@@ -155,11 +276,11 @@ fn parse_hit(values: &[Value]) -> Result<FeatureHit, String> {
     let layer = text(1).unwrap_or_default();
     let name = text(2);
     let bbox = (float(3), float(4), float(5), float(6));
-    let mut attrs: serde_json::Value = text(7)
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or(serde_json::Value::Null);
+    let mut attrs: JsonValue = text(7)
+        .and_then(|s| JsonValue::deserialize_json(&s).ok())
+        .unwrap_or(JsonValue::Null);
     if let Some(ring_text) = text(8) {
-        if let Ok(ring) = serde_json::from_str::<serde_json::Value>(&ring_text) {
+        if let Ok(ring) = JsonValue::deserialize_json(&ring_text) {
             if let Some(map) = attrs.as_object_mut() {
                 map.insert("__ring".into(), ring);
             }
@@ -177,7 +298,7 @@ fn parse_hit(values: &[Value]) -> Result<FeatureHit, String> {
 }
 
 /// Ray-cast point-in-polygon on a JSON ring [[lon,lat],...].
-fn point_in_ring(lon: f64, lat: f64, ring: &[serde_json::Value]) -> bool {
+fn point_in_ring(lon: f64, lat: f64, ring: &[JsonValue]) -> bool {
     let pts: Vec<(f64, f64)> = ring
         .iter()
         .filter_map(|p| {

@@ -123,7 +123,7 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// `testmap [--dir DIR] [--name NAME] [--url URL] [--keep-store]`
+/// `testmap [--dir DIR] [--name NAME] [--url URL] [--keep-store] [--full]`
 pub fn run(args: &[String]) -> Result<(), String> {
     let mut options = BakeOptions::amsterdam();
     let mut dir = "local/maps".to_string();
@@ -135,16 +135,15 @@ pub fn run(args: &[String]) -> Result<(), String> {
             "--name" => name = iter.next().ok_or("--name needs a name")?.clone(),
             "--url" => options.pbf_url = iter.next().ok_or("--url needs a URL")?.clone(),
             "--keep-store" => options.keep_store = true,
+            "--full" => options.full = true,
             other => return Err(format!("testmap: unexpected argument {other}")),
         }
     }
     options.paths = TestMapPaths::in_dir(&dir, &name);
-    if options.paths.is_complete() {
-        println!("test map already built:");
-        report(&options.paths);
-        return Ok(());
+    let stats = bake(&options, &mut SidecarFetch)?;
+    if stats.skipped_tiles != 0 {
+        println!("built, {} tiles skipped", stats.skipped_tiles);
     }
-    bake(&options, &mut SidecarFetch)?;
     report(&options.paths);
     Ok(())
 }
