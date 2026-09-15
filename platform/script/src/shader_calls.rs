@@ -1524,6 +1524,31 @@ impl ShaderFnCompiler {
     ) {
         // Handle texture methods - these are virtual methods that transpile to backend-specific code
         match method_id {
+            id!(sample_compare) => {
+                let mut s = self.stack.new_string();
+                if tex_type != TextureType::TextureDepth || args.len() != 2 {
+                    script_err_invalid_args!(self.trap, "texture_depth.sample_compare requires (uv, reference_depth)");
+                    s.push_str("0.0");
+                } else {
+                    let sampler = output.get_or_create_sampler(ShaderSampler {
+                        compare: true,
+                        ..ShaderSampler::default()
+                    });
+                    let uv = &args[0];
+                    let depth = &args[1];
+                    match output.backend {
+                        ShaderBackend::Metal => { write!(s, "{}.sample_compare(_s{}, {}, {})", texture_expr, sampler, uv, depth).ok(); }
+                        ShaderBackend::Hlsl => { write!(s, "{}.SampleCmpLevelZero(_s{}, {}, {})", texture_expr, sampler, uv, depth).ok(); }
+                        ShaderBackend::Wgsl => { write!(s, "textureSampleCompareLevel({}, _s{}, {}, {})", texture_expr, sampler, uv, depth).ok(); }
+                        ShaderBackend::Glsl => {
+                            output.bind_texture_sampler(&texture_expr, sampler);
+                            write!(s, "texture({}, vec3({}, {}))", texture_expr, uv, depth).ok();
+                        }
+                        ShaderBackend::Rust => { write!(s, "{}.sample_compare({}, {})", texture_expr, uv, depth).ok(); }
+                    }
+                }
+                self.stack.push(self.trap.pass(), ShaderType::Pod(vm.bx.code.builtins.pod.pod_f32), s);
+            }
             id!(size) => {
                 // size() returns vec2f with the texture dimensions
                 let mut s = self.stack.new_string();
