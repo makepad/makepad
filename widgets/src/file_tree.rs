@@ -651,7 +651,7 @@ impl FileTreeNode {
                 right: depth as f64 * 4.0,
                 bottom: 0.0,
             },
-            metrics: Metrics::default(),
+            ..Default::default()
         }
     }
 

@@ -268,6 +268,26 @@ export class WasmWebGL extends WasmWebBrowser {
   }
 
   FromWasmCompileWebGLShader(args) {
+    function gl_type_from_code(gl, code) {
+      switch (code) {
+        case 1:
+          return gl.HALF_FLOAT;
+        case 2:
+          return gl.UNSIGNED_SHORT;
+        case 3:
+          return gl.SHORT;
+        case 4:
+          return gl.UNSIGNED_BYTE;
+        case 5:
+          return gl.BYTE;
+        case 6:
+          return gl.UNSIGNED_INT;
+        case 7:
+          return gl.INT;
+        default:
+          return gl.FLOAT;
+      }
+    }
     function get_attrib_locations(gl, program, base, slots) {
       let attrib_locs = [];
       let attribs = slots >> 2;
@@ -283,7 +303,27 @@ export class WasmWebGL extends WasmWebBrowser {
           size: size,
           stride: slots * 4,
           integer: false,
+          normalized: false,
           gl_type: gl.FLOAT,
+        });
+      }
+      return attrib_locs;
+    }
+    function get_typed_attrib_locations(gl, program, table) {
+      let attrib_locs = [];
+      if (!table) {
+        return attrib_locs;
+      }
+      for (let i = 0; i < table.length; i++) {
+        let a = table[i];
+        attrib_locs.push({
+          loc: gl.getAttribLocation(program, a.name),
+          offset: a.offset,
+          size: a.size,
+          stride: a.stride,
+          integer: !!a.integer,
+          normalized: !!a.normalized,
+          gl_type: gl_type_from_code(gl, a.gl_type),
         });
       }
       return attrib_locs;
@@ -382,18 +422,24 @@ export class WasmWebGL extends WasmWebBrowser {
     this.draw_shaders[args.shader_id] = {
       vertex: args.vertex,
       pixel: args.pixel,
-      geom_attribs: get_attrib_locations(
-        gl,
-        program,
-        "packed_geometry_",
-        args.geometry_slots,
-      ),
-      inst_attribs: get_attrib_locations(
-        gl,
-        program,
-        "packed_instance_",
-        args.instance_slots,
-      ),
+      geom_attribs:
+        args.geom_attribs && args.geom_attribs.length
+          ? get_typed_attrib_locations(gl, program, args.geom_attribs)
+          : get_attrib_locations(
+              gl,
+              program,
+              "packed_geometry_",
+              args.geometry_slots,
+            ),
+      inst_attribs:
+        args.inst_attribs && args.inst_attribs.length
+          ? get_typed_attrib_locations(gl, program, args.inst_attribs)
+          : get_attrib_locations(
+              gl,
+              program,
+              "packed_instance_",
+              args.instance_slots,
+            ),
       pass_uniforms_binding: pass_uniforms_binding,
       draw_list_uniforms_binding: draw_list_uniforms_binding,
       draw_call_uniforms_binding: draw_call_uniforms_binding,
@@ -421,11 +467,23 @@ export class WasmWebGL extends WasmWebBrowser {
         gl_buf: gl.createBuffer(),
       };
     }
-    let array = new Uint32Array(
-      this.memory.buffer,
-      args.data.ptr,
-      args.data.len,
-    );
+    let index_width = args.index_width || 4;
+    let array;
+    if (index_width === 2 && args.byte_data && args.byte_data.len) {
+      array = new Uint16Array(
+        this.memory.buffer,
+        args.byte_data.ptr,
+        args.byte_data.len / 2,
+      );
+      buf.index_type = gl.UNSIGNED_SHORT;
+    } else {
+      array = new Uint32Array(
+        this.memory.buffer,
+        args.data.ptr,
+        args.data.len,
+      );
+      buf.index_type = gl.UNSIGNED_INT;
+    }
     buf.length = array.length;
 
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, buf.gl_buf);
@@ -443,11 +501,20 @@ export class WasmWebGL extends WasmWebBrowser {
       };
     }
 
-    let array = new Float32Array(
-      this.memory.buffer,
-      args.data.ptr,
-      args.data.len,
-    );
+    let array;
+    if (args.byte_data && args.byte_data.len) {
+      array = new Uint8Array(
+        this.memory.buffer,
+        args.byte_data.ptr,
+        args.byte_data.len,
+      );
+    } else {
+      array = new Float32Array(
+        this.memory.buffer,
+        args.data.ptr,
+        args.data.len,
+      );
+    }
     buf.length = array.length;
 
     gl.bindBuffer(gl.ARRAY_BUFFER, buf.gl_buf);
@@ -500,7 +567,7 @@ export class WasmWebGL extends WasmWebBrowser {
           attr.loc,
           attr.size,
           attr.gl_type,
-          false,
+          !!attr.normalized,
           attr.stride,
           attr.offset,
         );
@@ -529,7 +596,7 @@ export class WasmWebGL extends WasmWebBrowser {
           attr.loc,
           attr.size,
           attr.gl_type,
-          false,
+          !!attr.normalized,
           attr.stride,
           attr.offset,
         );
@@ -667,7 +734,7 @@ export class WasmWebGL extends WasmWebBrowser {
       gl.drawElementsInstanced(
         gl.TRIANGLES,
         indices,
-        gl.UNSIGNED_INT,
+        args.index_width === 2 ? gl.UNSIGNED_SHORT : gl.UNSIGNED_INT,
         0,
         instances,
       );
@@ -689,7 +756,7 @@ export class WasmWebGL extends WasmWebBrowser {
       gl.drawElementsInstanced(
         gl.TRIANGLES,
         indices,
-        gl.UNSIGNED_INT,
+        args.index_width === 2 ? gl.UNSIGNED_SHORT : gl.UNSIGNED_INT,
         0,
         instances,
       );
@@ -702,7 +769,7 @@ export class WasmWebGL extends WasmWebBrowser {
       gl.drawElementsInstanced(
         gl.TRIANGLES,
         indices,
-        gl.UNSIGNED_INT,
+        args.index_width === 2 ? gl.UNSIGNED_SHORT : gl.UNSIGNED_INT,
         0,
         instances,
       );

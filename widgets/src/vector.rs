@@ -1622,9 +1622,8 @@ impl Widget for Vector {
         if sw <= 0.0 || sh <= 0.0 {
             return DrawStep::done();
         }
+        let walk = cx.resolve_walk(walk, ResolveAt::BeforeBegin);
         let walk = Walk {
-            abs_pos: walk.abs_pos,
-            margin: walk.margin,
             width: match walk.width {
                 Size::Fit { .. } => Size::Fixed(sw),
                 other => other,
@@ -1633,7 +1632,7 @@ impl Widget for Vector {
                 Size::Fit { .. } => Size::Fixed(sh),
                 other => other,
             },
-            metrics: walk.metrics,
+            ..walk
         };
         let rect = cx.walk_turtle(walk);
         self.draw_svg.svg_doc = Some(std::mem::take(&mut self.doc));

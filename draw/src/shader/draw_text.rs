@@ -1,3 +1,12 @@
+//! Text clips like quads: per-instance clip ∩ list clip after the view transform.
+//!
+//! As in `DrawQuad::clip_and_transform_vertex`, `view_clip` is expressed in
+//! list coordinates (callers inverse-transform a screen clip), and applies
+//! after `view_shift`, before the matrix transform. All text vertex variants
+//! use that same intersection. Sampling uses the clipped vertex translated
+//! back by `view_shift`, relative to the original glyph rectangle; clipping
+//! crops glyphs without moving or stretching their atlas/curve coordinates.
+
 use {
     crate::{
         cx_2d::Cx2d,
@@ -7,7 +16,7 @@ use {
         text::{
             color::Color,
             font::FontId,
-            font_family::FontFamilyId,
+            font_family::{FontDiagnostics, FontFamilyId},
             fonts::Fonts,
             geom::{Point, Rect as TextRect, Size, Transform},
             layouter::{
@@ -138,7 +147,12 @@ fn register_draw_text_slug(vm: &mut ScriptVm) {
 
             vertex: fn() {
                 let p = mix(self.rect_pos, self.rect_pos + self.rect_size, self.geom.pos)
-                let p_clipped = clamp(p, self.draw_clip.xy, self.draw_clip.zw)
+                let p_clipped = clamp(
+                    clamp(p, self.draw_clip.xy, self.draw_clip.zw) + self.draw_list.view_shift,
+                    self.draw_list.view_clip.xy,
+                    self.draw_list.view_clip.zw
+                )
+                let p_sample = p_clipped - self.draw_list.view_shift
                 let pad_lpx = self.aa_pad_px / max(self.draw_pass.dpi_factor, 0.0001)
                 let content_rect_pos = self.rect_pos + vec2(pad_lpx, pad_lpx)
                 let content_rect_size = vec2(
@@ -146,8 +160,8 @@ fn register_draw_text_slug(vm: &mut ScriptVm) {
                     max(self.rect_size.y - 2.0 * pad_lpx, 0.0001)
                 )
                 self.pos = vec2(
-                    (p_clipped.x - content_rect_pos.x) / content_rect_size.x,
-                    (p_clipped.y - content_rect_pos.y) / content_rect_size.y
+                    (p_sample.x - content_rect_pos.x) / content_rect_size.x,
+                    (p_sample.y - content_rect_pos.y) / content_rect_size.y
                 )
                 self.world = self.draw_list.view_transform * vec4(
                     p_clipped.x,
@@ -583,8 +597,12 @@ script_mod! {
 
         vertex: fn() {
             let p = mix(self.rect_pos, self.rect_pos + self.rect_size, self.geom.pos)
-            let p_clipped = clamp(p, self.draw_clip.xy, self.draw_clip.zw)
-            let p_normalized = (p_clipped - self.rect_pos) / self.rect_size
+            let p_clipped = clamp(
+                clamp(p, self.draw_clip.xy, self.draw_clip.zw) + self.draw_list.view_shift,
+                self.draw_list.view_clip.xy,
+                self.draw_list.view_clip.zw
+            )
+            let p_normalized = (p_clipped - self.draw_list.view_shift - self.rect_pos) / self.rect_size
 
             self.pos = p_normalized
             self.t = mix(self.t_min, self.t_max, p_normalized.xy)
@@ -773,8 +791,12 @@ script_mod! {
             let use_slug = if self.texture_index > 2.5 {1.0} else {0.0}
 
             let p_raster = mix(self.rect_pos, self.rect_pos + self.rect_size, self.geom.pos)
-            let p_clipped_raster = clamp(p_raster, self.draw_clip.xy, self.draw_clip.zw)
-            let p_normalized_raster = (p_clipped_raster - self.rect_pos) / self.rect_size
+            let p_clipped_raster = clamp(
+                clamp(p_raster, self.draw_clip.xy, self.draw_clip.zw) + self.draw_list.view_shift,
+                self.draw_list.view_clip.xy,
+                self.draw_list.view_clip.zw
+            )
+            let p_normalized_raster = (p_clipped_raster - self.draw_list.view_shift - self.rect_pos) / self.rect_size
 
             let pad_lpx = self.aa_pad_px / max(self.draw_pass.dpi_factor, 0.0001)
             let content_rect_pos = self.rect_pos + vec2(pad_lpx, pad_lpx)
@@ -791,10 +813,15 @@ script_mod! {
                 vec2(1.0, 0.0)
             }
             let dilated = self.slug_dilate(p_slug, self.geom.pos, jac, normal)
-            let p_clipped_slug = clamp(dilated.zw, self.draw_clip.xy, self.draw_clip.zw)
+            let p_clipped_slug = clamp(
+                clamp(dilated.zw, self.draw_clip.xy, self.draw_clip.zw) + self.draw_list.view_shift,
+                self.draw_list.view_clip.xy,
+                self.draw_list.view_clip.zw
+            )
+            let p_sample_slug = p_clipped_slug - self.draw_list.view_shift
             let pos_slug = vec2(
-                dilated.x + (p_clipped_slug.x - dilated.z) * jac.x,
-                dilated.y + (p_clipped_slug.y - dilated.w) * jac.w
+                dilated.x + (p_sample_slug.x - dilated.z) * jac.x,
+                dilated.y + (p_sample_slug.y - dilated.w) * jac.w
             )
 
             self.pos = mix(p_normalized_raster, pos_slug, use_slug)
@@ -2163,6 +2190,7 @@ impl DrawText {
     }
 
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk, align: Align, text: &str) -> Rect {
+        let walk = cx.resolve_walk(walk, ResolveAt::BeforeBegin);
         let mut max_width_in_lpxs = self.max_layout_width_for_walk(cx, walk);
 
         // For Fit-width containers with a max bound, resolve the bound so that
@@ -2171,54 +2199,13 @@ impl DrawText {
         if max_width_in_lpxs.is_none()
             && (self.text_overflow == TextOverflow::Ellipsis || self.max_lines > 0)
         {
-            if let crate::turtle::Size::Fit {
-                max: Some(max_bound),
-                ..
-            } = walk.width
-            {
-                if let Some(resolved) = max_bound.eval_width(cx) {
-                    let turtle = cx.turtle();
-                    let padding = turtle.padding();
-                    // The bound limits this walk's margin box, so the text
-                    // itself gets the bound minus the walk's own horizontal
-                    // margins and the enclosing turtle's padding.
-                    let mut available =
-                        resolved - padding.left - padding.right - walk.margin.width();
-                    // When the enclosing turtle is itself an unresolved Fit
-                    // with a max bound (a Label sizing itself around this
-                    // text), its final width is clamped to the bound minus
-                    // its outer margins; the text must shrink by the same
-                    // amount, or the clamped clip slices off its tail.
-                    if turtle.width().is_nan()
-                        && matches!(
-                            turtle.walk().width,
-                            crate::turtle::Size::Fit { max: Some(_), .. }
-                        )
-                    {
-                        available -= turtle.walk().margin.width();
-                    }
-                    // The layouter works in unscaled units; rows are multiplied
-                    // by font_scale on output, so the bound must be divided by
-                    // it here, as max_layout_width_for_walk does.
-                    let available_in_lpxs =
-                        (available.max(0.0) as f32) / self.font_scale.max(0.0001);
-                    // A bound too narrow for even the truncation ellipsis is no
-                    // bound at all: the layouter appends the ellipsis glyph
-                    // unconditionally, so a narrower clip would slice it open.
-                    // Left unbounded, the text overflows honestly, which lets
-                    // an enclosing flow's inline-content clamp hide it and
-                    // draw the ellipsis itself.
-                    let below_ellipsis_width = self.text_overflow == TextOverflow::Ellipsis
-                        && available_in_lpxs
-                            < self
-                                .layout(cx, 0.0, 0.0, None, false, Align::default(), "…")
-                                .size_in_lpxs
-                                .width;
-                    if !below_ellipsis_width {
-                        max_width_in_lpxs = Some(available_in_lpxs);
-                    }
-                }
-            }
+            let ellipsis_width_in_lpxs = (self.text_overflow == TextOverflow::Ellipsis).then(|| {
+                self.layout(cx, 0.0, 0.0, None, false, Align::default(), "…")
+                    .size_in_lpxs
+                    .width
+            });
+            max_width_in_lpxs =
+                self.fit_layout_width_for_walk(cx, walk, ellipsis_width_in_lpxs);
         }
 
         let wrap = matches!(cx.turtle().layout().flow, Flow::Right { wrap: true, .. });
@@ -2228,12 +2215,39 @@ impl DrawText {
     }
 
     fn max_layout_width_for_walk(&self, cx: &mut Cx2d, walk: Walk) -> Option<f32> {
-        let width = cx.turtle().max_width(walk).or_else(|| {
-            let turtle_rect = cx.turtle().inner_rect();
-            (!turtle_rect.size.x.is_nan()).then_some(turtle_rect.size.x)
-        })?;
+        let width = cx
+            .turtle()
+            .max_width(walk)
+            .or_else(|| {
+                let turtle_rect = cx.turtle().inner_rect();
+                (!turtle_rect.size.x.is_nan()).then_some(turtle_rect.size.x)
+            })?;
 
         Some((width.max(0.0) as f32) / self.font_scale.max(0.0001))
+    }
+
+    fn fit_layout_width_for_walk(
+        &self,
+        cx: &Cx2d,
+        walk: Walk,
+        ellipsis_width_in_lpxs: Option<f32>,
+    ) -> Option<f32> {
+        if !walk.width.is_fit() {
+            return None;
+        }
+        let resolved = cx
+            .walk_max_width(walk)
+            .or_else(|| cx.current_turtle_max_width())?;
+        let padding = cx.turtle().padding();
+        let available_in_lpxs = ((resolved - padding.left - padding.right).max(0.0) as f32)
+            / self.font_scale.max(0.0001);
+        // A bound too narrow for even the truncation ellipsis is no bound at
+        // all. This lets an enclosing wrapped flow relocate or hide the run.
+        if ellipsis_width_in_lpxs.is_some_and(|ellipsis| available_in_lpxs < ellipsis) {
+            None
+        } else {
+            Some(available_in_lpxs)
+        }
     }
 
     pub fn draw_walk_laidout(
@@ -2245,6 +2259,7 @@ impl DrawText {
         use crate::text::geom::{Point, Size};
         use crate::turtle;
 
+        let walk = cx.resolve_walk(walk, ResolveAt::BeforeBegin);
         let size_in_lpxs = laidout_text.size_in_lpxs * self.font_scale;
         let max_size_in_lpxs = Size::new(
             cx.turtle()
@@ -2255,8 +2270,6 @@ impl DrawText {
                 .map_or(size_in_lpxs.height, |max_height| max_height as f32),
         );
         let turtle_rect = cx.walk_turtle(Walk {
-            abs_pos: walk.abs_pos,
-            margin: walk.margin,
             width: turtle::Size::Fixed(max_size_in_lpxs.width as f64),
             height: turtle::Size::Fixed(max_size_in_lpxs.height as f64),
             metrics: Metrics {
@@ -2264,6 +2277,7 @@ impl DrawText {
                 line_gap: 0.0,
                 line_scale: 1.0,
             },
+            ..walk
         });
 
         if self.debug {
@@ -2729,7 +2743,7 @@ impl DrawText {
         let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
         let mut fonts = fonts.borrow_mut();
 
-        fonts.get_or_layout(BorrowedLayoutParams {
+        let laidout = fonts.get_or_layout(BorrowedLayoutParams {
             text,
             style: Style {
                 font_family_id: self.text_style.font_family.to_font_family_id(),
@@ -2750,7 +2764,19 @@ impl DrawText {
                 },
                 ellipsis: self.text_overflow == TextOverflow::Ellipsis,
             },
-        })
+        });
+        drop(fonts);
+        let has_missing_glyph = laidout
+            .rows
+            .iter()
+            .flat_map(|row| &row.glyphs)
+            .any(|glyph| glyph.id == 0);
+        self.text_style.font_family.request_lazy_fonts_for_glyph_miss(
+            cx,
+            text,
+            has_missing_glyph,
+        );
+        laidout
     }
 
     fn draw_text(&mut self, cx: &mut Cx2d, origin_in_lpxs: Point<f32>, text: &LaidoutText) {
@@ -3426,6 +3452,10 @@ pub struct FontMember {
     /// Positive values map to the OpenType `wght` axis. `0.0` keeps the font default.
     #[live(0.0)]
     pub weight: f32,
+    /// `1` = CJK and `2` = emoji. These members are requested only after a
+    /// real glyph miss; zero keeps the ordinary eager behavior.
+    #[live(0.0)]
+    pub lazy: f32,
 }
 
 #[derive(Debug, Clone, Script, PartialEq)]
@@ -3434,14 +3464,20 @@ pub struct FontFamily {
     id: LiveId,
     #[rust]
     members: Vec<FontMemberDef>,
+    #[rust]
+    diagnostic_role: String,
+    #[rust]
+    diagnostic_set: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct FontMemberDef {
     handle: ScriptHandle,
+    id: String,
     asc: f32,
     desc: f32,
     weight: f32,
+    lazy: Option<LazyFontFamily>,
 }
 
 impl FontFamily {
@@ -3449,16 +3485,32 @@ impl FontFamily {
         (self.id.0).into()
     }
 
+    /// Stable logical member names in fallback order.
+    pub fn member_ids(&self) -> impl ExactSizeIterator<Item = &str> {
+        self.members.iter().map(|member| member.id.as_str())
+    }
+
     fn update_font_definitions(&self, cx: &mut Cx, fonts: &mut Fonts) {
         let mut font_ids = Vec::new();
+        let mut expected_member_count = 0;
+        let family_id = self.to_font_family_id();
 
         for member in &self.members {
+            if let Some(lazy) = member.lazy {
+                if !fonts.lazy_font_is_requested(family_id, lazy) {
+                    continue;
+                }
+            }
+            expected_member_count += 1;
             let font_id = font_member_font_id(member);
 
             if !fonts.is_font_known(font_id) {
                 let font_data = cx.get_resource_font_bytes(member.handle);
 
                 if let Some(data) = font_data {
+                    if let Some(family) = member.lazy {
+                        log!("lazy font family loaded: {:?} ({})", family, member.id);
+                    }
                     fonts.define_font(
                         font_id,
                         FontDefinition {
@@ -3479,10 +3531,24 @@ impl FontFamily {
         }
 
         fonts.set_font_family_definition(
-            self.to_font_family_id(),
+            family_id,
             FontFamilyDefinition {
                 font_ids,
-                expected_member_count: self.members.len(),
+                expected_member_count,
+                diagnostics: FontDiagnostics {
+                    role: self.diagnostic_role.clone(),
+                    set: self.diagnostic_set.clone(),
+                    tried: self
+                        .members
+                        .iter()
+                        .filter(|member| {
+                            member
+                                .lazy
+                                .map_or(true, |lazy| fonts.lazy_font_is_requested(family_id, lazy))
+                        })
+                        .map(|member| member.id.clone())
+                        .collect(),
+                },
             },
         );
     }
@@ -3492,26 +3558,87 @@ impl FontFamily {
 
         let family_id = self.to_font_family_id();
         let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
+        let expected_member_count = {
+            let fonts_ref = fonts.borrow();
+            self.members
+                .iter()
+                .filter(|member| {
+                    member
+                        .lazy
+                        .map_or(true, |lazy| fonts_ref.lazy_font_is_requested(family_id, lazy))
+                })
+                .count()
+        };
 
         {
             let fonts_ref = fonts.borrow();
-            if fonts_ref.is_font_family_complete(family_id) {
+            if fonts_ref.is_font_family_complete(family_id, expected_member_count) {
                 return;
             }
         }
 
-        for member in &self.members {
-            cx.load_script_resource(member.handle);
+        let handles = {
+            let fonts_ref = fonts.borrow();
+            self.members
+                .iter()
+                .filter(|member| {
+                    member
+                        .lazy
+                        .map_or(true, |lazy| fonts_ref.lazy_font_is_requested(family_id, lazy))
+                })
+                .map(|member| member.handle)
+                .collect::<Vec<_>>()
+        };
+        for handle in handles {
+            cx.load_script_resource(handle);
         }
         {
             let fonts_ref = fonts.borrow();
-            if fonts_ref.is_font_family_complete(family_id) {
+            if fonts_ref.is_font_family_complete(family_id, expected_member_count) {
                 return;
             }
         }
 
         let mut fonts_ref = fonts.borrow_mut();
         self.update_font_definitions(cx, &mut fonts_ref);
+    }
+
+    fn request_lazy_fonts_for_glyph_miss(
+        &self,
+        cx: &mut Cx,
+        text: &str,
+        has_missing_glyph: bool,
+    ) {
+        let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
+        let family_id = self.to_font_family_id();
+        let handles = {
+            let mut fonts_ref = fonts.borrow_mut();
+            self.members
+                .iter()
+                .filter_map(|member| {
+                    let family = member.lazy?;
+                    fonts_ref
+                        .take_lazy_font_request(
+                            family_id,
+                            family,
+                            text,
+                            has_missing_glyph,
+                        )
+                        .then_some(member.handle)
+                })
+                .collect::<Vec<_>>()
+        };
+        if handles.is_empty() {
+            return;
+        }
+        for handle in handles {
+            cx.load_script_resource(handle);
+        }
+
+        self.update_font_definitions(cx, &mut fonts.borrow_mut());
+        // Native file reads may have completed above; wasm will redraw again
+        // when the HTTP response populates the resource.
+        cx.redraw_all();
     }
 }
 
@@ -3574,6 +3701,18 @@ impl ScriptHook for FontFamily {
         // Use the object index as the unique id
         self.id = LiveId(obj.index() as u64);
         self.members.clear();
+        let selected_set = vm.cx().font_set().as_str().to_string();
+        let map = vm.bx.heap.map_ref(obj);
+        self.diagnostic_role = map
+            .get(&id!(_font_role).into())
+            .and_then(|entry| entry.value.as_id())
+            .and_then(|id| id.as_string(|name| name.map(str::to_owned)))
+            .unwrap_or_else(|| "custom".to_string());
+        self.diagnostic_set = map
+            .get(&id!(_font_set).into())
+            .and_then(|entry| entry.value.as_id())
+            .and_then(|id| id.as_string(|name| name.map(str::to_owned)))
+            .unwrap_or(selected_set);
 
         let len = vm.bx.heap.vec_len(obj);
         for i in 0..len {
@@ -3582,9 +3721,19 @@ impl ScriptHook for FontFamily {
             if let Some(ref handle_ref) = member.res {
                 self.members.push(FontMemberDef {
                     handle: handle_ref.as_handle(),
+                    id: kv
+                        .key
+                        .as_id()
+                        .and_then(|id| id.as_string(|name| name.map(str::to_owned)))
+                        .unwrap_or_else(|| format!("resource_{}", handle_ref.as_handle().index())),
                     asc: member.asc,
                     desc: member.desc,
                     weight: member.weight,
+                    lazy: match member.lazy as u32 {
+                        1 => Some(LazyFontFamily::Cjk),
+                        2 => Some(LazyFontFamily::Emoji),
+                        _ => None,
+                    },
                 });
             }
         }
@@ -3600,17 +3749,84 @@ impl ScriptHook for FontFamily {
 
 #[cfg(test)]
 mod tests {
-    use super::DrawText;
+    use super::{DrawText, TextOverflow};
+    use crate::{
+        cx_2d::Cx2d,
+        cx_draw::CxDraw,
+        makepad_platform::{dvec2, Cx, DrawEvent, Inset, ScriptNew},
+        turtle::{FitBound, Layout, Size, Walk},
+    };
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     use super::{register_draw_text_slug, DrawTextSlug};
     #[cfg(any(target_os = "linux", target_os = "windows"))]
-    use crate::makepad_platform::{live_id, LiveId, ScriptNew, ScriptVmCx};
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
-    use crate::makepad_platform::{vec4, Cx};
+    use crate::makepad_platform::{live_id, vec4, LiveId, ScriptVmCx};
 
     #[test]
     fn draw_text_size_stays_16_byte_aligned() {
         assert_eq!(std::mem::size_of::<DrawText>() % 16, 0);
+    }
+
+    #[test]
+    fn ellipsis_fit_bound_keeps_the_below_ellipsis_relocation_path() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut draw_text = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            DrawText::script_new_with_default(vm)
+        });
+        draw_text.text_overflow = TextOverflow::Ellipsis;
+        draw_text.font_scale = 1.0;
+
+        let event = DrawEvent::default();
+        let mut draw = CxDraw::new(&mut cx, &event);
+        let mut cx = Cx2d::new(&mut draw);
+        cx.begin_root_turtle(dvec2(300.0, 100.0), Layout::default());
+        cx.begin_turtle(
+            Walk {
+                width: Size::Fit {
+                    min: None,
+                    max: Some(FitBound::Abs(120.0)),
+                },
+                height: Size::fit(),
+                ..Default::default()
+            },
+            Layout::default().with_padding_left(5.0).with_padding_right(5.0),
+        );
+
+        // Label folds its padding into this margin before forwarding the walk.
+        let walk = Walk {
+            margin: Inset {
+                left: 10.0,
+                right: 10.0,
+                ..Default::default()
+            },
+            width: Size::Fit {
+                min: None,
+                max: Some(FitBound::Abs(100.0)),
+            },
+            height: Size::fit(),
+            ..Default::default()
+        };
+        assert_eq!(draw_text.max_layout_width_for_walk(&mut cx, walk), None);
+        // The Size::Fit max is a margin-box limit: walk_max_width removes the
+        // 20px label margin, then the enclosing turtle's padding is removed once.
+        assert_eq!(
+            draw_text.fit_layout_width_for_walk(&cx, walk, Some(60.0)),
+            Some(70.0)
+        );
+        // Leaving this unbounded is what keeps the enclosing flow's relocation
+        // and hide-then-ellipsis behavior reachable.
+        assert_eq!(
+            draw_text.fit_layout_width_for_walk(&cx, walk, Some(80.0)),
+            None
+        );
+
+        let current_bound_fallback = Walk::fit();
+        assert_eq!(
+            draw_text.fit_layout_width_for_walk(&cx, current_bound_fallback, None),
+            Some(110.0)
+        );
+        cx.end_turtle();
+        cx.end_turtle();
     }
 
     #[cfg(any(target_os = "linux", target_os = "windows"))]

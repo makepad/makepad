@@ -320,6 +320,9 @@ impl Cx {
                     continue;
                 };
 
+                if self.geometries.skip_stale(geometry_id) {
+                    continue;
+                }
                 let geometry = &mut self.geometries[geometry_id];
 
                 if geometry.dirty_vertices || geometry.os.vertex_buffer.inner.is_none() {
@@ -1200,24 +1203,40 @@ impl Cx {
         metal_cx: &MetalCx,
         command_buffer: ObjcId,
         kind_id: usize,
-        width: usize,
-        height: usize,
+        expected_width: usize,
+        expected_height: usize,
         in_texture: ObjcId,
-        alloc: Option<TextureAlloc>,
+        _alloc: Option<TextureAlloc>,
         window_id: Option<usize>,
     ) -> Option<ScreenshotInfo> {
         let request_ids =
             self.take_studio_screenshot_request_ids_for_window(kind_id as u32, window_id);
-        let (tex_width, tex_height) = if let Some(alloc) = alloc {
-            (alloc.width, alloc.height)
-        } else {
-            (width, height)
-        };
         // A pending grab/probe request, or a screen-capture sink that is due a
         // frame for this window: either way the drawable has to be blitted into
         // a shared texture before it is presented.
         let wants_capture = crate::screen_capture::capture_wants_window(window_id);
         if !request_ids.is_empty() || wants_capture {
+            // `copyFromTexture:toTexture:` copies complete mip levels and Metal
+            // requires their dimensions to match exactly. During a live resize
+            // the pass rectangle can lag the CAMetalDrawable by a frame, so
+            // sizing this staging texture from `pass_rect` made a remote grab
+            // abort in MTLPickLargestMip. The source MTLTexture is authoritative:
+            // allocate and report the capture at its actual dimensions.
+            let tex_width: usize = unsafe { msg_send![in_texture, width] };
+            let tex_height: usize = unsafe { msg_send![in_texture, height] };
+            if tex_width == 0 || tex_height == 0 {
+                crate::error!("screenshot source texture has zero size");
+                return None;
+            }
+            if tex_width != expected_width || tex_height != expected_height {
+                crate::log!(
+                    "screenshot source is {}x{}, pass expected {}x{}",
+                    tex_width,
+                    tex_height,
+                    expected_width,
+                    expected_height
+                );
+            }
             let descriptor = RcObjcId::from_owned(
                 NonNull::new(unsafe { msg_send![class!(MTLTextureDescriptor), new] }).unwrap(),
             );
@@ -1247,8 +1266,8 @@ impl Cx {
             };
             return Some(ScreenshotInfo {
                 request_ids,
-                width: width as _,
-                height: height as _,
+                width: tex_width as _,
+                height: tex_height as _,
                 window_id,
                 texture,
             });
@@ -2330,10 +2349,14 @@ impl DrawVars {
         // 3. Check code cache (different functions but identical generated code)
 
         if let Some(io_self) = value.as_object() {
+            // The object cache is keyed by HEAP as well as object: a splash
+            // isolate has its own heap, and an object index there says
+            // nothing about the same index in the app heap.
+            let heap_key = vm.bx.heap.heap_key();
             // Cache 1: Check if this exact object has been compiled before
             {
                 let cx = vm.host.cx();
-                if let Some(&shader_id) = cx.draw_shaders.cache_object_id_to_shader.get(&io_self) {
+                if let Some(&shader_id) = cx.draw_shaders.cache_object_id_to_shader.get(&(heap_key, io_self)) {
                     // log!("Shader cache HIT (object_id)");
                     self.finalize_cached_shader(vm, shader_id);
                     return;
@@ -2349,7 +2372,7 @@ impl DrawVars {
                     let cx = vm.host.cx_mut();
                     cx.draw_shaders
                         .cache_object_id_to_shader
-                        .insert(io_self, shader_id);
+                        .insert((heap_key, io_self), shader_id);
                     self.finalize_cached_shader(vm, shader_id);
                     return;
                 }
@@ -2442,7 +2465,7 @@ impl DrawVars {
                     let cx = vm.host.cx_mut();
                     cx.draw_shaders
                         .cache_object_id_to_shader
-                        .insert(io_self, shader_id);
+                        .insert((heap_key, io_self), shader_id);
                     cx.draw_shaders
                         .cache_functions_to_shader
                         .insert(fnhash, shader_id);
@@ -2501,7 +2524,7 @@ impl DrawVars {
             // Add to all caches
             cx.draw_shaders
                 .cache_object_id_to_shader
-                .insert(io_self, shader_id);
+                .insert((heap_key, io_self), shader_id);
             cx.draw_shaders
                 .cache_functions_to_shader
                 .insert(fnhash, shader_id);
