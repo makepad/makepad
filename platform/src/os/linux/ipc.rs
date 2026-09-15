@@ -225,107 +225,186 @@ mod sys {
 
     pub(super) fn stream_sendmsg<const FD_LEN: usize>(
         stream: &UnixStream,
-        mut bytes: io::IoSlice<'_>,
+        bytes: io::IoSlice<'_>,
         fds: &[BorrowedFd<'_>; FD_LEN],
     ) -> io::Result<()> {
-        let mut cmsg_buf = CMsgBuf {
-            header: cmsghdr {
-                cmsg_len: std::mem::size_of::<cmsghdr>() + FD_LEN * 4,
-                cmsg_level: SOL_SOCKET,
-                cmsg_type: SCM_RIGHTS,
-            },
+        use std::io::Write;
+        const MSG_NOSIGNAL: c_int = 0x4000;
+        // Send descriptors exactly once with one byte. Remaining bytes can
+        // fragment without losing their association or duplicating handles.
+        let prefix = [bytes.first().copied().unwrap_or(0)];
+        let mut iov = io::IoSlice::new(&prefix);
+        let mut control = CMsgBuf {
+            header: cmsghdr { cmsg_len: std::mem::size_of::<cmsghdr>() + FD_LEN * 4,
+                cmsg_level: SOL_SOCKET, cmsg_type: SCM_RIGHTS },
             fds: *fds,
         };
-
-        let written_len = unsafe {
-            sendmsg(
-                stream.as_fd(),
-                &msghdr {
-                    msg_name: ptr::null_mut(),
-                    msg_namelen: 0,
-                    msg_iov: &mut bytes,
-                    msg_iovlen: 1,
-                    msg_control: &mut cmsg_buf as *mut _ as *mut _,
-                    msg_controllen: std::mem::size_of_val(&cmsg_buf),
-                    msg_flags: 0,
-                },
-                0,
-            )
-        };
-        if written_len == -1 {
-            return Err(io::Error::last_os_error());
-        }
-        if written_len as usize != bytes.len() {
-            return Err(io_error_other(format!(
-                "partial write (only {written_len} out of {})",
-                bytes.len()
-            )));
-        }
-        Ok(())
+        let message = msghdr { msg_name: ptr::null_mut(), msg_namelen: 0,
+            msg_iov: &mut iov, msg_iovlen: 1, msg_control: &mut control as *mut _ as *mut _,
+            msg_controllen: std::mem::size_of_val(&control), msg_flags: 0 };
+        let result = (|| {
+            loop {
+                match unsafe { sendmsg(stream.as_fd(), &message, MSG_NOSIGNAL) } {
+                    1 => break,
+                    -1 => {
+                        let error = io::Error::last_os_error();
+                        if error.kind() != io::ErrorKind::Interrupted { return Err(error); }
+                    }
+                    _ => return Err(io::Error::new(io::ErrorKind::WriteZero, "auxiliary prefix write failed")),
+                }
+            }
+            (&*stream).write_all(bytes.get(1..).unwrap_or_default())
+        })();
+        if result.is_err() { let _ = stream.shutdown(std::net::Shutdown::Both); }
+        result
     }
 
     pub(super) fn stream_recvmsg<const FD_LEN: usize>(
         stream: &UnixStream,
         mut bytes: io::IoSliceMut<'_>,
     ) -> io::Result<[OwnedFd; FD_LEN]> {
-        let expected_len = bytes.len();
-
-        let mut cmsg_buf = std::mem::MaybeUninit::<CMsgBuf<Option<OwnedFd>, FD_LEN>>::zeroed();
-        let expected_cmsg_len = std::mem::size_of::<cmsghdr>() + FD_LEN * 4;
-        let expected_msg_controllen = std::mem::size_of_val(&cmsg_buf);
-
-        let mut msg = msghdr {
-            msg_name: ptr::null_mut(),
-            msg_namelen: 0,
-            msg_iov: &mut bytes,
-            msg_iovlen: 1,
-            msg_control: &mut cmsg_buf as *mut _ as *mut _,
-            msg_controllen: expected_msg_controllen,
-            msg_flags: 0,
-        };
-
-        let read_len = unsafe { recvmsg(stream.as_fd(), &mut msg, 0) };
-        if read_len == -1 {
-            return Err(io::Error::last_os_error());
-        }
-
-        // FIXME(eddyb) all of these errors should close fds to prevent fd DOS,
-        // but for now this is not particularly a notable surface of attack.
-
-        if read_len as usize != expected_len {
-            return Err(io_error_other(format!(
-                "partial read: only {read_len} out of {expected_len}"
-            )));
-        }
-
-        if msg.msg_controllen != expected_msg_controllen {
-            return Err(io_error_other(format!(
-                "recvmsg msg_controllen mismatch: got {}, expected {expected_msg_controllen}",
-                msg.msg_controllen,
-            )));
-        }
-
-        let cmsg = unsafe { cmsg_buf.assume_init() };
-        if cmsg.header.cmsg_len != expected_cmsg_len {
-            return Err(io_error_other(format!(
-                "recvmsg cmsg_len mismatch: got {}, expected {expected_cmsg_len}",
-                cmsg.header.cmsg_len
-            )));
-        }
-
-        if (cmsg.header.cmsg_level, cmsg.header.cmsg_type) != (SOL_SOCKET, SCM_RIGHTS) {
-            return Err(io_error_other(format!("unsupported non-SCM_RIGHTS CMSG")));
-        }
-
-        if cmsg.fds.iter().any(|fd| fd.is_none()) {
-            return Err(io_error_other(format!("recvmsg got invalid (-1) fds")));
-        }
-
-        Ok(cmsg.fds.map(Option::unwrap))
+        use std::{io::Read, os::fd::FromRawFd};
+        const MSG_CMSG_CLOEXEC: c_int = 0x40000000;
+        const MSG_CTRUNC: c_int = 8;
+        const MSG_TRUNC: c_int = 0x20;
+        // Raw integers until validated; constructing an Option<OwnedFd>
+        // directly over unvalidated ancillary bytes could close a wrong FD.
+        let mut control = [0usize; 64];
+        let mut prefix = [0u8];
+        let capacity = std::mem::size_of_val(&control);
+        let result = (|| {
+            let mut iov = io::IoSliceMut::new(&mut prefix);
+            let mut message = msghdr { msg_name: ptr::null_mut(), msg_namelen: 0,
+                msg_iov: &mut iov, msg_iovlen: 1, msg_control: control.as_mut_ptr().cast(),
+                msg_controllen: capacity, msg_flags: 0 };
+            loop {
+                message.msg_controllen = capacity;
+                message.msg_flags = 0;
+                match unsafe { recvmsg(stream.as_fd(), &mut message, MSG_CMSG_CLOEXEC) } {
+                    1 => break,
+                    -1 => {
+                        let error = io::Error::last_os_error();
+                        if error.kind() != io::ErrorKind::Interrupted { return Err(error); }
+                    }
+                    _ => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "auxiliary descriptor channel closed")),
+                }
+            }
+            let mut owned: Vec<OwnedFd> = Vec::new();
+            let mut malformed = message.msg_flags & (MSG_CTRUNC | MSG_TRUNC) != 0;
+            let header_size = std::mem::size_of::<cmsghdr>();
+            let length = message.msg_controllen.min(capacity);
+            malformed |= message.msg_controllen > capacity;
+            let mut offset = 0usize;
+            while offset + header_size <= length {
+                let header = unsafe { &*control.as_ptr().cast::<u8>().add(offset).cast::<cmsghdr>() };
+                if header.cmsg_len < header_size || header.cmsg_len > length - offset {
+                    malformed = true;
+                    break;
+                }
+                if header.cmsg_level == SOL_SOCKET && header.cmsg_type == SCM_RIGHTS {
+                    let data_len = header.cmsg_len - header_size;
+                    malformed |= data_len % 4 != 0;
+                    for index in 0..data_len / 4 {
+                        let raw = unsafe { control.as_ptr().cast::<u8>().add(offset + header_size + index * 4).cast::<c_int>().read() };
+                        if raw < 0 { malformed = true; }
+                        else { owned.push(unsafe { OwnedFd::from_raw_fd(raw) }); }
+                    }
+                } else { malformed = true; }
+                offset += header.cmsg_len.next_multiple_of(std::mem::size_of::<usize>());
+            }
+            if malformed || owned.len() != FD_LEN {
+                return Err(io_error_other(format!("invalid auxiliary descriptors: received {}, expected {FD_LEN}", owned.len())));
+            }
+            // OwnedFd closes every accepted descriptor if the byte tail is
+            // truncated. Never retry a partially consumed transaction.
+            if let Some(first) = bytes.first_mut() { *first = prefix[0]; }
+            (&*stream).read_exact(bytes.get_mut(1..).unwrap_or_default())?;
+            owned.try_into().map_err(|_| io_error_other("auxiliary FD count changed"))
+        })();
+        if result.is_err() { let _ = stream.shutdown(std::net::Shutdown::Both); }
+        result
     }
+
 }
 
 impl<TX, RX> Channel<TX, RX> {
+    /// Worker-side AF_UNIX connect with bounded cancellation, including a
+    /// full listener backlog. A blocking UnixStream::connect cannot provide
+    /// that guarantee merely by checking a deadline between attempts.
+    pub fn connect_cancellable(path: &std::path::Path, stop: &std::sync::atomic::AtomicBool,
+        timeout: std::time::Duration) -> io::Result<Self> {
+        use std::{os::{fd::FromRawFd, unix::ffi::OsStrExt}, sync::atomic::Ordering, time::{Duration, Instant}};
+        #[repr(C)]
+        struct Address { family: u16, path: [u8; 108] }
+        use crate::os::linux::v4l2_sys::{poll, pollfd};
+        extern "C" {
+            fn socket(domain: i32, kind: i32, protocol: i32) -> i32;
+            fn connect(fd: i32, address: *const Address, length: u32) -> i32;
+        }
+        let bytes = path.as_os_str().as_bytes();
+        if bytes.is_empty() || bytes.len() >= 108 || bytes.contains(&0) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid auxiliary socket path"));
+        }
+        let mut address = Address { family: 1, path: [0; 108] };
+        address.path[..bytes.len()].copy_from_slice(bytes);
+        let deadline = Instant::now() + timeout;
+        let stopped = || {
+            if stop.load(Ordering::Acquire) {
+                Err(io::Error::new(io::ErrorKind::Interrupted, "auxiliary connect cancelled"))
+            } else if Instant::now() >= deadline {
+                Err(io::Error::new(io::ErrorKind::TimedOut, "auxiliary connect timed out"))
+            } else { Ok(()) }
+        };
+        loop {
+            stopped()?;
+            let raw = unsafe { socket(1, 1 | 0x800 | 0x80000, 0) };
+            if raw < 0 { return Err(io::Error::last_os_error()); }
+            let stream = unsafe { UnixStream::from_raw_fd(raw) };
+            let result = unsafe { connect(raw, &address, (2 + bytes.len() + 1) as u32) };
+            if result == 0 {
+                stream.set_nonblocking(false)?;
+                return Ok(Self { stream, _marker: PhantomData });
+            }
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(115) { // EINPROGRESS
+                loop {
+                    stopped()?;
+                    let mut fd = pollfd { fd: raw, events: 4, revents: 0 };
+                    match unsafe { poll(&mut fd, 1, 5) } {
+                        0 => continue,
+                        -1 => {
+                            let error = io::Error::last_os_error();
+                            if error.kind() == io::ErrorKind::Interrupted { continue; }
+                            return Err(error);
+                        }
+                        _ => {
+                            if let Some(error) = stream.take_error()? { return Err(error); }
+                            stream.peer_addr()?;
+                            stream.set_nonblocking(false)?;
+                            return Ok(Self { stream, _marker: PhantomData });
+                        }
+                    }
+                }
+            }
+            if !matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                | io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock) { return Err(error); }
+            drop(stream);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    pub fn try_clone(&self) -> io::Result<Self> {
+        Ok(Self { stream: self.stream.try_clone()?, _marker: PhantomData })
+    }
+    pub fn set_read_timeout(&self, timeout: Option<std::time::Duration>) -> io::Result<()> {
+        self.stream.set_read_timeout(timeout)
+    }
+    /// Interrupt a worker-owned transaction during shutdown. A cloned handle
+    /// is only for cancellation: exactly one reader and one writer may frame
+    /// transactions on a stream, including across cloned endpoints.
+    pub fn shutdown(&self) -> io::Result<()> {
+        self.stream.shutdown(std::net::Shutdown::Both)
+    }
     pub fn send<const TX_BYTE_LEN: usize, const TX_FD_LEN: usize>(&self, msg: TX) -> io::Result<()>
     where
         TX: FixedSizeEncoding<TX_BYTE_LEN, TX_FD_LEN>,
@@ -410,11 +489,9 @@ impl<TX, RX> InheritableChannel<TX, RX> {
 /// or receive on its opposite counterpart, if that direction is unused.
 pub enum Never {}
 
-/// Encoding/decoding functionality that relies on each message being
-/// encoded to a constant (and small) "packet" size, allowing the use
-/// of 1:1 `sendmsg` and `recvmsg` calls, i.e. removing the need for
-/// any kind of "packet framing" that a `SOCK_STREAM` needs to soundly
-/// handle receiving a message's fds through multiple `recvmsg` calls.
+/// Fixed-size payloads. The stable transport associates descriptors with
+/// exactly one prefix byte, then completes the remaining payload across any
+/// stream fragmentation. A descriptor-only payload uses a zero prefix byte.
 //
 // HACK(eddyb) using const generics instead of associated consts
 // only to be able to use the compile-time constants in array types.

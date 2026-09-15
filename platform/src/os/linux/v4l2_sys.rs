@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 use std::os::raw::{c_char, c_int, c_long, c_short, c_ulong, c_void};
+pub use super::libc_sys::ioctl;
 
 // ioctl direction bits
 const IOC_NONE: u32 = 0;
@@ -335,7 +336,6 @@ pub const VIDIOC_ENUM_FRAMEINTERVALS: c_ulong = ioc(
 // --- extern "C" ---
 
 extern "C" {
-    pub fn ioctl(fd: c_int, request: c_ulong, arg: *mut c_void) -> c_int;
     pub fn poll(fds: *mut pollfd, nfds: c_ulong, timeout: c_int) -> c_int;
     pub fn inotify_init1(flags: c_int) -> c_int;
     pub fn inotify_add_watch(fd: c_int, pathname: *const c_char, mask: u32) -> c_int;

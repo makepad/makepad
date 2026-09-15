@@ -125,6 +125,31 @@ fn wgsl_packed_component(prefix: &str, slot: usize) -> String {
     format!("{prefix}{vec_idx}.{comp}")
 }
 
+/// Physical 32-bit words an attribute occupies in the vertex/instance fetch
+/// record: a compact (`Packed`) leaf is one raw word (two for `F16x4`), the
+/// same bytes `DrawShaderInputs` lays out on the CPU. Every other type keeps
+/// its f32-lane slot count.
+fn wgsl_attribute_words(ty: &ScriptPodTy) -> usize {
+    match ty {
+        ScriptPodTy::Packed(p) => p.size_of() / 4,
+        _ => ty.slots(),
+    }
+}
+
+/// Logical f32 lanes a type occupies in the varying stream: a compact leaf
+/// travels unpacked (`vec2f` / `vec4f`), so a struct with compact members is
+/// the sum of its leaves rather than its byte size.
+fn wgsl_varying_slots(ty: &ScriptPodTy) -> usize {
+    match ty {
+        ScriptPodTy::Packed(p) => p.logical_slots(),
+        ScriptPodTy::Struct { fields, .. } if ty.has_compact_format() => fields
+            .iter()
+            .map(|field| wgsl_varying_slots(&field.ty.data.ty))
+            .sum(),
+        _ => ty.slots(),
+    }
+}
+
 fn wgsl_push_field(
     output: &ShaderOutput,
     vm: &ScriptVm,
@@ -136,7 +161,11 @@ fn wgsl_push_field(
 ) {
     let io_name = output.backend.map_io_name(io.name);
     let pod_ty = vm.bx.heap.pod_type_ref(io.ty);
-    let slots = pod_ty.ty.slots();
+    let slots = if attribute_packing {
+        wgsl_attribute_words(&pod_ty.ty)
+    } else {
+        wgsl_varying_slots(&pod_ty.ty)
+    };
     let attr_format = if attribute_packing {
         wgsl_attr_format_from_pod_ty(&pod_ty.ty)
     } else {
@@ -287,10 +316,72 @@ fn wgsl_flatten_inline(
                 }
             }
         }
+        // A compact leaf is a logical vec2f / vec4f once fetched.
+        ScriptPodTy::Packed(p) => {
+            for comp in 0..p.logical_slots() {
+                let swizzle = wgsl_swizzle_component(comp);
+                out.push(format!("({expr}).{swizzle}"));
+            }
+        }
         scalar_ty => {
             out.push(wgsl_to_float_scalar_expr(scalar_ty, expr));
         }
     }
+}
+
+/// The unpack of one compact leaf. Attributes arrive as raw f32 bit
+/// carriers (one word, two for `F16x4`); varyings carry the logical floats.
+fn wgsl_reconstruct_packed(
+    packed: crate::pod::ScriptPodPacked,
+    source: WgslPackedSource,
+    scalars: &[String],
+    scalar_index: &mut usize,
+) -> String {
+    use crate::pod::ScriptPodPacked;
+    match source {
+        WgslPackedSource::NumericFloat => {
+            let dims = packed.logical_slots();
+            let comps = (0..dims)
+                .map(|_| wgsl_take_scalar_or_zero(scalars, scalar_index))
+                .collect::<Vec<_>>();
+            let ty = if packed.is_vec4() { "vec4f" } else { "vec2f" };
+            format!("{}({})", ty, comps.join(", "))
+        }
+        WgslPackedSource::BitPackedFloat => {
+            let w0 = wgsl_take_scalar_or_zero(scalars, scalar_index);
+            match packed {
+                ScriptPodPacked::F16x4 => {
+                    let w1 = wgsl_take_scalar_or_zero(scalars, scalar_index);
+                    format!("_mp_unpack_f16x4({w0}, {w1})")
+                }
+                ScriptPodPacked::F16x2 => format!("_mp_unpack2f16({w0})"),
+                ScriptPodPacked::U16x2 => format!("_mp_unpack_u16x2({w0})"),
+                ScriptPodPacked::I16x2 => format!("_mp_unpack_i16x2({w0})"),
+                ScriptPodPacked::U16x2Norm => format!("_mp_unpack_unorm16x2({w0})"),
+                ScriptPodPacked::I16x2Norm => format!("_mp_unpack_snorm16x2({w0})"),
+                ScriptPodPacked::U8x4Norm => format!("_mp_unpack4u8({w0})"),
+                ScriptPodPacked::I8x4Norm => format!("_mp_unpack_snorm8x4({w0})"),
+            }
+        }
+    }
+}
+
+/// The preamble helpers the compact leaf unpacks call, beyond the two
+/// `unpack2f16` / `unpack4u8` builtins every shader already gets. Same
+/// results as the CPU decode in `DrawShaderAttrFormat::decode_to_f32`
+/// (snorm clamps at -1).
+const WGSL_PACKED_UNPACK_HELPERS: &str = "\
+fn _mp_unpack_f16x4(a: f32, b: f32) -> vec4<f32> { return vec4<f32>(unpack2x16float(bitcast<u32>(a)), unpack2x16float(bitcast<u32>(b))); }\n\
+fn _mp_unpack_u16x2(x: f32) -> vec2<f32> { let w = bitcast<u32>(x); return vec2<f32>(f32(w & 0xffffu), f32(w >> 16u)); }\n\
+fn _mp_unpack_i16x2(x: f32) -> vec2<f32> { let w = bitcast<u32>(x); return vec2<f32>(f32(i32(w << 16u) >> 16u), f32(i32(w) >> 16u)); }\n\
+fn _mp_unpack_unorm16x2(x: f32) -> vec2<f32> { return unpack2x16unorm(bitcast<u32>(x)); }\n\
+fn _mp_unpack_snorm16x2(x: f32) -> vec2<f32> { return unpack2x16snorm(bitcast<u32>(x)); }\n\
+fn _mp_unpack_snorm8x4(x: f32) -> vec4<f32> { return unpack4x8snorm(bitcast<u32>(x)); }\n";
+
+fn wgsl_fields_have_compact(vm: &ScriptVm, fields: &[WgslPackedField]) -> bool {
+    fields
+        .iter()
+        .any(|field| vm.bx.heap.pod_type_ref(field.ty).ty.has_compact_format())
 }
 
 fn wgsl_flatten_exprs(
@@ -361,6 +452,7 @@ fn wgsl_reconstruct_inline(
                 comps.join(", ")
             )
         }
+        ScriptPodTy::Packed(p) => wgsl_reconstruct_packed(*p, source, scalars, scalar_index),
         scalar_ty => {
             let scalar = wgsl_take_scalar_or_zero(scalars, scalar_index);
             wgsl_convert_scalar_expr(source, scalar_ty, &scalar)
@@ -393,10 +485,21 @@ fn build_draw_shader_wgsl(
     xr_multiview: bool,
 ) -> (String, u32, u32, u32, u32) {
     let mut out = String::new();
+    // Packed path geometry travels through f32 attributes as raw bits, just
+    // like the Metal/GLSL/HLSL paths. Decode before interpolating its values.
+    out.push_str(
+        "fn _mp_unpack2f16(x: f32) -> vec2<f32> { return unpack2x16float(bitcast<u32>(x)); }\n\
+fn _mp_unpack4u8(x: f32) -> vec4<f32> { return unpack4x8unorm(bitcast<u32>(x)); }\n",
+    );
 
     let geometry_fields = wgsl_collect_geometry_fields(output, vm);
     let instance_fields = wgsl_collect_instance_fields(output, vm);
     let varying_fields = wgsl_collect_varying_fields(output, vm);
+    if wgsl_fields_have_compact(vm, &geometry_fields)
+        || wgsl_fields_have_compact(vm, &instance_fields)
+    {
+        out.push_str(WGSL_PACKED_UNPACK_HELPERS);
+    }
     let varying_slots = varying_fields
         .last()
         .map(|field| field.offset + field.slots)

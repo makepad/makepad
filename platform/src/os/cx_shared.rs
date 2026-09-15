@@ -696,6 +696,21 @@ impl Cx {
     /// screenshot, widget dump, and kill. Returns true on Kill (caller should
     /// shut down). Callers handle stdin-specific variants (Swapchain,
     /// WindowGeomChange, Tick) before delegating here.
+    /// A host-forwarded pointer position — host logical points, relative to
+    /// the host's origin — as the app's layout sees it: relative to the
+    /// window, then through the window's dpi override (a native window's
+    /// events take the same remap in the platform callbacks).
+    pub(crate) fn stdin_pointer_abs(
+        &self,
+        host: crate::makepad_math::DVec2,
+        window_pos: crate::makepad_math::DVec2,
+        window_id: crate::window::WindowId,
+    ) -> crate::makepad_math::DVec2 {
+        let mut abs = crate::makepad_math::dvec2(host.x - window_pos.x, host.y - window_pos.y);
+        self.dpi_override_scale(&mut abs, window_id);
+        abs
+    }
+
     pub fn dispatch_studio_msg(
         &mut self,
         msg: StudioToApp,
@@ -709,7 +724,7 @@ impl Cx {
                 // must become key before its drag starts.
                 self.activate_window_on_pointer_down(window_id);
                 let event = crate::event::MouseDownEvent {
-                    abs: crate::makepad_math::dvec2(e.x - pos.x, e.y - pos.y),
+                    abs: self.stdin_pointer_abs(crate::makepad_math::dvec2(e.x, e.y), pos, window_id),
                     button: crate::event::MouseButton::from_bits_retain(e.button_raw_bits),
                     window_id,
                     modifiers: e.modifiers.into_key_modifiers(),
@@ -724,7 +739,7 @@ impl Cx {
             StudioToApp::MouseMove(e) => {
                 self.call_event_handler(&Event::MouseMove(crate::event::MouseMoveEvent {
                 lock_delta: Default::default(),
-                    abs: crate::makepad_math::dvec2(e.x - pos.x, e.y - pos.y),
+                    abs: self.stdin_pointer_abs(crate::makepad_math::dvec2(e.x, e.y), pos, window_id),
                     window_id,
                     modifiers: e.modifiers.into_key_modifiers(),
                     time: e.time,
@@ -735,7 +750,7 @@ impl Cx {
             }
             StudioToApp::MouseUp(e) => {
                 let event = crate::event::MouseUpEvent {
-                    abs: crate::makepad_math::dvec2(e.x - pos.x, e.y - pos.y),
+                    abs: self.stdin_pointer_abs(crate::makepad_math::dvec2(e.x, e.y), pos, window_id),
                     button: crate::event::MouseButton::from_bits_retain(e.button_raw_bits),
                     window_id,
                     modifiers: e.modifiers.into_key_modifiers(),
@@ -750,7 +765,7 @@ impl Cx {
             }
             StudioToApp::Scroll(e) => {
                 self.call_event_handler(&Event::Scroll(crate::event::ScrollEvent {
-                    abs: crate::makepad_math::dvec2(e.x - pos.x, e.y - pos.y),
+                    abs: self.stdin_pointer_abs(crate::makepad_math::dvec2(e.x, e.y), pos, window_id),
                     scroll: crate::makepad_math::dvec2(e.sx, e.sy),
                     window_id,
                     modifiers: e.modifiers.into_key_modifiers(),
@@ -1144,6 +1159,22 @@ impl Cx {
 
     pub(crate) fn call_event_handler(&mut self, event: &Event) {
         if self.event_dispatch_is_reentrant(event) {
+            return;
+        }
+        #[cfg(any(target_arch = "wasm32", target_os = "linux", test))]
+        if let Some(event) = self.drag_drop.internal_drag_event(event) {
+            match event {
+                crate::event::InternalDragEvent::Drag(event) => {
+                    self.call_event_handler(&Event::Drag(event));
+                    self.drag_drop.cycle_drag();
+                }
+                crate::event::InternalDragEvent::Drop(event) => {
+                    self.call_event_handler(&Event::Drop(event));
+                    self.drag_drop.cycle_drag();
+                    self.call_event_handler(&Event::DragEnd);
+                    self.drag_drop.cycle_drag();
+                }
+            }
             return;
         }
         if !matches!(event, Event::Shutdown) {

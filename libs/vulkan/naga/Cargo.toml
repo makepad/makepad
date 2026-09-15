@@ -100,6 +100,7 @@ default-features = false
 
 [dependencies.bitflags]
 version = "2.9"
+path = "../../bitflags"
 
 [dependencies.cfg-if]
 path = "../../cfg-if"
@@ -182,6 +183,7 @@ version = "2.0.12"
 default-features = false
 
 [dependencies.unicode-ident]
+path = "../unicode-ident"
 version = "1.0.5"
 optional = true
 

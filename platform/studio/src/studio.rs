@@ -1,4 +1,5 @@
 use crate::cursor::MouseCursor;
+use crate::gpu::{AppToHostGpu, HostToAppGpu};
 use crate::hub_protocol::FrameCodec;
 use crate::keyboard::{KeyEvent, TextInputEvent};
 use crate::mouse::KeyModifiers;
@@ -284,6 +285,11 @@ pub enum AppToStudio {
     DrawCompleteAndFlip(PresentableDraw),
     /// Application-defined response to a `StudioToApp::Custom` event.
     Custom(String),
+    Gpu(AppToHostGpu),
+    /// The child consumed one `StudioToApp::Tick` (timers, draw, repaint).
+    /// The host paces its next Tick on this, so a slow child never has
+    /// more than one frame's worth of ticks and pointer moves queued.
+    TickDone,
 }
 
 #[derive(SerBin, DeBin, SerJson, DeJson, Debug, Clone)]
@@ -437,6 +443,7 @@ pub enum StudioToApp {
     #[default]
     None,
     Kill,
+    Gpu(HostToAppGpu),
 }
 
 #[derive(SerBin, DeBin, SerJson, DeJson)]
