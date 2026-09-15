@@ -7,6 +7,16 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 libloading = { path = "../vulkan/libloading", version = "0.8.9" }
+makepad-error-log = { path = "../error_log", version = "1.0.0" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 makepad-objc-sys = { path = "../objc-sys", version = "1.0.0" }
+
+# The build script fetches the CEF distribution itself when none is
+# present (build_support/cef_dist.rs): Makepad's native HTTPS and SHA-1,
+# the bz2 decoder with its bundled C source, and tar —
+# so a clean clone builds the browser on every host with no shell around.
+[build-dependencies]
+makepad-network = { path = "../../platform/network", version = "1.0.0" }
+bzip2 = { version = "0.6", default-features = false, features = ["bzip2-sys"] }
+tar = "0.4"
