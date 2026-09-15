@@ -88,21 +88,28 @@ builder_download() {
     } | awk 'BEGIN { RS="\r" } length { printf "\r   %s", $0; fflush() }' >&2
     return "$(cat "$builder_temp/curl.status")"
 }
-printf '\n  2 / 3   Private Rust %s\n' "$builder_rust"
+printf "\n  2 / 3   Makepad's local Rust\n"
 if [ "$(cat "$builder_tools/.toolchain-version" 2>/dev/null || :)" != "$builder_rust $builder_triple" ] || [ ! -x "$builder_tools/bin/rustc" ] || [ ! -x "$builder_tools/bin/cargo" ]; then
     if [ -e "$builder_tools" ]; then
         printf '\n  Incomplete toolchain at %s. Move it aside before retrying.\n' "$builder_tools"
         exit 1
     fi
-    printf '\n  Download rustc, cargo and rust-std %s from static.rust-lang.org.\n' "$builder_rust"
-    printf '  Install only in: %s\n' "$builder_tools"
+    printf "\n  Download Makepad's local version of Rust (%s).\n" "$builder_rust"
+    printf '  It stays in this installation folder. Your existing Rust stays unchanged.\n'
+    printf '  Source: static.rust-lang.org\n'
     printf '  Licenses: https://www.rust-lang.org/policies/licenses\n'
-    printf '  Global Rust and your shell settings will stay unchanged.\n\n  Continue? [Y/n] '
+    printf '\n  Continue? [Y/n] '
     IFS= read -r builder_answer
     case "$builder_answer" in ''|y|Y|yes|Yes) ;; *) exit 0 ;; esac
+    printf "\n  Downloading Makepad's local version of Rust...\n"
     builder_download "https://static.rust-lang.org/dist/channel-rust-$builder_rust.toml" "$builder_temp/rust.toml"
     mkdir "$builder_temp/ready"
     for builder_component in rustc rust-std cargo; do
+        case "$builder_component" in
+            rustc) builder_label='Rust compiler (1 / 3)' ;;
+            rust-std) builder_label='Rust libraries (2 / 3)' ;;
+            cargo) builder_label='Rust build tools (3 / 3)' ;;
+        esac
         builder_header="[pkg.$builder_component.target.$builder_triple]"
         builder_field() {
             awk -v section="$builder_header" -v key="$1" '
@@ -117,13 +124,13 @@ if [ "$(cat "$builder_tools/.toolchain-version" 2>/dev/null || :)" != "$builder_
         case "$builder_expected" in ''|*[!0-9a-f]*) printf '%s\n' 'Invalid Rust checksum.'; exit 1 ;; esac
         [ "${#builder_expected}" = 64 ] || exit 1
         builder_archive="$builder_root/cache/$builder_expected.tar.gz"
-        printf '\n  %s: download and verify\n' "$builder_component"
+        printf '\n  %s\n' "$builder_label"
         if [ ! -f "$builder_archive" ] || [ "$(builder_hash "$builder_archive")" != "$builder_expected" ]; then
             builder_download "$builder_url" "$builder_temp/component.tar.gz"
             if [ "$(builder_hash "$builder_temp/component.tar.gz")" != "$builder_expected" ]; then printf '%s\n' 'Rust checksum mismatch.'; exit 1; fi
             mv "$builder_temp/component.tar.gz" "$builder_archive"
         fi
-        printf '  %s: unpack\n' "$builder_component"
+        printf '  Setting up...\n'
         builder_unpack="$builder_temp/$builder_component"
         mkdir "$builder_unpack"
         tar -xzf "$builder_archive" -C "$builder_unpack"
@@ -135,11 +142,12 @@ if [ "$(cat "$builder_tools/.toolchain-version" 2>/dev/null || :)" != "$builder_
     done
     builder_prepare_host_tools "$builder_temp/ready"
     case "$("$builder_temp/ready/bin/rustc" --version)" in "rustc $builder_rust "*) ;; *) printf '%s\n' 'Private Rust failed its version check.'; exit 1 ;; esac
-    "$builder_temp/ready/bin/cargo" --version
+    "$builder_temp/ready/bin/cargo" --version >/dev/null
     printf '%s' "$builder_rust $builder_triple" > "$builder_temp/ready/.toolchain-version"
     mv "$builder_temp/ready" "$builder_tools"
 fi
 builder_prepare_host_tools "$builder_tools"
+printf '  Local Rust is ready.\n'
 printf '\n  3 / 3   Build the terminal menu\n'
 builder_sources="$builder_root/sources/$builder_release"
 builder_source="$builder_sources/makepad"
