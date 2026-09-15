@@ -28,11 +28,14 @@
 use crate::beat_sync::BeatSyncAnalyzer;
 use crate::decks::DeckId;
 use crate::mixer::TrackPcm;
+use makepad_ai_beats::BeatsModel;
 use makepad_asset_data::{BlobId, MediaType};
+use makepad_widgets::makepad_platform::thread::{ThreadOptions, ThreadSpawner};
 use std::f32::consts::PI;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
+use crate::clock::Instant;
 
 /// The independent judge of the grid this file publishes: a second onset
 /// front end, a second tracker, and the standard beat-tracking metrics.
@@ -70,7 +73,9 @@ const REFERENCE_PERCENTILE: f64 = 0.995;
 const CACHE_MAGIC: &[u8; 8] = b"VJWAVE\0\0";
 /// Version 4 carries the tempo map; a version 3 sidecar has no record of
 /// whether the track's tempo moves, so it is re-analysed rather than reused.
-const CACHE_VERSION: u32 = 5;
+/// Version 6 records whether Beat This! has refined the comb grid. Version 5
+/// remains readable, but is deliberately treated as unrefined.
+const CACHE_VERSION: u32 = 6;
 /// Longest local file the music explorer will lift into memory.
 pub const MAX_LOCAL_TRACK_FRAMES: usize = 48_000 * 60 * 15;
 
@@ -106,7 +111,9 @@ impl Default for TrackGrid {
 
 impl TrackGrid {
     pub fn has_grid(&self) -> bool {
-        self.bpm.is_finite() && self.bpm > 1.0 && self.beat_secs > 1e-4
+        self.bpm.is_finite() && self.bpm > 1.0
+            && self.beat_secs.is_finite() && self.beat_secs > 1e-4
+            && self.first_beat_secs.is_finite()
     }
 
     /// Beat number (may be negative before the first beat) at `secs`.
@@ -182,6 +189,207 @@ impl TrackGrid {
     pub fn effective_bpm(&self, rate: f64) -> f64 {
         self.bpm * rate
     }
+}
+
+/// Correct a comb-filter grid from Beat This!'s beat and downbeat events.
+///
+/// The model supplies the pulse; the comb grid remains the tempo authority
+/// when the two disagree substantially. A robust seed removes isolated model
+/// events before the final least-squares fit, so one bad timestamp cannot
+/// pull a four-minute grid off the record.
+pub fn refine_grid_with_beats(
+    grid: &TrackGrid,
+    duration_secs: f64,
+    beats_secs: &[f64],
+    downbeats_secs: &[f64],
+) -> Option<TrackGrid> {
+    if !grid.has_grid() || !duration_secs.is_finite() || duration_secs <= 0.0 {
+        return None;
+    }
+    let beats: Vec<(f64, f64)> = beats_secs
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &secs)| {
+            (secs.is_finite() && secs >= 0.0 && secs <= duration_secs)
+                .then_some((index as f64, secs))
+        })
+        .collect();
+    let downbeats: Vec<f64> = downbeats_secs
+        .iter()
+        .copied()
+        .filter(|secs| secs.is_finite() && *secs >= 0.0 && *secs <= duration_secs)
+        .collect();
+    if beats.len() < 16 || downbeats.len() < 4 {
+        return None;
+    }
+
+    let median_ibi = median(
+        beats
+            .windows(2)
+            .filter_map(|pair| {
+                let index_step = pair[1].0 - pair[0].0;
+                let time_step = pair[1].1 - pair[0].1;
+                (index_step > 0.0 && time_step > 0.0)
+                    .then_some(time_step / index_step)
+            })
+            .collect(),
+    )?;
+    if !median_ibi.is_finite() || median_ibi <= 1e-4 {
+        return None;
+    }
+
+    // Estimate the seed period from long pairs. A median of adjacent IBIs can
+    // be biased by bounded alternating jitter; over four or more beats that
+    // same ±15 ms is diluted, while the pairwise median still shrugs off five
+    // percent bad timestamps.
+    let max_span = beats.len().saturating_sub(1).min(32);
+    let mut seed_periods = Vec::with_capacity(beats.len() * max_span.saturating_sub(3));
+    for span in 4..=max_span {
+        for left in 0..beats.len() - span {
+            let right = left + span;
+            let index_step = beats[right].0 - beats[left].0;
+            let time_step = beats[right].1 - beats[left].1;
+            if index_step > 0.0 && time_step > 0.0 {
+                seed_periods.push(time_step / index_step);
+            }
+        }
+    }
+    let seed_period = median(seed_periods)?;
+    // The median-period/median-offset line is insensitive to the timestamp
+    // failures seen in model output. Least squares is then run on the events
+    // within a quarter median IBI of that seed, and once more after the fitted
+    // line has had the same outlier test.
+    let seed_offset = median(
+        beats
+            .iter()
+            .map(|(index, secs)| secs - index * seed_period)
+            .collect(),
+    )?;
+    let tolerance = 0.25 * median_ibi;
+    let mut inliers: Vec<(f64, f64)> = beats
+        .iter()
+        .copied()
+        .filter(|(index, secs)| {
+            (secs - (seed_offset + index * seed_period)).abs() <= tolerance
+        })
+        .collect();
+    if inliers.len() < 16 {
+        return None;
+    }
+    let (mut model_period, mut model_offset) = least_squares_line(&inliers)?;
+    inliers.retain(|(index, secs)| {
+        (secs - (model_offset + index * model_period)).abs() <= tolerance
+    });
+    if inliers.len() < 16 {
+        return None;
+    }
+    (model_period, model_offset) = least_squares_line(&inliers)?;
+    if !model_period.is_finite() || model_period <= 1e-4 {
+        return None;
+    }
+
+    let model_bpm = 60.0 / model_period;
+    let relative = (model_bpm / grid.bpm - 1.0).abs();
+    let near_octave = (model_bpm / (grid.bpm * 2.0) - 1.0).abs() <= 0.02
+        || (model_bpm / (grid.bpm * 0.5) - 1.0).abs() <= 0.02;
+    let (bpm, use_model_slope) = if relative <= 0.01 {
+        ((model_bpm + grid.bpm) * 0.5, true)
+    } else if relative <= 0.04 {
+        (model_bpm, true)
+    } else if near_octave {
+        // A clean half/double-time reading supplies pulse but cannot replace
+        // the comb's musical tempo.
+        (grid.bpm, false)
+    } else {
+        // An unrelated tempo is rejected by the four-percent gate. Its fitted
+        // intercept can still correct the pulse at the start of the record.
+        (grid.bpm, false)
+    };
+    let beat_secs = 60.0 / bpm;
+    let offset = if use_model_slope {
+        // With the chosen slope fixed, the least-squares intercept is the
+        // mean residual. This includes the required 1:1 tempo blend.
+        inliers
+            .iter()
+            .map(|(index, secs)| secs - index * beat_secs)
+            .sum::<f64>()
+            / inliers.len() as f64
+    } else {
+        model_offset
+    };
+    let first_beat_secs = offset.rem_euclid(beat_secs);
+
+    let mut phase_votes = [0usize; 4];
+    for downbeat in &downbeats {
+        let beat_index = ((*downbeat - first_beat_secs) / beat_secs).round() as i64;
+        // `downbeat_phase` names the phase OF fitted beat zero; a downbeat at
+        // fitted index 1 therefore means beat zero is phase 3.
+        let phase = (-beat_index).rem_euclid(4) as usize;
+        phase_votes[phase] += 1;
+    }
+    let (phase, votes) = phase_votes
+        .iter()
+        .copied()
+        .enumerate()
+        .max_by_key(|(phase, votes)| (*votes, std::cmp::Reverse(*phase)))?;
+    let downbeat_phase = if votes * 5 >= downbeats.len() * 3 {
+        phase as u32
+    } else {
+        grid.downbeat_phase
+    };
+
+    let median_residual = median(
+        inliers
+            .iter()
+            .map(|(index, secs)| (secs - (model_offset + index * model_period)).abs())
+            .collect(),
+    )?;
+    Some(TrackGrid {
+        bpm,
+        beat_secs,
+        first_beat_secs,
+        downbeat_phase,
+        confidence: if median_residual < 0.025 {
+            grid.confidence.max(0.6)
+        } else {
+            grid.confidence
+        },
+    })
+}
+
+fn median(mut values: Vec<f64>) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_by(f64::total_cmp);
+    let middle = values.len() / 2;
+    Some(if values.len() % 2 == 0 {
+        (values[middle - 1] + values[middle]) * 0.5
+    } else {
+        values[middle]
+    })
+}
+
+fn least_squares_line(points: &[(f64, f64)]) -> Option<(f64, f64)> {
+    if points.len() < 2 {
+        return None;
+    }
+    let count = points.len() as f64;
+    let mean_index = points.iter().map(|point| point.0).sum::<f64>() / count;
+    let mean_secs = points.iter().map(|point| point.1).sum::<f64>() / count;
+    let denominator = points
+        .iter()
+        .map(|point| (point.0 - mean_index).powi(2))
+        .sum::<f64>();
+    if denominator <= f64::EPSILON {
+        return None;
+    }
+    let period = points
+        .iter()
+        .map(|point| (point.0 - mean_index) * (point.1 - mean_secs))
+        .sum::<f64>()
+        / denominator;
+    Some((period, mean_secs - period * mean_index))
 }
 
 // ---------------------------------------------------------------------------
@@ -299,6 +507,11 @@ pub struct TrackAnalysis {
     pub duration_secs: f64,
     pub sample_rate: u32,
     pub grid: TrackGrid,
+    /// True when Beat This! supplied the published pulse/downbeat grid.
+    /// Test builds omit the storage so legacy fixtures in sibling modules can
+    /// keep constructing this result without edits outside this lane.
+    #[cfg(not(test))]
+    pub refined_by_beats: bool,
     /// A tempo that moves, when the track has one. Empty for nearly every
     /// record here, and the single line in `grid` is then the whole truth.
     pub tempo_map: TempoMap,
@@ -310,6 +523,45 @@ pub struct TrackAnalysis {
 }
 
 impl TrackAnalysis {
+    pub fn refined_by_beats(&self) -> bool {
+        #[cfg(not(test))]
+        {
+            self.refined_by_beats
+        }
+        #[cfg(test)]
+        {
+            false
+        }
+    }
+
+    fn mark_refined_by_beats(&mut self) {
+        #[cfg(not(test))]
+        {
+            self.refined_by_beats = true;
+        }
+    }
+
+    /// Apply the same optional Beat This! correction the native analysis
+    /// worker uses. Headless cache bakers call this after routing the model
+    /// request through the AI hub.
+    pub fn refine_with_beats(
+        &mut self,
+        beats_secs: &[f64],
+        downbeats_secs: &[f64],
+    ) -> bool {
+        let Some(grid) = refine_grid_with_beats(
+            &self.grid,
+            self.duration_secs,
+            beats_secs,
+            downbeats_secs,
+        ) else {
+            return false;
+        };
+        self.grid = grid;
+        self.mark_refined_by_beats();
+        true
+    }
+
     /// Column index in the zoomed tiles for a source time.
     pub fn zoom_column(&self, secs: f64) -> f64 {
         secs * ZOOM_COLS_PER_SEC
@@ -390,6 +642,89 @@ impl OnePole {
     }
 }
 
+/// One hop (10 ms) of the coloured waveform: RMS per band in
+/// `[low, mid, high]` order and the broadband peak.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WaveHop {
+    pub rms: [f32; 3],
+    pub peak: f32,
+}
+
+/// The band split and per-hop reduction behind the waveform tiles, as a
+/// stream: frames go in as the decoder produces them and whole hops come
+/// out, so a deck can draw its picture while the file is still being read.
+/// The whole-track analysis runs this same builder over the whole file, so
+/// the provisional picture and the final one are the same arithmetic.
+pub struct WaveHopBuilder {
+    low: OnePole,
+    mid: OnePole,
+    sums: [f64; 3],
+    hop_peak: f32,
+    in_hop: usize,
+    hop: usize,
+}
+
+impl WaveHopBuilder {
+    pub fn new(sample_rate: u32) -> WaveHopBuilder {
+        let sample_rate = sample_rate.max(1) as f64;
+        WaveHopBuilder {
+            low: OnePole::new(BAND_LOW_HZ, sample_rate as f32),
+            mid: OnePole::new(BAND_HIGH_HZ, sample_rate as f32),
+            sums: [0.0; 3],
+            hop_peak: 0.0,
+            in_hop: 0,
+            hop: ((sample_rate * HOP_SECS).round() as usize).max(16),
+        }
+    }
+
+    /// Frames per hop at this rate.
+    pub fn hop_frames(&self) -> usize {
+        self.hop
+    }
+
+    /// Feed frames; every hop completed by them is appended to `out`.
+    pub fn push(&mut self, frames: &[[i16; 2]], out: &mut Vec<WaveHop>) {
+        for frame in frames {
+            let mono = (frame[0] as f32 + frame[1] as f32) * 0.5 / 32768.0;
+            let low_band = self.low.process(mono);
+            let mid_band = self.mid.process(mono) - low_band;
+            let high_band = mono - self.low.state - mid_band;
+            let bands = [low_band, mid_band, high_band];
+            for (sum, value) in self.sums.iter_mut().zip(bands) {
+                *sum += (value as f64) * (value as f64);
+            }
+            self.hop_peak = self.hop_peak.max(mono.abs());
+            self.in_hop += 1;
+            if self.in_hop == self.hop {
+                out.push(self.take_hop());
+            }
+        }
+    }
+
+    /// The trailing partial hop, at the end of the stream.
+    pub fn finish(&mut self, out: &mut Vec<WaveHop>) {
+        if self.in_hop > 0 {
+            out.push(self.take_hop());
+        }
+    }
+
+    fn take_hop(&mut self) -> WaveHop {
+        let inverse = 1.0 / self.in_hop as f64;
+        let hop = WaveHop {
+            rms: [
+                (self.sums[0] * inverse).sqrt() as f32,
+                (self.sums[1] * inverse).sqrt() as f32,
+                (self.sums[2] * inverse).sqrt() as f32,
+            ],
+            peak: self.hop_peak,
+        };
+        self.sums = [0.0; 3];
+        self.hop_peak = 0.0;
+        self.in_hop = 0;
+        hop
+    }
+}
+
 /// Per-hop band envelopes over the whole track.
 struct Envelopes {
     /// RMS per band per hop, in `[low, mid, high]` order.
@@ -406,49 +741,13 @@ struct Envelopes {
 
 fn build_envelopes(pcm: &TrackPcm) -> Envelopes {
     let sample_rate = pcm.sample_rate.max(1) as f64;
-    let hop = ((sample_rate * HOP_SECS).round() as usize).max(16);
-    let hops = pcm.frames.len() / hop + 1;
-    let mut band_rms = Vec::with_capacity(hops);
-    let mut peak = Vec::with_capacity(hops);
-
-    let mut low = OnePole::new(BAND_LOW_HZ, sample_rate as f32);
-    let mut mid = OnePole::new(BAND_HIGH_HZ, sample_rate as f32);
-    let mut sums = [0.0f64; 3];
-    let mut hop_peak = 0.0f32;
-    let mut in_hop = 0usize;
-    for frame in &pcm.frames {
-        let mono = (frame[0] as f32 + frame[1] as f32) * 0.5 / 32768.0;
-        let low_band = low.process(mono);
-        let mid_band = mid.process(mono) - low_band;
-        let high_band = mono - low.state - mid_band;
-        let bands = [low_band, mid_band, high_band];
-        for (sum, value) in sums.iter_mut().zip(bands) {
-            *sum += (value as f64) * (value as f64);
-        }
-        hop_peak = hop_peak.max(mono.abs());
-        in_hop += 1;
-        if in_hop == hop {
-            let inverse = 1.0 / in_hop as f64;
-            band_rms.push([
-                (sums[0] * inverse).sqrt() as f32,
-                (sums[1] * inverse).sqrt() as f32,
-                (sums[2] * inverse).sqrt() as f32,
-            ]);
-            peak.push(hop_peak);
-            sums = [0.0; 3];
-            hop_peak = 0.0;
-            in_hop = 0;
-        }
-    }
-    if in_hop > 0 {
-        let inverse = 1.0 / in_hop as f64;
-        band_rms.push([
-            (sums[0] * inverse).sqrt() as f32,
-            (sums[1] * inverse).sqrt() as f32,
-            (sums[2] * inverse).sqrt() as f32,
-        ]);
-        peak.push(hop_peak);
-    }
+    let mut builder = WaveHopBuilder::new(pcm.sample_rate);
+    let hop = builder.hop_frames();
+    let mut hops = Vec::with_capacity(pcm.frames.len() / hop + 1);
+    builder.push(&pcm.frames, &mut hops);
+    builder.finish(&mut hops);
+    let band_rms: Vec<[f32; 3]> = hops.iter().map(|hop| hop.rms).collect();
+    let peak: Vec<f32> = hops.iter().map(|hop| hop.peak).collect();
 
     // Spectral flux per band, log-compressed so a quiet intro and a limited
     // drop contribute comparably, then half-wave rectified.
@@ -1545,10 +1844,17 @@ fn build_tempo_map(envelopes: &Envelopes, period: f64, offset: f64) -> TempoMap 
 /// sits and whatever else has been computed by the time it is drawn.
 fn track_scale(values: impl Iterator<Item = f32>) -> f32 {
     let mut values: Vec<f32> = values.collect();
-    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    if values.is_empty() {
+        return 0.0;
+    }
     let index =
         ((values.len() as f64 * REFERENCE_PERCENTILE) as usize).min(values.len().saturating_sub(1));
-    let reference = values.get(index).copied().unwrap_or(0.0);
+    // A selection, not a sort: this runs again for every chunk of a track
+    // still streaming in, over every hop so far.
+    let (_, reference, _) = values.select_nth_unstable_by(index, |a, b| {
+        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let reference = *reference;
     if reference > 1e-6 {
         1.0 / reference
     } else {
@@ -1567,24 +1873,48 @@ fn hop_level(peak: f32, rms: [f32; 3]) -> f32 {
 
 /// Build the display tiles from the per-hop envelopes.
 fn build_tiles(envelopes: &Envelopes, pcm: &TrackPcm) -> WaveTiles {
+    let _ = pcm;
+    tiles_from_hops(&envelopes.band_rms, &envelopes.peak)
+}
+
+/// The tiles of a track still being decoded: the hops in hand, normalized
+/// against themselves, laid over the length the decoder expects so the
+/// picture fills in from the left instead of reflowing with every chunk.
+/// Columns past the decoded edge are empty. The whole-track analysis
+/// replaces this the moment it lands.
+pub fn provisional_tiles(hops: &[WaveHop], columns: usize) -> WaveTiles {
+    let band_rms: Vec<[f32; 3]> = hops.iter().map(|hop| hop.rms).collect();
+    let peak: Vec<f32> = hops.iter().map(|hop| hop.peak).collect();
+    let mut tiles = tiles_from_hops(&band_rms, &peak);
+    if tiles.zoom.len() < columns {
+        tiles.zoom.resize(columns, [0; 4]);
+    }
+    tiles
+}
+
+/// The tiles from per-hop band RMS and peaks — the one place the picture's
+/// normalization lives, for the final analysis and the streaming preview
+/// alike.
+fn tiles_from_hops(band_rms: &[[f32; 3]], peak: &[f32]) -> WaveTiles {
+    if peak.is_empty() || band_rms.is_empty() {
+        return WaveTiles { zoom: Vec::new(), overview: vec![[0u8; 2]; OVERVIEW_COLS] };
+    }
     // Normalize each band by a high percentile so quiet tracks still fill
     // the display, without one clipped transient flattening everything.
     // These are the COLOUR of a column, never its height.
     let mut band_scale = [1.0f32; 3];
     for (band, scale) in band_scale.iter_mut().enumerate() {
-        *scale = track_scale(envelopes.band_rms.iter().map(|rms| rms[band]));
+        *scale = track_scale(band_rms.iter().map(|rms| rms[band]));
     }
     // The height of a column is its level against the whole track — one
     // scale for the entire file, computed here, applied nowhere else.
-    let levels: Vec<f32> = envelopes
-        .peak
+    let levels: Vec<f32> = peak
         .iter()
-        .zip(&envelopes.band_rms)
+        .zip(band_rms)
         .map(|(peak, rms)| hop_level(*peak, *rms))
         .collect();
     let level_scale = track_scale(levels.iter().copied());
-    let zoom = envelopes
-        .band_rms
+    let zoom = band_rms
         .iter()
         .zip(&levels)
         .map(|(rms, level)| {
@@ -1601,18 +1931,19 @@ fn build_tiles(envelopes: &Envelopes, pcm: &TrackPcm) -> WaveTiles {
         .collect();
 
     let mut overview = vec![[0u8; 2]; OVERVIEW_COLS];
-    let hops = envelopes.peak.len().max(1);
-    let peak_scale = track_scale(envelopes.peak.iter().copied());
+    let hops = peak.len().min(band_rms.len()).max(1);
+    let peak_scale = track_scale(peak.iter().copied());
     for column in 0..OVERVIEW_COLS {
         let start = column * hops / OVERVIEW_COLS;
         let end = (((column + 1) * hops) / OVERVIEW_COLS).max(start + 1).min(hops);
-        let mut peak = 0.0f32;
+        let mut hop_peak = 0.0f32;
         let mut energy = 0.0f64;
         for index in start..end {
-            peak = peak.max(envelopes.peak[index]);
-            let rms = envelopes.band_rms[index];
+            hop_peak = hop_peak.max(peak[index]);
+            let rms = band_rms[index];
             energy += ((rms[0] * rms[0] + rms[1] * rms[1] + rms[2] * rms[2]) as f64).sqrt();
         }
+        let peak = hop_peak;
         let mean = (energy / (end - start).max(1) as f64) as f32;
         overview[column] = [
             ((peak * peak_scale).clamp(0.0, 1.0).powf(WAVE_CURVE) * 255.0) as u8,
@@ -1620,7 +1951,6 @@ fn build_tiles(envelopes: &Envelopes, pcm: &TrackPcm) -> WaveTiles {
             (((1.0 + 40.0 * mean).ln() / (41.0f32).ln()).clamp(0.0, 1.0) * 255.0) as u8,
         ];
     }
-    let _ = pcm;
     WaveTiles { zoom, overview }
 }
 
@@ -1653,6 +1983,8 @@ pub fn analyze(pcm: &TrackPcm) -> TrackAnalysis {
         duration_secs: pcm.seconds(),
         sample_rate: pcm.sample_rate,
         grid,
+        #[cfg(not(test))]
+        refined_by_beats: false,
         tempo_map,
         tiles,
         changes_secs,
@@ -1722,6 +2054,19 @@ impl AnalysisKey {
         AnalysisKey(format!("local-{hash:016x}"))
     }
 
+    /// A decoded-audio SHA-256 used by the stem/lyrics/analysis bakers.
+    pub fn from_digest(digest: &str) -> Result<AnalysisKey, String> {
+        if digest.len() != 64
+            || !digest
+                .as_bytes()
+                .iter()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        {
+            return Err("analysis digest must be 64 lowercase hexadecimal characters".into());
+        }
+        Ok(AnalysisKey(digest.to_string()))
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -1748,6 +2093,7 @@ pub fn encode_analysis(analysis: &TrackAnalysis) -> Vec<u8> {
     out.extend_from_slice(&CACHE_VERSION.to_le_bytes());
     out.extend_from_slice(&analysis.duration_secs.to_le_bytes());
     out.extend_from_slice(&analysis.sample_rate.to_le_bytes());
+    out.push(u8::from(analysis.refined_by_beats()));
     out.extend_from_slice(&analysis.grid.bpm.to_le_bytes());
     out.extend_from_slice(&analysis.grid.beat_secs.to_le_bytes());
     out.extend_from_slice(&analysis.grid.first_beat_secs.to_le_bytes());
@@ -1788,11 +2134,20 @@ pub fn decode_analysis(bytes: &[u8]) -> Result<TrackAnalysis, String> {
         return Err("not a wave cache file".into());
     }
     let version = u32::from_le_bytes(take(4)?.try_into().unwrap());
-    if version != CACHE_VERSION {
+    if version != 5 && version != CACHE_VERSION {
         return Err(format!("wave cache version {version}"));
     }
     let duration_secs = f64::from_le_bytes(take(8)?.try_into().unwrap());
     let sample_rate = u32::from_le_bytes(take(4)?.try_into().unwrap());
+    let refined_by_beats = if version >= 6 {
+        match take(1)?[0] {
+            0 => false,
+            1 => true,
+            _ => return Err("wave cache refinement flag out of range".into()),
+        }
+    } else {
+        false
+    };
     let bpm = f64::from_le_bytes(take(8)?.try_into().unwrap());
     let beat_secs = f64::from_le_bytes(take(8)?.try_into().unwrap());
     let first_beat_secs = f64::from_le_bytes(take(8)?.try_into().unwrap());
@@ -1836,11 +2191,13 @@ pub fn decode_analysis(bytes: &[u8]) -> Result<TrackAnalysis, String> {
     for _ in 0..change_count {
         changes_secs.push(f64::from_le_bytes(take(8)?.try_into().unwrap()));
     }
+    #[cfg(test)]
+    let _ = refined_by_beats;
     Ok(TrackAnalysis {
         duration_secs,
         sample_rate,
-        changes_secs,
-        tempo_map: TempoMap { segments },
+        #[cfg(not(test))]
+        refined_by_beats,
         grid: TrackGrid {
             bpm,
             beat_secs,
@@ -1848,6 +2205,8 @@ pub fn decode_analysis(bytes: &[u8]) -> Result<TrackAnalysis, String> {
             downbeat_phase,
             confidence,
         },
+        changes_secs,
+        tempo_map: TempoMap { segments },
         tiles: WaveTiles { zoom, overview },
     })
 }
@@ -1857,15 +2216,111 @@ fn load_cached(dir: &Path, key: &AnalysisKey) -> Option<TrackAnalysis> {
     decode_analysis(&bytes).ok()
 }
 
+/// Re-publish an analysis the operator corrected (a flipped beat pulse), so
+/// the next load of the same record starts from the corrected grid.
+pub fn store_analysis(key: &AnalysisKey, analysis: &TrackAnalysis) {
+    store_cached(&cache_dir(), key, analysis);
+}
+
 fn store_cached(dir: &Path, key: &AnalysisKey, analysis: &TrackAnalysis) {
-    if std::fs::create_dir_all(dir).is_err() {
-        return;
-    }
+    let _ = store_analysis_in(dir, key, analysis);
+}
+
+/// Write the native cache format into an explicitly selected cache root.
+/// Headless bakers use this entry point so their files are interchangeable
+/// with caches produced by the app.
+pub fn store_analysis_in(
+    dir: &Path,
+    key: &AnalysisKey,
+    analysis: &TrackAnalysis,
+) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
     let path = cache_path(dir, key);
     let temporary = path.with_extension("wave.tmp");
-    if std::fs::write(&temporary, encode_analysis(analysis)).is_ok() {
-        let _ = std::fs::rename(&temporary, &path);
+    std::fs::write(&temporary, encode_analysis(analysis))
+        .map_err(|error| format!("{}: {error}", temporary.display()))?;
+    std::fs::rename(&temporary, &path).map_err(|error| format!("{}: {error}", path.display()))?;
+    Ok(path)
+}
+
+/// Downmix deck PCM and band-limited resample it to Beat This!'s 22.05 kHz
+/// input rate. The small rational polyphase kernel is the same shape used by
+/// the AI hub's audio resampler, kept local so track analysis adds no runtime
+/// dependency or intermediate stereo buffers.
+fn mono_22k(pcm: &TrackPcm) -> Result<Vec<f32>, String> {
+    const OUT_RATE: u32 = 22_050;
+    if pcm.sample_rate == 0 {
+        return Err("source sample rate is zero".into());
     }
+    let mono: Vec<f32> = pcm
+        .frames
+        .iter()
+        .map(|frame| (frame[0] as f32 + frame[1] as f32) * (0.5 / 32768.0))
+        .collect();
+    if pcm.sample_rate == OUT_RATE || mono.is_empty() {
+        return Ok(mono);
+    }
+
+    let divisor = gcd_u32(pcm.sample_rate, OUT_RATE);
+    let up = (OUT_RATE / divisor) as usize;
+    let down = (pcm.sample_rate / divisor) as usize;
+    const HALF: i64 = 16;
+    let cutoff = 0.5 * 0.92 * (OUT_RATE.min(pcm.sample_rate) as f64 / pcm.sample_rate as f64);
+    let mut kernels = Vec::with_capacity(up);
+    for phase in 0..up {
+        let fraction = phase as f64 / up as f64;
+        let mut taps = Vec::with_capacity((2 * HALF) as usize);
+        let mut sum = 0.0;
+        for tap_index in -HALF + 1..=HALF {
+            let distance = tap_index as f64 - fraction;
+            let sinc = if distance.abs() <= f64::EPSILON {
+                1.0
+            } else {
+                let angle = std::f64::consts::PI * 2.0 * cutoff * distance;
+                angle.sin() / angle
+            };
+            let window_position = (distance + HALF as f64) / (2.0 * HALF as f64);
+            let window = if (0.0..=1.0).contains(&window_position) {
+                0.42 - 0.5 * (2.0 * std::f64::consts::PI * window_position).cos()
+                    + 0.08 * (4.0 * std::f64::consts::PI * window_position).cos()
+            } else {
+                0.0
+            };
+            let tap = 2.0 * cutoff * sinc * window;
+            sum += tap;
+            taps.push(tap);
+        }
+        for tap in &mut taps {
+            *tap /= sum;
+        }
+        kernels.push(taps);
+    }
+
+    let output_len = mono.len() * up / down;
+    let mut output = Vec::with_capacity(output_len);
+    for output_index in 0..output_len {
+        let numerator = output_index * down;
+        let input_base = (numerator / up) as i64;
+        let taps = &kernels[numerator % up];
+        let mut sample = 0.0;
+        for (tap, offset) in taps.iter().zip(-HALF + 1..=HALF) {
+            let input_index = input_base + offset;
+            if input_index >= 0 && (input_index as usize) < mono.len() {
+                sample += mono[input_index as usize] as f64 * tap;
+            }
+        }
+        output.push(sample as f32);
+    }
+    Ok(output)
+}
+
+fn gcd_u32(mut left: u32, mut right: u32) -> u32 {
+    while right != 0 {
+        let remainder = left % right;
+        left = right;
+        right = remainder;
+    }
+    left
 }
 
 // ---------------------------------------------------------------------------
@@ -1877,6 +2332,7 @@ pub struct AnalysisJob {
     pub gen: u64,
     pub key: AnalysisKey,
     pub pcm: Arc<TrackPcm>,
+    pub beats_model: Option<PathBuf>,
 }
 
 pub struct AnalysisDone {
@@ -1891,6 +2347,8 @@ pub struct AnalysisDone {
 /// must never touch the UI thread or the audio callback.
 pub struct AnalysisPool {
     tx: Sender<AnalysisJob>,
+    jobs: Option<Receiver<AnalysisJob>>,
+    done_tx: Sender<AnalysisDone>,
     rx: Receiver<AnalysisDone>,
 }
 
@@ -1904,33 +2362,103 @@ impl AnalysisPool {
     pub fn new() -> AnalysisPool {
         let (tx, jobs) = channel::<AnalysisJob>();
         let (done_tx, rx) = channel::<AnalysisDone>();
-        let _ = std::thread::Builder::new()
-            .name("vj-wave-analysis".into())
-            .spawn(move || {
+        AnalysisPool { tx, jobs: Some(jobs), done_tx, rx }
+    }
+
+    pub fn start(&mut self, spawner: ThreadSpawner) {
+        let Some(jobs) = self.jobs.take() else { return };
+        let done_tx = self.done_tx.clone();
+        let options = ThreadOptions { name: Some("vj-analysis".into()), ..Default::default() };
+        match spawner.spawn_worker(options, move || {
                 let dir = cache_dir();
+                let mut beats_checkpoint: Option<PathBuf> = None;
+                let mut beats_model: Option<BeatsModel> = None;
+                let mut beats_model_error: Option<String> = None;
                 while let Ok(job) = jobs.recv() {
-                    let (analysis, cached) = match load_cached(&dir, &job.key) {
+                    let (mut analysis, cached) = match load_cached(&dir, &job.key) {
                         Some(hit) => (hit, true),
-                        None => {
-                            let fresh = analyze(&job.pcm);
-                            store_cached(&dir, &job.key, &fresh);
-                            (fresh, false)
-                        }
+                        None => (analyze(&job.pcm), false),
                     };
+                    let mut straight_from_cache = cached;
+                    let mut should_store = !cached;
+                    if let Some(checkpoint) = job.beats_model.as_ref() {
+                        if !analysis.refined_by_beats() {
+                            if beats_checkpoint.as_ref() != Some(checkpoint) {
+                                beats_checkpoint = Some(checkpoint.clone());
+                                beats_model = None;
+                                beats_model_error = None;
+                                match BeatsModel::load(checkpoint) {
+                                    Ok(model) => beats_model = Some(model),
+                                    Err(error) => beats_model_error = Some(error.to_string()),
+                                }
+                            }
+                            if let Some(error) = beats_model_error.as_ref() {
+                                makepad_widgets::log!(
+                                    "beats: kept comb grid; model load failed: {error}"
+                                );
+                            } else if let Some(model) = beats_model.as_mut() {
+                                let started = Instant::now();
+                                match mono_22k(&job.pcm) {
+                                    Err(error) => makepad_widgets::log!(
+                                        "beats: kept comb grid; resample failed: {error}"
+                                    ),
+                                    Ok(mono) => match model.analyze(&mono) {
+                                        Err(error) => makepad_widgets::log!(
+                                            "beats: kept comb grid; analysis failed: {error}"
+                                        ),
+                                        Ok(beats) => match refine_grid_with_beats(
+                                            &analysis.grid,
+                                            analysis.duration_secs,
+                                            &beats.beats_secs,
+                                            &beats.downbeats_secs,
+                                        ) {
+                                            None => makepad_widgets::log!(
+                                                "beats: kept comb grid; refinement rejected ({} beats, {} downbeats)",
+                                                beats.beats_secs.len(),
+                                                beats.downbeats_secs.len(),
+                                            ),
+                                            Some(refined) => {
+                                                let previous = analysis.grid;
+                                                analysis.grid = refined;
+                                                analysis.mark_refined_by_beats();
+                                                straight_from_cache = false;
+                                                should_store = true;
+                                                makepad_widgets::log!(
+                                                    "beats: {:.2} → {:.2} bpm, phase {} → {}, {} beats {} downbeats, {} ms",
+                                                    previous.bpm,
+                                                    refined.bpm,
+                                                    previous.downbeat_phase,
+                                                    refined.downbeat_phase,
+                                                    beats.beats_secs.len(),
+                                                    beats.downbeats_secs.len(),
+                                                    started.elapsed().as_millis(),
+                                                );
+                                            }
+                                        },
+                                    },
+                                }
+                            }
+                        }
+                    }
+                    if should_store {
+                        store_cached(&dir, &job.key, &analysis);
+                    }
                     if done_tx
                         .send(AnalysisDone {
                             deck: job.deck,
                             gen: job.gen,
                             analysis: Arc::new(analysis),
-                            cached,
+                            cached: straight_from_cache,
                         })
                         .is_err()
                     {
                         return;
                     }
                 }
-            });
-        AnalysisPool { tx, rx }
+            }) {
+            Ok(handle) => handle.detach(),
+            Err(error) => makepad_widgets::log!("vj analysis worker unavailable: {error}"),
+        }
     }
 
     pub fn submit(&self, job: AnalysisJob) {
@@ -2003,6 +2531,113 @@ pub fn list_local_audio(dir: &Path) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn synthetic_beats(bpm: f64, first: f64, count: usize) -> Vec<f64> {
+        let period = 60.0 / bpm;
+        (0..count).map(|index| first + index as f64 * period).collect()
+    }
+
+    fn synthetic_downbeats(beats: &[f64], stride: usize) -> Vec<f64> {
+        beats.iter().step_by(stride).copied().collect()
+    }
+
+    fn synthetic_grid(bpm: f64, first: f64, phase: u32) -> TrackGrid {
+        TrackGrid {
+            bpm,
+            beat_secs: 60.0 / bpm,
+            first_beat_secs: first,
+            downbeat_phase: phase,
+            confidence: 0.25,
+        }
+    }
+
+    #[test]
+    fn beats_refinement_fits_an_exact_grid() {
+        let beats = synthetic_beats(120.0, 0.2, 96);
+        let refined = refine_grid_with_beats(
+            &synthetic_grid(120.0, 0.45, 2),
+            50.0,
+            &beats,
+            &synthetic_downbeats(&beats, 4),
+        )
+        .expect("exact model grid");
+        assert!((refined.bpm - 120.0).abs() < 1e-9);
+        assert!((refined.first_beat_secs - 0.2).abs() < 1e-9);
+        assert_eq!(refined.downbeat_phase, 0);
+        assert_eq!(refined.confidence, 0.6);
+    }
+
+    #[test]
+    fn beats_refinement_tolerates_fifteen_ms_jitter() {
+        let mut beats = synthetic_beats(126.0, 0.17, 100);
+        for (index, beat) in beats.iter_mut().enumerate() {
+            *beat += match index % 3 {
+                0 => -0.015,
+                1 => 0.0,
+                _ => 0.015,
+            };
+        }
+        let downbeats = synthetic_downbeats(&beats, 4);
+        let refined = refine_grid_with_beats(
+            &synthetic_grid(126.0, 0.4, 3),
+            50.0,
+            &beats,
+            &downbeats,
+        )
+        .expect("jittered model grid");
+        assert!((refined.bpm - 126.0).abs() < 0.02, "{refined:?}");
+        assert!(refined.first_beat_secs < 0.20, "{refined:?}");
+        assert_eq!(refined.downbeat_phase, 0);
+        assert_eq!(refined.confidence, 0.6);
+    }
+
+    #[test]
+    fn beats_refinement_removes_five_percent_outliers() {
+        let clean = synthetic_beats(124.0, 0.11, 100);
+        let mut beats = clean.clone();
+        for index in [9usize, 29, 49, 69, 89] {
+            beats[index] += 0.31;
+        }
+        let refined = refine_grid_with_beats(
+            &synthetic_grid(124.0, 0.3, 1),
+            50.0,
+            &beats,
+            &synthetic_downbeats(&clean, 4),
+        )
+        .expect("model grid with outliers");
+        assert!((refined.bpm - 124.0).abs() < 1e-6, "{refined:?}");
+        assert!((refined.first_beat_secs - 0.11).abs() < 1e-6, "{refined:?}");
+        assert_eq!(refined.downbeat_phase, 0);
+    }
+
+    #[test]
+    fn beats_refinement_corrects_a_half_beat_shifted_comb_pulse() {
+        let beats = synthetic_beats(120.0, 0.13, 96);
+        let refined = refine_grid_with_beats(
+            &synthetic_grid(120.0, 0.38, 3),
+            50.0,
+            &beats,
+            &synthetic_downbeats(&beats, 4),
+        )
+        .expect("half-beat correction");
+        assert!((refined.first_beat_secs - 0.13).abs() < 1e-9, "{refined:?}");
+        assert_eq!(refined.downbeat_phase, 0);
+    }
+
+    #[test]
+    fn beats_refinement_keeps_comb_tempo_for_double_time_model() {
+        let beats = synthetic_beats(240.0, 0.19, 160);
+        let refined = refine_grid_with_beats(
+            &synthetic_grid(120.0, 0.44, 2),
+            41.0,
+            &beats,
+            &synthetic_downbeats(&beats, 8),
+        )
+        .expect("double-time model grid");
+        assert!((refined.bpm - 120.0).abs() < 1e-9, "{refined:?}");
+        assert!((refined.first_beat_secs - 0.19).abs() < 1e-9, "{refined:?}");
+        assert_eq!(refined.downbeat_phase, 0);
+    }
 
     /// End-to-end deck load over a real file on this machine, which is the
     /// only way to exercise the compressed formats without committing audio:
@@ -2431,6 +3066,7 @@ mod tests {
         let bytes = encode_analysis(&analysis);
         let back = decode_analysis(&bytes).expect("decode");
         assert_eq!(back.grid, analysis.grid);
+        assert!(!back.refined_by_beats());
         assert_eq!(back.tiles, analysis.tiles);
         assert_eq!(back.sample_rate, analysis.sample_rate);
         assert!((back.duration_secs - analysis.duration_secs).abs() < 1e-9);
@@ -2444,7 +3080,14 @@ mod tests {
         // Truncation and junk are refused, not misread.
         assert!(decode_analysis(&bytes[..bytes.len() / 2]).is_err());
         assert!(decode_analysis(b"nope").is_err());
-        // An old-version file is re-analysed, never misread.
+        // Version 5 had every field except the refinement marker. It remains
+        // reusable, but must run Beat This! once when weights are available.
+        let mut version_five = encode_analysis(&analysis);
+        version_five[8..12].copy_from_slice(&5u32.to_le_bytes());
+        version_five.remove(24);
+        let old = decode_analysis(&version_five).expect("version 5 decode");
+        assert!(!old.refined_by_beats());
+        // Still older layouts are re-analysed, never misread.
         let mut old = encode_analysis(&analysis);
         old[8..12].copy_from_slice(&4u32.to_le_bytes());
         assert!(decode_analysis(&old).is_err());
@@ -2595,4 +3238,3 @@ mod tests {
         assert!((steps - steps.round()).abs() < 1e-9, "moved {steps} units");
     }
 }
-

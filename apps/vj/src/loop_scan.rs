@@ -12,6 +12,7 @@
 
 use crate::mixer::TrackPcm;
 use makepad_ai_stems::stft::Stft;
+use makepad_widgets::makepad_platform::thread::{ThreadOptions, ThreadSpawner};
 
 /// STFT geometry for the feature pass.  2048/512 at the track's native rate
 /// gives ~86 Hz feature frames — a dozen per beat at any sane tempo.
@@ -682,6 +683,8 @@ fn load_scan_stems(root: &PathBuf, pcm: &TrackPcm, digest: Option<&str>) -> Opti
 /// as `AnalysisPool`, and the same shape.
 pub struct LoopScanPool {
     tx: Sender<ScanJob>,
+    jobs: Option<Receiver<ScanJob>>,
+    done_tx: Sender<ScanDone>,
     rx: Receiver<ScanDone>,
 }
 
@@ -695,9 +698,14 @@ impl LoopScanPool {
     pub fn new() -> LoopScanPool {
         let (tx, jobs) = channel::<ScanJob>();
         let (done_tx, rx) = channel::<ScanDone>();
-        let _ = std::thread::Builder::new()
-            .name("vj-loop-scan".into())
-            .spawn(move || {
+        LoopScanPool { tx, jobs: Some(jobs), done_tx, rx }
+    }
+
+    pub fn start(&mut self, spawner: ThreadSpawner) {
+        let Some(jobs) = self.jobs.take() else { return };
+        let done_tx = self.done_tx.clone();
+        let options = ThreadOptions { name: Some("vj-loop-scan".into()), ..Default::default() };
+        match spawner.spawn_worker(options, move || {
                 while let Ok(job) = jobs.recv() {
                     let stems = job.stems_root.as_ref().and_then(|root| {
                         load_scan_stems(root, &job.pcm, job.digest.as_deref())
@@ -710,8 +718,10 @@ impl LoopScanPool {
                         return;
                     }
                 }
-            });
-        LoopScanPool { tx, rx }
+            }) {
+            Ok(handle) => handle.detach(),
+            Err(error) => makepad_widgets::log!("vj loop-scan worker unavailable: {error}"),
+        }
     }
 
     pub fn submit(&self, job: ScanJob) {
@@ -944,7 +954,8 @@ mod tests {
 
     #[test]
     fn the_pool_answers_with_the_job_identity() {
-        let pool = LoopScanPool::new();
+        let mut pool = LoopScanPool::new();
+        pool.start(crate::test_thread_spawner());
         let pcm = std::sync::Arc::new(body_track(22050));
         let analysis = std::sync::Arc::new(analysis_120bpm(96));
         pool.submit(ScanJob {
@@ -959,7 +970,7 @@ mod tests {
             stems_root: None,
             digest: None,
         });
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let deadline = crate::clock::Instant::now() + std::time::Duration::from_secs(60);
         loop {
             let done = pool.poll();
             if let Some(done) = done.into_iter().next() {
@@ -968,7 +979,7 @@ mod tests {
                 assert!(!done.loops.is_empty());
                 break;
             }
-            assert!(std::time::Instant::now() < deadline, "worker never answered");
+            assert!(crate::clock::Instant::now() < deadline, "worker never answered");
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
     }

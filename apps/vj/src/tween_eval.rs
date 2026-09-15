@@ -286,7 +286,7 @@ fn rife_field(
         use makepad_ai_rife::rife::RifeFramePair;
         let pair = RifeFramePair::new(&rgb0, &rgb1, pw, ph)
             .map_err(|e| format!("rife pair: {e:?}"))?;
-        let t0 = std::time::Instant::now();
+        let t0 = crate::clock::Instant::now();
         let field = rife
             .flow_field_rgb8(pair, 0.5, None)
             .map_err(|e| format!("rife forward: {e:?}"))?;
@@ -322,7 +322,7 @@ fn rife_midpoint(
             rife.interpolate_rgb8(p, 0.5)
                 .map_err(|e| format!("rife interpolate: {e:?}"))
         };
-        let t0 = std::time::Instant::now();
+        let t0 = crate::clock::Instant::now();
         let mid = synth(&rgb0, &rgb1)?;
         let rungs = if depth >= 2 {
             vec![synth(&rgb0, &mid)?, mid.clone(), synth(&mid, &rgb1)?]
@@ -824,7 +824,7 @@ struct EvalState {
     /// whatever they score — the only way to watch ONE known case across
     /// a series of fixes once it has stopped being among the worst.
     forced: Vec<(Sample, Vec<u8>)>,
-    started: std::time::Instant,
+    started: crate::clock::Instant,
     stalls: u32,
     /// One row per pair: the FIELDS measured against the analytic motion
     /// (mean vector inside each endpoint's rect footprint, in grid cells).
@@ -979,7 +979,7 @@ fn load(path: &str) -> Result<EvalState, String> {
         samples: Vec::new(),
         keep: Vec::new(),
         forced: Vec::new(),
-        started: std::time::Instant::now(),
+        started: crate::clock::Instant::now(),
         stalls: 0,
         field_rows: Vec::new(),
     })
@@ -2061,7 +2061,7 @@ struct RealState {
     prev_xf_err: Vec<f32>,
     prev_scored_n: Option<usize>,
     black_flags: usize,
-    started: std::time::Instant,
+    started: crate::clock::Instant,
     stalls: u32,
     /// The producer that served the pair currently in flight, the one that
     /// served the previous scored pair, and the RIFE forward's cost.
@@ -2270,7 +2270,7 @@ fn load_real(path: &str) -> Result<RealState, String> {
         prev_xf_err: Vec::new(),
         prev_scored_n: None,
         black_flags: 0,
-        started: std::time::Instant::now(),
+        started: crate::clock::Instant::now(),
         stalls: 0,
         ai: AiTier::Off,
         prev_ai: AiTier::Off,

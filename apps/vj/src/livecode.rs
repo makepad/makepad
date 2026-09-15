@@ -42,10 +42,16 @@
 use makepad_widgets::*;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Sender};
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::mpsc;
+use std::sync::mpsc::Sender;
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use crate::clock::Instant;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Duration;
 
 /// How long after a load the settle pass harvests compile errors. A draw
 /// shader compiles on the next draw of the host that loaded it; a couple of
@@ -123,6 +129,7 @@ fn origin_file(stem: &str) -> Option<PathBuf> {
 /// and for the thumbnail lane, which must premix inputs for a document that
 /// shapes the program picture instead of drawing its own. So it is read
 /// from the file, once, and remembered against that file's mtime.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn observed_is_transition(stem: &str) -> bool {
     static CACHE: OnceLock<Mutex<HashMap<String, (u128, bool)>>> = OnceLock::new();
     let Some(path) = origin_file(stem) else { return false };
@@ -151,8 +158,14 @@ pub fn observed_is_transition(stem: &str) -> bool {
     is
 }
 
+#[cfg(target_arch = "wasm32")]
+pub fn observed_is_transition(_stem: &str) -> bool {
+    false
+}
+
 /// Run the observer for this process's hosted store until `stop` flips.
 /// Blocking — call it on the worker thread that has just finished seeding.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn run_observer(client: &mut makepad_asset_client::AssetClient, stop: &AtomicBool) {
     let mut config = makepad_asset_store::observe::ObserveConfig::vjfx(origins());
     // The one thing an engine name cannot tell the store: a scene engine
@@ -196,6 +209,11 @@ fn collect(message: &str, level: LogLevel) {
 pub fn install() {
     static ONCE: OnceLock<()> = OnceLock::new();
     ONCE.get_or_init(|| {
+        // The log callback may run on any worker. Construct its OnceLock on
+        // the UI thread before publishing the callback so no worker can race
+        // the UI through OnceLock's blocking initialization path on wasm.
+        let _ = tap();
+        #[cfg(not(target_arch = "wasm32"))]
         let _ = std::fs::create_dir_all(scratch_origin().join("status"));
         makepad_widgets::makepad_platform::log::set_log_tap(Some(collect));
     });
@@ -239,6 +257,7 @@ fn aliases() -> &'static Mutex<HashMap<String, String>> {
 
 /// Remember which document a revision is, so an outcome reported against a
 /// revision can be written under the file stem an agent knows.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn remember(revision: &str, alias: Option<&str>) {
     let Some(alias) = alias else { return };
     let stem = alias.rsplit('/').next().unwrap_or(alias);
@@ -251,6 +270,9 @@ pub fn remember(revision: &str, alias: Option<&str>) {
     }
     map.insert(revision.to_string(), stem.to_string());
 }
+
+#[cfg(target_arch = "wasm32")]
+pub fn remember(_revision: &str, _alias: Option<&str>) {}
 
 /// The file stem behind a revision, when it is an observed document.
 pub fn stem_of(revision: &str) -> Option<String> {
@@ -269,16 +291,23 @@ enum Job {
     Failed { stem: String, revision: String, error: String },
 }
 
-fn worker() -> &'static Sender<Job> {
-    static TX: OnceLock<Sender<Job>> = OnceLock::new();
-    TX.get_or_init(|| {
+static WORKER: OnceLock<Sender<Job>> = OnceLock::new();
+
+pub fn start_worker(spawner: makepad_widgets::makepad_platform::thread::ThreadSpawner) {
+    #[cfg(target_arch = "wasm32")]
+    let _ = spawner;
+    #[cfg(not(target_arch = "wasm32"))]
+    WORKER.get_or_init(|| {
         let (tx, rx) = mpsc::channel::<Job>();
         // One thread, only ever sleeping and writing two small files. It
         // outlives the app by design: there is nothing to shut down and
-        // nothing it holds that matters at exit.
-        let _ = std::thread::Builder::new()
-            .name("vj-livecode-status".to_string())
-            .spawn(move || {
+        // nothing it holds that matters at exit. The web build has no
+        // observed origin on disk, so the status files are not written.
+        let options = makepad_widgets::makepad_platform::thread::ThreadOptions {
+            name: Some("vj-livecode-status".into()),
+            ..Default::default()
+        };
+        match spawner.spawn_worker(options, move || {
                 let mut queue: VecDeque<Job> = VecDeque::new();
                 loop {
                     // Wait for work, then drain what is already queued.
@@ -312,9 +341,12 @@ fn worker() -> &'static Sender<Job> {
                         }
                     }
                 }
-            });
+            }) {
+            Ok(handle) => handle.detach(),
+            Err(error) => makepad_widgets::log!("vj livecode status worker unavailable: {error}"),
+        }
         tx
-    })
+    });
 }
 
 /// Report what happened to a document that was just loaded and drawn.
@@ -323,6 +355,7 @@ fn worker() -> &'static Sender<Job> {
 /// loaded". A load that succeeded still waits out [`SETTLE_MS`] before
 /// claiming `compile ok`, because the draw shader compiles after the load
 /// returns and its failure arrives through the log.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn report(revision: &str, mark: u64, outcome: Result<(), String>) {
     let Some(stem) = stem_of(revision) else { return };
     let job = match outcome {
@@ -334,14 +367,16 @@ pub fn report(revision: &str, mark: u64, outcome: Result<(), String>) {
             at: Instant::now() + Duration::from_millis(SETTLE_MS),
         },
     };
-    let _ = worker().send(job);
+    if let Some(worker) = WORKER.get() {
+        let _ = worker.send(job);
+    }
 }
 
+#[cfg(target_arch = "wasm32")]
+pub fn report(_revision: &str, _mark: u64, _outcome: Result<(), String>) {}
+
 fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    (makepad_widgets::Cx::time_now().max(0.0) * 1000.0) as u64
 }
 
 /// Write one document's verdict: the per-document status file (whole text)

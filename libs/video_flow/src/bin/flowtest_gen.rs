@@ -26,6 +26,13 @@
 //!
 //! Nothing here is random. The one noisy clip uses a fixed LCG seed, so two
 //! runs on two machines produce the same pixels.
+
+#[cfg(target_arch = "wasm32")]
+fn main() {}
+
+// This clip generator drives native file-video encoders; VJ depends on the library only.
+#[cfg(not(target_arch = "wasm32"))]
+mod native {
 //!
 //! ```text
 //! cargo run --release -p makepad-video-flow --bin flowtest_gen
@@ -674,7 +681,7 @@ fn default_out_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../local/flowtest")
 }
 
-fn main() {
+pub(super) fn run() {
     let mut out_dir = default_out_dir();
     let mut check_only = false;
     let mut probe: Option<String> = None;
@@ -752,4 +759,11 @@ fn main() {
         std::process::exit(1);
     }
     println!("all {} clips decode", CLIPS.len());
+}
+
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn main() {
+    native::run();
 }

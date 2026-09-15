@@ -6,6 +6,9 @@
 #![allow(dead_code)]
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::needless_range_loop)]
+// The port intentionally keeps the reference constants' exact decimal
+// spellings; replacing them can perturb deterministic simulation results.
+#![allow(clippy::approx_constant)]
 
 // Foundation (include/box3d + core)
 pub mod constants;

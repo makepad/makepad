@@ -728,6 +728,8 @@ fn convert_for_flow(
 }
 
 #[cfg(test)]
+// Native filesystem tests use wall-clock values only to make temporary paths unique.
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 mod tests {
     use super::*;
 

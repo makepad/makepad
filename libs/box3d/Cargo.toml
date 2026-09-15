@@ -20,3 +20,4 @@ double-precision = []
 unchecked-hulls = []
 
 [dependencies]
+makepad-platform = { path = "../../platform" }

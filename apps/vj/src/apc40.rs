@@ -6,6 +6,8 @@
 //! matching Makepad MIDI ports and dispatches actions to its existing cue,
 //! deck, and SFX engines.
 
+use crate::loop_splat_view::{SplatCellView, SplatRowView, SplatViewModel, SPLAT_COLS, SPLAT_ROWS};
+
 pub const PAD_COUNT: usize = 40;
 pub const PAGE_SIZE: usize = PAD_COUNT;
 
@@ -18,6 +20,11 @@ pub const NOTE_UP: u8 = 0x5e;
 pub const NOTE_DOWN: u8 = 0x5f;
 pub const NOTE_RIGHT: u8 = 0x60;
 pub const NOTE_LEFT: u8 = 0x61;
+/// Hardware communications protocol v1.2: scene buttons are notes 0x52..0x56
+/// on channel 0; clip-stop is note 0x34 on strip channels 0..7.
+pub const NOTE_SCENE_FIRST: u8 = 0x52;
+pub const NOTE_SCENE_LAST: u8 = 0x56;
+pub const NOTE_CLIP_STOP: u8 = 0x34;
 pub const CC_MASTER: u8 = 0x0e;
 pub const CC_CROSSFADER: u8 = 0x0f;
 /// Channel volume faders: CC 7 on MIDI channels 0..7.
@@ -45,6 +52,16 @@ pub enum ApcAction {
         index: usize,
         pressed: bool,
     },
+    Scene {
+        surface: ApcSurface,
+        row: u8,
+        pressed: bool,
+    },
+    ClipStop {
+        surface: ApcSurface,
+        col: u8,
+        pressed: bool,
+    },
     Surface(ApcSurface),
     VideoPlayPause,
     VideoStop,
@@ -56,6 +73,8 @@ pub enum ApcAction {
     TrackKnob { index: usize, value: f32 },
     /// Bottom (device) knob row.
     DeviceKnob { index: usize, value: f32 },
+    BankLeft,
+    BankRight,
     BankChanged,
 }
 
@@ -75,6 +94,23 @@ impl Apc40State {
         let pressed = status == 0x9 && data[2] != 0;
         if is_note {
             let note = data[1];
+            let channel = data[0] & 0x0f;
+            if self.model == ApcModel::Apc40Mk2 {
+                if channel == 0 && (NOTE_SCENE_FIRST..=NOTE_SCENE_LAST).contains(&note) {
+                    return Some(ApcAction::Scene {
+                        surface: self.surface,
+                        row: note - NOTE_SCENE_FIRST,
+                        pressed,
+                    });
+                }
+                if note == NOTE_CLIP_STOP && channel < 8 {
+                    return Some(ApcAction::ClipStop {
+                        surface: self.surface,
+                        col: channel,
+                        pressed,
+                    });
+                }
+            }
             if let Some(pad) = self.model.pad_index(note) {
                 return Some(ApcAction::Pad {
                     surface: self.surface,
@@ -117,12 +153,20 @@ impl Apc40State {
                     Some(ApcAction::BankChanged)
                 }
                 NOTE_LEFT => {
-                    self.bank = self.bank.saturating_sub(self.row_step());
-                    Some(ApcAction::BankChanged)
+                    if self.surface == ApcSurface::Music {
+                        Some(ApcAction::BankLeft)
+                    } else {
+                        self.bank = self.bank.saturating_sub(self.row_step());
+                        Some(ApcAction::BankChanged)
+                    }
                 }
                 NOTE_RIGHT => {
-                    self.bank = self.bank.saturating_add(self.row_step());
-                    Some(ApcAction::BankChanged)
+                    if self.surface == ApcSurface::Music {
+                        Some(ApcAction::BankRight)
+                    } else {
+                        self.bank = self.bank.saturating_add(self.row_step());
+                        Some(ApcAction::BankChanged)
+                    }
                 }
                 _ => None,
             };
@@ -430,6 +474,68 @@ pub fn palette_velocity(r: u8, g: u8, b: u8) -> u8 {
     best
 }
 
+fn splat_row_rgb(row: SplatRowView, value: f32) -> (u8, u8, u8) {
+    let color = row.color();
+    let channel = |v: f32| (v * value * 255.0).round().clamp(0.0, 255.0) as u8;
+    (channel(color[0]), channel(color[1]), channel(color[2]))
+}
+
+fn splat_row_velocities(row: SplatRowView) -> (u8, u8) {
+    let (r, g, b) = splat_row_rgb(row, 1.0);
+    let full = palette_velocity(r, g, b);
+    let (r, g, b) = splat_row_rgb(row, 0.35);
+    let candidate = palette_velocity(r, g, b);
+    let full_rgb = PAD_PALETTE[full as usize];
+    let dim_rgb = PAD_PALETTE[candidate as usize];
+    let (full_h, full_s, full_v) = hsv(
+        (full_rgb >> 16) as u8,
+        (full_rgb >> 8) as u8,
+        full_rgb as u8,
+    );
+    let (dim_h, dim_s, dim_v) = hsv(
+        (dim_rgb >> 16) as u8,
+        (dim_rgb >> 8) as u8,
+        dim_rgb as u8,
+    );
+    let hue_delta = (full_h - dim_h).abs().min(360.0 - (full_h - dim_h).abs());
+    let same_hue = if full_s < 0.18 {
+        dim_s < 0.18
+    } else {
+        dim_s >= 0.30 && hue_delta <= 24.0
+    };
+    let dim = if same_hue && dim_v + 0.05 < full_v {
+        candidate
+    } else {
+        full
+    };
+    (full, dim)
+}
+
+pub fn splat_pad_led(cell: SplatCellView, row: SplatRowView) -> PadLed {
+    let (full, dim) = splat_row_velocities(row);
+    match cell {
+        SplatCellView::Empty | SplatCellView::Silent => PadLed::Off,
+        SplatCellView::Ready { .. } => PadLed::Color(dim),
+        SplatCellView::Queued { .. } => PadLed::NextColor(full),
+        SplatCellView::Playing { .. } => PadLed::LiveColor(full),
+    }
+}
+
+pub fn splat_led_frame(model: &SplatViewModel, surface: ApcSurface) -> LedFrame {
+    let mut frame = LedFrame {
+        surface,
+        ..LedFrame::default()
+    };
+    let cols = model.cols.min(SPLAT_COLS);
+    for row in 0..SPLAT_ROWS {
+        for col in 0..cols {
+            frame.pads[row * SPLAT_COLS + col] =
+                splat_pad_led(model.cells[row][col], SplatRowView::ALL[row]);
+        }
+    }
+    frame
+}
+
 /// Hue buckets in the dominant-colour histogram (15° each).
 const HUE_BUCKETS: usize = 24;
 /// A pixel must be at least this saturated / lit to vote for a hue.
@@ -605,6 +711,95 @@ pub fn is_apc40_port(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::loop_splat::SplatPart;
+
+    #[test]
+    fn scene_and_clip_stop_buttons_decode_press_and_release() {
+        let mut state = Apc40State {
+            surface: ApcSurface::Music,
+            ..Apc40State::default()
+        };
+        assert_eq!(
+            state.decode([0x90, NOTE_SCENE_FIRST, 127]),
+            Some(ApcAction::Scene {
+                surface: ApcSurface::Music,
+                row: 0,
+                pressed: true,
+            })
+        );
+        assert_eq!(
+            state.decode([0x80, NOTE_SCENE_LAST, 0]),
+            Some(ApcAction::Scene {
+                surface: ApcSurface::Music,
+                row: 4,
+                pressed: false,
+            })
+        );
+        assert_eq!(
+            state.decode([0x93, NOTE_CLIP_STOP, 127]),
+            Some(ApcAction::ClipStop {
+                surface: ApcSurface::Music,
+                col: 3,
+                pressed: true,
+            })
+        );
+        assert_eq!(
+            state.decode([0x97, NOTE_CLIP_STOP, 0]),
+            Some(ApcAction::ClipStop {
+                surface: ApcSurface::Music,
+                col: 7,
+                pressed: false,
+            })
+        );
+    }
+
+    #[test]
+    fn splat_rows_have_distinct_full_colours_and_dimmer_ready_colours() {
+        let full: Vec<u8> = SplatRowView::ALL
+            .iter()
+            .map(|row| splat_row_velocities(*row).0)
+            .collect();
+        let unique: std::collections::HashSet<u8> = full.iter().copied().collect();
+        assert_eq!(unique.len(), SPLAT_ROWS);
+        for row in [
+            SplatRowView::Drums,
+            SplatRowView::Bass,
+            SplatRowView::Vocals,
+            SplatRowView::Other,
+        ] {
+            let (full, dim) = splat_row_velocities(row);
+            assert_ne!(dim, full, "{row:?}");
+        }
+        let row = SplatRowView::Vocals;
+        let (velocity, _) = splat_row_velocities(row);
+        assert_eq!(
+            splat_pad_led(
+                SplatCellView::Playing {
+                    energy: 0.8,
+                    phase: 0.25,
+                    part: SplatPart { num: 1, den: 2 },
+                },
+                row,
+            ),
+            PadLed::LiveColor(velocity)
+        );
+    }
+
+    #[test]
+    fn splat_frame_starts_at_the_top_left_pad() {
+        let mut model = SplatViewModel::empty(crate::loop_splat_view::SplatDeck::A);
+        model.cols = SPLAT_COLS;
+        model.cells[0][0] = SplatCellView::Playing {
+            energy: 1.0,
+            phase: 0.5,
+            part: SplatPart::WHOLE,
+        };
+        let frame = splat_led_frame(&model, ApcSurface::Music);
+        let expected = splat_pad_led(model.cells[0][0], SplatRowView::Drums);
+        assert_eq!(frame.pads[0], expected);
+        assert_eq!(ApcModel::Apc40Mk2.pad_note(0), 32);
+        assert_eq!(frame.surface, ApcSurface::Music);
+    }
 
     #[test]
     fn channel_faders_and_both_knob_rows_decode() {
@@ -685,6 +880,11 @@ mod tests {
         state.clamp_bank(41);
         assert_eq!(state.bank, 40);
         state.clamp_bank(40);
+        assert_eq!(state.bank, 0);
+
+        state.surface = ApcSurface::Music;
+        assert_eq!(state.decode([0x90, NOTE_LEFT, 127]), Some(ApcAction::BankLeft));
+        assert_eq!(state.decode([0x90, NOTE_RIGHT, 127]), Some(ApcAction::BankRight));
         assert_eq!(state.bank, 0);
     }
 
@@ -873,4 +1073,3 @@ mod tests {
         assert!(ps > 0.3 && (80.0..170.0).contains(&ph), "green pad, got h={ph}");
     }
 }
-

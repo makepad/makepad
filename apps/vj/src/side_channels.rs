@@ -35,9 +35,47 @@ use crate::stems::{
 };
 use makepad_ai_stems::{CacheHeader, StemCache, SAMPLE_RATE as STEMS_RATE};
 use makepad_asset_data::AssetId;
+use makepad_widgets::makepad_platform::thread::{
+    CancellationToken, Lane, TaskPool, ThreadOptions, ThreadSpawner,
+};
+use makepad_widgets::Cx;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
+
+/// A verified side-channel blob from either the native disk cache or the
+/// portable static store's memory cache.
+#[derive(Clone, Debug)]
+pub enum FetchedSource {
+    Path(PathBuf),
+    Bytes(Arc<[u8]>),
+}
+
+impl FetchedSource {
+    pub(crate) fn read_all(&self) -> Result<Vec<u8>, String> {
+        match self {
+            Self::Path(path) => std::fs::read(path)
+                .map_err(|error| format!("{}: {error}", path.display())),
+            Self::Bytes(bytes) => Ok(bytes.to_vec()),
+        }
+    }
+
+    fn len(&self) -> u64 {
+        match self {
+            Self::Path(path) => std::fs::metadata(path).map_or(0, |meta| meta.len()),
+            Self::Bytes(bytes) => bytes.len() as u64,
+        }
+    }
+}
+
+impl From<crate::media::DecodeSource> for FetchedSource {
+    fn from(source: crate::media::DecodeSource) -> Self {
+        match source {
+            crate::media::DecodeSource::Path(path) => Self::Path(path),
+            crate::media::DecodeSource::Bytes(bytes) => Self::Bytes(bytes),
+        }
+    }
+}
 
 /// Where each deck lane's audio sits in a fetched `FileRole::STEMS` set.
 ///
@@ -62,15 +100,23 @@ pub struct FetchedJob {
     /// are resampled to, and the digest the lyrics are keyed by.
     pub pcm: Arc<TrackPcm>,
     /// The four downloaded stem oggs, in `FileRole::STEMS` order.
-    pub stem_files: [PathBuf; 4],
+    pub stem_files: [FetchedSource; 4],
     /// The downloaded lyrics JSON, when the revision carried one.
-    pub lyrics_file: Option<PathBuf>,
+    pub lyrics_file: Option<FetchedSource>,
 }
 
 pub enum SideChannelMsg {
     /// Chunks and status, in the separator's own vocabulary: everything
     /// downstream of the deck treats the two sources identically.
     Stems(StemsMsg),
+    /// A verified precomputed transcript, decoded beside the stems. Keeping
+    /// it in memory is the portable equivalent of the native lyrics cache.
+    Lyrics {
+        deck: DeckId,
+        gen: u64,
+        digest: String,
+        lyrics: Arc<makepad_audio_lyrics::TrackLyrics>,
+    },
     /// The side-channel was unusable (a stem would not decode). The deck has
     /// to separate locally after all; nothing else can rescue it.
     Fallback { deck: DeckId, gen: u64, reason: String },
@@ -81,6 +127,8 @@ pub enum SideChannelMsg {
 /// and must never queue behind a model forward.
 pub struct SideChannelPool {
     tx: Sender<FetchedJob>,
+    jobs: Option<Receiver<FetchedJob>>,
+    out: Sender<SideChannelMsg>,
     rx: Receiver<SideChannelMsg>,
 }
 
@@ -94,14 +142,23 @@ impl SideChannelPool {
     pub fn new() -> SideChannelPool {
         let (tx, jobs) = channel::<FetchedJob>();
         let (out, rx) = channel::<SideChannelMsg>();
-        let _ = std::thread::Builder::new()
-            .name("vj-sidechannel".into())
-            .spawn(move || {
+        SideChannelPool { tx, jobs: Some(jobs), out, rx }
+    }
+
+    /// One dedicated worker for the app's life; the per-stem decodes it
+    /// fans out go to `pool`'s heavy lane.
+    pub fn start(&mut self, spawner: ThreadSpawner, pool: TaskPool) {
+        let Some(jobs) = self.jobs.take() else { return };
+        let out = self.out.clone();
+        let options = ThreadOptions { name: Some("vj-side-channel".into()), ..Default::default() };
+        match spawner.spawn_worker(options, move || {
                 while let Ok(job) = jobs.recv() {
-                    run_fetched(job, &out);
+                    run_fetched(job, &out, &pool);
                 }
-            });
-        SideChannelPool { tx, rx }
+            }) {
+            Ok(handle) => handle.detach(),
+            Err(error) => makepad_widgets::log!("side-channel worker unavailable: {error}"),
+        }
     }
 
     pub fn submit(&self, job: FetchedJob) {
@@ -126,10 +183,10 @@ fn drain<T>(rx: &Receiver<T>) -> Vec<T> {
 
 /// Decode one fetched stem into the track's own frames: 44.1 kHz stereo out
 /// of the encoder, resampled only when the track itself is at another rate.
-fn decode_stem(path: &Path, track_rate: u32) -> Result<Vec<[i16; 2]>, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+fn decode_stem(source: &FetchedSource, track_rate: u32) -> Result<Vec<[i16; 2]>, String> {
+    let bytes = source.read_all()?;
     let decoded = makepad_audio_decode::decode_any(&bytes)
-        .map_err(|e| format!("{}: {e}", path.display()))?;
+        .map_err(|error| format!("stem decode: {error}"))?;
     let channels = decoded.channels.max(1) as usize;
     let frames = decoded.pcm_interleaved_f32.len() / channels;
     let mut left = Vec::with_capacity(frames);
@@ -195,7 +252,7 @@ fn cut_chunks(
     out
 }
 
-fn run_fetched(job: FetchedJob, out: &Sender<SideChannelMsg>) {
+fn run_fetched(job: FetchedJob, out: &Sender<SideChannelMsg>, pool: &TaskPool) {
     let status = |text: &str, working: bool| {
         let _ = out.send(SideChannelMsg::Stems(StemsMsg::Status {
             deck: job.deck,
@@ -207,16 +264,26 @@ fn run_fetched(job: FetchedJob, out: &Sender<SideChannelMsg>) {
     status("stems: side-channel", true);
 
     let track_rate = job.pcm.sample_rate.max(1);
-    let mut decoded: Vec<Result<Vec<[i16; 2]>, String>> = Vec::with_capacity(4);
-    std::thread::scope(|scope| {
-        let mut handles = Vec::with_capacity(4);
-        for path in job.stem_files.iter() {
-            handles.push(scope.spawn(move || decode_stem(path, track_rate)));
+    // The four stems decode in parallel on the pool's heavy lane; this
+    // dedicated worker is the one that may wait for them (a pool job never
+    // waits on a sibling). A refused submission decodes that stem here.
+    let mut handles = Vec::with_capacity(4);
+    for source in job.stem_files.iter() {
+        let source = source.clone();
+        match pool.try_submit(Lane::Heavy, move || decode_stem(&source, track_rate)) {
+            Ok(handle) => handles.push(Ok(handle)),
+            Err(refused) => handles.push(Err((refused.job)())),
         }
-        for handle in handles {
-            decoded.push(handle.join().unwrap_or_else(|_| Err("decode panicked".into())));
-        }
-    });
+    }
+    let mut decoded: Vec<Result<Vec<[i16; 2]>, String>> = handles
+        .into_iter()
+        .map(|handle| match handle {
+            Ok(handle) => handle
+                .join()
+                .unwrap_or_else(|error| Err(format!("stem decode: {error}"))),
+            Err(inline) => inline,
+        })
+        .collect();
     let mut lanes: [Vec<[i16; 2]>; 4] = Default::default();
     for (lane, source) in LANE_FROM_ROLE.into_iter().enumerate() {
         match std::mem::replace(&mut decoded[source], Ok(Vec::new())) {
@@ -231,12 +298,7 @@ fn run_fetched(job: FetchedJob, out: &Sender<SideChannelMsg>) {
             }
         }
     }
-    let bytes: u64 = job
-        .stem_files
-        .iter()
-        .filter_map(|path| std::fs::metadata(path).ok())
-        .map(|meta| meta.len())
-        .sum();
+    let bytes: u64 = job.stem_files.iter().map(FetchedSource::len).sum();
 
     let frames = job.pcm.frames.len();
     let count = chunk_count(frames, track_rate);
@@ -268,8 +330,15 @@ fn run_fetched(job: FetchedJob, out: &Sender<SideChannelMsg>) {
     // The digest is what both caches are keyed by, and hashing decoded PCM is
     // not UI-thread work — so it happens here, once, like the separator does.
     let digest = track_digest(&job.pcm);
-    if let Some(path) = job.lyrics_file.as_ref() {
-        install_lyrics(path, &digest);
+    if let Some(source) = job.lyrics_file.as_ref() {
+        if let Some(lyrics) = install_lyrics(source, &digest) {
+            let _ = out.send(SideChannelMsg::Lyrics {
+                deck: job.deck,
+                gen: job.gen,
+                digest: digest.clone(),
+                lyrics: Arc::new(lyrics),
+            });
+        }
     }
     // Arm the karaoke. A store lyrics file has just landed in the cache, and
     // a track this machine transcribed in an earlier session is in there too;
@@ -299,18 +368,20 @@ fn run_fetched(job: FetchedJob, out: &Sender<SideChannelMsg>) {
 /// a VERIFIED copy: `from_json` refuses a document whose digest is not this
 /// track's, which is exactly what a re-encode of the audio would produce.
 /// Wrong words on the wrong timeline are worse than no words.
-fn install_lyrics(path: &Path, digest: &str) {
-    let Ok(bytes) = std::fs::read(path) else { return };
-    if makepad_audio_lyrics::TrackLyrics::from_json(&bytes, digest).is_none() {
+fn install_lyrics(source: &FetchedSource, digest: &str) -> Option<makepad_audio_lyrics::TrackLyrics> {
+    let Ok(bytes) = source.read_all() else { return None };
+    let Some(lyrics) = makepad_audio_lyrics::TrackLyrics::from_json(&bytes, digest) else {
         makepad_widgets::log!(
             "side-channel lyrics ignored: not this audio (digest {})",
             &digest[..8.min(digest.len())]
         );
-        return;
-    }
+        return None;
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    {
     let dir = crate::lyrics::cache_dir();
     if std::fs::create_dir_all(&dir).is_err() {
-        return;
+        return Some(lyrics);
     }
     let target = crate::lyrics::cache_path(&dir, digest);
     // Beside and rename, like `lyrics::store_cached`: a crash mid-write must
@@ -319,6 +390,8 @@ fn install_lyrics(path: &Path, digest: &str) {
     if std::fs::write(&temp, &bytes).is_ok() {
         let _ = std::fs::rename(&temp, &target);
     }
+    }
+    Some(lyrics)
 }
 
 // ---------------------------------------------------------------------------
@@ -350,7 +423,10 @@ pub enum WriteBackMsg {
 /// One worker, so two tracks separated back to back never encode at once.
 pub struct WriteBackPool {
     tx: Sender<WriteBackJob>,
+    jobs: Option<Receiver<WriteBackJob>>,
+    out: Sender<WriteBackMsg>,
     rx: Receiver<WriteBackMsg>,
+    root: PathBuf,
 }
 
 impl Default for WriteBackPool {
@@ -367,11 +443,21 @@ impl WriteBackPool {
     pub fn with_root(root: PathBuf) -> WriteBackPool {
         let (tx, jobs) = channel::<WriteBackJob>();
         let (out, rx) = channel::<WriteBackMsg>();
-        let _ = std::thread::Builder::new()
-            .name("vj-sidechannel-writeback".into())
-            .spawn(move || {
+        WriteBackPool { tx, jobs: Some(jobs), out, rx, root }
+    }
+
+    pub fn start(&mut self, spawner: ThreadSpawner) {
+        let Some(jobs) = self.jobs.take() else { return };
+        let out = self.out.clone();
+        let root = self.root.clone();
+        let options = ThreadOptions { name: Some("vj-write-back".into()), ..Default::default() };
+        match spawner.spawn_worker(options, move || {
                 while let Ok(job) = jobs.recv() {
-                    std::thread::sleep(WRITE_BACK_DELAY);
+                    // A plain sleep reads the std clock and panics on a
+                    // wasm worker; `wait_until` paces off
+                    // `Cx::monotonic_now()` instead.
+                    let wait = CancellationToken::new();
+                    let _ = wait.wait_until(Cx::monotonic_now() + WRITE_BACK_DELAY.as_secs_f64());
                     let message = match encode_from_cache(&root, &job) {
                         Ok(oggs) => WriteBackMsg::Encoded { asset: job.asset, oggs },
                         Err(reason) => WriteBackMsg::Skipped { asset: job.asset, reason },
@@ -380,8 +466,10 @@ impl WriteBackPool {
                         return;
                     }
                 }
-            });
-        WriteBackPool { tx, rx }
+            }) {
+            Ok(handle) => handle.detach(),
+            Err(error) => makepad_widgets::log!("vj write-back worker unavailable: {error}"),
+        }
     }
 
     pub fn submit(&self, job: WriteBackJob) {
@@ -521,7 +609,8 @@ mod tests {
         }
         let mut lanes: [Vec<[i16; 2]>; 4] = Default::default();
         for (lane, source) in LANE_FROM_ROLE.into_iter().enumerate() {
-            lanes[lane] = decode_stem(&paths[source], rate).expect("decode");
+            lanes[lane] = decode_stem(&FetchedSource::Path(paths[source].clone()), rate)
+                .expect("decode");
         }
         for (lane, stem) in STEM_ORDER.into_iter().enumerate() {
             let frames = &lanes[lane];
