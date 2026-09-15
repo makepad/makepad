@@ -1887,12 +1887,24 @@ impl Dock {
             self.dragging_tab = None;
             let redraw_id = cx.redraw_id;
             let ghost_dl_id = self.ghost_tab_draw_list.draw_list_id();
-            cx.draw_lists[ghost_dl_id].clear_draw_items(redraw_id);
+            let recording_gen = cx.next_uniform_gen();
+            let uniforms_gen = cx.next_uniform_gen();
+            cx.draw_lists[ghost_dl_id].clear_draw_items(
+                redraw_id,
+                recording_gen,
+                uniforms_gen,
+            );
             if let Some(pass_id) = cx.draw_lists[ghost_dl_id].draw_pass_id {
                 cx.repaint_pass_and_child_passes(pass_id);
             }
             let drop_dl_id = self.drop_target_draw_list.draw_list_id();
-            cx.draw_lists[drop_dl_id].clear_draw_items(redraw_id);
+            let recording_gen = cx.next_uniform_gen();
+            let uniforms_gen = cx.next_uniform_gen();
+            cx.draw_lists[drop_dl_id].clear_draw_items(
+                redraw_id,
+                recording_gen,
+                uniforms_gen,
+            );
             self.area.redraw(cx);
         }
 
@@ -1917,9 +1929,17 @@ impl Dock {
                 self.drop_state = None;
                 self.dragging_tab = None;
                 let redraw_id = cx.redraw_id;
-                cx.draw_lists[self.ghost_tab_draw_list.draw_list_id()].clear_draw_items(redraw_id);
+                let recording_gen = cx.next_uniform_gen();
+                let uniforms_gen = cx.next_uniform_gen();
+                cx.draw_lists[self.ghost_tab_draw_list.draw_list_id()].clear_draw_items(
+                    redraw_id,
+                    recording_gen,
+                    uniforms_gen,
+                );
+                let recording_gen = cx.next_uniform_gen();
+                let uniforms_gen = cx.next_uniform_gen();
                 cx.draw_lists[self.drop_target_draw_list.draw_list_id()]
-                    .clear_draw_items(redraw_id);
+                    .clear_draw_items(redraw_id, recording_gen, uniforms_gen);
                 self.area.redraw(cx);
                 cx.widget_action(uid, DockAction::Drop(f.clone()))
             }
@@ -1927,9 +1947,17 @@ impl Dock {
                 self.drop_state = None;
                 self.dragging_tab = None;
                 let redraw_id = cx.redraw_id;
-                cx.draw_lists[self.ghost_tab_draw_list.draw_list_id()].clear_draw_items(redraw_id);
+                let recording_gen = cx.next_uniform_gen();
+                let uniforms_gen = cx.next_uniform_gen();
+                cx.draw_lists[self.ghost_tab_draw_list.draw_list_id()].clear_draw_items(
+                    redraw_id,
+                    recording_gen,
+                    uniforms_gen,
+                );
+                let recording_gen = cx.next_uniform_gen();
+                let uniforms_gen = cx.next_uniform_gen();
                 cx.draw_lists[self.drop_target_draw_list.draw_list_id()]
-                    .clear_draw_items(redraw_id);
+                    .clear_draw_items(redraw_id, recording_gen, uniforms_gen);
                 self.area.redraw(cx);
             }
             _ => {}

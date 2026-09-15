@@ -4,7 +4,7 @@ use {
         to_wasm::ToWasmAudioDeviceList,
         web::CxOs,
     },
-    crate::{audio::*, makepad_live_id::*, thread::SignalToUI},
+    crate::{audio::*, makepad_live_id::*, thread::{lock_from_audio, lock_from_ui, SignalToUI}},
     std::sync::{Arc, Mutex},
 };
 
@@ -44,7 +44,7 @@ impl WebAudioAccess {
             output_device_id: Default::default(),
         }));
         let self_arc = ret.clone();
-        ret.lock().unwrap().self_arc = Arc::into_raw(self_arc);
+        lock_from_ui(&ret).self_arc = Arc::into_raw(self_arc);
         ret
     }
 
@@ -105,7 +105,6 @@ impl WebAudioAccess {
 
     pub fn use_audio_inputs(&mut self, _os: &mut CxOs, _devices: &[AudioDeviceId]) {
         // TODO
-        crate::log!("Web audio input todo!");
     }
 
     pub fn use_audio_outputs(&mut self, os: &mut CxOs, devices: &[AudioDeviceId]) {
@@ -123,8 +122,10 @@ impl WebAudioAccess {
             if let Some(device) = self.devices.iter().find(|v| v.desc.device_id == devices[0]) {
                 device.web_device_id.clone()
             } else {
+                crate::log!("web audio: requested output device is unavailable; using browser default");
                 "".to_string()
             };
+        self.output_device_id = devices[0];
         os.from_wasm(FromWasmStartAudioOutput {
             web_device_id,
             context_ptr: self.self_arc as u32,
@@ -146,10 +147,11 @@ pub unsafe extern "C" fn wasm_audio_output_entrypoint(
     context_ptr: u32,
     frames: u32,
     channels: u32,
+    sample_rate: f64,
 ) -> u32 {
     let wa = context_ptr as *const Mutex<WebAudioAccess>;
     let (output_fn, mut output_buffer, device_id) = {
-        let mut wa = (*wa).lock().unwrap();
+        let mut wa = lock_from_audio(&*wa);
         (
             wa.audio_output_cb[0].clone(),
             wa.output_buffer.take().unwrap(),
@@ -160,21 +162,21 @@ pub unsafe extern "C" fn wasm_audio_output_entrypoint(
     output_buffer.clear_final_size();
     output_buffer.resize(frames as usize, channels as usize);
     output_buffer.set_final_size();
-    let mut output_fn = output_fn.lock().unwrap();
+    let mut output_fn = lock_from_audio(&output_fn);
 
     if let Some(output_fn) = &mut *output_fn {
         output_fn(
             AudioInfo {
                 device_id,
                 time: None,
-                sample_rate: 48000.0,
+                sample_rate,
             },
             &mut output_buffer,
         );
     }
     let ptr = output_buffer.data.as_ptr();
 
-    (*wa).lock().unwrap().output_buffer = Some(output_buffer);
+    lock_from_audio(&*wa).output_buffer = Some(output_buffer);
 
     ptr as u32
 }

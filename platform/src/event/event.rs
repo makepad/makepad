@@ -16,6 +16,7 @@ use {
         makepad_script::*,
         midi::MidiPortsEvent,
         permission::PermissionResult,
+        storage::StorageResponsesEvent,
         video::VideoInputsEvent,
         window::WindowId,
     },
@@ -236,6 +237,8 @@ pub enum Event {
     MidiPorts(MidiPortsEvent),
     VideoInputs(VideoInputsEvent),
     NetworkResponses(NetworkResponsesEvent),
+    /// Results of asynchronous operations submitted through [`Cx::storage`].
+    Storage(StorageResponsesEvent),
 
     VideoPlaybackPrepared(VideoPlaybackPreparedEvent),
     VideoTextureUpdated(VideoTextureUpdatedEvent),
@@ -336,6 +339,7 @@ impl Event {
             42 => "MidiPorts",
             43 => "VideoInputs",
             44 => "NetworkResponses",
+            73 => "Storage",
 
             45 => "VideoPlaybackPrepared",
             46 => "VideoTextureUpdated",
@@ -429,6 +433,7 @@ impl Event {
             Self::MidiPorts(_) => 42,
             Self::VideoInputs(_) => 43,
             Self::NetworkResponses(_) => 44,
+            Self::Storage(_) => 73,
 
             Self::VideoPlaybackPrepared(_) => 45,
             Self::VideoTextureUpdated(_) => 46,

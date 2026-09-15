@@ -8,6 +8,8 @@ pub enum GpuPerformance {
 
 pub struct GpuInfo {
     pub min_uniform_vectors: u32,
+    /// Native backends support these formats; WebGL reports its extension.
+    pub float_color_targets: bool,
     pub performance: GpuPerformance,
     pub vendor: String,
     pub renderer: String,
@@ -18,6 +20,7 @@ impl Default for GpuInfo {
         Self {
             // default to a nice gpu
             min_uniform_vectors: 1024,
+            float_color_targets: true,
             performance: GpuPerformance::Tier4,
             vendor: "unknown".to_string(),
             renderer: "unknown".to_string(),

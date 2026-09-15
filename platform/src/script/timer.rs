@@ -2,7 +2,6 @@ use crate::script::vm::*;
 use crate::*;
 use makepad_script::id;
 use makepad_script::*;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone)]
 pub struct CxScriptTimer {
@@ -116,11 +115,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     }
 
     fn fresh_seed() -> u64 {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let mut seed = (nanos >> 64) as u64 ^ (nanos as u64);
+        let mut seed = Cx::time_now().to_bits();
         seed ^= std::process::id() as u64;
         if seed == 0 {
             seed = 0x9e37_79b9_7f4a_7c15;
@@ -164,11 +159,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     });
 
     vm.add_method(std, id_lut!(time_now), script_args_def!(), |_vm, _args| {
-        let secs = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs_f64())
-            .unwrap_or(0.0);
-        secs.into()
+        Cx::time_now().into()
     });
 
     // Returns {year month day hour minute second weekday} in local time (weekday: 0 = Sunday).
@@ -179,12 +170,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
         script_args_def!(epoch = NIL),
         |vm, args| {
             let epoch = script_value!(vm, args.epoch);
-            let epoch_secs = epoch.as_number().unwrap_or_else(|| {
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_secs_f64())
-                    .unwrap_or(0.0)
-            });
+            let epoch_secs = epoch.as_number().unwrap_or_else(Cx::time_now);
             // Clamp the epoch to a sane range so an absurd script-supplied value
             // can't overflow the offset addition or the civil-date math.
             let epoch_i = (epoch_secs.clamp(-8.0e15, 8.0e15)) as i64;

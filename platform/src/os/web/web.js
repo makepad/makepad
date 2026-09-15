@@ -26,6 +26,7 @@ export class WasmWebBrowser extends WasmBridge {
         this.web_sockets = [];
         this.network_web_sockets = {};
         this.network_http_requests = new Map();
+        this.storage_db_promise = null;
         this.window_info = {}
         this.xr_capabilities = {
             vr_supported: false,
@@ -44,6 +45,10 @@ export class WasmWebBrowser extends WasmBridge {
         this.init_detection();
         this.midi_inputs = [];
         this.midi_outputs = [];
+        this.audio_context = null;
+        this.audio_worklet = null;
+        this.audio_callback_started = false;
+        this.audio_callback_watchdog = null;
 
         this.dispatch_first_msg();
     }
@@ -148,7 +153,8 @@ export class WasmWebBrowser extends WasmBridge {
                 pathname: location.pathname + "",
                 search: location.search + "",
                 hash: location.hash + "",
-                has_thread_support: this.wasm._has_thread_support
+                has_thread_support: this.wasm._has_thread_support,
+                is_phone: WasmBridge.is_phone()
             },
             window_info: this.window_info,
         });
@@ -405,16 +411,21 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     FromWasmNormalScreen() {
-        if (this.canvas.exitFullscreen) {
-            this.canvas.exitFullscreen();
+        // Exiting is a DOCUMENT call (entering is on the element); nothing
+        // to do unless the page is actually fullscreen.
+        if (!is_fullscreen()) {
             return
         }
-        if (this.canvas.webkitExitFullscreen) {
-            this.canvas.webkitExitFullscreen();
+        if (document.exitFullscreen) {
+            document.exitFullscreen();
             return
         }
-        if (this.canvas.mozExitFullscreen) {
-            this.canvas.mozExitFullscreen();
+        if (document.webkitExitFullscreen) {
+            document.webkitExitFullscreen();
+            return
+        }
+        if (document.mozCancelFullScreen) {
+            document.mozCancelFullScreen();
             return
         }
     }
@@ -449,6 +460,207 @@ export class WasmWebBrowser extends WasmBridge {
 
     FromWasmTextCopyResponse(args) {
         this.text_copy_response = args.response
+    }
+
+    storage_database() {
+        if (this.storage_db_promise !== null) {
+            return this.storage_db_promise;
+        }
+        this.storage_db_promise = new Promise((resolve, reject) => {
+            const request = indexedDB.open("makepad-storage", 1);
+            request.onupgradeneeded = () => {
+                const db = request.result;
+                const store = db.objectStoreNames.contains("values")
+                    ? request.transaction.objectStore("values")
+                    : db.createObjectStore("values", { keyPath: "id" });
+                if (!store.indexNames.contains("namespace")) {
+                    store.createIndex("namespace", "namespace", { unique: false });
+                }
+            };
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error || new Error("could not open IndexedDB"));
+            request.onblocked = () => reject(new Error("IndexedDB upgrade was blocked"));
+        });
+        return this.storage_db_promise;
+    }
+
+    storage_id(namespace, key) {
+        return namespace + "\u0000" + key;
+    }
+
+    storage_error_text(error) {
+        if (error && error.message) {
+            return error.message;
+        }
+        return String(error || "unknown IndexedDB error");
+    }
+
+    storage_send_result(args, op, result = {}) {
+        this.to_wasm.ToWasmStorageResult({
+            request_id_lo: args.request_id_lo,
+            request_id_hi: args.request_id_hi,
+            op,
+            found: result.found === true,
+            value: result.value || new Uint8Array(0),
+            keys: result.keys || [],
+            has_next: result.next !== undefined,
+            next: result.next || "",
+            length_lo: result.length === undefined ? 0 : result.length >>> 0,
+            length_hi: result.length === undefined ? 0 : Math.floor(result.length / 0x100000000),
+            usage_lo: result.usage === undefined ? 0 : result.usage >>> 0,
+            usage_hi: result.usage === undefined ? 0 : Math.floor(result.usage / 0x100000000),
+            quota_lo: result.quota === undefined ? 0 : result.quota >>> 0,
+            quota_hi: result.quota === undefined ? 0 : Math.floor(result.quota / 0x100000000),
+            error_kind: result.error_kind || 0,
+            error: result.error || ""
+        });
+        this.do_wasm_pump();
+    }
+
+    storage_request(request) {
+        return new Promise((resolve, reject) => {
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error || new Error("IndexedDB request failed"));
+        });
+    }
+
+    FromWasmStorageGet(args) {
+        this.storage_database().then(db => {
+            const request = db.transaction("values", "readonly")
+                .objectStore("values").get(this.storage_id(args.namespace, args.key));
+            return this.storage_request(request);
+        }).then(record => {
+            this.storage_send_result(args, 0, record === undefined
+                ? { found: false }
+                : { found: true, value: record.value });
+        }).catch(error => {
+            this.storage_send_result(args, 0, { error: this.storage_error_text(error) });
+        });
+    }
+
+    FromWasmStorageSet(args) {
+        const value = this.clone_data_u8(args.value);
+        this.free_data_u8(args.value);
+        this.storage_database().then(db => new Promise((resolve, reject) => {
+            const transaction = db.transaction("values", "readwrite");
+            transaction.oncomplete = () => resolve();
+            transaction.onerror = () => reject(transaction.error || new Error("IndexedDB write failed"));
+            transaction.onabort = () => reject(transaction.error || new Error("IndexedDB write aborted"));
+            transaction.objectStore("values").put({
+                id: this.storage_id(args.namespace, args.key),
+                namespace: args.namespace,
+                key: args.key,
+                value: value.buffer
+            });
+        })).then(() => {
+            this.storage_send_result(args, 1);
+        }).catch(error => {
+            this.storage_send_result(args, 1, {
+                error: this.storage_error_text(error),
+                error_kind: error && error.name === "QuotaExceededError" ? 1 : 0
+            });
+        });
+    }
+
+    FromWasmStorageDelete(args) {
+        this.storage_database().then(db => new Promise((resolve, reject) => {
+            const transaction = db.transaction("values", "readwrite");
+            transaction.oncomplete = () => resolve();
+            transaction.onerror = () => reject(transaction.error || new Error("IndexedDB delete failed"));
+            transaction.onabort = () => reject(transaction.error || new Error("IndexedDB delete aborted"));
+            transaction.objectStore("values").delete(this.storage_id(args.namespace, args.key));
+        })).then(() => {
+            this.storage_send_result(args, 2);
+        }).catch(error => {
+            this.storage_send_result(args, 2, { error: this.storage_error_text(error) });
+        });
+    }
+
+    FromWasmStorageList(args) {
+        this.storage_database().then(db => new Promise((resolve, reject) => {
+            const keys = [];
+            const request = db.transaction("values", "readonly")
+                .objectStore("values").index("namespace")
+                .openCursor(IDBKeyRange.only(args.namespace));
+            request.onerror = () => reject(request.error || new Error("IndexedDB cursor failed"));
+            request.onsuccess = () => {
+                const cursor = request.result;
+                if (cursor === null) {
+                    resolve(keys);
+                    return;
+                }
+                const key = cursor.value.key;
+                if (key.startsWith(args.prefix) && (!args.has_after || key > args.after)) {
+                    keys.push(key);
+                    if (keys.length > args.limit) {
+                        resolve(keys);
+                        return;
+                    }
+                }
+                cursor.continue();
+            };
+        })).then(keys => {
+            let next;
+            if (keys.length > args.limit) {
+                keys.length = args.limit;
+                next = keys[keys.length - 1];
+            }
+            this.storage_send_result(args, 3, { keys, next });
+        }).catch(error => {
+            this.storage_send_result(args, 3, { error: this.storage_error_text(error) });
+        });
+    }
+
+    FromWasmStorageGetRange(args) {
+        this.storage_database().then(db => {
+            const request = db.transaction("values", "readonly")
+                .objectStore("values").get(this.storage_id(args.namespace, args.key));
+            return this.storage_request(request);
+        }).then(record => {
+            if (record === undefined) {
+                this.storage_send_result(args, 4, { found: false });
+                return;
+            }
+            const value = new Uint8Array(record.value);
+            const offset = args.offset_hi > 0x1fffff
+                ? Number.MAX_SAFE_INTEGER
+                : args.offset_lo + args.offset_hi * 0x100000000;
+            const end = Math.min(value.length, offset + args.len);
+            const range = offset >= value.length ? new Uint8Array(0) : value.slice(offset, end);
+            this.storage_send_result(args, 4, { found: true, value: range });
+        }).catch(error => {
+            this.storage_send_result(args, 4, { error: this.storage_error_text(error) });
+        });
+    }
+
+    FromWasmStorageStat(args) {
+        this.storage_database().then(db => {
+            const request = db.transaction("values", "readonly")
+                .objectStore("values").get(this.storage_id(args.namespace, args.key));
+            return this.storage_request(request);
+        }).then(record => {
+            this.storage_send_result(args, 5, record === undefined
+                ? { found: false }
+                : { found: true, length: record.value.byteLength });
+        }).catch(error => {
+            this.storage_send_result(args, 5, { error: this.storage_error_text(error) });
+        });
+    }
+
+    FromWasmStorageEstimate(args) {
+        const estimate = navigator.storage && navigator.storage.estimate;
+        if (!estimate) {
+            this.storage_send_result(args, 6, { error: "storage estimate is unavailable" });
+            return;
+        }
+        navigator.storage.estimate().then(result => {
+            this.storage_send_result(args, 6, {
+                usage: Math.max(0, Math.floor(result.usage || 0)),
+                quota: Math.max(0, Math.floor(result.quota || 0))
+            });
+        }).catch(error => {
+            this.storage_send_result(args, 6, { error: this.storage_error_text(error) });
+        });
     }
 
     FromWasmShowTextIME(args) {
@@ -518,31 +730,137 @@ export class WasmWebBrowser extends WasmBridge {
         if (!this.audio_context) {
             return
         }
-        this.audio_context.close();
+        if (this.audio_callback_watchdog !== null) {
+            clearTimeout(this.audio_callback_watchdog);
+            this.audio_callback_watchdog = null;
+        }
+        if (this.audio_worklet) {
+            this.audio_worklet.disconnect();
+            this.audio_worklet = null;
+        }
+        const audio_context = this.audio_context;
         this.audio_context = null;
+        audio_context.close().catch(error => {
+            console.error(`web audio: close failed: ${error}`);
+        });
+    }
+
+    watch_audio_callback(audio_context) {
+        if (!this.audio_worklet
+            || this.audio_callback_started
+            || this.audio_callback_watchdog !== null) {
+            return;
+        }
+        this.audio_callback_watchdog = setTimeout(() => {
+            this.audio_callback_watchdog = null;
+            if (this.audio_context === audio_context && !this.audio_callback_started) {
+                console.error(
+                    `web audio: callback never called state=${audio_context.state} sample_rate=${audio_context.sampleRate} buffer=pending`,
+                );
+            }
+        }, 3000);
+    }
+
+    resume_audio_from_gesture() {
+        this.had_user_gesture = true;
+        if (!this.audio_context && this.audio_start_args) {
+            const args = this.audio_start_args;
+            this.audio_start_args = null;
+            this.start_audio_output(args, 1);
+            return;
+        }
+        const audio_context = this.audio_context;
+        if (!audio_context) {
+            return;
+        }
+        if (audio_context.state === "running") {
+            this.watch_audio_callback(audio_context);
+            return;
+        }
+        if (audio_context.state !== "suspended" || audio_context._makepad_resume_pending) {
+            return;
+        }
+        audio_context._makepad_resume_pending = true;
+        audio_context.resume().then(() => {
+            audio_context._makepad_resume_pending = false;
+            if (this.audio_context !== audio_context) {
+                return;
+            }
+            console.log(
+                `web audio: resume state=${audio_context.state} sample_rate=${audio_context.sampleRate} buffer=pending`,
+            );
+            if (audio_context.state === "running") {
+                this.watch_audio_callback(audio_context);
+            } else {
+                console.error(
+                    `web audio: context suspended after canvas gesture state=${audio_context.state} sample_rate=${audio_context.sampleRate} buffer=pending`,
+                );
+            }
+        }).catch(error => {
+            audio_context._makepad_resume_pending = false;
+            console.error(
+                `web audio: resume failed state=${audio_context.state} sample_rate=${audio_context.sampleRate} buffer=pending: ${error}`,
+            );
+        });
     }
 
     FromWasmStartAudioOutput(args) {
         if (this.audio_context) {
             return
         }
+        // The web's rule: an output is created inside a user gesture. The wasm asks at
+        // start-up; the first click or key press creates the context and the worklet.
+        if (!this.had_user_gesture) {
+            this.audio_start_args = args;
+            console.log("web audio: output requested — waiting for the first click or key press");
+            return;
+        }
+        this.start_audio_output(args, 1);
+    }
+
+    start_audio_output(args, attempt) {
+        if (this.audio_context) {
+            return
+        }
+        let audio_context;
+        try {
+            audio_context = new AudioContext({
+                latencyHint: "interactive"
+            });
+        } catch (error) {
+            console.error(`web audio: context creation failed: ${error}`);
+            return;
+        }
+        this.audio_context = audio_context;
+        this.audio_callback_started = false;
+        console.log(
+            `web audio: context created state=${audio_context.state} sample_rate=${audio_context.sampleRate} buffer=pending`,
+        );
+
         const start_worklet = async () => {
             if (this.wasm._secondary_ready) {
                 await this.wasm._secondary_ready;
             }
             if (!this.wasm._has_thread_support) {
-                console.warn("FromWasmStartAudioOutput skipped: wasm threading support is unavailable");
-                return;
+                throw new Error("wasm threading support is unavailable");
             }
-            const thread_info = this.alloc_thread_stack(args.context_ptr);
+            // alloc_thread_stack(request_id, context_ptr, stack_size): the audio thread has no
+            // spawn request, and its context pointer is the wasm audio access — passing it as
+            // the request id left the worklet reading its audio state from address zero.
+            const thread_info = this.alloc_thread_stack(0, args.context_ptr);
             if (!thread_info) {
-                console.warn("FromWasmStartAudioOutput skipped: thread stack allocation prerequisites are unavailable");
-                return;
+                throw new Error("thread stack allocation prerequisites are unavailable");
             }
 
-            await this.audio_context.audioWorklet.addModule("./makepad_platform/audio_worklet.js", { credentials: 'omit' });
+            // A stalled module load (seen: it never settles until a second context exists)
+            // is not waited on forever — the deadline fails this attempt, and the retry below
+            // starts over on a fresh context.
+            await Promise.race([
+                audio_context.audioWorklet.addModule("./makepad_platform/audio_worklet.js", { credentials: 'omit' }),
+                new Promise((_, reject) => setTimeout(() => reject(new Error("worklet module load stalled")), 4000)),
+            ]);
 
-            const audio_worklet = new AudioWorkletNode(this.audio_context, 'audio-worklet', {
+            const audio_worklet = new AudioWorkletNode(audio_context, 'audio-worklet', {
                 numberOfInputs: 0,
                 numberOfOutputs: 1,
                 outputChannelCount: [2],
@@ -559,51 +877,91 @@ export class WasmWebBrowser extends WasmBridge {
                     case "console_error":
                         console.error(data.value);
                         break;
+
+                    case "wake_ui":
+                        // the audio thread raised the UI signal (meters, transport state): pump like a wake
+                        this.do_wasm_pump();
+                        break;
+
+                    case "audio_callback_started":
+                        this.audio_callback_started = true;
+                        if (this.audio_callback_watchdog !== null) {
+                            clearTimeout(this.audio_callback_watchdog);
+                            this.audio_callback_watchdog = null;
+                        }
+                        console.log(
+                            `web audio: callback running state=${audio_context.state} sample_rate=${data.sample_rate} buffer=${data.frames}x${data.channels}`,
+                        );
+                        break;
                 }
             };
             audio_worklet.onprocessorerror = (err) => {
-                console.error(err);
+                console.error(`web audio: processor failed: ${err}`);
             }
-            audio_worklet.connect(this.audio_context.destination);
+            audio_worklet.connect(audio_context.destination);
 
             return audio_worklet;
         };
 
-        let user_interact_hook = (arg) => {
-            if (this.audio_context.state === "suspended") {
-                this.audio_context.resume();
+        start_worklet().then(audio_worklet => {
+            if (this.audio_context !== audio_context) {
+                audio_worklet.disconnect();
+                return;
             }
-        }
-        this.audio_context = new AudioContext({
-            latencyHint: "interactive",
-            sampleRate: 48000
+            this.audio_worklet = audio_worklet;
+            if (audio_context.state === "running") {
+                this.watch_audio_callback(audio_context);
+            }
+        }).catch(error => {
+            console.error(`web audio: start failed (attempt ${attempt}): ${error}`);
+            if (this.audio_context !== audio_context) {
+                return;
+            }
+            this.audio_context = null;
+            audio_context.close().catch(() => {});
+            if (attempt < 3) {
+                console.log(`web audio: retrying the output on a fresh context (attempt ${attempt + 1})`);
+                this.start_audio_output(args, attempt + 1);
+            }
         });
-        start_worklet().catch(err => console.error(err));
-        window.addEventListener('mousedown', user_interact_hook)
-        window.addEventListener('touchstart', user_interact_hook)
     }
 
     FromWasmQueryAudioDevices(args) {
-        navigator.mediaDevices?.enumerateDevices().then((devices_enum) => {
+        const publish_devices = (devices_enum) => {
             let devices = []
             for (let device of devices_enum) {
-                if (device.kind == "audiooutput" || device.kind == "audioinput") {
+                if (device.kind == "audioinput") {
                     devices.push({
                         web_device_id: "" + device.deviceId,
                         label: "" + device.label,
-                        is_output: device.kind == "audiooutput"
+                        is_output: false
                     });
                 }
             }
-            // safari doesnt report any outputs
+            // AudioContext.destination is the browser-selected output. Until
+            // this backend supports setSinkId, expose that one honest route
+            // instead of device choices FromWasmStartAudioOutput cannot use.
+            const output = devices_enum.find(device =>
+                device.kind == "audiooutput" && device.deviceId == "default"
+            ) || devices_enum.find(device => device.kind == "audiooutput");
             devices.push({
-                web_device_id: "",
-                label: "",
+                web_device_id: output ? "" + output.deviceId : "default",
+                label: output && output.label ? "" + output.label : "Browser audio",
                 is_output: true
             });
             this.to_wasm.ToWasmAudioDeviceList({ devices });
             this.do_wasm_pump();
-        })
+        };
+        const query = navigator.mediaDevices?.enumerateDevices();
+        if (!query) {
+            console.warn("web audio: device enumeration unavailable; using browser default");
+            publish_devices([]);
+            return;
+        }
+        query.then(publish_devices).catch(error => {
+            console.warn(`web audio: device enumeration failed; using browser default: ${error}`);
+            publish_devices([]);
+        });
     }
 
     FromWasmUseMidiInputs(args) {
@@ -1359,6 +1717,13 @@ export class WasmWebBrowser extends WasmBridge {
 
         window.addEventListener('resize', _ => this.handlers.on_screen_resize())
         window.addEventListener('orientationchange', _ => this.handlers.on_screen_resize())
+        // Fullscreen is part of the window geometry (`is_fullscreen`), and
+        // the browser leaves it on its own Esc without telling the page a
+        // key was pressed — this is how the app learns. A resize does not
+        // always come with it (a viewport already at screen size, or an
+        // emulated one, keeps its size).
+        document.addEventListener('fullscreenchange', _ => this.handlers.on_screen_resize())
+        document.addEventListener('webkitfullscreenchange', _ => this.handlers.on_screen_resize())
     }
 
     bind_mouse_and_touch() {
@@ -1461,12 +1826,17 @@ export class WasmWebBrowser extends WasmBridge {
         }
         //let current_mouse_down = null;
         this.handlers.on_mouse_down = e => {
+            this.resume_audio_from_gesture();
             e.preventDefault();
             this.focus_keyboard_input();
             //if (current_mouse_down === null || current_mouse_down === e.button){
             //    current_mouse_down = e.button;
             this.to_wasm.ToWasmMouseDown({ mouse: mouse_to_wasm_wmouse(e) });
             this.do_wasm_pump();
+            // The gesture can synchronously cause the app to open its first
+            // output. Resume that newly-created context before returning to
+            // the browser and losing user activation.
+            this.resume_audio_from_gesture();
             //}
         }
 
@@ -1544,6 +1914,7 @@ export class WasmWebBrowser extends WasmBridge {
         }
 
         this.handlers.on_touchstart = e => {
+            this.resume_audio_from_gesture();
             e.preventDefault()
             this.to_wasm.ToWasmTouchUpdate({
                 time: e.timeStamp / 1000.0,
@@ -1551,6 +1922,7 @@ export class WasmWebBrowser extends WasmBridge {
                 touches: touches_to_wasm_wtouches(e, 1)
             });
             this.do_wasm_pump();
+            this.resume_audio_from_gesture();
             return false
         }
 
@@ -1790,6 +2162,7 @@ export class WasmWebBrowser extends WasmBridge {
         var ugly_ime_hack = false;
 
         this.handlers.on_keydown = e => {
+            this.resume_audio_from_gesture();
             let code = e.keyCode;
 
             //if (code == 91) {firefox_logo_key = true; e.preventDefault();}
@@ -1836,6 +2209,7 @@ export class WasmWebBrowser extends WasmBridge {
             })
 
             this.do_wasm_pump();
+            this.resume_audio_from_gesture();
         };
 
         ta.addEventListener('keydown', e => this.handlers.on_keydown(e));

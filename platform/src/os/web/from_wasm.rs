@@ -84,6 +84,68 @@ pub struct FromWasmTextCopyResponse {
 }
 
 #[derive(FromWasm)]
+pub struct FromWasmStorageGet {
+    pub request_id_lo: u32,
+    pub request_id_hi: u32,
+    pub namespace: String,
+    pub key: String,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmStorageSet {
+    pub request_id_lo: u32,
+    pub request_id_hi: u32,
+    pub namespace: String,
+    pub key: String,
+    pub value: WasmDataU8,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmStorageDelete {
+    pub request_id_lo: u32,
+    pub request_id_hi: u32,
+    pub namespace: String,
+    pub key: String,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmStorageList {
+    pub request_id_lo: u32,
+    pub request_id_hi: u32,
+    pub namespace: String,
+    pub prefix: String,
+    pub after: String,
+    pub has_after: bool,
+    pub limit: u32,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmStorageGetRange {
+    pub request_id_lo: u32,
+    pub request_id_hi: u32,
+    pub namespace: String,
+    pub key: String,
+    pub offset_lo: u32,
+    pub offset_hi: u32,
+    pub len: u32,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmStorageStat {
+    pub request_id_lo: u32,
+    pub request_id_hi: u32,
+    pub namespace: String,
+    pub key: String,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmStorageEstimate {
+    pub request_id_lo: u32,
+    pub request_id_hi: u32,
+    pub namespace: String,
+}
+
+#[derive(FromWasm)]
 pub struct FromWasmOpenUrl {
     pub url: String,
     pub in_place: bool,
@@ -238,6 +300,18 @@ pub struct FromWasmAllocVao {
     pub inst_vb_id: usize,
 }
 
+/// Deletes WebGL objects whose owning Rust pool slots are genuinely free.
+/// Each list contains the exact JavaScript table ids; the consumer also
+/// invalidates VAOs which depend on a retired vertex/index buffer.
+#[derive(FromWasm)]
+pub struct FromWasmFreeWebGLResources {
+    pub array_buffer_ids: Vec<usize>,
+    pub index_buffer_ids: Vec<usize>,
+    pub vao_ids: Vec<usize>,
+    pub texture_ids: Vec<usize>,
+    pub framebuffer_ids: Vec<usize>,
+}
+
 #[derive(FromWasm, Default)]
 pub struct WColor {
     pub r: f32,
@@ -298,13 +372,16 @@ pub struct WColorTarget {
     pub texture_id: usize,
     pub init_only: bool,
     pub clear_color: WColor,
-    /// Attachment pixel format: 0 = RGBA8 (default), 1 = R32F
-    /// (`TextureFormat::RenderRf32`, needs EXT_color_buffer_float).
+    /// Attachment format: 0 RGBA8, 1 R32F, 2 RGBA32F, 3 RGBA16F.
+    /// Float color attachments require EXT_color_buffer_float.
     pub format: u32,
 }
 
 #[derive(FromWasm, Default)]
 pub struct WDepthTarget {
+    /// false = the pass has no depth texture (`Default`); a texture id of 0 is
+    /// a real texture, so absence needs its own flag.
+    pub attached: bool,
     pub texture_id: usize,
     pub init_only: bool,
     pub clear_depth: f32,
@@ -317,6 +394,14 @@ pub struct FromWasmBeginRenderTexture {
     pub height: usize,
     pub color_targets: [WColorTarget; 1],
     pub depth_target: WDepthTarget,
+}
+
+/// Starts an asynchronous WebGL2 readback of a render-target texture.
+/// JavaScript uses a pixel-pack buffer plus a fence and reports the bytes
+/// through `ToWasmRenderTextureCapture` on a later animation frame.
+#[derive(FromWasm)]
+pub struct FromWasmRequestRenderTextureCapture {
+    pub texture_id: usize,
 }
 
 #[derive(FromWasm)]
@@ -336,10 +421,21 @@ pub struct FromWasmDrawCall {
     pub depth_write: bool,
     pub backface_culling: bool,
     pub pass_uniforms: WasmPtrF32,
+    pub pass_uniforms_gen_lo: u32,
+    pub pass_uniforms_gen_hi: u32,
     pub draw_list_uniforms: WasmPtrF32,
+    pub draw_list_uniforms_gen_lo: u32,
+    pub draw_list_uniforms_gen_hi: u32,
     pub draw_call_uniforms: WasmPtrF32,
+    pub draw_call_uniforms_gen_lo: u32,
+    pub draw_call_uniforms_gen_hi: u32,
     pub user_uniforms: WasmPtrF32,
+    pub user_uniforms_gen_lo: u32,
+    pub user_uniforms_gen_hi: u32,
     pub live_uniforms: WasmPtrF32,
+    pub live_uniforms_gen_lo: u32,
+    pub live_uniforms_gen_hi: u32,
+    pub reset_draw_uniforms: bool,
     pub const_table: WasmPtrF32,
     pub textures: [Option<usize>; DRAW_CALL_TEXTURE_SLOTS],
 }
