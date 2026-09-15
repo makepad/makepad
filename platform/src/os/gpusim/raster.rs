@@ -1859,6 +1859,14 @@ impl Cx {
             if let Some(call) = item.kind.draw_call_mut() {
                 call.instance_dirty = false;
             }
+            // The reference backend for the receipts (contract §10): the block
+            // is read directly, so it is encoded and submitted in the same
+            // paint; it completes when the paint's serial completes.
+            if let Some((block, _)) = item.shared.as_ref() {
+                let receipt = block.receipt();
+                receipt.mark_encoded(item.consumed_serial);
+                receipt.mark_submitted(item.consumed_serial, item.consumed_uniforms_gen);
+            }
 
             if setups.is_empty() {
                 if let Some(p) = profile.as_deref_mut() {
@@ -2011,6 +2019,9 @@ impl crate::os::gpusim::CxOsTexture {
 
 impl Cx {
     pub(crate) fn poll_texture_lifetimes(&mut self) {
+        // No backing here (the block is read directly): dropped blocks
+        // release from this poll, contract §3.3.
+        self.publications.retire_without_backing();
         let completed = self
             .textures
             .1

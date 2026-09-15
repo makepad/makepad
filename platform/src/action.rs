@@ -1,9 +1,6 @@
 use crate::cx::Cx;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::{
-    cx_api::CxOsApi,
-    file_dialogs::{load_virtual_files_action, FileDialogAction, FileDialogLoadAction},
-};
+use crate::file_dialogs::{load_virtual_files_action, FileDialogAction, FileDialogLoadAction};
 use crate::thread::SignalToUI;
 use std::any::TypeId;
 use std::fmt;
@@ -142,13 +139,16 @@ impl Cx {
                 if !pending.want_bytes {
                     return false;
                 }
-                self.spawn_thread(move || {
+                match self.task_pool().submit(crate::thread::Lane::Heavy, move || {
                     Cx::post_action(FileDialogLoadAction(load_virtual_files_action(
                         id,
                         paths,
                         pending.limits,
                     )));
-                });
+                }) {
+                    Ok(task) => task.detach(),
+                    Err(error) => crate::error!("file dialog load refused by the task pool: {error}"),
+                }
                 true
             }
             FileDialogAction::FileCancelled { id } => {

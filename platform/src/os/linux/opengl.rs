@@ -15,10 +15,7 @@ use {
         makepad_math::{Vec2d, Vec4f},
         makepad_script::{
             apply::Apply,
-            shader::{
-                ShaderFnCompiler, ShaderMode, ShaderOutput,
-                ShaderType,
-            },
+            shader::{ShaderFnCompiler, ShaderMode, ShaderOutput, ShaderType},
             shader_backend::ShaderBackend,
             shader_output::TextureType,
             trap::NoTrap,
@@ -50,7 +47,11 @@ impl DrawVars {
             let heap_key = vm.bx.heap.heap_key();
             {
                 let cx = vm.host.cx();
-                if let Some(&shader_id) = cx.draw_shaders.cache_object_id_to_shader.get(&(heap_key, io_self)) {
+                if let Some(&shader_id) = cx
+                    .draw_shaders
+                    .cache_object_id_to_shader
+                    .get(&(heap_key, io_self))
+                {
                     self.finalize_cached_shader(vm, shader_id);
                     return;
                 }
@@ -158,7 +159,13 @@ impl DrawVars {
             if crate::makepad_error_log::trace_enabled("shader.glsl_ir") {
                 crate::trace!("shader.glsl_ir", "---- Linux GLSL IR io list ----");
                 for io in &output.io {
-                    crate::trace!("shader.glsl_ir", "io kind={:?} name={} ty={:?}", io.kind, io.name, io.ty);
+                    crate::trace!(
+                        "shader.glsl_ir",
+                        "io kind={:?} name={} ty={:?}",
+                        io.kind,
+                        io.name,
+                        io.ty
+                    );
                 }
                 crate::trace!("shader.glsl_ir", "---- Linux GLSL IR functions ----");
                 for f in &output.functions {
@@ -364,8 +371,88 @@ impl Cx {
         zbias: &mut f32,
         step: f32,
     ) {
+        if !self.draw_lists.1.allocations.has_device_limit() {
+            let reported = self.retained_adapter_bytes();
+            let allowance = if reported != 0 {
+                reported as usize
+            } else {
+                self.memory_budget()
+            };
+            self.draw_lists
+                .1
+                .allocations
+                .set_device_limit(allowance / 4);
+            // The one derived limit of the publication registry (contract §7).
+            self.publications.set_envelope(allowance / 4);
+            crate::log!("retained-upload budgets: adapter_bytes={} process_allowance={} allocation_limit={} source={}", reported, self.memory_budget(), allowance / 4, if reported != 0 { "GL_NVX_gpu_memory_info" } else { "process_allowance_fallback" });
+        }
+        self.draw_lists.1.allocations.collect_for_frame(
+            self.repaint_id,
+            self.textures
+                .1
+                .serials
+                .completed
+                .load(std::sync::atomic::Ordering::Acquire),
+        );
+        let pool = self.task_pool();
+        let gl = self.os.gl();
+        if self
+            .draw_lists
+            .retire_free_items(&pool, self.repaint_id, |os| {
+                if let Some(vao) = os.vao.take() {
+                    vao.free(gl);
+                }
+                os.inst_vb.free_resources(gl);
+                std::mem::take(&mut os.inst_vb)
+            })
+        {
+            self.demo_time_repaint = true;
+        }
         self.render_view_inner(pass, list, zbias, step);
-        self.textures.1.serials.submit();
+        let serial = self.textures.1.serials.submit();
+        self.readback_pass_submitted(pass, serial);
+    }
+
+    fn retained_adapter_bytes(&self) -> u64 {
+        #[cfg(not(any(use_vulkan, linux_direct, target_env = "ohos")))]
+        {
+            #[cfg(target_os = "linux")]
+            let display = self.os.opengl_cx.as_ref();
+            #[cfg(target_os = "android")]
+            let display = self.os.display.as_ref();
+            let Some(display) = display else {
+                return 0;
+            };
+            let Some(get_proc) = display.libegl.eglGetProcAddress else {
+                return 0;
+            };
+            unsafe {
+                let integer = get_proc(c"glGetIntegerv".as_ptr());
+                let string_i = get_proc(c"glGetStringi".as_ptr());
+                if integer.is_null() || string_i.is_null() {
+                    return 0;
+                }
+                let integer = std::mem::transmute::<
+                    *mut std::ffi::c_void,
+                    unsafe extern "C" fn(u32, *mut i32),
+                >(integer);
+                let string_i = std::mem::transmute::<
+                    *mut std::ffi::c_void,
+                    unsafe extern "C" fn(u32, u32) -> *const c_char,
+                >(string_i);
+                let mut count = 0;
+                integer(0x821D, &mut count); // GL_NUM_EXTENSIONS
+                for index in 0..count.clamp(0, 4096) as u32 {
+                    let name = string_i(gl_sys::EXTENSIONS, index);
+                    if !name.is_null() && CStr::from_ptr(name) == c"GL_NVX_gpu_memory_info" {
+                        let mut kib = 0;
+                        integer(0x9048, &mut kib); // TOTAL_AVAILABLE_MEMORY_NVX
+                        return kib.max(0) as u64 * 1024;
+                    }
+                }
+            }
+        }
+        0
     }
 
     fn render_view_inner(
@@ -377,7 +464,10 @@ impl Cx {
     ) {
         let mut to_dispatch = Vec::new();
         //self.draw_lists[draw_list_id].draw_list_uniforms.view_transform = Mat4f::identity();
-        let _phase = crate::thread::ui_hang::ui_phase_detail(crate::thread::UiPhase::DrawList, draw_list_id.index() as u32);
+        let _phase = crate::thread::ui_hang::ui_phase_detail(
+            crate::thread::UiPhase::DrawList,
+            draw_list_id.index() as u32,
+        );
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_order_len = self.draw_lists[draw_list_id].draw_item_order_len();
         // Exploded z-layer view: z is the call's nesting depth, not paint order.
@@ -429,7 +519,8 @@ impl Cx {
             } else {
                 let gl = self.os.gl();
 
-                let draw_list = &mut self.draw_lists[draw_list_id];
+                let (draw_list, upload_budget) =
+                    self.draw_lists.list_and_upload_budget(draw_list_id);
                 let draw_item = &mut draw_list.draw_items[draw_item_id];
 
                 let draw_call = if let Some(draw_call) = draw_item.kind.draw_call_mut() {
@@ -452,20 +543,90 @@ impl Cx {
 
                 let shader_variant = self.passes[draw_pass_id].os.shader_variant;
 
-                shp.ensure_gl_shader_started(self.os.gl(), shader_variant, &sh.mapping, &self.os_type);
+                shp.ensure_gl_shader_started(
+                    self.os.gl(),
+                    shader_variant,
+                    &sh.mapping,
+                    &self.os_type,
+                );
                 shp.poll_gl_shader_ready(self.os.gl(), shader_variant, &sh.mapping, &self.os_type);
-                let Some(shgl) = shp.gl_shader[shader_variant].as_ref().and_then(GlShaderState::as_ready) else {
+                let Some(shgl) = shp.gl_shader[shader_variant]
+                    .as_ref()
+                    .and_then(GlShaderState::as_ready)
+                else {
                     self.demo_time_repaint = true;
                     continue;
                 };
                 let trace_draw = crate::makepad_error_log::trace_enabled("gl.draw");
 
-                if draw_call.instance_dirty || draw_item.os.inst_vb.gl_buffer.is_none() {
+                if (draw_call.instance_dirty
+                    || draw_item.os.inst_vb.gl_buffer.is_none()
+                    || draw_item.retained_gpu_evicted)
+                    && !(draw_item.retained_gpu_evicted
+                        && draw_item.retained_instances.is_some()
+                        && draw_item.retained_instance_count == 0)
+                {
+                    upload_budget.allocations.collect_for_frame(
+                        self.repaint_id,
+                        self.textures
+                            .1
+                            .serials
+                            .completed
+                            .load(std::sync::atomic::Ordering::Acquire),
+                    );
+                    let bytes = draw_item.retained_instances.as_ref().map_or_else(
+                        || draw_item.instances.as_ref().map_or(0, |v| v.len() * 4),
+                        |p| p.byte_len(),
+                    );
+                    let replaces = draw_item.retained_instances.is_none()
+                        || draw_item.retained_upload_range.start == 0
+                        || draw_item.os.inst_vb.gl_buffer.is_none()
+                        || bytes > draw_item.os.inst_vb.retained_capacity;
+                    let charge = if replaces {
+                        let capacity = if draw_item.retained_instances.is_some() {
+                            bytes.next_power_of_two().max(256)
+                        } else {
+                            bytes
+                        };
+                        let Some(charge) = upload_budget.allocations.reserve(capacity) else {
+                            draw_item.instance_upload_pending = true;
+                            self.demo_time_repaint = true;
+                            continue;
+                        };
+                        Some(charge)
+                    } else {
+                        None
+                    };
                     draw_call.instance_dirty = false;
-                    draw_item
-                        .os
-                        .inst_vb
-                        .update_array_buffer(gl, draw_item.instances.as_ref().unwrap());
+                    draw_item.retained_instance_id =
+                        draw_item.retained_instances.as_ref().map_or(0, |v| v.id());
+                    draw_item.resident_schema = draw_item.retained_schema;
+                    draw_item.retained_gpu_evicted = false;
+                    if let Some(charge) = charge {
+                        draw_item.os.inst_vb.charge = Some(charge);
+                    }
+                    draw_item.instance_upload_pending = false;
+                    // What this copy costs feeds the producers' pacing
+                    // (contract §8): summed per frame, recorded at the
+                    // pass's end.
+                    let copy_started = std::time::Instant::now();
+                    if let Some(retained) = &draw_item.retained_instances {
+                        draw_item.os.inst_vb.update_retained_array(
+                            gl,
+                            retained.data(),
+                            draw_item.retained_upload_range.clone(),
+                        );
+                    } else {
+                        draw_item
+                            .os
+                            .inst_vb
+                            .update_array_buffer(gl, draw_item.instances.as_deref().unwrap());
+                    }
+                    upload_budget.stats.bytes = upload_budget.stats.bytes.saturating_add(bytes);
+                    upload_budget.stats.install_us = upload_budget
+                        .stats
+                        .install_us
+                        .saturating_add(copy_started.elapsed().as_micros().min(u64::MAX as u128) as u64);
                 }
 
                 // update the zbias uniform if we have it.
@@ -477,8 +638,12 @@ impl Cx {
                     .draw_call_uniforms
                     .update_uniform_buffer(gl, draw_call.draw_call_uniforms.as_slice());
 
-                let instances = (draw_item.instances.as_ref().unwrap().len()
-                    / sh.mapping.instances.total_slots) as u64;
+                let instances = if draw_item.retained_instances.is_some() {
+                    draw_item.retained_instance_count as u64
+                } else {
+                    (draw_item.instances.as_ref().map_or(0, |v| v.len())
+                        / sh.mapping.instances.total_slots) as u64
+                };
 
                 if instances == 0 {
                     continue;
@@ -490,7 +655,11 @@ impl Cx {
                         draw_item_id,
                         sh,
                         draw_call,
-                        draw_item.instances.as_ref().unwrap(),
+                        draw_item
+                            .retained_instances
+                            .as_ref()
+                            .map(|v| v.data())
+                            .unwrap_or_else(|| draw_item.instances.as_deref().unwrap()),
                         instances as usize,
                     );
                 }
@@ -505,7 +674,10 @@ impl Cx {
                     continue;
                 }
                 let geometry = &mut self.geometries[geometry_id];
-                if !crate::geometry::geometry_backend_supports_typed(
+                // Typed geometry (a byte layout, u16 indices) uploads as-is;
+                // the GL attribute pointers still assume f32-lane records,
+                // so a compact shader layout stays gated.
+                if !crate::geometry::geometry_backend_supports_compact(
                     geometry,
                     "opengl",
                     sh.mapping.geometry_is_compact(),
@@ -518,18 +690,30 @@ impl Cx {
                 ) {
                     continue;
                 }
-                if geometry.dirty_vertices || geometry.os.vb.gl_buffer.is_none() {
-                    let Some(vertices) = geometry.vertices.as_f32() else {
+                let index_gl_type = match geometry.index_width {
+                    2 => gl_sys::UNSIGNED_SHORT,
+                    4 => gl_sys::UNSIGNED_INT,
+                    width => {
+                        crate::error!("invalid resident index width {width}; skipping draw");
                         continue;
-                    };
-                    geometry.os.vb.update_array_buffer(gl, vertices);
+                    }
+                };
+                if geometry.dirty_vertices || geometry.os.vb.gl_buffer.is_none() {
+                    geometry
+                        .os
+                        .vb
+                        .update_array_buffer_bytes(gl, geometry.vertices.as_bytes());
                     geometry.dirty_vertices = false;
                 }
                 if geometry.dirty_indices || geometry.os.ib.gl_buffer.is_none() {
-                    let Some(indices) = geometry.indices.as_u32() else {
-                        continue;
-                    };
-                    geometry.os.ib.update_index_buffer(gl, indices);
+                    match &geometry.indices {
+                        crate::geometry::IndexData::U32(indices) => {
+                            geometry.os.ib.update_index_buffer(gl, indices);
+                        }
+                        crate::geometry::IndexData::U16(indices) => {
+                            geometry.os.ib.update_index_buffer_u16(gl, indices);
+                        }
+                    }
                     geometry.dirty_indices = false;
                 }
                 geometry.dirty = geometry.dirty_vertices || geometry.dirty_indices;
@@ -688,9 +872,12 @@ impl Cx {
                 unsafe {
                     (gl.glUseProgram)(shgl.program);
                     (gl.glBindVertexArray)(draw_item.os.vao.as_ref().unwrap().vao.unwrap());
-                    let instances = (draw_item.instances.as_ref().unwrap().len()
-                        / sh.mapping.instances.total_slots)
-                        as u64;
+                    let instances = if draw_item.retained_instances.is_some() {
+                        draw_item.retained_instance_count as u64
+                    } else {
+                        (draw_item.instances.as_ref().map_or(0, |v| v.len())
+                            / sh.mapping.instances.total_slots) as u64
+                    };
                     (gl.glDepthMask)(if draw_call.options.depth_write {
                         gl_sys::TRUE
                     } else {
@@ -731,10 +918,17 @@ impl Cx {
                             {
                                 let cx_uniform_buffer =
                                     &mut self.uniform_buffers[uniform_buffer.uniform_buffer_id()];
-                                cx_uniform_buffer
-                                    .os
-                                    .buffer
-                                    .update_uniform_buffer_bytes(gl, &cx_uniform_buffer.data);
+                                if cx_uniform_buffer.os.uploaded_generation
+                                    != cx_uniform_buffer.generation
+                                    || cx_uniform_buffer.os.buffer.gl_buffer.is_none()
+                                {
+                                    cx_uniform_buffer
+                                        .os
+                                        .buffer
+                                        .update_uniform_buffer_bytes(gl, &cx_uniform_buffer.data);
+                                    cx_uniform_buffer.os.uploaded_generation =
+                                        cx_uniform_buffer.generation;
+                                }
                                 binding.bind_buffer(gl, &cx_uniform_buffer.os.buffer);
                             } else {
                                 binding.bind_buffer(gl, &OpenglBuffer::default());
@@ -844,10 +1038,30 @@ impl Cx {
                     (gl.glDrawElementsInstanced)(
                         gl_sys::TRIANGLES,
                         indices as i32,
-                        gl_sys::UNSIGNED_INT,
+                        index_gl_type,
                         ptr::null(),
                         instances as i32,
                     );
+                    draw_item.consumed_instance_id = draw_item.retained_instance_id;
+                    draw_item.consumed_schema = draw_item.resident_schema;
+                    draw_item.consumed_serial = self
+                        .textures
+                        .1
+                        .serials
+                        .submitted
+                        .load(std::sync::atomic::Ordering::Acquire)
+                        + 1;
+                    if let Some(charge) = &draw_item.os.inst_vb.charge {
+                        charge.submitted(draw_item.consumed_serial);
+                    }
+                    draw_item.consumed_uniforms_gen = draw_call.uniforms_gen;
+                    if let Some((block, _)) = draw_item.shared.as_ref() {
+                        // The lease's receipt: this backend encodes and
+                        // submits in the same call, under the pass's serial.
+                        let receipt = block.receipt();
+                        receipt.mark_encoded(draw_item.consumed_serial);
+                        receipt.mark_submitted(draw_item.consumed_serial, draw_call.uniforms_gen);
+                    }
 
                     (gl.glBindVertexArray)(0);
                     (gl.glUseProgram)(0);
@@ -890,6 +1104,7 @@ impl Cx {
         let dpi_factor = self.passes[draw_pass_id].dpi_factor.unwrap();
         let pass_rect = self.get_pass_rect(draw_pass_id, dpi_factor).unwrap();
         let repaint_id = self.repaint_id;
+        self.record_publication_copies();
         let pass = &mut self.passes[draw_pass_id];
         pass.paint_dirty = false;
         // the bake transaction's paint receipt (whole draws: ranges ignored)
@@ -998,8 +1213,9 @@ impl Cx {
                     clear_flags |= gl_sys::COLOR_BUFFER_BIT;
                 }
             }
-            self.textures[color_texture.texture.texture_id()].os.rendered_top_left =
-                rows_top_left;
+            self.textures[color_texture.texture.texture_id()]
+                .os
+                .rendered_top_left = rows_top_left;
             if let Some(gl_texture) = self.textures[color_texture.texture.texture_id()]
                 .os
                 .gl_texture
@@ -1044,8 +1260,13 @@ impl Cx {
             let depth = &self.textures[depth_texture.texture_id()];
             if depth.format.is_sampled_depth() {
                 unsafe {
-                    (gl.glFramebufferTexture2D)(gl_sys::FRAMEBUFFER, gl_sys::DEPTH_ATTACHMENT,
-                        gl_sys::TEXTURE_2D, depth.os.gl_texture.unwrap_or(0), 0);
+                    (gl.glFramebufferTexture2D)(
+                        gl_sys::FRAMEBUFFER,
+                        gl_sys::DEPTH_ATTACHMENT,
+                        gl_sys::TEXTURE_2D,
+                        depth.os.gl_texture.unwrap_or(0),
+                        0,
+                    );
                 }
             }
         } else {
@@ -1115,6 +1336,10 @@ impl Cx {
         unsafe {
             (self.os.gl().glBindFramebuffer)(gl_sys::FRAMEBUFFER, 0);
             //(gl.glFinish)();
+        }
+        #[cfg(not(any(use_vulkan, linux_direct, target_env = "ohos")))]
+        if !self.textures.1.readbacks.slots.is_empty() {
+            self.gl_capture_texture_readbacks(Some(draw_pass_id));
         }
     }
 
@@ -1900,12 +2125,7 @@ impl GlShader {
 
         if has_errors {
             let kind = if compile { "compile" } else { "link" };
-            crate::warning!(
-                "GLSL {} {} info:\n{}",
-                kind,
-                stage_name,
-                info
-            );
+            crate::warning!("GLSL {} {} info:\n{}", kind, stage_name, info);
         }
         if dump_sources && !has_errors {
             let kind = if compile { "compile" } else { "link" };
@@ -2037,7 +2257,10 @@ impl GlShader {
         gl_texture_slots
     }
 
-    pub fn opengl_create_samplers(_gl: &LibGl, mapping: &CxDrawShaderMapping) -> Vec<OpenglSampler> {
+    pub fn opengl_create_samplers(
+        _gl: &LibGl,
+        mapping: &CxDrawShaderMapping,
+    ) -> Vec<OpenglSampler> {
         // Rely on per-texture filter+wrap (set in update_vec_texture) instead of GL sampler objects:
         // some Mesa drivers ignore the sampler MIN_FILTER and point-sample minified textures.
         vec![OpenglSampler::default(); mapping.textures.len()]
@@ -2128,8 +2351,15 @@ impl CxOsDrawShader {
     ) {
         // Check before taking: taking a Ready value here would drop a live
         // pipeline on every frame and leave this variant permanently missing.
-        if !matches!(self.gl_shader[shader_variant], Some(GlShaderState::Pending(_))) { return; }
-        let Some(GlShaderState::Pending(pending)) = self.gl_shader[shader_variant].take() else { unreachable!() };
+        if !matches!(
+            self.gl_shader[shader_variant],
+            Some(GlShaderState::Pending(_))
+        ) {
+            return;
+        }
+        let Some(GlShaderState::Pending(pending)) = self.gl_shader[shader_variant].take() else {
+            unreachable!()
+        };
 
         if !pending.is_complete(gl) {
             self.gl_shader[shader_variant] = Some(GlShaderState::Pending(pending));
@@ -2185,8 +2415,7 @@ impl CxOsDrawShader {
         let listed_external = get_gl_string(gl, gl_sys::EXTENSIONS)
             .split_whitespace()
             .any(|ext| {
-                ext == "GL_OES_EGL_image_external"
-                    || ext == "GL_OES_EGL_image_external_essl3"
+                ext == "GL_OES_EGL_image_external" || ext == "GL_OES_EGL_image_external_essl3"
             });
         let is_external_texture_supported = listed_external
             || matches!(os_type, OsType::Android(params) if !params.is_emulator)
@@ -2491,6 +2720,7 @@ impl CxOsDrawCall {
 #[derive(Default, Clone)]
 pub struct CxOsUniformBuffer {
     pub buffer: OpenglBuffer,
+    pub uploaded_generation: u64,
 }
 
 /// Column-major identity 4x4 — default SurfaceTexture UV transform (Android OES).
@@ -2692,16 +2922,8 @@ impl CxTexture {
                 crate::texture::TextureWrap::Repeat => gl_sys::REPEAT as i32,
                 crate::texture::TextureWrap::ClampToEdge => gl_sys::CLAMP_TO_EDGE as i32,
             };
-            (gl.glTexParameteri)(
-                gl_sys::TEXTURE_2D,
-                gl_sys::TEXTURE_WRAP_S,
-                wrap,
-            );
-            (gl.glTexParameteri)(
-                gl_sys::TEXTURE_2D,
-                gl_sys::TEXTURE_WRAP_T,
-                wrap,
-            );
+            (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_S, wrap);
+            (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_T, wrap);
 
             // Set texture parameters based on the format
             let (
@@ -3159,27 +3381,11 @@ impl CxTexture {
                 };
                 (gl.glBindTexture)(target, self.os.gl_texture.unwrap());
 
-                (gl.glTexParameteri)(
-                    target,
-                    gl_sys::TEXTURE_WRAP_S,
-                    gl_sys::CLAMP_TO_EDGE as i32,
-                );
-                (gl.glTexParameteri)(
-                    target,
-                    gl_sys::TEXTURE_WRAP_T,
-                    gl_sys::CLAMP_TO_EDGE as i32,
-                );
+                (gl.glTexParameteri)(target, gl_sys::TEXTURE_WRAP_S, gl_sys::CLAMP_TO_EDGE as i32);
+                (gl.glTexParameteri)(target, gl_sys::TEXTURE_WRAP_T, gl_sys::CLAMP_TO_EDGE as i32);
 
-                (gl.glTexParameteri)(
-                    target,
-                    gl_sys::TEXTURE_MIN_FILTER,
-                    gl_sys::LINEAR as i32,
-                );
-                (gl.glTexParameteri)(
-                    target,
-                    gl_sys::TEXTURE_MAG_FILTER,
-                    gl_sys::LINEAR as i32,
-                );
+                (gl.glTexParameteri)(target, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR as i32);
+                (gl.glTexParameteri)(target, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
 
                 (gl.glBindTexture)(target, 0);
 
@@ -3346,12 +3552,37 @@ impl CxTexture {
                         self.os.gl_texture = Some(texture);
                     }
                     (gl.glBindTexture)(gl_sys::TEXTURE_2D, self.os.gl_texture.unwrap());
-                    (gl.glTexImage2D)(gl_sys::TEXTURE_2D, 0, gl_sys::DEPTH_COMPONENT32F as i32,
-                        alloc.width as i32, alloc.height as i32, 0, 0x1902, gl_sys::FLOAT, std::ptr::null());
-                    (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR as i32);
-                    (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
-                    (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_S, gl_sys::CLAMP_TO_EDGE as i32);
-                    (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_T, gl_sys::CLAMP_TO_EDGE as i32);
+                    (gl.glTexImage2D)(
+                        gl_sys::TEXTURE_2D,
+                        0,
+                        gl_sys::DEPTH_COMPONENT32F as i32,
+                        alloc.width as i32,
+                        alloc.height as i32,
+                        0,
+                        0x1902,
+                        gl_sys::FLOAT,
+                        std::ptr::null(),
+                    );
+                    (gl.glTexParameteri)(
+                        gl_sys::TEXTURE_2D,
+                        gl_sys::TEXTURE_MIN_FILTER,
+                        gl_sys::LINEAR as i32,
+                    );
+                    (gl.glTexParameteri)(
+                        gl_sys::TEXTURE_2D,
+                        gl_sys::TEXTURE_MAG_FILTER,
+                        gl_sys::LINEAR as i32,
+                    );
+                    (gl.glTexParameteri)(
+                        gl_sys::TEXTURE_2D,
+                        gl_sys::TEXTURE_WRAP_S,
+                        gl_sys::CLAMP_TO_EDGE as i32,
+                    );
+                    (gl.glTexParameteri)(
+                        gl_sys::TEXTURE_2D,
+                        gl_sys::TEXTURE_WRAP_T,
+                        gl_sys::CLAMP_TO_EDGE as i32,
+                    );
                     // GL_TEXTURE_COMPARE_MODE / GL_COMPARE_REF_TO_TEXTURE / GL_TEXTURE_COMPARE_FUNC.
                     (gl.glTexParameteri)(gl_sys::TEXTURE_2D, 0x884c, 0x884e);
                     (gl.glTexParameteri)(gl_sys::TEXTURE_2D, 0x884d, gl_sys::LEQUAL as i32);
@@ -3417,9 +3648,48 @@ impl CxOsPass {
 #[derive(Default, Clone)]
 pub struct OpenglBuffer {
     pub gl_buffer: Option<u32>,
+    pub retained_capacity: usize,
+    pub charge: Option<crate::retained_instances::RetainedAllocation>,
 }
 
 impl OpenglBuffer {
+    pub fn update_retained_array(
+        &mut self,
+        gl: &LibGl,
+        data: &[f32],
+        range: std::ops::Range<usize>,
+    ) {
+        let bytes = std::mem::size_of_val(data);
+        let mut start = range.start * 4;
+        if self.gl_buffer.is_none() {
+            self.alloc_gl_buffer(gl);
+            start = 0;
+        }
+        unsafe {
+            (gl.glBindBuffer)(gl_sys::ARRAY_BUFFER, self.gl_buffer.unwrap());
+            // Orphaning delegates old GPU-reader ownership to the GL driver.
+            if start == 0 || bytes > self.retained_capacity {
+                self.retained_capacity = bytes.next_power_of_two().max(256);
+                (gl.glBufferData)(
+                    gl_sys::ARRAY_BUFFER,
+                    self.retained_capacity as _,
+                    std::ptr::null(),
+                    gl_sys::STATIC_DRAW,
+                );
+                start = 0;
+            }
+            for offset in (start..bytes).step_by(256 * 1024) {
+                (gl.glBufferSubData)(
+                    gl_sys::ARRAY_BUFFER,
+                    offset as _,
+                    (bytes - offset).min(256 * 1024) as _,
+                    (data.as_ptr() as *const u8).add(offset) as *const _,
+                );
+            }
+            (gl.glBindBuffer)(gl_sys::ARRAY_BUFFER, 0);
+        }
+    }
+
     pub fn alloc_gl_buffer(&mut self, gl: &LibGl) {
         unsafe {
             let mut gl_buffer = 0;
@@ -3429,6 +3699,15 @@ impl OpenglBuffer {
     }
 
     pub fn update_array_buffer(&mut self, gl: &LibGl, data: &[f32]) {
+        self.update_array_buffer_bytes(gl, unsafe {
+            std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data))
+        });
+    }
+
+    /// A vertex record stream in its physical layout (typed geometry, or
+    /// the f32-lane path's bytes).
+    pub fn update_array_buffer_bytes(&mut self, gl: &LibGl, data: &[u8]) {
+        self.retained_capacity = 0;
         if self.gl_buffer.is_none() {
             self.alloc_gl_buffer(gl);
         }
@@ -3436,7 +3715,7 @@ impl OpenglBuffer {
             (gl.glBindBuffer)(gl_sys::ARRAY_BUFFER, self.gl_buffer.unwrap());
             (gl.glBufferData)(
                 gl_sys::ARRAY_BUFFER,
-                (data.len() * mem::size_of::<f32>()) as gl_sys::GLsizeiptr,
+                data.len() as gl_sys::GLsizeiptr,
                 data.as_ptr() as *const _,
                 gl_sys::STATIC_DRAW,
             );
@@ -3472,6 +3751,20 @@ impl OpenglBuffer {
     }
 
     pub fn update_index_buffer(&mut self, gl: &LibGl, data: &[u32]) {
+        self.update_index_buffer_bytes(gl, unsafe {
+            std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data))
+        });
+    }
+
+    /// Compact (u16) indices; the draw selects `GL_UNSIGNED_SHORT` from the
+    /// geometry's resident index width.
+    pub fn update_index_buffer_u16(&mut self, gl: &LibGl, data: &[u16]) {
+        self.update_index_buffer_bytes(gl, unsafe {
+            std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data))
+        });
+    }
+
+    fn update_index_buffer_bytes(&mut self, gl: &LibGl, data: &[u8]) {
         if self.gl_buffer.is_none() {
             self.alloc_gl_buffer(gl);
         }
@@ -3479,7 +3772,7 @@ impl OpenglBuffer {
             (gl.glBindBuffer)(gl_sys::ELEMENT_ARRAY_BUFFER, self.gl_buffer.unwrap());
             (gl.glBufferData)(
                 gl_sys::ELEMENT_ARRAY_BUFFER,
-                (data.len() * mem::size_of::<u32>()) as gl_sys::GLsizeiptr,
+                data.len() as gl_sys::GLsizeiptr,
                 data.as_ptr() as *const _,
                 gl_sys::STATIC_DRAW,
             );
@@ -3567,6 +3860,388 @@ impl EglRenderBridge {
 
 // Resolved only for clients using the lifetime API; LibGl's ordinary draw path
 // gains no queries, scans, or fence calls. A zero timeout never waits for GPU work.
+#[cfg(not(any(use_vulkan, linux_direct, target_env = "ohos")))]
+#[derive(Default)]
+pub(crate) struct GlReadbacks {
+    functions: Option<GlReadbackFunctions>,
+    jobs: Vec<GlReadback>,
+    worker: Option<crate::texture::ReadbackWorker>,
+    device_lost: bool,
+}
+
+#[cfg(not(any(use_vulkan, linux_direct, target_env = "ohos")))]
+struct GlReadback {
+    work: crate::texture::ReadbackWork,
+    framebuffer: u32,
+    buffer: u32,
+    fence: GlSync,
+    mapped: bool,
+    copy: Option<crate::texture::ReadbackCopyJob>,
+    receive: Option<std::sync::mpsc::Receiver<std::sync::Arc<[u8]>>>,
+}
+
+#[cfg(not(any(use_vulkan, linux_direct, target_env = "ohos")))]
+#[derive(Clone, Copy)]
+struct GlReadbackFunctions {
+    framebuffer_status: unsafe extern "C" fn(u32) -> u32,
+    create: unsafe extern "C" fn(u32, u32) -> GlSync,
+    poll: unsafe extern "C" fn(GlSync, u32, u64) -> u32,
+    delete: unsafe extern "C" fn(GlSync),
+    current: unsafe extern "C" fn() -> GlSync,
+    integer: unsafe extern "C" fn(u32, *mut i32),
+    map: unsafe extern "C" fn(u32, isize, isize, u32) -> GlSync,
+    unmap: unsafe extern "C" fn(u32) -> u8,
+}
+
+#[cfg(not(any(use_vulkan, linux_direct, target_env = "ohos")))]
+impl Cx {
+    fn gl_readback_functions(
+        &mut self,
+    ) -> Result<GlReadbackFunctions, crate::texture::ReadbackError> {
+        use crate::texture::ReadbackError;
+        #[cfg(target_os = "linux")]
+        let display = self
+            .os
+            .opengl_cx
+            .as_ref()
+            .ok_or(ReadbackError::DeviceLost)?;
+        #[cfg(target_os = "android")]
+        let display = self.os.display.as_ref().ok_or(ReadbackError::DeviceLost)?;
+        let get_proc = display
+            .libegl
+            .eglGetProcAddress
+            .ok_or(ReadbackError::UnsupportedBackend)?;
+        let functions = &mut self.textures.1.gl_readbacks.functions;
+        unsafe {
+            if functions.is_none() {
+                macro_rules! resolve {
+                    ($name:expr, $ty:ty) => {{
+                        let pointer = get_proc($name.as_ptr());
+                        if pointer.is_null() {
+                            return Err(ReadbackError::UnsupportedBackend);
+                        }
+                        std::mem::transmute::<*mut std::ffi::c_void, $ty>(pointer)
+                    }};
+                }
+                *functions = Some(GlReadbackFunctions {
+                    framebuffer_status: resolve!(
+                        c"glCheckFramebufferStatus",
+                        unsafe extern "C" fn(u32) -> u32
+                    ),
+                    create: resolve!(c"glFenceSync", unsafe extern "C" fn(u32, u32) -> GlSync),
+                    poll: resolve!(
+                        c"glClientWaitSync",
+                        unsafe extern "C" fn(GlSync, u32, u64) -> u32
+                    ),
+                    delete: resolve!(c"glDeleteSync", unsafe extern "C" fn(GlSync)),
+                    current: resolve!(c"eglGetCurrentContext", unsafe extern "C" fn() -> GlSync),
+                    integer: resolve!(c"glGetIntegerv", unsafe extern "C" fn(u32, *mut i32)),
+                    map: resolve!(
+                        c"glMapBufferRange",
+                        unsafe extern "C" fn(u32, isize, isize, u32) -> GlSync
+                    ),
+                    unmap: resolve!(c"glUnmapBuffer", unsafe extern "C" fn(u32) -> u8),
+                });
+            }
+            let functions = functions.unwrap();
+            if (functions.current)() != display.egl_context {
+                // Keep pending work when a window temporarily owns the current
+                // context. No GL operation may run on the wrong context.
+                return Err(ReadbackError::Backpressure);
+            }
+            Ok(functions)
+        }
+    }
+
+    pub(crate) fn poll_texture_readbacks(&mut self) {
+        if self.textures.1.readbacks.slots.is_empty()
+            && self.textures.1.gl_readbacks.jobs.is_empty()
+        {
+            return;
+        }
+        self.gl_capture_texture_readbacks(None);
+    }
+
+    fn gl_capture_texture_readbacks(&mut self, pass: Option<DrawPassId>) {
+        use crate::texture::{ReadbackChannelOrder, ReadbackError, ReadbackOrigin, ReadbackWorker};
+        if self.textures.1.gl_readbacks.jobs.is_empty()
+            && !self
+                .textures
+                .1
+                .readbacks
+                .slots
+                .iter()
+                .any(|slot| slot.pending && slot.pass == pass)
+        {
+            return;
+        }
+        if self.textures.1.gl_readbacks.device_lost {
+            self.fail_pending_readbacks(ReadbackError::DeviceLost);
+            self.gl_finish_lost_readback_leases();
+            return;
+        }
+        if self.textures.1.gl_readbacks.worker.is_none() {
+            match ReadbackWorker::new(self) {
+                Ok(worker) => self.textures.1.gl_readbacks.worker = Some(worker),
+                Err(error) => {
+                    self.fail_pending_readbacks(error);
+                    return;
+                }
+            }
+        }
+        self.textures
+            .1
+            .gl_readbacks
+            .worker
+            .as_ref()
+            .unwrap()
+            .set_active(true);
+        let functions = match self.gl_readback_functions() {
+            Ok(functions) => functions,
+            Err(ReadbackError::Backpressure) => return,
+            Err(error) => {
+                self.fail_pending_readbacks(error);
+                self.textures.1.gl_readbacks.device_lost = true;
+                self.gl_finish_lost_readback_leases();
+                return;
+            }
+        };
+        // A pass has a uniform row orientation. Current-allocation requests
+        // may refer to different passes; set each result from its native owner.
+        let work =
+            self.take_readback_work(pass, ReadbackChannelOrder::Rgba, ReadbackOrigin::TopLeft);
+        for work in work {
+            let origin = if self.textures[work.texture_id].os.rendered_top_left {
+                ReadbackOrigin::TopLeft
+            } else {
+                ReadbackOrigin::BottomLeft
+            };
+            for slot in &mut self.textures.1.readbacks.slots {
+                if slot.result.ticket == work.ticket {
+                    slot.result.origin = origin;
+                }
+            }
+            let Some(source) = self.textures[work.texture_id].os.gl_texture else {
+                work.completion.finish(Err(ReadbackError::NotRendered));
+                continue;
+            };
+            let gl = self.os.gl();
+            unsafe {
+                const PACK: u32 = 0x88eb; // GL_PIXEL_PACK_BUFFER
+                let mut framebuffer = 0;
+                let mut buffer = 0;
+                let mut old_fbo = 0;
+                let mut old_buffer = 0;
+                let mut old_pack = 0;
+                let mut old_row = 0;
+                let mut old_skip_rows = 0;
+                let mut old_skip_pixels = 0;
+                (functions.integer)(0x8caa, &mut old_fbo); // READ_FRAMEBUFFER_BINDING
+                (functions.integer)(0x88ed, &mut old_buffer);
+                (functions.integer)(0x0d05, &mut old_pack);
+                (functions.integer)(0x0d02, &mut old_row);
+                (functions.integer)(0x0d03, &mut old_skip_rows);
+                (functions.integer)(0x0d04, &mut old_skip_pixels);
+                (gl.glGenFramebuffers)(1, &mut framebuffer);
+                (gl.glGenBuffers)(1, &mut buffer);
+                (gl.glBindFramebuffer)(0x8ca8, framebuffer); // READ_FRAMEBUFFER
+                (gl.glFramebufferTexture2D)(
+                    0x8ca8,
+                    gl_sys::COLOR_ATTACHMENT0,
+                    gl_sys::TEXTURE_2D,
+                    source,
+                    0,
+                );
+                let complete = (functions.framebuffer_status)(0x8ca8) == 0x8cd5;
+                (gl.glBindBuffer)(PACK, buffer);
+                (gl.glBufferData)(
+                    PACK,
+                    (work.width * work.height * 4) as isize,
+                    std::ptr::null(),
+                    0x88e1,
+                ); // STREAM_READ
+                (gl.glPixelStorei)(0x0d05, 1);
+                (gl.glPixelStorei)(0x0d02, 0);
+                (gl.glPixelStorei)(0x0d03, 0);
+                (gl.glPixelStorei)(0x0d04, 0);
+                if complete {
+                    (gl.glReadPixels)(
+                        0,
+                        0,
+                        work.width as i32,
+                        work.height as i32,
+                        gl_sys::RGBA,
+                        gl_sys::UNSIGNED_BYTE,
+                        std::ptr::null_mut(),
+                    );
+                }
+                let fence = (functions.create)(0x9117, 0);
+                let error = (gl.glGetError)();
+                (gl.glPixelStorei)(0x0d05, old_pack);
+                (gl.glPixelStorei)(0x0d02, old_row);
+                (gl.glPixelStorei)(0x0d03, old_skip_rows);
+                (gl.glPixelStorei)(0x0d04, old_skip_pixels);
+                (gl.glBindBuffer)(PACK, old_buffer as u32);
+                (gl.glBindFramebuffer)(0x8ca8, old_fbo as u32);
+                if !complete || fence.is_null() || error != 0 {
+                    if !fence.is_null() {
+                        (functions.delete)(fence);
+                    }
+                    (gl.glDeleteBuffers)(1, &buffer);
+                    (gl.glDeleteFramebuffers)(1, &framebuffer);
+                    work.completion.finish(Err(if error == 0x0507 {
+                        ReadbackError::DeviceLost
+                    } else {
+                        ReadbackError::Failed
+                    }));
+                    continue;
+                }
+                (gl.glFlush)();
+                if pass.is_none() {
+                    self.textures.1.serials.submit();
+                }
+                // The dedicated FBO retains the exact source image after
+                // Texture::release; it survives until this fence/copy retires.
+                self.textures.1.gl_readbacks.jobs.push(GlReadback {
+                    work,
+                    framebuffer,
+                    buffer,
+                    fence,
+                    mapped: false,
+                    copy: None,
+                    receive: None,
+                });
+            }
+        }
+        self.gl_poll_readback_leases(functions);
+    }
+
+    fn gl_poll_readback_leases(&mut self, functions: GlReadbackFunctions) {
+        use crate::texture::ReadbackError;
+        if unsafe { (self.os.gl().glGetError)() } == 0x0507 {
+            // CONTEXT_LOST
+            self.textures.1.gl_readbacks.device_lost = true;
+            self.fail_pending_readbacks(ReadbackError::DeviceLost);
+            self.gl_finish_lost_readback_leases();
+            return;
+        }
+        let mut jobs = std::mem::take(&mut self.textures.1.gl_readbacks.jobs);
+        let mut pending = Vec::new();
+        let gl = self.os.gl();
+        let worker = self.textures.1.gl_readbacks.worker.as_ref().unwrap();
+        unsafe {
+            const PACK: u32 = 0x88eb;
+            let mut old_buffer = 0;
+            (functions.integer)(0x88ed, &mut old_buffer);
+            for mut job in jobs.drain(..) {
+                let mut result = None;
+                if !job.mapped {
+                    match (functions.poll)(job.fence, 0, 0) {
+                        0x911a | 0x911c => {
+                            (gl.glBindBuffer)(PACK, job.buffer);
+                            let length = job.work.width * job.work.height * 4;
+                            let address = (functions.map)(PACK, 0, length as isize, 1) as usize; // MAP_READ_BIT
+                            job.mapped = address != 0;
+                            if address == 0 || length > job.work.reserved_bytes {
+                                result = Some(Err(ReadbackError::Failed));
+                            } else {
+                                let width = job.work.width;
+                                let height = job.work.height;
+                                let (send, receive) = std::sync::mpsc::sync_channel(1);
+                                job.receive = Some(receive);
+                                // The renderer retains the mapped PBO and does
+                                // not unmap/delete it until this lease returns.
+                                job.copy = Some(Box::new(move || {
+                                    let bytes = crate::texture::copy_readback_rows(
+                                        address,
+                                        width * 4,
+                                        width,
+                                        height,
+                                    );
+                                    let _ = send.try_send(bytes);
+                                }));
+                            }
+                        }
+                        0x911b => {} // TIMEOUT_EXPIRED: zero wait, try next signal.
+                        _ => result = Some(Err(ReadbackError::DeviceLost)),
+                    }
+                }
+                if let Some(copy) = job.copy.take() {
+                    if let Err((copy, disconnected)) = worker.try_copy(copy) {
+                        if disconnected {
+                            drop(copy);
+                            result = Some(Err(ReadbackError::Failed));
+                        } else {
+                            job.copy = Some(copy);
+                        }
+                    }
+                }
+                if let Some(receive) = &job.receive {
+                    match receive.try_recv() {
+                        Ok(bytes) => result = Some(Ok(bytes)),
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            result = Some(Err(ReadbackError::Failed))
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                    }
+                }
+                if let Some(mut result) = result {
+                    if job.mapped {
+                        (gl.glBindBuffer)(PACK, job.buffer);
+                        if (functions.unmap)(PACK) == 0 {
+                            result = Err(ReadbackError::DeviceLost);
+                        }
+                    }
+                    (functions.delete)(job.fence);
+                    (gl.glDeleteBuffers)(1, &job.buffer);
+                    (gl.glDeleteFramebuffers)(1, &job.framebuffer);
+                    job.work.completion.finish(result);
+                } else {
+                    pending.push(job);
+                }
+            }
+            (gl.glBindBuffer)(PACK, old_buffer as u32);
+        }
+        worker.set_active(
+            !pending.is_empty()
+                || self
+                    .textures
+                    .1
+                    .readbacks
+                    .slots
+                    .iter()
+                    .any(|slot| slot.pending && slot.pass.is_none()),
+        );
+        self.textures.1.gl_readbacks.jobs = pending;
+    }
+
+    fn gl_finish_lost_readback_leases(&mut self) {
+        use crate::texture::ReadbackError;
+        let jobs = std::mem::take(&mut self.textures.1.gl_readbacks.jobs);
+        let mut pending = Vec::new();
+        for mut job in jobs {
+            // Never unmap while a worker still holds the pointer. A lost
+            // context owns destruction of its GL names; no further GL calls
+            // are issued, and this renderer cannot allocate new staging.
+            drop(job.copy.take());
+            if job.receive.as_ref().is_some_and(|receive| {
+                matches!(
+                    receive.try_recv(),
+                    Err(std::sync::mpsc::TryRecvError::Empty)
+                )
+            }) {
+                pending.push(job);
+            } else {
+                job.work.completion.finish(Err(ReadbackError::DeviceLost));
+            }
+        }
+        if let Some(worker) = &self.textures.1.gl_readbacks.worker {
+            worker.set_active(!pending.is_empty());
+        }
+        self.textures.1.gl_readbacks.jobs = pending;
+    }
+}
+
 #[cfg(not(any(use_vulkan, linux_direct, target_env = "ohos")))]
 type GlSync = *mut std::ffi::c_void;
 #[cfg(not(any(use_vulkan, linux_direct, target_env = "ohos")))]
@@ -3728,6 +4403,9 @@ impl Cx {
     }
 
     pub(crate) fn poll_texture_lifetimes(&mut self) {
+        // The adapter draws attached blocks here (no per-publication
+        // backing): dropped blocks release from this poll, contract §3.3.
+        self.publications.retire_without_backing();
         #[cfg(target_os = "linux")]
         let Some(display) = self.os.opengl_cx.as_ref() else {
             return;

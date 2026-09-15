@@ -1692,9 +1692,15 @@ impl Widget for Slider {
                 // abs,
                 // rect,
                 device,
+                tap_count,
                 ..
             }) if device.is_primary_hit() => {
                 if self.animator_in_state(cx, ids!(disabled.on)) {
+                    return ();
+                }
+                if tap_count == 2 {
+                    self.reset_to_default(cx);
+                    cx.widget_action(uid, SliderAction::Slide(self.to_external()));
                     return ();
                 }
                 // cx.set_key_focus(self.slider.area());
