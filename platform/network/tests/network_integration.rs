@@ -1,10 +1,11 @@
 use makepad_live_id::LiveId;
 use makepad_network::{
-    HttpMethod, HttpRequest, HttpServer, HttpServerRequest, NetworkConfig, NetworkResponse,
-    NetworkRuntime, SocketStream, WebSocketTransport, WsMessage, WsSend,
+    HttpMethod, HttpRequest, HttpServer, HttpServerRequest, HttpServerResponse, NetworkConfig,
+    NetworkResponse, NetworkRuntime, SocketStream, WebSocketTransport, WsMessage, WsSend,
+    HTTP_BODY_LIMIT_ERROR,
 };
 use std::io::{Read, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::{mpsc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -56,6 +57,539 @@ fn parse_content_length(headers: &str) -> usize {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn one_shot_http_response(
+    response: Vec<u8>,
+    expect_client_cancel: bool,
+) -> Option<(
+    SocketAddr,
+    mpsc::Receiver<(String, Vec<u8>, bool)>,
+    std::thread::JoinHandle<()>,
+)> {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).ok()?;
+    let address = listener.local_addr().expect("read HTTP fixture address");
+    let (capture_sender, capture_receiver) = mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept HTTP fixture request");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .expect("set HTTP fixture read timeout");
+        stream
+            .set_write_timeout(Some(Duration::from_secs(3)))
+            .expect("set HTTP fixture write timeout");
+
+        let mut request = Vec::new();
+        let mut scratch = [0u8; 4096];
+        let head_end = loop {
+            let read = stream.read(&mut scratch).expect("read HTTP fixture request");
+            assert_ne!(read, 0, "client closed before sending request headers");
+            request.extend_from_slice(&scratch[..read]);
+            if let Some(end) = find_header_end(&request) {
+                break end + 4;
+            }
+        };
+        let head = String::from_utf8_lossy(&request[..head_end]).to_string();
+        let body_len = parse_content_length(&head);
+        while request.len() - head_end < body_len {
+            let read = stream.read(&mut scratch).expect("read HTTP fixture body");
+            assert_ne!(read, 0, "client closed before sending request body");
+            request.extend_from_slice(&scratch[..read]);
+        }
+        let body = request[head_end..head_end + body_len].to_vec();
+
+        let client_cancelled = if expect_client_cancel {
+            if stream.write_all(&response).is_err() || stream.flush().is_err() {
+                true
+            } else {
+                let chunk = [b'x'; 4096];
+                (0..1024).any(|_| {
+                    if stream.write_all(&chunk).is_err() || stream.flush().is_err() {
+                        true
+                    } else {
+                        std::thread::sleep(Duration::from_millis(1));
+                        false
+                    }
+                })
+            }
+        } else {
+            stream.write_all(&response).expect("write HTTP fixture response");
+            stream.flush().expect("flush HTTP fixture response");
+            false
+        };
+        capture_sender
+            .send((head, body, client_cancelled))
+            .expect("send HTTP fixture capture");
+    });
+    Some((address, capture_receiver, server))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn run_http_request(
+    runtime: &NetworkRuntime,
+    request_id: LiveId,
+    address: SocketAddr,
+    method: HttpMethod,
+    body: &[u8],
+    max_body: u64,
+) -> NetworkResponse {
+    let mut request = HttpRequest::new(format!("http://{address}/body-cap"), method);
+    request.set_max_response_body_bytes(max_body);
+    if !body.is_empty() || matches!(method, HttpMethod::POST | HttpMethod::PUT) {
+        request.set_body(body.to_vec());
+    }
+    runtime
+        .http_start(request_id, request)
+        .expect("start native HTTP request");
+    wait_for_event(runtime, Duration::from_secs(5), |event| {
+        matches!(event, NetworkResponse::HttpResponse { request_id: id, .. } if *id == request_id)
+            || matches!(event, NetworkResponse::HttpError { request_id: id, .. } if *id == request_id)
+    })
+    .expect("native HTTP request did not complete")
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn native_http_enforces_body_cap_and_preserves_methods() {
+    let _guard = test_guard();
+    let runtime = NetworkRuntime::new(NetworkConfig::default());
+
+    // With no declared length, the server keeps sending until the backend observes
+    // the first byte over the cap and closes the request. The peer-side disconnect
+    // proves the backend did not buffer the rest of the response.
+    let oversized = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n".to_vec();
+    let Some((address, capture, server)) = one_shot_http_response(oversized, true) else {
+        eprintln!("native HTTP body-cap test skipped: cannot bind local fixture");
+        return;
+    };
+    let event = run_http_request(
+        &runtime,
+        LiveId::from_str("native.http.cap.exceeded"),
+        address,
+        HttpMethod::GET,
+        &[],
+        8,
+    );
+    match event {
+        NetworkResponse::HttpError { error, .. } => {
+            assert_eq!(error.message, HTTP_BODY_LIMIT_ERROR);
+        }
+        other => panic!("oversized response did not return the body-cap error: {other:?}"),
+    }
+    let (_, _, client_cancelled) = capture
+        .recv_timeout(Duration::from_secs(4))
+        .expect("capture oversized request");
+    assert!(client_cancelled, "backend did not cancel the oversized request");
+    server.join().expect("join oversized HTTP fixture");
+
+    let normal =
+        b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\n12345678".to_vec();
+    let (address, capture, server) =
+        one_shot_http_response(normal, false).expect("bind within-cap HTTP fixture");
+    let event = run_http_request(
+        &runtime,
+        LiveId::from_str("native.http.cap.accepted"),
+        address,
+        HttpMethod::GET,
+        &[],
+        8,
+    );
+    match event {
+        NetworkResponse::HttpResponse { response, .. } => {
+            assert_eq!(response.body(), Some(&b"12345678"[..]));
+        }
+        other => panic!("within-cap response failed: {other:?}"),
+    }
+    capture
+        .recv_timeout(Duration::from_secs(4))
+        .expect("capture within-cap request");
+    server.join().expect("join within-cap HTTP fixture");
+
+    for (name, method, request_body) in [
+        ("head", HttpMethod::HEAD, &b""[..]),
+        ("post", HttpMethod::POST, &b"post-body"[..]),
+        ("put", HttpMethod::PUT, &b"put-body"[..]),
+    ] {
+        let response = if matches!(method, HttpMethod::HEAD) {
+            b"HTTP/1.1 200 OK\r\nContent-Length: 99\r\nConnection: close\r\n\r\n".to_vec()
+        } else {
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".to_vec()
+        };
+        let (address, capture, server) =
+            one_shot_http_response(response, false).expect("bind method HTTP fixture");
+        let event = run_http_request(
+            &runtime,
+            LiveId::from_str(&format!("native.http.method.{name}")),
+            address,
+            method,
+            request_body,
+            8,
+        );
+        match event {
+            NetworkResponse::HttpResponse { response, .. } => {
+                if matches!(method, HttpMethod::HEAD) {
+                    assert!(response.body().is_none_or(|body| body.is_empty()));
+                } else {
+                    assert_eq!(response.body(), Some(&b"ok"[..]));
+                }
+            }
+            other => panic!("{method:?} request failed: {other:?}"),
+        }
+        let (head, body, _) = capture
+            .recv_timeout(Duration::from_secs(4))
+            .expect("capture method request");
+        assert!(head.starts_with(method.as_str()));
+        assert_eq!(body, request_body);
+        server.join().expect("join method HTTP fixture");
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn http_server_routes_head_through_get_and_suppresses_body() {
+    let _guard = test_guard();
+    let port = find_free_port().expect("allocate local test port");
+    let listen_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+    let runtime = NetworkRuntime::new(NetworkConfig::default());
+    let (request_sender, request_receiver) = mpsc::channel::<HttpServerRequest>();
+    runtime
+        .start_http_server(HttpServer {
+            listen_address,
+            request: request_sender,
+            post_max_size: 1024,
+            post_max_size_overrides: Vec::new(),
+            pre_admit_posts: false,
+            client_ip_resolver: None,
+            trusted_proxy: None,
+            allowed_methods: None,
+        })
+        .expect("start HTTP server");
+    let handler = std::thread::spawn(move || {
+        let request = request_receiver.recv_timeout(Duration::from_secs(3)).unwrap();
+        let HttpServerRequest::Get { headers, response_sender } = request else {
+            panic!("HEAD did not use GET-shaped dispatch");
+        };
+        assert_eq!(headers.verb, "HEAD");
+        assert!(response_sender
+            .send(HttpServerResponse::new(
+                "HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\n".into(),
+                b"hidden!".to_vec(),
+            ))
+            .is_ok());
+    });
+    let mut stream = TcpStream::connect(listen_address).unwrap();
+    stream
+        .write_all(b"HEAD /asset HTTP/1.1\r\nHost: test\r\n\r\n")
+        .unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).unwrap();
+    let split = find_header_end(&response).unwrap() + 4;
+    assert!(String::from_utf8_lossy(&response[..split]).contains("Content-Length: 7"));
+    assert!(response[split..].is_empty());
+    handler.join().unwrap();
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn raw_server_request(address: SocketAddr, request: &[u8]) -> String {
+    let mut stream = TcpStream::connect(address).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    stream.write_all(request).unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).unwrap();
+    String::from_utf8(response).unwrap()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn test_proxy_peer(ip: IpAddr) -> bool {
+    ip.is_loopback()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn test_forwarded_client(headers: &makepad_network::HttpServerHeaders) -> IpAddr {
+    headers
+        .header("X-Test-Client-IP")
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_else(|| headers.addr.ip())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn fixture_allowed_methods(path: &str) -> Option<&'static str> {
+    match path {
+        "/write-only" => Some("POST, OPTIONS"),
+        "/read-only" => Some("GET, HEAD, OPTIONS"),
+        _ => None,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn trusted_proxy_connections_are_capped_by_verified_forwarded_client() {
+    let _guard = test_guard();
+    let port = find_free_port().expect("allocate local test port");
+    let listen_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+    let runtime = NetworkRuntime::new(NetworkConfig::default());
+    let (request_sender, request_receiver) = mpsc::channel::<HttpServerRequest>();
+    runtime
+        .start_http_server(HttpServer {
+            listen_address,
+            request: request_sender,
+            post_max_size: 1024,
+            post_max_size_overrides: Vec::new(),
+            pre_admit_posts: false,
+            client_ip_resolver: Some(test_forwarded_client),
+            trusted_proxy: Some(test_proxy_peer),
+            allowed_methods: None,
+        })
+        .unwrap();
+
+    let mut streams = Vec::new();
+    let mut responders = Vec::new();
+    for octet in 1..=17 {
+        let mut stream = TcpStream::connect(listen_address).unwrap();
+        write!(
+            stream,
+            "GET /x HTTP/1.1\r\nHost: x\r\nX-Test-Client-IP: 192.0.2.{octet}\r\n\r\n"
+        )
+        .unwrap();
+        let HttpServerRequest::Get { response_sender, .. } = request_receiver
+            .recv_timeout(Duration::from_secs(3))
+            .expect("distinct forwarded client was starved by proxy-hop cap")
+        else {
+            panic!("unexpected proxy test request");
+        };
+        streams.push(stream);
+        responders.push(response_sender);
+    }
+
+    for _ in 0..16 {
+        let mut stream = TcpStream::connect(listen_address).unwrap();
+        stream
+            .write_all(
+                b"GET /x HTTP/1.1\r\nHost: x\r\nX-Test-Client-IP: ::ffff:198.51.100.7\r\n\r\n",
+            )
+            .unwrap();
+        let HttpServerRequest::Get { response_sender, .. } = request_receiver
+            .recv_timeout(Duration::from_secs(3))
+            .expect("forwarded client below cap")
+        else {
+            panic!("unexpected proxy test request");
+        };
+        streams.push(stream);
+        responders.push(response_sender);
+    }
+    let response = raw_server_request(
+        listen_address,
+        b"GET /x HTTP/1.1\r\nHost: x\r\nX-Test-Client-IP: 198.51.100.7\r\n\r\n",
+    );
+    assert!(response.starts_with("HTTP/1.1 503"), "{response:?}");
+    assert!(request_receiver.try_recv().is_err());
+
+    for responder in responders {
+        let _ = responder.send(HttpServerResponse::new(
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+            Vec::new(),
+        ));
+    }
+    drop(streams);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn http_server_rejects_disallowed_methods_before_dispatch() {
+    let _guard = test_guard();
+    let port = find_free_port().expect("allocate local test port");
+    let listen_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+    let runtime = NetworkRuntime::new(NetworkConfig::default());
+    let (request_sender, request_receiver) = mpsc::channel::<HttpServerRequest>();
+    runtime
+        .start_http_server(HttpServer {
+            listen_address,
+            request: request_sender,
+            post_max_size: 16,
+            post_max_size_overrides: Vec::new(),
+            pre_admit_posts: false,
+            client_ip_resolver: None,
+            trusted_proxy: None,
+            allowed_methods: Some(fixture_allowed_methods),
+        })
+        .unwrap();
+
+    let response = raw_server_request(
+        listen_address,
+        b"POST /read-only HTTP/1.1\r\nHost: x\r\n\r\n",
+    );
+    assert!(response.starts_with("HTTP/1.1 405"), "{response:?}");
+    assert!(response.contains("Allow: GET, HEAD, OPTIONS\r\n"), "{response:?}");
+    assert!(request_receiver.recv_timeout(Duration::from_millis(100)).is_err());
+
+    let response = raw_server_request(
+        listen_address,
+        b"GET /write-only HTTP/1.1\r\nHost: x\r\n\r\n",
+    );
+    assert!(response.starts_with("HTTP/1.1 405"), "{response:?}");
+    assert!(response.contains("Allow: POST, OPTIONS\r\n"), "{response:?}");
+    assert!(request_receiver.recv_timeout(Duration::from_millis(100)).is_err());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn sec_websocket_key_does_not_steal_an_ordinary_post() {
+    let _guard = test_guard();
+    let port = find_free_port().expect("allocate local test port");
+    let listen_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+    let runtime = NetworkRuntime::new(NetworkConfig::default());
+    let (request_sender, request_receiver) = mpsc::channel::<HttpServerRequest>();
+    runtime
+        .start_http_server(HttpServer {
+            listen_address,
+            request: request_sender,
+            post_max_size: 16,
+            post_max_size_overrides: Vec::new(),
+            pre_admit_posts: false,
+            client_ip_resolver: None,
+            trusted_proxy: None,
+            allowed_methods: None,
+        })
+        .unwrap();
+
+    let handler = std::thread::spawn(move || {
+        let HttpServerRequest::Post { headers, body, response } = request_receiver
+            .recv_timeout(Duration::from_secs(3))
+            .expect("POST request reached dispatcher")
+        else {
+            panic!("Sec-WebSocket-Key stole an ordinary POST");
+        };
+        assert_eq!(headers.path, "/submit");
+        assert_eq!(body, b"ok");
+        response
+            .send(HttpServerResponse::new(
+                "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+                Vec::new(),
+            ))
+            .unwrap();
+    });
+    let response = raw_server_request(
+        listen_address,
+        b"POST /submit HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nSec-WebSocket-Key: fixture\r\nContent-Length: 2\r\n\r\nok",
+    );
+    assert!(response.starts_with("HTTP/1.1 204"), "{response:?}");
+    handler.join().unwrap();
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn http_server_rejects_ambiguous_framing_and_unsupported_methods_before_get_consumer() {
+    let _guard = test_guard();
+    let port = find_free_port().expect("allocate local test port");
+    let listen_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+    let runtime = NetworkRuntime::new(NetworkConfig::default());
+    let (request_sender, request_receiver) = mpsc::channel::<HttpServerRequest>();
+    runtime
+        .start_http_server(HttpServer {
+            listen_address,
+            request: request_sender,
+            post_max_size: 16,
+            post_max_size_overrides: vec![("/small".into(), 2)],
+            pre_admit_posts: false,
+            client_ip_resolver: None,
+            trusted_proxy: None,
+            allowed_methods: None,
+        })
+        .unwrap();
+
+    for malformed in [
+        &b"GET /x HTTP/1.1?q\r\nHost: x\r\n\r\n"[..],
+        &b"GET  HTTP/1.1\r\nHost: x\r\n\r\n"[..],
+        &b"GET https://example.test/x HTTP/1.1\r\nHost: x\r\n\r\n"[..],
+        &b"POST /x HTTP/1.1\r\nContent-Length: 1\r\nContent-Length: 1\r\n\r\nx"[..],
+        &b"POST /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"[..],
+    ] {
+        let response = raw_server_request(listen_address, malformed);
+        assert!(response.starts_with("HTTP/1.1 400"), "{response:?}");
+        assert!(response.contains("Cross-Origin-Opener-Policy: same-origin"));
+        assert!(response.contains("Cross-Origin-Embedder-Policy: require-corp"));
+    }
+    let method_handler = std::thread::spawn(move || {
+        let HttpServerRequest::Get { headers, response_sender } = request_receiver
+            .recv_timeout(Duration::from_secs(3))
+            .expect("GET request reached dispatcher")
+        else {
+            panic!("unsupported method reached GET-only consumer");
+        };
+        assert_eq!(headers.verb, "GET");
+        response_sender
+            .send(HttpServerResponse::new(
+                "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+                Vec::new(),
+            ))
+            .unwrap();
+    });
+    for verb in ["PUT", "DELETE", "PATCH", "TRACE", "CONNECT"] {
+        let response = raw_server_request(
+            listen_address,
+            format!("{verb} /x HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes(),
+        );
+        assert!(response.starts_with("HTTP/1.1 405"), "{response:?}");
+        assert!(response.contains("Allow: GET, HEAD, POST, OPTIONS"), "{response:?}");
+    }
+    assert!(raw_server_request(
+        listen_address,
+        b"POST /x HTTP/1.1\r\nHost: x\r\n\r\n"
+    )
+    .starts_with("HTTP/1.1 411"));
+    assert!(raw_server_request(
+        listen_address,
+        b"POST /small HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\n\r\nabc"
+    )
+    .starts_with("HTTP/1.1 413"));
+    assert!(raw_server_request(
+        listen_address,
+        b"GET /x HTTP/1.1\r\nHost: x\r\n\r\n"
+    )
+    .starts_with("HTTP/1.1 200"));
+    method_handler.join().unwrap();
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn pre_admission_can_reject_without_waiting_for_or_allocating_body() {
+    let _guard = test_guard();
+    let port = find_free_port().expect("allocate local test port");
+    let listen_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+    let runtime = NetworkRuntime::new(NetworkConfig::default());
+    let (request_sender, request_receiver) = mpsc::channel::<HttpServerRequest>();
+    runtime
+        .start_http_server(HttpServer {
+            listen_address,
+            request: request_sender,
+            post_max_size: 2 * 1024 * 1024,
+            post_max_size_overrides: Vec::new(),
+            pre_admit_posts: true,
+            client_ip_resolver: None,
+            trusted_proxy: None,
+            allowed_methods: None,
+        })
+        .unwrap();
+    let handler = std::thread::spawn(move || {
+        let HttpServerRequest::PostPending { body, .. } = request_receiver
+            .recv_timeout(Duration::from_secs(3))
+            .expect("pending POST")
+        else {
+            panic!("POST body was read before admission");
+        };
+        assert_eq!(body.content_length, 2 * 1024 * 1024);
+        body.reject(HttpServerResponse::new(
+            "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+            Vec::new(),
+        ));
+    });
+    let response = raw_server_request(
+        listen_address,
+        b"POST /queued HTTP/1.1\r\nHost: x\r\nContent-Length: 2097152\r\n\r\n",
+    );
+    assert!(response.starts_with("HTTP/1.1 429"), "{response:?}");
+    handler.join().unwrap();
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn websocket_roundtrip_via_http_server(transport: WebSocketTransport) {
     let runtime = NetworkRuntime::new(NetworkConfig::default());
     let Some(port) = find_free_port() else {
@@ -68,6 +602,11 @@ fn websocket_roundtrip_via_http_server(transport: WebSocketTransport) {
         listen_address,
         request: request_sender,
         post_max_size: 1024 * 1024,
+        post_max_size_overrides: Vec::new(),
+        pre_admit_posts: false,
+        client_ip_resolver: None,
+        trusted_proxy: None,
+        allowed_methods: None,
     }) else {
         eprintln!("websocket integration test skipped: failed to start http server");
         return;

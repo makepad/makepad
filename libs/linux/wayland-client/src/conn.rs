@@ -14,6 +14,7 @@ use wayland_backend::{
     client::{Backend, InvalidId, ObjectData, ObjectId, ReadEventsGuard, WaylandError},
     protocol::{ObjectInfo, ProtocolError},
 };
+use wayland_sys::linux;
 
 use crate::{protocol::wl_display::WlDisplay, EventQueue, Proxy};
 
@@ -52,11 +53,11 @@ impl Connection {
             env::remove_var("WAYLAND_SOCKET");
             // set the CLOEXEC flag on this FD
             let raw_fd = fd.as_raw_fd();
-            let flags = unsafe { libc::fcntl(raw_fd, libc::F_GETFD) };
+            let flags = unsafe { linux::fcntl(raw_fd, linux::F_GETFD) };
             if flags < 0 {
                 return Err(ConnectError::InvalidFd);
             }
-            let result = unsafe { libc::fcntl(raw_fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) };
+            let result = unsafe { linux::fcntl(raw_fd, linux::F_SETFD, flags | linux::FD_CLOEXEC) };
             if result < 0 {
                 // something went wrong in F_GETFD or F_SETFD
                 return Err(ConnectError::InvalidFd);
@@ -151,7 +152,7 @@ impl Connection {
             crate::protocol::wl_display::Request::Sync {},
             Some(done.clone()),
         )
-        .map_err(|_| WaylandError::Io(std::io::Error::from_raw_os_error(libc::EPIPE)))?;
+        .map_err(|_| WaylandError::Io(std::io::Error::from_raw_os_error(linux::EPIPE)))?;
 
         let mut dispatched = 0;
 
@@ -216,14 +217,14 @@ impl Connection {
 
 pub(crate) fn blocking_read(guard: ReadEventsGuard) -> Result<usize, WaylandError> {
     let fd = guard.connection_fd();
-    let mut fds = [libc::pollfd {
+    let mut fds = [linux::pollfd {
         fd: fd.as_raw_fd(),
-        events: (libc::POLLIN | libc::POLLERR),
+        events: (linux::POLLIN | linux::POLLERR),
         revents: 0,
     }];
 
     loop {
-        let ret = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) };
+        let ret = unsafe { linux::poll(fds.as_mut_ptr(), fds.len() as linux::nfds_t, -1) };
         if ret > 0 {
             break;
         }
@@ -231,7 +232,7 @@ pub(crate) fn blocking_read(guard: ReadEventsGuard) -> Result<usize, WaylandErro
             continue;
         }
         let err = std::io::Error::last_os_error();
-        if err.raw_os_error() == Some(libc::EINTR) {
+        if err.raw_os_error() == Some(linux::EINTR) {
             continue;
         }
         return Err(WaylandError::Io(err));

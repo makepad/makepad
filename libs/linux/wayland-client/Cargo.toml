@@ -60,18 +60,21 @@ path = "examples/simple_window.rs"
 
 [dependencies.bitflags]
 version = "2"
+path = "../../bitflags"
 
 [dependencies.log]
-path = "../../vulkan/log"
-version = "0.4"
+package = "makepad-error-log"
+path = "../../error_log"
+version = "1.0.0"
 optional = true
-
-[dependencies.libc]
-version = "0.2"
 
 [dependencies.wayland-backend]
 path = "../wayland-backend"
 features = ["client_system"]
+
+[dependencies.wayland-sys]
+path = "../wayland-sys"
+features = []
 
 [dev-dependencies.futures-channel]
 version = "0.3.16"
