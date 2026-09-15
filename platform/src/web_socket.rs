@@ -261,7 +261,10 @@ impl Cx {
             let mut app_to_studio = AppToStudioVec(Vec::new());
             let mut first_message_time = None;
             let default_collect_time = Duration::from_millis(16);
-            let urgent_collect_time = Duration::from_millis(1);
+            // Frame delivery and tick credit are latency-sensitive control
+            // messages. Flush them immediately, including any older logs in
+            // the batch, instead of delaying every hosted frame by 1 ms.
+            let urgent_collect_time = Duration::ZERO;
             let mut collect_time = default_collect_time;
             let mut cycle_time = Duration::MAX;
 

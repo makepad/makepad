@@ -98,7 +98,7 @@
 use alloc::vec::Vec;
 use alloc::{format, vec};
 
-use log::error;
+use makepad_error_log::error;
 use makepad_zune_core::bit_depth::BitDepth;
 use makepad_zune_core::bytestream::{ZByteIoError, ZByteReaderTrait, ZReader};
 use makepad_zune_core::colorspace::{ColorPrimaries, ColorSpace, RenderingIntent};

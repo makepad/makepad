@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+use wayland_sys::linux::{gid_t, pid_t, uid_t};
+
 use crate::protocol::Interface;
 
 /// Description of a global advertised to some clients.
@@ -68,9 +70,9 @@ pub enum DisconnectReason {
 #[derive(Debug, Clone, Copy)]
 pub struct Credentials {
     /// pid of the client
-    pub pid: libc::pid_t,
+    pub pid: pid_t,
     /// uid of the client
-    pub uid: libc::uid_t,
+    pub uid: uid_t,
     /// gid of the client
-    pub gid: libc::gid_t,
+    pub gid: gid_t,
 }
