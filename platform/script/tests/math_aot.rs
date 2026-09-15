@@ -12,11 +12,9 @@ use makepad_script::makepad_math::{Vec2f, Vec3f, Vec4f};
 use makepad_script::*;
 
 fn test_vm() -> ScriptVm<'static> {
-    let host = Box::leak(Box::new(0i32));
-    let std = Box::leak(Box::new(0i32));
+    let host = Box::leak(Box::new(ScriptVmHost::new(0i32, ())));
     ScriptVm {
         host,
-        std,
         bx: Box::new(ScriptVmBase::new()),
     }
 }

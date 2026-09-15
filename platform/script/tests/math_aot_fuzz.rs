@@ -26,11 +26,9 @@ const FUZZ_EXPRS: u64 = 600;
 const INPUTS_PER_EXPR: usize = 6;
 
 fn test_vm() -> ScriptVm<'static> {
-    let host = Box::leak(Box::new(0i32));
-    let std = Box::leak(Box::new(0i32));
+    let host = Box::leak(Box::new(ScriptVmHost::new(0i32, ())));
     ScriptVm {
         host,
-        std,
         bx: Box::new(ScriptVmBase::new()),
     }
 }
