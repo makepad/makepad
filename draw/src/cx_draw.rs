@@ -107,9 +107,10 @@ impl<'a> CxDraw<'a> {
             if let Some(stack_item) = self.pass_stack.last_mut() {
                 stack_item.dpi_factor = dpi_factor;
             }
+            let uniforms_gen = self.cx.next_uniform_gen();
             let cxpass = &mut self.passes[pass_id];
             cxpass.dpi_factor = Some(dpi_factor);
-            cxpass.set_dpi_factor(dpi_factor);
+            cxpass.set_dpi_factor(dpi_factor, uniforms_gen);
         }
     }
 

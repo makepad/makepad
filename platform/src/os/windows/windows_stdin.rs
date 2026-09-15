@@ -60,7 +60,8 @@ impl Cx {
         self.repaint_id += 1;
         let time_now = time.time_now();
         for &draw_pass_id in &passes_todo {
-            self.passes[draw_pass_id].set_time(time_now as f32);
+            let uniforms_gen = self.next_uniform_gen();
+            self.passes[draw_pass_id].set_time(time_now as f32, uniforms_gen);
             match self.passes[draw_pass_id].parent.clone() {
                 CxDrawPassParent::Xr => {}
                 CxDrawPassParent::Window(window_id) => {

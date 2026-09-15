@@ -62,6 +62,19 @@ pub fn read_file_cwd_or_exe_relative(path: impl AsRef<Path>) -> Option<Vec<u8>> 
 // lets start a websocket thread
 
 impl Cx {
+    pub(crate) fn start_native_storage_request(
+        &mut self,
+        request: crate::storage::StorageRequest,
+    ) {
+        use crate::cx_api::CxOsApi;
+
+        let sender = self.storage_state.sender();
+        self.spawn_thread(move || {
+            let response = crate::storage::native::execute(&crate::home::storage_dir(), request);
+            let _ = sender.send(response);
+        });
+    }
+
     pub fn native_load_dependencies(&mut self) {
         for (path, dep) in &mut self.dependencies {
             if let Some(buffer) = read_file_cwd_or_exe_relative(path) {

@@ -230,6 +230,11 @@ struct TweakSession {
     /// held the edit; the release must reach it too or its buttons never
     /// complete a click.
     hold_up: bool,
+    /// The widget under the pointer at the last pick (the deepest hit, not
+    /// where the pin climbed to): click-to-climb continues only from the
+    /// same widget — a press on a different widget inside the pinned
+    /// container picks that widget.
+    climb_origin: u64,
     /// Sidebar width in points (0 = use the default).
     sidebar_width: f64,
     /// The on-canvas selection outline hides until this time: an edit was
@@ -1113,33 +1118,47 @@ pub fn window_intercept(
                 session().lock().unwrap().live_stroke = Some(stroke);
             } else {
                 let pick = resolve_pick(cx, &body, abs, window_id.id());
-                // CLICK-TO-CLIMB: clicking inside the pinned widget again
-                // walks the pin UP one ancestor per click — the only way a
-                // container fully covered by its children (the pane that
-                // draws the rounded background) can ever be reached. At the
-                // top the climb wraps back to the deepest pick.
-                let pick = {
-                    let pinned = session().lock().unwrap().pinned.clone();
+                let deep_uid = pick.as_ref().map_or(0, |p| p.uid);
+                // CLICK-TO-CLIMB: clicking the SAME widget again walks the
+                // pin UP one ancestor per click — the only way a container
+                // fully covered by its children (the pane that draws the
+                // rounded background) can ever be reached. At the top the
+                // climb wraps back to the deepest pick. The climb continues
+                // only while the presses land on the widget it started from:
+                // a press on a different widget inside the pinned container
+                // picks that widget. (Every press inside the container used
+                // to climb — a click on a sibling button after re-clicking
+                // one landed on a bare View, and its draw_bg well was empty.)
+                let (pick, climbed) = {
+                    let (pinned, origin) = {
+                        let s = session().lock().unwrap();
+                        (s.pinned.clone(), s.climb_origin)
+                    };
                     match (pick, pinned) {
                         (Some(deep), Some(pin))
                             if pin.window_id == window_id.id()
                                 && pin.rect.contains(abs)
                                 && (deep.uid == pin.uid
-                                    || is_ancestor_of(cx, pin.uid, deep.uid)) =>
+                                    || (origin == deep.uid
+                                        && is_ancestor_of(cx, pin.uid, deep.uid))) =>
                         {
-                            Some(
-                                ancestor_pick(cx, &pin, abs, window_id.id())
-                                    .unwrap_or(deep),
+                            (
+                                Some(
+                                    ancestor_pick(cx, &pin, abs, window_id.id())
+                                        .unwrap_or(deep),
+                                ),
+                                true,
                             )
                         }
-                        (deep, _) => deep,
+                        (deep, _) => (deep, false),
                     }
                 };
                 let mut s = session().lock().unwrap();
+                s.climb_origin = deep_uid;
                 match &pick {
                     Some(pick) => {
                         log!(
-                            "TWEAK pick {} ({}) rect {:.0},{:.0} {:.0}x{:.0}{}",
+                            "TWEAK pick {} ({}) rect {:.0},{:.0} {:.0}x{:.0}{}{}",
                             pick.path,
                             pick.ty,
                             pick.rect.pos.x,
@@ -1149,7 +1168,8 @@ pub fn window_intercept(
                             match &pick.band {
                                 Some(band) => format!(" band {band}"),
                                 None => String::new(),
-                            }
+                            },
+                            if climbed { " (climb)" } else { "" }
                         );
                         s.pinned = Some(pick.clone());
                     }
@@ -2289,6 +2309,7 @@ fn pulse_slot_set(cx: &mut Cx, s: PulseSlot, v: [f32; 4]) {
             }
         }
         PulseSlot::Uni { list, item, at } => {
+            let uniforms_gen = cx.next_uniform_gen();
             let items = &mut cx.draw_lists[list].draw_items;
             if item >= items.len() {
                 return;
@@ -2296,15 +2317,16 @@ fn pulse_slot_set(cx: &mut Cx, s: PulseSlot, v: [f32; 4]) {
             if let Some(call) = items[item].kind.draw_call_mut() {
                 if let Some(dst) = call.dyn_uniforms.get_mut(at..at + 4) {
                     dst.copy_from_slice(&v);
-                    call.uniforms_dirty = true;
+                    call.mark_uniforms_dirty(uniforms_gen);
                 }
             }
         }
         PulseSlot::Scope { shader, at } => {
+            let uniforms_gen = cx.next_uniform_gen();
             if let Some(sh) = cx.draw_shaders.shaders.get_mut(shader) {
                 if let Some(dst) = sh.mapping.scope_uniforms_buf.get_mut(at..at + 4) {
                     dst.copy_from_slice(&v);
-                    sh.mapping.scope_uniforms_gen = sh.mapping.scope_uniforms_gen.wrapping_add(1);
+                    sh.mapping.scope_uniforms_gen = uniforms_gen;
                 }
             }
         }
@@ -4236,7 +4258,8 @@ impl Widget for TweakMaterialSwatch {
                         ],
                     };
                     let id = list.id();
-                    cx.draw_lists[id].draw_list_uniforms.view_transform = m;
+                    let uniforms_gen = cx.next_uniform_gen();
+                    cx.draw_lists[id].set_uniform_view_transform(&m, uniforms_gen);
                     // The scroll viewport's clip, seen through the
                     // magnifier: (screen - t) / k.
                     let clip = self.clip.map(|c| {
@@ -6516,7 +6539,17 @@ impl Tweaker {
                 let doc = self.row_docs.get(&layer).cloned().unwrap_or_default();
                 // One line: the label ellipsises at its own width (max_lines
                 // 1); the whole doc rides on hover as a tooltip.
-                let doc_line = doc.lines().next().unwrap_or("").trim().to_string();
+                let mut doc_line = doc.lines().next().unwrap_or("").trim().to_string();
+                // A layer with no live draw call (a View with show_bg off,
+                // reached by the click-to-climb) has nothing to mirror: say
+                // so where the well would otherwise sit empty and silent.
+                {
+                    let widget = cx.widget_tree().widget(WidgetUid(self.rows_uid));
+                    let primary = self.materials.first().is_some_and(|m| *m == layer);
+                    if !widget.is_empty() && layer_shader_id(cx, &widget, &layer, primary).is_none() {
+                        doc_line = format!("{layer} is not drawn: no live draw call to mirror (show_bg off?)");
+                    }
+                }
                 col.child(live_id!(shader_doc)).set_text(cx, &doc_line);
                 // Flowing text: the source comment's hard breaks are not
                 // paragraph breaks.
