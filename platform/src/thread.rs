@@ -51,6 +51,7 @@ impl RevThreadPool {
 
 pub struct TagThreadPool<T: Clone + Send + 'static + PartialEq> {
     tasks: Arc<Mutex<Vec<(T, Box<dyn FnOnce(T) + Send + 'static>)>>>,
+    thread_count: usize,
 }
 
 impl<T> TagThreadPool<T>
@@ -75,7 +76,14 @@ where
                 }
             })
         }
-        Self { tasks }
+        Self {
+            tasks,
+            thread_count: num_threads,
+        }
+    }
+
+    pub fn thread_count(&self) -> usize {
+        self.thread_count
     }
 
     pub fn execute<F>(&self, tag: T, task: F)

@@ -483,6 +483,69 @@ pub unsafe fn attach_jni_env() -> *mut jni_sys::JNIEnv {
     env
 }
 
+/// Returns the device's physical RAM through ActivityManager. Android 8 is
+/// the minimum supported release, so MemoryInfo.totalMem is always present.
+pub fn physical_memory_bytes() -> Option<u64> {
+    unsafe {
+        let env = attach_jni_env();
+        let activity = get_activity();
+        if env.is_null() || activity.is_null() {
+            return None;
+        }
+
+        let activity_class = ((**env).GetObjectClass.unwrap())(env, activity);
+        let get_system_service = ((**env).GetMethodID.unwrap())(
+            env,
+            activity_class,
+            b"getSystemService\0".as_ptr() as _,
+            b"(Ljava/lang/String;)Ljava/lang/Object;\0".as_ptr() as _,
+        );
+        let service_name = new_jstring(env, "activity")?;
+        let manager = ((**env).CallObjectMethod.unwrap())(
+            env,
+            activity,
+            get_system_service,
+            service_name,
+        );
+        if manager.is_null() {
+            return None;
+        }
+
+        let info_class = ((**env).FindClass.unwrap())(
+            env,
+            b"android/app/ActivityManager$MemoryInfo\0".as_ptr() as _,
+        );
+        if info_class.is_null() {
+            return None;
+        }
+        let constructor = ((**env).GetMethodID.unwrap())(
+            env,
+            info_class,
+            b"<init>\0".as_ptr() as _,
+            b"()V\0".as_ptr() as _,
+        );
+        let info = ((**env).NewObject.unwrap())(env, info_class, constructor);
+        if info.is_null() {
+            return None;
+        }
+        let get_memory_info = ((**env).GetMethodID.unwrap())(
+            env,
+            ((**env).GetObjectClass.unwrap())(env, manager),
+            b"getMemoryInfo\0".as_ptr() as _,
+            b"(Landroid/app/ActivityManager$MemoryInfo;)V\0".as_ptr() as _,
+        );
+        ((**env).CallVoidMethod.unwrap())(env, manager, get_memory_info, info);
+        let total_mem = ((**env).GetFieldID.unwrap())(
+            env,
+            info_class,
+            b"totalMem\0".as_ptr() as _,
+            b"J\0".as_ptr() as _,
+        );
+        let bytes = ((**env).GetLongField.unwrap())(env, info, total_mem);
+        (bytes > 0).then_some(bytes as u64)
+    }
+}
+
 unsafe fn create_native_window(surface: jni_sys::jobject) -> *mut ndk_sys::ANativeWindow {
     let env = attach_jni_env();
 

@@ -5,6 +5,7 @@
 
 use crate::mod_shader::*;
 use crate::opcode::*;
+use crate::pod::ScriptPodTy;
 use crate::shader::*;
 use crate::shader_backend::*;
 use crate::shader_tables::*;
@@ -17,6 +18,16 @@ use makepad_live_id::*;
 use std::fmt::Write;
 
 impl ShaderFnCompiler {
+    fn logical_fetch_pod_type(vm: &ScriptVm, pod_ty: ScriptPodType) -> ScriptPodType {
+        match vm.bx.heap.pod_type_ref(pod_ty).ty {
+            ScriptPodTy::Packed(packed) if packed.is_vec4() => {
+                vm.bx.code.builtins.pod.pod_vec4f
+            }
+            ScriptPodTy::Packed(_) => vm.bx.code.builtins.pod.pod_vec2f,
+            _ => pod_ty,
+        }
+    }
+
     pub(crate) fn handle_log(&mut self, vm: &ScriptVm) {
         let (ty, value_str) = self.stack.peek(self.trap.pass());
         let type_name = self.shader_type_to_string(vm, ty);
@@ -699,14 +710,22 @@ impl ShaderFnCompiler {
                                     output.backend.map_field_name_typed(field_id, is_vec);
                                 write!(s, "{}.{}", instance_s, field_name).ok();
                                 self.stack
-                                    .push(self.trap.pass(), ShaderType::Pod(ret_ty), s);
+                                    .push(
+                                        self.trap.pass(),
+                                        ShaderType::Pod(Self::logical_fetch_pod_type(vm, ret_ty)),
+                                        s,
+                                    );
                                 self.stack.free_string(field_s);
                                 self.stack.free_string(instance_s);
                                 return;
                             }
                         }
                         self.stack
-                            .push(self.trap.pass(), ShaderType::Pod(ret_ty), s);
+                            .push(
+                                self.trap.pass(),
+                                ShaderType::Pod(Self::logical_fetch_pod_type(vm, ret_ty)),
+                                s,
+                            );
                         self.stack.free_string(field_s);
                         self.stack.free_string(instance_s);
                         return;
@@ -745,14 +764,22 @@ impl ShaderFnCompiler {
                                     output.backend.map_field_name_typed(field_id, is_vec);
                                 write!(s, "{}.{}", instance_s, field_name).ok();
                                 self.stack
-                                    .push(self.trap.pass(), ShaderType::Pod(ret_ty), s);
+                                    .push(
+                                        self.trap.pass(),
+                                        ShaderType::Pod(Self::logical_fetch_pod_type(vm, ret_ty)),
+                                        s,
+                                    );
                                 self.stack.free_string(field_s);
                                 self.stack.free_string(instance_s);
                                 return;
                             }
                         }
                         self.stack
-                            .push(self.trap.pass(), ShaderType::Pod(ret_ty), s);
+                            .push(
+                                self.trap.pass(),
+                                ShaderType::Pod(Self::logical_fetch_pod_type(vm, ret_ty)),
+                                s,
+                            );
                         self.stack.free_string(field_s);
                         self.stack.free_string(instance_s);
                         return;
@@ -768,7 +795,11 @@ impl ShaderFnCompiler {
                     let field_name = output.backend.map_field_name_typed(field_id, is_vec);
                     write!(s, "{}.{}", instance_s, field_name).ok();
                     self.stack
-                        .push(self.trap.pass(), ShaderType::Pod(ret_ty), s);
+                        .push(
+                            self.trap.pass(),
+                            ShaderType::Pod(Self::logical_fetch_pod_type(vm, ret_ty)),
+                            s,
+                        );
                 } else {
                     script_err_not_found!(
                         self.trap,
@@ -803,7 +834,11 @@ impl ShaderFnCompiler {
                     let field_name = output.backend.map_field_name_typed(field_id, is_vec);
                     write!(s, "{}->{}", instance_s, field_name).ok();
                     self.stack
-                        .push(self.trap.pass(), ShaderType::Pod(ret_ty), s);
+                        .push(
+                            self.trap.pass(),
+                            ShaderType::Pod(Self::logical_fetch_pod_type(vm, ret_ty)),
+                            s,
+                        );
                 } else {
                     script_err_not_found!(
                         self.trap,

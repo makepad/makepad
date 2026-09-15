@@ -44,6 +44,25 @@ script_mod! {
         // px), z = bend cap angle, w = cos(tilt).
         space_warp: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         space_warp2: uniform(vec4(0.0, 0.0, 0.0, 1.0))
+        // The label cross-fade clock (app seconds) and fade length: every
+        // glyph carries its own fade start and direction as instance
+        // values (`fade_at`, `fade_in`), so a retained batch fades on the
+        // GPU from one per-frame uniform without re-recording.
+        label_clock: uniform(0.0)
+        label_fade: uniform(0.25)
+
+        // 1 while the glyph is fully shown; rising from 0 over label_fade
+        // after fade_at for a label entering the set (fade_in 1), sinking
+        // to 0 for one leaving it (fade_in -1). fade_in 0 = no fade.
+        fade_alpha: fn() -> float {
+            if self.fade_in > 0.5 {
+                return clamp((self.label_clock - self.fade_at) / max(self.label_fade, 0.001), 0.0, 1.0)
+            }
+            if self.fade_in < -0.5 {
+                return 1.0 - clamp((self.label_clock - self.fade_at) / max(self.label_fade, 0.001), 0.0, 1.0)
+            }
+            return 1.0
+        }
 
         // Fold one camera-delta'd GROUND position (lift already removed)
         // and re-apply `lift` scaled by the local perspective factor —
@@ -169,7 +188,8 @@ script_mod! {
                 || self.rotated_pos.x > clip.z || self.rotated_pos.y > clip.w {
                 discard()
             }
-            return self.sample_text_pixel()
+            // Premultiplied: the fade scales every channel.
+            return self.sample_text_pixel() * self.fade_alpha()
         }
     }
 }
@@ -196,6 +216,13 @@ pub struct DrawRotatedText {
     /// offsets and size stay constant screen px (like the pin mesh).
     #[live(0.0)]
     pub billboard: f32,
+    /// Fade start on the `label_clock` (app seconds) — see `fade_in`.
+    #[live(0.0)]
+    pub fade_at: f32,
+    /// 1.0 = rising from transparent after `fade_at`, -1.0 = sinking to
+    /// transparent, 0.0 = no fade (the default for every other user).
+    #[live(0.0)]
+    pub fade_in: f32,
 }
 
 impl DrawRotatedText {
@@ -231,6 +258,13 @@ impl DrawRotatedText {
             live_id!(space_warp2),
             &[warp2[0], warp2[1], warp2[2], cos_t],
         );
+    }
+
+    /// The cross-fade clock (app seconds, the same base the glyphs'
+    /// `fade_at` was stamped on) and the fade length in seconds.
+    pub fn set_fade_clock(&mut self, cx: &mut Cx, clock: f32, fade_secs: f32) {
+        self.draw_vars.set_uniform(cx, live_id!(label_clock), &[clock]);
+        self.draw_vars.set_uniform(cx, live_id!(label_fade), &[fade_secs]);
     }
 }
 

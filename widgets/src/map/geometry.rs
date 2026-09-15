@@ -1164,7 +1164,13 @@ pub fn road_ribbon_rings(
                     continue;
                 }
                 ring.push(point);
-                ring_dz.push(ribbon.dz.map_or(0.0, |dz| dz[index]));
+                ring_dz.push(
+                    ribbon
+                        .dz
+                        .and_then(|dz| dz.get(index))
+                        .copied()
+                        .unwrap_or(0.0),
+                );
             }
             if ring.len() >= 2 && ring.first() == ring.last() {
                 ring.pop();
@@ -1185,7 +1191,13 @@ pub fn road_ribbon_rings(
                 continue;
             }
             center.push(point);
-            center_dz.push(ribbon.dz.map_or(0.0, |dz| dz[index]));
+            center_dz.push(
+                ribbon
+                    .dz
+                    .and_then(|dz| dz.get(index))
+                    .copied()
+                    .unwrap_or(0.0),
+            );
         }
         if center.len() < 2 {
             continue;
@@ -1659,22 +1671,44 @@ pub fn road_endpoint_is_clip_cut(point: (f32, f32), clip: GeoBounds) -> bool {
 
 // --- Shared tag helpers ---
 
-pub fn tag_is(tags: &HashMap<String, String>, key: &str, value: &str) -> bool {
+/// Read-only tag access shared by owned JSON maps and the MVT layer arena.
+/// Keeping consumers generic lets the tile decoder retain one copy of each
+/// layer string instead of materialising a `HashMap<String, String>` for
+/// every feature.
+pub trait TagLookup {
+    fn get(&self, key: &str) -> Option<&str>;
+
+    fn contains_key(&self, key: &str) -> bool {
+        self.get(key).is_some()
+    }
+}
+
+impl TagLookup for HashMap<String, String> {
+    fn get(&self, key: &str) -> Option<&str> {
+        HashMap::get(self, key).map(String::as_str)
+    }
+
+    fn contains_key(&self, key: &str) -> bool {
+        HashMap::contains_key(self, key)
+    }
+}
+
+pub fn tag_is(tags: &impl TagLookup, key: &str, value: &str) -> bool {
     tags.get(key).is_some_and(|v| v == value)
 }
 
-pub fn tag_is_truthy(tags: &HashMap<String, String>, key: &str) -> bool {
+pub fn tag_is_truthy(tags: &impl TagLookup, key: &str) -> bool {
     let Some(value) = tags.get(key) else {
         return false;
     };
-    !matches!(value.as_str(), "" | "0" | "false" | "False" | "no")
+    !matches!(value, "" | "0" | "false" | "False" | "no")
 }
 
 pub fn is_road_polygon_layer(layer: &str) -> bool {
     matches!(layer, "street_polygons" | "streets_polygons_labels")
 }
 
-pub fn select_label_text(tags: &HashMap<String, String>) -> Option<String> {
+pub fn select_label_text(tags: &impl TagLookup) -> Option<String> {
     for key in ["name", "name:latin", "name:en", "name_int"] {
         if let Some(value) = tags.get(key) {
             let trimmed = value.trim();
@@ -3173,6 +3207,56 @@ mod overlay_tests {
             },
         );
         assert_eq!(rings, vec![(points[..4].to_vec(), deck[..4].to_vec())]);
+    }
+
+    #[test]
+    fn malformed_short_deck_profile_falls_back_instead_of_panicking() {
+        // A damaged/degenerate overlay can collapse its deck samples while
+        // leaving the source line intact. This was the only unchecked index
+        // in the face-bake road-ring path.
+        let points = [(0.0, 0.0), (10.0, 0.0), (20.0, 0.0)];
+        let short_deck = [4.0];
+        let ribbon = [RoadRibbon {
+            points: &points,
+            dz: Some(&short_deck),
+            closed_ring: false,
+            start_disc: false,
+            end_disc: false,
+        }];
+        let rings = road_ribbon_rings(
+            &ribbon,
+            1.0,
+            GeoBounds {
+                min: GeoPoint { x: -5.0, y: -5.0 },
+                max: GeoPoint { x: 25.0, y: 5.0 },
+            },
+        );
+        assert_eq!(rings.len(), 1);
+        assert_eq!(rings[0].0.len(), rings[0].1.len());
+        assert!(rings[0].1.iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
+    fn empty_and_degenerate_rings_never_reach_the_face_boolean() {
+        assert!(normalize_polygon_ring(&[]).is_none());
+        assert!(normalize_polygon_ring(&[(1.0, 1.0), (1.0, 1.0), (1.0, 1.0)]).is_none());
+        let group = PaintGroup {
+            color: [1.0; 4],
+            emissive: 0.0,
+            phase: 0,
+            rank: 0,
+            depth_micro: 0.0,
+            field: 0,
+            skirt_joints: Vec::new(),
+            half_width: 1.0,
+            rings: vec![(Vec::new(), 0.0, 0.0), (vec![(0.0, 0.0); 3], 0.0, 0.0)],
+        };
+        let regions = compute_visible_regions(&[group]);
+        assert!(regions.iter().all(|region| {
+            region.main.is_empty()
+                && region.sunk.is_empty()
+                && region.lifted_outlines.is_empty()
+        }));
     }
 
     #[test]

@@ -56,7 +56,7 @@ pub const LABEL_CLASS_EXIT: u8 = 11;
 /// Administrative district names (gemeente/wijk/buurt) — muted purple.
 pub const LABEL_CLASS_ADMIN: u8 = 12;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TileLabel {
     pub text: String,
     pub priority: u8,
