@@ -366,6 +366,7 @@ impl Cx {
     ) {
         let mut to_dispatch = Vec::new();
         //self.draw_lists[draw_list_id].draw_list_uniforms.view_transform = Mat4f::identity();
+        let _phase = crate::thread::ui_hang::ui_phase_detail(crate::thread::UiPhase::DrawList, draw_list_id.index() as u32);
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_order_len = self.draw_lists[draw_list_id].draw_item_order_len();
         // Exploded z-layer view: z is the call's nesting depth, not paint order.
@@ -388,6 +389,12 @@ impl Cx {
                 .kind
                 .sub_list()
             {
+                // A retained sub-list its owner dropped between the parent's
+                // last record and this paint: the slot may already hold
+                // another widget's list. Nothing to draw here.
+                if self.draw_lists.is_id_freed(sub_list_id) {
+                    continue;
+                }
                 let child_resets_zbias = self.draw_lists[sub_list_id].reset_zbias;
                 let mut own_zbias = 0.0f32;
                 let child_zbias = if child_resets_zbias {
@@ -398,7 +405,16 @@ impl Cx {
                 // An overlay list carries a depth floor: this is what makes it
                 // composite above body content that uses `draw_depth`.
                 self.draw_lists[sub_list_id].raise_zbias_to_floor(child_zbias);
-                self.render_view(draw_pass_id, sub_list_id, child_zbias, zbias_step);
+                // A retained list is one unit of paint order: its calls all
+                // take the counter at entry, it advances by the layers the
+                // list reported. See `CxDrawList::zbias_hold`.
+                if let Some(steps) = self.draw_lists[sub_list_id].zbias_hold {
+                    let mut held = *child_zbias;
+                    self.render_view(draw_pass_id, sub_list_id, &mut held, 0.0);
+                    *child_zbias += steps as f32 * zbias_step;
+                } else {
+                    self.render_view(draw_pass_id, sub_list_id, child_zbias, zbias_step);
+                }
             } else {
                 let gl = self.os.gl();
 
@@ -425,41 +441,11 @@ impl Cx {
 
                 let shader_variant = self.passes[draw_pass_id].os.shader_variant;
 
-                let shgl = if sh.mapping.flags.async_compile {
-                    shp.ensure_gl_shader_started(
-                        self.os.gl(),
-                        shader_variant,
-                        &sh.mapping,
-                        &self.os_type,
-                    );
-                    shp.poll_gl_shader_ready(
-                        self.os.gl(),
-                        shader_variant,
-                        &sh.mapping,
-                        &self.os_type,
-                    );
-                    let Some(shgl) = shp.gl_shader[shader_variant]
-                        .as_ref()
-                        .and_then(GlShaderState::as_ready)
-                    else {
-                        self.demo_time_repaint = true;
-                        continue;
-                    };
-                    shgl
-                } else {
-                    if shp.gl_shader[shader_variant].is_none() {
-                        shp.gl_shader[shader_variant] = Some(GlShaderState::Ready(GlShader::new(
-                            self.os.gl(),
-                            &shp.vertex[shader_variant],
-                            &shp.pixel[shader_variant],
-                            &sh.mapping,
-                            &self.os_type,
-                        )));
-                    }
-                    shp.gl_shader[shader_variant]
-                        .as_ref()
-                        .and_then(GlShaderState::as_ready)
-                        .unwrap()
+                shp.ensure_gl_shader_started(self.os.gl(), shader_variant, &sh.mapping, &self.os_type);
+                shp.poll_gl_shader_ready(self.os.gl(), shader_variant, &sh.mapping, &self.os_type);
+                let Some(shgl) = shp.gl_shader[shader_variant].as_ref().and_then(GlShaderState::as_ready) else {
+                    self.demo_time_repaint = true;
+                    continue;
                 };
                 let trace_draw = crate::makepad_error_log::trace_enabled("gl.draw");
 
@@ -878,8 +864,11 @@ impl Cx {
     ) -> Option<(Vec2d, f64)> {
         let dpi_factor = self.passes[draw_pass_id].dpi_factor.unwrap();
         let pass_rect = self.get_pass_rect(draw_pass_id, dpi_factor).unwrap();
+        let repaint_id = self.repaint_id;
         let pass = &mut self.passes[draw_pass_id];
         pass.paint_dirty = false;
+        // the bake transaction's paint receipt (whole draws: ranges ignored)
+        pass.painted_serial = repaint_id;
         pass.os.shader_variant = SHADER_VARIANT_WINDOW;
 
         if pass_rect.size.x < 0.5 || pass_rect.size.y < 0.5 {
@@ -1133,9 +1122,6 @@ impl Cx {
             };
 
             if let Some(os_shader_id) = os_shader_id {
-                if !mapping.flags.async_compile {
-                    continue;
-                }
                 let os_shader = &mut self.draw_shaders.os_shaders[os_shader_id];
                 os_shader.ensure_gl_shader_started(
                     self.os.gl(),
@@ -1161,11 +1147,8 @@ impl Cx {
         for shader_index in 0..self.draw_shaders.shaders.len() {
             let (mapping, os_shader_id) = {
                 let cx_shader = &self.draw_shaders.shaders[shader_index];
-                (cx_shader.mapping.clone(), cx_shader.os_shader_id)
+                (&cx_shader.mapping, cx_shader.os_shader_id)
             };
-            if !mapping.flags.async_compile {
-                continue;
-            }
             let Some(os_shader_id) = os_shader_id else {
                 continue;
             };
@@ -1762,10 +1745,6 @@ impl GlShader {
         mapping: &CxDrawShaderMapping,
         os_type: &OsType,
     ) -> GlShaderState {
-        if let Some(program) = Self::read_program_cache(gl, vertex, pixel, os_type) {
-            return GlShaderState::Ready(Self::build_from_program(gl, program, mapping));
-        }
-
         if Self::supports_parallel_compile(gl) {
             return GlShaderState::Pending(Self::start_pending_program_compile(
                 gl, vertex, pixel, os_type,
@@ -2115,9 +2094,10 @@ impl CxOsDrawShader {
         mapping: &CxDrawShaderMapping,
         os_type: &OsType,
     ) {
-        let Some(GlShaderState::Pending(pending)) = self.gl_shader[shader_variant].take() else {
-            return;
-        };
+        // Check before taking: taking a Ready value here would drop a live
+        // pipeline on every frame and leave this variant permanently missing.
+        if !matches!(self.gl_shader[shader_variant], Some(GlShaderState::Pending(_))) { return; }
+        let Some(GlShaderState::Pending(pending)) = self.gl_shader[shader_variant].take() else { unreachable!() };
 
         if !pending.is_complete(gl) {
             self.gl_shader[shader_variant] = Some(GlShaderState::Pending(pending));
@@ -2456,6 +2436,14 @@ pub struct CxOsDrawCall {
     pub draw_call_uniforms_gen: Option<u64>,
     #[cfg(test)]
     pub user_uniforms_gen: Option<u64>,
+}
+
+impl CxOsDrawCall {
+    /// This backend keeps no per-publication backing lease on a draw item
+    /// (contract §10): nothing to release when the item's lease clears.
+    pub(crate) fn take_backing(&mut self) -> Option<u64> {
+        None
+    }
 }
 
 impl CxOsDrawCall {

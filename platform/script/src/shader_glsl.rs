@@ -199,6 +199,7 @@ vec4 _mp_unpack4u8(float x){ uint u = floatBitsToUint(x); return vec4(float(u & 
     }
 
     fn glsl_write_vertex_globals(&self, vm: &ScriptVm, out: &mut String) {
+        // instance_index() lowers to uint(gl_InstanceID), also on WebGL 2.
         // Keep the vertex position register available as a global for shaders
         // that write `self.pos` directly instead of returning a vec4 from io_vertex().
         writeln!(out, "vec4 vtx_pos;").ok();
@@ -303,7 +304,12 @@ vec4 _mp_unpack4u8(float x){ uint u = floatBitsToUint(x); return vec4(float(u & 
             let prefix = if geometry { "geom_" } else { "inst_" };
             let pod_ty = &vm.bx.heap.pod_type_ref(io.ty).ty;
             if let ScriptPodTy::Struct { .. } = pod_ty {
-                self.glsl_collect_typed_attrs_ty(vm, pod_ty, prefix.trim_end_matches('_'), &mut out);
+                self.glsl_collect_typed_attrs_ty(
+                    vm,
+                    pod_ty,
+                    prefix.trim_end_matches('_'),
+                    &mut out,
+                );
             } else {
                 let io_name = self.backend.map_io_name(io.name);
                 self.glsl_collect_typed_attrs_ty(
@@ -327,7 +333,11 @@ vec4 _mp_unpack4u8(float x){ uint u = floatBitsToUint(x); return vec4(float(u & 
         match ty {
             ScriptPodTy::Struct { fields, .. } => {
                 let prefix = if name.is_empty() || name == "geom" || name == "inst" {
-                    if name == "inst" { "inst" } else { "geom" }
+                    if name == "inst" {
+                        "inst"
+                    } else {
+                        "geom"
+                    }
                 } else {
                     name
                 };
@@ -1099,9 +1109,7 @@ mod typed_vertex_tests {
             "{source}"
         );
         assert!(
-            source.contains(&format!(
-                "vb_{vertex_name}.{off_name} = geom_{off_name};"
-            )),
+            source.contains(&format!("vb_{vertex_name}.{off_name} = geom_{off_name};")),
             "{source}"
         );
         assert!(

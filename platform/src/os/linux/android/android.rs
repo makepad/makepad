@@ -155,7 +155,8 @@ pub fn set_current_thread_priority(priority: crate::CxThreadPriority) {
     }
 
     let nice = match priority {
-        crate::CxThreadPriority::Normal => 0,
+        crate::CxThreadPriority::Normal | crate::CxThreadPriority::UserInteractive => 0,
+        crate::CxThreadPriority::UserInitiated => 1,
         crate::CxThreadPriority::Utility => 5,
         crate::CxThreadPriority::Background => 10,
         crate::CxThreadPriority::Idle => 15,
@@ -480,14 +481,20 @@ impl Cx {
     fn copy_or_cut_to_clipboard(&mut self, cut: bool) {
         let response = Rc::new(RefCell::new(None));
         let e = if cut {
-            Event::TextCut(TextClipboardEvent { response: response.clone() })
+            Event::TextCut(TextClipboardEvent {
+                response: response.clone(),
+            })
         } else {
-            Event::TextCopy(TextClipboardEvent { response: response.clone() })
+            Event::TextCopy(TextClipboardEvent {
+                response: response.clone(),
+            })
         };
         self.call_event_handler(&e);
         let text = response.borrow().clone();
         if let Some(text) = text {
-            unsafe { to_java_copy_to_clipboard(text); }
+            unsafe {
+                to_java_copy_to_clipboard(text);
+            }
         }
     }
 
@@ -1202,33 +1209,33 @@ impl Cx {
                                 error
                             );
                         } else {
-                        crate::log!(
+                            crate::log!(
                             "VIDEO: Android native decode failed for {}, falling back to software video: {}",
                             live_id.0,
                             error
                         );
-                        let (oes_bridge, oes_surface, oes_tex_id) =
-                            self.setup_mediacodec_oes_bridge(config.texture_id);
-                        let asp = AndroidSoftwarePlayer {
-                            player: PlaybackSessionHandle::new(
-                                live_id,
-                                config.texture_id,
-                                config.source,
-                                config.autoplay,
-                                config.should_loop,
-                            ),
-                            tex_y_id: config.tex_y_id,
-                            tex_u_id: config.tex_u_id,
-                            tex_v_id: config.tex_v_id,
-                            texture_id: config.texture_id,
-                            yuv_matrix: 0.0,
-                            oes_bridge,
-                            oes_surface,
-                            oes_tex_id,
-                        };
-                        self.os.software_video_players.insert(live_id, asp);
-                        self.redraw_all();
-                        return;
+                            let (oes_bridge, oes_surface, oes_tex_id) =
+                                self.setup_mediacodec_oes_bridge(config.texture_id);
+                            let asp = AndroidSoftwarePlayer {
+                                player: PlaybackSessionHandle::new(
+                                    live_id,
+                                    config.texture_id,
+                                    config.source,
+                                    config.autoplay,
+                                    config.should_loop,
+                                ),
+                                tex_y_id: config.tex_y_id,
+                                tex_u_id: config.tex_u_id,
+                                tex_v_id: config.tex_v_id,
+                                texture_id: config.texture_id,
+                                yuv_matrix: 0.0,
+                                oes_bridge,
+                                oes_surface,
+                                oes_tex_id,
+                            };
+                            self.os.software_video_players.insert(live_id, asp);
+                            self.redraw_all();
+                            return;
                         }
                     }
                 }
@@ -1621,10 +1628,10 @@ impl Cx {
                     biplanar: false,
                     full_range: false,
                     rotation_steps: 0.0,
-                external: false,
-                array: false,
+                    external: false,
+                    array: false,
                 },
-            rgba_gl_2d: false,
+                rgba_gl_2d: false,
             });
             self.call_event_handler(&e);
         }
@@ -1728,7 +1735,7 @@ impl Cx {
                                 video_id: player.video_id,
                                 current_position_ms: 0,
                                 yuv,
-                            rgba_gl_2d: false,
+                                rgba_gl_2d: false,
                             }));
                         }
                         Err(error) => {
@@ -1773,10 +1780,10 @@ impl Cx {
                         biplanar: false,
                         full_range: false,
                         rotation_steps: player.yuv_rotation_steps(),
-                    external: false,
-                    array: false,
+                        external: false,
+                        array: false,
                     },
-                rgba_gl_2d: false,
+                    rgba_gl_2d: false,
                 }));
             }
         }
@@ -1849,10 +1856,7 @@ impl Cx {
                     let tex_id = if asp.oes_tex_id != 0 {
                         asp.oes_tex_id
                     } else {
-                        self.textures[asp.texture_id]
-                            .os
-                            .gl_texture
-                            .unwrap_or(0)
+                        self.textures[asp.texture_id].os.gl_texture.unwrap_or(0)
                     };
                     if tex_id != 0 {
                         let tex = &mut self.textures[asp.texture_id];
@@ -1869,10 +1873,10 @@ impl Cx {
                                 biplanar: false,
                                 full_range: false,
                                 rotation_steps: 0.0,
-                            external: false,
-                            array: false,
+                                external: false,
+                                array: false,
                             },
-                        rgba_gl_2d: false,
+                            rgba_gl_2d: false,
                         }));
                         presented_oes = true;
                     }
@@ -1902,10 +1906,10 @@ impl Cx {
                             biplanar: false,
                             full_range: false,
                             rotation_steps: 0.0,
-                        external: false,
-                        array: false,
+                            external: false,
+                            array: false,
                         },
-                    rgba_gl_2d: false,
+                        rgba_gl_2d: false,
                     }));
                 }
                 // Pending take_oes_frame without a successful drain: leave markers
@@ -2330,8 +2334,7 @@ impl Cx {
         self.repaint_id += 1;
         for draw_pass_id in &passes_todo {
             let uniforms_gen = self.next_uniform_gen();
-            self.passes[*draw_pass_id]
-                .set_time(self.os.timers.time_now() as f32, uniforms_gen);
+            self.passes[*draw_pass_id].set_time(self.os.timers.time_now() as f32, uniforms_gen);
             match self.passes[*draw_pass_id].parent.clone() {
                 CxDrawPassParent::Xr => {
                     // cant happen
@@ -2835,7 +2838,9 @@ impl Cx {
                     }
                     // Notify widget so it can bind textures to shader slots
                     // (needed if native decode fails and we fall back to software)
-                    self.call_event_handler(&Event::VideoYuvTexturesReady(VideoYuvTexturesReady::planes(video_id, tex_y, tex_u, tex_v)));
+                    self.call_event_handler(&Event::VideoYuvTexturesReady(
+                        VideoYuvTexturesReady::planes(video_id, tex_y, tex_u, tex_v),
+                    ));
 
                     unsafe {
                         let env = attach_jni_env();
@@ -3080,12 +3085,10 @@ impl Cx {
                         android_jni::to_java_set_full_screen(env, false);
                     }
                 }
-                CxOsOp::SetSystemBarDarkIcons(dark_icons) => {
-                    unsafe {
-                        let env = attach_jni_env();
-                        android_jni::to_java_set_system_bar_appearance(env, dark_icons);
-                    }
-                }
+                CxOsOp::SetSystemBarDarkIcons(dark_icons) => unsafe {
+                    let env = attach_jni_env();
+                    android_jni::to_java_set_system_bar_appearance(env, dark_icons);
+                },
                 CxOsOp::SetCursor(_) => {
                     // no need
                 }

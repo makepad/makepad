@@ -221,11 +221,12 @@ impl DrawSvgGlyph {
             return;
         };
         let handle = handle_ref.as_handle();
-        let data = if let Some(data) = cx.get_resource(handle) {
+        let heap_key = handle_ref.heap_key();
+        let data = if let Some(data) = cx.get_resource(heap_key, handle) {
             data
         } else {
-            cx.load_script_resource(handle);
-            match cx.get_resource(handle) {
+            cx.load_script_resource(heap_key, handle);
+            match cx.get_resource(heap_key, handle) {
                 Some(data) => data,
                 None => return,
             }

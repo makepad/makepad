@@ -27,6 +27,8 @@ mod shared_bytes;
 
 pub mod action;
 pub mod game_input;
+pub mod frame_trace;
+pub mod present_trace;
 
 pub mod audio;
 pub mod midi;
@@ -43,12 +45,15 @@ pub mod video_encode;
 pub mod video_file;
 
 mod draw_list;
+pub mod retained_instances;
+pub mod recording_buffer;
+pub mod shared_instances;
 mod draw_matrix;
 mod draw_pass;
 mod draw_shader;
 mod draw_vars;
 
-#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+#[cfg(all(not(headless), not(linux_direct), any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 mod app_icon;
 mod area;
 pub mod component;
@@ -138,14 +143,19 @@ pub use {
         component::{ComponentInfo, ComponentRegistries, ComponentRegistry},
         cursor::MouseCursor,
         cx::{Cx, CxMemoryReport, CxRef, LinuxWindowParams, OsType},
-        cx_api::{AccessibilityUpdatePayload, CxOsApi, CxOsOp, CxThreadPriority, OpenUrlInPlace},
+        cx_api::{AccessibilityUpdatePayload, CxOsApi, CxOsOp, CxThreadPriority, OpenUrlInPlace, ScreenEdges},
         display_context::{DisplayContext, SystemBarAppearance},
         font_policy::{
             FontAsset, FontChain, FontPolicy, FontRole, FontSet,
             FONT_ASSET_MANIFEST_SECTION, INTERNATIONAL_FONT_ASSET_MANIFEST,
             LATIN_FONT_ASSET_MANIFEST, UI_SYMBOL_FALLBACK,
         },
-        draw_list::{CxDrawCall, CxDrawItem, CxDrawListPool, CxRectArea, DrawList, DrawListId},
+        draw_list::{immediate_payload_hash, CxDrawCall, CxDrawItem, CxDrawListPool, CxRectArea, DrawList, DrawListId, DrawListRecordingStorage},
+        shared_instances::{
+            upload_pacing, FrameLease, FrameLeases, PublicationAccounting, PublicationIds, Publications,
+            PublishBackpressure, PublishError, PublishHints, PublishReceipt, ReceiptPhase, SharedInstances,
+            UploadObservation, WeakSharedInstances,
+        },
         draw_matrix::DrawMatrix,
         draw_pass::{
             CxDrawPassParent, CxDrawPassRect, DrawPass, DrawPassClearColor, DrawPassClearDepth,
@@ -262,7 +272,7 @@ pub use {
             StorageEstimate, StorageResponse, StorageResult, StorageStat, DEFAULT_STORAGE_VALUE_CAP,
             MAX_STORAGE_KEY_BYTES, MAX_STORAGE_LIST_LIMIT, MAX_STORAGE_NAMESPACE_BYTES,
         },
-        texture::{
+        texture::{ReadbackTicket, ReadbackRequest, ReadbackChannelOrder, ReadbackOrigin, ReadbackError, TextureReadback, 
             image_cache_use_mipmaps, Texture, TextureAnimation, TextureFormat, TextureId,
             TextureSize, TextureUpdated, TextureWrap,
         },

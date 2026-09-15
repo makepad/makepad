@@ -342,16 +342,104 @@ script_mod! {
 
         // The Architecture map's categorical palette (top-level directory ownership), kind stripes and status roles
         color_map_1: #x9cccff
+        color_map_1_a: #xbae0ff
+        color_map_1_b: #x85c1f5
+        color_map_1_c: #xa5d3ff
+        color_map_1_d: #x87b2df
+        color_map_1_e: #xc6e1ff
+        color_map_1_f: #x94c5fe
+        color_map_1_g: #xb8d7ff
+        color_map_1_h: #x94b6e7
         color_map_2: #x88dec7
+        color_map_2_a: #xa8f0d4
+        color_map_2_b: #x77d2b4
+        color_map_2_c: #x89e6c9
+        color_map_2_d: #x77c2ad
+        color_map_2_e: #xa3f0dc
+        color_map_2_f: #x76d9c4
+        color_map_2_g: #x88edda
+        color_map_2_h: #x79c9bb
         color_map_3: #xefcc83
+        color_map_3_a: #xffd79b
+        color_map_3_b: #xe9bc6e
+        color_map_3_c: #xfcd081
+        color_map_3_d: #xd3b373
+        color_map_3_e: #xf9da99
+        color_map_3_f: #xe8c673
+        color_map_3_g: #xfadb86
+        color_map_3_h: #xd2bc79
         color_map_4: #xd5b9f7
+        color_map_4_a: #xdfd3ff
+        color_map_4_b: #xc4acf1
+        color_map_4_c: #xd9c1ff
+        color_map_4_d: #xb9a2d8
+        color_map_4_e: #xe8d4ff
+        color_map_4_f: #xd3b0f3
+        color_map_4_g: #xe6c5ff
+        color_map_4_h: #xc6a6da
         color_map_5: #x8fdcef
+        color_map_5_a: #xa5ecf7
+        color_map_5_b: #x78d1e1
+        color_map_5_c: #x8ce4f6
+        color_map_5_d: #x7dc1d1
+        color_map_5_e: #xa7ebfd
+        color_map_5_f: #x82d6ee
+        color_map_5_g: #xa0e8ff
+        color_map_5_h: #x86c6dc
         color_map_6: #xa4dba4
+        color_map_6_a: #xc3ecb5
+        color_map_6_b: #x9ace8e
+        color_map_6_c: #xaae2a3
+        color_map_6_d: #x90bf8e
+        color_map_6_e: #xbbeebc
+        color_map_6_f: #x95d79d
+        color_map_6_g: #xa6ebb3
+        color_map_6_h: #x8ec79c
         color_map_7: #xfab688
+        color_map_7_a: #xffcfb6
+        color_map_7_b: #xf3a579
+        color_map_7_c: #xffbd95
+        color_map_7_d: #xdb9e77
+        color_map_7_e: #xffd4b7
+        color_map_7_f: #xf6af78
+        color_map_7_g: #xffc79a
+        color_map_7_h: #xdea778
         color_map_8: #xf2b2ca
+        color_map_8_a: #xffc8e3
+        color_map_8_b: #xe6a3c3
+        color_map_8_c: #xfbb6d4
+        color_map_8_d: #xd39bb1
+        color_map_8_e: #xffcfdf
+        color_map_8_f: #xf0a9c1
+        color_map_8_g: #xffc0d2
+        color_map_8_h: #xdca1b1
         color_map_9: #xffb5ae
+        color_map_9_a: #xffd1d1
+        color_map_9_b: #xf6a5a4
+        color_map_9_c: #xffbebb
+        color_map_9_d: #xdf9e99
+        color_map_9_e: #xffd2cc
+        color_map_9_f: #xfdada1
+        color_map_9_g: #xffc9bf
+        color_map_9_h: #xe5a698
         color_map_10: #xbbc7ff
+        color_map_10_a: #xd0deff
+        color_map_10_b: #xa8bbf7
+        color_map_10_c: #xc1cfff
+        color_map_10_d: #xa3aedf
+        color_map_10_e: #xd5dcff
+        color_map_10_f: #xb6bffd
+        color_map_10_g: #xcfd4ff
+        color_map_10_h: #xb0b2e5
         color_map_11: #xcbd685
+        color_map_11_a: #xe4e399
+        color_map_11_b: #xc5c76c
+        color_map_11_c: #xd6dc80
+        color_map_11_d: #xb3bb74
+        color_map_11_e: #xdae69e
+        color_map_11_f: #xc0d179
+        color_map_11_g: #xd1e68e
+        color_map_11_h: #xb0c47f
         color_map_kind_module: #x315e96
         color_map_kind_file: #x566273
         color_map_kind_struct: #x286b5d
@@ -362,6 +450,13 @@ script_mod! {
         color_map_kind_const: #x865332
         color_map_kind_type_alias: #x326b7c
         color_map_kind_macro: #x8a4667
+        color_map_kind_component: #x315e96
+        color_map_kind_thread: #x79601f
+        color_map_kind_queue: #x4d702d
+        color_map_kind_store: #x865332
+        color_map_kind_memory: #x70508f
+        color_map_kind_gpu: #x326b7c
+        color_map_kind_io: #x8a4667
         color_success: #x2f7d4b
         color_map_basis_exact: #x4c5968
         color_map_basis_inferred: #x7c5b27
@@ -379,6 +474,8 @@ script_mod! {
         color_syntax_keyword_branch: #x674b6d
         color_syntax_keyword_loop: #x755635
         color_syntax_constant: #x6e483b
+        color_search_hit: #xf0c95a
+        color_search_rim: #xf0c95a
         color_syntax_bg: #xffffff
 
         // TYPOGRAPHY
