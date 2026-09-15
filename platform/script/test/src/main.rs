@@ -7,10 +7,9 @@ use makepad_script::*;
 use std::collections::BTreeMap;
 
 pub fn main() {
-    let mut std = 0;
+    let mut host = ScriptVmHost::new(0, ());
     let vm = &mut ScriptVm {
-        host: &mut 0,
-        std: &mut std,
+        host: &mut host,
         bx: Box::new(ScriptVmBase::new()),
     };
 
@@ -4663,10 +4662,9 @@ pub fn main() {
     // (game.md M0 — 60Hz hosts must not grow the heap per tick)
     // ========================================
     {
-        let mut std0 = 0usize;
+        let mut host = ScriptVmHost::new(0, ());
         let vm = &mut ScriptVm {
-            host: &mut 0,
-            std: &mut std0,
+            host: &mut host,
             bx: Box::new(ScriptVmBase::new()),
         };
 
@@ -4857,10 +4855,9 @@ pub fn main() {
     // (game.md M0r — N callbacks share ONE tick pool host-side)
     // ========================================
     {
-        let mut std0 = 0usize;
+        let mut host = ScriptVmHost::new(0, ());
         let vm = &mut ScriptVm {
-            host: &mut 0,
-            std: &mut std0,
+            host: &mut host,
             bx: Box::new(ScriptVmBase::new()),
         };
         let exports = vm.heap_mut().new_object();
