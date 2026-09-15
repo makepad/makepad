@@ -117,29 +117,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let prefill_start = Instant::now();
     session.append_tokens(&prompt_token_ids)?;
     let prefill_elapsed = prefill_start.elapsed();
-    if std::env::var_os("MAKEPAD_LLAMA_DUMP_STATE").is_some() {
-        for (name, sum, max, nans) in session.debug_cache_fingerprints() {
-            eprintln!("state.{}: sum={:.3} max={:.3} nans={}", name, sum, max, nans);
-        }
-    }
-    // Cross-backend numerical comparison: exact post-prefill logits stats.
-    if std::env::var_os("MAKEPAD_LLAMA_LOGITS_STATS").is_some() {
-        if let Some(logits) = session.last_logits() {
-            let (argmax, top) = logits.iter().copied().enumerate().fold(
-                (0usize, f32::NEG_INFINITY),
-                |acc, (index, value)| if value > acc.1 { (index, value) } else { acc },
-            );
-            let l2 = logits.iter().map(|v| (*v as f64) * (*v as f64)).sum::<f64>().sqrt();
-            eprintln!(
-                "logits.stats: n={} argmax={} top={:.6} l2={:.4} head={:?}",
-                logits.len(),
-                argmax,
-                top,
-                l2,
-                &logits[..8.min(logits.len())]
-            );
-        }
-    }
 
     let generation_start = Instant::now();
     let generation = session.continue_greedy(args.max_new_tokens)?;

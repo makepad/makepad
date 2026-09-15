@@ -63,22 +63,14 @@ pub const EMOTION_BIAS: [f32; 8] = [0.9375, 0.875, 1.0, 1.0, 0.9375, 0.9375, 0.6
 /// Per-category row counts of the feat1/feat2 matrices (config `emo_num`).
 pub const EMOTION_CATEGORY_ROWS: [usize; 8] = [3, 17, 2, 8, 4, 5, 10, 24];
 
-/// The reference-checkout checkpoints dir used by tests and validate bins:
-/// `$INDEXTTS_CHECKPOINTS` when set, else `local/indextts_ref/checkpoints`
-/// relative to the repo root (resolved from this crate's manifest dir).
+/// The reference-checkout checkpoints dir used by tests and validate bins.
 pub fn reference_checkpoints_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("INDEXTTS_CHECKPOINTS") {
-        return PathBuf::from(dir);
-    }
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../local/indextts_ref/checkpoints")
 }
 
-/// The oracle dumps dir (`$INDEXTTS_DUMPS` or `local/indextts_ref/dumps`).
+/// The oracle dumps dir (`local/indextts_ref/dumps`).
 pub fn reference_dumps_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("INDEXTTS_DUMPS") {
-        return PathBuf::from(dir);
-    }
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../local/indextts_ref/dumps")
 }
 

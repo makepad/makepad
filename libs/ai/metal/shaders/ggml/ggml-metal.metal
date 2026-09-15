@@ -13817,3 +13817,48 @@ kernel void kernel_mlx_affine_qmm_f32(
     }
 }
 
+// ---------------------------------------------------------------------------
+// makepad additions
+// ---------------------------------------------------------------------------
+
+// Rotate-half rotary embedding from precomputed per-token tables (the CUDA
+// `makepad_cuda_rope_half_f32` contract): for every (token, head),
+// (x1, x2) = (x[i], x[i + rot_half]) -> (x1*c - x2*s, x2*c + x1*s) with
+// c/s = table[token, i]; dims past 2*rot_half copy through. dst may alias x.
+typedef struct {
+    int32_t token_count;
+    int32_t head_count;
+    int32_t head_dim;
+    int32_t rot_half;
+} makepad_kargs_rope_half_tables;
+
+kernel void kernel_makepad_rope_half_tables_f32(
+        constant makepad_kargs_rope_half_tables & args,
+        device const float * x,
+        device const float * cos_table,
+        device const float * sin_table,
+        device       float * dst,
+        uint3 tgpig[[threadgroup_position_in_grid]],
+        uint3 tpitg[[thread_position_in_threadgroup]],
+        uint3 ntg3[[threads_per_threadgroup]]) {
+    const int token = (int) tgpig.x;
+    const int head  = (int) tgpig.y;
+    const uint tid = tpitg.x;
+    const uint ntg = ntg3.x;
+    if (token >= args.token_count || head >= args.head_count) {
+        return;
+    }
+    const ulong base = ((ulong) token * (ulong) args.head_count + (ulong) head) * (ulong) args.head_dim;
+    const ulong table_base = (ulong) token * (ulong) args.rot_half;
+    for (int i = (int) tid; i < args.rot_half; i += (int) ntg) {
+        const float c  = cos_table[table_base + i];
+        const float s  = sin_table[table_base + i];
+        const float x1 = x[base + i];
+        const float x2 = x[base + args.rot_half + i];
+        dst[base + i]                 = x1 * c - x2 * s;
+        dst[base + args.rot_half + i] = x2 * c + x1 * s;
+    }
+    for (int i = 2 * args.rot_half + (int) tid; i < args.head_dim; i += (int) ntg) {
+        dst[base + i] = x[base + i];
+    }
+}

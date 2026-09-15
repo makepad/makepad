@@ -14,7 +14,7 @@
 
 use crate::dual_stream::REF_TIMESTEP;
 use crate::unet_extras::{ExtraFlags, ExtraInputs, ExtraResident};
-use crate::unet_first::{paint_fast, unpack_planar_host, BatchAct, UnetFirst};
+use crate::unet_first::{unpack_planar_host, BatchAct, UnetFirst};
 use makepad_ai_common::backend::cuda::{
     gpu_add, gpu_concat_cols, gpu_concat_rows, gpu_download, gpu_mul, gpu_paint_scale,
     gpu_slice_cols, gpu_slice_rows, gpu_upload, gpu_upload_u32, GpuTensor,
@@ -227,161 +227,9 @@ fn forward_extras_on_cfg(
     if lat_w == 0 || lat_h == 0 || lat_w % 8 != 0 || lat_h % 8 != 0 {
         return Err(format!("forward_extras_on latent {lat_w}x{lat_h} must be a positive multiple of 8"));
     }
-    if paint_fast() {
-        return forward_extras_on_cfg_batch(
-            unet, x12s, temb, enc_albs, enc_mrs, dinos, ref_scales, cache, voxels, lat_w, lat_h,
-        );
-    }
-    let s8w = lat_w;
-    let s8h = lat_h;
-    let s4w = s8w / 2;
-    let s4h = s8h / 2;
-    let s2w = s4w / 2;
-    let s2h = s4h / 2;
-    let s1w = s2w / 2;
-    let s1h = s2h / 2;
-    let n_views = x12s.len() / (2 * n_cfg);
-    let plane8 = s8w * s8h;
-    let conv_in = x12s
-        .iter()
-        .map(|x| gpu_upload(x, 12, plane8))
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut xs = unet.conv_n(&conv_in, s8w, s8h, "unet.conv_in", 3, 1)?;
-    let mut skips: Vec<Vec<GpuTensor>> = vec![clone_n(&xs)?];
-
-    xs = map_n_resnet_gpu(unet, &xs, s8w, s8h, temb, "unet.down_blocks.0.resnets.0", 320)?;
-    xs = extras_on_attn_cache(
-        unet, &xs, cache_attn(cache, "down_0_0_0")?, s8w, s8h, 320, 5,
-        "unet.down_blocks.0.attentions.0", enc_albs, enc_mrs, dinos,
-        voxels.full.xyz, voxels.full.res, ref_scales, n_views,
-    )?;
-    skips.push(clone_n(&xs)?);
-    xs = map_n_resnet_gpu(unet, &xs, s8w, s8h, temb, "unet.down_blocks.0.resnets.1", 320)?;
-    xs = extras_on_attn_cache(
-        unet, &xs, cache_attn(cache, "down_0_1_0")?, s8w, s8h, 320, 5,
-        "unet.down_blocks.0.attentions.1", enc_albs, enc_mrs, dinos,
-        voxels.full.xyz, voxels.full.res, ref_scales, n_views,
-    )?;
-    skips.push(clone_n(&xs)?);
-    xs = map_n_down_gpu(unet, &xs, s8w, s8h, "unet.down_blocks.0.downsamplers.0.conv", 320)?;
-    skips.push(clone_n(&xs)?);
-
-    xs = map_n_resnet_gpu(unet, &xs, s4w, s4h, temb, "unet.down_blocks.1.resnets.0", 320)?;
-    xs = extras_on_attn_cache(
-        unet, &xs, cache_attn(cache, "down_1_0_0")?, s4w, s4h, 640, 10,
-        "unet.down_blocks.1.attentions.0", enc_albs, enc_mrs, dinos,
-        voxels.half.xyz, voxels.half.res, ref_scales, n_views,
-    )?;
-    skips.push(clone_n(&xs)?);
-    xs = map_n_resnet_gpu(unet, &xs, s4w, s4h, temb, "unet.down_blocks.1.resnets.1", 640)?;
-    xs = extras_on_attn_cache(
-        unet, &xs, cache_attn(cache, "down_1_1_0")?, s4w, s4h, 640, 10,
-        "unet.down_blocks.1.attentions.1", enc_albs, enc_mrs, dinos,
-        voxels.half.xyz, voxels.half.res, ref_scales, n_views,
-    )?;
-    skips.push(clone_n(&xs)?);
-    xs = map_n_down_gpu(unet, &xs, s4w, s4h, "unet.down_blocks.1.downsamplers.0.conv", 640)?;
-    skips.push(clone_n(&xs)?);
-
-    xs = map_n_resnet_gpu(unet, &xs, s2w, s2h, temb, "unet.down_blocks.2.resnets.0", 640)?;
-    xs = extras_on_attn_cache(
-        unet, &xs, cache_attn(cache, "down_2_0_0")?, s2w, s2h, 1280, 20,
-        "unet.down_blocks.2.attentions.0", enc_albs, enc_mrs, dinos,
-        voxels.quarter.xyz, voxels.quarter.res, ref_scales, n_views,
-    )?;
-    skips.push(clone_n(&xs)?);
-    xs = map_n_resnet_gpu(unet, &xs, s2w, s2h, temb, "unet.down_blocks.2.resnets.1", 1280)?;
-    xs = extras_on_attn_cache(
-        unet, &xs, cache_attn(cache, "down_2_1_0")?, s2w, s2h, 1280, 20,
-        "unet.down_blocks.2.attentions.1", enc_albs, enc_mrs, dinos,
-        voxels.quarter.xyz, voxels.quarter.res, ref_scales, n_views,
-    )?;
-    skips.push(clone_n(&xs)?);
-    xs = map_n_down_gpu(unet, &xs, s2w, s2h, "unet.down_blocks.2.downsamplers.0.conv", 1280)?;
-    skips.push(clone_n(&xs)?);
-
-    xs = map_n_resnet_gpu(unet, &xs, s1w, s1h, temb, "unet.down_blocks.3.resnets.0", 1280)?;
-    skips.push(clone_n(&xs)?);
-    xs = map_n_resnet_gpu(unet, &xs, s1w, s1h, temb, "unet.down_blocks.3.resnets.1", 1280)?;
-    skips.push(clone_n(&xs)?);
-
-    xs = map_n_resnet_gpu(unet, &xs, s1w, s1h, temb, "unet.mid_block.resnets.0", 1280)?;
-    xs = extras_on_attn_cache(
-        unet, &xs, cache_attn(cache, "mid_0_0")?, s1w, s1h, 1280, 20,
-        "unet.mid_block.attentions.0", enc_albs, enc_mrs, dinos,
-        voxels.eighth.xyz, voxels.eighth.res, ref_scales, n_views,
-    )?;
-    xs = map_n_resnet_gpu(unet, &xs, s1w, s1h, temb, "unet.mid_block.resnets.1", 1280)?;
-
-    let pop = |skips: &mut Vec<Vec<GpuTensor>>| skips.pop().unwrap();
-    xs = map_n_resnet_gpu(unet, &cat_skip_gpu(&xs, &pop(&mut skips))?, s1w, s1h, temb, "unet.up_blocks.0.resnets.0", 2560)?;
-    xs = map_n_resnet_gpu(unet, &cat_skip_gpu(&xs, &pop(&mut skips))?, s1w, s1h, temb, "unet.up_blocks.0.resnets.1", 2560)?;
-    xs = map_n_resnet_gpu(unet, &cat_skip_gpu(&xs, &pop(&mut skips))?, s1w, s1h, temb, "unet.up_blocks.0.resnets.2", 2560)?;
-    xs = map_n_up_gpu(unet, &xs, s1w, s1h, "unet.up_blocks.0.upsamplers.0.conv", 1280)?;
-
-    xs = map_n_resnet_gpu(unet, &cat_skip_gpu(&xs, &pop(&mut skips))?, s2w, s2h, temb, "unet.up_blocks.1.resnets.0", 2560)?;
-    xs = extras_on_attn_cache(
-        unet, &xs, cache_attn(cache, "up_1_0_0")?, s2w, s2h, 1280, 20,
-        "unet.up_blocks.1.attentions.0", enc_albs, enc_mrs, dinos,
-        voxels.quarter.xyz, voxels.quarter.res, ref_scales, n_views,
-    )?;
-    xs = map_n_resnet_gpu(unet, &cat_skip_gpu(&xs, &pop(&mut skips))?, s2w, s2h, temb, "unet.up_blocks.1.resnets.1", 2560)?;
-    xs = extras_on_attn_cache(
-        unet, &xs, cache_attn(cache, "up_1_1_0")?, s2w, s2h, 1280, 20,
-        "unet.up_blocks.1.attentions.1", enc_albs, enc_mrs, dinos,
-        voxels.quarter.xyz, voxels.quarter.res, ref_scales, n_views,
-    )?;
-    xs = map_n_resnet_gpu(unet, &cat_skip_gpu(&xs, &pop(&mut skips))?, s2w, s2h, temb, "unet.up_blocks.1.resnets.2", 1920)?;
-    xs = extras_on_attn_cache(
-        unet, &xs, cache_attn(cache, "up_1_2_0")?, s2w, s2h, 1280, 20,
-        "unet.up_blocks.1.attentions.2", enc_albs, enc_mrs, dinos,
-        voxels.quarter.xyz, voxels.quarter.res, ref_scales, n_views,
-    )?;
-    xs = map_n_up_gpu(unet, &xs, s2w, s2h, "unet.up_blocks.1.upsamplers.0.conv", 1280)?;
-
-    xs = map_n_resnet_gpu(unet, &cat_skip_gpu(&xs, &pop(&mut skips))?, s4w, s4h, temb, "unet.up_blocks.2.resnets.0", 1920)?;
-    xs = extras_on_attn_cache(
-        unet, &xs, cache_attn(cache, "up_2_0_0")?, s4w, s4h, 640, 10,
-        "unet.up_blocks.2.attentions.0", enc_albs, enc_mrs, dinos,
-        voxels.half.xyz, voxels.half.res, ref_scales, n_views,
-    )?;
-    xs = map_n_resnet_gpu(unet, &cat_skip_gpu(&xs, &pop(&mut skips))?, s4w, s4h, temb, "unet.up_blocks.2.resnets.1", 1280)?;
-    xs = extras_on_attn_cache(
-        unet, &xs, cache_attn(cache, "up_2_1_0")?, s4w, s4h, 640, 10,
-        "unet.up_blocks.2.attentions.1", enc_albs, enc_mrs, dinos,
-        voxels.half.xyz, voxels.half.res, ref_scales, n_views,
-    )?;
-    xs = map_n_resnet_gpu(unet, &cat_skip_gpu(&xs, &pop(&mut skips))?, s4w, s4h, temb, "unet.up_blocks.2.resnets.2", 960)?;
-    xs = extras_on_attn_cache(
-        unet, &xs, cache_attn(cache, "up_2_2_0")?, s4w, s4h, 640, 10,
-        "unet.up_blocks.2.attentions.2", enc_albs, enc_mrs, dinos,
-        voxels.half.xyz, voxels.half.res, ref_scales, n_views,
-    )?;
-    xs = map_n_up_gpu(unet, &xs, s4w, s4h, "unet.up_blocks.2.upsamplers.0.conv", 640)?;
-
-    xs = map_n_resnet_gpu(unet, &cat_skip_gpu(&xs, &pop(&mut skips))?, s8w, s8h, temb, "unet.up_blocks.3.resnets.0", 960)?;
-    xs = extras_on_attn_cache(
-        unet, &xs, cache_attn(cache, "up_3_0_0")?, s8w, s8h, 320, 5,
-        "unet.up_blocks.3.attentions.0", enc_albs, enc_mrs, dinos,
-        voxels.full.xyz, voxels.full.res, ref_scales, n_views,
-    )?;
-    xs = map_n_resnet_gpu(unet, &cat_skip_gpu(&xs, &pop(&mut skips))?, s8w, s8h, temb, "unet.up_blocks.3.resnets.1", 640)?;
-    xs = extras_on_attn_cache(
-        unet, &xs, cache_attn(cache, "up_3_1_0")?, s8w, s8h, 320, 5,
-        "unet.up_blocks.3.attentions.1", enc_albs, enc_mrs, dinos,
-        voxels.full.xyz, voxels.full.res, ref_scales, n_views,
-    )?;
-    xs = map_n_resnet_gpu(unet, &cat_skip_gpu(&xs, &pop(&mut skips))?, s8w, s8h, temb, "unet.up_blocks.3.resnets.2", 640)?;
-    xs = extras_on_attn_cache(
-        unet, &xs, cache_attn(cache, "up_3_2_0")?, s8w, s8h, 320, 5,
-        "unet.up_blocks.3.attentions.2", enc_albs, enc_mrs, dinos,
-        voxels.full.xyz, voxels.full.res, ref_scales, n_views,
-    )?;
-    let mut n1 = Vec::with_capacity(xs.len());
-    for h in &xs {
-        n1.push(unet.conv_head_gpu(h, s8w, s8h)?);
-    }
-    n1.iter().map(gpu_download).collect()
+    forward_extras_on_cfg_batch(
+        unet, x12s, temb, enc_albs, enc_mrs, dinos, ref_scales, cache, voxels, lat_w, lat_h,
+    )
 }
 
 /// Dual / text / DINO / voxels uploaded once per job.
@@ -579,31 +427,8 @@ pub(crate) fn walk_extras_on_resident(
     let vox_eighth = &ctx.vox_eighth;
 
     let mut skips: Vec<BatchAct> = vec![xs.clone_act()?];
-    // MAKEPAD_PBR_UNET_TAP=<dir>: dump the activation after named stages
-    // (planar [n][c][hw] f32) for a step-0 bisect against official hooks.
-    // Only the first walk of the process is dumped (files would otherwise be
-    // overwritten by every later step); the warm-up call is skipped by the
-    // caller running it before the tap env is honored... so tap the first
-    // t=999 call: skip while a "done" marker exists.
-    let tap_dir = std::env::var("MAKEPAD_PBR_UNET_TAP").ok().filter(|dir| {
-        !std::path::Path::new(&format!("{dir}/unet_tap_DONE")).exists()
-    });
-    let tap = |name: &str, x: &BatchAct| {
-        if let Some(dir) = &tap_dir {
-            if let Ok(v) = gpu_download(&x.t) {
-                let mut bytes = Vec::with_capacity(v.len() * 4);
-                for f in &v {
-                    bytes.extend_from_slice(&f.to_le_bytes());
-                }
-                let _ = std::fs::write(format!("{dir}/unet_tap_{name}.f32"), bytes);
-                eprintln!("[pbr-unet-tap] {name} n={} c={} {}x{}", x.n, x.c, x.w, x.h);
-            }
-        }
-    };
-    tap("conv_in", &xs);
 
     xs = unet.resnet_batch_act(&xs, &temb_act, "unet.down_blocks.0.resnets.0", 320)?;
-    tap("down0_res0", &xs);
     xs = unet.transformer2d_extras_batch(
         &xs,
         "unet.down_blocks.0.attentions.0",
@@ -614,7 +439,6 @@ pub(crate) fn walk_extras_on_resident(
         ref_scales,
         1.0,
     )?;
-    tap("down0_attn0", &xs);
     skips.push(xs.clone_act()?);
     xs = unet.resnet_batch_act(&xs, &temb_act, "unet.down_blocks.0.resnets.1", 320)?;
     xs = unet.transformer2d_extras_batch(
@@ -627,7 +451,6 @@ pub(crate) fn walk_extras_on_resident(
         ref_scales,
         1.0,
     )?;
-    tap("down0_attn1", &xs);
     skips.push(xs.clone_act()?);
     xs = unet.downsample_batch(&xs, "unet.down_blocks.0.downsamplers.0.conv", 320)?;
     skips.push(xs.clone_act()?);
@@ -643,7 +466,6 @@ pub(crate) fn walk_extras_on_resident(
         ref_scales,
         1.0,
     )?;
-    tap("down1_attn0", &xs);
     skips.push(xs.clone_act()?);
     xs = unet.resnet_batch_act(&xs, &temb_act, "unet.down_blocks.1.resnets.1", 640)?;
     xs = unet.transformer2d_extras_batch(
@@ -656,7 +478,6 @@ pub(crate) fn walk_extras_on_resident(
         ref_scales,
         1.0,
     )?;
-    tap("down1_attn1", &xs);
     skips.push(xs.clone_act()?);
     xs = unet.downsample_batch(&xs, "unet.down_blocks.1.downsamplers.0.conv", 640)?;
     skips.push(xs.clone_act()?);
@@ -672,7 +493,6 @@ pub(crate) fn walk_extras_on_resident(
         ref_scales,
         1.0,
     )?;
-    tap("down2_attn0", &xs);
     skips.push(xs.clone_act()?);
     xs = unet.resnet_batch_act(&xs, &temb_act, "unet.down_blocks.2.resnets.1", 1280)?;
     xs = unet.transformer2d_extras_batch(
@@ -685,7 +505,6 @@ pub(crate) fn walk_extras_on_resident(
         ref_scales,
         1.0,
     )?;
-    tap("down2_attn1", &xs);
     skips.push(xs.clone_act()?);
     xs = unet.downsample_batch(&xs, "unet.down_blocks.2.downsamplers.0.conv", 1280)?;
     skips.push(xs.clone_act()?);
@@ -706,7 +525,6 @@ pub(crate) fn walk_extras_on_resident(
         ref_scales,
         1.0,
     )?;
-    tap("mid_attn0", &xs);
     xs = unet.resnet_batch_act(&xs, &temb_act, "unet.mid_block.resnets.1", 1280)?;
 
     let pop = |skips: &mut Vec<BatchAct>| skips.pop().unwrap();
@@ -746,7 +564,6 @@ pub(crate) fn walk_extras_on_resident(
         ref_scales,
         1.0,
     )?;
-    tap("up1_attn0", &xs);
     xs = unet.resnet_batch_act(
         &UnetFirst::cat_skip_batch(&xs, &pop(&mut skips))?,
         &temb_act,
@@ -779,7 +596,6 @@ pub(crate) fn walk_extras_on_resident(
         ref_scales,
         1.0,
     )?;
-    tap("up1_attn2", &xs);
     xs = unet.upsample_batch(&xs, "unet.up_blocks.1.upsamplers.0.conv", 1280)?;
 
     xs = unet.resnet_batch_act(
@@ -830,7 +646,6 @@ pub(crate) fn walk_extras_on_resident(
         ref_scales,
         1.0,
     )?;
-    tap("up2_attn2", &xs);
     xs = unet.upsample_batch(&xs, "unet.up_blocks.2.upsamplers.0.conv", 640)?;
 
     xs = unet.resnet_batch_act(
@@ -881,10 +696,6 @@ pub(crate) fn walk_extras_on_resident(
         ref_scales,
         1.0,
     )?;
-    tap("up3_attn2", &xs);
-    if let Some(dir) = &tap_dir {
-        let _ = std::fs::write(format!("{dir}/unet_tap_DONE"), b"1");
-    }
     unet.conv_head_batch(&xs)
 }
 
@@ -921,7 +732,6 @@ pub fn cfg_ddim_gpu(
     let uncond = gpu_slice_cols(head, 0, branch)?;
     let ref_only = gpu_slice_cols(head, branch, branch)?;
     let full = gpu_slice_cols(head, 2 * branch, branch)?;
-    cfg_debug_branches("cfg_ddim", &uncond, &ref_only, &full);
     let ru = gpu_add(&ref_only, &gpu_paint_scale(&uncond, -1.0)?)?;
     let fr = gpu_add(&full, &gpu_paint_scale(&ref_only, -1.0)?)?;
     let guided = gpu_add(
@@ -932,42 +742,6 @@ pub fn cfg_ddim_gpu(
         &gpu_paint_scale(sample, c1)?,
         &gpu_paint_scale(&guided, c2)?,
     )
-}
-
-/// Conditioning liveness probe (MAKEPAD_PBR_CFG_DEBUG=1): near-identical
-/// branches mean the reference/DINO tokens never influenced attention.
-fn cfg_debug_branches(tag: &str, uncond: &GpuTensor, ref_only: &GpuTensor, full: &GpuTensor) {
-    if std::env::var("MAKEPAD_PBR_CFG_DEBUG").as_deref() != Ok("1") {
-        return;
-    }
-    let stats = |t: &GpuTensor| -> (f64, f64) {
-        match gpu_download(t) {
-            Ok(v) => {
-                let l2 = v.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
-                (l2, v.len() as f64)
-            }
-            Err(_) => (f64::NAN, 0.0),
-        }
-    };
-    let d = |a: &GpuTensor, b: &GpuTensor| -> f64 {
-        match (gpu_download(a), gpu_download(b)) {
-            (Ok(x), Ok(y)) => x
-                .iter()
-                .zip(&y)
-                .map(|(p, q)| ((*p - *q) as f64).powi(2))
-                .sum::<f64>()
-                .sqrt(),
-            _ => f64::NAN,
-        }
-    };
-    let (lu, _) = stats(uncond);
-    let (lr, _) = stats(ref_only);
-    let (lf, n) = stats(full);
-    eprintln!(
-        "[pbr-cfg] {tag} n={n} |uncond|={lu:.3} |ref|={lr:.3} |full|={lf:.3} d(u,r)={:.4} d(r,f)={:.4}",
-        d(uncond, ref_only),
-        d(ref_only, full),
-    );
 }
 
 pub fn cfg_ddim_gpu_t(
@@ -984,7 +758,6 @@ pub fn cfg_ddim_gpu_t(
     let uncond = gpu_slice_cols(head, 0, branch)?;
     let ref_only = gpu_slice_cols(head, branch, branch)?;
     let full = gpu_slice_cols(head, 2 * branch, branch)?;
-    cfg_debug_branches("cfg_ddim_t", &uncond, &ref_only, &full);
     let ru = gpu_add(&ref_only, &gpu_paint_scale(&uncond, -1.0)?)?;
     let fr = gpu_add(&full, &gpu_paint_scale(&ref_only, -1.0)?)?;
     let guided = gpu_add(
@@ -1058,69 +831,6 @@ fn cache_attn<'a>(cache: &'a HashMap<String, Vec<f32>>, name: &str) -> Result<&'
         .ok_or_else(|| format!("missing dual cache {name}"))
 }
 
-fn extras_on_attn_cache(
-    unet: &UnetFirst,
-    xs: &[GpuTensor],
-    cache: &[f32],
-    width: usize,
-    height: usize,
-    channels: usize,
-    heads: usize,
-    prefix: &str,
-    enc_albs: &[&[f32]],
-    enc_mrs: &[&[f32]],
-    dinos: &[&[f32]],
-    voxels: &[[u32; 3]],
-    voxel_res: usize,
-    ref_scales: &[f32],
-    n_views: usize,
-) -> Result<Vec<GpuTensor>, String> {
-    let n_cfg = enc_albs.len();
-    let want = n_cfg * 2 * n_views;
-    if xs.len() != want {
-        return Err(format!(
-            "{prefix} extras-on expects {want} samples ({n_cfg} cfg × 2 pbr × {n_views} views), got {}",
-            xs.len()
-        ));
-    }
-    let empty: [&[f32]; 0] = [];
-    let mut encoders = Vec::with_capacity(xs.len());
-    for cfg in 0..n_cfg {
-        for _ in 0..n_views {
-            encoders.push(enc_albs[cfg]);
-        }
-        for _ in 0..n_views {
-            encoders.push(enc_mrs[cfg]);
-        }
-    }
-    unet.transformer2d_extras_gpu(ExtraInputs {
-        samples: &empty,
-        samples_gpu: Some(xs),
-        encoders: &encoders,
-        width,
-        height,
-        channels,
-        heads,
-        prefix,
-        flags: ExtraFlags {
-            mda: true,
-            dino: true,
-            ra: true,
-            ma: true,
-        },
-        dino: dinos.first().copied(),
-        ref_samples: None,
-        ref_tokens: Some(cache),
-        ref_scale: ref_scales.first().copied().unwrap_or(1.0),
-        n_views,
-        voxel_xyz: Some(voxels),
-        voxel_res,
-        mva_scale: 1.0,
-        dinos: Some(dinos),
-        ref_scales: Some(ref_scales),
-    })
-}
-
 fn stash_attn(
     unet: &UnetFirst,
     xs: &[Vec<f32>],
@@ -1158,18 +868,6 @@ fn map_n_resnet(
         .collect()
 }
 
-fn map_n_resnet_gpu(
-    unet: &UnetFirst,
-    xs: &[GpuTensor],
-    w: usize,
-    h: usize,
-    temb: &[f32],
-    prefix: &str,
-    cin: usize,
-) -> Result<Vec<GpuTensor>, String> {
-    unet.resnet_n(xs, w, h, temb, prefix, cin)
-}
-
 fn map_n_down(
     unet: &UnetFirst,
     xs: &[Vec<f32>],
@@ -1181,21 +879,6 @@ fn map_n_down(
     let mut out = Vec::with_capacity(xs.len());
     for x in xs {
         out.push(unet.downsample(x, w, h, prefix, ch)?.0);
-    }
-    Ok(out)
-}
-
-fn map_n_down_gpu(
-    unet: &UnetFirst,
-    xs: &[GpuTensor],
-    w: usize,
-    h: usize,
-    prefix: &str,
-    ch: usize,
-) -> Result<Vec<GpuTensor>, String> {
-    let mut out = Vec::with_capacity(xs.len());
-    for x in xs {
-        out.push(unet.downsample_gpu(x, w, h, prefix, ch)?.0);
     }
     Ok(out)
 }
@@ -1215,37 +898,10 @@ fn map_n_up(
     Ok(out)
 }
 
-fn map_n_up_gpu(
-    unet: &UnetFirst,
-    xs: &[GpuTensor],
-    w: usize,
-    h: usize,
-    prefix: &str,
-    ch: usize,
-) -> Result<Vec<GpuTensor>, String> {
-    let mut out = Vec::with_capacity(xs.len());
-    for x in xs {
-        out.push(unet.upsample_gpu(x, w, h, prefix, ch)?.0);
-    }
-    Ok(out)
-}
-
 fn cat_skip(hidden: &[Vec<f32>], skip: &[Vec<f32>]) -> Vec<Vec<f32>> {
     hidden
         .iter()
         .zip(skip)
         .map(|(h, s)| UnetFirst::concat_planar(h, s))
         .collect()
-}
-
-fn cat_skip_gpu(hidden: &[GpuTensor], skip: &[GpuTensor]) -> Result<Vec<GpuTensor>, String> {
-    hidden
-        .iter()
-        .zip(skip)
-        .map(|(h, s)| gpu_concat_rows(h, s))
-        .collect()
-}
-
-fn clone_n(xs: &[GpuTensor]) -> Result<Vec<GpuTensor>, String> {
-    xs.iter().map(|x| gpu_slice_rows(x, 0, x.rows())).collect()
 }

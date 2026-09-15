@@ -8,7 +8,7 @@
 //! rises. This module replaces the guessing with measurement, in three
 //! stages, each of which the audit harness can score separately:
 //!
-//! 1. **Cross-attention DTW** (`makepad_voice::transcribe_aligned`): the
+//! 1. **Cross-attention DTW** (`makepad_ai_speech::whisper::transcribe_aligned`): the
 //!    decoder's alignment heads attend to the audio being sung as each token
 //!    is written; a DTW path through that attention IS the word timing, on a
 //!    20 ms grid. This is what `word_timestamps=True` does inside OpenAI's
@@ -29,10 +29,10 @@
 //! times out of the cache and the display sweeps smoothly instead of hopping
 //! wrongly — confidently wrong is worse than a smooth line.
 //!
-//! Everything here is track-time SECONDS and self-contained (makepad_voice +
+//! Everything here is track-time SECONDS and self-contained (makepad_ai_speech::whisper +
 //! std only), so the audit harness can drive the exact code the apps ship.
 
-use makepad_voice::{AlignedSegment, WhisperModel, WhisperState};
+use makepad_ai_speech::whisper::{AlignedSegment, WhisperModel, WhisperState};
 
 /// Whisper's input rate.
 pub const WHISPER_RATE: f64 = 16_000.0;

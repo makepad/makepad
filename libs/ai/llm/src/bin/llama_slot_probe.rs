@@ -288,7 +288,6 @@ fn main() {
             eprintln!("FAIL (cross-width): {e}");
             eprintln!("  NOTE: this gate compares batch width B against width 1, and the");
             eprintln!("  shipped Q8_1 mmvq route is NOT bit-identical across widths.");
-            eprintln!("  Re-run with MKLLM_DISABLE_Q81_MMVQ=1 BEFORE concluding cross-lane");
             eprintln!("  bleed. If it passes there, this is the width finding, not batching.");
             eprintln!("  Gate 4 is width-invariant and does not have this ambiguity.");
             std::process::exit(1);
@@ -918,7 +917,7 @@ fn solo_speed_floor(
     // tok/s: draft-heavy says the draft head is the cost (a restricted-vocab
     // sidecar is the lever), verify-heavy says the batch is, and catch-up
     // heavy says the draft head is re-ingesting committed tokens every round
-    // (`MKLLM_MTP_REUSE_DRAFT_KV`). Three different fixes, one number without
+    // every round. Three different fixes, one number without
     // this line.
     let per_round = |a: u64, b: u64| -> f64 {
         if rounds > 0 {

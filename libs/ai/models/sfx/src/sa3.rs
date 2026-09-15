@@ -452,8 +452,7 @@ impl F16Weight {
     }
 }
 
-/// True when the CUDA device path should be used (device present and not
-/// disabled with SA3_DEVICE=0).
+/// True when the CUDA device path should be used.
 ///
 /// Never on macOS: `gpu_device_available()` reports the Metal gpu_tensor
 /// shim there, but the SA3 device modules need ops the shim does not
@@ -465,9 +464,6 @@ impl F16Weight {
 /// those shim ops exist.
 pub fn sa3_device_enabled() -> bool {
     if cfg!(target_os = "macos") {
-        return false;
-    }
-    if std::env::var("SA3_DEVICE").map(|v| v == "0").unwrap_or(false) {
         return false;
     }
     makepad_ai_common::backend::cuda::gpu_device_available()

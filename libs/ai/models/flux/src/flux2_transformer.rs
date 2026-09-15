@@ -17,8 +17,7 @@
 //! resident.
 
 use crate::backend::{
-    gpu_add_bf16, gpu_attention_packed_composite_f32, gpu_attention_packed_flash_cross,
-    gpu_attention_packed_flash_cross_bf16_rn, gpu_attention_packed_flash_cross_bf16pre_f16,
+    gpu_add_bf16, gpu_attention_packed_flash_cross_bf16pre_f16,
     gpu_bf16_round, gpu_bf16buf_slab_to_f32, gpu_concat_f32rn_bf16buf, gpu_concat_rows,
     gpu_device_available, gpu_download, gpu_gated_residual_mod_round_bf16, gpu_layer_norm_mod,
     gpu_layer_norm_mod_to_bf16buf, gpu_linear_nt_cached_bf16_mm,
@@ -524,39 +523,16 @@ pub fn flux2_transformer_forward(
     flux2_ensure_double_ring(weights)?;
     let temb_in = flux2_timestep_embedding(sigma, TIME_EMBED_DIM);
     let gemb_in = guidance.map(|g| flux2_timestep_embedding(g, TIME_EMBED_DIM));
-    if flux2_state_enabled() {
-        return flux2_forward_state(
-            weights, img_tokens, img_ids, txt_tokens, txt_ids, &temb_in,
-            gemb_in.as_deref(), gen_tokens,
-        );
-    }
-
-    let mut all_ids = txt_ids.to_vec();
-    all_ids.extend_from_slice(img_ids);
-    let (cos, sin) = flux2_rope_tables(&all_ids, config);
-    let half = (config.head_dim / 2) as usize;
-    let rope_cos = gpu_upload(&cos, all_ids.len(), half).map_err(DiffusionError::model)?;
-    let rope_sin = gpu_upload(&sin, all_ids.len(), half).map_err(DiffusionError::model)?;
-    let img = gpu_upload(img_tokens, img_count, config.in_channels as usize)
-        .map_err(DiffusionError::model)?;
-    let txt = gpu_upload(txt_tokens, txt_count, config.context_in_dim as usize)
-        .map_err(DiffusionError::model)?;
-    let temb = gpu_upload(&temb_in, 1, TIME_EMBED_DIM).map_err(DiffusionError::model)?;
-    let gemb = match &gemb_in {
-        Some(values) => {
-            Some(gpu_upload(values, 1, TIME_EMBED_DIM).map_err(DiffusionError::model)?)
-        }
-        None => None,
-    };
-    let pred = flux2_transformer_core(
-        weights, &img, &txt, &temb, gemb.as_ref(), &rope_cos, &rope_sin, txt_count, img_count,
+    flux2_forward_state(
+        weights,
+        img_tokens,
+        img_ids,
+        txt_tokens,
+        txt_ids,
+        &temb_in,
+        gemb_in.as_deref(),
         gen_tokens,
-    )?;
-    let prediction = gpu_download(&pred).map_err(DiffusionError::model)?;
-    return Ok(Flux2TransformerRun {
-        prediction,
-        image_token_count: gen_tokens,
-    });
+    )
 }
 
 /// The device-resident step from persistent inputs to the still-on-device
@@ -583,7 +559,6 @@ fn flux2_transformer_core(
     let temb = linear(weights, temb_input, "time_in.in_layer.weight", hidden)?;
     let temb = round_bf16(gpu_silu(&temb).map_err(DiffusionError::model)?)?;
     let temb = linear(weights, &temb, "time_in.out_layer.weight", hidden)?;
-    dump_named("temb", &temb);
 
     // Dev: vec = time_in(...) + guidance_in(timestep_embedding(guidance)) —
     // the same MLPEmbedder shape, summed on the bf16 grid like the bf16
@@ -598,7 +573,6 @@ fn flux2_transformer_core(
             let gemb = linear(weights, gemb_input, "guidance_in.in_layer.weight", hidden)?;
             let gemb = round_bf16(gpu_silu(&gemb).map_err(DiffusionError::model)?)?;
             let gemb = linear(weights, &gemb, "guidance_in.out_layer.weight", hidden)?;
-            dump_named("gemb", &gemb);
             gpu_add_bf16(&temb, &gemb).map_err(DiffusionError::model)?
         }
         None => {
@@ -610,15 +584,11 @@ fn flux2_transformer_core(
             temb
         }
     };
-    dump_named("vec", &temb);
 
     let mut img = linear(weights, img_input, "img_in.weight", hidden)?;
     let mut txt = linear(weights, txt_input, "txt_in.weight", hidden)?;
-    dump_named("img_in", &img);
-    dump_named("txt_in", &txt);
 
     let silu_temb = round_bf16(gpu_silu(&temb).map_err(DiffusionError::model)?)?;
-    dump_named("silu_temb", &silu_temb);
     let img_mod = linear(
         weights,
         &silu_temb,
@@ -637,17 +607,12 @@ fn flux2_transformer_core(
         "single_stream_modulation.lin.weight",
         3 * hidden,
     )?;
-    dump_named("img_mod", &img_mod);
-    dump_named("txt_mod", &txt_mod);
-    dump_named("single_mod", &single_mod);
 
     let attn_scale = 1.0 / (head_dim as f32).sqrt();
     let depth = config.depth as usize;
     let depth_single = config.depth_single_blocks as usize;
 
-    let ring_streams = config.guidance_embed
-        && flux2_stream_doubles_enabled()
-        && gpu_stream_ring_active();
+    let ring_streams = config.guidance_embed && gpu_stream_ring_active();
     for layer in 0..depth {
         let prefix = format!("double_blocks.{layer}");
         let (img_next, txt_next) = double_block(
@@ -675,12 +640,9 @@ fn flux2_transformer_core(
         }
         img = img_next;
         txt = txt_next;
-        dump_named(&format!("double{layer}_img"), &img);
-        dump_named(&format!("double{layer}_txt"), &txt);
     }
 
     let mut joint = gpu_concat_rows(&txt, &img).map_err(DiffusionError::model)?;
-    dump_named("joint_in", &joint);
     for layer in 0..depth_single {
         let prefix = format!("single_blocks.{layer}");
         joint = single_block(
@@ -697,7 +659,6 @@ fn flux2_transformer_core(
             attn_scale,
         )?;
         if layer == 0 || layer + 1 == depth_single {
-            dump_named(&format!("single{layer}"), &joint);
         }
     }
 
@@ -705,7 +666,6 @@ fn flux2_transformer_core(
     // pipeline trims to gen. LN is per-token so this is not just cosmetics —
     // keep the same tensor the official module sees.
     let img = gpu_slice_rows(&joint, txt_count, img_count).map_err(DiffusionError::model)?;
-    dump_named("after_singles_img", &img);
     let ada = linear(
         weights,
         &silu_temb,
@@ -720,44 +680,18 @@ fn flux2_transformer_core(
     };
     let img = gpu_layer_norm_mod(&img, &ada, scale_off, shift_off, LAYER_NORM_EPS)
         .map_err(DiffusionError::model)?;
-    dump_named("after_adaln", &img);
     let img = round_bf16(img)?;
     let pred = linear(weights, &img, "final_layer.linear.weight", config.in_channels as usize)?;
-    dump_named("pred_full", &pred);
     let pred = gpu_slice_rows(&pred, 0, gen_tokens).map_err(DiffusionError::model)?;
-    dump_named("pred", &pred);
     Ok(pred)
 }
 
-/// The persistent-state warm path is the default: step inputs live in
-/// device tensors reused across steps and edits, and the rope tables (host
-/// sincos over 2560 tokens x 64 pairs — milliseconds per step) are computed
-/// once per geometry. CUDA-graph capture of the whole step was tried and is
-/// impossible here: capture pins every pool buffer it touches (no reuse
-/// within one capture), and one Klein step's transients — 25 attention
-/// score matrices at 630MB alone — sum to tens of GB unpooled.
-/// MAKEPAD_FLUX2_STATE=0 forces the stateless path.
-fn flux2_state_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| {
-        !matches!(std::env::var("MAKEPAD_FLUX2_STATE").as_deref(), Ok("0"))
-    })
-}
-
-/// Dev-32B on a 32GB card: the 35.5GB DiT cannot be fully device-resident.
-/// The 8 double blocks (10.3GB) stream through the pinned-host ring while
-/// the 48 single blocks + globals (25.2GB) stay cache-resident.
-/// MAKEPAD_FLUX2_STREAM_DOUBLES=0 forces all-resident (WDDM overcommit —
-/// pages every step; only for experiments).
-fn flux2_stream_doubles_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| {
-        !matches!(
-            std::env::var("MAKEPAD_FLUX2_STREAM_DOUBLES").as_deref(),
-            Ok("0")
-        )
-    })
-}
+// Step inputs live in device tensors reused across steps and edits, and the
+// rope tables (host sincos over 2560 tokens x 64 pairs — milliseconds per
+// step) are computed once per geometry. CUDA-graph capture of the whole step
+// was tried and is impossible here: capture pins every pool buffer it touches
+// (no reuse within one capture), and one Klein step's transients — 25
+// attention score matrices at 630MB alone — sum to tens of GB unpooled.
 
 thread_local! {
     /// Namespace the stream ring currently serves (one resident dev DiT).
@@ -817,7 +751,7 @@ fn ring_tensor_key_and_bytes(
 
 /// Build + register the double-block stream ring for a dev transformer.
 fn flux2_ensure_double_ring(weights: &Flux2TransformerWeights) -> Result<bool> {
-    if !weights.config.guidance_embed || !flux2_stream_doubles_enabled() {
+    if !weights.config.guidance_embed {
         return Ok(false);
     }
     let namespace = ns(weights);
@@ -964,43 +898,6 @@ fn flux2_forward_state(
     })
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum Flux2Attn {
-    /// Composite f32 cublas QK/softmax/PV — the port's original reference
-    /// path. Memory-bound: materializes heads*seq*seq f32 scores.
-    CompositeF32,
-    /// FA2 bf16 tensor cores with RN-even input staging (see
-    /// `gpu_attention_packed_flash_cross_bf16_rn`): the closest match to the
-    /// oracle's bf16 SDPA arithmetic (bf16 QK/PV operands, f32 softmax/acc).
-    Fa2Bf16Rn,
-    /// FA2 f16 tensor cores (RN staging via __float2half).
-    Fa2F16,
-    /// FA2 f16 mma over q/k/v pre-rounded to the oracle's bf16 value grid
-    /// (exact in f16): oracle QK operands, finer P.
-    Fa2Bf16PreF16,
-}
-
-fn flux2_attn_mode() -> Flux2Attn {
-    static MODE: std::sync::OnceLock<Flux2Attn> = std::sync::OnceLock::new();
-    *MODE.get_or_init(|| {
-        // Default fa2bf16pre — the only arithmetic class that beats the
-        // 671ms oracle gate (594.8ms measured), with the best decoded-PNG
-        // agreement of any variant (156/0.999588 vs f32's 190/0.999556)
-        // and visual parity on the fixture. MAKEPAD_FLUX2_ATTN=f32 selects
-        // the composite reference path (885ms) that reproduces the landed
-        // baseline bit-for-bit — use it for residual-metric work: the
-        // teacher single-step max_abs reads 0.203 there vs 0.414 here,
-        // a bf16-ulp chaos lottery, not an edit-quality signal (see
-        // flux2cuda.md).
-        match std::env::var("MAKEPAD_FLUX2_ATTN").as_deref() {
-            Ok("f32") => Flux2Attn::CompositeF32,
-            Ok("fa2f16") => Flux2Attn::Fa2F16,
-            Ok("fa2bf16") => Flux2Attn::Fa2Bf16Rn,
-            _ => Flux2Attn::Fa2Bf16PreF16,
-        }
-    })
-}
-
 fn attn_joint(
     q: &GpuTensor,
     k: &GpuTensor,
@@ -1011,19 +908,8 @@ fn attn_joint(
     // Official Klein is bf16 SDPA (torch EFFICIENT_bf16: bf16 QK/PV operands,
     // f32 softmax and accumulate). Self-attn is q_len == kv_len on the FA2
     // cross body.
-    match flux2_attn_mode() {
-        Flux2Attn::CompositeF32 => {
-            gpu_attention_packed_composite_f32(q, k, v, heads, scale)
-        }
-        Flux2Attn::Fa2Bf16Rn => {
-            gpu_attention_packed_flash_cross_bf16_rn(q, k, v, heads, scale)
-        }
-        Flux2Attn::Fa2F16 => gpu_attention_packed_flash_cross(q, k, v, heads, scale, false),
-        Flux2Attn::Fa2Bf16PreF16 => {
-            gpu_attention_packed_flash_cross_bf16pre_f16(q, k, v, heads, scale)
-        }
-    }
-    .map_err(DiffusionError::model)
+    gpu_attention_packed_flash_cross_bf16pre_f16(q, k, v, heads, scale)
+        .map_err(DiffusionError::model)
 }
 
 /// Per-head QK RMSNorm reading its `cols`-wide slab straight out of the
@@ -1075,11 +961,6 @@ fn double_block(
         .map_err(DiffusionError::model)?;
     let txt_norm = gpu_layer_norm_mod_to_bf16buf(txt, txt_mod, hidden, 0, LAYER_NORM_EPS)
         .map_err(DiffusionError::model)?;
-    let tag = match prefix {
-        "double_blocks.0" => Some("d0"),
-        "double_blocks.4" => Some("d4"),
-        _ => None,
-    };
     let img_qkv = linear_from_buf_to_buf(
         weights,
         &img_norm,
@@ -1129,44 +1010,20 @@ fn double_block(
         &format!("{prefix}.txt_attn.norm.key_norm.scale"),
         head_dim,
     )?;
-    if let Some(tag) = tag {
-        dump_named(&format!("{tag}_img_q_rms"), &img_q);
-        dump_named(&format!("{tag}_txt_q_rms"), &txt_q);
-        dump_named(&format!("{tag}_img_k_rms"), &img_k);
-        dump_named(&format!("{tag}_txt_k_rms"), &txt_k);
-    }
-
     let q = gpu_concat_rows(&txt_q, &img_q).map_err(DiffusionError::model)?;
     let k = gpu_concat_rows(&txt_k, &img_k).map_err(DiffusionError::model)?;
     let v = gpu_concat_rows(&txt_v, &img_v).map_err(DiffusionError::model)?;
     let q = gpu_rope_interleaved(&q, heads, rope_cos, rope_sin).map_err(DiffusionError::model)?;
     let k = gpu_rope_interleaved(&k, heads, rope_cos, rope_sin).map_err(DiffusionError::model)?;
-    if let Some(tag) = tag {
-        dump_named(&format!("{tag}_q_rope"), &q);
-        dump_named(&format!("{tag}_k_rope"), &k);
-        dump_named(&format!("{tag}_v"), &v);
-    }
     let attn = attn_joint(&q, &k, &v, heads, attn_scale)?;
     let txt_attn = gpu_slice_rows(&attn, 0, txt_count).map_err(DiffusionError::model)?;
     let img_attn = gpu_slice_rows(&attn, txt_count, img.rows()).map_err(DiffusionError::model)?;
-    if let Some(tag) = tag {
-        dump_named(&format!("{tag}_txt_attn"), &txt_attn);
-        dump_named(&format!("{tag}_img_attn"), &img_attn);
-    }
     let img_attn = linear(weights, &img_attn, &format!("{prefix}.img_attn.proj.weight"), hidden)?;
     let txt_attn = linear(weights, &txt_attn, &format!("{prefix}.txt_attn.proj.weight"), hidden)?;
-    if let Some(tag) = tag {
-        dump_named(&format!("{tag}_img_attn_proj"), &img_attn);
-        dump_named(&format!("{tag}_txt_attn_proj"), &txt_attn);
-    }
     let img = gpu_gated_residual_mod_round_bf16(img, &img_attn, img_mod, 2 * hidden)
         .map_err(DiffusionError::model)?;
     let txt = gpu_gated_residual_mod_round_bf16(txt, &txt_attn, txt_mod, 2 * hidden)
         .map_err(DiffusionError::model)?;
-    if let Some(tag) = tag {
-        dump_named(&format!("{tag}_img_res1"), &img);
-        dump_named(&format!("{tag}_txt_res1"), &txt);
-    }
 
     let img_ff = gpu_layer_norm_mod_to_bf16buf(&img, img_mod, 4 * hidden, 3 * hidden, LAYER_NORM_EPS)
         .map_err(DiffusionError::model)?;
@@ -1174,10 +1031,6 @@ fn double_block(
         .map_err(DiffusionError::model)?;
     let img_ff = swiglu_mlp(weights, &img_ff, &format!("{prefix}.img_mlp"), hidden, mlp)?;
     let txt_ff = swiglu_mlp(weights, &txt_ff, &format!("{prefix}.txt_mlp"), hidden, mlp)?;
-    if let Some(tag) = tag {
-        dump_named(&format!("{tag}_img_ff"), &img_ff);
-        dump_named(&format!("{tag}_txt_ff"), &txt_ff);
-    }
     let img = gpu_gated_residual_mod_round_bf16(&img, &img_ff, img_mod, 5 * hidden)
         .map_err(DiffusionError::model)?;
     let txt = gpu_gated_residual_mod_round_bf16(&txt, &txt_ff, txt_mod, 5 * hidden)
@@ -1263,27 +1116,6 @@ pub fn flux2_euler_step(sample: &mut [f32], pred: &[f32], sigma: f32, sigma_next
 
 pub fn flux2_dit_clear_pool() {
     gpu_pool_clear();
-}
-
-fn dump_named(name: &str, tensor: &GpuTensor) {
-    let Ok(dir) = std::env::var("FLUX2_DIT_DUMP") else {
-        return;
-    };
-    if dir.is_empty() {
-        return;
-    };
-    let Ok(values) = gpu_download(tensor) else {
-        return;
-    };
-    let path = std::path::Path::new(&dir).join(format!("{name}.f32"));
-    let mut bytes = Vec::with_capacity(8 + values.len() * 4);
-    bytes.extend_from_slice(&(tensor.rows() as u32).to_le_bytes());
-    bytes.extend_from_slice(&(tensor.cols() as u32).to_le_bytes());
-    for v in values {
-        bytes.extend_from_slice(&v.to_le_bytes());
-    }
-    let _ = std::fs::create_dir_all(&dir);
-    let _ = std::fs::write(path, bytes);
 }
 
 #[cfg(test)]

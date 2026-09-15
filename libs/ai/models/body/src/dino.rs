@@ -1,0 +1,622 @@
+//! DINOv3 ViT-H+/16 backbone for SAM 3D Body.
+//!
+//! Matrix weights stay as packed bf16 cache entries and use
+//! `gpu_linear_nt_cached_bf16_f32acc`; activations and reductions are f32.
+//! LayerScale is folded into the output projection rows and biases at load.
+
+use crate::backend::{
+    gpu_add, gpu_attention_packed_cross, gpu_attention_packed_flash2_d64, gpu_concat_rows_many,
+    gpu_download, gpu_layer_norm_mul_add, gpu_linear_nt_cached_bf16_bias_epilogue,
+    gpu_linear_nt_cached_bf16_f32acc, gpu_linear_nt_cached_bf16_mm, gpu_linear_nt_cached_f8_mm,
+    gpu_add_cols_broadcast, gpu_mul, gpu_rope_half, gpu_vit_backbone_resident, GpuVitLayer,
+    GpuVitLinear,
+    gpu_silu, gpu_slice_rows, gpu_upload, GpuLinearPart, GpuTensor,
+};
+use crate::weights::BodyWeights;
+use crate::{
+    emit_progress, DiffusionError, ProgressHook, Result, DINO_DEPTH, DINO_DIM, DINO_FFN,
+    DINO_HEADS, DINO_HEAD_DIM, DINO_NORM_EPS, DINO_PREFIX_TOKENS, DINO_ROPE_BASE, PATCH,
+    ROPE_HALF,
+};
+use makepad_ai_common::quant::{GGML_TYPE_BF16, GGML_TYPE_F8_E4M3};
+use makepad_ai_loader::MlxDType;
+
+const PATCH_DIM: usize = 3 * PATCH * PATCH;
+const CACHE_NAMESPACE: &str = "body-dinov3-hplus-bf16";
+
+struct Bf16Linear {
+    bytes: Vec<u8>,
+    key: String,
+    out: usize,
+    bias: Vec<f32>,
+    /// The same weight as FP8 E4M3 with one per-tensor scale, when the
+    /// FP8 mode is on; `None` after a backend refused it.
+    f8: std::cell::RefCell<Option<(Vec<u8>, f32)>>,
+    /// The bias resident on the device for the FP8 path (uploaded once).
+    bias_gpu: std::cell::RefCell<Option<GpuTensor>>,
+}
+
+/// Quantise a bf16-packed weight to E4M3 with a per-tensor absmax scale
+/// (`w = scale * q`, q saturating at 448).
+fn quantize_f8(bf16_bytes: &[u8]) -> (Vec<u8>, f32) {
+    let values: Vec<f32> = bf16_bytes
+        .chunks_exact(2)
+        .map(|c| f32::from_bits(u32::from(u16::from_le_bytes([c[0], c[1]])) << 16))
+        .collect();
+    let absmax = values.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+    let scale = if absmax > 0.0 { absmax / 448.0 } else { 1.0 };
+    let bytes = values
+        .iter()
+        .map(|v| makepad_ai_flux::flux_lora::f32_to_f8_e4m3(v / scale))
+        .collect();
+    (bytes, scale)
+}
+
+impl Bf16Linear {
+    fn load(
+        weights: &BodyWeights,
+        name: &str,
+        out: usize,
+        inn: usize,
+        bias: bool,
+    ) -> Result<Self> {
+        let bytes = bf16_bytes_shaped(weights, &format!("{name}.weight"), &[out, inn])?;
+        let bias = if bias {
+            weights.f32_shaped(&format!("{name}.bias"), &[out])?
+        } else {
+            Vec::new()
+        };
+        Ok(Self {
+            bytes,
+            key: name.to_string(),
+            out,
+            bias,
+            f8: std::cell::RefCell::new(None),
+            bias_gpu: std::cell::RefCell::new(None),
+        })
+    }
+
+    fn load_folded(
+        weights: &BodyWeights,
+        name: &str,
+        scale_name: &str,
+        out: usize,
+        inn: usize,
+    ) -> Result<Self> {
+        let mut matrix = weights.f32_shaped(&format!("{name}.weight"), &[out, inn])?;
+        let mut bias = weights.f32_shaped(&format!("{name}.bias"), &[out])?;
+        let scale = weights.f32_shaped(scale_name, &[out])?;
+        for row in 0..out {
+            for value in &mut matrix[row * inn..(row + 1) * inn] {
+                *value *= scale[row];
+            }
+            bias[row] *= scale[row];
+        }
+        Ok(Self {
+            bytes: f32_to_bf16_bytes(&matrix),
+            key: format!("{name}.layerscale_folded"),
+            out,
+            bias,
+            f8: std::cell::RefCell::new(None),
+            bias_gpu: std::cell::RefCell::new(None),
+        })
+    }
+
+    fn load_patch(weights: &BodyWeights) -> Result<Self> {
+        let name = "backbone.embeddings.patch_embeddings";
+        Ok(Self {
+            bytes: bf16_bytes_shaped(
+                weights,
+                &format!("{name}.weight"),
+                &[DINO_DIM, 3, PATCH, PATCH],
+            )?,
+            key: name.to_string(),
+            out: DINO_DIM,
+            bias: weights.f32_shaped(&format!("{name}.bias"), &[DINO_DIM])?,
+            f8: std::cell::RefCell::new(None),
+            bias_gpu: std::cell::RefCell::new(None),
+        })
+    }
+
+    /// The tensor-core paths first (cuBLASLt with the bias in the epilogue,
+    /// or the bias-free bf16 mm), the f32-accumulating GEMM as the fallback
+    /// where a backend lacks them. All three carry bf16 operands with f32
+    /// accumulation; the fast paths round the output to bf16, which is the
+    /// reference's own precision.
+    fn forward(&self, input: &GpuTensor) -> Result<GpuTensor> {
+        // FP8 first when quantised: the bias rides a broadcast add after
+        // the bias-free f8 mm. A backend without FP8 turns the mode off for
+        // this layer on its first refusal.
+        let f8_result = {
+            let f8 = self.f8.borrow();
+            f8.as_ref().map(|(bytes, scale)| {
+                gpu_linear_nt_cached_f8_mm(
+                    input,
+                    CACHE_NAMESPACE,
+                    &[GpuLinearPart {
+                        bt_ggml_type: GGML_TYPE_F8_E4M3,
+                        n: self.out,
+                        cache_key: &format!("{}.f8", self.key),
+                        bytes,
+                    }],
+                    *scale,
+                    None,
+                )
+            })
+        };
+        match f8_result {
+            Some(Ok(out)) => {
+                if self.bias.is_empty() {
+                    return Ok(out);
+                }
+                let mut slot = self.bias_gpu.borrow_mut();
+                if slot.is_none() {
+                    *slot = Some(gpu_upload(&self.bias, 1, self.out).map_err(DiffusionError::model)?);
+                }
+                return gpu_add_rows_broadcast_cols(&out, slot.as_ref().unwrap());
+            }
+            Some(Err(_)) => {
+                *self.f8.borrow_mut() = None;
+            }
+            None => {}
+        }
+        let part = GpuLinearPart {
+            bt_ggml_type: GGML_TYPE_BF16,
+            n: self.out,
+            cache_key: &self.key,
+            bytes: &self.bytes,
+        };
+        let fast = if self.bias.is_empty() {
+            gpu_linear_nt_cached_bf16_mm(input, CACHE_NAMESPACE, &[part])
+        } else {
+            gpu_linear_nt_cached_bf16_bias_epilogue(input, CACHE_NAMESPACE, &[part], &self.bias)
+        };
+        match fast {
+            Ok(out) => Ok(out),
+            Err(_) => gpu_linear_nt_cached_bf16_f32acc(
+                input,
+                CACHE_NAMESPACE,
+                &[GpuLinearPart {
+                    bt_ggml_type: GGML_TYPE_BF16,
+                    n: self.out,
+                    cache_key: &self.key,
+                    bytes: &self.bytes,
+                }],
+                &self.bias,
+            )
+            .map_err(DiffusionError::model),
+        }
+    }
+}
+
+struct DinoLayer {
+    norm1_w: Vec<f32>,
+    norm1_b: Vec<f32>,
+    q: Bf16Linear,
+    k: Bf16Linear,
+    v: Bf16Linear,
+    out: Bf16Linear,
+    norm2_w: Vec<f32>,
+    norm2_b: Vec<f32>,
+    gate: Bf16Linear,
+    up: Bf16Linear,
+    down: Bf16Linear,
+}
+
+pub struct BodyDino {
+    patch: Bf16Linear,
+    prefix: GpuTensor,
+    layers: Vec<DinoLayer>,
+    final_norm_w: Vec<f32>,
+    final_norm_b: Vec<f32>,
+    /// Set once the backend declined the whole-stack resident call; the
+    /// per-op path is used from then on.
+    resident_refused: std::cell::Cell<bool>,
+}
+
+impl Bf16Linear {
+    fn vit_ref(&self) -> GpuVitLinear<'_> {
+        GpuVitLinear {
+            w_bytes: &self.bytes,
+            w_ggml_type: GGML_TYPE_BF16,
+            n: self.out,
+            bias: &self.bias,
+        }
+    }
+}
+
+impl DinoLayer {
+    fn vit_ref(&self) -> GpuVitLayer<'_> {
+        GpuVitLayer {
+            norm1_w: &self.norm1_w,
+            norm1_b: &self.norm1_b,
+            q: self.q.vit_ref(),
+            k: self.k.vit_ref(),
+            v: self.v.vit_ref(),
+            out: self.out.vit_ref(),
+            norm2_w: &self.norm2_w,
+            norm2_b: &self.norm2_b,
+            gate: self.gate.vit_ref(),
+            up: self.up.vit_ref(),
+            down: self.down.vit_ref(),
+        }
+    }
+}
+
+/// Bias add broadcast over rows: `out[r] = x[r] + bias`.
+fn gpu_add_rows_broadcast_cols(x: &GpuTensor, bias: &GpuTensor) -> Result<GpuTensor> {
+    gpu_add_cols_broadcast(x, bias).map_err(DiffusionError::model)
+}
+
+fn bf16_bytes_shaped(
+    weights: &BodyWeights,
+    name: &str,
+    expected: &[usize],
+) -> Result<Vec<u8>> {
+    weights.expect_shape(name, expected)?;
+    if weights.dtype(name)? != MlxDType::BF16 {
+        return Err(DiffusionError::model(format!(
+            "body DINO tensor {name} is not bf16"
+        )));
+    }
+    let bytes = weights.bytes(name)?;
+    let values = expected.iter().try_fold(1usize, |product, &dimension| {
+        product.checked_mul(dimension).ok_or_else(|| {
+            DiffusionError::model(format!("body DINO tensor {name} shape overflows usize"))
+        })
+    })?;
+    if bytes.len() != values * 2 {
+        return Err(DiffusionError::model(format!(
+            "body DINO tensor {name} has {} bytes, expected {}",
+            bytes.len(),
+            values * 2
+        )));
+    }
+    Ok(bytes)
+}
+
+fn f32_to_bf16_bytes(values: &[f32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(values.len() * 2);
+    for &value in values {
+        let bits = value.to_bits();
+        let rounded = ((bits.wrapping_add(0x7fff + ((bits >> 16) & 1))) >> 16) as u16;
+        bytes.extend_from_slice(&rounded.to_le_bytes());
+    }
+    bytes
+}
+
+/// The crop side of a normalised CHW buffer: square, a multiple of the patch.
+pub(crate) fn crop_side(values: usize) -> Result<usize> {
+    if values % 3 != 0 {
+        return Err(DiffusionError::workflow(format!("body crop has {values} values, not 3 planes")));
+    }
+    let plane = values / 3;
+    let side = (plane as f64).sqrt().round() as usize;
+    if side * side != plane || side % PATCH != 0 || side == 0 {
+        return Err(DiffusionError::workflow(format!(
+            "body crop plane of {plane} values is not a square with a side that is a multiple of {PATCH}"
+        )));
+    }
+    Ok(side)
+}
+
+/// Head-dim-64 attention: the FA2 flash kernel (f16 operands, f32 softmax
+/// and accumulation — the reference's own precision class) where the
+/// backend has it, else the composite f32 path.
+pub(crate) fn attention_d64(
+    q: &GpuTensor,
+    k: &GpuTensor,
+    v: &GpuTensor,
+    heads: usize,
+) -> Result<GpuTensor> {
+    match gpu_attention_packed_flash2_d64(q, k, v, heads, 0.125) {
+        Ok(out) => Ok(out),
+        Err(_) => gpu_attention_packed_cross(q, k, v, heads, 0.125).map_err(DiffusionError::model),
+    }
+}
+
+impl BodyDino {
+    pub fn prepare(weights: &BodyWeights) -> Result<Self> {
+        Self::prepare_with_progress(weights, None)
+    }
+
+    pub fn prepare_with_progress(
+        weights: &BodyWeights,
+        mut progress: Option<ProgressHook>,
+    ) -> Result<Self> {
+        let cls = weights.f32_shaped("backbone.embeddings.cls_token", &[1, 1, DINO_DIM])?;
+        let registers = weights.f32_shaped(
+            "backbone.embeddings.register_tokens",
+            &[1, DINO_PREFIX_TOKENS - 1, DINO_DIM],
+        )?;
+        let mut prefix = cls;
+        prefix.extend_from_slice(&registers);
+
+        let patch = Bf16Linear::load_patch(weights)?;
+        let mut layers = Vec::with_capacity(DINO_DEPTH);
+        for i in 0..DINO_DEPTH {
+            if progress.is_some() {
+                emit_progress(
+                    &mut progress,
+                    &format!("load body dino block {}/{DINO_DEPTH}", i + 1),
+                    i as f64 / DINO_DEPTH as f64,
+                )?;
+            }
+            let p = format!("backbone.layer.{i}");
+            layers.push(DinoLayer {
+                norm1_w: weights.f32_shaped(&format!("{p}.norm1.weight"), &[DINO_DIM])?,
+                norm1_b: weights.f32_shaped(&format!("{p}.norm1.bias"), &[DINO_DIM])?,
+                q: Bf16Linear::load(
+                    weights,
+                    &format!("{p}.attention.q_proj"),
+                    DINO_DIM,
+                    DINO_DIM,
+                    true,
+                )?,
+                k: Bf16Linear::load(
+                    weights,
+                    &format!("{p}.attention.k_proj"),
+                    DINO_DIM,
+                    DINO_DIM,
+                    false,
+                )?,
+                v: Bf16Linear::load(
+                    weights,
+                    &format!("{p}.attention.v_proj"),
+                    DINO_DIM,
+                    DINO_DIM,
+                    true,
+                )?,
+                out: Bf16Linear::load_folded(
+                    weights,
+                    &format!("{p}.attention.o_proj"),
+                    &format!("{p}.layer_scale1.lambda1"),
+                    DINO_DIM,
+                    DINO_DIM,
+                )?,
+                norm2_w: weights.f32_shaped(&format!("{p}.norm2.weight"), &[DINO_DIM])?,
+                norm2_b: weights.f32_shaped(&format!("{p}.norm2.bias"), &[DINO_DIM])?,
+                gate: Bf16Linear::load(
+                    weights,
+                    &format!("{p}.mlp.gate_proj"),
+                    DINO_FFN,
+                    DINO_DIM,
+                    true,
+                )?,
+                up: Bf16Linear::load(
+                    weights,
+                    &format!("{p}.mlp.up_proj"),
+                    DINO_FFN,
+                    DINO_DIM,
+                    true,
+                )?,
+                down: Bf16Linear::load_folded(
+                    weights,
+                    &format!("{p}.mlp.down_proj"),
+                    &format!("{p}.layer_scale2.lambda1"),
+                    DINO_DIM,
+                    DINO_FFN,
+                )?,
+            });
+        }
+
+        Ok(Self {
+            patch,
+            prefix: gpu_upload(&prefix, DINO_PREFIX_TOKENS, DINO_DIM)
+                .map_err(DiffusionError::model)?,
+            layers,
+            final_norm_w: weights.f32_shaped("backbone.norm.weight", &[DINO_DIM])?,
+            final_norm_b: weights.f32_shaped("backbone.norm.bias", &[DINO_DIM])?,
+            resident_refused: std::cell::Cell::new(false),
+        })
+    }
+
+    fn rope_tables(&self, side: usize) -> (Vec<f32>, Vec<f32>) {
+        let rows = DINO_PREFIX_TOKENS + side * side;
+        let mut inv_freq = [0.0f32; 16];
+        for (j, value) in inv_freq.iter_mut().enumerate() {
+            *value = 1.0 / DINO_ROPE_BASE.powf(j as f32 * 4.0 / DINO_HEAD_DIM as f32);
+        }
+        let mut cos = vec![1.0f32; rows * ROPE_HALF];
+        let mut sin = vec![0.0f32; rows * ROPE_HALF];
+        for gy in 0..side {
+            for gx in 0..side {
+                let row = DINO_PREFIX_TOKENS + gy * side + gx;
+                let y = 2.0 * ((gy as f32 + 0.5) / side as f32) - 1.0;
+                let x = 2.0 * ((gx as f32 + 0.5) / side as f32) - 1.0;
+                for (j, frequency) in inv_freq.iter().enumerate() {
+                    let ay = 2.0 * std::f32::consts::PI * y * frequency;
+                    let ax = 2.0 * std::f32::consts::PI * x * frequency;
+                    cos[row * ROPE_HALF + j] = ay.cos();
+                    sin[row * ROPE_HALF + j] = ay.sin();
+                    cos[row * ROPE_HALF + 16 + j] = ax.cos();
+                    sin[row * ROPE_HALF + 16 + j] = ax.sin();
+                }
+            }
+        }
+        (cos, sin)
+    }
+
+    /// `pixels` is a normalised CHW crop of any square side that is a
+    /// multiple of the patch (512 is the trained size); the output has
+    /// `(side / 16)^2` rows.
+    /// Quantise every backbone weight to FP8 E4M3 (per-tensor scale) for the
+    /// tensor-core FP8 GEMM; `false` restores bf16. Backends without FP8 fall
+    /// back layer by layer.
+    pub fn set_fp8(&self, on: bool) {
+        let all = std::iter::once(&self.patch).chain(self.layers.iter().flat_map(|l| {
+            [&l.q, &l.k, &l.v, &l.out, &l.gate, &l.up, &l.down]
+        }));
+        for linear in all {
+            *linear.f8.borrow_mut() = if on { Some(quantize_f8(&linear.bytes)) } else { None };
+        }
+    }
+
+    pub fn forward_normalized(&self, pixels: &[f32]) -> Result<GpuTensor> {
+        let size = crop_side(pixels.len())?;
+        let side = size / PATCH;
+        let num_patches = side * side;
+
+        // Patch vectors use [channel][patch_y][patch_x], matching flattened
+        // conv2d weights [out, channel, patch_y, patch_x].
+        let mut patch_rows = vec![0.0f32; num_patches * PATCH_DIM];
+        let plane = size * size;
+        for gy in 0..side {
+            for gx in 0..side {
+                let row = gy * side + gx;
+                let base = row * PATCH_DIM;
+                for c in 0..3 {
+                    for py in 0..PATCH {
+                        let src = c * plane + (gy * PATCH + py) * size + gx * PATCH;
+                        let dst = base + c * PATCH * PATCH + py * PATCH;
+                        patch_rows[dst..dst + PATCH].copy_from_slice(&pixels[src..src + PATCH]);
+                    }
+                }
+            }
+        }
+        let patch_rows = gpu_upload(&patch_rows, num_patches, PATCH_DIM)
+            .map_err(DiffusionError::model)?;
+        let patches = self.patch.forward(&patch_rows)?;
+        let mut hidden = gpu_concat_rows_many(&[&self.prefix, &patches])
+            .map_err(DiffusionError::model)?;
+
+        let rows = DINO_PREFIX_TOKENS + num_patches;
+        let (cos, sin) = self.rope_tables(side);
+        let cos = gpu_upload(&cos, rows, ROPE_HALF).map_err(DiffusionError::model)?;
+        let sin = gpu_upload(&sin, rows, ROPE_HALF).map_err(DiffusionError::model)?;
+
+        // The whole stack in one backend call when the backend offers it
+        // (Metal: one command buffer, no host round trips between ops).
+        if !self.resident_refused.get() {
+            let layers: Vec<GpuVitLayer<'_>> = self.layers.iter().map(DinoLayer::vit_ref).collect();
+            match gpu_vit_backbone_resident(
+                &hidden,
+                DINO_HEADS,
+                ROPE_HALF,
+                &cos,
+                &sin,
+                &layers,
+                &self.final_norm_w,
+                &self.final_norm_b,
+                DINO_NORM_EPS,
+            ) {
+                Ok(normalized) => {
+                    return gpu_slice_rows(&normalized, DINO_PREFIX_TOKENS, num_patches)
+                        .map_err(DiffusionError::model);
+                }
+                Err(_) => self.resident_refused.set(true),
+            }
+        }
+
+        for layer in &self.layers {
+            let normed = gpu_layer_norm_mul_add(
+                &hidden,
+                &layer.norm1_w,
+                &layer.norm1_b,
+                DINO_NORM_EPS,
+            )
+            .map_err(DiffusionError::model)?;
+            let q = layer.q.forward(&normed)?;
+            let k = layer.k.forward(&normed)?;
+            let v = layer.v.forward(&normed)?;
+            let q = gpu_rope_half(&q, DINO_HEADS, ROPE_HALF, &cos, &sin)
+                .map_err(DiffusionError::model)?;
+            let k = gpu_rope_half(&k, DINO_HEADS, ROPE_HALF, &cos, &sin)
+                .map_err(DiffusionError::model)?;
+            let attention = attention_d64(&q, &k, &v, DINO_HEADS)?;
+            let attention = layer.out.forward(&attention)?;
+            hidden = gpu_add(&hidden, &attention).map_err(DiffusionError::model)?;
+
+            let normed = gpu_layer_norm_mul_add(
+                &hidden,
+                &layer.norm2_w,
+                &layer.norm2_b,
+                DINO_NORM_EPS,
+            )
+            .map_err(DiffusionError::model)?;
+            let gate = layer.gate.forward(&normed)?;
+            let up = layer.up.forward(&normed)?;
+            let gate = gpu_silu(&gate).map_err(DiffusionError::model)?;
+            let ff = gpu_mul(&gate, &up).map_err(DiffusionError::model)?;
+            let ff = layer.down.forward(&ff)?;
+            hidden = gpu_add(&hidden, &ff).map_err(DiffusionError::model)?;
+        }
+
+        let normalized = gpu_layer_norm_mul_add(
+            &hidden,
+            &self.final_norm_w,
+            &self.final_norm_b,
+            DINO_NORM_EPS,
+        )
+        .map_err(DiffusionError::model)?;
+        gpu_slice_rows(&normalized, DINO_PREFIX_TOKENS, num_patches)
+            .map_err(DiffusionError::model)
+    }
+
+    pub fn forward_normalized_host(&self, pixels: &[f32]) -> Result<Vec<f32>> {
+        let output = self.forward_normalized(pixels)?;
+        gpu_download(&output).map_err(DiffusionError::model)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backend::gpu_device_available;
+    use crate::{NUM_PATCHES, PATCHES_SIDE};
+
+    fn planar_to_tokens(values: &[f32]) -> Vec<f32> {
+        let mut output = vec![0.0f32; NUM_PATCHES * DINO_DIM];
+        for c in 0..DINO_DIM {
+            for token in 0..NUM_PATCHES {
+                output[token * DINO_DIM + c] = values[c * NUM_PATCHES + token];
+            }
+        }
+        output
+    }
+
+    #[test]
+    fn gpu_fixture_backbone() {
+        let Some((_, input)) = crate::fixture::load("backbone_in") else {
+            eprintln!("body oracle fixtures absent; skipping backbone GPU parity");
+            return;
+        };
+        let Some((expected_shape, expected)) = crate::fixture::load("backbone_out") else {
+            eprintln!("body backbone output fixture absent; skipping backbone GPU parity");
+            return;
+        };
+        let Some(weights_path) = crate::fixture::weights_path() else {
+            eprintln!("body weights path absent; skipping backbone GPU parity");
+            return;
+        };
+        if !gpu_device_available() || !crate::fixture::gpu_required_ops_available() {
+            eprintln!("body GPU unavailable; skipping backbone GPU parity");
+            return;
+        }
+        let weights = BodyWeights::load(weights_path).expect("load body weights");
+        let dino = BodyDino::prepare(&weights).expect("prepare body DINO");
+        let actual = dino
+            .forward_normalized_host(&input)
+            .expect("body DINO forward");
+        let expected = if expected_shape.ends_with(&[DINO_DIM, PATCHES_SIDE, PATCHES_SIDE]) {
+            planar_to_tokens(&expected)
+        } else {
+            expected
+        };
+        assert_eq!(actual.len(), expected.len());
+        let mut max_abs = 0.0f32;
+        let mut abs_error_sum = 0.0f64;
+        let mut reference_abs_sum = 0.0f64;
+        for (a, b) in actual.iter().zip(&expected) {
+            let error = (a - b).abs();
+            max_abs = max_abs.max(error);
+            abs_error_sum += error as f64;
+            reference_abs_sum += b.abs() as f64;
+        }
+        let mean_relative = abs_error_sum / reference_abs_sum.max(f64::EPSILON);
+        eprintln!(
+            "body backbone max abs error: {max_abs:.6}; relative mean error: {mean_relative:.6}"
+        );
+        assert!(mean_relative < 3e-2);
+    }
+}

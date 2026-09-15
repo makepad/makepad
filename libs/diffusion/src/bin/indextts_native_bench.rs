@@ -129,10 +129,6 @@ fn main() {
                     .and_then(|v| v.parse().ok())
                     .unwrap_or_else(|| die("--warm needs a number"));
             }
-            // Per-stage wall-time attribution (STAGE lines from the
-            // pipeline); in-process env set beats quoting it through the
-            // detached cmd.exe launch chain on the bench box.
-            "--stage-timing" => std::env::set_var("INDEXTTS_STAGE_TIMING", "1"),
             other => die(&format!("unknown arg {other}")),
         }
         i += 1;

@@ -19,11 +19,18 @@
 use crate::error::AssetAiError;
 use crate::http_client::{http_fetch, HttpClientRequest};
 use crate::protocol::{
-    GenerateRequestJson, GenerateResponseJson, HealthJson, JobStatusJson, ModelInfoJson,
-    ModelsJson,
+    ByeRequestJson, ByeResponseJson, GenerateRequestJson, HealthJson,
+    JobStatusJson, KeepaliveRequestJson, KeepaliveResponseJson, ModelInfoJson, ModelsJson,
 };
 use crate::registry::Domain;
 use makepad_micro_serde::{DeJson, SerJson};
+use std::sync::Mutex;
+
+#[path = "client_submission.rs"]
+mod submission;
+#[cfg(test)]
+#[path = "client_submission_tests.rs"]
+mod submission_tests;
 
 /// One artifact fetched from a provider.
 #[derive(Clone, Debug)]
@@ -47,6 +54,21 @@ pub trait ContentProvider {
         request: &GenerateRequestJson,
     ) -> Result<String, AssetAiError>;
 
+    /// Worker-side submission with cancellable pre-admission waiting. The
+    /// default makes ONE request: untyped provider errors never justify replay.
+    /// Once accepted, always return the job id, even if cancellation arrived
+    /// during the POST, so the caller can relinquish that job immediately.
+    fn request_pending(
+        &self,
+        domain: Domain,
+        request: &GenerateRequestJson,
+        cancelled: &dyn Fn() -> bool,
+        _pending: &mut dyn FnMut(&str),
+    ) -> Result<String, AssetAiError> {
+        if cancelled() { return Err(AssetAiError::Cancelled); }
+        self.request(domain, request)
+    }
+
     /// Job progress: queued / running{stage, progress} / done{artifacts} /
     /// error.
     fn poll(&self, job_id: &str) -> Result<JobStatusJson, AssetAiError>;
@@ -62,6 +84,18 @@ pub trait ContentProvider {
             "cancel not supported by this provider".to_string(),
         ))
     }
+
+    /// Renews the origin lease for an in-flight job. Providers without
+    /// leases need no special handling.
+    fn keepalive(&self, job_id: &str) -> Result<(), AssetAiError> {
+        let _ = job_id;
+        Ok(())
+    }
+
+    /// Gracefully releases every lease this origin owns at the provider.
+    fn bye(&self) -> Result<(), AssetAiError> {
+        Ok(())
+    }
 }
 
 /// `ContentProvider` over a `makepad-asset-ai` service at `base_url`,
@@ -69,6 +103,7 @@ pub trait ContentProvider {
 pub struct LocalService {
     base_url: String,
     auth_headers: Vec<(String, String)>,
+    lease_origin: Mutex<Option<(String, u64)>>,
 }
 
 const MAX_JSON_BODY: usize = 4 * 1024 * 1024;
@@ -82,6 +117,7 @@ impl LocalService {
         Self {
             base_url,
             auth_headers: Self::auth_headers(secret.as_deref()),
+            lease_origin: Mutex::new(None),
         }
     }
 
@@ -133,6 +169,52 @@ impl LocalService {
         let body = response.read_body_to_vec(MAX_JSON_BODY)?;
         parse_json_body::<T>(status, &body, &url)
     }
+
+    fn request_pending_using(
+        &self,
+        domain: Domain,
+        request: &GenerateRequestJson,
+        cancelled: &dyn Fn() -> bool,
+        pending: &mut dyn FnMut(&str),
+        transport: &mut impl submission::Transport,
+    ) -> Result<String, AssetAiError> {
+        if cancelled() { return Err(AssetAiError::Cancelled); }
+        let mut request_with_model = None;
+        if request.model.is_empty() {
+            let models = self.list_models()?;
+            let chosen = models
+                .iter()
+                .find(|model| model.available && model.domain == domain.as_str())
+                .ok_or_else(|| {
+                    AssetAiError::Unavailable(format!(
+                        "no available {} model on {}",
+                        domain.as_str(),
+                        self.base_url
+                    ))
+                })?;
+            let mut owned = request.clone();
+            owned.model = chosen.id.clone();
+            request_with_model = Some(owned);
+        }
+        let request = request_with_model.as_ref().unwrap_or(request);
+        let url = format!("{}/generate", self.base_url);
+        let body = request.serialize_json();
+        let job_id = submission::submit(&url, &self.auth_headers, body.as_bytes(),
+            request.queue_policy.as_deref() != Some("reject"),
+            cancelled, &mut |note| pending(&submission::safe_note(note, request, &self.auth_headers)), transport)
+            .map_err(|error| match error {
+                AssetAiError::Cancelled => AssetAiError::Cancelled,
+                AssetAiError::Busy => AssetAiError::Busy,
+                AssetAiError::QueueFull(limit) => AssetAiError::QueueFull(limit),
+                AssetAiError::Http(reason) => AssetAiError::Http(submission::safe_note(&reason, request, &self.auth_headers)),
+                AssetAiError::Unavailable(reason) if reason.starts_with("disk-space:") || reason.starts_with("local-use:") || reason.starts_with("admission-overloaded:") =>
+                    AssetAiError::Unavailable(submission::safe_note(&reason, request, &self.auth_headers)),
+                other => AssetAiError::Http(submission::safe_note(&other.to_string(), request, &self.auth_headers)),
+            })?;
+        *self.lease_origin.lock().unwrap_or_else(|e| e.into_inner()) = request
+            .origin_key.as_ref().map(|key| (key.clone(), request.origin_epoch.unwrap_or(0)));
+        Ok(job_id)
+    }
 }
 
 fn parse_json_body<T: DeJson>(status: u16, body: &[u8], url: &str) -> Result<T, AssetAiError> {
@@ -162,39 +244,15 @@ impl ContentProvider for LocalService {
         Ok(models.models)
     }
 
-    fn request(
-        &self,
-        domain: Domain,
-        request: &GenerateRequestJson,
+    fn request(&self, domain: Domain, request: &GenerateRequestJson) -> Result<String, AssetAiError> {
+        self.request_pending(domain, request, &|| false, &mut |_| {})
+    }
+
+    fn request_pending(
+        &self, domain: Domain, request: &GenerateRequestJson,
+        cancelled: &dyn Fn() -> bool, pending: &mut dyn FnMut(&str),
     ) -> Result<String, AssetAiError> {
-        let mut request = request.clone();
-        if request.model.is_empty() {
-            let models = self.list_models()?;
-            let chosen = models
-                .iter()
-                .find(|model| model.available && model.domain == domain.as_str())
-                .ok_or_else(|| {
-                    AssetAiError::Unavailable(format!(
-                        "no available {} model on {}",
-                        domain.as_str(),
-                        self.base_url
-                    ))
-                })?;
-            request.model = chosen.id.clone();
-        }
-        let url = format!("{}/generate", self.base_url);
-        let body = request.serialize_json();
-        let response = http_fetch(&self.post_request(&url, "application/json", body.as_bytes()))?;
-        let status = response.status;
-        let bytes = response.read_body_to_vec(MAX_JSON_BODY)?;
-        let parsed: GenerateResponseJson = parse_json_body(status, &bytes, &url)?;
-        match parsed.job_id {
-            Some(job_id) => Ok(job_id),
-            None => Err(AssetAiError::Http(format!(
-                "{url}: {}",
-                parsed.error.unwrap_or_else(|| "no job id".to_string())
-            ))),
-        }
+        self.request_pending_using(domain, request, cancelled, pending, &mut submission::HttpTransport)
     }
 
     fn poll(&self, job_id: &str) -> Result<JobStatusJson, AssetAiError> {
@@ -208,6 +266,53 @@ impl ContentProvider for LocalService {
         let status = response.status;
         let body = response.read_body_to_vec(MAX_JSON_BODY)?;
         parse_json_body(status, &body, &url)
+    }
+
+    fn keepalive(&self, job_id: &str) -> Result<(), AssetAiError> {
+        let Some((origin_key, origin_epoch)) = self
+            .lease_origin
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        else {
+            return Ok(());
+        };
+        let url = format!("{}/job/{job_id}/keepalive", self.base_url);
+        let body = KeepaliveRequestJson {
+            origin_key,
+            origin_epoch,
+        }
+        .serialize_json();
+        let response = http_fetch(&self.post_request(&url, "application/json", body.as_bytes()))?;
+        let status = response.status;
+        let bytes = response.read_body_to_vec(MAX_JSON_BODY)?;
+        let parsed: KeepaliveResponseJson = parse_json_body(status, &bytes, &url)?;
+        if parsed.renewed {
+            Ok(())
+        } else {
+            Err(AssetAiError::Unavailable(format!(
+                "job {job_id} lease was not renewed: {}",
+                parsed.reason.unwrap_or_else(|| "unknown reason".to_string())
+            )))
+        }
+    }
+
+    fn bye(&self) -> Result<(), AssetAiError> {
+        let Some((origin_key, _)) = self
+            .lease_origin
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        else {
+            return Ok(());
+        };
+        let url = format!("{}/bye", self.base_url);
+        let body = ByeRequestJson { origin_key }.serialize_json();
+        let response = http_fetch(&self.post_request(&url, "application/json", body.as_bytes()))?;
+        let status = response.status;
+        let bytes = response.read_body_to_vec(MAX_JSON_BODY)?;
+        let _: ByeResponseJson = parse_json_body(status, &bytes, &url)?;
+        Ok(())
     }
 
     fn fetch_artifact(&self, artifact_id: &str) -> Result<ArtifactBytes, AssetAiError> {

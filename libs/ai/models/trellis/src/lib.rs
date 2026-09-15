@@ -20,3 +20,5 @@ pub mod trellis_mesh;
 pub mod trellis_pipeline;
 pub mod trellis_slat;
 pub mod trellis_vae;
+pub mod pixal3d;
+pub mod pixal_naf;

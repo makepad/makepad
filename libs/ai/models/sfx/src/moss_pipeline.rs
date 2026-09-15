@@ -381,8 +381,8 @@ impl MossPipeline {
         Ok(latents)
     }
 
-    /// End-to-end with automatic device dispatch (device when available,
-    /// MOSS_DEVICE=0 forces CPU). Same contract as [`MossPipeline::generate`],
+    /// End-to-end with automatic device dispatch. Same contract as
+    /// [`MossPipeline::generate`],
     /// including the progress bands.
     #[allow(clippy::too_many_arguments)]
     pub fn generate_auto(

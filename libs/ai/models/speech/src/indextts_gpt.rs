@@ -1614,33 +1614,4 @@ mod tests {
         }
     }
 
-    /// Full-model oracle smoke (loads ~3.2 GB): opt-in via
-    /// `INDEXTTS_GPT_ORACLE=1` so `cargo test` stays fast; the validate bin
-    /// is the real gate.
-    #[test]
-    fn emo_path_matches_oracle_when_opted_in() {
-        if std::env::var("INDEXTTS_GPT_ORACLE").as_deref() != Ok("1") {
-            eprintln!("skipping emo_path_matches_oracle_when_opted_in: set INDEXTTS_GPT_ORACLE=1");
-            return;
-        }
-        let ckpt = reference_checkpoints_dir();
-        let dumps = reference_dumps_dir();
-        if !ckpt.join("gpt.pth").is_file() || !dumps.join("spk_cond_emb.npy").is_file() {
-            eprintln!("skipping emo_path_matches_oracle_when_opted_in: reference files missing");
-            return;
-        }
-        let gpt = IndexTtsGpt::load(&ckpt).unwrap();
-        let cond = load_npy_f32(&dumps.join("spk_cond_emb.npy")).unwrap();
-        let frames = cond.len() / EMO_INPUT_DIM;
-        let (conf, tp) = gpt.emo_conformer(&cond, frames).unwrap();
-        let want = load_npy_f32(&dumps.join("emo_conformer_out.npy")).unwrap();
-        assert_eq!(conf.len(), want.len());
-        assert_eq!(tp, conformer_subsampled_len(frames));
-        let max = conf
-            .iter()
-            .zip(&want)
-            .map(|(a, b)| (a - b).abs())
-            .fold(0f32, f32::max);
-        assert!(max <= 2e-3, "emo conformer max abs {max}");
-    }
 }

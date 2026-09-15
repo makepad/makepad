@@ -1332,29 +1332,4 @@ mod tests {
         assert!(RvqEncoderConfig::parse("{}").is_err());
     }
 
-    /// Opt-in load smoke on the real files: MAKEPAD_MUSIC3_REFERENCE_DIR must
-    /// hold dav.pth + encoders/… (the registry layout). Checks every tensor
-    /// is read at the shapes the port expects and that a 3 s tone encodes to
-    /// in-range codes.
-    #[test]
-    fn real_weights_load_and_encode_when_present() {
-        let Some(dir) = std::env::var_os("MAKEPAD_MUSIC3_REFERENCE_DIR") else {
-            eprintln!("skipping real_weights_load_and_encode_when_present (MAKEPAD_MUSIC3_REFERENCE_DIR unset)");
-            return;
-        };
-        let weights = Music3ReferenceWeights::resolve(Path::new(&dir)).unwrap();
-        let rate = 22_050u32;
-        let n = rate as usize * 3;
-        let left: Vec<f32> = (0..n).map(|i| (i as f32 * 440.0 * 2.0 * std::f32::consts::PI / rate as f32).sin() * 0.3).collect();
-        let right: Vec<f32> = (0..n).map(|i| (i as f32 * 660.0 * 2.0 * std::f32::consts::PI / rate as f32).sin() * 0.3).collect();
-        let audio = Music3ReferenceAudio { left, right, rate };
-        let enc = music3_encode_reference(&weights, &audio, &mut |_, _, _| {}, &|| false).unwrap();
-        assert_eq!(enc.frames, 75);
-        assert_eq!(enc.codes.len(), 75);
-        assert!(enc.codes.iter().all(|c| c[0] < 16_384 && c[1..].iter().all(|v| *v < 1024)));
-        assert!(enc.c0_topk.iter().all(|t| t[0] < 16_384 && t.iter().all(|v| *v < 16_384)));
-        for (c, t) in enc.codes.iter().zip(&enc.c0_topk) {
-            assert_eq!(c[0], t[0]);
-        }
-    }
 }

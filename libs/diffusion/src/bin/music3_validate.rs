@@ -25,7 +25,7 @@ use makepad_diffusion::music3::{
     MUSIC3_RVQ_HIDDEN, MUSIC3_SAMPLE_RATE,
 };
 use makepad_diffusion::music3_ar::{
-    music3_ar_emitted_frames, music3_ar_replay, music3_ar_sample,
+    music3_ar_emitted_frames, music3_ar_replay,
 };
 use makepad_diffusion::music3_dit::{music3_dit_evict, music3_dit_forward, Music3DitPrepared};
 use makepad_diffusion::music3_lm::{
@@ -250,13 +250,14 @@ fn main() {
     });
     let dump = opts.get("dump").cloned();
     let stage = opts.get("stage").cloned().unwrap_or_else(|| "all".to_string());
-    if let Err(err) = run(Path::new(&weights), dump.as_deref().map(Path::new), &stage) {
+    let bench_runs = opts.get("bench-runs").and_then(|value| value.parse().ok()).unwrap_or(0);
+    if let Err(err) = run(Path::new(&weights), dump.as_deref().map(Path::new), &stage, bench_runs) {
         eprintln!("music3-validate FAILED: {err}");
         std::process::exit(1);
     }
 }
 
-fn run(weights: &Path, dump: Option<&Path>, stage: &str) -> Result<(), String> {
+fn run(weights: &Path, dump: Option<&Path>, stage: &str, bench_runs: usize) -> Result<(), String> {
     let all = stage == "all";
     println!("music3-validate weights={}", weights.display());
     println!(
@@ -347,11 +348,6 @@ fn run(weights: &Path, dump: Option<&Path>, stage: &str) -> Result<(), String> {
         let dump = dump.ok_or("--dump is required for ar")?;
         println!("== ar ==");
         run_ar(weights, dump)?;
-    }
-    if stage == "sample" {
-        let dump = dump.ok_or("--dump is required for sample")?;
-        println!("== sample ==");
-        run_sample(weights, dump)?;
     }
     if stage == "teacher" {
         let dump = dump.ok_or("--dump is required for teacher")?;
@@ -614,6 +610,7 @@ fn run(weights: &Path, dump: Option<&Path>, stage: &str) -> Result<(), String> {
             &caption,
             &lyrics,
             reference,
+            bench_runs,
         )?;
     }
     println!("music3-validate PASS");
@@ -966,7 +963,7 @@ fn run_lm(weights: &Path, dump: &Path) -> Result<(), String> {
     for row in 0..t {
         let a = &hidden[row * MUSIC3_LM_HIDDEN..(row + 1) * MUSIC3_LM_HIDDEN];
         let b = &href_v[row * MUSIC3_LM_HIDDEN..(row + 1) * MUSIC3_LM_HIDDEN];
-        let (cos, mx, mean) = compare(a, b)?;
+        let (cos, mx, _) = compare(a, b)?;
         let ua = &hidden[(t + row) * MUSIC3_LM_HIDDEN..(t + row + 1) * MUSIC3_LM_HIDDEN];
         let ub = &href_v[(t + row) * MUSIC3_LM_HIDDEN..(t + row + 1) * MUSIC3_LM_HIDDEN];
         let (_, umx, _) = compare(ua, ub)?;
@@ -1034,12 +1031,6 @@ fn run_prefill_layers(weights: &Path, dump: &Path) -> Result<(), String> {
     let vals = ids.as_i64()?;
     let cond: Vec<u32> = vals[..t].iter().map(|&v| v as u32).collect();
     let uncond: Vec<u32> = vals[t..].iter().map(|&v| v as u32).collect();
-    if std::env::var_os("MAKEPAD_MUSIC3_DUMP_PREFILL_LAYERS").is_none() {
-        std::env::set_var(
-            "MAKEPAD_MUSIC3_DUMP_PREFILL_LAYERS",
-            r"C:\ai\music3_compare",
-        );
-    }
     let shards = Music3Shards::load(weights.join("language_model")).map_err(|err| err.to_string())?;
     let prepared = Music3LmPrepared::prepare(&shards).map_err(|err| err.to_string())?;
     let started = Instant::now();
@@ -1546,7 +1537,6 @@ fn report_toks(tag: &str, ours: &[f32], official: &[f32], tokens: usize) -> Resu
 /// Official-input L1: official full-seq L0 hidden → native layer 1.
 fn run_layer1(weights: &Path) -> Result<(), String> {
     let dir = r"C:\ai\music3_compare";
-    std::env::set_var("MAKEPAD_MUSIC3_DUMP_LAYER1", dir);
     let off_l0 = load_cmp(&format!("{dir}/official_fullseq_L0.npy"))?;
     let tokens = 18usize;
     if off_l0.len() != 2 * tokens * MUSIC3_LM_HIDDEN {
@@ -2015,325 +2005,6 @@ fn run_decode1(weights: &Path, dump: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn run_sample(weights: &Path, dump: &Path) -> Result<(), String> {
-    use makepad_diffusion::music3::{MUSIC3_AR_CFG, MUSIC3_AR_TOP_K, MUSIC3_SEMANTIC_VOCAB};
-    let ids = load_npy(&dump.join("text_ids.npy"))?;
-    if ids.shape.len() != 2 || ids.shape[0] != 2 {
-        return Err(format!("text_ids shape {:?}", ids.shape));
-    }
-    let t = ids.shape[1];
-    let vals = ids.as_i64()?;
-    let cond: Vec<u32> = vals[..t].iter().map(|&v| v as u32).collect();
-    let uncond: Vec<u32> = vals[t..].iter().map(|&v| v as u32).collect();
-    let lm = Music3Shards::load(weights.join("language_model")).map_err(|e| e.to_string())?;
-    let lm_prep = Music3LmPrepared::prepare(&lm).map_err(|e| e.to_string())?;
-    let (_hidden, logits) = music3_lm_prefill_pair(&lm, &lm_prep, &cond, &uncond)
-        .map_err(|e| e.to_string())?;
-    let cond_logits = &logits[..MUSIC3_LM_VOCAB];
-    let uncond_logits = &logits[MUSIC3_LM_VOCAB..];
-    let lo = MUSIC3_AUDIO_CODE_OFFSET as usize;
-    let hi = lo + MUSIC3_SEMANTIC_VOCAB;
-    let end = MUSIC3_AUDIO_END_TOKEN_ID as usize;
-    let mut cond_m = cond_logits.to_vec();
-    let mut uncond_m = uncond_logits.to_vec();
-    for (i, v) in cond_m.iter_mut().enumerate() {
-        if i != end && !(i >= lo && i < hi) {
-            *v = f32::NEG_INFINITY;
-        }
-    }
-    for (i, v) in uncond_m.iter_mut().enumerate() {
-        if i != end && !(i >= lo && i < hi) {
-            *v = f32::NEG_INFINITY;
-        }
-    }
-    let mut cond_fin: Vec<f32> = cond_m.iter().copied().filter(|v| v.is_finite()).collect();
-    cond_fin.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
-    let thresh = cond_fin
-        .get(MUSIC3_AR_TOP_K.min(cond_fin.len()).saturating_sub(1))
-        .copied()
-        .unwrap_or(f32::NEG_INFINITY);
-    let mut guided = vec![0f32; MUSIC3_LM_VOCAB];
-    for i in 0..MUSIC3_LM_VOCAB {
-        let g = uncond_m[i] + MUSIC3_AR_CFG * (cond_m[i] - uncond_m[i]);
-        guided[i] = if cond_m[i] < thresh || !g.is_finite() {
-            f32::NEG_INFINITY
-        } else {
-            g
-        };
-    }
-    let href = load_npy(&dump.join("first_sample_logits.npy"))?;
-    let href_v = href.as_f32()?;
-    if href_v.len() != MUSIC3_LM_VOCAB {
-        return Err(format!("first_sample_logits {}", href_v.len()));
-    }
-    let mut ours_fin = Vec::new();
-    let mut ref_fin = Vec::new();
-    let mut both = 0usize;
-    let mut only_ours = 0usize;
-    let mut only_ref = 0usize;
-    let mut best_ours = (0usize, f32::NEG_INFINITY);
-    let mut best_ref = (0usize, f32::NEG_INFINITY);
-    for i in 0..MUSIC3_LM_VOCAB {
-        let a = guided[i];
-        let b = href_v[i];
-        if a.is_finite() && a > best_ours.1 {
-            best_ours = (i, a);
-        }
-        if b.is_finite() && b > best_ref.1 {
-            best_ref = (i, b);
-        }
-        match (a.is_finite(), b.is_finite()) {
-            (true, true) => {
-                both += 1;
-                ours_fin.push(a);
-                ref_fin.push(b);
-            }
-            (true, false) => only_ours += 1,
-            (false, true) => only_ref += 1,
-            _ => {}
-        }
-    }
-    let (cos, max_abs, mean_abs) = if ours_fin.is_empty() {
-        (0.0, 0.0, 0.0)
-    } else {
-        compare(&ours_fin, &ref_fin)?
-    };
-    println!(
-        "  first guided finite ours={} dump={} both={both} only_ours={only_ours} only_ref={only_ref}",
-        both + only_ours,
-        both + only_ref
-    );
-    println!(
-        "  finite-overlap cos={cos:.7} max_abs={max_abs:.3e} mean_abs={mean_abs:.3e}"
-    );
-    println!(
-        "  argmax ours={} ({:.4}) dump={} ({:.4})",
-        best_ours.0, best_ours.1, best_ref.0, best_ref.1
-    );
-    let sem = load_npy(&dump.join("semantic_codes.npy"))?;
-    let official0 = sem.as_i64()?[0];
-    println!("  official first token={official0}");
-    let rvq = Music3Shards::load(weights.join("rvq_depth_decoder")).map_err(|e| e.to_string())?;
-    let rvq_prep = Music3RvqPrepared::prepare(&rvq).map_err(|e| e.to_string())?;
-    std::env::set_var("MAKEPAD_MUSIC3_TRACE_TOKENS", "1");
-    if std::env::var_os("MAKEPAD_MUSIC3_DUMP_SEMANTIC").is_none() {
-        std::env::set_var(
-            "MAKEPAD_MUSIC3_DUMP_SEMANTIC",
-            r"C:\ai\music3_compare\native_semantic_codes.npy",
-        );
-    }
-    if std::env::var_os("MAKEPAD_MUSIC3_DUMP_RVQ").is_none() {
-        std::env::set_var(
-            "MAKEPAD_MUSIC3_DUMP_RVQ",
-            r"C:\ai\music3_compare\native_rvq_codes.npy",
-        );
-    }
-    if std::env::var_os("MAKEPAD_MUSIC3_DUMP_RVQ_LOGITS").is_none() {
-        std::env::set_var(
-            "MAKEPAD_MUSIC3_DUMP_RVQ_LOGITS",
-            r"C:\ai\music3_compare\native_rvq_head2.txt",
-        );
-    }
-    if std::env::var_os("MAKEPAD_MUSIC3_DUMP_HIDDEN_F10").is_none() {
-        std::env::set_var(
-            "MAKEPAD_MUSIC3_DUMP_HIDDEN_F10",
-            r"C:\ai\music3_compare\native_last_hidden_f10.npy",
-        );
-    }
-    let _ = music3_ar_sample(
-        &lm,
-        &lm_prep,
-        &rvq,
-        &rvq_prep,
-        &cond,
-        &uncond,
-        36,
-        1,
-        7,
-    )
-    .map_err(|e| e.to_string())?;
-    let _ = dump_official_hidden_rvq_head2(weights, &lm, &rvq, &rvq_prep);
-    let sem_dump = std::env::var("MAKEPAD_MUSIC3_DUMP_SEMANTIC").unwrap_or_else(|_| {
-        r"C:\ai\music3_compare\native_semantic_codes.npy".into()
-    });
-    let native_sem = load_npy(Path::new(&sem_dump))?;
-    let native_sem_v = native_sem.as_i64()?;
-    let official_sem = sem.as_i64()?;
-    let ncmp = native_sem_v.len().min(official_sem.len());
-    let mut first_mismatch = None;
-    for i in 0..ncmp {
-        if native_sem_v[i] != official_sem[i] {
-            first_mismatch = Some(i);
-            break;
-        }
-    }
-    println!(
-        "  semantic native={} official={} compared={ncmp} first_mismatch={}",
-        native_sem_v.len(),
-        official_sem.len(),
-        first_mismatch
-            .map(|i| format!(
-                "{i} native={} official={}",
-                native_sem_v[i], official_sem[i]
-            ))
-            .unwrap_or_else(|| "-".into())
-    );
-    if ncmp > 0 {
-        let show = ncmp.min(24);
-        println!("  native[:{show}]={:?}", &native_sem_v[..show]);
-        println!("  officl[:{show}]={:?}", &official_sem[..show]);
-    }
-    let native_rvq_path = Path::new(r"C:\ai\music3_compare\native_rvq_codes.npy");
-    if native_rvq_path.exists() {
-        let native_rvq = load_npy(native_rvq_path)?;
-        let native_rvq_v = native_rvq.as_i64()?;
-        let official_rvq = load_npy(&dump.join("rvq_codes.npy"))?.as_i64()?;
-        let rcmp = native_rvq_v.len().min(official_rvq.len());
-        let mut rvq_mis = None;
-        for i in 0..rcmp {
-            if native_rvq_v[i] != official_rvq[i] {
-                rvq_mis = Some(i);
-                break;
-            }
-        }
-        println!(
-            "  rvq native={} official={} compared={rcmp} first_mismatch={}",
-            native_rvq_v.len(),
-            official_rvq.len(),
-            rvq_mis
-                .map(|i| format!(
-                    "{i} native={} official={}",
-                    native_rvq_v[i], official_rvq[i]
-                ))
-                .unwrap_or_else(|| "-".into())
-        );
-    }
-    let _ = music3_lm_evict();
-    let _ = music3_rvq_evict();
-    if let Some(i) = first_mismatch {
-        return Err(format!(
-            "sampled semantic first_mismatch={i} native={} official={}",
-            native_sem_v[i], official_sem[i]
-        ));
-    }
-    if both < 40 || only_ours + only_ref > 10 {
-        return Err(format!(
-            "sample0 support mismatch both={both} only_ours={only_ours} only_ref={only_ref}"
-        ));
-    }
-    if cos < 0.999 {
-        return Err(format!("sample0 guided mismatch cos={cos:.7} max_abs={max_abs:.3e}"));
-    }
-    println!("  sample PASS");
-    Ok(())
-}
-
-/// Official last_hidden f10 + official residual prefix [449,800] → native
-/// batched RVQ head-2 logits. Isolates decoder GEMM from LM last_hidden drift.
-fn dump_official_hidden_rvq_head2(
-    _weights: &Path,
-    lm: &Music3Shards,
-    rvq: &Music3Shards,
-    rvq_prep: &Music3RvqPrepared,
-) -> Result<(), String> {
-    let path = Path::new(r"C:\ai\music3_compare\official_last_hidden_f10.npy");
-    if !path.exists() {
-        println!("  official-hidden RVQ skip (no {})", path.display());
-        return Ok(());
-    }
-    let hidden = load_npy(path)?;
-    let h = hidden.as_f32()?;
-    if h.len() != 2 * MUSIC3_RVQ_HIDDEN {
-        return Err(format!("official last_hidden f10 len {}", h.len()));
-    }
-    let cond = &h[..MUSIC3_RVQ_HIDDEN];
-    let uncond = &h[MUSIC3_RVQ_HIDDEN..];
-    let sem = 155_120u32;
-    let embed = lm
-        .tensor_row_f32("model.embed_tokens.weight", sem as u64)
-        .map_err(|e| e.to_string())?;
-    let mut last_both = Vec::with_capacity(2 * MUSIC3_RVQ_HIDDEN);
-    last_both.extend_from_slice(cond);
-    last_both.extend_from_slice(uncond);
-    let p0 = music3_rvq_project_rows(rvq, &last_both, 2).map_err(|e| e.to_string())?;
-    let mut sem_both = Vec::with_capacity(2 * MUSIC3_RVQ_HIDDEN);
-    sem_both.extend_from_slice(&embed);
-    sem_both.extend_from_slice(&embed);
-    let p1 = music3_rvq_project_rows(rvq, &sem_both, 2).map_err(|e| e.to_string())?;
-    let mut seq_c = Vec::new();
-    let mut seq_u = Vec::new();
-    seq_c.extend_from_slice(&p0[..MUSIC3_RVQ_HIDDEN]);
-    seq_u.extend_from_slice(&p0[MUSIC3_RVQ_HIDDEN..]);
-    seq_c.extend_from_slice(&p1[..MUSIC3_RVQ_HIDDEN]);
-    seq_u.extend_from_slice(&p1[MUSIC3_RVQ_HIDDEN..]);
-    let prefix = [449u32, 800u32];
-    for (head, &code) in prefix.iter().enumerate() {
-        let n = seq_c.len() / MUSIC3_RVQ_HIDDEN;
-        let (out_c, out_u) =
-            music3_rvq_forward_pair(rvq, rvq_prep, &seq_c, &seq_u, n).map_err(|e| e.to_string())?;
-        let last_c = &out_c[(n - 1) * MUSIC3_RVQ_HIDDEN..];
-        let last_u = &out_u[(n - 1) * MUSIC3_RVQ_HIDDEN..];
-        let mut last_pair = Vec::with_capacity(2 * MUSIC3_RVQ_HIDDEN);
-        last_pair.extend_from_slice(last_c);
-        last_pair.extend_from_slice(last_u);
-        let _ = music3_rvq_audio_head_rows(rvq, &last_pair, head, 2).map_err(|e| e.to_string())?;
-        let idx = code as u64 + head as u64 * MUSIC3_AUDIO_VOCAB as u64;
-        let emb = rvq
-            .tensor_row_f32("audio_embeddings.weight", idx)
-            .map_err(|e| e.to_string())?;
-        let mut emb2 = Vec::with_capacity(2 * emb.len());
-        emb2.extend_from_slice(&emb);
-        emb2.extend_from_slice(&emb);
-        let proj = music3_rvq_project_rows(rvq, &emb2, 2).map_err(|e| e.to_string())?;
-        seq_c.extend_from_slice(&proj[..MUSIC3_RVQ_HIDDEN]);
-        seq_u.extend_from_slice(&proj[MUSIC3_RVQ_HIDDEN..]);
-    }
-    let n = seq_c.len() / MUSIC3_RVQ_HIDDEN;
-    let (out_c, out_u) =
-        music3_rvq_forward_pair(rvq, rvq_prep, &seq_c, &seq_u, n).map_err(|e| e.to_string())?;
-    let last_c = &out_c[(n - 1) * MUSIC3_RVQ_HIDDEN..];
-    let last_u = &out_u[(n - 1) * MUSIC3_RVQ_HIDDEN..];
-    let mut last_pair = Vec::with_capacity(2 * MUSIC3_RVQ_HIDDEN);
-    last_pair.extend_from_slice(last_c);
-    last_pair.extend_from_slice(last_u);
-    let logits = music3_rvq_audio_head_rows(rvq, &last_pair, 2, 2).map_err(|e| e.to_string())?;
-    let (lc, lu) = logits.split_at(logits.len() / 2);
-    let mut guided: Vec<f32> = lc
-        .iter()
-        .zip(lu.iter())
-        .map(|(c, u)| *u + MUSIC3_AR_CFG * (*c - *u))
-        .collect();
-    let off_path = Path::new(r"C:\ai\music3_compare\official_rvq_f10_h2.npy");
-    if off_path.exists() {
-        let off = load_npy(off_path)?.as_f32()?;
-        let n = guided.len().min(off.len());
-        let (cos, max_abs, _) = compare(&guided[..n], &off[..n])?;
-        let mut best_n = (0usize, f32::NEG_INFINITY);
-        let mut best_o = (0usize, f32::NEG_INFINITY);
-        for i in 0..n {
-            if guided[i] > best_n.1 {
-                best_n = (i, guided[i]);
-            }
-            if off[i] > best_o.1 {
-                best_o = (i, off[i]);
-            }
-        }
-        println!(
-            "  official-hidden RVQ f10 h2 cos={cos:.7} max_abs={max_abs:.3e} native[641]={:.4} native[776]={:.4} off[641]={:.4} off[776]={:.4} argmax_n={} argmax_o={}",
-            guided.get(641).copied().unwrap_or(0.0),
-            guided.get(776).copied().unwrap_or(0.0),
-            off.get(641).copied().unwrap_or(0.0),
-            off.get(776).copied().unwrap_or(0.0),
-            best_n.0,
-            best_o.0
-        );
-    } else {
-        let _ = &mut guided;
-        println!("  official-hidden RVQ f10 h2 computed (no official logits npy)");
-    }
-    Ok(())
-}
-
 /// Official last_hidden f12 + official residual prefix [234,14] → native
 /// RVQ tensors at each residual head. Isolates decoder from LM drift.
 fn run_rvq_f12(weights: &Path) -> Result<(), String> {
@@ -2568,14 +2239,11 @@ fn run_generate(
     caption: &str,
     lyrics: &str,
     reference: Option<Music3Reference>,
+    bench_runs: usize,
 ) -> Result<(), String> {
-    // MAKEPAD_MUSIC3_BENCH_RUNS=N: run 1 warm-up + N timed generates in-process
+    // Run one warm-up plus the requested timed generates in-process
     // (weights stay GPU-cached), print each wall and the median. Matches the
     // python protocol: time the generate call only, wav write excluded.
-    let bench_runs: usize = std::env::var("MAKEPAD_MUSIC3_BENCH_RUNS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
     let req = Music3Generate {
         caption: caption.to_string(),
         lyrics: lyrics.to_string(),
