@@ -704,8 +704,9 @@ impl ShaderOutput {
             };
             writeln!(
                 out,
-                "constexpr sampler _s{}(filter::{}, mip_filter::linear, address::{}, coord::{});",
-                idx, filter, address, coord
+                "constexpr sampler _s{}(filter::{}, mip_filter::linear, address::{}, coord::{}{});",
+                idx, filter, address, coord,
+                if sampler.compare { ", compare_func::less_equal" } else { "" }
             )
             .ok();
         }

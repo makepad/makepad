@@ -33,6 +33,8 @@ pub struct ShaderSampler {
     pub address: SamplerAddress,
     pub coord: SamplerCoord,
     pub is_video: bool,
+    /// Compare reference <= stored depth, then linearly filter visibility.
+    pub compare: bool,
 }
 
 impl Default for ShaderSampler {
@@ -42,6 +44,7 @@ impl Default for ShaderSampler {
             address: SamplerAddress::ClampToEdge,
             coord: SamplerCoord::Normalized,
             is_video: false,
+            compare: false,
         }
     }
 }

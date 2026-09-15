@@ -714,8 +714,9 @@ fn _mp_unpack4u8(x: f32) -> vec4<f32> { return unpack4x8unorm(bitcast<u32>(x)); 
         }
         writeln!(
             out,
-            "@group(0) @binding({}) var {}: sampler;",
-            next_binding, sampler_name
+            "@group(0) @binding({}) var {}: {};",
+            next_binding, sampler_name,
+            if output.samplers[sampler_index].compare { "sampler_comparison" } else { "sampler" }
         )
         .ok();
         next_binding += 1;
