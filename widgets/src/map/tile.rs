@@ -1916,6 +1916,11 @@ pub fn build_tile_buffers_from_mvt(
         }
     }
     profiler.lap("overlay-merge", "");
+    if faces_bake_sink_armed() {
+        // Field 101 contains road regions and dissolved building groups,
+        // never labels, POIs, trees, signals, or their contact shadows.
+        collector.points.clear();
+    }
     Ok(build_tile_buffers_from_features_profiled(
         profiler,
         tile_key,
@@ -4034,6 +4039,11 @@ fn build_tile_buffers_from_features_profiled(
 
     for (order_pos, group_index) in fill_order.into_iter().enumerate() {
         let group = &fill_groups[group_index];
+        if faces_bake_sink_armed() {
+            // Plaza rings were captured above; all other fill meshes are
+            // runtime output and are not part of the face stream.
+            continue;
+        }
         // A same-bucket 2D/3D switch reuses the resident road core. Its
         // deckable street-area fills already live in the stable stroke
         // geometry and must not be emitted a second time.
@@ -4403,11 +4413,8 @@ fn build_tile_buffers_from_features_profiled(
                 .atan();
             (crate::map::geometry::TILE_SIZE * n / (40_075_016.686 * lat.cos())) as f32
         };
-        let base_color = theme.building_fill_color().unwrap_or(0xd9d0c9);
-        // The one SceneSun: walls shade by their outward normal against its
-        // horizontal direction (defaults reproduce the legacy NW sun).
+        // The one SceneSun also drives the legacy baked-shadow projection.
         let sun_2d = theme.shiny.sun.dir_2d();
-        let (light_x, light_y) = (sun_2d.x, sun_2d.y);
         // T3 building shadows: no shadow map, no second scene pass —
         // project each exterior roof ring along the sun's ground direction
         // by height * shadow_len, dissolve footprint + projection +
@@ -4855,6 +4862,19 @@ fn build_tile_buffers_from_features_profiled(
                 profiler.lap("b-dissolved", &format!("groups={}", bake.buildings.len()));
             }
         }
+        // The offline sink consumes only the dissolved building groups
+        // above. Walls, roofs and their AO are derived again by the renderer
+        // and must not be tessellated into throwaway TileBuffers here.
+        let derived_building_jobs: &[BuildingJob] = if faces_bake_sink_armed() {
+            &[]
+        } else {
+            &building_jobs
+        };
+        let base_color = theme.building_fill_color().unwrap_or(0xd9d0c9);
+        // The one SceneSun: walls shade by their outward normal against its
+        // horizontal direction (defaults reproduce the legacy NW sun).
+        let sun_2d = theme.shiny.sun.dir_2d();
+        let (light_x, light_y) = (sun_2d.x, sun_2d.y);
         // T2 vertical AO: ground-contact vertices darken so buildings sit
         // in the scene instead of floating. Sections starting above ground
         // (bridge decks, tower setbacks) fade the effect out.
@@ -4871,7 +4891,7 @@ fn build_tile_buffers_from_features_profiled(
         // wall rings for courtyards under ~5 px; roofs keep full detail.
         let wall_min_edge = 1.2 / render_scale;
         let wall_min_hole_extent = 5.0 / render_scale;
-        for job in &building_jobs {
+        for job in derived_building_jobs {
             // Building-age layer tints the 3D model itself (walls shade
             // from the same hue via the normal lighting math).
             let roof_color = hex_to_premul_rgba(job.tint.unwrap_or(base_color), 1.0);
@@ -5167,7 +5187,9 @@ fn build_tile_buffers_from_features_profiled(
     // icons x groups x rings, and the icon horizon multiplied the icon
     // side by ~10 (75ms on center tiles). A point query now touches one
     // cell's candidates.
-    let lift_grid: CellMap<Vec<u32>> = {
+    let lift_grid: CellMap<Vec<u32>> = if faces_bake_sink_armed() {
+        CellMap::default()
+    } else {
         const LIFT_CELL: f32 = 24.0;
         let mut grid: CellMap<Vec<u32>> = CellMap::default();
         for (group_index, group) in building_groups.iter().enumerate() {
@@ -5411,8 +5433,10 @@ fn build_tile_buffers_from_features_profiled(
     let mut arrow_jobs = Vec::<ArrowDrawJob>::new();
     for prepared_way in &prepared {
         let way = &tile_ways[prepared_way.way_index];
-        if let Some(label) = extract_way_label(&way.tags, &prepared_way.points) {
-            labels.push(label);
+        if !faces_bake_sink_armed() {
+            if let Some(label) = extract_way_label(&way.tags, &prepared_way.points) {
+                labels.push(label);
+            }
         }
         // Detail building footprints are a mode-specific fill overlay. A
         // handful inherit highway-like OSM tags; letting those fall through
@@ -7584,7 +7608,7 @@ fn project_way_points_with_nodes(
 /// the ancestor shift (0 = exact zoom) and the quadrant offsets that map the
 /// ancestor's local space into this tile's.
 pub struct OverlayTileData {
-    pub raw: Vec<u8>,
+    pub raw: std::sync::Arc<[u8]>,
     pub shift: u32,
     pub quadrant_x: u32,
     pub quadrant_y: u32,
@@ -7604,6 +7628,154 @@ fn overlay_zoom_range(reader: &mut MbtilesReader) -> (u32, u32) {
             .unwrap_or(fallback)
     };
     (parse("minzoom", 0), parse("maxzoom", 30))
+}
+
+/// Build one tile from bytes already supplied by the asynchronous `.mkmap`
+/// archive. Local MBTiles bridge/overlay sidecars remain worker-only inputs.
+pub fn build_local_tile_from_archive_bytes(
+    tile_key: TileKey,
+    base: Option<Vec<u8>>,
+    detail: Option<Vec<u8>>,
+    detail_mbtiles_path: Option<&Path>,
+    bridge_dz_mbtiles_path: Option<&Path>,
+    mut overlay_tiles: Vec<OverlayTileData>,
+    overlay_paths: &[String],
+    theme: &CompiledMapTheme,
+    render_zoom: u32,
+    buildings_3d: bool,
+    build_road_core: bool,
+) -> Result<Option<LoadedLocalTile>, String> {
+    for path in overlay_paths.iter().filter(|path| !path.is_empty()) {
+        let (file, filter) = match path.split_once('?') {
+            Some((file, "fast")) => (file, 1_u8),
+            Some((file, "slow")) => (file, 2),
+            Some((file, _)) => (file, 0),
+            None => (path.as_str(), 0),
+        };
+        let Ok(mut reader) = MbtilesReader::open(Path::new(file)) else {
+            continue;
+        };
+        let (min_zoom, max_zoom) = overlay_zoom_range(&mut reader);
+        if tile_key.z < min_zoom {
+            continue;
+        }
+        let shift = tile_key.z.saturating_sub(max_zoom);
+        let fetch_z = tile_key.z - shift;
+        let fetch_x = (tile_key.x as u32 >> shift) as i64;
+        let fetch_y = (tile_key.y as u32 >> shift) as i64;
+        let tms_row = (1_i64 << fetch_z) - 1 - fetch_y;
+        if let Ok(Some(raw)) = reader.get_tile_decoded(fetch_z as i64, fetch_x, tms_row) {
+            overlay_tiles.push(OverlayTileData {
+                raw: raw.into(),
+                shift,
+                quadrant_x: tile_key.x as u32 - ((fetch_x as u32) << shift),
+                quadrant_y: tile_key.y as u32 - ((fetch_y as u32) << shift),
+                filter,
+                has_chargers: file.contains("chargers"),
+            });
+        }
+    }
+
+    let Some(base) = base else {
+        if overlay_tiles.is_empty() {
+            return Ok(None);
+        }
+        let buffers = build_tile_buffers_from_mvt(
+            tile_key,
+            &[],
+            None,
+            None,
+            false,
+            &overlay_tiles,
+            theme,
+            render_zoom,
+            buildings_3d,
+            build_road_core,
+        )?;
+        return Ok(Some(LoadedLocalTile { tile_key, buffers }));
+    };
+
+    let mut bridge_dz = bridge_dz_mbtiles_path
+        .filter(|path| path.is_file())
+        .and_then(|path| MbtilesReader::open(path).ok())
+        .and_then(|mut reader| {
+            let meta = reader.get_metadata().unwrap_or_default();
+            let zoom = meta.get("minzoom").and_then(|z| z.parse::<u32>().ok())?;
+            let bounds: Vec<f64> = meta
+                .get("bounds")?
+                .split(',')
+                .filter_map(|value| value.trim().parse().ok())
+                .collect();
+            (bounds.len() == 4)
+                .then_some((reader, zoom, [bounds[0], bounds[1], bounds[2], bounds[3]]))
+        });
+    let (bridge_dz_raw, bridge_dz_covered) = if let Some((reader, zoom, bounds)) = bridge_dz.as_mut()
+    {
+        if tile_key.z == *zoom {
+            let n = (1_u64 << tile_key.z) as f64;
+            let west = tile_key.x as f64 / n * 360.0 - 180.0;
+            let east = (tile_key.x as f64 + 1.0) / n * 360.0 - 180.0;
+            let lat = |y: f64| {
+                (std::f64::consts::PI * (1.0 - 2.0 * y / n))
+                    .sinh()
+                    .atan()
+                    .to_degrees()
+            };
+            let north = lat(tile_key.y as f64);
+            let south = lat(tile_key.y as f64 + 1.0);
+            let covered = west >= bounds[0]
+                && east <= bounds[2]
+                && south >= bounds[1]
+                && north <= bounds[3];
+            if covered {
+                let tms_row = (1_i64 << tile_key.z) - 1 - tile_key.y as i64;
+                (
+                    reader
+                        .get_tile_decoded(tile_key.z as i64, tile_key.x as i64, tms_row)
+                        .ok()
+                        .flatten(),
+                    true,
+                )
+            } else {
+                (None, false)
+            }
+        } else {
+            (None, false)
+        }
+    } else {
+        (None, false)
+    };
+    let detail_needed = render_zoom >= ICON_MIN_ZOOM
+        || render_zoom >= 16
+        || (buildings_3d && render_zoom >= BUILDING_3D_MIN_ZOOM)
+        || !bridge_dz_covered;
+    let detail = if detail.is_none() && detail_needed {
+        detail_mbtiles_path
+            .filter(|path| path.is_file())
+            .and_then(|path| MbtilesReader::open(path).ok())
+            .and_then(|mut reader| {
+                let tms_row = (1_i64 << tile_key.z) - 1 - tile_key.y as i64;
+                reader
+                    .get_tile_decoded(tile_key.z as i64, tile_key.x as i64, tms_row)
+                    .ok()
+                    .flatten()
+            })
+    } else {
+        detail
+    };
+    let buffers = build_tile_buffers_from_mvt(
+        tile_key,
+        &base,
+        detail_needed.then_some(detail.as_deref()).flatten(),
+        bridge_dz_raw.as_deref(),
+        bridge_dz_covered,
+        &overlay_tiles,
+        theme,
+        render_zoom,
+        buildings_3d,
+        build_road_core,
+    )?;
+    Ok(Some(LoadedLocalTile { tile_key, buffers }))
 }
 
 pub fn load_local_tile_batch(
@@ -7704,7 +7876,7 @@ pub fn load_local_tile_batch(
             let tms_row = (1_i64 << fetch_z) - 1 - fetch_y;
             if let Ok(Some(raw)) = reader.get_tile_decoded(fetch_z as i64, fetch_x, tms_row) {
                 out.push(OverlayTileData {
-                    raw,
+                    raw: raw.into(),
                     shift,
                     quadrant_x: (tile_key.x as u32) - ((fetch_x as u32) << shift),
                     quadrant_y: (tile_key.y as u32) - ((fetch_y as u32) << shift),
@@ -8032,6 +8204,97 @@ pub fn load_local_tile_batch(
     }
 
     Ok((loaded, decode_failed))
+}
+
+#[cfg(test)]
+mod local_archive_regression_tests {
+    use super::*;
+    use makepad_mbtile_reader::MbtilesWriter;
+
+    fn test_mbtiles(name: &str, with_tile: bool) -> std::path::PathBuf {
+        let id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::path::PathBuf::from(format!("target/{name}-{id}.mbtiles"));
+        let mut writer = MbtilesWriter::create(&path).unwrap();
+        writer.set_metadata("minzoom", "0");
+        writer.set_metadata("maxzoom", "0");
+        if with_tile {
+            writer.write_tile_encoded(0, 0, 0, &[]).unwrap();
+        }
+        writer.finish().unwrap();
+        path
+    }
+
+    #[test]
+    fn legacy_mbtiles_still_uses_the_original_reader_batch_path() {
+        let path = test_mbtiles("legacy-map-source", true);
+        let key = TileKey { z: 0, x: 0, y: 0 };
+        let (loaded, failed) = load_local_tile_batch(
+            &path,
+            None,
+            None,
+            &[],
+            &[key],
+            &CompiledMapTheme::default(),
+            0,
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert!(failed.is_empty());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn archive_overlay_only_build_ignores_detail_like_legacy_branch() {
+        let base = test_mbtiles("archive-missing-base", false);
+        let overlay = test_mbtiles("archive-overlay", true);
+        let overlay_paths = vec![overlay.to_string_lossy().into_owned()];
+        let key = TileKey { z: 0, x: 0, y: 0 };
+        let build = |detail| {
+            build_local_tile_from_archive_bytes(
+                key,
+                None,
+                detail,
+                None,
+                None,
+                Vec::new(),
+                &overlay_paths,
+                &CompiledMapTheme::default(),
+                0,
+                false,
+                false,
+            )
+            .unwrap()
+            .unwrap()
+            .buffers
+        };
+        let (mut legacy, failed) = load_local_tile_batch(
+            &base,
+            None,
+            None,
+            &overlay_paths,
+            &[key],
+            &CompiledMapTheme::default(),
+            0,
+            false,
+            false,
+        )
+        .unwrap();
+        assert!(failed.is_empty());
+        let legacy = legacy.pop().unwrap().buffers;
+        let archive = build(None);
+        let with_unusable_detail = build(Some(vec![0xff, 0xff, 0xff]));
+        assert_eq!(legacy.feature_count, archive.feature_count);
+        assert_eq!(legacy.byte_size(), archive.byte_size());
+        assert_eq!(archive.feature_count, with_unusable_detail.feature_count);
+        assert_eq!(archive.byte_size(), with_unusable_detail.byte_size());
+        std::fs::remove_file(base).unwrap();
+        std::fs::remove_file(overlay).unwrap();
+    }
 }
 
 // --- MVT (Mapbox Vector Tile) parsing ---
@@ -8393,6 +8656,31 @@ pub fn bake_tile_paint_faces(
     theme: &CompiledMapTheme,
     bucket: u32,
 ) -> Option<BakedFacesBucket> {
+    try_bake_tile_paint_faces(
+        tile_key,
+        raw_tile_data,
+        detail_tile_data,
+        bridge_dz_tile_data,
+        bridge_dz_covered,
+        theme,
+        bucket,
+    )
+    .ok()
+    .flatten()
+}
+
+/// Fallible face-bake entry used by the offline worker. The Option wrapper
+/// above remains convenient for probes; production baking must retain the
+/// tile-build error text so it can skip and report that tile.
+pub fn try_bake_tile_paint_faces(
+    tile_key: TileKey,
+    raw_tile_data: &[u8],
+    detail_tile_data: Option<&[u8]>,
+    bridge_dz_tile_data: Option<&[u8]>,
+    bridge_dz_covered: bool,
+    theme: &CompiledMapTheme,
+    bucket: u32,
+) -> Result<Option<BakedFacesBucket>, String> {
     FACES_BAKE_SINK.with(|sink| *sink.borrow_mut() = Some(None));
     let result = build_tile_buffers_from_mvt(
         tile_key,
@@ -8410,10 +8698,8 @@ pub fn bake_tile_paint_faces(
         true,
     );
     let captured = FACES_BAKE_SINK.with(|sink| sink.borrow_mut().take());
-    match (result, captured) {
-        (Ok(_), Some(bucket)) => bucket,
-        _ => None,
-    }
+    result?;
+    Ok(captured.flatten())
 }
 
 const BAKED_FACES_FIELD: u32 = 101;
@@ -8593,11 +8879,9 @@ pub struct BakedFacesBucket {
     pub bucket: u32,
     pub signature: u64,
     pub regions: Vec<VisibleRegions>,
-    /// Baked T3 building-shadow output (v3): the dissolved+opened shadow
-    /// shapes and the grounded footprints the deck-shadow pass subtracts.
-    /// Guarded by their own input signature — buildings and roads change
-    /// independently. Night themes leave shadows unsubmitted; the shapes
-    /// bake once under the standard sun.
+    /// Reserved v3 compatibility slots. Building and deck shadows are now
+    /// derived by the draw-time shadow mask, so v4 writers leave these
+    /// fields empty and the parser accepts them only for old archives.
     pub shadow_signature: u64,
     pub shadow_shapes: Vec<Vec<Vec<[f64; 2]>>>,
     pub shadow_footprints: Vec<Vec<[f64; 2]>>,
@@ -8667,6 +8951,39 @@ pub fn encode_baked_faces_field(buckets: &[BakedFacesBucket]) -> Vec<u8> {
     write_faces_varint(blob.len() as u64, &mut field);
     field.extend_from_slice(&blob);
     field
+}
+
+#[cfg(test)]
+#[test]
+fn trimmed_v4_and_legacy_v3_face_streams_parse_with_empty_shadow_sections() {
+    let bucket = BakedFacesBucket {
+        bucket: 16,
+        signature: 7,
+        regions: Vec::new(),
+        shadow_signature: 0,
+        shadow_shapes: Vec::new(),
+        shadow_footprints: Vec::new(),
+        building_signature: 11,
+        buildings: Vec::new(),
+    };
+    let v4 = encode_baked_faces_field(&[bucket]);
+    let parsed = parse_baked_faces(&v4, 16).expect("trimmed v4 stream");
+    assert!(parsed.shadow_shapes.is_empty());
+    assert!(parsed.shadow_footprints.is_empty());
+    assert_eq!(parsed.building_signature, 11);
+
+    // A v3 body ends after the same empty shadow sections. Reuse the v4
+    // encoder with an empty v4 extension; v3 ignores that zero-valued tail
+    // and validates the same coordinate checksum.
+    let mut v3 = v4;
+    let mut pos = 0;
+    let _field_key = read_pb_varint(&v3, &mut pos).unwrap();
+    let _blob_len = read_pb_varint(&v3, &mut pos).unwrap();
+    v3[pos] = 3;
+    let parsed = parse_baked_faces(&v3, 16).expect("legacy v3 stream");
+    assert!(parsed.shadow_shapes.is_empty());
+    assert_eq!(parsed.building_signature, 0);
+    assert!(parsed.buildings.is_empty());
 }
 
 fn read_shapes(
@@ -11496,7 +11813,7 @@ mod bridge_probe_tests {
             .unwrap()
             .expect("z9 ancestor ocean tile missing");
         let overlay = OverlayTileData {
-            raw: araw,
+            raw: araw.into(),
             shift,
             quadrant_x: vx - (fx << shift),
             quadrant_y: vy - (fy << shift),
@@ -11949,7 +12266,7 @@ mod bridge_probe_tests {
             .unwrap();
         let key = TileKey { z: z as u32, x: x as i32, y: y as i32 };
         let overlay_tiles = vec![OverlayTileData {
-            raw: ov,
+            raw: ov.into(),
             shift: 0,
             quadrant_x: 0,
             quadrant_y: 0,
