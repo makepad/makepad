@@ -5,7 +5,7 @@ use {
         cx_api::CxOsApi,
         draw_pass::{CxDrawPassParent, DrawPassId},
         event::{
-            DrawEvent, Event, KeyCode, KeyFocusEvent, NextFrameEvent, TextClipboardEvent,
+            DrawEvent, Event, KeyFocusEvent, NextFrameEvent, TextClipboardEvent,
             TimerEvent, TriggerEvent,
         },
         makepad_live_id::{live_id, LiveId},
@@ -1085,16 +1085,6 @@ impl Cx {
     }
 
     pub(crate) fn call_event_handler(&mut self, event: &Event) {
-        // Settle who owns this cancel gesture before anyone sees it: the frontmost scope
-        // takes the whole press, so one that ends part-way can't hand the rest to the next.
-        match event {
-            Event::KeyDown(key) if key.key_code == KeyCode::Escape && !key.is_repeat => {
-                self.cancel_scopes.begin_press();
-            }
-            Event::BackPressed { .. } => self.cancel_scopes.begin_press(),
-            _ => {}
-        }
-
         // A scrub pin listens for the button-up ITSELF: release must never
         // depend on a widget hit path. Schedule the cursor release here,
         // but do NOT clear the capture's pin flag yet — the flag must
@@ -1115,7 +1105,14 @@ impl Cx {
         // its ray lands on so ordinary dispatch — hover, wheel scrolling,
         // the tweaker's pick — works on the exploded app. (After the pin
         // hook: a mid-drag F10 must never strand a hidden cursor.)
-        if self.sploded_intercept(event) {
+        let intercepted = self.sploded_intercept(event);
+        // Settle ownership before widget dispatch, including presses consumed by a
+        // platform overlay so their release cannot cancel a second thing underneath.
+        let widget_owner = self.cancel_scopes.resolve_widget_owner(event, intercepted, |lookup| {
+            self.cancel_scope_resolver.and_then(|resolve| resolve(self, lookup))
+        });
+        self.cancel_scopes.handle_event(event, intercepted, widget_owner);
+        if intercepted {
             return;
         }
         let routed = self.sploded_route(event);

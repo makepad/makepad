@@ -365,7 +365,7 @@ impl ReorderList {
         }
         if let Some((from, y)) = start {
             self.drag = Some(ReorderDrag::press(from, y));
-            self.cancel_scope = Some(cx.begin_cancel_scope());
+            self.cancel_scope = Some(self.begin_cancel_scope(cx));
             return true;
         }
         false
@@ -447,6 +447,12 @@ impl ReorderList {
 
 impl Widget for ReorderList {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if self.drag.is_some()
+            && (crate::modal::ModalAction::is_dismissal(event)
+                || matches!(event, Event::WindowLostFocus(_)))
+        {
+            self.cancel_drag(cx);
+        }
         if self.handle_drag(cx, event) {
             return;
         }

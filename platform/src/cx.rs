@@ -12,7 +12,7 @@ use {
         draw_pass::CxDrawPassPool,
         draw_shader::CxDrawShaders,
         event::{
-            CancelScope, CxCancelScopes, CxDragDrop, CxFingers, CxKeyboard, DrawEvent, Event,
+            CancelScope, CancelScopeKind, CxCancelScopes, CxDragDrop, CxFingers, CxKeyboard, DrawEvent, Event,
             NextFrame, Trigger, WindowGeomChangeEvent,
         },
         geometry::CxGeometryPool,
@@ -217,6 +217,10 @@ pub struct Cx {
     pub widget_tree_dump_callback: Option<fn(&Cx) -> String>,
     pub widget_query_callback: Option<fn(&Cx, &str) -> Vec<String>>,
     pub widget_snapshot_callback: Option<fn(&Cx) -> Vec<WidgetSnapshot>>,
+    /// Selects a cancel scope from the currently active widget hierarchy. The lookup
+    /// returns the newest matching scope for a widget UID. Called only for a new
+    /// Escape/Back press; widgets install this without a platform dependency on them.
+    pub cancel_scope_resolver: Option<fn(&Cx, &dyn Fn(u64) -> Option<u64>) -> Option<u64>>,
     /// The tweaker overlay's remote dispatcher (widgets/src/tweaker.rs).
     /// Registered by the widgets crate at startup, exactly like the widget
     /// tree callbacks above; the /tweak routes in remote.rs delegate here so
@@ -403,14 +407,28 @@ impl OsType {
 }
 
 impl Cx {
-    /// The caller becomes the foreground owner of cancel gestures — the `Escape` key and
-    /// the back gesture — until it ends the returned scope, drops it, or something begins
-    /// a scope in front of it.
-    ///
-    /// Begin one when the widget becomes the active thing (a modal opens, a drag starts,
-    /// a dictation session begins) and end it when it stops being.
+    /// Begins a global scope for Escape and Back. Widget operations should use
+    /// [`Self::begin_widget_cancel_scope()`] so visibility and ancestry are handled
+    /// automatically. Global scopes are ordered by activation and have no widget
+    /// visibility check; end or drop one when its operation stops being active.
     pub fn begin_cancel_scope(&mut self) -> CancelScope {
         self.cancel_scopes.begin()
+    }
+
+    /// Begins a global scope for only the specified gestures. For widget operations,
+    /// use [`Self::begin_widget_cancel_scope()`] with the desired gesture kind.
+    pub fn begin_cancel_scope_for(&mut self, kind: CancelScopeKind) -> CancelScope {
+        self.cancel_scopes.begin_for(kind)
+    }
+
+    /// Begins a cancel scope owned by a widget. The widgets framework automatically
+    /// excludes hidden or detached owners, and gives descendants priority over their
+    /// ancestors. Keep the scope while the operation remains active, including while
+    /// its page is hidden. `owner` is the widget's nonzero UID, not its reusable named
+    /// ID. Zero is reserved for global scopes. A widgets resolver must be installed
+    /// for a bound scope to receive input.
+    pub fn begin_widget_cancel_scope(&mut self, owner: u64, kind: CancelScopeKind) -> CancelScope {
+        self.cancel_scopes.begin_widget(owner, kind)
     }
 
     /// Gives up a scope from [`Self::begin_cancel_scope()`]. Dropping it does the same.
@@ -422,6 +440,12 @@ impl Cx {
     /// case in which that scope's owner should act on it.
     pub fn owns_cancel(&self, scope: &CancelScope) -> bool {
         self.cancel_scopes.owns_press(scope)
+    }
+
+    /// Whether this physical cancel press was assigned to any scope. Remains true
+    /// after that scope is dropped, so a focused fallback cannot reuse its release.
+    pub fn has_cancel_owner(&self) -> bool {
+        self.cancel_scopes.has_press_owner()
     }
 
     pub fn new(event_handler: Box<dyn FnMut(&mut Cx, &Event)>) -> Self {
@@ -568,6 +592,7 @@ impl Cx {
             widget_tree_dump_callback: None,
             widget_query_callback: None,
             widget_snapshot_callback: None,
+            cancel_scope_resolver: None,
             tweak_callback: None,
             net,
 
