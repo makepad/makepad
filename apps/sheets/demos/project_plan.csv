@@ -1,0 +1,7 @@
+Task,Owner,Start,Due,Status,Days,Budget,Outcome
+Research,Amina,2026-09-01,2026-09-04,Done,4,1200,"=IF(E2=""Done"",""Closed"",""Open"")"
+Prototype,Leo,2026-09-05,2026-09-12,Done,8,3600,"=IF(E3=""Done"",""Closed"",""Open"")"
+User testing,Mei,2026-09-13,2026-09-18,In progress,6,2400,"=IF(E4=""Done"",""Closed"",""Open"")"
+Polish,Noah,2026-09-19,2026-09-25,Planned,7,3100,"=IF(E5=""Done"",""Closed"",""Open"")"
+Launch,Team,2026-09-28,2026-09-30,Planned,3,1800,"=IF(E6=""Done"",""Closed"",""Open"")"
+Total,,,,,=SUM(F2:F6),=SUM(G2:G6),"=IF(G7<=12500,""On budget"",""Review"")"

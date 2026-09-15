@@ -18,7 +18,7 @@
 //! 2. every visible viewport's own rect is not one flat colour — the composite
 //!    pass did render, and the blit landed there.
 //!
-//! Headless (`MAKEPAD=headless`) runs on the CPU rasterizer at dpi 1, so no GPU
+//! Gpusim (`MAKEPAD=gpusim`) runs on the CPU rasterizer at dpi 1, so no GPU
 //! is touched and screenshot pixels are layout points.
 
 use makepad_test::{makepad_test, Selector, TestApp};
@@ -195,7 +195,7 @@ fn viewport_composites_stay_inside_their_walk_rects(app: TestApp) {
     let path = app.screenshot();
     println!("[fab] grab: {}", path.display());
     let image = Image::read(&path);
-    // dpi 1 headless, but derive the factor anyway so a retina visible-mode
+    // dpi 1 gpusim, but derive the factor anyway so a retina visible-mode
     // run (MAKEPAD_TEST_VISIBLE=1) measures the same thing.
     let scale = image.width as f64 / shell.width as f64;
     let to_px = |v: i64| ((v as f64) * scale).round().max(0.0) as usize;

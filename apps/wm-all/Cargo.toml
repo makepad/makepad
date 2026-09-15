@@ -1,0 +1,43 @@
+# wm-all — the window manager with its apps linked in: one process,
+# every app an in-process module in a splash isolate of its own, drawn
+# into the desk's own texture. The build for a platform that has no
+# child processes (iOS), and the way to test that build on a desktop in
+# the iOS skin. Nothing of the desk lives here: this crate is the
+# `WmBuild` (which app crates, no processes, the iOS style, the assistant
+# in-process) around `makepad-wm`'s App.
+#
+# iOS simulator: cargo makepad apple ios --org=nl.makepad --app=wmall
+#   run-sim -p makepad-wm-all --release
+# macOS (the iOS skin): cargo build --release -p makepad-wm-all, then
+#   target/release/wm-all from the repo root.
+
+[package]
+name = "makepad-wm-all"
+version = "0.1.0"
+edition = "2021"
+default-run = "wm-all"
+
+[[bin]]
+name = "wm-all"
+path = "src/main.rs"
+
+[dependencies]
+makepad-wm = { path = "../wm" }
+makepad-widgets = { path = "../../widgets" }
+makepad-app-module = { path = "../../libs/app_module" }
+# The apps, as modules only: no standalone window, no model runtime.
+makepad-sheets = { path = "../sheets", default-features = false }
+makepad-photos = { path = "../photos", default-features = false }
+makepad-files = { path = "../files", default-features = false }
+makepad-app-route = { path = "../route", default-features = false }
+makepad-finance = { path = "../finance", default-features = false }
+makepad-clock = { path = "../clock", default-features = false }
+makepad-weather = { path = "../weather", default-features = false }
+makepad-mail = { path = "../mail", default-features = false }
+makepad-notes = { path = "../notes", default-features = false }
+makepad-calendar = { path = "../calendar", default-features = false }
+makepad-reminders = { path = "../reminders", default-features = false }
+makepad-calculator = { path = "../calculator", default-features = false }
+# The assistant seated in the pane in-process. Without the engine: no
+# model runtime in this build — NoModel and the tool console.
+makepad-aichat = { path = "../aichat", default-features = false }

@@ -13,9 +13,12 @@ makepad-widgets = { path = "../../widgets", version = "2.0.0" }
 makepad-score = { path = "../score", version = "1.0.0" }
 makepad-score-layout = { path = "../score_layout", version = "0.1.0" }
 makepad-score-render = { path = "../score_render", version = "0.1.0" }
+makepad-score-view = { path = "../score_view", version = "0.1.0" }
 makepad-score-play = { path = "../score_play", version = "0.1.0" }
 makepad-soundfont = { path = "../soundfont", version = "0.1.0" }
 makepad-piano-model = { path = "../piano_model", version = "0.1.0" }
 makepad-score-import = { path = "../score_import", version = "1.0.0" }
-ttf-parser = { path = "../ttf-parser" }
 
+
+[dev-dependencies]
+makepad-midi-file = { path = "../midi_file", version = "1.0.0" }

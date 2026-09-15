@@ -7,11 +7,10 @@ use makepad_ai_hub::{
     local_llm::{ChatEvent, LocalLlmConfig, ToolSpec},
 };
 use makepad_widgets::*;
+use makepad_widgets::makepad_micro_serde::{DeJson, JsonValue, SerJson};
 
-use std::{
-    path::PathBuf,
-    sync::{Arc, Mutex},
-};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 pub const DEFAULT_LOCAL_MODEL: &str = "local/models/Qwen3.5-9B-UD-Q4_K_XL.gguf";
 const MAX_CONTEXT: u32 = 32768;
@@ -28,11 +27,11 @@ pub struct LocalAgent {
     awaiting_tools: usize,
     tool_results: Vec<(String, String, bool)>,
     next_tool_id: u64,
-    timing: Arc<Mutex<String>>,
+    timing: ToUISender<String>,
 }
 
 impl LocalAgent {
-    pub fn new(model_path: String, timing: Arc<Mutex<String>>) -> Self {
+    pub fn new(model_path: String, timing: ToUISender<String>) -> Self {
         Self {
             model_path: model_path.into(),
             session: None,
@@ -47,9 +46,7 @@ impl LocalAgent {
     }
 
     fn set_timing(&self, text: String) {
-        if let Ok(mut timing) = self.timing.lock() {
-            *timing = text;
-        }
+        let _ = self.timing.send(text);
     }
 }
 
@@ -210,16 +207,33 @@ fn tool_args_json(args: Vec<(String, String)>) -> String {
         if index != 0 {
             out.push(',');
         }
-        out.push_str(&serde_json::to_string(&key).unwrap_or_else(|_| "\"\"".into()));
+        out.push_str(&key.serialize_json());
         out.push(':');
-        let encoded = match serde_json::from_str::<serde_json::Value>(&value) {
-            Ok(parsed) if !parsed.is_string() => parsed.to_string(),
-            _ => serde_json::to_string(&value).unwrap_or_else(|_| "\"\"".into()),
-        };
-        out.push_str(&encoded);
+        out.push_str(&typed_arg_json(&value));
     }
     out.push('}');
     out
+}
+
+/// A value that reads as exactly one JSON number, bool, null, array or
+/// object is passed through as that; anything else (including a number
+/// followed by text, like "12 apples", or an array followed by a note)
+/// stays a string.
+fn typed_arg_json(value: &str) -> String {
+    let trimmed = value.trim();
+    let is_number = trimmed.parse::<f64>().is_ok()
+        && trimmed
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '-' | '+' | '.' | 'e' | 'E'));
+    let is_composite = trimmed.starts_with('{') || trimmed.starts_with('[');
+    if is_number || is_composite || matches!(trimmed, "true" | "false" | "null") {
+        if let Ok(parsed) = JsonValue::deserialize_json_strict(trimmed) {
+            if !parsed.is_string() {
+                return parsed.serialize_json();
+            }
+        }
+    }
+    value.serialize_json()
 }
 
 #[cfg(test)]
@@ -232,10 +246,11 @@ mod tests {
             ("to".into(), "utrecht".into()),
             ("zoom".into(), "14".into()),
             ("on".into(), "true".into()),
+            ("note".into(), "[1, 2] {x}".into()),
         ];
         assert_eq!(
             tool_args_json(args),
-            r#"{"to":"utrecht","zoom":14,"on":true}"#
+            r#"{"to":"utrecht","zoom":14,"on":true,"note":"[1, 2] {x}"}"#
         );
     }
 }

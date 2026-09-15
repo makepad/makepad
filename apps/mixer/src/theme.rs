@@ -1,5 +1,5 @@
-//! The desk's palette. mpwm exports its active `theme.splash` as
-//! MPWM_THEME_SPLASH; `mp_theme` line-scans it and retints the *stock*
+//! The desk's palette. wm exports its active `theme.splash` as
+//! MAKEPAD_WM_THEME_SPLASH; `makepad_wm_theme` line-scans it and retints the *stock*
 //! widgets, and this module carries the same colours to the three places the
 //! mixer paints itself:
 //!
@@ -12,7 +12,7 @@
 //!   * [`Palette::rgb3`], for the one colour `surface.rs` sets from Rust.
 //!
 //! It also applies the stock retint with these same values, because
-//! `mp_theme::apply` is a no-op when the WM is not running and that would
+//! `makepad_wm_theme::apply` is a no-op when the WM is not running and that would
 //! otherwise leave the caption bar in the neutral stock theme above a black
 //! desk. Standalone runs get Tokyo Night, so the surface is dark and square
 //! either way.
@@ -21,7 +21,7 @@
 //! `makepad_mixer::safety`.
 
 use makepad_widgets::*;
-use std::sync::OnceLock;
+
 
 /// A palette entry: the name the DSL reads it by, the key in the WM's
 /// theme.splash, and the Tokyo Night fallback.
@@ -52,16 +52,16 @@ pub struct Palette {
 }
 
 impl Palette {
-    /// The palette for this process, read once.
-    pub fn shared() -> &'static Palette {
-        static PALETTE: OnceLock<Palette> = OnceLock::new();
-        PALETTE.get_or_init(Palette::load)
+    /// Resolve against the owning Splash VM on each application/style reload.
+    pub fn for_vm(vm: &mut ScriptVm) -> Self {
+        Self::from_palette(makepad_wm_theme::current_for_vm(vm))
     }
+    pub fn for_cx(cx: &mut Cx) -> Self { cx.with_vm(Self::for_vm) }
+    #[cfg(test)]
+    pub fn load() -> Self { Self::from_palette(makepad_wm_theme::current()) }
+    fn from_palette(palette: Option<makepad_wm_theme::Palette>) -> Self {
 
-    /// The palette mpwm exported for this process, with Tokyo Night standing
-    /// in for anything it does not name.
-    pub fn load() -> Self {
-        let wm = mp_theme::current();
+        let wm = palette;
         Palette {
             entries: KEYS
                 .iter()
@@ -116,7 +116,7 @@ impl Palette {
 
     /// Publish `mod.mpm.*` for the app's own `script_mod!`, and retint the
     /// stock widgets (the caption bar, the spinner) with the same palette.
-    /// Call once, after `makepad_widgets::script_mod` and `mp_theme::apply`,
+    /// Call once, after `makepad_widgets::script_mod` and `makepad_wm_theme::apply`,
     /// and before this crate's own `script_mod`.
     pub fn install(&self, vm: &mut ScriptVm) {
         let mut code = String::from("mod.mpm = {\n");
@@ -125,12 +125,12 @@ impl Palette {
         }
         code.push_str("}\n");
 
-        // `mp_theme::apply` only retints when the WM exported a palette;
+        // `makepad_wm_theme::apply` only retints when the WM exported a palette;
         // standalone that leaves the window chrome in the stock theme, which
         // reads as a grey band above a Tokyo Night desk. Same keys, our
         // fallbacks.
         let c = |name: &str| self.get(name).to_string();
-        code.push_str(&format!(
+        if !desktop_style::current_name(vm).is_some_and(|s|s!="omarchy") { code.push_str(&format!(
             "mod.theme.color_b = {bg_dark}\n\
              mod.theme.color_b_h = {bg_dark}00\n\
              mod.theme.color_w = {fg_bright}\n\
@@ -160,6 +160,8 @@ impl Palette {
             accent = c("accent"),
         ));
 
+        }
+        code.push_str("true\n");
         vm.eval(ScriptMod {
             cargo_manifest_path: env!("CARGO_MANIFEST_DIR").to_string(),
             module_path: "mixer_theme".to_string(),
@@ -183,7 +185,7 @@ mod tests {
     fn standalone_falls_back_to_tokyo_night() {
         let p = Palette::load();
         // The WM is not running under `cargo test`, so every key is a
-        // fallback — and the fallbacks ARE mpwm's bundled tokyo-night.
+        // fallback — and the fallbacks ARE wm's bundled tokyo-night.
         assert_eq!(p.get("bg"), "#1a1b26");
         assert_eq!(p.get("bg_dark"), "#0e0e14");
         assert_eq!(p.get("accent"), "#7aa2f7");
@@ -205,8 +207,8 @@ mod tests {
     fn a_wm_palette_wins_over_every_fallback() {
         // Both the top-level roles and the terminal hues come from the WM's
         // own theme.splash when it is running.
-        let src = "mod.mpwm_theme = {\n    accent: #ff8800\n    background: #101010\n    term: {\n        color1: #123456\n    }\n}\n";
-        let wm = mp_theme::scan(src);
+        let src = "mod.wm_theme = {\n    accent: #ff8800\n    background: #101010\n    term: {\n        color1: #123456\n    }\n}\n";
+        let wm = makepad_wm_theme::scan(src);
         assert_eq!(wm.hex("accent", "#7aa2f7"), "#ff8800");
         assert_eq!(wm.hex("term.color1", "#f7768e"), "#123456");
         // ...and a key the theme omits still resolves.

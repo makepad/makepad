@@ -5,6 +5,7 @@
 //! (the feature degrades, the app doesn't).
 
 use makepad_widgets::*;
+use makepad_widgets::makepad_micro_serde::{DeJson, JsonValue};
 
 const USER_AGENT: &str =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36";
@@ -37,7 +38,7 @@ pub struct DdgSearch {
 #[derive(Default)]
 pub struct DdgState {
     pub active: Option<DdgSearch>,
-    last_search: Option<std::time::Instant>,
+    last_search: Option<f64>,
 }
 
 pub enum DdgEvent {
@@ -84,7 +85,7 @@ impl DdgState {
             return Err("an image search is already running".into());
         }
         if let Some(last) = self.last_search {
-            let since = last.elapsed().as_secs_f64();
+            let since = Cx::monotonic_now() - last;
             if since < MIN_SEARCH_GAP_S {
                 return Err(format!(
                     "image search rate limit — retry in {:.0}s",
@@ -92,7 +93,7 @@ impl DdgState {
                 ));
             }
         }
-        self.last_search = Some(std::time::Instant::now());
+        self.last_search = Some(Cx::monotonic_now());
         let encoded = url_encode(query.trim());
         let request = get(
             cx,
@@ -166,7 +167,7 @@ impl DdgState {
                     out.push(DdgEvent::Done(id, "image search failed (results)".into(), true));
                     return out;
                 };
-                let parsed: Option<serde_json::Value> = serde_json::from_str(&body).ok();
+                let parsed: Option<JsonValue> = JsonValue::deserialize_json(&body).ok();
                 let results = parsed
                     .as_ref()
                     .and_then(|v| v.get("results"))
