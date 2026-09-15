@@ -455,12 +455,37 @@ impl Db {
     }
 
     pub fn insert_transaction(&mut self, txn: &Transaction) -> Result<Id, String> {
+        Ok(self.insert_transaction_with_ids(txn)?.0)
+    }
+
+    /// Insert a transaction and report the database ids assigned to both
+    /// the row and its splits. First-run persistence uses every returned id
+    /// to build an explicit map from generated ids to stored ids.
+    pub(crate) fn insert_transaction_with_ids(
+        &mut self,
+        txn: &Transaction,
+    ) -> Result<(Id, Vec<Id>), String> {
         insert_transaction_on(&mut self.conn, txn)?;
         let id = self.last_id("transactions")?;
+        let mut split_ids = Vec::with_capacity(txn.splits.len());
         for split in &txn.splits {
             insert_split_on(&mut self.conn, id, split)?;
+            split_ids.push(self.last_id("splits")?);
         }
-        Ok(id)
+        Ok((id, split_ids))
+    }
+
+    pub(crate) fn insert_payee(&mut self, payee: &Payee) -> Result<Id, String> {
+        self.conn
+            .execute(
+                "INSERT INTO payees(name, default_category) VALUES(?, ?)",
+                &[
+                    Value::text(payee.name.as_str()),
+                    payee.default_category.map(Value::Integer).unwrap_or(Value::Null),
+                ],
+            )
+            .map_err(|e| format!("insert payee: {e:?}"))?;
+        self.last_id("payees")
     }
 
     pub fn insert_budget(&mut self, entry: &BudgetEntry) -> Result<(), String> {

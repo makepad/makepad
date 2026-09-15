@@ -21,4 +21,4 @@ default-run = "makepad-mixer"
 
 [dependencies]
 makepad-widgets = { path = "../../widgets" }
-mp-theme = { path = "../../libs/mp_theme" }
+makepad-wm-theme = { path = "../../libs/wm_theme" }

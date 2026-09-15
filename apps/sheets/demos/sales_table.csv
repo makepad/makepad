@@ -1,0 +1,10 @@
+Date,Region,Product,Revenue,Units
+2026-08-03,North,Starter Kit,1840,23
+2026-08-05,West,Pro License,4200,12
+2026-08-08,South,Support Plan,1560,8
+2026-08-12,East,Pro License,5250,15
+2026-08-18,North,Support Plan,2340,12
+2026-08-25,West,Starter Kit,2160,27
+Average sale,,,=AVERAGE(D2:D7),
+Largest sale,,,=MAX(D2:D7),
+Order count,,,=COUNT(D2:D7),

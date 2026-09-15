@@ -3,7 +3,7 @@
 //! Same contract as `examples/text_center/tests/ui.rs`: the cap-height band of
 //! a one-line label sits within 0.5 logical px of the widget box centre.
 //! Specimens are live product controls (`Layout` workspace tab, `View` header
-//! menu), measured from a headless grab — dpi 1, no GPU.
+//! menu), measured from a gpusim grab — dpi 1, no GPU.
 
 use makepad_test::{makepad_test, Selector, TestApp, WidgetSnapshot};
 use std::path::Path;

@@ -1,0 +1,14 @@
+# makepad-app-module — the module contract: what an app crate exports when
+# it can be hosted IN-PROCESS by a Makepad host (the desktop window
+# manager, the web superbuild, later the mobile one), one instance per
+# splash isolate. Only the types: no host, no isolate code.
+
+[package]
+name = "makepad-app-module"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets" }
+makepad-ai-services = { path = "../ai/services" }
+makepad-strict-json = { path = "../strict_json" }

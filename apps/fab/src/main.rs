@@ -475,3 +475,8 @@ impl AppMain for App {
             .handle_event(cx, event, &mut Scope::with_data(&mut self.state));
     }
 }
+
+#[cfg(test)]
+mod desktop_style_tests {
+    include!("../../../widgets/tests/support/app_style.rs");
+}

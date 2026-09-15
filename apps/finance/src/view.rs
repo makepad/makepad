@@ -15,17 +15,13 @@
 
 use crate::chart::{FinanceChartWidgetExt, MeterWidgetRefExt};
 use crate::date::{self, DateRange, Day, MonthKey};
-use crate::db::Db;
 use crate::model::*;
 use crate::money::{format_compact, format_minor, format_money, Currency};
 use crate::report;
+use crate::runtime::{Backend, ImportState, Runtime};
 use crate::theme;
-use makepad_widgets::makepad_platform::file_dialogs::{FileDialog, FileDialogAction};
 use makepad_widgets::*;
-
-/// The dialog that picks a statement, so its answer is not confused with
-/// any other file dialog the app might grow.
-const PICK_STATEMENT: LiveId = live_id!(finance_pick_statement);
+use std::path::PathBuf;
 
 script_mod! {
     use mod.prelude.widgets.*
@@ -45,7 +41,7 @@ script_mod! {
         spacing: 8
         draw_bg +: {
             color: mod.finance.panel
-            border_radius: 10.0
+            border_radius: theme.container_corner_radius
             border_size: 1.0
             border_color: mod.finance.line_soft
         }
@@ -98,7 +94,7 @@ script_mod! {
             color_hover: mod.finance.raised
             color_down: mod.finance.accent_soft
             color_focus: #x00000000
-            border_radius: 6.0
+            border_radius: theme.corner_radius
             border_size: 0.0
         }
         draw_text +: {
@@ -118,7 +114,7 @@ script_mod! {
             color_hover: mod.finance.line
             color_down: mod.finance.accent_soft
             color_focus: mod.finance.raised
-            border_radius: 13.0
+            border_radius: theme.container_corner_radius
             border_size: 0.0
         }
         draw_text +: {
@@ -135,17 +131,17 @@ script_mod! {
         padding: Inset{left: 16, right: 16, top: 6, bottom: 6}
         draw_bg +: {
             color: mod.finance.accent
-            color_hover: #x5d99ff
-            color_down: #x3b7ae6
+            color_hover: mod.theme.color_focus
+            color_down: mod.theme.color_focus
             color_focus: mod.finance.accent
-            border_radius: 6.0
+            border_radius: theme.corner_radius
             border_size: 0.0
         }
         draw_text +: {
-            color: #xffffff
-            color_hover: #xffffff
-            color_down: #xffffff
-            color_focus: #xffffff
+            color: mod.theme.color_text_on_accent
+            color_hover: mod.theme.color_text_on_accent
+            color_down: mod.theme.color_text_on_accent
+            color_focus: mod.theme.color_text_on_accent
             text_style: theme.font_bold{font_size: 9.5}
         }
     }
@@ -182,7 +178,7 @@ script_mod! {
                 color_hover: mod.finance.raised
                 color_down: mod.finance.accent_soft
                 color_focus: #x00000000
-                border_radius: 6.0
+                border_radius: theme.corner_radius
                 border_size: 0.0
             }
         }
@@ -230,16 +226,16 @@ script_mod! {
         // invisible on a dark surface.
         scroll_bar_h: mod.widgets.ScrollBar{
             draw_bg +: {
-                color: uniform(#xffffff26)
-                color_hover: uniform(#xffffff42)
-                color_drag: uniform(#xffffff66)
+                color: uniform(mod.theme.color_bevel_inset_2)
+                color_hover: uniform(mod.theme.color_text_disabled)
+                color_drag: uniform(mod.theme.color_text)
             }
         }
         scroll_bar_v: mod.widgets.ScrollBar{
             draw_bg +: {
-                color: uniform(#xffffff26)
-                color_hover: uniform(#xffffff42)
-                color_drag: uniform(#xffffff66)
+                color: uniform(mod.theme.color_bevel_inset_2)
+                color_hover: uniform(mod.theme.color_text_disabled)
+                color_drag: uniform(mod.theme.color_text)
             }
         }
         draw_cell +: {
@@ -287,7 +283,7 @@ script_mod! {
         spacing: 6
         draw_bg +: {
             color: mod.finance.panel
-            border_radius: 10.0
+            border_radius: theme.container_corner_radius
             border_size: 1.0
             border_color: mod.finance.line_soft
         }
@@ -759,15 +755,32 @@ impl Range {
     }
 }
 
+/// The database path nobody has set yet: a plain SQLite file (not the
+/// storage jail, which is for small settings) under the shared makepad
+/// home's `finance/` directory. The module keeps this; the standalone
+/// window overrides it to a checkout-relative path in `main.rs`.
+fn default_db_path() -> PathBuf {
+    makepad_widgets::makepad_platform::home::makepad_home().join("finance").join("finance.db")
+}
+
 #[derive(Script, ScriptHook, Widget)]
 pub struct Finance {
     #[deref]
     view: View,
 
+    /// Where `start()` opens the database, on first draw. The default is
+    /// the makepad home's `finance/finance.db` — the module leaves it at
+    /// the default (and sets it explicitly anyway, for clarity); the
+    /// standalone window overrides it to a checkout-relative path before
+    /// the first draw (see `set_db_path`).
+    #[rust(default_db_path())]
+    db_path: PathBuf,
     #[rust]
-    db: Option<Db>,
+    backend: Backend,
     #[rust]
     ledger: Ledger,
+    #[rust]
+    today: Day,
     #[rust(Screen::Overview)]
     screen: Screen,
     #[rust(Layout::Wide)]
@@ -796,50 +809,46 @@ pub struct Finance {
     import: Option<ImportState>,
 }
 
-struct ImportState {
-    path: String,
-    csv: crate::csv::Csv,
-    mapping: crate::import::Mapping,
-    plan: crate::import::Plan,
-    account: Id,
-    ask_date_order: bool,
-}
-
 impl Finance {
     fn currency(&self) -> Currency {
         self.ledger.base_currency
     }
 
-    /// Open the file, generating a demo household if it is empty, and load
-    /// it into memory.
+    /// Set where `start()` opens the database. Whoever seats this widget
+    /// (the standalone window, a module's `create`) must call this before
+    /// the view's first draw — `start()` runs lazily on that first draw
+    /// and, once it has, the database is already open at whatever path was
+    /// current then.
+    pub fn set_db_path(&mut self, path: PathBuf) {
+        self.db_path = path;
+    }
+
+    /// Load either the generated demo household or the native database.
     fn start(&mut self, cx: &mut Cx) {
         if self.started {
             return;
         }
         self.started = true;
-        let path = std::path::PathBuf::from("local/finance/finance.db");
-        let mut db = match Db::open(&path) {
-            Ok(db) => db,
-            Err(error) => {
-                self.status = format!("cannot open {}: {error}", path.display());
-                error!("finance: {}", self.status);
-                return;
-            }
-        };
-        match db.is_empty() {
-            Ok(true) => match crate::seed::populate(&mut db, crate::seed::DEFAULT_YEARS) {
-                Ok(summary) => self.status = format!("Demo file created: {summary}"),
-                Err(error) => self.status = format!("demo data failed: {error}"),
-            },
-            Ok(false) => {}
-            Err(error) => self.status = format!("cannot read {}: {error}", path.display()),
-        }
-        match db.load() {
-            Ok(ledger) => self.ledger = ledger,
-            Err(error) => self.status = format!("load failed: {error}"),
-        }
-        self.db = Some(db);
-        self.budget_month = date::month_key(date::today());
+
+        let started = self.backend.start(&self.db_path);
+        // One line per start, so a host's log says which file this instance
+        // opened and how it went (a phone has no status bar to read).
+        log!(
+            "finance: {} — {} accounts, {} transactions{}",
+            self.db_path.display(),
+            started.ledger.accounts.len(),
+            started.ledger.transactions.len(),
+            if started.status.is_empty() { String::new() } else { format!("; {}", started.status) }
+        );
+        self.today = started.today;
+        self.ledger = started.ledger;
+        self.status = started.status;
+        let has_import = self.backend.has_import();
+        self.widget(cx, ids!(nav_import)).set_visible(cx, has_import);
+        self.widget(cx, ids!(tab_import)).set_visible(cx, has_import);
+        self.view(cx, ids!(import)).set_visible(cx, false);
+
+        self.budget_month = date::month_key(self.today);
         self.rebuild_rows();
         self.show_only_current_screen(cx);
         self.chrome_synced = false;
@@ -900,11 +909,11 @@ impl Finance {
             .iter()
             .map(|t| t.date)
             .min()
-            .unwrap_or_else(date::today)
+            .unwrap_or(self.today)
     }
 
     fn range(&self) -> DateRange {
-        self.range.resolve(date::today(), self.earliest())
+        self.range.resolve(self.today, self.earliest())
     }
 
     /// Show the screen, and make the chrome agree with it.
@@ -920,7 +929,11 @@ impl Finance {
     fn show_only_current_screen(&mut self, cx: &mut Cx) {
         for screen in Screen::ALL {
             self.view(cx, screen.view_id())
-                .set_visible(cx, screen == self.screen);
+                .set_visible(
+                    cx,
+                    screen == self.screen
+                        && (screen != Screen::Import || self.backend.has_import()),
+                );
         }
     }
 
@@ -942,13 +955,24 @@ impl Finance {
         // Stat cards stack rather than shrink to illegibility.
         self.view(cx, ids!(stat_saved)).set_visible(cx, !compact);
         self.view(cx, ids!(stat_net)).set_visible(cx, layout != Layout::Compact);
+        // "Where it went" and "Coming up" side by side need a desktop; on
+        // a phone they stack, each the full width.
+        let mut lower = self.view(cx, ids!(lower_row));
+        if compact {
+            script_apply_eval!(cx, lower, { flow: mod.turtle.Down });
+        } else {
+            script_apply_eval!(cx, lower, { flow: mod.turtle.Right });
+        }
+        // Import needs a file picker a phone has no room (or, hosted, no
+        // dialog) for: four tabs fit, five do not.
+        self.widget(cx, ids!(tab_import)).set_visible(cx, !compact && self.backend.has_import());
     }
 
     /// Push every value the chrome shows. Cheap enough to run whenever
     /// something changed, rather than tracking what.
     fn sync_chrome(&mut self, cx: &mut Cx) {
         let currency = self.currency();
-        let today = date::today();
+        let today = self.today;
         let range = self.range();
 
         self.label(cx, ids!(screen_title)).set_text(cx, self.screen.title());
@@ -1208,72 +1232,13 @@ impl Finance {
         self.chrome_synced = true;
     }
 
-    fn open_statement(&mut self, cx: &mut Cx) {
-        let dialog = FileDialog::new()
-            .set_id(PICK_STATEMENT)
-            .set_title("Choose a statement".to_string())
-            .add_filter("Comma-separated values".to_string(), vec!["csv".to_string()])
-            .add_filter("Text".to_string(), vec!["txt".to_string()])
-            .add_filter("All Files".to_string(), vec!["*".to_string()]);
-        cx.open_select_file_dialog(dialog);
-    }
-
-    /// Read a chosen file and build the plan, without writing anything.
-    fn prepare_import(&mut self, cx: &mut Cx, path: &std::path::Path) {
-        let text = match std::fs::read(path) {
-            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-            Err(error) => {
-                self.status = format!("cannot read {}: {error}", path.display());
-                self.chrome_synced = false;
-                self.redraw(cx);
-                return;
-            }
-        };
-        let csv = crate::csv::parse(&text);
-        let guess = crate::import::Mapping::guess(&csv);
-        let account = self
-            .account_filter
-            .or_else(|| self.ledger.accounts.first().map(|a| a.id))
-            .unwrap_or(0);
-        let Some(account_ref) = self.ledger.account(account).cloned() else {
-            self.status = "no account to import into".to_string();
-            return;
-        };
-        let known = self
-            .db
-            .as_mut()
-            .and_then(|db| db.known_fingerprints().ok())
-            .unwrap_or_default();
-        let plan = crate::import::plan(&csv, &guess.mapping, &account_ref, &self.ledger.rules, &known);
-        self.import = Some(ImportState {
-            path: path.display().to_string(),
-            csv,
-            mapping: guess.mapping,
-            plan,
-            account,
-            ask_date_order: guess.ask_date_order,
-        });
-        self.set_screen(cx, Screen::Import);
-    }
-
     /// Write the plan. Everything or nothing.
     fn commit_import(&mut self, cx: &mut Cx) {
         let Some(state) = self.import.take() else { return };
-        let Some(db) = self.db.as_mut() else { return };
-        let rows: Vec<Transaction> = state.plan.to_import().cloned().collect();
-        let count = rows.len();
-        let result = db.transact(|conn| {
-            for txn in &rows {
-                crate::db::insert_transaction_on(conn, txn)?;
-            }
-            Ok(())
-        });
-        match result {
-            Ok(()) => {
-                self.status = format!("Imported {count} transactions from {}", state.path);
-                if let Ok(ledger) = db.load() {
-                    self.ledger = ledger;
-                }
+        match self.backend.commit_import(state) {
+            Ok((ledger, status)) => {
+                self.status = status;
+                self.ledger = ledger;
                 self.rebuild_rows();
                 self.set_screen(cx, Screen::Ledger);
             }
@@ -1418,6 +1383,35 @@ impl Finance {
             ),
         }
     }
+
+    // -- AI --------------------------------------------------------------
+
+    /// Net worth, the current range's flow, and which screen and account
+    /// filter are showing — the one fact the `finance.summary` tool reads.
+    pub fn ai_summary(&self) -> String {
+        let currency = self.currency();
+        let worth = self.ledger.net_worth_on(self.today);
+        let flow = report::flow(&self.ledger, self.range());
+        let filter = match self.account_filter.and_then(|id| self.ledger.account(id)) {
+            Some(account) => format!(" Filtered to {}.", account.name),
+            None => String::new(),
+        };
+        format!(
+            "{} screen. Net worth {}. Over {}: in {}, out {}, net {}.{filter}",
+            self.screen.title(),
+            format_money(worth, currency),
+            self.range.label(),
+            format_money(flow.income, currency),
+            format_money(flow.expense, currency),
+            format_money(flow.net(), currency),
+        )
+    }
+
+    /// Answer one call from the AI bus — the module's executor and, if a
+    /// standalone build opens a service port later, that port too.
+    pub fn ai_answer(&self, call: &makepad_ai_services::wire::ServiceCall) -> makepad_ai_services::wire::ToolResult {
+        crate::ai::answer(call, || self.ai_summary())
+    }
 }
 
 /// Set a bar's length. The meter shader takes the fraction directly, so
@@ -1438,9 +1432,13 @@ impl Widget for Finance {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         self.start(cx);
 
-        // The layout follows the window, one frame behind on a resize —
-        // which is invisible, because a resize redraws continuously.
-        let width = self.view.area().rect(cx).size.x;
+        // The layout follows the room THIS widget is given — the turtle it
+        // is about to walk, which is the window's body standalone and a
+        // host's tile in a window manager — never a window's geometry. The
+        // area rect it read before is empty for the first draw and for a
+        // root recorded into a host's texture, which left a phone on the
+        // desktop layout.
+        let width = cx.turtle().rect().size.x;
         if width > 1.0 {
             let layout = Layout::for_width(width);
             if layout != self.layout {
@@ -1576,11 +1574,16 @@ impl WidgetMatchEvent for Finance {
             (Screen::Ledger, ids!(nav_ledger), ids!(tab_ledger)),
             (Screen::Budget, ids!(nav_budget), ids!(tab_budget)),
             (Screen::Reports, ids!(nav_reports), ids!(tab_reports)),
-            (Screen::Import, ids!(nav_import), ids!(tab_import)),
         ] {
             if self.button(cx, nav).clicked(actions) || self.button(cx, tab).clicked(actions) {
                 self.set_screen(cx, screen);
             }
+        }
+        if self.backend.has_import()
+            && (self.button(cx, ids!(nav_import)).clicked(actions)
+                || self.button(cx, ids!(tab_import)).clicked(actions))
+        {
+            self.set_screen(cx, Screen::Import);
         }
 
         for (range, id) in [
@@ -1607,10 +1610,10 @@ impl WidgetMatchEvent for Finance {
             self.redraw(cx);
         }
 
-        if self.button(cx, ids!(import_pick)).clicked(actions) {
-            self.open_statement(cx);
+        if self.backend.has_import() && self.button(cx, ids!(import_pick)).clicked(actions) {
+            self.backend.pick_statement(cx);
         }
-        if self.button(cx, ids!(import_apply)).clicked(actions) {
+        if self.backend.has_import() && self.button(cx, ids!(import_apply)).clicked(actions) {
             self.commit_import(cx);
         }
         if self.button(cx, ids!(import_cancel)).clicked(actions) {
@@ -1645,14 +1648,38 @@ impl WidgetMatchEvent for Finance {
             }
         }
 
-        for action in actions {
-            if let Some(picked) = action.downcast_ref::<FileDialogAction>() {
-                if picked.id() == PICK_STATEMENT {
-                    if let Some(path) = picked.path().cloned() {
-                        self.prepare_import(cx, &path);
-                    }
+        if let Some(prepared) =
+            self.backend.prepare_from_actions(actions, &self.ledger, self.account_filter)
+        {
+            match prepared {
+                Ok(state) => {
+                    self.import = Some(state);
+                    self.set_screen(cx, Screen::Import);
+                }
+                Err(error) => {
+                    self.status = error;
+                    self.chrome_synced = false;
+                    self.redraw(cx);
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::Layout;
+
+    /// A phone's width gets the phone app, a laptop's the desktop, and the
+    /// thresholds sit where the content stops fitting, not on a device.
+    #[test]
+    fn the_layout_follows_the_room_the_view_is_given() {
+        assert_eq!(Layout::for_width(402.0), Layout::Compact);
+        assert_eq!(Layout::for_width(699.0), Layout::Compact);
+        assert_eq!(Layout::for_width(700.0), Layout::Regular);
+        assert_eq!(Layout::for_width(900.0), Layout::Regular);
+        assert_eq!(Layout::for_width(1200.0), Layout::Wide);
+        assert!(!Layout::Compact.has_sidebar());
+        assert!(Layout::Regular.has_sidebar());
     }
 }

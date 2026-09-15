@@ -12,7 +12,7 @@ use makepad_widgets::*;
 use makepad_converse::agent_seam::*;
 use makepad_widgets::makepad_micro_serde::*;
 
-use crate::nav_data::NavData;
+use crate::nav::native::NavData;
 use crate::tools;
 use crate::trip::TripModel;
 
@@ -57,7 +57,7 @@ pub struct ToolCtx<'a> {
     pub map: &'a MapViewRef,
     pub trip: &'a mut TripModel,
     pub nav: Option<&'a mut NavData>,
-    pub radar: Option<&'a crate::nav_data::RadarData>,
+    pub radar: Option<&'a crate::nav::native::RadarData>,
     pub markers: &'a mut MarkerLegend,
     /// Latest GPS fix (lon, lat) from the platform geo service, if any.
     pub position: Option<(f64, f64)>,
@@ -67,6 +67,8 @@ pub struct ToolCtx<'a> {
     pub leg_routes: &'a mut Vec<makepad_map_nav::graph::Route>,
     /// Set by nav tools; the app starts/stops navigation after the run.
     pub nav_action: &'a mut Option<crate::nav::NavAction>,
+    /// Where the drive records are (`trip_history`).
+    pub history_dir: &'a std::path::Path,
 }
 
 impl<'a> ToolCtx<'a> {
@@ -179,6 +181,7 @@ pub fn execute(ctx: &mut ToolCtx, name: &str, input: &str) -> Result<String, Str
         "images_search" => Err("image search unavailable right now".into()),
         "weather_now" => tools::weather::now(ctx, &args),
         "trip_history" => Ok(crate::history::list_drives(
+            ctx.history_dir,
             arg_usize(&args, "limit").unwrap_or(10).clamp(1, 50),
         )),
         // Reached only when the app has no cloud agent (no key / offline).

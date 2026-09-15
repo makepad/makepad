@@ -4,7 +4,7 @@ use makepad_widgets::makepad_micro_serde::JsonValue;
 use makepad_converse::agent_seam::ToolDefinition;
 
 use crate::broker::{arg_f64, def, ToolCtx};
-use crate::nav_data::RadarGrid;
+use crate::nav::native::RadarGrid;
 
 pub fn defs() -> Vec<ToolDefinition> {
     vec![def(
