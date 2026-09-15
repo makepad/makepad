@@ -3244,7 +3244,7 @@ mod tests {
         let b = chat_turns("SYS", &[("b1", "rb1"), ("b2", "rb2"), ("b3", "rb3")]);
         let mut cache = PrefixCache::default();
 
-        let mut serve = |cache: &mut PrefixCache, prompt: &str, reply: &str| {
+        let serve = |cache: &mut PrefixCache, prompt: &str, reply: &str| {
             let (outcome, owner) = cache.classify("chat", prompt);
             cache.record(outcome, &owner, 4000, std::time::Duration::from_millis(1300));
             cache.commit(&owner, format!("{prompt}{reply}<|im_end|>\n"));
