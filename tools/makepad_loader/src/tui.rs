@@ -224,7 +224,7 @@ mod console {
             let saved = String::from_utf8_lossy(&saved.stdout).trim().to_owned();
             if !saved.is_empty()
                 && Command::new("stty")
-                    .args(["-icanon", "-echo", "min", "0", "time", "2"])
+                    .args(["-icanon", "-echo", "-isig", "min", "0", "time", "2"])
                     .status()
                     .map_err(|e| e.to_string())?
                     .success()

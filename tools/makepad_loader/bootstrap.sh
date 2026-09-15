@@ -36,9 +36,26 @@ if [ -x "$builder_root/makepad-builder" ] && [ "$(cat "$builder_root/.builder-ve
     builder_prepare_host_tools "$builder_tools"
     exec "$builder_root/makepad-builder" tui
 fi
-if ! mkdir "$builder_root/.setup-lock" 2>/dev/null; then
-    printf '%s\n' 'Another Builder setup is using this folder. Close it before retrying.'
-    exit 1
+builder_lock="$builder_root/.setup-lock"
+if ! mkdir "$builder_lock" 2>/dev/null; then
+    builder_owner=$(cat "$builder_lock/pid" 2>/dev/null || :)
+    case "$builder_owner" in
+        ''|0|*[!0-9]*) ;;
+        *)
+            # Window closure or a killed process bypasses Rust's Drop. Check
+            # the owner, not the age of the directory, before reclaiming it.
+            if ! kill -0 "$builder_owner" 2>/dev/null && ! ps -p "$builder_owner" -o pid= >/dev/null 2>&1; then
+                if [ "$(cat "$builder_lock/pid" 2>/dev/null || :)" = "$builder_owner" ]; then
+                    rm -f "$builder_lock/pid"
+                    rmdir "$builder_lock" 2>/dev/null || :
+                fi
+            fi
+            ;;
+    esac
+    if ! mkdir "$builder_lock" 2>/dev/null; then
+        printf '%s\n' 'Another Builder setup is using this folder. Close it before retrying.'
+        exit 1
+    fi
 fi
 printf '%s' "$$" > "$builder_root/.setup-lock/pid"
 builder_temp=
