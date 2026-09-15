@@ -1,5 +1,6 @@
+use super::archive::*;
 use super::geometry::*;
-use super::icons::ICON_MIN_ZOOM;
+use super::icons::{icon_mesh_by_slot, ICON_MIN_ZOOM};
 use super::label::*;
 use super::overlay::*;
 use super::style::*;
@@ -11,6 +12,83 @@ use crate::{
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
+
+/// Tile payload sources only. Navigation data is deliberately outside this
+/// contract; applications layer routing datasets over MapView separately.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TileSourceConfig {
+    LocalArchive {
+        mbtiles_path: String,
+        detail_mbtiles_path: String,
+        overlay_mbtiles_paths: String,
+        bridge_dz_path: String,
+    },
+    HttpArchive {
+        root_url: String,
+        detail_root_url: String,
+        overlay_mbtiles_paths: String,
+        bridge_dz_path: String,
+    },
+}
+
+fn is_mkmap_path_shape(path: &str) -> bool {
+    let path = Path::new(path);
+    path.extension().is_some_and(|extension| extension == "mkmap")
+        || path.file_name().is_some_and(|name| name == "root.mkidx")
+}
+
+fn detail_matches_base(config: &TileSourceConfig) -> bool {
+    match config {
+        TileSourceConfig::LocalArchive {
+            mbtiles_path,
+            detail_mbtiles_path,
+            ..
+        } => !detail_mbtiles_path.is_empty() && detail_mbtiles_path == mbtiles_path,
+        TileSourceConfig::HttpArchive {
+            root_url,
+            detail_root_url,
+            ..
+        } => !detail_root_url.is_empty() && detail_root_url == root_url,
+    }
+}
+
+fn needs_separate_detail_archive(config: &TileSourceConfig) -> bool {
+    match config {
+        TileSourceConfig::LocalArchive {
+            mbtiles_path,
+            detail_mbtiles_path,
+            ..
+        } => {
+            is_mkmap_path_shape(mbtiles_path)
+                && is_mkmap_path_shape(detail_mbtiles_path)
+                && !detail_mbtiles_path.is_empty()
+                && detail_mbtiles_path != mbtiles_path
+        }
+        TileSourceConfig::HttpArchive {
+            root_url,
+            detail_root_url,
+            ..
+        } => !detail_root_url.is_empty() && detail_root_url != root_url,
+    }
+}
+
+#[derive(Debug)]
+struct ArchiveTileParts {
+    generation: u64,
+    base: Option<Result<Option<Arc<[u8]>>, String>>,
+    detail: Option<Result<Option<Arc<[u8]>>, String>>,
+    detail_required: bool,
+    reuse_base_as_detail: bool,
+}
+
+#[derive(Debug)]
+#[cfg(not(target_arch = "wasm32"))]
+struct ArchiveWatchResult {
+    path: String,
+    mtime: Option<std::time::SystemTime>,
+    zoom_range: Option<(u32, u32)>,
+}
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -76,6 +154,21 @@ script_mod! {
         shiny_gates: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         // x=dynamic_sun (reserved), y=shadow_alpha, z/w unused.
         shiny_gates2: uniform(vec4(0.0, 0.22, 0.0, 0.0))
+        // Water/foliage shimmer clock, stamped from Rust each draw
+        // (`stamp_map_uniforms`) as elapsed seconds. NEVER read
+        // `draw_pass.time` here: the platform statically flags any shader
+        // whose compiled source contains that accessor as `uses_time`,
+        // which forces a full-pass GPU repaint on EVERY frame forever —
+        // for as long as ANY draw call using this shader is on screen —
+        // regardless of whether the water/foliage gates above are even on.
+        // Since this pixel function is inherited by every DrawMap* variant
+        // (road/wall/roof/icon/prop/shadow/fill), that pinned the whole map
+        // at display-rate GPU cost permanently, in 2D and 3D alike. A
+        // Rust-pushed uniform carries the same value without tripping the
+        // static check; the existing `shiny_anim_timer` heartbeat (20 Hz,
+        // gated on the feature actually being visible) is what keeps it
+        // moving, so the map still idles when nothing needs to animate.
+        shiny_time: uniform(0.0)
         sun_dir: uniform(vec3(-0.379, -0.575, 0.724))
         sun_color: uniform(vec3(1.0, 0.98, 0.94))
         sun_sky: uniform(vec3(0.55, 0.62, 0.72))
@@ -180,7 +273,7 @@ script_mod! {
                 }
                 let k = self.shiny_gates2.z
                 let uv = vec2(self.v_param1, self.v_param2) * k
-                let t = self.draw_pass.time
+                let t = self.shiny_time
                 let ct = clamp(self.tilt_params.x, 0.0, 1.0)
                 let st = sqrt(max(1.0 - ct * ct, 0.0))
                 let closeness = clamp(1.6 - k, 0.0, 1.0)
@@ -331,7 +424,7 @@ script_mod! {
                 }
                 let k = self.shiny_gates2.z
                 let uv = vec2(self.v_param1, self.v_param2) * k
-                let t = self.draw_pass.time
+                let t = self.shiny_time
                 // Broad meadow tone patches (static).
                 let patch = self.mat_noise(uv * 0.023) * 0.65 + self.mat_noise(uv * 0.11) * 0.35
                 var f = 0.93 + 0.11 * patch
@@ -805,6 +898,269 @@ script_mod! {
         }
     }
 
+    // Instanced POI symbols: one shared mesh per symbol slot, an 8-float
+    // record per placement (anchor, screen offset, scale, the zoom-floor /
+    // pin-lift composite, zbias, colour). This is DrawMapVector's shape-20
+    // vertex path with the per-placement slots read from the instance —
+    // keep the two in LOCKSTEP; the pixel side is inherited unchanged.
+    mod.draw.DrawMapIcon = mod.std.set_type_default() do #(DrawMapIcon::script_shader(vm)){
+        ..mod.draw.DrawMapVector
+        geom: vertex_buffer(geom.IconVertexPacked, geom.IconGeomPacked)
+
+        vertex: fn() {
+            var transformed = self.inst_anchor * self.map_scale + self.map_offset;
+            let terrain_pos = transformed;
+            var ground_m = 0.0;
+            if self.terrain_span.x > 0.5 {
+                let tuv = (terrain_pos - self.terrain_org) / self.terrain_span;
+                if tuv.x > 0.0 && tuv.x < 1.0 && tuv.y > 0.0 && tuv.y < 1.0 {
+                    let fit = tuv * self.terrain_uvfit.xy + self.terrain_uvfit.zw;
+                    let enc = self.terrain_tex.sample_lod(fit, 0.0);
+                    ground_m = max(
+                        enc.x * 65280.0 + enc.y * 255.0 + enc.z * 0.99609375 - 32768.0,
+                        0.0
+                    );
+                }
+            }
+            let rel = transformed - self.rot_pivot;
+            transformed = self.rot_pivot + vec2(
+                rel.x * self.view_rot.x - rel.y * self.view_rot.y,
+                rel.x * self.view_rot.y + rel.y * self.view_rot.x
+            );
+            let ground_rel_y = transformed.y - self.rot_pivot.y;
+            // param4 = zoom_floor + pin_lift_m*100: markers fly at their
+            // encoded height (0 for grounded icons).
+            let icon_floor = modf(self.inst_param4, 100.0);
+            let lift_m = (self.inst_param4 - icon_floor) * 0.0025 * self.height_grow + ground_m;
+            if self.space_warp.x > 0.0001 {
+                let cos_t = self.tilt_params.x
+                let sin_t = self.space_warp.w
+                let hpx = lift_m * self.space_warp2.y
+                let wg = 0.0 - ground_rel_y
+                var wf = wg
+                var wu = 0.0
+                var wnx = 0.0
+                var wny = 1.0
+                let wa = wg - self.space_warp.y
+                if wa > 0.0 {
+                    let wr = max(self.space_warp.z, 1.0)
+                    let cap = self.space_warp2.z
+                    let th = min(wa / wr, cap)
+                    let sth = sin(th)
+                    let cth = cos(th)
+                    wf = self.space_warp.y + wr * sth
+                    wu = wr * (1.0 - cth)
+                    let we = wa - wr * cap
+                    if we > 0.0 {
+                        wf = wf + we * cos_t
+                        wu = wu + we * sin_t
+                    }
+                    wnx = 0.0 - sth
+                    wny = cth
+                }
+                let pf = wf + hpx * wnx
+                let pu = wu + hpx * wny
+                let bf = wg + (pf - wg) * self.space_warp.x
+                let bu = hpx + (pu - hpx) * self.space_warp.x
+                let zrel = bf * sin_t - bu * cos_t
+                let pw = 1.0 / max(1.0 + self.space_warp2.x * zrel, 0.12)
+                transformed = vec2(
+                    self.rot_pivot.x + (transformed.x - self.rot_pivot.x) * pw,
+                    self.rot_pivot.y - (bf * cos_t + bu * sin_t) * pw
+                );
+            } else {
+                transformed.y = self.rot_pivot.y
+                    + ground_rel_y * self.tilt_params.x
+                    - lift_m * self.tilt_params.y;
+            }
+            // 0.6 grace below the floor: markers fade out on a zoom
+            // gesture instead of vanishing the instant the tier line is
+            // crossed. FAIL-OPEN when the icon_zoom uniform has not landed.
+            if self.icon_zoom > 1.0 && icon_floor > self.icon_zoom + 0.6 {
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 0.0);
+                return
+            }
+            // Zoom-constant symbol: the mesh vertex is a screen-px offset
+            // from the anchor, added after the map transform.
+            let off = vec2(self.geom.x, self.geom.y) * self.inst_scale + self.inst_offset;
+            transformed = transformed + off;
+
+            let g_uv = unpack2f16(self.geom.uv)
+            self.v_tcoord = vec2(g_uv.x, g_uv.y);
+            self.v_color = unpack4u8(self.inst_color);
+            self.v_stroke_mult = 1e6;
+            self.v_stroke_dist = self.geom.stroke_dist * self.map_scale.x;
+            self.v_shape_id = 20.0;
+            self.v_param0 = 0.0;
+            self.v_param1 = off.x;
+            self.v_param2 = off.y;
+            self.v_param3 = 0.0;
+            self.v_param4 = self.inst_param4;
+            // Tilt depth bias of a free-standing symbol (ICON_INSTANCE_DEPTH_BIAS).
+            self.v_param5 = 0.35;
+
+            let shifted = transformed + self.draw_list.view_shift;
+            self.v_world = shifted;
+
+            // Clip radius of a symbol (ICON_INSTANCE_CLIP_RADIUS) in view px.
+            let cr = 24.0 * max(self.map_scale.x, self.map_scale.y);
+            let clip = vec4(
+                max(self.draw_clip.x, self.draw_list.view_clip.x - self.draw_list.view_shift.x),
+                max(self.draw_clip.y, self.draw_list.view_clip.y - self.draw_list.view_shift.y),
+                min(self.draw_clip.z, self.draw_list.view_clip.z - self.draw_list.view_shift.x),
+                min(self.draw_clip.w, self.draw_list.view_clip.w - self.draw_list.view_shift.y)
+            )
+            if transformed.x + cr < clip.x || transformed.y + cr < clip.y
+                || transformed.x - cr > clip.z || transformed.y - cr > clip.w {
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 0.0);
+                return
+            }
+
+            let world = self.draw_list.view_transform * vec4(
+                shifted.x
+                shifted.y
+                self.draw_depth + self.tilt_params.w
+                    + mix(
+                        self.draw_call.zbias + self.inst_zbias,
+                        0.35 + (ground_rel_y + lift_m * self.tilt_params.y) * self.tilt_params.z,
+                        sign(self.tilt_params.z)
+                    )
+                1.
+            );
+            self.v_world_clip = world;
+            self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * world)
+        }
+    }
+
+    // Instanced building walls: the unit quad is extruded per footprint edge
+    // in the vertex shader from an 11-float record (edge a/b, base/top metres,
+    // outward normal, bottom AO, colour, zbias). Varyings match the vertices
+    // `append_wall_quad` used to bake (fill, material MAT_WALL, height in
+    // param4, BUILDING_SURFACE_DEPTH in param5) — keep in LOCKSTEP with
+    // DrawMapVector's fill path; the pixel side is inherited unchanged.
+    mod.draw.DrawMapWall = mod.std.set_type_default() do #(DrawMapWall::script_shader(vm)){
+        ..mod.draw.DrawMapVector
+        geom: vertex_buffer(geom.QuadVertex, geom.QuadGeom)
+
+        vertex: fn() {
+            let along = self.geom.pos.x;
+            let up = self.geom.pos.y;
+            let pos = mix(self.inst_a, self.inst_b, along);
+            let h = mix(self.inst_heights.x, self.inst_heights.y, up);
+            let ao = mix(self.inst_ao, 1.0, up);
+            var transformed = pos * self.map_scale + self.map_offset;
+            let terrain_pos = transformed;
+            var ground_m = 0.0;
+            if self.terrain_span.x > 0.5 {
+                let tuv = (terrain_pos - self.terrain_org) / self.terrain_span;
+                if tuv.x > 0.0 && tuv.x < 1.0 && tuv.y > 0.0 && tuv.y < 1.0 {
+                    let fit = tuv * self.terrain_uvfit.xy + self.terrain_uvfit.zw;
+                    let enc = self.terrain_tex.sample_lod(fit, 0.0);
+                    ground_m = max(
+                        enc.x * 65280.0 + enc.y * 255.0 + enc.z * 0.99609375 - 32768.0,
+                        0.0
+                    );
+                }
+            }
+            let rel = transformed - self.rot_pivot;
+            transformed = self.rot_pivot + vec2(
+                rel.x * self.view_rot.x - rel.y * self.view_rot.y,
+                rel.x * self.view_rot.y + rel.y * self.view_rot.x
+            );
+            let ground_rel_y = transformed.y - self.rot_pivot.y;
+            // Fills ride the terrain by terrain_fill_lift; the height grows
+            // with the 2D->3D reveal.
+            let lift_m = h * self.height_grow + ground_m * self.terrain_fill_lift;
+            if self.space_warp.x > 0.0001 {
+                let cos_t = self.tilt_params.x
+                let sin_t = self.space_warp.w
+                let hpx = lift_m * self.space_warp2.y
+                let wg = 0.0 - ground_rel_y
+                var wf = wg
+                var wu = 0.0
+                var wnx = 0.0
+                var wny = 1.0
+                let wa = wg - self.space_warp.y
+                if wa > 0.0 {
+                    let wr = max(self.space_warp.z, 1.0)
+                    let cap = self.space_warp2.z
+                    let th = min(wa / wr, cap)
+                    let sth = sin(th)
+                    let cth = cos(th)
+                    wf = self.space_warp.y + wr * sth
+                    wu = wr * (1.0 - cth)
+                    let we = wa - wr * cap
+                    if we > 0.0 {
+                        wf = wf + we * cos_t
+                        wu = wu + we * sin_t
+                    }
+                    wnx = 0.0 - sth
+                    wny = cth
+                }
+                let pf = wf + hpx * wnx
+                let pu = wu + hpx * wny
+                let bf = wg + (pf - wg) * self.space_warp.x
+                let bu = hpx + (pu - hpx) * self.space_warp.x
+                let zrel = bf * sin_t - bu * cos_t
+                let pw = 1.0 / max(1.0 + self.space_warp2.x * zrel, 0.12)
+                transformed = vec2(
+                    self.rot_pivot.x + (transformed.x - self.rot_pivot.x) * pw,
+                    self.rot_pivot.y - (bf * cos_t + bu * sin_t) * pw
+                );
+            } else {
+                transformed.y = self.rot_pivot.y
+                    + ground_rel_y * self.tilt_params.x
+                    - lift_m * self.tilt_params.y;
+            }
+
+            let color = unpack4u8(self.inst_color);
+            self.v_tcoord = vec2(0.5, 1.0);
+            self.v_color = vec4(color.x * ao, color.y * ao, color.z * ao, color.w);
+            self.v_stroke_mult = 1e6;
+            self.v_stroke_dist = 0.0;
+            self.v_shape_id = 0.0;
+            self.v_param0 = 0.0;
+            // Outward normal, material MAT_WALL, height, surface depth: the
+            // slots the wall pixel path reads.
+            self.v_param1 = self.inst_normal.x;
+            self.v_param2 = self.inst_normal.y;
+            self.v_param3 = 1.0;
+            self.v_param4 = h;
+            self.v_param5 = 0.5;
+
+            let shifted = transformed + self.draw_list.view_shift;
+            self.v_world = shifted;
+
+            // Clip radius of a wall vertex (90 units) in view px.
+            let cr = 90.0 * max(self.map_scale.x, self.map_scale.y);
+            let clip = vec4(
+                max(self.draw_clip.x, self.draw_list.view_clip.x - self.draw_list.view_shift.x),
+                max(self.draw_clip.y, self.draw_list.view_clip.y - self.draw_list.view_shift.y),
+                min(self.draw_clip.z, self.draw_list.view_clip.z - self.draw_list.view_shift.x),
+                min(self.draw_clip.w, self.draw_list.view_clip.w - self.draw_list.view_shift.y)
+            )
+            if transformed.x + cr < clip.x || transformed.y + cr < clip.y
+                || transformed.x - cr > clip.z || transformed.y - cr > clip.w {
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 0.0);
+                return
+            }
+
+            let world = self.draw_list.view_transform * vec4(
+                shifted.x
+                shifted.y
+                self.draw_depth + self.tilt_params.w
+                    + mix(
+                        self.draw_call.zbias + self.inst_zbias,
+                        0.5 + (ground_rel_y + lift_m * self.tilt_params.y) * self.tilt_params.z,
+                        sign(self.tilt_params.z)
+                    )
+                1.
+            );
+            self.v_world_clip = world;
+            self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * world)
+        }
+    }
+
     // Terrain hillshade: plain textured quad (RGBA baked CPU-side),
     // drawn between the land fills and the road network.
     mod.draw.DrawTerrainOverlay = mod.std.set_type_default() do #(DrawTerrainOverlay::script_shader(vm)){
@@ -1140,6 +1496,7 @@ script_mod! {
 const ZOOM_SETTLE_SECONDS: f64 = 0.08;
 /// Frames before an archive-absent tile is probed again (~30 s at 60 fps).
 const MISSING_RECHECK_FRAMES: u64 = 1800;
+const ARCHIVE_REQUEST_TIMEOUT_SECONDS: f64 = 10.0;
 
 /// Camera tilt ceiling (degrees from top-down). Flat enough to read
 /// terrain relief against the horizon without the far plane exploding.
@@ -1369,116 +1726,31 @@ impl DrawMapVector {
         pass_depth: f32,
         terrain_fill_lift: f32,
     ) {
-        // Casings/centers/icons ride far above the displaced terrain
-        // surface: quad-twist between the GPU bilinear lift and the mesh
-        // triangles is bounded well below this.
         self.draw_super.draw_depth = pass_depth;
         self.map_scale = map_scale;
         self.map_offset = map_offset;
         self.tile_fade = fade;
-        self.draw_super
-            .draw_vars
-            .set_uniform(cx.cx, live_id!(tile_fade), &[fade]);
-        self.draw_super.draw_vars.set_uniform(
+        stamp_map_uniforms(
+            &mut self.draw_super.draw_vars,
             cx.cx,
-            live_id!(map_scale),
-            &[map_scale.x, map_scale.y],
+            &MapDrawUniforms {
+                map_scale,
+                map_offset,
+                fade,
+                width_correction,
+                view_rot,
+                rot_pivot,
+                tilt_params,
+                icon_zoom,
+                height_grow,
+                terrain_org,
+                terrain_span,
+                terrain_uvfit,
+                terrain_fill_lift,
+            },
+            &self.shiny,
+            terrain_tex,
         );
-        self.draw_super.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(map_offset),
-            &[map_offset.x, map_offset.y],
-        );
-        self.draw_super.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(width_correction),
-            &width_correction,
-        );
-        let face_correction: [f32; 4] = [
-            width_correction[0].max(1.0),
-            width_correction[1].max(1.0),
-            width_correction[2].max(1.0),
-            width_correction[3].max(1.0),
-        ];
-        self.draw_super.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(face_correction),
-            &face_correction,
-        );
-        self.draw_super
-            .draw_vars
-            .set_uniform(cx.cx, live_id!(view_rot), &view_rot);
-        self.draw_super
-            .draw_vars
-            .set_uniform(cx.cx, live_id!(rot_pivot), &rot_pivot);
-        self.draw_super
-            .draw_vars
-            .set_uniform(cx.cx, live_id!(tilt_params), &tilt_params);
-        self.draw_super
-            .draw_vars
-            .set_uniform(cx.cx, live_id!(icon_zoom), &[icon_zoom]);
-        self.draw_super
-            .draw_vars
-            .set_uniform(cx.cx, live_id!(height_grow), &[height_grow]);
-        self.draw_super
-            .draw_vars
-            .set_uniform(cx.cx, live_id!(terrain_org), &terrain_org);
-        self.draw_super
-            .draw_vars
-            .set_uniform(cx.cx, live_id!(terrain_span), &terrain_span);
-        self.draw_super
-            .draw_vars
-            .set_uniform(cx.cx, live_id!(terrain_uvfit), &terrain_uvfit);
-        self.draw_super
-            .draw_vars
-            .set_uniform(cx.cx, live_id!(terrain_fill_lift), &[terrain_fill_lift]);
-        let shiny = &self.shiny;
-        self.draw_super.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(shiny_gates),
-            &[
-                if shiny.water_fx { 1.0 } else { 0.0 },
-                if shiny.building_sheen { shiny.gloss } else { 0.0 },
-                if shiny.foliage_fx { 1.0 } else { 0.0 },
-                if shiny.route_glow { 1.0 } else { 0.0 },
-            ],
-        );
-        // Water/green noise anchors physically to the map: scale the
-        // baked view-px UV by exp2(16 - view_zoom) so ripple size tracks
-        // meters, not screen pixels. The lower bound keeps refining well
-        // past z20 (the shaders gate their finest octaves on this value);
-        // the upper bound keeps far-out zooms from going sub-pixel.
-        let mat_uv_scale = (16.0 - icon_zoom).exp2().clamp(0.03, 1.25);
-        // Wide-range variant for patterns that stay physical further out
-        // (shrub fills) and want to know the true zoom for LOD blending.
-        let mat_uv_wide = (16.0 - icon_zoom).exp2().clamp(0.03, 8.0);
-        self.draw_super.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(shiny_gates2),
-            &[
-                if shiny.dynamic_sun { 1.0 } else { 0.0 },
-                shiny.sun.shadow_alpha,
-                mat_uv_scale,
-                mat_uv_wide,
-            ],
-        );
-        let sun = &shiny.sun;
-        self.draw_super.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(sun_dir),
-            &[sun.dir.x, sun.dir.y, sun.dir.z],
-        );
-        self.draw_super.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(sun_color),
-            &[sun.color.x, sun.color.y, sun.color.z],
-        );
-        self.draw_super.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(sun_sky),
-            &[sun.sky.x, sun.sky.y, sun.sky.z],
-        );
-        self.draw_super.draw_vars.set_texture(1, terrain_tex);
         self.draw_super.draw_vars.geometry_id = Some(geometry_id);
         cx.new_draw_call(&self.draw_super.draw_vars);
         if self.draw_super.draw_vars.can_instance() {
@@ -1486,6 +1758,247 @@ impl DrawMapVector {
             self.draw_super.draw_vars.area =
                 cx.update_area_refs(self.draw_super.draw_vars.area, new_area);
         }
+    }
+}
+
+/// The per-draw view state every map shader stamps as uniforms: one struct
+/// so the vector and the instanced-icon draws cannot drift apart.
+#[derive(Clone, Copy)]
+pub(crate) struct MapDrawUniforms {
+    pub map_scale: Vec2f,
+    pub map_offset: Vec2f,
+    pub fade: f32,
+    pub width_correction: [f32; 4],
+    pub view_rot: [f32; 2],
+    pub rot_pivot: [f32; 2],
+    pub tilt_params: [f32; 4],
+    pub icon_zoom: f32,
+    pub height_grow: f32,
+    pub terrain_org: [f32; 2],
+    pub terrain_span: [f32; 2],
+    pub terrain_uvfit: [f32; 4],
+    pub terrain_fill_lift: f32,
+}
+
+fn stamp_map_uniforms(
+    draw_vars: &mut DrawVars,
+    cx: &Cx,
+    u: &MapDrawUniforms,
+    shiny: &ShinyConfig,
+    terrain_tex: &Texture,
+) {
+    // Rust-pushed shimmer clock (see the `shiny_time` uniform comment in the
+    // DrawMapVector DSL above): never read the shader's own `draw_pass.time`
+    // accessor from a DrawMap* pixel shader, or the platform's static
+    // `uses_time` scan pins the whole map at full-pass GPU repaint forever.
+    draw_vars.set_uniform(cx, live_id!(shiny_time), &[cx.seconds_since_app_start() as f32]);
+    draw_vars.set_uniform(cx, live_id!(tile_fade), &[u.fade]);
+    draw_vars.set_uniform(cx, live_id!(map_scale), &[u.map_scale.x, u.map_scale.y]);
+    draw_vars.set_uniform(cx, live_id!(map_offset), &[u.map_offset.x, u.map_offset.y]);
+    draw_vars.set_uniform(cx, live_id!(width_correction), &u.width_correction);
+    // Face variant, clamped >= 1: union faces may only WIDEN (inward morph
+    // inverts narrow features); stale cross-band tiles render at keyframe
+    // width magnified instead of garbling.
+    let face_correction: [f32; 4] = [
+        u.width_correction[0].max(1.0),
+        u.width_correction[1].max(1.0),
+        u.width_correction[2].max(1.0),
+        u.width_correction[3].max(1.0),
+    ];
+    draw_vars.set_uniform(cx, live_id!(face_correction), &face_correction);
+    draw_vars.set_uniform(cx, live_id!(view_rot), &u.view_rot);
+    draw_vars.set_uniform(cx, live_id!(rot_pivot), &u.rot_pivot);
+    draw_vars.set_uniform(cx, live_id!(tilt_params), &u.tilt_params);
+    draw_vars.set_uniform(cx, live_id!(icon_zoom), &[u.icon_zoom]);
+    draw_vars.set_uniform(cx, live_id!(height_grow), &[u.height_grow]);
+    draw_vars.set_uniform(cx, live_id!(terrain_org), &u.terrain_org);
+    draw_vars.set_uniform(cx, live_id!(terrain_span), &u.terrain_span);
+    draw_vars.set_uniform(cx, live_id!(terrain_uvfit), &u.terrain_uvfit);
+    draw_vars.set_uniform(cx, live_id!(terrain_fill_lift), &[u.terrain_fill_lift]);
+    draw_vars.set_uniform(
+        cx,
+        live_id!(shiny_gates),
+        &[
+            if shiny.water_fx { 1.0 } else { 0.0 },
+            if shiny.building_sheen { shiny.gloss } else { 0.0 },
+            if shiny.foliage_fx { 1.0 } else { 0.0 },
+            if shiny.route_glow { 1.0 } else { 0.0 },
+        ],
+    );
+    // Water/green noise anchors physically to the map: scale the baked
+    // view-px UV by exp2(16 - view_zoom) so ripple size tracks meters, not
+    // screen pixels. The lower bound keeps refining well past z20 (the
+    // shaders gate their finest octaves on this value); the upper bound
+    // keeps far-out zooms from going sub-pixel.
+    let mat_uv_scale = (16.0 - u.icon_zoom).exp2().clamp(0.03, 1.25);
+    // Wide-range variant for patterns that stay physical further out
+    // (shrub fills) and want to know the true zoom for LOD blending.
+    let mat_uv_wide = (16.0 - u.icon_zoom).exp2().clamp(0.03, 8.0);
+    draw_vars.set_uniform(
+        cx,
+        live_id!(shiny_gates2),
+        &[
+            if shiny.dynamic_sun { 1.0 } else { 0.0 },
+            shiny.sun.shadow_alpha,
+            mat_uv_scale,
+            mat_uv_wide,
+        ],
+    );
+    let sun = &shiny.sun;
+    draw_vars.set_uniform(cx, live_id!(sun_dir), &[sun.dir.x, sun.dir.y, sun.dir.z]);
+    draw_vars.set_uniform(cx, live_id!(sun_color), &[sun.color.x, sun.color.y, sun.color.z]);
+    draw_vars.set_uniform(cx, live_id!(sun_sky), &[sun.sky.x, sun.sky.y, sun.sky.z]);
+    draw_vars.set_texture(1, terrain_tex);
+}
+
+/// Instanced POI symbols: the registry mesh is bound as the geometry (one
+/// GPU copy per slot, see `MapView::icon_mesh_geometries`), every placement
+/// is one instance of `DrawMapIcon`'s per-instance fields. The shader is
+/// `DrawMapVector`'s icon path (see the script twin).
+#[derive(Script, ScriptHook, Debug)]
+#[repr(C)]
+pub struct DrawMapIcon {
+    #[rust(ShinyConfig::default())]
+    pub shiny: ShinyConfig,
+    #[deref]
+    pub draw_vars: DrawVars,
+    #[live]
+    pub draw_clip: Vec4f,
+    #[live(1.0)]
+    pub depth_clip: f32,
+    #[live(0.0)]
+    pub draw_depth: f32,
+    #[live]
+    pub inst_anchor: Vec2f,
+    #[live]
+    pub inst_offset: Vec2f,
+    #[live(1.0)]
+    pub inst_scale: f32,
+    #[live]
+    pub inst_param4: f32,
+    #[live]
+    pub inst_zbias: f32,
+    #[live]
+    pub inst_color: f32,
+}
+
+impl DrawMapIcon {
+    /// Draw every instance group of one tile: one draw call per symbol mesh.
+    fn draw_groups(
+        &mut self,
+        cx: &mut Cx2d,
+        groups: &[IconInstances],
+        mesh_geometries: &mut HashMap<u16, Geometry>,
+        uniforms: &MapDrawUniforms,
+        terrain_tex: &Texture,
+        pass_depth: f32,
+    ) {
+        if self.draw_vars.draw_shader_id.is_none() {
+            return;
+        }
+        self.draw_depth = pass_depth;
+        for group in groups {
+            if group.data.is_empty() {
+                continue;
+            }
+            let Some(mesh) = icon_mesh_by_slot(group.mesh_slot) else {
+                continue;
+            };
+            let geometry = mesh_geometries.entry(group.mesh_slot).or_insert_with(|| {
+                let geometry = Geometry::new(cx.cx);
+                geometry.update(
+                    cx.cx,
+                    mesh.indices.clone(),
+                    crate::makepad_draw::vector::pack_icon_vertices(&mesh.verts),
+                );
+                geometry
+            });
+            stamp_map_uniforms(&mut self.draw_vars, cx.cx, uniforms, &self.shiny, terrain_tex);
+            self.draw_vars.geometry_id = Some(geometry.geometry_id());
+            cx.new_draw_call(&self.draw_vars);
+            let Some(mut instances) = cx.begin_many_aligned_instances(&self.draw_vars) else {
+                continue;
+            };
+            for record in group.data.chunks_exact(ICON_INSTANCE_FLOATS) {
+                self.inst_anchor = vec2(record[0], record[1]);
+                self.inst_offset = vec2(record[2], record[3]);
+                self.inst_scale = record[4];
+                self.inst_param4 = record[5];
+                self.inst_zbias = record[6];
+                self.inst_color = record[7];
+                instances.instances.extend_from_slice(self.draw_vars.as_slice());
+            }
+            let new_area = cx.end_many_instances(instances);
+            self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
+        }
+    }
+}
+
+
+/// Instanced building walls: the shared unit quad is the geometry, every
+/// footprint edge is one instance (see `WALL_INSTANCE_FLOATS`); the shader is
+/// `DrawMapWall` in the script block.
+#[derive(Script, ScriptHook, Debug)]
+#[repr(C)]
+pub struct DrawMapWall {
+    #[rust(ShinyConfig::default())]
+    pub shiny: ShinyConfig,
+    #[deref]
+    pub draw_vars: DrawVars,
+    #[live]
+    pub draw_clip: Vec4f,
+    #[live(1.0)]
+    pub depth_clip: f32,
+    #[live(0.0)]
+    pub draw_depth: f32,
+    #[live]
+    pub inst_a: Vec2f,
+    #[live]
+    pub inst_b: Vec2f,
+    /// x = base metres, y = top metres.
+    #[live]
+    pub inst_heights: Vec2f,
+    #[live]
+    pub inst_normal: Vec2f,
+    #[live(1.0)]
+    pub inst_ao: f32,
+    #[live]
+    pub inst_color: f32,
+    #[live]
+    pub inst_zbias: f32,
+}
+
+impl DrawMapWall {
+    /// Draw one tile's wall edges as a single instanced call.
+    fn draw_edges(
+        &mut self,
+        cx: &mut Cx2d,
+        records: &[f32],
+        uniforms: &MapDrawUniforms,
+        terrain_tex: &Texture,
+        pass_depth: f32,
+    ) {
+        if records.is_empty() || self.draw_vars.draw_shader_id.is_none() {
+            return;
+        }
+        self.draw_depth = pass_depth;
+        stamp_map_uniforms(&mut self.draw_vars, cx.cx, uniforms, &self.shiny, terrain_tex);
+        cx.new_draw_call(&self.draw_vars);
+        let Some(mut instances) = cx.begin_many_aligned_instances(&self.draw_vars) else {
+            return;
+        };
+        for record in records.chunks_exact(WALL_INSTANCE_FLOATS) {
+            self.inst_a = vec2(record[0], record[1]);
+            self.inst_b = vec2(record[2], record[3]);
+            self.inst_heights = vec2(record[4], record[5]);
+            self.inst_normal = vec2(record[6], record[7]);
+            self.inst_ao = record[8];
+            self.inst_color = record[9];
+            self.inst_zbias = record[10];
+            instances.instances.extend_from_slice(self.draw_vars.as_slice());
+        }
+        let new_area = cx.end_many_instances(instances);
+        self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
     }
 }
 
@@ -1513,6 +2026,16 @@ pub struct MapView {
     #[redraw]
     #[live]
     draw_map: DrawMapVector,
+    #[redraw]
+    #[live]
+    draw_icon: DrawMapIcon,
+    #[redraw]
+    #[live]
+    draw_wall: DrawMapWall,
+    /// One GPU copy of every symbol mesh the resident tiles reference,
+    /// keyed by registry slot; instanced draws bind these.
+    #[rust]
+    icon_mesh_geometries: HashMap<u16, Geometry>,
     #[redraw]
     #[live]
     draw_label: DrawRotatedText,
@@ -1594,6 +2117,24 @@ pub struct MapView {
     /// True when the metadata read ran while the archive file existed.
     #[rust]
     local_source_zoom_range_checked: bool,
+    #[rust]
+    tile_source_config: Option<TileSourceConfig>,
+    #[rust]
+    base_archive: Option<MapTileArchive>,
+    #[rust]
+    detail_archive: Option<MapTileArchive>,
+    #[rust]
+    archive_generation: u64,
+    #[rust]
+    archive_pending_tiles: HashMap<TileKey, ArchiveTileParts>,
+    #[rust]
+    archive_worker_pool: Option<ArchiveWorkerPool>,
+    #[cfg(not(target_arch = "wasm32"))]
+    #[rust]
+    archive_watch_rx: ToUIReceiver<ArchiveWatchResult>,
+    #[cfg(not(target_arch = "wasm32"))]
+    #[rust]
+    archive_watch_in_flight: bool,
 
     #[rust]
     center_norm: Vec2d,
@@ -1623,12 +2164,10 @@ pub struct MapView {
     tile_worker_rx: ToUIReceiver<TileWorkerMessage>,
     #[rust]
     tile_thread_pool: Option<TagThreadPool<TileKey>>,
-    /// Last (request zoom, bucket, 3D mode, epoch) the worker queue was
-    /// pruned for — obsolete queued jobs are dropped when this changes.
     #[rust]
-    last_pool_prune: Option<(u32, u32, bool, u64)>,
+    local_requested_tiles: HashMap<TileKey, f64>,
     #[rust]
-    local_requested_tiles: HashMap<TileKey, u64>,
+    archive_request_watchdog_timer: Timer,
     #[rust]
     /// Tiles the archive reported absent, stamped with the frame we learned
     /// it — re-checked after MISSING_RECHECK_FRAMES so a rebuilt/replaced
@@ -1731,8 +2270,10 @@ pub struct MapView {
     zoom_settle_timer: Timer,
     #[rust]
     tile_fade_timer: Timer,
+    #[cfg(not(target_arch = "wasm32"))]
     #[rust]
     archive_watch_timer: Timer,
+    #[cfg(not(target_arch = "wasm32"))]
     #[rust]
     archive_watch_mtime: Option<std::time::SystemTime>,
     // Label placement cache: while panning at the same zoom over the same
@@ -1875,6 +2416,8 @@ impl ScriptHook for MapView {
             return;
         }
 
+        super::warm_shared_registries();
+
         let min_zoom = self.min_zoom.max(0.0);
         let max_zoom = self.max_zoom.max(min_zoom);
         self.zoom = self.zoom.clamp(min_zoom, max_zoom);
@@ -1913,7 +2456,20 @@ impl ScriptHook for MapView {
 
 impl Widget for MapView {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if self.use_local_mbtiles {
+            self.ensure_archive_source(cx);
+            self.handle_archive_events(cx, event);
+        }
         self.handle_tile_worker_messages(cx);
+        if self
+            .archive_request_watchdog_timer
+            .is_event(event)
+            .is_some()
+        {
+            self.archive_request_watchdog_timer = Timer::empty();
+            self.expire_archive_requests(cx);
+        }
+        self.sync_archive_request_watchdog(cx);
         self.widget_match_event(cx, event, scope);
 
         if self.wind_timer.is_event(event).is_some() && self.wind_field.is_some() {
@@ -1941,36 +2497,73 @@ impl Widget for MapView {
             self.retune_rain_timer(cx);
             self.redraw(cx);
         }
-        // Growing-archive watch: the world spiral atomically swaps the
-        // shard dir as cells weave in. Workers reopen per batch already;
-        // here we notice the new index, drop Failed placeholders and let
-        // the visible loop re-request — the map grows live, no restart.
-        if self.archive_watch_timer.is_event(event).is_some()
-            || (self.archive_watch_timer.is_empty() && self.use_local_mbtiles)
-        {
-            let path = std::path::PathBuf::from(self.active_mbtiles_path());
-            let probe = if makepad_mbtile_reader::TileArchiveReader::is_mkmap_path(&path) {
-                path.join("root.mkidx")
-            } else {
-                path
-            };
-            let mtime = std::fs::metadata(&probe).and_then(|m| m.modified()).ok();
-            if mtime != self.archive_watch_mtime {
-                let had = self.archive_watch_mtime.is_some() || mtime.is_some();
-                self.archive_watch_mtime = mtime;
+        while let Ok(watch) = self.archive_watch_rx.try_recv() {
+            self.archive_watch_in_flight = false;
+            if !self.is_local_archive() || watch.path != self.active_mbtiles_path() {
+                continue;
+            }
+            if let Some(range) = watch
+                .zoom_range
+                .filter(|(min, max)| min <= max && *max <= 30)
+            {
+                self.local_source_zoom_range = Some(range);
+                self.local_source_zoom_range_checked = true;
+            }
+            if watch.mtime != self.archive_watch_mtime {
+                let had = self.archive_watch_mtime.is_some() || watch.mtime.is_some();
+                self.archive_watch_mtime = watch.mtime;
                 if had {
+                    if let Some(config) = self.tile_source_config.clone() {
+                        self.install_archive_source(cx, config);
+                    }
+                    self.local_requested_tiles.clear();
                     let before = self.tiles.len();
-                    self.tiles.retain(|_, entry| {
-                        !matches!(entry.state, TileLoadState::Failed { .. })
-                    });
+                    self.tiles
+                        .retain(|_, entry| matches!(entry.state, TileLoadState::Ready { .. }));
                     if self.tiles.len() != before {
                         log!(
-                            "MapView: archive changed — cleared {} failed tiles for reload",
+                            "MapView: archive changed — cleared {} pending/failed tiles for reload",
                             before - self.tiles.len()
                         );
                     }
                     self.redraw(cx);
                 }
+            }
+        }
+        // Growing-archive watch: both directory probing and metadata stay on
+        // the persistent archive pool; the UI only consumes the timestamp.
+        if self.is_local_archive()
+            && (self.archive_watch_timer.is_event(event).is_some()
+                || (self.archive_watch_timer.is_empty() && self.use_local_mbtiles))
+        {
+            if !self.archive_watch_in_flight {
+                self.archive_watch_in_flight = true;
+                let path = self.active_mbtiles_path().to_string();
+                let sender = self.archive_watch_rx.sender();
+                let workers = self.ensure_archive_worker_pool(cx);
+                workers.execute_rev(next_archive_task_token(), move |_| {
+                    let archive_path = std::path::PathBuf::from(&path);
+                    let probe = if is_mkmap_path_shape(&path) {
+                        if archive_path.file_name().is_some_and(|name| name == "root.mkidx") {
+                            archive_path
+                        } else {
+                            archive_path.join("root.mkidx")
+                        }
+                    } else {
+                        archive_path
+                    };
+                    let mtime = std::fs::metadata(probe).and_then(|m| m.modified()).ok();
+                    let zoom_range = makepad_mbtile_reader::TileArchiveReader::open(
+                        Path::new(&path),
+                    )
+                    .ok()
+                    .and_then(|mut reader| reader.validated_zoom_range());
+                    let _ = sender.send(ArchiveWatchResult {
+                        path,
+                        mtime,
+                        zoom_range,
+                    });
+                });
             }
             self.archive_watch_timer = cx.start_timeout(5.0);
         }
@@ -2299,6 +2892,8 @@ impl Widget for MapView {
         let terrain_fill_lift = if self.render_bucket() >= 14 { 1.0f32 } else { 0.0 };
         // shiny.md gates + sun for the material dispatch, per active theme.
         self.draw_map.shiny = self.active_style().shiny;
+        self.draw_icon.shiny = self.draw_map.shiny;
+        self.draw_wall.shiny = self.draw_map.shiny;
         // Road/symbol clearance over the terrain surface, scaled by the
         // relief actually in view: the margin exists to beat interpolation
         // twist (which grows with relief), but a flat-city boost lets
@@ -2381,6 +2976,7 @@ impl Widget for MapView {
                     fringe_geometry,
                     fill_3d_geometry,
                     wall_geometry,
+                    wall_instances,
                     tree_geometry,
                     tree_cross_geometry,
                     ..
@@ -2574,6 +3170,35 @@ impl Widget for MapView {
                             terrain_fill_lift,
                         );
                     }
+                    // Instanced walls follow the wall band's LOD gate.
+                    if lod > 0.55 && !wall_instances.is_empty() {
+                        self.draw_wall.draw_edges(
+                            cx,
+                            wall_instances,
+                            &MapDrawUniforms {
+                                map_scale,
+                                map_offset: screen_offset,
+                                fade: fade_alpha,
+                                width_correction: stroke_width_correction(entry.bucket, view_zoom),
+                                view_rot: view_rot_uniform,
+                                rot_pivot: rot_pivot_uniform,
+                                tilt_params: tilt_uniform,
+                                icon_zoom: view_zoom as f32,
+                                height_grow: lod
+                                    * if entry.fade.as_ref().is_some_and(|fade| fade.grow_heights) {
+                                        fade_alpha
+                                    } else {
+                                        1.0
+                                    },
+                                terrain_org,
+                                terrain_span,
+                                terrain_uvfit,
+                                terrain_fill_lift,
+                            },
+                            &terrain_tex,
+                            0.0,
+                        );
+                    }
                 }
                 // AA fringes ride the casing pass, but only where 1px edge
                 // AA is visible: at strong tilt the tilt-shift blur and
@@ -2634,6 +3259,8 @@ impl Widget for MapView {
                     stroke_geometry,
                     icon_geometry,
                     icon_high_geometry,
+                    icon_instances,
+                    icon_high_instances,
                     ..
                 } = &entry.state
                 else {
@@ -2709,6 +3336,67 @@ impl Widget for MapView {
                                 0.0
                             },
                             terrain_fill_lift,
+                        );
+                    }
+                }
+                // Instanced POI symbols ride the same pass as the vertex-baked
+                // decals: the outgoing generation first (cross-fade), then the
+                // resident groups.
+                if pass >= 3 {
+                    let pass_depth = if tilt_rad > 1e-4 {
+                        pass_boost + (pass - 1) as f32 * 0.02
+                    } else {
+                        0.0
+                    };
+                    let mut uniforms = MapDrawUniforms {
+                        map_scale,
+                        map_offset: screen_offset,
+                        fade: 1.0,
+                        width_correction: stroke_width_correction(entry.bucket, view_zoom),
+                        view_rot: view_rot_uniform,
+                        rot_pivot: rot_pivot_uniform,
+                        tilt_params: tilt_uniform,
+                        icon_zoom: view_zoom as f32,
+                        height_grow: 1.0,
+                        terrain_org,
+                        terrain_span,
+                        terrain_uvfit,
+                        terrain_fill_lift,
+                    };
+                    if pass == 3 {
+                        if let Some(fade) = &entry.fade {
+                            if !fade.icon_instances.is_empty() {
+                                uniforms.width_correction =
+                                    stroke_width_correction(fade.bucket, view_zoom);
+                                self.draw_icon.draw_groups(
+                                    cx,
+                                    &fade.icon_instances,
+                                    &mut self.icon_mesh_geometries,
+                                    &uniforms,
+                                    &terrain_tex,
+                                    pass_depth,
+                                );
+                                uniforms.width_correction =
+                                    stroke_width_correction(entry.bucket, view_zoom);
+                            }
+                        }
+                    }
+                    let groups = if pass == 3 { icon_instances } else { icon_high_instances };
+                    if !groups.is_empty() {
+                        uniforms.fade = fade_alpha;
+                        uniforms.height_grow =
+                            if entry.fade.as_ref().is_some_and(|fade| fade.grow_heights) {
+                                fade_alpha
+                            } else {
+                                1.0
+                            };
+                        self.draw_icon.draw_groups(
+                            cx,
+                            groups,
+                            &mut self.icon_mesh_geometries,
+                            &uniforms,
+                            &terrain_tex,
+                            pass_depth,
                         );
                     }
                 }
@@ -3031,6 +3719,91 @@ impl WidgetMatchEvent for MapView {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+impl MapView {
+    fn handle_archive_watch(&mut self, cx: &mut Cx, event: &Event) {
+        while let Ok(watch) = self.archive_watch_rx.try_recv() {
+            self.archive_watch_in_flight = false;
+            if !self.is_local_archive() || watch.path != self.active_mbtiles_path() {
+                continue;
+            }
+            if let Some(range) = watch.zoom_range {
+                self.local_source_zoom_range = Some(range);
+                self.local_source_zoom_range_checked = true;
+            }
+            if watch.mtime != self.archive_watch_mtime {
+                let had = self.archive_watch_mtime.is_some() || watch.mtime.is_some();
+                self.archive_watch_mtime = watch.mtime;
+                if had {
+                    if let Some(config) = self.tile_source_config.clone() {
+                        self.install_archive_source(cx, config);
+                    }
+                    self.local_requested_tiles.clear();
+                    let before = self.tiles.len();
+                    self.tiles
+                        .retain(|_, entry| matches!(entry.state, TileLoadState::Ready { .. }));
+                    if self.tiles.len() != before {
+                        log!(
+                            "MapView: archive changed — cleared {} pending/failed tiles for reload",
+                            before - self.tiles.len()
+                        );
+                    }
+                    self.redraw(cx);
+                }
+            }
+        }
+
+        // Growing-archive watch: both directory probing and metadata stay on
+        // the persistent archive pool; the UI only consumes the timestamp.
+        if self.is_local_archive()
+            && (self.archive_watch_timer.is_event(event).is_some()
+                || (self.archive_watch_timer.is_empty() && self.use_local_mbtiles))
+        {
+            if !self.archive_watch_in_flight {
+                self.archive_watch_in_flight = true;
+                let path = self.active_mbtiles_path().to_string();
+                let sender = self.archive_watch_rx.sender();
+                let workers = self.ensure_archive_worker_pool(cx);
+                workers.execute_rev(next_archive_task_token(), move |_| {
+                    let archive_path = std::path::PathBuf::from(&path);
+                    let probe = if is_mkmap_path_shape(&path) {
+                        if archive_path.file_name().is_some_and(|name| name == "root.mkidx") {
+                            archive_path
+                        } else {
+                            archive_path.join("root.mkidx")
+                        }
+                    } else {
+                        archive_path
+                    };
+                    let mtime = std::fs::metadata(probe).and_then(|m| m.modified()).ok();
+                    let zoom_range = makepad_mbtile_reader::TileArchiveReader::open(
+                        Path::new(&path),
+                    )
+                    .ok()
+                    .and_then(|mut reader| reader.get_metadata().ok())
+                    .and_then(|metadata| {
+                        Some((
+                            metadata.get("minzoom")?.parse().ok()?,
+                            metadata.get("maxzoom")?.parse().ok()?,
+                        ))
+                    });
+                    let _ = sender.send(ArchiveWatchResult {
+                        path,
+                        mtime,
+                        zoom_range,
+                    });
+                });
+            }
+            self.archive_watch_timer = cx.start_timeout(5.0);
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl MapView {
+    fn handle_archive_watch(&mut self, _cx: &mut Cx, _event: &Event) {}
+}
+
 // --- MapView impl ---
 
 impl MapView {
@@ -3180,6 +3953,7 @@ impl MapView {
             old_road_core_cached,
             old_road_icon_indices,
             old_road_icon_vertices,
+            old_icon_instances,
         ) = match old_entry {
             Some(TileEntry {
                 state:
@@ -3188,6 +3962,7 @@ impl MapView {
                         casing_geometry,
                         stroke_geometry,
                         icon_geometry,
+                        icon_instances,
                 feature_count,
                 ..
             },
@@ -3210,6 +3985,7 @@ impl MapView {
                 road_core_cached,
                 road_icon_indices,
                 road_icon_vertices,
+                icon_instances,
             ),
             _ => (
                 buffers.render_zoom,
@@ -3221,6 +3997,7 @@ impl MapView {
                 0,
                 0,
                 false,
+                Vec::new(),
                 Vec::new(),
                 Vec::new(),
             ),
@@ -3376,6 +4153,7 @@ impl MapView {
                 .any(|entry| entry.baked_3d && matches!(entry.state, TileLoadState::Ready { .. }));
         let fade = if old_fill.is_some()
             || old_icon.is_some()
+            || !old_icon_instances.is_empty()
             || fade_casing_geometry.is_some()
             || fade_stroke_geometry.is_some()
         {
@@ -3390,6 +4168,7 @@ impl MapView {
                 casing_geometry: fade_casing_geometry,
                 stroke_geometry: fade_stroke_geometry,
                 icon_geometry: old_icon,
+                icon_instances: old_icon_instances,
             })
         } else {
             Some(TileFade {
@@ -3401,6 +4180,7 @@ impl MapView {
                 casing_geometry: None,
                 stroke_geometry: None,
                 icon_geometry: None,
+                icon_instances: Vec::new(),
             })
         };
         // In an established 3D scene tiles snap in whole: any fade of
@@ -3419,9 +4199,12 @@ impl MapView {
                     stroke_geometry,
                     icon_geometry,
                     icon_high_geometry,
+                    icon_instances: buffers.icon_instances,
+                    icon_high_instances: buffers.icon_high_instances,
                     fringe_geometry,
                     fill_3d_geometry,
                     wall_geometry,
+                    wall_instances: buffers.wall_instances,
                     tree_geometry,
                     tree_cross_geometry,
                     feature_count: if reuse_road_core {
@@ -3645,58 +4428,330 @@ impl MapView {
         }
     }
 
-    fn request_visible_tiles_from_local_source(&mut self, _cx: &mut Cx) {
+    fn ensure_archive_source(&mut self, cx: &mut Cx) {
+        if self.tile_source_config.is_some() {
+            return;
+        }
+        let config = self
+            .tile_source_config
+            .clone()
+            .unwrap_or_else(|| TileSourceConfig::LocalArchive {
+                mbtiles_path: self.active_mbtiles_path().to_string(),
+                detail_mbtiles_path: self.detail_mbtiles_path.clone(),
+                overlay_mbtiles_paths: self.overlay_mbtiles_paths.clone(),
+                bridge_dz_path: self.bridge_dz_mbtiles_path.clone(),
+            });
+        self.install_archive_source(cx, config);
+    }
+
+    fn ensure_archive_worker_pool(&mut self, cx: &mut Cx) -> ArchiveWorkerPool {
+        if self.archive_worker_pool.is_none() {
+            self.archive_worker_pool = Some(new_archive_worker_pool(cx));
+        }
+        self.archive_worker_pool.as_ref().unwrap().clone()
+    }
+
+    fn install_archive_source(&mut self, cx: &mut Cx, config: TileSourceConfig) {
+        self.archive_generation = self.archive_generation.wrapping_add(1).max(1);
+        self.style_epoch = self.style_epoch.wrapping_add(1).max(1);
+        if let Some(archive) = self.base_archive.as_mut() {
+            archive.reset_generation(cx, self.archive_generation);
+        }
+        if let Some(archive) = self.detail_archive.as_mut() {
+            archive.reset_generation(cx, self.archive_generation);
+        }
+        let workers = self.ensure_archive_worker_pool(cx);
+        match &config {
+            TileSourceConfig::LocalArchive {
+                mbtiles_path,
+                detail_mbtiles_path,
+                overlay_mbtiles_paths,
+                bridge_dz_path,
+                ..
+            } => {
+                self.mbtiles_path = mbtiles_path.clone();
+                self.detail_mbtiles_path = detail_mbtiles_path.clone();
+                self.overlay_mbtiles_paths = overlay_mbtiles_paths.clone();
+                self.bridge_dz_mbtiles_path = bridge_dz_path.clone();
+                self.base_archive = is_mkmap_path_shape(mbtiles_path)
+                    .then(|| MapTileArchive::file(mbtiles_path, workers.clone()));
+                self.detail_archive = needs_separate_detail_archive(&config)
+                    .then(|| MapTileArchive::file(detail_mbtiles_path, workers.clone()));
+                self.use_local_mbtiles = true;
+                self.use_network = false;
+            }
+            TileSourceConfig::HttpArchive {
+                root_url,
+                detail_root_url,
+                overlay_mbtiles_paths,
+                bridge_dz_path,
+            } => {
+                self.mbtiles_path.clear();
+                self.detail_mbtiles_path = detail_root_url.clone();
+                self.overlay_mbtiles_paths = overlay_mbtiles_paths.clone();
+                self.bridge_dz_mbtiles_path = bridge_dz_path.clone();
+                self.base_archive = Some(MapTileArchive::http(root_url, workers.clone()));
+                self.detail_archive = needs_separate_detail_archive(&config)
+                    .then(|| MapTileArchive::http(detail_root_url, workers));
+                self.use_local_mbtiles = true;
+                self.use_network = false;
+            }
+        }
+        self.tile_source_config = Some(config);
+        self.archive_pending_tiles.clear();
+        self.pending_ready_tiles.clear();
+        self.local_source_zoom_range = None;
+        self.local_source_zoom_range_path = None;
+        self.local_source_zoom_range_checked = false;
+    }
+
+    fn is_local_archive(&self) -> bool {
+        matches!(self.tile_source_config, Some(TileSourceConfig::LocalArchive { .. }))
+    }
+
+    fn handle_archive_events(&mut self, cx: &mut Cx, event: &Event) {
+        let base = self
+            .base_archive
+            .as_mut()
+            .map(|archive| archive.drain(cx, event))
+            .unwrap_or_default();
+        let detail = self
+            .detail_archive
+            .as_mut()
+            .map(|archive| archive.drain(cx, event))
+            .unwrap_or_default();
+
+        if let Some(range) = self.base_archive.as_ref().and_then(MapTileArchive::zoom_range) {
+            if self.local_source_zoom_range != Some(range) {
+                self.local_source_zoom_range = Some(range);
+                self.local_source_zoom_range_checked = true;
+                self.redraw(cx);
+            }
+        }
+        for tile in base {
+            if tile.generation != self.archive_generation {
+                continue;
+            }
+            if let Some(parts) = self.archive_pending_tiles.get_mut(&tile.key) {
+                parts.base = Some(match tile.result {
+                    TileBytesResult::Bytes(bytes) => Ok(Some(bytes)),
+                    TileBytesResult::Missing => Ok(None),
+                    TileBytesResult::Error(error) => Err(error),
+                });
+            }
+        }
+        for tile in detail {
+            if tile.generation != self.archive_generation {
+                continue;
+            }
+            if let Some(parts) = self.archive_pending_tiles.get_mut(&tile.key) {
+                parts.detail = Some(match tile.result {
+                    TileBytesResult::Bytes(bytes) => Ok(Some(bytes)),
+                    TileBytesResult::Missing => Ok(None),
+                    TileBytesResult::Error(error) => Err(error),
+                });
+            }
+        }
+
+        let ready: Vec<TileKey> = self
+            .archive_pending_tiles
+            .iter()
+            .filter(|(_, parts)| {
+                parts.base.is_some() && (!parts.detail_required || parts.detail.is_some())
+            })
+            .map(|(key, _)| *key)
+            .collect();
+        for key in ready {
+            let parts = self.archive_pending_tiles.remove(&key).unwrap();
+            if parts.generation != self.archive_generation {
+                continue;
+            }
+            let base = match parts.base.unwrap() {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    self.local_requested_tiles.remove(&key);
+                    self.mark_tile_failed(key, &error);
+                    self.update_status_text();
+                    self.redraw(cx);
+                    continue;
+                }
+            };
+            let detail = if parts.reuse_base_as_detail {
+                base.clone()
+            } else {
+                parts.detail.and_then(Result::ok).flatten()
+            };
+            self.dispatch_archive_tile_build(cx, key, base, detail);
+        }
+    }
+
+    fn dispatch_archive_tile_build(
+        &mut self,
+        cx: &mut Cx,
+        key: TileKey,
+        base: Option<Arc<[u8]>>,
+        detail: Option<Arc<[u8]>>,
+    ) {
+        self.ensure_tile_thread_pool(cx);
+        let pool = self.tile_thread_pool.as_ref().unwrap();
+        let sender = self.tile_worker_rx.sender();
+        let style_epoch = self.style_epoch;
+        let requested = vec![key];
+        let theme_style = self.active_style().clone();
+        let bucket = self.render_bucket();
+        let buildings_3d = self.buildings_3d && self.tilt > 0.0;
+        let build_road_core = !self.tiles.get(&key).is_some_and(|entry| {
+            matches!(entry.state, TileLoadState::Ready { .. })
+                && entry.bucket == bucket
+                && entry.road_core_cached
+        });
+        let (detail_path, bridge_dz_path, overlay_paths) = match self.tile_source_config.as_ref() {
+            Some(TileSourceConfig::LocalArchive {
+                detail_mbtiles_path,
+                bridge_dz_path,
+                overlay_mbtiles_paths,
+                ..
+            }) => (detail_mbtiles_path, bridge_dz_path, overlay_mbtiles_paths),
+            Some(TileSourceConfig::HttpArchive {
+                detail_root_url,
+                bridge_dz_path,
+                overlay_mbtiles_paths,
+                ..
+            }) => (detail_root_url, bridge_dz_path, overlay_mbtiles_paths),
+            None => (&self.detail_mbtiles_path, &self.bridge_dz_mbtiles_path, &self.overlay_mbtiles_paths),
+        };
+        let detail_path = (!detail_path.is_empty() && !is_mkmap_path_shape(detail_path))
+            .then_some(detail_path.clone());
+        let bridge_dz_path = (!bridge_dz_path.is_empty()).then_some(bridge_dz_path.clone());
+        let overlay_paths = overlay_paths
+            .split(';')
+            .filter(|path| !path.trim().is_empty())
+            .map(|path| path.trim().to_string())
+            .collect::<Vec<_>>();
+        pool.execute_rev(key, move |_| {
+            let result = build_local_tile_from_archive_bytes(
+                key,
+                base,
+                detail,
+                detail_path.as_deref().map(Path::new),
+                bridge_dz_path.as_deref().map(Path::new),
+                &overlay_paths,
+                &theme_style,
+                bucket,
+                buildings_3d,
+                build_road_core,
+            );
+            match result {
+                Ok(tile) => {
+                    let _ = sender.send(TileWorkerMessage::LocalBatchLoaded {
+                        style_epoch,
+                        requested,
+                        loaded: tile.into_iter().collect(),
+                        failed: Vec::new(),
+                    });
+                }
+                Err(error) => {
+                    let _ = sender.send(TileWorkerMessage::LocalBatchLoaded {
+                        style_epoch,
+                        requested: requested.clone(),
+                        loaded: Vec::new(),
+                        failed: requested,
+                    });
+                    log!("MapView: archive tile build failed: {}", error);
+                }
+            }
+        });
+    }
+
+    fn cancel_archive_tile(&mut self, cx: &mut Cx, key: TileKey) {
+        self.archive_pending_tiles.remove(&key);
+        if let Some(archive) = self.base_archive.as_mut() {
+            archive.cancel_tile(cx, key);
+        }
+        if let Some(archive) = self.detail_archive.as_mut() {
+            archive.cancel_tile(cx, key);
+        }
+    }
+
+    fn dispatch_legacy_tile_builds(&mut self, cx: &mut Cx, keys: Vec<TileKey>, bucket: u32) {
+        self.ensure_tile_thread_pool(cx);
+        let pool = self.tile_thread_pool.as_ref().unwrap();
+        let style_epoch = self.style_epoch;
+        let active_path = self.active_mbtiles_path().to_string();
+        for key in keys {
+            let sender = self.tile_worker_rx.sender();
+            let requested = vec![key];
+            let mbtiles_path = active_path.clone();
+            let detail_path = self.detail_mbtiles_path.clone();
+            let bridge_dz_path = self.bridge_dz_mbtiles_path.clone();
+            let overlay_paths = self
+                .overlay_mbtiles_paths
+                .split(';')
+                .filter(|path| !path.trim().is_empty())
+                .map(|path| path.trim().to_string())
+                .collect::<Vec<_>>();
+            let buildings_3d = self.buildings_3d && self.tilt > 0.0;
+            let theme_style = self.active_style().clone();
+            let build_road_core = !self.tiles.get(&key).is_some_and(|entry| {
+                matches!(entry.state, TileLoadState::Ready { .. })
+                    && entry.bucket == bucket
+                    && entry.road_core_cached
+            });
+            pool.execute_rev(key, move |_| {
+                let detail_path = (!detail_path.is_empty()).then_some(detail_path);
+                let bridge_dz_path = (!bridge_dz_path.is_empty()).then_some(bridge_dz_path);
+                match load_local_tile_batch(
+                    Path::new(&mbtiles_path),
+                    detail_path.as_deref().map(Path::new),
+                    bridge_dz_path.as_deref().map(Path::new),
+                    &overlay_paths,
+                    &requested,
+                    &theme_style,
+                    bucket,
+                    buildings_3d,
+                    build_road_core,
+                ) {
+                    Ok((loaded, failed)) => {
+                        let _ = sender.send(TileWorkerMessage::LocalBatchLoaded {
+                            style_epoch,
+                            requested,
+                            loaded,
+                            failed,
+                        });
+                    }
+                    Err(error) => {
+                        let _ = sender.send(TileWorkerMessage::LocalBatchFailed {
+                            style_epoch,
+                            requested,
+                            error,
+                        });
+                    }
+                }
+            });
+        }
+    }
+
+    fn request_visible_tiles_from_local_source(&mut self, cx: &mut Cx) {
         if !self.use_local_mbtiles {
             return;
         }
 
-        let active_path = self.active_mbtiles_path().to_string();
-        let mbtiles_path = Path::new(&active_path);
-        if !mbtiles_path.exists() && !self.local_source_missing_logged {
-            log!("MapView: local mbtiles source missing at {} — serving disk tile cache only", active_path);
-            self.local_source_missing_logged = true;
-        }
+        self.ensure_archive_source(cx);
 
         let bucket = self.render_bucket();
-        // OBSOLETE-WORK CANCELLATION: when the request context changes
-        // (zoom gesture reversed, bucket advanced, 2D/3D flip, restyle),
-        // queued builds for the dead context would hold every pool slot
-        // ahead of current work — running jobs finish, but nothing stale
-        // may START. Drop queued jobs for keys outside the current visible
-        // set and free their in-flight slots.
+        // OBSOLETE-WORK CANCELLATION runs on every viewport pass, including
+        // same-zoom pans. Running jobs finish, but queued jobs outside the
+        // current visible set may not start or retain an in-flight slot.
         let request_zoom = self.request_zoom_level();
-        let prune_sig = (request_zoom, bucket, self.baked_3d_mode, self.style_epoch);
-        if self.last_pool_prune != Some(prune_sig) {
-            self.last_pool_prune = Some(prune_sig);
-            if let Some(pool) = self.tile_thread_pool.as_ref() {
-                let visible: HashSet<TileKey> = self.visible_tiles.iter().copied().collect();
-                let dropped =
-                    pool.retain_queued(|key| key.z == request_zoom && visible.contains(key));
-                for key in dropped {
-                    self.local_requested_tiles.remove(&key);
-                    // A queued-then-dropped placeholder must not linger as
-                    // Loading forever; keep-stale Ready entries stay.
-                    if self
-                        .tiles
-                        .get(&key)
-                        .is_some_and(|entry| matches!(entry.state, TileLoadState::LoadingLocal))
-                    {
-                        self.tiles.remove(&key);
-                    }
-                }
-            }
-        }
-        // Watchdog: a worker job that dies (or a lost message) would leak its
-        // key here forever and choke the 12-slot in-flight cap; time out and
-        // retry, clearing any stuck Loading placeholder so it can re-request.
-        let now = self.frame_counter;
-        let timed_out: Vec<TileKey> = self
-            .local_requested_tiles
-            .iter()
-            .filter(|(_, started)| now.saturating_sub(**started) > 600)
-            .map(|(key, _)| *key)
+        let visible: HashSet<TileKey> = self.visible_tiles.iter().copied().collect();
+        let obsolete_archive: Vec<TileKey> = self
+            .archive_pending_tiles
+            .keys()
+            .filter(|key| key.z != request_zoom || !visible.contains(key))
+            .copied()
             .collect();
-        for key in timed_out {
+        for key in obsolete_archive {
+            self.cancel_archive_tile(cx, key);
             self.local_requested_tiles.remove(&key);
             if self
                 .tiles
@@ -3706,6 +4761,23 @@ impl MapView {
                 self.tiles.remove(&key);
             }
         }
+        if let Some(pool) = self.tile_thread_pool.as_ref() {
+            let dropped = pool.retain_queued(|key| key.z == request_zoom && visible.contains(key));
+            for key in dropped {
+                self.local_requested_tiles.remove(&key);
+                // A queued-then-dropped placeholder must not linger as
+                // Loading forever; keep-stale Ready entries stay.
+                if self
+                    .tiles
+                    .get(&key)
+                    .is_some_and(|entry| matches!(entry.state, TileLoadState::LoadingLocal))
+                {
+                    self.tiles.remove(&key);
+                }
+            }
+        }
+        self.sync_archive_request_watchdog(cx);
+        let now = self.frame_counter;
         // Absent tiles get re-checked after a while: our mbtiles archives
         // are rebuilt in place during development, and a one-off read
         // glitch must not leave a permanent hole.
@@ -3818,7 +4890,8 @@ impl MapView {
         }
 
         for key in &missing {
-            self.local_requested_tiles.insert(*key, self.frame_counter);
+            self.local_requested_tiles
+                .insert(*key, cx.seconds_since_app_start());
             let prev_attempts = self.tiles.get(key).map_or(0, |entry| entry.attempts);
             let keep_stale = self
                 .tiles
@@ -3843,62 +4916,84 @@ impl MapView {
                 );
             }
         }
+        self.sync_archive_request_watchdog(cx);
 
-        let pool = self.tile_thread_pool.as_ref().unwrap();
-        let style_epoch = self.style_epoch;
+        if self.base_archive.is_none() {
+            self.dispatch_legacy_tile_builds(cx, missing, bucket);
+            return;
+        }
+
+        let detail_needed = bucket >= 14;
+        let reuse_base_as_detail = detail_needed
+            && self
+                .tile_source_config
+                .as_ref()
+                .is_some_and(detail_matches_base);
+        let detail_required = detail_needed && self.detail_archive.is_some();
+        let generation = self.archive_generation;
         for key in missing {
-            let build_road_core = !self.tiles.get(&key).is_some_and(|entry| {
-                matches!(entry.state, TileLoadState::Ready { .. })
-                    && entry.bucket == bucket
-                    && entry.road_core_cached
-            });
-            let sender = self.tile_worker_rx.sender();
-            let requested = vec![key];
-            let mbtiles_path = active_path.clone();
-            let detail_path = self.detail_mbtiles_path.clone();
-            let bridge_dz_path = self.bridge_dz_mbtiles_path.clone();
-            let overlay_paths: Vec<String> = self
-                .overlay_mbtiles_paths
-                .split(';')
-                .filter(|p| !p.trim().is_empty())
-                .map(|p| p.trim().to_string())
-                .collect();
-            // Extruded buildings only bake while the camera is tilted; flat
-            // mode keeps the classic 2D building and tree style.
-            let buildings_3d = self.buildings_3d && self.tilt > 0.0;
-            let theme_style = self.active_style().clone();
-            pool.execute_rev(key, move |_tag| {
-                let detail_path = (!detail_path.is_empty()).then_some(detail_path);
-                let bridge_dz_path = (!bridge_dz_path.is_empty()).then_some(bridge_dz_path);
-                let result = load_local_tile_batch(
-                    Path::new(&mbtiles_path),
-                    detail_path.as_deref().map(Path::new),
-                    bridge_dz_path.as_deref().map(Path::new),
-                    &overlay_paths,
-                    &requested,
-                    &theme_style,
-                    bucket,
-                    buildings_3d,
-                    build_road_core,
-                );
-            match result {
-                Ok((loaded, failed)) => {
-                    let _ = sender.send(TileWorkerMessage::LocalBatchLoaded {
-                        style_epoch,
-                        requested,
-                        loaded,
-                        failed,
-                    });
-                }
-                Err(error) => {
-                    let _ = sender.send(TileWorkerMessage::LocalBatchFailed {
-                        style_epoch,
-                        requested,
-                        error,
-                    });
+            self.archive_pending_tiles.insert(
+                key,
+                ArchiveTileParts {
+                    generation,
+                    base: None,
+                    detail: None,
+                    detail_required,
+                    reuse_base_as_detail: reuse_base_as_detail && key.z >= 14,
+                },
+            );
+            if let Some(archive) = self.base_archive.as_mut() {
+                archive.request_tile(cx, key, generation);
+            }
+            if detail_required {
+                if let Some(archive) = self.detail_archive.as_mut() {
+                    archive.request_tile(cx, key, generation);
                 }
             }
-            });
+        }
+        self.sync_archive_request_watchdog(cx);
+    }
+
+    fn expire_archive_requests(&mut self, cx: &mut Cx) {
+        let now = cx.seconds_since_app_start();
+        let timed_out: Vec<TileKey> = self
+            .local_requested_tiles
+            .iter()
+            .filter(|(_, started)| now - **started >= ARCHIVE_REQUEST_TIMEOUT_SECONDS)
+            .map(|(key, _)| *key)
+            .collect();
+        let expired_any = !timed_out.is_empty();
+        for key in timed_out {
+            self.local_requested_tiles.remove(&key);
+            self.cancel_archive_tile(cx, key);
+            if self
+                .tiles
+                .get(&key)
+                .is_some_and(|entry| matches!(entry.state, TileLoadState::LoadingLocal))
+            {
+                self.tiles.remove(&key);
+            }
+        }
+        if expired_any {
+            self.redraw(cx);
+        }
+    }
+
+    fn sync_archive_request_watchdog(&mut self, cx: &mut Cx) {
+        if self.local_requested_tiles.is_empty() {
+            if !self.archive_request_watchdog_timer.is_empty() {
+                cx.stop_timer(self.archive_request_watchdog_timer);
+                self.archive_request_watchdog_timer = Timer::empty();
+            }
+        } else if self.archive_request_watchdog_timer.is_empty() {
+            let now = cx.seconds_since_app_start();
+            let deadline = self
+                .local_requested_tiles
+                .values()
+                .copied()
+                .fold(f64::INFINITY, f64::min)
+                + ARCHIVE_REQUEST_TIMEOUT_SECONDS;
+            self.archive_request_watchdog_timer = cx.start_timeout((deadline - now).max(0.001));
         }
     }
 
@@ -4041,8 +5136,8 @@ impl MapView {
         // tile keys — request_zoom_level clamps to it, and reading it after
         // meant the very first frame requested impossible zoom levels.
         if self.use_local_mbtiles {
-            let active_path = self.active_mbtiles_path().to_string();
-            self.ensure_local_zoom_range(&active_path, Path::new(&active_path));
+            self.ensure_archive_source(cx);
+            self.ensure_local_zoom_range();
         }
         for entry in self.tiles.values_mut() {
             if entry
@@ -4273,6 +5368,7 @@ impl MapView {
                     && fade.casing_geometry.is_none()
                     && fade.stroke_geometry.is_none()
                     && fade.icon_geometry.is_none()
+                    && fade.icon_instances.is_empty()
             })
         })
     }
@@ -5595,49 +6691,27 @@ impl MapView {
             // Honor the archive's declared zoom range: a single-zoom detail
             // archive (minzoom=maxzoom=14) must never be asked for z13/z12 —
             // those rows cannot exist and only produce missing-tile spam.
-            let (min_zoom, max_zoom) = self
+            let range = self
                 .local_source_zoom_range
                 .unwrap_or((LOCAL_MBTILES_MIN_ZOOM, LOCAL_MBTILES_MAX_ZOOM));
-            zoom = zoom.clamp(min_zoom, max_zoom);
+            let (min_zoom, max_zoom) = if range.0 <= range.1 && range.1 <= 30 {
+                range
+            } else {
+                (LOCAL_MBTILES_MIN_ZOOM, LOCAL_MBTILES_MAX_ZOOM)
+            };
+            zoom = zoom.max(min_zoom).min(max_zoom);
         }
         zoom
     }
 
-    /// Read the active archive's declared minzoom/maxzoom once per path.
-    /// Opening is cheap (metadata B-tree only); absent/invalid metadata
-    /// falls back to the compiled-in range.
-    fn ensure_local_zoom_range(&mut self, active_path: &str, mbtiles_path: &Path) {
-        let file_exists = mbtiles_path.is_file()
-            || makepad_mbtile_reader::TileArchiveReader::is_mkmap_path(mbtiles_path);
-        let same_path = self
-            .local_source_zoom_range_path
-            .as_deref()
-            .is_some_and(|p| p == active_path);
-        // Re-attempt only on a path change, or when the archive appears after
-        // a missing-file attempt (e.g. a conversion finishing mid-session).
-        if same_path && (self.local_source_zoom_range_checked || !file_exists) {
-            return;
-        }
-        self.local_source_zoom_range_path = Some(active_path.to_string());
-        self.local_source_zoom_range = None;
-        self.local_source_zoom_range_checked = file_exists;
-        if !file_exists {
-            return;
-        }
-        let range = makepad_mbtile_reader::TileArchiveReader::open(mbtiles_path)
-            .ok()
-            .and_then(|mut reader| reader.get_metadata().ok())
-            .and_then(|metadata| {
-                let min = metadata.get("minzoom")?.trim().parse::<u32>().ok()?;
-                let max = metadata.get("maxzoom")?.trim().parse::<u32>().ok()?;
-                (min <= max).then_some((min, max))
-            });
+    /// Adopt minzoom/maxzoom from the asynchronously parsed root index.
+    fn ensure_local_zoom_range(&mut self) {
+        let range = self.base_archive.as_ref().and_then(MapTileArchive::zoom_range);
         if let Some((min, max)) = range {
             self.local_source_zoom_range = Some((min, max));
             if (min, max) != (LOCAL_MBTILES_MIN_ZOOM, LOCAL_MBTILES_MAX_ZOOM) {
                 log!(
-                    "MapView: {} declares zoom range z{}-z{}; clamping tile requests",
-                    active_path,
+                    "MapView: archive declares zoom range z{}-z{}; clamping tile requests",
                     min,
                     max
                 );
@@ -5956,19 +7030,15 @@ impl MapView {
     /// (First-run bake: the app starts with no archive at all and points
     /// the view at the one it just built.) Empty strings clear the
     /// optional detail/bridge-dz sources.
-    pub fn set_source_paths(&mut self, cx: &mut Cx, base: &str, detail: &str, bridge_dz: &str) {
-        if self.mbtiles_path == base
-            && self.detail_mbtiles_path == detail
-            && self.bridge_dz_mbtiles_path == bridge_dz
-        {
+    pub fn set_source_config(&mut self, cx: &mut Cx, config: TileSourceConfig) {
+        if self.tile_source_config.as_ref() == Some(&config) {
             return;
         }
-        self.mbtiles_path = base.to_string();
-        self.detail_mbtiles_path = detail.to_string();
-        self.bridge_dz_mbtiles_path = bridge_dz.to_string();
+        self.install_archive_source(cx, config);
         self.tiles.clear();
         self.local_requested_tiles.clear();
         self.local_missing_tiles.clear();
+        self.archive_pending_tiles.clear();
         self.local_source_missing_logged = false;
         // Force the zoom-range probe to re-read: the new archive declares
         // its own minzoom/maxzoom (a city extract is not the planet).
@@ -5978,6 +7048,22 @@ impl MapView {
         self.redraw(cx);
     }
 
+    pub fn source_config(&self) -> Option<&TileSourceConfig> {
+        self.tile_source_config.as_ref()
+    }
+
+    pub fn set_source_paths(&mut self, cx: &mut Cx, base: &str, detail: &str, bridge_dz: &str) {
+        self.set_source_config(
+            cx,
+            TileSourceConfig::LocalArchive {
+                mbtiles_path: base.to_string(),
+                detail_mbtiles_path: detail.to_string(),
+                overlay_mbtiles_paths: self.overlay_mbtiles_paths.clone(),
+                bridge_dz_path: bridge_dz.to_string(),
+            },
+        );
+    }
+
     /// Swap the active geodata overlays; stale tiles keep rendering while
     /// rebuilt ones stream in with the new layer set.
     pub fn set_overlay_paths(&mut self, cx: &mut Cx, paths: &str) {
@@ -5985,6 +7071,18 @@ impl MapView {
             return;
         }
         self.overlay_mbtiles_paths = paths.to_string();
+        if let Some(config) = self.tile_source_config.as_mut() {
+            match config {
+                TileSourceConfig::LocalArchive {
+                    overlay_mbtiles_paths,
+                    ..
+                }
+                | TileSourceConfig::HttpArchive {
+                    overlay_mbtiles_paths,
+                    ..
+                } => *overlay_mbtiles_paths = paths.to_string(),
+            }
+        }
         self.restyle_tiles_keep_stale(cx);
     }
 
@@ -6698,6 +7796,12 @@ impl MapViewRef {
         }
     }
 
+    pub fn set_source_config(&self, cx: &mut Cx, config: TileSourceConfig) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_source_config(cx, config);
+        }
+    }
+
     pub fn set_rain_frames(
         &self,
         cx: &mut Cx,
@@ -6834,7 +7938,42 @@ fn label_class_color(color_class: u8, default_color: Vec4f, dark_theme: bool) ->
 
 #[cfg(test)]
 mod tests {
-    use super::{tile_span_with_prefetch, TILE_SIZE};
+    use super::*;
+    use makepad_mbtile_reader::MbtilesWriter;
+
+    fn test_map(cx: &mut Cx) -> MapView {
+        cx.init_cx_os();
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            MapView::script_new_with_default(vm)
+        })
+    }
+
+    fn temp_mbtiles_with_zoom(
+        name: &str,
+        min_zoom: &str,
+        max_zoom: &str,
+        tile_zoom: u8,
+    ) -> std::path::PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::path::PathBuf::from(format!("target/{name}-{nonce}.mbtiles"));
+        std::fs::create_dir_all("target").unwrap();
+        let mut writer = MbtilesWriter::create(&path).unwrap();
+        writer.set_metadata("minzoom", min_zoom);
+        writer.set_metadata("maxzoom", max_zoom);
+        writer
+            .write_tile_encoded(tile_zoom, 0, 0, &[])
+            .unwrap();
+        writer.finish().unwrap();
+        path
+    }
+
+    fn temp_mbtiles(name: &str) -> std::path::PathBuf {
+        temp_mbtiles_with_zoom(name, "0", "0", 0)
+    }
 
     #[test]
     fn tile_span_keeps_exactly_one_prefetch_tile_for_partial_edge_tiles() {
@@ -6847,5 +7986,235 @@ mod tests {
     fn tile_span_keeps_one_prefetch_tile_at_exact_boundaries() {
         let (min, max) = tile_span_with_prefetch(TILE_SIZE, TILE_SIZE * 2.0);
         assert_eq!((min, max), (0, 2));
+    }
+
+    #[test]
+    fn source_shape_recognizes_archive_formats() {
+        assert!(!is_mkmap_path_shape("local/maps/example-base.mbtiles"));
+        assert!(is_mkmap_path_shape("local/maps/world.mkmap"));
+        assert!(is_mkmap_path_shape("local/maps/world/root.mkidx"));
+    }
+
+    #[test]
+    fn malformed_zoom_state_cannot_invert_request_clamping() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut map = test_map(&mut cx);
+        map.use_local_mbtiles = true;
+        map.zoom = 17.0;
+        map.local_source_zoom_range = Some((20, 3));
+        assert_eq!(map.request_zoom_level(), LOCAL_MBTILES_MAX_ZOOM);
+        map.local_source_zoom_range = Some((0, 31));
+        assert_eq!(map.request_zoom_level(), LOCAL_MBTILES_MAX_ZOOM);
+    }
+
+    #[test]
+    fn archive_watcher_rejects_malformed_mbtiles_zoom_metadata() {
+        let path = temp_mbtiles_with_zoom("map-view-invalid-watch-zoom", "20", "3", 0);
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut map = test_map(&mut cx);
+        map.set_source_config(
+            &mut cx,
+            TileSourceConfig::LocalArchive {
+                mbtiles_path: path.to_string_lossy().into_owned(),
+                detail_mbtiles_path: String::new(),
+                overlay_mbtiles_paths: String::new(),
+                bridge_dz_path: String::new(),
+            },
+        );
+        map.local_source_zoom_range = Some((4, 6));
+        map.local_source_zoom_range_checked = true;
+        map.archive_watch_mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+
+        <MapView as Widget>::handle_event(
+            &mut map,
+            &mut cx,
+            &Event::Startup,
+            &mut Scope::empty(),
+        );
+        assert!(map.archive_watch_in_flight);
+        for _ in 0..2_000 {
+            <MapView as Widget>::handle_event(
+                &mut map,
+                &mut cx,
+                &Event::Startup,
+                &mut Scope::empty(),
+            );
+            if !map.archive_watch_in_flight {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(!map.archive_watch_in_flight);
+        assert_eq!(map.local_source_zoom_range, Some((4, 6)));
+        map.zoom = 5.0;
+        assert!((4..=6).contains(&map.request_zoom_level()));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn legacy_mbtiles_installed_on_map_view_dispatches_legacy_worker() {
+        let path = temp_mbtiles("map-view-legacy-dispatch");
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut map = test_map(&mut cx);
+        map.zoom = 0.0;
+        map.set_source_config(
+            &mut cx,
+            TileSourceConfig::LocalArchive {
+                mbtiles_path: path.to_string_lossy().into_owned(),
+                detail_mbtiles_path: String::new(),
+                overlay_mbtiles_paths: String::new(),
+                bridge_dz_path: String::new(),
+            },
+        );
+        map.local_source_zoom_range = Some((0, 0));
+        let key = TileKey { z: 0, x: 0, y: 0 };
+        map.visible_tiles = vec![key];
+        map.request_visible_tiles_from_local_source(&mut cx);
+        assert!(map.base_archive.is_none());
+        assert!(map.archive_pending_tiles.is_empty());
+        let mut message = None;
+        for _ in 0..2_000 {
+            if let Ok(received) = map.tile_worker_rx.try_recv() {
+                message = Some(received);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(matches!(
+            message,
+            Some(TileWorkerMessage::LocalBatchLoaded { loaded, .. }) if loaded.len() == 1
+        ));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn map_view_source_switch_reuses_archive_pool_and_thread_count() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut map = test_map(&mut cx);
+        map.set_source_config(&mut cx, TileSourceConfig::http_archive("https://one.invalid/map"));
+        let first = map.archive_worker_pool.as_ref().unwrap().clone();
+        let thread_count = first.thread_count();
+        map.set_source_config(&mut cx, TileSourceConfig::http_archive("https://two.invalid/map"));
+        let second = map.archive_worker_pool.as_ref().unwrap();
+        assert!(Arc::ptr_eq(&first, second));
+        assert_eq!(second.thread_count(), thread_count);
+        assert_eq!(thread_count, 2);
+    }
+
+    #[test]
+    fn detail_equal_to_base_issues_one_archive_request() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut map = test_map(&mut cx);
+        map.zoom = 14.0;
+        map.set_source_config(
+            &mut cx,
+            TileSourceConfig::http_archive("https://tiles.invalid/world.mkmap"),
+        );
+        let key = TileKey { z: 14, x: 0, y: 0 };
+        map.visible_tiles = vec![key];
+        map.request_visible_tiles_from_local_source(&mut cx);
+        assert!(map.detail_archive.is_none());
+        assert_eq!(map.base_archive.as_ref().unwrap().source_request_count(), 1);
+        assert!(map.archive_pending_tiles[&key].reuse_base_as_detail);
+    }
+
+    #[test]
+    fn same_zoom_pan_prunes_queued_build_and_loading_placeholder() {
+        let path = temp_mbtiles_with_zoom("map-view-same-zoom-prune", "3", "3", 3);
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut map = test_map(&mut cx);
+        map.zoom = 3.0;
+        map.set_source_config(
+            &mut cx,
+            TileSourceConfig::LocalArchive {
+                mbtiles_path: path.to_string_lossy().into_owned(),
+                detail_mbtiles_path: String::new(),
+                overlay_mbtiles_paths: String::new(),
+                bridge_dz_path: String::new(),
+            },
+        );
+        map.local_source_zoom_range = Some((3, 3));
+        map.ensure_tile_thread_pool(&mut cx);
+        let thread_count = map.tile_thread_pool.as_ref().unwrap().thread_count();
+        let reached = Arc::new(std::sync::Barrier::new(thread_count + 1));
+        let release = Arc::new(std::sync::Barrier::new(thread_count + 1));
+        for index in 0..thread_count {
+            let reached = reached.clone();
+            let release = release.clone();
+            map.tile_thread_pool.as_ref().unwrap().execute_rev(
+                TileKey { z: 30, x: index as i32, y: 0 },
+                move |_| {
+                    reached.wait();
+                    release.wait();
+                },
+            );
+        }
+        reached.wait();
+        let rect = Rect {
+            pos: dvec2(0.0, 0.0),
+            size: dvec2(64.0, 64.0),
+        };
+        map.set_center(&mut cx, -90.0, 0.0);
+        map.ensure_visible_tiles(&mut cx, rect);
+        let requested_before = map
+            .local_requested_tiles
+            .keys()
+            .copied()
+            .collect::<HashSet<_>>();
+        assert!(!requested_before.is_empty());
+
+        map.set_center(&mut cx, 0.0, 0.0);
+        map.ensure_visible_tiles(&mut cx, rect);
+        let stale = requested_before
+            .into_iter()
+            .filter(|key| !map.visible_tiles.contains(key))
+            .collect::<Vec<_>>();
+        assert!(!stale.is_empty());
+        for key in stale {
+            assert!(!map.local_requested_tiles.contains_key(&key));
+            assert!(!map.tiles.contains_key(&key));
+        }
+        assert!(map
+            .local_requested_tiles
+            .keys()
+            .any(|key| map.visible_tiles.contains(key)));
+
+        map.visible_tiles.clear();
+        map.request_visible_tiles_from_local_source(&mut cx);
+        assert!(map.local_requested_tiles.is_empty());
+        release.wait();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn real_timer_cancels_never_completing_archive_without_draws() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut map = test_map(&mut cx);
+        map.zoom = 1.0;
+        map.set_source_config(
+            &mut cx,
+            TileSourceConfig::http_archive("https://never.invalid/world.mkmap"),
+        );
+        let key = TileKey { z: 1, x: 0, y: 0 };
+        map.visible_tiles = vec![key];
+        map.request_visible_tiles_from_local_source(&mut cx);
+        assert_eq!(map.base_archive.as_ref().unwrap().waiter_count(), 1);
+        *map.local_requested_tiles.get_mut(&key).unwrap() =
+            cx.seconds_since_app_start() - ARCHIVE_REQUEST_TIMEOUT_SECONDS;
+        let timer_id = map.archive_request_watchdog_timer.0;
+        <MapView as Widget>::handle_event(
+            &mut map,
+            &mut cx,
+            &Event::Timer(TimerEvent {
+                time: None,
+                timer_id,
+            }),
+            &mut Scope::empty(),
+        );
+        assert!(map.local_requested_tiles.is_empty());
+        assert!(map.archive_pending_tiles.is_empty());
+        assert_eq!(map.base_archive.as_ref().unwrap().waiter_count(), 0);
+        assert_eq!(map.base_archive.as_ref().unwrap().source_request_count(), 0);
+        assert!(!map.tiles.contains_key(&key));
     }
 }

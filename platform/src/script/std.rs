@@ -172,7 +172,7 @@ impl Cx {
                             if (200..300).contains(&res.status_code) {
                                 self.script_data
                                     .resources
-                                    .handle_http_response(request_id, body.clone());
+                                    .handle_http_response(request_id, body.to_vec());
                             } else {
                                 crate::log!(
                                     "Script resource HTTP load failed: status={} {}",

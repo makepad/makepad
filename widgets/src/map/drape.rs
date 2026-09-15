@@ -6,9 +6,10 @@
 //! into the RGBA texture, fading out across the treeline.
 
 use crate::map::geometry::TileKey;
-use crate::map::tile::{decode_vector_tile_payload, parse_mvt_tile, MvtSink};
+use crate::map::tile::{
+    decode_vector_tile_payload, parse_mvt_tile, MvtPathMeta, MvtSink, TagSet,
+};
 use makepad_mbtile_reader::MbtilesReader;
-use std::collections::HashMap;
 
 pub fn drape_landcover(
     reader: &mut MbtilesReader,
@@ -63,7 +64,7 @@ pub fn drape_landcover(
             _tile_key: TileKey,
             _extent: u32,
             _point: (i32, i32),
-            _tags: HashMap<String, String>,
+            _tags: TagSet,
         ) {
         }
         fn add_path(
@@ -71,14 +72,15 @@ pub fn drape_landcover(
             tile_key: TileKey,
             extent: u32,
             points: &[(i32, i32)],
-            tags: HashMap<String, String>,
+            tags: TagSet,
+            _meta: MvtPathMeta,
             close: bool,
         ) {
             if !close || points.len() < 3 {
                 return;
             }
-            let layer = tags.get("layer").map(|v| v.as_str()).unwrap_or("");
-            let kind = tags.get("kind").map(|v| v.as_str()).unwrap_or("");
+            let layer = tags.get("layer").unwrap_or("");
+            let kind = tags.get("kind").unwrap_or("");
             let class: u8 = match layer {
                 "water_polygons" | "ocean" => 4,
                 "land" | "landuse" | "landcover" | "nature" | "sites" => match kind {
