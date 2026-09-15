@@ -16,7 +16,7 @@ use makepad_audio_decode::{decode_audio_limited, AudioFormat, Limits};
 use makepad_audio_picture::spectrogram::spectrogram_rgba;
 use makepad_audio_picture::wave::{wave_rgba, WavePalette};
 use makepad_widgets::*;
-use std::sync::mpsc::{channel, Receiver, TryRecvError};
+use makepad_widgets::makepad_platform::thread::{Lane, TaskHandle};
 
 /// Decode ceiling: thirty minutes at 48 kHz, the same bound the importer
 /// uses. A well is not the place to discover a two-hour file.
@@ -77,7 +77,7 @@ pub struct ClipPictures {
 /// A decode in flight, or the pictures it produced.
 #[derive(Default)]
 pub struct ClipDecoder {
-    pending: Option<Receiver<ClipPictures>>,
+    pending: Option<TaskHandle<ClipPictures>>,
     /// Bumped per request, so a late result from an abandoned clip is
     /// dropped rather than drawn over the current one.
     generation: u64,
@@ -86,21 +86,23 @@ pub struct ClipDecoder {
 impl ClipDecoder {
     /// Start decoding and rendering. Any decode already running is
     /// abandoned — its channel is dropped, the thread finds nobody home.
-    pub fn start(&mut self, bytes: Vec<u8>, format: ClipFormat) {
+    pub fn start(&mut self, cx: &Cx, bytes: Vec<u8>, format: ClipFormat) {
         self.generation = self.generation.wrapping_add(1);
-        let (tx, rx) = channel();
-        self.pending = Some(rx);
-        std::thread::Builder::new()
-            .name("asset-widgets-clip".into())
-            .spawn(move || {
-                let _ = tx.send(render(&bytes, format));
-            })
+        if let Some(pending) = &self.pending {
+            pending.cancel();
+        }
+        self.pending = cx
+            .task_pool()
+            .submit(Lane::Heavy, move || render(&bytes, format))
             .ok();
     }
 
     /// Forget any decode in flight and any pictures from one.
     pub fn clear(&mut self) {
         self.generation = self.generation.wrapping_add(1);
+        if let Some(pending) = &self.pending {
+            pending.cancel();
+        }
         self.pending = None;
     }
 
@@ -111,15 +113,9 @@ impl ClipDecoder {
     /// The pictures, once. `None` while the worker is still going; the
     /// receiver is dropped either way once it has answered.
     pub fn poll(&mut self) -> Option<ClipPictures> {
-        let done = match self.pending.as_ref()?.try_recv() {
-            Ok(pictures) => Some(pictures),
-            Err(TryRecvError::Empty) => return None,
-            // The worker died without sending: nothing to show, and nothing
-            // to keep waiting for.
-            Err(TryRecvError::Disconnected) => None,
-        };
+        let done = self.pending.as_mut()?.try_take()?;
         self.pending = None;
-        done
+        done.ok()
     }
 }
 
@@ -332,12 +328,13 @@ mod tests {
     #[test]
     fn a_new_clip_abandons_the_one_in_flight() {
         let rate = 22_050;
+        let cx = Cx::new(Box::new(|_, _| {}));
         let mut decoder = ClipDecoder::default();
         assert!(!decoder.is_running());
-        decoder.start(wav_pcm16(&tone(rate, 1.0), rate), ClipFormat::Wav);
+        decoder.start(&cx, wav_pcm16(&tone(rate, 1.0), rate), ClipFormat::Wav);
         let first = decoder.generation;
         assert!(decoder.is_running());
-        decoder.start(wav_pcm16(&tone(rate, 1.0), rate), ClipFormat::Wav);
+        decoder.start(&cx, wav_pcm16(&tone(rate, 1.0), rate), ClipFormat::Wav);
         assert_ne!(decoder.generation, first);
         decoder.clear();
         assert!(!decoder.is_running());

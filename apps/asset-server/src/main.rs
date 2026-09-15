@@ -25,13 +25,14 @@ fleet connections — the store stores.
 
 Options:
   --root <dir>            Server root. Default: $AI_CONTENT_ASSET_ROOT, else
-                          <checkout>/local/asset-ui/asset-server
+                          <checkout>/local/asset-library/store
   --control <addr>        Control plane bind (default 0.0.0.0:0 — ephemeral;
                           the real address is written to <root>/listen)
   --data <addr>           Data plane bind    (default 0.0.0.0:0)
   --no-beacon             Do not announce on the LAN discovery beacon
   --library <dir>         ai-content library to publish continuously.
-                          Default: <checkout>/local/ai_content_library
+                          Default: $MAKEPAD_ASSET_LIBRARY, else
+                          <checkout>/local/asset-library
   --no-library            Do not run the library publisher
   --namespace <ns>        Namespace for published rows (default gen)
   --work <dir>            Parent for the loops' client caches
@@ -69,21 +70,8 @@ fn fail(message: &str) -> ! {
     std::process::exit(2);
 }
 
-/// The checkout this binary was built from, so the default root and library
-/// are the same paths the Asset UI uses. `MAKEPAD_ROOT` overrides, exactly
-/// as it does there.
-fn checkout_root() -> PathBuf {
-    if let Ok(root) = std::env::var("MAKEPAD_ROOT") {
-        return PathBuf::from(root);
-    }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
-
 fn default_root() -> PathBuf {
-    if let Ok(root) = std::env::var("AI_CONTENT_ASSET_ROOT") {
-        return PathBuf::from(root);
-    }
-    checkout_root().join("local/asset-ui/asset-server")
+    makepad_asset_client::paths::store_root()
 }
 
 fn parse_config() -> HostConfig {
@@ -143,7 +131,7 @@ fn parse_config() -> HostConfig {
     config.library = if no_library {
         None
     } else {
-        Some(library.unwrap_or_else(|| checkout_root().join("local/ai_content_library")))
+        Some(library.unwrap_or_else(makepad_asset_client::paths::library_root))
     };
     if let Some(namespace) = namespace {
         if namespace.is_empty() {

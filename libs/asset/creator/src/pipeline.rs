@@ -3,8 +3,8 @@
 //! A pipeline is its stages: a small DAG where each stage names a pipe
 //! domain, declares which earlier stages feed it, and carries the splices
 //! that paste a dependency's output into its own request. The spec is data;
-//! the engine that walks it against a hub comes with the chain migrations
-//! (asset-ui's `pipeline.rs` execution half, vj's DREAM shape).
+//! creator compiles it into a Flow graph and observes a run instance. These
+//! types retain the existing app progress and publication interface.
 
 use std::collections::HashSet;
 

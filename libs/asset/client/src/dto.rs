@@ -155,6 +155,8 @@ pub fn role_name(role: makepad_asset_data::FileRole) -> &'static str {
         R::StemVocals => "stem_vocals",
         R::StemOther => "stem_other",
         R::Lyrics => "lyrics",
+        R::DjAnalysis => "dj_analysis",
+        R::DjLoopSplat => "dj_loop_splat",
     }
 }
 
@@ -186,6 +188,8 @@ pub fn role_parse(s: &str) -> Option<FileRole> {
         "stem_vocals" => R::StemVocals,
         "stem_other" => R::StemOther,
         "lyrics" => R::Lyrics,
+        "dj_analysis" => R::DjAnalysis,
+        "dj_loop_splat" => R::DjLoopSplat,
         _ => return None,
     })
 }
@@ -294,6 +298,15 @@ pub struct CatalogHit {
     pub namespace: String,
     pub kind: Option<AssetKind>,
     pub title: String,
+    /// Public creator/artist annotation. Optional on the wire so clients
+    /// remain compatible with stores predating this projection.
+    pub creator: String,
+    pub artist: String,
+    pub artist_url: String,
+    pub album: String,
+    pub source_url: String,
+    pub license: String,
+    pub license_url: String,
     pub snippet: String,
     pub score: u64,
     pub live: bool,
@@ -424,6 +437,25 @@ pub fn parse_catalog_page(v: &Value) -> ClientResult<CatalogPageDto> {
         };
         let title = need_str(h, "title", MAX_TITLE_BYTES, "hit title")?.to_string();
         check_display(&title, "hit title")?;
+        let creator = match h.get("creator") {
+            None | Some(Value::Null) => String::new(),
+            Some(_) => need_str(h, "creator", 128, "hit creator")?.to_string(),
+        };
+        check_display(&creator, "hit creator")?;
+        let optional_text = |key: &'static str, what: &'static str| -> ClientResult<String> {
+            let text = match h.get(key) {
+                None | Some(Value::Null) => String::new(),
+                Some(_) => need_str(h, key, MAX_SNIPPET_BYTES, what)?.to_string(),
+            };
+            check_display(&text, what)?;
+            Ok(text)
+        };
+        let artist = optional_text("artist", "hit artist")?;
+        let artist_url = optional_text("artist_url", "hit artist url")?;
+        let album = optional_text("album", "hit album")?;
+        let source_url = optional_text("source_url", "hit source url")?;
+        let license = optional_text("license", "hit license")?;
+        let license_url = optional_text("license_url", "hit license url")?;
         let snippet = need_str(h, "snippet", MAX_SNIPPET_BYTES, "hit snippet")?.to_string();
         check_display(&snippet, "hit snippet")?;
         let score = need_u64(h, "score", "hit score")?;
@@ -450,6 +482,13 @@ pub fn parse_catalog_page(v: &Value) -> ClientResult<CatalogPageDto> {
             namespace,
             kind,
             title,
+            creator,
+            artist,
+            artist_url,
+            album,
+            source_url,
+            license,
+            license_url,
             snippet,
             score,
             live,
@@ -1175,7 +1214,7 @@ pub fn parse_events_page(v: &Value) -> ClientResult<EventsPageDto> {
                         .as_str()
                         .ok_or(ClientError::Protocol { what: "event preview part name" })?;
                     if value.is_empty()
-                        || value.len() > 24
+                        || value.len() > 32
                         || !value.bytes().all(|byte| {
                             byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
                         })
@@ -2366,6 +2405,12 @@ pub struct AnnotationDto {
     pub categories: Vec<String>,
     pub tags: Vec<String>,
     pub creator: String,
+    pub artist: String,
+    pub artist_url: String,
+    pub album: String,
+    pub source_url: String,
+    pub license: String,
+    pub license_url: String,
     pub generator: String,
     pub backend: String,
     pub model: String,
@@ -2421,6 +2466,12 @@ pub fn parse_annotation(v: &Value) -> ClientResult<AnnotationDto> {
         categories: labels("categories", "annotation categories")?,
         tags: labels("tags", "annotation tags")?,
         creator: text("creator", 128, "annotation creator")?,
+        artist: text("artist", 4096, "annotation artist")?,
+        artist_url: text("artist_url", 4096, "annotation artist url")?,
+        album: text("album", 4096, "annotation album")?,
+        source_url: text("source_url", 4096, "annotation source url")?,
+        license: text("license", 4096, "annotation license")?,
+        license_url: text("license_url", 4096, "annotation license url")?,
         generator: text("generator", 128, "annotation generator")?,
         backend: text("backend", 128, "annotation backend")?,
         model: text("model", 128, "annotation model")?,

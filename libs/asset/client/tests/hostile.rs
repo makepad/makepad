@@ -3,6 +3,9 @@
 //! one specific way and asserts the client refuses with the right typed
 //! error, keeps its budgets, and never lets bad bytes reach cache or caller.
 
+// Native hostile-socket test: std deadlines cannot enter the wasm library.
+#![allow(clippy::disallowed_types, clippy::disallowed_methods)]
+
 mod common;
 
 use common::{

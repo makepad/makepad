@@ -46,6 +46,8 @@
 //!   provenance, not even for the owner — normalized (control bytes stripped,
 //!   whitespace collapsed) and byte-bounded at char boundaries.
 
+#![cfg_attr(any(target_arch = "wasm32", feature = "embedded"), allow(dead_code))]
+
 use crate::auth::PrincipalId;
 use crate::budget::Budgets;
 use crate::catalog::{fixed16, validate_namespace};
@@ -85,6 +87,12 @@ CREATE TABLE IF NOT EXISTS search_annotations(
     title TEXT NOT NULL,
     description TEXT NOT NULL,
     creator TEXT NOT NULL,
+    artist TEXT NOT NULL DEFAULT '',
+    artist_url TEXT NOT NULL DEFAULT '',
+    album TEXT NOT NULL DEFAULT '',
+    source_url TEXT NOT NULL DEFAULT '',
+    license TEXT NOT NULL DEFAULT '',
+    license_url TEXT NOT NULL DEFAULT '',
     generator TEXT NOT NULL,
     backend TEXT NOT NULL,
     model TEXT NOT NULL,
@@ -316,6 +324,17 @@ pub(crate) fn canon_alias_migration_sql() -> String {
     format!("ALTER TABLE search_annotations ADD COLUMN {CANON_ALIAS_DDL}")
 }
 
+/// The v13 -> v14 attribution columns. Empty defaults preserve annotations
+/// written before music credits became a typed catalog projection.
+pub(crate) const ATTRIBUTION_MIGRATION_SQL: [&str; 6] = [
+    "ALTER TABLE search_annotations ADD COLUMN artist TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE search_annotations ADD COLUMN artist_url TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE search_annotations ADD COLUMN album TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE search_annotations ADD COLUMN source_url TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE search_annotations ADD COLUMN license TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE search_annotations ADD COLUMN license_url TEXT NOT NULL DEFAULT ''",
+];
+
 /// The browse-mode total order, verbatim: `canon_alias ASC, asset_id ASC`.
 /// Without it every browse page is a full table scan plus a temp b-tree sort
 /// of the whole annotation table, and the keyset predicate cannot seek.
@@ -389,6 +408,12 @@ pub struct AssetAnnotation {
     pub categories: Vec<String>,
     pub tags: Vec<String>,
     pub creator: String,
+    pub artist: String,
+    pub artist_url: String,
+    pub album: String,
+    pub source_url: String,
+    pub license: String,
+    pub license_url: String,
     /// Owning principal. Required when visibility is Private; grants the
     /// owner private-field search and private-annotation visibility.
     pub owner: Option<PrincipalId>,
@@ -424,7 +449,8 @@ pub struct SearchFilters<'a> {
 #[derive(Clone, Copy, Debug)]
 pub struct SearchQuery<'a> {
     /// Lexical query text. Empty text is browse mode: filters only, ordered
-    /// by asset_id. Non-empty text must yield at least one term.
+    /// by alias unless newest is set. Non-empty text must yield at least one
+    /// term.
     pub text: &'a str,
     pub filters: SearchFilters<'a>,
     pub page_size: u32,
@@ -434,6 +460,8 @@ pub struct SearchQuery<'a> {
     /// is the escape hatch for a caller that means the literal words it typed
     /// (the HTTP routes spell it `exact=1`).
     pub expand: bool,
+    /// In empty-text browse mode, order by newest indexed timestamp first.
+    pub newest: bool,
     /// How many facet rows to return with the page; 0 asks for none.
     ///
     /// Facets ride the page rather than a route of their own so they are
@@ -464,6 +492,13 @@ pub struct SearchHit {
     pub namespace: String,
     pub kind: Option<AssetKind>,
     pub title: String,
+    pub creator: String,
+    pub artist: String,
+    pub artist_url: String,
+    pub album: String,
+    pub source_url: String,
+    pub license: String,
+    pub license_url: String,
     pub snippet: String,
     pub score: u64,
     pub live: bool,
@@ -798,9 +833,9 @@ fn build_snippet(title: &str, description: &str, terms: &[String], max_bytes: us
 // before ANY index mutation refuses as stale rather than skipping or
 // duplicating rows under a changed total order.
 
-const CURSOR_VERSION: u8 = 2;
+const CURSOR_VERSION: u8 = 3;
 /// Everything except the variable alias bytes.
-const CURSOR_FIXED_LEN: usize = 1 + 8 + 32 + 8 + 2 + 16 + 8;
+const CURSOR_FIXED_LEN: usize = 1 + 8 + 32 + 8 + 8 + 2 + 16 + 8;
 const CURSOR_CHECK_LEN: usize = 8;
 /// Longest encoded search cursor: the fixed frame plus a maximal alias.
 /// The HTTP routes decode cursors against THIS bound — a smaller one turned
@@ -811,6 +846,7 @@ pub const MAX_SEARCH_CURSOR_BYTES: usize = CURSOR_FIXED_LEN + MAX_ALIAS_BYTES;
 /// total order `score DESC, canon_alias ASC, asset_id ASC`.
 struct Keyset {
     generation: u64,
+    updated_ms: u64,
     score: u64,
     alias: String,
     asset: [u8; 16],
@@ -825,6 +861,7 @@ fn cursor_check(body: &[u8]) -> [u8; CURSOR_CHECK_LEN] {
 fn encode_cursor(
     generation: u64,
     fp: &[u8; 32],
+    updated_ms: u64,
     score: u64,
     alias: &str,
     asset: &AssetId,
@@ -833,6 +870,7 @@ fn encode_cursor(
     out.push(CURSOR_VERSION);
     out.extend_from_slice(&generation.to_be_bytes());
     out.extend_from_slice(fp);
+    out.extend_from_slice(&updated_ms.to_be_bytes());
     out.extend_from_slice(&score.to_be_bytes());
     // Alias length always fits u16: the catalog admits at most
     // MAX_ALIAS_BYTES (128) bytes per alias.
@@ -853,7 +891,7 @@ fn decode_cursor(bytes: &[u8], expect_fp: &[u8; 32]) -> ServerResult<Keyset> {
         return Err(malformed);
     }
     let mut n = [0u8; 2];
-    n.copy_from_slice(&bytes[49..51]);
+    n.copy_from_slice(&bytes[57..59]);
     let n = u16::from_be_bytes(n) as usize;
     if n > MAX_ALIAS_BYTES || bytes.len() != CURSOR_FIXED_LEN + n {
         return Err(malformed);
@@ -868,15 +906,18 @@ fn decode_cursor(bytes: &[u8], expect_fp: &[u8; 32]) -> ServerResult<Keyset> {
     let mut generation = [0u8; 8];
     generation.copy_from_slice(&bytes[1..9]);
     let mut score = [0u8; 8];
-    score.copy_from_slice(&bytes[41..49]);
+    score.copy_from_slice(&bytes[49..57]);
     // The check passed, so these are bytes we encoded: the alias is valid
     // UTF-8 by construction. Refuse (not panic) on the impossible case.
     let alias =
-        String::from_utf8(bytes[51..51 + n].to_vec()).map_err(|_| malformed)?;
+        String::from_utf8(bytes[59..59 + n].to_vec()).map_err(|_| malformed)?;
     let mut asset = [0u8; 16];
-    asset.copy_from_slice(&bytes[51 + n..51 + n + 16]);
+    asset.copy_from_slice(&bytes[59 + n..59 + n + 16]);
+    let mut updated_ms = [0u8; 8];
+    updated_ms.copy_from_slice(&bytes[41..49]);
     Ok(Keyset {
         generation: u64::from_be_bytes(generation),
+        updated_ms: u64::from_be_bytes(updated_ms),
         score: u64::from_be_bytes(score),
         alias,
         asset,
@@ -1095,6 +1136,10 @@ pub struct Search<'a> {
 }
 
 impl<'a> Search<'a> {
+    pub fn generation(&self) -> ServerResult<u64> {
+        read_generation(self.db)
+    }
+
     // ---- annotations -------------------------------------------------------
 
     /// Create or replace the annotation for a registered asset and rebuild its
@@ -1138,6 +1183,16 @@ impl<'a> Search<'a> {
             (&ann.model, "annotation model bytes", "annotation model charset"),
         ] {
             check_text(s, MAX_ANNOTATION_NAME_BYTES, false, wl, wc)?;
+        }
+        for (s, wl, wc) in [
+            (&ann.artist, "annotation artist bytes", "annotation artist charset"),
+            (&ann.artist_url, "annotation artist url bytes", "annotation artist url charset"),
+            (&ann.album, "annotation album bytes", "annotation album charset"),
+            (&ann.source_url, "annotation source url bytes", "annotation source url charset"),
+            (&ann.license, "annotation license bytes", "annotation license charset"),
+            (&ann.license_url, "annotation license url bytes", "annotation license url charset"),
+        ] {
+            check_text(s, MAX_PROVENANCE_BYTES, false, wl, wc)?;
         }
         check_text(&ann.prompt, MAX_PROMPT_BYTES, true, "annotation prompt bytes", "annotation prompt charset")?;
         check_text(
@@ -1223,13 +1278,15 @@ impl<'a> Search<'a> {
             let mut s = db.prepare(
                 "upsert annotation",
                 "INSERT INTO search_annotations(asset_id, namespace, kind, visibility, owner,
-                    title, description, creator, generator, backend, model,
-                    prompt, provenance, live, updated_ms, canon_alias)
-                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
+                    title, description, creator, artist, artist_url, album, source_url,
+                    license, license_url, generator, backend, model, prompt, provenance,
+                    live, updated_ms, canon_alias)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)
                  ON CONFLICT(asset_id) DO UPDATE SET
                     namespace=?2, kind=?3, visibility=?4, owner=?5, title=?6, description=?7,
-                    creator=?8, generator=?9, backend=?10, model=?11,
-                    prompt=?12, provenance=?13, live=?14, updated_ms=?15, canon_alias=?16",
+                    creator=?8, artist=?9, artist_url=?10, album=?11, source_url=?12,
+                    license=?13, license_url=?14, generator=?15, backend=?16, model=?17,
+                    prompt=?18, provenance=?19, live=?20, updated_ms=?21, canon_alias=?22",
             )?;
             s.bind_blob(1, asset_id.as_bytes())?;
             s.bind_text(2, &namespace)?;
@@ -1245,14 +1302,20 @@ impl<'a> Search<'a> {
             s.bind_text(6, &ann.title)?;
             s.bind_text(7, &ann.description)?;
             s.bind_text(8, &ann.creator)?;
-            s.bind_text(9, &ann.generator)?;
-            s.bind_text(10, &ann.backend)?;
-            s.bind_text(11, &ann.model)?;
-            s.bind_text(12, &ann.prompt)?;
-            s.bind_text(13, &ann.provenance)?;
-            s.bind_i64(14, live as i64)?;
-            s.bind_u64(15, now_ms)?;
-            s.bind_text(16, &canon_alias)?;
+            s.bind_text(9, &ann.artist)?;
+            s.bind_text(10, &ann.artist_url)?;
+            s.bind_text(11, &ann.album)?;
+            s.bind_text(12, &ann.source_url)?;
+            s.bind_text(13, &ann.license)?;
+            s.bind_text(14, &ann.license_url)?;
+            s.bind_text(15, &ann.generator)?;
+            s.bind_text(16, &ann.backend)?;
+            s.bind_text(17, &ann.model)?;
+            s.bind_text(18, &ann.prompt)?;
+            s.bind_text(19, &ann.provenance)?;
+            s.bind_i64(20, live as i64)?;
+            s.bind_u64(21, now_ms)?;
+            s.bind_text(22, &canon_alias)?;
             s.run()?;
             drop(s);
 
@@ -1311,8 +1374,9 @@ impl<'a> Search<'a> {
     pub fn annotation(&self, asset_id: &AssetId) -> ServerResult<Option<AssetAnnotation>> {
         let mut s = self.db.prepare(
             "read annotation",
-            "SELECT visibility, owner, title, description, creator, generator,
-                    backend, model, prompt, provenance, kind
+            "SELECT visibility, owner, title, description, creator, artist, artist_url,
+                    album, source_url, license, license_url, generator, backend, model,
+                    prompt, provenance, kind
              FROM search_annotations WHERE asset_id = ?1",
         )?;
         s.bind_blob(1, asset_id.as_bytes())?;
@@ -1326,7 +1390,7 @@ impl<'a> Search<'a> {
         } else {
             Some(PrincipalId(fixed16(&s.column_blob(1), "annotation owner")?))
         };
-        let kind = read_kind_column(&s, 10)?;
+        let kind = read_kind_column(&s, 16)?;
         let mut ann = AssetAnnotation {
             title: s.column_text(2),
             description: s.column_text(3),
@@ -1334,12 +1398,18 @@ impl<'a> Search<'a> {
             categories: Vec::new(),
             tags: Vec::new(),
             creator: s.column_text(4),
+            artist: s.column_text(5),
+            artist_url: s.column_text(6),
+            album: s.column_text(7),
+            source_url: s.column_text(8),
+            license: s.column_text(9),
+            license_url: s.column_text(10),
             owner,
-            generator: s.column_text(5),
-            backend: s.column_text(6),
-            model: s.column_text(7),
-            prompt: s.column_text(8),
-            provenance: s.column_text(9),
+            generator: s.column_text(11),
+            backend: s.column_text(12),
+            model: s.column_text(13),
+            prompt: s.column_text(14),
+            provenance: s.column_text(15),
             visibility,
         };
         drop(s);
@@ -1563,7 +1633,15 @@ impl<'a> Search<'a> {
             groups.iter().flat_map(|g| g.all().cloned()).collect();
 
         // -- fingerprint the full query shape for cursor binding -------------
-        let fp = fingerprint(&groups, browse, f, viewer, &scope_namespaces, query.page_size);
+        let fp = fingerprint(
+            &groups,
+            browse,
+            query.newest,
+            f,
+            viewer,
+            &scope_namespaces,
+            query.page_size,
+        );
         let keyset = match cursor {
             None => None,
             Some(bytes) => Some(decode_cursor(bytes, &fp)?),
@@ -1580,7 +1658,16 @@ impl<'a> Search<'a> {
                 }
             }
             let (count_sql, count_binds) =
-                build_sql(&groups, browse, f, &viewer.principal, &scope_namespaces, None, None);
+                build_sql(
+                    &groups,
+                    browse,
+                    query.newest,
+                    f,
+                    &viewer.principal,
+                    &scope_namespaces,
+                    None,
+                    None,
+                );
             let mut s = db.prepare("search count", &count_sql)?;
             apply_binds(&mut s, &count_binds)?;
             s.step()?;
@@ -1592,6 +1679,7 @@ impl<'a> Search<'a> {
             let (page_sql, page_binds) = build_sql(
                 &groups,
                 browse,
+                query.newest,
                 f,
                 &viewer.principal,
                 &scope_namespaces,
@@ -1616,6 +1704,13 @@ impl<'a> Search<'a> {
                 let kind = read_kind_column(&s, 6)?;
                 let canon = s.column_text(7);
                 let updated_ms = s.column_u64(8);
+                let creator = s.column_text(9);
+                let artist = s.column_text(10);
+                let artist_url = s.column_text(11);
+                let album = s.column_text(12);
+                let source_url = s.column_text(13);
+                let license = s.column_text(14);
+                let license_url = s.column_text(15);
                 let snippet = build_snippet(
                     &title,
                     &description,
@@ -1628,6 +1723,13 @@ impl<'a> Search<'a> {
                     namespace,
                     kind,
                     title,
+                    creator,
+                    artist,
+                    artist_url,
+                    album,
+                    source_url,
+                    license,
+                    license_url,
                     snippet,
                     score,
                     live,
@@ -1640,6 +1742,7 @@ impl<'a> Search<'a> {
                 Some(encode_cursor(
                     generation,
                     &fp,
+                    last.updated_ms,
                     last.score,
                     last.alias.as_deref().unwrap_or(""),
                     &last.asset_id,
@@ -1688,6 +1791,7 @@ impl<'a> Search<'a> {
 fn fingerprint(
     groups: &[TermGroup],
     browse: bool,
+    newest: bool,
     f: &SearchFilters<'_>,
     viewer: &SearchViewer<'_>,
     scope: &Option<Vec<&str>>,
@@ -1696,6 +1800,7 @@ fn fingerprint(
     let mut buf = Vec::new();
     buf.push(CURSOR_VERSION);
     buf.push(browse as u8);
+    buf.push(newest as u8);
     // Groups, not bare terms: two queries that read the same but expand
     // differently (`exact=1`, a changed table) are different shapes, and a
     // cursor from one refuses against the other.
@@ -1860,7 +1965,7 @@ mod tests {
     #[test]
     fn longest_cursor_fits_the_route_bound() {
         let alias = "a".repeat(MAX_ALIAS_BYTES);
-        let bytes = encode_cursor(7, &[3u8; 32], 9, &alias, &AssetId::from_bytes([1u8; 16]));
+        let bytes = encode_cursor(7, &[3u8; 32], 0, 9, &alias, &AssetId::from_bytes([1u8; 16]));
         assert_eq!(bytes.len(), MAX_SEARCH_CURSOR_BYTES);
         assert!(
             decode_cursor(&bytes, &[3u8; 32]).is_ok(),
@@ -1870,7 +1975,7 @@ mod tests {
         // 53-byte alias room and must round-trip too.
         let long = "kenney/modular-dungeon-kit/wall-doorway-round-cracked-narrow";
         assert!(long.len() > 53);
-        let bytes = encode_cursor(1, &[0u8; 32], 1, long, &AssetId::from_bytes([2u8; 16]));
+        let bytes = encode_cursor(1, &[0u8; 32], 0, 1, long, &AssetId::from_bytes([2u8; 16]));
         assert!(bytes.len() > 128, "this cursor exceeds the old bound");
         assert!(bytes.len() <= MAX_SEARCH_CURSOR_BYTES);
         assert!(decode_cursor(&bytes, &[0u8; 32]).is_ok());
@@ -1962,6 +2067,7 @@ fn build_facet_sql(
 fn build_sql(
     groups: &[TermGroup],
     browse: bool,
+    newest: bool,
     f: &SearchFilters<'_>,
     principal: &Option<PrincipalId>,
     scope: &Option<Vec<&str>>,
@@ -1970,11 +2076,14 @@ fn build_sql(
 ) -> (String, Vec<Bind>) {
     let counting = limit.is_none();
     let (mut sql, mut binds) = build_candidate_sql(groups, browse, f, principal, scope);
-    // Keyset: resume strictly after (score DESC, canon_alias ASC, asset ASC).
-    // In browse mode every score is 0, so the score comparison degenerates
-    // and only the (alias, asset) tail remains.
+    // Keyset: resume strictly after the selected total order.
     if let Some(k) = keyset {
-        if browse {
+        if browse && newest {
+            sql.push_str(" AND (a.updated_ms < ? OR (a.updated_ms = ? AND a.asset_id > ?))");
+            binds.push(Bind::U64(k.updated_ms));
+            binds.push(Bind::U64(k.updated_ms));
+            binds.push(Bind::Blob(k.asset.to_vec()));
+        } else if browse {
             sql.push_str(" AND (a.canon_alias > ? OR (a.canon_alias = ? AND a.asset_id > ?))");
             binds.push(Bind::Text(k.alias.clone()));
             binds.push(Bind::Text(k.alias.clone()));
@@ -1994,7 +2103,9 @@ fn build_sql(
         sql.insert_str(0, "SELECT COUNT(*) FROM (");
         sql.push(')');
     } else {
-        if browse {
+        if browse && newest {
+            sql.push_str(" ORDER BY a.updated_ms DESC, a.asset_id ASC");
+        } else if browse {
             sql.push_str(" ORDER BY a.canon_alias ASC, a.asset_id ASC");
         } else {
             sql.push_str(" ORDER BY score DESC, a.canon_alias ASC, a.asset_id ASC");
@@ -2032,7 +2143,8 @@ fn build_candidate_sql(
     if browse {
         sql.push_str(
             "SELECT a.asset_id, a.namespace, a.title, a.description, a.live, 0 AS score, a.kind,
-                    a.canon_alias, a.updated_ms
+                    a.canon_alias, a.updated_ms, a.creator, a.artist, a.artist_url,
+                    a.album, a.source_url, a.license, a.license_url
              FROM search_annotations a WHERE 1=1",
         );
     } else {
@@ -2074,7 +2186,7 @@ fn build_candidate_sql(
         // worker stack, so an over-wide query (which the term budget alone
         // could reach, and expansion is kept clear of) is served by the scan
         // instead. Both forms select exactly the same postings.
-        sql.push_str(") AS score, a.kind, a.canon_alias, a.updated_ms FROM (");
+        sql.push_str(") AS score, a.kind, a.canon_alias, a.updated_ms, a.creator, a.artist, a.artist_url, a.album, a.source_url, a.license, a.license_url FROM (");
         if seek {
             for (i, t) in groups.iter().flat_map(TermGroup::all).enumerate() {
                 if i > 0 {
