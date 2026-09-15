@@ -475,7 +475,7 @@ impl LazyFluxVae {
         latents_whcb: &[f32],
         progress: &mut Option<ProgressHook>,
     ) -> Result<FluxVaeDecodeRun> {
-        if flux_vae_device_path_enabled() && gpu_device_available() {
+        if gpu_device_available() {
             match self.execute_device(weights, latents_whcb, progress) {
                 Ok(run) => return Ok(run),
                 Err(DiffusionError::Cancelled) => {
@@ -1045,13 +1045,6 @@ fn apply_group_norm(
         .map_err(DiffusionError::model)
 }
 
-fn vae_use_im2col_mm() -> bool {
-    match std::env::var("FLUX_VAE_NAIVE") {
-        Ok(value) if value == "1" || value.eq_ignore_ascii_case("on") => false,
-        _ => true,
-    }
-}
-
 fn apply_conv2d(
     ctx: &mut Context,
     tensor_ids: &BTreeMap<String, TensorId>,
@@ -1061,32 +1054,17 @@ fn apply_conv2d(
     pad_x: i32,
     pad_y: i32,
 ) -> Result<TensorId> {
-    let out = if vae_use_im2col_mm() {
-        conv_2d_im2col_mm(
-            ctx,
-            require_tensor_id(tensor_ids, weight_name)?,
-            input,
-            1,
-            1,
-            pad_x,
-            pad_y,
-            1,
-            1,
-        )?
-    } else {
-        ctx.conv_2d(
-            require_tensor_id(tensor_ids, weight_name)?,
-            input,
-            1,
-            1,
-            pad_x,
-            pad_y,
-            1,
-            1,
-            BufferUsage::Activations,
-        )
-        .map_err(DiffusionError::model)?
-    };
+    let out = conv_2d_im2col_mm(
+        ctx,
+        require_tensor_id(tensor_ids, weight_name)?,
+        input,
+        1,
+        1,
+        pad_x,
+        pad_y,
+        1,
+        1,
+    )?;
     let bias = broadcast_channel_vector(ctx, require_tensor_id(tensor_ids, bias_name)?, out)?;
     ctx.binary_like_a(Op::Add, out, bias, BufferUsage::Activations)
         .map_err(DiffusionError::model)
@@ -1895,13 +1873,6 @@ struct GpuSpatial {
     channels: usize,
 }
 
-fn flux_vae_device_path_enabled() -> bool {
-    match std::env::var("FLUX_DEVICE") {
-        Ok(value) => value != "0",
-        Err(_) => true,
-    }
-}
-
 pub(crate) fn flux_vae_cache_namespace(weights: &LoadedFluxVaeWeights) -> String {
     format!("flux_vae:{}", weights.path.display())
 }
@@ -2417,7 +2388,7 @@ fn vae_target_tensor_type(dtype: MlxDType) -> Result<TensorType> {
 /// `kernel_mul_mm_f16_f16`. Rank-1 bias/norm stay F32.
 fn vae_stored_tensor_type(entry: &MlxTensorEntry) -> Result<TensorType> {
     vae_target_tensor_type(entry.dtype)?;
-    if entry.shape.len() == 4 && vae_use_im2col_mm() {
+    if entry.shape.len() == 4 {
         Ok(TensorType::F16)
     } else {
         Ok(TensorType::F32)
@@ -2857,32 +2828,17 @@ fn apply_conv2d_downsample(
     let padded = ctx
         .pad_4d(input, 1, 1, 0, 0, BufferUsage::Activations)
         .map_err(DiffusionError::model)?;
-    let out = if vae_use_im2col_mm() {
-        conv_2d_im2col_mm(
-            ctx,
-            require_tensor_id(tensor_ids, weight_name)?,
-            padded,
-            2,
-            2,
-            0,
-            0,
-            1,
-            1,
-        )?
-    } else {
-        ctx.conv_2d(
-            require_tensor_id(tensor_ids, weight_name)?,
-            padded,
-            2,
-            2,
-            0,
-            0,
-            1,
-            1,
-            BufferUsage::Activations,
-        )
-        .map_err(DiffusionError::model)?
-    };
+    let out = conv_2d_im2col_mm(
+        ctx,
+        require_tensor_id(tensor_ids, weight_name)?,
+        padded,
+        2,
+        2,
+        0,
+        0,
+        1,
+        1,
+    )?;
     let bias = broadcast_channel_vector(ctx, require_tensor_id(tensor_ids, bias_name)?, out)?;
     ctx.binary_like_a(Op::Add, out, bias, BufferUsage::Activations)
         .map_err(DiffusionError::model)

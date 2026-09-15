@@ -11,7 +11,7 @@
 //! alternate model fallback.
 
 use crate::backend::{
-    gpu_add, gpu_attention_packed, gpu_attention_packed_flash_bf16,
+    gpu_add, gpu_attention_packed_f32, gpu_attention_packed_flash_bf16,
     gpu_birefnet_image_to_patches, gpu_birefnet_relu,
     gpu_birefnet_resize_bilinear, gpu_birefnet_tokens_to_planar, gpu_concat_cols,
     gpu_concat_rows, gpu_conv2d_planar_cached, gpu_download, gpu_gelu_erf, gpu_graph_capture,
@@ -63,9 +63,7 @@ pub enum Da3Precision {
     /// while beating its warm latency.
     FullBf16,
     /// Explicit validation / high-accuracy mode: true f32 linears and f32
-    /// attention (conv GEMM operands remain f16).  Requires
-    /// `FLUX_ATTN_F16=0` in the environment and refuses to load otherwise;
-    /// never selected automatically.
+    /// attention (conv GEMM operands remain f16). Never selected automatically.
     StrictF32,
 }
 
@@ -86,30 +84,19 @@ impl Da3Precision {
             },
         }
     }
+
+    fn attention_operands(self) -> Da3AttentionOperands {
+        match self {
+            Self::FullBf16 => Da3AttentionOperands::Bf16,
+            Self::StrictF32 => Da3AttentionOperands::F32,
+        }
+    }
 }
 
-/// Environment preconditions for a mode, checked fail-closed at load time.
-/// The attention composite and the conv im2col path read these process-wide
-/// switches inside the shared CUDA backend, so a misconfigured environment
-/// must refuse to load rather than silently change compute.
-fn precision_env_error(precision: Da3Precision) -> Option<&'static str> {
-    if std::env::var("FLUX_VAE_CONV_GEMM").as_deref() == Ok("0") {
-        return Some(
-            "DA3 requires the conv GEMM path; unset FLUX_VAE_CONV_GEMM or set it to 1",
-        );
-    }
-    match precision {
-        Da3Precision::StrictF32 => {
-            if std::env::var("FLUX_ATTN_F16").as_deref() != Ok("0") {
-                return Some(
-                    "DA3 strict-f32 requires FLUX_ATTN_F16=0 in the service environment; \
-                     refusing to run with f16 attention operands",
-                );
-            }
-            None
-        }
-        Da3Precision::FullBf16 => None,
-    }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Da3AttentionOperands {
+    Bf16,
+    F32,
 }
 
 #[derive(Clone, Debug)]
@@ -651,9 +638,6 @@ impl Da3MetricLarge {
         mut progress: Option<ProgressHook>,
         precision: Da3Precision,
     ) -> Result<Self> {
-        if let Some(error) = precision_env_error(precision) {
-            return Err(DiffusionError::workflow(error));
-        }
         let patch_dim = 3 * DA3_PATCH * DA3_PATCH;
         let patch_w = tensor(
             weights,
@@ -916,37 +900,28 @@ impl Da3MetricLarge {
         {
             return Err(DiffusionError::workflow("DA3 normalized input shape mismatch"));
         }
-        let stage_timing = std::env::var("DA3_STAGE_TIMING").as_deref() == Ok("1");
         // Warm production requests replay a captured CUDA graph; taps and
-        // stage timing need the eager op-by-op path. Progress does NOT force
+        // validation taps need the eager op-by-op path. Progress does NOT force
         // eager: the replay is a single ~16ms launch, so the service's
         // cancellation hook gets one check before and one done after —
         // gating on progress.is_none() kept the shipped service (which
         // always passes Some) permanently on the eager path.
-        if tap.is_none() && !stage_timing {
+        if tap.is_none() {
             emit_progress(&mut progress, "DA3 graph", 0.0)?;
             if let Some(prediction) = self.forward_graph(pixels, width, height)? {
                 emit_progress(&mut progress, "DA3 done", 1.0)?;
                 return Ok(prediction);
             }
         }
-        let mut timer = StageTimer {
-            sync: stage_timing.then_some(&self.cls),
-            last: std::time::Instant::now(),
-            totals: Vec::new(),
-        };
         let image = upload(pixels, 3, width * height)?;
-        let (depth, sky) = self.forward_device(&image, width, height, &mut progress, &mut tap, &mut timer)?;
+        let (depth, sky) = self.forward_device(&image, width, height, &mut progress, &mut tap)?;
         let depth_logits = gpu_download(&depth.tensor).map_err(DiffusionError::model)?;
         let sky_logits = gpu_download(&sky.tensor).map_err(DiffusionError::model)?;
-        timer.mark("download");
         if let Some(sink) = tap.as_mut() {
             sink("depth_logits", depth_logits.clone());
             sink("sky_logits", sky_logits.clone());
         }
         let prediction = Self::postprocess(depth_logits, sky_logits, width, height);
-        timer.mark("host_postprocess");
-        timer.report();
         emit_progress(&mut progress, "DA3 done", 1.0)?;
         Ok(prediction)
     }
@@ -1027,7 +1002,6 @@ impl Da3MetricLarge {
                     height,
                     &mut None,
                     &mut None,
-                    &mut StageTimer::disabled(),
                 )?;
                 let depth_logits = gpu_download(&depth.tensor).map_err(DiffusionError::model)?;
                 let sky_logits = gpu_download(&sky.tensor).map_err(DiffusionError::model)?;
@@ -1041,7 +1015,6 @@ impl Da3MetricLarge {
                     height,
                     &mut None,
                     &mut None,
-                    &mut StageTimer::disabled(),
                 )
                 .map_err(|err| err.to_string())
             });
@@ -1073,7 +1046,6 @@ impl Da3MetricLarge {
         height: usize,
         progress: &mut Option<ProgressHook>,
         tap: &mut Option<&mut dyn FnMut(&'static str, Vec<f32>)>,
-        timer: &mut StageTimer,
     ) -> Result<(Planar, Planar)> {
         fn emit(
             sink: &mut Option<&mut dyn FnMut(&'static str, Vec<f32>)>,
@@ -1115,7 +1087,6 @@ impl Da3MetricLarge {
         let pos = &pos_cache.as_ref().expect("DA3 position cache filled").1;
         let mut hidden = gpu_add(&hidden, pos).map_err(DiffusionError::model)?;
         drop(pos_cache);
-        timer.mark("patch_embed_pos");
 
         let mut features = Vec::with_capacity(4);
         for (index, layer) in self.layers.iter().enumerate() {
@@ -1126,43 +1097,32 @@ impl Da3MetricLarge {
             )?;
             let normed = gpu_layer_norm_mod(&hidden, &layer.norm1, 0, DA3_HIDDEN, DA3_NORM_EPS)
                 .map_err(DiffusionError::model)?;
-            timer.mark("block_norm1");
             let qkv = layer.qkv(&normed)?;
-            timer.mark("block_qkv");
             let q = gpu_slice_cols(&qkv, 0, DA3_HIDDEN).map_err(DiffusionError::model)?;
             let k = gpu_slice_cols(&qkv, DA3_HIDDEN, DA3_HIDDEN)
                 .map_err(DiffusionError::model)?;
             let v = gpu_slice_cols(&qkv, 2 * DA3_HIDDEN, DA3_HIDDEN)
                 .map_err(DiffusionError::model)?;
-            timer.mark("block_qkv_slice");
             let scale = 1.0 / (DA3_HEAD_DIM as f32).sqrt();
-            let attention = match self.precision {
+            let attention = match self.precision.attention_operands() {
                 // Head-dim-64 flash kernel: bf16 operands, f32 accumulation.
-                Da3Precision::FullBf16 => {
+                Da3AttentionOperands::Bf16 => {
                     gpu_attention_packed_flash_bf16(&q, &k, &v, DA3_HEADS, scale)
                 }
-                // Composite path; the load-time guard pinned FLUX_ATTN_F16=0,
-                // so operands stay f32.
-                Da3Precision::StrictF32 => gpu_attention_packed(&q, &k, &v, DA3_HEADS, scale),
+                Da3AttentionOperands::F32 => {
+                    gpu_attention_packed_f32(&q, &k, &v, DA3_HEADS, scale)
+                }
             }
             .map_err(DiffusionError::model)?;
-            timer.mark("block_attention");
             let update = layer.proj(&attention)?;
-            timer.mark("block_proj");
             hidden = gpu_add(&hidden, &update).map_err(DiffusionError::model)?;
-            timer.mark("block_residual");
 
             let normed = gpu_layer_norm_mod(&hidden, &layer.norm2, 0, DA3_HIDDEN, DA3_NORM_EPS)
                 .map_err(DiffusionError::model)?;
-            timer.mark("block_norm2");
             let ff = layer.fc1(&normed)?;
-            timer.mark("block_fc1");
             let ff = gpu_gelu_erf(&ff).map_err(DiffusionError::model)?;
-            timer.mark("block_gelu");
             let ff = layer.fc2(&ff)?;
-            timer.mark("block_fc2");
             hidden = gpu_add(&hidden, &ff).map_err(DiffusionError::model)?;
-            timer.mark("block_residual");
 
             if DA3_TAP_LAYERS.contains(&index) {
                 let (block_tap, feature_tap) = match index {
@@ -1180,7 +1140,6 @@ impl Da3MetricLarge {
                     .map_err(DiffusionError::model)?;
                 emit(tap,feature_tap, &feature)?;
                 features.push(feature);
-                timer.mark("feature_norm_slice");
             }
         }
         if features.len() != 4 {
@@ -1200,7 +1159,6 @@ impl Da3MetricLarge {
             const RESIZE_TAPS: [&str; 4] = ["resize_0", "resize_1", "resize_2", "resize_3"];
             let projected = self.projects[index].forward(&planar)?;
             emit(tap,PROJECT_TAPS[index], &projected.tensor)?;
-            timer.mark("dpt_project");
             let projected = match index {
                 0 => self.resize0.forward(projected)?,
                 1 => self.resize1.forward(projected)?,
@@ -1209,7 +1167,6 @@ impl Da3MetricLarge {
                 _ => unreachable!(),
             };
             emit(tap,RESIZE_TAPS[index], &projected.tensor)?;
-            timer.mark("dpt_resize");
             resized.push(projected);
         }
 
@@ -1218,99 +1175,42 @@ impl Da3MetricLarge {
         for (conv, input) in self.scratch_layers.iter().zip(&resized) {
             lateral.push(conv.forward(input)?);
         }
-        timer.mark("dpt_scratch");
         let mut fused = self.fusion[3].forward(
             lateral.remove(3),
             None,
             (lateral[2].width, lateral[2].height),
         )?;
         emit(tap,"refinenet_4", &fused.tensor)?;
-        timer.mark("dpt_refinenet4");
         fused = self.fusion[2].forward(
             fused,
             Some(&lateral[2]),
             (lateral[1].width, lateral[1].height),
         )?;
         emit(tap,"refinenet_3", &fused.tensor)?;
-        timer.mark("dpt_refinenet3");
         fused = self.fusion[1].forward(
             fused,
             Some(&lateral[1]),
             (lateral[0].width, lateral[0].height),
         )?;
         emit(tap,"refinenet_2", &fused.tensor)?;
-        timer.mark("dpt_refinenet2");
         fused = self.fusion[0].forward(
             fused,
             Some(&lateral[0]),
             (lateral[0].width * 2, lateral[0].height * 2),
         )?;
         emit(tap,"refinenet_1", &fused.tensor)?;
-        timer.mark("dpt_refinenet1");
 
         emit_progress(progress, "DA3 depth and sky heads", 0.94)?;
         let neck = self.output_conv1.forward(&fused)?;
         emit(tap,"output_conv1_pre_resize", &neck.tensor)?;
-        timer.mark("head_output_conv1");
         let neck = resize(&neck, width, height, true)?;
-        timer.mark("head_resize");
         let depth = self.depth_conv.forward(&neck)?;
         let depth = relu(&depth)?;
         let depth = self.depth_out.forward(&depth)?;
-        timer.mark("head_depth");
         let sky = self.sky_conv.forward(&neck)?;
         let sky = relu(&sky)?;
         let sky = self.sky_out.forward(&sky)?;
-        timer.mark("head_sky");
         Ok((depth, sky))
-    }
-}
-
-/// DA3_STAGE_TIMING=1: per-op-class GPU time totals.  Each mark synchronizes
-/// the stream by downloading the tiny resident cls row, so totals are honest
-/// at ~15us sync cost per boundary.
-struct StageTimer<'a> {
-    sync: Option<&'a GpuTensor>,
-    last: std::time::Instant,
-    totals: Vec<(&'static str, f64)>,
-}
-
-impl StageTimer<'_> {
-    fn disabled() -> Self {
-        StageTimer {
-            sync: None,
-            last: std::time::Instant::now(),
-            totals: Vec::new(),
-        }
-    }
-
-    fn mark(&mut self, name: &'static str) {
-        let Some(sync) = self.sync else { return };
-        let _ = gpu_download(sync);
-        let now = std::time::Instant::now();
-        let seconds = now.duration_since(self.last).as_secs_f64();
-        self.last = now;
-        match self.totals.iter_mut().find(|(slot, _)| *slot == name) {
-            Some((_, total)) => *total += seconds,
-            None => self.totals.push((name, seconds)),
-        }
-    }
-
-    fn report(&self) {
-        if self.sync.is_none() {
-            return;
-        }
-        let total: f64 = self.totals.iter().map(|(_, seconds)| seconds).sum();
-        let mut totals = self.totals.clone();
-        totals.sort_by(|a, b| b.1.total_cmp(&a.1));
-        for (name, seconds) in &totals {
-            println!(
-                "STAGE {name} ms={:.3} share={:.1}%",
-                seconds * 1000.0,
-                100.0 * seconds / total
-            );
-        }
-        println!("STAGE_TOTAL ms={:.3}", total * 1000.0);
     }
 }
 
@@ -2109,20 +2009,14 @@ mod tests {
     }
 
     #[test]
-    fn precision_modes_report_identity_and_fail_closed() {
+    fn precision_modes_report_identity_and_arithmetic_path() {
         let bf16 = Da3Precision::FullBf16.execution_info();
         assert!(bf16.weight_precision.contains("bf16"));
         assert_eq!(bf16.accumulation_precision, "f32");
         let f32_info = Da3Precision::StrictF32.execution_info();
         assert!(f32_info.weight_precision.starts_with("f32"));
-        // Fail-closed: strict-f32 refuses to load unless the process
-        // environment pins f32 attention operands.
-        std::env::remove_var("FLUX_ATTN_F16");
-        assert!(precision_env_error(Da3Precision::StrictF32).is_some());
-        assert!(precision_env_error(Da3Precision::FullBf16).is_none());
-        std::env::set_var("FLUX_ATTN_F16", "0");
-        assert!(precision_env_error(Da3Precision::StrictF32).is_none());
-        std::env::remove_var("FLUX_ATTN_F16");
+        assert_eq!(Da3Precision::StrictF32.attention_operands(), Da3AttentionOperands::F32);
+        assert_eq!(Da3Precision::FullBf16.attention_operands(), Da3AttentionOperands::Bf16);
     }
 
     #[test]

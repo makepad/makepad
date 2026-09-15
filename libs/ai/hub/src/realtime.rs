@@ -23,7 +23,9 @@ use std::time::{Duration, Instant};
 /// build without it does instead (refuses the request at admission time).
 #[cfg(feature = "video")]
 mod h264 {
-    pub use makepad_video::{StreamVideoCodec, VideoStreamDecoder, VideoStreamEncoder, VideoStreamEncoderOptions};
+    pub use makepad_video::{
+        stream_debug, StreamVideoCodec, VideoStreamDecoder, VideoStreamEncoder, VideoStreamEncoderOptions,
+    };
 }
 
 /// One connected realtime websocket: the sender the connection's write
@@ -269,8 +271,30 @@ impl RealtimeSession {
     /// Merges a partial `{"type":"control", ...}` update: only the fields
     /// present in `update` change anything (see [`apply_control_to_config`]
     /// for the `LiveConfig` subset; the session-only knobs are merged here).
-    pub fn apply_control(&self, update: &realtime_wire::ControlUpdateJson) {
+    pub fn apply_control(
+        &self,
+        update: &realtime_wire::ControlUpdateJson,
+    ) -> Result<(), AssetAiError> {
         let mut state = self.state.lock().unwrap();
+        let next_loop_mode = update
+            .loop_mode
+            .as_deref()
+            .and_then(|text| LoopMode::parse(text).ok())
+            .unwrap_or(state.loop_mode);
+        let next_output_encoding = update
+            .output_encoding
+            .as_deref()
+            .and_then(|text| OutputEncoding::parse(text).ok())
+            .filter(OutputEncoding::is_supported_in_this_build)
+            .unwrap_or(state.output_encoding);
+        if next_loop_mode == LoopMode::Feedback
+            && next_output_encoding == OutputEncoding::None
+        {
+            return Err(AssetAiError::Params(
+                "realtime: loop_mode \"feedback\" requires output frames; output_encoding \"none\" is not allowed"
+                    .to_string(),
+            ));
+        }
         apply_control_to_config(&mut state.config, update);
         if let Some(mode) = update
             .loop_mode
@@ -314,6 +338,7 @@ impl RealtimeSession {
         if update.reset == Some(true) {
             self.reset_requested.store(true, Ordering::Relaxed);
         }
+        Ok(())
     }
 
     /// `{"type":"reference", "slot":N, ...}`: grows `references` with black
@@ -368,8 +393,20 @@ impl RealtimeSession {
             }
         }
         let decoder = decoder_slot.as_mut().unwrap();
-        match decoder.push_packet(payload, header.frame_index as i64) {
+        // The decoder wants monotonic 100 ns timestamps; the wire only
+        // carries a frame index, so stamp it at a nominal 30 fps.
+        let pts_100ns = header.frame_index as i64 * 333_333;
+        h264::stream_debug::log(|| {
+            format!(
+                "realtime: h264 frame #{} {} bytes head [{}]",
+                header.frame_index,
+                payload.len(),
+                h264::stream_debug::head(payload)
+            )
+        });
+        match decoder.push_packet(payload, pts_100ns) {
             Ok(frames) => {
+                h264::stream_debug::log(|| format!("realtime: h264 frame #{} -> {} decoded", header.frame_index, frames.len()));
                 if let Some(frame) = frames.into_iter().last() {
                     self.push_input_frame(RgbImage {
                         width: frame.width,
@@ -381,8 +418,11 @@ impl RealtimeSession {
                 // or the decoder still buffering) — not a drop.
             }
             Err(e) => {
-                eprintln!("realtime: h264 input decode failed, dropping packet: {e}");
-                self.dropped_decode.fetch_add(1, Ordering::Relaxed);
+                let dropped = self.dropped_decode.fetch_add(1, Ordering::Relaxed) + 1;
+                h264::stream_debug::log(|| format!("realtime: h264 frame #{} decode failed: {e}", header.frame_index));
+                if dropped <= 3 || dropped % 100 == 0 {
+                    eprintln!("realtime: h264 input decode failed, dropping packet ({dropped} so far): {e}");
+                }
             }
         }
     }
@@ -396,7 +436,7 @@ impl RealtimeSession {
     /// Handles one client -> server text message: control / reference / stop.
     pub fn handle_text(&self, text: &str) -> Result<(), AssetAiError> {
         match realtime_wire::parse_client_message(text)? {
-            ClientMessage::Control(update) => self.apply_control(&update),
+            ClientMessage::Control(update) => self.apply_control(&update)?,
             ClientMessage::Reference(reference) => {
                 let slot = reference.slot.unwrap_or(0) as usize;
                 let png_b64 = reference.png_b64.as_deref().unwrap_or("");
@@ -422,6 +462,7 @@ impl RealtimeSession {
     fn encode_output(&self, image: &RgbImage, frame_index: u32) -> Vec<Vec<u8>> {
         let output_encoding = self.state.lock().unwrap().output_encoding;
         match output_encoding {
+            OutputEncoding::None => Vec::new(),
             OutputEncoding::Raw | OutputEncoding::Png => {
                 vec![encode_output_frame(image, output_encoding, frame_index)]
             }
@@ -572,8 +613,8 @@ fn encode_output_frame(image: &RgbImage, encoding: OutputEncoding, frame_index: 
                 }
             }
         }
-        OutputEncoding::H264 => {
-            eprintln!("realtime: encode_output_frame called with H264 (should route through encode_output) — using raw");
+        OutputEncoding::H264 | OutputEncoding::None => {
+            eprintln!("realtime: encode_output_frame called with non-frame encoding (should route through encode_output) - using raw");
             (FrameKind::Raw, image.data.clone())
         }
     };
@@ -1108,6 +1149,14 @@ pub fn run_live(
     cancel: &CancelToken,
     mut progress: impl FnMut(&str, u64, u64, f64),
 ) -> Result<(), AssetAiError> {
+    let started = Instant::now();
+    {
+        let codec = session.codec_stats();
+        eprintln!(
+            "realtime {}: live session open — model {}, {} in, {} out",
+            session.job_id, session.model_id, codec.input, codec.output
+        );
+    }
     let mut last_output: Option<RgbImage> = None;
     let mut feedback = FeedbackState::default();
     let mut frame_index: u64 = 0;
@@ -1185,6 +1234,15 @@ pub fn run_live(
                     }
                     if let Some(frame) = session.take_mailbox_frame() {
                         break frame;
+                    }
+                    if session.socket_count() == 0 {
+                        // Nobody listening and nobody feeding: a client that
+                        // died without `stop` would otherwise park this
+                        // branch forever and hold the GPU slot. Go back
+                        // through the top, where the idle timeout counts a
+                        // socketless session down and ends it.
+                        session.wait_for_mailbox(Duration::from_millis(250));
+                        continue 'session;
                     }
                     if session.loop_mode() != LoopMode::Feed {
                         // A control update flipped the session to feedback
@@ -1298,6 +1356,9 @@ pub fn run_live(
             }
         };
 
+        if let Some(aux_json) = out.aux_json.as_deref() {
+            session.push_bytes(realtime_wire::encode_aux_message(frame_index, aux_json));
+        }
         {
             let mut slot = outbound.lock().unwrap();
             if slot.replace((frame_index, out.image.clone())).is_some() {
@@ -1371,6 +1432,27 @@ pub fn run_live(
     outbound_cv.notify_all();
     result
     });
+    // One line per session in the service log: enough to tell from a
+    // headless box whether the wire decoded and how fast the model ran.
+    let elapsed = started.elapsed().as_secs_f64();
+    let frames_in = session.frames_in.load(Ordering::Relaxed);
+    let frames_out = session.frames_out.load(Ordering::Relaxed);
+    let codec = session.codec_stats();
+    eprintln!(
+        "realtime {}: session closed after {elapsed:.1} s — {} {} frames in, {frames_out} out ({:.1} fps), \
+         {} dropped, {} undecodable, {} unencoded{}",
+        session.job_id,
+        codec.input,
+        frames_in,
+        if elapsed > 0.0 { frames_out as f64 / elapsed } else { 0.0 },
+        session.dropped.load(Ordering::Relaxed),
+        codec.dropped_decode,
+        session.dropped_encode.load(Ordering::Relaxed),
+        match &result {
+            Ok(()) => String::new(),
+            Err(e) => format!(", error: {e}"),
+        }
+    );
     result
 }
 
@@ -1638,6 +1720,33 @@ mod tests {
         assert_eq!(params.config.camera, CameraMotion::feedback_default());
         assert_eq!(params.config.noise_mode.resolve(LoopMode::Feedback), NoiseMode::Hold);
         assert_eq!(params.config.noise_mode.resolve(LoopMode::Feed), NoiseMode::Reroll);
+    }
+
+    #[test]
+    fn output_encoding_none_is_feed_only() {
+        use crate::protocol::RealtimeRequestJson;
+
+        let feed = RealtimeRequestJson {
+            model: "testpattern".to_string(),
+            loop_mode: Some("feed".to_string()),
+            output_encoding: Some("none".to_string()),
+            ..Default::default()
+        };
+        let params = LiveParams::from_request(&feed).unwrap();
+        assert_eq!(params.output_encoding, OutputEncoding::None);
+
+        let feedback = RealtimeRequestJson {
+            model: "testpattern".to_string(),
+            loop_mode: Some("feedback".to_string()),
+            output_encoding: Some("none".to_string()),
+            ..Default::default()
+        };
+        let error = LiveParams::from_request(&feedback)
+            .err()
+            .expect("feedback with no output must be refused");
+        assert!(matches!(error, AssetAiError::Params(_)));
+        assert!(error.to_string().contains("feedback"));
+        assert!(error.to_string().contains("output_encoding \"none\""));
     }
 
     #[test]
@@ -1939,7 +2048,12 @@ mod tests {
             // A frame that changes every step, so frame_diff is non-zero.
             let tint = (frame.frame_index * 40 % 256) as u8;
             let image = solid_image(frame.config.width, frame.config.height, [tint, 20, 30]);
-            Ok(crate::backend::LiveFrameOut { image, model_ms: 0.1, text_encode_ms: 0.0 })
+            Ok(crate::backend::LiveFrameOut {
+                image,
+                aux_json: None,
+                model_ms: 0.1,
+                text_encode_ms: 0.0,
+            })
         }
     }
 
@@ -1993,6 +2107,48 @@ mod tests {
             max_fps: 200.0,
             idle_timeout_s: 0,
         }
+    }
+
+    /// A feed-mode client that vanishes without `stop` (a crash, a kill)
+    /// must not hold the box's live slot forever: once its socket is gone
+    /// the idle timeout ends the session even though no frame ever arrives
+    /// again.
+    #[test]
+    fn run_live_feed_mode_ends_when_the_last_socket_leaves_past_the_idle_timeout() {
+        let mut params = recording_params(LoopMode::Feed);
+        params.idle_timeout_s = 1;
+        let session = std::sync::Arc::new(RealtimeSession::new("job-t".to_string(), &params));
+        let (socket_tx, socket_rx) = mpsc::channel();
+        session.add_socket(1, socket_tx);
+        let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let source = gradient_image(32, 32);
+        let worker = {
+            let session = session.clone();
+            let seen = seen.clone();
+            let source = source.clone();
+            std::thread::spawn(move || {
+                let mut backend = RecordingBackend { seen, source };
+                let cancel = CancelToken::new();
+                run_live(&session, &mut backend, &cancel, |_, _, _, _| {})
+            })
+        };
+        session.push_input_frame(source);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while seen.lock().unwrap().is_empty() {
+            assert!(Instant::now() < deadline, "the first frame never ran");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // The client is gone: socket closed, no stop, no more frames.
+        session.remove_socket(1);
+        drop(socket_rx);
+        let started = Instant::now();
+        let deadline = started + Duration::from_secs(8);
+        while !worker.is_finished() {
+            assert!(Instant::now() < deadline, "a socketless feed session must end on the idle timeout");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        worker.join().unwrap().unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(900), "ended before the idle timeout");
     }
 
     #[test]
@@ -2186,12 +2342,38 @@ mod tests {
             prompt: Some("hi".to_string()),
             ..Default::default()
         };
-        session.apply_control(&update);
+        session.apply_control(&update).unwrap();
         let (config, loop_mode, output_encoding, max_fps) = session.snapshot();
         assert_eq!(loop_mode, LoopMode::Feedback);
         assert_eq!(output_encoding, OutputEncoding::Png);
         assert_eq!(max_fps, 24.0);
         assert_eq!(config.prompt, "hi");
+    }
+
+    #[test]
+    fn none_control_sends_no_frame_and_refuses_feedback() {
+        let params = LiveParams {
+            model: "testpattern".to_string(),
+            config: LiveConfig::default(),
+            loop_mode: LoopMode::Feed,
+            input_encoding: OutputEncoding::Raw,
+            output_encoding: OutputEncoding::None,
+            max_fps: 0.0,
+            idle_timeout_s: 30,
+        };
+        let session = RealtimeSession::new("job-none".to_string(), &params);
+        assert!(session.encode_output(&RgbImage::blank(16, 16), 0).is_empty());
+
+        let update = ControlUpdateJson {
+            kind: "control".to_string(),
+            loop_mode: Some("feedback".to_string()),
+            ..Default::default()
+        };
+        let error = session.apply_control(&update).unwrap_err();
+        assert!(matches!(error, AssetAiError::Params(_)));
+        let (_, loop_mode, output_encoding, _) = session.snapshot();
+        assert_eq!(loop_mode, LoopMode::Feed);
+        assert_eq!(output_encoding, OutputEncoding::None);
     }
 
     /// The server-loop handshake: open in feed, push the source once, flip

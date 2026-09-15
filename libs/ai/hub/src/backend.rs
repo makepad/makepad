@@ -93,6 +93,8 @@ pub struct GenerateParams {
     pub text: String,
     pub voice: String,
     pub speed: f32,
+    /// Speech language hint (`language` on the wire); "" = model default.
+    pub language: String,
     /// 8-slot emotion vector (indextts), validated to length 8 and clamped
     /// per-slot to [0, 1.2]; `None` = neutral.
     pub emotion: Option<[f32; 8]>,
@@ -116,6 +118,7 @@ pub struct GenerateParams {
     pub decimation_target: Option<u32>,
     /// Baked texture atlas size; `None` = backend default.
     pub texture_size: Option<u32>,
+    pub pixal: Option<crate::protocol::PixalOptionsJson>,
 
     // Splat domain (triposplat backend).
     /// Target gaussian count; `None` = backend default (262144). Clamped and
@@ -343,6 +346,7 @@ impl GenerateParams {
 
             text: request.text.clone().unwrap_or_default(),
             voice: request.voice.clone().unwrap_or_default(),
+            language: request.language.clone().unwrap_or_default(),
             speed: if speed.is_finite() && speed > 0.0 {
                 speed.clamp(0.25, 4.0) as f32
             } else {
@@ -391,6 +395,7 @@ impl GenerateParams {
                 .decimation_target
                 .map(|v| v.clamp(1_000, 2_000_000)),
             texture_size: request.texture_size.map(|v| v.clamp(256, 4096)),
+            pixal: request.pixal.clone(),
             gaussians: request
                 .gaussians
                 .map(|v| v.clamp(SPLAT_GAUSSIANS_MIN, SPLAT_GAUSSIANS_MAX)),
@@ -589,6 +594,9 @@ pub fn img2img_start_step(strength: f32, steps: u32) -> u32 {
 /// enforced (it picks what the session itself encodes and pushes).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum OutputEncoding {
+    /// Do not send output frames. JSON stats/aux/error/stopped messages still
+    /// flow, making this suitable for structured per-frame backends.
+    None,
     /// Raw RGB8, no compression — cheapest on a LAN, always available.
     #[default]
     Raw,
@@ -606,14 +614,16 @@ impl OutputEncoding {
             "" | "raw" => Ok(OutputEncoding::Raw),
             "png" => Ok(OutputEncoding::Png),
             "h264" => Ok(OutputEncoding::H264),
+            "none" => Ok(OutputEncoding::None),
             other => Err(AssetAiError::Params(format!(
-                "unknown output_encoding {other:?} (expected \"raw\", \"png\" or \"h264\")"
+                "unknown output_encoding {other:?} (expected \"none\", \"raw\", \"png\" or \"h264\")"
             ))),
         }
     }
 
     pub fn as_str(&self) -> &'static str {
         match self {
+            OutputEncoding::None => "none",
             OutputEncoding::Raw => "raw",
             OutputEncoding::Png => "png",
             OutputEncoding::H264 => "h264",
@@ -625,7 +635,7 @@ impl OutputEncoding {
     /// hardware codec seam); `Raw`/`Png` are always available.
     pub fn is_supported_in_this_build(&self) -> bool {
         match self {
-            OutputEncoding::Raw | OutputEncoding::Png => true,
+            OutputEncoding::None | OutputEncoding::Raw | OutputEncoding::Png => true,
             OutputEncoding::H264 => cfg!(feature = "video"),
         }
     }
@@ -979,6 +989,12 @@ impl LiveParams {
                 input_encoding.as_str()
             )));
         }
+        if loop_mode == LoopMode::Feedback && output_encoding == OutputEncoding::None {
+            return Err(AssetAiError::Params(
+                "realtime: loop_mode \"feedback\" requires output frames; output_encoding \"none\" is not allowed"
+                    .to_string(),
+            ));
+        }
         let max_fps = request
             .max_fps
             .filter(|v| v.is_finite() && *v >= 0.0)
@@ -1051,13 +1067,15 @@ pub struct LiveFrameIn<'a> {
     pub config: &'a LiveConfig,
 }
 
-/// One `ContentBackend::live_step` call's output: the produced frame plus
-/// the backend's own wall-clock cost (surfaced in the `stats` message's
-/// `stage_ms.model`) and, inside that, the share the text encoder took
-/// (`stage_ms.text_encode`; 0 for backends without one, and near 0 on the
-/// frames where `flux2_backend` served the prompt embeds from its cache).
+/// One `ContentBackend::live_step` call's output: the produced frame, an
+/// optional structured JSON packet sent before that frame, plus the backend's
+/// own wall-clock cost (surfaced in the `stats` message's `stage_ms.model`)
+/// and, inside that, the share the text encoder took (`stage_ms.text_encode`;
+/// 0 for backends without one, and near 0 on frames where `flux2_backend`
+/// served the prompt embeds from its cache).
 pub struct LiveFrameOut {
     pub image: RgbImage,
+    pub aux_json: Option<String>,
     pub model_ms: f64,
     pub text_encode_ms: f64,
 }
@@ -1203,6 +1221,7 @@ pub fn validate_loras_for_backend(
 
 /// One generated output. `content_type` drives the `/artifact` response;
 /// `ext` names the file on disk.
+#[derive(Clone, Debug)]
 pub struct ArtifactData {
     pub content_type: &'static str,
     pub ext: &'static str,
@@ -1226,7 +1245,10 @@ pub type ProgressSink<'a> = &'a mut dyn FnMut(&str, f64);
 /// and unwind with [`AssetAiError::Cancelled`] promptly — seconds, not
 /// end-of-job. A single in-flight kernel/forward is the granularity floor.
 #[derive(Clone, Debug, Default)]
-pub struct CancelToken(std::sync::Arc<std::sync::atomic::AtomicBool>);
+pub struct CancelToken {
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    activity: Option<(std::sync::Arc<crate::activity::ActivityGate>, u64)>,
+}
 
 impl CancelToken {
     pub fn new() -> Self {
@@ -1235,11 +1257,21 @@ impl CancelToken {
 
     /// Raise the flag (idempotent).
     pub fn cancel(&self) {
-        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(std::sync::atomic::Ordering::Relaxed)
+        if self.activity_interrupted() { self.cancel(); }
+        self.cancelled.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub(crate) fn bind_activity(&mut self, gate: std::sync::Arc<crate::activity::ActivityGate>) {
+        let epoch = gate.epoch();
+        self.activity = Some((gate, epoch));
+    }
+
+    pub(crate) fn activity_interrupted(&self) -> bool {
+        self.activity.as_ref().is_some_and(|(gate, epoch)| !gate.allows_work() || gate.epoch() != *epoch)
     }
 
     /// `Err(AssetAiError::Cancelled)` once the flag is raised — the one-liner
@@ -1275,6 +1307,7 @@ impl<'a> BackendCtx<'a> {
     /// Downloads any registry files missing from the cache; returns their
     /// resolved local paths in registry order.
     pub fn ensure_files(&mut self) -> Result<Vec<PathBuf>, AssetAiError> {
+        crate::disk_space::check_model(self.spec, self.cache_dir)?;
         let mut paths = Vec::new();
         for file in &self.spec.files {
             self.cancel.check()?;
@@ -1552,7 +1585,9 @@ pub fn backend_compiled(name: &str) -> bool {
         // so it is compiled in exactly when the LLM is.
         "vision" => cfg!(feature = "llm"),
         "ocr" => cfg!(feature = "llm"),
+        "notes" => cfg!(feature = "notes-native"),
         "kokoro" => cfg!(feature = "tts"),
+        "whisper" => cfg!(feature = "stt"),
         "indextts" => cfg!(feature = "indextts"),
         // The `fast` (FastH3) lane rides the H3 pipeline: same feature.
         "h3" | "fast" => cfg!(feature = "video"),
@@ -1560,11 +1595,14 @@ pub fn backend_compiled(name: &str) -> bool {
         "moss" => cfg!(feature = "audio"),
         "woosh" => cfg!(feature = "audio"),
         "ace" => cfg!(feature = "audio"),
+        "beats" => cfg!(feature = "beats-native"),
+        "stems" => cfg!(feature = "stems-native"),
         "trellis" => cfg!(feature = "mesh"),
         "paint" | "paint-test" => cfg!(feature = "paint"),
         "matte-native" => cfg!(feature = "matte-native"),
         "depth-native" => cfg!(feature = "depth-native"),
         "segment-native" => cfg!(feature = "segment-native"),
+        "body-native" => cfg!(feature = "body-native"),
         "upscale-native" => cfg!(feature = "upscale-native"),
         "video-enhance" => {
             cfg!(feature = "upscale-native")
@@ -1623,6 +1661,7 @@ pub fn backend_provisioned(name: &str) -> bool {
         "ocr" => crate::vision_backend::vision_provisioned(),
         "depth-native" => cfg!(feature = "depth-native"),
         "segment-native" => cfg!(feature = "segment-native"),
+        "body-native" => cfg!(feature = "body-native"),
         "upscale-native" => cfg!(feature = "upscale-native"),
         "video-enhance" => {
             cfg!(feature = "upscale-native")
@@ -1747,10 +1786,29 @@ pub fn model_availability(
 
 pub fn create_backend(spec: &ModelSpec) -> Result<Box<dyn ContentBackend>, AssetAiError> {
     match spec.backend.as_str() {
+        "sample-kit" => Err(AssetAiError::Unavailable(
+            "sample-kit is a sample bank, not a model".to_string(),
+        )),
+        #[cfg(feature = "notes-native")]
+        "notes" => Ok(Box::new(crate::notes_backend::NotesBackend::new(&spec.id))),
+        #[cfg(not(feature = "notes-native"))]
+        "notes" => Err(AssetAiError::Unavailable(format!(
+            "model {} needs a build with the 'notes-native' cargo feature",
+            spec.id
+        ))),
         #[cfg(feature = "paint")]
         "paint" | "paint-test" => Ok(Box::new(crate::paint_backend::PaintBackend::new(spec))),
         "testpattern" => Ok(Box::new(crate::testpattern::TestPatternBackend::new(
             &spec.id,
+        ))),
+        #[cfg(feature = "body-native")]
+        "body-native" => Ok(Box::new(
+            crate::body_native_backend::BodyNativeBackend::new_native(&spec.id),
+        )),
+        #[cfg(not(feature = "body-native"))]
+        "body-native" => Err(AssetAiError::Unavailable(format!(
+            "model {} needs a build with the 'body-native' cargo feature",
+            spec.id
         ))),
         #[cfg(feature = "flux")]
         "flux" => Ok(Box::new(crate::flux_backend::FluxBackend::new(&spec.id))),
@@ -1801,6 +1859,15 @@ pub fn create_backend(spec: &ModelSpec) -> Result<Box<dyn ContentBackend>, Asset
             "model {} needs a build with the 'llm' cargo feature",
             spec.id
         ))),
+        #[cfg(feature = "stt")]
+        "whisper" => Ok(Box::new(crate::whisper_backend::WhisperBackend::new_whisper(
+            &spec.id,
+        ))),
+        #[cfg(not(feature = "stt"))]
+        "whisper" => Err(AssetAiError::Unavailable(format!(
+            "model {} needs a build with the 'stt' cargo feature",
+            spec.id
+        ))),
         #[cfg(feature = "tts")]
         "kokoro" => Ok(Box::new(crate::kokoro_backend::KokoroBackend::new_kokoro(
             &spec.id,
@@ -1843,6 +1910,20 @@ pub fn create_backend(spec: &ModelSpec) -> Result<Box<dyn ContentBackend>, Asset
         ))),
         #[cfg(feature = "audio")]
         "ace" => Ok(Box::new(crate::ace_backend::AceBackend::new_ace(&spec.id))),
+        #[cfg(feature = "beats-native")]
+        "beats" => Ok(Box::new(crate::beats_backend::BeatsBackend::new(&spec.id))),
+        #[cfg(not(feature = "beats-native"))]
+        "beats" => Err(AssetAiError::Unavailable(format!(
+            "model {} needs a build with the 'beats-native' cargo feature",
+            spec.id
+        ))),
+        #[cfg(feature = "stems-native")]
+        "stems" => Ok(Box::new(crate::stems_backend::StemsBackend::new(&spec.id))),
+        #[cfg(not(feature = "stems-native"))]
+        "stems" => Err(AssetAiError::Unavailable(format!(
+            "model {} needs a build with the 'stems-native' cargo feature",
+            spec.id
+        ))),
         #[cfg(not(feature = "audio"))]
         "moss" => Err(AssetAiError::Unavailable(format!(
             "model {} needs a build with the 'audio' cargo feature",
@@ -1987,7 +2068,6 @@ mod tests {
     use super::{backend_compiled, create_backend, model_availability};
     #[cfg(not(feature = "python-backends"))]
     use super::backend_provisioned;
-    #[cfg(not(feature = "python-backends"))]
     use crate::error::AssetAiError;
     use crate::gpu::GpuInfo;
     use crate::registry::{Domain, ModelSpec};
@@ -2014,6 +2094,17 @@ mod tests {
             note: None,
             license: None,
             files: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn sample_kit_is_downloadable_but_not_runnable() {
+        match create_backend(&spec("sample-kit", true, Some(0.0))) {
+            Err(AssetAiError::Unavailable(message)) => {
+                assert_eq!(message, "sample-kit is a sample bank, not a model")
+            }
+            Err(error) => panic!("wrong sample-kit error: {error}"),
+            Ok(_) => panic!("sample-kit unexpectedly created a runnable backend"),
         }
     }
 

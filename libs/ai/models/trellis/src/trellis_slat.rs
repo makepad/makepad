@@ -3,8 +3,7 @@
 //! with Channel2Spatial upsampling, channels [1024, 512, 256, 128, 64],
 //! blocks [4, 16, 8, 4, 0].
 //!
-//! Sparse conv = 27 taps of (neighbor gather with zero row for absent
-//! neighbors -> cached f16 gemm -> accumulate), the trellis.cpp recipe.
+//! Sparse conv = chunked im2col slabs followed by tensor-core gemms.
 //! Checkpoint conv weights are ALREADY permuted [Co, kd, kh, kw, Ci]
 //! (flex_gemm layout) — tap slices are Ci-contiguous. Tap k = (kd*3+kh)*3+kw
 //! pairs with input voxel (x+kd-1, y+kh-1, z+kw-1) (cross-correlation).
@@ -41,30 +40,12 @@ fn host_f32(weights: &TrellisWeights, name: &str) -> Result<Vec<f32>> {
     weights.tensor_f32(name)
 }
 
-/// The im2col single-gemm sparse conv (default). T2_CONV_IM2COL=0 restores
-/// the legacy 27 x (gather + gemm + add) path for A/B.
-fn t2_conv_im2col_enabled() -> bool {
-    match std::env::var("T2_CONV_IM2COL") {
-        Ok(value) => value != "0",
-        Err(_) => true,
-    }
-}
-
 /// Neighbor index buffers (27 taps) for one sparse coordinate set.
 pub struct SparseStageCtx {
     pub coords: Vec<[i32; 3]>,
     /// Tap-major (27*N) neighbor rows, u32::MAX = absent — one upload,
     /// consumed by the im2col conv.
     neighbors27: GpuTensor,
-    /// Per-tap index tensors, built only for the legacy conv path.
-    tap_neighbors: Vec<GpuTensor>,
-}
-
-fn t2_trace_enabled() -> bool {
-    match std::env::var("T2_TRACE") {
-        Ok(value) => value != "0",
-        Err(_) => false,
-    }
 }
 
 /// Open-addressing coord -> row map (multiplicative hash over the packed
@@ -127,9 +108,7 @@ impl CoordMap {
 
 impl SparseStageCtx {
     pub fn new(coords: Vec<[i32; 3]>) -> Result<Self> {
-        let trace_start = std::time::Instant::now();
         let map = CoordMap::build(&coords);
-        let map_built = trace_start.elapsed();
         // 27 taps of N read-only hashmap lookups: thread across taps (the
         // host neighbor build dominated cold decode otherwise).
         let offsets: Vec<[i32; 3]> = (-1i32..=1)
@@ -159,32 +138,14 @@ impl SparseStageCtx {
                 .map(|handle| handle.join().expect("neighbor tap thread"))
                 .collect()
         });
-        let taps_built = trace_start.elapsed();
         let mut combined = Vec::with_capacity(27 * coords.len());
         for idx in &tap_indices {
             combined.extend_from_slice(idx);
         }
         let neighbors27 = gpu_upload_u32(&combined).map_err(DiffusionError::model)?;
-        if t2_trace_enabled() {
-            println!(
-                "TRACE stage_ctx n={} map={:.3}s taps={:.3}s upload+total={:.3}s",
-                coords.len(),
-                map_built.as_secs_f64(),
-                (taps_built - map_built).as_secs_f64(),
-                trace_start.elapsed().as_secs_f64(),
-            );
-        }
-        let mut tap_neighbors = Vec::new();
-        if !t2_conv_im2col_enabled() {
-            tap_neighbors.reserve(27);
-            for idx in &tap_indices {
-                tap_neighbors.push(gpu_upload_u32(idx).map_err(DiffusionError::model)?);
-            }
-        }
         Ok(Self {
             coords,
             neighbors27,
-            tap_neighbors,
         })
     }
 
@@ -338,42 +299,6 @@ impl T2SparseDec {
         })
     }
 
-    /// Ensure one tap slice of a sparse conv weight [Co, 3, 3, 3, Ci] in the
-    /// device cache; returns the part for the cached gemm.
-    fn conv_tap_part(
-        &self,
-        name: String,
-        co: usize,
-        ci: usize,
-        tap: usize,
-    ) -> Result<(String, usize)> {
-        let (dtype, _) = self.weights.tensor_dtype_shape(&name)?;
-        let ggml_type = match dtype {
-            MlxDType::F16 => GGML_TYPE_F16,
-            MlxDType::BF16 => GGML_TYPE_BF16,
-            other => {
-                return Err(DiffusionError::model(format!(
-                    "sparse conv '{name}' unsupported dtype {other:?}"
-                )))
-            }
-        };
-        let key = format!("{name}::t{tap}");
-        let want_a16 = crate::backend::gpu_gemm_f16acc_enabled();
-        gpu_weight_cache_ensure(self.namespace, &key, ggml_type, co, ci, want_a16, || {
-            let bytes = self.weights.tensor_bytes(&name).map_err(|e| e.to_string())?;
-            let row_len = 27 * ci * 2;
-            let mut out = vec![0u8; co * ci * 2];
-            for row in 0..co {
-                let src = row * row_len + tap * ci * 2;
-                out[row * ci * 2..(row + 1) * ci * 2]
-                    .copy_from_slice(&bytes[src..src + ci * 2]);
-            }
-            Ok(out)
-        })
-        .map_err(DiffusionError::model)?;
-        Ok((key, ggml_type as usize))
-    }
-
     /// Ensure the FULL [Co, 27*Ci] flex_gemm conv weight (checkpoint layout,
     /// f16, no permute needed) in the device cache for the im2col conv.
     fn ensure_conv_full(&self, weight_name: &str, co: usize, ci: usize) -> Result<String> {
@@ -393,9 +318,8 @@ impl T2SparseDec {
         Ok(key)
     }
 
-    /// Submanifold conv3d. Default: chunked im2col slab + one tensor-core
-    /// gemm per chunk (gpu_sparse_conv27). Legacy (T2_CONV_IM2COL=0):
-    /// 27 x (gather -> cached gemm -> add), bias on the center tap.
+    /// Submanifold conv3d: chunked im2col slab + one tensor-core gemm per
+    /// chunk (`gpu_sparse_conv27`).
     fn sparse_conv(
         &self,
         x: &GpuTensor,
@@ -409,33 +333,9 @@ impl T2SparseDec {
             .get(name)
             .ok_or_else(|| DiffusionError::model(format!("missing conv bias {name}")))?;
         let weight_name = format!("{name}.weight");
-        if t2_conv_im2col_enabled() {
-            let key = self.ensure_conv_full(&weight_name, co, ci)?;
-            return gpu_sparse_conv27(x, &ctx.neighbors27, self.namespace, &key, co, bias)
-                .map_err(DiffusionError::model);
-        }
-        let mut acc: Option<GpuTensor> = None;
-        for tap in 0..27 {
-            let gathered = gpu_gather_rows_colblock(x, &ctx.tap_neighbors[tap], None, ci)
-                .map_err(DiffusionError::model)?;
-            let (key, ggml_type) = self.conv_tap_part(weight_name.clone(), co, ci, tap)?;
-            let part = GpuLinearPart {
-                bt_ggml_type: ggml_type as u32,
-                n: co,
-                cache_key: &key,
-                bytes: &[],
-            };
-            let parts = [part];
-            let tap_bias: &[f32] = if tap == 13 { bias } else { &[] };
-            let y = gpu_linear_nt_cached(&gathered, self.namespace, &parts, tap_bias)
-                .map_err(DiffusionError::model)?;
-            drop(gathered);
-            acc = Some(match acc {
-                None => y,
-                Some(a) => gpu_add(&a, &y).map_err(DiffusionError::model)?,
-            });
-        }
-        acc.ok_or_else(|| DiffusionError::model("sparse conv produced no output"))
+        let key = self.ensure_conv_full(&weight_name, co, ci)?;
+        gpu_sparse_conv27(x, &ctx.neighbors27, self.namespace, &key, co, bias)
+            .map_err(DiffusionError::model)
     }
 
     fn linear_cached(&self, x: &GpuTensor, name: &str, n: usize, bias: &[f32]) -> Result<GpuTensor> {

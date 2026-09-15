@@ -217,15 +217,6 @@ impl MossDit {
             )));
         }
 
-        // Optional debug taps: MOSS_TAPS=<dir> writes raw LE f32 dumps.
-        let taps_dir = std::env::var("MOSS_TAPS").ok();
-        let tap = |name: &str, data: &[f32]| {
-            if let Some(dir) = &taps_dir {
-                let bytes: Vec<u8> = data.iter().flat_map(|v| v.to_le_bytes()).collect();
-                let _ = std::fs::write(format!("{dir}/{name}.bin"), bytes);
-            }
-        };
-
         // t embeddings: sinusoid(256) -> Linear+SiLU+Linear -> t (dim);
         // t_mod = Linear(SiLU(t)) -> (6, dim)
         let sinus = moss_sinusoid(MOSS_DIT_FREQ_DIM, timestep as f64);
@@ -239,8 +230,6 @@ impl MossDit {
             *v = silu(*v);
         }
         let t_mod = linear(&t_act, &self.tproj_w, Some(&self.tproj_b), 1, d, 6 * d);
-        tap("t", &t_vec);
-        tap("t_mod", &t_mod);
 
         // patchify: token per frame, x[f] = W @ latents[:, f] + b
         let mut x = vec![0f32; frames * d];
@@ -255,14 +244,12 @@ impl MossDit {
             }
         });
 
-        tap("patchify", &x);
-        tap("ctx_emb", &context.embedded);
 
         let heads = MOSS_DIT_HEADS;
         let hd = MOSS_DIT_HEAD_DIM;
         let scale = 1.0 / (hd as f32).sqrt();
 
-        for (block_index, block) in self.blocks.iter().enumerate() {
+        for block in &self.blocks {
             // modulation rows: (modulation + t_mod) -> 6 x dim
             let mod_row = |idx: usize| -> Vec<f32> {
                 let base = idx * d;
@@ -361,9 +348,6 @@ impl MossDit {
                     x[row * d + i] += gate_mlp[i] * ffn[row * d + i];
                 }
             }
-            if matches!(block_index, 0 | 1 | 14 | 29) {
-                tap(&format!("block{block_index:02}"), &x);
-            }
         }
 
         // head: LayerNorm(no affine) * (1+scale) + shift with (head_mod + t)
@@ -379,7 +363,6 @@ impl MossDit {
         layer_norm_rows(&mut normed, d, None, None);
         modulate_rows(&mut normed, d, &shift, &scale_h);
         let out_tokens = linear(&normed, &self.head_w, Some(&self.head_b), frames, d, c);
-        tap("head", &out_tokens);
 
         // unpatchify: (frames x 128) -> (128 x frames)
         let mut out = vec![0f32; c * frames];
@@ -388,7 +371,6 @@ impl MossDit {
                 out[i * frames + frame] = out_tokens[frame * c + i];
             }
         }
-        tap("final", &out);
         Ok(out)
     }
 }

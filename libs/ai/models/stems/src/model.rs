@@ -202,9 +202,6 @@ impl StemsModel {
             )));
         }
 
-        let timing = std::env::var_os("MAKEPAD_STEMS_TIMING").is_some();
-        let t0 = std::time::Instant::now();
-
         // -- STFT both channels into the graph's feature layout --
         for ch in 0..AUDIO_CHANNELS {
             let (spec, frames) = self.stft.forward(chunk.channel(ch));
@@ -216,8 +213,6 @@ impl StemsModel {
             self.spectrum[ch].copy_from_slice(&spec);
         }
         pack_features(&self.spectrum, &mut self.features);
-        let t_stft = t0.elapsed();
-
         // -- forward --
         let outputs: Vec<TensorId> = self.graph.masks.to_vec();
         let execution = self.session.execute(
@@ -225,8 +220,6 @@ impl StemsModel {
             &[(self.graph.features, as_bytes(&self.features))],
             &outputs,
         )?;
-        let t_forward = t0.elapsed();
-
         // -- complex mask + inverse STFT --
         // The eight (stem, channel) reconstructions are fully independent, and
         // together they are the whole CPU cost of a chunk (the profile puts
@@ -286,16 +279,6 @@ impl StemsModel {
         let mut stems = empty_stem_set(0);
         for (stem, ch, samples) in done {
             *stems[stem].channel_mut(ch) = samples;
-        }
-        if timing {
-            let total = t0.elapsed();
-            eprintln!(
-                "stems chunk: stft {:.0}ms  forward {:.0}ms  mask+istft {:.0}ms  total {:.0}ms",
-                t_stft.as_secs_f64() * 1e3,
-                (t_forward - t_stft).as_secs_f64() * 1e3,
-                (total - t_forward).as_secs_f64() * 1e3,
-                total.as_secs_f64() * 1e3,
-            );
         }
         Ok(stems)
     }

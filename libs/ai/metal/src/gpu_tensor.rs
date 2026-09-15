@@ -3,11 +3,14 @@
 //! Metal try_* kernels. Small addressing ops stay on the host. No oracle;
 //! goal is a working Metal path we can then keep cutting copies.
 
-use crate::gpu_types::{GpuLinearPart, GpuTensor};
+use crate::gpu_types::{fresh_tensor_id, GpuLinearPart, GpuTensor};
+use makepad_ai_loader::quant::GGML_TYPE_F32;
+pub use crate::shim::{DecAttnRef, DecLinearRef, TwoWayLayerRef, VitLayerRef, VitLinearRef};
 use crate::shim::{
     try_add_f32, try_conv2d_planar_f32, try_flash_attn_f32_packed, try_gelu_f32,
     try_group_norm_planar_f32, try_layer_norm_mul_add_f32, try_matmul_nt_f32, try_mul_f32,
-    try_silu_f32,
+    try_matmul_nt_ggml_bytes_keyed, try_silu_f32, try_two_way_layer_resident_f32,
+    try_vit_backbone_resident_f32,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -19,6 +22,7 @@ fn tensor(rows: usize, cols: usize, data: Vec<f32>) -> GpuTensor {
         cols,
         data: RefCell::new(data),
         u32s: RefCell::new(Vec::new()),
+        id: std::cell::Cell::new(fresh_tensor_id()),
     }
 }
 
@@ -133,6 +137,7 @@ pub fn upload_u32(values: &[u32]) -> Result<GpuTensor, String> {
         cols: 1,
         data: RefCell::new(Vec::new()),
         u32s: RefCell::new(values.to_vec()),
+        id: std::cell::Cell::new(fresh_tensor_id()),
     })
 }
 
@@ -151,6 +156,7 @@ pub fn upload_into(t: &GpuTensor, values: &[f32]) -> Result<(), String> {
         }
     }
     *slot = values.to_vec();
+    t.id.set(fresh_tensor_id());
     Ok(())
 }
 
@@ -161,6 +167,7 @@ pub fn copy_into(src: &GpuTensor, dst: &GpuTensor) -> Result<(), String> {
         .try_borrow_mut()
         .map_err(|_| "metal copy_into borrow".to_string())?;
     *dst_data = src_data;
+    dst.id.set(fresh_tensor_id());
     Ok(())
 }
 
@@ -178,6 +185,24 @@ pub fn add(a: &GpuTensor, b: &GpuTensor) -> Result<GpuTensor, String> {
                 .map(|(x, y)| x + y)
                 .collect::<Vec<_>>()
         });
+    Ok(tensor(a.rows, a.cols, out))
+}
+
+/// `out[r] = a[r] + bias` with a `cols`-wide bias broadcast over rows.
+pub fn add_cols_broadcast(a: &GpuTensor, bias: &GpuTensor) -> Result<GpuTensor, String> {
+    if bias.rows * bias.cols != a.cols {
+        return Err(format!(
+            "metal add_cols_broadcast bias width {} != {} cols",
+            bias.rows * bias.cols,
+            a.cols
+        ));
+    }
+    let ad = data(a)?;
+    let bd = data(bias)?;
+    let mut out = Vec::with_capacity(ad.len());
+    for row in ad.chunks_exact(a.cols) {
+        out.extend(row.iter().zip(bd.iter()).map(|(x, b)| x + b));
+    }
     Ok(tensor(a.rows, a.cols, out))
 }
 
@@ -384,17 +409,42 @@ pub fn linear_nt(
     Ok(tensor(x.rows, n, out))
 }
 
+/// Linear against a long-lived f32 weight: the weight goes to the device
+/// once, cached under the tensor's content identity (the CUDA contract keeps
+/// the weight resident too), so a per-frame call pays for the GEMM only.
 pub fn linear_f32_resident(
     x: &GpuTensor,
     w: &GpuTensor,
     bias: Option<&GpuTensor>,
 ) -> Result<GpuTensor, String> {
     let xd = data(x)?;
-    let wd = data(w)?;
     let n = w.rows;
     let k = w.cols;
-    let mut out = try_matmul_nt_f32(&xd, &wd, x.rows, k, n)
-        .ok_or_else(|| "metal resident matmul failed".to_string())?;
+    if x.cols != k {
+        return Err(format!(
+            "metal resident linear k mismatch: x {}x{}, w {}x{}",
+            x.rows, x.cols, w.rows, w.cols
+        ));
+    }
+    let cache_key = format!("t{}", w.id.get());
+    let mut out = try_matmul_nt_ggml_bytes_keyed(
+        &xd,
+        GGML_TYPE_F32,
+        x.rows,
+        k,
+        n,
+        "resident_f32",
+        &cache_key,
+        || {
+            let wd = data(w)?;
+            let mut bytes = Vec::with_capacity(wd.len() * 4);
+            for value in wd.iter() {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            Ok(bytes)
+        },
+    )
+    .ok_or_else(|| "metal resident matmul failed".to_string())?;
     if let Some(bias) = bias {
         let bd = data(bias)?;
         for r in 0..x.rows {
@@ -684,13 +734,153 @@ pub fn rope_interleaved(
     Ok(tensor(x.rows, x.cols, out))
 }
 
+/// Rotate-half rope (the DINOv3 / LLaMA layout): within each head the first
+/// `rot_half` lanes pair with the next `rot_half`, `out1 = x1 c - x2 s`,
+/// `out2 = x2 c + x1 s`, with one `[rows, rot_half]` cos/sin table shared by
+/// both halves; lanes past `2 * rot_half` pass through. Same contract as the
+/// CUDA `rope_half` kernel.
 pub fn rope_half(
     x: &GpuTensor,
     heads: usize,
+    rot_half: usize,
     cos: &GpuTensor,
     sin: &GpuTensor,
 ) -> Result<GpuTensor, String> {
-    rope_interleaved(x, heads, cos, sin)
+    if heads == 0 || x.cols % heads != 0 {
+        return Err("metal rope_half head mismatch".to_string());
+    }
+    let dim = x.cols / heads;
+    if rot_half * 2 > dim {
+        return Err("metal rope_half rotary span exceeds head dim".to_string());
+    }
+    if cos.rows != x.rows || cos.cols != rot_half || sin.rows != x.rows || sin.cols != rot_half {
+        return Err("metal rope_half table mismatch".to_string());
+    }
+    let xd = data(x)?;
+    let cd = data(cos)?;
+    let sd = data(sin)?;
+    let mut out = xd.clone();
+    for r in 0..x.rows {
+        for h in 0..heads {
+            let base = r * x.cols + h * dim;
+            for i in 0..rot_half {
+                let c = cd[r * rot_half + i];
+                let s = sd[r * rot_half + i];
+                let x1 = xd[base + i];
+                let x2 = xd[base + rot_half + i];
+                out[base + i] = x1 * c - x2 * s;
+                out[base + rot_half + i] = x2 * c + x1 * s;
+            }
+        }
+    }
+    Ok(tensor(x.rows, x.cols, out))
+}
+
+/// Per-row layer norm with an affine: `(x - mean) / sqrt(var + eps) * mul + add`
+/// (biased variance), `mul`/`add` one value per column.
+/// A whole pre-norm ViT stack device-resident (see `shim::VitLayerRef`):
+/// `x` `[seq, dim]` goes up once, every layer encodes into one command
+/// buffer, and the final layer-normed activations come back.
+#[allow(clippy::too_many_arguments)]
+pub fn vit_backbone_resident(
+    x: &GpuTensor,
+    n_head: usize,
+    rot_half: usize,
+    cos: &GpuTensor,
+    sin: &GpuTensor,
+    layers: &[VitLayerRef<'_>],
+    final_norm_w: &[f32],
+    final_norm_b: &[f32],
+    eps: f32,
+) -> Result<GpuTensor, String> {
+    let xd = data(x)?;
+    let cd = data(cos)?;
+    let sd = data(sin)?;
+    let out = try_vit_backbone_resident_f32(
+        &xd,
+        x.rows,
+        x.cols,
+        n_head,
+        rot_half,
+        &cd,
+        &sd,
+        layers,
+        final_norm_w,
+        final_norm_b,
+        eps,
+    )
+    .ok_or_else(|| "metal resident vit backbone failed".to_string())?;
+    Ok(tensor(x.rows, x.cols, out))
+}
+
+/// One two-way decoder layer device-resident (see `shim::TwoWayLayerRef`);
+/// returns `(hidden, ln_final(hidden))`.
+pub fn two_way_layer_resident(
+    hidden: &GpuTensor,
+    token_pe: &GpuTensor,
+    context: &GpuTensor,
+    context_pe: &GpuTensor,
+    layer: &TwoWayLayerRef<'_>,
+) -> Result<(GpuTensor, GpuTensor), String> {
+    if token_pe.rows != hidden.rows
+        || token_pe.cols != hidden.cols
+        || context_pe.rows != context.rows
+        || context_pe.cols != context.cols
+    {
+        return Err("metal two-way layer: PE shapes do not match their tensors".to_string());
+    }
+    let h = data(hidden)?;
+    let t = data(token_pe)?;
+    let c = data(context)?;
+    let cp = data(context_pe)?;
+    let (out, normed) = try_two_way_layer_resident_f32(
+        &h,
+        &t,
+        &c,
+        &cp,
+        hidden.rows,
+        hidden.cols,
+        context.rows,
+        context.cols,
+        layer,
+    )
+    .ok_or_else(|| "metal resident two-way layer failed".to_string())?;
+    Ok((
+        tensor(hidden.rows, hidden.cols, out),
+        tensor(hidden.rows, hidden.cols, normed),
+    ))
+}
+
+pub fn layer_norm_mul_add(
+    x: &GpuTensor,
+    mul: &[f32],
+    add: &[f32],
+    eps: f32,
+) -> Result<GpuTensor, String> {
+    if mul.len() != x.cols || add.len() != x.cols {
+        return Err(format!(
+            "metal layer_norm_mul_add affine width {}/{} != {} cols",
+            mul.len(),
+            add.len(),
+            x.cols
+        ));
+    }
+    let xd = data(x)?;
+    let out = try_layer_norm_mul_add_f32(&xd, &[x.rows, x.cols], mul, &[x.cols], add, &[x.cols], eps)
+        .unwrap_or_else(|| {
+            let mut out = vec![0.0; xd.len()];
+            for r in 0..x.rows {
+                let row = &xd[r * x.cols..(r + 1) * x.cols];
+                let mean = row.iter().sum::<f32>() / x.cols as f32;
+                let var = row.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / x.cols as f32;
+                let inv = (var + eps).sqrt().recip();
+                for c in 0..x.cols {
+                    out[r * x.cols + c] = (row[c] - mean) * inv * mul[c] + add[c];
+                }
+            }
+            out
+        });
+    Ok(tensor(x.rows, x.cols, out))
 }
 
 pub fn rpb_expand(

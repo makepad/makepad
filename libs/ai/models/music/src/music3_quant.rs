@@ -28,12 +28,6 @@ use std::sync::Arc;
 /// Per-tensor packed-byte cache cap. Layer Q4/BF16 weights fit; embed/lm_head do not.
 const BYTE_CACHE_MAX: usize = 64 * 1024 * 1024;
 
-fn music3_trace(f: impl FnOnce()) {
-    if std::env::var_os("MAKEPAD_MUSIC3_TRACE").is_some() {
-        f();
-    }
-}
-
 fn music3_log_first_linear(path: &str, name: &str, ty: TensorType, m: usize, k: usize, n: usize) {
     use std::sync::OnceLock;
     static METAL: OnceLock<()> = OnceLock::new();
@@ -451,23 +445,15 @@ impl Music3GgufFile {
         // `kernel_mul_mm_q4_0_f32`, which wrote zeros on the older metallib.
         // m=1 hits official `kernel_mul_mv_q4_0_f32`.
         // Skip native BF16: this metallib has no kernel_mul_mv_bf16_*.
-        let skip_metal = std::env::var_os("MAKEPAD_MUSIC3_CPU_LINEAR").is_some();
         // Q4 mul_mm on the 104-token LM prefill accumulates enough error that
         // RVQ head-0 ranks 996 instead of official 271. Prefill dequants once
         // and uses F32 Metal GEMM. Decode (m=1) stays on Q4 mul_mv.
-        let skip_q4_mm_prefill = self.role == Music3GgufRole::LanguageModel
-            && ty == TensorType::Q4_0
-            && m >= 8
-            && std::env::var_os("MAKEPAD_MUSIC3_F32_PREFILL").is_some();
-        if !skip_metal && ty != TensorType::BF16 && !skip_q4_mm_prefill {
+        if ty != TensorType::BF16 {
             if let Some(out) = self.try_metal_quant_linear(name, a, m, k, n, ty) {
                 if out.iter().any(|v| v.is_finite() && *v != 0.0) {
                     music3_log_first_linear("metal", name, ty, m, k, n);
                     return Ok(out);
                 }
-                music3_trace(|| {
-                    eprintln!("[music3] metal {name} {ty:?} m={m} returned zeros; fallback")
-                });
             }
         }
         // Compiled metallib has no BF16 mul_mv/mul_mm. F16 kernels exist.
@@ -604,9 +590,6 @@ impl Music3GgufFile {
         a: &[f32],
         m: usize,
     ) -> Option<Vec<Vec<f32>>> {
-        if std::env::var_os("MAKEPAD_MUSIC3_CPU_LINEAR").is_some() {
-            return None;
-        }
         let ns = format!("music3-{}", self.role.as_str());
         let ns_f16 = format!("music3-{}-f16", self.role.as_str());
         let mut specs: Vec<(&str, u32, usize, bool)> = Vec::with_capacity(names.len());

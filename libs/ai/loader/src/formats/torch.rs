@@ -40,7 +40,8 @@ const MAX_PICKLE_HEAP_BYTES: usize = 32 * 1024 * 1024;
 const MAX_PICKLE_STRING_BYTES: usize = 1024 * 1024;
 const MAX_TENSOR_RANK: usize = 16;
 const MAX_TENSORS: usize = 16_384;
-const MAX_TENSOR_BYTES: usize = 8 * 1024 * 1024 * 1024;
+const MAX_TENSOR_BYTES: usize =
+    if usize::BITS >= 64 { 8_u64 * 1024 * 1024 * 1024 } else { usize::MAX as u64 } as usize;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TorchDtype {

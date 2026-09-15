@@ -3,6 +3,7 @@
 
 pub mod gguf;
 pub mod npy;
+pub mod onnx;
 pub mod safetensors;
 pub mod torch;
 pub mod torch_pth;

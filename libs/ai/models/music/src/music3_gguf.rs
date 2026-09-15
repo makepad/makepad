@@ -137,17 +137,6 @@ pub(crate) mod perf {
     }
 }
 
-/// RVQ whole-layer resident decode is the default; `MAKEPAD_MUSIC3_RVQ_HOST`
-/// (or the global CPU switch) restores per-GEMM host elementwise.
-pub(crate) fn rvq_resident_enabled() -> bool {
-    use std::sync::OnceLock;
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
-        std::env::var_os("MAKEPAD_MUSIC3_RVQ_HOST").is_none()
-            && std::env::var_os("MAKEPAD_MUSIC3_CPU_LINEAR").is_none()
-    })
-}
-
 pub(crate) fn repeat_kv(
     x: &[f32],
     tokens: usize,
@@ -729,10 +718,8 @@ impl Music3GgufRvq {
         let pos = &self.pos_embedding[..seq * MUSIC3_RVQ_HIDDEN];
         add_inplace(&mut hidden[..seq * MUSIC3_RVQ_HIDDEN], pos);
         add_inplace(&mut hidden[seq * MUSIC3_RVQ_HIDDEN..], pos);
-        if rvq_resident_enabled() {
-            if let Some(pair) = self.try_prefill_pair_resident(file, &hidden, seq) {
-                return Ok(pair);
-            }
+        if let Some(pair) = self.try_prefill_pair_resident(file, &hidden, seq) {
+            return Ok(pair);
         }
         let head_dim = MUSIC3_RVQ_HIDDEN / MUSIC3_RVQ_HEADS;
         let scale = 1.0 / (head_dim as f32).sqrt();
@@ -1049,23 +1036,21 @@ impl Music3GgufRvq {
         let pos_row = &self.pos_embedding[off..off + MUSIC3_RVQ_HIDDEN];
         add_inplace(&mut hidden[..MUSIC3_RVQ_HIDDEN], pos_row);
         add_inplace(&mut hidden[MUSIC3_RVQ_HIDDEN..], pos_row);
-        if rvq_resident_enabled() {
-            let klen: Vec<usize> = cond.k.iter().map(|k| k.len()).collect();
-            if self
-                .try_step_pair_resident(file, cond, uncond, &hidden)
-                .is_some()
-            {
-                return Ok(());
-            }
-            // A mid-stack miss leaves partially grown KV; trim before the
-            // host rerun appends again.
-            if cond.pos == pos {
-                for (layer, len) in klen.iter().enumerate() {
-                    cond.k[layer].truncate(*len);
-                    cond.v[layer].truncate(*len);
-                    uncond.k[layer].truncate(*len);
-                    uncond.v[layer].truncate(*len);
-                }
+        let klen: Vec<usize> = cond.k.iter().map(|k| k.len()).collect();
+        if self
+            .try_step_pair_resident(file, cond, uncond, &hidden)
+            .is_some()
+        {
+            return Ok(());
+        }
+        // A mid-stack miss leaves partially grown KV; trim before the
+        // host rerun appends again.
+        if cond.pos == pos {
+            for (layer, len) in klen.iter().enumerate() {
+                cond.k[layer].truncate(*len);
+                cond.v[layer].truncate(*len);
+                uncond.k[layer].truncate(*len);
+                uncond.v[layer].truncate(*len);
             }
         }
         let head_dim = MUSIC3_RVQ_HIDDEN / MUSIC3_RVQ_HEADS;

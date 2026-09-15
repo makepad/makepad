@@ -561,8 +561,7 @@ impl Music3ConditionEncoder {
         // weight. Do the same math as the CPU loop: three 1x1 GEMMs on
         // time-shifted copies (tap k at t+k-1).
         progress("conv", 0, 1);
-        let use_gpu = gpu_device_available()
-            && std::env::var("MAKEPAD_MUSIC3_CPU_COND").ok().as_deref() != Some("1");
+        let use_gpu = gpu_device_available();
         let conv = if use_gpu {
             cond_conv1d_gpu_taps(&mixed, frames, &self.proj_weight, &self.proj_bias)?
         } else {

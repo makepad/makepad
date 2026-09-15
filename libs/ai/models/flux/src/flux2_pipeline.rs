@@ -272,16 +272,9 @@ impl Flux2KleinPipeline {
             None => 0,
         };
 
-        let prof = std::env::var_os("MAKEPAD_GPU_PROF").is_some();
-        if prof {
-            // Discard text-encode/VAE-encode counters so the denoise report
-            // covers only the loop below.
-            let _ = makepad_ai_common::backend::prof::report_and_reset("");
-        }
         let started = std::time::Instant::now();
         let mut step_residuals = Vec::new();
         for step in start_step..request.steps {
-            let step_started = std::time::Instant::now();
             let (img_tokens, img_ids) = flux2_concat_ref_tokens(&sample, &gen_ids, &refs);
             let run = flux2_transformer_forward(
                 &self.transformer,
@@ -297,33 +290,14 @@ impl Flux2KleinPipeline {
                 step_residuals.push(run.prediction.clone());
             }
             flux2_euler_step(&mut sample, &run.prediction, sigmas[step], sigmas[step + 1])?;
-            if prof {
-                eprintln!(
-                    "flux2 prof step{step} ms={:.1}",
-                    step_started.elapsed().as_secs_f64() * 1000.0
-                );
-            }
         }
         let warm_ms = started.elapsed().as_secs_f64() * 1000.0;
-        if prof {
-            eprint!(
-                "{}",
-                makepad_ai_common::backend::prof::report_and_reset("flux2 prof denoise ")
-            );
-        }
         flux2_dit_clear_pool();
 
         let packed = Flux2PackedLatents::from_tokens(&sample, packed_w, packed_h, channels)?;
         let decode_started = std::time::Instant::now();
         let image = flux2_vae_decode(&self.vae, &packed)?;
         let decode_ms = decode_started.elapsed().as_secs_f64() * 1000.0;
-        if prof {
-            eprintln!("flux2 prof vae_decode ms={decode_ms:.1}");
-            eprint!(
-                "{}",
-                makepad_ai_common::backend::prof::report_and_reset("flux2 prof vae ")
-            );
-        }
         let png_started = std::time::Instant::now();
         let rgb = flux2_image_to_rgb_u8(&image);
         let png = encode_png_rgb(
@@ -670,10 +644,6 @@ impl Flux2DevPipeline {
             None => 0,
         };
 
-        let prof = std::env::var_os("MAKEPAD_GPU_PROF").is_some();
-        if prof {
-            let _ = makepad_ai_common::backend::prof::report_and_reset("");
-        }
         let denoise_started = std::time::Instant::now();
         let mut step_predictions = Vec::new();
         if let Some(teacher) = &request.teacher_steps {
@@ -686,7 +656,6 @@ impl Flux2DevPipeline {
             }
         }
         for step in start_step..request.steps {
-            let step_started = std::time::Instant::now();
             if let Some(hook) = on_stage.as_deref_mut() {
                 hook("denoise", step + 1, request.steps);
             }
@@ -714,29 +683,13 @@ impl Flux2DevPipeline {
                 step_predictions.push((step, run.prediction.clone()));
             }
             flux2_euler_step(&mut sample, &run.prediction, sigmas[step], sigmas[step + 1])?;
-            if prof {
-                eprintln!(
-                    "flux2dev prof step{step} ms={:.1}",
-                    step_started.elapsed().as_secs_f64() * 1000.0
-                );
-            }
         }
         let denoise_ms = denoise_started.elapsed().as_secs_f64() * 1000.0;
-        if prof {
-            eprint!(
-                "{}",
-                makepad_ai_common::backend::prof::report_and_reset("flux2dev prof denoise ")
-            );
-            flux2_dev_prof_mem("after denoise");
-        }
         flux2_dit_clear_pool();
         // Decode transients (~2-3GB at 1024px) plus the resident DiT sit at
         // the 32GB WDDM cliff; the ring slots are the cheapest headroom —
         // freed here, re-primed on the next forward.
         let _ = crate::backend::gpu_stream_ring_release_slots();
-        if prof {
-            flux2_dev_prof_mem("before decode (pool cleared, ring slots released)");
-        }
 
         let packed = Flux2PackedLatents::from_tokens(&sample, packed_w, packed_h, channels)?;
         let decode_started = std::time::Instant::now();
@@ -745,14 +698,6 @@ impl Flux2DevPipeline {
         }
         let image = flux2_vae_decode(&self.vae, &packed)?;
         let decode_ms = decode_started.elapsed().as_secs_f64() * 1000.0;
-        if prof {
-            eprintln!("flux2dev prof vae_decode ms={decode_ms:.1}");
-            flux2_dev_prof_mem("after decode");
-            eprint!(
-                "{}",
-                makepad_ai_common::backend::prof::report_and_reset("flux2dev prof vae ")
-            );
-        }
         let png_started = std::time::Instant::now();
         let rgb = flux2_image_to_rgb_u8(&image);
         let png = encode_png_rgb(
@@ -966,27 +911,6 @@ impl Flux2DevPipeline {
             total_ms: total_started.elapsed().as_secs_f64() * 1000.0,
         })
     }
-}
-
-/// `MAKEPAD_GPU_PROF` line: live device memory + weight-cache/pool counters
-/// (reset on each call) — the 32GB-card decode phase lives at the WDDM
-/// residency cliff, so "where the bytes are" is the first question.
-fn flux2_dev_prof_mem(label: &str) {
-    let stats = crate::backend::gpu_perf_stats(true);
-    eprintln!(
-        "flux2dev prof mem {label}: free={:.0}MB total={:.0}MB weight_stream={} ({:.0}MB) \
-         weight_evict_events={} pool_fresh_alloc={} ({:.0}MB) pool_oom_clears={} \
-         pool_overcap_free={:.0}MB",
-        stats.mem_free_bytes as f64 / (1024.0 * 1024.0),
-        stats.mem_total_bytes as f64 / (1024.0 * 1024.0),
-        stats.weight_stream_count,
-        stats.weight_stream_bytes as f64 / (1024.0 * 1024.0),
-        stats.weight_evict_events,
-        stats.pool_fresh_alloc_count,
-        stats.pool_fresh_alloc_bytes as f64 / (1024.0 * 1024.0),
-        stats.pool_oom_clears,
-        stats.pool_overcap_free_bytes as f64 / (1024.0 * 1024.0),
-    );
 }
 
 /// Resolve the dev weight layout under one root: the Comfy fp8mixed DiT

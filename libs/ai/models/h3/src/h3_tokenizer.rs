@@ -727,34 +727,4 @@ mod tests {
         assert_eq!(tokenizer.token_id("hi"), Some(2));
     }
 
-    /// Full parity gate against transformers reference ids. Skips silently
-    /// unless both env vars point at the fixture data, e.g.
-    ///   H3_TOK_DIR=.../fixtures/tok H3_TOK_FIXTURE=.../fixtures/tok_ref.json \
-    ///     cargo test -p makepad-diffusion --lib
-    #[test]
-    fn fixture_parity_when_env_set() {
-        let (Ok(dir), Ok(fixture)) = (
-            std::env::var("H3_TOK_DIR"),
-            std::env::var("H3_TOK_FIXTURE"),
-        ) else {
-            return;
-        };
-        let tokenizer = H3Tokenizer::load(Path::new(&dir)).expect("load tokenizer");
-        let text = std::fs::read_to_string(&fixture).expect("read fixture");
-        let root = Json::parse(&text).expect("parse fixture");
-        let prompts = root.get("prompts").and_then(Json::as_arr).expect("prompts");
-        assert!(!prompts.is_empty());
-        for prompt in prompts {
-            let name = prompt.get("name").and_then(Json::as_str).unwrap_or("?");
-            let text = prompt.get("text").and_then(Json::as_str).expect("text");
-            let expected: Vec<u32> = prompt
-                .get("ids")
-                .and_then(Json::as_arr)
-                .expect("ids")
-                .iter()
-                .map(|id| id.as_u32().expect("u32 id"))
-                .collect();
-            assert_eq!(tokenizer.encode(text), expected, "prompt {}", name);
-        }
-    }
 }

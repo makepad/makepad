@@ -436,7 +436,7 @@ mod imp {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
 mod imp {
     use super::{ArenaPtr, Placement};
     use std::os::raw::{c_int, c_void};
@@ -539,6 +539,22 @@ mod imp {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+mod imp {
+    use super::Placement;
+    use std::path::Path;
+
+    pub fn read_threaded(
+        _path: &Path,
+        _arena: &mut [u8],
+        _ordered: &[Placement],
+        _threads: usize,
+        _chunk: usize,
+    ) -> Result<(), String> {
+        Err("bulk file reads are unsupported on wasm32-unknown-unknown".to_string())
     }
 }
 

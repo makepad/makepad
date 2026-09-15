@@ -27,15 +27,6 @@ use crate::indextts_tokenizer::IndexTtsTokenizer;
 use crate::indextts_w2v::{extract_w2v_features, W2vBertEncoder};
 use crate::{emit_progress, hook_ref, BoxedProgressHook, ProgressHook};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
-
-/// `INDEXTTS_STAGE_TIMING=1` prints per-stage wall times to stdout
-/// (`STAGE <name> <secs>`), used by the native bench to attribute
-/// end-to-end time across gpt / codec / regulator / cfm / vocoder.
-fn stage_timing() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("INDEXTTS_STAGE_TIMING").as_deref() == Ok("1"))
-}
 
 /// The reference's `char_rep_map`: punctuation folding applied before
 /// tokenization (order matters for the multi-char entries — longest first).
@@ -618,27 +609,18 @@ impl IndexTtsPipeline {
         mut progress: Option<ProgressHook>,
     ) -> Result<IndexTtsVoice> {
         emit_progress(&mut progress, "voice w2v", 0.05)?;
-        let t_stage = Instant::now();
         let feats = extract_w2v_features(audio_16k)?;
         let spk_cond_emb = self.w2v.encode(&feats);
         let spk_frames = spk_cond_emb.len() / 1024;
-        if stage_timing() {
-            println!("STAGE voice_w2v {:.3}s", t_stage.elapsed().as_secs_f64());
-        }
 
         emit_progress(&mut progress, "voice mel", 0.50)?;
         let (ref_mel, mel_frames) = mel_spectrogram_22k(audio_22k);
 
         emit_progress(&mut progress, "voice campplus", 0.55)?;
-        let t_stage = Instant::now();
         let (fbank, fbank_frames) = campplus_fbank(audio_16k)?;
         let style = self.campplus.embed(&fbank, fbank_frames);
-        if stage_timing() {
-            println!("STAGE voice_campplus {:.3}s", t_stage.elapsed().as_secs_f64());
-        }
 
         emit_progress(&mut progress, "voice regulator", 0.65)?;
-        let t_stage = Instant::now();
         let prompt_condition =
             self.s2mel
                 .length_regulator
@@ -648,12 +630,6 @@ impl IndexTtsPipeline {
         // Same-clip merge_emovec(spk, spk, 1.0) is bitwise emovec(spk); the
         // separate-emotion-audio path is not exposed (jobs carry vectors).
         let emovec_ref = self.gpt.emovec(&spk_cond_emb, spk_frames)?;
-        if stage_timing() {
-            println!(
-                "STAGE voice_regulator_emovec {:.3}s",
-                t_stage.elapsed().as_secs_f64()
-            );
-        }
         emit_progress(&mut progress, "voice ready", 1.0)?;
 
         Ok(IndexTtsVoice {
@@ -730,7 +706,6 @@ impl IndexTtsPipeline {
             }
 
             let mut hook = seg_band(&mut progress, seg_index, nseg, 0.0, 0.60);
-            let t_stage = Instant::now();
             // Device transformer when present (parity-gated by
             // indextts_cuda_validate); CPU reference otherwise.
             let mut codes = if gpt_cuda_available() {
@@ -751,13 +726,6 @@ impl IndexTtsPipeline {
                 )?
             };
             drop(hook);
-            if stage_timing() {
-                println!(
-                    "STAGE gpt {:.3}s ({} codes)",
-                    t_stage.elapsed().as_secs_f64(),
-                    codes.len()
-                );
-            }
             if codes.last() == Some(&GPT_STOP_MEL) {
                 codes.pop();
             }
@@ -811,14 +779,9 @@ impl IndexTtsPipeline {
         let mut hook = seg_band(progress, seg_index, nseg, 0.60, 0.03);
         emit_progress(&mut hook_ref(&mut hook), "codec", 0.0)?;
         drop(hook);
-        let t_stage = Instant::now();
         let s_infer = self.codec.decode(codes)?;
         let s_frames = codes.len() * 2;
-        if stage_timing() {
-            println!("STAGE codec {:.3}s", t_stage.elapsed().as_secs_f64());
-        }
 
-        let t_stage = Instant::now();
         let target_len = cfm_target_len(s_frames, duration_factor).max(1);
         let cond = self
             .s2mel
@@ -828,15 +791,8 @@ impl IndexTtsPipeline {
         let mut cat_condition = Vec::with_capacity(total_frames * 512);
         cat_condition.extend_from_slice(&voice.prompt_condition);
         cat_condition.extend_from_slice(&cond);
-        if stage_timing() {
-            println!(
-                "STAGE regulator {:.3}s ({total_frames} frames)",
-                t_stage.elapsed().as_secs_f64()
-            );
-        }
 
         let mut hook = seg_band(progress, seg_index, nseg, 0.65, 0.27);
-        let t_stage = Instant::now();
         let mel = self.s2mel.generate_mel(
             &cat_condition,
             total_frames,
@@ -847,19 +803,12 @@ impl IndexTtsPipeline {
             hook_ref(&mut hook),
         )?;
         drop(hook);
-        if stage_timing() {
-            println!("STAGE cfm {:.3}s", t_stage.elapsed().as_secs_f64());
-        }
 
         let mut hook = seg_band(progress, seg_index, nseg, 0.92, 0.08);
         emit_progress(&mut hook_ref(&mut hook), "vocoder", 0.0)?;
         drop(hook);
-        let t_stage = Instant::now();
         let vc = mel.vc_target();
         let wav = self.bigvgan.synthesize(&vc, target_len)?;
-        if stage_timing() {
-            println!("STAGE bigvgan {:.3}s", t_stage.elapsed().as_secs_f64());
-        }
         let mut hook = seg_band(progress, seg_index, nseg, 1.0, 0.0);
         emit_progress(&mut hook_ref(&mut hook), "vocoder", 1.0)?;
         Ok(wav)

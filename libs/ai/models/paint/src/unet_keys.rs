@@ -380,38 +380,6 @@ mod tests {
         assert_eq!(report.duplicates.len(), 1);
     }
 
-    /// Gate B1 against the real checkpoint when `MAKEPAD_PBR_UNET_KEYDUMP`
-    /// names an operator-provided key dump; skips silently otherwise.
-    #[test]
-    fn dump_verification_when_available() {
-        let Ok(path) = std::env::var("MAKEPAD_PBR_UNET_KEYDUMP") else {
-            eprintln!("MAKEPAD_PBR_UNET_KEYDUMP unset; skipping dump verification");
-            return;
-        };
-        let Ok(text) = std::fs::read_to_string(path) else {
-            panic!("MAKEPAD_PBR_UNET_KEYDUMP does not name a readable file");
-        };
-        let (inventory, storages) = parse_dump(&text);
-        assert_eq!(inventory.len(), 1747, "dump tensor count");
-        assert_eq!(storages, vec!["HalfStorage".to_string()], "checkpoint is fp16");
-        let report = verify_inventory(&inventory);
-        if !report.clean() {
-            panic!(
-                "B1 mismatch: matched {} missing {} (first: {:?}) mismatched {} (first: {:?}) unexpected {} (first: {:?}) processor {} dual {}",
-                report.matched,
-                report.missing.len(),
-                report.missing.first(),
-                report.shape_mismatch.len(),
-                report.shape_mismatch.first(),
-                report.unexpected.len(),
-                report.unexpected.first(),
-                report.processor_extras.len(),
-                report.dual_extras.len(),
-            );
-        }
-        assert_eq!(report.matched, inventory.len());
-    }
-
     #[test]
     fn clean_inventory_verifies_clean() {
         let inventory = expected_keys();

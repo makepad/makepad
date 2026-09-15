@@ -326,13 +326,6 @@ impl SdVae {
         if rgb01.len() != 3 * width * height {
             return Err("VAE encode expects planar RGB".into());
         }
-        // Naive planar conv matches the official f32 VAE; GEMM is a Flux-VAE
-        // fast path and is 1e-3 off on this residual stack. Inference leaves
-        // GEMM on unless MAKEPAD_PBR_TAP_PARITY=1.
-        if std::env::var("MAKEPAD_PBR_TAP_PARITY").as_deref() == Ok("1") {
-            std::env::set_var("FLUX_VAE_CONV_GEMM", "0");
-            std::env::set_var("FLUX_VAE_CONV_IM2COL", "0");
-        }
         let x01: Vec<f32> = rgb01.iter().map(|v| v * 2.0 - 1.0).collect();
         let mut h = gpu_upload(&x01, 3, width * height)?;
         let mut w = width;
@@ -391,10 +384,6 @@ impl SdVae {
     ) -> Result<(Vec<f32>, usize, usize), String> {
         if scaled_latent.len() != 4 * lat_w * lat_h {
             return Err("VAE decode expects 4-ch planar latent".into());
-        }
-        if std::env::var("MAKEPAD_PBR_TAP_PARITY").as_deref() == Ok("1") {
-            std::env::set_var("FLUX_VAE_CONV_GEMM", "0");
-            std::env::set_var("FLUX_VAE_CONV_IM2COL", "0");
         }
         let unscaled: Vec<f32> = scaled_latent.iter().map(|v| v / SCALE).collect();
         let mut h = gpu_upload(&unscaled, 4, lat_w * lat_h)?;

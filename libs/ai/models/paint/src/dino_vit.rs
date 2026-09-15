@@ -482,12 +482,6 @@ mod exec {
             if !gpu_device_available() {
                 return Err("CUDA unavailable".into());
             }
-            if std::env::var("MAKEPAD_PBR_TAP_PARITY").as_deref() == Ok("1") {
-                std::env::set_var("FLUX_VAE_CONV_GEMM", "0");
-                std::env::set_var("FLUX_VAE_CONV_IM2COL", "0");
-                // Composite attn defaults to f16 GEMM; 40 layers accumulate past 1e-3.
-                std::env::set_var("FLUX_ATTN_F16", "0");
-            }
             let st = if path.is_dir() {
                 path.join("model.safetensors")
             } else {
@@ -608,8 +602,8 @@ mod exec {
             let k = block.k.apply(&n1)?;
             let v = block.v.apply(&n1)?;
             // f32 QK/PV/softmax always. DINOv2-giant carries massive-activation
-            // outlier tokens (|x| in the hundreds by mid-depth); the default
-            // FLUX_ATTN_F16 composite path saturates them and the error grows
+            // outlier tokens (|x| in the hundreds by mid-depth); f16 composite
+            // attention saturates them and the error grows
             // 0.25 -> 280 max_abs across layers 16..39 (oracle bisect on the
             // elf reference), which starves the paint UNet of reference
             // structure. HF fp16 SDPA accumulates in f32; so must we.
@@ -717,23 +711,9 @@ mod exec {
         /// Official `AutoModel(...)[0]` / `last_hidden_state`: `[TOKENS, HIDDEN]`.
         pub fn forward(&self, pixels: &[f32]) -> Result<Vec<f32>, String> {
             let emb = self.embeddings(pixels)?;
-            let dump_dir = std::env::var("MAKEPAD_PBR_DINO_LAYER_DUMP").ok();
-            let dump = |tag: &str, data: &[f32]| {
-                if let Some(dir) = &dump_dir {
-                    let mut bytes = Vec::with_capacity(data.len() * 4);
-                    for v in data {
-                        bytes.extend_from_slice(&v.to_le_bytes());
-                    }
-                    let _ = std::fs::write(format!("{dir}/dino_layer_{tag}.f32"), bytes);
-                }
-            };
-            dump("emb", &emb);
             let mut x = gpu_upload(&emb, TOKENS, HIDDEN)?;
-            for (i, layer) in self.layers.iter().enumerate() {
+            for layer in &self.layers {
                 x = Self::block(&x, layer)?;
-                if dump_dir.is_some() {
-                    dump(&format!("{i:02}"), &gpu_download(&x)?);
-                }
             }
             let x = Self::layer_norm(&x, &self.ln_w, &self.ln_b)?;
             gpu_download(&x)

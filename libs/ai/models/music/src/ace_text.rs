@@ -317,7 +317,6 @@ impl AceTextEncoder {
         let half = hd / 2;
 
         let x_host = self.embed_tokens(&ids[..seq])?;
-        te_dump_npy("native_te_embed.npy", &x_host, &[1, seq, h]);
         let mut x = gpu_upload(&x_host, seq, h).map_err(|e| dev_err("ace te x", e))?;
         x = gpu_bf16_round(&x).map_err(|e| dev_err("ace te x rnd", e))?;
         let rope_cos = gpu_upload(&device.rope_cos_full[..seq * half], seq, half)
@@ -369,55 +368,11 @@ impl AceTextEncoder {
             let down = lin(&act, &dev.down).map_err(|e| dev_err("ace te down", e))?;
             x = gpu_add(&x, &down).map_err(|e| dev_err("ace te mlp residual", e))?;
             x = gpu_bf16_round(&x).map_err(|e| dev_err("ace te mlp add rnd", e))?;
-            if i == 0 {
-                if let Ok(h0) = gpu_download(&x) {
-                    te_dump_npy("native_te_l0.npy", &h0, &[1, seq, h]);
-                }
-            }
         }
         let x = rms(&x, h, "final", &self.final_norm)?;
         let host = gpu_download(&x).map_err(|e| dev_err("ace te download", e))?;
-        te_dump_npy("native_text_hidden.npy", &host, &[1, seq, h]);
         Ok(host)
     }
-}
-
-fn te_dump_npy(name: &str, data: &[f32], shape: &[usize]) {
-    let Ok(dir) = std::env::var("ACE_HOOK_DUMP") else {
-        return;
-    };
-    if dir.is_empty() {
-        return;
-    }
-    let path = std::path::Path::new(&dir).join(name);
-    let shape_txt = if shape.len() == 1 {
-        format!("({},)", shape[0])
-    } else {
-        format!(
-            "({})",
-            shape
-                .iter()
-                .map(|d| d.to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    };
-    let header = format!(
-        "{{'descr': '<f4', 'fortran_order': False, 'shape': {shape_txt}, }}"
-    );
-    let mut bytes = b"\x93NUMPY\x01\x00".to_vec();
-    let mut hdr = header.into_bytes();
-    hdr.push(b'\n');
-    while (10 + hdr.len()) % 16 != 0 {
-        hdr.insert(hdr.len() - 1, b' ');
-    }
-    let hlen = hdr.len() as u16;
-    bytes.extend_from_slice(&hlen.to_le_bytes());
-    bytes.extend_from_slice(&hdr);
-    for &v in data {
-        bytes.extend_from_slice(&v.to_le_bytes());
-    }
-    let _ = std::fs::write(path, bytes);
 }
 
 fn expand_gqa(

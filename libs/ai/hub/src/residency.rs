@@ -29,6 +29,7 @@ use crate::error::AssetAiError;
 use crate::gpu::query_gpu;
 use crate::registry::ModelSpec;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// Default admission safety reserve on top of a model's estimated peak.
@@ -39,6 +40,121 @@ pub const EVICT_VERIFY_TIMEOUT: Duration = Duration::from_secs(15);
 /// (driver bookkeeping can trail the allocator by seconds on WDDM).
 pub const ADMIT_TIMEOUT: Duration = Duration::from_secs(20);
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
+const UNKNOWN_USABLE_MB: u64 = u64::MAX;
+
+/// Last measured post-eviction VRAM ceiling. The measurement itself happens
+/// only at startup or when the service has retired every resident; ordinary
+/// `/health` polling must not mistake a currently loaded model for permanent
+/// driver/display overhead.
+#[derive(Debug)]
+pub struct UsableVram(AtomicU64);
+
+impl UsableVram {
+    pub fn new(value: Option<u64>) -> Self {
+        Self(AtomicU64::new(value.unwrap_or(UNKNOWN_USABLE_MB)))
+    }
+
+    pub fn get(&self) -> Option<u64> {
+        match self.0.load(Ordering::Relaxed) {
+            UNKNOWN_USABLE_MB => None,
+            value => Some(value),
+        }
+    }
+
+    pub fn refresh(&self) -> Option<u64> {
+        self.refresh_from_gpu(&query_gpu())
+    }
+
+    pub fn refresh_from_gpu(&self, gpu: &crate::gpu::GpuInfo) -> Option<u64> {
+        let value = usable_vram_mb(gpu);
+        if let Some(value) = value {
+            self.0.store(value, Ordering::Relaxed);
+            Some(value)
+        } else {
+            self.get()
+        }
+    }
+}
+
+/// Fresh VRAM samples bracketing an allocator-pool trim. The final admission
+/// poll may observe more of the asynchronous driver release than the immediate
+/// `after` sample, so diagnostics compute the released amount against the
+/// final value with [`Self::released_mb_at`].
+#[derive(Clone, Debug)]
+pub struct CachedPoolTrim {
+    pub before_free_mb: Option<u64>,
+    pub after_gpu: crate::gpu::GpuInfo,
+}
+
+impl CachedPoolTrim {
+    pub fn after_free_mb(&self) -> Option<u64> {
+        self.after_gpu.vram_free_mb
+    }
+
+    pub fn released_mb_at(&self, final_free_mb: u64) -> u64 {
+        self.before_free_mb
+            .map(|before| final_free_mb.saturating_sub(before))
+            .unwrap_or(0)
+    }
+}
+
+/// Trim cached device allocations between two uncached GPU samples. Keeping
+/// the sampler and trim operation injectable makes the admission rule testable
+/// without CUDA or `nvidia-smi`.
+pub fn trim_cached_pool_with<Q, T>(mut query: Q, trim: T) -> CachedPoolTrim
+where
+    Q: FnMut() -> crate::gpu::GpuInfo,
+    T: FnOnce(),
+{
+    let before_free_mb = query().vram_free_mb;
+    trim();
+    CachedPoolTrim {
+        before_free_mb,
+        after_gpu: query(),
+    }
+}
+
+/// Admission decision from the post-trim sample. `previous_free_mb` keeps a
+/// briefly stale NVML sample from making free memory appear to go backwards.
+pub fn admission_after_trim(
+    trimmed: &CachedPoolTrim,
+    previous_free_mb: u64,
+    need_mb: u64,
+) -> (u64, bool) {
+    let free_mb = trimmed
+        .after_free_mb()
+        .map(|after| after.max(previous_free_mb))
+        .unwrap_or(previous_free_mb);
+    (free_mb, free_mb >= need_mb)
+}
+
+/// `total - non_evictable_baseline`, expressed from one idle-card sample.
+/// Clamping protects the public health contract from inconsistent driver
+/// samples that briefly report free memory above total memory.
+pub fn usable_vram_mb(gpu: &crate::gpu::GpuInfo) -> Option<u64> {
+    Some(gpu.vram_free_mb?.min(gpu.vram_total_mb?))
+}
+
+/// Why a model can never pass the load-time byte gate on this node.
+pub fn too_small_note(spec: &ModelSpec, reserve_mb: u64, usable_mb: u64) -> Option<String> {
+    let estimate_mb = estimated_peak_mb(spec);
+    let need_mb = estimate_mb.saturating_add(reserve_mb);
+    (estimate_mb > 0 && need_mb > usable_mb)
+        .then(|| format!("needs {need_mb} MB, this card can free {usable_mb}"))
+}
+
+pub fn insufficient_vram_message(
+    model_id: &str,
+    estimate_mb: u64,
+    reserve_mb: u64,
+    free_mb: u64,
+    released_pool_mb: u64,
+) -> String {
+    let need_mb = estimate_mb.saturating_add(reserve_mb);
+    format!(
+        "insufficient VRAM for {model_id}: need {need_mb} MB (estimate {estimate_mb} MB + reserve {reserve_mb} MB), only {free_mb} MB free after evicting every resident and releasing {released_pool_mb} MB of cached pool — refusing to load (no CPU/other-node fallback)"
+    )
+}
 
 #[derive(Clone, Debug)]
 pub struct ResidencyConfig {
@@ -160,6 +276,7 @@ pub fn wait_free_at_least(target_mb: u64, timeout: Duration) -> Option<u64> {
 mod tests {
     use super::*;
     use crate::registry::Domain;
+    use std::cell::Cell;
 
     fn spec(vram_gb: Option<f64>) -> ModelSpec {
         ModelSpec {
@@ -187,6 +304,70 @@ mod tests {
         assert_eq!(estimated_peak_mb(&spec(Some(0.5))), 512);
         // Rounds UP: a 1.1 GB estimate must not admit at 1.0 GB free.
         assert_eq!(estimated_peak_mb(&spec(Some(1.1))), 1127);
+    }
+
+    #[test]
+    fn usable_vram_is_the_idle_free_ceiling_and_drives_too_small_notes() {
+        let gpu = crate::gpu::GpuInfo {
+            vram_free_mb: Some(30_603),
+            vram_total_mb: Some(32_607),
+            ..Default::default()
+        };
+        assert_eq!(usable_vram_mb(&gpu), Some(30_603));
+        assert_eq!(
+            too_small_note(&spec(Some(29.0)), DEFAULT_RESERVE_MB, 30_603).as_deref(),
+            Some("needs 31744 MB, this card can free 30603")
+        );
+        assert!(too_small_note(&spec(Some(29.0)), DEFAULT_RESERVE_MB, 36_535).is_none());
+    }
+
+    fn trim_fake_pool(total_mb: u64, free_mb: u64, cached_mb: u64) -> CachedPoolTrim {
+        let free = Cell::new(free_mb);
+        let cached = Cell::new(cached_mb);
+        trim_cached_pool_with(
+            || crate::gpu::GpuInfo {
+                vram_free_mb: Some(free.get()),
+                vram_total_mb: Some(total_mb),
+                ..Default::default()
+            },
+            || {
+                free.set(free.get().saturating_add(cached.replace(0)).min(total_mb));
+            },
+        )
+    }
+
+    #[test]
+    fn incident_card_admits_after_releasing_cached_pool() {
+        let trimmed = trim_fake_pool(32_607, 30_510, 1_487);
+        let (free, admitted) = admission_after_trim(&trimmed, 30_510, 29_696 + 1_024);
+        assert_eq!(free, 31_997);
+        assert_eq!(trimmed.released_mb_at(31_997), 1_487);
+        assert!(admitted);
+    }
+
+    #[test]
+    fn card_still_short_after_pool_trim_refuses_with_release_amount() {
+        let trimmed = trim_fake_pool(32_607, 29_116, 1_487);
+        let (free, admitted) = admission_after_trim(&trimmed, 29_116, 29_696 + 1_024);
+        assert!(!admitted);
+        assert_eq!(
+            insufficient_vram_message(
+                "flux2-dev",
+                29_696,
+                1_024,
+                free,
+                trimmed.released_mb_at(free),
+            ),
+            "insufficient VRAM for flux2-dev: need 30720 MB (estimate 29696 MB + reserve 1024 MB), only 30603 MB free after evicting every resident and releasing 1487 MB of cached pool — refusing to load (no CPU/other-node fallback)"
+        );
+    }
+
+    #[test]
+    fn usable_vram_is_published_from_the_post_trim_sample() {
+        let usable = UsableVram::new(Some(30_510));
+        let trimmed = trim_fake_pool(32_607, 30_510, 1_487);
+        usable.refresh_from_gpu(&trimmed.after_gpu);
+        assert_eq!(usable.get(), Some(31_997));
     }
 
     #[test]

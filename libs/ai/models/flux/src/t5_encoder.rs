@@ -18,7 +18,6 @@ use makepad_ai_common::{
 use makepad_ai_loader::{MlxDType, MlxSafetensorsHeader, MlxTensorEntry};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -70,7 +69,6 @@ pub struct T5xxlGraph {
     pub input_token_ids: TensorId,
     pub result_hidden_states: TensorId,
     pub eos_index: usize,
-    pub debug_hidden_states: Vec<(String, TensorId)>,
 }
 
 pub struct CompiledT5xxl {
@@ -121,14 +119,6 @@ pub struct T5xxlRun {
 #[derive(Clone, Debug)]
 struct T5AttentionGraphOutput {
     attn: TensorId,
-    debug_tensors: Vec<(String, TensorId)>,
-}
-
-#[derive(Clone, Debug)]
-struct T5AttentionRowsOutput {
-    attn: RowsTensor,
-    scores: Option<Vec<f32>>,
-    probs: Option<Vec<f32>>,
 }
 
 impl LoadedT5xxlWeights {
@@ -309,16 +299,6 @@ impl CompiledT5xxl {
         }
         let input_bytes = i32s_to_le_bytes(token_ids);
 
-        let mut requested_outputs = vec![self.graph.result_hidden_states];
-        if t5_debug_dir().is_some() {
-            requested_outputs.extend(
-                self.graph
-                    .debug_hidden_states
-                    .iter()
-                    .map(|(_, tensor_id)| *tensor_id),
-            );
-        }
-
         let execution = self
             .session
             .execute(
@@ -327,7 +307,7 @@ impl CompiledT5xxl {
                     tensor_id: self.graph.input_token_ids,
                     bytes: &input_bytes,
                 }],
-                &requested_outputs,
+                &[self.graph.result_hidden_states],
             )
             .map_err(DiffusionError::model)?;
 
@@ -340,16 +320,6 @@ impl CompiledT5xxl {
             .map_err(|_| DiffusionError::model("t5xxl hidden size exceeds usize"))?;
         let token_count = usize::try_from(hidden_tensor.ne[1])
             .map_err(|_| DiffusionError::model("t5xxl token count exceeds usize"))?;
-        if let Some(debug_dir) = t5_debug_dir() {
-            dump_t5_debug_outputs(
-                &debug_dir,
-                &execution.outputs,
-                &self.graph.debug_hidden_states,
-                hidden_size,
-                token_count,
-            )?;
-        }
-
         Ok(T5xxlRun {
             hidden_states: f32_bytes_to_vec(hidden_bytes)?,
             token_count,
@@ -419,16 +389,7 @@ impl LazyT5xxl {
             .map_err(|_| DiffusionError::model("t5xxl head dim exceeds usize"))?;
         let feedforward_dim = usize::try_from(weights.config.feedforward_dim)
             .map_err(|_| DiffusionError::model("t5xxl feedforward dim exceeds usize"))?;
-        let debug_dir = t5_debug_dir();
-        let dump_t5_debug = debug_dir.is_some();
-        let dump_t5_debug_stages = dump_t5_debug && t5_debug_stages_enabled();
-        let debug_stage_layer = t5_debug_stage_layer().unwrap_or(0);
-        let mut debug_hidden_states = Vec::new();
-
         let mut hidden = embed_t5_tokens(weights, token_ids, model_dim)?;
-        if dump_t5_debug {
-            debug_hidden_states.push(("t5_embed".to_string(), hidden.data.clone()));
-        }
         let layer_count = weights.config.layer_count as usize;
         for layer in 0..layer_count {
             if progress.is_some() {
@@ -448,41 +409,24 @@ impl LazyT5xxl {
                     .as_slice(),
                 weights.config.layer_norm_epsilon(),
             )?;
-            let debug_stage_prefix = format!("t5_block_{layer:02}");
-            if dump_t5_debug_stages && layer == debug_stage_layer {
-                debug_hidden_states
-                    .push((format!("{debug_stage_prefix}_norm1"), norm1.data.clone()));
-            }
             let q = linear_rows_ggml(
                 weights,
                 &norm1,
                 &format!("{attn_prefix}.SelfAttention.q.weight"),
                 1.0,
             )?;
-            if dump_t5_debug_stages && layer == debug_stage_layer {
-                debug_hidden_states
-                    .push((format!("{debug_stage_prefix}_q_linear"), q.data.clone()));
-            }
             let k = linear_rows_ggml(
                 weights,
                 &norm1,
                 &format!("{attn_prefix}.SelfAttention.k.weight"),
                 1.0,
             )?;
-            if dump_t5_debug_stages && layer == debug_stage_layer {
-                debug_hidden_states
-                    .push((format!("{debug_stage_prefix}_k_linear"), k.data.clone()));
-            }
             let v = linear_rows_ggml(
                 weights,
                 &norm1,
                 &format!("{attn_prefix}.SelfAttention.v.weight"),
                 1.0,
             )?;
-            if dump_t5_debug_stages && layer == debug_stage_layer {
-                debug_hidden_states
-                    .push((format!("{debug_stage_prefix}_v_linear"), v.data.clone()));
-            }
             let attn = t5_attention_rows(
                 &q,
                 &k,
@@ -491,32 +435,13 @@ impl LazyT5xxl {
                 self.token_count,
                 head_count,
                 head_dim,
-                dump_t5_debug_stages && layer == debug_stage_layer,
             )?;
-            if dump_t5_debug_stages && layer == debug_stage_layer {
-                if let Some(scores) = attn.scores.as_ref() {
-                    debug_hidden_states
-                        .push((format!("{debug_stage_prefix}_scores"), scores.clone()));
-                }
-                if let Some(probs) = attn.probs.as_ref() {
-                    debug_hidden_states
-                        .push((format!("{debug_stage_prefix}_probs"), probs.clone()));
-                }
-                debug_hidden_states
-                    .push((format!("{debug_stage_prefix}_attn"), attn.attn.data.clone()));
-            }
             let attn_proj = linear_rows_ggml(
                 weights,
-                &attn.attn,
+                &attn,
                 &format!("{attn_prefix}.SelfAttention.o.weight"),
                 1.0,
             )?;
-            if dump_t5_debug_stages && layer == debug_stage_layer {
-                debug_hidden_states.push((
-                    format!("{debug_stage_prefix}_attn_proj"),
-                    attn_proj.data.clone(),
-                ));
-            }
             hidden = add_rows(&hidden, &attn_proj)?;
 
             let norm2 = rms_norm_rows_with_weight(
@@ -526,50 +451,26 @@ impl LazyT5xxl {
                     .as_slice(),
                 weights.config.layer_norm_epsilon(),
             )?;
-            if dump_t5_debug_stages && layer == debug_stage_layer {
-                debug_hidden_states
-                    .push((format!("{debug_stage_prefix}_norm2"), norm2.data.clone()));
-            }
             let wi0 = linear_rows_ggml(
                 weights,
                 &norm2,
                 &format!("{ff_prefix}.DenseReluDense.wi_0.weight"),
                 1.0,
             )?;
-            if dump_t5_debug_stages && layer == debug_stage_layer {
-                debug_hidden_states
-                    .push((format!("{debug_stage_prefix}_wi0_linear"), wi0.data.clone()));
-            }
             let wi1 = linear_rows_ggml(
                 weights,
                 &norm2,
                 &format!("{ff_prefix}.DenseReluDense.wi_1.weight"),
                 1.0,
             )?;
-            if dump_t5_debug_stages && layer == debug_stage_layer {
-                debug_hidden_states
-                    .push((format!("{debug_stage_prefix}_wi1_linear"), wi1.data.clone()));
-            }
             let wi0 = gelu_rows(&wi0)?;
-            if dump_t5_debug_stages && layer == debug_stage_layer {
-                debug_hidden_states
-                    .push((format!("{debug_stage_prefix}_wi0_gelu"), wi0.data.clone()));
-            }
             let gated = mul_rows(&wi0, &wi1)?;
-            if dump_t5_debug_stages && layer == debug_stage_layer {
-                debug_hidden_states
-                    .push((format!("{debug_stage_prefix}_gated"), gated.data.clone()));
-            }
             let ff_out = linear_rows_ggml(
                 weights,
                 &gated,
                 &format!("{ff_prefix}.DenseReluDense.wo.weight"),
                 T5_GATED_FF_OUTPUT_INPUT_SCALE,
             )?;
-            if dump_t5_debug_stages && layer == debug_stage_layer {
-                debug_hidden_states
-                    .push((format!("{debug_stage_prefix}_ff_out"), ff_out.data.clone()));
-            }
             if ff_out.cols != model_dim || ff_out.rows != self.token_count {
                 return Err(DiffusionError::model(format!(
                     "t5xxl ff_out shape mismatch: got {}x{}, expected {}x{}",
@@ -583,9 +484,6 @@ impl LazyT5xxl {
                 )));
             }
             hidden = add_rows(&hidden, &ff_out)?;
-            if dump_t5_debug {
-                debug_hidden_states.push((format!("t5_block_{layer:02}"), hidden.data.clone()));
-            }
         }
 
         let final_hidden = rms_norm_rows_with_weight(
@@ -595,13 +493,6 @@ impl LazyT5xxl {
                 .as_slice(),
             weights.config.layer_norm_epsilon(),
         )?;
-        if dump_t5_debug {
-            debug_hidden_states.push(("t5_final".to_string(), final_hidden.data.clone()));
-        }
-        if let Some(debug_dir) = debug_dir.as_ref() {
-            dump_t5_debug_rows(debug_dir, &debug_hidden_states, model_dim, self.token_count)?;
-        }
-
         Ok(T5xxlRun {
             hidden_states: final_hidden.data,
             token_count: self.token_count,
@@ -666,7 +557,7 @@ fn embed_t5_tokens(
     // degrades to CPU math behind a ready state. `None` means no capable
     // device backend exists (mac/unit tests), where the CPU twin is the
     // intended path.
-    if embedding.ggml_type == GGML_TYPE_F8_E4M3 && !t5_force_cpu_math() {
+    if embedding.ggml_type == GGML_TYPE_F8_E4M3 {
         match try_get_rows_ggml_bytes_cached(
             embedding.ggml_type,
             embedding.cols,
@@ -719,11 +610,7 @@ fn linear_rows_ggml(
     // checkpoints) uploads once under `t5xxl:<path>::<tensor>` and stays
     // resident — a changed prompt re-encodes with zero weight bytes moved.
     // The pre-existing uncached path below re-uploaded ~5-10GB per encode.
-    if !t5_force_cpu_math()
-        && !t5_force_f32_linear()
-        && input.rows > 0
-        && input.cols == weight.cols
-    {
+    if input.rows > 0 && input.cols == weight.cols {
         let scaled_input;
         let input_values = if input_scale == 1.0 {
             &input.data
@@ -808,34 +695,7 @@ fn linear_rows_ggml_matrix(
             .collect::<Vec<_>>();
         &scaled_input
     };
-    let mut output = if t5_force_cpu_math() || t5_force_f32_linear() {
-        let dequantized = decoded_matrix_f32_cached(weight)?;
-        if t5_force_cpu_math() {
-            matmul_nt_f32_cpu(
-                input_values,
-                dequantized.as_slice(),
-                input.rows,
-                input.cols,
-                weight.rows,
-            )?
-        } else if let Some(output) = try_matmul_nt_f32(
-            input_values,
-            dequantized.as_slice(),
-            input.rows,
-            input.cols,
-            weight.rows,
-        ) {
-            output
-        } else {
-            matmul_nt_f32_cpu(
-                input_values,
-                dequantized.as_slice(),
-                input.rows,
-                input.cols,
-                weight.rows,
-            )?
-        }
-    } else if let Some(output) = try_matmul_nt_ggml_bytes(
+    let mut output = if let Some(output) = try_matmul_nt_ggml_bytes(
         input_values,
         weight.bytes,
         weight.ggml_type,
@@ -884,16 +744,14 @@ fn rms_norm_rows_with_weight(input: &RowsTensor, weight: &[f32], eps: f32) -> Re
     if input.rows == 0 {
         return RowsTensor::new(0, input.cols, Vec::new());
     }
-    if !t5_force_cpu_math() {
-        if let Some(output) = try_rms_norm_mul_f32(
-            &input.data,
-            &[input.rows, input.cols],
-            weight,
-            &[weight.len()],
-            eps,
-        ) {
-            return RowsTensor::new(input.rows, input.cols, output);
-        }
+    if let Some(output) = try_rms_norm_mul_f32(
+        &input.data,
+        &[input.rows, input.cols],
+        weight,
+        &[weight.len()],
+        eps,
+    ) {
+        return RowsTensor::new(input.rows, input.cols, output);
     }
     let mut output = Vec::with_capacity(input.data.len());
     for row in input.data.chunks_exact(input.cols) {
@@ -916,15 +774,13 @@ fn add_rows(lhs: &RowsTensor, rhs: &RowsTensor) -> Result<RowsTensor> {
     if lhs.rows == 0 {
         return RowsTensor::new(0, lhs.cols, Vec::new());
     }
-    if !t5_force_cpu_math() {
-        if let Some(output) = try_add_f32(
-            &lhs.data,
-            &[lhs.rows, lhs.cols],
-            &rhs.data,
-            &[rhs.rows, rhs.cols],
-        ) {
-            return RowsTensor::new(lhs.rows, lhs.cols, output);
-        }
+    if let Some(output) = try_add_f32(
+        &lhs.data,
+        &[lhs.rows, lhs.cols],
+        &rhs.data,
+        &[rhs.rows, rhs.cols],
+    ) {
+        return RowsTensor::new(lhs.rows, lhs.cols, output);
     }
     let output = lhs
         .data
@@ -945,15 +801,13 @@ fn mul_rows(lhs: &RowsTensor, rhs: &RowsTensor) -> Result<RowsTensor> {
     if lhs.rows == 0 {
         return RowsTensor::new(0, lhs.cols, Vec::new());
     }
-    if !t5_force_cpu_math() {
-        if let Some(output) = try_mul_f32(
-            &lhs.data,
-            &[lhs.rows, lhs.cols],
-            &rhs.data,
-            &[rhs.rows, rhs.cols],
-        ) {
-            return RowsTensor::new(lhs.rows, lhs.cols, output);
-        }
+    if let Some(output) = try_mul_f32(
+        &lhs.data,
+        &[lhs.rows, lhs.cols],
+        &rhs.data,
+        &[rhs.rows, rhs.cols],
+    ) {
+        return RowsTensor::new(lhs.rows, lhs.cols, output);
     }
     let output = lhs
         .data
@@ -968,10 +822,8 @@ fn gelu_rows(input: &RowsTensor) -> Result<RowsTensor> {
     if input.rows == 0 {
         return RowsTensor::new(0, input.cols, Vec::new());
     }
-    if !t5_force_cpu_math() {
-        if let Some(output) = try_gelu_f32(&input.data, &[input.rows, input.cols]) {
-            return RowsTensor::new(input.rows, input.cols, output);
-        }
+    if let Some(output) = try_gelu_f32(&input.data, &[input.rows, input.cols]) {
+        return RowsTensor::new(input.rows, input.cols, output);
     }
     let output = input
         .data
@@ -990,8 +842,7 @@ fn t5_attention_rows(
     token_count: usize,
     head_count: usize,
     head_dim: usize,
-    dump_debug_stages: bool,
-) -> Result<T5AttentionRowsOutput> {
+) -> Result<RowsTensor> {
     if q.rows != token_count || k.rows != token_count || v.rows != token_count {
         return Err(DiffusionError::model(
             "t5xxl attention token count mismatch",
@@ -1024,16 +875,11 @@ fn t5_attention_rows(
         )));
     }
     let mut output = vec![0.0f32; token_count * head_count * head_dim];
-    let mut debug_scores = dump_debug_stages.then(|| Vec::with_capacity(attention_bias.len()));
-    let mut debug_probs = dump_debug_stages.then(|| Vec::with_capacity(attention_bias.len()));
     for head_idx in 0..head_count {
         let q_head = extract_head_rows(q, head_idx, head_dim);
         let k_head = extract_head_rows(k, head_idx, head_dim);
         let v_head = extract_head_rows(v, head_idx, head_dim);
-        let force_cpu_attention = t5_force_cpu_math() || t5_force_cpu_attention();
-        let mut scores = if force_cpu_attention {
-            matmul_nt_f32_cpu(&q_head, &k_head, token_count, head_dim, token_count)?
-        } else if let Some(scores) =
+        let mut scores = if let Some(scores) =
             try_matmul_nt_f32(&q_head, &k_head, token_count, head_dim, token_count)
         {
             scores
@@ -1041,41 +887,26 @@ fn t5_attention_rows(
             matmul_nt_f32_cpu(&q_head, &k_head, token_count, head_dim, token_count)?
         };
         let head_bias = &attention_bias[head_idx * head_bias_len..(head_idx + 1) * head_bias_len];
-        if dump_debug_stages {
-            add_bias_in_place(&mut scores, head_bias)?;
-            if let Some(debug_scores) = debug_scores.as_mut() {
-                debug_scores.extend_from_slice(&scores);
-            }
-            softmax_in_place(&mut scores, token_count)?;
-            if let Some(debug_probs) = debug_probs.as_mut() {
-                debug_probs.extend_from_slice(&scores);
-            }
-        } else {
-            add_bias_in_place(&mut scores, head_bias)?;
-            if !force_cpu_attention {
-                if let Some(head_output) = try_attention_softmax_weighted_sum_f32(
-                    &scores,
-                    &v_head,
-                    token_count,
-                    token_count,
-                    head_dim,
-                ) {
-                    write_head_rows(
-                        &mut output,
-                        token_count,
-                        head_count,
-                        head_dim,
-                        head_idx,
-                        &head_output,
-                    )?;
-                    continue;
-                }
-            }
-            softmax_in_place(&mut scores, token_count)?;
+        add_bias_in_place(&mut scores, head_bias)?;
+        if let Some(head_output) = try_attention_softmax_weighted_sum_f32(
+            &scores,
+            &v_head,
+            token_count,
+            token_count,
+            head_dim,
+        ) {
+            write_head_rows(
+                &mut output,
+                token_count,
+                head_count,
+                head_dim,
+                head_idx,
+                &head_output,
+            )?;
+            continue;
         }
-        let head_output = if force_cpu_attention {
-            matmul_nn_f32_cpu(&scores, &v_head, token_count, token_count, head_dim)?
-        } else if let Some(head_output) =
+        softmax_in_place(&mut scores, token_count)?;
+        let head_output = if let Some(head_output) =
             try_matmul_nn_f32(&scores, &v_head, token_count, token_count, head_dim)
         {
             head_output
@@ -1091,11 +922,7 @@ fn t5_attention_rows(
             &head_output,
         )?;
     }
-    Ok(T5AttentionRowsOutput {
-        attn: RowsTensor::new(token_count, head_count * head_dim, output)?,
-        scores: debug_scores,
-        probs: debug_probs,
-    })
+    RowsTensor::new(token_count, head_count * head_dim, output)
 }
 
 pub fn build_t5xxl_graph(
@@ -1144,10 +971,6 @@ pub fn build_t5xxl_graph(
         .ctx
         .write_tensor_data(attention_bias, &attention_bias_bytes)
         .map_err(DiffusionError::model)?;
-    let dump_t5_debug = t5_debug_dir().is_some();
-    let dump_t5_debug_stages = dump_t5_debug && t5_debug_stages_enabled();
-    let mut debug_hidden_states = Vec::new();
-
     let mut hidden = weights
         .ctx
         .get_rows(
@@ -1160,10 +983,6 @@ pub fn build_t5xxl_graph(
         .ctx
         .cont_2d(hidden, model_dim, n_tokens as i64)
         .map_err(DiffusionError::model)?;
-    if dump_t5_debug {
-        debug_hidden_states.push(("t5_embed".to_string(), hidden));
-    }
-
     for layer in 0..weights.config.layer_count as usize {
         let attn_prefix = format!("encoder.block.{layer}.layer.0");
         let ff_prefix = format!("encoder.block.{layer}.layer.1");
@@ -1197,25 +1016,6 @@ pub fn build_t5xxl_graph(
             1.0,
         )?;
 
-        if dump_t5_debug_stages && layer == 0 {
-            debug_hidden_states.push((
-                "t5_block_00_norm1".to_string(),
-                weights.ctx.cont(norm1).map_err(DiffusionError::model)?,
-            ));
-            debug_hidden_states.push((
-                "t5_block_00_q_linear".to_string(),
-                weights.ctx.cont(q).map_err(DiffusionError::model)?,
-            ));
-            debug_hidden_states.push((
-                "t5_block_00_k_linear".to_string(),
-                weights.ctx.cont(k).map_err(DiffusionError::model)?,
-            ));
-            debug_hidden_states.push((
-                "t5_block_00_v_linear".to_string(),
-                weights.ctx.cont(v).map_err(DiffusionError::model)?,
-            ));
-        }
-
         let attn = build_attention_mha_output(
             &mut weights.ctx,
             q,
@@ -1225,13 +1025,7 @@ pub fn build_t5xxl_graph(
             head_dim,
             head_count,
             n_tokens as i64,
-            if dump_t5_debug_stages && layer == 0 {
-                Some("t5_block_00")
-            } else {
-                None
-            },
         )?;
-        debug_hidden_states.extend(attn.debug_tensors);
         let attn_proj = apply_linear_no_bias(
             &mut weights.ctx,
             &weights.tensor_ids,
@@ -1239,12 +1033,6 @@ pub fn build_t5xxl_graph(
             &format!("{attn_prefix}.SelfAttention.o.weight"),
             1.0,
         )?;
-        if dump_t5_debug_stages && layer == 0 {
-            debug_hidden_states.push((
-                "t5_block_00_attn_proj".to_string(),
-                weights.ctx.cont(attn_proj).map_err(DiffusionError::model)?,
-            ));
-        }
         hidden = weights
             .ctx
             .binary_like_a(Op::Add, hidden, attn_proj, BufferUsage::Activations)
@@ -1257,12 +1045,6 @@ pub fn build_t5xxl_graph(
             &format!("{ff_prefix}.layer_norm.weight"),
             weights.config.layer_norm_epsilon(),
         )?;
-        if dump_t5_debug_stages && layer == 0 {
-            debug_hidden_states.push((
-                "t5_block_00_norm2".to_string(),
-                weights.ctx.cont(norm2).map_err(DiffusionError::model)?,
-            ));
-        }
         let wi0 = apply_linear_no_bias(
             &mut weights.ctx,
             &weights.tensor_ids,
@@ -1277,33 +1059,11 @@ pub fn build_t5xxl_graph(
             &format!("{ff_prefix}.DenseReluDense.wi_1.weight"),
             1.0,
         )?;
-        if dump_t5_debug_stages && layer == 0 {
-            debug_hidden_states.push((
-                "t5_block_00_wi0_linear".to_string(),
-                weights.ctx.cont(wi0).map_err(DiffusionError::model)?,
-            ));
-            debug_hidden_states.push((
-                "t5_block_00_wi1_linear".to_string(),
-                weights.ctx.cont(wi1).map_err(DiffusionError::model)?,
-            ));
-        }
         let wi0 = gelu(&mut weights.ctx, wi0)?;
-        if dump_t5_debug_stages && layer == 0 {
-            debug_hidden_states.push((
-                "t5_block_00_wi0_gelu".to_string(),
-                weights.ctx.cont(wi0).map_err(DiffusionError::model)?,
-            ));
-        }
         let gated = weights
             .ctx
             .binary_like_a(Op::Mul, wi0, wi1, BufferUsage::Activations)
             .map_err(DiffusionError::model)?;
-        if dump_t5_debug_stages && layer == 0 {
-            debug_hidden_states.push((
-                "t5_block_00_gated".to_string(),
-                weights.ctx.cont(gated).map_err(DiffusionError::model)?,
-            ));
-        }
         let ff_out = apply_linear_no_bias(
             &mut weights.ctx,
             &weights.tensor_ids,
@@ -1311,20 +1071,10 @@ pub fn build_t5xxl_graph(
             &format!("{ff_prefix}.DenseReluDense.wo.weight"),
             T5_GATED_FF_OUTPUT_INPUT_SCALE,
         )?;
-        if dump_t5_debug_stages && layer == 0 {
-            debug_hidden_states.push((
-                "t5_block_00_ff_out".to_string(),
-                weights.ctx.cont(ff_out).map_err(DiffusionError::model)?,
-            ));
-        }
         hidden = weights
             .ctx
             .binary_like_a(Op::Add, hidden, ff_out, BufferUsage::Activations)
             .map_err(DiffusionError::model)?;
-        if dump_t5_debug {
-            let debug_hidden = weights.ctx.cont(hidden).map_err(DiffusionError::model)?;
-            debug_hidden_states.push((format!("t5_block_{layer:02}"), debug_hidden));
-        }
     }
 
     let result_hidden_states = apply_rms_norm_candidates(
@@ -1334,30 +1084,15 @@ pub fn build_t5xxl_graph(
         &T5_FINAL_LAYER_NORM_NAMES,
         weights.config.layer_norm_epsilon(),
     )?;
-    if dump_t5_debug {
-        let debug_hidden = weights
-            .ctx
-            .cont(result_hidden_states)
-            .map_err(DiffusionError::model)?;
-        debug_hidden_states.push(("t5_final".to_string(), debug_hidden));
-    }
-
     let mut graph = Graph::new();
     graph
         .build_forward_expand(&weights.ctx, result_hidden_states)
         .map_err(DiffusionError::model)?;
-    for (_, tensor_id) in &debug_hidden_states {
-        graph
-            .build_forward_expand(&weights.ctx, *tensor_id)
-            .map_err(DiffusionError::model)?;
-    }
-
     Ok(T5xxlGraph {
         graph,
         input_token_ids,
         result_hidden_states,
         eos_index: prompt.eos_index,
-        debug_hidden_states,
     })
 }
 
@@ -1370,10 +1105,7 @@ fn build_attention_mha_output(
     head_dim: i64,
     head_count: i64,
     token_count: i64,
-    debug_prefix: Option<&str>,
 ) -> Result<T5AttentionGraphOutput> {
-    let mut debug_tensors = Vec::new();
-
     let q = ctx
         .reshape(q, &[head_dim, head_count, token_count])
         .map_err(DiffusionError::model)?;
@@ -1413,21 +1145,9 @@ fn build_attention_mha_output(
     kq = ctx
         .binary_like_a(Op::Add, kq, attention_bias, BufferUsage::Activations)
         .map_err(DiffusionError::model)?;
-    if let Some(prefix) = debug_prefix {
-        debug_tensors.push((
-            format!("{prefix}_scores"),
-            ctx.cont(kq).map_err(DiffusionError::model)?,
-        ));
-    }
     kq = ctx
         .soft_max(kq, BufferUsage::Activations)
         .map_err(DiffusionError::model)?;
-    if let Some(prefix) = debug_prefix {
-        debug_tensors.push((
-            format!("{prefix}_probs"),
-            ctx.cont(kq).map_err(DiffusionError::model)?,
-        ));
-    }
 
     let kqv = ctx
         .mul_mat(v, kq, BufferUsage::Activations)
@@ -1442,16 +1162,7 @@ fn build_attention_mha_output(
     let attn = ctx
         .reshape(attn, &[head_dim * head_count, token_count])
         .map_err(DiffusionError::model)?;
-    if let Some(prefix) = debug_prefix {
-        debug_tensors.push((
-            format!("{prefix}_attn"),
-            ctx.cont(attn).map_err(DiffusionError::model)?,
-        ));
-    }
-    Ok(T5AttentionGraphOutput {
-        attn,
-        debug_tensors,
-    })
+    Ok(T5AttentionGraphOutput { attn })
 }
 
 fn apply_rms_norm(
@@ -2211,131 +1922,6 @@ fn next_graph_reserve_bytes(weights: &LoadedT5xxlWeights) -> Result<usize> {
         .graph_reserve_bytes()
         .checked_mul(2)
         .ok_or_else(|| DiffusionError::model("t5xxl graph reserve overflow"))
-}
-
-fn t5_debug_dir() -> Option<PathBuf> {
-    std::env::var_os("FLUX_T5_DEBUG_DIR").map(PathBuf::from)
-}
-
-fn t5_debug_stages_enabled() -> bool {
-    std::env::var_os("FLUX_T5_DEBUG_STAGES")
-        .map(|value| value != "0")
-        .unwrap_or(false)
-}
-
-fn t5_debug_stage_layer() -> Option<usize> {
-    std::env::var("FLUX_T5_DEBUG_LAYER")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-}
-
-fn t5_force_cpu_math() -> bool {
-    std::env::var_os("FLUX_T5_FORCE_CPU_MATH")
-        .map(|value| value != "0")
-        .unwrap_or(false)
-}
-
-fn t5_force_cpu_attention() -> bool {
-    std::env::var_os("FLUX_T5_FORCE_CPU_ATTN")
-        .map(|value| value != "0")
-        .unwrap_or(false)
-}
-
-fn t5_force_f32_linear() -> bool {
-    std::env::var_os("FLUX_T5_FORCE_F32_LINEAR")
-        .map(|value| value != "0")
-        .unwrap_or(false)
-}
-
-fn dump_t5_debug_outputs(
-    dir: &Path,
-    outputs: &BTreeMap<TensorId, Vec<u8>>,
-    debug_hidden_states: &[(String, TensorId)],
-    hidden_size: usize,
-    token_count: usize,
-) -> Result<()> {
-    fs::create_dir_all(dir).map_err(|err| {
-        DiffusionError::model(format!(
-            "failed to create t5 debug dir {}: {}",
-            dir.display(),
-            err
-        ))
-    })?;
-    let meta_path = dir.join("t5_meta.txt");
-    fs::write(
-        &meta_path,
-        format!("hidden_size={hidden_size}\ntoken_count={token_count}\n"),
-    )
-    .map_err(|err| {
-        DiffusionError::model(format!(
-            "failed to write t5 debug meta {}: {}",
-            meta_path.display(),
-            err
-        ))
-    })?;
-    for (name, tensor_id) in debug_hidden_states {
-        let bytes = outputs.get(tensor_id).ok_or_else(|| {
-            DiffusionError::model(format!(
-                "missing t5 debug output '{}' for tensor {}",
-                name, tensor_id
-            ))
-        })?;
-        let path = dir.join(format!("{name}.bin"));
-        fs::write(&path, bytes).map_err(|err| {
-            DiffusionError::model(format!(
-                "failed to write t5 debug tensor {}: {}",
-                path.display(),
-                err
-            ))
-        })?;
-    }
-    Ok(())
-}
-
-fn dump_t5_debug_rows(
-    dir: &Path,
-    debug_hidden_states: &[(String, Vec<f32>)],
-    hidden_size: usize,
-    token_count: usize,
-) -> Result<()> {
-    fs::create_dir_all(dir).map_err(|err| {
-        DiffusionError::model(format!(
-            "failed to create t5 debug dir {}: {}",
-            dir.display(),
-            err
-        ))
-    })?;
-    let meta_path = dir.join("t5_meta.txt");
-    fs::write(
-        &meta_path,
-        format!("hidden_size={hidden_size}\ntoken_count={token_count}\n"),
-    )
-    .map_err(|err| {
-        DiffusionError::model(format!(
-            "failed to write t5 debug meta {}: {}",
-            meta_path.display(),
-            err
-        ))
-    })?;
-    for (name, values) in debug_hidden_states {
-        let path = dir.join(format!("{name}.bin"));
-        fs::write(&path, f32s_to_le_bytes(values)).map_err(|err| {
-            DiffusionError::model(format!(
-                "failed to write t5 debug tensor {}: {}",
-                path.display(),
-                err
-            ))
-        })?;
-    }
-    Ok(())
-}
-
-fn f32s_to_le_bytes(values: &[f32]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(values.len() * std::mem::size_of::<f32>());
-    for value in values {
-        bytes.extend_from_slice(&value.to_le_bytes());
-    }
-    bytes
 }
 
 #[cfg(test)]

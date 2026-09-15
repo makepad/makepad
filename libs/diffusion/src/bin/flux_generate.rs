@@ -13,7 +13,7 @@ use makepad_diffusion::flux_text::{
 use makepad_diffusion::flux_transformer::{
     CompiledFluxTransformer, FluxTransformerCompileTiming, LoadedFluxTransformerWeights,
 };
-use makepad_diffusion::flux_vae::{CompiledFluxVae, FluxVaeStageOutput, LoadedFluxVaeWeights};
+use makepad_diffusion::flux_vae::{CompiledFluxVae, LoadedFluxVaeWeights};
 use makepad_zune_core::bit_depth::BitDepth;
 use makepad_zune_core::colorspace::ColorSpace;
 use makepad_zune_core::options::EncoderOptions;
@@ -33,7 +33,7 @@ fn usage() -> ! {
            --steps 4         --seed 1\n\
            --prompt TEXT     --guidance 1\n\
          \n\
-         FLUX_COND_DIR still overrides T5/CLIP with precomputed bins."
+         --cond-dir overrides T5/CLIP with precomputed bins."
     );
     std::process::exit(1);
 }
@@ -50,6 +50,11 @@ struct GenerateArgs {
     seed: u64,
     prompt: String,
     guidance: f32,
+    skip_denoise: bool,
+    cond_dir: Option<String>,
+    compare_cond_dir: Option<String>,
+    recompile_transformer_each_step: bool,
+    fixed_t: Option<String>,
 }
 
 fn parse_args() -> Result<GenerateArgs, Box<dyn std::error::Error>> {
@@ -64,6 +69,11 @@ fn parse_args() -> Result<GenerateArgs, Box<dyn std::error::Error>> {
     let mut seed = 1u64;
     let mut prompt = "a red cube".to_string();
     let mut guidance = 1.0f32;
+    let mut skip_denoise = false;
+    let mut cond_dir = None;
+    let mut compare_cond_dir = None;
+    let mut recompile_transformer_each_step = false;
+    let mut fixed_t = None;
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
         let require = |flag: &str, got: Option<String>| {
@@ -82,6 +92,11 @@ fn parse_args() -> Result<GenerateArgs, Box<dyn std::error::Error>> {
             "--seed" => seed = require(&arg, args.next())?.parse()?,
             "--prompt" => prompt = require(&arg, args.next())?,
             "--guidance" => guidance = require(&arg, args.next())?.parse()?,
+            "--skip-denoise" => skip_denoise = true,
+            "--cond-dir" => cond_dir = Some(require(&arg, args.next())?),
+            "--compare-cond-dir" => compare_cond_dir = Some(require(&arg, args.next())?),
+            "--recompile-transformer-each-step" => recompile_transformer_each_step = true,
+            "--fixed-t" => fixed_t = Some(require(&arg, args.next())?),
             other => return Err(format!("unknown argument: {other}").into()),
         }
     }
@@ -97,6 +112,11 @@ fn parse_args() -> Result<GenerateArgs, Box<dyn std::error::Error>> {
         seed,
         prompt,
         guidance,
+        skip_denoise,
+        cond_dir,
+        compare_cond_dir,
+        recompile_transformer_each_step,
+        fixed_t,
     })
 }
 
@@ -144,7 +164,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         0.0
     };
-    let skip_denoise = env::var_os("FLUX_SKIP_DENOISE").is_some();
+    let skip_denoise = args.skip_denoise;
     let mut conditioning_source = if skip_denoise { "skipped" } else { "native" }.to_string();
     let mut t5_backend = "skipped".to_string();
     let mut conditioning_override_ms = 0.0;
@@ -156,7 +176,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     } else {
         let override_start = Instant::now();
-        if let Some(conditioning) = load_conditioning_override()? {
+        if let Some(conditioning) = load_conditioning_override(args.cond_dir.as_deref())? {
             conditioning_override_ms = elapsed_ms(override_start);
             conditioning_source = "override".to_string();
             t5_backend = "override".to_string();
@@ -188,8 +208,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     if let Some(conditioning) = conditioning.as_ref() {
-        if let Some(compare_dir) = env::var_os("FLUX_COMPARE_COND_DIR") {
-            let reference_conditioning = load_conditioning_from_dir(Path::new(&compare_dir))?;
+        if let Some(compare_dir) = args.compare_cond_dir.as_deref() {
+            let reference_conditioning = load_conditioning_from_dir(Path::new(compare_dir))?;
             let (clip_max_abs, clip_mean_abs) = diff_stats(
                 &conditioning.clip_pooled,
                 &reference_conditioning.clip_pooled,
@@ -214,8 +234,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let steps = plan.generation.steps.max(1) as usize;
     let latent_shape = FluxLatentShape::from_image_size(width, height)?;
     let schedule = FluxSchedule::for_flux1(steps, plan.transformer.guidance_embed)?;
-    let recompile_transformer_each_step =
-        env::var_os("FLUX_RECOMPILE_TRANSFORMER_EACH_STEP").is_some();
+    let recompile_transformer_each_step = args.recompile_transformer_each_step;
 
     let noise_start = Instant::now();
     let mut latents = gaussian_latents(
@@ -303,7 +322,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &mut transformer_session_create_ms,
             );
             let denoise_start = Instant::now();
-            let fixed_t = env::var("FLUX_DIT_FIXED_T").ok().and_then(|value| {
+            let fixed_t = args.fixed_t.as_deref().and_then(|value| {
                 if value == "1" || value.eq_ignore_ascii_case("on") {
                     Some(schedule.sigmas[0])
                 } else {
@@ -365,14 +384,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let vae_compile_ms = elapsed_ms(vae_compile_start);
     let vae_backend = vae_compiled.backend_name().to_string();
-    let dump_vae_stages = env::var_os("FLUX_DEBUG_VAE_STAGES").is_some();
     let vae_execute_start = Instant::now();
-    let (image, stage_outputs) = if dump_vae_stages {
-        let debug = vae_compiled.execute_with_debug(&vae, &latents)?;
-        (debug.final_image, Some(debug.stages))
-    } else {
-        (vae_compiled.execute(&vae, &latents)?, None)
-    };
+    let image = vae_compiled.execute(&vae, &latents)?;
     let vae_execute_ms = elapsed_ms(vae_execute_start);
     let png_encode_start = Instant::now();
     let png = encode_png_rgb(&image.image, image.width, image.height)?;
@@ -380,22 +393,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let png_write_start = Instant::now();
     fs::write(Path::new(&output_path), png)?;
     let png_write_ms = elapsed_ms(png_write_start);
-    if let Some(stage_outputs) = stage_outputs.as_ref() {
-        dump_vae_stage_outputs(Path::new(&output_path), stage_outputs)?;
-    }
-    if env::var_os("FLUX_DEBUG_VAE_LAYOUTS").is_some() {
-        let interleaved_path = format!("{}.interleaved.png", output_path);
-        let swapped_path = format!("{}.wh-swapped.png", output_path);
-        fs::write(
-            Path::new(&interleaved_path),
-            encode_png_rgb_interleaved(&image.image, image.width, image.height)?,
-        )?;
-        fs::write(
-            Path::new(&swapped_path),
-            encode_png_rgb_planar_swapped_wh(&image.image, image.width, image.height)?,
-        )?;
-        println!("debug layouts: {}, {}", interleaved_path, swapped_path);
-    }
 
     println!(
         "unet: {}",
@@ -487,13 +484,9 @@ fn accumulate_transformer_compile_timing(
     *total_ms += timing.graph_build_ms + timing.graph_prepare_ms + timing.session_create_ms;
 }
 
-fn load_conditioning_override() -> Result<Option<FluxConditioning>, Box<dyn std::error::Error>> {
-    let dir = match env::var("FLUX_COND_DIR") {
-        Ok(dir) => dir,
-        Err(env::VarError::NotPresent) => return Ok(None),
-        Err(err) => return Err(Box::new(err)),
-    };
-    Ok(Some(load_conditioning_from_dir(Path::new(&dir))?))
+fn load_conditioning_override(dir: Option<&str>) -> Result<Option<FluxConditioning>, Box<dyn std::error::Error>> {
+    let Some(dir) = dir else { return Ok(None); };
+    Ok(Some(load_conditioning_from_dir(Path::new(dir))?))
 }
 
 fn parse_meta_usize(text: &str, key: &str) -> Option<usize> {
@@ -642,191 +635,6 @@ fn encode_png_rgb(
         .set_depth(BitDepth::Eight)
         .set_colorspace(ColorSpace::RGBA);
     let mut encoder = PngEncoder::new(&pixels, options);
-    let mut out = Vec::new();
-    encoder
-        .encode(&mut out)
-        .map_err(|err| format!("png encode failed: {err:?}"))?;
-    Ok(out)
-}
-
-fn encode_png_rgb_interleaved(
-    image_rgb: &[f32],
-    width: usize,
-    height: usize,
-) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let expected = width * height * 3;
-    if image_rgb.len() != expected {
-        return Err(format!(
-            "png encode expected {} float values, got {}",
-            expected,
-            image_rgb.len()
-        )
-        .into());
-    }
-    let mut pixels = Vec::with_capacity(width * height * 4);
-    for chunk in image_rgb.chunks_exact(3) {
-        pixels.extend_from_slice(&[to_u8(chunk[0]), to_u8(chunk[1]), to_u8(chunk[2]), 255]);
-    }
-    encode_png_rgba_bytes(&pixels, width, height)
-}
-
-fn dump_vae_stage_outputs(
-    output_path: &Path,
-    stages: &[FluxVaeStageOutput],
-) -> Result<(), Box<dyn std::error::Error>> {
-    let output_str = output_path.to_string_lossy();
-    for (index, stage) in stages.iter().enumerate() {
-        let safe_name = sanitize_filename_component(&stage.name);
-        let stage_path = format!("{output_str}.stage{index:02}.{safe_name}.png");
-        fs::write(
-            Path::new(&stage_path),
-            encode_activation_rms_png(&stage.values, stage.width, stage.height, stage.channels)?,
-        )?;
-        let (left_mean_abs, right_mean_abs, max_abs) =
-            activation_half_stats(&stage.values, stage.width, stage.height, stage.channels);
-        println!(
-            "vae stage {index:02} {}: {}x{}x{} left_mean_abs={:.6} right_mean_abs={:.6} max_abs={:.6} path={}",
-            stage.name,
-            stage.width,
-            stage.height,
-            stage.channels,
-            left_mean_abs,
-            right_mean_abs,
-            max_abs,
-            stage_path
-        );
-    }
-    Ok(())
-}
-
-fn sanitize_filename_component(name: &str) -> String {
-    name.chars()
-        .map(|ch| match ch {
-            'a'..='z' | 'A'..='Z' | '0'..='9' => ch,
-            _ => '_',
-        })
-        .collect()
-}
-
-fn encode_activation_rms_png(
-    values: &[f32],
-    width: usize,
-    height: usize,
-    channels: usize,
-) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let expected = width * height * channels;
-    if values.len() != expected {
-        return Err(format!(
-            "activation png expected {} float values, got {}",
-            expected,
-            values.len()
-        )
-        .into());
-    }
-    let plane = width * height;
-    let mut rms = vec![0.0f32; plane];
-    let mut max_rms = 0.0f32;
-    for pixel in 0..plane {
-        let mut sum_sq = 0.0f32;
-        for channel in 0..channels {
-            let value = values[channel * plane + pixel];
-            sum_sq += value * value;
-        }
-        let value = (sum_sq / channels.max(1) as f32).sqrt();
-        rms[pixel] = value;
-        max_rms = max_rms.max(value);
-    }
-    let denom = max_rms.max(1.0e-8);
-    let mut pixels = Vec::with_capacity(width * height * 4);
-    for value in rms {
-        let gray = ((value / denom).clamp(0.0, 1.0) * 255.0).round() as u8;
-        pixels.extend_from_slice(&[gray, gray, gray, 255]);
-    }
-    encode_png_rgba_bytes(&pixels, width, height)
-}
-
-fn activation_half_stats(
-    values: &[f32],
-    width: usize,
-    height: usize,
-    channels: usize,
-) -> (f32, f32, f32) {
-    let plane = width * height;
-    let split = width / 2;
-    let mut left_sum = 0.0f32;
-    let mut right_sum = 0.0f32;
-    let mut left_count = 0usize;
-    let mut right_count = 0usize;
-    let mut max_abs = 0.0f32;
-    for channel in 0..channels {
-        let base = channel * plane;
-        for y in 0..height {
-            for x in 0..width {
-                let value = values[base + y * width + x].abs();
-                max_abs = max_abs.max(value);
-                if x < split {
-                    left_sum += value;
-                    left_count += 1;
-                } else {
-                    right_sum += value;
-                    right_count += 1;
-                }
-            }
-        }
-    }
-    let left = left_sum / left_count.max(1) as f32;
-    let right = right_sum / right_count.max(1) as f32;
-    (left, right, max_abs)
-}
-
-fn encode_png_rgb_planar_swapped_wh(
-    image_whcb: &[f32],
-    width: usize,
-    height: usize,
-) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let expected = width * height * 3;
-    if image_whcb.len() != expected {
-        return Err(format!(
-            "png encode expected {} float values, got {}",
-            expected,
-            image_whcb.len()
-        )
-        .into());
-    }
-    let mut pixels = Vec::with_capacity(width * height * 4);
-    let plane = width * height;
-    for y in 0..height {
-        for x in 0..width {
-            let pixel = x * height + y;
-            let r = to_u8(image_whcb[pixel]);
-            let g = to_u8(image_whcb[plane + pixel]);
-            let b = to_u8(image_whcb[plane * 2 + pixel]);
-            pixels.extend_from_slice(&[r, g, b, 255]);
-        }
-    }
-    encode_png_rgba_bytes(&pixels, width, height)
-}
-
-fn encode_png_rgba_bytes(
-    pixels: &[u8],
-    width: usize,
-    height: usize,
-) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let expected = width * height * 4;
-    if pixels.len() != expected {
-        return Err(format!(
-            "png encode expected {} RGBA bytes, got {}",
-            expected,
-            pixels.len()
-        )
-        .into());
-    }
-    let options = EncoderOptions::default()
-        .set_width(width)
-        .set_height(height)
-        .set_depth(BitDepth::Eight)
-        .set_colorspace(ColorSpace::RGBA);
-    let mut encoder = PngEncoder::new(pixels, options);
     let mut out = Vec::new();
     encoder
         .encode(&mut out)

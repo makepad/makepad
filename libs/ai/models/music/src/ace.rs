@@ -234,12 +234,6 @@ pub fn ace_time_sinusoid(t: f32) -> Vec<f32> {
 }
 
 pub fn ace_device_enabled() -> bool {
-    if std::env::var("ACE_DEVICE")
-        .map(|v| v == "0")
-        .unwrap_or(false)
-    {
-        return false;
-    }
     makepad_ai_common::backend::cuda::gpu_device_available()
 }
 

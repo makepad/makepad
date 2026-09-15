@@ -396,37 +396,7 @@ fn vae_pool_cap_bytes() -> usize {
         Some(mb) => mb * 1024 * 1024,
         None => free.saturating_sub(MARGIN).clamp(MIN, MAX),
     };
-    if std::env::var_os("MAKEPAD_GPU_PROF").is_some() {
-        eprintln!(
-            "flux2 vae pool cap {:.0}MB (free {:.0}MB)",
-            cap as f64 / (1024.0 * 1024.0),
-            free as f64 / (1024.0 * 1024.0)
-        );
-    }
     cap as usize
-}
-
-/// FLUX2_VAE_DUMP=dir: dump decoder stage outputs as rows=channels x
-/// cols=plane .f32 files (the DiT dump format) for oracle bisection.
-fn vae_dump(name: &str, spatial: &GpuSpatial) {
-    let Ok(dir) = std::env::var("FLUX2_VAE_DUMP") else {
-        return;
-    };
-    if dir.is_empty() {
-        return;
-    }
-    let Ok(values) = gpu_download(&spatial.tensor) else {
-        return;
-    };
-    let path = std::path::Path::new(&dir).join(format!("{name}.f32"));
-    let mut bytes = Vec::with_capacity(8 + values.len() * 4);
-    bytes.extend_from_slice(&(spatial.channels as u32).to_le_bytes());
-    bytes.extend_from_slice(&((spatial.width * spatial.height) as u32).to_le_bytes());
-    for v in values {
-        bytes.extend_from_slice(&v.to_le_bytes());
-    }
-    let _ = std::fs::create_dir_all(&dir);
-    let _ = std::fs::write(path, bytes);
 }
 
 pub fn flux2_vae_decode(
@@ -453,7 +423,6 @@ pub fn flux2_vae_decode(
         height,
         channels: z_channels,
     };
-    vae_dump("vae_in", &hidden);
     if weights.has_tensor("decoder.post_quant_conv.weight") {
         hidden = conv2d(
             weights,
@@ -466,13 +435,9 @@ pub fn flux2_vae_decode(
         )?;
     }
     hidden = conv2d(weights, &ns, &hidden, "decoder.conv_in.weight", "decoder.conv_in.bias", 1, 1)?;
-    vae_dump("vae_conv_in", &hidden);
     hidden = resnet(weights, &ns, &hidden, "decoder.mid.block_1")?;
-    vae_dump("vae_mid_b1", &hidden);
     hidden = mid_attn(weights, &ns, &hidden, "decoder.mid.attn_1")?;
-    vae_dump("vae_mid_attn", &hidden);
     hidden = resnet(weights, &ns, &hidden, "decoder.mid.block_2")?;
-    vae_dump("vae_mid_b2", &hidden);
     for stage in (0..=3).rev() {
         let prefix = format!("decoder.up.{stage}");
         for block in 0..=2 {
@@ -490,13 +455,10 @@ pub fn flux2_vae_decode(
                 1,
             )?;
         }
-        vae_dump(&format!("vae_up{stage}"), &hidden);
     }
     hidden = group_norm(weights, &ns, &hidden, "decoder.norm_out.weight", "decoder.norm_out.bias")?;
-    vae_dump("vae_norm_out", &hidden);
     hidden = silu(&hidden)?;
     hidden = conv2d(weights, &ns, &hidden, "decoder.conv_out.weight", "decoder.conv_out.bias", 1, 1)?;
-    vae_dump("vae_out", &hidden);
     let data = gpu_download(&hidden.tensor).map_err(DiffusionError::model)?;
     let image = Flux2VaeImage {
         width: hidden.width,

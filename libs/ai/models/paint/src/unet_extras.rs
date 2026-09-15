@@ -5,7 +5,7 @@ use crate::unet_attn::{
     as_f32, attn_cross, attn_cross_batched, attn_packed, attn_packed_batched, match_half,
     paint_scale_like, ref_attn_wide_like,
 };
-use crate::unet_first::{paint_fast, BatchAct, UnetFirst, ATTN_GN_EPS, GN_GROUPS, NS};
+use crate::unet_first::{BatchAct, UnetFirst, ATTN_GN_EPS, GN_GROUPS, NS};
 use makepad_ai_common::backend::cuda::{
     gpu_add, gpu_concat_cols, gpu_concat_rows_many, gpu_download,
     gpu_group_norm_nchw, gpu_group_norm_planar, gpu_nchw_to_tokens, gpu_paint_group_norm_batched,
@@ -144,7 +144,7 @@ impl UnetFirst {
                 .map(|s| gpu_upload(s, channels, plane))
                 .collect::<Result<_, _>>()?
         };
-        let (n1s, mut tokens) = if paint_fast() && n > 1 {
+        let (n1s, mut tokens) = if n > 1 {
             let refs: Vec<&GpuTensor> = residuals.iter().collect();
             let stacked = gpu_concat_cols(&refs)?;
             let gn = gpu_paint_group_norm_batched(
@@ -492,23 +492,6 @@ impl UnetFirst {
         let view_blk = n_views * plane;
         let inner = format!("{prefix}.transformer_blocks.0.transformer");
         let tb = format!("{prefix}.transformer_blocks.0");
-        // First-block sub-op taps (MAKEPAD_PBR_UNET_TAP), first walk only.
-        let sub_tap_dir = std::env::var("MAKEPAD_PBR_UNET_TAP").ok().filter(|dir| {
-            prefix == "unet.down_blocks.0.attentions.0"
-                && !std::path::Path::new(&format!("{dir}/unet_tap_DONE")).exists()
-        });
-        let sub_tap = |name: &str, t: &GpuTensor| {
-            if let Some(dir) = &sub_tap_dir {
-                if let Ok(v) = gpu_download(t) {
-                    let mut bytes = Vec::with_capacity(v.len() * 4);
-                    for f in &v {
-                        bytes.extend_from_slice(&f.to_le_bytes());
-                    }
-                    let _ = std::fs::write(format!("{dir}/unet_sub_{name}.f32"), bytes);
-                    eprintln!("[pbr-unet-sub] {name} {}x{}", t.rows(), t.cols());
-                }
-            }
-        };
         let nw = self.get(&format!("{prefix}.norm.weight"))?;
         let nb = self.get(&format!("{prefix}.norm.bias"))?;
         let residual = x.clone_act()?;
@@ -527,7 +510,6 @@ impl UnetFirst {
         let packed = gpu_nchw_to_tokens(&gn, channels, x.w, x.h)?;
         let mut tokens = self.linear_tokens(&packed, &format!("{prefix}.proj_in"), true)?;
         let n1 = self.layer_norm(&tokens, &format!("{inner}.norm1"))?;
-        sub_tap("norm1", &n1);
 
         let alb_n1 = gather_pbr(&n1, n_cfg, n_views, 0, plane)?;
         let mr_n1 = gather_pbr(&n1, n_cfg, n_views, 1, plane)?;
@@ -551,13 +533,7 @@ impl UnetFirst {
             heads,
             scale,
         )?;
-        sub_tap("alb_n1", &alb_n1);
-        sub_tap("mr_n1", &mr_n1);
-        sub_tap("alb_attn", &alb_attn);
-        sub_tap("mr_attn", &mr_attn);
-        sub_tap("tokens_pre_mda", &tokens);
         tokens = scatter_add_pbr(&tokens, &alb_attn, &mr_attn, n_cfg, n_views, plane)?;
-        sub_tap("after_mda", &tokens);
 
         let alb_q = self.linear_tokens(&alb_n1, &format!("{tb}.attn_refview.to_q"), false)?;
         let (k, v_alb) = self.encoder_kv(res.ref_tokens, &format!("{tb}.attn_refview"), "ref")?;
@@ -573,35 +549,6 @@ impl UnetFirst {
             &format!("{tb}.attn_refview.processor.to_out_mr.0"),
             true,
         )?;
-        if std::env::var("MAKEPAD_PBR_RA_DEBUG").as_deref() == Ok("1") {
-            let rms = |t: &GpuTensor| -> f64 {
-                match gpu_download(t) {
-                    Ok(v) if !v.is_empty() => {
-                        (v.iter().map(|x| (*x as f64).powi(2)).sum::<f64>() / v.len() as f64).sqrt()
-                    }
-                    _ => f64::NAN,
-                }
-            };
-            let short = tb.trim_start_matches("unet.").replace(".transformer_blocks.0", "");
-            eprintln!("[pbr-ra] {short} ref {}x{} rms={:.4}", res.ref_tokens.rows(), res.ref_tokens.cols(), rms(res.ref_tokens));
-            eprintln!("[pbr-ra] {short} k={:.4} valb={:.4} q={:.4}", rms(&k), rms(&v_alb), rms(&alb_q));
-            eprintln!("[pbr-ra] {short} oalb={:.4} tokens={:.4}", rms(&o_alb), rms(&tokens));
-            if let Ok(dir) = std::env::var("MAKEPAD_PBR_DUMP_VIEWS") {
-                let dump = |tag: &str, t: &GpuTensor| {
-                    if let Ok(v) = gpu_download(t) {
-                        let mut bytes = Vec::with_capacity(v.len() * 4);
-                        for x in &v {
-                            bytes.extend_from_slice(&x.to_le_bytes());
-                        }
-                        let _ = std::fs::write(format!("{dir}/ra_{short}_{tag}.f32"), bytes);
-                    }
-                };
-                dump("q", &alb_q);
-                dump("n1alb", &alb_n1);
-                dump("oalb", &o_alb);
-                dump("tokens_pre", &tokens);
-            }
-        }
         for cfg in 0..n_cfg {
             let rs = ref_scales[cfg];
             if (rs - 1.0).abs() < 1e-6 {
@@ -615,7 +562,6 @@ impl UnetFirst {
             o_mr = replace_block(&o_mr, cfg * view_blk, &mr)?;
         }
         tokens = scatter_add_pbr(&tokens, &o_alb, &o_mr, n_cfg, n_views, plane)?;
-        sub_tap("after_ra", &tokens);
 
         if n_views > 1 {
             let (q, k, v) = self.linear_qkv(
@@ -643,11 +589,9 @@ impl UnetFirst {
             };
             tokens = gpu_add(&tokens, &attn)?;
         }
-        sub_tap("after_ma", &tokens);
 
         let packed = tokens;
         let n2 = self.layer_norm(&packed, &format!("{inner}.norm2"))?;
-        sub_tap("norm2", &n2);
         let q_all = self.linear_tokens(&n2, &format!("{inner}.attn2.to_q"), false)?;
         let cross = self.cross_cfg_groups(
             &q_all,
@@ -662,7 +606,6 @@ impl UnetFirst {
             res.enc_mr,
         )?;
         let tokens = gpu_add(&packed, &cross)?;
-        sub_tap("after_cross", &tokens);
         let q_dino = self.linear_tokens(&n2, &format!("{tb}.attn_dino.to_q"), false)?;
         let dino = self.dino_cfg_groups(
             &q_dino,
@@ -676,9 +619,7 @@ impl UnetFirst {
             res.dino,
         )?;
         let tokens = gpu_add(&tokens, &dino)?;
-        sub_tap("after_dino", &tokens);
         let n3 = self.layer_norm(&tokens, &format!("{inner}.norm3"))?;
-        sub_tap("norm3", &n3);
         let ff = self.geglu_ff(&n3, &inner)?;
         let tokens = gpu_add(&tokens, &ff)?;
         let tokens = self.linear_tokens(&tokens, &format!("{prefix}.proj_out"), true)?;
@@ -767,7 +708,7 @@ impl UnetFirst {
         let view_blk = n_views * plane;
         let group = 2 * view_blk;
         let batch = n_cfg * 2 * n_views;
-        if n_cfg == 3 && paint_fast() && q_all.rows() == batch * plane {
+        if n_cfg == 3 && q_all.rows() == batch * plane {
             // Official: encoder.unsqueeze.repeat(N_gen) then
             // rearrange (b n_pbr n) — zeros cfg0 both materials, learned alb,
             // learned mr. One F.sdpa [36,H,L,64]×[36,H,77,64]. Q is already
@@ -817,7 +758,7 @@ impl UnetFirst {
     ) -> Result<GpuTensor, String> {
         let group = 2 * n_views * plane;
         let batch = n_cfg * 2 * n_views;
-        if n_cfg == 3 && paint_fast() && q_all.rows() == batch * plane {
+        if n_cfg == 3 && q_all.rows() == batch * plane {
             // Official: dino.unsqueeze(1).repeat(1, N_pbr*N_gen) then
             // rearrange (b n) — zeros on cfg0+cfg1, real DINO on cfg2.
             // One F.sdpa [36,H,L,64]×[36,H,1028,64].

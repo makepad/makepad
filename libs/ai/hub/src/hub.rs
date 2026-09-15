@@ -45,6 +45,14 @@ impl AiHub {
         Self { _private: () }
     }
 
+    /// Open the shared local registry/downloader/backend manager. Like the
+    /// hub itself this binds no listener; workers start only for installs or
+    /// runs.
+    #[cfg(feature = "local")]
+    pub fn local_models(&self) -> Result<crate::local::LocalModels, crate::AssetAiError> {
+        crate::local::LocalModels::open()
+    }
+
     /// Start a chat on this machine. The session's worker runs the machine
     /// residency election first (aicore §3): route to a serving co-located
     /// holder, wait on a loading one, else claim and load in-process.
@@ -54,10 +62,31 @@ impl AiHub {
     pub fn start_local_chat(&self, config: ChatConfig) -> HubChatSession {
         HubChatSession::start(HubChatConfig {
             llm: config.llm,
+            preferred_model: None,
+            // Existing app chat callers keep the previous unbounded fleet
+            // request and provider-default thinking behaviour. Callers that
+            // need per-turn controls use HubChatConfig directly.
+            max_tokens: Some(u32::MAX),
+            thinking: None,
             system_prompt: config.system_prompt,
             tools: config.tools,
             wake: config.wake,
         })
+    }
+
+    /// Start speech-to-text. The worker picks the engine — Whisper here, on
+    /// the machine node, or on a LAN node, else the OS recognizer — and
+    /// reports it in `Ready`; the app feeds PCM or asks the engine to listen.
+    #[cfg(feature = "speech")]
+    pub fn start_stt(&self, config: crate::speech::SttConfig) -> crate::speech::SttSession {
+        crate::speech::SttSession::start(config)
+    }
+
+    /// Start text-to-speech: Kokoro wherever it is, else the OS voice. Text
+    /// in, PCM out; the app owns playback.
+    #[cfg(feature = "speech")]
+    pub fn start_tts(&self, config: crate::speech::TtsConfig) -> crate::speech::TtsSession {
+        crate::speech::TtsSession::start(config)
     }
 
     /// The pipe id the in-process local model publishes (machine-local only).

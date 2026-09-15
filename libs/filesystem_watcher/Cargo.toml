@@ -6,3 +6,4 @@ description = "Platform-specific filesystem watcher for Studio backends"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+makepad-git = { path = "../git" }
