@@ -115,6 +115,13 @@ pub struct AppleVideoPlayer {
     /// When set, `poll_frame` holds the previous texture until post-seek warm-up
     /// completes (or the hard timeout clears it).
     post_seek_gate: Option<PostSeekGate>,
+    /// Output timestamps are the UI's clock. AVPlayerItem.currentTime can
+    /// synchronously wait on MediaToolbox's decoder lock for hundreds of ms.
+    position_secs: f64,
+    duration_secs: f64,
+    frame_pending: bool,
+    has_presented_frame: bool,
+    cleaned_up: bool,
 }
 
 impl AppleVideoPlayer {
@@ -161,6 +168,7 @@ impl AppleVideoPlayer {
                 video_output,
                 initWithPixelBufferAttributes: pixel_attrs
             ];
+            let _: () = msg_send![pixel_attrs, release];
 
             // Add output to player item
             let _: () = msg_send![player_item, addOutput: video_output];
@@ -185,9 +193,11 @@ impl AppleVideoPlayer {
             // If source was InMemory, we created a temp file - the URL retains it
 
             Self {
-                player: RcObjcId::from_unowned(NonNull::new(player).unwrap()),
-                player_item: RcObjcId::from_unowned(NonNull::new(player_item).unwrap()),
-                video_output: RcObjcId::from_unowned(NonNull::new(video_output).unwrap()),
+                // The two convenience-created objects were retained above;
+                // the output is owned by alloc/init. Adopt each retain once.
+                player: RcObjcId::from_owned(NonNull::new(player).unwrap()),
+                player_item: RcObjcId::from_owned(NonNull::new(player_item).unwrap()),
+                video_output: RcObjcId::from_owned(NonNull::new(video_output).unwrap()),
                 texture_cache,
                 cv_texture: std::ptr::null_mut(),
                 texture_id,
@@ -207,6 +217,11 @@ impl AppleVideoPlayer {
                 yuv_full_range: false,
                 gpu_frame_keep_alive: None,
                 post_seek_gate: None,
+                position_secs: 0.0,
+                duration_secs: 0.0,
+                frame_pending: true,
+                has_presented_frame: false,
+                cleaned_up: false,
             }
         }
     }
@@ -514,10 +529,8 @@ impl AppleVideoPlayer {
         if time_control == 1 {
             return;
         }
-        let current: CMTime = msg_send![self.player_item.as_id(), currentTime];
-        let duration: CMTime = msg_send![self.player_item.as_id(), duration];
-        let current_sec = CMTimeGetSeconds(current);
-        let duration_sec = CMTimeGetSeconds(duration);
+        let current_sec = self.position_secs;
+        let duration_sec = self.duration_secs;
         if !(duration_sec.is_finite()
             && duration_sec > 0.0
             && current_sec.is_finite()
@@ -607,6 +620,7 @@ impl AppleVideoPlayer {
                 // Get duration
                 let duration: CMTime = msg_send![self.player_item.as_id(), duration];
                 let duration_seconds = CMTimeGetSeconds(duration);
+                self.duration_secs = cmtime_secs(duration).unwrap_or(0.0);
                 let duration_ms = if duration_seconds.is_finite() && duration_seconds > 0.0 {
                     (duration_seconds * 1000.0) as u128
                 } else {
@@ -714,7 +728,7 @@ impl AppleVideoPlayer {
 
     /// Poll for a new video frame. Returns true if a new frame was bound to the texture.
     pub fn poll_frame(&mut self, textures: &mut CxTexturePool) -> bool {
-        if !self.is_prepared {
+        if !self.is_prepared || !self.needs_poll() {
             return false;
         }
 
@@ -746,30 +760,32 @@ impl AppleVideoPlayer {
                 }
             }
 
-            // Prefer the video-output's host-time mapping over player.currentTime.
+            // Never ask AVPlayerItem for currentTime on the UI thread. Before
+            // the output's clock is ready, use the last position/seek target.
             let host_time = CACurrentMediaTime();
             let output_time: CMTime =
                 msg_send![self.video_output.as_id(), itemTimeForHostTime: host_time];
-            let query_time = if cmtime_secs(output_time).is_some() {
+            let query_time = if let Some(seconds) = cmtime_secs(output_time) {
+                self.position_secs = seconds;
                 output_time
             } else {
-                msg_send![self.player_item.as_id(), currentTime]
+                CMTimeMakeWithSeconds(self.position_secs, 600)
             };
 
             // During the gate, only consume fresh samples — unless we already
             // have ≥1 sample and are ready to present: then re-copy the current
             // buffer without waiting for another hasNew.
-            if gating {
-                let has_new: bool = msg_send![
-                    self.video_output.as_id(),
-                    hasNewPixelBufferForItemTime: query_time
-                ];
+            let has_new: bool = msg_send![
+                self.video_output.as_id(),
+                hasNewPixelBufferForItemTime: query_time
+            ];
+            if !has_new {
                 let samples = self
                     .post_seek_gate
                     .as_ref()
                     .map(|g| g.new_samples)
                     .unwrap_or(0);
-                if !has_new && !self.post_seek_ready(samples) {
+                if !gating || !self.post_seek_ready(samples) {
                     return false;
                 }
             }
@@ -829,25 +845,38 @@ impl AppleVideoPlayer {
                 }
             }
 
-            self.present_pixel_buffer(textures, pixel_buffer)
+            let presented = self.present_pixel_buffer(textures, pixel_buffer);
+            if presented {
+                self.frame_pending = false;
+                self.has_presented_frame = true;
+                if let Some(seconds) = display_secs {
+                    self.position_secs = seconds;
+                }
+            }
+            presented
         }
     }
 
     pub fn current_position_ms(&self) -> u128 {
-        unsafe {
-            let current: CMTime = msg_send![self.player_item.as_id(), currentTime];
-            let seconds = CMTimeGetSeconds(current);
-            if seconds.is_finite() && seconds >= 0.0 {
-                (seconds * 1000.0) as u128
-            } else {
-                0
-            }
-        }
+        (self.position_secs * 1000.0) as u128
+    }
+
+    /// Paused players with a displayed frame do no work until play or seek.
+    pub fn needs_poll(&self) -> bool {
+        !self.prepare_notified
+            || (self.is_prepared
+                && (self.frame_pending || self.should_play.load(Ordering::Acquire)))
+    }
+
+    pub fn is_waiting_for_first_frame(&self) -> bool {
+        self.is_prepared && !self.has_presented_frame
     }
 
     pub fn seek_to(&mut self, position_ms: u64) {
         unsafe {
             let seconds = position_ms as f64 / 1000.0;
+            self.position_secs = seconds;
+            self.frame_pending = true;
             let time = CMTimeMakeWithSeconds(seconds, 600);
             // `cancelPendingSeeks` lives on AVPlayerItem, not AVPlayer.
             let _: () = msg_send![self.player_item.as_id(), cancelPendingSeeks];
@@ -945,6 +974,14 @@ impl AppleVideoPlayer {
     }
 
     pub fn cleanup(&mut self) {
+        // Explicit cleanup is followed by Drop (also through the unified
+        // player). Release the Metal device and output attachment only once.
+        if self.cleaned_up {
+            return;
+        }
+        self.cleaned_up = true;
+        self.is_prepared = false;
+        self.prepare_notified = true;
         unsafe {
             self.should_play.store(false, Ordering::Release);
             let _: () = msg_send![self.player_item.as_id(), cancelPendingSeeks];
@@ -974,6 +1011,7 @@ impl AppleVideoPlayer {
         self.nv12_present.release_textures();
         unsafe {
             let _: () = msg_send![self.metal_device, release];
+            self.metal_device = nil;
         }
     }
 }

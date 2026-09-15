@@ -112,9 +112,47 @@ pub fn annex_b_to_avcc(nals: &[&[u8]]) -> Vec<u8> {
     out
 }
 
+/// The access unit with every SPS's `level_idc` (the third payload byte:
+/// profile_idc, constraint flags, level_idc) replaced, re-framed with
+/// 4-byte start codes; `None` when it carries no SPS so callers can pass
+/// the original bytes through untouched. A decoder that sizes its picture
+/// reorder buffer from the level (the Microsoft H.264 MFT) is told a
+/// lower level to make it emit pictures one access unit later.
+pub fn with_sps_level_idc(access_unit: &[u8], level_idc: u8) -> Option<Vec<u8>> {
+    let nals = split_annex_b(access_unit);
+    if !nals.iter().any(|nal| nal_unit_type(nal) == NAL_TYPE_SPS && nal.len() > 3) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(access_unit.len() + 4);
+    for nal in nals {
+        if nal_unit_type(nal) == NAL_TYPE_SPS && nal.len() > 3 {
+            let mut sps = nal.to_vec();
+            sps[3] = level_idc;
+            push_annex_b_nal(&mut out, &sps);
+        } else {
+            push_annex_b_nal(&mut out, nal);
+        }
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sps_level_rewrite_touches_only_level_idc() {
+        let mut au = Vec::new();
+        push_annex_b_nal(&mut au, &[0x67, 0x4d, 0x00, 0x16, 0xab, 0x40]); // SPS, level 2.2
+        push_annex_b_nal(&mut au, &[0x68, 0xee, 0x3c, 0x80]); // PPS
+        push_annex_b_nal(&mut au, &[0x65, 0x88, 0x84]); // IDR
+        let rewritten = with_sps_level_idc(&au, 10).expect("an SPS is present");
+        assert_eq!(rewritten.len(), au.len());
+        let changed: Vec<usize> = (0..au.len()).filter(|&i| au[i] != rewritten[i]).collect();
+        assert_eq!(changed, vec![7], "only level_idc may change");
+        assert_eq!(rewritten[7], 10);
+        assert!(with_sps_level_idc(&rewritten[4 + 6..], 10).is_none(), "no SPS -> None");
+    }
 
     #[test]
     fn split_annex_b_mixed_start_codes() {

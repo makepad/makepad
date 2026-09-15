@@ -241,7 +241,7 @@ impl WindowsStreamEncoder {
             } else {
                 Some(make_output_sample(self.output_buffer_size)?)
             };
-            let (hr, sample) = unsafe { windows_mft::process_output(&self.transform, provided) };
+            let (hr, _status, sample) = unsafe { windows_mft::process_output(&self.transform, provided) };
             if hr.0 == MF_E_TRANSFORM_NEED_MORE_INPUT {
                 break;
             }
