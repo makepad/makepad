@@ -18,7 +18,7 @@ use crate::term::terminal::{TermEvent, Terminal};
 /// A flooding shell (`yes x`) writes far faster than the emulator can
 /// consume, so an unbounded drain never reaches an empty channel: it
 /// starves the event loop for as long as the flood lasts — no frame, no
-/// timer, and in an mpwm-hosted child not even the host-is-gone check, so
+/// timer, and in an wm-hosted child not even the host-is-gone check, so
 /// the tile stays black and the orphan keeps burning a core after its host
 /// dies. Bounded, every pass hands the loop back in time to paint, and the
 /// rest of the backlog is picked up on the next one.
@@ -40,6 +40,9 @@ pub struct Session {
 }
 
 impl Session {
+    /// PID of this session’s shell, for exact host activity relationships.
+    pub fn child_pid(&self) -> i32 { self.pty.child_pid() }
+
     pub fn spawn(
         cols: usize,
         rows: usize,
@@ -59,7 +62,7 @@ impl Session {
         let mut reader = pty.take_reader();
         let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(BACKLOG_CHUNKS);
         std::thread::Builder::new()
-            .name("mpterm-pty-read".into())
+            .name("terminal-pty-read".into())
             .spawn(move || {
                 while let Some(bytes) = reader.read() {
                     if tx.send(bytes).is_err() {
@@ -138,6 +141,12 @@ impl Session {
             return;
         }
         let _ = self.writer.send(bytes.to_vec());
+    }
+
+    /// Whether the full input was accepted by this live PTY, for acknowledged
+    /// file drops. Does not infer that the application consumed the input.
+    pub fn try_write(&mut self, bytes: &[u8]) -> bool {
+        !self.exited && !bytes.is_empty() && self.writer.send(bytes.to_vec()).is_ok()
     }
 
     pub fn resize(&mut self, cols: usize, rows: usize) {

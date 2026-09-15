@@ -1,4 +1,4 @@
-//! mpterm's VT core: a clean Rust port of Ghostty's terminal subsystem.
+//! terminal's VT core: a clean Rust port of Ghostty's terminal subsystem.
 //!
 //! Ported from github.com/ghostty-org/ghostty (`src/terminal/`, `src/input/`),
 //! MIT License, Copyright (c) 2024 Mitchell Hashimoto, Ghostty contributors.
