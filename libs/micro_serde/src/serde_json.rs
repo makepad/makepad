@@ -5,13 +5,27 @@ use std::str::Chars;
 
 pub struct SerJsonState {
     pub out: String,
+    /// Human-readable output: a newline and four spaces per depth before
+    /// every field, array item and closing bracket. Off = compact.
+    pub pretty: bool,
 }
 
 impl SerJsonState {
-    pub fn indent(&mut self, _d: usize) {
-        //for _ in 0..d {
-        //    self.out.push_str("    ");
-        //}
+    pub fn new() -> Self {
+        Self { out: String::new(), pretty: false }
+    }
+
+    pub fn new_pretty() -> Self {
+        Self { out: String::new(), pretty: true }
+    }
+
+    pub fn indent(&mut self, d: usize) {
+        if self.pretty {
+            self.out.push('\n');
+            for _ in 0..d {
+                self.out.push_str("    ");
+            }
+        }
     }
 
     pub fn field(&mut self, d: usize, field: &str) {
@@ -20,6 +34,9 @@ impl SerJsonState {
         self.out.push_str(field);
         self.out.push('"');
         self.out.push(':');
+        if self.pretty {
+            self.out.push(' ');
+        }
     }
 
     pub fn label(&mut self, label: &str) {
@@ -44,7 +61,14 @@ impl SerJsonState {
 
 pub trait SerJson {
     fn serialize_json(&self) -> String {
-        let mut s = SerJsonState { out: String::new() };
+        let mut s = SerJsonState::new();
+        self.ser_json(0, &mut s);
+        s.out
+    }
+
+    /// Indented, one field or item per line — for files people read.
+    fn serialize_json_pretty(&self) -> String {
+        let mut s = SerJsonState::new_pretty();
         self.ser_json(0, &mut s);
         s.out
     }
@@ -70,8 +94,28 @@ pub trait DeJson: Sized {
         DeJson::de_json(&mut state, &mut chars)
     }
 
+    /// Like `deserialize_json`, but the input must be exactly one JSON
+    /// value: anything but whitespace after it is an error, and numbers
+    /// with a leading zero are rejected.
+    fn deserialize_json_strict(input: &str) -> Result<Self, DeJsonErr> {
+        let mut state = DeJsonState::default();
+        state.strict = true;
+        let mut chars = input.chars();
+        state.next(&mut chars);
+        state.next_tok(&mut chars)?;
+        let value = DeJson::de_json(&mut state, &mut chars)?;
+        if state.tok != DeJsonTok::Eof {
+            return Err(state.err_msg("Trailing content after the JSON value"));
+        }
+        Ok(value)
+    }
+
     fn de_json(s: &mut DeJsonState, i: &mut Chars) -> Result<Self, DeJsonErr>;
 }
+
+/// Deepest nesting the parser accepts, the same as serde_json: it keeps a
+/// pathological input from turning recursion into a stack overflow.
+pub const MAX_JSON_DEPTH: u32 = 128;
 
 #[derive(PartialEq, Debug, Default)]
 pub enum DeJsonTok {
@@ -106,6 +150,10 @@ pub struct DeJsonState {
     pub line: usize,
     pub col: usize,
     pub lenient: bool,
+    /// Reject leading-zero numbers (`deserialize_json_strict`).
+    pub strict: bool,
+    /// Open arrays and objects at this point of the parse.
+    pub depth: u32,
 }
 
 pub struct DeJsonErr {
@@ -126,6 +174,14 @@ impl std::fmt::Debug for DeJsonErr {
     }
 }
 
+impl std::fmt::Display for DeJsonErr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(self, f)
+    }
+}
+
+impl std::error::Error for DeJsonErr {}
+
 impl DeJsonState {
     pub fn next(&mut self, i: &mut Chars) {
         if let Some(c) = i.next() {
@@ -139,6 +195,16 @@ impl DeJsonState {
         } else {
             self.cur = '\0';
         }
+    }
+
+    /// Four hex digits after the current char; a bad digit counts as 0.
+    fn hex4(&mut self, i: &mut Chars) -> u32 {
+        let mut a = 0u32;
+        for _ in 0..4 {
+            self.next(i);
+            a = (a << 4) | self.cur.to_digit(16).unwrap_or(0);
+        }
+        a
     }
 
     pub fn err_exp(&self, name: &str) -> DeJsonErr {
@@ -263,8 +329,19 @@ impl DeJsonState {
         }
     }
 
+    /// Every array or object open passes through here, so the depth limit
+    /// covers derives, `JsonValue` and `skip_value` alike.
+    fn descend(&mut self) -> Result<(), DeJsonErr> {
+        if self.depth >= MAX_JSON_DEPTH {
+            return Err(self.err_msg(&format!("Nesting deeper than {MAX_JSON_DEPTH} levels")));
+        }
+        self.depth += 1;
+        Ok(())
+    }
+
     pub fn block_open(&mut self, i: &mut Chars) -> Result<(), DeJsonErr> {
         if self.tok == DeJsonTok::BlockOpen {
+            self.descend()?;
             self.next_tok(i)?;
             return Ok(());
         }
@@ -273,6 +350,7 @@ impl DeJsonState {
 
     pub fn block_close(&mut self, i: &mut Chars) -> Result<(), DeJsonErr> {
         if self.tok == DeJsonTok::BlockClose {
+            self.depth = self.depth.saturating_sub(1);
             self.next_tok(i)?;
             return Ok(());
         }
@@ -281,6 +359,7 @@ impl DeJsonState {
 
     pub fn curly_open(&mut self, i: &mut Chars) -> Result<(), DeJsonErr> {
         if self.tok == DeJsonTok::CurlyOpen {
+            self.descend()?;
             self.next_tok(i)?;
             return Ok(());
         }
@@ -289,6 +368,7 @@ impl DeJsonState {
 
     pub fn curly_close(&mut self, i: &mut Chars) -> Result<(), DeJsonErr> {
         if self.tok == DeJsonTok::CurlyClose {
+            self.depth = self.depth.saturating_sub(1);
             self.next_tok(i)?;
             return Ok(());
         }
@@ -514,6 +594,12 @@ impl DeJsonState {
                     self.numbuf.push(self.cur);
                     self.next(i);
                 }
+                if self.strict {
+                    let digits = &self.numbuf[usize::from(is_neg)..];
+                    if digits.len() > 1 && digits.starts_with('0') {
+                        return Err(self.err_parse("number with a leading zero"));
+                    }
+                }
                 if self.cur == '.' {
                     is_float = true;
                     self.numbuf.push(self.cur);
@@ -606,33 +692,31 @@ impl DeJsonState {
                             'n' => self.strbuf.push('\n'),
                             'r' => self.strbuf.push('\r'),
                             't' => self.strbuf.push('\t'),
+                            'b' => self.strbuf.push('\u{8}'),
+                            'f' => self.strbuf.push('\u{c}'),
                             '0' => self.strbuf.push('\0'),
                             '\0' => {
                                 return Err(self.err_parse("string"));
                             }
                             'u' => {
-                                // 4 digit hex unicode following
-                                fn hex_char_to_u8(byte: char) -> u8 {
-                                    if byte >= '0' && byte <= '9' {
-                                        byte as u8 - '0' as u8
-                                    } else if byte >= 'a' && byte <= 'f' {
-                                        byte as u8 - 'a' as u8 + 10
-                                    } else if byte >= 'A' && byte <= 'F' {
-                                        byte as u8 - 'A' as u8 + 10
-                                    } else {
-                                        0
+                                // 4 hex digits; a UTF-16 high surrogate is
+                                // joined with the `\uXXXX` low surrogate
+                                // that must follow it.
+                                let mut a = self.hex4(i);
+                                if (0xD800..0xDC00).contains(&a) {
+                                    // `self.cur` is the last hex digit; look
+                                    // past it for the pair.
+                                    let mut probe = i.clone();
+                                    if probe.next() == Some('\\') && probe.next() == Some('u') {
+                                        self.next(i);
+                                        self.next(i);
+                                        let low = self.hex4(i);
+                                        if (0xDC00..0xE000).contains(&low) {
+                                            a = 0x10000 + ((a - 0xD800) << 10) + (low - 0xDC00);
+                                        }
                                     }
                                 }
-                                let mut a = 0;
-                                self.next(i);
-                                a |= (hex_char_to_u8(self.cur) as u32) << 12;
-                                self.next(i);
-                                a |= (hex_char_to_u8(self.cur) as u32) << 8;
-                                self.next(i);
-                                a |= (hex_char_to_u8(self.cur) as u32) << 4;
-                                self.next(i);
-                                a |= (hex_char_to_u8(self.cur) as u32) << 0;
-                                self.strbuf.push(std::char::from_u32(a).unwrap_or('?'));
+                                self.strbuf.push(std::char::from_u32(a).unwrap_or('\u{FFFD}'));
                             }
                             _ => self.strbuf.push(self.cur),
                         }
@@ -695,7 +779,12 @@ macro_rules! impl_ser_de_json_float {
     ( $ ty: ident) => {
         impl SerJson for $ty {
             fn ser_json(&self, _d: usize, s: &mut SerJsonState) {
-                s.out.push_str(&self.to_string());
+                // JSON has no NaN/inf; they become null, as serde_json does.
+                if self.is_finite() {
+                    s.out.push_str(&self.to_string());
+                } else {
+                    s.out.push_str("null");
+                }
             }
         }
 
@@ -744,7 +833,7 @@ where
         if let Some(v) = self {
             v.ser_json(d, s);
         } else {
-            s.out.push_str("None");
+            s.out.push_str("null");
         }
     }
 }
@@ -780,7 +869,7 @@ impl DeJson for bool {
     }
 }
 
-impl SerJson for String {
+impl SerJson for str {
     fn ser_json(&self, _d: usize, s: &mut SerJsonState) {
         s.out.push('"');
         for c in self.chars() {
@@ -797,10 +886,6 @@ impl SerJson for String {
                     s.out.push('\\');
                     s.out.push('t');
                 }
-                '\0' => {
-                    s.out.push('\\');
-                    s.out.push('0');
-                }
                 '\\' => {
                     s.out.push('\\');
                     s.out.push('\\');
@@ -809,10 +894,30 @@ impl SerJson for String {
                     s.out.push('\\');
                     s.out.push('"');
                 }
+                // The remaining control characters (NUL included) have no
+                // short escape in JSON.
+                c if (c as u32) < 0x20 => {
+                    s.out.push_str(&format!("\\u{:04x}", c as u32));
+                }
                 _ => s.out.push(c),
             }
         }
         s.out.push('"');
+    }
+}
+
+impl SerJson for String {
+    fn ser_json(&self, d: usize, s: &mut SerJsonState) {
+        self.as_str().ser_json(d, s);
+    }
+}
+
+impl<T> SerJson for &T
+where
+    T: SerJson + ?Sized,
+{
+    fn ser_json(&self, d: usize, s: &mut SerJsonState) {
+        (**self).ser_json(d, s);
     }
 }
 
@@ -839,6 +944,7 @@ where
                     s.out.push(',');
                 }
             }
+            s.indent(d);
         }
         s.out.push(']');
     }
@@ -861,7 +967,7 @@ where
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum JsonValue {
     String(String),
     Char(char),
@@ -897,6 +1003,210 @@ impl JsonValue {
         }
         None
     }
+
+    // --- serde_json-style accessors: `None` whenever the shape differs ---
+
+    /// Member `key` of an object.
+    pub fn get(&self, key: &str) -> Option<&JsonValue> {
+        self.key(key)
+    }
+
+    pub fn get_mut(&mut self, key: &str) -> Option<&mut JsonValue> {
+        if let JsonValue::Object(obj) = self {
+            return obj.get_mut(key);
+        }
+        None
+    }
+
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            JsonValue::String(v) => Some(v.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Any integer that fits an i64 (an in-range float is not an integer).
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            JsonValue::I64(v) => Some(*v),
+            JsonValue::U64(v) => i64::try_from(*v).ok(),
+            JsonValue::I128(v) => i64::try_from(*v).ok(),
+            JsonValue::U128(v) => i64::try_from(*v).ok(),
+            _ => None,
+        }
+    }
+
+    pub fn as_u64(&self) -> Option<u64> {
+        match self {
+            JsonValue::U64(v) => Some(*v),
+            JsonValue::I64(v) => u64::try_from(*v).ok(),
+            JsonValue::I128(v) => u64::try_from(*v).ok(),
+            JsonValue::U128(v) => u64::try_from(*v).ok(),
+            _ => None,
+        }
+    }
+
+    /// Any number, integers widened.
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            JsonValue::F64(v) => Some(*v),
+            JsonValue::U64(v) => Some(*v as f64),
+            JsonValue::I64(v) => Some(*v as f64),
+            JsonValue::U128(v) => Some(*v as f64),
+            JsonValue::I128(v) => Some(*v as f64),
+            _ => None,
+        }
+    }
+
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            JsonValue::Bool(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    pub fn as_array(&self) -> Option<&Vec<JsonValue>> {
+        match self {
+            JsonValue::Array(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    pub fn as_array_mut(&mut self) -> Option<&mut Vec<JsonValue>> {
+        match self {
+            JsonValue::Array(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    pub fn as_object(&self) -> Option<&HashMap<String, JsonValue>> {
+        self.object()
+    }
+
+    pub fn as_object_mut(&mut self) -> Option<&mut HashMap<String, JsonValue>> {
+        match self {
+            JsonValue::Object(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    pub fn is_null(&self) -> bool {
+        matches!(self, JsonValue::Null)
+    }
+
+    pub fn is_string(&self) -> bool {
+        matches!(self, JsonValue::String(_))
+    }
+
+    pub fn is_number(&self) -> bool {
+        matches!(
+            self,
+            JsonValue::U64(_)
+                | JsonValue::I64(_)
+                | JsonValue::U128(_)
+                | JsonValue::I128(_)
+                | JsonValue::F64(_)
+        )
+    }
+
+    pub fn is_array(&self) -> bool {
+        matches!(self, JsonValue::Array(_))
+    }
+
+    pub fn is_object(&self) -> bool {
+        matches!(self, JsonValue::Object(_))
+    }
+}
+
+impl From<&str> for JsonValue {
+    fn from(v: &str) -> Self {
+        JsonValue::String(v.to_string())
+    }
+}
+
+impl From<String> for JsonValue {
+    fn from(v: String) -> Self {
+        JsonValue::String(v)
+    }
+}
+
+impl From<bool> for JsonValue {
+    fn from(v: bool) -> Self {
+        JsonValue::Bool(v)
+    }
+}
+
+impl From<f64> for JsonValue {
+    fn from(v: f64) -> Self {
+        JsonValue::F64(v)
+    }
+}
+
+impl From<f32> for JsonValue {
+    fn from(v: f32) -> Self {
+        JsonValue::F64(v as f64)
+    }
+}
+
+impl From<i64> for JsonValue {
+    fn from(v: i64) -> Self {
+        JsonValue::I64(v)
+    }
+}
+
+impl From<i32> for JsonValue {
+    fn from(v: i32) -> Self {
+        JsonValue::I64(v as i64)
+    }
+}
+
+impl From<u64> for JsonValue {
+    fn from(v: u64) -> Self {
+        JsonValue::U64(v)
+    }
+}
+
+impl From<u32> for JsonValue {
+    fn from(v: u32) -> Self {
+        JsonValue::U64(v as u64)
+    }
+}
+
+impl From<usize> for JsonValue {
+    fn from(v: usize) -> Self {
+        JsonValue::U64(v as u64)
+    }
+}
+
+impl From<Vec<JsonValue>> for JsonValue {
+    fn from(v: Vec<JsonValue>) -> Self {
+        JsonValue::Array(v)
+    }
+}
+
+impl From<HashMap<String, JsonValue>> for JsonValue {
+    fn from(v: HashMap<String, JsonValue>) -> Self {
+        JsonValue::Object(v)
+    }
+}
+
+impl<T> From<Option<T>> for JsonValue
+where
+    T: Into<JsonValue>,
+{
+    fn from(v: Option<T>) -> Self {
+        match v {
+            Some(v) => v.into(),
+            None => JsonValue::Null,
+        }
+    }
+}
+
+/// The compact JSON text (`serialize_json`).
+impl std::fmt::Display for JsonValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.serialize_json())
+    }
 }
 
 impl SerJson for JsonValue {
@@ -913,7 +1223,30 @@ impl SerJson for JsonValue {
             JsonValue::BareIdent(v) => v.ser_json(d, s),
             JsonValue::Null => s.out.push_str("null"),
             JsonValue::Undefined => s.out.push_str("undefined"),
-            JsonValue::Object(v) => v.ser_json(d, s),
+            JsonValue::Object(v) => {
+                // Sorted keys: the text of an object is deterministic even
+                // though the map is hashed, so it can be diffed and hashed.
+                let mut keys: Vec<&String> = v.keys().collect();
+                keys.sort();
+                s.out.push('{');
+                let last = keys.len().saturating_sub(1);
+                for (index, k) in keys.iter().enumerate() {
+                    s.indent(d + 1);
+                    k.ser_json(d + 1, s);
+                    s.out.push(':');
+                    if s.pretty {
+                        s.out.push(' ');
+                    }
+                    v[*k].ser_json(d + 1, s);
+                    if index != last {
+                        s.conl();
+                    }
+                }
+                if !keys.is_empty() {
+                    s.indent(d);
+                }
+                s.out.push('}');
+            }
             JsonValue::Array(v) => v.ser_json(d, s),
         }
     }
@@ -1171,12 +1504,17 @@ where
             s.indent(d + 1);
             k.ser_json(d + 1, s);
             s.out.push(':');
+            if s.pretty {
+                s.out.push(' ');
+            }
             v.ser_json(d + 1, s);
             if index != last {
                 s.conl();
             }
         }
-        s.indent(d);
+        if !self.is_empty() {
+            s.indent(d);
+        }
         s.out.push('}');
     }
 }
@@ -1221,7 +1559,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{DeJson, SerJson};
+    use super::*;
+    use makepad_micro_serde_derive::{DeJson, SerJson};
     use std::collections::HashMap;
 
     #[test]
@@ -1249,5 +1588,159 @@ mod tests {
     fn deserialize_string_preserves_dollar_signs() {
         let value: String = DeJson::deserialize_json("\"▁$($\"").unwrap();
         assert_eq!(value, "▁$($");
+    }
+
+    #[test]
+    fn string_escapes_round_trip() {
+        let text = "tab\t nl\n cr\r bs\u{8} ff\u{c} nul\0 quote\" slash\\ bell\u{7}";
+        let json = text.serialize_json();
+        assert_eq!(
+            json,
+            "\"tab\\t nl\\n cr\\r bs\\u0008 ff\\u000c nul\\u0000 quote\\\" slash\\\\ bell\\u0007\""
+        );
+        let back: String = DeJson::deserialize_json(&json).unwrap();
+        assert_eq!(back, text);
+        // The short escapes JSON defines, and the legacy `\0`.
+        let back: String = DeJson::deserialize_json(r#""\b\f\/\0""#).unwrap();
+        assert_eq!(back, "\u{8}\u{c}/\0");
+    }
+
+    #[test]
+    fn unicode_escapes_join_surrogate_pairs() {
+        let back: String = DeJson::deserialize_json(r#""a😀bé""#).unwrap();
+        assert_eq!(back, "a😀bé");
+        // A lone surrogate becomes U+FFFD instead of corrupting the string.
+        let back: String = DeJson::deserialize_json(r#""x\ud83dy""#).unwrap();
+        assert_eq!(back, "x\u{FFFD}y");
+    }
+
+    #[test]
+    fn option_none_and_non_finite_floats_serialize_as_null() {
+        let values: Vec<Option<u32>> = vec![Some(1), None];
+        assert_eq!(values.serialize_json(), "[1,null]");
+        assert_eq!(f64::NAN.serialize_json(), "null");
+        assert_eq!(f64::INFINITY.serialize_json(), "null");
+        assert_eq!(2.5f64.serialize_json(), "2.5");
+    }
+
+    #[test]
+    fn str_and_references_serialize() {
+        assert_eq!("hi".serialize_json(), "\"hi\"");
+        let map: HashMap<String, &str> = [("k".to_string(), "v")].into_iter().collect();
+        assert_eq!(map.serialize_json(), "{\"k\":\"v\"}");
+    }
+
+    #[derive(SerJson, DeJson, PartialEq, Debug)]
+    struct Record {
+        event: String,
+        t: f64,
+        speed: Option<f64>,
+        tags: Vec<String>,
+    }
+
+    fn nested(open: &str, close: &str, depth: usize) -> String {
+        let mut text = String::new();
+        for _ in 0..depth {
+            text.push_str(open);
+        }
+        text.push_str("1");
+        for _ in 0..depth {
+            text.push_str(close);
+        }
+        text
+    }
+
+    #[test]
+    fn nesting_is_capped_at_the_depth_limit() {
+        let deep = MAX_JSON_DEPTH as usize;
+        assert!(JsonValue::deserialize_json(&nested("[", "]", deep)).is_ok());
+        assert!(JsonValue::deserialize_json(&nested("[", "]", deep + 1))
+            .unwrap_err()
+            .msg
+            .contains("Nesting"));
+        assert!(JsonValue::deserialize_json(&nested("{\"a\":", "}", deep)).is_ok());
+        assert!(JsonValue::deserialize_json(&nested("{\"a\":", "}", deep + 1)).is_err());
+        // A derive skipping an unknown field in lenient mode descends too.
+        let record = |extra: &str| {
+            format!(r#"{{"event":"x","t":1,"tags":[],"extra":{extra}}}"#)
+        };
+        assert!(Record::deserialize_json_lenient(&record(&nested("[", "]", deep - 1))).is_ok());
+        assert!(Record::deserialize_json_lenient(&record(&nested("[", "]", deep))).is_err());
+        // Closing brackets give the depth back, so siblings do not add up.
+        let siblings = format!("[{},{}]", nested("[", "]", deep - 1), nested("[", "]", deep - 1));
+        assert!(JsonValue::deserialize_json(&siblings).is_ok());
+    }
+
+    #[test]
+    fn strict_parse_rejects_trailing_content_and_leading_zeros() {
+        assert!(JsonValue::deserialize_json_strict(r#"{"a":1}{"#).is_err());
+        assert!(JsonValue::deserialize_json_strict("[1, 2] {note}").is_err());
+        assert!(JsonValue::deserialize_json_strict("01").is_err());
+        assert!(JsonValue::deserialize_json_strict("-01").is_err());
+        assert_eq!(
+            JsonValue::deserialize_json_strict(" {\"a\": 0.5} \n").unwrap().get("a").and_then(|v| v.as_f64()),
+            Some(0.5)
+        );
+        assert_eq!(JsonValue::deserialize_json_strict("0").unwrap().as_u64(), Some(0));
+        assert_eq!(JsonValue::deserialize_json_strict("-0").unwrap().as_i64(), Some(0));
+        // The default parse keeps ignoring what follows the value.
+        assert!(JsonValue::deserialize_json(r#"{"a":1}{"#).is_ok());
+    }
+
+    #[test]
+    fn pretty_output_is_indented_and_parses_back() {
+        let record = Record {
+            event: "fix".into(),
+            t: 12.5,
+            speed: None,
+            tags: vec!["a".into(), "b".into()],
+        };
+        assert_eq!(record.serialize_json(), r#"{"event":"fix","t":12.5,"tags":["a","b"]}"#);
+        let pretty = record.serialize_json_pretty();
+        assert_eq!(
+            pretty,
+            "{\n    \"event\": \"fix\",\n    \"t\": 12.5,\n    \"tags\": [\n        \"a\",\n        \"b\"\n    ]\n}"
+        );
+        assert_eq!(Record::deserialize_json(&pretty).unwrap(), record);
+        let empty: Vec<u8> = Vec::new();
+        assert_eq!(empty.serialize_json_pretty(), "[]");
+        let empty: HashMap<String, u8> = HashMap::new();
+        assert_eq!(empty.serialize_json_pretty(), "{}");
+    }
+
+    #[test]
+    fn json_value_accessors_and_sorted_output() {
+        let value = JsonValue::deserialize_json(
+            r#"{"z":1,"a":"x","n":-2,"f":1.5,"b":true,"nil":null,"arr":[1,2.5,"s"],"big":18446744073709551615}"#,
+        )
+        .unwrap();
+        assert_eq!(value.get("a").and_then(|v| v.as_str()), Some("x"));
+        assert_eq!(value.get("z").and_then(|v| v.as_i64()), Some(1));
+        assert_eq!(value.get("z").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(value.get("z").and_then(|v| v.as_f64()), Some(1.0));
+        assert_eq!(value.get("n").and_then(|v| v.as_i64()), Some(-2));
+        assert_eq!(value.get("n").and_then(|v| v.as_u64()), None);
+        assert_eq!(value.get("f").and_then(|v| v.as_f64()), Some(1.5));
+        assert_eq!(value.get("f").and_then(|v| v.as_i64()), None);
+        assert_eq!(value.get("b").and_then(|v| v.as_bool()), Some(true));
+        assert!(value.get("nil").unwrap().is_null());
+        assert_eq!(value.get("big").and_then(|v| v.as_i64()), None);
+        assert_eq!(value.get("big").and_then(|v| v.as_u64()), Some(u64::MAX));
+        assert_eq!(value.get("arr").and_then(|v| v.as_array()).map(|a| a.len()), Some(3));
+        assert_eq!(value.get("missing"), None);
+        assert_eq!(JsonValue::Null.get("k"), None);
+        assert_eq!(
+            value.to_string(),
+            r#"{"a":"x","arr":[1,2.5,"s"],"b":true,"big":18446744073709551615,"f":1.5,"n":-2,"nil":null,"z":1}"#
+        );
+        let mut value = value;
+        value.as_object_mut().unwrap().remove("big");
+        value.as_object_mut().unwrap().insert("o".into(), JsonValue::from(Some(3u32)));
+        assert_eq!(
+            format!("{value}"),
+            r#"{"a":"x","arr":[1,2.5,"s"],"b":true,"f":1.5,"n":-2,"nil":null,"o":3,"z":1}"#
+        );
+        assert_eq!(JsonValue::from(None::<u32>), JsonValue::Null);
+        assert_eq!(JsonValue::from("s"), JsonValue::String("s".into()));
     }
 }

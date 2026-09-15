@@ -1,0 +1,19 @@
+[Unit]
+Description=Makepad CUDA AI Hub
+After=makepad-provision.service
+ConditionPathExists=/var/lib/makepad-provision/complete
+
+[Service]
+Type=simple
+User=arch
+WorkingDirectory=/home/arch/makepad
+Environment=HOME=/home/arch
+ExecStart=/usr/local/bin/makepad-aihub-session
+Restart=on-failure
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

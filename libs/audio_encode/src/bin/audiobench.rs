@@ -10,10 +10,17 @@
 //! cargo run --release -p makepad-audio-encode --bin audiobench -- track1.mp3 track2.ogg ...
 //! ```
 
+#[cfg(target_arch = "wasm32")]
+fn main() {}
+
+// This filesystem benchmark is a native developer tool, not part of the wasm library graph.
+#[cfg(not(target_arch = "wasm32"))]
+mod native {
+
 use makepad_audio_decode::{decode_any, probe_duration, sniff, AudioFormat};
 use makepad_audio_encode::{encode_vorbis, EncodeOptions};
 
-fn main() {
+pub(super) fn run() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
         eprintln!("usage: audiobench <files...>");
@@ -102,4 +109,11 @@ fn trim(name: &str) -> String {
     } else {
         format!("{}...", &name[..37])
     }
+}
+
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn main() {
+    native::run();
 }

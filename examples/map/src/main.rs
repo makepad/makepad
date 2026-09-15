@@ -514,12 +514,19 @@ impl App {
         self.ui.label(cx, ids!(status_label)).set_text(cx, text);
     }
 
-    fn start_worker(&mut self) {
+    fn start_worker(&mut self, cx: &mut Cx) {
         makepad_widgets::start_memory_watchdog(None);
         let (tx, rx) = mpsc::channel::<NavRequest>();
         self.nav_tx = Some(tx);
         let sender = self.nav_rx.sender();
-        std::thread::spawn(move || {
+        let pool = cx.task_pool();
+        let worker_pool = pool.clone();
+        let spawned = cx.thread_spawner().spawn_worker(
+            ThreadOptions {
+                name: Some("map-navigation".into()),
+                ..Default::default()
+            },
+            move || {
             let load = || -> Result<(SearchIndex, RouteGraph), String> {
                 let search_path = format!("{}.search", NAV_DATA_BASENAME);
                 let graph_path = format!("{}.graph", NAV_DATA_BASENAME);
@@ -624,22 +631,36 @@ impl App {
                         });
                     }
                     NavRequest::Elevation { id, points } => {
-                        // Own thread: the first request may download DEM
+                        // Heavy pool job: the first request may download DEM
                         // tiles and must not stall search/route requests.
                         let dem_cache = dem_cache.clone();
                         let sender = sender.clone();
-                        std::thread::spawn(move || {
+                        let rejected_sender = sender.clone();
+                        match worker_pool.submit(Lane::Heavy, move || {
                             let mut cache = dem_cache.lock().unwrap();
                             let profile = dem::route_profile(&mut cache, &points, 200);
                             let _ = sender.send(NavResponse::ElevationDone {
                                 id,
                                 profile: Box::new(profile),
                             });
-                        });
+                        }) {
+                            Ok(handle) => handle.detach(),
+                            Err(error) => {
+                                log!("elevation task rejected: {error}");
+                                let _ = rejected_sender.send(NavResponse::ElevationDone {
+                                    id,
+                                    profile: Box::new(None),
+                                });
+                            }
+                        }
                     }
                 }
             }
         });
+        match spawned {
+            Ok(handle) => handle.detach(),
+            Err(error) => log!("navigation worker unavailable: {error}"),
+        }
     }
 
     // --- Search ---
@@ -675,7 +696,7 @@ impl App {
         // A script hot-reload wipes #[rust] state including the worker
         // channel; bring it back on demand.
         if self.nav_tx.is_none() {
-            self.start_worker();
+            self.start_worker(cx);
         }
         if !self.data_ready || self.pending_query.trim().is_empty() {
             self.hide_results(cx);
@@ -743,13 +764,19 @@ impl App {
     /// 4 min), decodes the 25-frame HDF5 and reprojects to mercator RGBA.
     /// Also syncs both raw radar volumes and composites the hi-res "now"
     /// image (250 m instead of the composite's 1 km).
-    fn ensure_rain_worker(&mut self) {
+    fn ensure_rain_worker(&mut self, cx: &mut Cx) {
         if self.rain_worker_started {
             return;
         }
         self.rain_worker_started = true;
         let sender = self.rain_rx.sender();
-        std::thread::spawn(move || {
+        let pool = cx.task_pool();
+        let spawned = cx.thread_spawner().spawn_worker(
+            ThreadOptions {
+                name: Some("map-rain-radar".into()),
+                ..Default::default()
+            },
+            move || {
             use makepad_geodata::radar::{RadarConfig, RadarSync};
             use makepad_geodata::radar_volume::{composite_volumes, RadarVolume};
             use makepad_geodata::{knmi_hdf5, radar_raster};
@@ -771,6 +798,7 @@ impl App {
             let mut last_decoded: Option<std::path::PathBuf> = None;
             let mut last_volume_stamp = String::new();
             let mut current: Option<RainUpdate> = None;
+            let pacing = CancellationToken::new();
             loop {
                 let mut changed = false;
                 if let Ok(state) = sync.sync() {
@@ -781,24 +809,18 @@ impl App {
                                     // Reproject the 25 frames in parallel —
                                     // serial this was the multi-second wait
                                     // blamed on "downloading".
-                                    let texels: Vec<Vec<u32>> =
-                                        std::thread::scope(|scope| {
-                                            let handles: Vec<_> = frames
-                                                .iter()
-                                                .map(|frame| {
-                                                    let projection = &projection;
-                                                    scope.spawn(move || {
-                                                        radar_raster::rgba_to_bgra_texels(
-                                                            &projection.frame_to_rgba(frame),
-                                                        )
-                                                    })
-                                                })
-                                                .collect();
-                                            handles
-                                                .into_iter()
-                                                .map(|h| h.join().unwrap())
-                                                .collect()
-                                        });
+                                    let texels = (0..frames.len())
+                                        .map(|_| std::sync::OnceLock::new())
+                                        .collect::<Vec<_>>();
+                                    pool.fan_out(Lane::Heavy, frames.len(), |index| {
+                                        let rgba = projection.frame_to_rgba(&frames[index]);
+                                        let _ = texels[index]
+                                            .set(radar_raster::rgba_to_bgra_texels(&rgba));
+                                    });
+                                    let texels = texels
+                                        .into_iter()
+                                        .map(|frame| frame.into_inner().unwrap_or_default())
+                                        .collect::<Vec<_>>();
                                     let now_hires =
                                         current.as_ref().and_then(|c| c.now_hires.clone());
                                     current = Some(RainUpdate {
@@ -859,22 +881,32 @@ impl App {
                         let _ = sender.send(current.clone());
                     }
                 }
-                std::thread::sleep(std::time::Duration::from_secs(60));
+                let _ = pacing.wait_until(Cx::monotonic_now() + 60.0);
             }
         });
+        match spawned {
+            Ok(handle) => handle.detach(),
+            Err(error) => log!("rain radar worker unavailable: {error}"),
+        }
     }
 
     /// GFS wind worker: 30 min disk-gated NOMADS polls (US public domain,
     /// ~3 KB per fetch), cached GRIB2 on disk, decoded in-process.
-    fn ensure_wind_worker(&mut self) {
+    fn ensure_wind_worker(&mut self, cx: &mut Cx) {
         if self.wind_worker_started {
             return;
         }
         self.wind_worker_started = true;
         let sender = self.wind_rx.sender();
-        std::thread::spawn(move || {
+        let spawned = cx.thread_spawner().spawn_worker(
+            ThreadOptions {
+                name: Some("map-wind".into()),
+                ..Default::default()
+            },
+            move || {
             use makepad_geodata::wind::{WindSync, WIND_EAST, WIND_NORTH, WIND_SOUTH, WIND_WEST};
             let sync = WindSync::new("local/overlays/wind");
+            let pacing = CancellationToken::new();
             loop {
                 let field = sync.sync().ok().flatten().or_else(|| sync.cached());
                 if let Some(field) = field {
@@ -886,14 +918,18 @@ impl App {
                         bbox: (WIND_WEST, WIND_SOUTH, WIND_EAST, WIND_NORTH),
                     });
                 }
-                std::thread::sleep(std::time::Duration::from_secs(300));
+                let _ = pacing.wait_until(Cx::monotonic_now() + 300.0);
             }
         });
+        match spawned {
+            Ok(handle) => handle.detach(),
+            Err(error) => log!("wind worker unavailable: {error}"),
+        }
     }
 
     /// Terrain worker: renders hillshade textures for requested view
     /// bboxes from the local terrarium mbtiles (no network at all).
-    fn ensure_terrain_worker(&mut self) {
+    fn ensure_terrain_worker(&mut self, cx: &mut Cx) {
         if self.terrain_worker_started {
             return;
         }
@@ -901,7 +937,12 @@ impl App {
         let (tx, rx) = mpsc::channel::<((f64, f64, f64, f64), (f32, f32, f32), bool)>();
         self.terrain_tx = Some(tx);
         let sender = self.terrain_rx.sender();
-        std::thread::spawn(move || {
+        let spawned = cx.thread_spawner().spawn_worker(
+            ThreadOptions {
+                name: Some("map-terrain".into()),
+                ..Default::default()
+            },
+            move || {
             use makepad_geodata::terrain_shade::TerrainShader;
             let Ok(mut shader) =
                 TerrainShader::open(std::path::Path::new("local/overlays/nl-terrain.mbtiles"))
@@ -961,6 +1002,10 @@ impl App {
                 });
             }
         });
+        match spawned {
+            Ok(handle) => handle.detach(),
+            Err(error) => log!("terrain worker unavailable: {error}"),
+        }
     }
 
     /// Request a hillshade render for the current viewport (debounced by
@@ -969,7 +1014,7 @@ impl App {
         if !self.terrain_on {
             return;
         }
-        self.ensure_terrain_worker();
+        self.ensure_terrain_worker(cx);
         let Some((lon, lat, zoom)) = self
             .map(cx)
             .center()
@@ -1100,7 +1145,7 @@ impl App {
             return;
         };
         if self.nav_tx.is_none() {
-            self.start_worker();
+            self.start_worker(cx);
         }
         if !self.data_ready {
             return;
@@ -1118,24 +1163,30 @@ impl App {
         self.set_status(cx, &format!("Routing to {}…", name));
     }
 
-    /// Rebuild the overlay path list from the app-tracked layer states.
+    /// Rebuild the overlay source list from the app-tracked layer states.
     fn apply_overlay_selection(&mut self, cx: &mut Cx) {
-        const LAYER_PATHS: [&str; 7] = [
-            "local/overlays/nl-chargers.mbtiles?fast",
-            "local/overlays/nl-transit.mbtiles",
-            "local/overlays/nl-nature.mbtiles",
-            "local/overlays/nl-wijkbuurt.mbtiles",
-            "local/overlays/nl-buildings-age.mbtiles",
-            "local/overlays/nl-demographics.mbtiles",
-            "local/overlays/nl-chargers.mbtiles?slow",
+        const LAYERS: [(&str, &str, Option<&str>); 7] = [
+            ("chargers", "local/overlays/nl-chargers.mbtiles", Some("fast")),
+            ("transit", "local/overlays/nl-transit.mbtiles", None),
+            ("nature", "local/overlays/nl-nature.mbtiles", None),
+            ("districts", "local/overlays/nl-wijkbuurt.mbtiles", None),
+            ("buildings_age", "local/overlays/nl-buildings-age.mbtiles", None),
+            ("demographics", "local/overlays/nl-demographics.mbtiles", None),
+            ("chargers", "local/overlays/nl-chargers.mbtiles", Some("slow")),
         ];
-        let paths: Vec<&str> = LAYER_PATHS
+        let overlays = LAYERS
             .iter()
             .zip(self.layer_states.iter())
             .filter(|(_, on)| **on)
-            .map(|(path, _)| *path)
+            .map(|((name, path, option), _)| {
+                OverlaySource::with_option(
+                    *name,
+                    TileSourceConfig::local_archive(*path),
+                    *option,
+                )
+            })
             .collect();
-        self.map(cx).set_overlay_paths(cx, &paths.join(";"));
+        self.map(cx).set_overlays(cx, overlays);
     }
 
     fn apply_route(&mut self, cx: &mut Cx, route: Route) {
@@ -1369,7 +1420,7 @@ fn fmt_dur(s: f64) -> String {
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
-        self.start_worker();
+        self.start_worker(cx);
         self.set_status(cx, "Loading navigation data…");
         // Debug: /tmp/mp_start_cam holds "lon lat zoom [rot] [tilt]" — boot
         // straight into a benchmark viewport (env vars don't reach
@@ -1571,14 +1622,14 @@ impl MatchEvent for App {
         if let Some(value) = self.ui.check_box(cx, ids!(layer_rain)).changed(actions) {
             self.rain_on = value;
             if value {
-                self.ensure_rain_worker();
+                self.ensure_rain_worker(cx);
             }
             self.apply_rain(cx);
         }
         if let Some(value) = self.ui.check_box(cx, ids!(layer_wind)).changed(actions) {
             self.wind_on = value;
             if value {
-                self.ensure_wind_worker();
+                self.ensure_wind_worker(cx);
             }
             self.apply_wind(cx);
         }

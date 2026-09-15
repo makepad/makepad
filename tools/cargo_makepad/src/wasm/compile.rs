@@ -2,8 +2,10 @@ use crate::makepad_network::http_server::*;
 use crate::makepad_network::{NetworkConfig, NetworkRuntime};
 use crate::makepad_shell::*;
 use crate::makepad_wasm_strip::*;
+use crate::font_assets::{no_skip, remove_existing_fonts, FontAssetManifest, FontPackage};
 use crate::server_manager::WasmServerOwnershipGuard;
 use crate::utils::*;
+use super::size_report::print_package_size_report;
 use makepad_filesystem_watcher::{FileSystemWatcher, WatchRoot};
 use makepad_micro_serde::{SerJson, SerJsonState};
 use std::{
@@ -27,12 +29,16 @@ pub struct WasmConfig {
     pub strip: bool,
     pub lan: bool,
     pub port: Option<u16>,
-    pub small_fonts: bool,
     pub brotli: bool,
     pub bindgen: bool,
     pub threads: bool,
     pub optimize_size: bool,
     pub wasm_opt: bool,
+    pub production: bool,
+    pub lto: bool,
+    pub no_location_detail: bool,
+    pub size_report: bool,
+    pub keep_names: bool,
     pub split: bool,
     pub split_auto: bool,
     pub split_functions: bool,
@@ -119,9 +125,65 @@ fn print_wasm_split_report(primary_bytes: usize, split_bytes: usize, segments: u
     println!("  split total:     {} bytes", primary_bytes + split_bytes);
 }
 
-/// Run Binaryen wasm-opt -Os on the given wasm bytes if the tool is installed.
+const MIN_BINARYEN_VERSION: u32 = 116;
+
+fn parse_binaryen_version(output: &str) -> Option<u32> {
+    let version = output.split_once("version")?.1;
+    version
+        .split(|character: char| !character.is_ascii_digit())
+        .find(|part| !part.is_empty())?
+        .parse()
+        .ok()
+}
+
+/// Run pinned-compatible Binaryen wasm-opt -Oz on the given wasm bytes.
 /// Returns the optimized bytes on success, or the original bytes on failure (with a note).
 fn try_wasm_opt(data: &[u8], cwd: &Path) -> Vec<u8> {
+    let version_output = match Command::new("wasm-opt")
+        .arg("--version")
+        .current_dir(cwd)
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            println!(
+                "wasm-opt: skipped (version check failed{})",
+                if stderr.trim().is_empty() {
+                    "".to_string()
+                } else {
+                    format!(": {}", stderr.lines().next().unwrap_or(stderr.trim()))
+                }
+            );
+            return data.to_vec();
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            println!(
+                "wasm-opt: skipped (not found on PATH; optional Binaryen >= {MIN_BINARYEN_VERSION})"
+            );
+            return data.to_vec();
+        }
+        Err(error) => {
+            println!("wasm-opt: skipped (version check failed: {error})");
+            return data.to_vec();
+        }
+    };
+    let version_text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&version_output.stdout),
+        String::from_utf8_lossy(&version_output.stderr)
+    );
+    let Some(version) = parse_binaryen_version(&version_text) else {
+        println!("wasm-opt: skipped (unrecognized Binaryen version output)");
+        return data.to_vec();
+    };
+    if version < MIN_BINARYEN_VERSION {
+        println!(
+            "wasm-opt: skipped (Binaryen {version} is older than pinned minimum {MIN_BINARYEN_VERSION})"
+        );
+        return data.to_vec();
+    }
+
     let build_dir = cwd.join("target/makepad-wasm-opt-tmp");
     if fs::create_dir_all(&build_dir).is_err() {
         println!("wasm-opt: skipped (cannot create temp dir)");
@@ -133,9 +195,10 @@ fn try_wasm_opt(data: &[u8], cwd: &Path) -> Vec<u8> {
         println!("wasm-opt: skipped (cannot write temp file)");
         return data.to_vec();
     }
+    let _ = fs::remove_file(&out_path);
     let args = vec![
         "--all-features".into(),
-        "-Os".into(),
+        "-Oz".into(),
         "-o".into(),
         out_path.to_string_lossy().into_owned(),
         in_path.to_string_lossy().into_owned(),
@@ -149,7 +212,11 @@ fn try_wasm_opt(data: &[u8], cwd: &Path) -> Vec<u8> {
             Ok(optimized) => {
                 let _ = fs::remove_file(&in_path);
                 let _ = fs::remove_file(&out_path);
-                println!("wasm-opt: {} -> {} bytes", data.len(), optimized.len());
+                println!(
+                    "wasm-opt: Binaryen {version} -Oz, {} -> {} bytes",
+                    data.len(),
+                    optimized.len()
+                );
                 return optimized;
             }
             Err(_) => {
@@ -159,7 +226,7 @@ fn try_wasm_opt(data: &[u8], cwd: &Path) -> Vec<u8> {
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
             if stderr.trim().is_empty() {
-                println!("wasm-opt: skipped (Binaryen wasm-opt failed; install from https://github.com/WebAssembly/binaryen)");
+                println!("wasm-opt: skipped (Binaryen wasm-opt -Oz failed)");
             } else {
                 println!(
                     "wasm-opt: skipped ({})",
@@ -196,6 +263,55 @@ fn print_brotli_size_report(
             "  compressed total: {} bytes",
             wasm_brotli_bytes + split_brotli_bytes
         );
+    }
+}
+
+/// FNV-1a over the bytes, 16 hex chars: enough to make a changed build a new URL.
+fn content_hash_hex(bytes: &[u8]) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for &byte in bytes {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+/// A package artifact of a previous build of `build_bin`: the primary wasm, the secondary
+/// (function-split) wasm and the split data blob, with or without a content hash and with or
+/// without the `.br` sibling. The analysis-only `<bin>.names.wasm` is not one.
+fn is_package_artifact(build_bin: &str, file_name: &str) -> bool {
+    let name = file_name.strip_suffix(".br").unwrap_or(file_name);
+    let Some(rest) = name.strip_prefix(build_bin) else {
+        return false;
+    };
+    let mid = if let Some(mid) = rest.strip_suffix(".wasm") {
+        mid.strip_prefix(".secondary").unwrap_or(mid)
+    } else if let Some(mid) = rest.strip_suffix(".bin") {
+        match mid.strip_prefix(".data") {
+            Some(mid) => mid,
+            None => return false,
+        }
+    } else {
+        return false;
+    };
+    match mid.strip_prefix('.') {
+        None => mid.is_empty(),
+        Some(hash) => hash.len() == 16 && hash.bytes().all(|b| b.is_ascii_hexdigit()),
+    }
+}
+
+fn remove_package_artifacts(app_dir: &Path, build_bin: &str) {
+    let Ok(entries) = fs::read_dir(app_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+        if is_package_artifact(build_bin, file_name) {
+            let _ = fs::remove_file(entry.path());
+        }
     }
 }
 
@@ -255,12 +371,6 @@ pub fn generate_html(
     } else {
         ""
     };
-    let small_font_aliases = if config.small_fonts {
-        "\n            window.makepad_small_font_aliases = true;"
-    } else {
-        ""
-    };
-
     let preloads = if config.bindgen {
         "
         <link rel='modulepreload' href='./makepad_wasm_bridge/wasm_bridge.js'>
@@ -279,16 +389,30 @@ pub fn generate_html(
     <html>
     <head>
         <meta charset='utf-8'>
-        <meta name='viewport' content='width=device-width, initial-scale=1.0, user-scalable=no'>
+        <meta name='viewport' content='width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no'>
         <title>{wasm}</title>
         {preloads}
         <script type='module'>
             const reportBrowserIssue = async (kind, data) => {{
                 try {{
+                    const reporter = window.makepad_crash_reporter;
+                    if (reporter && typeof reporter.report === 'function') {{
+                        return reporter.report(kind, data);
+                    }}
                     const payload = JSON.stringify({{
+                        v: 1,
                         kind,
+                        app: location.pathname.split('/').filter(Boolean)[0] || '',
                         href: location.href,
                         user_agent: navigator.userAgent,
+                        time: Date.now(),
+                        wasm_memory_bytes: null,
+                        hardware_concurrency: Number.isFinite(navigator.hardwareConcurrency)
+                            ? navigator.hardwareConcurrency
+                            : null,
+                        has_thread_support: typeof SharedArrayBuffer !== 'undefined'
+                            && (typeof crossOriginIsolated === 'undefined' || crossOriginIsolated === true),
+                        breadcrumbs: [],
                         data
                     }});
                     const encoded = encodeURIComponent(payload.slice(0, 8192));
@@ -328,8 +452,9 @@ pub fn generate_html(
             }});
 
             try {{
-                {small_font_aliases}
+                const {{makepad_crash_reporter}} = await import('./makepad_platform/web.js');
                 {init}
+                makepad_crash_reporter.set_wasm(wasm);
                 class MyWasmApp {{
                     constructor(wasm) {{
                         let canvas = document.getElementsByClassName('full_canvas')[0];
@@ -392,17 +517,6 @@ fn remove_brotli_artifact(dest_path: &PathBuf) {
         None => return,
     };
     let _ = fs::remove_file(dest_path_br);
-}
-
-fn small_font_fallback_target(file_name: &str) -> Option<&'static str> {
-    match file_name {
-        "GoNotoKurrent-Bold.ttf" => Some("IBMPlexSans-SemiBold.ttf"),
-        "GoNotoKurrent-Regular.ttf" => Some("IBMPlexSans-Text.ttf"),
-        "LXGWWenKaiBold.ttf" => Some("IBMPlexSans-Text.ttf"),
-        "LXGWWenKaiRegular.ttf" => Some("IBMPlexSans-Text.ttf"),
-        "NotoColorEmoji.ttf" => Some("IBMPlexSans-Text.ttf"),
-        _ => None,
-    }
 }
 
 fn minify_js(input: &str) -> String {
@@ -513,6 +627,12 @@ pub fn cp_brotli(
     exec: bool,
     compress: bool,
 ) -> Result<(), String> {
+    fs::create_dir_all(
+        dest_path
+            .parent()
+            .ok_or_else(|| format!("Destination has no parent directory: {:?}", dest_path))?,
+    )
+    .map_err(|err| format!("Cannot create parent directory for {:?}: {err}", dest_path))?;
     if source_path.extension().and_then(|s| s.to_str()) == Some("js") {
         if let Ok(content) = std::fs::read_to_string(source_path) {
             let minified = minify_js(&content);
@@ -540,7 +660,7 @@ pub fn cp_brotli(
 
 const WASM_TARGET_TRIPLE: &str = "wasm32-unknown-unknown";
 const WASM_TARGET_SPEC_FEATURES: &str = "+atomics,+bulk-memory,+mutable-globals";
-const WASM_RUSTFLAGS_THREADED: &str = "-C codegen-units=1 -C debuginfo=0 -C link-arg=--export=__stack_pointer -C link-arg=--compress-relocations -C link-arg=--strip-debug -C link-arg=--shared-memory -C link-arg=--max-memory=2147483648 -C link-arg=--import-memory -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base -C opt-level=z";
+const WASM_RUSTFLAGS_THREADED: &str = "-C codegen-units=1 -C debuginfo=0 -C link-arg=--export=__stack_pointer -C link-arg=--compress-relocations -C link-arg=--strip-debug -C link-arg=--shared-memory -C link-arg=--max-memory=4294967296 -C link-arg=--import-memory -C link-arg=--export=__wasm_init_tls -C link-arg=--export=__tls_size -C link-arg=--export=__tls_align -C link-arg=--export=__tls_base -C opt-level=z";
 const WASM_RUSTFLAGS_SINGLE_THREADED: &str =
     "-C codegen-units=1 -C debuginfo=0 -C link-arg=--export=__stack_pointer -C link-arg=--compress-relocations -C link-arg=--strip-debug -C opt-level=z";
 
@@ -599,6 +719,7 @@ fn build_wasm_target_spec(cwd: &PathBuf, threaded: bool) -> Result<PathBuf, Stri
 pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, String> {
     let build_crate = get_build_crate_from_args(args)?;
     let cwd = std::env::current_dir().unwrap();
+    let build_bin = get_wasm_binary_name(build_crate, args)?;
     let wasm_target_spec = build_wasm_target_spec(&cwd, config.threads)?;
     let target_arg = format!("--target={}", wasm_target_spec.display());
 
@@ -622,13 +743,24 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     }
     let args_out_refs: Vec<&str> = args_out.iter().map(|arg| arg.as_str()).collect();
 
-    let rustflags = if config.threads {
+    let mut rustflags = if config.threads {
         WASM_RUSTFLAGS_THREADED
     } else {
         WASM_RUSTFLAGS_SINGLE_THREADED
-    };
-    let mut env = vec![("RUSTFLAGS", rustflags)];
-    // `profile.small` with LTO enabled miscompiles single-threaded wasm in the script VM.
+    }
+    .to_string();
+    if config.no_location_detail {
+        rustflags.push_str(" -Zlocation-detail=none");
+    }
+    let mut env = vec![("RUSTFLAGS", rustflags.as_str())];
+    // Let Makepad's explicit strip pass see custom sections so `--keep-names` can retain the
+    // analysis module before the shipping module is stripped. The emitted production wasm is
+    // still stripped below, and its standard code/data section bytes are unchanged.
+    if profile == "small" && config.strip {
+        env.push(("CARGO_PROFILE_SMALL_STRIP", "none"));
+    }
+    // If a caller explicitly uses profile.small with `--no-threads`, disable LTO: it is known
+    // to miscompile the script VM in wasm.
     if profile == "small" && !config.threads {
         env.push(("CARGO_PROFILE_SMALL_LTO", "off"));
     }
@@ -637,27 +769,28 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
 
     let app_dir = cwd.join(format!("target/makepad-wasm-app/{profile}/{}", build_crate));
     let build_dir = cwd.join(format!("target/{WASM_TARGET_TRIPLE}/{profile}"));
+    // Read and validate the application contract immediately after linking. Later size/strip
+    // passes intentionally remove custom sections from the shipping wasm.
+    let linked_wasm = build_dir.join(format!("{}.wasm", build_bin));
+    let font_manifest = FontAssetManifest::from_wasm_file(&linked_wasm)?;
+    remove_existing_fonts(&app_dir)?;
+    let mut font_package = FontPackage::new(&font_manifest);
 
     let build_crate_dir = get_crate_dir(build_crate)?;
     let local_resources_path = build_crate_dir.join("resources");
 
     if local_resources_path.is_dir() {
-        // if we have an index.html in src/ copy that one
-        let underscore_build_crate = build_crate.replace('-', "_");
-        let dst_dir = app_dir.join(underscore_build_crate).join("resources");
-        mkdir(&dst_dir)?;
-        //cp_all(&local_resources_path, &dst_dir, false) ?;
-        walk_all(
+        // The app resolves `self://` through its own module path, which for a bin target is
+        // the BIN name (`files`), not the package name (`makepad-files`): package under that.
+        let underscore_build_bin = build_bin.replace('-', "_");
+        let dst_dir = app_dir.join(&underscore_build_bin).join("resources");
+        font_package.copy_tree_filtered(
             &local_resources_path,
             &dst_dir,
-            &mut |source_path, dest_dir| {
-                let source_file_name = source_path
-                    .file_name()
-                    .ok_or_else(|| format!("Unable to get filename for {:?}", source_path))?
-                    .to_string_lossy()
-                    .to_string();
-                let dest_path = dest_dir.join(&source_file_name);
-                cp(&source_path, &dest_path, false)?;
+            &format!("{underscore_build_bin}/resources"),
+            no_skip,
+            |dest_path| {
+                let dest_path = dest_path.to_path_buf();
                 if config.brotli {
                     brotli_compress(&dest_path);
                 } else {
@@ -748,46 +881,30 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
 
         if resources_path.is_dir() {
             let dst_dir = app_dir.join(&name).join("resources");
-            mkdir(&dst_dir)?;
-            if config.small_fonts {
-                for file_name in [
-                    "GoNotoKurrent-Bold.ttf",
-                    "GoNotoKurrent-Regular.ttf",
-                    "LXGWWenKaiBold.ttf",
-                    "LXGWWenKaiRegular.ttf",
-                    "NotoColorEmoji.ttf",
-                ] {
-                    let stale_path = dst_dir.join(file_name);
-                    let _ = fs::remove_file(&stale_path);
-                    remove_brotli_artifact(&stale_path);
-                }
-            }
-            walk_all(&resources_path, &dst_dir, &mut |source_path, dest_dir| {
-                let source_file_name = source_path
-                    .file_name()
-                    .ok_or_else(|| format!("Unable to get filename for {:?}", source_path))?
-                    .to_string_lossy()
-                    .to_string();
-                if config.small_fonts && small_font_fallback_target(&source_file_name).is_some() {
-                    return Ok(());
-                }
-                let dest_path = dest_dir.join(&source_file_name);
-                cp(source_path, &dest_path, false)?;
-                if config.brotli {
-                    brotli_compress(&dest_path);
-                } else {
-                    remove_brotli_artifact(&dest_path);
-                }
-                Ok(())
-            })?;
+            font_package.copy_tree_filtered(
+                &resources_path,
+                &dst_dir,
+                &format!("{name}/resources"),
+                no_skip,
+                |dest_path| {
+                    let dest_path = dest_path.to_path_buf();
+                    if config.brotli {
+                        brotli_compress(&dest_path);
+                    } else {
+                        remove_brotli_artifact(&dest_path);
+                    }
+                    Ok(())
+                },
+            )?;
         }
     }
+    font_package.finish()?.print();
     let wasm_source = if config.bindgen {
         shell(
             build_dir.as_path(),
             "wasm-bindgen",
             &[
-                &format!("{build_crate}.wasm"),
+                &format!("{build_bin}.wasm"),
                 "--out-dir=.",
                 "--out-name=bindgen",
                 "--target=web",
@@ -848,14 +965,21 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
 
         build_dir.join("bindgen_bg.wasm")
     } else {
-        build_dir.join(format!("{}.wasm", build_crate))
+        build_dir.join(format!("{}.wasm", build_bin))
     };
 
-    let wasm_dest = app_dir.join(format!("{}.wasm", build_crate));
+    let named_wasm_dest = app_dir.join(format!("{}.names.wasm", build_bin));
+    let data = fs::read(&wasm_source)
+        .map_err(|_| format!("Cannot read wasm file {:?}", wasm_source))?;
+    if config.keep_names {
+        fs::write(&named_wasm_dest, &data)
+            .map_err(|error| format!("Can't write named wasm {:?}: {error}", named_wasm_dest))?;
+        println!("Kept named analysis wasm: {:?}", named_wasm_dest);
+    } else {
+        let _ = fs::remove_file(&named_wasm_dest);
+        remove_brotli_artifact(&named_wasm_dest);
+    }
     let mut output = if config.optimize_size || config.strip {
-        let data = fs::read(&wasm_source)
-            .map_err(|_| format!("Cannot read wasm file {:?}", wasm_source))?;
-
         if config.optimize_size {
             let report = wasm_size_report(&data)
                 .map_err(|_| format!("Cannot parse wasm {:?}", wasm_source))?;
@@ -866,18 +990,20 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
                 .map_err(|_| format!("Cannot parse wasm {:?}", wasm_source))?
         }
     } else {
-        fs::read(&wasm_source).map_err(|_| format!("Cannot read wasm file {:?}", wasm_source))?
+        data
     };
 
     if config.wasm_opt {
         output = try_wasm_opt(&output, &cwd);
     }
+    // Package artifacts carry a content hash in their name so a re-upload is a new URL and
+    // `immutable` caching is correct; drop the previous build's set first.
+    remove_package_artifacts(&app_dir, &build_bin);
 
     // `--split` implies function splitting as part of the higher-level split pipeline.
     let split_functions_enabled = config.split || config.split_functions;
 
     // Function splitting: split large functions into primary (stubs) + secondary (real bodies)
-    let secondary_wasm_dest = app_dir.join(format!("{}.secondary.wasm", build_crate));
     let mut defer_secondary_wasm = false;
     let mut auto_split_outcome = AutoSplitOutcome::NotAttempted;
     let secondary_wasm_path = if split_functions_enabled {
@@ -924,8 +1050,6 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
                     config.split_functions_threshold
                 );
             }
-            let _ = fs::remove_file(&secondary_wasm_dest);
-            remove_brotli_artifact(&secondary_wasm_dest);
             None
         } else {
             if config.split_auto && config.split {
@@ -951,22 +1075,23 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
             println!("  primary:   {} bytes", result.primary_wasm.len());
             println!("  secondary: {} bytes", result.secondary_wasm.len());
             output = result.primary_wasm;
+            let secondary_name = format!(
+                "{}.secondary.{}.wasm",
+                build_bin,
+                content_hash_hex(&result.secondary_wasm)
+            );
+            let secondary_wasm_dest = app_dir.join(&secondary_name);
             fs::write(&secondary_wasm_dest, &result.secondary_wasm)
                 .map_err(|e| format!("Can't write file {:?} {:?}", secondary_wasm_dest, e))?;
             if config.brotli {
                 brotli_compress(&secondary_wasm_dest);
-            } else {
-                remove_brotli_artifact(&secondary_wasm_dest);
             }
-            Some(format!("./{}.secondary.wasm", build_crate))
+            Some(format!("./{secondary_name}"))
         }
     } else {
-        let _ = fs::remove_file(&secondary_wasm_dest);
-        remove_brotli_artifact(&secondary_wasm_dest);
         None
     };
 
-    let split_data_dest = app_dir.join(format!("{}.data.bin", build_crate));
     let mut split_data_bytes = None;
     let mut split_brotli_bytes = None;
     let split_data_path = if config.split {
@@ -982,26 +1107,28 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
         );
         output = split.primary_wasm;
         if split.split_data.is_empty() {
-            let _ = fs::remove_file(&split_data_dest);
-            remove_brotli_artifact(&split_data_dest);
             None
         } else {
             split_data_bytes = Some(split.split_data.len());
+            let split_data_name = format!(
+                "{}.data.{}.bin",
+                build_bin,
+                content_hash_hex(&split.split_data)
+            );
+            let split_data_dest = app_dir.join(&split_data_name);
             fs::write(&split_data_dest, &split.split_data)
                 .map_err(|e| format!("Can't write file {:?} {:?} ", split_data_dest, e))?;
             if config.brotli {
                 split_brotli_bytes = Some(brotli_compress(&split_data_dest));
-            } else {
-                remove_brotli_artifact(&split_data_dest);
             }
-            Some(format!("./{}.data.bin", build_crate))
+            Some(format!("./{split_data_name}"))
         }
     } else {
-        let _ = fs::remove_file(&split_data_dest);
-        remove_brotli_artifact(&split_data_dest);
         None
     };
 
+    let wasm_name = format!("{}.{}", build_bin, content_hash_hex(&output));
+    let wasm_dest = app_dir.join(format!("{wasm_name}.wasm"));
     fs::write(&wasm_dest, output)
         .map_err(|e| format!("Can't write file {:?} {:?} ", wasm_dest, e))?;
     let wasm_bytes = fs::metadata(&wasm_dest)
@@ -1016,7 +1143,7 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     // generate html file
     let index_path = app_dir.join("index.html");
     let html = generate_html(
-        build_crate,
+        &wasm_name,
         split_data_path.as_deref(),
         secondary_wasm_path.as_deref(),
         defer_secondary_wasm,
@@ -1036,6 +1163,14 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
             split_data_bytes,
             split_brotli_bytes,
         );
+    }
+    if config.size_report {
+        let config_id = if config.production {
+            format!("production/{profile}")
+        } else {
+            profile.to_string()
+        };
+        print_package_size_report(&build_bin, &config_id, &wasm_dest)?;
     }
     println!("Created wasm package: {:?}", app_dir);
     if config.threads {
@@ -1751,6 +1886,11 @@ fn start_wasm_server(
     let _listen_thread = net.start_http_server(HttpServer {
         listen_address: addr,
         post_max_size: 1024 * 1024,
+        post_max_size_overrides: Vec::new(),
+        pre_admit_posts: false,
+        client_ip_resolver: None,
+        trusted_proxy: None,
+        allowed_methods: None,
         request: tx_request,
     });
     if _listen_thread.is_none() {
@@ -1837,10 +1977,7 @@ fn start_wasm_server(
                         Cache-Control: max-age:0\r\n\
                         Connection: close\r\n\r\n"
                             .to_string();
-                        let _ = response_sender.send(HttpServerResponse {
-                            header,
-                            body: vec![],
-                        });
+                        let _ = response_sender.send(HttpServerResponse::new(header, vec![]));
                         continue;
                     }
                     if path == "/$report_error" {
@@ -1851,10 +1988,7 @@ fn start_wasm_server(
                         Cache-Control: max-age:0\r\n\
                         Connection: close\r\n\r\n"
                             .to_string();
-                        let _ = response_sender.send(HttpServerResponse {
-                            header,
-                            body: vec![],
-                        });
+                        let _ = response_sender.send(HttpServerResponse::new(header, vec![]));
                         continue;
                     }
 
@@ -1867,7 +2001,7 @@ fn start_wasm_server(
                             Connection: close\r\n\r\n",
                             body.len()
                         );
-                        let _ = response_sender.send(HttpServerResponse { header, body });
+                        let _ = response_sender.send(HttpServerResponse::new(header, body));
                         continue;
                     }
 
@@ -1927,7 +2061,7 @@ fn start_wasm_server(
                             Connection: close\r\n\r\n",
                             body.len()
                         );
-                        let _ = response_sender.send(HttpServerResponse { header, body });
+                        let _ = response_sender.send(HttpServerResponse::new(header, body));
                         continue;
                     };
 
@@ -1971,7 +2105,7 @@ fn start_wasm_server(
                                         body.len()
                                     );
                                     let _ =
-                                        response_sender.send(HttpServerResponse { header, body });
+                                        response_sender.send(HttpServerResponse::new(header, body));
                                     continue;
                                 }
                             }
@@ -2008,7 +2142,7 @@ fn start_wasm_server(
                                 cache_extra,
                                 body.len()
                             );
-                            let _ = response_sender.send(HttpServerResponse { header, body });
+                            let _ = response_sender.send(HttpServerResponse::new(header, body));
                         }
                     } else {
                         println!("Wasm webserver 404 (missing file): {}", headers.path);
@@ -2020,7 +2154,7 @@ fn start_wasm_server(
                             Connection: close\r\n\r\n",
                             body.len()
                         );
-                        let _ = response_sender.send(HttpServerResponse { header, body });
+                        let _ = response_sender.send(HttpServerResponse::new(header, body));
                     }
                 }
                 HttpServerRequest::Post {
@@ -2040,10 +2174,7 @@ fn start_wasm_server(
                             Cache-Control: max-age:0\r\n\
                             Connection: close\r\n\r\n"
                             .to_string();
-                        let _ = response.send(HttpServerResponse {
-                            header,
-                            body: vec![],
-                        });
+                        let _ = response.send(HttpServerResponse::new(header, vec![]));
                     } else {
                         let body = b"Not found".to_vec();
                         let header = format!(
@@ -2053,8 +2184,14 @@ fn start_wasm_server(
                             Connection: close\r\n\r\n",
                             body.len()
                         );
-                        let _ = response.send(HttpServerResponse { header, body });
+                        let _ = response.send(HttpServerResponse::new(header, body));
                     }
+                }
+                HttpServerRequest::PostPending { body, .. } => {
+                    body.reject(HttpServerResponse::new(
+                        "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into(),
+                        Vec::new(),
+                    ));
                 }
             }
         }
@@ -2092,6 +2229,41 @@ fn client_accepts_brotli(header: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_wasm_config() -> WasmConfig {
+        WasmConfig {
+            strip: false,
+            lan: false,
+            port: None,
+            brotli: false,
+            bindgen: false,
+            threads: true,
+            optimize_size: false,
+            wasm_opt: false,
+            production: false,
+            lto: false,
+            no_location_detail: false,
+            size_report: false,
+            keep_names: false,
+            split: false,
+            split_auto: false,
+            split_functions: false,
+            split_functions_threshold: 200,
+            hot_reload: false,
+        }
+    }
+
+    #[test]
+    fn generated_html_keeps_early_hooks_and_delegates_to_crash_reporter() {
+        let html = generate_html("demo", None, None, false, &test_wasm_config());
+        assert!(html.contains("window.addEventListener('error'"));
+        assert!(html.contains("window.addEventListener('unhandledrejection'"));
+        assert!(html.contains("window.makepad_report_browser_issue = reportBrowserIssue"));
+        assert!(html.contains("window.makepad_crash_reporter"));
+        assert!(html.contains("await import('./makepad_platform/web.js')"));
+        assert!(html.contains("makepad_crash_reporter.set_wasm(wasm)"));
+        assert!(html.contains("/$report_error?data="));
+    }
 
     #[test]
     fn script_mod_extraction_ignores_non_code_segments() {
@@ -2166,27 +2338,47 @@ mod tests {
     }
 
     #[test]
-    fn small_font_fallbacks_cover_heavy_widget_fonts() {
+    fn parses_binaryen_version_output() {
         assert_eq!(
-            small_font_fallback_target("GoNotoKurrent-Bold.ttf"),
-            Some("IBMPlexSans-SemiBold.ttf")
+            parse_binaryen_version("wasm-opt version 123 (git deadbeef)"),
+            Some(123)
         );
-        assert_eq!(
-            small_font_fallback_target("GoNotoKurrent-Regular.ttf"),
-            Some("IBMPlexSans-Text.ttf")
-        );
-        assert_eq!(
-            small_font_fallback_target("LXGWWenKaiBold.ttf"),
-            Some("IBMPlexSans-Text.ttf")
-        );
-        assert_eq!(
-            small_font_fallback_target("LXGWWenKaiRegular.ttf"),
-            Some("IBMPlexSans-Text.ttf")
-        );
-        assert_eq!(
-            small_font_fallback_target("NotoColorEmoji.ttf"),
-            Some("IBMPlexSans-Text.ttf")
-        );
-        assert_eq!(small_font_fallback_target("IBMPlexSans-Text.ttf"), None);
+        assert_eq!(parse_binaryen_version("unexpected output"), None);
+    }
+
+    #[test]
+    fn package_artifacts_are_the_hashed_or_legacy_outputs_only() {
+        for name in [
+            "app.wasm",
+            "app.wasm.br",
+            "app.0123456789abcdef.wasm",
+            "app.0123456789abcdef.wasm.br",
+            "app.secondary.wasm",
+            "app.secondary.fedcba9876543210.wasm.br",
+            "app.data.bin",
+            "app.data.0123456789abcdef.bin.br",
+        ] {
+            assert!(is_package_artifact("app", name), "{name}");
+        }
+        for name in [
+            "app.names.wasm",
+            "application.wasm",
+            "app.0123.wasm",
+            "app.0123456789abcdeg.wasm",
+            "app.data.wasm",
+            "app.secondary.bin",
+            "index.html",
+            "app.wasm.br.old",
+        ] {
+            assert!(!is_package_artifact("app", name), "{name}");
+        }
+    }
+
+    #[test]
+    fn content_hash_is_stable_and_content_sensitive() {
+        assert_eq!(content_hash_hex(b""), "cbf29ce484222325");
+        assert_eq!(content_hash_hex(b"a"), "af63dc4c8601ec8c");
+        assert_ne!(content_hash_hex(b"ab"), content_hash_hex(b"ba"));
+        assert_eq!(content_hash_hex(b"makepad").len(), 16);
     }
 }

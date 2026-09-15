@@ -1,6 +1,6 @@
-//! Pins headless render-to-texture: the `CachedView` in this example renders
+//! Pins gpusim render-to-texture: the `CachedView` in this example renders
 //! its children into a child `DrawPass` and composites the resulting texture
-//! back with a quad. When the headless rasterizer skips child passes, the
+//! back with a quad. When the gpusim rasterizer skips child passes, the
 //! composite samples an empty texture and the whole window comes out one flat
 //! colour — which is exactly what this test refuses to accept.
 
