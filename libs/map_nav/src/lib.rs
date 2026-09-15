@@ -17,3 +17,4 @@ pub mod graph;
 pub mod nav;
 pub mod search;
 pub mod searchdb;
+pub mod search_service;

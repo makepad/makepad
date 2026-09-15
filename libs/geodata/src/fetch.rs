@@ -14,10 +14,11 @@
 //! `fetch_source` with the source's `recheck_days` (e.g. 1-2 days for the NDW
 //! charger file) and it does the right thing.
 
+use makepad_micro_serde::*;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
 
 pub const USER_AGENT: &str =
     "makepad-geodata/0.1 (bulk open-data fetcher; contact: rik@n4.io)";
@@ -69,28 +70,37 @@ fn meta_path(cache_dir: &Path, spec: &SourceSpec) -> PathBuf {
 
 fn read_fetched_unix(cache_dir: &Path, spec: &SourceSpec) -> Option<u64> {
     let text = std::fs::read_to_string(meta_path(cache_dir, spec)).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let value = JsonValue::deserialize_json(&text).ok()?;
     value.get("fetched_unix")?.as_u64()
 }
 
+/// `<file>.meta.json` next to a cached source: provenance plus the fetch
+/// time the revalidation gate reads.
+#[derive(SerJson)]
+struct FetchMeta {
+    id: String,
+    url: String,
+    license: String,
+    attribution: String,
+    fetched_unix: u64,
+    bytes: u64,
+}
+
 fn write_meta(cache_dir: &Path, spec: &SourceSpec, bytes: u64) -> std::io::Result<()> {
-    let meta = serde_json::json!({
-        "id": spec.id,
-        "url": spec.url,
-        "license": spec.license,
-        "attribution": spec.attribution,
-        "fetched_unix": now_unix(),
-        "bytes": bytes,
-    });
+    let meta = FetchMeta {
+        id: spec.id.to_string(),
+        url: spec.url.to_string(),
+        license: spec.license.to_string(),
+        attribution: spec.attribution.to_string(),
+        fetched_unix: now_unix(),
+        bytes,
+    };
     let mut file = std::fs::File::create(meta_path(cache_dir, spec))?;
-    file.write_all(serde_json::to_string_pretty(&meta).unwrap().as_bytes())
+    file.write_all(meta.serialize_json_pretty().as_bytes())
 }
 
 fn now_unix() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    crate::clock::now_unix()
 }
 
 /// Fetch one source into the cache directory, politely. Returns the cached

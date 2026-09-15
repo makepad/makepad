@@ -14,6 +14,8 @@
 use crate::mvt::AttrVal;
 use crate::wkb::Geometry;
 use makepad_mbtile_reader::{MbtilesWriter, WriterValue};
+use makepad_micro_serde::{JsonValue, SerJson};
+use std::collections::HashMap;
 
 /// Grid zoom for the cell index: 4096 x 4096 cells world-wide, ~10 km cells
 /// at NL latitude — small enough to prune, big enough to keep ranges few.
@@ -85,29 +87,25 @@ impl SidecarBuilder {
                 AttrVal::Str(s) => Some(s.clone()),
                 _ => None,
             });
-        let mut map = serde_json::Map::with_capacity(attrs.len());
+        let mut map = HashMap::with_capacity(attrs.len());
         for (key, value) in attrs {
             let json = match value {
-                AttrVal::Str(s) => serde_json::Value::String(s.clone()),
-                AttrVal::Int(i) => serde_json::Value::from(*i),
-                AttrVal::Float(f) => serde_json::Value::from(*f),
-                AttrVal::Bool(b) => serde_json::Value::Bool(*b),
+                AttrVal::Str(s) => JsonValue::String(s.clone()),
+                AttrVal::Int(i) => JsonValue::from(*i),
+                AttrVal::Float(f) => JsonValue::from(*f),
+                AttrVal::Bool(b) => JsonValue::Bool(*b),
             };
             map.insert(key.clone(), json);
         }
         let ring_json = if want_ring {
             exterior_ring(geometry).map(|ring| {
                 let simplified = simplify_ring(&ring);
-                let pts: Vec<serde_json::Value> = simplified
+                // `[[lon,lat],...]`, 5 decimals (~1 m).
+                let pts: Vec<(f64, f64)> = simplified
                     .iter()
-                    .map(|&(lon, lat)| {
-                        serde_json::json!([
-                            (lon * 1e5).round() / 1e5,
-                            (lat * 1e5).round() / 1e5
-                        ])
-                    })
+                    .map(|&(lon, lat)| ((lon * 1e5).round() / 1e5, (lat * 1e5).round() / 1e5))
                     .collect();
-                serde_json::Value::Array(pts).to_string()
+                pts.serialize_json()
             })
         } else {
             None
@@ -117,7 +115,9 @@ impl SidecarBuilder {
             layer: layer.to_string(),
             name,
             bbox,
-            attrs_json: serde_json::Value::Object(map).to_string(),
+            // Keys sorted by the serializer: the same feature always gets
+            // the same text.
+            attrs_json: JsonValue::Object(map).serialize_json(),
             ring_json,
         });
     }

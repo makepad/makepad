@@ -3,7 +3,10 @@
 //! point (norm × 2³²) in the file formats.
 
 pub const EQUATOR_CIRCUMFERENCE_M: f64 = 40_075_016.686;
+pub const EARTH_RADIUS_M: f64 = 6_371_000.0;
 pub const MAX_MERCATOR_LAT: f64 = 85.051_128_78;
+/// Maximum route geometry accepted on either side of the hosted API.
+pub const MAX_ROUTE_POINTS: usize = 20_000;
 
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct LonLat {
@@ -53,12 +56,64 @@ pub fn fixed_to_lon_lat(x: u32, y: u32) -> LonLat {
 
 /// Great-circle distance in meters.
 pub fn haversine_m(a: LonLat, b: LonLat) -> f64 {
-    const EARTH_RADIUS_M: f64 = 6_371_008.8;
     let (lat1, lat2) = (a.lat.to_radians(), b.lat.to_radians());
     let dlat = lat2 - lat1;
     let dlon = (b.lon - a.lon).to_radians();
     let h = (dlat * 0.5).sin().powi(2) + lat1.cos() * lat2.cos() * (dlon * 0.5).sin().powi(2);
     2.0 * EARTH_RADIUS_M * h.sqrt().asin()
+}
+
+/// Cumulative great-circle distance for every point in a polyline.
+pub fn cumulative_distances(line: &[LonLat]) -> Option<Vec<f64>> {
+    if line.is_empty() || line.len() > MAX_ROUTE_POINTS {
+        return None;
+    }
+    let mut cumulative = Vec::with_capacity(line.len());
+    cumulative.push(0.0);
+    let mut total = 0.0;
+    for segment in line.windows(2) {
+        total += haversine_m(segment[0], segment[1]);
+        if !total.is_finite() {
+            return None;
+        }
+        cumulative.push(total);
+    }
+    Some(cumulative)
+}
+
+/// Samples a polyline at fixed great-circle-distance intervals. The caller's
+/// distance metadata is deliberately irrelevant: segment lengths are always
+/// recomputed from the geometry.
+pub fn sample_polyline(line: &[LonLat], spacing_m: f64) -> Vec<(LonLat, f64)> {
+    let mut samples = Vec::new();
+    if line.is_empty() || !spacing_m.is_finite() || spacing_m <= 0.0 {
+        return samples;
+    }
+    samples.push((line[0], 0.0));
+    let mut cumulative = 0.0;
+    let mut next_at = spacing_m;
+    for segment in line.windows(2) {
+        let length = haversine_m(segment[0], segment[1]);
+        if !length.is_finite() || length <= 0.0 {
+            continue;
+        }
+        while next_at <= cumulative + length {
+            let fraction = (next_at - cumulative) / length;
+            samples.push((
+                LonLat::new(
+                    segment[0].lon + (segment[1].lon - segment[0].lon) * fraction,
+                    segment[0].lat + (segment[1].lat - segment[0].lat) * fraction,
+                ),
+                next_at,
+            ));
+            next_at += spacing_m;
+        }
+        cumulative += length;
+    }
+    if cumulative - samples.last().expect("start sample").1 > spacing_m * 0.5 {
+        samples.push((*line.last().expect("non-empty polyline"), cumulative));
+    }
+    samples
 }
 
 /// Initial bearing from `a` to `b` in degrees, 0 = north, clockwise, 0..360.
@@ -156,5 +211,26 @@ mod tests {
         let (p, t) = project_on_segment((-1.0, 1.0), (0.0, 0.0), (1.0, 0.0));
         assert_eq!(p, (0.0, 0.0));
         assert_eq!(t, 0.0);
+    }
+
+    #[test]
+    fn sampling_recomputes_segment_distances() {
+        let line = [
+            LonLat::new(0.0, 0.0),
+            LonLat::new(0.045, 0.0),
+            LonLat::new(0.09, 0.0),
+        ];
+        let cumulative = cumulative_distances(&line).unwrap();
+        assert!(cumulative[1] > 4_900.0 && cumulative[1] < 5_100.0);
+        let samples = sample_polyline(&line, 3_000.0);
+        assert_eq!(samples[1].1, 3_000.0);
+        assert!(samples[1].0.lon < line[1].lon, "3 km must land in the first segment");
+    }
+
+    #[test]
+    fn sampling_half_spacing_boundary_uses_shared_earth_radius() {
+        let line = [LonLat::new(0.0, 0.0), LonLat::new(0.004496606231, 0.0)];
+        assert!(haversine_m(line[0], line[1]) < 500.0);
+        assert_eq!(sample_polyline(&line, 1_000.0), vec![(line[0], 0.0)]);
     }
 }
