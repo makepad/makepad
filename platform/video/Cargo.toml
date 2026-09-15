@@ -1,9 +1,13 @@
 [package]
-name = "makepad-video"
+name = "makepad-platform-video"
 version = "1.0.0"
 edition = "2021"
 description = "Offline hardware video file encode/decode (Media Foundation / VideoToolbox), no Cx"
 license = "MIT OR Apache-2.0"
+
+[lib]
+name = "makepad_video"
+path = "src/lib.rs"
 
 [dependencies]
 
