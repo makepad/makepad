@@ -1,4 +1,4 @@
-//! The one-frame `GameWorld` consumed by Fab's realtime viewport.
+//! The one-frame `World` consumed by Fab's realtime viewport.
 //!
 //! The building carries its own site, so this stage has no terrain or extra
 //! entities. Its default sky selects the engine's analytic dome; Fab supplies
@@ -6,7 +6,7 @@
 
 use crate::api::*;
 use crate::viewport::pack::to_render;
-use makepad_game_sim::{GameWorld, SkyConfig, SunConfig};
+use makepad_scene::{World, SkyConfig, SunConfig};
 
 /// Sun elevation below which the shadow rig is off and the sky takes over.
 const NIGHT_DEG: f32 = 0.5;
@@ -17,14 +17,11 @@ pub(crate) fn haze_density(amount: f32) -> f32 {
     amount.clamp(0.0, 1.0) * MAX_HAZE_DENSITY
 }
 
-pub fn stage_world(state: &AppState, camera: &Camera) -> GameWorld {
-    let mut world = GameWorld::new();
-    world.entities.clear();
-    world.next_id = 1;
-    world.terrain = None;
-    world.cam_target = to_render(camera.target);
-    world.cam_distance = camera.distance().max(0.5);
-    world.cam_fov = camera.fov_y_deg.clamp(20.0, 120.0);
+pub fn stage_world(state: &AppState, camera: &Camera) -> World {
+    let mut world = World::new();
+    world.camera.target = to_render(camera.target);
+    world.camera.distance = camera.distance().max(0.5);
+    world.camera.fov = camera.fov_y_deg.clamp(20.0, 120.0);
 
     let sky = &state.sun;
     let sun_up = sky.elevation_deg() > NIGHT_DEG;

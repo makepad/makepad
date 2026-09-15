@@ -17,3 +17,8 @@ makepad-csg-boolean = { path = "../csg_boolean", default-features = false }
 makepad-csg-primitives = { path = "../csg_primitives" }
 makepad-csg-sdf = { path = "../csg_sdf", default-features = false }
 makepad-script = { path = "../../../platform/script", version = "1.0.0" }
+makepad-gltf = { path = "../../gltf" }
+makepad-zune-png = { path = "../../zune/zune-png" }
+
+[dev-dependencies]
+makepad-render = { path = "../../render" }

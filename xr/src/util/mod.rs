@@ -1,3 +1,4 @@
+pub(crate) mod clock;
 pub mod depth_debug_mesh;
 pub(crate) mod depth_debug_mesh_worker;
 pub mod gltf_bridge;

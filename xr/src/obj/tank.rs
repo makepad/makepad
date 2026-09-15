@@ -1042,15 +1042,15 @@ impl TankSceneRuntime {
         self.tank_projectile_next_emit_at = Some(next_emit_at);
     }
 
-    // The headless platform backend has no game input implementation on
-    // macOS/Windows targets; the headless integration tests drive the tank
+    // The gpusim platform backend has no game input implementation on
+    // macOS/Windows targets; the gpusim integration tests drive the tank
     // through synthetic XR controllers instead.
-    #[cfg(headless)]
+    #[cfg(gpusim)]
     fn desktop_gamepad_tank_input(&self, _cx: &mut Cx) -> Option<DesktopTankInput> {
         None
     }
 
-    #[cfg(not(headless))]
+    #[cfg(not(gpusim))]
     fn desktop_gamepad_tank_input(&self, cx: &mut Cx) -> Option<DesktopTankInput> {
         let mut best_input = None;
         let mut best_score = 0.0f32;
