@@ -561,7 +561,7 @@ impl Default for SkyState {
 
 impl SkyState {
     /// How much brighter the sun is than the sky it hangs in, at full
-    /// daylight — see [`makepad_game_sim::SunConfig::daylight_balance`].
+    /// daylight — see [`makepad_scene::SunConfig::daylight_balance`].
     ///
     /// The engine's stock split is about 2.6:1, a soft key that suits a
     /// stylised world and reads as a bright overcast day: shadows fill in,

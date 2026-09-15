@@ -8,7 +8,7 @@
 //! called "night" while the true sun still stood golden above the horizon.
 
 use makepad_draw::*;
-use makepad_game_sim::SunConfig;
+use makepad_scene::SunConfig;
 use makepad_render::sky::{luminance, noaa_solar_position, SkyDate};
 use makepad_render::sun::{resolve_sun, solar_dir};
 

@@ -315,8 +315,11 @@ impl WidgetNode for XrSceneView {
 }
 
 impl Widget for XrSceneView {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.camera.handle_desktop_interaction(cx, event);
+        for (_, child) in &self.children {
+            child.handle_event(cx, event, scope);
+        }
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {

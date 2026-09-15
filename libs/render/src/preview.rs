@@ -1,11 +1,11 @@
 //! Orbit camera + empty stage for Asset UI / VJ mesh preview.
 //!
-//! Viewers do not own a GameWorld. They pass a [`PreviewLook`] and optional
+//! Viewers do not own a World. They pass a [`PreviewLook`] and optional
 //! ground/sky flags; the renderer builds the one-frame dummy the existing
 //! scene pass still wants.
 
 use makepad_draw::*;
-use makepad_game_sim::{BodyKind, Entity, GameWorld, SkyConfig};
+use makepad_scene::{BodyKind, Entity, World, SkyConfig};
 
 use crate::{SceneDraws, Renderer, SkinnedBatch};
 
@@ -95,8 +95,8 @@ pub fn preview_scene_state(look: PreviewLook, rect: Rect, time: f64) -> Option<S
     })
 }
 
-fn preview_world(look: PreviewLook, stage: PreviewStage) -> GameWorld {
-    let mut world = GameWorld::new();
+fn preview_world(look: PreviewLook, stage: PreviewStage) -> World {
+    let mut world = World::new();
     if stage.ground {
         let ground_color = if stage.dark {
             vec4(0.025, 0.028, 0.032, 1.0)
@@ -109,12 +109,9 @@ fn preview_world(look: PreviewLook, stage: PreviewStage) -> GameWorld {
             pos: vec3f(0.0, -0.25, 0.0),
             half: vec3f(stage.ground_half, 0.25, stage.ground_half),
             color: ground_color,
-            collide: true,
             scale: vec3f(1.0, 1.0, 1.0),
-            scale_target: vec3f(1.0, 1.0, 1.0),
             ..Default::default()
         }];
-        world.next_id = 2;
     } else {
         world.entities.clear();
     }
@@ -138,16 +135,16 @@ fn preview_world(look: PreviewLook, stage: PreviewStage) -> GameWorld {
         world.sun.shadow_alpha = Some(0.85);
     }
     world.terrain = None;
-    world.cam_target = look.target;
-    world.cam_distance = look.distance;
-    world.cam_fov = look.fov;
+    world.camera.target = look.target;
+    world.camera.distance = look.distance;
+    world.camera.fov = look.fov;
     world.mark_render_dirty();
     world
 }
 
 impl Renderer {
     /// Draw models + optional skinned batch on a preview stage.
-    /// No caller-owned GameWorld.
+    /// No caller-owned World.
     pub fn draw_preview(
         &mut self,
         cx: &mut Cx3d,

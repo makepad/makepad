@@ -21,8 +21,9 @@ use crate::obj::splat_sort::{
 };
 use makepad_splat::{load_splat_from_bytes, SplatFileFormat};
 use makepad_widgets::{makepad_derive_widget::*, makepad_draw::*, widget::*};
-use std::{mem, path::PathBuf, rc::Rc, sync::mpsc::TryRecvError, time::Instant};
+use std::{mem, path::PathBuf, rc::Rc, sync::mpsc::TryRecvError};
 
+use crate::util::clock::Instant;
 use crate::util::scene_draw::{
     compose_scene_node_transform, scene_node_world_transform_from_cx, scene_state_from_cx,
     SceneState3D,
@@ -38,7 +39,9 @@ script_mod! {
     mod.draw.DrawSplat = set_type_default() do #(DrawSplat::script_shader(vm)){
         alpha_blend: true
         depth_write: false
-        backface_culling: true
+        // Projected Gaussian billboards have no back face: their ellipse
+        // basis can reverse winding, including in an offscreen scene pass.
+        backface_culling: false
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
         draw_call: uniform_buffer(draw.DrawCallUniforms)
@@ -454,6 +457,14 @@ pub struct ViewSplat {
 
     #[rust]
     loaded_src_handle: Option<ScriptHandle>,
+    /// Host-supplied scene bytes (a typed setter, no resource handle);
+    /// `bytes_generation` counts sets so a draw decodes each one once.
+    #[rust]
+    bytes_src: Option<Rc<Vec<u8>>>,
+    #[rust]
+    bytes_generation: u64,
+    #[rust]
+    loaded_bytes_generation: u64,
     #[rust]
     scene_format: Option<SplatFileFormat>,
     #[rust]
@@ -599,6 +610,15 @@ impl ViewSplat {
         self.scale = scale;
     }
 
+    /// Show a scene from bytes the host already holds (a flow value, a
+    /// download). Decoding happens on the next draw, like `src`; a later
+    /// call replaces the scene. Typed, so a host whose widgets live in an
+    /// isolate never needs a script apply.
+    pub fn set_scene_bytes(&mut self, bytes: Vec<u8>) {
+        self.bytes_src = Some(Rc::new(bytes));
+        self.bytes_generation = self.bytes_generation.wrapping_add(1);
+    }
+
     /// Measured load/build/upload/sort costs (see [`ViewSplatStats`]).
     pub fn stats(&self) -> &ViewSplatStats {
         &self.stats
@@ -607,22 +627,25 @@ impl ViewSplat {
     /// True once the source resource has been decoded (or failed) and the
     /// GPU representation for it exists.
     pub fn is_scene_ready(&self) -> bool {
-        self.loaded_src_handle.is_some() && self.gpu_scene.is_some()
+        let decoded = self.loaded_src_handle.is_some()
+            || (self.bytes_src.is_some() && self.loaded_bytes_generation == self.bytes_generation);
+        decoded && self.gpu_scene.is_some()
     }
 
-    fn resource_metadata_by_handle(cx: &mut Cx, handle: ScriptHandle) -> Option<(PathBuf, bool)> {
+    fn resource_metadata_by_handle(cx: &mut Cx, heap_key: usize, handle: ScriptHandle) -> Option<(PathBuf, bool)> {
         let resources = cx.script_data.resources.resources.borrow();
         let resource = resources
             .iter()
-            .find(|resource| resource.has_handle(handle))?;
+            .find(|resource| resource.has_handle(heap_key, handle))?;
         Some((PathBuf::from(&resource.abs_path), resource.is_error()))
     }
 
     fn resolve_resource(cx: &mut Cx, handle_ref: &ScriptHandleRef) -> ResourceResolve {
         let handle = handle_ref.as_handle();
+        let heap_key = handle_ref.heap_key();
 
-        if let Some(data) = cx.get_resource(handle) {
-            let abs_path = Self::resource_metadata_by_handle(cx, handle)
+        if let Some(data) = cx.get_resource(heap_key, handle) {
+            let abs_path = Self::resource_metadata_by_handle(cx, heap_key, handle)
                 .map(|metadata| metadata.0)
                 .unwrap_or_else(|| PathBuf::from("resource"));
             return ResourceResolve::Ready {
@@ -632,10 +655,10 @@ impl ViewSplat {
             };
         }
 
-        cx.load_script_resource(handle);
+        cx.load_script_resource(heap_key, handle);
 
-        if let Some(data) = cx.get_resource(handle) {
-            let abs_path = Self::resource_metadata_by_handle(cx, handle)
+        if let Some(data) = cx.get_resource(heap_key, handle) {
+            let abs_path = Self::resource_metadata_by_handle(cx, heap_key, handle)
                 .map(|metadata| metadata.0)
                 .unwrap_or_else(|| PathBuf::from("resource"));
             return ResourceResolve::Ready {
@@ -645,7 +668,7 @@ impl ViewSplat {
             };
         }
 
-        if let Some((_, is_error)) = Self::resource_metadata_by_handle(cx, handle) {
+        if let Some((_, is_error)) = Self::resource_metadata_by_handle(cx, heap_key, handle) {
             if is_error {
                 return ResourceResolve::Error { handle };
             }
@@ -682,9 +705,14 @@ impl ViewSplat {
             return;
         }
         self.depth_sort_request_tx.new_channel();
-        let request_rx = self.depth_sort_request_tx.receiver();
+        let request_rx = self
+            .depth_sort_request_tx
+            .receiver()
+            .expect("depth sort receiver is taken exactly once per channel");
         let result_tx = self.depth_sort_result_rx.sender();
-        cx.spawn_thread(move || run_sort_worker(request_rx, result_tx));
+        if let Ok(task) = cx.spawn_worker(move || run_sort_worker(request_rx, result_tx)) {
+            task.detach();
+        }
         self.depth_sort_thread_started = true;
     }
 
@@ -890,6 +918,20 @@ impl ViewSplat {
     }
 
     fn ensure_scene_loaded(&mut self, cx: &mut CxDraw) {
+        if let Some(bytes) = self.bytes_src.clone() {
+            if self.loaded_bytes_generation != self.bytes_generation {
+                let load_started = Instant::now();
+                let loaded = load_splat_from_bytes(&bytes, None);
+                self.stats = ViewSplatStats {
+                    load_ms: load_started.elapsed().as_secs_f64() * 1000.0,
+                    ..Default::default()
+                };
+                self.install_decoded(loaded, "host bytes");
+                self.loaded_bytes_generation = self.bytes_generation;
+                self.loaded_src_handle = None;
+            }
+            return;
+        }
         let Some(handle_ref) = self.src.as_ref() else {
             return;
         };
@@ -911,21 +953,7 @@ impl ViewSplat {
                     load_ms: load_started.elapsed().as_secs_f64() * 1000.0,
                     ..Default::default()
                 };
-                match loaded {
-                    Ok(scene) => {
-                        self.scene_antialias = scene.antialias;
-                        self.scene_format = Some(scene.format);
-                        self.update_scene_fit(&scene);
-                        self.pending_scene = Some(scene);
-                        self.reset_depth_sort_state_for_new_scene();
-                    }
-                    Err(error) => {
-                        log!("ViewSplat parse error ({}): {}", abs_path.display(), error);
-                        self.pending_scene = None;
-                        self.scene_format = None;
-                        self.reset_depth_sort_state_for_new_scene();
-                    }
-                }
+                self.install_decoded(loaded, &abs_path.display().to_string());
                 self.loaded_src_handle = Some(handle);
             }
             ResourceResolve::Error { handle } => {
@@ -938,6 +966,29 @@ impl ViewSplat {
                 let _ = handle;
             }
             ResourceResolve::Missing => {}
+        }
+    }
+
+    /// A decoded scene (or its error) becomes the pending scene for upload.
+    fn install_decoded(
+        &mut self,
+        loaded: Result<makepad_splat::SplatScene, makepad_splat::SplatError>,
+        origin: &str,
+    ) {
+        match loaded {
+            Ok(scene) => {
+                self.scene_antialias = scene.antialias;
+                self.scene_format = Some(scene.format);
+                self.update_scene_fit(&scene);
+                self.pending_scene = Some(scene);
+                self.reset_depth_sort_state_for_new_scene();
+            }
+            Err(error) => {
+                log!("ViewSplat parse error ({origin}): {error}");
+                self.pending_scene = None;
+                self.scene_format = None;
+                self.reset_depth_sort_state_for_new_scene();
+            }
         }
     }
 
@@ -1157,7 +1208,13 @@ impl Widget for ViewSplat {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         if let Event::Signal = event {
             if self.poll_depth_sort_results() {
-                self.draw_splat.redraw(cx);
+                // The first sort completes before this widget has submitted
+                // any instances, so there is no draw area to invalidate yet.
+                if self.draw_splat.draw_vars.area.is_empty() {
+                    cx.redraw_all();
+                } else {
+                    self.draw_splat.redraw(cx);
+                }
             }
         }
     }
