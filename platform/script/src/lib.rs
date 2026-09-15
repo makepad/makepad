@@ -14,6 +14,7 @@ macro_rules! script_eval {
 }
 
 pub mod colorhex;
+mod clock;
 pub mod docs;
 pub mod gen_index;
 pub mod heap;

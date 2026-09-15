@@ -2,6 +2,7 @@ use {
     crate::{
         area::Area,
         cx::Cx,
+        file_dialogs::VirtualFile,
         event::{
             event::{DragHit, Event},
             finger::{HitOptions, Inset},
@@ -74,6 +75,10 @@ pub enum DragItem {
         value: String,
         internal_id: Option<LiveId>,
     },
+    /// A browser-selected file whose bytes live only in the application.
+    /// Web hover events use empty values as count/type placeholders; the
+    /// values on [`Event::Drop`] always contain the complete file bytes.
+    VirtualFile(VirtualFile),
 }
 
 /*

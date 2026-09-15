@@ -18,6 +18,10 @@ use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::time::Instant;
 
+pub(crate) fn wake_ui_event_loop() {
+    // Headless bounded loops do not sleep in an OS wait primitive.
+}
+
 #[derive(Default, Clone)]
 pub struct CxOsDrawList {}
 
@@ -72,6 +76,7 @@ pub struct CxOs {
     pub(crate) frame_dir: Option<PathBuf>,
     pub(crate) no_draw: bool,
     pub(crate) no_draw_initialized: bool,
+    pub(crate) bounded_started: bool,
     pub(crate) draw_cycles: Option<usize>,
     /// BGRA -> RGBAf32 conversions of sampled textures, kept ACROSS frames.
     /// Rebuilding this per frame re-converted the whole glyph atlas on every
@@ -99,6 +104,7 @@ impl Default for CxOs {
             frame_dir: None,
             no_draw: false,
             no_draw_initialized: false,
+            bounded_started: false,
             draw_cycles: None,
             texture_conversions: Default::default(),
             render_targets: Default::default(),

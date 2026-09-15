@@ -1922,6 +1922,43 @@ pub type IOHIDValueRef = *mut c_void;
 pub type IOHIDElementRef = *mut c_void;
 #[cfg(target_os = "macos")]
 pub type IOHIDReportType = u32;
+#[cfg(target_os = "macos")]
+pub const kIOHIDReportTypeInput: IOHIDReportType = 0;
+#[cfg(target_os = "macos")]
+pub const kIOHIDReportTypeOutput: IOHIDReportType = 1;
+#[cfg(target_os = "macos")]
+pub const kIOHIDReportTypeFeature: IOHIDReportType = 2;
+#[cfg(target_os = "macos")]
+pub type IOHIDValueCallback = Option<
+    unsafe extern "C" fn(
+        context: *mut c_void,
+        result: IOReturn,
+        sender: *mut c_void,
+        value: IOHIDValueRef,
+    ),
+>;
+#[cfg(target_os = "macos")]
+#[link(name = "IOKit", kind = "framework")]
+extern "C" {
+    pub fn IOHIDDeviceSetReport(
+        device: IOHIDDeviceRef,
+        report_type: IOHIDReportType,
+        report_id: CFIndex,
+        report: *const u8,
+        report_length: CFIndex,
+    ) -> IOReturn;
+    pub fn IOHIDDeviceRegisterInputValueCallback(
+        device: IOHIDDeviceRef,
+        callback: IOHIDValueCallback,
+        context: *mut c_void,
+    );
+    pub fn IOHIDValueGetElement(value: IOHIDValueRef) -> IOHIDElementRef;
+    pub fn IOHIDValueGetIntegerValue(value: IOHIDValueRef) -> CFIndex;
+    pub fn IOHIDElementGetUsagePage(element: IOHIDElementRef) -> u32;
+    pub fn IOHIDElementGetUsage(element: IOHIDElementRef) -> u32;
+    pub fn IOHIDElementGetLogicalMin(element: IOHIDElementRef) -> CFIndex;
+    pub fn IOHIDElementGetLogicalMax(element: IOHIDElementRef) -> CFIndex;
+}
 
 #[cfg(target_os = "macos")]
 pub type IOHIDCallback =

@@ -15,6 +15,7 @@ use {
             CancelScope, CancelScopeKind, CxCancelScopes, CxDragDrop, CxFingers, CxKeyboard, DrawEvent, Event,
             NextFrame, Trigger, WindowGeomChangeEvent,
         },
+        file_dialogs::FileDialogState,
         geometry::CxGeometryPool,
         gpu_info::GpuInfo,
         os::CxOs,
@@ -39,7 +40,7 @@ use {
     },
     std::{
         any::{Any, TypeId},
-        cell::RefCell,
+        cell::{Cell, RefCell, UnsafeCell},
         collections::{HashMap, HashSet, VecDeque},
         rc::Rc,
         sync::Arc,
@@ -78,6 +79,7 @@ pub struct Cx {
     pub(crate) gpu_info: GpuInfo,
     pub(crate) xr_capabilities: XrCapabilities,
     pub(crate) cpu_cores: usize,
+    pub(crate) thread_spawner: crate::thread::ThreadSpawner,
     pub null_texture: Texture,
     pub null_cube_texture: Texture,
     pub windows: CxWindowPool,
@@ -107,6 +109,7 @@ pub struct Cx {
     pub(crate) ime_area: Area,
     pub keyboard_shift: f64,
     pub(crate) drag_drop: CxDragDrop,
+    pub(crate) file_dialogs: FileDialogState,
 
     pub(crate) platform_ops: VecDeque<CxOsOp>,
     pub(crate) pending_camera_playbacks: Vec<PendingCameraPlayback>,
@@ -126,7 +129,8 @@ pub struct Cx {
 
     pub os: CxOs,
     // (cratethis cuts the compiletime of an end-user application in half
-    pub(crate) event_handler: Option<Box<dyn FnMut(&mut Cx, &Event)>>,
+    pub(crate) event_handler: Rc<UnsafeCell<Box<dyn FnMut(&mut Cx, &Event)>>>,
+    pub(crate) event_handler_dispatch_active: Rc<Cell<bool>>,
 
     pub(crate) globals: Vec<(TypeId, Box<dyn Any>)>,
 
@@ -464,6 +468,10 @@ impl Cx {
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         crate::os::termination_signal::install();
 
+        makepad_network::install_ui_waker(Some(makepad_network::UiWaker::new(|| {
+            crate::thread::wake_ui_event_loop();
+        })));
+
         //#[cfg(any(target_arch = "wasm32", target_os = "android"))]
         //crate::makepad_error_log::set_panic_hook();
         // the null texture
@@ -517,7 +525,10 @@ impl Cx {
             demo_time_repaint: false,
             null_texture,
             null_cube_texture,
-            cpu_cores: 8,
+            cpu_cores: crate::thread::available_parallelism().get(),
+            thread_spawner: crate::thread::ThreadSpawner::for_current_thread(
+                crate::thread::available_parallelism().get(),
+            ),
             in_makepad_studio: false,
             game_input_remote: Vec::new(),
             in_draw_event: false,
@@ -550,6 +561,7 @@ impl Cx {
             cancel_scopes: Default::default(),
             fingers: Default::default(),
             drag_drop: Default::default(),
+            file_dialogs: Default::default(),
             ime_area: Default::default(),
             keyboard_shift: 0.0,
             platform_ops: Default::default(),
@@ -571,7 +583,8 @@ impl Cx {
 
             os: CxOs::default(),
 
-            event_handler: Some(event_handler),
+            event_handler: Rc::new(UnsafeCell::new(event_handler)),
+            event_handler_dispatch_active: Rc::new(Cell::new(false)),
 
             debug: Default::default(),
 

@@ -68,8 +68,7 @@ static METAL_LINK_TRACE_LAST_US: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
 fn metal_link_frame_trace_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("MAKEPAD_FRAME_TRACE").is_some())
+    crate::makepad_error_log::trace_enabled("frame")
 }
 
 pub(super) fn metal_link_trace_drawable_consumed() {
@@ -116,8 +115,9 @@ fn metal_link_trace_report() {
     let updates = METAL_LINK_TRACE_UPDATES.swap(0, std::sync::atomic::Ordering::AcqRel);
     let drawables = METAL_LINK_TRACE_DRAWABLES.swap(0, std::sync::atomic::Ordering::AcqRel);
     let presented = METAL_LINK_TRACE_PRESENTED.swap(0, std::sync::atomic::Ordering::AcqRel);
-    eprintln!(
-        "[frame-trace] metal-link interval_ms={:.1} updates_fired={} drawables_consumed={} presented={}",
+    crate::trace!(
+        "frame",
+        "metal-link interval_ms={:.1} updates_fired={} drawables_consumed={} presented={}",
         now_us.saturating_sub(last_us) as f64 / 1000.0,
         updates,
         drawables,
@@ -139,6 +139,29 @@ pub fn try_with_macos_app<R>(f: impl FnOnce(&mut MacosApp) -> R) -> Option<R> {
         Ok(mut app) => app.as_mut().map(f),
         Err(_) => None,
     })
+}
+
+/// Posts an application-defined event from any thread, waking AppKit's event
+/// wait without activating the application or any window.
+pub fn wake_event_loop() {
+    unsafe {
+        let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
+        let event: ObjcId = msg_send![
+            class!(NSEvent),
+            otherEventWithType: NSEventType::NSApplicationDefined
+            location: NSPoint { x: 0., y: 0. }
+            modifierFlags: 0u64
+            timestamp: 0f64
+            windowNumber: 0isize
+            context: nil
+            subtype: 0i16
+            data1: 0isize
+            data2: 0isize
+        ];
+        let app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
+        let () = msg_send![app, postEvent: event atStart: false];
+        let () = msg_send![pool, release];
+    }
 }
 
 /// Whether this process may activate itself or make a window key.
@@ -513,9 +536,8 @@ impl MacosApp {
                     // `MacosEvent::AppQuitRequested` from the main loop —
                     // i.e. *outside* any in-flight event handler — so apps
                     // can call `cx.request_quit` from their `QuitRequested`
-                    // arm without re-entering `call_event_handler` and
-                    // panicking on `event_handler.take().unwrap()`. Other
-                    // commands keep going through `menuAction:` →
+                    // arm without a rejected synchronous re-entry into
+                    // `call_event_handler`. Other commands keep going through `menuAction:` →
                     // `Event::MacosMenuCommand`.
                     let is_quit = *command == live_id!(quit);
                     let action = if is_quit {
@@ -1381,8 +1403,9 @@ impl MacosApp {
                             let () = msg_send![link, setPreferredFrameRateRange: requested_range];
                             let () = msg_send![link, setPreferredFrameLatency: 2isize];
                             if metal_link_frame_trace_enabled() {
-                                eprintln!(
-                                    "[frame-trace] metal-link defaults rate={:.1}..{:.1}@{:.1} latency={} requested={:.1} latency=2",
+                                crate::trace!(
+                                    "frame",
+                                    "metal-link defaults rate={:.1}..{:.1}@{:.1} latency={} requested={:.1} latency=2",
                                     default_range.minimum,
                                     default_range.maximum,
                                     default_range.preferred,
