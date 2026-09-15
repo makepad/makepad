@@ -879,7 +879,7 @@ impl Cx {
                     } else {
                         // Everything else reaches the widget as a KeyDown, including
                         // other Ctrl/Alt shortcuts like Ctrl+Enter or Ctrl+A.
-                        if makepad_keycode == KeyCode::Back {
+                        if makepad_keycode == KeyCode::Back && !is_repeat {
                             self.call_event_handler(&Event::BackPressed {
                                 handled: Cell::new(false),
                             });

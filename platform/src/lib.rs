@@ -134,6 +134,7 @@ pub use {
         sploded::{SplodedParams, SplodedView},
         event::{
             CancelScope,
+            CancelScopeKind,
             CharOffset,
             DigitDevice,
             DragEvent,

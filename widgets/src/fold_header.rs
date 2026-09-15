@@ -101,13 +101,28 @@ pub struct FoldHeader {
 }
 
 impl Widget for FoldHeader {
+    fn visit_cancel(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
+        if !self.visible() {
+            return false;
+        }
+        visit(id!(header), self.header.clone());
+        if self.body_is_active() {
+            visit(id!(body), self.body.clone());
+        }
+        true
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if self.animator_handle_event(cx, event).must_redraw() {
             self.area.redraw(cx);
         }
 
         self.header.handle_event(cx, event, scope);
-        self.body.handle_event(cx, event, scope);
+        let cancel = matches!(event, Event::BackPressed { .. })
+            || matches!(event, Event::KeyDown(key) | Event::KeyUp(key) if key.key_code == KeyCode::Escape);
+        if !cancel || self.body_is_active() {
+            self.body.handle_event(cx, event, scope);
+        }
 
         if let Event::Actions(actions) = event {
             let button = self.header.widget(cx, ids!(fold_button));
@@ -211,6 +226,14 @@ impl Widget for FoldHeader {
 }
 
 impl FoldHeader {
+    fn body_is_active(&self) -> bool {
+        if self.animator.groups.contains_key(&id!(active)) {
+            self.animator.in_state_id(ids!(active.on))
+        } else {
+            self.opened > 0.0
+        }
+    }
+
     pub fn set_is_open(&mut self, cx: &mut Cx, is_open: bool, animate: Animate) {
         self.animator_toggle(cx, is_open, animate, ids!(active.on), ids!(active.off));
         // Also toggle the fold button if it exists

@@ -728,6 +728,19 @@ impl Animator {
 
     /// Check if the animator is in a specific state
     pub fn in_state(&self, _cx: &Cx, state: &[LiveId; 2]) -> bool {
+        self.current_state_matches(state)
+    }
+
+    /// Inspect the requested state without a draw context. Cancel visibility must
+    /// follow a pending open/close even before its animation has drawn a frame.
+    pub(crate) fn in_state_id(&self, state: &[LiveId; 2]) -> bool {
+        if let Some(deferred) = self.deferred.iter().rev().find(|op| op.state[0] == state[0]) {
+            return deferred.state[1] == state[1];
+        }
+        self.current_state_matches(state)
+    }
+
+    fn current_state_matches(&self, state: &[LiveId; 2]) -> bool {
         let group_id = state[0];
         let state_id = state[1];
 

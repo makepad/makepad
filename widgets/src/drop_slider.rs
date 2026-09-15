@@ -188,7 +188,7 @@ impl DropSlider {
         if self.open != open {
             self.open = open;
             if open {
-                self.cancel_scope = Some(cx.begin_cancel_scope());
+                self.cancel_scope = Some(self.begin_cancel_scope(cx));
             } else if let Some(scope) = self.cancel_scope.take() {
                 cx.end_cancel_scope(scope);
             }
@@ -278,6 +278,10 @@ impl Widget for DropSlider {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         let uid = self.widget_uid();
+        if self.open && crate::modal::ModalAction::is_dismissal(event) {
+            self.set_open(cx, false);
+            return;
+        }
         if self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s))
             && event.back_pressed()
         {

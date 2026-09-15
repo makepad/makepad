@@ -2259,6 +2259,18 @@ impl WidgetNode for PortalList {
         }
     }
 
+    fn cancel_children_impl(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
+        let end = self.first_id.saturating_add(self.visible_items).min(self.range_end);
+        for row in &self.draw_align_list {
+            if row.index >= self.first_id.max(self.range_start) && row.index < end {
+                if let Some(item) = self.items.get(&row.index) {
+                    visit(LiveId(row.index as u64), item.widget.clone());
+                }
+            }
+        }
+        true
+    }
+
     fn skip_widget_tree_search(&self) -> bool {
         self.skip_widget_tree_search
     }

@@ -2820,8 +2820,9 @@ impl Widget for TextInput {
 
             Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Escape,
+                is_repeat: false,
                 ..
-            }) => {
+            }) if !cx.has_cancel_owner() => {
                 cx.widget_action(uid, TextInputAction::Escaped);
             }
             Hit::KeyDown(KeyEvent {

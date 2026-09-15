@@ -1615,6 +1615,13 @@ impl Cx {
         item.1.downcast_mut().unwrap()
     }
 
+    /// Reads a global without creating it or requiring mutable access to the context.
+    pub fn get_global_ref<T: 'static + Any>(&self) -> Option<&T> {
+        self.globals.iter()
+            .find(|item| item.0 == TypeId::of::<T>())
+            .and_then(|item| item.1.downcast_ref())
+    }
+
     pub fn has_global<T: 'static + Any>(&mut self) -> bool {
         self.globals
             .iter_mut()
