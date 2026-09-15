@@ -16,7 +16,11 @@ makepad-derive-widget = {path = "./derive_widget", version="2.0.0"}
 makepad-mbtile-reader = { path = "../libs/mbtile_reader", version = "1.0.0", optional = true }
 i_overlay = { path = "../libs/i_overlay", version = "7.0.3", optional = true, default-features = false }
 makepad-fast-inflate = { path = "../libs/fast_inflate", optional = true }
-makepad-voice = { path = "../libs/voice", version = "0.1.0", optional = true }
+# Silero VAD (the speech gate) from the speech model family; only that module.
+makepad-ai-speech = { path = "../libs/ai/models/speech", default-features = false, features = ["vad"], optional = true }
+# Speech-to-text sessions (Whisper here / machine / LAN, else the OS engine).
+# No default features: only the speech pipes, never the image/video backends.
+makepad-ai-hub = { path = "../libs/ai/hub", default-features = false, features = ["stt"], optional = true }
 makepad-cef = { path = "../libs/cef", optional = true }
 
 makepad-html = { path = "../libs/html", version = "1.0.0" }
@@ -31,7 +35,7 @@ serde = { version = "1.0", optional = true, features = ["derive"] }
 [features]
 default = []
 
-voice = ["dep:makepad-voice"]
+voice = ["dep:makepad-ai-speech", "dep:makepad-ai-hub"]
 maps = ["dep:makepad-mbtile-reader", "dep:makepad-fast-inflate", "dep:i_overlay"]
 pdf = ["dep:makepad-pdf-parse"]
 cef = ["dep:makepad-cef"]

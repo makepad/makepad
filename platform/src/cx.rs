@@ -155,6 +155,8 @@ pub struct Cx {
     /// `pending_script_reapply` whenever the change can be modeled as a
     /// shared-heap-object mutation instead.
     pub pending_live_edit_request: bool,
+    /// Re-evaluate Splash definitions while preserving imperative widget state.
+    pub pending_style_reload: bool,
 
     /// Which `Apply` variant the pending `Event::LiveEdit` should re-apply
     /// the freshly re-run `script_mod` value with. A file-change hot reload
@@ -180,7 +182,7 @@ pub struct Cx {
     pub performance_stats: PerformanceStats,
     /// Frame monitor behind the PerfGraph widget; off until the widget enables it.
     pub perf_monitor: PerfMonitor,
-    /// The F10 exploded z-layer inspection view. Inert while off.
+    /// The exploded z-layer inspection view. Inert while off.
     pub sploded: SplodedView,
     /// How many `WidgetRef` draw scopes deep the current draw is — the turtle
     /// nesting AS COMPONENTS SEE IT. Maintained by `WidgetRef::draw_walk` and
@@ -226,6 +228,10 @@ pub struct Cx {
     /// tree callbacks above; the /tweak routes in remote.rs delegate here so
     /// platform never depends on widgets. `(op, query/body params) -> JSON`.
     pub tweak_callback: Option<fn(&mut Cx, &str, &[(String, String)]) -> Result<String, String>>,
+    /// The AI chat overlay's remote dispatcher (`/ai`, `/ai/transcript`):
+    /// registered by the aichat crate when an app links it, the same way
+    /// the widgets crate registers the tweaker's. `(op, params) -> JSON`.
+    pub ai_callback: Option<fn(&mut Cx, &str, &[(String, String)]) -> Result<String, String>>,
 
     pub net: Arc<NetworkRuntime>,
 }
@@ -580,6 +586,7 @@ impl Cx {
 
             display_context: Default::default(),
             pending_script_reapply: false,
+            pending_style_reload: false,
             pending_live_edit_request: false,
             live_edit_apply: Apply::Reload,
             pending_window_geom_changes: Default::default(),
@@ -594,6 +601,7 @@ impl Cx {
             widget_snapshot_callback: None,
             cancel_scope_resolver: None,
             tweak_callback: None,
+            ai_callback: None,
             net,
 
             script_data: CxScriptData {

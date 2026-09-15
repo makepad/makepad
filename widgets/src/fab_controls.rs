@@ -26,7 +26,8 @@
 use crate::button::ButtonAction;
 use crate::widget_tree::CxWidgetExt;
 use crate::{
-    animator::*, makepad_derive_widget::*, makepad_draw::*, text_input::*, view::View, widget::*,
+    animator::*, makepad_derive_widget::*, makepad_draw::ime::TextInputConfig, makepad_draw::*,
+    text_input::*, view::View, widget::*,
 };
 use crate::makepad_script::script;
 
@@ -919,6 +920,10 @@ pub struct FabValueInput {
     walk: Walk,
     #[layout]
     layout: Layout,
+    /// A host can swap the field for another control in the same slot.
+    #[live(true)]
+    #[visible]
+    visible: bool,
 
     /// Held during either a drag or text editing, so cancel never also
     /// dismisses the surrounding popup or modal.
@@ -1072,6 +1077,21 @@ impl FabValueInput {
         self.value
     }
 
+    /// Focus/IME state of the private text editor used while a scrub field is
+    /// being typed. Canvas hosts cannot discover this child through the
+    /// public widget tree because it is embedded directly, not a WidgetRef.
+    pub fn text_ime_anchor(&self, cx: &Cx) -> Option<(Area, Rect, TextInputConfig)> {
+        let area = self.text_input.area();
+        if !self.editing || area.is_empty() || !cx.has_key_focus(area) {
+            return None;
+        }
+        Some((
+            area,
+            self.text_input.cursor_rect_in_absolute(cx)?,
+            self.text_input.ime_config(),
+        ))
+    }
+
     fn publish(&mut self, cx: &mut Cx, uid: WidgetUid, v: f64, ended: bool) {
         if (v - self.value).abs() > f64::EPSILON {
             self.value = v;
@@ -1166,6 +1186,9 @@ impl FabValueInput {
 
 impl Widget for FabValueInput {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        if !self.visible {
+            return DrawStep::done();
+        }
         // The fill claims "this range means something": only bounded fields
         // paint one.
         self.draw_bg.fill = if self.show_fill && self.max > self.min {
@@ -1183,10 +1206,15 @@ impl Widget for FabValueInput {
             let fs = self.draw_text.text_style.font_size as f64;
             let value_reserve = (self.format().chars().count() as f64 + 0.5) * fs * 0.72 + 6.0;
             let label_w = (row - pad - value_reserve).max(0.0);
-            let mut label_walk = Walk::fit();
-            label_walk.width = Size::Fixed(label_w);
-            self.draw_text
-                .draw_walk(cx, label_walk, Align::default(), &self.label);
+            // A label that cannot fit is not drawn at all: a crushed "w"
+            // renders as a stray dot beside the number.
+            let needed = self.label.chars().count() as f64 * fs * 0.62 + 2.0;
+            if label_w >= needed {
+                let mut label_walk = Walk::fit();
+                label_walk.width = Size::Fixed(label_w);
+                self.draw_text
+                    .draw_walk(cx, label_walk, Align::default(), &self.label);
+            }
         }
         let iw = self.text_input.walk(cx);
         let _ = self.text_input.draw_walk(cx, &mut Scope::empty(), iw);
@@ -1495,12 +1523,7 @@ impl FabValueInputRef {
     }
 
     pub fn ended(&self, actions: &Actions) -> Option<f64> {
-        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
-            if let FabValueInputAction::Ended(v) = item.cast() {
-                return Some(v);
-            }
-        }
-        None
+        ended_value(actions, self.widget_uid())
     }
 
     pub fn set_value(&self, cx: &mut Cx, v: f64) {
@@ -1512,6 +1535,15 @@ impl FabValueInputRef {
     pub fn value(&self) -> f64 {
         self.borrow().map_or(0.0, |i| i.value())
     }
+}
+
+fn ended_value(actions: &Actions, uid: WidgetUid) -> Option<f64> {
+    for action in actions.filter_widget_actions_cast::<FabValueInputAction>(uid) {
+        if let FabValueInputAction::Ended(v) = action {
+            return Some(v);
+        }
+    }
+    None
 }
 
 // ===========================================================================
@@ -2472,5 +2504,25 @@ mod tests {
         assert_eq!(field_zone(5.0, 200.0, 20.0), FieldZone::Decrement);
         assert_eq!(field_zone(100.0, 200.0, 20.0), FieldZone::Middle);
         assert_eq!(field_zone(195.0, 200.0, 20.0), FieldZone::Increment);
+    }
+
+    #[test]
+    fn ended_finds_commit_after_changed_action() {
+        let uid = WidgetUid(17);
+        let actions: ActionsBuf = vec![
+            Box::new(WidgetAction {
+                data: None,
+                action: Box::new(FabValueInputAction::Changed(72.0)),
+                widget_uid: uid,
+                group: None,
+            }),
+            Box::new(WidgetAction {
+                data: None,
+                action: Box::new(FabValueInputAction::Ended(73.0)),
+                widget_uid: uid,
+                group: None,
+            }),
+        ];
+        assert_eq!(ended_value(&actions, uid), Some(73.0));
     }
 }

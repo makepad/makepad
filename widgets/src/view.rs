@@ -17,6 +17,7 @@ use {
 script_mod! {
     use mod.prelude.widgets_internal.*
 
+    mod.widgets.EventOrder = #(EventOrder::script_api(vm))
     mod.widgets.ViewBase = set_type_default() do #(View::register_widget(vm))
 }
 
@@ -329,6 +330,14 @@ impl View {
 }
 
 impl ViewRef {
+    /// Updates this view's typed walk without evaluating script.
+    pub fn set_walk(&self, cx: &mut Cx, walk: Walk) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.walk = walk;
+            inner.redraw(cx);
+        }
+    }
+
     pub fn set_debug_dump(&self, cx: &mut Cx, debug: bool) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_debug_dump(cx, debug);
@@ -351,6 +360,9 @@ impl ViewRef {
 
     /// Caps the offscreen texture's height in Texture mode (`None` = uncapped). See the `View`
     /// method for details.
+    /// Caps the offscreen texture's height when this view is in Texture mode. `None` (the default)
+    /// leaves it uncapped. Only useful for a Fit-height cached view whose content can be taller than
+    /// the GPU's max texture size; content past the cap is clipped.
     pub fn set_texture_max_height(&self, max: Option<f64>) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_texture_max_height(max);

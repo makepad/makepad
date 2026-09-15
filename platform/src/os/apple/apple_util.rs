@@ -16,10 +16,33 @@ pub fn load_undocumented_cursor(cursor_name: &str) -> ObjcId {
     unsafe {
         let class = class!(NSCursor);
         let sel = Sel::register(cursor_name);
-        let sel: ObjcId = msg_send![class, respondsToSelector: sel];
-        let id: ObjcId = msg_send![class, performSelector: sel];
-        id
+        // respondsToSelector returns BOOL, never a selector. Passing its 0/1
+        // result to performSelector crashes inside AppKit cursor updates.
+        let available: BOOL = msg_send![class, respondsToSelector: sel];
+        if available == YES {
+            let id: ObjcId = msg_send![class, performSelector: sel];
+            if !id.is_null() {
+                return id;
+            }
+        }
+        load_native_cursor("arrowCursor")
     }
+}
+
+fn load_frame_resize_cursor(position: usize, legacy_name: &str) -> ObjcId {
+    unsafe {
+        let class = class!(NSCursor);
+        let available: BOOL = msg_send![class, respondsToSelector: sel!(frameResizeCursorFromPosition:inDirections:)];
+        if available == YES {
+            // Public since macOS 15. NSCursorFrameResizeDirectionsAll = 3;
+            // position uses NSCursorFrameResizePosition's edge/corner flags.
+            let id: ObjcId = msg_send![class, frameResizeCursorFromPosition: position inDirections: 3usize];
+            if !id.is_null() {
+                return id;
+            }
+        }
+    }
+    load_undocumented_cursor(legacy_name)
 }
 
 pub unsafe fn ccfstr_from_str(inp: &str) -> CFStringRef {
@@ -420,10 +443,10 @@ pub fn load_mouse_cursor(cursor: MouseCursor) -> ObjcId {
         MouseCursor::NResize => load_native_cursor("resizeUpCursor"),
         MouseCursor::WResize => load_native_cursor("resizeLeftCursor"),
         MouseCursor::SResize => load_native_cursor("resizeDownCursor"),
-        MouseCursor::NeResize => load_undocumented_cursor("_windowResizeNorthEastCursor"),
-        MouseCursor::NwResize => load_undocumented_cursor("_windowResizeNorthWestCursor"),
-        MouseCursor::SeResize => load_undocumented_cursor("_windowResizeSouthEastCursor"),
-        MouseCursor::SwResize => load_undocumented_cursor("_windowResizeSouthWestCursor"),
+        MouseCursor::NeResize => load_frame_resize_cursor(1 | 8, "_windowResizeNorthEastCursor"),
+        MouseCursor::NwResize => load_frame_resize_cursor(1 | 2, "_windowResizeNorthWestCursor"),
+        MouseCursor::SeResize => load_frame_resize_cursor(4 | 8, "_windowResizeSouthEastCursor"),
+        MouseCursor::SwResize => load_frame_resize_cursor(4 | 2, "_windowResizeSouthWestCursor"),
         
         MouseCursor::EwResize | MouseCursor::ColResize => load_native_cursor("resizeLeftRightCursor"),
         MouseCursor::NsResize | MouseCursor::RowResize => load_native_cursor("resizeUpDownCursor"),
@@ -433,8 +456,8 @@ pub fn load_mouse_cursor(cursor: MouseCursor) -> ObjcId {
         //MouseCursor::ZoomIn => load_undocumented_cursor("_zoomInCursor"),
         //MouseCursor::ZoomOut => load_undocumented_cursor("_zoomOutCursor"),
         
-        MouseCursor::NeswResize => load_undocumented_cursor("_windowResizeNorthEastSouthWestCursor"),
-        MouseCursor::NwseResize => load_undocumented_cursor("_windowResizeNorthWestSouthEastCursor"),
+        MouseCursor::NeswResize => load_frame_resize_cursor(1 | 8, "_windowResizeNorthEastSouthWestCursor"),
+        MouseCursor::NwseResize => load_frame_resize_cursor(4 | 8, "_windowResizeNorthWestSouthEastCursor"),
         
         // While these are available, the former just loads a white arrow,
         // and the latter loads an ugly deflated beachball!
