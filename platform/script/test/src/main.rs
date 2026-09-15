@@ -3918,8 +3918,8 @@ pub fn main() {
             probe: fn() {
                 // The analytic-sky recipe: exp of a vec3, pow of a vec3 by a
                 // scalar. Unsuffixed these hit the scalar preamble fns and
-                // the whole shader fails the headless JIT (found live: a
-                // headless sweep died at the first game.sky).
+                // the whole shader fails the gpusim JIT (found live: a
+                // gpusim sweep died at the first game.sky).
                 let absorbed = exp(self.tint * -0.5)
                 let shaped = pow(absorbed, 0.75)
                 let leveled = log(absorbed + vec3(1.0, 1.0, 1.0))

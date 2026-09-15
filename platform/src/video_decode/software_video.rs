@@ -73,7 +73,7 @@ impl PlaybackSessionHandle {
         self.inner.as_mut().and_then(|p| p.take_oes_frame())
     }
 
-    #[cfg(all(any(target_os = "macos", target_os = "ios"), not(headless)))]
+    #[cfg(all(any(target_os = "macos", target_os = "ios"), not(gpusim)))]
     pub fn take_metal_nv12_frame(&mut self) -> Option<crate::gpu_texture::MetalNv12Frame> {
         self.inner
             .as_mut()

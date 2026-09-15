@@ -1,4 +1,4 @@
-// ─── Makepad Headless Shader Runtime Preamble ───
+// ─── Makepad Gpusim Shader Runtime Preamble ───
 // This file is included verbatim in every JIT-compiled shader module.
 // It provides Vec2f/Vec3f/Vec4f/Mat4f types, operators, constructors,
 // swizzle methods, Sdf2d, Texture2D, and shader builtin functions.
@@ -1250,7 +1250,7 @@ pub fn round(x: f32) -> f32 {
 
 // exp/log/pow family — the analytic sky (robobo1221 recipe) is all
 // exp(vec3) and pow(vec3, f32); without these the whole sky shader
-// failed the JIT and a headless run died at the first game.sky.
+// failed the JIT and a gpusim run died at the first game.sky.
 pub fn exp_2f(v: Vec2f) -> Vec2f {
     vec2(v.x.exp(), v.y.exp())
 }

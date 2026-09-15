@@ -1,7 +1,7 @@
-//! Headless determinism check of the windows_blur example GaussStack.
-//! Run with MAKEPAD=headless RUSTFLAGS='--cfg headless' cargo test --release
+//! Gpusim determinism check of the windows_blur example GaussStack.
+//! Run with MAKEPAD=gpusim RUSTFLAGS='--cfg gpusim' cargo test --release
 //! -p makepad-widgets --test gauss_chain -- --ignored --nocapture. Optional
-//! MAKEPAD_HEADLESS_OUT_DIR keeps the two compared frames.
+//! MAKEPAD_GPUSIM_OUT_DIR keeps the two compared frames.
 
 pub use makepad_widgets;
 use makepad_widgets::*;
@@ -21,13 +21,13 @@ fn decode_png(path: &std::path::Path) -> ((usize, usize), Vec<u8>) {
 fn render_gauss_frame(out_dir: &std::path::Path) -> usize {
     use windows_blur::App;
     std::fs::create_dir_all(out_dir).unwrap();
-    std::env::set_var("MAKEPAD_HEADLESS_OUT_DIR", out_dir);
+    std::env::set_var("MAKEPAD_GPUSIM_OUT_DIR", out_dir);
     let mut handler = makepad_platform::_app_main_event_closure!(App);
     let cx = Rc::new(RefCell::new(Cx::new(Box::new(move |cx, event| {
         handler(cx, event);
         if matches!(event, Event::Draw(_)) {
             // Warm up window glass registration, then record the capture and
-            // consumer together before the headless backend submits the frame.
+            // consumer together before the gpusim backend submits the frame.
             cx.redraw_all();
             handler(cx, event);
         }
@@ -48,16 +48,16 @@ fn render_gauss_frame(out_dir: &std::path::Path) -> usize {
 }
 
 #[test]
-#[ignore = "requires a MAKEPAD=headless release build"]
+#[ignore = "requires a MAKEPAD=gpusim release build"]
 fn windows_blur_gauss_stack_render_matches_reference() {
     assert!(std::env::var("MAKEPAD")
         .unwrap_or_default()
-        .contains("headless"));
-    // Logical window is 1380x920; default headless DPI is 2. Pin to 1 so the
+        .contains("gpusim"));
+    // Logical window is 1380x920; default gpusim DPI is 2. Pin to 1 so the
     // comparison is independent of a previously captured retina PNG.
-    std::env::set_var("MAKEPAD_HEADLESS_DPI", "1");
+    std::env::set_var("MAKEPAD_GPUSIM_DPI", "1");
 
-    let keep = std::env::var_os("MAKEPAD_HEADLESS_OUT_DIR").map(std::path::PathBuf::from);
+    let keep = std::env::var_os("MAKEPAD_GPUSIM_OUT_DIR").map(std::path::PathBuf::from);
     let scratch = keep.clone().unwrap_or_else(|| {
         std::env::temp_dir().join(format!("makepad-gauss-chain-{}", std::process::id()))
     });
