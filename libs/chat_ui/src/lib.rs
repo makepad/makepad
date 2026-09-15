@@ -22,6 +22,10 @@
 
 use makepad_widgets::*;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub mod feed;
+#[cfg(target_arch = "wasm32")]
+#[path = "portable/feed.rs"]
 pub mod feed;
 pub mod list;
 pub mod transcript;

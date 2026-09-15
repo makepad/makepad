@@ -180,6 +180,7 @@ impl PbrProbe {
             color_adjust: vec4(0.0, 1.0, 1.0, 0.0),
             dynamic: false,
             depth_order: 0.0,
+            custom_material: None,
             part_poses: Vec::new(),
         });
         self.look.target = vec3f(0.0, 0.9, 0.0);

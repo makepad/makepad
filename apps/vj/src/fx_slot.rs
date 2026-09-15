@@ -40,6 +40,7 @@ use crate::views::DrawProgram;
 use makepad_widgets::*;
 
 script_mod! {
+    let vj = mod.vj_theme
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
 
@@ -106,11 +107,11 @@ script_mod! {
         width: 150
         height: 86
         draw_title +: {
-            color: #xf0f5f9
+            color: vj.text
             text_style: theme.font_bold{font_size: 8}
         }
         draw_tag +: {
-            color: #x8e9aa7
+            color: vj.text_secondary
             text_style: theme.font_bold{font_size: 7}
         }
     }

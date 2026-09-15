@@ -11,6 +11,7 @@ use makepad_chat_ui::feed::{ChatFeed, ClientTools, FeedConfig};
 use makepad_chat_ui::transcript::{ChatData, ChatRole, CHAT};
 use makepad_asset_client::json::{self, Value};
 use makepad_asset_client::ApiEndpoints;
+use makepad_widgets::Cx;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -137,7 +138,12 @@ fn a_turn_streams_runs_the_apps_tool_and_lands() {
             .expect("one session per test");
         Box::new(Scripted::new(scripts))
     }));
-    let feed = ChatFeed::start(cfg, Box::new(RecordingTools { calls: calls_tx }));
+    let cx = Cx::new(Box::new(|_, _| {}));
+    let feed = ChatFeed::start(
+        cfg,
+        Box::new(RecordingTools { calls: calls_tx }),
+        cx.thread_spawner(),
+    );
 
     // The app owns the user's bubble — exactly as a host does it.
     ChatData::push(ChatRole::User, "make me a trawler");
@@ -160,7 +166,10 @@ fn a_turn_streams_runs_the_apps_tool_and_lands() {
     assert_eq!(name, "image.generate");
     assert_eq!(args.get("width").and_then(Value::as_i64), Some(768));
 
-    wait_for("the turn to land", || !ChatData::is_streaming());
+    wait_for("the turn to land", || {
+        let _ = feed.take_dirty();
+        !ChatData::is_streaming()
+    });
 
     let data = CHAT.read().unwrap();
     let roles: Vec<ChatRole> = data.messages.iter().map(|m| m.role).collect();
