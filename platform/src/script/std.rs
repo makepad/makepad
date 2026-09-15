@@ -204,3 +204,67 @@ impl Cx {
         makepad_script_std::handle_script_network_events(self, responses);
     }
 }
+
+#[cfg(test)]
+mod unwind_tests {
+    use crate::*;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    fn heap_key(cx: &mut Cx) -> usize {
+        cx.with_vm(|vm| vm.bx.heap.heap_key())
+    }
+
+    /// A closure handed to `with_vm` panics inside a `catch_unwind` (the
+    /// platforms' event catchers): the VM is parked back on `Cx` — the
+    /// same heap, not a fresh one — and the next `with_vm` works.
+    #[test]
+    fn a_panic_inside_with_vm_leaves_the_vm_parked_on_cx() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let key = heap_key(&mut cx);
+        let caught = catch_unwind(AssertUnwindSafe(|| cx.with_vm(|_vm| panic!("a native panicked under with_vm"))));
+        assert!(caught.is_err());
+        assert!(!cx.is_script_vm_held(), "the VM is back on Cx after the unwind");
+        assert_eq!(heap_key(&mut cx), key, "the same heap came back");
+
+        // The same through `eval`, `try_with_vm` and a thread entry.
+        let caught = catch_unwind(AssertUnwindSafe(|| cx.try_with_vm(|_vm| panic!("under try_with_vm"))));
+        assert!(caught.is_err());
+        assert!(!cx.is_script_vm_held());
+        let caught = catch_unwind(AssertUnwindSafe(|| cx.with_vm_and_async(|_vm| panic!("under with_vm_and_async"))));
+        assert!(caught.is_err());
+        assert!(!cx.is_script_vm_held());
+        assert_eq!(heap_key(&mut cx), key);
+        // A re-entrant call is still diagnosed, so the holder bookkeeping
+        // came back with the VM too.
+        let caught = catch_unwind(AssertUnwindSafe(|| cx.with_vm(|vm| vm.cx_mut().with_vm(|_| ()))));
+        assert!(caught.is_err(), "a raw cx_mut re-entry is still refused");
+        assert!(!cx.is_script_vm_held());
+        assert_eq!(heap_key(&mut cx), key);
+    }
+
+    /// The panic starts under `with_cx_mut`, where the VM sits on `Cx` and
+    /// the `ScriptVm` holds a placeholder: the real VM is what survives.
+    #[test]
+    fn a_panic_under_with_cx_mut_keeps_the_real_vm() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let key = heap_key(&mut cx);
+        let caught = catch_unwind(AssertUnwindSafe(|| {
+            cx.with_vm(|vm| vm.with_cx_mut(|_cx| panic!("a native panicked under with_cx_mut")))
+        }));
+        assert!(caught.is_err());
+        assert!(!cx.is_script_vm_held());
+        assert_eq!(heap_key(&mut cx), key, "the parked VM, not the placeholder, is on Cx");
+        // Nested: the inner `with_vm` under `with_cx_mut` is where it starts.
+        let caught = catch_unwind(AssertUnwindSafe(|| {
+            cx.with_vm(|vm| vm.with_cx_mut(|cx| cx.with_vm(|_vm| panic!("two levels down"))))
+        }));
+        assert!(caught.is_err());
+        assert!(!cx.is_script_vm_held());
+        assert_eq!(heap_key(&mut cx), key);
+        // And the VM still runs script afterwards.
+        cx.with_vm(|vm| {
+            let value = vm.eval(script! { 1 + 2 });
+            assert_eq!(value.as_f64(), Some(3.0));
+        });
+    }
+}

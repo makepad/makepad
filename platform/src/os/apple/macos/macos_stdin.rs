@@ -3,7 +3,7 @@ use crate::{
     cx_api::{CxOsApi, CxOsOp},
     draw_pass::{CxDrawPassColorTexture, CxDrawPassParent, DrawPassClearColor},
     event::Event,
-    event::{WindowGeom, WindowGeomChangeEvent},
+    event::{WindowGeom},
     makepad_math::*,
     makepad_micro_serde::*,
     os::{
@@ -125,6 +125,7 @@ impl Cx {
                             let pass_rect = self.get_pass_rect(draw_pass_id, dpi_factor).unwrap();
 
                             let future_presentable_draw = PresentableDraw {
+                                sequence: 0,
                                 target_id: current_image.id,
                                 window_id: window_id.id(),
                                 width: (pass_rect.size.x * dpi_factor) as u32,
@@ -183,28 +184,39 @@ impl Cx {
             match incoming {
                 WebSocketMessage::Binary(data) => match StudioToAppVec::deserialize_bin(&data) {
                     Ok(msgs) => {
+                        // The whole queued backlog at once, collapsed to one
+                        // Tick and the latest pointer position, so a slow
+                        // frame never pays for the ticks it missed.
+                        let mut batch = msgs.0;
+                        let closed = self.stdin_drain_host_batches(&mut batch);
+                        let queued = batch.len();
+                        Self::stdin_coalesce_host_batch(&mut batch);
                         {
-                            // One compact line per batch: M=mouse move, T=tick.
+                            // One compact line per batch: M=mouse move, T=tick,
+                            // Q=queued before coalescing.
                             let mut m = 0usize;
                             let mut t = 0usize;
                             let mut o = 0usize;
-                            for msg in &msgs.0 {
+                            for msg in &batch {
                                 match msg {
                                     StudioToApp::MouseMove(_) => m += 1,
                                     StudioToApp::Tick => t += 1,
                                     _ => o += 1,
                                 }
                             }
-                            if m > 0 || o > 0 {
-                                stdin_trace(&format!("rx m={} t={} o={}", m, t, o));
+                            if m > 0 || o > 0 || queued != batch.len() {
+                                stdin_trace(&format!("rx m={} t={} o={} q={}", m, t, o, queued));
                             }
                         }
-                        for msg in msgs.0 {
+                        for msg in batch {
                             if self.stdin_handle_host_to_stdin(msg, metal_cx, &mut stdin_windows) {
                                 return;
                             }
                         }
                         self.handle_actions();
+                        if closed {
+                            break;
+                        }
                     }
                     Err(err) => {
                         crate::error!(
@@ -262,7 +274,7 @@ impl Cx {
                 let (window_id, pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
                 let dpi_factor = self.windows[window_id].window_geom.dpi_factor.max(1.0);
                 let tweak_ray = crate::event::TweakRayEvent {
-                    abs: dvec2(e.x - pos.x, e.y - pos.y),
+                    abs: self.stdin_pointer_abs(dvec2(e.x, e.y), pos, window_id),
                     window_id,
                     modifiers: e.modifiers.into_key_modifiers(),
                     time: e.time,
@@ -296,19 +308,15 @@ impl Cx {
             } => {
                 let window_id = CxWindowPool::from_usize(window_id);
                 if self.windows.is_valid(window_id) {
-                    let old_geom = self.windows[window_id].window_geom.clone();
-                    let new_geom = WindowGeom {
-                        position: dvec2(0.0, 0.0),
-                        dpi_factor,
-                        inner_size: dvec2(width, height),
-                        ..Default::default()
-                    };
-                    self.windows[window_id].window_geom = new_geom.clone();
-                    let re = WindowGeomChangeEvent {
+                    let re = self.windows.stdin_apply_native_geom(
                         window_id,
-                        new_geom,
-                        old_geom,
-                    };
+                        WindowGeom {
+                            position: dvec2(0.0, 0.0),
+                            dpi_factor,
+                            inner_size: dvec2(width, height),
+                            ..Default::default()
+                        },
+                    );
                     if re.old_geom.dpi_factor != re.new_geom.dpi_factor
                         || re.old_geom.inner_size != re.new_geom.inner_size
                     {
@@ -435,6 +443,9 @@ impl Cx {
                 {
                     Self::stdin_send_to_host(AppToStudio::RequestAnimationFrame);
                 }
+                // One Tick consumed: the host sends the next one on this,
+                // never ahead of it (run_view.rs tick pacing).
+                Self::stdin_send_to_host(AppToStudio::TickDone);
             }
             // All other variants (Key*, Text*, Screenshot, WidgetTreeDump,
             // Kill, KeepAlive, LiveChange, None) handled by shared dispatch.

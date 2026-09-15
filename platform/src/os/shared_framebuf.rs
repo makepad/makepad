@@ -149,6 +149,33 @@ pub struct HostPresentableImage {
     pub software_buffer: Option<LinuxSharedSoftwareBuffer>,
 }
 
+impl HostPresentableImage {
+    /// Return a texture retaining this specific completed frame. Vulkan reads
+    /// hold a lease instead of exposing the writer's reusable allocation.
+    pub fn texture_for_draw(&self, cx: &mut Cx, draw: &PresentableDraw, width: u32, height: u32) -> Option<Texture> {
+        #[cfg(all(target_os = "linux", use_vulkan))]
+        {
+            let _ = (width, height);
+            let mut vulkan = cx.os.vulkan.take().expect("Vulkan renderer initialized");
+            let result = vulkan.acquire_shared_draw(cx, &self.texture, draw.sequence);
+            cx.os.vulkan = Some(vulkan);
+            return match result {
+                Ok(texture) => Some(texture),
+                Err(error) => { crate::error!("Shared Vulkan frame rejected: {error}"); None }
+            };
+        }
+        #[cfg(not(all(target_os = "linux", use_vulkan)))]
+        {
+            let _ = (&cx, draw, width, height);
+            #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+            if let Some(buffer) = self.software_buffer.as_ref() {
+                cx.upload_presentable_image_software_buffer(&self.texture, width, height, buffer.as_bytes());
+            }
+            Some(self.texture.clone())
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct HostSwapchain {
     pub window_id: usize,
@@ -259,7 +286,15 @@ pub struct LinuxOwnedImagePlane {
 
 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
 #[derive(Debug)]
+pub struct LinuxOwnedVulkanImage {
+    pub info: makepad_studio_protocol::LinuxVulkanSharedImage,
+    pub semaphore_fd: std::os::fd::OwnedFd,
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[derive(Debug)]
 pub struct LinuxOwnedImage {
+    pub vulkan: Option<LinuxOwnedVulkanImage>,
     pub drm_format: crate::os::linux::dma_buf::DrmFormat,
     pub plane: LinuxOwnedImagePlane,
 }
@@ -273,6 +308,7 @@ impl LinuxOwnedImage {
 
     pub fn software_fallback(dma_buf_fd: std::os::fd::OwnedFd, stride: u32) -> Self {
         Self {
+            vulkan: None,
             drm_format: crate::os::linux::dma_buf::DrmFormat {
                 fourcc: LINUX_SOFTWARE_FALLBACK_DRM_FOURCC,
                 modifiers: LINUX_SOFTWARE_FALLBACK_DRM_MODIFIERS,
@@ -298,6 +334,7 @@ pub struct LinuxPresentableImage {
 pub enum SharedSwapchainCreateError {
     AuxChannelSend(std::io::Error),
     SoftwareFallback(std::io::Error),
+    Vulkan(String),
 }
 
 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
@@ -363,16 +400,55 @@ fn software_fallback_image(
 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
 pub fn shared_swapchain_from_host_swapchain(
     host: &mut HostSwapchain,
-    cx: &mut crate::cx::Cx,
+    _cx: &mut crate::cx::Cx,
     host_endpoint: &aux_chan::HostEndpoint,
 ) -> Result<SharedSwapchain, SharedSwapchainCreateError> {
+    export_host_swapchain(host, _cx)?.send(host_endpoint)
+        .map_err(SharedSwapchainCreateError::AuxChannelSend)
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+pub use crate::os::linux::hosted_gpu_sender::{LinuxSwapchainSender, SentSwapchain};
+
+/// An exported handle batch, with no CPU pixel payload. Ownership can move
+/// to a worker after Vulkan export has completed on the renderer thread.
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+pub struct ExportedHostSwapchain {
+    window_id: usize,
+    alloc_width: u32,
+    alloc_height: u32,
+    images: [LinuxPresentableImage; SWAPCHAIN_IMAGE_COUNT],
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+impl ExportedHostSwapchain {
+    pub(crate) fn send(self, endpoint: &aux_chan::HostEndpoint) -> std::io::Result<SharedSwapchain> {
+        let mut shared = Vec::with_capacity(SWAPCHAIN_IMAGE_COUNT);
+        for image in self.images {
+            shared.push(SharedPresentableImage { id: image.id,
+                image: aux_chan::send_image_fds_to_aux_chan(image.id, image.image, endpoint)? });
+        }
+        Ok(SharedSwapchain { window_id: self.window_id,
+            alloc_width: self.alloc_width, alloc_height: self.alloc_height,
+            presentable_images: shared.try_into().map_err(|_| std::io::Error::other("incomplete framebuffer export"))? })
+    }
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+pub fn export_host_swapchain(host: &mut HostSwapchain, _cx: &mut Cx)
+    -> Result<ExportedHostSwapchain, SharedSwapchainCreateError> {
     let mut owned_images: [Option<LinuxOwnedImage>; SWAPCHAIN_IMAGE_COUNT] =
         std::array::from_fn(|_| None);
     let mut use_software_fallback = false;
     for i in 0..SWAPCHAIN_IMAGE_COUNT {
-        if let Some(image) =
-            cx.share_texture_for_presentable_image(&host.presentable_images[i].texture)
-        {
+        #[cfg(not(any(linux_direct, use_vulkan)))]
+        let shared = _cx.share_texture_for_presentable_image(&host.presentable_images[i].texture);
+        #[cfg(all(linux_direct, not(use_vulkan)))]
+        let shared: Option<LinuxOwnedImage> = None;
+        #[cfg(use_vulkan)]
+        let shared = Some(_cx.export_vulkan_presentable_image(&host.presentable_images[i].texture)
+            .map_err(SharedSwapchainCreateError::Vulkan)?);
+        if let Some(image) = shared {
             owned_images[i] = Some(image);
         } else {
             use_software_fallback = true;
@@ -401,22 +477,13 @@ pub fn shared_swapchain_from_host_swapchain(
         }
     }
 
-    let mut presentable_images: [Option<SharedPresentableImage>; SWAPCHAIN_IMAGE_COUNT] =
-        [None; SWAPCHAIN_IMAGE_COUNT];
-    for i in 0..SWAPCHAIN_IMAGE_COUNT {
-        let id = host.presentable_images[i].id;
-        let image = owned_images[i].take().expect("image exported");
-        let image = aux_chan::send_image_fds_to_aux_chan(id, image, host_endpoint)
-            .map_err(SharedSwapchainCreateError::AuxChannelSend)?;
-        presentable_images[i] = Some(SharedPresentableImage { id, image });
-    }
-    let presentable_images = presentable_images.map(|image| image.expect("filled"));
-
-    Ok(SharedSwapchain {
+    Ok(ExportedHostSwapchain {
         window_id: host.window_id,
         alloc_width: host.alloc_width,
         alloc_height: host.alloc_height,
-        presentable_images,
+        images: std::array::from_fn(|i| LinuxPresentableImage {
+            id: host.presentable_images[i].id, image: owned_images[i].take().expect("image exported"),
+        }),
     })
 }
 
@@ -512,21 +579,31 @@ pub mod aux_chan {
             Ok(Self { path, listener })
         }
 
+        /// One nonblocking accept attempt. A UI poll may call this without
+        /// occupying a shared worker while a hosted app is dormant.
+        pub fn try_accept_host_endpoint(&self) -> io::Result<Option<HostEndpoint>> {
+            match self.listener.accept() {
+                Ok((stream, _)) => {
+                    let owned_fd: OwnedFd = stream.into();
+                    linux_ipc::InheritableChannel::<H2C, C2H>::from(owned_fd)
+                        .into_uninheritable()
+                        .map(Some)
+                }
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                    ) => Ok(None),
+                Err(err) => Err(err),
+            }
+        }
+
         pub fn accept_host_endpoint(&self) -> io::Result<HostEndpoint> {
             let deadline = Instant::now() + Duration::from_secs(120);
             loop {
-                match self.listener.accept() {
-                    Ok((stream, _)) => {
-                        let owned_fd: OwnedFd = stream.into();
-                        return linux_ipc::InheritableChannel::<H2C, C2H>::from(owned_fd)
-                            .into_uninheritable();
-                    }
-                    Err(err)
-                        if matches!(
-                            err.kind(),
-                            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-                        ) =>
-                    {
+                match self.try_accept_host_endpoint()? {
+                    Some(endpoint) => return Ok(endpoint),
+                    None => {
                         if Instant::now() >= deadline {
                             return Err(io_error_other(
                                 "timeout while waiting for child aux-channel connection",
@@ -534,7 +611,6 @@ pub mod aux_chan {
                         }
                         thread::sleep(Duration::from_millis(5));
                     }
-                    Err(err) => return Err(err),
                 }
             }
         }
@@ -564,6 +640,13 @@ pub mod aux_chan {
     pub type ClientEndpoint = linux_ipc::Channel<C2H, H2C>;
 
     impl ClientEndpoint {
+        #[cfg(all(linux_direct, use_vulkan))]
+        pub fn connect_from_studio_env_cancellable(stop: &std::sync::atomic::AtomicBool) -> io::Result<Self> {
+            let studio_host = crate::app_main::resolve_studio_host();
+            if studio_host.is_empty() { return Err(io_error_other("missing STUDIO_HOST")); }
+            Self::connect_cancellable(&path_for_studio(&studio_host, None)?, stop, Duration::from_secs(10))
+        }
+
         pub fn connect_from_studio_env() -> io::Result<Self> {
             let studio_host = crate::app_main::resolve_studio_host();
             if studio_host.is_empty() {
@@ -602,9 +685,17 @@ pub mod aux_chan {
         image: LinuxOwnedImage,
         host_endpoint: &HostEndpoint,
     ) -> io::Result<makepad_studio_protocol::LinuxSharedImage> {
-        let LinuxOwnedImage { drm_format, plane } = image;
+        let LinuxOwnedImage { drm_format, plane, vulkan } = image;
         host_endpoint.send((id, plane.dma_buf_fd))?;
+        let vulkan = match vulkan {
+            Some(image) => {
+                host_endpoint.send((id, image.semaphore_fd))?;
+                Some(image.info)
+            }
+            None => None,
+        };
         Ok(makepad_studio_protocol::LinuxSharedImage {
+            vulkan,
             drm_format: makepad_studio_protocol::DrmFormat {
                 fourcc: drm_format.fourcc,
                 modifiers: drm_format.modifiers,
@@ -622,7 +713,7 @@ pub mod aux_chan {
         image: makepad_studio_protocol::LinuxSharedImage,
         client_endpoint: &ClientEndpoint,
     ) -> io::Result<LinuxOwnedImage> {
-        let makepad_studio_protocol::LinuxSharedImage { drm_format, plane } = image;
+        let makepad_studio_protocol::LinuxSharedImage { drm_format, plane, vulkan } = image;
         let mut mismatches = 0usize;
         let dma_buf_fd = loop {
             let (recv_id, recv_fd) = client_endpoint.recv()?;
@@ -642,7 +733,18 @@ pub mod aux_chan {
                 "recv_fds_from_aux_chan: dropped {mismatches} stale swapchain images before {id:?}"
             );
         }
+        let vulkan = match vulkan {
+            Some(info) => {
+                let (recv_id, semaphore_fd) = client_endpoint.recv()?;
+                if recv_id != id {
+                    return Err(io_error_other("Vulkan timeline FD does not match image"));
+                }
+                Some(LinuxOwnedVulkanImage { info, semaphore_fd })
+            }
+            None => None,
+        };
         Ok(LinuxOwnedImage {
+            vulkan,
             drm_format: crate::os::linux::dma_buf::DrmFormat {
                 fourcc: drm_format.fourcc,
                 modifiers: drm_format.modifiers,

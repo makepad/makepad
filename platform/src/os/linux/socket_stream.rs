@@ -30,6 +30,8 @@ const TLSEXT_NAMETYPE_HOST_NAME: c_long = 0;
 const SSL_ERROR_WANT_READ: c_int = 2;
 const SSL_ERROR_WANT_WRITE: c_int = 3;
 const SSL_ERROR_SYSCALL: c_int = 5;
+/// The peer sent close_notify: a clean end of stream, not a failure.
+const SSL_ERROR_ZERO_RETURN: c_int = 6;
 
 #[link(name = "ssl")]
 #[link(name = "crypto")]
@@ -252,6 +254,7 @@ impl Read for OpenSslStream {
                 io::ErrorKind::WouldBlock,
                 "SSL_read would block",
             )),
+            SSL_ERROR_ZERO_RETURN => Ok(0),
             SSL_ERROR_SYSCALL => {
                 let os_err = io::Error::last_os_error();
                 if matches!(

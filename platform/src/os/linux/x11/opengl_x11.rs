@@ -149,6 +149,7 @@ impl Cx {
             }
 
             Some(LinuxOwnedImage {
+                vulkan: None,
                 drm_format: crate::os::linux::dma_buf::DrmFormat { fourcc, modifiers },
                 plane: LinuxOwnedImagePlane {
                     dma_buf_fd: os::fd::OwnedFd::from_raw_fd(dma_buf_fd),
@@ -159,6 +160,7 @@ impl Cx {
         }
     }
 
+    #[cfg(not(use_vulkan))]
     pub fn upload_presentable_image_software_buffer(
         &mut self,
         texture: &Texture,
