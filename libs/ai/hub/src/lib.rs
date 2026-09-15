@@ -31,7 +31,13 @@
 //!                              upgrade) streams input/output video frames + live control —
 //!                              see `protocol.rs`'s wire doc block and `crate::realtime`.
 
+pub mod activity;
 pub mod backend;
+#[cfg(feature = "beats-native")]
+pub mod beats_backend;
+#[cfg(feature = "stems-native")]
+pub mod stems_backend;
+pub mod body_native_backend;
 pub mod chat_wire;
 pub use makepad_base64;
 pub mod client;
@@ -39,6 +45,8 @@ mod child_process;
 pub mod control_image;
 pub mod depth_backend;
 pub mod download;
+mod disk_space;
+mod disk_volume;
 pub mod error;
 pub mod fabric;
 pub mod fleet;
@@ -54,11 +62,19 @@ pub mod http_client;
 pub mod jobs;
 pub mod lane_advert;
 pub mod lease;
+#[cfg(feature = "local")]
+pub mod license;
 pub mod indextts_backend;
 pub mod kokoro_backend;
+#[cfg(feature = "stt")]
+pub mod whisper_backend;
+#[cfg(feature = "speech")]
+pub mod speech;
 pub mod llm_backend;
 #[cfg(feature = "llm")]
 pub mod local_llm;
+#[cfg(feature = "local")]
+pub mod local;
 pub mod matte_backend;
 pub mod segment_backend;
 pub mod upscale_backend;
@@ -90,6 +106,10 @@ pub mod rig_native_backend;
 pub mod ace_backend;
 pub mod moss_backend;
 pub mod sa3_backend;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod discovery;
+#[cfg(target_arch = "wasm32")]
+#[path = "discovery_portable.rs"]
 pub mod discovery;
 pub mod server;
 pub mod sha256;
@@ -100,6 +120,8 @@ pub mod trellis_backend;
 pub mod wav;
 pub mod woosh_backend;
 pub mod music3_backend;
+#[cfg(feature = "notes-native")]
+pub mod notes_backend;
 pub mod world_backend;
 
 #[cfg(feature = "flux")]

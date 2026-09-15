@@ -139,6 +139,8 @@ pub enum Domain {
     Matte,
     /// Image -> metric depthmap (Depth-Anything-3).
     Depth,
+    /// Image/frame -> structured human body pose packet (SAM 3D Body).
+    Body,
     /// Image + text prompt -> instance mask PNG + RGBA cutout (SAM 3.1).
     Segment,
     /// Mesh GLB -> skinned/rigged GLB (SkinTokens).
@@ -193,6 +195,19 @@ pub enum Domain {
     Vision,
     /// Scanned page -> HTML transcription (Chandra 2 on the vision tower).
     Ocr,
+    /// Speech audio -> timed transcript (Whisper). The `stt.whisper` pipe;
+    /// `Speech` stays text-to-speech, so the two never share affinity.
+    Stt,
+    /// Audio -> beat and downbeat tracking JSON.
+    Beats,
+    /// Stereo music -> four separated stems.
+    Stems,
+    /// Audio -> polyphonic note transcription JSON/MIDI.
+    Notes,
+    /// Audio -> music-structure sections.
+    Sections,
+    /// Image -> sewing-pattern JSON.
+    Garment,
 }
 
 impl Domain {
@@ -207,6 +222,7 @@ impl Domain {
             "world" => Some(Domain::World),
             "matte" => Some(Domain::Matte),
             "depth" => Some(Domain::Depth),
+            "body" => Some(Domain::Body),
             "segment" => Some(Domain::Segment),
             "rig" => Some(Domain::Rig),
             "motion" => Some(Domain::Motion),
@@ -220,6 +236,12 @@ impl Domain {
             "splat" => Some(Domain::Splat),
             "vision" => Some(Domain::Vision),
             "ocr" => Some(Domain::Ocr),
+            "stt" => Some(Domain::Stt),
+            "beats" => Some(Domain::Beats),
+            "stems" => Some(Domain::Stems),
+            "notes" => Some(Domain::Notes),
+            "sections" => Some(Domain::Sections),
+            "garment" => Some(Domain::Garment),
             _ => None,
         }
     }
@@ -235,6 +257,7 @@ impl Domain {
             Domain::World => "world",
             Domain::Matte => "matte",
             Domain::Depth => "depth",
+            Domain::Body => "body",
             Domain::Segment => "segment",
             Domain::Rig => "rig",
             Domain::Motion => "motion",
@@ -248,6 +271,12 @@ impl Domain {
             Domain::Splat => "splat",
             Domain::Vision => "vision",
             Domain::Ocr => "ocr",
+            Domain::Stt => "stt",
+            Domain::Beats => "beats",
+            Domain::Stems => "stems",
+            Domain::Notes => "notes",
+            Domain::Sections => "sections",
+            Domain::Garment => "garment",
         }
     }
 }
@@ -369,11 +398,14 @@ pub struct ModelLicense {
 
 impl ModelLicense {
     /// Stable identity of the *text* the user accepted: sha256 when pinned,
-    /// otherwise the canonical URL.
+    /// otherwise a hash of the licence name and canonical URL. A registry
+    /// correction to either value therefore prompts again.
     pub fn identity(&self) -> String {
         self.sha256
             .clone()
-            .unwrap_or_else(|| self.url.clone())
+            .unwrap_or_else(|| {
+                crate::sha256::sha256_hex(format!("{}\0{}", self.name, self.url).as_bytes())
+            })
     }
 }
 
@@ -447,7 +479,7 @@ impl Registry {
         for model in wire.models {
             let domain = Domain::parse(&model.domain).ok_or_else(|| {
                 AssetAiError::Registry(format!(
-                    "model {}: unknown domain {:?} (expected image|mesh|video|audio|text|speech|world|matte|depth|segment|rig|motion)",
+                    "model {}: unknown domain {:?} (expected image|mesh|video|audio|text|speech|world|matte|depth|body|segment|rig|motion|music|paint|edit|upscale|control|inpaint|enhance|splat|vision|ocr|beats|stems|notes|sections|garment)",
                     model.id, model.domain
                 ))
             })?;
@@ -868,6 +900,24 @@ mod tests {
             registry.find("pbr-testpattern").is_none(),
             "deterministic paint-test is crate-internal and must not advertise"
         );
+        let beats = registry.find("beat-this").unwrap();
+        assert_eq!(beats.domain, Domain::Beats);
+        assert_eq!(beats.backend, "beats");
+        assert_eq!(beats.vram_gb, Some(0.5));
+        assert_eq!(beats.files.len(), 2);
+        let final_weights = beats.file_by_role("weights").unwrap();
+        assert_eq!(final_weights.size, Some(81_058_141));
+        assert_eq!(
+            final_weights.sha256.as_deref(),
+            Some("8c328b45f59d8dd3dff219253ff6a8d6482be57d0133a29140e2febbf8eb8331")
+        );
+        assert!(final_weights.path.starts_with("https://cloud.cp.jku.at/"));
+        assert!(beats.file_by_role("weights-small").unwrap().optional);
+        let stems = registry.find("bs-roformer-4stem").unwrap();
+        assert_eq!(stems.domain, Domain::Stems);
+        assert_eq!(stems.backend, "stems");
+        assert_eq!(stems.files.len(), 1);
+        assert_eq!(stems.file_by_role("weights").unwrap().size, Some(527_385_512));
         let hunyuan = registry.find("hunyuan3d-paint-2.1").unwrap();
         assert_eq!(hunyuan.domain, Domain::Paint);
         assert_eq!(hunyuan.backend, "paint");
@@ -1488,6 +1538,47 @@ mod tests {
         // The licensing guard lives in the note: the x.1 refreshes are NC.
         assert!(depth.note.as_deref().unwrap().contains("Apache-2.0"));
 
+        // Body domain: the pinned native artifact.
+        let native_body = registry.find("sam3dbody").unwrap();
+        assert_eq!(native_body.domain, Domain::Body);
+        assert_eq!(native_body.backend, "body-native");
+        assert!(native_body.available && !native_body.gated);
+        assert_eq!(native_body.vram_gb, Some(4.5));
+        // The checkpoint plus the optional SAM 3.1 detector for `detect`
+        // (the same artifact the segment entry pins, so one cache file).
+        assert_eq!(native_body.files.len(), 2);
+        let detector = native_body.file_by_role("native-segment").unwrap();
+        assert!(detector.optional);
+        assert_eq!(
+            detector.cache_as,
+            registry
+                .find("sam3-1-multiplex")
+                .unwrap()
+                .file_by_role("native-segment")
+                .unwrap()
+                .cache_as
+        );
+        let body_weights = native_body.file_by_role("native-body").unwrap();
+        assert_eq!(body_weights.repo, "Comfy-Org/sam-3d-body");
+        assert_eq!(
+            body_weights.path,
+            "detection/sam_3d_body_dinov3_bf16.safetensors"
+        );
+        assert_eq!(
+            body_weights.revision.as_deref(),
+            Some("60476aced0b8de0a0e82a318c79a85061cc97434")
+        );
+        assert_eq!(body_weights.size, Some(2_830_737_652));
+        assert_eq!(
+            body_weights.sha256.as_deref(),
+            Some("59fa45200c504c5b56625004d7d3385daf48c616613e88099e43bf83b3e249cf")
+        );
+        assert_eq!(
+            body_weights.cache_as,
+            "body/sam3dbody/sam_3d_body_dinov3_bf16.safetensors"
+        );
+        assert!(!body_weights.repo.starts_with("facebook/"));
+
         // Segment domain: pinned Comfy-Org SAM 3.1 multiplex CUDA artifact.
         let segment = registry.find("sam3-1-multiplex").unwrap();
         assert_eq!(segment.domain, Domain::Segment);
@@ -1759,5 +1850,19 @@ mod tests {
         let json = r#"{"models":[{"id":"x","domain":"image","backend":"b","available":true,"gated":false,"vram_gb":null,"note":null,"license":{"name":"X","url":"https://example.com/l","summary":"s","restriction":"copyleft"},"files":[]}]}"#;
         let message = Registry::parse(json).unwrap_err().to_string();
         assert!(message.contains("unknown license restriction"), "{message}");
+    }
+
+    #[test]
+    fn local_app_domains_round_trip() {
+        for (text, domain) in [
+            ("beats", Domain::Beats),
+            ("stems", Domain::Stems),
+            ("notes", Domain::Notes),
+            ("sections", Domain::Sections),
+            ("garment", Domain::Garment),
+        ] {
+            assert_eq!(Domain::parse(text), Some(domain));
+            assert_eq!(domain.as_str(), text);
+        }
     }
 }

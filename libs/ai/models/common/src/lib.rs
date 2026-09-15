@@ -28,9 +28,11 @@ pub use progress::{
 };
 
 // Graph IR + quant helpers that used to live at `makepad_ggml::`.
+// The CUDA llm op contract exists only where the CUDA store does.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 pub use makepad_ai_cuda::llm_ops;
-pub use makepad_ai_cuda::quant;
-pub use makepad_ai_cuda::quant::*;
+pub use makepad_ai_loader::quant;
+pub use makepad_ai_loader::quant::*;
 pub use makepad_ai_llm::context;
 pub use makepad_ai_llm::core;
 pub use makepad_ai_llm::graph;

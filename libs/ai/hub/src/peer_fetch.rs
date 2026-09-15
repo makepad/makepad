@@ -115,6 +115,7 @@ pub fn try_fetch_via_peers(
         let mut retried_from_zero = false;
         'chunks: loop {
             cancel.check()?;
+            crate::disk_space::check_download(part, Some(total))?;
             let appended = match fetch_one_chunk(
                 base, &ticket, plan, file, digest, total, offset, part, progress, cancel,
             ) {
@@ -140,7 +141,7 @@ pub fn try_fetch_via_peers(
                     hasher = trusted_hasher.clone();
                     break 'chunks;
                 }
-                Err(e @ AssetAiError::Cancelled) => return Err(e),
+                Err(e @ (AssetAiError::Cancelled | AssetAiError::Unavailable(_))) => return Err(e),
                 Err(e) => {
                     eprintln!("peer-fetch {}: {base}: {e} — next source", file.cache_as);
                     restore_part_prefix(part, trusted_offset)?;
@@ -347,6 +348,7 @@ fn fetch_one_chunk(
                 )));
             }
         }
+        crate::disk_space::check_download(part, Some(total))?;
         let mut out = fs::OpenOptions::new()
             .create(true)
             .write(true)

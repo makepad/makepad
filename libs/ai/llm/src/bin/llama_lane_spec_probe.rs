@@ -35,8 +35,8 @@
 use std::collections::HashMap;
 
 use makepad_ai_llm::{
-    LaneEvent, LaneExecutor, LaneRequest, LaneScheduler, LlamaModel, LlamaSamplingParams,
-    LlamaSession, LlamaSessionConfig, LlamaVocab,
+    LaneEvent, LaneExecutor, LaneRequest, LaneScheduler, LaneSpeculationOptions, LlamaModel,
+    LlamaSamplingParams, LlamaSession, LlamaSessionConfig, LlamaVocab,
 };
 
 /// Graph activations grow with the slot count: wider batches mean wider
@@ -103,6 +103,7 @@ fn run_lanes(
     prompts: &[String],
     steps: usize,
     budget: usize,
+    speculation: LaneSpeculationOptions,
 ) -> Result<(LlamaSession, Run), String> {
     let width = prompts.len();
     session.reset().map_err(|e| format!("reset: {e}"))?;
@@ -116,7 +117,8 @@ fn run_lanes(
         temperature: 0.0,
         ..LlamaSamplingParams::default()
     };
-    let mut exec = LaneExecutor::new(session, scheduler, params);
+    let mut exec = LaneExecutor::new(session, scheduler, params)
+        .with_speculation_options(speculation);
 
     for (index, prompt) in prompts.iter().enumerate() {
         let tokens = vocab
@@ -230,7 +232,6 @@ fn neighbour_invariance(
     // it — and at depth 0 the executor takes the plain step. A gate that let
     // the allocator decide would therefore stop exercising the round it exists
     // to gate, and would report that by passing.
-    std::env::set_var("MAKEPAD_LLAMA_BATCH_SPEC_DEPTH", depth.to_string());
     let mut a_prompts = vec![lane_prompt(0)];
     let mut b_prompts = vec![lane_prompt(0)];
     for index in 1..width {
@@ -239,8 +240,12 @@ fn neighbour_invariance(
     }
 
     let session = build_session(model, slots, per_slot_context, spec)?;
-    let (session, a) = run_lanes(session, vocab, &a_prompts, GATE_STEPS, 512)?;
-    let (_session, b) = run_lanes(session, vocab, &b_prompts, GATE_STEPS, 512)?;
+    let options = LaneSpeculationOptions {
+        forced_depth: Some(depth),
+        force_round: false,
+    };
+    let (session, a) = run_lanes(session, vocab, &a_prompts, GATE_STEPS, 512, options)?;
+    let (_session, b) = run_lanes(session, vocab, &b_prompts, GATE_STEPS, 512, options)?;
 
     // NON-VACUITY, before any comparison. Each of these has a way of being
     // silently untrue, and a gate that compared two unspeculated runs would
@@ -356,12 +361,6 @@ fn measure(
             .chain((width > 1).then_some((0usize, true)))
             .collect();
         for (depth, forced_round) in arms {
-            std::env::set_var("MAKEPAD_LLAMA_BATCH_SPEC_DEPTH", depth.to_string());
-            if forced_round {
-                std::env::set_var("MAKEPAD_LLAMA_BATCH_FORCE_ROUND", "1");
-            } else {
-                std::env::remove_var("MAKEPAD_LLAMA_BATCH_FORCE_ROUND");
-            }
             // The solo path decodes a whole chunk per step, so it needs far
             // fewer steps to time honestly than a batched one does.
             let want = if width == 1 { steps.min(8) } else { steps };
@@ -371,6 +370,10 @@ fn measure(
                 &prompts,
                 want,
                 4096,
+                LaneSpeculationOptions {
+                    forced_depth: Some(depth),
+                    force_round: forced_round,
+                },
             )?;
             session = Some(returned);
             if run.width_held_for < 8.min(want) {
@@ -411,7 +414,6 @@ fn measure(
             );
         }
     }
-    std::env::remove_var("MAKEPAD_LLAMA_BATCH_SPEC_DEPTH");
     Ok(())
 }
 

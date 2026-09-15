@@ -1,6 +1,464 @@
 {
  "models": [
   {
+   "id": "pixal3d",
+   "domain": "mesh",
+   "backend": "trellis",
+   "available": true,
+   "gated": false,
+   "license": {
+    "name": "MIT and component licenses",
+    "url": "https://github.com/TencentARC/Pixal3D",
+    "summary": "Tencent Pixal3D is MIT. The bundle includes Microsoft TRELLIS decoders, DINOv3/NAF conditioning and BiRefNet under their respective published licenses. ComfyUI GPL source is not bundled.",
+    "restriction": "community"
+   },
+   "vram_gb": 24.0,
+   "note": "Native Pixal3D BF16 image-to-PBR-GLB. Sparse projected NAF avoids the dense 4 GiB texture feature map. Supports 1024/1536 cascades, manual camera FOV, independent structure/texture seeds and shape steps through pixal options. Native BiRefNet and FaithC/xatlas postprocessing. Validated on RTX PRO 6000 at 1024 and 1536; the larger cascade needs more VRAM. This BF16 backend does not implement the Comfy INT8 6 GB mode.",
+   "files": [
+    {
+     "role": "ss-flow",
+     "repo": "Comfy-Org/Pixal3D",
+     "path": "diffusion_models/pixal3d_bf16.safetensors",
+     "revision": "b35ffffa61fa02a86c377d94b755d9fe65d185d9",
+     "cache_as": "pixal3d/pixal3d_bf16.safetensors",
+     "size": 10999317704,
+     "sha256": "5f3cd67b7ff9104d810754bcd89e47a6c2393e41f8c0a808d0dead37802d85fe"
+    },
+    {
+     "role": "shape-flow-512",
+     "repo": "Comfy-Org/Pixal3D",
+     "path": "diffusion_models/pixal3d_bf16.safetensors",
+     "revision": "b35ffffa61fa02a86c377d94b755d9fe65d185d9",
+     "cache_as": "pixal3d/pixal3d_bf16.safetensors",
+     "size": 10999317704,
+     "sha256": "5f3cd67b7ff9104d810754bcd89e47a6c2393e41f8c0a808d0dead37802d85fe"
+    },
+    {
+     "role": "shape-flow-1024",
+     "repo": "Comfy-Org/Pixal3D",
+     "path": "diffusion_models/pixal3d_bf16.safetensors",
+     "revision": "b35ffffa61fa02a86c377d94b755d9fe65d185d9",
+     "cache_as": "pixal3d/pixal3d_bf16.safetensors",
+     "size": 10999317704,
+     "sha256": "5f3cd67b7ff9104d810754bcd89e47a6c2393e41f8c0a808d0dead37802d85fe"
+    },
+    {
+     "role": "texture-flow-1024",
+     "repo": "Comfy-Org/Pixal3D",
+     "path": "diffusion_models/pixal3d_bf16.safetensors",
+     "revision": "b35ffffa61fa02a86c377d94b755d9fe65d185d9",
+     "cache_as": "pixal3d/pixal3d_bf16.safetensors",
+     "size": 10999317704,
+     "sha256": "5f3cd67b7ff9104d810754bcd89e47a6c2393e41f8c0a808d0dead37802d85fe"
+    },
+    {
+     "role": "dino-conditioner",
+     "repo": "Comfy-Org/Pixal3D",
+     "path": "clip_vision/dino_v3_L_naf_fp32.safetensors",
+     "revision": "b35ffffa61fa02a86c377d94b755d9fe65d185d9",
+     "cache_as": "pixal3d/dino_naf.safetensors",
+     "size": 1215214176,
+     "sha256": "4ad2ec4e0879a5b5b04cd97325cc37da954a7b6edca5170b86510f17f2b2290f"
+    },
+    {
+     "role": "shape-decoder",
+     "repo": "microsoft/TRELLIS.2-4B",
+     "path": "ckpts/shape_dec_next_dc_f16c32_fp16.safetensors",
+     "revision": "af44b45f2e35a493886929c6d786e563ec68364d",
+     "cache_as": "trellis2/ckpts/shape_dec_next_dc_f16c32_fp16.safetensors",
+     "size": 948490494,
+     "sha256": "e3b718d3e43e4f8780e9a24ac6fff231811a67e3b058e336e10fe654c911d581"
+    },
+    {
+     "role": "texture-decoder",
+     "repo": "microsoft/TRELLIS.2-4B",
+     "path": "ckpts/tex_dec_next_dc_f16c32_fp16.safetensors",
+     "revision": "af44b45f2e35a493886929c6d786e563ec68364d",
+     "cache_as": "trellis2/ckpts/tex_dec_next_dc_f16c32_fp16.safetensors",
+     "size": 948458812,
+     "sha256": "97ea69addea2ecd9312910f5f548234665eef51c088386180b7cd5b258645e3c"
+    },
+    {
+     "role": "ss-decoder",
+     "repo": "microsoft/TRELLIS-image-large",
+     "path": "ckpts/ss_dec_conv3d_16l8_fp16.safetensors",
+     "revision": "25e0d31ffbebe4b5a97464dd851910efc3002d96",
+     "cache_as": "trellis2/ckpts/ss_dec_conv3d_16l8_fp16.safetensors",
+     "size": 147591972,
+     "sha256": "1c76d4a40519aa2d711cc263a8404105231ac26db31d946bed48b84fee79009a"
+    },
+    {
+     "role": "native-matte",
+     "repo": "ZhengPeng7/BiRefNet_HR-matting",
+     "path": "model.safetensors",
+     "revision": "5d6b6f8adcb5b417c871b1d84ceaae9871355b7f",
+     "cache_as": "matte/birefnet-hr/model.safetensors",
+     "size": 444473596,
+     "sha256": "a5a4de698739ea5e0e8bbab28e1b293dde95092b87a442d566cbc585c53cef55"
+    }
+   ]
+  },
+  {
+   "id": "bs-roformer-4stem",
+   "domain": "stems",
+   "backend": "stems",
+   "available": true,
+   "gated": false,
+   "license": {
+    "name": "MIT License",
+    "url": "https://github.com/ZFTurbo/Music-Source-Separation-Training",
+    "summary": "BS-RoFormer four-stem separator checkpoint and implementation are MIT licensed.",
+    "restriction": "none"
+   },
+   "vram_gb": 6.0,
+   "note": "Contract: input_b64 is a 44.1 kHz stereo PCM WAV. Output is application/vnd.makepad.stems-f32: drums, bass, other and vocals as planar stereo f32.",
+   "files": [
+    {
+     "role": "weights",
+     "repo": "ZFTurbo/Music-Source-Separation-Training",
+     "path": "https://github.com/ZFTurbo/Music-Source-Separation-Training/releases/download/v1.0.12/model_bs_roformer_ep_17_sdr_9.6568.ckpt",
+     "cache_as": "stems/model_bs_roformer_ep_17_sdr_9.6568.ckpt",
+     "size": 527385512,
+     "sha256": "3e9daecd70aaed5b5a0d1f861cc4d77eaa45afb3fc6301b1cf32c1be0f5868fb"
+    }
+   ]
+  },
+  {
+   "id": "beat-this",
+   "domain": "beats",
+   "backend": "beats",
+   "available": true,
+   "gated": false,
+   "license": {
+    "name": "MIT License",
+    "url": "https://github.com/CPJKU/beat_this",
+    "summary": "Beat This! beat and downbeat tracker (Foscarin, Schl\u00fcter, Widmer 2024), code and released weights MIT; training data partly copyrighted \u2014 weights are unrestricted.",
+    "restriction": "none"
+   },
+   "vram_gb": 0.5,
+   "note": "Contract: input_b64 is a WAV, MP3, FLAC or Ogg Vorbis file at any sample rate/channel count; the backend downmixes and resamples to 22050 Hz. Output is one application/json artifact: {bpm, confidence, beats:[seconds], downbeats:[seconds], frame_rate:50}.",
+   "files": [
+    {
+     "role": "weights",
+     "repo": "CPJKU/beat_this",
+     "path": "https://cloud.cp.jku.at/public.php/dav/files/7ik4RrBKTS273gp/final0.ckpt",
+     "cache_as": "beats/beat_this_final0.ckpt",
+     "size": 81058141,
+     "sha256": "8c328b45f59d8dd3dff219253ff6a8d6482be57d0133a29140e2febbf8eb8331"
+    },
+    {
+     "role": "weights-small",
+     "repo": "CPJKU/beat_this",
+     "path": "https://cloud.cp.jku.at/public.php/dav/files/7ik4RrBKTS273gp/small0.ckpt",
+     "cache_as": "beats/beat_this_small0.ckpt",
+     "size": 8451101,
+     "sha256": "6074be2c4d490c5f6101fcc374a1ec72ae93456e23bb6019783b849f5dc7d47b",
+     "optional": true
+    }
+   ]
+  },
+  {
+   "id": "basic-pitch",
+   "domain": "notes",
+   "backend": "notes",
+   "available": true,
+   "gated": false,
+   "license": {
+    "name": "Apache License 2.0",
+    "url": "https://github.com/spotify/basic-pitch",
+    "summary": "Spotify Basic Pitch instrument-agnostic polyphonic note transcription model (ICASSP 2022), Apache-2.0 code and weights; permissive incl. commercial.",
+    "restriction": "none"
+   },
+   "vram_gb": 0.1,
+   "note": "Request: domain notes with input_b64 containing a PCM WAV (16/24/32-bit integer or f32, any sample rate/channels). Response artifacts: application/json {frame_rate,notes:[{start_secs,end_secs,midi,amplitude,bends:[semitones_per_frame]}]} and audio/midi .mid bytes with per-note pitch bends in the standard +/-2-semitone range.",
+   "files": [
+    {
+     "role": "model",
+     "repo": "spotify/basic-pitch",
+     "path": "https://github.com/spotify/basic-pitch/raw/main/basic_pitch/saved_models/icassp_2022/nmp.onnx",
+     "cache_as": "notes/basic_pitch_nmp.onnx",
+     "size": 230444,
+     "sha256": "2c3c1d144bfa61ad236e92e169c13535c880469a12a047d4e73451f2c059a0ec"
+    }
+   ]
+  },
+  {
+   "id": "salamander-drumkit",
+   "domain": "audio",
+   "backend": "sample-kit",
+   "available": true,
+   "gated": false,
+   "license": {
+    "name": "CC BY-SA 3.0",
+    "url": "https://creativecommons.org/licenses/by-sa/3.0/",
+    "summary": "Salamander Drumkit by Alexander Holm. Free use with attribution; adaptations must be shared under the same licence.",
+    "restriction": "community"
+   },
+   "vram_gb": 0.0,
+   "note": "37 overhead samples from the Salamander Drumkit (48 kHz, 24-bit stereo), mirrored unmodified on makepad.nl with an ATTRIBUTION.txt beside them (the GitHub repo carries only the .sfz files). This is a sample bank for makepad-drumkit, not a runnable AI model.",
+   "files": [
+    {
+     "repo": "endolith/Salamander-Drumkit",
+     "path": "https://makepad.nl/models/drums/salamander/OH/kick_OH_P_1.wav",
+     "cache_as": "drums/salamander/OH/kick_OH_P_1.wav",
+     "size": 12832244,
+     "sha256": "bab7bc6aaec2c0d6db39c8e33214c4bf6870f51b557238eb1a5ce88052c92f06"
+    },
+    {
+     "repo": "endolith/Salamander-Drumkit",
+     "path": "https://makepad.nl/models/drums/salamander/OH/kick_OH_P_2.wav",
+     "cache_as": "drums/salamander/OH/kick_OH_P_2.wav",
+     "size": 137012,
+     "sha256": "3520f1518c7d05a7ad507aee1d50aa6e299572c6daba9c9d50731bfd9e33beb3"
+    },
+    {
+     "repo": "endolith/Salamander-Drumkit",
+     "path": "https://makepad.nl/models/drums/salamander/OH/kick_OH_F_1.wav",
+     "cache_as": "drums/salamander/OH/kick_OH_F_1.wav",
+     "size": 135920,
+     "sha256": "fc1a6388402144f1888a3febce1207799795fbbc3d87f41ce84be31f4adc70ae"
+    },
+    {
+     "repo": "endolith/Salamander-Drumkit",
+     "path": "https://makepad.nl/models/drums/salamander/OH/kick_OH_F_2.wav",
+     "cache_as": "drums/salamander/OH/kick_OH_F_2.wav",
+     "size": 136316,
+     "sha256": "30bfcd1f944c3a427e443db037a813278f404628bde6349cba96cd1501365fc2"
+    },
+    {
+     "repo": "endolith/Salamander-Drumkit",
+     "path": "https://makepad.nl/models/drums/salamander/OH/kick_OH_FF_1.wav",
+     "cache_as": "drums/salamander/OH/kick_OH_FF_1.wav",
+     "size": 136022,
+     "sha256": "f3c3272a7d0623b6d9b7cb028b08b5b3812c650fd22f4739e43e77e9faf69b28"
+    },
+    {
+     "repo": "endolith/Salamander-Drumkit",
+     "path": "https://makepad.nl/models/drums/salamander/OH/kick_OH_FF_2.wav",
+     "cache_as": "drums/salamander/OH/kick_OH_FF_2.wav",
+     "size": 135296,
+     "sha256": "d7a5c50cdd03cf985b330397030dada2a4ce4350b6a6db43fa1b8a3db48c9a75"
+    },
+    {
+     "repo": "endolith/Salamander-Drumkit",
+     "path": "https://makepad.nl/models/drums/salamander/OH/snare_OH_Ghost_1.wav",
+     "cache_as": "drums/salamander/OH/snare_OH_Ghost_1.wav",
+     "size": 133448,
+     "sha256": "b856339d674b8c92200cdb2aaace161c6b54001e029df7f1f7328c182fc59f0a"
+    },
+    {
+     "repo": "endolith/Salamander-Drumkit",
+     "path": "https://makepad.nl/models/drums/salamander/OH/snare_OH_Ghost_2.wav",
+     "cache_as": "drums/salamander/OH/snare_OH_Ghost_2.wav",
+     "size": 132026,
+     "sha256": "abe51b8167caff1f9d2e9fafff7dcaf632647359e65293ef8bfdd0604423cb10"
+    },
+    {
+     "repo": "endolith/Salamander-Drumkit",
+     "path": "https://makepad.nl/models/drums/salamander/OH/snare_OH_Ghost_3.wav",
+     "cache_as": "drums/salamander/OH/snare_OH_Ghost_3.wav",
+     "size": 132980,
+     "sha256": "1829e6a8ab0e76a301f032f7b0b1a32307247d2aec77741bc25f69bf5997971c"
+    },
+    {
+     "repo": "endolith/Salamander-Drumkit",
+     "path": "https://makepad.nl/models/drums/salamander/OH/snare_OH_MP_1.wav",
+     "cache_as": "drums/salamander/OH/snare_OH_MP_1.wav",
+     "size": 440678,
+     "sha256": "9f671962ba0eccd713d85f5b297bfb5e2cde2e7f4ff7735e535480b524aa185f"
+    },
+    {
+     "repo": "endolith/Salamander-Drumkit",
+     "path": "https://makepad.nl/models/drums/salamander/OH/snare_OH_MP_2.wav",
+     "cache_as": "drums/salamander/OH/snare_OH_MP_2.wav",
+     "size": 439310,
+     "sha256": "cbfec703cc8d3bec8b12127aa4d9daf626af2d50842995fd98fc27716eac17f9"
+    },
+    {
+     "repo": "endolith/Salamander-Drumkit",
+     "path": "https://makepad.nl/models/drums/salamander/OH/snare_OH_MP_3.wav",
+     "cache_as": "drums/salamander/OH/snare_OH_MP_3.wav",
+     "size": 439832,
+     "sha256": "4aea5fd07444a45f30a3a79304e58aa2f0e31d267a694dd7fbf813730c704aab"
+    },
+    {
+     "repo": "endolith/Salamander-Drumkit",
+     "path": "https://makepad.nl/models/drums/salamander/OH/snare_OH_F_1.wav",
+     "cache_as": "drums/salamander/OH/snare_OH_F_1.wav",
+     "size": 479102,
+     "sha256": "502b42305ae9c82c34060b1664d5ab5bf9d23dc7afacedbafaf92bb7047b7457"
+    },
+    {
+     "repo": "endolith/Salamander-Drumkit",
+     "path": "https://makepad.nl/models/drums/salamander/OH/snare_OH_F_2.wav",
+     "cache_as": "drums/salamander/OH/snare_OH_F_2.wav",
+     "size": 476714,
+     "sha256": "4daaefe7f43a7e8a2d9a45f9bb1ef35502122ec95191cf9dbf6a55776f401ff3"
+    },
+    {
+     "repo": "endolith/Salamander-Drumkit",
+     "path": "https://makepad.nl/models/drums/salamander/OH/snare_OH_F_3.wav",
+     "cache_as": "drums/salamander/OH/snare_OH_F_3.wav",
+     "size": 492866,
+     "sha256": "79450ca54856fc8351bb0b5c6f3cef7d10e6c7aa9f9b92480de3fec1254e0d73"
+    },
+    {
+     "repo": "endolith/Salamander-Drumkit",
+     "path": "https://makepad.nl/models/drums/salamander/OH/snare_OH_FF_1.wav",
+     "cache_as": "drums/salamander/OH/snare_OH_FF_1.wav",
+     "size": 526562,
+     "sha256": "4f30503ba0b27e702c75f027cfecdb49ec526ae31ea510f7bea71f98eaf9dc39"
+    },
+    {
+     "repo": "endolith/Salamander-Drumkit",
+     "path": "https://makepad.nl/models/drums/salamander/OH/snare_OH_FF_2.wav",
+     "cache_as": "drums/salamander/OH/snare_OH_FF_2.wav",
+     "size": 514484,
+     "sha256": "4a4e1a3cd56d87e013cd93379e71e4ef9e8c8b781cbb0cd177f5f068b168bf29"
+    },
+    {
+     "repo": "endolith/Salamander-Drumkit",
+     "path": "https://makepad.nl/models/drums/salamander/OH/snare_OH_FF_3.wav",
+     "cache_as": "drums/salamander/OH/snare_OH_FF_3.wav",
+     "size": 527324,
+     "sha256": "5cc0315e222b2a2e8ffc538f03fd76bf9de34acd8d42111ca08460f9d099fee5"
+    },
+    {
+     "repo": "endolith/Salamander-Drumkit",
+     "path": "https://makepad.nl/models/drums/salamander/OH/snareStick_OH_F_1.wav",
+     "cache_as": "drums/salamander/OH/snareStick_OH_F_1.wav",
+     "size": 200330,
+     "sha256": "cf1eb153fd033d822325071e7496f54a1f7610ae1702c2d700135ac98eaf5354"
+    },
+    {
+     "repo": "endolith/Salamander-Drumkit",
+     "path": "https://makepad.nl/models/drums/salamander/OH/hihatClosed_OH_P_1.wav",
+     "cache_as": "drums/salamander/OH/hihatClosed_OH_P_1.wav",
+     "size": 150878,
+     "sha256": "75e3a8ee84db75d0e9cec922d8bb44b977f5a73648145fbcd59a76e706636040"
+    },
+    {
+     "repo": "endolith/Salamander-Drumkit",
+     "path": "https://makepad.nl/models/drums/salamander/OH/hihatClosed_OH_F_1.wav",
+     "cache_as": "drums/salamander/OH/hihatClosed_OH_F_1.wav",
+     "size": 162758,
+     "sha256": "bd485de70450f68bb4692557a4ae909caaa965f5739693317365ebe85c986cbb"
+    },
+    {
+     "repo": "endolith/Salamander-Drumkit",
+     "path": "https://makepad.nl/models/drums/salamander/OH/hihatOpen_OH_P_1.wav",
+     "cache_as": "drums/salamander/OH/hihatOpen_OH_P_1.wav",
+     "size": 2397722,
+     "sha256": "3aeb5939739ac0d94a0ab5e0d237d96c46545f0c98778a5b2b18001be1090391"
+    },
+    {
+     "repo": "endolith/Salamander-Drumkit",
+     "path": "https://makepad.nl/models/drums/salamander/OH/hihatOpen_OH_F_1.wav",
+     "cache_as": "drums/salamander/OH/hihatOpen_OH_F_1.wav",
+     "size": 2554610,
+     "sha256": "7493fce31fb00093e4944f878a7fe802177a5c311e82725ac0ce7956e86f2fdc"
+    },
+    {
+     "repo": "endolith/Salamander-Drumkit",
+     "path": "https://makepad.nl/models/drums/salamander/OH/hihatOpen_OH_FF_1.wav",
+     "cache_as": "drums/salamander/OH/hihatOpen_OH_FF_1.wav",
+     "size": 2897654,
+     "sha256": "ef88d66d0289de4befe583de11298d75bae788de9ea63f156b493689668a7d54"
+    },
+    {
+     "repo": "endolith/Salamander-Drumkit",
+     "path": "https://makepad.nl/models/drums/salamander/OH/hihatFoot_OH_MP_1.wav",
+     "cache_as": "drums/salamander/OH/hihatFoot_OH_MP_1.wav",
+     "size": 382556,
+     "sha256": "2ad5e1bc38e5b9984d923b278b8ec5488540366082f4de9401d4702b9ba95e4c"
+    },
+    {
+     "repo": "endolith/Salamander-Drumkit",
+     "path": "https://makepad.nl/models/drums/salamander/OH/hiTom_OH_P_1.wav",
+     "cache_as": "drums/salamander/OH/hiTom_OH_P_1.wav",
+     "size": 599078,
+     "sha256": "fe826370a1ef7562a3c11701281a536f2b722f10390bf0322f95655919581568"
+    },
+    {
+     "repo": "endolith/Salamander-Drumkit",
+     "path": "https://makepad.nl/models/drums/salamander/OH/hiTom_OH_F_1.wav",
+     "cache_as": "drums/salamander/OH/hiTom_OH_F_1.wav",
+     "size": 789824,
+     "sha256": "b6802ce4ff40974f91ab9e30dea885a51db324376db3a56bbcaaaa6eaf69a043"
+    },
+    {
+     "repo": "endolith/Salamander-Drumkit",
+     "path": "https://makepad.nl/models/drums/salamander/OH/hiTom_OH_FF_1.wav",
+     "cache_as": "drums/salamander/OH/hiTom_OH_FF_1.wav",
+     "size": 871400,
+     "sha256": "25d6092617cc798ba488b2d4843f1ea789324a795007ba405884c981f63f079e"
+    },
+    {
+     "repo": "endolith/Salamander-Drumkit",
+     "path": "https://makepad.nl/models/drums/salamander/OH/loTom_OH_PP_1.wav",
+     "cache_as": "drums/salamander/OH/loTom_OH_PP_1.wav",
+     "size": 583160,
+     "sha256": "8afb4c8bbb7a46472f387db6cb0d6597f3ad14f73a6e23bbf58ed945accef0e1"
+    },
+    {
+     "repo": "endolith/Salamander-Drumkit",
+     "path": "https://makepad.nl/models/drums/salamander/OH/loTom_OH_MP_1.wav",
+     "cache_as": "drums/salamander/OH/loTom_OH_MP_1.wav",
+     "size": 609278,
+     "sha256": "4c1fdf7233a170eb625efa5e5681d1811fb53fb7f34a85a05c8bc936d5ac60b2"
+    },
+    {
+     "repo": "endolith/Salamander-Drumkit",
+     "path": "https://makepad.nl/models/drums/salamander/OH/loTom_OH_FF_1.wav",
+     "cache_as": "drums/salamander/OH/loTom_OH_FF_1.wav",
+     "size": 680900,
+     "sha256": "bfb74d255554c2965bf012452bc3717dee88a44aa04d120f2a1b86b9b6a7082d"
+    },
+    {
+     "repo": "endolith/Salamander-Drumkit",
+     "path": "https://makepad.nl/models/drums/salamander/OH/crash1_OH_P_1.wav",
+     "cache_as": "drums/salamander/OH/crash1_OH_P_1.wav",
+     "size": 2558096,
+     "sha256": "82b0ff9452b35ee6cf56445420af28b554d5ccc3659dff48167c21f1a357d795"
+    },
+    {
+     "repo": "endolith/Salamander-Drumkit",
+     "path": "https://makepad.nl/models/drums/salamander/OH/crash1_OH_FF_1.wav",
+     "cache_as": "drums/salamander/OH/crash1_OH_FF_1.wav",
+     "size": 3312620,
+     "sha256": "da28a2e9446c0e0a124f37ccf727db796f0d8575f63fbc923d16ad0143f1310c"
+    },
+    {
+     "repo": "endolith/Salamander-Drumkit",
+     "path": "https://makepad.nl/models/drums/salamander/OH/crash2_OH_FF_1.wav",
+     "cache_as": "drums/salamander/OH/crash2_OH_FF_1.wav",
+     "size": 3088784,
+     "sha256": "a361cfd992cb33026b1174c82b97b7cf04c10f23af7c9c5c1d1f588dfabc2ff1"
+    },
+    {
+     "repo": "endolith/Salamander-Drumkit",
+     "path": "https://makepad.nl/models/drums/salamander/OH/ride1_OH_MP_1.wav",
+     "cache_as": "drums/salamander/OH/ride1_OH_MP_1.wav",
+     "size": 1946042,
+     "sha256": "9e9135d595edf9f41ee3bd5caa9c797233422f62a3fb2c63ea542c58fb5ba155"
+    },
+    {
+     "repo": "endolith/Salamander-Drumkit",
+     "path": "https://makepad.nl/models/drums/salamander/OH/ride1_OH_FF_1.wav",
+     "cache_as": "drums/salamander/OH/ride1_OH_FF_1.wav",
+     "size": 3094256,
+     "sha256": "5dbdf8cdecd62b83acfde4e268be6a52da0ca64ae145536004ffce3b1b7d6608"
+    },
+    {
+     "repo": "endolith/Salamander-Drumkit",
+     "path": "https://makepad.nl/models/drums/salamander/OH/ride1Bell_OH_F_1.wav",
+     "cache_as": "drums/salamander/OH/ride1Bell_OH_F_1.wav",
+     "size": 2123384,
+     "sha256": "736bb2a58147359054df4b7c857b74c2d7b848efb9335b9e354661f025363e78"
+    }
+   ]
+  },
+  {
    "id": "hunyuan3d-paint-2.1",
    "domain": "paint",
    "backend": "paint",
@@ -331,9 +789,9 @@
     "summary": "FLUX.2-dev weights are under Black Forest Labs' non-commercial license. Personal and research use only unless you have a separate BFL grant.",
     "restriction": "non-commercial"
    },
-   "vram_gb": 29.0,
+   "vram_gb": 30.0,
    "min_vram_gb": 30.0,
-   "note": "FLUX.2-dev (32B guidance-distilled) text-to-image through the in-repo CUDA port of the official 32GB-card fp8 recipe (Comfy fp8mixed DiT: 48 singles + globals resident 1-byte, 8 doubles streamed through the pinned-host ring; Mistral-Small-3.2-24B fp8 TE taps [10,20,30] streamed per layer, flux2-vae, euler 20 steps guidance 4.0, 1024px default). Tekken tokenizer from the ungated Mistral-Small-3.1 repo (byte-identical to the gated BFL bundle). CUDA-only; fails closed without a GPU device. vram_gb is the ADMISSION estimate for the 32GB class it is built for: the measured process peak on the RTX 5090 is ~30.1GB (nvidia-smi 30.65GB incl. context, 2026-08-19, validator at 1024px) with an elastic activation pool, and the service adds its 2GB reserve on top, so 29.0 is what lets a cold 32GB card (32607 MB) admit it (29x1024+2048 = 31744 MB) while min_vram_gb 30 still refuses 24GB cards. Request: prompt (+ optional width/height/steps/guidance/seed).",
+   "note": "FLUX.2-dev (32B guidance-distilled) text-to-image through the in-repo CUDA port of the official 32GB-card fp8 recipe (Comfy fp8mixed DiT: 48 singles + globals resident 1-byte, 8 doubles streamed through the pinned-host ring; Mistral-Small-3.2-24B fp8 TE taps [10,20,30] streamed per layer, flux2-vae, euler 20 steps guidance 4.0, 1024px default). Tekken tokenizer from the ungated Mistral-Small-3.1 repo (byte-identical to the gated BFL bundle). CUDA-only; fails closed without a GPU device. vram_gb is the ADMISSION estimate for the 32GB class it is built for: the measured process peak on the RTX 5090 is ~30.1GB (nvidia-smi 30.65GB incl. context, 2026-08-19, validator at 1024px) with an elastic activation pool, and the service adds its 2GB reserve on top, so 29.0 is what lets a cold 32GB card (32607 MB) admit it (29x1024+2048 = 31744 MB) while min_vram_gb 30 still refuses 24GB cards. Request: prompt (+ optional width/height/steps/guidance/seed). Measured peak 30.5 GB used on an RTX 5090 (2026-09-04, 1024x1024, 8 steps, nvidia-smi 250 ms samples): the 32 GB card fits it with the node reserve at 1024 MB.",
    "files": [
     {
      "role": "transformer",
@@ -620,6 +1078,32 @@
      "cache_as": "llm/chandra-ocr-2.mmproj-f16.gguf",
      "size": 672423200,
      "sha256": "9235483343937e5a43aa28e4e2f80ca4c8319062595c6ae0784b461772e5df65"
+    }
+   ]
+  },
+  {
+   "id": "whisper-large-v3-turbo",
+   "domain": "stt",
+   "backend": "whisper",
+   "available": true,
+   "gated": false,
+   "license": {
+    "name": "MIT License",
+    "url": "https://huggingface.co/ggerganov/whisper.cpp",
+    "summary": "OpenAI Whisper large-v3-turbo weights in ggml format as distributed by ggerganov/whisper.cpp (MIT). Permissive use, including commercial.",
+    "restriction": "none"
+   },
+   "vram_gb": 2.0,
+   "note": "Whisper large-v3-turbo speech-to-text via the in-repo pure-Rust port (makepad-ai-speech whisper module; Metal/CUDA/CPU). Request: input_b64 audio/wav (any rate/channels, downmixed + resampled to 16 kHz) + language. Output: one application/json TranscriptJson {text, segments[{start_ms,end_ms,text}]}. The wire side of the stt.whisper pipe; apps reach it through AiHub::start_stt.",
+   "files": [
+    {
+     "repo": "ggerganov/whisper.cpp",
+     "path": "ggml-large-v3-turbo.bin",
+     "revision": "5359861c739e955e79d9a303bcbc70fb988958b1",
+     "cache_as": "stt/ggml-large-v3-turbo.bin",
+     "size": 1624555275,
+     "sha256": "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69",
+     "local": false
     }
    ]
   },
@@ -1738,6 +2222,42 @@
      "cache_as": "depth/da3-metric-large/model.safetensors",
      "size": 1336734448,
      "sha256": "bbea5b0b3ee389849cffa7ddae89de064a90abd2b055fc5aa99aac68db324776"
+    }
+   ]
+  },
+  {
+   "id": "sam3dbody",
+   "domain": "body",
+   "backend": "body-native",
+   "available": true,
+   "gated": false,
+   "license": {
+    "name": "SAM License",
+    "url": "https://huggingface.co/Comfy-Org/sam-3d-body",
+    "summary": "SAM 3D Body is under the SAM License / Meta acceptable-use terms published with the checkpoint. Review the model card before production use. This stack never downloads facebook/* checkpoints.",
+    "restriction": "community"
+   },
+   "vram_gb": 4.5,
+   "note": "SAM 3D Body (Comfy-Org/sam-3d-body, SAM License) RGB image -> application/json human pose packet. Native Rust inference; no Python, Torch, subprocess, or silent fallback. facebook/* checkpoints are never fetched. The checkpoint is pinned to an immutable revision, byte size, and SHA-256. Options ride the prompt string: `hands` (both hand crops, wrist fusion), `detect` (SAM 3.1 person detection, needs the optional native-segment weights), `persons=N` (max persons for detect).",
+   "files": [
+    {
+     "role": "native-body",
+     "repo": "Comfy-Org/sam-3d-body",
+     "path": "detection/sam_3d_body_dinov3_bf16.safetensors",
+     "revision": "60476aced0b8de0a0e82a318c79a85061cc97434",
+     "cache_as": "body/sam3dbody/sam_3d_body_dinov3_bf16.safetensors",
+     "size": 2830737652,
+     "sha256": "59fa45200c504c5b56625004d7d3385daf48c616613e88099e43bf83b3e249cf"
+    },
+    {
+     "role": "native-segment",
+     "repo": "Comfy-Org/sam3.1",
+     "path": "checkpoints/sam3.1_multiplex_fp16.safetensors",
+     "revision": "f38cd62b71494b53ac2b56ca36e24f3c8d565581",
+     "cache_as": "segment/sam3-1-multiplex/sam3.1_multiplex_fp16.safetensors",
+     "size": 1745546848,
+     "sha256": "9ba99c92703c2e8b4f47de2d34a539bb8e18923049e238b780d70dbe6368eb03",
+     "optional": true
     }
    ]
   },
