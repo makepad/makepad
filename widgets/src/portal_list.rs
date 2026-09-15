@@ -1125,7 +1125,7 @@ impl PortalList {
                                     margin: Default::default(),
                                     width: Size::fill(),
                                     height: Size::fit(),
-                                    metrics: Metrics::default(),
+                                    ..Default::default()
                                 },
                                 layout,
                             );
@@ -1140,7 +1140,7 @@ impl PortalList {
                                     margin: Default::default(),
                                     width: Size::fit(),
                                     height: Size::fill(),
-                                    metrics: Metrics::default(),
+                                    ..Default::default()
                                 },
                                 layout,
                             );
@@ -1185,7 +1185,7 @@ impl PortalList {
                                             margin: Default::default(),
                                             width: Size::fill(),
                                             height: Size::fit(),
-                                            metrics: Metrics::default(),
+                                            ..Default::default()
                                         },
                                         layout,
                                     );
@@ -1197,7 +1197,7 @@ impl PortalList {
                                             margin: Default::default(),
                                             width: Size::fit(),
                                             height: Size::fill(),
-                                            metrics: Metrics::default(),
+                                            ..Default::default()
                                         },
                                         layout,
                                     );
@@ -1233,7 +1233,7 @@ impl PortalList {
                                     margin: Default::default(),
                                     width: Size::fill(),
                                     height: Size::fit(),
-                                    metrics: Metrics::default(),
+                                    ..Default::default()
                                 },
                                 layout,
                             );
@@ -1248,7 +1248,7 @@ impl PortalList {
                                     margin: Default::default(),
                                     width: Size::fit(),
                                     height: Size::fill(),
-                                    metrics: Metrics::default(),
+                                    ..Default::default()
                                 },
                                 layout,
                             );
@@ -1299,7 +1299,7 @@ impl PortalList {
                                             margin: Default::default(),
                                             width: Size::fill(),
                                             height: Size::fit(),
-                                            metrics: Metrics::default(),
+                                            ..Default::default()
                                         },
                                         layout,
                                     ),
@@ -1312,7 +1312,7 @@ impl PortalList {
                                             margin: Default::default(),
                                             width: Size::fit(),
                                             height: Size::fill(),
-                                            metrics: Metrics::default(),
+                                            ..Default::default()
                                         },
                                         layout,
                                     ),
@@ -1351,7 +1351,7 @@ impl PortalList {
                                 margin: Default::default(),
                                 width: Size::fill(),
                                 height: Size::fit(),
-                                metrics: Metrics::default(),
+                                ..Default::default()
                             },
                             layout,
                         ),
@@ -1361,7 +1361,7 @@ impl PortalList {
                                 margin: Default::default(),
                                 width: Size::fit(),
                                 height: Size::fill(),
-                                metrics: Metrics::default(),
+                                ..Default::default()
                             },
                             layout,
                         ),

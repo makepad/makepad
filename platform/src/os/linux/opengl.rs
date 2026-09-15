@@ -44,9 +44,13 @@ use crate::os::linux::vulkan_naga::CxVulkanShaderBinary;
 impl DrawVars {
     pub(crate) fn compile_shader(&mut self, vm: &mut ScriptVm, _apply: &Apply, value: ScriptValue) {
         if let Some(io_self) = value.as_object() {
+            // The object cache is keyed by HEAP as well as object: a splash
+            // isolate has its own heap, and an object index there says
+            // nothing about the same index in the app heap.
+            let heap_key = vm.bx.heap.heap_key();
             {
                 let cx = vm.host.cx();
-                if let Some(&shader_id) = cx.draw_shaders.cache_object_id_to_shader.get(&io_self) {
+                if let Some(&shader_id) = cx.draw_shaders.cache_object_id_to_shader.get(&(heap_key, io_self)) {
                     self.finalize_cached_shader(vm, shader_id);
                     return;
                 }
@@ -59,7 +63,7 @@ impl DrawVars {
                     let cx = vm.host.cx_mut();
                     cx.draw_shaders
                         .cache_object_id_to_shader
-                        .insert(io_self, shader_id);
+                        .insert((heap_key, io_self), shader_id);
                     self.finalize_cached_shader(vm, shader_id);
                     return;
                 }
@@ -181,7 +185,7 @@ impl DrawVars {
                     let cx = vm.host.cx_mut();
                     cx.draw_shaders
                         .cache_object_id_to_shader
-                        .insert(io_self, shader_id);
+                        .insert((heap_key, io_self), shader_id);
                     cx.draw_shaders
                         .cache_functions_to_shader
                         .insert(fnhash, shader_id);
@@ -263,7 +267,7 @@ impl DrawVars {
             let shader_id = DrawShaderId { index };
             cx.draw_shaders
                 .cache_object_id_to_shader
-                .insert(io_self, shader_id);
+                .insert((heap_key, io_self), shader_id);
             cx.draw_shaders
                 .cache_functions_to_shader
                 .insert(fnhash, shader_id);
@@ -498,13 +502,35 @@ impl Cx {
                     continue;
                 };
 
+                if self.geometries.skip_stale(geometry_id) {
+                    continue;
+                }
                 let geometry = &mut self.geometries[geometry_id];
+                if !crate::geometry::geometry_backend_supports_typed(
+                    geometry,
+                    "opengl",
+                    sh.mapping.geometry_is_compact(),
+                ) {
+                    continue;
+                }
+                if !crate::geometry::geometry_layout_matches_shader(
+                    geometry,
+                    &sh.mapping.geometries,
+                ) {
+                    continue;
+                }
                 if geometry.dirty_vertices || geometry.os.vb.gl_buffer.is_none() {
-                    geometry.os.vb.update_array_buffer(gl, &geometry.vertices);
+                    let Some(vertices) = geometry.vertices.as_f32() else {
+                        continue;
+                    };
+                    geometry.os.vb.update_array_buffer(gl, vertices);
                     geometry.dirty_vertices = false;
                 }
                 if geometry.dirty_indices || geometry.os.ib.gl_buffer.is_none() {
-                    geometry.os.ib.update_index_buffer(gl, &geometry.indices);
+                    let Some(indices) = geometry.indices.as_u32() else {
+                        continue;
+                    };
+                    geometry.os.ib.update_index_buffer(gl, indices);
                     geometry.dirty_indices = false;
                 }
                 geometry.dirty = geometry.dirty_vertices || geometry.dirty_indices;
@@ -564,7 +590,10 @@ impl Cx {
                         for attr in &shgl.geometries {
                             if let Some(loc) = attr.loc {
                                 match attr.attr_format {
-                                    DrawShaderAttrFormat::Float => {
+                                    DrawShaderAttrFormat::F32x1
+                                    | DrawShaderAttrFormat::F32x2
+                                    | DrawShaderAttrFormat::F32x3
+                                    | DrawShaderAttrFormat::F32x4 => {
                                         (gl.glVertexAttribPointer)(
                                             loc,
                                             attr.size,
@@ -574,7 +603,7 @@ impl Cx {
                                             attr.offset as *const () as *const _,
                                         );
                                     }
-                                    DrawShaderAttrFormat::UInt => {
+                                    DrawShaderAttrFormat::U32x1 => {
                                         (gl.glVertexAttribIPointer)(
                                             loc,
                                             attr.size,
@@ -583,7 +612,7 @@ impl Cx {
                                             attr.offset as *const () as *const _,
                                         );
                                     }
-                                    DrawShaderAttrFormat::SInt => {
+                                    DrawShaderAttrFormat::I32x1 => {
                                         (gl.glVertexAttribIPointer)(
                                             loc,
                                             attr.size,
@@ -592,6 +621,7 @@ impl Cx {
                                             attr.offset as *const () as *const _,
                                         );
                                     }
+                                    _ => {}
                                 }
                                 (gl.glEnableVertexAttribArray)(loc);
                             }
@@ -600,7 +630,10 @@ impl Cx {
                         for attr in &shgl.instances {
                             if let Some(loc) = attr.loc {
                                 match attr.attr_format {
-                                    DrawShaderAttrFormat::Float => {
+                                    DrawShaderAttrFormat::F32x1
+                                    | DrawShaderAttrFormat::F32x2
+                                    | DrawShaderAttrFormat::F32x3
+                                    | DrawShaderAttrFormat::F32x4 => {
                                         (gl.glVertexAttribPointer)(
                                             loc,
                                             attr.size,
@@ -610,7 +643,7 @@ impl Cx {
                                             attr.offset as *const () as *const _,
                                         );
                                     }
-                                    DrawShaderAttrFormat::UInt => {
+                                    DrawShaderAttrFormat::U32x1 => {
                                         (gl.glVertexAttribIPointer)(
                                             loc,
                                             attr.size,
@@ -619,7 +652,7 @@ impl Cx {
                                             attr.offset as *const () as *const _,
                                         );
                                     }
-                                    DrawShaderAttrFormat::SInt => {
+                                    DrawShaderAttrFormat::I32x1 => {
                                         (gl.glVertexAttribIPointer)(
                                             loc,
                                             attr.size,
@@ -628,6 +661,7 @@ impl Cx {
                                             attr.offset as *const () as *const _,
                                         );
                                     }
+                                    _ => {}
                                 }
                                 (gl.glEnableVertexAttribArray)(loc);
                                 (gl.glVertexAttribDivisor)(loc, 1 as gl_sys::GLuint);
@@ -1923,7 +1957,7 @@ impl GlShader {
                         size,
                         stride,
                         (i * 4 * mem::size_of::<f32>()),
-                        DrawShaderAttrFormat::Float
+                        DrawShaderAttrFormat::F32x4
                     );
                 }
                 attribs.push(OpenglAttribute {
@@ -1932,7 +1966,7 @@ impl GlShader {
                     offset: (i * 4 * mem::size_of::<f32>()) as usize,
                     size: size,
                     stride: stride,
-                    attr_format: DrawShaderAttrFormat::Float,
+                    attr_format: DrawShaderAttrFormat::F32x4,
                 })
             }
         }

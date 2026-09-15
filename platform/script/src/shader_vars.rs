@@ -1202,6 +1202,12 @@ impl ShaderFnCompiler {
                         // lets see if our podtype has a name. ifnot use pod_ty
                         vm.bx.heap.pod_type_name_if_not_set(pod_ty, field_id);
                         if !output.io.iter().any(|io| io.name == field_id) {
+                            output.validate_vertex_fetch_io(
+                                &vm.bx.heap,
+                                &kind,
+                                field_id,
+                                pod_ty,
+                            );
                             output.io.push(ShaderIo {
                                 kind: kind.clone(),
                                 name: field_id,
@@ -1280,6 +1286,12 @@ impl ShaderFnCompiler {
 
                     vm.bx.heap.pod_type_name_if_not_set(pod_ty, field_id);
                     if !output.io.iter().any(|io| io.name == field_id) {
+                        output.validate_vertex_fetch_io(
+                            &vm.bx.heap,
+                            &kind,
+                            field_id,
+                            pod_ty,
+                        );
                         output.io.push(ShaderIo {
                             kind: kind.clone(),
                             name: field_id,

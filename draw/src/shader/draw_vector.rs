@@ -223,7 +223,13 @@ script_mod! {
             );
             if local.x < clip.x || local.y < clip.y
                 || local.x > clip.z || local.y > clip.w {
-                return vec4(0.0, 0.0, 0.0, 0.0)
+                // Transparent fragments still write depth. That is normally
+                // invisible, but an embedded vector canvas can contain page-
+                // sized geometry extending far beyond its widget clip; those
+                // zero-alpha fragments would then hide every lower-depth
+                // sibling drawn later in the pass. Discard outside the clip
+                // so both color and depth stay confined to the widget.
+                discard()
             }
             // geometry shadow mode: stroke_mult == -2.0
             // v interpolates 1.0 (edge) to 0.0 (3*blur out), stroke_dist = blur
