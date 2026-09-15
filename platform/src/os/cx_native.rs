@@ -6,7 +6,7 @@ use {
         path::{Path, PathBuf},
         rc::Rc,
         sync::OnceLock,
-        time::SystemTime,
+        time::{Instant, SystemTime},
     },
 };
 
@@ -66,13 +66,13 @@ impl Cx {
         &mut self,
         request: crate::storage::StorageRequest,
     ) {
-        use crate::cx_api::CxOsApi;
-
         let sender = self.storage_state.sender();
-        self.spawn_thread(move || {
+        if let Ok(task) = self.spawn_thread(move || {
             let response = crate::storage::native::execute(&crate::home::storage_dir(), request);
             let _ = sender.send(response);
-        });
+        }) {
+            task.detach();
+        }
     }
 
     pub fn native_load_dependencies(&mut self) {
@@ -91,5 +91,10 @@ impl Cx {
             return elapsed.as_secs_f64();
         }
         return 0.0;
+    }
+
+    pub fn monotonic_now() -> f64 {
+        static START: OnceLock<Instant> = OnceLock::new();
+        START.get_or_init(Instant::now).elapsed().as_secs_f64()
     }
 }
