@@ -4,7 +4,8 @@
 set -eu
 
 apple_status() {
-    selected=$(/usr/bin/xcode-select -p 2>/dev/null || :)
+    selected=${DEVELOPER_DIR:-$(/usr/bin/xcode-select -p 2>/dev/null || :)}
+    case "$selected" in *.app) selected="$selected/Contents/Developer" ;; esac
     apple_ok=yes
     printf '\n  Apple developer tools\n\n'
     if [ -d /Applications/Xcode.app ]; then
@@ -20,27 +21,31 @@ apple_status() {
         return
     fi
     printf '  Active tools       %s\n' "$selected"
-    if [ -x "$selected/usr/bin/xcodebuild" ]; then
-        if /usr/bin/xcodebuild -checkFirstLaunchStatus >/dev/null 2>&1; then
-            printf '  License / setup    Ready\n'
-        else
-            printf '  License / setup    Needs attention — finish Xcode first launch\n'
-            apple_ok=no
-            return
-        fi
+    # Xcode's first-launch status includes setup beyond the command-line
+    # toolchain. Probe the tools we actually use. Apple's tools report any
+    # outstanding license requirement themselves; never accept it here.
+    if apple_detail=$(/usr/bin/xcrun --sdk macosx clang --version 2>&1); then
+        printf '  C/C++ compiler     Ready\n'
     else
-        printf '  License / setup    Standalone tools; checking they are usable\n'
-    fi
-    if /usr/bin/xcrun --sdk macosx clang --version >/dev/null 2>&1 && /usr/bin/xcrun --sdk macosx --show-sdk-path >/dev/null 2>&1; then
-        printf '  Compiler + SDK     Ready\n'
-    else
-        printf '  Compiler + SDK     Missing or awaiting Apple setup / acceptance\n'
+        printf '  C/C++ compiler     Unavailable\n\n%s\n' "$apple_detail"
         apple_ok=no
     fi
-    if command -v git >/dev/null 2>&1 && git --version >/dev/null 2>&1; then
+    if apple_detail=$(/usr/bin/xcrun --sdk macosx --show-sdk-path 2>&1) && [ -d "$apple_detail" ]; then
+        printf '  macOS SDK          Ready\n'
+    else
+        printf '  macOS SDK          Unavailable\n\n%s\n' "$apple_detail"
+        apple_ok=no
+    fi
+    if apple_detail=$(/usr/bin/xcrun --sdk macosx --find ld 2>&1) && [ -x "$apple_detail" ]; then
+        printf '  Linker             Ready\n'
+    else
+        printf '  Linker             Unavailable\n\n%s\n' "$apple_detail"
+        apple_ok=no
+    fi
+    if apple_detail=$(git --version 2>&1); then
         printf '  Git                Ready\n'
     else
-        printf '  Git                Unavailable — included with Apple developer tools\n'
+        printf '  Git                Unavailable\n\n%s\n' "$apple_detail"
         apple_ok=no
     fi
 }
@@ -51,7 +56,8 @@ case "$(uname -s)" in
             apple_status
             [ "$apple_ok" = yes ] && break
             [ "${1:-}" = --check ] && exit 1
-            printf '\n  Complete Apple’s installation and accept its terms in Apple’s UI.\n'
+            printf '\n  A required build tool is unavailable; see its error above.\n'
+            printf '  If Apple reports a license or setup requirement, finish it in Apple’s UI.\n'
             printf '  If tools are installed elsewhere, select them with:\n'
             printf '    sudo xcode-select --switch /path/to/Xcode.app/Contents/Developer\n'
             printf '\n  i  Open Command Line Tools installation (xcode-select --install)\n'
