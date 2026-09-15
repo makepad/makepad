@@ -380,7 +380,7 @@ impl Setup {
             }
         }
     }
-    fn app_menu(&mut self, app: &str) -> Result<(), String> {
+    fn app_setup(&self, app: &str) -> Result<Self, String> {
         let definition = catalog::apps()?.into_iter().find(|entry| entry.get("id").and_then(makepad_strict_json::Value::as_str) == Some(app)).ok_or("Unknown public app")?;
         let mut selected = self.clone();
         selected.app = app.into();
@@ -395,7 +395,18 @@ impl Setup {
             fs::create_dir_all(&available).map_err(|e| e.to_string())?;
             release.save(&cached)?;
         }
+        Ok(selected)
+    }
+    fn app_menu(&mut self, app: &str) -> Result<(), String> {
+        let mut selected = self.app_setup(app)?;
         let result = show_menu(&mut selected, false);
+        fs::write(self.root.join("selected-app"), &self.app).map_err(|e| e.to_string())?;
+        result
+    }
+    fn run_app(&mut self, app: &str) -> Result<(), String> {
+        let mut selected = self.app_setup(app)?;
+        fs::write(self.root.join("selected-app"), app).map_err(|e| e.to_string())?;
+        let result = selected.install_and_run();
         fs::write(self.root.join("selected-app"), &self.app).map_err(|e| e.to_string())?;
         result
     }
@@ -788,7 +799,7 @@ fn show_menu(setup: &mut Setup, primary: bool) -> Result<(), String> {
             "1" => setup.install_and_run(),
             "2" => setup.build(),
             "3" if primary => setup.apps(),
-            "4" if primary => setup.app_menu("wm"),
+            "4" if primary => setup.run_app("wm"),
             key if key == (if primary { "5" } else { "3" }) => setup.ai_terminal(),
             key if primary && key == command_key => (|| {
                 let info = [
