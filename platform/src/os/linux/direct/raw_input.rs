@@ -2,13 +2,28 @@ use {
     self::super::super::libc_sys,
     self::super::direct_event::*,
     crate::{area::Area, event::*, makepad_math::*, window::WindowId},
-    std::{cell::Cell, fs::File, io::Read, sync::mpsc},
+    std::{
+        cell::Cell,
+        collections::HashSet,
+        fs::{File, OpenOptions},
+        io::{self, Read},
+        os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
+        path::PathBuf,
+    },
 };
 
-#[allow(unused, non_camel_case_types)]
-#[repr(u16)]
-#[derive(Clone, Copy, Debug)]
-enum InputEventType {
+// Kernel event codes are extensible integers, not Rust enum discriminants.
+// Unknown codes must be ignored without constructing an invalid enum value.
+macro_rules! input_codes {
+    ($name:ident, $ty:ty, {$($key:ident = $value:expr,)*}) => {
+        #[allow(dead_code, non_snake_case)]
+        mod $name {
+            $(pub const $key: $ty = $value;)*
+        }
+    };
+}
+
+input_codes! { InputEventType, u16, {
     EV_SYN = 0x00,
     EV_KEY = 0x01,
     EV_REL = 0x02,
@@ -22,31 +37,20 @@ enum InputEventType {
     EV_PWR = 0x16,
     EV_FF_STATUS = 0x17,
     EV_MAX = 0x1f,
-    EV_CNT = InputEventType::EV_MAX as u16 + 1,
-}
+    EV_CNT = EV_MAX as u16 + 1,
+}}
 
-impl Default for InputEventType {
-    fn default() -> Self {
-        InputEventType::EV_SYN
-    }
-}
 
-#[allow(unused, non_camel_case_types)]
-#[repr(u16)]
-#[derive(Clone, Copy, Debug)]
-enum EvSynCodes {
+input_codes! { EvSynCodes, u16, {
     SYN_REPORT = 0x00,
     SYN_CONFIG = 0x01,
     SYN_MT_REPORT = 0x02,
     SYN_DROPPED = 0x03,
     SYN_MAX = 0x0f,
-    SYN_CNT = EvSynCodes::SYN_MAX as u16 + 1,
-}
+    SYN_CNT = SYN_MAX as u16 + 1,
+}}
 
-#[allow(unused, non_camel_case_types)]
-#[repr(u16)]
-#[derive(Clone, Copy, Debug)]
-enum EvKeyCodes {
+input_codes! { EvKeyCodes, u16, {
     KEY_RESERVED = 0,
     KEY_ESC = 1,
     KEY_1 = 2,
@@ -438,12 +442,9 @@ enum EvKeyCodes {
     KEY_LOGOFF = 0x1b1,
     KEY_DOLLAR = 0x1b2,
     KEY_EURO = 0x1b3,
-}
+}}
 
-#[allow(unused, non_camel_case_types)]
-#[repr(u16)]
-#[derive(Clone, Copy, Debug)]
-enum EvRelCodes {
+input_codes! { EvRelCodes, u16, {
     REL_X = 0x00,
     REL_Y = 0x01,
     REL_Z = 0x02,
@@ -458,13 +459,10 @@ enum EvRelCodes {
     REL_WHEEL_HI_RES = 0x0b,
     REL_HWHEEL_HI_RES = 0x0c,
     REL_MAX = 0x0f,
-    REL_CNT = EvRelCodes::REL_MAX as u16 + 1,
-}
+    REL_CNT = REL_MAX as u16 + 1,
+}}
 
-#[allow(unused, non_camel_case_types)]
-#[repr(u16)]
-#[derive(Clone, Copy, Debug)]
-enum EvAbsCodes {
+input_codes! { EvAbsCodes, u16, {
     ABS_X = 0x00,
     ABS_Y = 0x01,
     ABS_Z = 0x02,
@@ -509,8 +507,8 @@ enum EvAbsCodes {
     ABS_MT_TOOL_X = 0x3c,
     ABS_MT_TOOL_Y = 0x3d,
     ABS_MAX = 0x3f,
-    ABS_CNT = EvAbsCodes::ABS_MAX as u16 + 1,
-}
+    ABS_CNT = ABS_MAX as u16 + 1,
+}}
 
 #[allow(unused, non_camel_case_types)]
 #[repr(u16)]
@@ -589,27 +587,282 @@ enum EvRepCodes {
     REP_CNT = EvRepCodes::REP_PERIOD_MAX as u16 + 1,
 }
 
-#[allow(unused)]
-#[repr(i32)]
-#[derive(Clone, Copy, Debug)]
-enum KeyAction {
-    KeyUp = 0x00,
-    KeyDown = 0x01,
-    KeyRepeat = 0x02,
-}
+input_codes! { KeyAction, i32, {
+    KEY_UP = 0x00,
+    KEY_DOWN = 0x01,
+    KEY_REPEAT = 0x02,
+}}
 
 #[repr(C)]
 #[derive(Default, Clone, Copy, Debug)]
 struct InputEvent {
     time: libc_sys::timeval,
-    ty: InputEventType,
+    ty: u16,
     code: u16,
     value: i32,
 }
 
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+struct AbsInfo {
+    value: i32,
+    minimum: i32,
+    maximum: i32,
+    fuzz: i32,
+    flat: i32,
+    resolution: i32,
+}
+
+// Linux evdev's _IOR('E', nr, size), using the existing in-house ioctl FFI.
+fn evdev_read(file: &File, nr: u32, bytes: &mut [u8]) -> bool {
+    let request = 0x8000_0000u32 | ((bytes.len() as u32) << 16) | (b'E' as u32) << 8 | nr;
+    unsafe { libc_sys::ioctl(file.as_raw_fd(), request as std::os::raw::c_ulong, bytes.as_mut_ptr()) >= 0 }
+}
+
+fn abs_info(file: &File, axis: u16) -> Option<AbsInfo> {
+    let mut supported = [0u8; 8];
+    if !evdev_read(file, 0x23, &mut supported) || !has_bit(&supported, axis) {
+        return None;
+    }
+    let mut bytes = [0u8; std::mem::size_of::<AbsInfo>()];
+    evdev_read(file, 0x40 + axis as u32, &mut bytes)
+        .then(|| unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast::<AbsInfo>()) })
+}
+
+fn has_bit(bytes: &[u8], bit: u16) -> bool {
+    bytes.get(bit as usize / 8).is_some_and(|byte| byte & (1 << (bit % 8)) != 0)
+}
+
+#[derive(Default, Clone)]
+struct Contact {
+    id: Option<i32>,
+    x: Option<i32>,
+    y: Option<i32>,
+}
+
+struct Touchpad {
+    axes: [AbsInfo; 2],
+    slots: Vec<Contact>,
+    slot_base: i32,
+    slot: Option<usize>,
+    has_touch: bool,
+    contact: bool,
+    tools: [bool; 5],
+    // Exact slot identities: a new finger or a change in contact count must
+    // establish a new baseline, never jump the pointer/scroll position.
+    previous_ids: Vec<(usize, i32)>,
+    previous: Option<Vec2d>,
+    suppress_until_lift: bool,
+}
+
+impl Touchpad {
+    fn open(file: &File, props: &[u8], keys: &[u8]) -> Option<Self> {
+        if has_bit(props, 1) || !has_bit(keys, EvKeyCodes::BTN_TOOL_FINGER) {
+            return None;
+        }
+        let mt = abs_info(file, EvAbsCodes::ABS_MT_SLOT).filter(|axis| {
+            axis.minimum == 0 && (0..64).contains(&axis.maximum)
+        });
+        let codes = if mt.is_some() {
+            [EvAbsCodes::ABS_MT_POSITION_X, EvAbsCodes::ABS_MT_POSITION_Y]
+        } else {
+            [EvAbsCodes::ABS_X, EvAbsCodes::ABS_Y]
+        };
+        let axes = [abs_info(file, codes[0])?, abs_info(file, codes[1])?];
+        if axes.iter().any(|axis| axis.maximum <= axis.minimum) { return None; }
+        let mut pad = Self {
+            axes,
+            slots: vec![Contact::default(); mt.map_or(0, |axis| (axis.maximum + 1) as usize)],
+            slot_base: mt.map_or(0, |axis| axis.minimum),
+            slot: None,
+            has_touch: has_bit(keys, EvKeyCodes::BTN_TOUCH),
+            contact: false,
+            tools: [false; 5],
+            previous_ids: Vec::new(),
+            previous: None,
+            suppress_until_lift: false,
+        };
+        pad.resync(file);
+        Some(pad)
+    }
+
+    fn tool_index(code: u16) -> Option<usize> {
+        match code {
+            EvKeyCodes::BTN_TOOL_FINGER => Some(0),
+            EvKeyCodes::BTN_TOOL_DOUBLETAP => Some(1),
+            EvKeyCodes::BTN_TOOL_TRIPLETAP => Some(2),
+            EvKeyCodes::BTN_TOOL_QUADTAP => Some(3),
+            EvKeyCodes::BTN_TOOL_QUINTTAP => Some(4),
+            _ => None,
+        }
+    }
+
+    fn resync(&mut self, file: &File) {
+        self.previous = None;
+        self.previous_ids.clear();
+        self.suppress_until_lift = true;
+        let mut keys = [0u8; 96];
+        evdev_read(file, 0x18, &mut keys); // EVIOCGKEY
+        self.contact = has_bit(&keys, EvKeyCodes::BTN_TOUCH);
+        for (index, code) in [EvKeyCodes::BTN_TOOL_FINGER, EvKeyCodes::BTN_TOOL_DOUBLETAP,
+            EvKeyCodes::BTN_TOOL_TRIPLETAP, EvKeyCodes::BTN_TOOL_QUADTAP,
+            EvKeyCodes::BTN_TOOL_QUINTTAP].into_iter().enumerate() {
+            self.tools[index] = has_bit(&keys, code);
+        }
+        if self.slots.is_empty() {
+            for (index, code) in [EvAbsCodes::ABS_X, EvAbsCodes::ABS_Y].into_iter().enumerate() {
+                if let Some(axis) = abs_info(file, code) { self.axes[index] = axis; }
+            }
+        } else {
+            self.slots.fill(Contact::default());
+            self.slot = abs_info(file, EvAbsCodes::ABS_MT_SLOT).and_then(|axis| self.slot_index(axis.value));
+            for code in [EvAbsCodes::ABS_MT_TRACKING_ID, EvAbsCodes::ABS_MT_POSITION_X, EvAbsCodes::ABS_MT_POSITION_Y] {
+                // EVIOCGMTSLOTS takes the desired axis followed by one i32 per slot.
+                let mut bytes = vec![0u8; (1 + self.slots.len()) * 4];
+                bytes[..4].copy_from_slice(&(code as i32).to_ne_bytes());
+                if !evdev_read(file, 0x0a, &mut bytes) { continue; }
+                for (slot, value) in self.slots.iter_mut().zip(bytes[4..].chunks_exact(4)) {
+                    let value = i32::from_ne_bytes(value.try_into().unwrap());
+                    match code {
+                        EvAbsCodes::ABS_MT_TRACKING_ID => slot.id = (value >= 0).then_some(value),
+                        EvAbsCodes::ABS_MT_POSITION_X => slot.x = Some(value),
+                        EvAbsCodes::ABS_MT_POSITION_Y => slot.y = Some(value),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        // A pad opened while untouched is ready for the first contact.
+        if !self.contact && !self.tools.iter().any(|tool| *tool)
+            && self.slots.iter().all(|slot| slot.id.is_none()) {
+            self.suppress_until_lift = false;
+        }
+    }
+
+    fn slot_index(&self, value: i32) -> Option<usize> {
+        let index = value.checked_sub(self.slot_base)?;
+        (index >= 0 && (index as usize) < self.slots.len()).then_some(index as usize)
+    }
+
+    // Consume only touch coordinates/contact keys. Physical button events
+    // still take the ordinary mouse path. In particular BTN_TOUCH is NOT a
+    // click on an indirect touchpad.
+    fn consume(&mut self, event: &InputEvent) -> bool {
+        if event.ty == InputEventType::EV_REL
+            && matches!(event.code, EvRelCodes::REL_X | EvRelCodes::REL_Y) {
+            return true;
+        }
+        if event.ty == InputEventType::EV_KEY {
+            if event.code == EvKeyCodes::BTN_TOUCH {
+                if self.contact != (event.value != 0) { self.previous = None; }
+                self.contact = event.value != 0;
+                return true;
+            }
+            if let Some(index) = Self::tool_index(event.code) {
+                self.tools[index] = event.value != 0;
+                return true;
+            }
+        }
+        if event.ty != InputEventType::EV_ABS { return false; }
+        if self.slots.is_empty() {
+            match event.code {
+                EvAbsCodes::ABS_X => self.axes[0].value = event.value,
+                EvAbsCodes::ABS_Y => self.axes[1].value = event.value,
+                _ => {}
+            }
+        } else if event.code == EvAbsCodes::ABS_MT_SLOT {
+            self.slot = self.slot_index(event.value);
+        } else if let Some(slot) = self.slot.and_then(|index| self.slots.get_mut(index)) {
+            match event.code {
+                EvAbsCodes::ABS_MT_TRACKING_ID => {
+                    slot.id = (event.value >= 0).then_some(event.value);
+                }
+                EvAbsCodes::ABS_MT_POSITION_X => slot.x = Some(event.value),
+                EvAbsCodes::ABS_MT_POSITION_Y => slot.y = Some(event.value),
+                _ => {}
+            }
+        }
+        true // Never process both legacy ABS_X/Y and the MT coordinates.
+    }
+
+    fn finish_report(&mut self) -> Option<(Vec2d, bool)> {
+        // Some pads keep reporting proximity positions while a finger is
+        // hovering. Only actual surface contact may move the pointer.
+        if self.has_touch && !self.contact {
+            self.previous = None;
+            self.previous_ids.clear();
+            self.suppress_until_lift = false;
+            return None;
+        }
+        let mut position = dvec2(0.0, 0.0);
+        let mut ids = Vec::new();
+        if self.slots.is_empty() {
+            let count = self.tools.iter().rposition(|tool| *tool).map_or(self.contact as usize, |i| i + 1);
+            if count > 0 {
+                position = dvec2(self.axes[0].value as f64, self.axes[1].value as f64);
+                for i in 0..count { ids.push((i, 0)); }
+            }
+        } else {
+            for (index, slot) in self.slots.iter().enumerate() {
+                if let Some(id) = slot.id {
+                    let (Some(x), Some(y)) = (slot.x, slot.y) else {
+                        self.previous = None;
+                        return None;
+                    };
+                    ids.push((index, id));
+                    position += dvec2(x as f64, y as f64);
+                }
+            }
+            if !ids.is_empty() { position = position / ids.len() as f64; }
+        }
+        if ids.is_empty() { self.suppress_until_lift = false; }
+        if self.suppress_until_lift || !(1..=2).contains(&ids.len()) {
+            self.previous = None;
+            self.previous_ids = ids;
+            return None;
+        }
+        let previous = self.previous.replace(position);
+        let same_contacts = self.previous_ids == ids;
+        let scroll = ids.len() == 2;
+        self.previous_ids = ids;
+        if !same_contacts { return None; }
+        let delta = position - previous?;
+        // Kernel resolution is units/mm. Old pads without it use their axis
+        // extent as a conservative physical-size estimate, not screen size.
+        let resolution = |index: usize, size_mm: f64| {
+            let axis = self.axes[index];
+            if axis.resolution > 0 { axis.resolution as f64 }
+            else { (axis.maximum - axis.minimum) as f64 / size_mm }
+        };
+        let delta = dvec2(delta.x / resolution(0, 100.0), delta.y / resolution(1, 65.0));
+        (delta.x != 0.0 || delta.y != 0.0).then_some((delta, scroll))
+    }
+}
+
+enum DeviceEvent {
+    Raw(InputEvent),
+    TouchpadMotion { millimeters: Vec2d, scroll: bool },
+}
+
+struct InputDevice {
+    id: u64,
+    path: PathBuf,
+    file: File,
+    pending: Vec<InputEvent>,
+    dropped: bool,
+    reported_input: bool,
+    touchpad: Option<Touchpad>,
+    absolute_axes: Option<[AbsInfo; 2]>,
+    absolute_mt: bool,
+}
+
 pub struct RawInput {
     pub modifiers: KeyModifiers,
-    receiver: mpsc::Receiver<InputEvent>,
+    devices: Vec<InputDevice>,
+    next_device_id: u64,
+    modifier_keys: HashSet<(u64, u16)>,
+    denied: HashSet<PathBuf>,
+    next_scan: f64,
     width: f64,
     height: f64,
     dpi_factor: f64,
@@ -618,96 +871,205 @@ pub struct RawInput {
 
 impl RawInput {
     pub fn new(width: f64, height: f64, dpi_factor: f64) -> Self {
-        let (send, receiver) = mpsc::channel();
-        for i in 0..12 {
-            let device = format!("/dev/input/event{}", i);
-            let send = send.clone();
-            if let Ok(mut kb) = File::open(&device) {
-                std::thread::spawn(move || loop {
-                    let mut buf = [0u8; std::mem::size_of::<InputEvent>()];
-                    if let Ok(len) = kb.read(&mut buf) {
-                        if len == std::mem::size_of::<InputEvent>() {
-                            let buf = unsafe { std::mem::transmute(buf) };
-                            send.send(buf).unwrap();
-                        }
-                    } else {
-                        return;
-                    }
-                });
-            }
-        }
-
-        Self {
-            receiver,
+        let mut input = Self {
+            devices: Vec::new(),
+            next_device_id: 0,
+            modifier_keys: HashSet::new(),
+            denied: HashSet::new(),
+            next_scan: 1.0,
             width,
             height,
             dpi_factor,
             abs: dvec2(0.0, 0.0),
             modifiers: Default::default(),
-        }
+        };
+        input.scan_devices();
+        input
     }
 
-    pub fn poll_raw_input(&mut self, time: f64, window_id: WindowId) -> Vec<DirectEvent> {
-        let mut dir_evts: Vec<DirectEvent> = Vec::new();
-        let mut evts: Vec<InputEvent> = Vec::new();
-        loop {
-            let new = match self.receiver.try_recv() {
-                Ok(new) => new, //new event
-                Err(err) => {
-                    match err {
-                        mpsc::TryRecvError::Empty => {
-                            if evts.len() > 0 {
-                                continue; //partial message read that hasnt been cleared out, keep reading
-                            } else {
-                                break; //nothing to read
-                            }
-                        }
-                        mpsc::TryRecvError::Disconnected => break, //no input devices?
-                    }
+    /// The pointer's clamp rectangle follows the primary display. Called when a
+    /// hotplug reconcile changes the desktop size; the current pointer position
+    /// is kept and clamped so it stays on screen.
+    pub fn set_bounds(&mut self, width: f64, height: f64, dpi_factor: f64) {
+        self.width = width;
+        self.height = height;
+        if dpi_factor.is_finite() && dpi_factor > 0.0 {
+            self.dpi_factor = dpi_factor;
+        }
+        self.abs.x = self.abs.x.clamp(0.0, width.max(0.0));
+        self.abs.y = self.abs.y.clamp(0.0, height.max(0.0));
+    }
+
+    fn scan_devices(&mut self) {
+        let entries = match std::fs::read_dir("/dev/input") {
+            Ok(entries) => entries,
+            Err(error) => {
+                if self.denied.insert(PathBuf::from("/dev/input")) {
+                    crate::warning!("Direct input: enumerate /dev/input: {error}");
                 }
-            };
-            match new.ty {
-                InputEventType::EV_SYN => {
-                    let code: EvSynCodes = unsafe { std::mem::transmute_copy(&new.code) };
-                    match code {
-                        EvSynCodes::SYN_REPORT => {
-                            //end of event reached
-                            self.process_event(&mut evts, &mut dir_evts, time, window_id);
-                        }
-                        EvSynCodes::SYN_DROPPED => {
-                            //evdev client buffer overrun, ignore event till now and up untill the next SYN_REPORT
-                            evts.clear();
-                            while let Ok(dropped) = self.receiver.try_recv() {
-                                match dropped.ty {
-                                    InputEventType::EV_SYN => {
-                                        if dropped.code == EvSynCodes::SYN_REPORT as u16 {
-                                            break;
-                                        }
-                                    }
-                                    _ => continue,
-                                }
-                            }
-                            continue;
-                        }
-                        _ => evts.push(new),
-                    }
+                return;
+            }
+        };
+        let mut paths: Vec<_> = entries.flatten().map(|entry| entry.path()).filter(|path| {
+            path.file_name().and_then(|name| name.to_str())
+                .and_then(|name| name.strip_prefix("event"))
+                .is_some_and(|number| !number.is_empty() && number.bytes().all(|c| c.is_ascii_digit()))
+        }).collect();
+        paths.sort();
+        self.denied.retain(|path| paths.contains(path));
+        for path in paths {
+            if self.devices.iter().any(|device| device.path == path) {
+                continue;
+            }
+            match OpenOptions::new().read(true).custom_flags(libc_sys::O_NONBLOCK).open(&path) {
+                Ok(file) => {
+                    self.denied.remove(&path);
+                    let mut props = [0u8; 8];
+                    let mut keys = [0u8; 96];
+                    evdev_read(&file, 0x09, &mut props); // EVIOCGPROP
+                    evdev_read(&file, 0x21, &mut keys); // EVIOCGBIT(EV_KEY)
+                    let touchpad = Touchpad::open(&file, &props, &keys);
+                    let mut absolute_mt = false;
+                    let absolute_axes = if touchpad.is_none() && (has_bit(&props, 1)
+                        || has_bit(&keys, EvKeyCodes::BTN_TOOL_PEN) || has_bit(&keys, EvKeyCodes::BTN_TOUCH)) {
+                        abs_info(&file, EvAbsCodes::ABS_X).zip(abs_info(&file, EvAbsCodes::ABS_Y))
+                            .or_else(|| {
+                                absolute_mt = true;
+                                abs_info(&file, EvAbsCodes::ABS_MT_POSITION_X)
+                                    .zip(abs_info(&file, EvAbsCodes::ABS_MT_POSITION_Y))
+                            })
+                            .filter(|(x, y)| x.maximum > x.minimum && y.maximum > y.minimum)
+                            .map(|(x, y)| [x, y])
+                    } else { None };
+                    crate::log!("Direct input: opened {}{}", path.display(),
+                        if touchpad.is_some() { " (relative touchpad, two-finger scroll)" } else { "" });
+                    self.next_device_id += 1;
+                    self.devices.push(InputDevice { id: self.next_device_id, path, file,
+                        pending: Vec::new(), dropped: false, reported_input: false, touchpad, absolute_axes, absolute_mt });
                 }
-                _ => {
-                    evts.push(new);
+                Err(error) => {
+                    if self.denied.insert(path.clone()) {
+                        crate::warning!("Direct input: open {}: {error}", path.display());
+                    }
                 }
             }
         }
+    }
+
+    pub fn fds(&self) -> impl Iterator<Item = i32> + '_ {
+        self.devices.iter().map(|device| device.file.as_raw_fd())
+    }
+
+    pub fn poll_raw_input(&mut self, time: f64, window_id: WindowId) -> Vec<DirectEvent> {
+        if time >= self.next_scan {
+            self.next_scan = time + 1.0;
+            self.scan_devices();
+        }
+        let mut dir_evts = Vec::new();
+        let mut packets = Vec::new();
+        // Poll nonblocking descriptors directly. Packet state belongs to each
+        // device, so a partial report never spins the UI or mixes two devices.
+        self.devices.retain_mut(|device| {
+            const EVENT_SIZE: usize = std::mem::size_of::<InputEvent>();
+            let mut buffer = [0u8; EVENT_SIZE * 64];
+            // Bound work per device so an input flood cannot starve rendering.
+            for _ in 0..16 {
+                let len = match device.file.read(&mut buffer) {
+                    Ok(0) => return false,
+                    Ok(len) => len,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(error) => {
+                        crate::log!("Direct input: disconnected {}: {error}", device.path.display());
+                        return false;
+                    }
+                };
+                for bytes in buffer[..len].chunks_exact(EVENT_SIZE) {
+                    // input_event consists only of integers; read_unaligned
+                    // also works when the byte buffer has no struct alignment.
+                    let event = unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast::<InputEvent>()) };
+                    if event.ty == InputEventType::EV_SYN {
+                        if event.code == EvSynCodes::SYN_DROPPED {
+                            device.pending.clear();
+                            device.dropped = true;
+                            crate::warning!("Direct input: event queue overrun on {}", device.path.display());
+                        } else if event.code == EvSynCodes::SYN_REPORT {
+                            if !device.dropped {
+                                if !device.reported_input && device.pending.iter().any(|event| {
+                                    matches!(event.ty, InputEventType::EV_KEY | InputEventType::EV_REL)
+                                }) {
+                                    crate::log!("Direct input: receiving keyboard/pointer reports from {}", device.path.display());
+                                    device.reported_input = true;
+                                }
+                                if let Some(pad) = device.touchpad.as_mut() {
+                                    device.pending.retain(|event| !pad.consume(event));
+                                    if let Some((millimeters, scroll)) = pad.finish_report() {
+                                        packets.push((device.id, event.time, DeviceEvent::TouchpadMotion { millimeters, scroll }));
+                                    }
+                                }
+                                packets.extend(device.pending.drain(..)
+                                    .map(|event| (device.id, event.time, DeviceEvent::Raw(event))));
+                            } else if let Some(pad) = device.touchpad.as_mut() {
+                                // The kernel requires a state query after SYN_DROPPED.
+                                // Suppress a held gesture until lift instead of jumping.
+                                pad.resync(&device.file);
+                            }
+                            device.dropped = false;
+                        }
+                    } else if !device.dropped {
+                        if device.pending.len() < 1024 {
+                            device.pending.push(event);
+                        } else {
+                            device.pending.clear();
+                            device.dropped = true;
+                        }
+                    }
+                }
+            }
+            true
+        });
+        // Composite keyboards can report modifiers and keys on different
+        // event nodes. Preserve kernel order, not device enumeration order.
+        packets.sort_by_key(|(_, time, _)| (time.tv_sec, time.tv_usec));
+        self.modifier_keys.retain(|(id, _)| self.devices.iter().any(|device| device.id == *id));
+        self.update_modifiers();
+        self.process_event(&mut packets, &mut dir_evts, time, window_id);
         dir_evts
     }
 
     fn process_event(
         &mut self,
-        evts: &mut Vec<InputEvent>,
+        evts: &mut Vec<(u64, libc_sys::timeval, DeviceEvent)>,
         dir_evts: &mut Vec<DirectEvent>,
         time: f64,
         window_id: WindowId,
     ) {
-        while let Some(evt) = evts.pop() {
+        for (device_id, _, event) in evts.drain(..) {
+            let evt = match event {
+                DeviceEvent::Raw(evt) => evt,
+                DeviceEvent::TouchpadMotion { millimeters, scroll } => {
+                    let delta = if scroll {
+                        millimeters * (12.0 / self.dpi_factor)
+                    } else {
+                        millimeters * (20.0 * crate::linux_input::pointer_speed(true) as f64 / 100.0 / self.dpi_factor)
+                    };
+                    if scroll {
+                        dir_evts.push(DirectEvent::Scroll(ScrollEvent {
+                            window_id, scroll: delta, abs: self.abs, modifiers: self.modifiers,
+                            handled_x: Cell::new(false), handled_y: Cell::new(false),
+                            is_mouse: false, time, phase: Default::default(),
+                        }));
+                    } else {
+                        self.abs.x = (self.abs.x + delta.x).clamp(0.0, self.width.max(0.0));
+                        self.abs.y = (self.abs.y + delta.y).clamp(0.0, self.height.max(0.0));
+                        dir_evts.push(DirectEvent::MouseMove(MouseMoveEvent {
+                            lock_delta: Default::default(), abs: self.abs, window_id,
+                            modifiers: self.modifiers, time, handled: Cell::new(Area::Empty),
+                        }));
+                    }
+                    continue;
+                }
+            };
             match evt.ty {
                 InputEventType::EV_REL => {
                     // relative input
@@ -715,11 +1077,11 @@ impl RawInput {
                 }
                 InputEventType::EV_ABS => {
                     // absolute input
-                    self.process_abs_event(evt, dir_evts, time, window_id)
+                    self.process_abs_event(device_id, evt, dir_evts, time, window_id)
                 }
                 InputEventType::EV_KEY => {
                     // key press
-                    self.process_key_event(evt, dir_evts, time, window_id)
+                    self.process_key_event(device_id, evt, dir_evts, time, window_id)
                 }
                 _ => (),
             }
@@ -733,10 +1095,10 @@ impl RawInput {
         time: f64,
         window_id: WindowId,
     ) {
-        let code: EvRelCodes = unsafe { std::mem::transmute(evt.code) };
+        let code = evt.code;
         match code {
             EvRelCodes::REL_X => {
-                self.abs.x += evt.value as f64;
+                self.abs.x += evt.value as f64 * crate::linux_input::pointer_speed(false) as f64 / 100.0 / self.dpi_factor;
                 if self.abs.x < 0.0 {
                     self.abs.x = 0.0
                 }
@@ -745,13 +1107,32 @@ impl RawInput {
                 }
             }
             EvRelCodes::REL_Y => {
-                self.abs.y += evt.value as f64;
+                self.abs.y += evt.value as f64 * crate::linux_input::pointer_speed(false) as f64 / 100.0 / self.dpi_factor;
                 if self.abs.y < 0.0 {
                     self.abs.y = 0.0
                 }
                 if self.abs.y > self.height {
                     self.abs.y = self.height
                 }
+            }
+            EvRelCodes::REL_WHEEL | EvRelCodes::REL_HWHEEL => {
+                let delta = evt.value as f64 * 40.0;
+                dir_evts.push(DirectEvent::Scroll(ScrollEvent {
+                    window_id,
+                    scroll: if code == EvRelCodes::REL_WHEEL {
+                        dvec2(0.0, -delta)
+                    } else {
+                        dvec2(delta, 0.0)
+                    },
+                    abs: self.abs,
+                    modifiers: self.modifiers,
+                    handled_x: Cell::new(false),
+                    handled_y: Cell::new(false),
+                    is_mouse: true,
+                    time,
+                    phase: Default::default(),
+                }));
+                return;
             }
             _ => return (),
         }
@@ -767,24 +1148,24 @@ impl RawInput {
 
     fn process_abs_event(
         &mut self,
+        device_id: u64,
         evt: InputEvent,
         dir_evts: &mut Vec<DirectEvent>,
         time: f64,
         window_id: WindowId,
     ) {
-        let code: EvAbsCodes = unsafe { std::mem::transmute(evt.code) };
-        match code {
-            EvAbsCodes::ABS_X => {
-                self.abs.x = (evt.value as f64 / 32767.0) * self.width;
+        // Wheels, pedals and gamepad axes are not absolute pointing devices.
+        let Some((axes, mt)) = self.devices.iter().find(|device| device.id == device_id)
+            .and_then(|device| device.absolute_axes.map(|axes| (axes, device.absolute_mt))) else { return; };
+        let normalized = |axis: AbsInfo| {
+            ((evt.value as f64 - axis.minimum as f64) / (axis.maximum as f64 - axis.minimum as f64)).clamp(0.0, 1.0)
+        };
+        match (evt.code, mt) {
+            (EvAbsCodes::ABS_X, false) | (EvAbsCodes::ABS_MT_POSITION_X, true) => {
+                self.abs.x = normalized(axes[0]) * self.width;
             }
-            EvAbsCodes::ABS_Y => {
-                self.abs.y = (evt.value as f64 / 32767.0) * self.height;
-            }
-            EvAbsCodes::ABS_MT_POSITION_X => {
-                self.abs.x = evt.value as f64 / self.dpi_factor;
-            }
-            EvAbsCodes::ABS_MT_POSITION_Y => {
-                self.abs.y = evt.value as f64 / self.dpi_factor;
+            (EvAbsCodes::ABS_Y, false) | (EvAbsCodes::ABS_MT_POSITION_Y, true) => {
+                self.abs.y = normalized(axes[1]) * self.height;
             }
             _ => return (),
         }
@@ -798,15 +1179,29 @@ impl RawInput {
         }))
     }
 
+    fn update_modifiers(&mut self) {
+        let held = |left, right| self.modifier_keys.iter().any(|(_, key)| *key == left || *key == right);
+        self.modifiers = KeyModifiers {
+            shift: held(EvKeyCodes::KEY_LEFTSHIFT, EvKeyCodes::KEY_RIGHTSHIFT),
+            control: held(EvKeyCodes::KEY_LEFTCTRL, EvKeyCodes::KEY_RIGHTCTRL),
+            alt: held(EvKeyCodes::KEY_LEFTALT, EvKeyCodes::KEY_RIGHTALT),
+            logo: held(EvKeyCodes::KEY_LEFTMETA, EvKeyCodes::KEY_RIGHTMETA),
+        };
+    }
+
     fn process_key_event(
         &mut self,
+        device_id: u64,
         evt: InputEvent,
         dir_evts: &mut Vec<DirectEvent>,
         time: f64,
         window_id: WindowId,
     ) {
-        let code: EvKeyCodes = unsafe { std::mem::transmute(evt.code) };
-        let key_action: KeyAction = unsafe { std::mem::transmute(evt.value) };
+        let code = evt.code;
+        let key_action = evt.value;
+        if !(KeyAction::KEY_UP..=KeyAction::KEY_REPEAT).contains(&key_action) {
+            return;
+        }
         let key_code = match code {
             EvKeyCodes::KEY_ESC => KeyCode::Escape,
             EvKeyCodes::KEY_1 => KeyCode::Key1,
@@ -915,15 +1310,19 @@ impl RawInput {
             EvKeyCodes::KEY_RIGHTMETA => KeyCode::Logo,
             _ => KeyCode::Unknown,
         };
+        if matches!(code, EvKeyCodes::KEY_LEFTSHIFT | EvKeyCodes::KEY_RIGHTSHIFT
+            | EvKeyCodes::KEY_LEFTCTRL | EvKeyCodes::KEY_RIGHTCTRL
+            | EvKeyCodes::KEY_LEFTALT | EvKeyCodes::KEY_RIGHTALT
+            | EvKeyCodes::KEY_LEFTMETA | EvKeyCodes::KEY_RIGHTMETA) {
+            if key_action == KeyAction::KEY_UP { self.modifier_keys.remove(&(device_id, code)); }
+            else { self.modifier_keys.insert((device_id, code)); }
+            self.update_modifiers();
+        }
+        if matches!(key_code, KeyCode::Logo | KeyCode::Space) {
+            crate::trace!("input.keys", "direct key device={} code={} key={:?} action={} modifiers={:?}", device_id, code, key_code, key_action, self.modifiers);
+        }
         match key_action {
-            KeyAction::KeyDown => {
-                match key_code {
-                    KeyCode::Shift => self.modifiers.shift = true,
-                    KeyCode::Control => self.modifiers.control = true,
-                    KeyCode::Logo => self.modifiers.logo = true,
-                    KeyCode::Alt => self.modifiers.alt = true,
-                    _ => (),
-                };
+            KeyAction::KEY_DOWN => {
                 match code {
                     EvKeyCodes::BTN_LEFT
                     | EvKeyCodes::BTN_RIGHT
@@ -973,14 +1372,7 @@ impl RawInput {
                     }
                 }
             }
-            KeyAction::KeyUp => {
-                match key_code {
-                    KeyCode::Shift => self.modifiers.shift = false,
-                    KeyCode::Control => self.modifiers.control = false,
-                    KeyCode::Logo => self.modifiers.logo = false,
-                    KeyCode::Alt => self.modifiers.alt = false,
-                    _ => (),
-                };
+            KeyAction::KEY_UP => {
                 match code {
                     EvKeyCodes::BTN_LEFT
                     | EvKeyCodes::BTN_RIGHT
@@ -1010,7 +1402,7 @@ impl RawInput {
                     })),
                 }
             }
-            KeyAction::KeyRepeat => {
+            KeyAction::KEY_REPEAT => {
                 if !self.modifiers.control && !self.modifiers.alt && !self.modifiers.logo {
                     let uc = self.modifiers.shift;
                     let inp = key_code.to_char(uc);
@@ -1030,6 +1422,7 @@ impl RawInput {
                     time,
                 }))
             }
+            _ => (),
         }
     }
 }
