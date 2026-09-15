@@ -17,16 +17,6 @@ impl Cx {
         &mut self.script_data.std
     }
 
-    fn with_script_std_vm<R>(
-        &mut self,
-        f: impl FnOnce(&mut Cx, &mut ScriptStd, &mut Option<Box<ScriptVmBase>>) -> R,
-    ) -> R {
-        let host = self as *mut Cx;
-        let std = &mut self.script_data.std as *mut ScriptStd;
-        let script_vm = &mut self.script_vm as *mut Option<Box<ScriptVmBase>>;
-        unsafe { f(&mut *host, &mut *std, &mut *script_vm) }
-    }
-
     /// Whether the script VM is currently held (`take()`n) by an enclosing
     /// `with_vm`/`eval` on this thread, i.e. calling `with_vm` now would be
     /// re-entrant and panic. Lets a call site that can degrade gracefully
@@ -41,9 +31,7 @@ impl Cx {
             self.script_vm.is_some(),
             std::panic::Location::caller(),
         );
-        self.with_script_std_vm(|host, std, script_vm| {
-            makepad_script_std::with_vm_and_async(host, std, script_vm, f)
-        })
+        makepad_script_std::with_vm_and_async(self, f)
     }
 
     #[track_caller]
@@ -52,17 +40,13 @@ impl Cx {
             self.script_vm.is_some(),
             std::panic::Location::caller(),
         );
-        self.with_script_std_vm(|host, std, script_vm| {
-            makepad_script_std::with_vm(host, std, script_vm, f)
-        })
+        makepad_script_std::with_vm(self, f)
     }
 
     /// Like [`Cx::with_vm`], but returns `None` instead of panicking when the
     /// VM is already held (swapped off) by an enclosing `with_vm`/`eval`.
     pub fn try_with_vm<R, F: FnOnce(&mut ScriptVm) -> R>(&mut self, f: F) -> Option<R> {
-        self.with_script_std_vm(|host, std, script_vm| {
-            makepad_script_std::try_with_vm(host, std, script_vm, f)
-        })
+        makepad_script_std::try_with_vm(self, f)
     }
 
     #[track_caller]
@@ -75,9 +59,7 @@ impl Cx {
             self.script_vm.is_some(),
             std::panic::Location::caller(),
         );
-        self.with_script_std_vm(|host, std, script_vm| {
-            makepad_script_std::with_vm_thread(host, std, script_vm, thread_id, f)
-        })
+        makepad_script_std::with_vm_thread(self, thread_id, f)
     }
 
     #[track_caller]
@@ -86,9 +68,7 @@ impl Cx {
             self.script_vm.is_some(),
             std::panic::Location::caller(),
         );
-        self.with_script_std_vm(|host, std, script_vm| {
-            makepad_script_std::eval(host, std, script_vm, script_mod)
-        })
+        makepad_script_std::eval(self, script_mod)
     }
 
     pub fn add_script_task_on_thread_completed_hook(
@@ -111,21 +91,15 @@ impl Cx {
     }
 
     pub(crate) fn handle_script_tasks(&mut self) {
-        self.with_script_std_vm(|host, std, script_vm| {
-            makepad_script_std::handle_script_tasks(host, std, script_vm)
-        });
+        makepad_script_std::handle_script_tasks(self);
     }
 
     pub(crate) fn handle_script_signals(&mut self) {
-        self.with_script_std_vm(|host, std, script_vm| {
-            makepad_script_std::pump(host, std, script_vm)
-        });
+        makepad_script_std::pump(self);
     }
 
     pub(crate) fn handle_script_web_socket_event(&mut self, event: NetworkResponse) {
-        self.with_script_std_vm(|host, std, script_vm| {
-            makepad_script_std::handle_script_web_socket_event(host, std, script_vm, event)
-        });
+        makepad_script_std::handle_script_web_socket_event(self, event);
     }
 
     #[allow(unused)]
@@ -212,9 +186,7 @@ impl Cx {
             }
         }
 
-        self.with_script_std_vm(|host, std, script_vm| {
-            makepad_script_std::handle_script_network_events(host, std, script_vm, responses)
-        });
+        makepad_script_std::handle_script_network_events(self, responses);
     }
 
     /// Run the script network handlers against whichever VM is currently *installed*
@@ -229,8 +201,6 @@ impl Cx {
     /// loads — those live on `Cx::script_data.resources` and are handled once, for the
     /// app VM, before the event is dispatched to the widget tree.
     pub fn handle_script_network_events_for_current_vm(&mut self, responses: &[NetworkResponse]) {
-        self.with_script_std_vm(|host, std, script_vm| {
-            makepad_script_std::handle_script_network_events(host, std, script_vm, responses)
-        });
+        makepad_script_std::handle_script_network_events(self, responses);
     }
 }

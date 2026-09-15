@@ -84,46 +84,78 @@ pub fn queue_script_thread_resume(std: &mut ScriptStd, thread_id: ScriptThreadId
 pub fn set_script_task_trace(_std: &mut ScriptStd, _enabled: bool) {}
 
 fn run_script_task_thread_completed_hooks(
-    host: &mut dyn Any,
-    std: &mut ScriptStd,
+    host: &mut dyn ScriptHost,
     thread_id: ScriptThreadId,
     result: ScriptValue,
 ) -> bool {
-    let hooks = std.data.tasks.hooks.on_thread_completed.clone();
+    let hooks = host
+        .script_std()
+        .downcast_ref::<ScriptStd>()
+        .unwrap()
+        .data
+        .tasks
+        .hooks
+        .on_thread_completed
+        .clone();
     let mut consumed = false;
     for hook in hooks {
-        consumed |= hook(host, thread_id, result);
+        consumed |= hook(host.as_any_mut(), thread_id, result);
     }
     consumed
 }
 
-fn run_script_task_pump_hooks(host: &mut dyn Any, std: &mut ScriptStd) -> bool {
-    let hooks = std.data.tasks.hooks.pump.clone();
+fn run_script_task_pump_hooks(host: &mut dyn ScriptHost) -> bool {
+    let hooks = host
+        .script_std()
+        .downcast_ref::<ScriptStd>()
+        .unwrap()
+        .data
+        .tasks
+        .hooks
+        .pump
+        .clone();
     let mut progressed = false;
     for hook in hooks {
-        progressed |= hook(host);
+        progressed |= hook(host.as_any_mut());
     }
     progressed
 }
 
-pub fn handle_script_tasks<H: Any>(
-    host: &mut H,
-    std: &mut ScriptStd,
-    script_vm: &mut Option<Box<ScriptVmBase>>,
-) {
+pub fn handle_script_tasks(host: &mut dyn ScriptHost) {
     loop {
         let mut progressed = false;
 
         let mut next_thread = None;
         let mut start_task = None;
 
-        if let Some(thread_id) = std.data.tasks.pending_resumes.pop_front() {
+        if let Some(thread_id) = host
+            .script_std()
+            .downcast_mut::<ScriptStd>()
+            .unwrap()
+            .data
+            .tasks
+            .pending_resumes
+            .pop_front()
+        {
             next_thread = Some(thread_id);
         } else {
-            let mut tasks = std.data.tasks.tasks.borrow_mut();
+            let tasks = host
+                .script_std()
+                .downcast_ref::<ScriptStd>()
+                .unwrap()
+                .data
+                .tasks
+                .tasks
+                .clone();
+            let mut tasks = tasks.borrow_mut();
             for task in tasks.iter_mut() {
                 let queue = task.queue.as_array();
-                let queue_len = script_vm.as_ref().unwrap().heap.array_len(queue);
+                let queue_len = host
+                    .script_vm_slot()
+                    .as_ref()
+                    .unwrap()
+                    .heap
+                    .array_len(queue);
                 if let Some(st) = task.start_task.take() {
                     start_task = Some((st, task.handle));
                     break;
@@ -141,25 +173,26 @@ pub fn handle_script_tasks<H: Any>(
 
         if let Some((start_task, handle)) = start_task.take() {
             progressed = true;
-            vm::with_vm(host, std, script_vm, |vm| {
+            vm::with_vm(host, |vm| {
                 vm.call(start_task.into(), &[handle.into()]);
             });
         } else if let Some(next_thread) = next_thread.take() {
             progressed = true;
-            let result = vm::with_vm_thread(host, std, script_vm, next_thread, |vm| vm.resume());
+            let result = vm::with_vm_thread(host, next_thread, |vm| vm.resume());
 
-            let is_paused = script_vm
+            let is_paused = host
+                .script_vm_slot()
                 .as_ref()
                 .and_then(|bx| bx.threads.get(next_thread.to_index()))
                 .map(|thread| thread.is_paused())
                 .unwrap_or(true);
 
             if !is_paused {
-                run_script_task_thread_completed_hooks(host, std, next_thread, result);
+                run_script_task_thread_completed_hooks(host, next_thread, result);
             }
         }
 
-        if run_script_task_pump_hooks(host, std) {
+        if run_script_task_pump_hooks(host) {
             progressed = true;
         }
 
