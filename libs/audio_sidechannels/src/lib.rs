@@ -48,37 +48,58 @@ pub const STEM_ROLE_TO_SET: [(FileRole, usize); 4] = [
     (FileRole::StemOther, 2),
 ];
 
+fn encode_one_stem(buf: &makepad_ai_stems::StereoBuf, opts: &EncodeOptions) -> Vec<u8> {
+    let mut pcm = Vec::with_capacity(buf.left.len() * 2);
+    for (l, r) in buf.left.iter().zip(buf.right.iter()) {
+        pcm.push(*l);
+        pcm.push(*r);
+    }
+    encode_vorbis(STEMS_RATE, 2, &pcm, opts).expect("stem encode")
+}
+
 /// Encode a full separated `StemSet` (at the model's 44.1 kHz) to four Ogg
-/// Vorbis streams, in [`FileRole::STEMS`] order, one thread per stem.
+/// Vorbis streams, in [`FileRole::STEMS`] order. Native uses one thread per
+/// stem; the web build has no `std::thread` workers, so it encodes in order.
 pub fn encode_stem_oggs(stems: &StemSet) -> [Vec<u8>; 4] {
     let opts = stem_encode_options();
     let mut out: [Vec<u8>; 4] = Default::default();
+    #[cfg(not(target_arch = "wasm32"))]
     std::thread::scope(|scope| {
         let mut handles = Vec::new();
         for (_, set_index) in STEM_ROLE_TO_SET {
             let buf = &stems[set_index];
             let opts = opts.clone();
-            handles.push(scope.spawn(move || {
-                let mut pcm = Vec::with_capacity(buf.left.len() * 2);
-                for (l, r) in buf.left.iter().zip(buf.right.iter()) {
-                    pcm.push(*l);
-                    pcm.push(*r);
-                }
-                encode_vorbis(STEMS_RATE, 2, &pcm, &opts).expect("stem encode")
-            }));
+            handles.push(scope.spawn(move || encode_one_stem(buf, &opts)));
         }
         for (slot, handle) in out.iter_mut().zip(handles) {
             *slot = handle.join().expect("stem encode worker");
         }
     });
+    #[cfg(target_arch = "wasm32")]
+    {
+        for (slot, (_, set_index)) in out.iter_mut().zip(STEM_ROLE_TO_SET) {
+            *slot = encode_one_stem(&stems[set_index], &opts);
+        }
+    }
     out
 }
 
-/// The typed side-channel files for a bake result: four stem oggs (in
-/// [`FileRole::STEMS`] order) and/or a lyrics JSON document.
+/// The typed side-channel files for the original stem/lyrics bake contract.
 pub fn side_channel_files(
     stem_oggs: Option<[Vec<u8>; 4]>,
     lyrics_json: Option<String>,
+) -> Vec<SideChannelFile> {
+    side_channel_files_with_analysis(stem_oggs, lyrics_json, None, None)
+}
+
+/// The complete DJ cache side-channel set: four stem oggs (in
+/// [`FileRole::STEMS`] order), lyrics, the native whole-track analysis cache,
+/// and the prebuilt loop-splat grid.
+pub fn side_channel_files_with_analysis(
+    stem_oggs: Option<[Vec<u8>; 4]>,
+    lyrics_json: Option<String>,
+    dj_analysis: Option<Vec<u8>>,
+    dj_loop_splat: Option<Vec<u8>>,
 ) -> Vec<SideChannelFile> {
     let mut files = Vec::new();
     if let Some(oggs) = stem_oggs {
@@ -91,6 +112,20 @@ pub fn side_channel_files(
             role: FileRole::Lyrics,
             media: MediaType::Json,
             bytes: json.into_bytes(),
+        });
+    }
+    if let Some(bytes) = dj_analysis {
+        files.push(SideChannelFile {
+            role: FileRole::DjAnalysis,
+            media: MediaType::Bin,
+            bytes,
+        });
+    }
+    if let Some(bytes) = dj_loop_splat {
+        files.push(SideChannelFile {
+            role: FileRole::DjLoopSplat,
+            media: MediaType::Bin,
+            bytes,
         });
     }
     files
@@ -165,7 +200,12 @@ mod tests {
     #[test]
     fn files_carry_the_contract_roles() {
         let set = tone_set();
-        let files = side_channel_files(Some(encode_stem_oggs(&set)), Some("{}".into()));
+        let files = side_channel_files_with_analysis(
+            Some(encode_stem_oggs(&set)),
+            Some("{}".into()),
+            Some(b"wave".to_vec()),
+            Some(b"splat".to_vec()),
+        );
         let roles: Vec<FileRole> = files.iter().map(|f| f.role).collect();
         assert_eq!(
             roles,
@@ -174,10 +214,13 @@ mod tests {
                 FileRole::StemBass,
                 FileRole::StemVocals,
                 FileRole::StemOther,
-                FileRole::Lyrics
+                FileRole::Lyrics,
+                FileRole::DjAnalysis,
+                FileRole::DjLoopSplat,
             ]
         );
         assert!(files[..4].iter().all(|f| f.media == MediaType::Ogg));
         assert_eq!(files[4].media, MediaType::Json);
+        assert!(files[5..].iter().all(|f| f.media == MediaType::Bin));
     }
 }

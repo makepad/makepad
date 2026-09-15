@@ -225,6 +225,10 @@ impl CueEngine {
         self.fader = fader.clamp(0.0, 1.0);
     }
 
+    pub fn fader(&self) -> f32 {
+        self.fader
+    }
+
     /// The slot the fader is (mostly) showing, and the other one.
     fn fader_sides(&self) -> (SlotId, SlotId) {
         if self.fader < 0.5 {
@@ -239,6 +243,10 @@ impl CueEngine {
         if !overlay {
             self.bed = None;
         }
+    }
+
+    pub fn overlay(&self) -> bool {
+        self.overlay
     }
 
     fn overlay_slot(&self) -> SlotId {

@@ -34,7 +34,8 @@ use std::path::Path;
 /// The flow-warp endpoint cache budget in the VJ player
 /// (`apps/vj/src/flow_warp.rs`). Kept here as the converter's default target
 /// so a clip is produced at a size that actually warps.
-pub const DEFAULT_FIT_CACHE_BYTES: usize = 4 * 1024 * 1024 * 1024;
+pub const DEFAULT_FIT_CACHE_BYTES: usize =
+    if usize::BITS >= 64 { 4_u64 * 1024 * 1024 * 1024 } else { usize::MAX as u64 } as usize;
 
 /// Largest mp4 the player will lift into memory to scan for the box.
 pub const DEFAULT_MAX_OUTPUT_BYTES: u64 = 256 * 1024 * 1024;
@@ -299,7 +300,7 @@ fn convert_inner(
     let mut prev: Option<FramePyramid> = None;
     let mut rgb = Vec::new();
     let passthrough = scale == 1 && out_w == src_w && out_h == src_h;
-    let mut last_report = std::time::Instant::now();
+    let mut last_report = makepad_platform::Cx::monotonic_now();
     progress(ConvertProgress { frames: 0, expected, fraction: 0.0 });
 
     loop {
@@ -357,8 +358,9 @@ fn convert_inner(
         }
         prev = Some(pyramid);
         frames += 1;
-        if last_report.elapsed().as_millis() >= 150 {
-            last_report = std::time::Instant::now();
+        let now = makepad_platform::Cx::monotonic_now();
+        if now - last_report >= 0.15 {
+            last_report = now;
             progress(ConvertProgress {
                 frames,
                 expected,

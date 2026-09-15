@@ -18,9 +18,10 @@
 use crate::url::{is_archive_host, parse_https, resolve_location, HttpsUrl};
 use makepad_network::blocking_http::{self, CancelToken, Limits, Request};
 use makepad_network::SocketStream;
+use makepad_platform::Cx;
 use std::io::{Read, Write};
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Redirect hops followed before giving up. The archive needs one
 /// (`/download/…` → the storage node); five leaves room for a bounce.
@@ -295,7 +296,7 @@ fn stream_get(
     };
     let mut loaded = 0u64;
     let mut filled = false;
-    let mut last_report = Instant::now();
+    let mut last_report = Cx::monotonic_now();
     on_progress(Progress { loaded: 0, total: shown_total });
     let mut deliver = |chunk: &[u8], loaded: &mut u64, filled: &mut bool| -> Result<bool, Error> {
         let (take, done) = clip_to_cap(chunk.len(), *loaded, stop_at);
@@ -307,8 +308,8 @@ fn stream_get(
         if !chunk.is_empty() {
             sink(chunk)?;
         }
-        if last_report.elapsed() >= Duration::from_millis(100) {
-            last_report = Instant::now();
+        if Cx::monotonic_now() - last_report >= 0.1 {
+            last_report = Cx::monotonic_now();
             on_progress(Progress { loaded: *loaded, total: shown_total });
         }
         if done {
