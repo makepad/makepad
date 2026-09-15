@@ -135,7 +135,10 @@ impl ShaderOutput {
         for io in &self.io {
             if let ShaderIoKind::VertexBuffer = io.kind {
                 if !have_vb {
-                    writeln!(out, "    constant IoVertexBuffer *vb;").ok();
+                    writeln!(out, "    constant IoVertexBufferRaw *vb;").ok();
+                    // The decoded (logical) vertex lives on vertex_main's stack; every
+                    // shader function reaches it through the context, like the instance.
+                    writeln!(out, "    thread IoVertexBuffer *g;").ok();
                     have_vb = true;
                 }
             }
@@ -180,8 +183,12 @@ impl ShaderOutput {
                     }
                 } else {
                     write!(out, "    ").ok();
-                    self.backend
-                        .pod_type_name_packed_from_ty(&vm.bx.heap, io.ty, out);
+                    if matches!(pod_ty.ty, ScriptPodTy::Struct { .. }) {
+                        self.backend.pod_type_name_from_ty(&vm.bx.heap, io.ty, out);
+                    } else {
+                        self.backend
+                            .pod_type_name_packed_from_ty(&vm.bx.heap, io.ty, out);
+                    }
                     writeln!(out, " {};", io.name).ok();
                 }
             }
@@ -198,8 +205,12 @@ impl ShaderOutput {
                     }
                 } else {
                     write!(out, "    ").ok();
-                    self.backend
-                        .pod_type_name_packed_from_ty(&vm.bx.heap, io.ty, out);
+                    if matches!(pod_ty.ty, ScriptPodTy::Struct { .. }) {
+                        self.backend.pod_type_name_from_ty(&vm.bx.heap, io.ty, out);
+                    } else {
+                        self.backend
+                            .pod_type_name_packed_from_ty(&vm.bx.heap, io.ty, out);
+                    }
                     writeln!(out, " {};", io.name).ok();
                 }
             }
@@ -298,8 +309,7 @@ impl ShaderOutput {
     }
 
     pub fn metal_create_vertex_buffer_struct(&self, vm: &ScriptVm, out: &mut String) {
-        writeln!(out, "struct IoVertexBuffer {{").ok();
-        // Use packed types to match CPU-side repr(C) struct alignment
+        writeln!(out, "struct IoVertexBufferRaw {{").ok();
         for io in &self.io {
             if let ShaderIoKind::VertexBuffer = io.kind {
                 write!(out, "    ").ok();
@@ -309,6 +319,83 @@ impl ShaderOutput {
             }
         }
         writeln!(out, "}};").ok();
+
+        writeln!(out, "struct IoVertexBuffer {{").ok();
+        for io in &self.io {
+            if let ShaderIoKind::VertexBuffer = io.kind {
+                write!(out, "    ").ok();
+                self.backend.pod_type_name_from_ty(&vm.bx.heap, io.ty, out);
+                writeln!(out, " {};", io.name).ok();
+            }
+        }
+        writeln!(out, "}};").ok();
+
+        writeln!(
+            out,
+            "inline IoVertexBuffer _mp_decode_geometry(constant IoVertexBufferRaw &raw) {{"
+        )
+        .ok();
+        writeln!(out, "    IoVertexBuffer out_geom;").ok();
+        for io in &self.io {
+            if let ShaderIoKind::VertexBuffer = io.kind {
+                self.metal_write_decode_assign(
+                    vm,
+                    io.name.to_string(),
+                    &vm.bx.heap.pod_type_ref(io.ty).ty,
+                    out,
+                );
+            }
+        }
+        writeln!(out, "    return out_geom;").ok();
+        writeln!(out, "}}").ok();
+    }
+
+    fn metal_write_decode_assign(
+        &self,
+        vm: &ScriptVm,
+        path: String,
+        ty: &ScriptPodTy,
+        out: &mut String,
+    ) {
+        match ty {
+            ScriptPodTy::Packed(p) => {
+                let expr = match p {
+                    crate::pod::ScriptPodPacked::F16x2 | crate::pod::ScriptPodPacked::F16x4 => {
+                        format!("float{}(raw.{path})", if p.is_vec4() { "4" } else { "2" })
+                    }
+                    crate::pod::ScriptPodPacked::U16x2 | crate::pod::ScriptPodPacked::I16x2 => {
+                        format!("float2(raw.{path})")
+                    }
+                    crate::pod::ScriptPodPacked::U16x2Norm => {
+                        format!("float2(raw.{path}) / 65535.0")
+                    }
+                    crate::pod::ScriptPodPacked::I16x2Norm => {
+                        format!("max(float2(raw.{path}) / 32767.0, float2(-1.0))")
+                    }
+                    crate::pod::ScriptPodPacked::U8x4Norm => {
+                        format!("float4(raw.{path}) / 255.0")
+                    }
+                    crate::pod::ScriptPodPacked::I8x4Norm => {
+                        format!("max(float4(raw.{path}) / 127.0, float4(-1.0))")
+                    }
+                };
+                writeln!(out, "    out_geom.{path} = {expr};").ok();
+            }
+            ScriptPodTy::Struct { fields, .. } => {
+                for field in fields {
+                    let field_name = self.backend.map_field_name(field.name);
+                    self.metal_write_decode_assign(
+                        vm,
+                        format!("{path}.{field_name}"),
+                        &field.ty.data.ty,
+                        out,
+                    );
+                }
+            }
+            _ => {
+                writeln!(out, "    out_geom.{path} = raw.{path};").ok();
+            }
+        }
     }
 
     pub fn metal_create_io_vertex_struct(&self, _vm: &ScriptVm, out: &mut String) {
@@ -326,7 +413,7 @@ impl ShaderOutput {
             .any(|io| matches!(io.kind, ShaderIoKind::ScopeUniform));
 
         writeln!(out, "vertex IoVarying vertex_main(").ok();
-        writeln!(out, "    constant IoVertexBuffer *vb [[buffer(0)]],").ok();
+        writeln!(out, "    constant IoVertexBufferRaw *vb [[buffer(0)]],").ok();
         writeln!(out, "    constant IoInstanceRaw *i_raw [[buffer(1)]],").ok();
         writeln!(out, "    constant IoUniform *u [[buffer(2)]],").ok();
 
@@ -404,7 +491,19 @@ impl ShaderOutput {
             "    IoInstance _inst = _mp_decode_instance(i_raw[iid]);"
         )
         .ok();
+        writeln!(
+            out,
+            "    constant char *_geom_bytes = (constant char *)vb;"
+        )
+        .ok();
+        writeln!(
+            out,
+            "    constant IoVertexBufferRaw *_geom_raw = (constant IoVertexBufferRaw *)(_geom_bytes + vid * sizeof(IoVertexBufferRaw));"
+        )
+        .ok();
+        writeln!(out, "    IoVertexBuffer _geom = _mp_decode_geometry(*_geom_raw);").ok();
         writeln!(out, "    _io.vb = vb;").ok();
+        writeln!(out, "    _io.g = &_geom;").ok();
         writeln!(out, "    _io.i = &_inst;").ok();
         writeln!(out, "    _io.u = u;").ok();
 
@@ -458,7 +557,7 @@ impl ShaderOutput {
 
         writeln!(out, "fragment IoFb fragment_main(").ok();
         writeln!(out, "    IoVarying v [[stage_in]],").ok();
-        writeln!(out, "    constant IoVertexBuffer *vb [[buffer(0)]],").ok();
+        writeln!(out, "    constant IoVertexBufferRaw *vb [[buffer(0)]],").ok();
         writeln!(out, "    constant IoInstanceRaw *i_raw [[buffer(1)]],").ok();
         write!(out, "    constant IoUniform *u [[buffer(2)]]").ok();
 

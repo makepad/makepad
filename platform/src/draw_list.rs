@@ -251,7 +251,7 @@ impl Cx {
                 continue;
             };
             let geometry = &self.geometries[geometry_id];
-            let index_count = geometry.indices.len() as u64;
+            let index_count = geometry.index_count as u64;
 
             metrics.draw_calls = metrics.draw_calls.saturating_add(1);
             metrics.instances = metrics.instances.saturating_add(instance_count as u64);
@@ -279,12 +279,12 @@ impl Cx {
                 if geometry.dirty_vertices {
                     metrics.vertex_buffer_bytes = metrics
                         .vertex_buffer_bytes
-                        .saturating_add((geometry.vertices.len() * 4) as u64);
+                        .saturating_add(geometry.vertices.byte_len() as u64);
                 }
                 if geometry.dirty_indices {
                     metrics.vertex_buffer_bytes = metrics
                         .vertex_buffer_bytes
-                        .saturating_add((geometry.indices.len() * 4) as u64);
+                        .saturating_add((geometry.index_count * geometry.index_width) as u64);
                 }
             }
 
