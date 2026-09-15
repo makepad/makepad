@@ -14,6 +14,7 @@
 //! held while it runs). Copy into a channel and get off the thread.
 
 use crate::audio::{AudioBuffer, AudioInfo};
+use crate::thread::{lock_from_audio, lock_from_ui};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -24,9 +25,9 @@ pub type AudioOutputTapFn = Box<dyn FnMut(AudioInfo, &AudioBuffer) + Send + 'sta
 /// relaxed atomic load per audio callback.
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+static TAPS: OnceLock<Mutex<HashMap<u64, AudioOutputTapFn>>> = OnceLock::new();
 
 fn taps() -> &'static Mutex<HashMap<u64, AudioOutputTapFn>> {
-    static TAPS: OnceLock<Mutex<HashMap<u64, AudioOutputTapFn>>> = OnceLock::new();
     TAPS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -41,14 +42,14 @@ where
 
 pub fn add_audio_output_tap_box(f: AudioOutputTapFn) -> u64 {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    let mut taps = taps().lock().unwrap();
+    let mut taps = lock_from_ui(taps());
     taps.insert(id, f);
     ACTIVE.store(true, Ordering::Release);
     id
 }
 
 pub fn remove_audio_output_tap(id: u64) {
-    let mut taps = taps().lock().unwrap();
+    let mut taps = lock_from_ui(taps());
     taps.remove(&id);
     ACTIVE.store(!taps.is_empty(), Ordering::Release);
 }
@@ -64,11 +65,14 @@ pub(crate) fn feed_audio_output_tap(info: AudioInfo, buffer: &AudioBuffer) {
     if !ACTIVE.load(Ordering::Acquire) {
         return;
     }
-    // A tap that panics would poison the lock and silence every later frame
-    // of audio for the app itself; take what we can get and carry on.
-    let Ok(mut taps) = taps().lock() else {
+    // Recover a poisoned registry so a tap panic cannot silence every later
+    // frame of audio for the app itself.
+    // ACTIVE is published only after add initialized TAPS, but use `get`
+    // here so the realtime path can never run a contended OnceLock init.
+    let Some(taps) = TAPS.get() else {
         return;
     };
+    let mut taps = lock_from_audio(taps);
     for f in taps.values_mut() {
         f(info, buffer);
     }

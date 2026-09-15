@@ -19,6 +19,7 @@ use {
 #[derive(ToWasm)]
 pub struct WGpuInfo {
     pub min_uniform_vectors: u32,
+    pub float_color_targets: bool,
     pub vendor: String,
     pub renderer: String,
 }
@@ -32,6 +33,7 @@ pub struct WBrowserInfo {
     pub search: String,
     pub hash: String,
     pub has_thread_support: bool,
+    pub is_phone: bool,
 }
 
 impl Into<OsType> for WBrowserInfo {
@@ -43,6 +45,7 @@ impl Into<OsType> for WBrowserInfo {
             pathname: self.pathname,
             search: self.search,
             hash: self.hash,
+            is_phone: self.is_phone,
         })
     }
 }
@@ -151,6 +154,15 @@ pub struct ToWasmPaintDirty {}
 
 #[derive(ToWasm)]
 pub struct ToWasmRedrawAll {}
+
+/// `count` WebGL programs finished compiling (or failed) since the last
+/// report. Pairs with the compiles queued through `FromWasmCompileWebGLShader`
+/// so `Cx::draw_shaders_pending` can say whether draws are still being
+/// dropped for a program that has not linked yet.
+#[derive(ToWasm)]
+pub struct ToWasmWebGLShadersDone {
+    pub count: usize,
+}
 
 #[derive(ToWasm)]
 pub struct ToWasmLiveFileChange {
@@ -510,6 +522,35 @@ impl Into<TextInputEvent> for ToWasmTextInput {
 
 #[derive(ToWasm)]
 pub struct ToWasmTextCopy {}
+
+#[derive(ToWasm)]
+pub struct ToWasmStorageResult {
+    pub request_id_lo: u32,
+    pub request_id_hi: u32,
+    pub op: u32,
+    pub found: bool,
+    pub value: WasmDataU8,
+    pub keys: Vec<String>,
+    pub has_next: bool,
+    pub next: String,
+    pub length_lo: u32,
+    pub length_hi: u32,
+    pub usage_lo: u32,
+    pub usage_hi: u32,
+    pub quota_lo: u32,
+    pub quota_hi: u32,
+    pub error_kind: u32,
+    pub error: String,
+}
+
+#[derive(ToWasm)]
+pub struct ToWasmRenderTextureCapture {
+    pub texture_id: usize,
+    pub width: usize,
+    pub height: usize,
+    pub data: WasmDataU8,
+    pub error: String,
+}
 
 // Keyboard API
 

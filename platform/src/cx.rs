@@ -22,6 +22,7 @@ use {
         performance_stats::PerformanceStats,
         script::script::CxScriptData,
         sploded::SplodedView,
+        storage::StorageState,
         texture::{CxTexturePool, Texture, TextureFormat, TextureUpdated},
         thread::{SignalToUI, ToUIReceiver},
         uniform_buffer::CxUniformBufferPool,
@@ -98,6 +99,7 @@ pub struct Cx {
     pub(crate) timer_id: u64,
     pub(crate) next_frame_id: u64,
     pub(crate) permissions_request_id: i32,
+    pub(crate) storage_state: StorageState,
 
     pub keyboard: CxKeyboard,
     pub(crate) cancel_scopes: CxCancelScopes,
@@ -338,6 +340,10 @@ pub struct XrCapabilities {
 }
 
 impl OsType {
+    /// The platform has ONE window. A second `Window` is not created there
+    /// (the web reports it once and never paints its pass; the canvas is
+    /// window zero's), so an app that wants a second surface — a projector
+    /// output, say — hosts it in-page when this is true.
     pub fn is_single_window(&self) -> bool {
         match self {
             OsType::Web(_) => true,
@@ -538,6 +544,7 @@ impl Cx {
             timer_id: 1,
             next_frame_id: 1,
             permissions_request_id: 0,
+            storage_state: StorageState::default(),
 
             keyboard: Default::default(),
             cancel_scopes: Default::default(),
@@ -630,7 +637,7 @@ impl Cx {
 // ---------------------------------------------------------------------------
 
 static STARTUP_TRACE_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-static STARTUP_T0: std::sync::OnceLock<std::time::SystemTime> = std::sync::OnceLock::new();
+static STARTUP_T0: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
 static STARTUP_ACC: std::sync::Mutex<Vec<(&'static str, f64, u32)>> =
     std::sync::Mutex::new(Vec::new());
 
@@ -639,24 +646,18 @@ pub fn startup_trace_enabled() -> bool {
     *STARTUP_TRACE_ON.get_or_init(|| std::env::var_os("MAKEPAD_STARTUP_TRACE").is_some())
 }
 
-fn startup_t0() -> std::time::SystemTime {
+fn startup_t0() -> f64 {
     *STARTUP_T0.get_or_init(|| {
         std::env::var("MAKEPAD_STARTUP_T0")
             .ok()
             .and_then(|v| v.trim().parse::<f64>().ok())
-            .map(|secs| {
-                std::time::UNIX_EPOCH + std::time::Duration::from_secs_f64(secs)
-            })
-            .unwrap_or_else(std::time::SystemTime::now)
+            .unwrap_or_else(Cx::time_now)
     })
 }
 
 /// Milliseconds since exec (or since the first trace call).
 pub fn startup_since_exec_ms() -> f64 {
-    std::time::SystemTime::now()
-        .duration_since(startup_t0())
-        .map(|d| d.as_secs_f64() * 1000.0)
-        .unwrap_or(0.0)
+    (Cx::time_now() - startup_t0()).max(0.0) * 1000.0
 }
 
 /// Mark a startup phase.

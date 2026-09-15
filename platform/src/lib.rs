@@ -1,6 +1,19 @@
 //#![cfg_attr(all(unix), feature(unix_socket_ancillary_data))]
 pub mod gl_render_bridge;
+pub mod home;
 pub mod os;
+
+#[cfg(any(
+    test,
+    all(target_arch = "wasm32", target_feature = "atomics")
+))]
+#[path = "os/web/alloc.rs"]
+mod web_alloc;
+
+#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
+#[global_allocator]
+static WEB_GLOBAL_ALLOCATOR: web_alloc::ThreadCachingAllocator =
+    web_alloc::ThreadCachingAllocator::new();
 
 #[macro_use]
 pub mod log;
@@ -18,6 +31,7 @@ pub mod audio;
 pub mod midi;
 pub mod script;
 pub mod thread;
+pub mod storage;
 pub mod video;
 pub mod gpu_texture;
 
@@ -122,7 +136,7 @@ pub use {
         audio::*,
         component::{ComponentInfo, ComponentRegistries, ComponentRegistry},
         cursor::MouseCursor,
-        cx::{Cx, CxRef, LinuxWindowParams, OsType},
+        cx::{Cx, CxMemoryReport, CxRef, LinuxWindowParams, OsType},
         cx_api::{AccessibilityUpdatePayload, CxOsApi, CxOsOp, CxThreadPriority, OpenUrlInPlace},
         display_context::{DisplayContext, SystemBarAppearance},
         font_policy::{
@@ -177,6 +191,7 @@ pub use {
             MouseMoveEvent,
             MouseUpEvent,
             NetworkResponsesEvent,
+            StorageResponsesEvent,
             NextFrame,
             NextFrameEvent,
             QuitReason,
@@ -238,6 +253,11 @@ pub use {
         script::vm::*,
         screen::{fit_window_rect_to_screens, ScreenGeom, MIN_WINDOW_SIZE},
         shared_bytes::{MappedBytes, SharedBytes, SharedBytesStats},
+        storage::{
+            StorageError, StorageHandle, StorageList, StorageOp, StorageRequestId,
+            StorageEstimate, StorageResponse, StorageResult, StorageStat, DEFAULT_STORAGE_VALUE_CAP,
+            MAX_STORAGE_KEY_BYTES, MAX_STORAGE_LIST_LIMIT, MAX_STORAGE_NAMESPACE_BYTES,
+        },
         texture::{
             image_cache_use_mipmaps, Texture, TextureAnimation, TextureFormat, TextureId,
             TextureSize, TextureUpdated, TextureWrap,
