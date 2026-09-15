@@ -1,0 +1,21 @@
+use mod.flow.*
+
+/** The seamless shot to paint and animate. */
+let prompt = Input{ type: @text default: "a lantern floating on a perfectly still night lake" }
+let image = Image{ prompt: prompt.text() width: 512 height: 512 }
+let video = Video{
+    prompt: prompt.text()
+    image: image.image()
+    last_frame: image.image()
+    frames: 39
+    steps: 30
+    audio: true
+}
+/** Publish the closed-loop clip into the flow asset library. */
+let published = Publish{ value: video.video() namespace: "flows" tags: ["flow", "video", "loop"] }
+
+Flow{
+    label: "Prompt to video loop"
+    brief: "Paints a keyframe and conditions both clip ends on it for a seamless loop."
+    prompt, image, video, published
+}

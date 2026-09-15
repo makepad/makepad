@@ -1,0 +1,18 @@
+use mod.flow.*
+
+/** The song idea to expand into arrangement and lyrics. */
+let prompt = Input{ type: @text default: "slow dub techno at 92 BPM with deep chord echoes" }
+let expand = Llm{
+    system: "Write a production brief followed by a Lyrics: section with original section-tagged lyrics. Use [Instrumental] when no vocals are requested."
+    prompt: prompt.text()
+    max_tokens: 4096
+}
+let music = Music{ prompt: expand.text() seconds: 180 }
+/** Publish the generated song into the flow asset library. */
+let published = Publish{ value: music.audio() namespace: "flows" tags: ["flow", "music"] }
+
+Flow{
+    label: "Expanded prompt to music"
+    brief: "Expands a song idea into a production brief and lyrics, then generates a three-minute song."
+    prompt, expand, music, published
+}

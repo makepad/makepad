@@ -1,0 +1,20 @@
+use mod.flow.*
+
+/** The shot whose first frame and motion should be generated. */
+let prompt = Input{ type: @text default: "a paper airship crossing a sunrise cloud bank" }
+let image = Image{ prompt: prompt.text() width: 512 height: 512 }
+let video = Video{
+    prompt: prompt.text()
+    image: image.image()
+    frames: 39
+    steps: 30
+    audio: true
+}
+/** Publish the animated keyframe into the flow asset library. */
+let published = Publish{ value: video.video() namespace: "flows" tags: ["flow", "video"] }
+
+Flow{
+    label: "Prompt to video keyframe"
+    brief: "Paints a keyframe and animates it into an audible image-to-video clip."
+    prompt, image, video, published
+}

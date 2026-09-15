@@ -1,0 +1,19 @@
+use mod.flow.*
+
+/** The isolated object to paint and reconstruct as Gaussians. */
+let prompt = Input{ type: @text default: "a small hand-painted ceramic fox" }
+let image = Image{ prompt: prompt.text() width: 512 height: 512 }
+let splat = Splat{
+    prompt: prompt.text()
+    image: image.image()
+    gaussians: 262144
+    model: "triposplat"
+}
+/** Publish the object splat into the flow asset library. */
+let published = Publish{ value: splat.mesh() namespace: "flows" tags: ["flow", "splat"] }
+
+Flow{
+    label: "Prompt to object splat"
+    brief: "Paints one isolated object and reconstructs it as a detailed Gaussian splat."
+    prompt, image, splat, published
+}
