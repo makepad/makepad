@@ -44,6 +44,14 @@ thread_local! {
     pub static MACOS_APP: RefCell<Option<MacosApp>> = RefCell::new(None);
 }
 
+/// Set once the main thread has created the shared `NSApplication` in
+/// `init_macos_app_global`. Until then `wake_event_loop` is a no-op: a worker
+/// thread signalling the UI before any event loop exists (headless tests,
+/// early startup) must not create `NSApplication` off the main thread, which
+/// costs about a second and looks like a hang. Mirrors the Windows waker,
+/// which no-ops while its UI thread is unset.
+static UI_LOOP_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 struct CAFrameRateRange {
@@ -144,6 +152,9 @@ pub fn try_with_macos_app<R>(f: impl FnOnce(&mut MacosApp) -> R) -> Option<R> {
 /// Posts an application-defined event from any thread, waking AppKit's event
 /// wait without activating the application or any window.
 pub fn wake_event_loop() {
+    if !UI_LOOP_STARTED.load(std::sync::atomic::Ordering::Acquire) {
+        return;
+    }
     unsafe {
         let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
         let event: ObjcId = msg_send![
@@ -260,7 +271,8 @@ pub fn init_macos_app_global(event_callback: Box<dyn FnMut(MacosEvent) -> EventF
     }
     MACOS_APP.with(|app| {
         *app.borrow_mut() = Some(MacosApp::new(event_callback));
-    })
+    });
+    UI_LOOP_STARTED.store(true, std::sync::atomic::Ordering::Release);
 }
 
 pub fn get_macos_class_global() -> &'static MacosClasses {
