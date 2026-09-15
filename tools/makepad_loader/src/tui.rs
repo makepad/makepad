@@ -229,6 +229,10 @@ mod console {
                     .map_err(|e| e.to_string())?
                     .success()
             {
+                // Report mouse input only while a menu is consuming it with
+                // echo disabled, never during builds or while an app runs.
+                print!("\x1b[?1000h\x1b[?1006h");
+                let _ = io::stdout().flush();
                 Ok(Self(saved))
             } else {
                 Err("Cannot read terminal keys".into())
@@ -237,6 +241,8 @@ mod console {
     }
     impl Drop for Input {
         fn drop(&mut self) {
+            print!("\x1b[?1000l\x1b[?1006l");
+            let _ = io::stdout().flush();
             let _ = Command::new("stty").arg(&self.0).status();
         }
     }

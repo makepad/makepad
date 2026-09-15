@@ -190,11 +190,6 @@ fn too_small() -> bool {
 pub(super) struct Screen {
     color: bool,
 }
-fn mouse_tracking(enabled: bool) {
-    if !cfg!(windows) {
-        print!("{}", if enabled { "\x1b[?1000h\x1b[?1006h" } else { "\x1b[?1000l\x1b[?1006l" });
-    }
-}
 impl Screen {
     pub(super) fn enter() -> Self {
         let color = io::stdout().is_terminal()
@@ -203,7 +198,7 @@ impl Screen {
         if color {
             console::enable();
             SCREEN_DEPTH.with(|depth| {
-                if depth.get()==0 {print!("\x1b[?1049h\x1b[?25l");mouse_tracking(true);invalidate();}
+                if depth.get()==0 {print!("\x1b[?1049h\x1b[?25l");invalidate();}
                 depth.set(depth.get()+1);
             });
         }
@@ -211,7 +206,7 @@ impl Screen {
     }
     pub(super) fn pause() -> Pause {
         let active=SCREEN_DEPTH.with(|d|d.get()>0);
-        if active {mouse_tracking(false);print!("\x1b[0m\x1b[?25h\x1b[?1049l");let _=io::stdout().flush();}
+        if active {print!("\x1b[0m\x1b[?25h\x1b[?1049l");let _=io::stdout().flush();}
         Pause(active)
     }
     pub(super) fn choose(
@@ -468,7 +463,7 @@ impl Screen {
 pub(super) struct Pause(bool);
 impl Drop for Pause {
     fn drop(&mut self) {
-        if self.0 {print!("\x1b[?1049h\x1b[?25l");mouse_tracking(true);invalidate();let _=io::stdout().flush();}
+        if self.0 {print!("\x1b[?1049h\x1b[?25l");invalidate();let _=io::stdout().flush();}
     }
 }
 impl Drop for Screen {
@@ -476,7 +471,7 @@ impl Drop for Screen {
         if self.color {
             SCREEN_DEPTH.with(|depth| {
                 depth.set(depth.get().saturating_sub(1));
-                if depth.get()==0 {mouse_tracking(false);print!("\x1b[0m\x1b[?25h\x1b[?1049l");invalidate();}
+                if depth.get()==0 {print!("\x1b[0m\x1b[?25h\x1b[?1049l");invalidate();}
             });
             let _ = io::stdout().flush();
         }
