@@ -6,7 +6,7 @@
 
 use super::{BuildCtx, BuildReport, Layer};
 use crate::fetch::SourceSpec;
-use crate::raster::{build_raster, RasterConfig, RasterEncoding};
+use crate::raster::{build_raster, ClassEntry, RasterConfig, RasterEncoding};
 use crate::tiff::Tiff;
 use std::path::PathBuf;
 use std::process::Command;
@@ -66,16 +66,16 @@ impl Layer for NoiseLayer {
             Some(f32::from(class))
         };
 
-        let classmap = serde_json::json!([
-            {"class": 1, "label": "< 45 dB",   "color": "#00000000"},
-            {"class": 2, "label": "45-50 dB", "color": "#4575b4"},
-            {"class": 3, "label": "50-55 dB", "color": "#91bfdb"},
-            {"class": 4, "label": "55-60 dB", "color": "#e0f382"},
-            {"class": 5, "label": "60-65 dB", "color": "#fee090"},
-            {"class": 6, "label": "65-70 dB", "color": "#fc8d59"},
-            {"class": 7, "label": "70-75 dB", "color": "#d73027"},
-            {"class": 8, "label": ">= 75 dB", "color": "#a50026"}
-        ]);
+        let classmap = vec![
+            ClassEntry::new(1, "< 45 dB", "#00000000"),
+            ClassEntry::new(2, "45-50 dB", "#4575b4"),
+            ClassEntry::new(3, "50-55 dB", "#91bfdb"),
+            ClassEntry::new(4, "55-60 dB", "#e0f382"),
+            ClassEntry::new(5, "60-65 dB", "#fee090"),
+            ClassEntry::new(6, "65-70 dB", "#fc8d59"),
+            ClassEntry::new(7, "70-75 dB", "#d73027"),
+            ClassEntry::new(8, ">= 75 dB", "#a50026"),
+        ];
 
         let out = ctx.out_file(self.id());
         let stats = build_raster(

@@ -117,22 +117,80 @@ impl TileCodec {
 
     /// Decode one stored tile payload to raw bytes (usually MVT protobuf).
     pub fn decode(&self, bytes: &[u8]) -> Result<Vec<u8>> {
+        self.decode_limited(bytes, usize::MAX)
+    }
+
+    /// Decode while refusing an advertised or produced output above `limit`.
+    pub fn decode_limited(&self, bytes: &[u8], limit: usize) -> Result<Vec<u8>> {
         match self.kind {
             TileCodecKind::Gzip => {
                 // Mirror the historical per-tile sniffing: gzip, zlib, or raw.
                 if bytes.len() >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b {
-                    return makepad_fast_inflate::gzip_decompress_vec(bytes)
-                        .map_err(|err| Error::Codec(format!("gzip decode failed: {err:?}")));
+                    return gzip_decompress_limited(bytes, limit);
                 }
                 if bytes.len() >= 2 && bytes[0] == 0x78 {
-                    if let Ok(out) = makepad_fast_inflate::zlib_decompress_vec(bytes) {
-                        return Ok(out);
+                    match zlib_decompress_limited(bytes, limit) {
+                        Ok(out) => return Ok(out),
+                        Err(Error::Codec(error)) if error.starts_with("zlib decode failed") => {}
+                        Err(error) => return Err(error),
                     }
                 }
-                Ok(bytes.to_vec())
+                (bytes.len() <= limit)
+                    .then(|| bytes.to_vec())
+                    .ok_or_else(|| Error::Codec("decoded tile exceeds byte limit".to_string()))
             }
-            TileCodecKind::Brotli => brotli_decompress(bytes, &[]),
-            TileCodecKind::BrotliDict => brotli_decompress(bytes, &self.dict),
+            TileCodecKind::Brotli => brotli_decompress_limited(bytes, &[], limit),
+            TileCodecKind::BrotliDict => brotli_decompress_limited(bytes, &self.dict, limit),
+        }
+    }
+}
+
+fn gzip_decompress_limited(bytes: &[u8], limit: usize) -> Result<Vec<u8>> {
+    if limit == usize::MAX {
+        return makepad_fast_inflate::gzip_decompress_vec(bytes)
+            .map_err(|err| Error::Codec(format!("gzip decode failed: {err:?}")));
+    }
+    let size = bytes
+        .get(bytes.len().saturating_sub(4)..)
+        .and_then(|size| size.try_into().ok())
+        .map(u32::from_le_bytes)
+        .ok_or_else(|| Error::Codec("gzip decode failed: truncated trailer".to_string()))?
+        as usize;
+    if size > limit {
+        return Err(Error::Codec("decoded tile exceeds byte limit".to_string()));
+    }
+    let mut out = vec![0_u8; size];
+    let (_, written) = makepad_fast_inflate::gzip_decompress(bytes, &mut out).map_err(|err| {
+        if matches!(err, makepad_fast_inflate::DecompressError::InsufficientSpace) {
+            Error::Codec("decoded tile exceeds byte limit".to_string())
+        } else {
+            Error::Codec(format!("gzip decode failed: {err:?}"))
+        }
+    })?;
+    out.truncate(written);
+    Ok(out)
+}
+
+fn zlib_decompress_limited(bytes: &[u8], limit: usize) -> Result<Vec<u8>> {
+    if limit == usize::MAX {
+        return makepad_fast_inflate::zlib_decompress_vec(bytes)
+            .map_err(|err| Error::Codec(format!("zlib decode failed: {err:?}")));
+    }
+    let mut capacity = bytes.len().saturating_mul(3).max(4096).min(limit);
+    loop {
+        let mut out = vec![0_u8; capacity];
+        match makepad_fast_inflate::zlib_decompress(bytes, &mut out) {
+            Ok((_, written)) => {
+                out.truncate(written);
+                return Ok(out);
+            }
+            Err(makepad_fast_inflate::DecompressError::InsufficientSpace) => {
+                if capacity >= limit {
+                    return Err(Error::Codec("decoded tile exceeds byte limit".to_string()));
+                }
+                capacity = capacity.saturating_mul(2).min(limit);
+            }
+            Err(err) => return Err(Error::Codec(format!("zlib decode failed: {err:?}"))),
         }
     }
 }
@@ -239,9 +297,29 @@ fn brotli_compress(raw: &[u8], quality: u32, dict: &[u8]) -> Result<Vec<u8>> {
     Ok(output)
 }
 
-fn brotli_decompress(bytes: &[u8], dict: &[u8]) -> Result<Vec<u8>> {
+fn brotli_decompress_limited(bytes: &[u8], dict: &[u8], limit: usize) -> Result<Vec<u8>> {
     use brotli::{Allocator, HeapAlloc, HuffmanCode, IoReaderWrapper, IoWriterWrapper};
     use brotli::SliceWrapperMut;
+    use std::io::Write;
+
+    struct LimitedWriter {
+        bytes: Vec<u8>,
+        limit: usize,
+    }
+
+    impl Write for LimitedWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if self.bytes.len().saturating_add(bytes.len()) > self.limit {
+                return Err(IoError::new(ErrorKind::InvalidData, "decoded byte limit"));
+            }
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     let mut alloc_u8 = HeapAlloc::<u8>::new(0);
     let dict_mem = if dict.is_empty() {
@@ -252,7 +330,10 @@ fn brotli_decompress(bytes: &[u8], dict: &[u8]) -> Result<Vec<u8>> {
         cell
     };
     let mut input = bytes;
-    let mut output = Vec::with_capacity(bytes.len().saturating_mul(4).max(4096));
+    let mut output = LimitedWriter {
+        bytes: Vec::with_capacity(bytes.len().saturating_mul(4).max(4096).min(limit)),
+        limit,
+    };
     let mut input_buffer = [0u8; 8192];
     let mut output_buffer = [0u8; 8192];
     brotli::BrotliDecompressCustomIoCustomDict(
@@ -267,7 +348,12 @@ fn brotli_decompress(bytes: &[u8], dict: &[u8]) -> Result<Vec<u8>> {
         IoError::new(ErrorKind::UnexpectedEof, "unexpected EOF"),
     )
     .map_err(|err| Error::Codec(format!("brotli decode failed: {err}")))?;
-    Ok(output)
+    Ok(output.bytes)
+}
+
+#[cfg(test)]
+fn brotli_decompress(bytes: &[u8], dict: &[u8]) -> Result<Vec<u8>> {
+    brotli_decompress_limited(bytes, dict, usize::MAX)
 }
 
 // ---------------------------------------------------------------------------
@@ -367,6 +453,24 @@ mod tests {
             makepad_fast_inflate::gzip_decompress_vec(&gz).unwrap(),
             raw
         );
+    }
+
+    #[test]
+    fn limited_decode_rejects_gzip_zlib_and_brotli_expansion() {
+        let raw = vec![42_u8; 16_384];
+        let gzip = gzip_compress(&raw);
+        let zlib = makepad_fast_inflate::zlib_compress(&raw, 1);
+        let brotli = compress_tile(&TileCompression::Brotli { quality: 5 }, None, &raw).unwrap();
+        let gzip_codec = TileCodec::gzip();
+        let brotli_codec = TileCodec::from_metadata(
+            &[(COMPRESSION_METADATA_KEY.to_string(), COMPRESSION_BR.to_string())]
+                .into_iter()
+                .collect(),
+        )
+        .unwrap();
+        assert!(gzip_codec.decode_limited(&gzip, 1024).is_err());
+        assert!(gzip_codec.decode_limited(&zlib, 1024).is_err());
+        assert!(brotli_codec.decode_limited(&brotli, 1024).is_err());
     }
 
     #[test]

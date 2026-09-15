@@ -1,5 +1,5 @@
 //! Minimal PNG codec for raster overlay tiles: 8-bit grayscale (class-index
-//! rasters like noise/flood) and 8-bit RGB (terrarium elevation). Encoder
+//! rasters like noise/flood), RGB, and RGBA. Encoder
 //! writes filter-0 rows + zlib; decoder handles exactly what any
 //! standard encoder emits for these formats (all five row filters,
 //! non-interlaced). CRC32 is the 30-line table version — not worth a dep.
@@ -10,6 +10,7 @@ use makepad_fast_inflate::{zlib_compress, zlib_decompress_vec};
 pub enum PngFormat {
     Gray8,
     Rgb8,
+    Rgba8,
 }
 
 impl PngFormat {
@@ -17,12 +18,14 @@ impl PngFormat {
         match self {
             PngFormat::Gray8 => 0,
             PngFormat::Rgb8 => 2,
+            PngFormat::Rgba8 => 6,
         }
     }
     pub fn bytes_per_pixel(&self) -> usize {
         match self {
             PngFormat::Gray8 => 1,
             PngFormat::Rgb8 => 3,
+            PngFormat::Rgba8 => 4,
         }
     }
 }
@@ -84,6 +87,7 @@ pub fn decode(data: &[u8]) -> Result<DecodedPng, String> {
                 format = match body[9] {
                     0 => PngFormat::Gray8,
                     2 => PngFormat::Rgb8,
+                    6 => PngFormat::Rgba8,
                     other => return Err(format!("unsupported png color type {other}")),
                 };
             }
@@ -208,6 +212,15 @@ mod tests {
         assert_eq!(decoded.width, width);
         assert_eq!(decoded.height, height);
         assert_eq!(decoded.format, PngFormat::Rgb8);
+        assert_eq!(decoded.pixels, pixels);
+    }
+
+    #[test]
+    fn rgba_png_round_trip() {
+        let pixels = vec![1, 2, 3, 4, 250, 240, 230, 220];
+        let encoded = encode(2, 1, PngFormat::Rgba8, &pixels);
+        let decoded = decode(&encoded).unwrap();
+        assert_eq!(decoded.format, PngFormat::Rgba8);
         assert_eq!(decoded.pixels, pixels);
     }
 }

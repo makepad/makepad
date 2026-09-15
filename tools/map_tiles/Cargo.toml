@@ -13,6 +13,5 @@ makepad-map-build = { path = "../../libs/map_build", features = ["faces"] }
 makepad-map-nav = { path = "../../libs/map_nav" }
 makepad-mbtile-reader = { path = "../../libs/mbtile_reader" }
 makepad-network = { path = "../../platform/network" }   # testmap: fetch the extract
-osmpbf = "0.3.8"
-serde_json = "1.0"
+makepad-micro-serde = { path = "../../libs/micro_serde", version = "1.0.0" }
 smallvec = { path = "../../libs/smallvec" }

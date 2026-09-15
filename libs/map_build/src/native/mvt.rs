@@ -80,11 +80,56 @@ impl Layer {
         }
     }
 
-    /// Whether MVT features in this layer carry the `__makepad_osm_*`
-    /// provenance tags. Detail/dz layers keep them (existing contract);
-    /// base layers stay lean for compression.
+    /// Whether MVT features in this layer are eligible to carry the
+    /// `__makepad_osm_*` provenance tags. The renderer profile removes them
+    /// from `osm_*`; `--full` retains the existing detail-layer contract.
     pub fn includes_osm_meta(self) -> bool {
         (self as u8) <= Self::BaseDz as u8
+    }
+
+    fn is_osm_detail(self) -> bool {
+        matches!(
+            self,
+            Self::OsmPoints
+                | Self::OsmLines
+                | Self::OsmPolygons
+                | Self::OsmRelationPoints
+                | Self::OsmRelationLines
+                | Self::OsmRelationPolygons
+        )
+    }
+}
+
+// Keep these byte-for-byte aligned with the renderer's DETAIL_WAY_KEYS and
+// DETAIL_POINT_EXTRA_KEYS in widgets/src/map/tile.rs. They are duplicated
+// here because map_build deliberately has no renderer dependency unless its
+// optional `faces` feature is enabled.
+const DETAIL_WAY_KEYS: &[&str] = &[
+    "layer", "bridge", "tunnel", "highway", "railway", "width", "barrier", "area",
+    "name", "attraction", "zoo", "tourism", "public_transport", "landuse", "leisure",
+    "natural", "building", "building:part", "height", "building:levels", "min_height",
+    "building:min_level", "location", "place", "parking", "surface", "access", "service",
+    "link", "rail", "waterway", "ref",
+];
+
+const DETAIL_POINT_EXTRA_KEYS: &[&str] = &[
+    "amenity", "brand", "craft", "entrance", "historic", "max_kw", "office", "operator",
+    "shop", "osm_layer", "kerb", "bus", "shelter",
+];
+
+fn renderer_reads_detail_key(key: &str) -> bool {
+    DETAIL_WAY_KEYS.contains(&key) || DETAIL_POINT_EXTRA_KEYS.contains(&key)
+}
+
+/// Drop tags that the current renderer cannot observe. Geometry and every
+/// shortbread/base layer remain untouched.
+pub(super) fn retain_renderer_detail_tags(features: &mut [TileFeature]) {
+    for feature in features {
+        if feature.layer.is_osm_detail() {
+            feature
+                .tags
+                .retain(|(key, _)| renderer_reads_detail_key(key));
+        }
     }
 }
 
@@ -347,10 +392,12 @@ struct LayerBuilder {
 }
 
 impl LayerBuilder {
-    fn new(layer: Layer) -> Self {
+    fn new(layer: Layer, full: bool) -> Self {
         Self {
             name: layer.name(),
-            include_osm_meta: layer.includes_osm_meta(),
+            // __makepad_osm_* has no production reader in the renderer.
+            // Preserve it for --full and for non-detail dz join layers.
+            include_osm_meta: layer.includes_osm_meta() && (full || !layer.is_osm_detail()),
             keys: Vec::new(),
             key_map: FastHashMap::default(),
             values: Vec::new(),
@@ -449,11 +496,24 @@ impl LayerBuilder {
 }
 
 pub fn encode_tile(features: Vec<TileFeature>) -> Result<Vec<u8>, String> {
+    encode_tile_with_profile(features, true)
+}
+
+/// Encode the renderer-consumed archive profile. `full` retains all source
+/// tags and provenance metadata for archival pipelines.
+pub fn encode_tile_with_profile(
+    mut features: Vec<TileFeature>,
+    full: bool,
+) -> Result<Vec<u8>, String> {
+    if !full {
+        retain_renderer_detail_tags(&mut features);
+    }
     let mut layers = BTreeMap::<Layer, LayerBuilder>::new();
     for feature in features {
+        let layer = feature.layer;
         layers
-            .entry(feature.layer)
-            .or_insert_with(|| LayerBuilder::new(feature.layer))
+            .entry(layer)
+            .or_insert_with(|| LayerBuilder::new(layer, full))
             .push(feature)?;
     }
     let mut tile = Vec::new();
@@ -781,5 +841,52 @@ mod tests {
         assert_eq!(inspected.layers[0].name, "osm_lines");
         assert_eq!(inspected.layers[0].features, 1);
         assert_eq!(inspected.layers[0].tag_features["height"], 1);
+    }
+
+    #[test]
+    fn renderer_profile_keeps_only_reader_whitelist_and_drops_provenance() {
+        let mut line = sample_feature();
+        line.tags
+            .push(("amenity".to_string(), "parking".to_string()));
+        line.tags
+            .push(("addr:housenumber".to_string(), "99".to_string()));
+        line.tags
+            .push(("roof:shape".to_string(), "gabled".to_string()));
+        let trimmed = encode_tile_with_profile(vec![line.clone()], false).unwrap();
+        let full = encode_tile_with_profile(vec![line], true).unwrap();
+        let trimmed = inspect_tile(&trimmed).unwrap();
+        let full = inspect_tile(&full).unwrap();
+        let trimmed_tags = &trimmed.layers[0].tag_features;
+        let full_tags = &full.layers[0].tag_features;
+
+        assert!(trimmed_tags.contains_key("highway"));
+        assert!(trimmed_tags.contains_key("name"));
+        assert!(trimmed_tags.contains_key("height"));
+        assert!(trimmed_tags.contains_key("amenity"));
+        assert!(!trimmed_tags.contains_key("addr:housenumber"));
+        assert!(!trimmed_tags.contains_key("roof:shape"));
+        assert!(!trimmed_tags.contains_key("__makepad_osm_id"));
+        assert!(full_tags.contains_key("addr:housenumber"));
+        assert!(full_tags.contains_key("roof:shape"));
+        assert!(full_tags.contains_key("__makepad_osm_id"));
+    }
+
+    #[test]
+    fn renderer_profile_keeps_point_extra_keys() {
+        let mut point = sample_feature();
+        point.layer = Layer::OsmPoints;
+        point.geometry_type = GeometryType::Point;
+        point.tags = vec![
+            ("amenity".to_string(), "cafe".to_string()),
+            ("operator".to_string(), "Example".to_string()),
+            ("addr:street".to_string(), "Nowhere".to_string()),
+        ];
+        point.paths = vec![vec![TilePoint { x: 10, y: 20 }]];
+        let encoded = encode_tile_with_profile(vec![point], false).unwrap();
+        let inspected = inspect_tile(&encoded).unwrap();
+        let tags = &inspected.layers[0].tag_features;
+        assert!(tags.contains_key("amenity"));
+        assert!(tags.contains_key("operator"));
+        assert!(!tags.contains_key("addr:street"));
     }
 }

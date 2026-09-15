@@ -209,6 +209,30 @@ impl RadarProjection {
     }
 }
 
+/// Rain rate in mm/h at a lon/lat point for one RAD_NL25 frame.
+pub fn sample_mm_h(frame: &KnmiFrame, lon: f64, lat: f64) -> Option<f64> {
+    let (col, row) = Stereo::new().forward(lon, lat);
+    let (col, row) = (col.round() as i64, row.round() as i64);
+    if col < 0
+        || row < 0
+        || col >= GRID_COLS as i64
+        || row >= GRID_ROWS as i64
+        || frame.cols != GRID_COLS
+        || frame.rows != GRID_ROWS
+    {
+        return None;
+    }
+    let value = frame.values[row as usize * frame.cols + col as usize];
+    if value == 255 {
+        return None;
+    }
+    if value < 1 {
+        return Some(0.0);
+    }
+    let dbz = 0.5 * f64::from(value) - 32.0;
+    Some((10.0_f64.powf(dbz / 10.0) / 200.0).powf(1.0 / 1.6))
+}
+
 /// RGBA bytes → BGRA u32 texels (makepad VecBGRAu8_32 layout).
 pub fn rgba_to_bgra_texels(rgba: &[u8]) -> Vec<u32> {
     rgba.chunks_exact(4)
