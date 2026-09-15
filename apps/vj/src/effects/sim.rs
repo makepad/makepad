@@ -505,7 +505,7 @@ impl SimFields {
         palette: &[Vec4f; 4],
         draws: &mut SimDraws,
     ) {
-        let t0 = std::time::Instant::now();
+        let t0 = crate::clock::Instant::now();
         let dt = sig.0[Signals::DT].clamp(0.0, 1.0 / 30.0);
         let time = sig.0[Signals::TIME];
         let beat = sig.0[Signals::BEAT];

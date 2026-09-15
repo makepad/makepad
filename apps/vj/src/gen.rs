@@ -1335,10 +1335,18 @@ impl GenModel {
     /// The operator's own prompt-box text is untouched.
     pub fn blast(&mut self, now_ms: u64) -> Vec<GenCmd> {
         let keep = self.prompt.clone();
+        // BLAST fires a burst of CONTINUOUS_IN_FLIGHT runs at once. When the
+        // operator typed a prompt, every run in the burst uses THAT prompt —
+        // the model seeds each run itself, so the burst is variations on what
+        // was asked for, not random subjects. Only an EMPTY box falls back to
+        // a random "surprise me" prompt per fire.
+        let surprise = one_line(&self.prompt).is_empty();
         let mut seed = now_ms ^ (self.next_tag.wrapping_mul(0x9e37_79b9));
         let mut cmds = Vec::new();
         for _ in 0..CONTINUOUS_IN_FLIGHT {
-            self.prompt = blast_prompt(&mut seed);
+            if surprise {
+                self.prompt = blast_prompt(&mut seed);
+            }
             let fired = self.generate(now_ms);
             if fired.is_empty() {
                 break; // rows full / profile refused — stop honestly
@@ -1975,10 +1983,21 @@ impl GenModel {
     /// pipeline the store advances by itself; this path only ever sees the
     /// one-job pipes.
     pub fn status_arrived_at(&mut self, status: &JobStatusDto, now_ms: u64) {
+        let _ = self.take_produced_on_success(status, now_ms);
+    }
+
+    /// Same as [`Self::status_arrived_at`], but on a fresh success returns
+    /// the produced clip and the row title so the grid can show it without
+    /// waiting on the catalog event stream.
+    pub fn take_produced_on_success(
+        &mut self,
+        status: &JobStatusDto,
+        now_ms: u64,
+    ) -> Option<(AssetId, String)> {
         let already_published = self.published_assets.clone();
-        let Some(row) = self.job_by_id(status.job) else { return };
+        let Some(row) = self.job_by_id(status.job) else { return None };
         if row.state.is_terminal() {
-            return; // late duplicate
+            return None; // late duplicate
         }
         row.last_update_ms = now_ms;
         row.status_warning = None;
@@ -2035,7 +2054,11 @@ impl GenModel {
                     row.node_state = GenNodeState::Finished;
                 }
                 GenJobState::Failed(
-                    status.outcome.clone().unwrap_or_else(|| "failed".to_string()),
+                    status.outcome.as_deref()
+                        .filter(|outcome| !outcome.trim().is_empty() && *outcome != "failed")
+                        .or_else(|| status.progress.as_ref().map(|(_, note)| note.as_str())
+                            .filter(|note| !note.trim().is_empty()))
+                        .unwrap_or("failed").to_string(),
                 )
             }
             JobStateDto::Cancelled => {
@@ -2046,6 +2069,14 @@ impl GenModel {
                 GenJobState::Cancelled
             }
         };
+        if matches!(row.state, GenJobState::Succeeded) {
+            if let Some(asset) = row.produced {
+                if row.kind == "video.generate" {
+                    return Some((asset, row.title.clone()));
+                }
+            }
+        }
+        None
     }
 
     /// A status poll failed (transient transport): keep the row, retry on a
@@ -3257,6 +3288,29 @@ mod tests {
             result_asset: None,
             result_revision: None,
             stages: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn failed_job_displays_precise_progress_error_and_descriptive_outcome_fallback() {
+        for (outcome, note, expected) in [
+            (Some("failed"), Some("http://node:8765/generate: http 503: queue full"), "http://node:8765/generate: http 503: queue full"),
+            (None, Some("node: poll disconnected after acceptance"), "node: poll disconnected after acceptance"),
+            (Some("video encoder failed"), None, "video encoder failed"),
+            (Some("video encoder failed"), Some("denoising"), "video encoder failed"),
+            (Some("failed"), Some("  "), "failed"),
+        ] {
+            let mut model = ready_model();
+            model.set_prompt("clip".into());
+            let GenCmd::Enqueue { tag, .. } = model.generate(100)[0] else { panic!() };
+            model.queued_at(tag, job_id(9), Some(110));
+            let mut failed = status(job_id(9), JobStateDto::Failed);
+            failed.outcome = outcome.map(str::to_string);
+            failed.progress = note.map(|s| (0, s.to_string()));
+            model.status_arrived_at(&failed, 200);
+            let row = model.jobs().next().unwrap();
+            assert!(matches!(&row.state, GenJobState::Failed(reason) if reason == expected));
+            assert!(row.display(300).message.contains(expected));
         }
     }
 

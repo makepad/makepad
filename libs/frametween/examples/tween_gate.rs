@@ -196,7 +196,7 @@ impl App {
                 },
                 width: pw,
                 height: ph,
-                deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),
+                deadline: Cx::monotonic_now() + 60.0,
             });
             return false;
         }

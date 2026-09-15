@@ -1,4 +1,4 @@
-//! Lazy ANIMATED thumbnails for `vjeffect` assets.
+//! Lazy rendered thumbnails for `vjeffect` assets.
 //!
 //! The bundled effect library seeds into the store with modest colored
 //! placeholder JPEGs (effects/seed.rs). This widget replaces them, tile by
@@ -58,23 +58,13 @@
 //! - the offscreen passes are thumbnail-sized ([`SLOT_W`]x[`SLOT_H`]), not
 //!   program-sized, and the bake pools hand their memory back the moment
 //!   the bank goes idle,
-//! - video encode + cache write happen on a worker thread, never the UI
-//!   thread.
+//! - JPEG conversion/encode happens on a Cx worker and the persistent cache
+//!   write is asynchronous, never blocking the UI thread.
 //!
-//! Cache: `<cache_parent>/cache-vjfx-thumbs-30/<revision>-rN.mp4`, keyed by
-//! the immutable revision id (the content digest of the published revision)
-//! plus [`RECIPE`]. THE ARTIFACT IS AN MP4 (H.264, 30 frames at cell
-//! resolution) written and read through the platform-neutral makepad-video
-//! seam — VideoToolbox on macOS, Media Foundation on Windows, GStreamer on
-//! Linux — with the cell layout stamped as a trailer box the demuxer skips
-//! (`anim_icon::stamp_layout_mp4`), so the file describes its own grid and
-//! survives a byte copy. STORAGE ONLY: on load the file is decoded ONCE
-//! into the same frames-in-a-sheet texture path the PNG used to feed, and
-//! the decoder session is torn down — the runtime animates the atlas by
-//! frame index exactly as before, zero codec work at draw time. A relaunch
-//! decodes the file instead of re-rendering. Thin-client law: this is a
-//! digest-keyed derived cache, never durable content state. Stale-recipe
-//! files (including every legacy PNG sheet) are swept on startup.
+//! Cache: `cx.storage("vj-fx-thumbs")`, keyed by asset, immutable revision,
+//! recipe and sheet size. The value is a pure-Rust encoded JPEG atlas on
+//! every platform; IndexedDB backs web and the native storage backend backs
+//! desktop. A relaunch decodes those bytes instead of rendering.
 //!
 //! Fallback honesty: a document that fails to parse, a readback the
 //! platform cannot do, a capture that comes back black, or an encoder the
@@ -86,14 +76,13 @@
 use crate::effects::shaders::DrawVjFxPresent;
 use crate::effects::VjFxView;
 use makepad_asset_data::{AssetId, AssetRevisionId, ThumbnailCells};
-use makepad_asset_importer::anim_icon;
-use makepad_widgets::makepad_platform::video_file::{
-    VideoFileCodec, VideoFileEncoder, VideoFileEncoderOptions,
-};
 use makepad_widgets::*;
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::time::Instant;
+use makepad_widgets::makepad_platform::{
+    storage::{StorageHandle, StorageRequestId, StorageResult},
+    thread::{Lane as PoolLane, TaskHandle},
+};
+use std::collections::{HashMap, HashSet};
+use crate::clock::Instant;
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -150,12 +139,22 @@ script_mod! {
 /// = 383x172 physical px (measured via the remote bridge's /snap). A
 /// 384-wide cell is that width exactly; 16:10 height keeps the bake
 /// framing the tiles have always had (the pad crops vertically, as it
-/// always did). 30 cells pack 6x5 into a 2304x1200 sheet.
+/// always did). Native's 30 cells pack 5x6 into a 1920x1440 sheet; web uses
+/// one 384x240 representative frame to keep the bridge payload small.
 pub const CELL_W: usize = 384;
 pub const CELL_H: usize = 240;
-/// Sheet columns.
-pub const SHEET_COLS: usize = 6;
+/// Native keeps the animated atlas. Web caches the representative middle
+/// frame as the requested small JPEG: this holds the readback transfer below
+/// a millisecond-scale payload instead of sending an 11 MiB atlas through
+/// the browser UI thread for every tile.
+#[cfg(not(target_arch = "wasm32"))]
+pub const SHEET_COLS: usize = 5;
+#[cfg(target_arch = "wasm32")]
+pub const SHEET_COLS: usize = 1;
+#[cfg(not(target_arch = "wasm32"))]
 pub const FRAME_COUNT: usize = 30;
+#[cfg(target_arch = "wasm32")]
+pub const FRAME_COUNT: usize = 1;
 const SHEET_ROWS: usize = FRAME_COUNT.div_ceil(SHEET_COLS);
 /// The sheet target's exact texel size — the GPU packs the cells, so the
 /// readback IS the finished sheet.
@@ -172,10 +171,13 @@ const SLOT_H: f64 = (CELL_H * SUPERSAMPLE) as f64;
 /// operator judged the earlier 6 fps sheet "a bit too low framerate" —
 /// half a bar of genuinely smooth motion beats a whole bar of slideshow.
 const CAPTURE_SPAN: f64 = 1.0;
-/// Document time between captured frames — and the exact `dt` each rendered
-/// frame is told passed, so the sheet plays back at the rate it was
-/// simulated at, on any machine.
-const FRAME_STEP: f64 = CAPTURE_SPAN / FRAME_COUNT as f64;
+/// The effect is always simulated at native's 30 Hz capture cadence. Web
+/// stores one representative cell, but that storage optimization must not
+/// turn the simulation step into one second or collapse feedback preroll.
+const TIMELINE_FRAMES: usize = 30;
+/// Document time between native timeline frames — and the exact `dt` each
+/// rendered frame is told passed, on every target.
+const FRAME_STEP: f64 = CAPTURE_SPAN / TIMELINE_FRAMES as f64;
 /// Document time to run before the first captured frame, so effects that
 /// build (emitter plumes, feedback trails, growth ramps) are underway.
 const PREROLL_SECS: f64 = 0.9;
@@ -200,35 +202,27 @@ pub const LANES: usize = 6;
 /// Pooled bake steps per lane ([`VjFxView::bake_pool_ensure`]): the most
 /// captured frames one lane can encode into one paint. Sized against the
 /// pool's render-target memory (~1.5-3MB a step), freed at idle.
-const BAKE_STEPS: usize = 12;
+const BAKE_STEPS: usize = if cfg!(target_arch = "wasm32") { 1 } else { 4 };
 /// Bake steps (scene encodes + chain runs) all lanes may spend in one UI
 /// frame at full speed. The polite budget is 1 — the old cadence exactly.
 ///
 /// 16, not 48: the bake shares the UI's render thread, and the cold burst
 /// stacks first-use pipeline compiles on top of the steps — at 48 the
-/// opening paints fused into a MULTI-SECOND freeze of the whole app. At 16
-/// a paint stays interactive and the library still bakes in ~half a
-/// minute; the difference disappears into the decode overlap.
-const STEP_BUDGET: usize = 16;
+/// opening paints fused into a MULTI-SECOND freeze of the whole app. Four
+/// plus the wall-clock deadline keeps a paint interactive.
+const STEP_BUDGET: usize = 4;
+/// Leave margin inside a 60 Hz frame for the rest of the VJ UI. Every
+/// multi-step CPU loop also checks this wall-clock deadline.
+const UI_STEP_BUDGET_MS: f64 = 7.5;
 /// Documents that may START in one UI frame. A load is a splash eval plus
 /// a script shader apply — staggering them is what keeps regen from ever
-/// reading as a stall. Two per frame: with batching, starts — not steps —
-/// are the cold-library floor.
-const LOADS_PER_FRAME: usize = 2;
+/// reading as a stall. One per frame also bounds first-use shader work.
+const LOADS_PER_FRAME: usize = 1;
 /// Sheet readbacks started per UI frame. On Metal a readback is an async
 /// renderer-owned capture (request + completion-handler delivery); on the
 /// fallback backends it blocks the UI thread on the GPU (a few ms at sheet
-/// size). Two is the ceiling either way and the rest wait a frame.
-const READBACKS_PER_FRAME: usize = 2;
-/// H.264 bitrate for the cell-resolution cache stream. Sized for the
-/// ALL-INTRA stream below (~0.7 bits/pixel at 384x240@30): every frame an
-/// IDR costs bitrate over a GOP, but a 30-frame thumbnail gains nothing
-/// from inter compression and an intra stream HAS no frame reordering —
-/// no B-frames, no decode-order/presentation-order gap on any platform's
-/// codec, which is one half of the frames-land-in-the-right-cell law
-/// (the pts-keyed packing in media.rs is the other).
-const THUMB_BITRATE_BPS: u32 = 2_000_000;
-
+/// size). One is the ceiling either way and the rest wait a frame.
+const READBACKS_PER_FRAME: usize = 1;
 /// A render job: everything needed with no further lookups.
 pub struct FxThumbJob {
     pub asset: AssetId,
@@ -247,9 +241,10 @@ pub struct FxThumbJob {
 /// decode pool exactly like a store-fetched thumbnail blob.
 pub struct FxThumbSheet {
     pub revision: AssetRevisionId,
-    pub path: PathBuf,
+    pub jpeg: Vec<u8>,
     pub cells: ThumbnailCells,
     pub fps: f32,
+    pub encode_ms: f32,
 }
 
 /// THE BAKE RECIPE, versioned.
@@ -275,7 +270,14 @@ pub struct FxThumbSheet {
 //    producing GPU queue. An r4 artifact could be a racy partial bake
 //    (one lit cell + twenty-nine black ones passes the whole-sheet-black
 //    gate and decodes clean), so every r4 file retires and re-proves.
-pub const RECIPE: u32 = 6;
+// 7: cache payload is a portable JPEG atlas in Cx storage; web and native
+//    now share the same key/value path.
+// 8: web keeps native's 30 Hz timeline and 27-step feedback preroll even
+//    though it stores one representative cell.
+// 9: WebGL texture passes honour the effect's 3D camera (the platform used
+//    to overwrite it with the 2D ortho, so every r8 browser sheet of a 3D
+//    engine is its clear colour with the scene collapsed to a few pixels).
+pub const RECIPE: u32 = 9;
 
 /// The same lever for the TWO-DECK STAND-INS alone
 /// ([`crate::effects::deck_pattern`]). A transition sheet is a picture OF
@@ -288,44 +290,40 @@ pub const RECIPE: u32 = 6;
 // 2: deck A's stand-in moved from warm slate to the darkened key colour.
 pub const DECK_RECIPE: u32 = 2;
 
-/// The cache file for one revision. Transition previews render differently
-/// (two-input sweep), so they key their own file — a static sheet cached
-/// before the sweep existed is simply ignored, never shown. `-t3`: the
-/// frame-indexed sweep (the whole transition edge to edge in one sheet).
-pub fn cache_path(dir: &Path, revision: &AssetRevisionId, transition: bool) -> PathBuf {
-    if transition {
-        dir.join(format!("{revision}-t3-d{DECK_RECIPE}-r{RECIPE}.mp4"))
+const CACHE_SWEEP_LIST_LIMIT: u32 = 256;
+const CACHE_SWEEP_DELETE_BATCH: usize = 16;
+/// A browser storage request normally answers in the next event turn. A
+/// missing IndexedDB callback must not keep a revision in `holds()` forever.
+const CACHE_REQUEST_TIMEOUT_S: f32 = 5.0;
+/// Whole render/encode lane watchdog, counted in draws so a backgrounded tab
+/// does not fail simply because its animation clock was parked.
+const LANE_TIMEOUT_POLLS: u32 = 900;
+
+/// Browser and native use the same namespace/key contract. The immutable
+/// revision is the thumbnail version; recipe and dimensions invalidate any
+/// change in rendering without scanning or deleting old entries.
+pub fn cache_key(
+    asset: &AssetId,
+    revision: &AssetRevisionId,
+    transition: bool,
+) -> String {
+    let mode = if transition {
+        format!("transition-d{DECK_RECIPE}")
     } else {
-        dir.join(format!("{revision}-r{RECIPE}.mp4"))
-    }
+        "effect".to_string()
+    };
+    format!(
+        "{asset}/{revision}-{mode}-r{RECIPE}-{SHEET_W}x{SHEET_H}.jpg"
+    )
 }
 
-/// Startup sweep: everything in the cache directory that is not a
-/// current-recipe artifact — legacy PNG sheets, older recipes, orphaned
-/// tmp files — is dead weight nothing will ever read again (the recipe is
-/// part of the only name the app looks up). Deleting it here is what makes
-/// a recipe bump a re-bake instead of a cache that doubles.
-fn sweep_stale_cache(dir: &Path) {
-    let keep = format!("-r{RECIPE}.mp4");
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
-    let mut dropped = 0usize;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
-        if name.ends_with(&keep) {
-            continue;
-        }
-        if std::fs::remove_file(&path).is_ok() {
-            dropped += 1;
-        }
-    }
-    if dropped > 0 {
-        log!("fx thumb: cache sweep dropped {dropped} stale files (current recipe r{RECIPE}, mp4)");
-    }
+fn is_stale_cache_key(key: &str) -> bool {
+    let suffix = format!("-r{RECIPE}-{SHEET_W}x{SHEET_H}.jpg");
+    let Some(prefix) = key.strip_suffix(&suffix) else {
+        return true;
+    };
+    !(prefix.ends_with("-effect")
+        || prefix.ends_with(&format!("-transition-d{DECK_RECIPE}")))
 }
 
 /// The declared layout every sheet this module writes carries.
@@ -370,10 +368,16 @@ fn sheet_rgba_from_bgra(src: &[u8], sw: usize, sh: usize) -> Vec<u8> {
             for sy in y0..y1 {
                 for sx in x0..x1 {
                     let si = (sy * sw + sx) * 4;
-                    // BGRA source.
-                    b += src[si] as u32;
+                    // Native render targets are BGRA. WebGL readPixels is
+                    // RGBA; keep that conversion on this encode worker so
+                    // the browser UI thread only transfers the PBO bytes.
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let (pr, pb) = (src[si + 2], src[si]);
+                    #[cfg(target_arch = "wasm32")]
+                    let (pr, pb) = (src[si], src[si + 2]);
+                    b += pb as u32;
                     g += src[si + 1] as u32;
-                    r += src[si + 2] as u32;
+                    r += pr as u32;
                 }
             }
             let count = ((y1 - y0) * (x1 - x0)) as u32;
@@ -395,76 +399,35 @@ fn all_black(rgba: &[u8]) -> bool {
         .any(|px| px[0] > 12 || px[1] > 12 || px[2] > 12)
 }
 
-/// Convert + gate + encode + stamp + atomically land the cache file. Runs
-/// on a worker: the UI thread never touches a sheet's pixels again after
-/// the readback.
-///
-/// The artifact: 30 cell-resolution frames hardware-encoded to H.264 in an
-/// mp4 through makepad-video (the platform-neutral seam — VideoToolbox /
-/// Media Foundation / GStreamer), with the cell layout appended as a
-/// trailer box (`anim_icon::stamp_layout_mp4`) that any demuxer skips and
-/// `anim_icon::read_layout` recovers. H.264 rather than H.265 because it
-/// is the arm the realtime encode lane has proven on BOTH desktop
-/// platforms; H.265 encode support is uneven across Media Foundation
-/// machines and buys nothing at 75KB a sheet.
-fn encode_and_write(
+/// Convert + gate + JPEG encode on a Cx worker. The UI thread never scans or
+/// encodes a sheet's pixels after the asynchronous readback arrives.
+fn encode_jpeg(
     bgra: Vec<u8>,
     sw: usize,
     sh: usize,
-    path: PathBuf,
     revision: AssetRevisionId,
 ) -> Result<FxThumbSheet, String> {
+    let started = Instant::now();
     let sheet = sheet_rgba_from_bgra(&bgra, sw, sh);
     if all_black(&sheet) {
         return Err("rendered black".to_string());
     }
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("cache dir: {e}"))?;
-    }
-    // The tmp file keeps the .mp4 extension: platform muxers use it as the
-    // container type hint.
-    let tmp = path.with_extension("tmp.mp4");
-    let tmp_str = tmp
-        .to_str()
-        .ok_or_else(|| format!("non-utf8 cache path: {}", tmp.display()))?
-        .to_string();
-    let mut encoder = VideoFileEncoder::new(
-        &tmp_str,
-        VideoFileEncoderOptions {
-            codec: VideoFileCodec::H264,
-            width: CELL_W as u32,
-            height: CELL_H as u32,
-            fps_num: SHEET_FPS as u32,
-            fps_den: 1,
-            video_bitrate_bps: THUMB_BITRATE_BPS,
-            audio: None,
-            // ALL-INTRA: an IDR-only stream cannot reorder frames, so
-            // emission order IS presentation order on every decoder.
-            keyframe_only: true,
-        },
-    )
-    .map_err(|e| format!("thumb video encoder: {e}"))?;
-    let mut cell = vec![0u8; CELL_W * CELL_H * 4];
-    for k in 0..FRAME_COUNT {
-        let cx0 = (k % SHEET_COLS) * CELL_W;
-        let cy0 = (k / SHEET_COLS) * CELL_H;
-        for y in 0..CELL_H {
-            let src = ((cy0 + y) * SHEET_W + cx0) * 4;
-            cell[y * CELL_W * 4..(y + 1) * CELL_W * 4]
-                .copy_from_slice(&sheet[src..src + CELL_W * 4]);
-        }
-        encoder
-            .push_frame_rgba8(&cell, None)
-            .map_err(|e| format!("thumb video frame {k}: {e}"))?;
-    }
-    encoder.finish().map_err(|e| format!("thumb video finish: {e}"))?;
-    // The layout trailer: the file carries its own cell grid, exactly as
-    // the PNG tEXt stamp did, and survives a byte copy.
-    let bytes = std::fs::read(&tmp).map_err(|e| format!("cache read-back: {e}"))?;
-    let bytes = anim_icon::stamp_layout_mp4(&bytes, sheet_cells(), SHEET_FPS);
-    std::fs::write(&tmp, &bytes).map_err(|e| format!("cache write: {e}"))?;
-    std::fs::rename(&tmp, &path).map_err(|e| format!("cache rename: {e}"))?;
-    Ok(FxThumbSheet { revision, path, cells: sheet_cells(), fps: SHEET_FPS })
+    let mut jpeg = Vec::new();
+    jpeg_encoder::Encoder::new(&mut jpeg, 84)
+        .encode(
+            &sheet,
+            SHEET_W as u16,
+            SHEET_H as u16,
+            jpeg_encoder::ColorType::Rgba,
+        )
+        .map_err(|e| format!("thumb jpeg encoder: {e}"))?;
+    Ok(FxThumbSheet {
+        revision,
+        jpeg,
+        cells: sheet_cells(),
+        fps: SHEET_FPS,
+        encode_ms: started.elapsed().as_secs_f32() * 1000.0,
+    })
 }
 
 /// Where a lane's job is in its life. The clock only ever moves in
@@ -490,14 +453,14 @@ enum Phase {
     /// via `take_render_texture_captures` once that buffer completed —
     /// they provably follow the last cell's render.
     AwaitRead,
-    /// Worker thread encoding + writing the cache file.
+    /// Cx worker encoding + asynchronous persistent-store write.
     Encoding,
 }
 
 struct ActiveJob {
     job: FxThumbJob,
     phase: Phase,
-    encoder: Option<std::thread::JoinHandle<Result<FxThumbSheet, String>>>,
+    encoder: Option<TaskHandle<Result<FxThumbSheet, String>>>,
     /// LIVECODING: the log position this document's load started at, so a
     /// draw-shader failure raised while the lane rendered can be attributed
     /// to it (see `crate::livecode`).
@@ -510,23 +473,44 @@ struct ActiveJob {
     seq_pending: Option<Option<usize>>,
     /// The sheet target holds drawn cells (clear turns into load-preserve).
     sheet_cleared: bool,
-    /// When the renderer-owned capture was requested ([`Phase::AwaitRead`]):
-    /// its read time for the report line.
-    await_started: Instant,
     /// Frames spent in [`Phase::AwaitRead`] — the timeout counts POLLS, not
     /// wall time, so a stalled clock (occlusion, machine sleep) can never
     /// spuriously fail a lane whose capture is simply parked with the app.
     await_polls: u32,
-    // Honest numbers for the report line.
-    started: Instant,
-    frames: u32,
-    load_ms: f32,
-    read_ms: f32,
-    /// CPU spent in tick_manual across the sheet (sim + clock).
-    tick_ms: f32,
-    /// CPU spent encoding the draws (scene + chain + cell blits).
-    draw_ms: f32,
+    /// Draw polls spent on this job across load, bake, readback and encode.
+    /// This is the outer watchdog; phase-specific failures remain more useful.
+    lane_polls: u32,
+    /// Frames spent in [`Phase::Encoding`] with the worker not finished —
+    /// the same poll-counted timeout. On the web every encode is a fresh
+    /// worker; one that never starts or never reports must not hold its
+    /// lane for the rest of the session.
+    encode_polls: u32,
+    /// Polls the warmup has been HELD because the platform was still
+    /// compiling draw shaders (their draw calls are dropped until then —
+    /// a capture taken in that window is a black frame, not the effect).
+    warmup_holds: u32,
 }
+
+impl ActiveJob {
+    /// Keep the job in warmup while shaders are still compiling: the draw
+    /// that queued them has happened, nothing more is drawn or ticked until
+    /// they link. Capped in polls like every other wait here, so a
+    /// completion the platform never reports cannot wedge a lane.
+    fn hold_warmup(&mut self, shaders_pending: bool) -> bool {
+        if !matches!(self.phase, Phase::Warmup(_))
+            || !shaders_pending
+            || self.warmup_holds > WAIT_POLL_LIMIT
+        {
+            return false;
+        }
+        self.warmup_holds += 1;
+        true
+    }
+}
+
+/// Polls a lane may spend waiting on its capture or its encode worker before
+/// the job fails and the lane moves on: ~10 s of frames at 60 Hz.
+const WAIT_POLL_LIMIT: u32 = 600;
 
 /// One lane's own render target: the sheet the GPU packs cell by cell, plus
 /// the pass that owns it. The effect's passes are begun INSIDE this one
@@ -568,6 +552,20 @@ struct Lane {
     prepared: bool,
 }
 
+struct CacheLookup {
+    revision: AssetRevisionId,
+    key: String,
+    job: Option<FxThumbJob>,
+    started: Instant,
+}
+
+struct CacheWrite {
+    revision: AssetRevisionId,
+    key: String,
+    stores_value: bool,
+    started: Instant,
+}
+
 /// The premix texture pair for pool step `step` (grown on demand). A free
 /// fn so the lane's `job` can stay mutably borrowed alongside it.
 fn trans_pair(trans_tex: &mut Vec<[Option<Texture>; 2]>, step: usize) -> &mut [Option<Texture>; 2] {
@@ -575,6 +573,18 @@ fn trans_pair(trans_tex: &mut Vec<[Option<Texture>; 2]>, step: usize) -> &mut [O
         trans_tex.push([None, None]);
     }
     &mut trans_tex[step]
+}
+
+#[derive(Default)]
+struct CacheSweep {
+    started: bool,
+    finished: bool,
+    listing_done: bool,
+    list_request: Option<StorageRequestId>,
+    pending_deletes: Vec<String>,
+    delete_requests: HashSet<StorageRequestId>,
+    stale_count: usize,
+    error: Option<String>,
 }
 
 #[derive(Script, ScriptHook, WidgetRef, WidgetRegister)]
@@ -614,7 +624,19 @@ pub struct VjFxThumbs {
     #[rust]
     next_frame: NextFrame,
     #[rust]
-    cache_dir: Option<PathBuf>,
+    storage: Option<StorageHandle>,
+    #[rust]
+    cache_sweep: CacheSweep,
+    /// IndexedDB/native-storage reads in flight. A lookup may carry the
+    /// complete render job (bundled feed) or be a cheap catalog probe.
+    #[rust]
+    cache_reads: HashMap<StorageRequestId, CacheLookup>,
+    #[rust]
+    cache_writes: HashMap<StorageRequestId, CacheWrite>,
+    #[rust]
+    cache_misses: HashSet<AssetRevisionId>,
+    #[rust]
+    cache_keys: HashMap<AssetRevisionId, String>,
     /// THE PENDING SET — one deep store (the whole library fits), pulled
     /// by [`Self::take_next`]'s strict classes. Order within the vec is
     /// enqueue order; the classes decide between entries at the pull, so
@@ -644,7 +666,7 @@ pub struct VjFxThumbs {
     #[rust]
     new_failures: Vec<AssetRevisionId>,
     /// Set once the platform proves it cannot read a render target back
-    /// (web/headless); rendering is pointless then, cache decode still works.
+    /// (web/gpusim); rendering is pointless then, cache decode still works.
     #[rust]
     disabled: Option<String>,
     /// Consecutive whole-job readback failures; one flaky texture must not
@@ -658,28 +680,137 @@ pub struct VjFxThumbs {
     /// bank at one lane and one step per frame.
     #[rust(true)]
     full_speed: bool,
-    // Session totals for the report line.
-    #[rust]
-    done_count: usize,
-    #[rust]
-    done_ms: f32,
     #[rust]
     batch_started: Option<Instant>,
+    #[rust]
+    batch_rendered: usize,
+    #[rust]
+    batch_cached: usize,
+    #[rust]
+    batch_stored: usize,
+    #[rust]
+    batch_failed: usize,
+    /// Cache-hit JPEGs handed to the decode workers but not yet uploaded
+    /// and bound to the grid. Keeping them in the batch lifetime makes the
+    /// summary measure what the operator sees, not merely IndexedDB reads.
+    #[rust]
+    cache_visible_pending: HashSet<AssetRevisionId>,
+    #[rust]
+    batch_all_visible_s: Option<f32>,
 }
 
 impl VjFxThumbs {
-    pub fn set_cache_dir(&mut self, dir: PathBuf) {
-        sweep_stale_cache(&dir);
-        self.cache_dir = Some(dir);
+    fn begin_batch(&mut self) {
+        if self.batch_started.is_none() {
+            self.batch_started = Some(Instant::now());
+            self.batch_rendered = 0;
+            self.batch_cached = 0;
+            self.batch_stored = 0;
+            self.batch_failed = 0;
+            self.cache_visible_pending.clear();
+            self.batch_all_visible_s = None;
+        }
     }
 
-    pub fn cache_dir(&self) -> Option<&Path> {
-        self.cache_dir.as_deref()
+    fn finish_visible_timing_if_ready(&mut self) {
+        if self.batch_all_visible_s.is_none()
+            && self.batch_cached > 0
+            && self.cache_reads.is_empty()
+            && self.cache_visible_pending.is_empty()
+        {
+            self.batch_all_visible_s = self
+                .batch_started
+                .map(|started| started.elapsed().as_secs_f32());
+        }
+    }
+
+    fn storage(&mut self, cx: &mut Cx) -> StorageHandle {
+        let storage = self.storage
+            .get_or_insert_with(|| cx.storage("vj-fx-thumbs"))
+            .clone();
+        if !self.cache_sweep.started {
+            self.cache_sweep.started = true;
+            self.cache_sweep.list_request =
+                Some(storage.list(cx, "", None, CACHE_SWEEP_LIST_LIMIT));
+        }
+        storage
+    }
+
+    fn finish_cache_sweep_if_ready(&mut self) {
+        if self.cache_sweep.finished
+            || !self.cache_sweep.listing_done
+            || !self.cache_sweep.pending_deletes.is_empty()
+            || !self.cache_sweep.delete_requests.is_empty()
+        {
+            return;
+        }
+        self.cache_sweep.finished = true;
+        if let Some(error) = self.cache_sweep.error.as_deref() {
+            log!("fx thumbs: sweep failed: {error}");
+        }
+    }
+
+    fn sweep_delete_batch(&mut self, cx: &mut Cx) {
+        let Some(storage) = self.storage.clone() else { return };
+        for _ in 0..CACHE_SWEEP_DELETE_BATCH {
+            let Some(key) = self.cache_sweep.pending_deletes.pop() else { break };
+            let request = storage.delete(cx, &key);
+            self.cache_sweep.delete_requests.insert(request);
+        }
+        self.finish_cache_sweep_if_ready();
+    }
+
+    /// Start a cache-only lookup before fetching an effect's source. Returns
+    /// true once that key is known missing and rendering may be enqueued.
+    pub fn probe_cache(
+        &mut self,
+        cx: &mut Cx,
+        asset: AssetId,
+        revision: AssetRevisionId,
+        transition: bool,
+    ) -> bool {
+        if self.cache_misses.contains(&revision) {
+            return true;
+        }
+        if self.cache_reads.values().any(|read| read.revision == revision)
+            || self.results.iter().any(|sheet| sheet.revision == revision)
+        {
+            return false;
+        }
+        let key = cache_key(&asset, &revision, transition);
+        self.begin_batch();
+        self.batch_all_visible_s = None;
+        self.cache_keys.insert(revision, key.clone());
+        let request = self.storage(cx).get(cx, &key);
+        self.cache_reads.insert(
+            request,
+            CacheLookup { revision, key, job: None, started: Instant::now() },
+        );
+        false
+    }
+
+    pub fn invalidate_cache(&mut self, cx: &mut Cx, revision: AssetRevisionId) {
+        self.cache_visible_pending.remove(&revision);
+        self.finish_visible_timing_if_ready();
+        if let Some(key) = self.cache_keys.get(&revision).cloned() {
+            let request = self.storage(cx).delete(cx, &key);
+            self.cache_writes.insert(request, CacheWrite {
+                revision,
+                key,
+                stores_value: false,
+                started: Instant::now(),
+            });
+        }
+        self.cache_misses.insert(revision);
     }
 
     /// Nothing loaded, nothing pending: everything handed over is finished.
     pub fn is_idle(&self) -> bool {
-        self.pending.is_empty() && self.lanes.iter().all(|l| l.job.is_none())
+        self.pending.is_empty()
+            && self.cache_reads.is_empty()
+            && self.cache_writes.is_empty()
+            && self.cache_visible_pending.is_empty()
+            && self.lanes.iter().all(|l| l.job.is_none())
     }
 
     /// A live set is running: keep the bank to one lane. At boot, idle, or a
@@ -727,6 +858,11 @@ impl VjFxThumbs {
     }
 
     fn mark_failed(&mut self, revision: AssetRevisionId, error: String) {
+        if self.failed.contains_key(&revision) {
+            return;
+        }
+        log!("fx thumbs: {revision} failed: {error}");
+        self.batch_failed += 1;
         self.failed.insert(revision, error);
         self.new_failures.push(revision);
     }
@@ -737,6 +873,7 @@ impl VjFxThumbs {
     /// twice.
     pub fn holds(&self, revision: &AssetRevisionId) -> bool {
         self.pending.iter().any(|j| &j.revision == revision)
+            || self.cache_reads.values().any(|read| &read.revision == revision)
             || self
                 .lanes
                 .iter()
@@ -751,6 +888,27 @@ impl VjFxThumbs {
         std::mem::take(&mut self.results)
     }
 
+    /// The host has decoded, uploaded and rebound this cache-hit sheet, and
+    /// has requested the grid redraw that makes it visible.
+    pub fn mark_cache_visible(&mut self, cx: &mut Cx, revision: AssetRevisionId) {
+        if !self.cache_visible_pending.remove(&revision) {
+            return;
+        }
+        self.finish_visible_timing_if_ready();
+        self.area.redraw(cx);
+        self.next_frame = cx.new_next_frame();
+    }
+
+    /// A worker that never answered must release the cache batch just like a
+    /// decode error does. `mark_failed` de-duplicates the error line.
+    pub fn mark_decode_timed_out(&mut self, cx: &mut Cx, revision: AssetRevisionId) {
+        self.cache_visible_pending.remove(&revision);
+        self.finish_visible_timing_if_ready();
+        self.mark_failed(revision, "JPEG decode timed out".to_string());
+        self.area.redraw(cx);
+        self.next_frame = cx.new_next_frame();
+    }
+
     /// Admission NEVER collapses: a job is refused only when the platform
     /// cannot render at all, its revision already failed (terminal), or the
     /// same revision is already pending/rendering. A REVISION CHANGE is an
@@ -762,12 +920,199 @@ impl VjFxThumbs {
             return;
         }
         self.pending.retain(|j| j.asset != job.asset);
-        if self.batch_started.is_none() {
-            self.batch_started = Some(Instant::now());
+        self.begin_batch();
+        if self.cache_misses.contains(&job.revision) {
+            self.pending.push(job);
+        } else if let Some(read) = self
+            .cache_reads
+            .values_mut()
+            .find(|read| read.revision == job.revision)
+        {
+            read.job = Some(job);
+        } else {
+            let key = cache_key(&job.asset, &job.revision, job.transition);
+            self.batch_all_visible_s = None;
+            self.cache_keys.insert(job.revision, key.clone());
+            let request = self.storage(cx).get(cx, &key);
+            self.cache_reads.insert(
+                request,
+                CacheLookup {
+                    revision: job.revision,
+                    key,
+                    job: Some(job),
+                    started: Instant::now(),
+                },
+            );
         }
-        self.pending.push(job);
         self.next_frame = cx.new_next_frame();
         self.area.redraw(cx);
+    }
+
+    fn handle_storage(&mut self, cx: &mut Cx, event: &Event) {
+        let Event::Storage(responses) = event else { return };
+        let mut changed = false;
+        for response in responses {
+            if self.cache_sweep.list_request == Some(response.request_id) {
+                self.cache_sweep.list_request = None;
+                match &response.result {
+                    Ok(StorageResult::List(page)) => {
+                        let stale = page
+                            .keys
+                            .iter()
+                            .filter(|key| is_stale_cache_key(key))
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        self.cache_sweep.stale_count += stale.len();
+                        self.cache_sweep.pending_deletes.extend(stale);
+                        if let Some(cursor) = page.next_cursor.clone() {
+                            let storage = self.storage(cx);
+                            self.cache_sweep.list_request = Some(storage.list(
+                                cx,
+                                "",
+                                Some(cursor),
+                                CACHE_SWEEP_LIST_LIMIT,
+                            ));
+                        } else {
+                            self.cache_sweep.listing_done = true;
+                        }
+                    }
+                    Ok(_) => {
+                        self.cache_sweep.listing_done = true;
+                        self.cache_sweep.error.get_or_insert_with(|| {
+                            "storage list returned the wrong payload".to_string()
+                        });
+                    }
+                    Err(error) => {
+                        self.cache_sweep.listing_done = true;
+                        self.cache_sweep.error.get_or_insert_with(|| error.to_string());
+                    }
+                }
+                if !self.cache_sweep.pending_deletes.is_empty() {
+                    self.next_frame = cx.new_next_frame();
+                }
+                self.finish_cache_sweep_if_ready();
+                continue;
+            }
+            if self.cache_sweep.delete_requests.remove(&response.request_id) {
+                if let Err(error) = &response.result {
+                    self.cache_sweep.error.get_or_insert_with(|| error.to_string());
+                }
+                self.finish_cache_sweep_if_ready();
+                continue;
+            }
+            if let Some(read) = self.cache_reads.remove(&response.request_id) {
+                match &response.result {
+                    Ok(StorageResult::Value(Some(jpeg)))
+                        if jpeg.starts_with(&[0xff, 0xd8]) =>
+                    {
+                        self.batch_cached += 1;
+                        self.cache_visible_pending.insert(read.revision);
+                        self.results.push(FxThumbSheet {
+                            revision: read.revision,
+                            jpeg: jpeg.clone(),
+                            cells: sheet_cells(),
+                            fps: SHEET_FPS,
+                            encode_ms: 0.0,
+                        });
+                    }
+                    Ok(StorageResult::Value(_)) => {
+                        self.cache_misses.insert(read.revision);
+                        if let Some(job) = read.job {
+                            self.pending.push(job);
+                        }
+                    }
+                    Ok(_) => {
+                        self.cache_misses.insert(read.revision);
+                        if let Some(job) = read.job {
+                            self.pending.push(job);
+                        }
+                    }
+                    Err(error) => {
+                        log!(
+                            "fx thumbs: {} cache read failed ({}): {error}",
+                            read.revision,
+                            read.key
+                        );
+                        self.cache_misses.insert(read.revision);
+                        if let Some(job) = read.job {
+                            self.pending.push(job);
+                        }
+                    }
+                }
+                changed = true;
+            }
+            if let Some(write) = self.cache_writes.remove(&response.request_id) {
+                if let Err(error) = &response.result {
+                    log!(
+                        "fx thumbs: {} cache write failed ({}): {error}",
+                        write.revision,
+                        write.key
+                    );
+                } else if write.stores_value {
+                    self.batch_stored += 1;
+                }
+                changed = true;
+            }
+        }
+        self.finish_visible_timing_if_ready();
+        if changed {
+            self.area.redraw(cx);
+            self.next_frame = cx.new_next_frame();
+        }
+    }
+
+    /// Storage completions are event-driven, but a browser callback can be
+    /// lost (transaction abort, worker teardown). Retire each orphan once so
+    /// it cannot keep `holds()`/`is_idle()` true forever; a read falls back to
+    /// rendering, while a write leaves the already-visible result intact.
+    fn poll_cache_timeouts(&mut self, cx: &mut Cx) {
+        let reads: Vec<StorageRequestId> = self
+            .cache_reads
+            .iter()
+            .filter_map(|(request, read)| {
+                (read.started.elapsed().as_secs_f32() >= CACHE_REQUEST_TIMEOUT_S)
+                    .then_some(*request)
+            })
+            .collect();
+        let mut timed_out = !reads.is_empty();
+        for request in reads {
+            let Some(read) = self.cache_reads.remove(&request) else { continue };
+            log!(
+                "fx thumbs: {} cache read timed out ({})",
+                read.revision,
+                read.key
+            );
+            self.cache_misses.insert(read.revision);
+            if let Some(job) = read.job {
+                self.pending.push(job);
+            }
+        }
+
+        let writes: Vec<StorageRequestId> = self
+            .cache_writes
+            .iter()
+            .filter_map(|(request, write)| {
+                (write.started.elapsed().as_secs_f32() >= CACHE_REQUEST_TIMEOUT_S)
+                    .then_some(*request)
+            })
+            .collect();
+        timed_out |= !writes.is_empty();
+        for request in writes {
+            let Some(write) = self.cache_writes.remove(&request) else { continue };
+            log!(
+                "fx thumbs: {} cache write timed out ({})",
+                write.revision,
+                write.key
+            );
+        }
+        if !self.cache_reads.is_empty() || !self.cache_writes.is_empty() {
+            return;
+        }
+        self.finish_visible_timing_if_ready();
+        if !self.pending.is_empty() || timed_out {
+            self.area.redraw(cx);
+            self.next_frame = cx.new_next_frame();
+        }
     }
 
     /// The lane bank, built on first use (one [`Lane`] per view field).
@@ -792,11 +1137,6 @@ impl VjFxThumbs {
 
     fn fail_lane(&mut self, cx: &mut Cx, index: usize, error: String) {
         if let Some(active) = self.lanes[index].job.take() {
-            log!(
-                "fx thumb: {} FAILED — {} (marked failed for this revision)",
-                active.job.title,
-                error
-            );
             self.mark_failed(active.job.revision, error);
         }
         self.view(index).clear_effect(cx);
@@ -805,7 +1145,7 @@ impl VjFxThumbs {
     /// Pull pending documents onto free lanes, strictly by class
     /// ([`Self::take_next`]). At most [`LOADS_PER_FRAME`] a frame so a
     /// compile never lands on top of another one.
-    fn start_jobs(&mut self, cx: &mut Cx) {
+    fn start_jobs(&mut self, cx: &mut Cx, deadline: f64) {
         // A platform that proved it cannot read back must stop PULLING:
         // without this the deep pending set kept rendering after disable
         // and marked the rest of the library failed.
@@ -815,6 +1155,9 @@ impl VjFxThumbs {
         let budget = self.lane_budget();
         let mut loads = 0;
         for index in 0..LANES {
+            if Cx::monotonic_now() >= deadline {
+                return;
+            }
             if loads >= LOADS_PER_FRAME || self.pending.is_empty() {
                 return;
             }
@@ -828,7 +1171,6 @@ impl VjFxThumbs {
             let Some(job) = self.take_next() else { return };
             loads += 1;
             let prepared = self.lanes[index].prepared;
-            let t0 = Instant::now();
             let view = self.view(index);
             if !prepared {
                 view.set_manual_clock(true);
@@ -853,21 +1195,13 @@ impl VjFxThumbs {
                         pending_chain: Vec::new(),
                         seq_pending: None,
                         sheet_cleared: false,
-                        await_started: t0,
                         await_polls: 0,
-                        started: t0,
-                        frames: 0,
-                        load_ms: t0.elapsed().as_secs_f32() * 1000.0,
-                        read_ms: 0.0,
-                        tick_ms: 0.0,
-                        draw_ms: 0.0,
+                        lane_polls: 0,
+                        encode_polls: 0,
+                        warmup_holds: 0,
                     });
                 }
                 Err(error) => {
-                    log!(
-                        "fx thumb: {} document failed to load — {error} (placeholder kept)",
-                        job.title
-                    );
                     // A parse failure is DEFINITE: report it as the answer
                     // rather than waiting to see what the shader does.
                     crate::livecode::report(
@@ -882,17 +1216,33 @@ impl VjFxThumbs {
     }
 
     /// Harvest finished encode workers without ever blocking the UI thread.
-    fn poll_encoders(&mut self) {
+    /// A worker that never finishes times out on polls, exactly like a
+    /// capture that never lands ([`Self::poll_captures`]): the lane fails
+    /// its job and pulls the next one instead of stalling the bank.
+    fn poll_encoders(&mut self, cx: &mut Cx) {
         for index in 0..self.lanes.len() {
-            let finished = self.lanes[index].job.as_ref().is_some_and(|a| {
-                a.phase == Phase::Encoding && a.encoder.as_ref().is_some_and(|h| h.is_finished())
-            });
+            let (finished, timed_out) = match self.lanes[index].job.as_mut() {
+                Some(a) if a.phase == Phase::Encoding => {
+                    let finished = a.encoder.as_ref().is_some_and(|h| h.is_finished());
+                    if !finished {
+                        a.encode_polls += 1;
+                    }
+                    (finished, !finished && a.encode_polls > WAIT_POLL_LIMIT)
+                }
+                _ => (false, false),
+            };
+            if timed_out {
+                if let Some(handle) = self.lanes[index].job.as_mut().and_then(|a| a.encoder.take()) {
+                    handle.cancel();
+                }
+                self.fail_lane(cx, index, "encode worker never finished".to_string());
+                continue;
+            }
             if !finished {
                 continue;
             }
             let Some(mut active) = self.lanes[index].job.take() else { continue };
-            let Some(handle) = active.encoder.take() else { continue };
-            let total_ms = active.started.elapsed().as_secs_f32() * 1000.0;
+            let Some(mut handle) = active.encoder.take() else { continue };
             // LIVECODING: the document parsed and a full sheet was DRAWN, so
             // whatever the shader had to say has been said by now. A black
             // sheet is not itself a verdict — an input-shaping transition
@@ -900,42 +1250,52 @@ impl VjFxThumbs {
             // is whatever the compiler actually reported, and nothing means
             // it compiled.
             crate::livecode::report(&active.job.revision.to_string(), active.mark, Ok(()));
-            match handle.join() {
-                Ok(Ok(sheet)) => {
-                    self.done_count += 1;
-                    self.done_ms += total_ms;
-                    log!(
-                        "fx thumb: {} rendered — {} frames over {:.1}s in {:.0}ms ({} steps: tick {:.1}ms, encode {:.1}ms, load {:.1}ms, readback {:.1}ms); {} done, avg {:.0}ms, {:.1}s elapsed",
-                        active.job.title,
-                        FRAME_COUNT,
-                        CAPTURE_SPAN,
-                        total_ms,
-                        active.frames,
-                        active.tick_ms,
-                        active.draw_ms,
-                        active.load_ms,
-                        active.read_ms,
-                        self.done_count,
-                        self.done_ms / self.done_count as f32,
-                        self.batch_started
-                            .map(|t| t.elapsed().as_secs_f32())
-                            .unwrap_or(0.0),
+            match handle.try_take() {
+                None => {
+                    // `is_finished` publishes before the payload mutex is
+                    // necessarily available. Keep the handle and the frame
+                    // pump alive so lock contention is retried, never lost.
+                    active.encoder = Some(handle);
+                    self.lanes[index].job = Some(active);
+                }
+                Some(Ok(Ok(sheet))) => {
+                    self.batch_rendered += 1;
+                    let key = cache_key(
+                        &active.job.asset,
+                        &active.job.revision,
+                        active.job.transition,
                     );
+                    self.cache_keys.insert(active.job.revision, key.clone());
+                    let request = self.storage(cx).set(cx, &key, sheet.jpeg.clone());
+                    self.cache_writes.insert(request, CacheWrite {
+                        revision: active.job.revision,
+                        key,
+                        stores_value: true,
+                        started: Instant::now(),
+                    });
                     self.results.push(sheet);
                 }
-                Ok(Err(error)) => {
-                    log!(
-                        "fx thumb: {} FAILED — {error} (marked failed for this revision)",
-                        active.job.title
-                    );
+                Some(Ok(Err(error))) => {
                     self.mark_failed(active.job.revision, error);
                 }
-                Err(_) => {
+                Some(Err(error)) => {
                     self.mark_failed(
                         active.job.revision,
-                        "encode worker panicked".to_string(),
+                        format!("encode worker failed: {error}"),
                     );
                 }
+            }
+        }
+    }
+
+    fn poll_lane_timeouts(&mut self, cx: &mut Cx) {
+        for index in 0..self.lanes.len() {
+            let timed_out = self.lanes[index].job.as_mut().is_some_and(|active| {
+                active.lane_polls = active.lane_polls.saturating_add(1);
+                active.lane_polls > LANE_TIMEOUT_POLLS
+            });
+            if timed_out {
+                self.fail_lane(cx, index, "thumbnail lane timed out".to_string());
             }
         }
     }
@@ -953,7 +1313,11 @@ impl VjFxThumbs {
         k: usize,
     ) {
         if transition {
-            let m = (k as f32 / (FRAME_COUNT - 1) as f32).clamp(0.0, 1.0);
+            let m = if FRAME_COUNT == 1 {
+                0.5
+            } else {
+                (k as f32 / (FRAME_COUNT - 1) as f32).clamp(0.0, 1.0)
+            };
             let time = (PREROLL_SECS + k as f64 * FRAME_STEP) as f32;
             if view.wants_deck_inputs() {
                 // Two-deck doc: the distinct patterns land on separate
@@ -997,6 +1361,8 @@ impl VjFxThumbs {
         cell: &mut DrawVjFxThumbCell,
         scratch: &mut Vec<u32>,
         budget: &mut usize,
+        deadline: f64,
+        shaders_pending: bool,
     ) -> bool {
         match lane.job.as_ref().map(|a| a.phase) {
             None | Some(Phase::Encoding) => return false,
@@ -1038,9 +1404,13 @@ impl VjFxThumbs {
         cx.begin_root_turtle(pass_size, Layout::flow_overlay());
 
         let ready = if view.bake_batch_limit() > 1 {
-            Self::lane_steps_batched(cx, view, job, trans_tex, cell, scratch, budget)
+            Self::lane_steps_batched(
+                cx, view, job, trans_tex, cell, scratch, budget, deadline, shaders_pending,
+            )
         } else {
-            Self::lane_step_sequential(cx, view, job, trans_tex, cell, scratch, budget)
+            Self::lane_step_sequential(
+                cx, view, job, trans_tex, cell, scratch, budget, shaders_pending,
+            )
         };
 
         cx.end_pass_sized_turtle();
@@ -1051,8 +1421,9 @@ impl VjFxThumbs {
 
     /// One sequential step is done (its chain ran, or it had no chain):
     /// advance the phase. `stepped` = [`VjFxView::needs_stepped_time`].
-    fn advance_sequential_phase(phase: Phase, stepped: bool) -> Phase {
+    fn advance_sequential_phase(phase: Phase, stepped: bool, hold: bool) -> Phase {
         match phase {
+            Phase::Warmup(n) if hold => Phase::Warmup(n),
             Phase::Warmup(n) if n + 1 < WARMUP_DRAWS => Phase::Warmup(n + 1),
             Phase::Warmup(_) => {
                 if stepped {
@@ -1087,9 +1458,11 @@ impl VjFxThumbs {
         cell: &mut DrawVjFxThumbCell,
         scratch: &mut Vec<u32>,
         budget: &mut usize,
+        shaders_pending: bool,
     ) -> bool {
         let Some(active) = job.as_mut() else { return false };
         *budget = budget.saturating_sub(1);
+        let hold = active.hold_warmup(shaders_pending);
 
         // CHAIN HALF: last paint's scene has settled; run the chain, blit
         // if this step captured, and only then advance the phase. With the
@@ -1097,21 +1470,28 @@ impl VjFxThumbs {
         // same paint (fall through below) — sim-field documents keep
         // strict alternation ([`VjFxView::bake_seq_pipeline`]).
         if let Some(capture) = active.seq_pending.take() {
-            let t_draw = Instant::now();
             let texture = view.seq_chain_step(cx);
             if let (Some(k), Some(texture)) = (capture, texture) {
                 cell.draw_vars.set_texture(0, &texture);
                 cell.draw_abs(cx, cell_rect(k));
                 active.sheet_cleared = true;
             }
-            active.draw_ms += t_draw.elapsed().as_secs_f32() * 1000.0;
             active.phase =
-                Self::advance_sequential_phase(active.phase, view.needs_stepped_time());
+                Self::advance_sequential_phase(active.phase, view.needs_stepped_time(), hold);
             if !view.bake_seq_pipeline()
                 || matches!(active.phase, Phase::Readback | Phase::Flush | Phase::Encoding)
             {
                 return false;
             }
+        }
+
+        // HELD: the platform is still compiling programs. The chain half
+        // above may have just queued the chain's own; nothing more is drawn
+        // until they are linked, so the number of effect draws a sheet
+        // sees never depends on compile timing — the bake stays a pure
+        // function of the document on a cold browser and a warm one.
+        if hold {
+            return false;
         }
 
         // SCENE HALF. What this step stands for:
@@ -1122,12 +1502,8 @@ impl VjFxThumbs {
             Phase::Capture(k) => (FRAME_STEP, Some(k)),
             _ => (0.0, None),
         };
-        let t_tick = Instant::now();
         view.tick_manual(cx.cx, dt);
-        active.tick_ms += t_tick.elapsed().as_secs_f32() * 1000.0;
-        active.frames += 1;
 
-        let t_draw = Instant::now();
         Self::bind_step_inputs(
             cx.cx,
             view,
@@ -1151,9 +1527,8 @@ impl VjFxThumbs {
                 active.sheet_cleared = true;
             }
             active.phase =
-                Self::advance_sequential_phase(phase, view.needs_stepped_time());
+                Self::advance_sequential_phase(phase, view.needs_stepped_time(), hold);
         }
-        active.draw_ms += t_draw.elapsed().as_secs_f32() * 1000.0;
         false
     }
 
@@ -1171,6 +1546,8 @@ impl VjFxThumbs {
         cell: &mut DrawVjFxThumbCell,
         scratch: &mut Vec<u32>,
         budget: &mut usize,
+        deadline: f64,
+        shaders_pending: bool,
     ) -> bool {
         let Some(active) = job.as_mut() else { return false };
 
@@ -1178,9 +1555,13 @@ impl VjFxThumbs {
         // their chains and blit. Nothing else this paint — the pool steps
         // must not be re-encoded under a chain that reads them.
         if !active.pending_chain.is_empty() {
-            let t_draw = Instant::now();
             let pending = std::mem::take(&mut active.pending_chain);
+            let mut left = Vec::new();
             for (step, k) in pending {
+                if *budget == 0 || Cx::monotonic_now() >= deadline {
+                    left.push((step, k));
+                    continue;
+                }
                 if let Some(texture) = view.bake_chain_step(cx, step) {
                     cell.draw_vars.set_texture(0, &texture);
                     cell.draw_abs(cx, cell_rect(k));
@@ -1188,8 +1569,8 @@ impl VjFxThumbs {
                 }
                 *budget = budget.saturating_sub(1);
             }
-            active.draw_ms += t_draw.elapsed().as_secs_f32() * 1000.0;
-            if active.phase == Phase::Flush {
+            active.pending_chain = left;
+            if active.pending_chain.is_empty() && active.phase == Phase::Flush {
                 active.phase = Phase::Readback;
             }
             return false;
@@ -1202,6 +1583,9 @@ impl VjFxThumbs {
         // Batched documents need no warmup: the pipeline builds in the
         // same paint that executes the first batch's draws.
         if let Phase::Warmup(_) = active.phase {
+            if active.hold_warmup(shaders_pending) {
+                return false;
+            }
             active.phase = if view.needs_stepped_time() {
                 Phase::Preroll { left: PREROLL_STEPS, dt: FRAME_STEP }
             } else {
@@ -1213,16 +1597,20 @@ impl VjFxThumbs {
         // never seen and fed no GPU state — the regen sequence (same dts)
         // is the whole effect. Runs to completion in one paint.
         if let Phase::Preroll { mut left, dt } = active.phase {
-            let t_tick = Instant::now();
-            while left > 0 {
+            while left > 0 && *budget > 0 && Cx::monotonic_now() < deadline {
                 view.tick_manual(cx.cx, dt);
                 view.bake_advance_only();
-                active.frames += 1;
                 left -= 1;
+                *budget = budget.saturating_sub(1);
             }
-            active.tick_ms += t_tick.elapsed().as_secs_f32() * 1000.0;
-            *budget = budget.saturating_sub(1);
-            active.phase = Phase::Capture(0);
+            active.phase = if left == 0 {
+                Phase::Capture(0)
+            } else {
+                Phase::Preroll { left, dt }
+            };
+            if left > 0 {
+                return false;
+            }
         }
 
         // SCENE BEAT: encode as many captures as pool, budget and the
@@ -1231,15 +1619,11 @@ impl VjFxThumbs {
         let limit = view.bake_batch_limit();
         let mut used = 0usize;
         while let Phase::Capture(k) = active.phase {
-            if *budget == 0 || used >= limit {
+            if *budget == 0 || used >= limit || Cx::monotonic_now() >= deadline {
                 break;
             }
-            let t_tick = Instant::now();
             view.tick_manual(cx.cx, FRAME_STEP);
-            active.tick_ms += t_tick.elapsed().as_secs_f32() * 1000.0;
-            active.frames += 1;
 
-            let t_draw = Instant::now();
             Self::bind_step_inputs(
                 cx.cx,
                 view,
@@ -1256,8 +1640,6 @@ impl VjFxThumbs {
                 cell.draw_abs(cx, cell_rect(k));
                 active.sheet_cleared = true;
             }
-            active.draw_ms += t_draw.elapsed().as_secs_f32() * 1000.0;
-
             used += 1;
             *budget = budget.saturating_sub(1);
             active.phase = if k + 1 < FRAME_COUNT {
@@ -1282,10 +1664,6 @@ impl VjFxThumbs {
     /// half-black sheets); it survives only as the fallback for backends
     /// whose readback is inherently ordered (GL/D3D11) or absent.
     fn finish_lane(&mut self, cx: &mut Cx, index: usize) {
-        if self.cache_dir.is_none() {
-            self.fail_lane(cx, index, "no cache dir configured".to_string());
-            return;
-        }
         let Some((texture, pass_id)) = self.lanes[index]
             .sheet
             .as_ref()
@@ -1302,19 +1680,17 @@ impl VjFxThumbs {
             cx.repaint_pass(pass_id);
             if let Some(active) = self.lanes[index].job.as_mut() {
                 active.phase = Phase::AwaitRead;
-                active.await_started = Instant::now();
                 active.await_polls = 0;
             }
             // The effect can stop ticking now — every cell is encoded.
             self.view(index).clear_effect(cx);
             return;
         }
-        let t0 = Instant::now();
         let Some((w, h, bytes)) = cx.debug_read_render_texture(&texture) else {
             self.readback_failures += 1;
             if self.readback_failures >= 3 {
                 // Three different jobs in a row could not read back: this
-                // platform has no readback (web/headless). Stop trying;
+                // platform has no readback (web/gpusim). Stop trying;
                 // cached sheets still decode.
                 self.disabled = Some("render-target readback unavailable".to_string());
             }
@@ -1322,8 +1698,7 @@ impl VjFxThumbs {
             return;
         };
         self.readback_failures = 0;
-        let read_ms = t0.elapsed().as_secs_f32() * 1000.0;
-        self.spawn_encode(cx, index, w, h, bytes, read_ms);
+        self.spawn_encode(cx, index, w, h, bytes);
     }
 
     /// The sheet bytes are on the CPU: hand them to the encode worker. The
@@ -1335,20 +1710,22 @@ impl VjFxThumbs {
         w: usize,
         h: usize,
         bytes: Vec<u8>,
-        read_ms: f32,
     ) {
-        let Some(dir) = self.cache_dir.clone() else {
-            self.fail_lane(cx, index, "no cache dir configured".to_string());
-            return;
-        };
         let Some(active) = self.lanes[index].job.as_mut() else { return };
-        active.read_ms = read_ms;
         let revision = active.job.revision;
-        let path = cache_path(&dir, &revision, active.job.transition);
         active.phase = Phase::Encoding;
-        active.encoder = Some(std::thread::spawn(move || {
-            encode_and_write(bytes, w, h, path, revision)
-        }));
+        match cx
+            .task_pool()
+            .submit(PoolLane::Light, move || encode_jpeg(bytes, w, h, revision))
+        {
+            Ok(handle) => {
+                active.encoder = Some(handle);
+            }
+            Err(error) => {
+                self.fail_lane(cx, index, format!("jpeg worker unavailable: {error}"));
+                return;
+            }
+        }
         // The effect can stop ticking now — the pixels are on the worker.
         self.view(index).clear_effect(cx);
     }
@@ -1369,20 +1746,23 @@ impl VjFxThumbs {
                         .is_some_and(|s| s.texture.texture_id() == tid)
             });
             let Some(index) = found else { continue };
+            if w == 0 || h == 0 || bytes.len() < w.saturating_mul(h).saturating_mul(4) {
+                self.readback_failures += 1;
+                if self.readback_failures >= 3 {
+                    self.disabled = Some("render-target capture failed".to_string());
+                }
+                self.fail_lane(cx, index, "render-target capture failed".to_string());
+                continue;
+            }
             self.readback_failures = 0;
-            let read_ms = self.lanes[index]
-                .job
-                .as_ref()
-                .map(|a| a.await_started.elapsed().as_secs_f32() * 1000.0)
-                .unwrap_or(0.0);
-            self.spawn_encode(cx, index, w, h, bytes, read_ms);
+            self.spawn_encode(cx, index, w, h, bytes);
         }
         for index in 0..self.lanes.len() {
             let timed_out = match self.lanes[index].job.as_mut() {
                 Some(a) if a.phase == Phase::AwaitRead => {
                     a.await_polls += 1;
-                    // ~10s of frames at 60Hz; polls, not wall time (above).
-                    a.await_polls > 600
+                    // Polls, not wall time (above).
+                    a.await_polls > WAIT_POLL_LIMIT
                 }
                 _ => false,
             };
@@ -1396,39 +1776,6 @@ impl VjFxThumbs {
         }
     }
 
-    /// TEMPORARY: env-gated view of the bank's real occupancy.
-    fn debug_bank(&mut self) {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        static TICK: AtomicU32 = AtomicU32::new(0);
-        if std::env::var("VJ_FX_BANK_DEBUG").is_err() {
-            return;
-        }
-        let n = TICK.fetch_add(1, Ordering::Relaxed);
-        if n % 20 != 0 {
-            return;
-        }
-        let phases: String = self
-            .lanes
-            .iter()
-            .map(|l| match l.job.as_ref().map(|a| a.phase) {
-                None => '.',
-                Some(Phase::Warmup(_)) => 'w',
-                Some(Phase::Preroll { .. }) => 'p',
-                Some(Phase::Capture(_)) => 'c',
-                Some(Phase::Flush) => 'f',
-                Some(Phase::Readback) => 'r',
-                Some(Phase::AwaitRead) => 'a',
-                Some(Phase::Encoding) => 'e',
-            })
-            .collect();
-        log!(
-            "fx bank: budget={} full_speed={} pending={} lanes=[{}]",
-            self.lane_budget(),
-            self.full_speed,
-            self.pending.len(),
-            phases
-        );
-    }
 }
 
 /// THE CLASS PULL, standalone so the tests can pin it. Classes are decided
@@ -1610,6 +1957,10 @@ impl WidgetNode for VjFxThumbs {
 
 impl Widget for VjFxThumbs {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if matches!(event, Event::Startup) {
+            self.storage(cx);
+        }
+        self.handle_storage(cx, event);
         // The hosts run on the manual clock (this widget drives every frame
         // they render), but they are still widgets: forward the event.
         self.fx.handle_event(cx, event, scope);
@@ -1618,29 +1969,40 @@ impl Widget for VjFxThumbs {
         self.fx3.handle_event(cx, event, scope);
         self.fx4.handle_event(cx, event, scope);
         self.fx5.handle_event(cx, event, scope);
-        if self.next_frame.is_event(event).is_some() && !self.is_idle() {
-            self.area.redraw(cx);
-            self.next_frame = cx.new_next_frame();
+        if self.next_frame.is_event(event).is_some() {
+            self.sweep_delete_batch(cx);
+            if !self.is_idle() || !self.cache_sweep.pending_deletes.is_empty() {
+                self.area.redraw(cx);
+                self.next_frame = cx.new_next_frame();
+            }
         }
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        let ui_started = Cx::monotonic_now();
+        let deadline = ui_started + UI_STEP_BUDGET_MS / 1000.0;
         cx.begin_turtle(walk, self.layout);
         let rect = cx.turtle().rect();
         // The slot's LOGICAL size, chosen so its PHYSICAL size is exactly
         // [`SLOT_W`]x[`SLOT_H`] on any screen — the bake is screen-blind.
         let dpi = cx.current_dpi_factor().max(0.5);
         let slot = dvec2(SLOT_W / dpi, SLOT_H / dpi);
+        // Cold programs are still linking: every lane holds its warmup.
+        let shaders_pending = cx.cx.draw_shaders_pending();
         self.ensure_lanes();
-        self.poll_encoders();
+        self.poll_cache_timeouts(cx.cx);
+        self.poll_encoders(cx.cx);
         self.poll_captures(cx.cx);
-        self.start_jobs(cx.cx);
-        self.debug_bank();
+        self.poll_lane_timeouts(cx.cx);
+        self.start_jobs(cx.cx, deadline);
 
         let mut budget = if self.full_speed { STEP_BUDGET } else { 1 };
         let mut ready: Vec<usize> = Vec::new();
         let mut last_sheet: Option<Texture> = None;
         for index in 0..LANES {
+            if Cx::monotonic_now() >= deadline {
+                break;
+            }
             if self.lanes[index].job.is_none() {
                 continue;
             }
@@ -1658,15 +2020,28 @@ impl Widget for VjFxThumbs {
             if self.full_speed {
                 view.bake_pool_ensure(cx.cx, BAKE_STEPS);
             }
-            if Self::draw_lane(cx, view, lane, &mut self.draw_cell, &mut self.trans_data, &mut budget) {
+            if Self::draw_lane(
+                cx,
+                view,
+                lane,
+                &mut self.draw_cell,
+                &mut self.trans_data,
+                &mut budget,
+                deadline,
+                shaders_pending,
+            ) {
                 ready.push(index);
             }
             if let Some(sheet) = self.lanes[index].sheet.as_ref() {
                 last_sheet = Some(sheet.texture.clone());
             }
         }
-        // Readbacks are the one blocking thing here: bounded per frame.
+        // Bound readback submissions too. Web is asynchronous; native
+        // fallback backends may still perform a short synchronous copy.
         for index in ready.into_iter().take(READBACKS_PER_FRAME) {
+            if Cx::monotonic_now() >= deadline {
+                break;
+            }
             self.finish_lane(cx.cx, index);
         }
         // Sample a sheet into our 4x4 rect: the frame dependency that makes
@@ -1680,7 +2055,20 @@ impl Widget for VjFxThumbs {
             self.area.redraw(cx.cx);
             self.next_frame = cx.cx.new_next_frame();
         } else {
-            self.batch_started = None;
+            if let Some(started) = self.batch_started.take() {
+                if self.batch_rendered > 0 || self.batch_failed > 0 {
+                    log!(
+                        "fx thumbs: {} rendered, {} cached, {} stored, {} failed, {:.1} s, all cached visible {:.1} s",
+                        self.batch_rendered,
+                        self.batch_cached,
+                        self.batch_stored,
+                        self.batch_failed,
+                        started.elapsed().as_secs_f32(),
+                        self.batch_all_visible_s
+                            .unwrap_or_else(|| started.elapsed().as_secs_f32()),
+                    );
+                }
+            }
             // Hand the bake pools' MEMORY back the moment the bank rests —
             // never their pass identity (see bake_pool_release_memory: pass
             // ids recycle into execution order, so pool objects are
@@ -1709,6 +2097,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn fx_thumb_cache_key_staleness_tracks_all_recipe_inputs() {
+        let base = "0123456789abcdef/abcdef0123456789";
+        assert!(!is_stale_cache_key(&format!(
+            "{base}-effect-r{RECIPE}-{SHEET_W}x{SHEET_H}.jpg"
+        )));
+        assert!(!is_stale_cache_key(&format!(
+            "{base}-transition-d{DECK_RECIPE}-r{RECIPE}-{SHEET_W}x{SHEET_H}.jpg"
+        )));
+        assert!(is_stale_cache_key(&format!(
+            "{base}-effect-r{}-{SHEET_W}x{SHEET_H}.jpg",
+            RECIPE - 1
+        )));
+        assert!(is_stale_cache_key(&format!(
+            "{base}-effect-r{RECIPE}-{}x{SHEET_H}.jpg",
+            SHEET_W / 2
+        )));
+        assert!(is_stale_cache_key(&format!(
+            "{base}-transition-d{}-r{RECIPE}-{SHEET_W}x{SHEET_H}.jpg",
+            DECK_RECIPE - 1
+        )));
+        assert!(is_stale_cache_key("unrecognized-key"));
+    }
+
+    #[test]
     fn sheet_geometry_declares_exactly_what_the_gpu_packs() {
         let cells = sheet_cells();
         // The declared grid fits the sheet target exactly (the same
@@ -1725,10 +2137,10 @@ mod tests {
         assert_eq!((CELL_W, CELL_H), (384, 240));
         assert_eq!((SLOT_W as usize, SLOT_H as usize), (768, 480));
         // Every cell rect lands inside the sheet, on its own row/column.
+        let r4 = cell_rect(4);
+        assert_eq!(r4.pos, dvec2((4 * CELL_W) as f64, 0.0));
         let r5 = cell_rect(5);
-        assert_eq!(r5.pos, dvec2((5 * CELL_W) as f64, 0.0));
-        let r6 = cell_rect(6);
-        assert_eq!(r6.pos, dvec2(0.0, CELL_H as f64));
+        assert_eq!(r5.pos, dvec2(0.0, CELL_H as f64));
         let last_rect = cell_rect(FRAME_COUNT - 1);
         assert!(last_rect.pos.x + last_rect.size.x <= SHEET_W as f64);
         assert!(last_rect.pos.y + last_rect.size.y <= SHEET_H as f64);
@@ -1737,16 +2149,16 @@ mod tests {
         assert!((SHEET_FPS * CAPTURE_SPAN as f32 - FRAME_COUNT as f32).abs() < 1e-6);
         assert!((FRAME_STEP * SHEET_FPS as f64 - 1.0).abs() < 1e-9);
         assert_eq!(PREROLL_STEPS, 27);
-        // The cache artifact is mp4, and the recipe is part of the name —
-        // the startup sweep keys off exactly this suffix.
+        // Asset, content version, recipe and dimensions all participate in
+        // the persistent storage key.
+        let asset = AssetId::from_bytes([3; 16]);
         let rev = AssetRevisionId::from_bytes([7; 32]);
-        let path = cache_path(Path::new("/tmp"), &rev, false);
-        assert!(path.to_str().unwrap().ends_with(&format!("-r{RECIPE}.mp4")));
-        let path = cache_path(Path::new("/tmp"), &rev, true);
-        assert!(path
-            .to_str()
-            .unwrap()
-            .ends_with(&format!("-t3-d{DECK_RECIPE}-r{RECIPE}.mp4")));
+        let key = cache_key(&asset, &rev, false);
+        assert!(key.contains(&asset.to_string()));
+        assert!(key.contains(&rev.to_string()));
+        assert!(key.ends_with(&format!("-r{RECIPE}-{SHEET_W}x{SHEET_H}.jpg")));
+        let transition = cache_key(&asset, &rev, true);
+        assert!(transition.contains(&format!("transition-d{DECK_RECIPE}")));
     }
 
     #[test]
@@ -1809,60 +2221,12 @@ mod tests {
         assert_eq!(first.revision, rev(3));
     }
 
-    /// The black gate refuses empty sheets, and the mp4 layout trailer —
-    /// the whole cache-file contract — round-trips through the same
-    /// `read_layout` the app calls on the cache bytes. (A synthetic ftyp
-    /// box stands in for the container: the stamp is a top-level box
-    /// append, codec-independent by design.)
     #[test]
-    fn the_black_gate_and_the_mp4_layout_stamp_round_trip() {
+    fn the_black_gate_refuses_empty_sheets() {
         let black = vec![0u8; SHEET_W * SHEET_H * 4];
         assert!(all_black(&black), "black sheets must be refused");
         let mut lit = black.clone();
         lit[4] = 200;
         assert!(!all_black(&lit));
-
-        // A minimal mp4 skeleton: an ftyp box alone is enough for the
-        // trailer scan.
-        let mut mp4 = Vec::new();
-        mp4.extend_from_slice(&16u32.to_be_bytes());
-        mp4.extend_from_slice(b"ftypisom");
-        mp4.extend_from_slice(&[0u8; 4]);
-        let stamped = anim_icon::stamp_layout_mp4(&mp4, sheet_cells(), SHEET_FPS);
-        let (cells, fps) = anim_icon::read_layout(&stamped).expect("stamped layout");
-        assert_eq!(cells, sheet_cells());
-        assert_eq!(fps, SHEET_FPS);
-        // Restamping replaces rather than stacks.
-        let restamped = anim_icon::stamp_layout_mp4(&stamped, sheet_cells(), SHEET_FPS);
-        assert_eq!(restamped.len(), stamped.len());
-    }
-
-    /// The startup sweep keeps exactly the current recipe's artifacts.
-    #[test]
-    fn cache_sweep_drops_everything_but_the_current_recipe() {
-        let dir = std::env::temp_dir().join(format!(
-            "vjfx-thumbs-sweep-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let rev = AssetRevisionId::from_bytes([9; 32]);
-        let keep = cache_path(&dir, &rev, false);
-        let keep_t = cache_path(&dir, &rev, true);
-        std::fs::write(&keep, b"x").unwrap();
-        std::fs::write(&keep_t, b"x").unwrap();
-        for stale in ["a.png", "b-r1.png", "c-t3-d2-r1.png", "d-r0.mp4", "e.tmp.mp4"] {
-            std::fs::write(dir.join(stale), b"x").unwrap();
-        }
-        sweep_stale_cache(&dir);
-        let left: Vec<_> = std::fs::read_dir(&dir)
-            .unwrap()
-            .flatten()
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(left.len(), 2, "sweep left: {left:?}");
-        assert!(keep.exists() && keep_t.exists());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
