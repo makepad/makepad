@@ -1,0 +1,8 @@
+Category,Planned,Actual,Variance,Status
+Housing,1850,1850,=B2-C2,"=IF(D2>=0,""On track"",""Over"")"
+Groceries,650,612.45,=B3-C3,"=IF(D3>=0,""On track"",""Over"")"
+Utilities,320,287.80,=B4-C4,"=IF(D4>=0,""On track"",""Over"")"
+Transport,425,468.20,=B5-C5,"=IF(D5>=0,""On track"",""Over"")"
+Insurance,280,280,=B6-C6,"=IF(D6>=0,""On track"",""Over"")"
+Leisure,300,246.75,=B7-C7,"=IF(D7>=0,""On track"",""Over"")"
+Total,=SUM(B2:B7),=SUM(C2:C7),=B8-C8,"=IF(D8>=0,""Within budget"",""Over budget"")"

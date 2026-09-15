@@ -1,23 +1,66 @@
 //! Disk-based drive history (route.md follow-up; user directive 2026-07-30).
 //!
 //! Every app session with GPS movement becomes one append-only JSONL drive
-//! record under `local/route_history/`: a header line, `trip` events each
+//! record in the instance's history directory (`local/route_history/` in a
+//! checkout, see maps_root.rs): a header line, `trip` events each
 //! time the planned trip changes, one line per accepted GPS fix, and an
 //! `end` footer. The header reserves `media` (future timelapse video
 //! attachments) and `synced` (future server sync) so the format survives
 //! those extensions without migration.
 
 use crate::trip::haversine_m;
-use makepad_widgets::LocationUpdateEvent;
+use makepad_widgets::makepad_micro_serde::*;
+use makepad_widgets::{Cx, LocationUpdateEvent};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-const HISTORY_DIR: &str = "local/route_history";
 /// Ignore jitter below this move distance.
 const MIN_MOVE_M: f64 = 3.0;
 
+// The record lines. Each carries its `event` tag first, so a reader can
+// dispatch on it before it knows the shape.
+
+#[derive(SerJson)]
+struct StartRecord {
+    event: String,
+    v: u32,
+    started_unix: f64,
+    /// Future: timelapse video refs.
+    media: Vec<String>,
+    /// Future: server sync state.
+    synced: bool,
+}
+
+#[derive(SerJson)]
+struct TripRecord {
+    event: String,
+    t: f64,
+    digest: String,
+}
+
+#[derive(SerJson)]
+struct FixRecord {
+    event: String,
+    t: f64,
+    lon: f64,
+    lat: f64,
+    acc: f64,
+    speed: Option<f64>,
+    heading: Option<f64>,
+}
+
+#[derive(SerJson)]
+struct EndRecord {
+    event: String,
+    t: f64,
+    distance_m: f64,
+    samples: usize,
+}
+
 #[derive(Default)]
 pub struct DriveLog {
+    /// Where the records go; nothing is written until it is set.
+    dir: PathBuf,
     file: Option<std::fs::File>,
     last: Option<(f64, f64)>,
     pub distance_m: f64,
@@ -26,27 +69,33 @@ pub struct DriveLog {
 }
 
 fn now_unix() -> f64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
+    Cx::time_now().max(0.0)
 }
 
 impl DriveLog {
+    /// Record into `dir`. Before this the log is inert.
+    pub fn set_dir(&mut self, dir: PathBuf) {
+        self.dir = dir;
+    }
+
     fn ensure_file(&mut self) -> Option<&mut std::fs::File> {
         if self.file.is_none() && !self.closed {
-            std::fs::create_dir_all(HISTORY_DIR).ok()?;
-            let path = PathBuf::from(HISTORY_DIR)
+            if self.dir.as_os_str().is_empty() {
+                return None;
+            }
+            std::fs::create_dir_all(&self.dir).ok()?;
+            let path = self
+                .dir
                 .join(format!("drive-{}.jsonl", now_unix() as u64));
             let mut file = std::fs::File::create(&path).ok()?;
-            let header = serde_json::json!({
-                "event": "start",
-                "v": 1,
-                "started_unix": now_unix(),
-                "media": [],       // future: timelapse video refs
-                "synced": false,   // future: server sync state
-            });
-            writeln!(file, "{header}").ok()?;
+            let header = StartRecord {
+                event: "start".into(),
+                v: 1,
+                started_unix: now_unix(),
+                media: Vec::new(),
+                synced: false,
+            };
+            writeln!(file, "{}", header.serialize_json()).ok()?;
             self.file = Some(file);
         }
         self.file.as_mut()
@@ -54,11 +103,12 @@ impl DriveLog {
 
     /// Record a trip (re)plan so the drive record knows what was navigated.
     pub fn log_trip(&mut self, digest: &str) {
-        let line = serde_json::json!({
-            "event": "trip",
-            "t": now_unix(),
-            "digest": digest,
-        });
+        let line = TripRecord {
+            event: "trip".into(),
+            t: now_unix(),
+            digest: digest.to_string(),
+        }
+        .serialize_json();
         if let Some(file) = self.ensure_file() {
             let _ = writeln!(file, "{line}");
         }
@@ -75,15 +125,16 @@ impl DriveLog {
         }
         self.last = Some((fix.lon, fix.lat));
         self.samples += 1;
-        let line = serde_json::json!({
-            "event": "fix",
-            "t": fix.time,
-            "lon": fix.lon,
-            "lat": fix.lat,
-            "acc": fix.accuracy_m,
-            "speed": fix.speed_mps,
-            "heading": fix.heading_deg,
-        });
+        let line = FixRecord {
+            event: "fix".into(),
+            t: fix.time,
+            lon: fix.lon,
+            lat: fix.lat,
+            acc: fix.accuracy_m,
+            speed: fix.speed_mps,
+            heading: fix.heading_deg,
+        }
+        .serialize_json();
         if let Some(file) = self.ensure_file() {
             let _ = writeln!(file, "{line}");
         }
@@ -92,12 +143,13 @@ impl DriveLog {
     /// Finalize the record (app shutdown).
     pub fn close(&mut self) {
         if let Some(mut file) = self.file.take() {
-            let footer = serde_json::json!({
-                "event": "end",
-                "t": now_unix(),
-                "distance_m": self.distance_m,
-                "samples": self.samples,
-            });
+            let footer = EndRecord {
+                event: "end".into(),
+                t: now_unix(),
+                distance_m: self.distance_m,
+                samples: self.samples,
+            }
+            .serialize_json();
             let _ = writeln!(file, "{footer}");
         }
         self.closed = true;
@@ -105,8 +157,8 @@ impl DriveLog {
 }
 
 /// Digest of recent drive records for the `trip_history` tool.
-pub fn list_drives(limit: usize) -> String {
-    let Ok(dir) = std::fs::read_dir(HISTORY_DIR) else {
+pub fn list_drives(history_dir: &Path, limit: usize) -> String {
+    let Ok(dir) = std::fs::read_dir(history_dir) else {
         return "no drive history yet".into();
     };
     let mut names: Vec<String> = dir
@@ -122,13 +174,13 @@ pub fn list_drives(limit: usize) -> String {
     names.truncate(limit);
     let mut out = String::new();
     for name in &names {
-        let path = PathBuf::from(HISTORY_DIR).join(name);
+        let path = history_dir.join(name);
         let mut date = String::from("?");
         let mut km = String::from("in progress");
         let mut trip = String::new();
         if let Ok(content) = std::fs::read_to_string(&path) {
             for line in content.lines() {
-                let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+                let Ok(v) = JsonValue::deserialize_json(line) else {
                     continue;
                 };
                 match v.get("event").and_then(|e| e.as_str()) {

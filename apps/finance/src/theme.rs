@@ -4,24 +4,9 @@
 //! rather than a hex literal repeated forty times — change a colour here
 //! and every screen moves together.
 //!
-//! It is a dark palette because a ledger is a wall of numbers, and dark
-//! rows with one bright accent let the numbers carry the contrast instead
-//! of fighting the background for it.
+//! Surfaces and controls follow the active widget theme. Chart series and
+//! financial/status semantics keep their dedicated colors.
 //!
-//! Three rules, taken from what the best-looking money apps actually do:
-//!
-//! * **A cool near-black, never `#000`, and elevation by tone.** Three
-//!   surfaces each a few percent lighter than the last, separated by
-//!   hairlines rather than shadows. Drop shadows on cards are the single
-//!   clearest "designed in 2018" tell.
-//! * **One saturated accent.** Indigo, and nothing else competes with it.
-//!   Restricting the palette is what reads as expensive; a different bright
-//!   colour per spending category reads as a 2015 budgeting app.
-//! * **Money colour is reserved and redundant.** Good/critical are status,
-//!   never a chart series, and they never carry meaning alone — the sign is
-//!   always there too, because roughly one man in twelve cannot tell the
-//!   two hues apart.
-
 use makepad_widgets::*;
 
 pub fn install(vm: &mut ScriptVm) {
@@ -30,22 +15,22 @@ pub fn install(vm: &mut ScriptVm) {
             // Surfaces, darkest to lightest: the page, a card, and a
             // control on that card. Each step is a few percent lighter,
             // which is the whole elevation system — there are no shadows.
-            bg: #x0c0d12,
-            panel: #x14161d,
-            raised: #x1b1e27,
-            line: #x272a35,
-            line_soft: #x1e212a,
+            bg: mod.theme.color_bg_app,
+            panel: mod.theme.color_bg_container,
+            raised: mod.theme.color_outset,
+            line: mod.theme.color_bevel_inset_2,
+            line_soft: mod.theme.color_bevel_outset_1,
 
             // Text.
-            fg: #xf2f4f8,
-            fg_dim: #xa2a8b8,
-            fg_faint: #x6f7585,
+            fg: mod.theme.color_text,
+            fg_dim: mod.theme.color_text_disabled,
+            fg_faint: mod.theme.color_text_disabled,
 
             // One accent, used for selection, the active tab and the
             // primary action. Anything else that wants attention has to
             // earn it with weight or size instead.
-            accent: #x5e6ad2,
-            accent_soft: #x272a52,
+            accent: mod.theme.color_focus,
+            accent_soft: mod.theme.color_bg_highlight,
 
             // Money. Nothing else may use these two.
             up: #x3fb950,
@@ -77,8 +62,8 @@ pub fn install(vm: &mut ScriptVm) {
 
             // Register surfaces: the alternate row is a hair lighter than
             // the page, never a different colour.
-            zebra: #x101219,
-            select: #x5e6ad233,
+            zebra: mod.theme.color_bg_odd,
+            select: mod.theme.color_bg_highlight,
         }
     });
 }

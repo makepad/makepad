@@ -1,0 +1,25 @@
+use mod.widgets.*
+use mod.prelude.widgets.*
+View{
+    width: Fill height: Fill
+    startup_surface := RectView{
+    width: Fill height: Fill
+    flow: Down align: Align{x: 0.5 y: 0.5}
+    padding: 20 spacing: 10
+    draw_bg +: {
+        color: theme.color_bg_app
+        opacity: instance(1.0)
+        pixel: fn() {return vec4(self.color.rgb * self.color.a, self.color.a) * self.opacity}
+    }
+    startup_icon := AppIcon{name: "app" width: 64 height: 64}
+    placeholder := Label{
+        text: "Starting…"
+        draw_text +: {color: theme.color_text text_style: theme.font_bold{font_size: 14}}
+    }
+    status_line := Label{
+        text: "" width: Fill
+        align: Align{x: 0.5 y: 0.5}
+        draw_text +: {color: theme.color_text_disabled text_style: theme.font_regular{font_size: 10}}
+    }
+}
+}
