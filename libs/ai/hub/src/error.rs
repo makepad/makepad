@@ -29,6 +29,12 @@ pub enum AssetAiError {
     Cancelled,
     /// Model id not present in the registry.
     UnknownModel(String),
+    /// A local pull or run was attempted before the current weight licence
+    /// identity had been acknowledged.
+    LicenseNotAcknowledged,
+    /// A local run was attempted before all of the model's files were
+    /// installed at their pinned sizes.
+    NotInstalled(String),
     /// Model is in the registry but marked unavailable, or no backend is
     /// compiled in for it (e.g. `flux` without the cargo feature).
     Unavailable(String),
@@ -49,6 +55,10 @@ impl fmt::Display for AssetAiError {
             }
             AssetAiError::Cancelled => write!(f, "cancelled"),
             AssetAiError::UnknownModel(m) => write!(f, "unknown model: {m}"),
+            AssetAiError::LicenseNotAcknowledged => {
+                write!(f, "model licence has not been acknowledged")
+            }
+            AssetAiError::NotInstalled(m) => write!(f, "model not installed: {m}"),
             AssetAiError::Unavailable(m) => write!(f, "model unavailable: {m}"),
         }
     }

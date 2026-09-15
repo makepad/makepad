@@ -59,7 +59,6 @@ fn dit_ffn(
     let in_bk = format!("transformer_blocks.{layer}.ff_in.bias");
     let out_bk = format!("transformer_blocks.{layer}.ff_out.bias");
     if let (Some(ff_in), Some(ff_out)) = (file.keyed_mat(&ns, &in_n), file.keyed_mat(&ns, &out_n)) {
-        let swap = std::env::var_os("MAKEPAD_MUSIC3_SWIGLU_SWAP").is_some();
         if let Some(y) = makepad_ai_common::backend::metal::try_dit_ffn_resident(
             normed,
             rows,
@@ -69,7 +68,7 @@ fn dit_ffn(
             &prep.ff_out_b[layer],
             &in_bk,
             &out_bk,
-            swap,
+            false,
             ff_in,
             ff_out,
             |a, b| file.load_keyed_bytes(a, b),
@@ -90,13 +89,11 @@ fn dit_ffn(
 fn swiglu_rows(ff: &[f32], rows: usize, ff_dim: usize) -> Vec<f32> {
     let mut values = vec![0f32; rows * ff_dim];
     let mut gates = vec![0f32; rows * ff_dim];
-    let swap = std::env::var_os("MAKEPAD_MUSIC3_SWIGLU_SWAP").is_some();
     for r in 0..rows {
         let row = &ff[r * ff_dim * 2..(r + 1) * ff_dim * 2];
         let (a, b) = row.split_at(ff_dim);
-        let (value, gate) = if swap { (b, a) } else { (a, b) };
-        values[r * ff_dim..(r + 1) * ff_dim].copy_from_slice(value);
-        gates[r * ff_dim..(r + 1) * ff_dim].copy_from_slice(gate);
+        values[r * ff_dim..(r + 1) * ff_dim].copy_from_slice(a);
+        gates[r * ff_dim..(r + 1) * ff_dim].copy_from_slice(b);
     }
     swiglu(&values, &gates)
 }
@@ -703,10 +700,7 @@ impl Music3GgufLm {
         // Whole-layer resident decode is the default: 1 command-buffer wait
         // per layer instead of 4, zero transient buffer allocs after the
         // pool warms. (It lost 3-5s before the pool + into-dst plumbing;
-        // with allocation churn gone it wins.) MAKEPAD_MUSIC3_AR_HOST
-        // restores the per-GEMM host-elementwise path.
-        if std::env::var_os("MAKEPAD_MUSIC3_AR_HOST").is_none()
-            && std::env::var_os("MAKEPAD_MUSIC3_CPU_LINEAR").is_none()
+        // with allocation churn gone it wins.)
         {
             let pos0 = cond.pos;
             let klen: Vec<usize> = cond.k.iter().map(|k| k.len()).collect();
@@ -915,8 +909,6 @@ fn rvq_depth_sample_cfg(
         for (c, u) in guided.iter_mut().zip(logits_u.iter()) {
             *c = *u + MUSIC3_AR_CFG * (*c - *u);
         }
-        let greedy = std::env::var_os("MAKEPAD_MUSIC3_AR_GREEDY").is_some()
-            || std::env::var_os("MAKEPAD_MUSIC3_RVQ_GREEDY").is_some();
         if dump_top && head < 2 {
             let mut top: Vec<(f32, usize)> = guided
                 .iter()
@@ -948,14 +940,6 @@ fn rvq_depth_sample_cfg(
             } else {
                 sample_top_k(&guided, MUSIC3_AR_TOP_K, rng) as u32
             }
-        } else if greedy {
-            guided
-                .iter()
-                .enumerate()
-                .filter(|(_, v)| v.is_finite())
-                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-                .map(|(i, _)| i as u32)
-                .unwrap_or(0)
         } else {
             sample_top_k(&guided, MUSIC3_AR_TOP_K, rng) as u32
         };
@@ -1013,25 +997,14 @@ pub fn gguf_ar_sample_forced(
     force_rvq: Option<&[u32]>,
     progress: &mut dyn FnMut(&str, usize, usize),
 ) -> Result<Vec<f32>> {
-    // Stacked pair prefill (m=2*seq) is opt-in: one run matched last_h but
-    // decode lm_step doubled, likely from the larger prefill working set.
-    let (mut cond_s, mut uncond_s) = if cond_ids.len() == uncond_ids.len()
-        && !cond_ids.is_empty()
-        && std::env::var_os("MAKEPAD_MUSIC3_PAIR_PREFILL").is_some()
-    {
-        progress("prefill-pair", 0, 1);
-        lm.prefill_pair(&pack.language_model, cond_ids, uncond_ids, layers)?
-    } else {
-        progress("prefill-cond", 0, 1);
-        let t_pf = std::time::Instant::now();
-        let cond_s = lm.prefill_session(&pack.language_model, cond_ids, layers)?;
-        eprintln!("  prefill-pass1 {:.2}s", t_pf.elapsed().as_secs_f32());
-        progress("prefill-uncond", 0, 1);
-        let t_pf = std::time::Instant::now();
-        let uncond_s = lm.prefill_session(&pack.language_model, uncond_ids, layers)?;
-        eprintln!("  prefill-pass2 {:.2}s", t_pf.elapsed().as_secs_f32());
-        (cond_s, uncond_s)
-    };
+    progress("prefill-cond", 0, 1);
+    let t_pf = std::time::Instant::now();
+    let mut cond_s = lm.prefill_session(&pack.language_model, cond_ids, layers)?;
+    eprintln!("  prefill-pass1 {:.2}s", t_pf.elapsed().as_secs_f32());
+    progress("prefill-uncond", 0, 1);
+    let t_pf = std::time::Instant::now();
+    let mut uncond_s = lm.prefill_session(&pack.language_model, uncond_ids, layers)?;
+    eprintln!("  prefill-pass2 {:.2}s", t_pf.elapsed().as_secs_f32());
     // Prefill's m=100..208 GEMMs leave ~1 GB of large recycled transients in
     // the pool; decode uses none of those sizes. Drop them at the phase edge
     // (pair-prefill runs showed decode slowing while they stayed retained).
@@ -1046,31 +1019,6 @@ pub fn gguf_ar_sample_forced(
             session.k[layer].reserve(need.saturating_sub(have));
             let have = session.v[layer].len();
             session.v[layer].reserve(need.saturating_sub(have));
-        }
-    }
-    if let Ok(path) = std::env::var("MAKEPAD_MUSIC3_DUMP_LAST_H") {
-        let mut bytes = Vec::with_capacity(cond_s.last.len() * 4);
-        for v in &cond_s.last {
-            bytes.extend_from_slice(&v.to_le_bytes());
-        }
-        let _ = std::fs::write(&path, bytes);
-        eprintln!("  dumped last_h {} -> {path}", FiniteStats::of(&cond_s.last));
-    }
-    if let Ok(path) = std::env::var("MAKEPAD_MUSIC3_LOAD_LAST_H") {
-        let bytes = std::fs::read(&path).map_err(|err| {
-            DiffusionError::workflow(format!("load last_h {path}: {err}"))
-        })?;
-        if bytes.len() == cond_s.last.len() * 4 {
-            for (i, chunk) in bytes.chunks_exact(4).enumerate() {
-                cond_s.last[i] = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-            }
-            eprintln!("  loaded last_h {} from {path}", FiniteStats::of(&cond_s.last));
-        } else {
-            eprintln!(
-                "  last_h file {} bytes, expected {}",
-                bytes.len(),
-                cond_s.last.len() * 4
-            );
         }
     }
     let mut rng = TorchPhilox::new(seed);
@@ -1129,22 +1077,11 @@ pub fn gguf_ar_sample_forced(
                 FiniteStats::of(&sem_c)
             );
         }
-        let greedy = std::env::var_os("MAKEPAD_MUSIC3_AR_GREEDY").is_some();
         let mut pack_ids = vec![MUSIC3_AUDIO_END_TOKEN_ID];
         for i in 0..MUSIC3_SEMANTIC_VOCAB {
             pack_ids.push(lo + i as u32);
         }
-        let packed = if greedy {
-            guided
-                .iter()
-                .enumerate()
-                .filter(|(_, v)| v.is_finite())
-                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-                .map(|(i, _)| i)
-                .unwrap_or(0)
-        } else {
-            sample_top_k_ids(&guided, &pack_ids, MUSIC3_AR_TOP_K, &mut rng)
-        };
+        let packed = sample_top_k_ids(&guided, &pack_ids, MUSIC3_AR_TOP_K, &mut rng);
         let mut tok = if packed == 0 {
             MUSIC3_AUDIO_END_TOKEN_ID
         } else {
@@ -1286,11 +1223,7 @@ mod dit_perf {
 /// [`layer_norm`] Metal path costs a submit plus a 2×7MB round trip per call
 /// (576 calls per 8-step generate) for ~1ms of arithmetic. Rows are
 /// independent, so threading is bit-exact vs the serial CPU reference.
-/// `MAKEPAD_MUSIC3_DIT_LN_METAL` restores the old path.
 fn dit_layer_norm(x: &mut [f32], weight: &[f32], bias: &[f32], width: usize) {
-    if std::env::var_os("MAKEPAD_MUSIC3_DIT_LN_METAL").is_some() {
-        return layer_norm(x, weight, bias, width);
-    }
     makepad_ai_sfx::sa3::par_rows(x, width, &|_row, row| {
         let mut mean = 0f32;
         for v in row.iter() {
@@ -1465,12 +1398,6 @@ fn official_flow_sigmas(steps: usize) -> Vec<f32> {
         sigmas.push(1.0 - raw);
     }
     sigmas.push(1.0);
-    if std::env::var_os("MAKEPAD_MUSIC3_SIGMA_FLIP").is_some() {
-        // Standard FM 1→0 instead of official invert 0→1.
-        for s in &mut sigmas {
-            *s = 1.0 - *s;
-        }
-    }
     sigmas
 }
 
@@ -1496,18 +1423,7 @@ fn dit_forward(
         *x += *p;
     }
     let mut hidden = file.linear_nt("proj_in.weight", &cat, tokens)?;
-    let temb = match std::env::var("MAKEPAD_MUSIC3_TEMB").ok().as_deref() {
-        Some("in_major") => time_embed_layout(prep, &time_embed_feat(prep, timestep), true),
-        Some("linear_nt") => time_embed_linear_nt(file, prep, timestep)?,
-        _ => time_embed(prep, timestep),
-    };
-    if std::env::var_os("MAKEPAD_MUSIC3_DIT_TRACE").is_some() {
-        eprintln!(
-            "  dit-proj_in {} temb {}",
-            FiniteStats::of(&hidden),
-            FiniteStats::of(&temb)
-        );
-    }
+    let temb = time_embed(prep, timestep);
     let mut seq = Vec::with_capacity((tokens + 1) * MUSIC3_DIT_DIM);
     seq.extend_from_slice(&temb);
     seq.extend_from_slice(&hidden);
@@ -1524,13 +1440,6 @@ fn dit_forward(
         }
     }
     let scale = 1.0 / (MUSIC3_DIT_HEAD_DIM as f32).sqrt();
-    let trace = std::env::var_os("MAKEPAD_MUSIC3_DIT_TRACE").is_some();
-    if trace {
-        eprintln!(
-            "  dit-in t={timestep:.3} hidden {}",
-            FiniteStats::of(&hidden)
-        );
-    }
     for layer in 0..MUSIC3_DIT_LAYERS {
         let mut normed = hidden.clone();
         dit_layer_norm(&mut normed, &prep.norm1_w[layer], &prep.norm1_b[layer], MUSIC3_DIT_DIM);
@@ -1575,9 +1484,6 @@ fn dit_forward(
         dit_layer_norm(&mut normed, &prep.norm2_w[layer], &prep.norm2_b[layer], MUSIC3_DIT_DIM);
         let ff = dit_ffn(file, prep, layer, &normed, n)?;
         add_inplace(&mut hidden, &ff);
-        if trace && (layer < 2 || layer + 1 == MUSIC3_DIT_LAYERS || layer == 17) {
-            eprintln!("  dit-h L{layer} {}", FiniteStats::of(&hidden));
-        }
     }
     let tok = hidden[MUSIC3_DIT_DIM..].to_vec();
     let hidden = file.linear_nt("proj_out.weight", &tok, tokens)?;
@@ -1622,11 +1528,7 @@ fn dit_forward_cfg(
         *x += *p;
     }
     let stacked = file.linear_nt("proj_in.weight", &cat, m2)?;
-    let temb = match std::env::var("MAKEPAD_MUSIC3_TEMB").ok().as_deref() {
-        Some("in_major") => time_embed_layout(prep, &time_embed_feat(prep, timestep), true),
-        Some("linear_nt") => time_embed_linear_nt(file, prep, timestep)?,
-        _ => time_embed(prep, timestep),
-    };
+    let temb = time_embed(prep, timestep);
     let n = tokens + 1;
     let mut hidden = vec![0f32; 2 * n * MUSIC3_DIT_DIM];
     for batch in 0..2 {
@@ -1770,15 +1672,7 @@ fn dit_euler_x0(
     for i in 0..steps {
         progress("dit", i, steps);
         let t = sigmas[i];
-        let (v_cond, v_uncond) = if std::env::var_os("MAKEPAD_MUSIC3_DIT_SERIAL_CFG").is_some() {
-            let zeros = vec![0f32; cond.len()];
-            (
-                dit_forward(file, prep, &x, cond, tokens, t)?,
-                dit_forward(file, prep, &x, &zeros, tokens, t)?,
-            )
-        } else {
-            dit_forward_cfg(file, prep, &x, cond, tokens, t)?
-        };
+        let (v_cond, v_uncond) = dit_forward_cfg(file, prep, &x, cond, tokens, t)?;
         let dt = sigmas[i + 1] - sigmas[i];
         if i == 0 {
             eprintln!(
@@ -1874,10 +1768,6 @@ pub fn gguf_generate(
         } else {
             eprintln!("  cond-ref len {} != cond {}", pref.len(), cond.len());
         }
-    }
-    if std::env::var_os("MAKEPAD_MUSIC3_AR_ONLY").is_some() {
-        eprintln!("  ar-only: skip dit/vocoder");
-        return Ok(vec![0f32; 2]);
     }
     // Vocoder GGUF dequant is ~18s of host work and touches a different file
     // than DiT. Hide it behind Euler.

@@ -396,23 +396,16 @@ struct LayerOut {
     value: GpuTensor,
 }
 
-/// Official Music3 LM is bf16 SDPA/FlashAttention. Default is causal FA2
-/// with bf16 tensor-core operands (`MAKEPAD_MUSIC3_ATTN=fa2bf16`).
-/// `fa2` is the same kernel in f16; `composite` is the old cuBLAS path.
+/// Official Music3 LM is bf16 SDPA/FlashAttention. The native path uses
+/// causal FA2 with bf16 tensor-core operands.
 fn music3_lm_prefill_attn(
     q: &GpuTensor,
     k: &GpuTensor,
     v: &GpuTensor,
     scale: f32,
 ) -> Result<GpuTensor> {
-    let kind = std::env::var("MAKEPAD_MUSIC3_ATTN").unwrap_or_else(|_| {
-        if official_py() {
-            "math".into()
-        } else {
-            String::new()
-        }
-    });
-    let attn = match kind.as_str() {
+    let kind = if official_py() { "math" } else { "" };
+    let attn = match kind {
         "math" | "sdpa" => {
             // Official dump60 SDPA is torch MATH (Flash not compiled in 169 venv).
             gpu_attention_packed_causal_f32(q, k, v, MUSIC3_LM_HEADS, scale)
@@ -559,69 +552,10 @@ fn layer_forward(
     let q_name = format!("{prefix}.self_attn.q_proj.weight");
     let k_name = format!("{prefix}.self_attn.k_proj.weight");
     let v_name = format!("{prefix}.self_attn.v_proj.weight");
-    if layer == 0 {
-        if let Ok(dir) = std::env::var("MAKEPAD_MUSIC3_DUMP_L0_QKV") {
-            if let Ok(nh) = gpu_download(&normed) {
-                let last_rows = |data: &[f32], cols: usize| -> Vec<f32> {
-                    let mut out = Vec::with_capacity(batch.max(1) * cols);
-                    for b in 0..batch.max(1) {
-                        let row = (b + 1) * tokens - 1;
-                        let s = row * cols;
-                        out.extend_from_slice(&data[s..s + cols]);
-                    }
-                    out
-                };
-                let _ = write_npy_f32_lm(
-                    &format!("{dir}/native_l0_norm.npy"),
-                    &last_rows(&nh, MUSIC3_LM_HIDDEN),
-                    &[batch.max(1), MUSIC3_LM_HIDDEN],
-                );
-            }
-        }
-    }
     let q = linear_qk(weights, &normed, &q_name, q_inner)?;
     let k = linear_qk(weights, &normed, &k_name, kv_inner)?;
     let v = linear_cached(weights, &normed, &v_name, kv_inner)?;
     drop(normed);
-    if layer == 0 {
-        dump_fullseq_if(&q, tokens, batch, "native_fullseq_L0_qproj.npy");
-        dump_fullseq_if(&k, tokens, batch, "native_fullseq_L0_kproj.npy");
-    }
-    if layer == 0 {
-        if let Ok(dir) = std::env::var("MAKEPAD_MUSIC3_DUMP_L0_QKV") {
-            if let (Ok(qp), Ok(kp)) = (gpu_download(&q), gpu_download(&k)) {
-                let last_rows = |data: &[f32], cols: usize| -> Vec<f32> {
-                    let mut out = Vec::with_capacity(batch.max(1) * cols);
-                    for b in 0..batch.max(1) {
-                        let row = (b + 1) * tokens - 1;
-                        let s = row * cols;
-                        out.extend_from_slice(&data[s..s + cols]);
-                    }
-                    out
-                };
-                let _ = write_npy_f32_lm(
-                    &format!("{dir}/native_l0_qproj.npy"),
-                    &last_rows(&qp, q_inner),
-                    &[batch.max(1), q_inner],
-                );
-                let _ = write_npy_f32_lm(
-                    &format!("{dir}/native_l0_kproj.npy"),
-                    &last_rows(&kp, kv_inner),
-                    &[batch.max(1), kv_inner],
-                );
-                let _ = write_npy_f32_lm(
-                    &format!("{dir}/native_l0_qnorm_w.npy"),
-                    &prepared.q_norm[layer],
-                    &[prepared.q_norm[layer].len()],
-                );
-                let _ = write_npy_f32_lm(
-                    &format!("{dir}/native_l0_knorm_w.npy"),
-                    &prepared.k_norm[layer],
-                    &[prepared.k_norm[layer].len()],
-                );
-            }
-        }
-    }
 
     // Official Qwen3RMSNorm returns bf16: weight * (x*rsqrt).to(bf16).
     // Precise f32 RMS is correct (GPU==CPU 8e-6) but last-token knorm
@@ -636,51 +570,8 @@ fn layer_forward(
         format!("{prefix}.self_attn.k_norm"),
         &prepared.k_norm[layer],
     )?;
-    if layer == 0 {
-        dump_fullseq_if(&q, tokens, batch, "native_fullseq_L0_qnorm.npy");
-        dump_fullseq_if(&k, tokens, batch, "native_fullseq_L0_knorm.npy");
-    }
-    if layer == 0 {
-        if let Ok(dir) = std::env::var("MAKEPAD_MUSIC3_DUMP_L0_QKV") {
-            if let (Ok(qh), Ok(kh), Ok(vh)) =
-                (gpu_download(&q), gpu_download(&k), gpu_download(&v))
-            {
-                let last_rows = |data: &[f32], cols: usize| -> Vec<f32> {
-                    let mut out = Vec::with_capacity(batch.max(1) * cols);
-                    for b in 0..batch.max(1) {
-                        let row = (b + 1) * tokens - 1;
-                        let s = row * cols;
-                        out.extend_from_slice(&data[s..s + cols]);
-                    }
-                    out
-                };
-                let _ = write_npy_f32_lm(
-                    &format!("{dir}/native_l0_qnorm.npy"),
-                    &last_rows(&qh, q_inner),
-                    &[batch.max(1), q_inner],
-                );
-                let _ = write_npy_f32_lm(
-                    &format!("{dir}/native_l0_knorm.npy"),
-                    &last_rows(&kh, kv_inner),
-                    &[batch.max(1), kv_inner],
-                );
-                let _ = write_npy_f32_lm(
-                    &format!("{dir}/native_l0_vproj.npy"),
-                    &last_rows(&vh, kv_inner),
-                    &[batch.max(1), kv_inner],
-                );
-            }
-        }
-    }
     let q = music3_rope(q, MUSIC3_LM_HEADS, half, rope_cos, rope_sin)?;
     let k = music3_rope(k, MUSIC3_LM_KV_HEADS, half, rope_cos, rope_sin)?;
-    if layer == 0 {
-        dump_l0_last_rows(&q, tokens, batch, q_inner, "native_l0_qrope.npy");
-        dump_l0_last_rows(&k, tokens, batch, kv_inner, "native_l0_krope.npy");
-        dump_fullseq_if(&q, tokens, batch, "native_fullseq_L0_qrope.npy");
-        dump_fullseq_if(&k, tokens, batch, "native_fullseq_L0_krope.npy");
-        dump_fullseq_if(&v, tokens, batch, "native_fullseq_L0_v.npy");
-    }
 
     let mut k_heads = Vec::with_capacity(MUSIC3_LM_KV_HEADS);
     let mut v_heads = Vec::with_capacity(MUSIC3_LM_KV_HEADS);
@@ -726,45 +617,14 @@ fn layer_forward(
         joined
     };
     drop((q, k_full, v_full));
-    if layer == 0 {
-        dump_l0_last_rows(&attn, tokens, batch, q_inner, "native_l0_attn_out.npy");
-    }
     let attn = linear_cached(
         weights,
         &attn,
         &format!("{prefix}.self_attn.o_proj.weight"),
         MUSIC3_LM_HIDDEN,
     )?;
-    if layer == 0 {
-        dump_l0_last_rows(&attn, tokens, batch, MUSIC3_LM_HIDDEN, "native_l0_oproj.npy");
-        // Official self_attn hook is post-o_proj [B,T,H]; last-token dumps stay last-token.
-        dump_fullseq_if(&attn, tokens, batch, "native_fullseq_L0_attn.npy");
-    }
-    if layer == 1 {
-        dump_layer1_if(&attn, tokens, batch, "native_offin_L1_attn.npy");
-    }
-    if layer == 10 || layer == 20 || layer == 35 {
-        dump_fullseq_if(
-            &attn,
-            tokens,
-            batch,
-            &format!("native_fullseq_L{layer}_attn.npy"),
-        );
-    }
     hidden = residual_add(&hidden, &attn)?;
     hidden = music3_cast_hidden(hidden)?;
-    if layer == 0 {
-        dump_l0_last_rows(
-            &hidden,
-            tokens,
-            batch,
-            MUSIC3_LM_HIDDEN,
-            "native_l0_attn_resid.npy",
-        );
-    }
-    if layer == 1 {
-        dump_layer1_if(&hidden, tokens, batch, "native_offin_L1_attn_resid.npy");
-    }
     drop(attn);
 
     let normed = music3_hidden_rms(
@@ -772,29 +632,13 @@ fn layer_forward(
         format!("{prefix}.post_attention_layernorm"),
         &prepared.post_attn_norm[layer],
     )?;
-    if layer == 0 {
-        dump_l0_last_rows(
-            &normed,
-            tokens,
-            batch,
-            MUSIC3_LM_HIDDEN,
-            "native_l0_post_norm.npy",
-        );
-    }
     let up_name = format!("{prefix}.mlp.up_proj.weight");
     let gate_name = format!("{prefix}.mlp.gate_proj.weight");
     let up = linear_cached(weights, &normed, &up_name, MUSIC3_LM_FF)?;
     let gate = linear_cached(weights, &normed, &gate_name, MUSIC3_LM_FF)?;
     drop(normed);
-    if layer == 0 {
-        dump_l0_last_rows(&up, tokens, batch, MUSIC3_LM_FF, "native_l0_up.npy");
-        dump_l0_last_rows(&gate, tokens, batch, MUSIC3_LM_FF, "native_l0_gate.npy");
-    }
     let up_gate = gpu_concat_cols(&[&up, &gate]).map_err(DiffusionError::model)?;
     let ff = gpu_swiglu_value_gate(&up_gate).map_err(DiffusionError::model)?;
-    if layer == 0 {
-        dump_l0_last_rows(&ff, tokens, batch, MUSIC3_LM_FF, "native_l0_swiglu.npy");
-    }
     drop(up_gate);
     let ff = down_proj_cached(
         weights,
@@ -802,19 +646,8 @@ fn layer_forward(
         &format!("{prefix}.mlp.down_proj.weight"),
         MUSIC3_LM_HIDDEN,
     )?;
-    if layer == 0 {
-        dump_l0_last_rows(&ff, tokens, batch, MUSIC3_LM_HIDDEN, "native_l0_down.npy");
-    }
     hidden = residual_add(&hidden, &ff)?;
     hidden = music3_cast_hidden(hidden)?;
-    if layer == 0 || layer == 10 || layer == 20 || layer == 35 {
-        dump_fullseq_if(
-            &hidden,
-            tokens,
-            batch,
-            &format!("native_fullseq_L{layer}.npy"),
-        );
-    }
     let k = music3_kv_cache(k)?;
     let v = music3_kv_cache(v)?;
     Ok(LayerOut { hidden, key: k, value: v })
@@ -1059,14 +892,6 @@ impl Music3LmSession {
             embeds[row * MUSIC3_LM_HIDDEN..(row + 1) * MUSIC3_LM_HIDDEN].copy_from_slice(&values);
         }
         let mut hidden = gpu_upload(&embeds, 2 * t, MUSIC3_LM_HIDDEN).map_err(DiffusionError::model)?;
-        let dump_dir = std::env::var("MAKEPAD_MUSIC3_DUMP_PREFILL_LAYERS").ok();
-        if let Some(dir) = dump_dir.as_deref() {
-            dump_prefill_last_pair(&hidden, t, dir, "native_prefill_embed.npy");
-        }
-        let fullseq_dir = std::env::var("MAKEPAD_MUSIC3_DUMP_FULLSEQ").ok();
-        if let Some(dir) = fullseq_dir.as_deref() {
-            dump_fullseq_pair(&hidden, t, dir, "native_fullseq_embed.npy");
-        }
         let (rope_one_c, rope_one_s) = rope_range(prepared, 0, t)?;
         let rope_cos = gpu_concat_rows(&rope_one_c, &rope_one_c).map_err(DiffusionError::model)?;
         let rope_sin = gpu_concat_rows(&rope_one_s, &rope_one_s).map_err(DiffusionError::model)?;
@@ -1087,28 +912,6 @@ impl Music3LmSession {
                 2,
             )?;
             hidden = out.hidden;
-            if let Some(dir) = dump_dir.as_deref() {
-                dump_prefill_last_pair(
-                    &hidden,
-                    t,
-                    dir,
-                    &format!("native_prefill_layer{layer}.npy"),
-                );
-            }
-            if let Some(dir) = fullseq_dir.as_deref() {
-                if layer == 1 || layer == 5 || layer == 10 || layer == 20 || layer == 35 {
-                    dump_fullseq_pair(
-                        &hidden,
-                        t,
-                        dir,
-                        &format!("native_fullseq_L{layer}.npy"),
-                    );
-                }
-                if layer + 1 == MUSIC3_LM_LAYERS {
-                    dump_fullseq_pair(&out.key, t, dir, "native_fullseq_L35_k.npy");
-                    dump_fullseq_pair(&out.value, t, dir, "native_fullseq_L35_v.npy");
-                }
-            }
             k_cond.push(gpu_slice_rows(&out.key, 0, t).map_err(DiffusionError::model)?);
             k_uncond.push(gpu_slice_rows(&out.key, t, t).map_err(DiffusionError::model)?);
             v_cond.push(gpu_slice_rows(&out.value, 0, t).map_err(DiffusionError::model)?);
@@ -1116,14 +919,6 @@ impl Music3LmSession {
             progress(layer + 1, MUSIC3_LM_LAYERS);
         }
         hidden = music3_hidden_rms(&hidden, "model.norm".to_string(), &prepared.final_norm)?;
-        if let Some(dir) = dump_dir.as_deref() {
-            dump_prefill_last_pair(&hidden, t, dir, "native_prefill_norm.npy");
-            dump_prefill_last_pair(&hidden, t, dir, "native_last_hidden_f0.npy");
-        }
-        if let Some(dir) = fullseq_dir.as_deref() {
-            dump_fullseq_pair(&hidden, t, dir, "native_fullseq_norm.npy");
-            dump_fullseq_pair(&hidden, t, dir, "native_fullseq_last_hidden.npy");
-        }
         let last_c = gpu_download(
             &gpu_slice_rows(&hidden, t - 1, 1).map_err(DiffusionError::model)?,
         )
@@ -1215,10 +1010,6 @@ impl Music3LmSession {
         both.extend_from_slice(cond_embeds);
         both.extend_from_slice(uncond_embeds);
         let mut hidden = gpu_upload(&both, 2, MUSIC3_LM_HIDDEN).map_err(DiffusionError::model)?;
-        let dump_f1 = want_f1_dump(pos);
-        if dump_f1 {
-            dump_f1_rows(&hidden, MUSIC3_LM_HIDDEN, "native_f1_embed.npy");
-        }
         let (rope_one_c, rope_one_s) = rope_range(prepared, pos, 1)?;
         let rope_cos = gpu_concat_rows(&rope_one_c, &rope_one_c).map_err(DiffusionError::model)?;
         let rope_sin = gpu_concat_rows(&rope_one_s, &rope_one_s).map_err(DiffusionError::model)?;
@@ -1240,10 +1031,6 @@ impl Music3LmSession {
             )?;
         }
         hidden = music3_hidden_rms(&hidden, "model.norm".to_string(), &prepared.final_norm)?;
-        if dump_f1 {
-            dump_f1_rows(&hidden, MUSIC3_LM_HIDDEN, "native_f1_model_norm.npy");
-            dump_f1_rows(&hidden, MUSIC3_LM_HIDDEN, "native_f1_last_hidden.npy");
-        }
         cond.seq += 1;
         uncond.seq += 1;
         let host = gpu_download(&hidden).map_err(DiffusionError::model)?;
@@ -1403,25 +1190,11 @@ fn decode_layer_pair(
     let q_inner = MUSIC3_LM_HEADS * MUSIC3_LM_HEAD_DIM;
     let kv_inner = MUSIC3_LM_KV_HEADS * MUSIC3_LM_HEAD_DIM;
     let prefix = layer_prefix(layer);
-    let dump = want_f1_dump(seq);
-    if dump {
-        if layer == 0 {
-            eprintln!("f1 dump decode seq={seq} rows={}", hidden.rows());
-        }
-        dump_f1_rows(&hidden, MUSIC3_LM_HIDDEN, &format!("native_f1_L{layer}_in.npy"));
-    }
     let normed = music3_hidden_rms(
         &hidden,
         format!("{prefix}.input_layernorm"),
         &prepared.input_norm[layer],
     )?;
-    if dump {
-        dump_f1_rows(
-            &normed,
-            MUSIC3_LM_HIDDEN,
-            &format!("native_f1_L{layer}_norm.npy"),
-        );
-    }
     let q_name = format!("{prefix}.self_attn.q_proj.weight");
     let k_name = format!("{prefix}.self_attn.k_proj.weight");
     let v_name = format!("{prefix}.self_attn.v_proj.weight");
@@ -1429,11 +1202,6 @@ fn decode_layer_pair(
     let k_step = linear_qk(weights, &normed, &k_name, kv_inner)?;
     let v_step = linear_cached(weights, &normed, &v_name, kv_inner)?;
     drop(normed);
-    if dump {
-        dump_f1_rows(&q, q_inner, &format!("native_f1_L{layer}_qproj.npy"));
-        dump_f1_rows(&k_step, kv_inner, &format!("native_f1_L{layer}_kproj.npy"));
-        dump_f1_rows(&v_step, kv_inner, &format!("native_f1_L{layer}_vproj.npy"));
-    }
     let q = music3_qk_rms(
         q,
         format!("{prefix}.self_attn.q_norm"),
@@ -1444,16 +1212,8 @@ fn decode_layer_pair(
         format!("{prefix}.self_attn.k_norm"),
         &prepared.k_norm[layer],
     )?;
-    if dump {
-        dump_f1_rows(&q, q_inner, &format!("native_f1_L{layer}_qnorm.npy"));
-        dump_f1_rows(&k_step, kv_inner, &format!("native_f1_L{layer}_knorm.npy"));
-    }
     let q = music3_rope(q, MUSIC3_LM_HEADS, half, rope_cos, rope_sin)?;
     let k_step = music3_rope(k_step, MUSIC3_LM_KV_HEADS, half, rope_cos, rope_sin)?;
-    if dump {
-        dump_f1_rows(&q, q_inner, &format!("native_f1_L{layer}_qrope.npy"));
-        dump_f1_rows(&k_step, kv_inner, &format!("native_f1_L{layer}_krope.npy"));
-    }
     let k_step = music3_kv_cache(k_step)?;
     let v_step = music3_kv_cache(v_step)?;
     let k0 = gpu_slice_rows(&k_step, 0, 1).map_err(DiffusionError::model)?;
@@ -1492,58 +1252,27 @@ fn decode_layer_pair(
     )
     .map_err(DiffusionError::model)?;
     drop(q);
-    if dump {
-        dump_f1_rows(&attn, q_inner, &format!("native_f1_L{layer}_attn_out.npy"));
-    }
     let attn = linear_cached(
         weights,
         &attn,
         &format!("{prefix}.self_attn.o_proj.weight"),
         MUSIC3_LM_HIDDEN,
     )?;
-    if dump {
-        dump_f1_rows(
-            &attn,
-            MUSIC3_LM_HIDDEN,
-            &format!("native_f1_L{layer}_oproj.npy"),
-        );
-    }
     let hidden = residual_add(&hidden, &attn)?;
     let hidden = music3_cast_hidden(hidden)?;
-    if dump {
-        dump_f1_rows(
-            &hidden,
-            MUSIC3_LM_HIDDEN,
-            &format!("native_f1_L{layer}_attn_resid.npy"),
-        );
-    }
     drop(attn);
     let normed = music3_hidden_rms(
         &hidden,
         format!("{prefix}.post_attention_layernorm"),
         &prepared.post_attn_norm[layer],
     )?;
-    if dump {
-        dump_f1_rows(
-            &normed,
-            MUSIC3_LM_HIDDEN,
-            &format!("native_f1_L{layer}_post_norm.npy"),
-        );
-    }
     let up_name = format!("{prefix}.mlp.up_proj.weight");
     let gate_name = format!("{prefix}.mlp.gate_proj.weight");
     let up = linear_cached(weights, &normed, &up_name, MUSIC3_LM_FF)?;
     let gate = linear_cached(weights, &normed, &gate_name, MUSIC3_LM_FF)?;
     drop(normed);
-    if dump {
-        dump_f1_rows(&up, MUSIC3_LM_FF, &format!("native_f1_L{layer}_up.npy"));
-        dump_f1_rows(&gate, MUSIC3_LM_FF, &format!("native_f1_L{layer}_gate.npy"));
-    }
     let up_gate = gpu_concat_cols(&[&up, &gate]).map_err(DiffusionError::model)?;
     let ff = gpu_swiglu_value_gate(&up_gate).map_err(DiffusionError::model)?;
-    if dump {
-        dump_f1_rows(&ff, MUSIC3_LM_FF, &format!("native_f1_L{layer}_swiglu.npy"));
-    }
     drop(up_gate);
     let ff = down_proj_cached(
         weights,
@@ -1551,22 +1280,8 @@ fn decode_layer_pair(
         &format!("{prefix}.mlp.down_proj.weight"),
         MUSIC3_LM_HIDDEN,
     )?;
-    if dump {
-        dump_f1_rows(
-            &ff,
-            MUSIC3_LM_HIDDEN,
-            &format!("native_f1_L{layer}_down.npy"),
-        );
-    }
     let hidden = residual_add(&hidden, &ff)?;
     let hidden = music3_cast_hidden(hidden)?;
-    if dump {
-        dump_f1_rows(
-            &hidden,
-            MUSIC3_LM_HIDDEN,
-            &format!("native_f1_layer{layer}.npy"),
-        );
-    }
     Ok(hidden)
 }
 
@@ -1601,173 +1316,4 @@ pub fn music3_embed_audio_frame(
         *e *= scale;
     }
     Ok(embeds)
-}
-
-fn want_f1_dump(seq: usize) -> bool {
-    // Oracle prompt prefill is 18 tokens; first decode is f1.
-    seq == 18 && std::env::var_os("MAKEPAD_MUSIC3_DUMP_F1").is_some()
-}
-
-fn dump_f1_rows(tensor: &GpuTensor, cols: usize, name: &str) {
-    let Ok(dir) = std::env::var("MAKEPAD_MUSIC3_DUMP_F1") else {
-        return;
-    };
-    let Ok(data) = gpu_download(tensor) else {
-        return;
-    };
-    let rows = tensor.rows().min(2).max(1);
-    let mut out = Vec::with_capacity(rows * cols);
-    for b in 0..rows {
-        let s = b * cols;
-        if s + cols <= data.len() {
-            out.extend_from_slice(&data[s..s + cols]);
-        }
-    }
-    let _ = write_npy_f32_lm(&format!("{dir}/{name}"), &out, &[rows, cols]);
-}
-
-fn dump_l0_last_rows(
-    tensor: &GpuTensor,
-    tokens: usize,
-    batch: usize,
-    cols: usize,
-    name: &str,
-) {
-    let Ok(dir) = std::env::var("MAKEPAD_MUSIC3_DUMP_L0_QKV") else {
-        return;
-    };
-    let Ok(data) = gpu_download(tensor) else {
-        return;
-    };
-    let batch = batch.max(1);
-    let mut out = Vec::with_capacity(batch * cols);
-    for b in 0..batch {
-        let row = (b + 1) * tokens - 1;
-        let s = row * cols;
-        if s + cols <= data.len() {
-            out.extend_from_slice(&data[s..s + cols]);
-        }
-    }
-    let _ = write_npy_f32_lm(&format!("{dir}/{name}"), &out, &[batch, cols]);
-}
-
-fn dump_fullseq_if(hidden: &GpuTensor, tokens: usize, batch: usize, name: &str) {
-    if batch != 2 || tokens == 0 {
-        return;
-    }
-    let Ok(dir) = std::env::var("MAKEPAD_MUSIC3_DUMP_FULLSEQ") else {
-        return;
-    };
-    dump_fullseq_pair(hidden, tokens, &dir, name);
-}
-
-fn dump_layer1_if(hidden: &GpuTensor, tokens: usize, batch: usize, name: &str) {
-    if batch != 2 || tokens == 0 {
-        return;
-    }
-    let Ok(dir) = std::env::var("MAKEPAD_MUSIC3_DUMP_LAYER1") else {
-        return;
-    };
-    dump_fullseq_pair(hidden, tokens, &dir, name);
-}
-
-/// Full pair sequence `[2, T, C]` (row-major same as `[2T, C]`). Not last-token.
-fn dump_fullseq_pair(hidden: &GpuTensor, tokens: usize, dir: &str, name: &str) {
-    if tokens == 0 {
-        return;
-    }
-    let path = std::path::Path::new(dir).join(name);
-    let path = match path.to_str() {
-        Some(p) => p.to_string(),
-        None => return,
-    };
-    let cols = hidden.cols();
-    let rows = hidden.rows();
-    if rows != 2 * tokens {
-        eprintln!("dump {path}: rows={rows} expected 2*{tokens}");
-        return;
-    }
-    let data = match gpu_download(hidden) {
-        Ok(v) => v,
-        Err(err) => {
-            eprintln!("dump {path}: {err}");
-            return;
-        }
-    };
-    if data.len() != 2 * tokens * cols {
-        eprintln!(
-            "dump {path}: len={} expected {}",
-            data.len(),
-            2 * tokens * cols
-        );
-        return;
-    }
-    if let Err(err) = write_npy_f32_lm(&path, &data, &[2, tokens, cols]) {
-        eprintln!("dump {path}: {err}");
-    } else {
-        eprintln!("dumped {path} [2,{tokens},{cols}]");
-    }
-}
-
-fn dump_prefill_last_pair(hidden: &GpuTensor, tokens: usize, dir: &str, name: &str) {
-    if tokens == 0 {
-        return;
-    }
-    let path = std::path::Path::new(dir).join(name);
-    let path = match path.to_str() {
-        Some(p) => p.to_string(),
-        None => return,
-    };
-    let last_c = match gpu_slice_rows(hidden, tokens - 1, 1).and_then(|t| gpu_download(&t)) {
-        Ok(v) => v,
-        Err(err) => {
-            eprintln!("dump {path}: {err}");
-            return;
-        }
-    };
-    let last_u = match gpu_slice_rows(hidden, 2 * tokens - 1, 1).and_then(|t| gpu_download(&t)) {
-        Ok(v) => v,
-        Err(err) => {
-            eprintln!("dump {path}: {err}");
-            return;
-        }
-    };
-    let mut both = last_c;
-    both.extend_from_slice(&last_u);
-    if let Err(err) = write_npy_f32_lm(&path, &both, &[2, MUSIC3_LM_HIDDEN]) {
-        eprintln!("dump {path}: {err}");
-    } else {
-        eprintln!("dumped {path}");
-    }
-}
-
-fn write_npy_f32_lm(path: &str, data: &[f32], shape: &[usize]) -> std::io::Result<()> {
-    use std::io::Write;
-    let shape_txt = if shape.len() == 1 {
-        format!("({},)", shape[0])
-    } else {
-        format!(
-            "({})",
-            shape
-                .iter()
-                .map(|d| d.to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    };
-    let mut dict = format!("{{'descr': '<f4', 'fortran_order': False, 'shape': {shape_txt}, }}");
-    let prefix = 10usize;
-    let mut header_len = dict.len() + 1;
-    let pad = (16 - ((prefix + header_len) % 16)) % 16;
-    header_len += pad;
-    dict.push_str(&" ".repeat(pad));
-    dict.push('\n');
-    let mut f = std::fs::File::create(path)?;
-    f.write_all(b"\x93NUMPY\x01\x00")?;
-    f.write_all(&(header_len as u16).to_le_bytes())?;
-    f.write_all(dict.as_bytes())?;
-    for v in data {
-        f.write_all(&v.to_le_bytes())?;
-    }
-    Ok(())
 }

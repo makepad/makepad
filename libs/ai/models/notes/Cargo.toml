@@ -1,0 +1,11 @@
+[package]
+name = "makepad-ai-notes"
+version = "0.1.0"
+edition = "2021"
+description = "Native Spotify Basic Pitch polyphonic note transcription"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+makepad-ai-common = { path = "../common" }
+makepad-ai-loader = { path = "../../loader" }
+makepad-midi-file = { path = "../../../midi_file" }

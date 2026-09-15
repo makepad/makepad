@@ -672,7 +672,6 @@ pub fn build_clip_l_graph(
             k,
             v,
             attention_mask,
-            weights.config.attention_head_count,
         )?;
         let attn_proj = apply_linear(
             &mut weights.ctx,
@@ -749,7 +748,6 @@ fn build_attention_mha_output(
     k: TensorId,
     v: TensorId,
     attention_mask: TensorId,
-    head_count: u32,
 ) -> Result<TensorId> {
     let q = ctx
         .permute(q, [0, 2, 1, 3])
@@ -757,67 +755,32 @@ fn build_attention_mha_output(
     let k = ctx
         .permute(k, [0, 2, 1, 3])
         .map_err(DiffusionError::model)?;
-    let mut v = ctx
+    let v = ctx
         .permute(v, [0, 2, 1, 3])
         .map_err(DiffusionError::model)?;
 
-    let q_tensor = require_tensor(ctx, q)?.clone();
-    let n_tokens = usize::try_from(q_tensor.ne[1])
-        .map_err(|_| DiffusionError::model("clip_l q token count exceeds usize"))?;
     let attention_scale = 1.0 / (CLIP_L_HEAD_DIM as f32).sqrt();
-
-    if flash_attention_allowed(head_count, n_tokens) {
-        let attn = ctx
-            .flash_attn_ext(
-                q,
-                k,
-                v,
-                Some(attention_mask),
-                attention_scale,
-                0.0,
-                0.0,
-                BufferUsage::Activations,
-            )
-            .map_err(DiffusionError::model)?;
-        ctx.flash_attn_ext_set_prec(attn, makepad_ai_common::Prec::F32)
-            .map_err(DiffusionError::model)?;
-        let attn_tensor = require_tensor(ctx, attn)?.clone();
-        return ctx
-            .reshape(
-                attn,
-                &[
-                    attn_tensor.ne[0] * attn_tensor.ne[1],
-                    attn_tensor.ne[2] * attn_tensor.ne[3],
-                ],
-            )
-            .map_err(DiffusionError::model);
-    }
-
-    let mut kq = ctx
-        .mul_mat(k, q, BufferUsage::Activations)
-        .map_err(DiffusionError::model)?;
-    kq = ctx
-        .soft_max_ext(
-            kq,
+    let attn = ctx
+        .flash_attn_ext(
+            q,
+            k,
+            v,
             Some(attention_mask),
             attention_scale,
+            0.0,
             0.0,
             BufferUsage::Activations,
         )
         .map_err(DiffusionError::model)?;
-    v = ctx.transpose(v).map_err(DiffusionError::model)?;
-    v = ctx.cont(v).map_err(DiffusionError::model)?;
-    let kqv = ctx
-        .mul_mat(v, kq, BufferUsage::Activations)
-        .map_err(DiffusionError::model)?;
-    let attn = ctx
-        .permute(kqv, [0, 2, 1, 3])
+    ctx.flash_attn_ext_set_prec(attn, makepad_ai_common::Prec::F32)
         .map_err(DiffusionError::model)?;
     let attn_tensor = require_tensor(ctx, attn)?.clone();
-    ctx.cont_2d(
+    ctx.reshape(
         attn,
-        attn_tensor.ne[0] * attn_tensor.ne[1],
-        attn_tensor.ne[2] * attn_tensor.ne[3],
+        &[
+            attn_tensor.ne[0] * attn_tensor.ne[1],
+            attn_tensor.ne[2] * attn_tensor.ne[3],
+        ],
     )
     .map_err(DiffusionError::model)
 }
@@ -996,10 +959,7 @@ fn linear_rows_ggml(
         return RowsTensor::new(0, weight.rows, Vec::new());
     }
 
-    let mut output = if clip_force_cpu_math() {
-        let decoded = decode_ggml_matrix_to_f32(weight)?;
-        matmul_nt_f32_cpu(&input.data, &decoded, input.rows, input.cols, weight.rows)?
-    } else if let Some(result) = try_matmul_nt_ggml_bytes_cached(
+    let mut output = if let Some(result) = try_matmul_nt_ggml_bytes_cached(
         &input.data,
         weight.ggml_type,
         input.rows,
@@ -1060,18 +1020,16 @@ fn layer_norm_rows_with_weight_bias(
     if input.rows == 0 {
         return RowsTensor::new(0, input.cols, Vec::new());
     }
-    if !clip_force_cpu_math() {
-        if let Some(output) = try_layer_norm_mul_add_f32(
-            &input.data,
-            &[input.rows, input.cols],
-            weight,
-            &[input.cols],
-            bias,
-            &[input.cols],
-            eps,
-        ) {
-            return RowsTensor::new(input.rows, input.cols, output);
-        }
+    if let Some(output) = try_layer_norm_mul_add_f32(
+        &input.data,
+        &[input.rows, input.cols],
+        weight,
+        &[input.cols],
+        bias,
+        &[input.cols],
+        eps,
+    ) {
+        return RowsTensor::new(input.rows, input.cols, output);
     }
 
     let mut output = Vec::with_capacity(input.data.len());
@@ -1125,9 +1083,7 @@ fn clip_attention_rows(
         let q_head = extract_head_rows(q, head_idx, head_dim);
         let k_head = extract_head_rows(k, head_idx, head_dim);
         let v_head = extract_head_rows(v, head_idx, head_dim);
-        let mut scores = if clip_force_cpu_math() {
-            matmul_nt_f32_cpu(&q_head, &k_head, token_count, head_dim, token_count)?
-        } else if let Some(scores) =
+        let mut scores = if let Some(scores) =
             try_matmul_nt_f32(&q_head, &k_head, token_count, head_dim, token_count)
         {
             scores
@@ -1136,30 +1092,26 @@ fn clip_attention_rows(
         };
         apply_causal_scale_mask_in_place(&mut scores, token_count, scale)?;
 
-        if !clip_force_cpu_math() {
-            if let Some(head_output) = try_attention_softmax_weighted_sum_f32(
-                &scores,
-                &v_head,
+        if let Some(head_output) = try_attention_softmax_weighted_sum_f32(
+            &scores,
+            &v_head,
+            token_count,
+            token_count,
+            head_dim,
+        ) {
+            write_head_rows(
+                &mut output,
                 token_count,
-                token_count,
+                head_count,
                 head_dim,
-            ) {
-                write_head_rows(
-                    &mut output,
-                    token_count,
-                    head_count,
-                    head_dim,
-                    head_idx,
-                    &head_output,
-                )?;
-                continue;
-            }
+                head_idx,
+                &head_output,
+            )?;
+            continue;
         }
 
         softmax_in_place(&mut scores, token_count)?;
-        let head_output = if clip_force_cpu_math() {
-            matmul_nn_f32_cpu(&scores, &v_head, token_count, token_count, head_dim)?
-        } else if let Some(head_output) =
+        let head_output = if let Some(head_output) =
             try_matmul_nn_f32(&scores, &v_head, token_count, token_count, head_dim)
         {
             head_output
@@ -1213,10 +1165,6 @@ pub fn clip_cache_namespace(weights: &LoadedClipLWeights) -> String {
 /// the outgoing checkpoint path.
 pub(crate) fn evict_device_weight_cache(weights: &LoadedClipLWeights) -> usize {
     crate::backend::gpu_weight_cache_evict_prefix(&clip_cache_namespace(weights)).unwrap_or(0)
-}
-
-fn clip_force_cpu_math() -> bool {
-    std::env::var_os("CLIP_L_FORCE_CPU_MATH").is_some()
 }
 
 fn can_fallback_from_accel_error(err: &str) -> bool {
@@ -1699,18 +1647,6 @@ fn require_tensor<'a>(ctx: &'a Context, id: TensorId) -> Result<&'a Tensor> {
         .ok_or_else(|| DiffusionError::model(format!("invalid clip_l tensor id {}", id)))
 }
 
-fn flash_attention_allowed(head_count: u32, n_tokens: usize) -> bool {
-    let _ = head_count;
-    let _ = n_tokens;
-    if std::env::var_os("CLIP_L_DISABLE_FLASH_ATTN").is_some() {
-        return false;
-    }
-    matches!(
-        CLIP_L_HEAD_DIM,
-        32 | 40 | 48 | 64 | 72 | 80 | 96 | 112 | 128 | 192 | 256 | 576
-    )
-}
-
 fn is_context_oom(err: &DiffusionError) -> bool {
     matches!(err, DiffusionError::Model(message) if message.starts_with("context out of memory allocating "))
 }
@@ -1782,7 +1718,7 @@ fn pooled_from_hidden_states(
 mod tests {
     use super::{
         clip_model_config_from_inspection, clip_target_extents, clip_target_tensor_type,
-        clip_weight_in_scope, flash_attention_allowed, ClipLWeightScope,
+        clip_weight_in_scope, ClipLWeightScope,
     };
     use crate::flux::ClipLTextEncoderConfig;
     use makepad_ai_common::TensorType;
@@ -1807,11 +1743,6 @@ mod tests {
             data_offsets: [0, 0],
         };
         assert_eq!(clip_target_tensor_type(&entry).unwrap(), TensorType::F32);
-    }
-
-    #[test]
-    fn clip_flash_attention_allows_standard_prompt_lengths() {
-        assert!(flash_attention_allowed(12, 77));
     }
 
     #[test]

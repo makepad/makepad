@@ -460,8 +460,7 @@ fn fresh_ui_rig_has_real_wrist_directions() {
         eprintln!("HY retarget oracle fixtures absent; skipping");
         return;
     };
-    let rig_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../local/ai_content_library/lib-13.glb");
+    let rig_path = makepad_asset_client::paths::library_root().join("lib-13.glb");
     if !rig_path.is_file() {
         eprintln!("fresh UI rig fixture absent; skipping");
         return;
@@ -538,8 +537,7 @@ fn fresh_yoshi_rig_with_raised_hip_heads_retargets_if_present() {
         eprintln!("HY retarget oracle fixtures absent; skipping");
         return;
     };
-    let rig_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../local/ai_content_library/lib-19.glb");
+    let rig_path = makepad_asset_client::paths::library_root().join("lib-19.glb");
     if !rig_path.is_file() {
         eprintln!("fresh Yoshi rig fixture absent; skipping");
         return;
@@ -574,8 +572,7 @@ fn fresh_elf_rig_with_terminal_hand_leaves_retargets_if_present() {
         eprintln!("HY retarget oracle fixtures absent; skipping");
         return;
     };
-    let rig_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../local/ai_content_library/lib-34.glb");
+    let rig_path = makepad_asset_client::paths::library_root().join("lib-34.glb");
     if !rig_path.is_file() {
         eprintln!("fresh elf rig fixture absent; skipping");
         return;
@@ -617,8 +614,7 @@ fn clean_elf_rig_with_low_hands_and_split_ankles_retargets_if_present() {
         eprintln!("HY retarget oracle fixtures absent; skipping");
         return;
     };
-    let rig_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../local/ai_content_library/lib-49.glb");
+    let rig_path = makepad_asset_client::paths::library_root().join("lib-49.glb");
     if !rig_path.is_file() {
         eprintln!("clean elf rig fixture absent; skipping");
         return;
@@ -670,8 +666,7 @@ fn export_fresh_ui_foot_frame_candidate_if_requested() {
         eprintln!("HY retarget oracle fixtures absent; skipping");
         return;
     };
-    let rig_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../local/ai_content_library/lib-13.glb");
+    let rig_path = makepad_asset_client::paths::library_root().join("lib-13.glb");
     let rig = std::fs::read(&rig_path)
         .unwrap_or_else(|error| panic!("cannot read {}: {error}", rig_path.display()));
     let clips = [

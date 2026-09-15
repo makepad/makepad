@@ -1,12 +1,12 @@
 //! Cross-backend host-path dispatch (Metal first, then CUDA).
-//! Spec types live in `makepad-ai-cuda::accel`.
+//! Spec types live in `makepad_ai_loader::accel`.
 
 use crate::gpu as cuda;
-use makepad_ai_cuda::prof;
-use makepad_ai_cuda::quant::bf16_to_f32;
+use makepad_ai_loader::prof;
+use makepad_ai_loader::quant::bf16_to_f32;
 use makepad_ai_metal as metal;
 
-pub use makepad_ai_cuda::accel::{AffineQuantizedMatmulRowsSpec, AffineQuantizedMatmulSpec};
+pub use makepad_ai_loader::accel::{AffineQuantizedMatmulRowsSpec, AffineQuantizedMatmulSpec};
 
 pub fn try_matmul_nt_ggml_bytes(
     a: &[f32],

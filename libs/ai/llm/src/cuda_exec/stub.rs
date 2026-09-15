@@ -119,6 +119,7 @@ impl Runtime {
         _ctx: &Context,
         _graph: &crate::Graph,
         _pinned: &[crate::TensorId],
+        _options: super::CudaGraphOptions,
         _progress: &mut dyn FnMut(usize, usize),
     ) -> Result<RawSession> {
         Err(LlamaError::unsupported(unavailable_reason()))
@@ -154,6 +155,7 @@ impl Compiled {
         _input: LogitsProbeInput<'_>,
         _layout: &HybridDecodeBatchLayout,
         _capture_hidden: bool,
+        _skip_logits_readback: bool,
     ) -> Result<HybridDecodeRun> {
         match *self {}
     }

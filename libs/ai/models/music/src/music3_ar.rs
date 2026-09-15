@@ -7,7 +7,7 @@ use crate::music3::{
     MUSIC3_COND_HIDDEN, MUSIC3_COND_LAYERS, MUSIC3_NUM_CODEBOOKS, MUSIC3_RVQ_HIDDEN,
 };
 use crate::music3_lm::{
-    music3_embed_audio_frame, music3_lm_head, music3_lm_head_audio_host,
+    music3_embed_audio_frame, music3_lm_head_audio_host,
     Music3LmPrepared, Music3LmSession,
 };
 use crate::backend::{gpu_concat_rows, gpu_download, gpu_slice_rows, gpu_upload};
@@ -179,41 +179,6 @@ fn music3_rvq_depth_sample_cfg(
         for (c, u) in guided.iter_mut().zip(logits_u.iter()) {
             *c = *u + MUSIC3_AR_CFG * (*c - *u);
         }
-        if let Ok(path) = std::env::var("MAKEPAD_MUSIC3_DUMP_RVQ_LOGITS") {
-            if head == 2 {
-                static HEAD2: std::sync::atomic::AtomicUsize =
-                    std::sync::atomic::AtomicUsize::new(0);
-                let which = HEAD2.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let mut idx: Vec<usize> = (0..guided.len()).collect();
-                idx.sort_by(|&a, &b| {
-                    guided[b]
-                        .partial_cmp(&guided[a])
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
-                let top: Vec<String> = idx
-                    .iter()
-                    .take(8)
-                    .map(|&i| format!("{i}:{:.4}", guided[i]))
-                    .collect();
-                let line = format!("frame={which} head={head} top8={}\n", top.join(","));
-                let _ = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&path)
-                    .and_then(|mut f| {
-                        use std::io::Write;
-                        f.write_all(line.as_bytes())
-                    });
-                if which == 10 || which == 12 {
-                    let npy = format!(
-                        "{}_f{which}.npy",
-                        path.trim_end_matches(".txt")
-                    );
-                    let _ = write_npy_f32(&npy, &guided, &[guided.len()]);
-                    eprintln!("dumped rvq logits frame{which} head2 -> {npy}");
-                }
-            }
-        }
         let code = sample_top_k(&guided, top_k, rng);
         codes.push(code as u32);
         if head + 1 < MUSIC3_NUM_CODEBOOKS - 1 {
@@ -373,7 +338,6 @@ pub fn music3_ar_sample_with_progress(
     }
     // Official `language_model.model` is one forward on batch 2 (cond+uncond):
     // pair prefill, then in-place pair decode over reserved caches.
-    let t_prefill = std::time::Instant::now();
     let (mut cond_s, mut cond_h, mut uncond_s, mut uncond_h) =
         Music3LmSession::prefill_pair_with_progress(
             lm,
@@ -382,9 +346,6 @@ pub fn music3_ar_sample_with_progress(
             uncond_ids,
             &mut |k, n| progress("prefill-cond", k, n),
         )?;
-    if std::env::var_os("MAKEPAD_MUSIC3_BENCH").is_some() {
-        eprintln!("BENCH prefill_wall={:.3}", t_prefill.elapsed().as_secs_f64());
-    }
     // Reserve once so decode appends the new K/V row in place. Without this
     // every frame regrows all four caches — O(n²) copy traffic over a
     // 1500-frame song. The appended rows are copied verbatim, so the
@@ -393,54 +354,22 @@ pub fn music3_ar_sample_with_progress(
     uncond_s.reserve(max_frames + 2)?;
     let mut rng = TorchPhilox::new(seed);
     let mut hiddens = Vec::new();
-    let mut semantic_out: Vec<u32> = Vec::new();
-    let mut rvq_out: Vec<u32> = Vec::new();
     let lo = MUSIC3_AUDIO_CODE_OFFSET as usize;
     let hi = lo + MUSIC3_SEMANTIC_VOCAB;
     let end = MUSIC3_AUDIO_END_TOKEN_ID as usize;
     let mut ns_head = 0u128;
     let mut ns_rvq = 0u128;
     let mut ns_step = 0u128;
-    let trace = std::env::var_os("MAKEPAD_MUSIC3_TRACE_TOKENS").is_some();
     progress("lm", 0, max_frames);
     // Official SemanticGenerationStep: dummy first decode is not emitted
     // (`range(max_frames+1)`, emit if frame_index>0). Sample is cond top-50
     // then guided; RVQ is m=2 CFG; stop on the first <|audio_end|>.
     let _ = min_frames;
-    let force_no_eos = std::env::var_os("MAKEPAD_MUSIC3_NO_EOS").is_some();
-    // MAKEPAD_MUSIC3_FORCE_SEM / _RVQ (whitespace-separated int files) +
-    // MAKEPAD_MUSIC3_FORCE_K: teacher-force the first K frames with dump
-    // codes, then free-run. Measurement gate for free-run content drift; the
-    // semantic RNG still advances so the continuation stays a valid draw.
-    let force: Option<(Vec<u32>, Vec<u32>, usize)> = match (
-        std::env::var("MAKEPAD_MUSIC3_FORCE_SEM"),
-        std::env::var("MAKEPAD_MUSIC3_FORCE_RVQ"),
-        std::env::var("MAKEPAD_MUSIC3_FORCE_K"),
-    ) {
-        (Ok(sp), Ok(rp), Ok(kp)) => {
-            let parse = |p: &str| -> Vec<u32> {
-                std::fs::read_to_string(p)
-                    .unwrap_or_default()
-                    .split_whitespace()
-                    .filter_map(|t| t.parse().ok())
-                    .collect()
-            };
-            let k: usize = kp.parse().unwrap_or(0);
-            let fs = parse(&sp);
-            let fr = parse(&rp);
-            eprintln!("FORCE_PREFIX k={k} sem={} rvq={}", fs.len(), fr.len());
-            Some((fs, fr, k))
-        }
-        _ => None,
-    };
     // Band head: lm_head only over `audio_end` + the semantic codebook
     // (16 385 rows) instead of the 200 k vocab — the full-path mask kills
     // everything else before sampling anyway, and `sample_top_k_ids` draws
     // Philox by the GLOBAL vocab index, so the packed vector samples
-    // bit-identically to the full head. Full head stays for the
-    // DUMP_GUIDED bias instrument or `MAKEPAD_MUSIC3_FULL_HEAD=1`.
-    let full_head = std::env::var_os("MAKEPAD_MUSIC3_DUMP_GUIDED").is_some()
-        || std::env::var_os("MAKEPAD_MUSIC3_FULL_HEAD").is_some();
+    // bit-identically to the full head.
     let band_ids: Vec<u32> = std::iter::once(end as u32)
         .chain((lo as u32)..(hi as u32))
         .collect();
@@ -462,123 +391,38 @@ pub fn music3_ar_sample_with_progress(
         // Emitted frame = frame_index - 1; the warm-up draw is free.
         let mask_candidates = reference
             .and_then(|mask| frame_index.checked_sub(1).and_then(|f| mask.candidates(f)));
-        let guided = if full_head {
-            let mut cond_logits = music3_lm_head(lm, &cond_h)?;
-            let mut uncond_logits = music3_lm_head(lm, &uncond_h)?;
-            for (i, v) in cond_logits.iter_mut().enumerate() {
-                if i != end && !(i >= lo && i < hi) {
-                    *v = f32::NEG_INFINITY;
-                }
+        let (end_c, band_c) = music3_lm_head_audio_host(lm, &cond_h)?;
+        let (end_u, band_u) = music3_lm_head_audio_host(lm, &uncond_h)?;
+        let mut cond_logits = Vec::with_capacity(1 + band_c.len());
+        cond_logits.push(end_c);
+        cond_logits.extend_from_slice(&band_c);
+        let mut uncond_logits = Vec::with_capacity(1 + band_u.len());
+        uncond_logits.push(end_u);
+        uncond_logits.extend_from_slice(&band_u);
+        let thresh = kth_largest(&cond_logits, MUSIC3_AR_TOP_K);
+        let mut guided = cond_logits;
+        let mut raw = mask_candidates.map(|_| Vec::with_capacity(guided.len()));
+        for (g, u) in guided.iter_mut().zip(uncond_logits.iter()) {
+            let c = *g;
+            let v = *u + MUSIC3_AR_CFG * (c - *u);
+            if let Some(raw) = raw.as_mut() {
+                raw.push(v);
             }
-            for (i, v) in uncond_logits.iter_mut().enumerate() {
-                if i != end && !(i >= lo && i < hi) {
-                    *v = f32::NEG_INFINITY;
-                }
-            }
-            let thresh = kth_largest(&cond_logits, MUSIC3_AR_TOP_K);
-            let mut guided = cond_logits.clone();
-            let mut raw = mask_candidates.map(|_| Vec::with_capacity(guided.len()));
-            for (g, (c, u)) in guided
-                .iter_mut()
-                .zip(cond_logits.iter().zip(uncond_logits.iter()))
-            {
-                let v = *u + MUSIC3_AR_CFG * (*c - *u);
-                if let Some(raw) = raw.as_mut() {
-                    raw.push(v);
-                }
-                *g = if *c < thresh { f32::NEG_INFINITY } else { v };
-            }
-            for (i, v) in guided.iter_mut().enumerate() {
-                if i != end && !(i >= lo && i < hi) {
-                    *v = f32::NEG_INFINITY;
-                }
-            }
-            if let (Some(candidates), Some(raw)) = (mask_candidates, raw.as_ref()) {
-                apply_reference_mask(
-                    &mut guided,
-                    raw,
-                    &|global| Some(global as usize),
-                    candidates,
-                    end as u32,
-                    lo as u32,
-                );
-            }
-            // MAKEPAD_MUSIC3_DUMP_GUIDED=<dir>: dump the vocab-masked
-            // cond+uncond logits every 5th frame (bias measurement leg).
-            if frame_index % 5 == 0 {
-                if let Ok(dir) = std::env::var("MAKEPAD_MUSIC3_DUMP_GUIDED") {
-                    let mut both = cond_logits.clone();
-                    both.extend_from_slice(&uncond_logits);
-                    let out = format!("{dir}/native_logits_f{frame_index}.npy");
-                    if let Err(err) = write_npy_f32(&out, &both, &[2, cond_logits.len()]) {
-                        eprintln!("dump guided f{frame_index}: {err}");
-                    }
-                }
-            }
-            guided
-        } else {
-            let (end_c, band_c) = music3_lm_head_audio_host(lm, &cond_h)?;
-            let (end_u, band_u) = music3_lm_head_audio_host(lm, &uncond_h)?;
-            let mut cond_logits = Vec::with_capacity(1 + band_c.len());
-            cond_logits.push(end_c);
-            cond_logits.extend_from_slice(&band_c);
-            let mut uncond_logits = Vec::with_capacity(1 + band_u.len());
-            uncond_logits.push(end_u);
-            uncond_logits.extend_from_slice(&band_u);
-            let thresh = kth_largest(&cond_logits, MUSIC3_AR_TOP_K);
-            let mut guided = cond_logits;
-            let mut raw = mask_candidates.map(|_| Vec::with_capacity(guided.len()));
-            for (g, u) in guided.iter_mut().zip(uncond_logits.iter()) {
-                let c = *g;
-                let v = *u + MUSIC3_AR_CFG * (c - *u);
-                if let Some(raw) = raw.as_mut() {
-                    raw.push(v);
-                }
-                *g = if c < thresh { f32::NEG_INFINITY } else { v };
-            }
-            if let (Some(candidates), Some(raw)) = (mask_candidates, raw.as_ref()) {
-                apply_reference_mask(
-                    &mut guided,
-                    raw,
-                    &|global| band_index(global as usize),
-                    candidates,
-                    end as u32,
-                    lo as u32,
-                );
-            }
-            guided
-        };
-        let mut tok = if full_head {
-            sample_top_k(&guided, MUSIC3_AR_TOP_K, &mut rng) as u32
-        } else {
-            band_ids[sample_top_k_ids(&guided, &band_ids, MUSIC3_AR_TOP_K, &mut rng)]
-        };
-        if let Some((fs, _, k)) = force.as_ref() {
-            if frame_index < *k && frame_index < fs.len() {
-                tok = fs[frame_index];
-            }
+            *g = if c < thresh { f32::NEG_INFINITY } else { v };
         }
-        semantic_out.push(tok);
-        ns_head += t0.elapsed().as_nanos();
-        if trace && frame_index < 64 {
-            let finite = guided.iter().filter(|v| v.is_finite()).count();
-            let mut best = (0usize, f32::NEG_INFINITY);
-            for (i, &v) in guided.iter().enumerate() {
-                if v.is_finite() && v > best.1 {
-                    best = (i, v);
-                }
-            }
-            let argmax = if full_head {
-                best.0
-            } else {
-                band_ids[best.0] as usize
-            };
-            eprintln!(
-                "ARTOK frame={frame_index} tok={tok} argmax={argmax} finite={finite} eos={}",
-                tok == MUSIC3_AUDIO_END_TOKEN_ID
+        if let (Some(candidates), Some(raw)) = (mask_candidates, raw.as_ref()) {
+            apply_reference_mask(
+                &mut guided,
+                raw,
+                &|global| band_index(global as usize),
+                candidates,
+                end as u32,
+                lo as u32,
             );
         }
-        if tok == MUSIC3_AUDIO_END_TOKEN_ID && !force_no_eos {
+        let tok = band_ids[sample_top_k_ids(&guided, &band_ids, MUSIC3_AR_TOP_K, &mut rng)];
+        ns_head += t0.elapsed().as_nanos();
+        if tok == MUSIC3_AUDIO_END_TOKEN_ID {
             break;
         }
         let semantic = if tok == MUSIC3_AUDIO_END_TOKEN_ID {
@@ -589,19 +433,6 @@ pub fn music3_ar_sample_with_progress(
         let t1 = std::time::Instant::now();
         let sem_embed = lm.tensor_row_f32("model.embed_tokens.weight", semantic as u64)?;
         {
-            const DUMP_FRAMES: &[usize] = &[0, 1, 2, 3, 4, 5, 8, 10, 12, 15];
-            if DUMP_FRAMES.contains(&frame_index) {
-                if let Ok(path) = std::env::var("MAKEPAD_MUSIC3_DUMP_HIDDEN_F10") {
-                    let out = path.replace("f10", &format!("f{frame_index}"));
-                    let mut both = cond_h.clone();
-                    both.extend_from_slice(&uncond_h);
-                    if let Err(err) = write_npy_f32(&out, &both, &[2, cond_h.len()]) {
-                        eprintln!("dump hidden f{frame_index}: {err}");
-                    } else {
-                        eprintln!("dumped last_hidden f{frame_index} -> {out}");
-                    }
-                }
-            }
             if frame_index == 12 || frame_index == 15 {
                 let mut best = (0usize, f32::NEG_INFINITY);
                 for (i, &v) in guided.iter().enumerate() {
@@ -609,20 +440,12 @@ pub fn music3_ar_sample_with_progress(
                         best = (i, v);
                     }
                 }
-                let argmax = if full_head {
-                    best.0
-                } else {
-                    band_ids[best.0] as usize
-                };
+                let argmax = band_ids[best.0] as usize;
                 // Read `guided` at a GLOBAL vocab index in either layout.
                 let at = |global: usize| -> f32 {
-                    if full_head {
-                        guided.get(global).copied().unwrap_or(f32::NAN)
-                    } else {
-                        band_index(global)
-                            .and_then(|i| guided.get(i).copied())
-                            .unwrap_or(f32::NEG_INFINITY)
-                    }
+                    band_index(global)
+                        .and_then(|i| guided.get(i).copied())
+                        .unwrap_or(f32::NEG_INFINITY)
                 };
                 let a = at(155120);
                 let b = at(156729);
@@ -632,55 +455,17 @@ pub fn music3_ar_sample_with_progress(
                     a - b,
                     at(if frame_index == 12 { 156729 } else { 155120 }),
                 );
-                if let Ok(dir) = std::env::var("MAKEPAD_MUSIC3_DUMP_SEMANTIC") {
-                    let out = dir.replace("native_semantic_codes.npy", &format!("native_logits_f{frame_index}.npy"));
-                    // Band layout scatters into a vocab-sized -inf vector so
-                    // the npy matches the full-head dump byte-for-byte.
-                    let full: Vec<f32>;
-                    let dump_slice: &[f32] = if full_head {
-                        &guided
-                    } else {
-                        let mut v = vec![f32::NEG_INFINITY; crate::music3::MUSIC3_LM_VOCAB];
-                        for (i, &g) in band_ids.iter().enumerate() {
-                            v[g as usize] = guided[i];
-                        }
-                        full = v;
-                        &full
-                    };
-                    if let Err(err) = write_npy_f32(&out, dump_slice, &[dump_slice.len()]) {
-                        eprintln!("dump logits f{frame_index}: {err}");
-                    } else {
-                        eprintln!("dumped logits f{frame_index} -> {out}");
-                    }
-                }
             }
         }
-        let forced_resid = force.as_ref().and_then(|(_, fr, k)| {
-            let w = MUSIC3_NUM_CODEBOOKS - 1;
-            if frame_index < *k && (frame_index + 1) * w <= fr.len() {
-                Some(fr[frame_index * w..(frame_index + 1) * w].to_vec())
-            } else {
-                None
-            }
-        });
-        let (resid, depth) = if let Some(fresid) = forced_resid {
-            let depth = music3_rvq_depth_replay(rvq, rvq_prep, &cond_h, &sem_embed, &fresid)?;
-            (fresid, depth)
-        } else {
-            music3_rvq_depth_sample_cfg(
-                rvq,
-                rvq_prep,
-                &cond_h,
-                &uncond_h,
-                &sem_embed,
-                &mut rng,
-                MUSIC3_AR_TOP_K,
-            )?
-        };
-        rvq_out.extend_from_slice(&resid);
-        if trace && frame_index < 16 {
-            eprintln!("ARRVQ frame={frame_index} codes={resid:?}");
-        }
+        let (resid, depth) = music3_rvq_depth_sample_cfg(
+            rvq,
+            rvq_prep,
+            &cond_h,
+            &uncond_h,
+            &sem_embed,
+            &mut rng,
+            MUSIC3_AR_TOP_K,
+        )?;
         if frame_index > 0 {
             hiddens.extend_from_slice(&cond_h);
             hiddens.extend_from_slice(&depth);
@@ -709,23 +494,6 @@ pub fn music3_ar_sample_with_progress(
         }
         let t2 = std::time::Instant::now();
         let feedback = music3_embed_audio_frame(lm, rvq, semantic, &resid)?;
-        {
-            const DUMP_FRAMES: &[usize] = &[0, 1, 2, 3, 4, 5, 8, 10, 12, 15];
-            if DUMP_FRAMES.contains(&frame_index) {
-                if let Ok(path) = std::env::var("MAKEPAD_MUSIC3_DUMP_HIDDEN_F10") {
-                    let out = path
-                        .replace("last_hidden_f10", &format!("feedback_f{frame_index}"))
-                        .replace("f10", &format!("f{frame_index}"));
-                    let mut both = feedback.clone();
-                    both.extend_from_slice(&feedback);
-                    if let Err(err) = write_npy_f32(&out, &both, &[2, feedback.len()]) {
-                        eprintln!("dump feedback f{frame_index}: {err}");
-                    } else {
-                        eprintln!("dumped feedback f{frame_index} -> {out}");
-                    }
-                }
-            }
-        }
         let pair = Music3LmSession::step_embeds_pair(
             &mut cond_s,
             &mut uncond_s,
@@ -738,107 +506,10 @@ pub fn music3_ar_sample_with_progress(
         uncond_h = pair.1;
         ns_step += t2.elapsed().as_nanos();
     }
-    if std::env::var_os("MAKEPAD_MUSIC3_BENCH").is_some() {
-        let frames = music3_ar_emitted_frames(&hiddens).max(1) as u128;
-        eprintln!(
-            "BENCH ar_split head_ms={:.2} rvq_ms={:.2} step_ms={:.2} frames={frames}",
-            (ns_head / frames) as f64 / 1.0e6,
-            (ns_rvq / frames) as f64 / 1.0e6,
-            (ns_step / frames) as f64 / 1.0e6,
-        );
-    }
-    if let Ok(path) = std::env::var("MAKEPAD_MUSIC3_DUMP_SEMANTIC") {
-        let vals: Vec<i64> = semantic_out.iter().map(|&t| t as i64).collect();
-        if let Err(err) = write_npy_i64(&path, &vals, &[vals.len()]) {
-            eprintln!("dump semantic {path}: {err}");
-        } else if trace {
-            eprintln!("dumped semantic {} -> {path}", vals.len());
-        }
-    }
-    if let Ok(path) = std::env::var("MAKEPAD_MUSIC3_DUMP_RVQ") {
-        let width = MUSIC3_NUM_CODEBOOKS - 1;
-        let n = if width == 0 { 0 } else { rvq_out.len() / width };
-        let vals: Vec<i64> = rvq_out.iter().map(|&t| t as i64).collect();
-        if let Err(err) = write_npy_i64(&path, &vals, &[n, width]) {
-            eprintln!("dump rvq {path}: {err}");
-        } else if trace {
-            eprintln!("dumped rvq {n}x{width} -> {path}");
-        }
-    }
-    if trace {
-        eprintln!("ARSEMANTIC n={} {:?}", semantic_out.len(), semantic_out);
-    }
     if hiddens.is_empty() {
         return Err(DiffusionError::workflow("music3 AR produced no frames"));
     }
     Ok(hiddens)
-}
-
-fn write_npy_i64(path: &str, data: &[i64], shape: &[usize]) -> std::io::Result<()> {
-    use std::io::Write;
-    let shape_txt = if shape.len() == 1 {
-        format!("({},)", shape[0])
-    } else {
-        format!(
-            "({})",
-            shape
-                .iter()
-                .map(|d| d.to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    };
-    let mut dict = format!(
-        "{{'descr': '<i8', 'fortran_order': False, 'shape': {shape_txt}, }}"
-    );
-    // npy v1: 6 magic + 1 ver + 1 minor + 2 header_len + header, 64-aligned.
-    let prefix = 10usize;
-    let mut header_len = dict.len() + 1;
-    let pad = (16 - ((prefix + header_len) % 16)) % 16;
-    header_len += pad;
-    dict.push_str(&" ".repeat(pad));
-    dict.push('\n');
-    let mut f = std::fs::File::create(path)?;
-    f.write_all(b"\x93NUMPY\x01\x00")?;
-    f.write_all(&(header_len as u16).to_le_bytes())?;
-    f.write_all(dict.as_bytes())?;
-    for v in data {
-        f.write_all(&v.to_le_bytes())?;
-    }
-    Ok(())
-}
-
-fn write_npy_f32(path: &str, data: &[f32], shape: &[usize]) -> std::io::Result<()> {
-    use std::io::Write;
-    let shape_txt = if shape.len() == 1 {
-        format!("({},)", shape[0])
-    } else {
-        format!(
-            "({})",
-            shape
-                .iter()
-                .map(|d| d.to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    };
-    let mut dict = format!(
-        "{{'descr': '<f4', 'fortran_order': False, 'shape': {shape_txt}, }}"
-    );
-    let prefix = 10usize;
-    let mut header_len = dict.len() + 1;
-    let pad = (16 - ((prefix + header_len) % 16)) % 16;
-    header_len += pad;
-    dict.push_str(&" ".repeat(pad));
-    dict.push('\n');
-    let mut f = std::fs::File::create(path)?;
-    f.write_all(b"\x93NUMPY\x01\x00")?;
-    f.write_all(&(header_len as u16).to_le_bytes())?;
-    f.write_all(dict.as_bytes())?;
-    for v in data {
-        f.write_all(&v.to_le_bytes())?;
-    }
-    Ok(())
 }
 
 fn kth_largest(xs: &[f32], k: usize) -> f32 {

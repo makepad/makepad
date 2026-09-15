@@ -12,10 +12,11 @@
 
 use crate::backend::{
     gpu_attention_packed, gpu_concat_rows, gpu_download, gpu_gated_residual_indexed,
-    gpu_gemm_f16acc_enabled, gpu_linear_f32_resident, gpu_linear_nt_cached,
-    gpu_linear_nt_cached_f16, gpu_rms_norm_mod_indexed, gpu_rms_norm_mul, gpu_rope_half,
+    gpu_linear_f32_resident, gpu_linear_nt_cached_f16_with_precision,
+    gpu_linear_nt_cached_with_precision, gpu_rms_norm_mod_indexed, gpu_rms_norm_mul, gpu_rope_half,
     gpu_slice_cols, gpu_slice_rows, gpu_swiglu_value_gate, gpu_upload, gpu_upload_u32,
-    gpu_weight_cache_ensure, gpu_weight_cache_ensure_quant, GpuLinearPart, GpuTensor,
+    gpu_weight_cache_ensure, gpu_weight_cache_ensure_quant, gpu_weight_cache_evict_prefix, GpuLinearPart, GpuTensor,
+    GemmPrecision,
 };
 use crate::h3::{
     H3PackedLayout, H3RopeTables, H3RowTimesteps, H3ShardedWeights, h3_timestep_embedding,
@@ -62,6 +63,7 @@ pub struct H3DitPrepared {
     refiner_q_norm: Vec<Vec<f32>>,
     refiner_k_norm: Vec<Vec<f32>>,
     refiner_final_norm: Vec<f32>,
+    pub(crate) adaln_cache: Option<std::sync::Arc<H3AdaLnCache>>,
 }
 
 #[derive(Default)]
@@ -227,8 +229,94 @@ impl H3DitPrepared {
             refiner_q_norm,
             refiner_k_norm,
             refiner_final_norm: host_named_f32(weights, "token_refiner.final_norm.weight", h)?,
+            adaln_cache: None,
         })
     }
+}
+
+/// Exact projection outputs for one bounded schedule. Host storage survives
+/// component eviction; only the current block's small table is uploaded during
+/// a forward. This avoids retaining the 26 GB BF16 projection weights.
+pub(crate) struct H3AdaLnCache {
+    namespace: String,
+    precision: GemmPrecision,
+    values: Vec<Vec<u32>>,
+    // [step][layer][row * ADALN_COLS + column]
+    tables: Vec<Vec<Vec<f32>>>,
+}
+
+impl H3AdaLnCache {
+    pub(crate) fn matches(&self, weights: &H3ShardedWeights, values: &[Vec<f32>], precision: GemmPrecision) -> bool {
+        self.namespace == weights.dit_namespace()
+            && self.precision == precision
+            && self.values.len() == values.len()
+            && self.values.iter().zip(values).all(|(a, b)| {
+                a.iter().copied().eq(b.iter().map(|v| v.to_bits()))
+            })
+    }
+
+    fn table(&self, weights: &H3ShardedWeights, values: &[f32], precision: GemmPrecision, layer: usize) -> Option<&[f32]> {
+        if self.namespace != weights.dit_namespace() || self.precision != precision {
+            return None;
+        }
+        let step = self.values.iter().position(|a| a.iter().copied().eq(values.iter().map(|v| v.to_bits())))?;
+        Some(&self.tables[step][layer])
+    }
+
+    pub(crate) fn prepare(
+        weights: &H3ShardedWeights,
+        prepared: &H3DitPrepared,
+        values: &[Vec<f32>],
+        precision: GemmPrecision,
+        mut check: impl FnMut() -> Result<()>,
+    ) -> Result<Self> {
+        let mut embeddings = Vec::with_capacity(values.len());
+        for step in values {
+            check()?;
+            embeddings.push(silu_temb_gpu(weights, prepared, step)?);
+        }
+        let mut tables: Vec<Vec<Vec<f32>>> = values.iter().map(|_| Vec::with_capacity(H3_DEPTH)).collect();
+        for layer in 0..H3_DEPTH {
+            let name = format!("transformer_blocks.{layer}.adaln_proj.linear.weight");
+            // Retain the original per-step GEMM shape and precision. A combined
+            // larger GEMM can choose a different algorithm and perturb outputs.
+            let result: Result<()> = (|| {
+                for (step, embedding) in embeddings.iter().enumerate() {
+                    check()?;
+                    let table = linear_cached(weights, embedding, &name, ADALN_COLS,
+                        &prepared.adaln_bias[layer], false, precision)?;
+                    tables[step].push(gpu_download(&table).map_err(DiffusionError::model)?);
+                }
+                Ok(())
+            })();
+            // Also release this projection when cancelled or when a copy fails.
+            let release = gpu_weight_cache_evict_prefix(&format!("{}::{name}", weights.dit_namespace()))
+                .map_err(DiffusionError::model);
+            result?;
+            release?;
+        }
+        Ok(Self {
+            namespace: weights.dit_namespace().to_string(),
+            precision,
+            values: values.iter().map(|step| step.iter().map(|v| v.to_bits()).collect()).collect(),
+            tables,
+        })
+    }
+}
+
+fn silu_temb_gpu(weights: &H3ShardedWeights, prepared: &H3DitPrepared, values: &[f32]) -> Result<GpuTensor> {
+    let (temb, dim, curve_mode) = match weights.adaln_curve() {
+        Some(curve) => (values.iter().flat_map(|&t| curve.temb(t)).collect(), curve.dim, true),
+        None => (compute_temb(prepared, values)?, H3_TIME_EMBED_DIM, false),
+    };
+    let rows = values.len().max(2);
+    let mut padded = Vec::with_capacity(rows * dim);
+    for row in 0..rows {
+        let src = row.min(values.len() - 1);
+        padded.extend_from_slice(&temb[src * dim..(src + 1) * dim]);
+    }
+    if !curve_mode { host_silu(&mut padded); }
+    gpu_upload(&padded, rows, dim).map_err(DiffusionError::model)
 }
 
 /// Stream-ensure one linear weight into the device cache, then hand back the
@@ -241,6 +329,7 @@ fn ensure_linear<'a>(
     n: usize,
     k: usize,
     m: usize,
+    precision: GemmPrecision,
 ) -> Result<GpuLinearPart<'a>> {
     let ggml_type = weights.linear_ggml_type(name)?;
     if crate::backend::gpu_quant_linear_type_supported(ggml_type) {
@@ -249,7 +338,7 @@ fn ensure_linear<'a>(
         })
         .map_err(DiffusionError::model)?;
     } else {
-        let want_a16 = gpu_gemm_f16acc_enabled() && m > 1;
+        let want_a16 = precision.f16_accumulate && m > 1;
         gpu_weight_cache_ensure(weights.dit_namespace(), name, ggml_type, n, k, want_a16, || {
             weights.tensor_bytes(name).map_err(|err| err.to_string())
         })
@@ -270,13 +359,26 @@ fn linear_cached(
     n: usize,
     bias: &[f32],
     out_half: bool,
+    precision: GemmPrecision,
 ) -> Result<GpuTensor> {
-    let part = ensure_linear(weights, name, n, x.cols(), x.rows())?;
+    let part = ensure_linear(weights, name, n, x.cols(), x.rows(), precision)?;
     let parts = [part];
     if out_half {
-        gpu_linear_nt_cached_f16(x, weights.dit_namespace(), &parts, bias)
+        gpu_linear_nt_cached_f16_with_precision(
+            x,
+            weights.dit_namespace(),
+            &parts,
+            bias,
+            precision,
+        )
     } else {
-        gpu_linear_nt_cached(x, weights.dit_namespace(), &parts, bias)
+        gpu_linear_nt_cached_with_precision(
+            x,
+            weights.dit_namespace(),
+            &parts,
+            bias,
+            precision,
+        )
     }
     .map_err(DiffusionError::model)
 }
@@ -286,19 +388,32 @@ fn qkv_cached(
     x: &GpuTensor,
     prefix: &str,
     out_half: bool,
+    precision: GemmPrecision,
 ) -> Result<(GpuTensor, GpuTensor, GpuTensor)> {
     let inner = H3_HEAD_COUNT * H3_HEAD_DIM;
     let q_name = format!("{prefix}.attn.to_q.weight");
     let k_name = format!("{prefix}.attn.to_k.weight");
     let v_name = format!("{prefix}.attn.to_v.weight");
-    let q_part = ensure_linear(weights, &q_name, inner, x.cols(), x.rows())?;
-    let k_part = ensure_linear(weights, &k_name, inner, x.cols(), x.rows())?;
-    let v_part = ensure_linear(weights, &v_name, inner, x.cols(), x.rows())?;
+    let q_part = ensure_linear(weights, &q_name, inner, x.cols(), x.rows(), precision)?;
+    let k_part = ensure_linear(weights, &k_name, inner, x.cols(), x.rows(), precision)?;
+    let v_part = ensure_linear(weights, &v_name, inner, x.cols(), x.rows(), precision)?;
     let parts = [q_part, k_part, v_part];
     let qkv = if out_half {
-        gpu_linear_nt_cached_f16(x, weights.dit_namespace(), &parts, &[])
+        gpu_linear_nt_cached_f16_with_precision(
+            x,
+            weights.dit_namespace(),
+            &parts,
+            &[],
+            precision,
+        )
     } else {
-        gpu_linear_nt_cached(x, weights.dit_namespace(), &parts, &[])
+        gpu_linear_nt_cached_with_precision(
+            x,
+            weights.dit_namespace(),
+            &parts,
+            &[],
+            precision,
+        )
     }
     .map_err(DiffusionError::model)?;
     let q = gpu_slice_cols(&qkv, 0, inner).map_err(DiffusionError::model)?;
@@ -369,6 +484,7 @@ fn refiner_block(
     prepared: &H3DitPrepared,
     hidden: GpuTensor,
     layer: usize,
+    precision: GemmPrecision,
 ) -> Result<GpuTensor> {
     let prefix = format!("token_refiner.refiner_blocks.{layer}");
     let scale = 1.0 / (H3_HEAD_DIM as f32).sqrt();
@@ -381,7 +497,7 @@ fn refiner_block(
         H3_NORM_EPS,
     )
     .map_err(DiffusionError::model)?;
-    let (q, k, v) = qkv_cached(weights, &normed, &prefix, false)?;
+    let (q, k, v) = qkv_cached(weights, &normed, &prefix, false, precision)?;
     drop(normed);
     let q = gpu_rms_norm_mul(
         &q,
@@ -411,6 +527,7 @@ fn refiner_block(
         H3_HIDDEN_SIZE,
         &[],
         false,
+        precision,
     )?;
     let hidden = crate::backend::gpu_add(&hidden, &attn).map_err(DiffusionError::model)?;
     drop(attn);
@@ -430,6 +547,7 @@ fn refiner_block(
         2 * H3_FFN_DIM,
         &[],
         false,
+        precision,
     )?;
     drop(normed);
     let ff = gpu_swiglu_value_gate(&gateval).map_err(DiffusionError::model)?;
@@ -441,6 +559,7 @@ fn refiner_block(
         H3_HIDDEN_SIZE,
         &[],
         false,
+        precision,
     )?;
     crate::backend::gpu_add(&hidden, &ff).map_err(DiffusionError::model)
 }
@@ -456,9 +575,10 @@ pub fn h3_dit_forward(
     video_rows: &[f32],
     audio_rows: &[f32],
     text_embeds: &[f32],
-    act16: bool,
+    precision: GemmPrecision,
     debug_blocks: &[usize],
 ) -> Result<H3DitForwardOutput> {
+    let f16_activations = precision.f16_activations;
     let seq = layout.sequence_length;
     // `video_rows` carries the fl2va conditioning rows FIRST, then the
     // generated rows (the reference's `video_indices` order); t2va has zero
@@ -488,10 +608,11 @@ pub fn h3_dit_forward(
         H3_HIDDEN_SIZE,
         &prepared.context_embedder_bias,
         false,
+        precision,
     )?;
     drop(text_in);
     for layer in 0..H3_REFINER_DEPTH {
-        text = refiner_block(weights, prepared, text, layer)?;
+        text = refiner_block(weights, prepared, text, layer, precision)?;
     }
     text = gpu_rms_norm_mul(
         &text,
@@ -591,14 +712,17 @@ pub fn h3_dit_forward(
         // Per-block AdaLN table: (m_pad, 96768) viewed as (m_pad * 3, 32256)
         // rows addressed by adaln_idx. Chunks: shift_msa, scale_msa,
         // gate_msa, shift_mlp, scale_mlp, gate_mlp.
-        let table = linear_cached(
-            weights,
-            &silu_temb_gpu,
-            &format!("{prefix}.adaln_proj.linear.weight"),
-            ADALN_COLS,
-            &prepared.adaln_bias[layer],
-            false,
-        )?;
+        let cached = prepared.adaln_cache.as_ref()
+            .and_then(|cache| cache.table(weights, &plan.values, precision, layer));
+        let table = if let Some(table) = cached {
+            gpu_upload(table, m_pad, ADALN_COLS).map_err(DiffusionError::model)?
+        } else {
+            linear_cached(
+                weights, &silu_temb_gpu,
+                &format!("{prefix}.adaln_proj.linear.weight"), ADALN_COLS,
+                &prepared.adaln_bias[layer], false, precision,
+            )?
+        };
         if layer == 0 && !debug_blocks.is_empty() {
             debug.block_adaln0 = Some(gpu_download(&table).map_err(DiffusionError::model)?);
         }
@@ -612,10 +736,10 @@ pub fn h3_dit_forward(
             H3_HIDDEN_SIZE,     // scale_msa = chunk 1
             0,                  // shift_msa = chunk 0
             H3_NORM_EPS,
-            act16,
+            f16_activations,
         )
         .map_err(DiffusionError::model)?;
-        let (q, k, v) = qkv_cached(weights, &normed, &prefix, act16)?;
+        let (q, k, v) = qkv_cached(weights, &normed, &prefix, f16_activations, precision)?;
         drop(normed);
         let q = gpu_rms_norm_mul(
             &q,
@@ -649,6 +773,7 @@ pub fn h3_dit_forward(
             H3_HIDDEN_SIZE,
             &[],
             false,
+            precision,
         )?;
         hidden = gpu_gated_residual_indexed(
             &hidden,
@@ -670,7 +795,7 @@ pub fn h3_dit_forward(
             4 * H3_HIDDEN_SIZE, // scale_mlp = chunk 4
             3 * H3_HIDDEN_SIZE, // shift_mlp = chunk 3
             H3_NORM_EPS,
-            act16,
+            f16_activations,
         )
         .map_err(DiffusionError::model)?;
         let gateval = linear_cached(
@@ -679,7 +804,8 @@ pub fn h3_dit_forward(
             &format!("{prefix}.ff.net.0.proj.weight"),
             2 * H3_FFN_DIM,
             &[],
-            act16,
+            f16_activations,
+            precision,
         )?;
         drop(normed);
         let ff = gpu_swiglu_value_gate(&gateval).map_err(DiffusionError::model)?;
@@ -691,6 +817,7 @@ pub fn h3_dit_forward(
             H3_HIDDEN_SIZE,
             &[],
             false,
+            precision,
         )?;
         hidden = gpu_gated_residual_indexed(
             &hidden,
@@ -720,6 +847,7 @@ pub fn h3_dit_forward(
         NORM_OUT_COLS,
         &prepared.norm_out_bias,
         false,
+        precision,
     )?;
     let hidden = gpu_rms_norm_mod_indexed(
         &hidden,

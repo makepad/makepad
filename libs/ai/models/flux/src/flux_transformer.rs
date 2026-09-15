@@ -73,7 +73,6 @@ pub struct FluxTransformerGraph {
     pub image_token_count: usize,
     input_hidden: TensorId,
     input_hidden_mm: TensorId,
-    debug_tensors: Vec<FluxTransformerDebugTensor>,
 }
 
 pub struct CompiledFluxTransformer {
@@ -130,12 +129,6 @@ struct FluxTransformerShapeInfo {
     hidden_size: usize,
     head_count: usize,
     head_dim: usize,
-}
-
-#[derive(Clone, Debug)]
-struct FluxTransformerDebugTensor {
-    name: String,
-    tensor_id: TensorId,
 }
 
 #[derive(Clone, Debug)]
@@ -725,22 +718,6 @@ impl CompiledFluxTransformerGraph {
         let channel_count = usize::try_from(output_tensor.ne[0])
             .map_err(|_| DiffusionError::model("flux transformer output channels exceed usize"))?;
         let prediction = f32_bytes_to_vec(prediction_bytes)?;
-        if std::env::var_os("FLUX_DIT_DOUBLE_EXEC").is_some() {
-            let execution2 = self
-                .session
-                .execute(&weights.ctx, &writes, &[self.graph.result_prediction])
-                .map_err(DiffusionError::model)?;
-            let pred2 = f32_bytes_to_vec(
-                execution2
-                    .outputs
-                    .get(&self.graph.result_prediction)
-                    .ok_or_else(|| {
-                        DiffusionError::model("flux transformer double-exec missing output")
-                    })?,
-            )?;
-            eprintln!("flux dit pred2-same-in {}", f32_stats(&pred2));
-        }
-
         Ok(FluxTransformerRun {
             prediction,
             image_token_count: self.graph.image_token_count,
@@ -756,112 +733,11 @@ impl CompiledFluxTransformerGraph {
         timestep: f32,
         guidance: f32,
     ) -> Result<FluxTransformerDebugRun> {
-        let latents_tensor = require_tensor(&weights.ctx, self.graph.input_packed_latents)?;
-        let expected_latents = usize::try_from(latents_tensor.ne[0] * latents_tensor.ne[1])
-            .map_err(|_| DiffusionError::model("flux packed latents shape exceeds usize"))?;
-        if packed_latents.len() != expected_latents {
-            return Err(DiffusionError::workflow(format!(
-                "flux packed latents expected {} values, got {}",
-                expected_latents,
-                packed_latents.len()
-            )));
-        }
-
-        let encoder_tensor = require_tensor(&weights.ctx, self.graph.input_encoder_hidden_states)?;
-        let expected_encoder = usize::try_from(encoder_tensor.ne[0] * encoder_tensor.ne[1])
-            .map_err(|_| DiffusionError::model("flux encoder hidden shape exceeds usize"))?;
-        if conditioning.t5_hidden_states.len() != expected_encoder {
-            return Err(DiffusionError::workflow(format!(
-                "flux encoder hidden expected {} values, got {}",
-                expected_encoder,
-                conditioning.t5_hidden_states.len()
-            )));
-        }
-
-        let pooled_tensor = require_tensor(&weights.ctx, self.graph.input_pooled_projections)?;
-        let expected_pooled = usize::try_from(pooled_tensor.ne[0] * pooled_tensor.ne[1])
-            .map_err(|_| DiffusionError::model("flux pooled shape exceeds usize"))?;
-        if conditioning.clip_pooled.len() != expected_pooled {
-            return Err(DiffusionError::workflow(format!(
-                "flux pooled projection expected {} values, got {}",
-                expected_pooled,
-                conditioning.clip_pooled.len()
-            )));
-        }
-
-        let packed_latents_bytes = f32s_to_le_bytes(packed_latents);
-        let encoder_hidden_bytes = f32s_to_le_bytes(&conditioning.t5_hidden_states);
-        let pooled_bytes = f32s_to_le_bytes(&conditioning.clip_pooled);
-        let timestep_bytes = f32s_to_le_bytes(&[timestep]);
-        let guidance_bytes = f32s_to_le_bytes(&[guidance]);
-
-        let mut writes = vec![
-            GraphTensorWrite {
-                tensor_id: self.graph.input_packed_latents,
-                bytes: &packed_latents_bytes,
-            },
-            GraphTensorWrite {
-                tensor_id: self.graph.input_encoder_hidden_states,
-                bytes: &encoder_hidden_bytes,
-            },
-            GraphTensorWrite {
-                tensor_id: self.graph.input_pooled_projections,
-                bytes: &pooled_bytes,
-            },
-            GraphTensorWrite {
-                tensor_id: self.graph.input_timestep,
-                bytes: &timestep_bytes,
-            },
-        ];
-        if let Some(input_guidance) = self.graph.input_guidance {
-            writes.push(GraphTensorWrite {
-                tensor_id: input_guidance,
-                bytes: &guidance_bytes,
-            });
-        }
-
-        let mut outputs = Vec::with_capacity(1 + self.graph.debug_tensors.len());
-        outputs.push(self.graph.result_prediction);
-        for stage in &self.graph.debug_tensors {
-            outputs.push(stage.tensor_id);
-        }
-
-        let execution = self
-            .session
-            .execute(&weights.ctx, &writes, &outputs)
-            .map_err(DiffusionError::model)?;
-        let prediction_bytes = execution
-            .outputs
-            .get(&self.graph.result_prediction)
-            .ok_or_else(|| {
-                DiffusionError::model("flux transformer execution did not return output")
-            })?;
-        let output_tensor = require_tensor(&weights.ctx, self.graph.result_prediction)?;
-        let channel_count = usize::try_from(output_tensor.ne[0])
-            .map_err(|_| DiffusionError::model("flux transformer output channels exceed usize"))?;
-        let run = FluxTransformerRun {
-            prediction: f32_bytes_to_vec(prediction_bytes)?,
-            image_token_count: self.graph.image_token_count,
-            channel_count,
-        };
-
-        let mut stages = Vec::with_capacity(self.graph.debug_tensors.len());
-        for stage in &self.graph.debug_tensors {
-            let tensor = require_tensor(&weights.ctx, stage.tensor_id)?;
-            let bytes = execution.outputs.get(&stage.tensor_id).ok_or_else(|| {
-                DiffusionError::model(format!(
-                    "flux transformer debug tensor '{}' missing output",
-                    stage.name
-                ))
-            })?;
-            stages.push(FluxTransformerStageOutput {
-                name: stage.name.clone(),
-                values: f32_bytes_to_vec(bytes)?,
-                extents: tensor_extents_usize(tensor)?,
-            });
-        }
-
-        Ok(FluxTransformerDebugRun { run, stages })
+        let run = self.execute(weights, conditioning, packed_latents, timestep, guidance)?;
+        Ok(FluxTransformerDebugRun {
+            run,
+            stages: Vec::new(),
+        })
     }
 }
 
@@ -966,11 +842,7 @@ impl LazyFluxTransformer {
         // never leave the device between ops; only tiny modulation vectors and
         // the final prediction cross the bus). Any failure falls back to the
         // host math below, which stays byte-for-byte what it was.
-        if !capture_debug
-            && !flux_force_cpu_math()
-            && flux_device_path_enabled()
-            && gpu_device_available()
-        {
+        if !capture_debug && gpu_device_available() {
             match self.execute_device(
                 weights,
                 conditioning,
@@ -1533,12 +1405,12 @@ impl LazyFluxTransformer {
         FLUX_DEVICE_GRAPH.with(|cell| {
             let mut slot = cell.borrow_mut();
             let namespace = flux_cache_namespace(weights);
-            let act16 = flux_act16_enabled(weights);
+            let f16_activations = flux_f16_activations_enabled(weights);
             let matches = slot.as_ref().is_some_and(|state| {
                 state.namespace == namespace
                     && state.image_token_count == self.image_token_count
                     && state.text_token_count == self.text_token_count
-                    && state.act16 == act16
+                    && state.f16_activations == f16_activations
             });
             if matches {
                 let state = slot.as_ref().expect("matching flux graph state");
@@ -1553,7 +1425,7 @@ impl LazyFluxTransformer {
                     namespace,
                     image_token_count: self.image_token_count,
                     text_token_count: self.text_token_count,
-                    act16,
+                    f16_activations,
                     latents: gpu_upload(
                         packed_latents,
                         self.image_token_count,
@@ -1682,10 +1554,10 @@ impl LazyFluxTransformer {
         let attention_scale = 1.0 / (self.head_dim as f32).sqrt();
         // The f16 activation spine: modulated-norm outputs, qkv/linear1/mlp
         // activations and the q/k/v pipeline stay f16 between the f16acc
-        // gemms and the attention/gelu consumers (FLUX_ACT_F16=0 reverts;
-        // F8 weights force it off — their dequant feeds f32-accumulate
+        // gemms and the attention/gelu consumers. F8 weights force it off —
+        // their dequant feeds f32-accumulate
         // gemms, which refuse f16 activations).
-        let act16 = flux_act16_enabled(weights);
+        let f16_activations = flux_f16_activations_enabled(weights);
 
         let mut hidden = linear_device(
             weights,
@@ -1799,7 +1671,7 @@ impl LazyFluxTransformer {
             let txt_scale_mlp = mod_off(txt_mod, 4);
             let txt_gate_mlp = mod_off(txt_mod, 5);
 
-            let norm_hidden = if act16 {
+            let norm_hidden = if f16_activations {
                 gpu_layer_norm_mod_f16(
                     &hidden,
                     &mod_out,
@@ -1817,7 +1689,7 @@ impl LazyFluxTransformer {
                 )
             }
             .map_err(DiffusionError::model)?;
-            let norm_encoder_hidden = if act16 {
+            let norm_encoder_hidden = if f16_activations {
                 gpu_layer_norm_mod_f16(
                     &encoder_hidden,
                     &mod_out,
@@ -1836,7 +1708,7 @@ impl LazyFluxTransformer {
             }
             .map_err(DiffusionError::model)?;
 
-            let img_qkv = if act16 {
+            let img_qkv = if f16_activations {
                 linear_device_f16(
                     weights,
                     &namespace,
@@ -1860,7 +1732,7 @@ impl LazyFluxTransformer {
             let img_v = gpu_slice_cols(&img_qkv, self.hidden_size * 2, self.hidden_size)
                 .map_err(DiffusionError::model)?;
             drop(img_qkv);
-            let txt_qkv = if act16 {
+            let txt_qkv = if f16_activations {
                 linear_device_f16(
                     weights,
                     &namespace,
@@ -1949,7 +1821,7 @@ impl LazyFluxTransformer {
                     .map_err(DiffusionError::model)?;
             drop((hidden_attn, encoder_attn));
 
-            let hidden_ff_input = if act16 {
+            let hidden_ff_input = if f16_activations {
                 gpu_layer_norm_mod_f16(
                     &hidden,
                     &mod_out,
@@ -1967,7 +1839,7 @@ impl LazyFluxTransformer {
                 )
             }
             .map_err(DiffusionError::model)?;
-            let encoder_ff_input = if act16 {
+            let encoder_ff_input = if f16_activations {
                 gpu_layer_norm_mod_f16(
                     &encoder_hidden,
                     &mod_out,
@@ -2028,13 +1900,13 @@ impl LazyFluxTransformer {
             let shift = mod_off(single_mod, 0);
             let scale = mod_off(single_mod, 1);
             let gate = mod_off(single_mod, 2);
-            let norm_joint = if act16 {
+            let norm_joint = if f16_activations {
                 gpu_layer_norm_mod_f16(&joint, &mod_out, scale, shift, FLUX_LAYER_NORM_EPSILON)
             } else {
                 gpu_layer_norm_mod(&joint, &mod_out, scale, shift, FLUX_LAYER_NORM_EPSILON)
             }
             .map_err(DiffusionError::model)?;
-            let linear1 = if act16 {
+            let linear1 = if f16_activations {
                 linear_device_f16(
                     weights,
                     &namespace,
@@ -2083,7 +1955,7 @@ impl LazyFluxTransformer {
             let mlp = gpu_gelu(&mlp).map_err(DiffusionError::model)?;
             // On the f16 spine the mlp half is f16; bring the f32 attention
             // output over so linear2 consumes one f16 activation block.
-            let fused = if act16 {
+            let fused = if f16_activations {
                 let attn16 = gpu_to_f16(&attn).map_err(DiffusionError::model)?;
                 gpu_concat_cols(&[&attn16, &mlp]).map_err(DiffusionError::model)?
             } else {
@@ -2144,7 +2016,7 @@ struct FluxDeviceGraphState {
     namespace: String,
     image_token_count: usize,
     text_token_count: usize,
-    act16: bool,
+    f16_activations: bool,
     latents: GpuTensor,
     encoder: GpuTensor,
     temb: GpuTensor,
@@ -2159,24 +2031,11 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-fn flux_device_path_enabled() -> bool {
-    match std::env::var("FLUX_DEVICE") {
-        Ok(value) => value != "0",
-        Err(_) => true,
-    }
-}
-
 /// CUDA-graph replay of the denoise step. Default: 512-class shapes only —
 /// at 1024 the graph-pinned pool buffers cannot be freed at the VAE phase
 /// boundary, which re-crowds the 32GB WDDM residency cliff the per-phase
 /// pool cap exists to avoid. FLUX_GRAPH=1 forces all shapes, =0 disables.
-/// Compare/profile modes bypass the graph (they sync inside the step).
 fn flux_graph_enabled(total_tokens: usize) -> bool {
-    if matches!(std::env::var("FLUX_ATTN_COMPARE"), Ok(value) if value == "1")
-        || matches!(std::env::var("MAKEPAD_GPU_PROF"), Ok(value) if value == "1")
-    {
-        return false;
-    }
     match std::env::var("FLUX_GRAPH") {
         Ok(value) if value == "0" => false,
         Ok(value) if value == "1" => true,
@@ -2293,7 +2152,7 @@ fn feed_forward_device(
     weight2: &str,
     bias2: &str,
 ) -> Result<GpuTensor> {
-    if flux_act16_enabled(weights) {
+    if flux_f16_activations_enabled(weights) {
         let hidden = linear_device_f16(weights, namespace, input, weight0, None)?;
         let bias = weights.tensor_f32_values_concat(bias0)?;
         let hidden = gpu_gelu_bias_f16(&hidden, namespace, weight0, &bias)
@@ -2605,9 +2464,6 @@ fn linear_rows(
         }
         let mut part_output = if input.rows == 0 {
             Vec::new()
-        } else if flux_force_cpu_math() {
-            let decoded = decoded_matrix_f32_cached(part)?;
-            matmul_nt_f32_cpu(&input.data, decoded.as_slice(), input.rows, input.cols, part.rows)?
         } else if let Some(values) = try_matmul_nt_ggml_bytes(
             &input.data,
             part.bytes,
@@ -2705,18 +2561,16 @@ fn apply_modulated_layer_norm_rows(
     if input.rows == 0 {
         return RowsTensor::new(0, input.cols, Vec::new());
     }
-    if !flux_force_cpu_math() {
-        if let Some(output) = try_layer_norm_mul_add_f32(
-            &input.data,
-            &[input.rows, input.cols],
-            &scale_plus_one,
-            &[input.cols],
-            shift,
-            &[input.cols],
-            FLUX_LAYER_NORM_EPSILON,
-        ) {
-            return RowsTensor::new(input.rows, input.cols, output);
-        }
+    if let Some(output) = try_layer_norm_mul_add_f32(
+        &input.data,
+        &[input.rows, input.cols],
+        &scale_plus_one,
+        &[input.cols],
+        shift,
+        &[input.cols],
+        FLUX_LAYER_NORM_EPSILON,
+    ) {
+        return RowsTensor::new(input.rows, input.cols, output);
     }
     let mut output = Vec::with_capacity(input.data.len());
     for row in input.data.chunks_exact(input.cols) {
@@ -2753,16 +2607,14 @@ fn apply_head_rms_norm_rows(
     if input.token_count == 0 {
         return HeadTensor::new(0, input.head_count, input.head_dim, Vec::new());
     }
-    if !flux_force_cpu_math() {
-        if let Some(output) = try_rms_norm_mul_f32(
-            &input.data,
-            &[input.token_count * input.head_count, input.head_dim],
-            &scale,
-            &[scale.len()],
-            FLUX_LAYER_NORM_EPSILON,
-        ) {
-            return HeadTensor::new(input.token_count, input.head_count, input.head_dim, output);
-        }
+    if let Some(output) = try_rms_norm_mul_f32(
+        &input.data,
+        &[input.token_count * input.head_count, input.head_dim],
+        &scale,
+        &[scale.len()],
+        FLUX_LAYER_NORM_EPSILON,
+    ) {
+        return HeadTensor::new(input.token_count, input.head_count, input.head_dim, output);
     }
     let mut output = Vec::with_capacity(input.data.len());
     for row in input.data.chunks_exact(input.head_dim) {
@@ -2826,19 +2678,17 @@ fn build_attention_output_rows(q: &HeadTensor, k: &HeadTensor, v: &HeadTensor) -
     let head_dim = q.head_dim;
     let scale = 1.0 / (head_dim as f32).sqrt();
 
-    if !flux_force_cpu_math() {
-        if let Some(output) = try_flash_attn_f32_packed(
-            &q.data,
-            &k.data,
-            &v.data,
-            token_count,
-            token_count,
-            head_count,
-            head_dim,
-            scale,
-        ) {
-            return RowsTensor::new(token_count, head_count * head_dim, output);
-        }
+    if let Some(output) = try_flash_attn_f32_packed(
+        &q.data,
+        &k.data,
+        &v.data,
+        token_count,
+        token_count,
+        head_count,
+        head_dim,
+        scale,
+    ) {
+        return RowsTensor::new(token_count, head_count * head_dim, output);
     }
 
     let mut output = vec![0.0f32; token_count * head_count * head_dim];
@@ -2846,9 +2696,7 @@ fn build_attention_output_rows(q: &HeadTensor, k: &HeadTensor, v: &HeadTensor) -
         let q_head = extract_head_rows(&q.data, token_count, head_count, head_dim, head_idx);
         let k_head = extract_head_rows(&k.data, token_count, head_count, head_dim, head_idx);
         let v_head = extract_head_rows(&v.data, token_count, head_count, head_dim, head_idx);
-        let mut scores = if flux_force_cpu_math() {
-            matmul_nt_f32_cpu(&q_head, &k_head, token_count, head_dim, token_count)?
-        } else if let Some(scores) =
+        let mut scores = if let Some(scores) =
             try_matmul_nt_f32(&q_head, &k_head, token_count, head_dim, token_count)
         {
             scores
@@ -2859,30 +2707,26 @@ fn build_attention_output_rows(q: &HeadTensor, k: &HeadTensor, v: &HeadTensor) -
             *score *= scale;
         }
 
-        if !flux_force_cpu_math() {
-            if let Some(head_output) = try_attention_softmax_weighted_sum_f32(
-                &scores,
-                &v_head,
+        if let Some(head_output) = try_attention_softmax_weighted_sum_f32(
+            &scores,
+            &v_head,
+            token_count,
+            token_count,
+            head_dim,
+        ) {
+            write_head_rows(
+                &mut output,
                 token_count,
-                token_count,
+                head_count,
                 head_dim,
-            ) {
-                write_head_rows(
-                    &mut output,
-                    token_count,
-                    head_count,
-                    head_dim,
-                    head_idx,
-                    &head_output,
-                )?;
-                continue;
-            }
+                head_idx,
+                &head_output,
+            )?;
+            continue;
         }
 
         softmax_in_place(&mut scores, token_count)?;
-        let head_output = if flux_force_cpu_math() {
-            matmul_nn_f32_cpu(&scores, &v_head, token_count, token_count, head_dim)?
-        } else if let Some(head_output) =
+        let head_output = if let Some(head_output) =
             try_matmul_nn_f32(&scores, &v_head, token_count, token_count, head_dim)
         {
             head_output
@@ -2918,10 +2762,8 @@ fn gelu_rows(input: &RowsTensor) -> Result<RowsTensor> {
     if input.rows == 0 {
         return RowsTensor::new(0, input.cols, Vec::new());
     }
-    if !flux_force_cpu_math() {
-        if let Some(output) = try_gelu_f32(&input.data, &[input.rows, input.cols]) {
-            return RowsTensor::new(input.rows, input.cols, output);
-        }
+    if let Some(output) = try_gelu_f32(&input.data, &[input.rows, input.cols]) {
+        return RowsTensor::new(input.rows, input.cols, output);
     }
     RowsTensor::new(
         input.rows,
@@ -2945,12 +2787,10 @@ fn add_rows(lhs: &RowsTensor, rhs: &RowsTensor) -> Result<RowsTensor> {
     if lhs.rows == 0 {
         return RowsTensor::new(0, lhs.cols, Vec::new());
     }
-    if !flux_force_cpu_math() {
-        if let Some(output) =
-            try_add_f32(&lhs.data, &[lhs.rows, lhs.cols], &rhs.data, &[rhs.rows, rhs.cols])
-        {
-            return RowsTensor::new(lhs.rows, lhs.cols, output);
-        }
+    if let Some(output) =
+        try_add_f32(&lhs.data, &[lhs.rows, lhs.cols], &rhs.data, &[rhs.rows, rhs.cols])
+    {
+        return RowsTensor::new(lhs.rows, lhs.cols, output);
     }
     RowsTensor::new(
         lhs.rows,
@@ -2983,18 +2823,16 @@ fn gated_residual_rows(residual: &RowsTensor, update: &RowsTensor, gate: &[f32])
     if residual.rows == 0 {
         return RowsTensor::new(0, residual.cols, Vec::new());
     }
-    if !flux_force_cpu_math() {
-        if let Some(scaled_update) =
-            try_mul_f32(&update.data, &[update.rows, update.cols], gate, &[gate.len()])
-        {
-            if let Some(output) = try_add_f32(
-                &residual.data,
-                &[residual.rows, residual.cols],
-                &scaled_update,
-                &[update.rows, update.cols],
-            ) {
-                return RowsTensor::new(residual.rows, residual.cols, output);
-            }
+    if let Some(scaled_update) =
+        try_mul_f32(&update.data, &[update.rows, update.cols], gate, &[gate.len()])
+    {
+        if let Some(output) = try_add_f32(
+            &residual.data,
+            &[residual.rows, residual.cols],
+            &scaled_update,
+            &[update.rows, update.cols],
+        ) {
+            return RowsTensor::new(residual.rows, residual.cols, output);
         }
     }
     let mut output = residual.data.clone();
@@ -3104,15 +2942,8 @@ fn flux_namespace_for(path: &Path, lora_fingerprint: &str) -> String {
 /// The f16 activation spine requires f16-accumulate gemms, which the F8
 /// dequant path (bf16 scratch + f32 accumulate, the ComfyUI-default numerics
 /// class) deliberately refuses — so F8 weights force the f32 spine.
-fn flux_act16_enabled(weights: &LoadedFluxTransformerWeights) -> bool {
+fn flux_f16_activations_enabled(weights: &LoadedFluxTransformerWeights) -> bool {
     !weights.f8_weights && gpu_act_f16_enabled()
-}
-
-/// Compiled-graph F16 spine (Metal). Off by default: at 256 the extra
-/// F32↔F16 casts after ggml mul_mat (always F32) cost more than Q4×F16
-/// saves. `FLUX_ACT_F16=1` enables; dirty drops ~150MB.
-fn flux_compiled_act16() -> bool {
-    matches!(std::env::var("FLUX_ACT_F16"), Ok(value) if value != "0")
 }
 
 fn tensor_type_of(ctx: &Context, id: TensorId) -> Result<TensorType> {
@@ -3153,10 +2984,6 @@ pub(crate) fn evict_device_weight_cache(weights: &LoadedFluxTransformerWeights) 
             .retain(|key, _| !key.starts_with(&namespace));
     });
     crate::backend::gpu_weight_cache_evict_prefix(&namespace).unwrap_or(0)
-}
-
-fn flux_force_cpu_math() -> bool {
-    std::env::var_os("FLUX_TRANSFORMER_FORCE_CPU_MATH").is_some()
 }
 
 fn can_fallback_from_accel_error(err: &str) -> bool {
@@ -3546,8 +3373,6 @@ pub fn build_flux_transformer_graph(
     // assigns (and reuses) GPU dirty ranges; CPU-allocating them is what
     // grew a 32GiB arena and then failed newBufferWithBytesNoCopy.
     weights.ctx.set_no_alloc(true);
-    let mut debug_tensors = Vec::new();
-
     let img_in_weight = concat_linear_parts(
         &mut weights.ctx,
         &weights.tensor_ids,
@@ -3567,25 +3392,12 @@ pub fn build_flux_transformer_graph(
         .binary_like_a(Op::Add, input_hidden_mm, img_in_bias, BufferUsage::Activations)
         .map_err(DiffusionError::model)?;
     let input_hidden = hidden;
-    if flux_compiled_act16() {
-        hidden = cast_activation(&mut weights.ctx, hidden, TensorType::F16)?;
-    }
-    push_debug_tensor(&mut weights.ctx, &mut debug_tensors, "input.hidden", hidden)?;
     let mut encoder_hidden = apply_linear(
         &mut weights.ctx,
         &weights.tensor_ids,
         input_encoder_hidden_states,
         "txt_in.weight",
         "txt_in.bias",
-    )?;
-    if flux_compiled_act16() {
-        encoder_hidden = cast_activation(&mut weights.ctx, encoder_hidden, TensorType::F16)?;
-    }
-    push_debug_tensor(
-        &mut weights.ctx,
-        &mut debug_tensors,
-        "input.encoder_hidden",
-        encoder_hidden,
     )?;
 
     let mut temb = apply_timestep_projection(
@@ -3616,7 +3428,6 @@ pub fn build_flux_transformer_graph(
             .binary_like_a(Op::Add, temb, guidance, BufferUsage::Activations)
             .map_err(DiffusionError::model)?;
     }
-    push_debug_tensor(&mut weights.ctx, &mut debug_tensors, "input.temb", temb)?;
     // One SiLU(temb) for every AdaLN linear. The previous graph silu'd the
     // same 1x3072 row 76 times (19*2 + 38).
     let temb_silu = silu(&mut weights.ctx, temb)?;
@@ -3669,20 +3480,6 @@ pub fn build_flux_transformer_graph(
             txt_scale_msa,
             txt_shift_msa,
         )?;
-        if layer == 0 {
-            push_debug_tensor(
-                &mut weights.ctx,
-                &mut debug_tensors,
-                "double_blocks.0.norm_hidden",
-                norm_hidden,
-            )?;
-            push_debug_tensor(
-                &mut weights.ctx,
-                &mut debug_tensors,
-                "double_blocks.0.norm_encoder_hidden",
-                norm_encoder_hidden,
-            )?;
-        }
 
         let (img_q, img_k, img_v) = qkv_projections(
             &mut weights.ctx,
@@ -3731,44 +3528,6 @@ pub fn build_flux_transformer_graph(
             txt_k,
             &format!("{prefix}.txt_attn.norm.key_norm.scale"),
         )?;
-        if layer == 0 {
-            push_debug_tensor(
-                &mut weights.ctx,
-                &mut debug_tensors,
-                "double_blocks.0.img_q_norm",
-                img_q,
-            )?;
-            push_debug_tensor(
-                &mut weights.ctx,
-                &mut debug_tensors,
-                "double_blocks.0.img_k_norm",
-                img_k,
-            )?;
-            push_debug_tensor(
-                &mut weights.ctx,
-                &mut debug_tensors,
-                "double_blocks.0.img_v",
-                img_v,
-            )?;
-            push_debug_tensor(
-                &mut weights.ctx,
-                &mut debug_tensors,
-                "double_blocks.0.txt_q_norm",
-                txt_q,
-            )?;
-            push_debug_tensor(
-                &mut weights.ctx,
-                &mut debug_tensors,
-                "double_blocks.0.txt_k_norm",
-                txt_k,
-            )?;
-            push_debug_tensor(
-                &mut weights.ctx,
-                &mut debug_tensors,
-                "double_blocks.0.txt_v",
-                txt_v,
-            )?;
-        }
 
         let q = weights
             .ctx
@@ -3790,20 +3549,6 @@ pub fn build_flux_transformer_graph(
             rope_pos_w,
             weights.config,
         )?;
-        if layer == 0 {
-            push_debug_tensor(
-                &mut weights.ctx,
-                &mut debug_tensors,
-                "double_blocks.0.q_rope",
-                q,
-            )?;
-            push_debug_tensor(
-                &mut weights.ctx,
-                &mut debug_tensors,
-                "double_blocks.0.k_rope",
-                k,
-            )?;
-        }
         let attn = build_attention_output(&mut weights.ctx, q, k, v, weights.config.head_dim())?;
         let encoder_attn = slice_cols_2d(&mut weights.ctx, attn, 0, text_token_count as i64)?;
         let hidden_attn = slice_cols_2d(
@@ -3812,20 +3557,6 @@ pub fn build_flux_transformer_graph(
             text_token_count as i64,
             image_token_count as i64,
         )?;
-        if layer == 0 {
-            push_debug_tensor(
-                &mut weights.ctx,
-                &mut debug_tensors,
-                "double_blocks.0.hidden_attn_input",
-                hidden_attn,
-            )?;
-            push_debug_tensor(
-                &mut weights.ctx,
-                &mut debug_tensors,
-                "double_blocks.0.encoder_attn_input",
-                encoder_attn,
-            )?;
-        }
 
         let hidden_attn = apply_linear(
             &mut weights.ctx,
@@ -3844,20 +3575,6 @@ pub fn build_flux_transformer_graph(
         hidden = gated_residual(&mut weights.ctx, hidden, hidden_attn, img_gate_msa)?;
         encoder_hidden =
             gated_residual(&mut weights.ctx, encoder_hidden, encoder_attn, txt_gate_msa)?;
-        if layer == 0 {
-            push_debug_tensor(
-                &mut weights.ctx,
-                &mut debug_tensors,
-                "double_blocks.0.hidden_post_attn",
-                hidden,
-            )?;
-            push_debug_tensor(
-                &mut weights.ctx,
-                &mut debug_tensors,
-                "double_blocks.0.encoder_hidden_post_attn",
-                encoder_hidden,
-            )?;
-        }
 
         let hidden_ff_input = apply_modulated_layer_norm(
             &mut weights.ctx,
@@ -3880,20 +3597,6 @@ pub fn build_flux_transformer_graph(
             txt_scale_mlp,
             txt_shift_mlp,
         )?;
-        if layer == 0 {
-            push_debug_tensor(
-                &mut weights.ctx,
-                &mut debug_tensors,
-                "double_blocks.0.hidden_ff_input",
-                hidden_ff_input,
-            )?;
-            push_debug_tensor(
-                &mut weights.ctx,
-                &mut debug_tensors,
-                "double_blocks.0.encoder_ff_input",
-                encoder_ff_input,
-            )?;
-        }
         let encoder_ff = feed_forward(
             &mut weights.ctx,
             &weights.tensor_ids,
@@ -3906,18 +3609,6 @@ pub fn build_flux_transformer_graph(
         hidden = gated_residual(&mut weights.ctx, hidden, hidden_ff, img_gate_mlp)?;
         encoder_hidden =
             gated_residual(&mut weights.ctx, encoder_hidden, encoder_ff, txt_gate_mlp)?;
-        push_debug_tensor(
-            &mut weights.ctx,
-            &mut debug_tensors,
-            &format!("double_blocks.{layer}.hidden"),
-            hidden,
-        )?;
-        push_debug_tensor(
-            &mut weights.ctx,
-            &mut debug_tensors,
-            &format!("double_blocks.{layer}.encoder_hidden"),
-            encoder_hidden,
-        )?;
     }
 
     // Stay in the joint [text+image] layout for every single block.
@@ -3928,9 +3619,6 @@ pub fn build_flux_transformer_graph(
         .ctx
         .concat(enc_f32, hid_f32, 1, BufferUsage::Activations)
         .map_err(DiffusionError::model)?;
-    if flux_compiled_act16() {
-        joint = cast_activation(&mut weights.ctx, joint, TensorType::F16)?;
-    }
 
     for layer in 0..weights.config.depth_single_blocks as usize {
         let prefix = format!("single_blocks.{layer}");
@@ -3945,14 +3633,6 @@ pub fn build_flux_transformer_graph(
         )?;
         let norm_joint =
             apply_modulated_layer_norm(&mut weights.ctx, joint, scale, shift)?;
-        if layer == 0 {
-            push_debug_tensor(
-                &mut weights.ctx,
-                &mut debug_tensors,
-                "single_blocks.0.norm_joint",
-                norm_joint,
-            )?;
-        }
         let linear1 = apply_linear(
             &mut weights.ctx,
             &weights.tensor_ids,
@@ -4001,21 +3681,6 @@ pub fn build_flux_transformer_graph(
             k,
             &format!("{prefix}.norm.key_norm.scale"),
         )?;
-        if layer == 0 {
-            push_debug_tensor(
-                &mut weights.ctx,
-                &mut debug_tensors,
-                "single_blocks.0.q_norm",
-                q,
-            )?;
-            push_debug_tensor(
-                &mut weights.ctx,
-                &mut debug_tensors,
-                "single_blocks.0.k_norm",
-                k,
-            )?;
-            push_debug_tensor(&mut weights.ctx, &mut debug_tensors, "single_blocks.0.v", v)?;
-        }
         let (q, k) = apply_flux_rope_pair(
             &mut weights.ctx,
             q,
@@ -4025,23 +3690,7 @@ pub fn build_flux_transformer_graph(
             weights.config,
         )?;
         let attn = build_attention_output(&mut weights.ctx, q, k, v, weights.config.head_dim())?;
-        if layer == 0 {
-            push_debug_tensor(
-                &mut weights.ctx,
-                &mut debug_tensors,
-                "single_blocks.0.attn",
-                attn,
-            )?;
-        }
         let mlp = gelu(&mut weights.ctx, mlp)?;
-        if layer == 0 {
-            push_debug_tensor(
-                &mut weights.ctx,
-                &mut debug_tensors,
-                "single_blocks.0.mlp",
-                mlp,
-            )?;
-        }
         let fused = weights
             .ctx
             .concat(attn, mlp, 0, BufferUsage::Activations)
@@ -4053,43 +3702,7 @@ pub fn build_flux_transformer_graph(
             &format!("{prefix}.linear2.weight"),
             &format!("{prefix}.linear2.bias"),
         )?;
-        if layer == 0 {
-            push_debug_tensor(
-                &mut weights.ctx,
-                &mut debug_tensors,
-                "single_blocks.0.proj",
-                proj,
-            )?;
-        }
         joint = gated_residual(&mut weights.ctx, joint, proj, gate)?;
-        if trace_single_block(layer, weights.config.depth_single_blocks as usize) {
-            push_debug_tensor(
-                &mut weights.ctx,
-                &mut debug_tensors,
-                &format!("single_blocks.{layer}.joint"),
-                joint,
-            )?;
-            let dbg_enc =
-                slice_cols_2d(&mut weights.ctx, joint, 0, text_token_count as i64)?;
-            let dbg_hid = slice_cols_2d(
-                &mut weights.ctx,
-                joint,
-                text_token_count as i64,
-                image_token_count as i64,
-            )?;
-            push_debug_tensor(
-                &mut weights.ctx,
-                &mut debug_tensors,
-                &format!("single_blocks.{layer}.hidden"),
-                dbg_hid,
-            )?;
-            push_debug_tensor(
-                &mut weights.ctx,
-                &mut debug_tensors,
-                &format!("single_blocks.{layer}.encoder_hidden"),
-                dbg_enc,
-            )?;
-        }
     }
     hidden = slice_cols_2d(
         &mut weights.ctx,
@@ -4121,23 +3734,11 @@ pub fn build_flux_transformer_graph(
         "final_layer.linear.weight",
         "final_layer.linear.bias",
     )?;
-    push_debug_tensor(&mut weights.ctx, &mut debug_tensors, "final.hidden", hidden)?;
-    push_debug_tensor(
-        &mut weights.ctx,
-        &mut debug_tensors,
-        "final.output",
-        result_prediction,
-    )?;
 
     let mut graph = Graph::new();
     graph
         .build_forward_expand(&weights.ctx, result_prediction)
         .map_err(DiffusionError::model)?;
-    for debug_tensor in &debug_tensors {
-        graph
-            .build_forward_expand(&weights.ctx, debug_tensor.tensor_id)
-            .map_err(DiffusionError::model)?;
-    }
     graph.add_leaf(input_hidden);
     graph.add_leaf(input_hidden_mm);
 
@@ -4152,32 +3753,7 @@ pub fn build_flux_transformer_graph(
         image_token_count,
         input_hidden,
         input_hidden_mm,
-        debug_tensors,
     })
-}
-
-fn flux_debug_transformer_stages() -> bool {
-    std::env::var_os("FLUX_DEBUG_TRANSFORMER_STAGES").is_some()
-}
-
-fn push_debug_tensor(
-    ctx: &mut Context,
-    debug_tensors: &mut Vec<FluxTransformerDebugTensor>,
-    name: &str,
-    tensor_id: TensorId,
-) -> Result<()> {
-    // Production denoise never reads these. Leaving them in the compiled
-    // graph runs ~80 extra CPY kernels and pins activations in the dirty
-    // buffer. Smoke/compare opt in with FLUX_DEBUG_TRANSFORMER_STAGES.
-    if !flux_debug_transformer_stages() {
-        return Ok(());
-    }
-    let captured = ctx.cont(tensor_id).map_err(DiffusionError::model)?;
-    debug_tensors.push(FluxTransformerDebugTensor {
-        name: name.to_string(),
-        tensor_id: captured,
-    });
-    Ok(())
 }
 
 fn trace_single_block(layer: usize, total_layers: usize) -> bool {
@@ -4710,7 +4286,7 @@ fn build_attention_output(
     let v = ctx.cont(v).map_err(DiffusionError::model)?;
     let attention_scale = 1.0 / (head_dim as f32).sqrt();
 
-    if flux_flash_attention_allowed(head_dim) {
+    if head_dim == 128 {
         let attn = ctx
             .flash_attn_ext(
                 q,
@@ -5024,9 +4600,6 @@ fn flux_target_tensor_type(entry: &MlxTensorEntry) -> Result<TensorType> {
     if entry.shape.len() == 1 {
         return Ok(TensorType::F32);
     }
-    if flux_force_f32_weights() {
-        return Ok(TensorType::F32);
-    }
     match entry.dtype {
         MlxDType::BF16 => Ok(TensorType::BF16),
         MlxDType::F16 => Ok(TensorType::F16),
@@ -5060,11 +4633,6 @@ fn flux_target_bytes(
         };
     }
     match entry.dtype {
-        MlxDType::BF16 if flux_force_f32_weights() => bf16_bytes_to_f32_bytes(&bytes),
-        MlxDType::F16 if flux_force_f32_weights() => f16_bytes_to_f32_bytes(&bytes),
-        MlxDType::F8E4M3 if flux_force_f32_weights() => {
-            f8_bytes_to_f32_bytes_checked(name, &bytes)
-        }
         MlxDType::F8E4M3 => {
             // Raw resident payload: reject the two NaN encodings up front —
             // fail closed at load rather than propagate NaN activations.
@@ -5102,10 +4670,6 @@ fn f8_bytes_to_f32_bytes_checked(name: &str, bytes: &[u8]) -> Result<Vec<u8>> {
         out.extend_from_slice(&f8_e4m3_to_f32(byte).to_le_bytes());
     }
     Ok(out)
-}
-
-fn flux_force_f32_weights() -> bool {
-    std::env::var_os("FLUX_FORCE_F32_WEIGHTS").is_some()
 }
 
 #[cfg(test)]
@@ -5301,19 +4865,6 @@ fn tensor_extents_usize(tensor: &Tensor) -> Result<[usize; 4]> {
         usize::try_from(tensor.ne[3])
             .map_err(|_| DiffusionError::model("flux tensor extent ne3 exceeds usize"))?,
     ])
-}
-
-fn flux_flash_attention_allowed(head_dim: u32) -> bool {
-    if matches!(
-        std::env::var("FLUX_FLASH").ok().as_deref(),
-        Some("0") | Some("off") | Some("OFF")
-    ) {
-        return false;
-    }
-    // Official ggml Metal flash_attn_ext has f32 dk128/dv128. Naive
-    // softmax attention was a temporary disable and dominated step time
-    // once weights were Metal-resident.
-    matches!(head_dim, 128)
 }
 
 fn is_context_oom(err: &DiffusionError) -> bool {

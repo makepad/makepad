@@ -2072,8 +2072,7 @@ mod tests {
 
     #[test]
     fn generated_lib_19_raised_hip_topology_classifies_if_present() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../local/ai_content_library/lib-19.glb");
+        let path = makepad_asset_client::paths::library_root().join("lib-19.glb");
         if !path.is_file() {
             eprintln!("generated lib-19 rig fixture absent; skipping");
             return;
@@ -2096,8 +2095,7 @@ mod tests {
 
     #[test]
     fn generated_lib_34_terminal_hand_topology_classifies_if_present() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../local/ai_content_library/lib-34.glb");
+        let path = makepad_asset_client::paths::library_root().join("lib-34.glb");
         if !path.is_file() {
             eprintln!("generated lib-34 elf rig fixture absent; skipping");
             return;
@@ -2121,8 +2119,7 @@ mod tests {
 
     #[test]
     fn generated_lib_49_low_hand_and_split_ankle_topology_classifies_if_present() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../local/ai_content_library/lib-49.glb");
+        let path = makepad_asset_client::paths::library_root().join("lib-49.glb");
         if !path.is_file() {
             eprintln!("generated lib-49 elf rig fixture absent; skipping");
             return;

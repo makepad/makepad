@@ -4,7 +4,6 @@ pub mod core;
 pub mod graph;
 pub mod mmap;
 pub mod metal_compiled;
-pub mod metal_qmm;
 pub mod metal_selector;
 pub mod op;
 pub mod tensor;
@@ -28,6 +27,7 @@ pub mod weights;
 
 pub use cuda_exec::{
     CompiledHybridDecodeCuda, CudaContextArena, CudaDeviceFeatures, CudaExecRuntime,
+    CudaGraphOptions,
     CudaRawGraphSession,
 };
 pub use error::{LlamaError, Result};
@@ -71,8 +71,8 @@ pub use qwen35moe_runtime::{
     qwen35moe_token_logits_probe_spec, Qwen35MoeDims,
 };
 pub use lanes::{
-    LaneCounts, LaneEvent, LaneExecutor, LaneOutcome, LaneRequest, LaneScheduler, LaneStep,
-    CHUNK_TOKENS,
+    LaneCounts, LaneEvent, LaneExecutor, LaneOutcome, LaneRequest, LaneScheduler,
+    LaneSpeculationOptions, LaneStep, CHUNK_TOKENS,
 };
 pub use slots::{
     allocate_depths, draft_depth_for, draft_depth_for_budget, pad_batch_width, should_admit,
@@ -143,7 +143,7 @@ pub use session::{
 };
 pub use vision::{
     calc_size_preserved_ratio, preprocess_rgb8, vision_rope_positions, PreparedImage,
-    VisionConfig, VisionTower,
+    VisionConfig, VisionExecutionConfig, VisionTower,
 };
 pub use vocab::{LlamaTextDecoder, LlamaTokenizerKind, LlamaVocab};
 pub use weights::{GgufWeightLayout, LoadedGgufWeights};

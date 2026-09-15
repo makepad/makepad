@@ -1407,6 +1407,7 @@ fn run_generate(
                     steps: job.steps,
                     guidance: job.guidance,
                     seed: clip_seed(job.seed, index),
+                    f16_attention_operands: true,
                     initial_latent: None,
                     smooth: true,
                 },

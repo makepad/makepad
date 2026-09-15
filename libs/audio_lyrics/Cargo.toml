@@ -7,6 +7,6 @@ description = "Word-aligned lyrics: the karaoke alignment core and the lyrics JS
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-makepad-voice = { path = "../voice" }
+makepad-ai-speech = { path = "../ai/models/speech", default-features = false, features = ["whisper"] }
 makepad-asset-client = { path = "../asset/client" }
 makepad-asset-data = { path = "../asset/data" }

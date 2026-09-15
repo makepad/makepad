@@ -109,6 +109,7 @@ impl ContentBackend for TestPatternBackend {
         cancel.check()?;
         Ok(LiveFrameOut {
             image: RgbImage { width, height, data: out_data },
+            aux_json: None,
             model_ms: start.elapsed().as_secs_f64() * 1000.0,
             text_encode_ms: 0.0,
         })

@@ -1585,15 +1585,7 @@ mod imp {
             let command_buffer = self.active_command_buffer.take().ok_or_else(|| {
                 "Metal command batch disappeared during encoder rollover".to_string()
             })?;
-            let rolled_ops = self.active_command_buffer_ops;
             self.commit_command_buffer(command_buffer);
-            // Codex: wait each rolled CB so a later InnocentVictim does not hide
-            // the first non-terminating dispatch. Off unless opted in.
-            if std::env::var_os("MAKEPAD_METAL_WAIT_EACH_CB").is_some() {
-                self.wait_for_last_submitted_work(false).map_err(|err| {
-                    format!("Metal CB after {rolled_ops} ops: {err}")
-                })?;
-            }
             self.active_command_buffer = Some(self.new_command_buffer()?);
             self.active_command_buffer_ops = 0;
             self.active_command_buffer_bytes = 0;
@@ -1612,13 +1604,7 @@ mod imp {
             let command_buffer = self.active_command_buffer.take().ok_or_else(|| {
                 "Metal command batch disappeared during official partial submit".to_string()
             })?;
-            let rolled_ops = self.active_command_buffer_ops;
             self.commit_command_buffer(command_buffer);
-            if std::env::var_os("MAKEPAD_METAL_WAIT_EACH_CB").is_some() {
-                self.wait_for_last_submitted_work(false).map_err(|err| {
-                    format!("Metal CB after {rolled_ops} ops: {err}")
-                })?;
-            }
             self.active_command_buffer = Some(self.new_command_buffer()?);
             self.active_command_buffer_ops = 0;
             self.active_command_buffer_bytes = 0;
@@ -1929,28 +1915,15 @@ mod imp {
             // with later compute on this runtime once the GPU has touched
             // the buffer (or after the session-create prefix fill): Flux
             // then keeps the step-0 packed/timestep and later preds go
-            // stale or NaN. Opt back into memcpy only for isolated benches.
-            let force_memcpy = std::env::var_os("MAKEPAD_METAL_MEMCPY_WRITES").is_some();
-            let blit = !force_memcpy;
-            if blit {
-                let staging = self.new_buffer_with_bytes(bytes)?;
-                self.copy_between_buffers_ranges(
-                    staging.as_id(),
-                    0,
-                    buffer,
-                    offset_bytes,
-                    bytes.len(),
-                )?;
-                return Ok(());
-            }
-
-            let ptr: *mut u8 = unsafe { msg_send![buffer, contents] };
-            if ptr.is_null() {
-                return Err("buffer contents returned null".to_string());
-            }
-            unsafe {
-                std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr.add(offset_bytes), bytes.len());
-            }
+            // stale or NaN.
+            let staging = self.new_buffer_with_bytes(bytes)?;
+            self.copy_between_buffers_ranges(
+                staging.as_id(),
+                0,
+                buffer,
+                offset_bytes,
+                bytes.len(),
+            )?;
             Ok(())
         }
 

@@ -52,23 +52,14 @@ use weights::Weights;
 /// Default weights filename, resolved relative to the working directory.
 pub const DEFAULT_MODEL_PATH: &str = "kokoro-v1_0.mktts";
 
-/// Path override, mirroring `MAKEPAD_VOICE_MODEL`.
-pub const MODEL_PATH_ENV: &str = "MAKEPAD_TTS_MODEL";
-
 /// The default voice: `daniel`, a British male voice.
 pub const DEFAULT_VOICE_PATH: &str = "bm_daniel.mkvoice";
 
-/// Voice pack override.
-pub const VOICE_PATH_ENV: &str = "MAKEPAD_TTS_VOICE";
-
 pub const SAMPLE_RATE: u32 = 24_000;
 
-/// Env override, working directory, then next to the executable — the last is
-/// what a bundled app sees, where the working directory is anything at all.
-fn resolve(env_var: &str, default_name: &str) -> Option<String> {
-    if let Ok(path) = std::env::var(env_var) {
-        return std::path::Path::new(&path).is_file().then_some(path);
-    }
+/// Working directory, then next to the executable — the last is what a
+/// bundled app sees, where the working directory is anything at all.
+fn resolve(default_name: &str) -> Option<String> {
     if std::path::Path::new(default_name).is_file() {
         return Some(default_name.to_string());
     }
@@ -81,18 +72,18 @@ fn resolve(env_var: &str, default_name: &str) -> Option<String> {
 
 /// The weights path, if the file actually exists.
 pub fn model_path_if_present() -> Option<String> {
-    resolve(MODEL_PATH_ENV, DEFAULT_MODEL_PATH)
+    resolve(DEFAULT_MODEL_PATH)
 }
 
 /// The voice pack path, if the file actually exists.
 pub fn voice_path_if_present() -> Option<String> {
-    resolve(VOICE_PATH_ENV, DEFAULT_VOICE_PATH)
+    resolve(DEFAULT_VOICE_PATH)
 }
 
 /// Like [`voice_path_if_present`], but preferring a specific voice pack file
-/// (e.g. `bm_fable.mkvoice`). `MAKEPAD_TTS_VOICE` still wins as an override.
+/// (e.g. `bm_fable.mkvoice`).
 pub fn named_voice_path_if_present(name: &str) -> Option<String> {
-    resolve(VOICE_PATH_ENV, name)
+    resolve(name)
 }
 
 pub struct KokoroSpeaker {
