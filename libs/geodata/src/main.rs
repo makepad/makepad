@@ -1,6 +1,11 @@
+#[cfg(not(target_arch = "wasm32"))]
 use makepad_geodata::{fetch_source, find_layer, registry, BuildCtx, FetchOptions};
+#[cfg(not(target_arch = "wasm32"))]
+use makepad_micro_serde::JsonValue;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
 
+#[cfg(not(target_arch = "wasm32"))]
 fn usage() -> ! {
     eprintln!(
         "geodata — bulk open-geodata fetcher / overlay database builder
@@ -24,6 +29,7 @@ OPTIONS:
     std::process::exit(2);
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 struct Args {
     command: String,
     target: String,
@@ -35,6 +41,7 @@ struct Args {
     limit: usize,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn parse_args() -> Args {
     let mut args = Args {
         command: String::new(),
@@ -68,6 +75,7 @@ fn parse_args() -> Args {
     args
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() {
     let args = parse_args();
     match args.command.as_str() {
@@ -254,17 +262,23 @@ fn main() {
             match result {
                 Ok(hits) => {
                     for hit in hits {
-                        let mut attrs = hit.attrs.clone();
+                        let mut attrs = hit.attrs;
                         if let Some(map) = attrs.as_object_mut() {
                             map.remove("__ring");
                         }
-                        let line = serde_json::json!({
-                            "layer": hit.layer,
-                            "name": hit.name,
-                            "distance_m": hit.distance_m.map(|d| d.round()),
-                            "center": [hit.center.0, hit.center.1],
-                            "attrs": attrs,
-                        });
+                        let center = vec![hit.center.0.into(), hit.center.1.into()];
+                        let line = JsonValue::Object(
+                            [
+                                ("layer", JsonValue::from(hit.layer)),
+                                ("name", JsonValue::from(hit.name)),
+                                ("distance_m", JsonValue::from(hit.distance_m.map(|d| d.round()))),
+                                ("center", JsonValue::Array(center)),
+                                ("attrs", attrs),
+                            ]
+                            .into_iter()
+                            .map(|(k, v)| (k.to_string(), v))
+                            .collect(),
+                        );
                         println!("{line}");
                     }
                 }
@@ -302,6 +316,10 @@ fn main() {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+fn main() {}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn select(target: &str) -> Vec<Box<dyn makepad_geodata::Layer>> {
     if target == "all" {
         registry()
