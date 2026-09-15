@@ -6,7 +6,6 @@ set +x
 umask 077
 builder_root=$(cd -P -- "$(dirname -- "$0")" && pwd)
 export MAKEPAD_LOADER_ROOT="$builder_root"
-export MAKEPAD_LOADER_PROJECT="${MAKEPAD_LOADER_PROJECT:-$PWD}"
 builder_rust='@RUST_VERSION@'
 builder_commit='@MAKEPAD_COMMIT@'
 builder_release='@RELEASE_ID@'

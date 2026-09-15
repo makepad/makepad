@@ -45,6 +45,12 @@ enum Key {
     Enter,
     PageUp,
     PageDown,
+    Home,
+    End,
+    #[cfg(not(windows))]
+    WheelUp,
+    #[cfg(not(windows))]
+    WheelDown,
     Quit,
     Char(char),
     Other,
@@ -161,6 +167,8 @@ mod console {
                 77 => Key::Right,
                 73 => Key::PageUp,
                 81 => Key::PageDown,
+                71 => Key::Home,
+                79 => Key::End,
                 68 => Key::Quit,
                 _ => Key::Other,
             },
@@ -243,7 +251,7 @@ mod console {
             3 => Key::Quit,
             27 => {
                 let mut sequence = Vec::new();
-                for _ in 0..6 {
+                for _ in 0..32 {
                     if io::stdin().read(&mut byte).map_err(|e| e.to_string())? == 0 {
                         break;
                     }
@@ -259,6 +267,10 @@ mod console {
                     b"[D" | b"OD" => Key::Left,
                     b"[5~" => Key::PageUp,
                     b"[6~" => Key::PageDown,
+                    b"[H" | b"OH" | b"[1~" | b"[7~" => Key::Home,
+                    b"[F" | b"OF" | b"[4~" | b"[8~" => Key::End,
+                    s if s.starts_with(b"[<64;") && s.ends_with(b"M") => Key::WheelUp,
+                    s if s.starts_with(b"[<65;") && s.ends_with(b"M") => Key::WheelDown,
                     b"[21~" | b"" => Key::Quit,
                     _ => Key::Other,
                 }
@@ -315,20 +327,15 @@ impl Setup {
             let text = |name| app.get(name).and_then(makepad_strict_json::Value::as_str).map(str::to_owned).ok_or("Invalid app registry");
             apps.push((text("id")?, text("title")?, "Public Makepad app".into()));
         }
-        let mut page = apps.iter().position(|a| a.0 == self.app).unwrap_or(0) / 8;
+        let mut selected = apps.iter().position(|a| a.0 == self.app).unwrap_or(0);
+        let mut options: Vec<_> = apps.iter().enumerate().map(|(i, a)| ((i + 1).to_string(), a.1.clone(), a.2.clone())).collect();
+        options.push(("q".into(), "Back".into(), String::new()));
         loop {
-            let start = page * 8;
-            let mut options: Vec<_> = apps.iter().skip(start).take(8).enumerate().map(|(i, a)| ((i + 1).to_string(), a.1.clone(), a.2.clone())).collect();
-            if start + 8 < apps.len() { options.push(("9".into(), "Next page".into(), String::new())); }
-            if page > 0 { options.push(("0".into(), "Previous page".into(), String::new())); }
-            options.push(("q".into(), "Back".into(), String::new()));
-            match Screen::enter().choose("Other Apps", &[format!("Page {} of {} · shared compiler, source and build cache", page + 1, apps.len().div_ceil(8))], &options)?.as_str() {
+            match Screen::enter().choose_from("Other Apps", &["Shared compiler, source and build cache".into()], &options, selected)?.as_str() {
                 "q" => return Ok(()),
-                "9" => page += 1,
-                "0" => page = page.saturating_sub(1),
                 choice => {
-                    let index = choice.parse::<usize>().map_err(|_| "Invalid app choice")?;
-                    let app = apps.get(start + index - 1).ok_or("Invalid app choice")?;
+                    selected = choice.parse::<usize>().ok().and_then(|i| i.checked_sub(1)).ok_or("Invalid app choice")?;
+                    let app = apps.get(selected).ok_or("Invalid app choice")?;
                     self.app_menu(&app.0)?;
                 }
             }
@@ -616,7 +623,7 @@ pub fn run() -> Result<(), String> {
     let mut setup = Setup {
         project: env::var_os("MAKEPAD_LOADER_PROJECT")
             .map(PathBuf::from)
-            .unwrap_or(env::current_dir().map_err(|e| e.to_string())?)
+            .unwrap_or_else(|| root.clone())
             .canonicalize().map_err(|e| e.to_string())?,
         service: env::var("MAKEPAD_LOADER_SERVICE")
             .unwrap_or_else(|_| catalog::DEFAULT_SERVICE.into()),

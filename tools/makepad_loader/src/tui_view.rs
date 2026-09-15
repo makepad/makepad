@@ -190,6 +190,11 @@ fn too_small() -> bool {
 pub(super) struct Screen {
     color: bool,
 }
+fn mouse_tracking(enabled: bool) {
+    if !cfg!(windows) {
+        print!("{}", if enabled { "\x1b[?1000h\x1b[?1006h" } else { "\x1b[?1000l\x1b[?1006l" });
+    }
+}
 impl Screen {
     pub(super) fn enter() -> Self {
         let color = io::stdout().is_terminal()
@@ -198,7 +203,7 @@ impl Screen {
         if color {
             console::enable();
             SCREEN_DEPTH.with(|depth| {
-                if depth.get()==0 {print!("\x1b[?1049h\x1b[?25l");invalidate();}
+                if depth.get()==0 {print!("\x1b[?1049h\x1b[?25l");mouse_tracking(true);invalidate();}
                 depth.set(depth.get()+1);
             });
         }
@@ -206,7 +211,7 @@ impl Screen {
     }
     pub(super) fn pause() -> Pause {
         let active=SCREEN_DEPTH.with(|d|d.get()>0);
-        if active {print!("\x1b[0m\x1b[?25h\x1b[?1049l");let _=io::stdout().flush();}
+        if active {mouse_tracking(false);print!("\x1b[0m\x1b[?25h\x1b[?1049l");let _=io::stdout().flush();}
         Pause(active)
     }
     pub(super) fn choose(
@@ -225,9 +230,30 @@ impl Screen {
         ready: Option<[bool; 2]>,
         disabled: &[&str],
     ) -> Result<String, String> {
+        let selected = ready.map_or(0, |r| r.iter().position(|v| !v).unwrap_or(r.len() - 1));
+        self.choose_state_from(title, info, options, ready, disabled, selected)
+    }
+    pub(super) fn choose_from(
+        &self,
+        title: &str,
+        info: &[String],
+        options: &[(String, String, String)],
+        selected: usize,
+    ) -> Result<String, String> {
+        self.choose_state_from(title, info, options, None, &[], selected)
+    }
+    fn choose_state_from(
+        &self,
+        title: &str,
+        info: &[String],
+        options: &[(String, String, String)],
+        ready: Option<[bool; 2]>,
+        disabled: &[&str],
+        selected: usize,
+    ) -> Result<String, String> {
+        if options.is_empty() { return Ok("q".into()); }
         let enabled = |i: usize| !disabled.contains(&options[i].0.as_str());
-        let mut selected = ready.map_or(0, |r| r.iter().position(|v| !v).unwrap_or(r.len() - 1));
-        selected = selected.min(options.len() - 1);
+        let mut selected = selected.min(options.len() - 1);
         if !self.color {
             println!("\n{title}");
             for line in info {
@@ -256,6 +282,10 @@ impl Screen {
         let mut last_frame = None;
         let mut offset = 0;
         let mut max_offset = 0;
+        let mut option_offset = 0;
+        let mut visible_options = options.len();
+        let mut shortcut = String::new();
+        let numbered = options.iter().any(|o| o.0.len() > 1 && o.0.bytes().all(|c| c.is_ascii_digit()));
         loop {
             let size = console::size();
             let frame = (size, selected, offset);
@@ -273,8 +303,15 @@ impl Screen {
                     max_offset = info_lines.len().saturating_sub(max_info);
                     offset = offset.min(max_offset);
                     let info_lines: Vec<_> = info_lines.iter().skip(offset).take(max_info).collect();
-                    let height = (info_lines.len() + options.len() + 5 + intro_rows).max(11);
-                    let footer = if max_offset > 0 {
+                    visible_options = size.1.saturating_sub(info_lines.len() + 13 + intro_rows).max(1).min(options.len());
+                    option_offset = option_offset.min(options.len() - visible_options);
+                    if selected < option_offset { option_offset = selected; }
+                    if selected >= option_offset + visible_options { option_offset = selected + 1 - visible_options; }
+                    let scrolling = visible_options < options.len();
+                    let height = (info_lines.len() + visible_options + 5 + intro_rows).max(11);
+                    let footer = if scrolling {
+                        " ↑↓ Scroll   PgUp/PgDn   Enter Open   Esc Back"
+                    } else if max_offset > 0 {
                         " PgUp/PgDn Read   ↑↓ Select   Enter Confirm   Esc Back"
                     } else if ready.is_some() {
                         " ↑↓ Select   Enter Continue   Esc Quit"
@@ -289,7 +326,16 @@ impl Screen {
                         row(y + 1 + i + intro_rows / 2, x + 2 + intro_rows, text, "30;47", width - 4 - inset);
                     }
                     let first = y + info_lines.len() + 2 + intro_rows;
-                    for (i, (key, label, _)) in options.iter().enumerate() {
+                    if scrolling {
+                        let range = format!("{}–{} / {}", option_offset + 1, option_offset + visible_options, options.len());
+                        row(first - 1, x + width - 2 - range.chars().count(), &range, "90;47", range.chars().count());
+                        let thumb = (visible_options * visible_options / options.len()).max(1);
+                        let top = option_offset * (visible_options - thumb) / (options.len() - visible_options);
+                        for i in 0..visible_options {
+                            row(first + i, x + width - 2, if i >= top && i < top + thumb { "█" } else { "│" }, "90;47", 1);
+                        }
+                    }
+                    for (i, (key, label, _)) in options.iter().enumerate().skip(option_offset).take(visible_options) {
                         let style = if i == selected {
                             if enabled(i) { "1;97;40" } else { "90;40" }
                         } else if !enabled(i) {
@@ -307,15 +353,15 @@ impl Screen {
                             }
                         });
                         row(
-                            first + i,
+                            first + i - option_offset,
                             x + 2,
                             &format!("{} {key}. {label}", mark.unwrap_or("")),
                             style,
-                            width - 4,
+                            width - 4 - usize::from(scrolling),
                         );
                         if ready.is_some_and(|r| i < r.len() && r[i]) {
                             row(
-                                first + i,
+                                first + i - option_offset,
                                 x + 2,
                                 "[✓]",
                                 if i == selected { "32;40" } else { "32;47" },
@@ -334,13 +380,41 @@ impl Screen {
                 }
             }
             match console::key()? {
+                Key::PageUp if visible_options < options.len() => { selected = selected.saturating_sub(visible_options); shortcut.clear(); }
+                Key::PageDown if visible_options < options.len() => { selected = (selected + visible_options).min(options.len() - 1); shortcut.clear(); }
                 Key::PageUp => offset = offset.saturating_sub(3),
                 Key::PageDown => offset = (offset + 3).min(max_offset),
-                Key::Up | Key::Left => selected = (selected + options.len() - 1) % options.len(),
-                Key::Down | Key::Right => selected = (selected + 1) % options.len(),
+                Key::Home => { selected = 0; shortcut.clear(); }
+                Key::End => { selected = options.len() - 1; shortcut.clear(); }
+                #[cfg(not(windows))]
+                Key::WheelUp => {
+                    if max_offset > 0 && visible_options == options.len() { offset = offset.saturating_sub(3); }
+                    else { selected = selected.saturating_sub(3); }
+                    shortcut.clear();
+                }
+                #[cfg(not(windows))]
+                Key::WheelDown => {
+                    if max_offset > 0 && visible_options == options.len() { offset = (offset + 3).min(max_offset); }
+                    else { selected = (selected + 3).min(options.len() - 1); }
+                    shortcut.clear();
+                }
+                Key::Up | Key::Left => { selected = if visible_options < options.len() { selected.saturating_sub(1) } else { (selected + options.len() - 1) % options.len() }; shortcut.clear(); }
+                Key::Down | Key::Right => { selected = if visible_options < options.len() { (selected + 1).min(options.len() - 1) } else { (selected + 1) % options.len() }; shortcut.clear(); }
                 Key::Enter if enabled(selected) => return Ok(options[selected].0.clone()),
                 Key::Quit => return Ok("q".into()),
                 Key::Char(c) => {
+                    if numbered && c.is_ascii_digit() {
+                        shortcut.push(c);
+                        if !options.iter().any(|o| o.0.starts_with(&shortcut)) { shortcut = c.to_string(); }
+                        if let Some(i) = options.iter().position(|o| o.0 == shortcut) {
+                            selected = i;
+                            if enabled(i) && !options.iter().any(|o| o.0.len() > shortcut.len() && o.0.starts_with(&shortcut)) {
+                                return Ok(options[i].0.clone());
+                            }
+                        }
+                        continue;
+                    }
+                    shortcut.clear();
                     let key = c.to_ascii_lowercase().to_string();
                     if let Some(i) = options.iter().position(|o| o.0 == key) {
                         selected = i;
@@ -394,7 +468,7 @@ impl Screen {
 pub(super) struct Pause(bool);
 impl Drop for Pause {
     fn drop(&mut self) {
-        if self.0 {print!("\x1b[?1049h\x1b[?25l");invalidate();let _=io::stdout().flush();}
+        if self.0 {print!("\x1b[?1049h\x1b[?25l");mouse_tracking(true);invalidate();let _=io::stdout().flush();}
     }
 }
 impl Drop for Screen {
@@ -402,7 +476,7 @@ impl Drop for Screen {
         if self.color {
             SCREEN_DEPTH.with(|depth| {
                 depth.set(depth.get().saturating_sub(1));
-                if depth.get()==0 {print!("\x1b[0m\x1b[?25h\x1b[?1049l");invalidate();}
+                if depth.get()==0 {mouse_tracking(false);print!("\x1b[0m\x1b[?25h\x1b[?1049l");invalidate();}
             });
             let _ = io::stdout().flush();
         }

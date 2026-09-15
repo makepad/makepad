@@ -33,7 +33,6 @@ MAKEPAD_BOOTSTRAP
 set -eu
 builder_root=$(cd -P -- "$(dirname -- "$0")" && pwd)
 export MAKEPAD_LOADER_ROOT="$builder_root"
-export MAKEPAD_LOADER_PROJECT="${MAKEPAD_LOADER_PROJECT:-$PWD}"
 if [ -x "$builder_root/makepad-builder" ]; then
     exec "$builder_root/makepad-builder" tui
 fi
@@ -41,7 +40,6 @@ exec sh "$builder_root/bootstrap-builder.sh"
 MAKEPAD_RUN
     chmod 700 "$builder_root/run-builder.sh" "$builder_root/bootstrap-builder.sh" "$builder_root/check-tools.sh"
     export MAKEPAD_LOADER_ROOT="$builder_root"
-    export MAKEPAD_LOADER_PROJECT="${MAKEPAD_LOADER_PROJECT:-$PWD}"
     sh "$builder_root/bootstrap-builder.sh" <&3 >&3 2>&3
 }
 makepad_main
