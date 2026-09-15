@@ -1,0 +1,8 @@
+[package]
+name = "makepad-fabric-measure"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Body measurements from a body mesh: plane slices, landmarks, the 25-key garment schema"
+
+[dependencies]

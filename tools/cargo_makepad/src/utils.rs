@@ -1,9 +1,11 @@
 use crate::makepad_shell::*;
+use makepad_micro_serde::{DeJson, DeJsonErr, DeJsonState};
 use makepad_toml_parser::{parse_toml, Toml};
 use std::{
     collections::HashMap,
     env,
     path::{Path, PathBuf},
+    process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -170,19 +172,19 @@ version_code = "auto"
 "#;
         let toml = parse_toml(toml_text).expect("parse");
         assert!(matches!(
-            toml.get("package.metadata.packager.identifier"),
+            toml.get_path(&["package", "metadata", "packager", "identifier"]),
             Some(Toml::Str(v, _)) if v == "rs.robius.robrix"
         ));
         assert!(matches!(
-            toml.get("package.metadata.packager.product_name"),
+            toml.get_path(&["package", "metadata", "packager", "product_name"]),
             Some(Toml::Str(v, _)) if v == "Robrix"
         ));
         assert!(matches!(
-            toml.get("package.metadata.makepad.android.version_code"),
+            toml.get_path(&["package", "metadata", "makepad", "android", "version_code"]),
             Some(Toml::Str(v, _)) if v.eq_ignore_ascii_case("auto")
         ));
         assert!(matches!(
-            toml.get("package.version"),
+            toml.get_path(&["package", "version"]),
             Some(Toml::Str(v, _)) if v == "1.0.0-alpha.1"
         ));
     }
@@ -318,16 +320,16 @@ pub fn read_android_package_metadata(build_crate: &str) -> AndroidPackageMetadat
     let Ok(toml) = parse_toml(&cargo_toml) else {
         return out;
     };
-    if let Some(Toml::Str(v, _)) = toml.get("package.version") {
+    if let Some(Toml::Str(v, _)) = toml.get_path(&["package", "version"]) {
         out.package_version = Some(v.clone());
     }
-    if let Some(Toml::Str(v, _)) = toml.get("package.metadata.packager.identifier") {
+    if let Some(Toml::Str(v, _)) = toml.get_path(&["package", "metadata", "packager", "identifier"]) {
         out.identifier = Some(v.clone());
     }
-    if let Some(Toml::Str(v, _)) = toml.get("package.metadata.packager.product_name") {
+    if let Some(Toml::Str(v, _)) = toml.get_path(&["package", "metadata", "packager", "product_name"]) {
         out.product_name = Some(v.clone());
     }
-    match toml.get("package.metadata.makepad.android.version_code") {
+    match toml.get_path(&["package", "metadata", "makepad", "android", "version_code"]) {
         Some(Toml::Num(n, _)) if *n >= 0.0 && *n <= u32::MAX as f64 => {
             out.version_code = Some(VersionCodeStrategy::Explicit(*n as u32));
         }
@@ -341,10 +343,10 @@ pub fn read_android_package_metadata(build_crate: &str) -> AndroidPackageMetadat
         }
         _ => {}
     }
-    if let Some(Toml::Str(v, _)) = toml.get("package.metadata.makepad.android.version_name") {
+    if let Some(Toml::Str(v, _)) = toml.get_path(&["package", "metadata", "makepad", "android", "version_name"]) {
         out.version_name_override = Some(v.clone());
     }
-    if let Some(Toml::Num(n, _)) = toml.get("package.metadata.makepad.android.min_sdk_version") {
+    if let Some(Toml::Num(n, _)) = toml.get_path(&["package", "metadata", "makepad", "android", "min_sdk_version"]) {
         if *n >= 1.0 && *n <= 100.0 && n.fract() == 0.0 {
             out.min_sdk_version = Some(*n as usize);
         } else {
@@ -359,32 +361,243 @@ pub fn read_android_package_metadata(build_crate: &str) -> AndroidPackageMetadat
 pub fn get_package_binary_name(build_crate: &str) -> Option<String> {
     let crate_dir = get_crate_dir(build_crate).ok()?;
     let cargo_toml = std::fs::read_to_string(crate_dir.join("Cargo.toml")).ok()?;
-
-    let mut in_bin = false;
-    for raw in cargo_toml.lines() {
-        let line = raw.trim();
-        if line.starts_with("[[bin]]") {
-            in_bin = true;
-            continue;
-        }
-        if line.starts_with('[') {
-            in_bin = false;
-        }
-        if in_bin && line.starts_with("name") {
-            if let Some(eq) = line.find('=') {
-                let value = line[eq + 1..].trim().trim_matches('"').to_string();
-                if !value.is_empty() {
-                    return Some(value);
+    let toml = parse_toml(&cargo_toml).ok()?;
+    // The first `[[bin]]` with a name wins, in manifest order.
+    if let Some(Toml::ArrayOfTables(bins)) = toml.get_path(&["bin"]) {
+        for bin in bins {
+            if let Some(Toml::Str(name, _)) = bin.get("name") {
+                if !name.is_empty() {
+                    return Some(name.clone());
                 }
             }
         }
     }
-
-    let toml = parse_toml(&cargo_toml).ok()?;
-    if let Some(Toml::Str(pkg_name, _)) = toml.get("package.name") {
+    if let Some(Toml::Str(pkg_name, _)) = toml.get_path(&["package", "name"]) {
         return Some(pkg_name.clone());
     }
     None
+}
+
+#[derive(DeJson)]
+struct CargoMetadata {
+    packages: Vec<CargoMetadataPackage>,
+}
+
+#[derive(DeJson)]
+struct CargoMetadataPackage {
+    name: String,
+    default_run: Option<String>,
+    targets: Vec<CargoMetadataTarget>,
+}
+
+#[derive(DeJson)]
+struct CargoMetadataTarget {
+    name: String,
+    kind: Vec<String>,
+}
+
+fn requested_bin_from_args<'a>(args: &'a [String]) -> Result<Option<&'a str>, String> {
+    let mut requested = None;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        let value = if arg == "--bin" {
+            i += 1;
+            Some(
+                args.get(i)
+                    .map(String::as_str)
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| "Missing binary name after --bin".to_string())?,
+            )
+        } else {
+            arg.strip_prefix("--bin=")
+                .map(|value| {
+                    if value.is_empty() {
+                        Err("Missing binary name in --bin=<name>".to_string())
+                    } else {
+                        Ok(value)
+                    }
+                })
+                .transpose()?
+        };
+
+        if let Some(value) = value {
+            if requested.replace(value).is_some() {
+                return Err(
+                    "Multiple --bin targets were requested; wasm packaging supports one binary"
+                        .to_string(),
+                );
+            }
+        }
+        i += 1;
+    }
+    Ok(requested)
+}
+
+fn resolve_wasm_binary_name_from_metadata(
+    metadata_json: &str,
+    build_crate: &str,
+    args: &[String],
+) -> Result<String, String> {
+    let metadata = CargoMetadata::deserialize_json_lenient(metadata_json)
+        .map_err(|err| format!("Unable to parse cargo metadata: {err:?}"))?;
+    let package = metadata
+        .packages
+        .iter()
+        .find(|package| package.name == build_crate)
+        .ok_or_else(|| format!("Package `{build_crate}` was not found in cargo metadata"))?;
+    let bins = package
+        .targets
+        .iter()
+        .filter(|target| target.kind.iter().any(|kind| kind == "bin"))
+        .map(|target| target.name.as_str())
+        .collect::<Vec<_>>();
+    let available = bins.join(", ");
+
+    if let Some(requested) = requested_bin_from_args(args)? {
+        if bins.contains(&requested) {
+            return Ok(requested.to_string());
+        }
+        return Err(format!(
+            "Package `{build_crate}` has no binary target `{requested}`; available binaries: {available}"
+        ));
+    }
+    if let Some(default_run) = package.default_run.as_deref() {
+        if bins.contains(&default_run) {
+            return Ok(default_run.to_string());
+        }
+        return Err(format!(
+            "Package `{build_crate}` default-run `{default_run}` is not a binary target; available binaries: {available}"
+        ));
+    }
+    match bins.as_slice() {
+        [only] => Ok((*only).to_string()),
+        [] => Err(format!("Package `{build_crate}` has no binary targets")),
+        _ => Err(format!(
+            "Package `{build_crate}` has multiple binary targets: {available}. Pass --bin <name> or set package.default-run"
+        )),
+    }
+}
+
+pub fn get_wasm_binary_name(build_crate: &str, args: &[String]) -> Result<String, String> {
+    let cwd = std::env::current_dir()
+        .map_err(|err| format!("Unable to determine current directory: {err}"))?;
+    let output = Command::new("cargo")
+        .args(["metadata", "--format-version", "1", "--no-deps"])
+        .current_dir(cwd)
+        .output()
+        .map_err(|err| format!("Unable to run cargo metadata: {err}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "cargo metadata failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let metadata_json = std::str::from_utf8(&output.stdout)
+        .map_err(|err| format!("cargo metadata returned invalid UTF-8: {err}"))?;
+    resolve_wasm_binary_name_from_metadata(metadata_json, build_crate, args)
+}
+
+#[cfg(test)]
+mod wasm_binary_name_tests {
+    use super::*;
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn resolves_bin_matching_package() {
+        let fixture = r#"{
+            "packages": [{
+                "name": "same-name",
+                "default_run": null,
+                "targets": [{"name": "same-name", "kind": ["bin"]}]
+            }]
+        }"#;
+        assert_eq!(
+            resolve_wasm_binary_name_from_metadata(fixture, "same-name", &args(&["-p", "same-name"])),
+            Ok("same-name".to_string())
+        );
+    }
+
+    #[test]
+    fn resolves_single_differing_bin() {
+        let fixture = r#"{
+            "packages": [{
+                "name": "package-name",
+                "default_run": null,
+                "targets": [{"name": "app", "kind": ["bin"]}]
+            }]
+        }"#;
+        assert_eq!(
+            resolve_wasm_binary_name_from_metadata(fixture, "package-name", &args(&["-p", "package-name"])),
+            Ok("app".to_string())
+        );
+    }
+
+    #[test]
+    fn resolves_default_run_among_multiple_bins() {
+        let fixture = r#"{
+            "packages": [{
+                "name": "package-name",
+                "default_run": "second",
+                "targets": [
+                    {"name": "first", "kind": ["bin"]},
+                    {"name": "second", "kind": ["bin"]}
+                ]
+            }]
+        }"#;
+        assert_eq!(
+            resolve_wasm_binary_name_from_metadata(fixture, "package-name", &args(&["-p", "package-name"])),
+            Ok("second".to_string())
+        );
+    }
+
+    #[test]
+    fn bin_arg_overrides_default_run() {
+        let fixture = r#"{
+            "packages": [{
+                "name": "package-name",
+                "default_run": "first",
+                "targets": [
+                    {"name": "first", "kind": ["bin"]},
+                    {"name": "second", "kind": ["bin"]}
+                ]
+            }]
+        }"#;
+        assert_eq!(
+            resolve_wasm_binary_name_from_metadata(
+                fixture,
+                "package-name",
+                &args(&["-p", "package-name", "--bin", "second"]),
+            ),
+            Ok("second".to_string())
+        );
+    }
+
+    #[test]
+    fn multiple_bins_without_selection_lists_targets() {
+        let fixture = r#"{
+            "packages": [{
+                "name": "package-name",
+                "default_run": null,
+                "targets": [
+                    {"name": "first", "kind": ["bin"]},
+                    {"name": "second", "kind": ["bin"]}
+                ]
+            }]
+        }"#;
+        let error = resolve_wasm_binary_name_from_metadata(
+            fixture,
+            "package-name",
+            &args(&["-p", "package-name"]),
+        )
+        .unwrap_err();
+        assert!(error.contains("multiple binary targets"));
+        assert!(error.contains("first"));
+        assert!(error.contains("second"));
+    }
 }
 
 pub fn get_build_crate_from_args(args: &[String]) -> Result<&str, String> {

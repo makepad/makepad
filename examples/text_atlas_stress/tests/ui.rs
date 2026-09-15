@@ -13,7 +13,7 @@ use makepad_zune_png::PngDecoder;
 use std::path::Path;
 
 /// Rows are stacked from the window's top edge, `ROW_H` points each, full
-/// width (`MAKEPAD_HEADLESS_DPI=1` makes points equal screenshot pixels):
+/// width (`MAKEPAD_GPUSIM_DPI=1` makes points equal screenshot pixels):
 /// rows 0-3 regular, 4-7 bold. A two-point inset keeps neighbours apart.
 const ROW_H: usize = 60;
 const WIDTH: usize = 900;
@@ -53,7 +53,7 @@ fn glyphs_survive_a_texture_burst_frame() {
         "ui::glyphs_survive_a_texture_burst_frame",
     )
     .unwrap();
-    config.env.insert("MAKEPAD_HEADLESS_DPI".to_string(), "1".to_string());
+    config.env.insert("MAKEPAD_GPUSIM_DPI".to_string(), "1".to_string());
     run_with_config(config, |app: TestApp| -> Result<(), TestError> {
         app.locator(Selector::id("row_3")).wait_visible();
         app.locator(Selector::id("status")).wait_text("phase 0 frame 3");
