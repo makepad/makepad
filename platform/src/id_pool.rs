@@ -102,6 +102,7 @@ where
     }
 
     /// Whether drops are waiting to be examined at the next safe point.
+    #[cfg(any(target_arch = "wasm32", test))]
     pub(crate) fn has_pending_retirements(&self) -> bool {
         !self.free.0.borrow().retirement_pending.is_empty()
     }
@@ -197,6 +198,7 @@ where
     /// free at this safe point.
     /// Drops are coalesced per slot, so pending metadata is bounded by the
     /// pool's slot count and allocation never needs to search it.
+    #[cfg(any(target_arch = "wasm32", test))]
     pub(crate) fn take_free_retirements(&mut self, limit: usize) -> Vec<usize> {
         let mut state = self.free.0.borrow_mut();
         let mut retired = Vec::with_capacity(limit.min(state.retirement_pending.len()));
