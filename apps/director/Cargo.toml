@@ -1,0 +1,55 @@
+# Director: AI accounts, agent lanes with their terminals, editors and the disk map.
+
+[package]
+name = "makepad-director"
+version = "2.0.0"
+edition = "2021"
+default-run = "director"
+
+[lib]
+name = "makepad_director"
+path = "src/lib.rs"
+
+[[bin]]
+name = "director"
+path = "src/main.rs"
+
+[[bin]]
+name = "director-git-guard"
+path = "src/bin/director_git_guard.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "director-rustc-guard"
+path = "src/bin/director_rustc_guard.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "director-flow"
+path = "src/bin/director_flow.rs"
+test = false
+bench = false
+
+[dependencies]
+makepad-widgets = { path = "../../widgets" }
+makepad-diskmap = { path = "../../libs/diskmap" }
+makepad-workspace = { path = "../../libs/workspace" }
+makepad-terminal = { path = "../terminal" }
+makepad-wm-theme = { path = "../../libs/wm_theme" }
+makepad-wm-api = { path = "../../libs/wm_api" }
+makepad-aichat = { path = "../aichat", default-features = false, features = ["engine"] }
+makepad-ai-services = { path = "../../libs/ai/services" }
+makepad-strict-json = { path = "../../libs/strict_json" }
+makepad-bounded-http = { path = "../../libs/bounded_http" }
+
+makepad-code-editor = { path = "../../code_editor" }
+makepad-code-arch = { path = "../../libs/code_arch" }
+makepad-git = { path = "../../libs/git" }
+
+[target.'cfg(windows)'.dependencies]
+makepad-screen = { path = "../../tools/screen" }
+
+[dev-dependencies]
+makepad-draw = { path = "../../draw" }
