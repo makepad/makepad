@@ -1,6 +1,5 @@
 1|Download compiler|{tools} and the pinned private Rust compiler
-2|Download/update source code|Download and verify the latest source
-3|Build and run {app}|Compile the source and open {app}
-4|Other Apps|Build other Makepad applications
-5|Window Manager|Build and run the Makepad desktop
-6|AI Terminal|Open Claude, Codex or a shell with the private compiler available
+2|Compile and run {app}|Download/update source code, compile and open {app}
+3|Other Apps|Build other Makepad applications
+4|Window Manager|Compile and run the Makepad desktop
+5|AI Terminal|Open Claude, Codex or a shell with the private compiler available

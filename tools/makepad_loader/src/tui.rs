@@ -428,12 +428,17 @@ impl Setup {
         with_progress(|| runtime::dependency(&self.root, release, Dependency::Cuda)).map(|_| ())
     }
     fn build(&mut self) -> Result<(), String> {
-        if !self.ready().into_iter().all(|v| v) {
-            return Err("Complete compiler and source setup first".into());
+        if !self.ready()[..2].iter().all(|v| *v) {
+            return Err("Download the compiler first".into());
         }
-        let release = self.release()?;
-        let environment = Environment::prepare(&self.root, &release, self.cuda)?;
-        with_progress(|| environment.build(&release))?;
+        let release = self.refresh()?;
+        if !self.ready()[1] {
+            return Err(format!("The latest source requires Rust {}. Choose Download compiler first.", release.rust));
+        }
+        with_progress(|| {
+            catalog::checkout(&self.service, &self.email, &self.root, &release)?;
+            Environment::prepare(&self.root, &release, self.cuda)?.build(&release)
+        })?;
         fs::create_dir_all(self.root.join("installed")).map_err(|e| e.to_string())?;
         release.save(&self.root.join("installed").join(format!("{}.json", release.id)))?;
         release.save(&self.root.join("installed-release.json"))?;
@@ -649,12 +654,12 @@ fn show_menu(setup: &mut Setup, primary: bool) -> Result<(), String> {
         });
         let mut options: Vec<_> = MENU
             .lines()
-            .filter(|entry| primary || !(entry.starts_with("4|") || entry.starts_with("5|")))
+            .filter(|entry| primary || !(entry.starts_with("3|") || entry.starts_with("4|")))
             .filter_map(|entry| {
                 let fields: Vec<_> = entry.split('|').collect();
                 (fields.len() == 3).then(|| {
                     (
-                        if !primary && fields[0] == "6" { "4".into() } else { fields[0].into() },
+                        if !primary && fields[0] == "5" { "3".into() } else { fields[0].into() },
                         fields[1].replace("{app}", &title),
                         fields[2].replace("{app}", &title).replace(
                             "{tools}",
@@ -671,37 +676,40 @@ fn show_menu(setup: &mut Setup, primary: bool) -> Result<(), String> {
             })
             .collect();
         if crate::cuda::supported() {
-            options.push(((if primary { "7" } else { "5" }).into(), if setup.cuda { "Disable CUDA".into() } else { "Enable CUDA (required for AI app features)".into() }, "NVIDIA compiler and libraries for AI app features".into()));
+            options.push(((if primary { "6" } else { "4" }).into(), if setup.cuda { "Disable CUDA".into() } else { "Enable CUDA (required for AI app features)".into() }, "NVIDIA compiler and libraries for AI app features".into()));
         }
-        let command_key = if crate::cuda::supported() { "8" } else { "7" };
+        let command_key = if crate::cuda::supported() { "7" } else { "6" };
         if primary && setup.root.join(if cfg!(windows) { "scope.exe" } else { "scope.bin" }).is_file() {
             options.push((command_key.into(), "Set up scope command".into(), "Open any project from your terminal".into()));
         }
         if !primary { options.push(("q".into(), if setup.app == "wm" { "Back to Builder".into() } else { "Back to Other Apps".into() }, String::new())); }
         let info = [ABOUT.trim().replace("{app}", &title)];
         let heading = if primary { "Makepad Builder".to_owned() } else { format!("Makepad Builder · {title}") };
+        let compiler_ready = ready[0] && ready[1];
+        let built = setup.release.as_ref().is_some_and(|release| {
+            load_release(&setup.root.join("installed").join(format!("{}.json", setup.app)))
+                .is_some_and(|installed| installed.release == release.release)
+                && setup.root.join(if cfg!(windows) { runtime::exe(&release.binary) } else { format!("{}.bin", release.binary) }).is_file()
+        });
+        let mut disabled = Vec::new();
+        if !compiler_ready { disabled.push("2"); }
+        if !ready.into_iter().all(|v| v) { disabled.push(if primary { "5" } else { "3" }); }
         let choice = Screen::enter().choose_state(
             &heading,
             &info,
             &options,
-            Some([ready[0] && ready[1], ready[2]]),
-            if ready.into_iter().all(|v| v) { &[] } else if primary { &["3", "6"] } else { &["3", "4"] },
+            Some([compiler_ready, built]),
+            &disabled,
         )?;
         if choice == "q" {
             break;
         }
         let result = match choice.as_str() {
             "1" => setup.release().and_then(|r| setup.install_compiler(&r)),
-            "2" => with_progress(|| {
-                setup
-                    .refresh()
-                    .and_then(|r| catalog::checkout(&setup.service, &setup.email, &setup.root, &r))
-            })
-            .map(|_| ()),
-            "3" => setup.build(),
-            "4" if primary => setup.apps(),
-            "5" if primary => setup.app_menu("wm"),
-            key if key == (if primary { "6" } else { "4" }) => setup.ai_terminal(),
+            "2" => setup.build(),
+            "3" if primary => setup.apps(),
+            "4" if primary => setup.app_menu("wm"),
+            key if key == (if primary { "5" } else { "3" }) => setup.ai_terminal(),
             key if primary && key == command_key => (|| {
                 let info = [
                     "Add the Scope command to your user PATH?".into(),
@@ -716,7 +724,7 @@ fn show_menu(setup: &mut Setup, primary: bool) -> Result<(), String> {
                 }
                 Ok(())
             })(),
-            key if key == (if primary { "7" } else { "5" }) => setup.release().and_then(|r| {
+            key if key == (if primary { "6" } else { "4" }) => setup.release().and_then(|r| {
                 if !crate::cuda::supported() {
                     return Err("The optional CUDA toolkit is available on x64 Windows".into());
                 }

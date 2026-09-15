@@ -226,7 +226,7 @@ impl Screen {
         disabled: &[&str],
     ) -> Result<String, String> {
         let enabled = |i: usize| !disabled.contains(&options[i].0.as_str());
-        let mut selected = ready.map_or(0, |r| r.iter().position(|v| !v).unwrap_or(2));
+        let mut selected = ready.map_or(0, |r| r.iter().position(|v| !v).unwrap_or(r.len() - 1));
         selected = selected.min(options.len() - 1);
         if !self.color {
             println!("\n{title}");
