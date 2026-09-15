@@ -18,17 +18,24 @@ const COMPONENTS: &[&str] = &[
     "libcublas",
 ];
 
+/// Availability of the private toolkit, independent of the app release defaults.
+pub fn supported() -> bool {
+    cfg!(all(windows, target_arch = "x86_64"))
+}
+
 pub fn install(cache: &Path, dest: &Path) -> Result<(), String> {
+    crate::progress::package("NVIDIA CUDA", "Read package manifest", 0, 0);
     if dest.join("bin").join("nvcc.exe").is_file() {
-        println!("cuda: already extracted at {}", dest.display());
+        crate::progress::stage("Ready", "CUDA already installed", 1.0);
         return Ok(());
     }
     let manifest_url = format!("{REDIST}/redistrib_{CUDA_VERSION}.json");
-    println!("cuda: {manifest_url}");
+    crate::setup_note!("cuda: {manifest_url}");
     let bytes = http::fetch_bytes(&manifest_url)?;
     let doc = json::parse(&bytes).map_err(|e| format!("cuda json: {e}"))?;
     fs::create_dir_all(dest).map_err(|e| e.to_string())?;
-    for name in COMPONENTS {
+    for (index, name) in COMPONENTS.iter().enumerate() {
+        crate::progress::package("NVIDIA CUDA", name, index + 1, COMPONENTS.len());
         let comp = doc
             .get(name)
             .ok_or_else(|| format!("cuda manifest missing {name}"))?;
@@ -42,7 +49,7 @@ pub fn install(cache: &Path, dest: &Path) -> Result<(), String> {
         let sha = win.get("sha256").and_then(Value::as_str);
         let url = format!("{REDIST}/{rel}");
         let file = rel.rsplit('/').next().unwrap_or(name);
-        println!("cuda: {name}");
+        crate::setup_note!("cuda: {name}");
         let zip = http::cached_file(cache, &url, file, sha)?;
         let tmp = dest.join(format!(".unpack-{name}"));
         let _ = fs::remove_dir_all(&tmp);
@@ -54,7 +61,7 @@ pub fn install(cache: &Path, dest: &Path) -> Result<(), String> {
     if !dest.join("bin").join("nvcc.exe").is_file() {
         return Err("nvcc.exe missing after cuda extract".into());
     }
-    println!("cuda: ready at {}", dest.display());
+    crate::progress::stage("Ready", "CUDA installed", 1.0);
     Ok(())
 }
 
@@ -65,7 +72,7 @@ pub fn install(cache: &Path, dest: &Path) -> Result<(), String> {
 pub fn harvest_runtime(dest: &Path) -> Result<(), String> {
     let bin = dest.join("bin");
     if bin.join("cudart64_13.dll").is_file() || bin.join("cudart64_12.dll").is_file() {
-        println!("cuda: runtime already at {}", bin.display());
+        crate::setup_note!("cuda: runtime already at {}", bin.display());
         return Ok(());
     }
     let src_bin = system_cuda_bin().ok_or_else(|| {
@@ -94,7 +101,7 @@ pub fn harvest_runtime(dest: &Path) -> Result<(), String> {
     if copied == 0 {
         return Err(format!("no CUDA runtime DLLs in {}", src_bin.display()));
     }
-    println!(
+    crate::setup_note!(
         "cuda: harvested {copied} runtime DLLs from {} into {}",
         src_bin.display(),
         bin.display()

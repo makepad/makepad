@@ -12,26 +12,26 @@ const TABLE_PREFIX: char = '\u{4840}';
 
 pub fn dump(msi: &[u8]) -> Result<(), String> {
     let cfb = Cfb::open(msi)?;
-    println!(
+    crate::setup_note!(
         "cfb sector_size={} streams={}",
         cfb.sector_size,
         cfb.dir.iter().filter(|d| d.kind == 2).count()
     );
     for d in &cfb.dir {
         if d.kind == 2 {
-            println!("  stream {} kind={} start={} size={}", d.name, d.kind, d.start, d.size);
+            crate::setup_note!("  stream {} kind={} start={} size={}", d.name, d.kind, d.start, d.size);
         }
     }
     let (strings, long_str) = read_string_pool(&cfb)?;
-    println!("string pool {} entries long_str={long_str}", strings.len().saturating_sub(1));
+    crate::setup_note!("string pool {} entries long_str={long_str}", strings.len().saturating_sub(1));
     let schemas = read_columns_schema(&cfb, &strings, long_str)?;
     let mut tables: Vec<_> = schemas.keys().cloned().collect();
     tables.sort();
-    println!("tables: {}", tables.join(", "));
+    crate::setup_note!("tables: {}", tables.join(", "));
     if let Ok(media) = read_table(&cfb, &strings, &schemas, "Media", long_str) {
-        println!("Media ({} rows):", media.len());
+        crate::setup_note!("Media ({} rows):", media.len());
         for row in &media {
-            println!("  {}", row.join(" | "));
+            crate::setup_note!("  {}", row.join(" | "));
         }
     }
     let dirs = if let Ok(dir_rows) = read_table(&cfb, &strings, &schemas, "Directory", long_str) {
@@ -48,7 +48,7 @@ pub fn dump(msi: &[u8]) -> Result<(), String> {
         }
     }
     if let Ok(files) = read_table(&cfb, &strings, &schemas, "File", long_str) {
-        println!("File rows={}", files.len());
+        crate::setup_note!("File rows={}", files.len());
         let mut hits = 0usize;
         for row in &files {
             let name = pretty_name(row.get(2).map(String::as_str).unwrap_or(""));
@@ -60,14 +60,14 @@ pub fn dump(msi: &[u8]) -> Result<(), String> {
             {
                 let component = row.get(1).cloned().unwrap_or_default();
                 let rel = comp_dir.get(&component).cloned().unwrap_or_default().join(name);
-                println!("  {} -> {}", row.join(" | "), rel.display());
+                crate::setup_note!("  {} -> {}", row.join(" | "), rel.display());
                 hits += 1;
             }
         }
-        println!("interesting File hits={hits}");
+        crate::setup_note!("interesting File hits={hits}");
         if hits == 0 {
             for row in files.iter().take(15) {
-                println!("  sample {}", row.join(" | "));
+                crate::setup_note!("  sample {}", row.join(" | "));
             }
         }
     }
@@ -121,23 +121,23 @@ pub fn unpack_msi(
     }
 
     if !media_rows.is_empty() {
-        println!("    Media cabinets:");
+        crate::setup_note!("    Media cabinets:");
         for row in &media_rows {
             let last = row.get(1).cloned().unwrap_or_default();
             let cab_name = row.get(3).cloned().unwrap_or_default();
-            println!("      last={last} cab={cab_name}");
+            crate::setup_note!("      last={last} cab={cab_name}");
         }
     }
     for (id, name, seq, rel) in &interesting {
-        println!("    {name} id={id} seq={seq} -> {}", rel.display());
+        crate::setup_note!("    {name} id={id} seq={seq} -> {}", rel.display());
     }
 
     let extracted = extract_needed_cabs(cabs, &needed)?;
 
     for (id, name, _, _) in &interesting {
         match extracted.get(&id.to_ascii_lowercase()) {
-            Some(_) => println!("    {name} found in cab as {id}"),
-            None => println!("    {name} id={id} NOT in any cab"),
+            Some(_) => crate::setup_note!("    {name} found in cab as {id}"),
+            None => crate::setup_note!("    {name} id={id} NOT in any cab"),
         }
     }
 
@@ -158,9 +158,10 @@ pub fn unpack_msi(
         };
         extract::write_file(&dest.join(&rel), data)?;
         written += 1;
+        crate::progress::measured("Installing SDK", file_name, written as u64, needed.len() as u64, crate::progress::Unit::Files);
     }
     if missing > 0 {
-        println!("    {missing} File rows had no cab payload");
+        crate::setup_note!("    {missing} File rows had no cab payload");
     }
     Ok(written)
 }
@@ -179,7 +180,7 @@ fn extract_needed_cabs(
         let members = match cab::list(bytes) {
             Ok(m) => m,
             Err(e) => {
-                println!("    WARN cab list {name}: {e}");
+                crate::setup_note!("    WARN cab list {name}: {e}");
                 continue;
             }
         };
@@ -191,7 +192,7 @@ fn extract_needed_cabs(
         if hits.is_empty() {
             continue;
         }
-        println!(
+        crate::setup_note!(
             "    cab {name} contains {} needed file(s) e.g. {}",
             hits.len(),
             hits.iter().take(3).cloned().collect::<Vec<_>>().join(", ")
@@ -202,18 +203,16 @@ fn extract_needed_cabs(
                     extracted.insert(fname.to_ascii_lowercase(), data);
                 }
             }
-            Err(e) => println!("    WARN cab extract {name}: {e}"),
+            Err(e) => crate::setup_note!("    WARN cab extract {name}: {e}"),
         }
     }
     Ok(extracted)
 }
 
 fn skip_sdk_file(name: &str) -> bool {
-    let n = name.to_ascii_lowercase();
-    n == "libucrt.lib"
-        || n == "libucrtd.lib"
-        || n.starts_with("libucrt")
-        || n.ends_with(".pdb")
+    // Keep the static UCRT libraries: the portable loader must run before a
+    // customer has installed Visual C++ runtimes on their Windows machine.
+    name.to_ascii_lowercase().ends_with(".pdb")
 }
 
 fn pretty_name(raw: &str) -> &str {

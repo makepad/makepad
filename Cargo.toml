@@ -61,6 +61,7 @@ workspace.members = [
     "libs/bounded_http",
     "libs/flow",
     "libs/strict_json",
+    "libs/loader_bundle",
     "libs/unescaper",
     # === remesh (FaithC port) / xatlas (jpcy port) ===
     "libs/remesh",

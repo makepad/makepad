@@ -1,4 +1,6 @@
 pub mod cab;
+pub mod catalog;
+pub mod command;
 pub mod cuda;
 pub mod extract;
 pub mod gitclone;
@@ -7,8 +9,12 @@ pub mod lzx;
 pub mod msi;
 pub mod msvc;
 pub mod progress;
+pub mod publish;
+pub mod runtime;
 pub mod rustc;
 pub mod sha256;
+pub mod tui;
+pub mod agent;
 
 use std::env;
 use std::fs;
@@ -47,16 +53,14 @@ pub fn default_root() -> PathBuf {
     if let Ok(p) = env::var("MAKEPAD_LOADER_ROOT") {
         return PathBuf::from(p);
     }
-    // Unzip-and-run: the folder that contains the exe (or cwd) is the
-    // whole install. Cache, toolchain, tmp, and src land next to it.
-    if let Ok(exe) = env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            if dir.as_os_str().len() > 0 {
-                return dir.to_path_buf();
-            }
-        }
+    if let Ok(Some((directory, _))) = makepad_loader_bundle::load() {
+        return directory;
     }
-    env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".makepad")
+        .join("loader")
 }
 
 #[derive(Clone, Debug)]
@@ -109,9 +113,7 @@ fn run_install_inner(opts: &InstallOpts) -> Result<Vec<AppInfo>, String> {
                 }
             }
         } else {
-            dwell("CUDA", "copying local NVIDIA runtime", 0.62);
-            cuda::harvest_runtime(&cuda_dir)?;
-            dwell("CUDA", "runtime ready", 0.72);
+            dwell("CUDA", "not requested", 0.72);
         }
         write_env_scripts(&opts.root, &rust_dir, &msvc_dir, &cuda_dir, &src_dir)?;
     }
@@ -195,7 +197,10 @@ fn crate_exists(src: &Path, package: &str) -> bool {
                 }
             } else if p.file_name().is_some_and(|n| n == "Cargo.toml") {
                 if package_name(&p).as_deref() == Some(package) {
-                    return p.parent().map(|d| d.join("src/main.rs").is_file()).unwrap_or(false);
+                    return p
+                        .parent()
+                        .map(|d| d.join("src/main.rs").is_file())
+                        .unwrap_or(false);
                 }
             }
         }
@@ -391,7 +396,11 @@ fn push_sdk_paths(msvc_dir: &Path, include: &mut Vec<String>, lib: &mut Vec<Stri
     let kits = msvc_dir.join("Windows Kits/10");
     let inc_root = kits.join("Include");
     if let Ok(rd) = fs::read_dir(&inc_root) {
-        let mut vers: Vec<_> = rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+        let mut vers: Vec<_> = rd
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect();
         vers.sort();
         if let Some(v) = vers.last() {
             for sub in ["ucrt", "shared", "um", "winrt"] {
@@ -401,7 +410,11 @@ fn push_sdk_paths(msvc_dir: &Path, include: &mut Vec<String>, lib: &mut Vec<Stri
     }
     let lib_root = kits.join("Lib");
     if let Ok(rd) = fs::read_dir(&lib_root) {
-        let mut vers: Vec<_> = rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+        let mut vers: Vec<_> = rd
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect();
         vers.sort();
         if let Some(v) = vers.last() {
             lib.push(v.join("ucrt/x64").display().to_string());
@@ -420,6 +433,24 @@ fn exe(name: &str) -> String {
 }
 
 pub fn cli_main() -> Result<(), String> {
+    if std::env::args().nth(1).as_deref() == Some("launch-scope") {
+        return command::launch_scope();
+    }
+    if std::env::args().nth(1).as_deref() == Some("rebuild") {
+        return runtime::rebuild_local();
+    }
+    if std::env::args().nth(1).as_deref() == Some("tui") {
+        return tui::run();
+    }
+    if std::env::args().nth(1).as_deref() == Some("windows-sdk") {
+        return msvc::cli_install();
+    }
+    if std::env::args().nth(1).as_deref() == Some("publish") {
+        return publish::main();
+    }
+    if std::env::args().any(|a| matches!(a.as_str(), "--app" | "--fetch-latest" | "--sources-only" | "--prepare")) {
+        return runtime::cli_main();
+    }
     let args = parse_args()?;
     if let Some(path) = &args.dump_msi {
         let bytes = fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
@@ -502,7 +533,7 @@ fn parse_args() -> Result<CliArgs, String> {
             }
             "-h" | "--help" => {
                 println!(
-                    "makepad-loader-cli [--root DIR] [--git URL] [--branch NAME] [-p PKG]\n\
+                    "makepad-builder-cli [--root DIR] [--git URL] [--branch NAME] [-p PKG]\n\
                      [--skip-build] [--skip-cuda|--cuda] [--skip-git]"
                 );
                 std::process::exit(0);

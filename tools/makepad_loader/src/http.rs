@@ -45,6 +45,7 @@ pub fn fetch_method_progress(
 ) -> Result<blocking_http::Response, String> {
     let mut current = url.to_string();
     for _ in 0..8 {
+        let display_url = current.split('?').next().unwrap_or(&current).to_string();
         let mut req = match method {
             "POST" => Request::post(&current),
             _ => Request::get(&current),
@@ -73,32 +74,56 @@ pub fn fetch_method_progress(
                 };
                 progress::emit(Progress {
                     stage: "Download".into(),
-                    detail: format!(
-                        "{name}  {:.1} / {:.1} MB",
-                        loaded as f64 / 1_048_576.0,
-                        total.unwrap_or(0) as f64 / 1_048_576.0
-                    ),
+                    detail: name.clone(),
                     loaded,
                     total: total.unwrap_or(0),
                     frac,
+                    unit: progress::Unit::Bytes,
+                    package: progress::Package::default(),
                 });
             });
         }
         let resp = blocking_http::request_no_redirect(req)
-            .map_err(|e| format!("http {e} for {current}"))?;
+            .map_err(|e| {
+                if current.contains('?') { format!("HTTP request failed for {display_url}") }
+                else { format!("http {e} for {display_url}") }
+            })?;
         if (300..400).contains(&resp.status) {
             let loc = resp
                 .header("location")
-                .ok_or_else(|| format!("redirect without location from {current}"))?;
-            current = resolve_url(&current, loc)?;
+                .ok_or_else(|| format!("redirect without location from {display_url}"))?;
+            if current.contains('?') || headers.iter().any(|(name, _)| {
+                name.eq_ignore_ascii_case("authorization")
+                    || name.eq_ignore_ascii_case("x-makepad-email")
+            }) {
+                return Err("Authenticated source downloads must not redirect".into());
+            }
+            let next = resolve_url(&current, loc)?;
+            if current.starts_with("https://") && !next.starts_with("https://") {
+                return Err("Refusing HTTPS download downgrade".into());
+            }
+            current = next;
             continue;
         }
         if resp.status != 200 {
-            return Err(format!("http {} for {current}", resp.status));
+            let detail = if resp.body.len() <= 4096 {
+                makepad_strict_json::parse(&resp.body).ok().and_then(|v| {
+                    v.get("error")
+                        .and_then(|e| e.as_str())
+                        .filter(|s| s.len() < 256)
+                        .map(str::to_owned)
+                })
+            } else {
+                None
+            };
+            return Err(match detail {
+                Some(detail) => format!("{detail} (HTTP {})", resp.status),
+                None => format!("http {} for {display_url}", resp.status),
+            });
         }
         return Ok(resp);
     }
-    Err(format!("too many redirects from {url}"))
+    Err(format!("too many redirects from {}", url.split('?').next().unwrap_or(url)))
 }
 
 pub fn cached_file(
@@ -113,26 +138,28 @@ pub fn cached_file(
     let ok = sidecar(&dest, ".ok");
     let _ = fs::remove_file(&part);
 
+    progress::stage("Verify cache", file_name, 0.0);
     if dest.is_file() && file_is_complete(&dest, &ok, sha256_hex)? {
-        println!(
+        crate::setup_note!(
             "  cache hit {}",
             dest.file_name().unwrap().to_string_lossy()
         );
         return Ok(dest);
     }
     if dest.is_file() {
-        println!("  incomplete or corrupt {file_name}, redownloading");
+        crate::setup_note!("  incomplete or corrupt {file_name}, redownloading");
         let _ = fs::remove_file(&dest);
         let _ = fs::remove_file(&ok);
     }
 
-    println!("  download {file_name}");
+    crate::setup_note!("  download {file_name}");
     progress::stage("Download", file_name, 0.0);
     let resp = fetch_method_progress("GET", url, &[], &[], Some(file_name))?;
     if resp.body.is_empty() {
         return Err(format!("empty download {file_name}"));
     }
     if let Some(expect) = sha256_hex {
+        progress::stage("Verify SHA-256", file_name, 0.0);
         let got = sha256::sha256_hex(&resp.body);
         if !got.eq_ignore_ascii_case(expect) {
             return Err(format!(
@@ -149,8 +176,9 @@ pub fn cached_file(
         }
     }
 
+    progress::stage("Save download", file_name, 0.0);
     write_atomic(&dest, &part, &ok, &resp.body, sha256_hex)?;
-    println!(
+    crate::setup_note!(
         "  wrote {} ({:.1} MB)",
         dest.file_name().unwrap().to_string_lossy(),
         dest.metadata().map(|m| m.len()).unwrap_or(0) as f64 / 1_048_576.0
@@ -173,11 +201,7 @@ fn sidecar(dest: &Path, extra: &str) -> PathBuf {
     PathBuf::from(s)
 }
 
-fn file_is_complete(
-    dest: &Path,
-    ok: &Path,
-    sha256_hex: Option<&str>,
-) -> Result<bool, String> {
+fn file_is_complete(dest: &Path, ok: &Path, sha256_hex: Option<&str>) -> Result<bool, String> {
     let meta = dest.metadata().map_err(|e| e.to_string())?;
     if meta.len() == 0 {
         return Ok(false);
@@ -200,14 +224,8 @@ fn file_is_complete(
         return Ok(false);
     }
     if let Some(expect) = sha256_hex {
-        if sha
-            .as_deref()
-            .map(|s| !s.eq_ignore_ascii_case(expect))
-            .unwrap_or(true)
-        {
-            return Ok(false);
-        }
-        return Ok(true);
+        let bytes = fs::read(dest).map_err(|e| e.to_string())?;
+        return Ok(sha256::sha256_hex(&bytes).eq_ignore_ascii_case(expect));
     }
     if let Some(recorded) = sha {
         let bytes = fs::read(dest).map_err(|e| e.to_string())?;

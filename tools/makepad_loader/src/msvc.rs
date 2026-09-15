@@ -10,16 +10,55 @@ use crate::msi;
 
 const CHANNEL: &str = "https://aka.ms/vs/17/release/channel";
 
+/// The same VSIX/MSI/CAB extractor used by Windows setup also runs on Linux.
+/// No Windows executables are run, and no global tools or registry are changed.
+pub fn cli_install() -> Result<(), String> {
+    let mut root = None;
+    let mut accepted = false;
+    let mut show_progress = false;
+    let mut args = std::env::args().skip(2);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--root" => root = Some(std::path::PathBuf::from(args.next().ok_or("--root needs a directory")?)),
+            "--accept-ms-license" => accepted = true,
+            "--progress" => show_progress = true,
+            "--help" | "-h" => {
+                crate::setup_note!("makepad-builder-cli windows-sdk --root DIR --accept-ms-license\n\
+                    Downloads Visual Studio 2022 C++ tools and Windows SDK from Microsoft.\n\
+                    Extracts VSIX/MSI/CAB into DIR/sdk without running Windows installers.\n\
+                    https://visualstudio.microsoft.com/license-terms/vs2022-ga-diagnosticbuildtools/\n\
+                    https://learn.microsoft.com/legal/windows-sdk/windows-sdk-license");
+                return Ok(());
+            }
+            _ => return Err(format!("unknown Windows SDK option {arg}")),
+        }
+    }
+    let root = root.ok_or("windows-sdk requires --root DIR")?;
+    if !accepted {
+        return Err("Read Microsoft's Build Tools and Windows SDK terms (windows-sdk --help), then pass --accept-ms-license to download and extract them".into());
+    }
+    if show_progress { crate::tui::with_progress(|| install(&root.join("cache"), &root.join("sdk"))) }
+    else { install(&root.join("cache"), &root.join("sdk")) }
+}
+
+pub fn ready(dest: &Path) -> bool {
+    find_cl(dest).is_some() && walk_find(dest, "kernel32.lib").is_some() && walk_find(dest, "libucrt.lib").is_some()
+}
+
 pub fn install(cache: &Path, dest: &Path) -> Result<(), String> {
-    if find_cl(dest).is_some() && walk_find(dest, "kernel32.lib").is_some() {
-        println!("msvc: already extracted at {}", dest.display());
+    crate::progress::package("Microsoft tools + Windows SDK", "Read package catalog", 0, 0);
+    if find_cl(dest).is_some()
+        && walk_find(dest, "kernel32.lib").is_some()
+        && walk_find(dest, "libucrt.lib").is_some()
+    {
+        crate::progress::stage("Ready", "Microsoft tools and SDK already installed", 1.0);
         return Ok(());
     }
-    println!("msvc: vs 17 release channel");
+    crate::setup_note!("msvc: vs 17 release channel");
     let channel_bytes = http::fetch_bytes(CHANNEL)?;
     let channel = json::parse(&channel_bytes).map_err(|e| format!("channel json: {e}"))?;
     let vsman_url = channel_item_payload(&channel, "Microsoft.VisualStudio.Manifests.VisualStudio")?;
-    println!("msvc: catalog {vsman_url}");
+    crate::setup_note!("msvc: catalog {vsman_url}");
     let vsman_bytes = http::fetch_bytes(&vsman_url)?;
     let vsman = json::parse(&vsman_bytes).map_err(|e| format!("vsman json: {e}"))?;
     let packages = vsman
@@ -41,8 +80,8 @@ pub fn install(cache: &Path, dest: &Path) -> Result<(), String> {
         .ok_or("msvc pid parse")?
         .to_string();
     let sdk_pid = latest_sdk(&by_id).ok_or("no Windows SDK component")?;
-    println!("msvc: VC {msvc_ver}");
-    println!("msvc: SDK {sdk_pid}");
+    crate::setup_note!("msvc: VC {msvc_ver}");
+    crate::setup_note!("msvc: SDK {sdk_pid}");
 
     fs::create_dir_all(dest).map_err(|e| e.to_string())?;
     unpack_msvc_vsix(&by_id, cache, dest, &msvc_ver)?;
@@ -54,7 +93,10 @@ pub fn install(cache: &Path, dest: &Path) -> Result<(), String> {
     if walk_find(dest, "kernel32.lib").is_none() {
         return Err("kernel32.lib missing after sdk extract".into());
     }
-    println!("msvc: ready at {}", dest.display());
+    if walk_find(dest, "libucrt.lib").is_none() {
+        return Err("libucrt.lib missing after sdk extract".into());
+    }
+    crate::progress::stage("Ready", "Microsoft tools and SDK installed", 1.0);
     Ok(())
 }
 
@@ -123,9 +165,11 @@ fn unpack_msvc_vsix(
     if let Some(redist) = redist_pkg(by_id, ver, target) {
         ids.push(redist);
     }
-    for id in ids {
+    let count = ids.len();
+    for (index, id) in ids.into_iter().enumerate() {
+        crate::progress::package("Microsoft C++ tools", &id, index + 1, count);
         let Some(pkg) = pick_pkg(by_id, &id) else {
-            println!("  msvc skip missing {id}");
+            crate::setup_note!("  msvc skip missing {id}");
             continue;
         };
         download_and_unzip_vsix(pkg, cache, dest)?;
@@ -181,9 +225,10 @@ fn unpack_sdk(
     let mut cab_map: HashMap<String, Vec<u8>> = HashMap::new();
     let mut msi_files: Vec<(String, Vec<u8>)> = Vec::new();
 
-    for name in msi_names {
+    for (index, name) in msi_names.into_iter().enumerate() {
+        crate::progress::package("Windows SDK downloads", name, index + 1, msi_names.len());
         let Some(payload) = payload_named(payloads, name) else {
-            println!("  sdk skip {name}");
+            crate::setup_note!("  sdk skip {name}");
             continue;
         };
         let (url, sha, file) = payload_url(payload)?;
@@ -203,7 +248,7 @@ fn unpack_sdk(
         msi_files.push((name.to_string(), bytes));
     }
     if cab_map.is_empty() {
-        println!("  no .cab names scanned from msi; downloading sdk cab payloads");
+        crate::setup_note!("  no .cab names scanned from msi; downloading sdk cab payloads");
         for p in payloads {
             let Ok((url, sha, file)) = payload_url(p) else {
                 continue;
@@ -215,7 +260,7 @@ fn unpack_sdk(
             if lower.contains("arm") {
                 continue;
             }
-            println!("  cab {file}");
+            crate::setup_note!("  cab {file}");
             let path = http::cached_file(cache, &url, &file, sha.as_deref())?;
             let bytes = fs::read(&path).map_err(|e| e.to_string())?;
             cab_map.insert(file.clone(), bytes.clone());
@@ -223,11 +268,13 @@ fn unpack_sdk(
         }
     }
 
-    for (name, bytes) in msi_files {
-        println!("  msi unpack {name} (no msiexec)");
+    let count = msi_files.len();
+    for (index, (name, bytes)) in msi_files.into_iter().enumerate() {
+        crate::progress::package("Install Windows SDK", &name, index + 1, count);
+        crate::setup_note!("  msi unpack {name} (no msiexec)");
         match msi::unpack_msi(&bytes, &cab_map, dest) {
-            Ok(n) => println!("    {n} files"),
-            Err(e) => println!("    WARN {name}: {e}"),
+            Ok(n) => crate::setup_note!("    {n} files"),
+            Err(e) => crate::setup_note!("    WARN {name}: {e}"),
         }
     }
     Ok(())
@@ -327,7 +374,7 @@ fn download_and_unzip_vsix(pkg: &Value, cache: &Path, dest: &Path) -> Result<(),
         if !(file.ends_with(".vsix") || file.ends_with(".zip") || file.ends_with(".msi")) {
             continue;
         }
-        println!("  vsix {file}");
+        crate::setup_note!("  vsix {file}");
         let path = http::cached_file(cache, &url, &file, sha.as_deref())?;
         if file.ends_with(".vsix") || file.ends_with(".zip") {
             extract::unzip_file(&path, dest, Some("Contents"))?;

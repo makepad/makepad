@@ -40,6 +40,12 @@ pub struct Session {
 }
 
 impl Session {
+    /// Poll the child independently of pipe EOF. ConPTY can retain its output
+    /// pipe after the child exits until the host closes the pseudo console.
+    pub fn process_exited(&mut self) -> bool {
+        self.exited || self.pty.child_exited()
+    }
+
     /// PID of this session’s shell, for exact host activity relationships.
     pub fn child_pid(&self) -> i32 { self.pty.child_pid() }
 

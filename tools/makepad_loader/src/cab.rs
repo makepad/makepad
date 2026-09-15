@@ -139,7 +139,8 @@ fn decompress_folder(data: &[u8], folder: &Folder) -> Result<Vec<u8>, String> {
     } else {
         None
     };
-    for _ in 0..folder.blocks {
+    for index in 0..folder.blocks {
+        crate::progress::measured("Decompressing CAB", "Compressed blocks", index as u64, folder.blocks as u64, crate::progress::Unit::Blocks);
         if off + 8 > data.len() {
             return Err("cab data truncated".into());
         }

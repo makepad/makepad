@@ -4,47 +4,94 @@ use std::path::Path;
 use crate::extract;
 use crate::http;
 
-const CHANNEL: &str = "https://static.rust-lang.org/dist/channel-rust-stable.toml";
-const TRIPLE: &str = "x86_64-pc-windows-msvc";
+pub const DEFAULT_VERSION: &str = "1.98.0";
 
 pub fn install(cache: &Path, dest: &Path) -> Result<(), String> {
-    if dest.join("bin").join("cargo.exe").is_file() && dest.join("bin").join("rustc.exe").is_file()
+    install_version(cache, dest, DEFAULT_VERSION)
+}
+
+pub fn install_version(cache: &Path, dest: &Path, version: &str) -> Result<(), String> {
+    if version.split('.').count() != 3
+        || !version
+            .split('.')
+            .all(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
     {
-        println!("rust: already extracted at {}", dest.display());
+        return Err("A pinned Rust version is required".into());
+    }
+    crate::progress::package("Rust", "Read toolchain manifest", 0, 0);
+    let triple = crate::catalog::platform();
+    let stamp = format!("{version} {triple}");
+    if fs::read_to_string(dest.join(".toolchain-version")).is_ok_and(|s| s == stamp)
+        && dest
+            .join("bin")
+            .join(crate::runtime::exe("cargo"))
+            .is_file()
+        && dest
+            .join("bin")
+            .join(crate::runtime::exe("rustc"))
+            .is_file()
+    {
+        crate::progress::stage("Ready", &format!("Rust {stamp} already installed"), 1.0);
         return Ok(());
     }
-    println!("rust: fetching stable channel");
-    let toml = String::from_utf8(http::fetch_bytes(CHANNEL)?)
-        .map_err(|_| "rust channel is not utf-8")?;
-    let rustc = pkg_target(&toml, "rustc", TRIPLE)?;
-    let std = pkg_target(&toml, "rust-std", TRIPLE)?;
-    let cargo = pkg_target(&toml, "cargo", TRIPLE)?;
-    println!("rust: {} / {} / {}", rustc.0, std.0, cargo.0);
-
+    if dest.exists() {
+        return Err(format!(
+            "Incomplete or different Rust toolchain at {}",
+            dest.display()
+        ));
+    }
+    let channel = format!("https://static.rust-lang.org/dist/channel-rust-{version}.toml");
+    crate::setup_note!("rust: fetching {stamp}");
+    let toml = String::from_utf8(http::fetch_bytes(&channel)?)
+        .map_err(|_| "Rust manifest is not UTF-8")?;
+    let rustc = pkg_target(&toml, "rustc", triple)?;
+    let std = pkg_target(&toml, "rust-std", triple)?;
+    let cargo = pkg_target(&toml, "cargo", triple)?;
+    crate::progress::package("Rust downloads", "rustc", 1, 3);
     let rustc_path = http::cached_file(cache, &rustc.1, &file_name(&rustc.1), Some(&rustc.2))?;
+    crate::progress::package("Rust downloads", "rust-std", 2, 3);
     let std_path = http::cached_file(cache, &std.1, &file_name(&std.1), Some(&std.2))?;
+    crate::progress::package("Rust downloads", "cargo", 3, 3);
     let cargo_path = http::cached_file(cache, &cargo.1, &file_name(&cargo.1), Some(&cargo.2))?;
 
-    let tmp = dest.parent().unwrap_or(dest).join("rust-unpack");
+    let tmp = dest.with_extension("unpack");
     let _ = fs::remove_dir_all(&tmp);
     fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
 
-    println!("rust: unpack rustc");
+    crate::progress::package("Install Rust", "rustc", 1, 3);
     extract::extract_tar_gz(&rustc_path, &tmp.join("rustc"))?;
-    println!("rust: unpack rust-std");
+    crate::progress::package("Install Rust", "rust-std", 2, 3);
     extract::extract_tar_gz(&std_path, &tmp.join("std"))?;
-    println!("rust: unpack cargo");
+    crate::progress::package("Install Rust", "cargo", 3, 3);
     extract::extract_tar_gz(&cargo_path, &tmp.join("cargo"))?;
 
-    fs::create_dir_all(dest).map_err(|e| e.to_string())?;
-    merge_component(&tmp.join("rustc"), dest, "rustc")?;
-    merge_component(&tmp.join("cargo"), dest, "cargo")?;
-    merge_std(&tmp.join("std"), dest)?;
+    let staged = tmp.join("ready");
+    fs::create_dir_all(&staged).map_err(|e| e.to_string())?;
+    merge_component(&tmp.join("rustc"), &staged, "rustc")?;
+    merge_component(&tmp.join("cargo"), &staged, "cargo")?;
+    merge_std(&tmp.join("std"), &staged)?;
+    crate::progress::stage("Checking compiler", "Running rustc --version", 0.0);
+    let mut check = std::process::Command::new(staged.join("bin").join(crate::runtime::exe("rustc")));
+    crate::runtime::hide_console(&mut check);
+    let output = check.arg("--version")
+        .output()
+        .map_err(|e| format!("Run private rustc: {e}"))?;
+    if !output.status.success()
+        || !String::from_utf8_lossy(&output.stdout).starts_with(&format!("rustc {version} "))
+    {
+        return Err("Extracted Rust compiler failed its version check".into());
+    }
+    fs::write(staged.join(".toolchain-version"), stamp).map_err(|e| e.to_string())?;
+    fs::rename(&staged, dest).map_err(|e| e.to_string())?;
     let _ = fs::remove_dir_all(&tmp);
-    if !dest.join("bin").join("rustc.exe").is_file() {
+    if !dest
+        .join("bin")
+        .join(crate::runtime::exe("rustc"))
+        .is_file()
+    {
         return Err("rustc.exe missing after extract".into());
     }
-    println!("rust: ready at {}", dest.display());
+    crate::progress::stage("Ready", "Rust installed and verified", 1.0);
     Ok(())
 }
 

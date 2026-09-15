@@ -8,7 +8,11 @@ use makepad_zip_file::{
     COMPRESS_METHOD_UNCOMPRESSED,
 };
 
-pub fn unzip_file(zip_path: &Path, dest: &Path, strip_prefix: Option<&str>) -> Result<usize, String> {
+pub fn unzip_file(
+    zip_path: &Path,
+    dest: &Path,
+    strip_prefix: Option<&str>,
+) -> Result<usize, String> {
     let bytes = fs::read(zip_path).map_err(|e| format!("read {}: {e}", zip_path.display()))?;
     unzip_bytes(&bytes, dest, strip_prefix)
 }
@@ -17,11 +21,13 @@ pub fn unzip_bytes(bytes: &[u8], dest: &Path, strip_prefix: Option<&str>) -> Res
     fs::create_dir_all(dest).map_err(|e| e.to_string())?;
     let eocd_at = find_eocd(bytes).ok_or("zip: missing end of central directory")?;
     let mut cur = Cursor::new(&bytes[eocd_at..]);
-    let eocd = EndOfCentralDirectory::from_stream(&mut cur).map_err(|e| format!("zip eocd: {e:?}"))?;
+    let eocd =
+        EndOfCentralDirectory::from_stream(&mut cur).map_err(|e| format!("zip eocd: {e:?}"))?;
     let mut cur = Cursor::new(bytes);
     cur.set_position(eocd.central_directory_offset as u64);
     let mut n = 0usize;
-    for _ in 0..eocd.total_entries_all_disk {
+    for index in 0..eocd.total_entries_all_disk {
+        crate::progress::measured("Unpacking", "Archive entries", index as u64, eocd.total_entries_all_disk as u64, crate::progress::Unit::Files);
         let hdr = CentralDirectoryFileHeader::from_stream(&mut cur)
             .map_err(|e| format!("zip cd: {e:?}"))?;
         if let Some(path) = zip_entry_path(&hdr.file_name, strip_prefix)? {
@@ -37,12 +43,14 @@ pub fn unzip_bytes(bytes: &[u8], dest: &Path, strip_prefix: Option<&str>) -> Res
             n += 1;
         }
     }
+    crate::progress::measured("Unpacking", "Archive entries", eocd.total_entries_all_disk as u64, eocd.total_entries_all_disk as u64, crate::progress::Unit::Files);
     let _ = (COMPRESS_METHOD_DEFLATED, COMPRESS_METHOD_UNCOMPRESSED);
     Ok(n)
 }
 
 pub fn extract_tar_gz(path: &Path, dest: &Path) -> Result<usize, String> {
     let gz = fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    crate::progress::stage("Decompressing", &path.file_name().unwrap_or_default().to_string_lossy(), 0.0);
     let tar = gzip_to_vec(&gz).map_err(|e| format!("gzip {}: {e}", path.display()))?;
     extract_tar(&tar, dest)
 }
@@ -52,9 +60,7 @@ fn gzip_to_vec(gz: &[u8]) -> Result<Vec<u8>, String> {
         return Err("gzip too short".into());
     }
     let header = gzip_header_len(gz)?;
-    let deflate = gz
-        .get(header..gz.len() - 8)
-        .ok_or("gzip missing body")?;
+    let deflate = gz.get(header..gz.len() - 8).ok_or("gzip missing body")?;
     let isize = u32::from_le_bytes(gz[gz.len() - 4..].try_into().unwrap()) as usize;
     let mut cap = isize.max(deflate.len().saturating_mul(4)).max(1);
     loop {
@@ -148,13 +154,22 @@ pub fn extract_tar(tar: &[u8], dest: &Path) -> Result<usize, String> {
             }
             b'0' | b'\0' | b'7' => {
                 if let Some(rel) = safe_rel(&name)? {
-                    write_file(&dest.join(rel), payload)?;
+                    let path = dest.join(rel);
+                    write_file(&path, payload)?;
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let mode = tar_octal(&hdr[100..108])? as u32 & 0o777;
+                        fs::set_permissions(&path, fs::Permissions::from_mode(mode))
+                            .map_err(|e| e.to_string())?;
+                    }
                     n += 1;
                 }
             }
             _ => {}
         }
         off = next.min(tar.len());
+        crate::progress::measured("Unpacking", &name, off as u64, tar.len() as u64, crate::progress::Unit::Bytes);
     }
     Ok(n)
 }
@@ -215,8 +230,11 @@ fn zip_entry_path(name: &str, strip: Option<&str>) -> Result<Option<String>, Str
 
 fn safe_rel(name: &str) -> Result<Option<String>, String> {
     let n = name.replace('\\', "/");
-    if n.is_empty() || n.starts_with('/') {
+    if n.is_empty() {
         return Ok(None);
+    }
+    if n.starts_with('/') || n.contains(':') || n.contains('\0') {
+        return Err(format!("refusing archive path {name}"));
     }
     for part in n.split('/') {
         if part == ".." {
@@ -261,6 +279,7 @@ pub fn merge_dir(src: &Path, dest: &Path) -> Result<(), String> {
         if ft.is_dir() {
             merge_dir(&entry.path(), &to)?;
         } else if ft.is_file() {
+            crate::progress::stage("Installing", &entry.file_name().to_string_lossy(), 0.0);
             fs::copy(entry.path(), &to).map_err(|e| e.to_string())?;
         }
     }
