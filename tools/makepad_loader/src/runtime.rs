@@ -356,6 +356,13 @@ impl Environment {
             fs::write(&command, include_str!("../launcher.sh").replace("@APP_BINARY@", &release.binary)).map_err(|e| e.to_string())?;
             fs::set_permissions(&command, fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
         }
+        #[cfg(target_os = "macos")]
+        {
+            let project = release.repositories.iter().find(|repo| repo.name == "makepad")
+                .map(|repo| release.directory(&self.root).join(&repo.path))
+                .unwrap_or_else(|| release.source(&self.root));
+            crate::desktop::prepare(&self.root, release, &project)?;
+        }
         progress::stage("Ready", &format!("{} is ready in the installation folder", exe(&release.binary)), 1.0);
         Ok(())
     }

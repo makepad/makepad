@@ -1,6 +1,8 @@
 pub mod cab;
 pub mod catalog;
 pub mod command;
+#[cfg(target_os = "macos")]
+pub mod desktop;
 pub mod cuda;
 pub mod extract;
 pub mod gitclone;

@@ -37,6 +37,39 @@ mod view;
 pub use view::with_progress;
 use view::{activity, Screen};
 
+struct RunningApp {
+    title: String,
+    child: std::process::Child,
+    log: PathBuf,
+}
+thread_local! {
+    static RUNNING_APPS: std::cell::RefCell<Vec<RunningApp>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+// Menu polling owns child bookkeeping; no blocking waiter or per-app thread.
+fn reap_apps() -> bool {
+    RUNNING_APPS.with(|apps| {
+        let mut changed = false;
+        apps.borrow_mut().retain_mut(|app| match app.child.try_wait() {
+            Ok(None) => true,
+            Ok(Some(status)) => {
+                if status.success() {
+                    activity(&format!("{} closed", app.title));
+                } else {
+                    activity(&format!("{} exited {status}; see {}", app.title, app.log.display()));
+                }
+                changed = true;
+                false
+            }
+            Err(error) => {
+                activity(&format!("{}: {error}", app.title));
+                changed = true;
+                false
+            }
+        });
+        changed
+    })
+}
+
 enum Key {
     Left,
     Right,
@@ -565,12 +598,20 @@ impl Setup {
         } else {
             self.project.clone()
         };
-        let mut app = Command::new(environment.app_binary(&release));
+        #[cfg(target_os = "macos")]
+        let executable = crate::desktop::prepare(&self.root, &release, &project)?;
+        #[cfg(not(target_os = "macos"))]
+        let executable = environment.app_binary(&release);
+        let mut app = Command::new(executable);
         runtime::hide_console(&mut app);
-        let log_path = environment.build.join("builder-app.log");
+        #[cfg(unix)] {
+            use std::os::unix::process::CommandExt;
+            app.process_group(0);
+        }
+        let log_path = environment.build.join(format!("{}-app.log", release.binary));
         let log = fs::File::create(&log_path).map_err(|e| e.to_string())?;
         activity(&format!("Running {}", release.title));
-        let status = app
+        let child = app
             .args(["--cwd", &project.to_string_lossy()])
             .current_dir(&project)
             .envs(environment.vars)
@@ -579,13 +620,12 @@ impl Setup {
             .stdin(Stdio::null())
             .stderr(log.try_clone().map_err(|e| e.to_string())?)
             .stdout(log)
-            .status()
+            .spawn()
             .map_err(|e| e.to_string())?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(format!("App exited {status}; see {}", log_path.display()))
-        }
+        RUNNING_APPS.with(|apps| apps.borrow_mut().push(RunningApp {
+            title: release.title, child, log: log_path,
+        }));
+        Ok(())
     }
 }
 fn load_release(path: &Path) -> Option<Release> {

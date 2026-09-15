@@ -12,6 +12,19 @@ pub fn launch_scope() -> Result<(), String> {
     if args.first().is_some_and(|arg| !arg.to_string_lossy().starts_with('-')) {
         args.insert(0, "--cwd".into());
     }
+    #[cfg(target_os = "macos")]
+    let binary = {
+        let data = fs::read(root.join("installed/scope.json")).map_err(|e| e.to_string())?;
+        let release = crate::catalog::Release::parse(&makepad_strict_json::parse(&data).map_err(str::to_owned)?)?;
+        let cwd = env::current_dir().map_err(|e| e.to_string())?;
+        let project = args.windows(2).find(|args| args[0] == "--cwd")
+            .map(|args| cwd.join(&args[1])).unwrap_or_else(|| cwd.clone());
+        let executable = crate::desktop::prepare(&root, &release, &project)?;
+        if !args.iter().any(|arg| arg == "--cwd") {
+            args.splice(0..0, ["--cwd".into(), cwd.into_os_string()]);
+        }
+        executable
+    };
     let mut child = Command::new(binary);
     child.args(args).env_remove("MAKEPAD_LOADER_EMAIL").env_remove("MAKEPAD_PACKAGE_DIR");
     let cuda = root.join("toolchain/cuda/bin");

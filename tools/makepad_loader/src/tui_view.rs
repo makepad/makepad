@@ -246,6 +246,7 @@ impl Screen {
         disabled: &[&str],
         selected: usize,
     ) -> Result<String, String> {
+        super::reap_apps();
         if options.is_empty() { return Ok("q".into()); }
         let enabled = |i: usize| !disabled.contains(&options[i].0.as_str());
         let mut selected = selected.min(options.len() - 1);
@@ -282,6 +283,7 @@ impl Screen {
         let mut shortcut = String::new();
         let numbered = options.iter().any(|o| o.0.len() > 1 && o.0.bytes().all(|c| c.is_ascii_digit()));
         loop {
+            if super::reap_apps() { last_frame = None; }
             let size = console::size();
             let frame = (size, selected, offset);
             if last_frame != Some(frame) {

@@ -12,4 +12,18 @@ unset MAKEPAD_LOADER_EMAIL MAKEPAD_PACKAGE_DIR
 if [ "$#" -gt 0 ]; then
     case "$1" in -*) ;; *) set -- --cwd "$@" ;; esac
 fi
+if [ "$(uname -s)" = Darwin ]; then
+    # The shell command opens the invoking directory; Dock launches use the
+    # bundle's saved project. Keep the two entry points consistent.
+    for builder_app in "$builder_directory/"*.app; do
+        if [ -x "$builder_app/Contents/MacOS/@APP_BINARY@" ]; then
+            builder_has_cwd=0
+            for builder_arg in "$@"; do
+                [ "$builder_arg" != --cwd ] || builder_has_cwd=1
+            done
+            if [ "$builder_has_cwd" = 0 ]; then set -- --cwd "$PWD" "$@"; fi
+            exec "$builder_app/Contents/MacOS/@APP_BINARY@" "$@"
+        fi
+    done
+fi
 exec "$builder_directory/@APP_BINARY@.bin" "$@"
