@@ -1,0 +1,29 @@
+Produce or refresh exactly one architecture plan in SCHEMA.toml, version 0.
+Return only the complete TOML plan, without fences or commentary.
+Plans live in the repository-root arch/ tree: arch/<crate path>/crate.toml or arch/<crate path>/<module path>.toml.
+Graph facts and the existing plan are primary evidence; source excerpts are secondary.
+The supplied scope, manifest, affected node IDs, and change list bound the task.
+On refresh keep every unaffected node, edge, and prose byte-identical.
+Only touch nodes listed as affected; preserve their IDs whenever the role survives.
+Only change edges incident to affected nodes when evidence requires it.
+Keep unaffected overview sentences byte-identical; revise only affected facts.
+Echo the supplied manifest verbatim into source.files, including ordering and hashes.
+Never calculate, guess, omit, or rewrite manifest entries.
+Use plain sentences, one sentence per line; no Markdown or decorative prose.
+Explain what each node does, why it exists, its invariants, and failure behavior.
+Summaries are at most 120 characters; stories are at most 600 characters.
+The overview is at most 1,200 characters and gives a quick account of the whole scope.
+Say unknown when evidence is absent; distinguish inference from observed facts.
+Never invent files, threads, stores, budgets, relationships, or operating guarantees.
+Use at most 24 nodes; prefer a few meaningful subsystems over exhaustive detail.
+Use at most 48 edges and 8 optional lanes; source.files has at most 512 entries.
+Node kinds: component, thread, queue, store, memory, gpu, io.
+Edge kinds: owns, spawns, sends, reads, writes, allocates_from, uploads_to, calls.
+IDs match [a-z][a-z0-9_-]{0,63}; every edge endpoint and lane must exist.
+Refs are repo-relative file paths, optionally followed by :line and/or ::Symbol.
+Use only existing relative child plan paths under the repository root.
+Budget is free text supported by evidence; omit it or say unknown if unsupported.
+Preserve any supplied visual string opaquely; version 0 does not interpret it.
+Do not add schema fields, phase 1 features, new node kinds, or new edge kinds.
+Write overview under [source], as required by this schema's TOML layout.
+Use multiline strings for prose and sort lane, node, and edge IDs.

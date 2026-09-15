@@ -45,7 +45,7 @@ impl State {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_studio::rust_editor::rust_tokenizer::{
+    /// use makepad_rust_tokenizer::{
     ///     full_token::{FullToken, TokenWithLen},
     ///     tokenizer::{Cursor, InitialState, State}
     /// };
@@ -95,7 +95,8 @@ pub struct InitialState;
 impl InitialState {
     fn next(self, cursor: &mut Cursor<'_>) -> (State, FullToken) {
         match (cursor.peek(0), cursor.peek(1), cursor.peek(2)) {
-            ('r', '#', '"') | ('r', '#', '#') => self.raw_string(cursor),
+            ('r', '#', '"') | ('r', '#', '#') | ('r', '"', _) => self.raw_string(cursor),
+            ('r', '#', ch2) if ch2.is_identifier_start() => self.raw_identifier(cursor),
             ('b', 'r', '"') | ('b', 'r', '#') => self.raw_byte_string(cursor),
             ('.', '.', '.') | ('.', '.', '=') | ('<', '<', '=') | ('>', '>', '=') => {
                 let id = cursor.id_from_3();
@@ -181,7 +182,7 @@ impl InitialState {
                 )
             }
             ('#', ch1, ch2) if ch1 == 'x' && ch2.is_digit(16) || ch1.is_digit(16) => self.color(cursor),
-            ('.', ch1, _) if ch1.is_digit(10) => self.number(cursor),
+            ('_', ch1, _) if ch1.is_identifier_continue() => self.identifier_or_bool(cursor),
             ('!', _, _)
                 | ('#', _, _)
                 | ('$', _, _)
@@ -262,8 +263,16 @@ impl InitialState {
     fn identifier_tail(self, start: usize, cursor: &mut Cursor) -> (State, FullToken) {
         while cursor.skip_if( | ch | ch.is_identifier_continue()) {}
         (State::Initial(InitialState), FullToken::Ident(
-            LiveId::from_str_with_lut(cursor.from_start_to_scratch(start)).unwrap()
+            LiveId::from_str(cursor.from_start_to_scratch(start))
         ))
+    }
+
+    /// `r#ident`: one identifier token including its prefix.
+    fn raw_identifier(self, cursor: &mut Cursor) -> (State, FullToken) {
+        debug_assert!(cursor.peek(0) == 'r' && cursor.peek(1) == '#');
+        let start = cursor.index();
+        cursor.skip(2);
+        self.identifier_tail(start, cursor)
     }
     
     fn number(self, cursor: &mut Cursor) -> (State, FullToken) {
@@ -295,7 +304,7 @@ impl InitialState {
                 cursor.skip_digits(10);
                 
                 match cursor.peek(0) {
-                    '.' if cursor.peek(1) != '.' && !cursor.peek(0).is_identifier_start() => {
+                    '.' if cursor.peek(1) != '.' && !cursor.peek(1).is_identifier_start() => {
                         cursor.skip(1);
                         if cursor.skip_digits(10) {
                             if cursor.peek(0) == 'E' || cursor.peek(0) == 'e' {
@@ -430,7 +439,8 @@ impl InitialState {
                     break;
                 }
                 ('\0', _) => return (State::Initial(InitialState), FullToken::Unknown),
-                ('\\', '\'') | ('\\', '\\') => cursor.skip(2),
+                ('\\', '\0') => cursor.skip(1),
+                ('\\', _) => cursor.skip(2),
                 _ => cursor.skip(1),
             }
         }
@@ -448,6 +458,10 @@ impl InitialState {
         while cursor.skip_if( | ch | ch == '#') {
             start_hash_count += 1;
         }
+        // The opening quote belongs to the opener, never to the body.
+        if !cursor.skip_if( | ch | ch == '"') {
+            return (State::Initial(InitialState), FullToken::Unknown);
+        }
         RawDoubleQuotedStringTailState {start_hash_count}.next(cursor)
     }
     
@@ -462,6 +476,16 @@ impl InitialState {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct BlockCommentTailState {
     depth: usize,
+}
+
+impl BlockCommentTailState {
+    /// A state inside a block comment nested `depth` levels deep.
+    pub fn new(depth: usize) -> Self {
+        BlockCommentTailState { depth }
+    }
+    pub fn depth(&self) -> usize {
+        self.depth
+    }
 }
 
 impl BlockCommentTailState {
@@ -508,7 +532,8 @@ impl DoubleQuotedStringTailState {
                         FullToken::String,
                     );
                 }
-                ('\\', '"') => cursor.skip(2),
+                ('\\', '\0') => cursor.skip(1),
+                ('\\', _) => cursor.skip(2),
                 _ => cursor.skip(1),
             }
         }
@@ -519,6 +544,16 @@ impl DoubleQuotedStringTailState {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct RawDoubleQuotedStringTailState {
     start_hash_count: usize,
+}
+
+impl RawDoubleQuotedStringTailState {
+    /// A state inside a raw string opened with `start_hash_count` hashes.
+    pub fn new(start_hash_count: usize) -> Self {
+        RawDoubleQuotedStringTailState { start_hash_count }
+    }
+    pub fn start_hash_count(&self) -> usize {
+        self.start_hash_count
+    }
 }
 
 impl RawDoubleQuotedStringTailState {
@@ -560,7 +595,7 @@ impl<'a> Cursor<'a> {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_studio::rust_editor::rust_tokenizer::tokenizer::Cursor;
+    /// use makepad_rust_tokenizer::tokenizer::Cursor;
     /// 
     /// let mut scratch = String::new();
     /// let cursor = Cursor::new(&['1', '2', '3'], &mut scratch);
@@ -686,33 +721,147 @@ impl TokenRange{
 }
 
 /// Extension methods for `char`.
-/// 
-/// These methods assume that all identifiers are ASCII. This is not actually the case for Rust,
-/// which identifiers follow the specification in Unicode Standard Annex #31. We intend to
-/// implement this properly in the future, but doing so requires generating several large Unicode
-/// character tables, which why we've held off from this for now. 
+///
+/// Identifier characters follow a practical reading of Unicode Standard Annex #31: ASCII
+/// letters, digits and `_`, plus every non-ASCII alphabetic (start) or alphanumeric
+/// (continue) character. Full XID tables are not shipped; the rare characters that XID
+/// admits but `char::is_alphabetic` does not (some marks and connectors) lex as `Unknown`
+/// and are retained as such, never dropped.
 pub trait CharExt {
     /// Checks if `char` is the start of an identifier.
     fn is_identifier_start(self) -> bool;
 
     /// Checks if `char` is the continuation of an identifier.
-    /// 
-    /// Note that this method assumes all identifiers are ASCII.
     fn is_identifier_continue(self) -> bool;
 }
 
 impl CharExt for char {
     fn is_identifier_start(self) -> bool {
-        match self {
-            'A'..='Z' | '_' | 'a'..='z' => true,
-            _ => false,
-        }
+        self == '_' || self.is_ascii_alphabetic() || (!self.is_ascii() && self.is_alphabetic())
     }
 
     fn is_identifier_continue(self) -> bool {
-        match self {
-            '0'..='9' | 'A'..='Z' | '_' | 'a'..='z' => true,
-            _ => false,
+        self == '_' || self.is_ascii_alphanumeric() || (!self.is_ascii() && self.is_alphanumeric())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn toks(src: &str) -> Vec<(FullToken, String)> {
+        let mut state = State::default();
+        let mut scratch = String::new();
+        let mut out = Vec::new();
+        for line in src.split('\n') {
+            let chars: Vec<char> = line.chars().collect();
+            let mut cursor = Cursor::new(&chars, &mut scratch);
+            let mut at = 0;
+            loop {
+                let (next, token) = state.next(&mut cursor);
+                state = next;
+                let Some(token) = token else { break };
+                assert!(at + token.len <= chars.len(), "token overran the line in {src:?}");
+                let text: String = chars[at..at + token.len].iter().collect();
+                at += token.len;
+                if !matches!(token.token, FullToken::Whitespace) {
+                    out.push((token.token, text));
+                }
+            }
+            assert_eq!(at, chars.len(), "tokens must cover the line in {src:?}");
         }
+        out
+    }
+
+    fn end_state(src: &str) -> State {
+        let chars: Vec<char> = src.chars().collect();
+        let mut scratch = String::new();
+        let mut cursor = Cursor::new(&chars, &mut scratch);
+        let mut state = State::default();
+        loop {
+            let (next, token) = state.next(&mut cursor);
+            state = next;
+            if token.is_none() {
+                break state;
+            }
+        }
+    }
+
+    fn texts(src: &str) -> Vec<String> {
+        toks(src).into_iter().map(|(_, t)| t).collect()
+    }
+
+    #[test]
+    fn raw_strings_all_hash_counts() {
+        assert_eq!(texts(r#"r"a\" b"#), vec![r#"r"a\""#, "b"]);
+        assert_eq!(texts(r##"r#"x"y"# z"##), vec![r##"r#"x"y"#"##, "z"]);
+        assert_eq!(texts(r###"r##"x"#y"## z"###), vec![r###"r##"x"#y"##"###, "z"]);
+        assert_eq!(texts(r#"br"bytes" q"#), vec![r#"br"bytes""#, "q"]);
+        assert_eq!(texts(r##"br#"b"# q"##), vec![r##"br#"b"#"##, "q"]);
+        assert!(matches!(toks(r#"r"a\" b"#)[0].0, FullToken::String));
+        // an opener without its quote is unknown, not a string that eats the line
+        assert_eq!(texts("r## x"), vec!["r##", "x"]);
+        assert!(matches!(toks("r## x")[0].0, FullToken::Unknown));
+    }
+
+    #[test]
+    fn escapes_do_not_swallow_the_closing_quote() {
+        assert_eq!(texts(r#""a\\"; let"#), vec![r#""a\\""#, ";", "let"]);
+        assert_eq!(texts(r#""q\"x" y"#), vec![r#""q\"x""#, "y"]);
+        assert_eq!(texts(r#"'\\'; x"#), vec![r#"'\\'"#, ";", "x"]);
+        assert_eq!(texts(r#"'\''; x"#), vec![r#"'\''"#, ";", "x"]);
+        assert_eq!(texts(r#"b'\\' x"#), vec![r#"b'\\'"#, "x"]);
+        assert!(matches!(end_state(r#""open\"#), State::DoubleQuotedStringTail(_)));
+        assert!(matches!(end_state(r#""closed\\""#), State::Initial(_)));
+        assert!(matches!(end_state(r#""trailing backslash \"#), State::DoubleQuotedStringTail(_)));
+    }
+
+    #[test]
+    fn raw_identifiers_lifetimes_and_chars() {
+        assert_eq!(texts("r#type x"), vec!["r#type", "x"]);
+        assert!(matches!(toks("r#type")[0].0, FullToken::Ident(_)));
+        assert_eq!(texts("'a'"), vec!["'a'"]);
+        assert!(matches!(toks("'a'")[0].0, FullToken::String));
+        assert_eq!(texts("<'a>"), vec!["<", "'a", ">"]);
+        assert!(matches!(toks("<'a>")[1].0, FullToken::Lifetime));
+        assert_eq!(texts("'static x"), vec!["'static", "x"]);
+        assert_eq!(texts(r#"'\n' x"#), vec![r#"'\n'"#, "x"]);
+        assert_eq!(texts(r#"'\u{1F600}' x"#), vec![r#"'\u{1F600}'"#, "x"]);
+    }
+
+    #[test]
+    fn unicode_identifiers_and_nested_comments() {
+        assert_eq!(texts("let é = ünï;"), vec!["let", "é", "=", "ünï", ";"]);
+        assert!(matches!(toks("é")[0].0, FullToken::Ident(_)));
+        assert_eq!(texts("/* a /* b */ c */ d"), vec!["/* a /* b */ c */", "d"]);
+        assert!(matches!(end_state("/* open /* nested */"), State::BlockCommentTail(_)));
+        assert!(matches!(end_state("/* open /* nested */ */"), State::Initial(_)));
+    }
+
+    #[test]
+    fn underscore_identifiers() {
+        assert_eq!(texts("struct _Hidden; let _ = _x + __y;"), vec!["struct", "_Hidden", ";", "let", "_", "=", "_x", "+", "__y", ";"]);
+        assert!(matches!(toks("_Hidden")[0].0, FullToken::Ident(_)));
+        assert!(matches!(toks("_")[0].0, FullToken::Punct(_)));
+        assert!(matches!(toks("_1")[0].0, FullToken::Ident(_)));
+    }
+
+    #[test]
+    fn numbers_and_field_access() {
+        assert_eq!(texts("x.0.1"), vec!["x", ".", "0.1"]);
+        assert_eq!(texts("x.0.len()"), vec!["x", ".", "0", ".", "len", "(", ")"]);
+        assert_eq!(texts("1.max(2)"), vec!["1", ".", "max", "(", "2", ")"]);
+        assert_eq!(texts("1..2"), vec!["1", "..", "2"]);
+        assert_eq!(texts("1.5f32 + 2u8 + 0x1F + 1e3"), vec!["1.5f32", "+", "2u8", "+", "0x1F", "+", "1e3"]);
+        assert!(matches!(toks("1.5")[0].0, FullToken::Float(_)));
+        assert!(matches!(toks("1.max(2)")[0].0, FullToken::Int(1)));
+    }
+
+    #[test]
+    fn identifiers_do_not_grow_the_global_table() {
+        let a = toks("some_identifier_name")[0].0.clone();
+        let b = toks("some_identifier_name")[0].0.clone();
+        assert_eq!(a, b);
+        assert!(matches!(a, FullToken::Ident(id) if id == LiveId::from_str("some_identifier_name")));
     }
 }

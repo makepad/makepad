@@ -1,0 +1,177 @@
+[arch]
+version = 0
+scope = "fictional/"
+title = "Fictional thumbnail service"
+prompt = "arch/0"
+generator = "fictional/example"
+
+[source]
+files = [
+    { path = "fictional/src/cache.rs", hash = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391" },
+    { path = "fictional/src/decode.rs", hash = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391" },
+    { path = "fictional/src/gpu.rs", hash = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391" },
+    { path = "fictional/src/io.rs", hash = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391" },
+    { path = "fictional/src/lib.rs", hash = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391" },
+    { path = "fictional/src/pool.rs", hash = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391" },
+    { path = "fictional/src/queue.rs", hash = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391" },
+    { path = "fictional/src/worker.rs", hash = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391" },
+]
+overview = """
+This fictional crate turns image requests into reusable thumbnails.
+A worker decodes files while the caller polls bounded replies.
+The cache avoids repeated decoding and the caller uploads completed pixels."""
+
+[lanes]
+background = { title = "Worker thread" }
+caller = { title = "Caller thread" }
+
+[nodes]
+
+[nodes.cache]
+kind = "store"
+title = "Thumbnail cache"
+summary = "Reuses decoded thumbnails"
+story = """
+The cache stores completed thumbnails to avoid repeated decoding.
+Keys include the requested size and content identity.
+Missing entries trigger decoding and invalid entries are discarded."""
+lane = "background"
+refs = ["fictional/src/cache.rs::Cache"]
+budget = "unknown"
+
+[nodes.decoder]
+kind = "component"
+title = "Image decoder"
+summary = "Converts source bytes into pixels"
+story = """
+The decoder produces thumbnail pixels so the caller avoids expensive work.
+It checks dimensions before admitting output storage.
+Malformed input produces an error reply."""
+lane = "background"
+refs = ["fictional/src/decode.rs:1::Decoder"]
+
+[nodes.files]
+kind = "io"
+title = "Image files"
+summary = "Supplies encoded image bytes"
+story = """
+The file reader supplies encoded bytes to the worker.
+Reads belong to the worker to keep the caller responsive.
+Missing files become error replies."""
+lane = "background"
+refs = ["fictional/src/io.rs::Reader"]
+
+[nodes.frontend]
+kind = "component"
+title = "Request interface"
+summary = "Accepts thumbnail requests"
+story = """
+The interface assigns request identities so replies can be matched.
+It retains requests when the command queue is full.
+Obsolete replies never replace the latest requested image."""
+lane = "caller"
+refs = ["fictional/src/lib.rs:1::Service"]
+
+[nodes.gpu]
+kind = "gpu"
+title = "Thumbnail textures"
+summary = "Retains uploaded thumbnail pixels"
+story = """
+Textures hold completed thumbnails for repeated drawing.
+The caller owns texture handles until consumers release them.
+Allocation failure leaves the previous image visible."""
+lane = "caller"
+refs = ["fictional/src/gpu.rs::Textures"]
+budget = "unknown"
+
+[nodes.inbox]
+kind = "queue"
+title = "Request queue"
+summary = "Hands requests to the worker"
+story = """
+The bounded queue separates request submission from decoding.
+Submitting never blocks the caller.
+A full queue asks the caller to retry later."""
+refs = ["fictional/src/queue.rs::Requests"]
+budget = "unknown"
+
+[nodes.memory]
+kind = "memory"
+title = "Pixel storage"
+summary = "Owns admitted pixel buffers"
+story = """
+Pixel storage accounts for buffers used by decoding and replies.
+Buffers remain owned while either side holds a reference.
+Failed admission defers decoding instead of dropping live pixels."""
+lane = "background"
+refs = ["fictional/src/pool.rs::Pixels"]
+budget = "unknown"
+
+[nodes.outbox]
+kind = "queue"
+title = "Reply queue"
+summary = "Publishes pixels and errors"
+story = """
+Replies carry request identities and shared pixel ownership.
+The worker retains a reply while the queue is full.
+A disconnected receiver ends publication."""
+refs = ["fictional/src/queue.rs::Replies"]
+
+[nodes.scheduler]
+kind = "component"
+title = "Request scheduler"
+summary = "Chooses the next useful request"
+story = """
+The scheduler discards superseded requests to avoid wasted decoding.
+It processes one admitted request at a time.
+Cancellation preserves replies that have already been published."""
+lane = "background"
+refs = ["fictional/src/worker.rs::Scheduler"]
+
+[nodes.session]
+kind = "component"
+title = "Service lifetime"
+summary = "Starts and closes the worker"
+story = """
+The session owns worker lifetime so shutdown has one authority.
+Closing stops admission before releasing communication endpoints.
+Worker startup failure is returned to the caller."""
+lane = "caller"
+refs = ["fictional/src/lib.rs::Session"]
+
+[nodes.uploader]
+kind = "component"
+title = "Texture uploader"
+summary = "Turns completed replies into textures"
+story = """
+The uploader polls replies and checks request identity before upload.
+GPU work stays on the caller thread.
+Failed uploads preserve the previous texture and report the error."""
+lane = "caller"
+refs = ["fictional/src/gpu.rs::Uploader"]
+
+[nodes.worker]
+kind = "thread"
+title = "Decode worker"
+summary = "Owns file reads and decoding"
+story = """
+One persistent worker owns scheduling, file reads, and decoding.
+It publishes shared payloads without lending mutable state to the caller.
+Queue disconnection starts orderly shutdown."""
+lane = "background"
+refs = ["fictional/src/worker.rs::Worker"]
+child = "fictional/arch/worker.toml"
+
+[edges]
+allocate = { from = "decoder", to = "memory", kind = "allocates_from", label = "admit pixels" }
+cache_read = { from = "scheduler", to = "cache", kind = "reads", label = "reuse" }
+cache_write = { from = "decoder", to = "cache", kind = "writes", label = "completed thumbnail" }
+decode = { from = "scheduler", to = "decoder", kind = "calls", label = "cache miss" }
+poll = { from = "uploader", to = "outbox", kind = "reads", label = "nonblocking poll" }
+publish = { from = "worker", to = "outbox", kind = "sends", label = "pixels or error" }
+read_file = { from = "worker", to = "files", kind = "reads", label = "encoded bytes" }
+schedule = { from = "worker", to = "scheduler", kind = "owns", label = "request selection" }
+spawn = { from = "session", to = "worker", kind = "spawns", label = "once per service" }
+submit = { from = "frontend", to = "inbox", kind = "sends", label = "retry on full" }
+take_request = { from = "worker", to = "inbox", kind = "reads", label = "next request" }
+upload = { from = "uploader", to = "gpu", kind = "uploads_to", label = "current reply" }

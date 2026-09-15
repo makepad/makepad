@@ -1,0 +1,14 @@
+# The document layer and canvas primitives shared by the Makepad IDE apps.
+
+[package]
+name = "makepad-workspace"
+version = "2.0.0"
+edition = "2021"
+
+[lib]
+name = "makepad_workspace"
+path = "src/lib.rs"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets" }
+makepad-code-editor = { path = "../../code_editor" }

@@ -130,5 +130,5 @@ DRYRUN=${1:---dry-run}
 #echo "---- PUBLISHING makepad-code-editor----" 
 cargo publish $DRYRUN --allow-dirty -p makepad-code-editor
 
-#echo "---- PUBLISHING makepad-studio----" 
-cargo publish $DRYRUN --allow-dirty -p makepad-studio
+#echo "---- PUBLISHING makepad-director----" 
+cargo publish $DRYRUN --allow-dirty -p makepad-director

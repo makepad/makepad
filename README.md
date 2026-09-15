@@ -96,13 +96,13 @@ sudo apt-get update && sudo apt-get install -y --no-install-recommends build-ess
 Makepad Studio is the main entry point for exploring examples and iterating on UI.
 
 ```bash
-cargo run -p makepad-studio --release
+cargo run -p makepad-director --release
 ```
 
 If you want a local install (note: may lag the repo):
 
 ```bash
-cargo install makepad-studio
+cargo install makepad-director
 ```
 
 ## Examples
