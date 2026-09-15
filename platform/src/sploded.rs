@@ -589,6 +589,9 @@ impl Cx {
         let mut planes: Vec<Vec<Rect>> = vec![Vec::new(); max + 1];
         let mut stack = vec![root];
         while let Some(list_id) = stack.pop() {
+            if self.draw_lists.is_id_freed(list_id) {
+                continue;
+            }
             let draw_list = &self.draw_lists[list_id];
             let u = &draw_list.draw_list_uniforms;
             let has_clip = draw_list.draw_list_has_clip;

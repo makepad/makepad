@@ -339,16 +339,104 @@ script_mod! {
 
         // The Architecture map's categorical palette (top-level directory ownership), kind stripes and status roles
         color_map_1: #x286cab
+        color_map_1_a: #x075d8f
+        color_map_1_b: #x177abc
+        color_map_1_c: #x0067a9
+        color_map_1_d: #x4885be
+        color_map_1_e: #x1a548c
+        color_map_1_f: #x2d70b9
+        color_map_1_g: #x1f5da6
+        color_map_1_h: #x4f7bba
         color_map_2: #x00816b
+        color_map_2_a: #x126d53
+        color_map_2_b: #x0e8f70
+        color_map_2_c: #x007b62
+        color_map_2_d: #x409882
+        color_map_2_e: #x006756
+        color_map_2_f: #x008774
+        color_map_2_g: #x007365
+        color_map_2_h: #x319184
         color_map_3: #x906b00
+        color_map_3_a: #x805802
+        color_map_3_b: #xa37300
+        color_map_3_c: #x8b6400
+        color_map_3_d: #xa78339
+        color_map_3_e: #x735600
+        color_map_3_f: #x947200
+        color_map_3_g: #x7e6200
+        color_map_3_h: #x998132
         color_map_4: #x78569e
+        color_map_4_a: #x5f4a8a
+        color_map_4_b: #x8061b3
+        color_map_4_c: #x714f9f
+        color_map_4_d: #x8d70b3
+        color_map_4_e: #x604280
+        color_map_4_f: #x8358a7
+        color_map_4_g: #x734693
+        color_map_4_h: #x8e68a7
         color_map_5: #x04869c
+        color_map_5_a: #x007480
+        color_map_5_b: #x0094a6
+        color_map_5_c: #x008092
+        color_map_5_d: #x429eb1
+        color_map_5_e: #x006c80
+        color_map_5_f: #x008ca7
+        color_map_5_g: #x007892
+        color_map_5_h: #x4196b0
         color_map_6: #x3b7d3f
+        color_map_6_a: #x3c682b
+        color_map_6_b: #x4b893d
+        color_map_6_c: #x35782e
+        color_map_6_d: #x5b945a
+        color_map_6_e: #x28642f
+        color_map_6_f: #x328544
+        color_map_6_g: #x137436
+        color_map_6_h: #x488f5e
         color_map_7: #x9c5313
+        color_map_7_a: #x874219
+        color_map_7_b: #xb0591e
+        color_map_7_c: #x9a4900
+        color_map_7_d: #xb26d3d
+        color_map_7_e: #x7e4000
+        color_map_7_f: #xa45800
+        color_map_7_g: #x8a4b00
+        color_map_7_h: #xa76a2e
         color_map_8: #xa04b6f
+        color_map_8_a: #x863f65
+        color_map_8_b: #xaf5382
+        color_map_8_c: #x9c416e
+        color_map_8_d: #xb56787
+        color_map_8_e: #x823857
+        color_map_8_f: #xac4c71
+        color_map_8_g: #x993a5d
+        color_map_8_h: #xb16078
         color_map_9: #xb64f4b
+        color_map_9_a: #x9c4149
+        color_map_9_b: #xc9555b
+        color_map_9_c: #xb54246
+        color_map_9_d: #xcb6c68
+        color_map_9_e: #x963d38
+        color_map_9_f: #xc25046
+        color_map_9_g: #xae3e31
+        color_map_9_h: #xc46857
         color_map_10: #x606cbd
+        color_map_10_a: #x485fa3
+        color_map_10_b: #x6179d2
+        color_map_10_c: #x5466be
+        color_map_10_d: #x7786d0
+        color_map_10_e: #x4d569c
+        color_map_10_f: #x696fca
+        color_map_10_g: #x5b5cb6
+        color_map_10_h: #x7c7cc8
         color_map_11: #x737c24
+        color_map_11_a: #x696715
+        color_map_11_b: #x85861d
+        color_map_11_c: #x717500
+        color_map_11_d: #x8c9348
+        color_map_11_e: #x5b6416
+        color_map_11_f: #x758421
+        color_map_11_g: #x617307
+        color_map_11_h: #x7c9049
         color_map_kind_module: #x94bfff
         color_map_kind_file: #xb7c0cc
         color_map_kind_struct: #x74cbb7
@@ -359,6 +447,13 @@ script_mod! {
         color_map_kind_const: #xdaa37d
         color_map_kind_type_alias: #x84c7d8
         color_map_kind_macro: #xd895b6
+        color_map_kind_component: #x94bfff
+        color_map_kind_thread: #xddc27b
+        color_map_kind_queue: #x9bcb79
+        color_map_kind_store: #xdaa37d
+        color_map_kind_memory: #xc1a0e0
+        color_map_kind_gpu: #x84c7d8
+        color_map_kind_io: #xd895b6
         color_success: #x79be93
         color_map_basis_exact: #xb8c2cf
         color_map_basis_inferred: #xd9ae6b
@@ -376,6 +471,8 @@ script_mod! {
         color_syntax_keyword_branch: #xd8bcde
         color_syntax_keyword_loop: #xe7c8a6
         color_syntax_constant: #xe0baac
+        color_search_hit: #xf0c95a
+        color_search_rim: #xf0c95a
         color_syntax_bg: #x202125
 
         // TYPOGRAPHY
@@ -433,5 +530,210 @@ script_mod! {
             }
             line_spacing: 1.2
         }
+    }
+}
+
+#[cfg(test)]
+mod crate_tint_role_tests {
+    use crate::desktop_style::{install, DesktopStyle, StyleSheet};
+    use crate::makepad_platform::*;
+    use crate::script_eval;
+
+    const SUFFIXES: [char; 8] = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
+    /// 8-bit RGB of `color_map_{1..=11}_{a..=h}` from the OKLab derivation (dark, s=+1).
+    const DARK_TINTS: [[u32; 8]; 11] = [
+        [
+            0x075d8f, 0x177abc, 0x0067a9, 0x4885be, 0x1a548c, 0x2d70b9, 0x1f5da6, 0x4f7bba,
+        ],
+        [
+            0x126d53, 0x0e8f70, 0x007b62, 0x409882, 0x006756, 0x008774, 0x007365, 0x319184,
+        ],
+        [
+            0x805802, 0xa37300, 0x8b6400, 0xa78339, 0x735600, 0x947200, 0x7e6200, 0x998132,
+        ],
+        [
+            0x5f4a8a, 0x8061b3, 0x714f9f, 0x8d70b3, 0x604280, 0x8358a7, 0x734693, 0x8e68a7,
+        ],
+        [
+            0x007480, 0x0094a6, 0x008092, 0x429eb1, 0x006c80, 0x008ca7, 0x007892, 0x4196b0,
+        ],
+        [
+            0x3c682b, 0x4b893d, 0x35782e, 0x5b945a, 0x28642f, 0x328544, 0x137436, 0x488f5e,
+        ],
+        [
+            0x874219, 0xb0591e, 0x9a4900, 0xb26d3d, 0x7e4000, 0xa45800, 0x8a4b00, 0xa76a2e,
+        ],
+        [
+            0x863f65, 0xaf5382, 0x9c416e, 0xb56787, 0x823857, 0xac4c71, 0x993a5d, 0xb16078,
+        ],
+        [
+            0x9c4149, 0xc9555b, 0xb54246, 0xcb6c68, 0x963d38, 0xc25046, 0xae3e31, 0xc46857,
+        ],
+        [
+            0x485fa3, 0x6179d2, 0x5466be, 0x7786d0, 0x4d569c, 0x696fca, 0x5b5cb6, 0x7c7cc8,
+        ],
+        [
+            0x696715, 0x85861d, 0x717500, 0x8c9348, 0x5b6416, 0x758421, 0x617307, 0x7c9049,
+        ],
+    ];
+    /// Light appearance (s=-1).
+    const LIGHT_TINTS: [[u32; 8]; 11] = [
+        [
+            0xbae0ff, 0x85c1f5, 0xa5d3ff, 0x87b2df, 0xc6e1ff, 0x94c5fe, 0xb8d7ff, 0x94b6e7,
+        ],
+        [
+            0xa8f0d4, 0x77d2b4, 0x89e6c9, 0x77c2ad, 0xa3f0dc, 0x76d9c4, 0x88edda, 0x79c9bb,
+        ],
+        [
+            0xffd79b, 0xe9bc6e, 0xfcd081, 0xd3b373, 0xf9da99, 0xe8c673, 0xfadb86, 0xd2bc79,
+        ],
+        [
+            0xdfd3ff, 0xc4acf1, 0xd9c1ff, 0xb9a2d8, 0xe8d4ff, 0xd3b0f3, 0xe6c5ff, 0xc6a6da,
+        ],
+        [
+            0xa5ecf7, 0x78d1e1, 0x8ce4f6, 0x7dc1d1, 0xa7ebfd, 0x82d6ee, 0xa0e8ff, 0x86c6dc,
+        ],
+        [
+            0xc3ecb5, 0x9ace8e, 0xaae2a3, 0x90bf8e, 0xbbeebc, 0x95d79d, 0xa6ebb3, 0x8ec79c,
+        ],
+        [
+            0xffcfb6, 0xf3a579, 0xffbd95, 0xdb9e77, 0xffd4b7, 0xf6af78, 0xffc79a, 0xdea778,
+        ],
+        [
+            0xffc8e3, 0xe6a3c3, 0xfbb6d4, 0xd39bb1, 0xffcfdf, 0xf0a9c1, 0xffc0d2, 0xdca1b1,
+        ],
+        [
+            0xffd1d1, 0xf6a5a4, 0xffbebb, 0xdf9e99, 0xffd2cc, 0xfdada1, 0xffc9bf, 0xe5a698,
+        ],
+        [
+            0xd0deff, 0xa8bbf7, 0xc1cfff, 0xa3aedf, 0xd5dcff, 0xb6bffd, 0xcfd4ff, 0xb0b2e5,
+        ],
+        [
+            0xe4e399, 0xc5c76c, 0xd6dc80, 0xb3bb74, 0xdae69e, 0xc0d179, 0xd1e68e, 0xb0c47f,
+        ],
+    ];
+
+    fn packed(rgb: u32) -> u32 {
+        (rgb << 8) | 0xff
+    }
+
+    fn assert_tints(vm: &mut ScriptVm, expected: &[[u32; 8]; 11], label: &str) {
+        let theme = vm.module(id!(theme));
+        for family in 1..=11 {
+            for (k, suf) in SUFFIXES.iter().enumerate() {
+                let name = format!("color_map_{family}_{suf}");
+                let color = vm
+                    .bx
+                    .heap
+                    .value(theme, LiveId::from_str(&name).into(), NoTrap)
+                    .as_color();
+                assert_eq!(
+                    color,
+                    Some(packed(expected[family - 1][k])),
+                    "{label} {name}"
+                );
+            }
+        }
+    }
+
+    const DESIGN_KIND_ROLES: [&str; 7] = [
+        "color_map_kind_component",
+        "color_map_kind_thread",
+        "color_map_kind_queue",
+        "color_map_kind_store",
+        "color_map_kind_memory",
+        "color_map_kind_gpu",
+        "color_map_kind_io",
+    ];
+
+    fn assert_design_kind_roles(vm: &mut ScriptVm, label: &str) {
+        let theme = vm.module(id!(theme));
+        for name in DESIGN_KIND_ROLES {
+            let color = vm
+                .bx
+                .heap
+                .value(theme, LiveId::from_str(name).into(), NoTrap)
+                .as_color();
+            assert!(color.is_some(), "{label} {name} does not resolve");
+        }
+    }
+
+    /// The Design mode's seven subsystem kinds have a colour role in the
+    /// defaults and in every shipped theme.
+    #[test]
+    fn design_kind_roles_resolve_in_every_theme() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            assert_design_kind_roles(vm, "dark-default");
+            script_eval!(vm, {
+                mod.theme = mod.themes.light
+            });
+            assert_design_kind_roles(vm, "light-default");
+            for (style, dark) in [
+                (DesktopStyle::Omarchy, false),
+                (DesktopStyle::Macos, false),
+                (DesktopStyle::Macos, true),
+                (DesktopStyle::Windows, false),
+                (DesktopStyle::Windows, true),
+                (DesktopStyle::Windows2000, false),
+                (DesktopStyle::NextStep, false),
+                (DesktopStyle::Ios, false),
+                (DesktopStyle::Ios, true),
+                (DesktopStyle::Android, false),
+                (DesktopStyle::Android, true),
+            ] {
+                install(vm, StyleSheet::load_with_appearance(style, dark));
+                vm.bx.captured_errors = Some(Vec::new());
+                vm.with_reload(crate::script_mod);
+                let errors = vm.take_errors();
+                let label = StyleSheet::load_with_appearance(style, dark).name;
+                assert!(errors.is_empty(), "{label}: {errors:?}");
+                assert_design_kind_roles(vm, &label);
+            }
+        });
+    }
+
+    #[test]
+    fn crate_tint_roles_resolve_in_dark_and_light_defaults() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            assert_tints(vm, &DARK_TINTS, "dark-default");
+            script_eval!(vm, {
+                mod.theme = mod.themes.light
+            });
+            assert_tints(vm, &LIGHT_TINTS, "light-default");
+        });
+    }
+
+    #[test]
+    fn crate_tint_roles_resolve_in_every_shipped_theme() {
+        let sheets = [
+            (DesktopStyle::Omarchy, false, &DARK_TINTS),
+            (DesktopStyle::Macos, false, &LIGHT_TINTS),
+            (DesktopStyle::Macos, true, &DARK_TINTS),
+            (DesktopStyle::Windows, false, &LIGHT_TINTS),
+            (DesktopStyle::Windows, true, &DARK_TINTS),
+            (DesktopStyle::Windows2000, false, &LIGHT_TINTS),
+            (DesktopStyle::NextStep, false, &LIGHT_TINTS),
+            (DesktopStyle::Ios, false, &LIGHT_TINTS),
+            (DesktopStyle::Ios, true, &DARK_TINTS),
+            (DesktopStyle::Android, false, &LIGHT_TINTS),
+            (DesktopStyle::Android, true, &DARK_TINTS),
+        ];
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            for (style, dark, expected) in sheets {
+                install(vm, StyleSheet::load_with_appearance(style, dark));
+                vm.bx.captured_errors = Some(Vec::new());
+                vm.with_reload(crate::script_mod);
+                let errors = vm.take_errors();
+                let label = StyleSheet::load_with_appearance(style, dark).name;
+                assert!(errors.is_empty(), "{label}: {errors:?}");
+                assert_tints(vm, expected, &label);
+            }
+        });
     }
 }

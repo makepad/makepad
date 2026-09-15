@@ -4,7 +4,10 @@ use makepad_widgets::*;
 pub mod char;
 pub mod code_editor;
 pub mod code_view;
+pub mod code_view_prepare;
+pub mod map_code_view;
 pub mod decoration;
+pub mod diff;
 pub mod document;
 pub mod draw_selection;
 pub mod history;
@@ -31,4 +34,5 @@ pub fn script_mod(vm: &mut ScriptVm) {
     crate::draw_selection::script_mod(vm);
     crate::code_editor::script_mod(vm);
     crate::code_view::script_mod(vm);
+    crate::map_code_view::script_mod(vm);
 }

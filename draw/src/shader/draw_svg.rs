@@ -30,10 +30,18 @@ script_mod! {
 
         // Animation time in seconds, available for custom shader effects
         svg_time: uniform(float(0.0))
+        // A turn about the rect's centre, in radians (`DrawSvg::rotation`):
+        // an app icon's jiggle in a home screen's edit mode.
+        svg_rotation: uniform(float(0.0))
 
-        // Hook to allow custom transformations on the SVG geometry (e.g. rotation)
+        // Hook to allow custom transformations on the SVG geometry. The
+        // default turns the geometry by `svg_rotation` about the rect's centre.
         transform_svg_point: fn(pos: vec2) -> vec2 {
-            return pos
+            let c = self.rect_size * 0.5
+            let d = pos - c
+            let s = sin(self.svg_rotation)
+            let co = cos(self.svg_rotation)
+            return vec2(d.x * co - d.y * s, d.x * s + d.y * co) + c
         }
 
         vertex: fn() {
@@ -143,6 +151,9 @@ pub struct DrawSvg {
     // This is the actual extent of rendered geometry.
     #[rust]
     pub content_bounds: (f32, f32, f32, f32), // (min_x, min_y, max_x, max_y)
+    /// A turn about the rect's centre, radians, applied by the shader.
+    #[rust]
+    pub rotation: f32,
     #[rust]
     pub content_size: DVec2,
     #[rust]
@@ -306,13 +317,15 @@ impl DrawSvg {
             let offset_x = (tw - bw * sx) * 0.5 - bmin_x * sx;
             let offset_y = (th - bh * sy) * 0.5 - bmin_y * sy;
 
-            // svg_scale at uniform offset 0..1, svg_offset at 2..3, svg_time at 4
+            // svg_scale at uniform offset 0..1, svg_offset at 2..3, svg_time
+            // at 4, svg_rotation at 5
             let uniforms = &mut self.draw_super.draw_vars.dyn_uniforms;
             uniforms[0] = sx;
             uniforms[1] = sy;
             uniforms[2] = offset_x;
             uniforms[3] = offset_y;
             uniforms[4] = time;
+            uniforms[5] = self.rotation;
         } else {
             let uniforms = &mut self.draw_super.draw_vars.dyn_uniforms;
             uniforms[0] = 1.0;
@@ -320,6 +333,7 @@ impl DrawSvg {
             uniforms[2] = 0.0;
             uniforms[3] = 0.0;
             uniforms[4] = time;
+            uniforms[5] = self.rotation;
         }
 
         if use_uploaded_cache {
@@ -399,11 +413,12 @@ impl DrawSvg {
             return;
         };
 
-        let data = if let Some(data) = cx.get_resource(handle) {
+        let heap_key = self.svg.as_ref().map(|h| h.heap_key()).unwrap_or(0);
+        let data = if let Some(data) = cx.get_resource(heap_key, handle) {
             data
         } else {
-            cx.load_script_resource(handle);
-            match cx.get_resource(handle) {
+            cx.load_script_resource(heap_key, handle);
+            match cx.get_resource(heap_key, handle) {
                 Some(data) => data,
                 // Resource isn't yet available (may be loading via HTTP),
                 // so don't set loaded_handle to ensure we retry on the next draw after data arrives.

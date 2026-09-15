@@ -82,6 +82,19 @@ impl CodeSession {
         }
     }
 
+    /// Prepare immutable snapshot text for an existing document's exact version.
+    /// Capture the version beside the text on its owning thread; attachment still
+    /// checks both version and digest. Never infer it from a registry revision.
+    pub fn prepare_view_at_version(
+        document: &PreparedDocument,
+        range: Option<Range<Position>>,
+        version: u64,
+    ) -> PreparedView {
+        let mut view = Self::prepare_view(document, range);
+        view.version = version;
+        view
+    }
+
     /// Move worker allocations into a session; no tokenization or whole-file layout.
     pub fn from_prepared(
         document: CodeDocument,
@@ -481,6 +494,7 @@ impl CodeSession {
     }
 
     pub fn insert(&self, text: Text) {
+        if self.document.is_read_only() { return; }
         let mut edit_kind = EditKind::Insert;
         let mut inject_char = None;
         let mut uninject_char = None;
@@ -584,6 +598,7 @@ impl CodeSession {
     }
 
     pub fn paste(&self, text: Text) {
+        if self.document.is_read_only() { return; }
         self.document.edit_selections(
             self.id,
             EditKind::Other,
@@ -603,6 +618,7 @@ impl CodeSession {
     }
 
     pub fn paste_grouped(&self, text: Text, group: u64) {
+        if self.document.is_read_only() { return; }
         self.document.edit_selections(
             self.id,
             EditKind::Group(group),
@@ -622,6 +638,7 @@ impl CodeSession {
     }
 
     pub fn enter(&self) {
+        if self.document.is_read_only() { return; }
         self.selection_state
             .borrow_mut()
             .injected_char_stack
@@ -700,6 +717,7 @@ impl CodeSession {
     }
 
     pub fn delete(&self) {
+        if self.document.is_read_only() { return; }
         self.selection_state
             .borrow_mut()
             .injected_char_stack
@@ -781,6 +799,7 @@ impl CodeSession {
     }
 
     pub fn backspace(&self) {
+        if self.document.is_read_only() { return; }
         self.selection_state
             .borrow_mut()
             .injected_char_stack
@@ -892,6 +911,7 @@ impl CodeSession {
     }
 
     pub fn indent(&self) {
+        if self.document.is_read_only() { return; }
         self.document.edit_linewise(
             self.id,
             EditKind::Other,
@@ -918,6 +938,7 @@ impl CodeSession {
     }
 
     pub fn outdent(&self) {
+        if self.document.is_read_only() { return; }
         self.document.edit_linewise(
             self.id,
             EditKind::Other,
@@ -965,6 +986,7 @@ impl CodeSession {
     }
 
     pub fn undo(&self) -> bool {
+        if self.document.is_read_only() { return false; }
         self.selection_state
             .borrow_mut()
             .injected_char_stack
@@ -974,6 +996,7 @@ impl CodeSession {
     }
 
     pub fn redo(&self) -> bool {
+        if self.document.is_read_only() { return false; }
         self.selection_state
             .borrow_mut()
             .injected_char_stack

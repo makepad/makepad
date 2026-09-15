@@ -310,6 +310,13 @@ impl Vec2d {
         }
     }
 
+    pub fn round(self) -> Vec2d {
+        Vec2d {
+            x: self.x.round(),
+            y: self.y.round(),
+        }
+    }
+
     pub fn distance(&self, other: &Vec2d) -> f64 {
         let dx = self.x - other.x;
         let dy = self.y - other.y;

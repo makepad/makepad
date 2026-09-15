@@ -440,6 +440,15 @@ fn outline_to_normalized_quads(
     curves
 }
 
+/// Cx-free font publication used by the retained code renderer. This shares the
+/// editor's outline conversion, including cubic tolerance and contour closure.
+pub(crate) fn prepare_code_curves(font: &Font, outline: &GlyphOutline) -> Vec<f32> {
+    outline_to_normalized_quads(outline, outline.bounds_in_ems(), font.units_per_em())
+        .iter()
+        .flat_map(|c| [c.p0.x, c.p0.y, c.p1.x, c.p1.y, c.p2.x, c.p2.y, 0.0, 0.0])
+        .collect()
+}
+
 fn scale_point(point: Point<f32>, inv_units: f32) -> P2 {
     P2 {
         x: point.x * inv_units,

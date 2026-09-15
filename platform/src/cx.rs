@@ -76,6 +76,7 @@ pub struct Cx {
     /// `game_input_states` reads while `in_makepad_studio` is set.
     pub(crate) game_input_remote: Vec<crate::event::game_input::GameInputState>,
     pub demo_time_repaint: bool,
+    pub(crate) mouse_cursor: crate::cursor::MouseCursor,
     pub(crate) gpu_info: GpuInfo,
     pub(crate) xr_capabilities: XrCapabilities,
     pub(crate) cpu_cores: usize,
@@ -87,6 +88,9 @@ pub struct Cx {
     pub draw_lists: CxDrawListPool,
     pub draw_matrices: CxDrawMatrixPool,
     pub textures: CxTexturePool,
+    /// Shared-instance publications (cleanup DL-1 freeze): the registry that
+    /// mints ids, charges bytes and hands out receipts over the frame serials.
+    pub publications: crate::shared_instances::Publications,
     pub uniform_buffers: CxUniformBufferPool,
     pub(crate) geometries: CxGeometryPool,
 
@@ -465,6 +469,7 @@ impl Cx {
     }
 
     pub fn new(event_handler: Box<dyn FnMut(&mut Cx, &Event)>) -> Self {
+        crate::thread::ui_hang::initialize();
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         crate::os::termination_signal::install();
 
@@ -512,9 +517,11 @@ impl Cx {
         let crate_manifests = script_vm.code.crate_manifests.clone();
         let script_mod_overrides = script_vm.code.script_mod_overrides.clone();
 
+        let publications = crate::shared_instances::Publications::new(textures.1.serials.clone());
         let mut cx = Self {
             package_root: None,
             demo_time_repaint: false,
+            mouse_cursor: Default::default(),
             null_texture,
             null_cube_texture,
             cpu_cores: crate::thread::available_parallelism().get(),
@@ -534,6 +541,7 @@ impl Cx {
             draw_matrices: Default::default(),
             geometries: Default::default(),
             textures,
+            publications,
             uniform_buffers: Default::default(),
 
             draw_shaders: Default::default(),

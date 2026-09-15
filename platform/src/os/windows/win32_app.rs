@@ -67,6 +67,7 @@ use {
         sync::atomic::{AtomicU32, Ordering},
     },
 };
+use crate::frame_trace::TickSource;
 pub const FALSE: BOOL = BOOL(0);
 pub const TRUE: BOOL = BOOL(1);
 
@@ -306,6 +307,8 @@ pub struct Win32App {
     /// nothing would wake us; the paint tick shortens the timeout in that case
     /// so such work keeps its old ~8 ms cadence instead of stalling to 33 ms.
     pub beat_timeout_ms: u32,
+    /// The frame clock, measured (`MAKEPAD_TRACE=frames`).
+    pub frame_trace: crate::frame_trace::FrameTrace,
 }
 
 /// One window's frame clock.
@@ -430,6 +433,7 @@ impl Win32App {
             is_dragging_internal: Cell::new(false),
             beat_handles: Vec::new(),
             beat_timeout_ms: BEAT_TIMEOUT_PRESENTED_MS,
+            frame_trace: crate::frame_trace::FrameTrace::new(),
         };
         win32_app.dpi_functions.become_dpi_aware();
 
@@ -540,6 +544,10 @@ impl Win32App {
                             let _ = TranslateMessage(&msg);
                             DispatchMessageW(&msg);
                             if !with_win32_app(|app| app.was_signal_poll()) {
+                                with_win32_app(|app| {
+                                    let now = app.time_now();
+                                    app.frame_trace.tick(TickSource::Message, now, None);
+                                });
                                 Win32App::do_callback(Win32Event::Paint);
                             }
                         }
@@ -574,6 +582,10 @@ impl Win32App {
                             // tick's own idle sleep keep it from spinning, exactly as the
                             // NSTimer fallback survives on macOS.
                             if drain_messages() {
+                                with_win32_app(|app| {
+                                    let now = app.time_now();
+                                    app.frame_trace.tick(TickSource::Drain, now, None);
+                                });
                                 Win32App::do_callback(Win32Event::Paint);
                             }
                         } else {
@@ -589,6 +601,10 @@ impl Win32App {
                                     app.take_beat_credit(window_id);
                                     app.time_now()
                                 });
+                                // The flip this beat aims at is only known once the window's
+                                // frame statistics are read (windows.rs): the source is noted
+                                // here, the lead there.
+                                with_win32_app(|app| app.frame_trace.tick(TickSource::Waitable, time, None));
                                 Win32App::do_callback(Win32Event::Beat {
                                     window_id,
                                     time,
@@ -619,6 +635,10 @@ impl Win32App {
                                     with_win32_app(|app| app.event_flow.clone()),
                                     EventFlow::Exit
                                 ) {
+                                    with_win32_app(|app| {
+                                        let now = app.time_now();
+                                        app.frame_trace.tick(TickSource::Timeout, now, None);
+                                    });
                                     Win32App::do_callback(Win32Event::Paint);
                                 }
                             }
@@ -719,9 +739,17 @@ impl Win32App {
                     }));
                 }
                 Win32Timer::Resize { .. } => {
+                    with_win32_app(|app| {
+                        let now = app.time_now();
+                        app.frame_trace.tick(TickSource::Timer, now, None);
+                    });
                     Win32App::do_callback(Win32Event::Paint);
                 }
                 Win32Timer::DragDrop { .. } => {
+                    with_win32_app(|app| {
+                        let now = app.time_now();
+                        app.frame_trace.tick(TickSource::Timer, now, None);
+                    });
                     Win32App::do_callback(Win32Event::Paint);
                 }
                 Win32Timer::SignalPoll { .. } => {

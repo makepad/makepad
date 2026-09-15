@@ -30,7 +30,11 @@ impl DrawVars {
             let heap_key = vm.bx.heap.heap_key();
             {
                 let cx = vm.host.cx();
-                if let Some(&shader_id) = cx.draw_shaders.cache_object_id_to_shader.get(&(heap_key, io_self)) {
+                if let Some(&shader_id) = cx
+                    .draw_shaders
+                    .cache_object_id_to_shader
+                    .get(&(heap_key, io_self))
+                {
                     self.finalize_cached_shader(vm, shader_id);
                     return;
                 }
@@ -394,7 +398,7 @@ fn generate_headless_rust_shader_module(
     writeln!(out, "#[no_mangle]").ok();
     writeln!(
         out,
-        "pub extern \"C\" fn makepad_headless_shader_version() -> u32 {{ 3 }}"
+        "pub extern \"C\" fn makepad_headless_shader_version() -> u32 {{ 4 }}"
     )
     .ok();
     writeln!(out, "#[no_mangle]").ok();
@@ -543,6 +547,7 @@ fn write_render_cx_struct(output: &ShaderOutput, vm: &ScriptVm, out: &mut String
     // template reads/writes rcx.vtx_pos unconditionally, and shaders whose custom vertex
     // fn RETURNS the position (e.g. clip_and_transform_vertex) have no VertexPosition io.
     writeln!(out, "    vtx_pos: Vec4f,").ok();
+    writeln!(out, "    instance_index: u32,").ok();
 
     // Group 8: Fragment output
     for io in &output.io {
@@ -778,6 +783,7 @@ fn write_vertex_entry(output: &ShaderOutput, vm: &ScriptVm, out: &mut String) {
     writeln!(out, "pub extern \"C\" fn makepad_headless_vertex(").ok();
     writeln!(out, "    geom_ptr: *const f32, geom_len: u32,").ok();
     writeln!(out, "    inst_ptr: *const f32, inst_len: u32,").ok();
+    writeln!(out, "    instance_index: u32,").ok();
     writeln!(
         out,
         "    uniform_ptrs: *const *const f32, uniform_lens: *const u32, uniform_count: u32,"
@@ -801,6 +807,7 @@ fn write_vertex_entry(output: &ShaderOutput, vm: &ScriptVm, out: &mut String) {
     // Build RenderCx — zeroed, then fill in fields
     writeln!(out, "    let mut rcx: RenderCx = std::mem::zeroed();").ok();
     writeln!(out, "    rcx.vtx_pos.w = 1.0;").ok();
+    writeln!(out, "    rcx.instance_index = instance_index;").ok();
     writeln!(out).ok();
 
     // Unpack geometry fields → rcx.vb_*
@@ -819,7 +826,10 @@ fn write_vertex_entry(output: &ShaderOutput, vm: &ScriptVm, out: &mut String) {
             } else {
                 pod_ty.slots()
             };
-            let is_struct = matches!(pod_ty, crate::makepad_script::pod::ScriptPodTy::Struct { .. });
+            let is_struct = matches!(
+                pod_ty,
+                crate::makepad_script::pod::ScriptPodTy::Struct { .. }
+            );
             if is_struct && !pod_ty.has_compact_format() {
                 writeln!(
                     out,
@@ -1113,9 +1123,10 @@ fn headless_uniform_packing() -> DrawShaderInputPacking {
 fn logical_fetch_slots(ty: &crate::makepad_script::pod::ScriptPodTy) -> usize {
     match ty {
         crate::makepad_script::pod::ScriptPodTy::Packed(p) => p.logical_slots(),
-        crate::makepad_script::pod::ScriptPodTy::Struct { fields, .. } => {
-            fields.iter().map(|f| logical_fetch_slots(&f.ty.data.ty)).sum()
-        }
+        crate::makepad_script::pod::ScriptPodTy::Struct { fields, .. } => fields
+            .iter()
+            .map(|f| logical_fetch_slots(&f.ty.data.ty))
+            .sum(),
         _ => ty.slots(),
     }
 }
@@ -1338,11 +1349,13 @@ fn write_uniform_unpack(output: &ShaderOutput, vm: &ScriptVm, out: &mut String, 
         let ty = type_name(output, vm, io.ty);
         writeln!(out, "    if ({buf_idx} as u32) < uniform_count {{").ok();
         writeln!(out, "        let p = *uniform_ptrs.add({buf_idx});").ok();
+        writeln!(out, "        if !p.is_null() && (*uniform_lens.add({buf_idx}) as usize) * 4 >= std::mem::size_of::<{ty}>() {{").ok();
         writeln!(
             out,
-            "        {prefix}unibuf_{io_name} = std::ptr::read(p as *const {ty});"
+            "        {prefix}unibuf_{io_name} = std::ptr::read_unaligned(p as *const {ty});"
         )
         .ok();
+        writeln!(out, "        }}").ok();
         writeln!(out, "    }}").ok();
     }
 
@@ -1476,7 +1489,13 @@ mod typed_vertex_tests {
         write_static_assign_typed(&mut source, "out.i", "geom", 2, 1, "i32");
         write_static_assign_typed(&mut source, "out.b", "geom", 3, 1, "bool");
         assert!(source.contains("out.u = geom[1].to_bits();"), "{source}");
-        assert!(source.contains("out.i = geom[2].to_bits() as i32;"), "{source}");
-        assert!(source.contains("out.b = geom[3].to_bits() != 0;"), "{source}");
+        assert!(
+            source.contains("out.i = geom[2].to_bits() as i32;"),
+            "{source}"
+        );
+        assert!(
+            source.contains("out.b = geom[3].to_bits() != 0;"),
+            "{source}"
+        );
     }
 }

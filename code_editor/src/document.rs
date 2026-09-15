@@ -1,7 +1,8 @@
 use {
     crate::{
         char::CharExt,
-        decoration::{Decoration, DecorationSet},
+        decoration::{Decoration, DecorationSet, PreparedDecorationsError},
+        diff::{DiffMetadata, DiffRowSpec, GutterMode, PrepareDiffError, PreparedDiffDocument},
         history::{EditKind, History},
         inlays::{BlockInlay, InlineInlay},
         iter::IteratorExt,
@@ -36,6 +37,11 @@ impl CodeDocument {
 
     /// Tokenize and compute indentation without a Cx. The result can cross threads.
     pub fn prepare(text: Text) -> PreparedDocument {
+        Self::prepare_cancellable(text, &|| false).expect("non-cancellable preparation")
+    }
+
+    pub fn prepare_cancellable(text: Text, cancel: &impl Fn() -> bool) -> Result<PreparedDocument, crate::tokenizer::TokenizeCancelled> {
+        if cancel() { return Err(crate::tokenizer::TokenizeCancelled); }
         let text = if text.as_lines().is_empty() {
             Text::new()
         } else {
@@ -50,14 +56,15 @@ impl CodeDocument {
         };
         update_indent_state(&text, &mut layout.indent_state);
         let mut tokenizer = Tokenizer::new(line_count);
-        tokenizer.update(&text, &mut layout.tokens);
-        PreparedDocument {
-            digest: text_digest(&text),
+        tokenizer.update_cancellable(&text, &mut layout.tokens, cancel)?;
+        Ok(PreparedDocument {
+            byte_len:text.as_lines().iter().map(|line|line.len()+1).sum(),
+            digest: crate::tokenizer::code_source_digest(&text, cancel)?,
             version: 0,
             text,
             layout,
             tokenizer,
-        }
+        })
     }
 
     /// Attach prepared allocations without rescanning or tokenizing the source.
@@ -74,8 +81,37 @@ impl CodeDocument {
             tokenizer: RefCell::new(prepared.tokenizer),
             decorations: RefCell::new(DecorationSet::default()),
             edit_senders: RefCell::new(HashMap::new()),
+            diff: None,
+            gutter_mode: Cell::new(GutterMode::Plain),
         }))
     }
+
+    /// Validate complete display-order rows and prepare independent endpoint tokens.
+    /// Source line numbers are zero-based and exclude the final-newline sentinel.
+    pub fn prepare_diff(
+        rows: &[DiffRowSpec], old_text: &str, new_text: &str,
+    ) -> Result<PreparedDiffDocument, PrepareDiffError> {
+        crate::diff::prepare(rows, old_text, new_text)
+    }
+
+    /// Move all diff allocations into an immutable document in O(1).
+    pub fn from_prepared_diff(prepared: PreparedDiffDocument) -> Self {
+        let mut document = Self::from_prepared(prepared.document);
+        let inner = Rc::get_mut(&mut document.0).unwrap();
+        inner.diff = Some(prepared.metadata);
+        *inner.decorations.get_mut() = prepared.decorations;
+        inner.gutter_mode.set(GutterMode::Diff);
+        document
+    }
+
+    pub fn diff_metadata(&self) -> Option<&DiffMetadata> { self.0.diff.as_ref() }
+    pub fn is_read_only(&self) -> bool { self.0.diff.is_some() }
+    pub fn ensure_editable(&self) -> Result<(), DocumentMutationError> {
+        if self.is_read_only() { Err(DocumentMutationError::ReadOnlyDiff) } else { Ok(()) }
+    }
+    pub fn gutter_mode(&self) -> GutterMode { self.0.gutter_mode.get() }
+    /// Presentation only; switching back to Plain never enables text mutation.
+    pub fn set_gutter_mode(&self, mode: GutterMode) { self.0.gutter_mode.set(mode); }
 
     pub fn version(&self) -> u64 {
         self.0.version.get()
@@ -121,7 +157,9 @@ impl CodeDocument {
         }
     }
 
+    /// Legacy mutation methods are no-ops on a diff; use ensure_editable for a typed refusal.
     pub fn replace(&self, new_text: Text) {
+        if self.is_read_only() { return; }
         let mut history = self.0.history.borrow_mut();
 
         // Create an edit that deletes the entire existing text.
@@ -176,6 +214,7 @@ impl CodeDocument {
         settings: &Settings,
         mut f: impl FnMut(Editor<'_>, Position, Length),
     ) {
+        if self.is_read_only() { return; }
         let mut history = self.0.history.borrow_mut();
         history.push_or_extend_group(session_id, kind, selections);
         let mut edits = Vec::new();
@@ -246,6 +285,7 @@ impl CodeDocument {
         selections: &SelectionSet,
         mut f: impl FnMut(Editor, usize),
     ) {
+        if self.is_read_only() { return; }
         let mut history = self.0.history.borrow_mut();
         history.push_or_extend_group(origin_id, kind, selections);
         let mut edits = Vec::new();
@@ -277,6 +317,11 @@ impl CodeDocument {
 
     pub fn add_decoration(&mut self, decoration: Decoration) {
         self.0.decorations.borrow_mut().add_decoration(decoration);
+    }
+
+    /// Replace visual decorations without changing text or separate diff metadata.
+    pub fn replace_prepared_decorations(&mut self, decorations: Vec<Decoration>) -> Result<(), PreparedDecorationsError> {
+        self.0.decorations.borrow_mut().replace_prepared(decorations)
     }
 
     pub fn clear_decorations(&mut self) {
@@ -417,10 +462,12 @@ impl CodeDocument {
     }
 
     pub fn force_new_group(&self) {
+        if self.is_read_only() { return; }
         self.0.history.borrow_mut().force_new_group()
     }
 
     pub fn undo(&self, origin_id: SessionId, selections: &SelectionSet) -> bool {
+        if self.is_read_only() { return false; }
         let mut changes = Vec::new();
         let selections = self.0.history.borrow_mut().undo(selections, &mut changes);
         if let Some(selections) = selections {
@@ -432,6 +479,7 @@ impl CodeDocument {
     }
 
     pub fn redo(&self, origin_id: SessionId, selections: &SelectionSet) -> bool {
+        if self.is_read_only() { return false; }
         let mut changes = Vec::new();
         let selections = self.0.history.borrow_mut().redo(selections, &mut changes);
         if let Some(selections) = selections {
@@ -759,6 +807,8 @@ impl<'a> Editor<'a> {
 
 #[derive(Debug)]
 struct DocumentInner {
+    diff: Option<DiffMetadata>,
+    gutter_mode: Cell<GutterMode>,
     id: u64,
     next_anchor: Cell<u64>,
     anchors: RefCell<HashMap<u64, (Position, Drift)>>,
@@ -798,6 +848,7 @@ pub struct AnchorRange {
 /// Immutable worker output. Fields are private so callers cannot forge a stamp.
 #[derive(Clone, Debug)]
 pub struct PreparedDocument {
+    byte_len:usize,
     pub(crate) text: Text,
     layout: DocumentLayout,
     tokenizer: Tokenizer,
@@ -805,7 +856,21 @@ pub struct PreparedDocument {
     version: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DocumentMutationError {
+    ReadOnlyDiff,
+}
+
 impl PreparedDocument {
+    pub(crate) fn from_diff_rows(text: Text, layout: DocumentLayout) -> Self {
+        Self { byte_len:text.as_lines().iter().map(|line|line.len()+1).sum(), digest: text_digest(&text), version: 0,
+            tokenizer: Tokenizer::new(text.as_lines().len()), text, layout }
+    }
+
+    /// Cached source-byte upper bound for O(1) worker admission on the UI.
+    pub fn byte_len(&self)->usize {self.byte_len}
+    pub fn layout(&self) -> &DocumentLayout { &self.layout }
+
     pub fn as_text(&self) -> &Text {
         &self.text
     }
