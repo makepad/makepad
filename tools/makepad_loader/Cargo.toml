@@ -1,0 +1,27 @@
+[package]
+name = "makepad-loader"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Unzip-and-run Makepad installer: one exe, EULAs, then a private toolchain in this folder"
+
+[lib]
+name = "makepad_loader"
+path = "src/lib.rs"
+
+[[bin]]
+name = "makepad-loader"
+path = "src/main.rs"
+
+[[bin]]
+name = "makepad-loader-cli"
+path = "src/bin/makepad-loader-cli.rs"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets" }
+makepad-terminal = { path = "../../apps/terminal" }
+makepad-network = { path = "../../platform/network" }
+makepad-zip-file = { path = "../../libs/zip_file" }
+makepad-git = { path = "../../libs/git" }
+makepad-fast-inflate = { path = "../../libs/fast_inflate" }
+makepad-strict-json = { path = "../../libs/strict_json" }
