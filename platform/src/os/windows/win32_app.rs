@@ -20,8 +20,8 @@ use {
             //core::IntoParam,
             Win32::{
                 Foundation::{
-                    COLORREF, DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, FARPROC, HANDLE, HWND, S_OK,
-                    WPARAM,
+                    COLORREF, DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, FARPROC, HANDLE, HWND, LPARAM,
+                    S_OK, WPARAM,
                 },
                 Graphics::Gdi::{
                     CreateSolidBrush, GetDC, GetDeviceCaps, MonitorFromWindow, HMONITOR,
@@ -51,7 +51,8 @@ use {
                         IDC_HELP, IDC_IBEAM, IDC_NO, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS,
                         IDC_SIZENWSE, IDC_SIZEWE, IDI_WINLOGO, IMAGE_ICON, LR_DEFAULTCOLOR, MSG,
                         PM_NOREMOVE, PM_REMOVE, SM_CXICON, SM_CXSMICON, SM_CYICON, SM_CYSMICON,
-                        SYSTEM_METRICS_INDEX, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WNDCLASSEXW,
+                        SYSTEM_METRICS_INDEX, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT,
+                        WNDCLASSEXW,
                     },
                 },
             },
@@ -63,6 +64,7 @@ use {
         ffi::OsStr,
         mem,
         os::windows::ffi::OsStrExt,
+        sync::atomic::{AtomicU32, Ordering},
     },
 };
 pub const FALSE: BOOL = BOOL(0);
@@ -70,6 +72,29 @@ pub const TRUE: BOOL = BOOL(1);
 
 thread_local! {
     pub static WIN32_APP: RefCell<Option<Win32App>> = RefCell::new(None);
+}
+
+static UI_THREAD_ID: AtomicU32 = AtomicU32::new(0);
+
+#[link(name = "kernel32")]
+extern "system" {
+    #[link_name = "GetCurrentThreadId"]
+    fn get_current_thread_id() -> u32;
+}
+
+#[link(name = "user32")]
+extern "system" {
+    #[link_name = "PostThreadMessageW"]
+    fn post_thread_message_w(thread_id: u32, message: u32, w_param: WPARAM, l_param: LPARAM) -> BOOL;
+}
+
+pub(crate) fn wake_ui_event_loop() {
+    let thread_id = UI_THREAD_ID.load(Ordering::Acquire);
+    if thread_id != 0 {
+        unsafe {
+            let _ = post_thread_message_w(thread_id, 0, WPARAM(0), LPARAM(0));
+        }
+    }
 }
 
 pub fn with_win32_app<R>(f: impl FnOnce(&mut Win32App) -> R) -> R {
@@ -87,6 +112,7 @@ pub fn try_with_win32_app<R>(f: impl FnOnce(&mut Win32App) -> R) -> Option<R> {
 }
 
 pub fn init_win32_app_global(event_callback: Box<dyn FnMut(Win32Event) -> EventFlow>) {
+    UI_THREAD_ID.store(unsafe { get_current_thread_id() }, Ordering::Release);
     WIN32_APP.with(|app| {
         *app.borrow_mut() = Some(Win32App::new(event_callback));
     });

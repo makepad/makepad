@@ -176,7 +176,9 @@ impl ChildProcess {
         let out_send = out_recv.sender();
 
         let mut in_send: FromUISender<ChildIn> = Default::default();
-        let in_recv = in_send.receiver();
+        let in_recv = in_send
+            .receiver()
+            .expect("child stdin receiver is taken exactly once");
 
         let _stdout_thread = {
             let out_send = out_send.clone();

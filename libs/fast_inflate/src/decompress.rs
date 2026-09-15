@@ -536,8 +536,21 @@ pub fn deflate_decompress(
     input: &[u8],
     output: &mut [u8],
 ) -> Result<(usize, usize), DecompressError> {
+    deflate_decompress_from(input, output, 0)
+}
+
+/// Decompress raw DEFLATE into `output[start..]`. Bytes before `start` are
+/// history the matcher may read (MSZIP 32K window across cabinet blocks).
+pub fn deflate_decompress_from(
+    input: &[u8],
+    output: &mut [u8],
+    start: usize,
+) -> Result<(usize, usize), DecompressError> {
+    if start > output.len() {
+        return Err(DecompressError::InsufficientSpace);
+    }
     let mut d = Decompressor::new();
-    deflate_decompress_with(&mut d, input, output)
+    deflate_decompress_with(&mut d, input, output, start)
 }
 
 /// Decompress raw DEFLATE data using a reusable decompressor.
@@ -545,6 +558,7 @@ fn deflate_decompress_with(
     d: &mut Decompressor,
     input: &[u8],
     output: &mut [u8],
+    start: usize,
 ) -> Result<(usize, usize), DecompressError> {
     let in_len = input.len();
     let out_len = output.len();
@@ -553,7 +567,7 @@ fn deflate_decompress_with(
     let in_fastloop_end = in_len.saturating_sub(FASTLOOP_MAX_BYTES_READ);
 
     let mut in_pos: usize = 0;
-    let mut out_pos: usize = 0;
+    let mut out_pos: usize = start;
 
     let mut bitbuf: BitBuf = 0;
     let mut bitsleft: u32 = 0;
@@ -1134,7 +1148,7 @@ fn deflate_decompress_with(
     safety_check!(overread_count <= (bitsleft >> 3) as usize);
 
     let actual_in_pos = in_pos - (bitsleft >> 3) as usize + overread_count;
-    Ok((actual_in_pos, out_pos))
+    Ok((actual_in_pos, out_pos - start))
 }
 
 // --- Zlib wrapper ---
@@ -1176,7 +1190,7 @@ fn zlib_decompress_with(
     }
 
     let deflate_data = &input[2..];
-    let (consumed, written) = deflate_decompress_with(d, deflate_data, output)?;
+    let (consumed, written) = deflate_decompress_with(d, deflate_data, output, 0)?;
 
     let footer_start = 2 + consumed;
     if footer_start + ZLIB_FOOTER_SIZE > input.len() {
@@ -1203,7 +1217,7 @@ pub fn deflate_decompress_vec(input: &[u8]) -> Result<Vec<u8>, DecompressError> 
     let mut capacity = (input.len() * 3).max(INITIAL_VEC_CAPACITY);
     loop {
         let mut output = vec![0u8; capacity];
-        match deflate_decompress_with(&mut d, input, &mut output) {
+        match deflate_decompress_with(&mut d, input, &mut output, 0) {
             Ok((_consumed, written)) => {
                 output.truncate(written);
                 return Ok(output);
@@ -1358,7 +1372,7 @@ fn gzip_decompress_with(
     }
 
     let deflate_data = &input[pos..];
-    let (consumed, written) = deflate_decompress_with(d, deflate_data, output)?;
+    let (consumed, written) = deflate_decompress_with(d, deflate_data, output, 0)?;
 
     let footer_start = pos + consumed;
     if footer_start + 8 > input.len() {

@@ -124,13 +124,13 @@ pub(crate) fn compile_draw_shader_wgsl_to_spirv(
 ) -> Result<CxVulkanShaderBinary, String> {
     let wgsl_source = compile_draw_shader_wgsl_source(vm, io_self, layout_source, xr_multiview)?;
 
-    if std::env::var_os("MAKEPAD_DUMP_VULKAN_WGSL").is_some() {
+    if crate::makepad_error_log::trace_enabled("shader.wgsl") {
         let variant = if xr_multiview { "xr" } else { "window" };
-        crate::log!("---- Vulkan WGSL ({variant}) ----\n{}", wgsl_source.wgsl);
+        crate::trace!("shader.wgsl", "---- Vulkan WGSL ({}) ----\n{}", variant, wgsl_source.wgsl);
     }
 
     let (vertex_spirv, fragment_spirv) = compile_wgsl_to_spirv(&wgsl_source.wgsl)
-        .map_err(|err| format!("{err}\nSet MAKEPAD_DUMP_VULKAN_WGSL=1 to dump generated WGSL."))?;
+        .map_err(|err| format!("{err}\nSet MAKEPAD_TRACE=shader.wgsl to dump generated WGSL."))?;
 
     Ok(CxVulkanShaderBinary {
         vertex_spirv,

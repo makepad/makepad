@@ -156,6 +156,7 @@ fn main() {
     match target_os.as_str() {
         "macos" => {
             println!("cargo:rustc-link-lib=framework=GameController");
+            println!("cargo:rustc-link-lib=framework=CoreHaptics");
             println!("cargo:rustc-link-lib=framework=CoreLocation");
             println!("cargo:rustc-link-lib=framework=AudioToolbox");
         }

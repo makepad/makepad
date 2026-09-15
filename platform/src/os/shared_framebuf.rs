@@ -445,6 +445,8 @@ pub fn shared_swapchain_from_host_swapchain(
 
 /// Auxiliary communication channel, besides stdin (only on Linux).
 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+// Unix-domain studio IPC is a native-only process boundary.
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 pub mod aux_chan {
     use super::*;
     use crate::os::linux::ipc::{self as linux_ipc, FixedSizeEncoding};
@@ -702,12 +704,9 @@ impl WindowKindId {
 
 impl Cx {}
 
-use std::time::Duration;
-use std::time::Instant;
-
 pub struct PollTimer {
-    pub start_time: Instant,
-    pub interval: Duration,
+    pub start_time: f64,
+    pub interval: f64,
     pub repeats: bool,
     pub step: u64,
 }
@@ -715,8 +714,8 @@ pub struct PollTimer {
 impl PollTimer {
     pub fn new(interval_s: f64, repeats: bool) -> Self {
         Self {
-            start_time: Instant::now(),
-            interval: Duration::from_secs_f64(interval_s),
+            start_time: Cx::monotonic_now(),
+            interval: interval_s,
             repeats,
             step: 0,
         }
@@ -725,33 +724,31 @@ impl PollTimer {
 
 pub struct PollTimers {
     pub timers: HashMap<u64, PollTimer>,
-    pub time_start: Instant,
-    pub last_time: Instant,
+    pub time_start: f64,
+    pub last_time: f64,
 }
 impl Default for PollTimers {
     fn default() -> Self {
         Self {
-            time_start: Instant::now(),
-            last_time: Instant::now(),
+            time_start: Cx::monotonic_now(),
+            last_time: Cx::monotonic_now(),
             timers: Default::default(),
         }
     }
 }
 impl PollTimers {
     pub fn time_now(&self) -> f64 {
-        let time_now = Instant::now(); //unsafe {mach_absolute_time()};
-        (time_now.duration_since(self.time_start)).as_secs_f64()
+        Cx::monotonic_now() - self.time_start
     }
 
     pub fn get_dispatch(&mut self) -> Vec<TimerEvent> {
         let mut to_be_dispatched = Vec::with_capacity(self.timers.len());
         let mut to_be_removed = Vec::with_capacity(self.timers.len());
-        let now = Instant::now();
+        let now = Cx::monotonic_now();
         let time = self.time_now();
         for (id, timer) in self.timers.iter_mut() {
             let elapsed_time = now - timer.start_time;
-            let next_due_time =
-                Duration::from_nanos(timer.interval.as_nanos() as u64 * (timer.step + 1));
+            let next_due_time = timer.interval * (timer.step + 1) as f64;
 
             if elapsed_time > next_due_time {
                 to_be_dispatched.push(TimerEvent {

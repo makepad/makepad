@@ -100,7 +100,7 @@ pub mod screen_capture;
 pub mod audio_output_tap;
 pub mod shader_error;
 pub use crate::app_main::{resolve_studio_http, should_run_stdin_loop_from_env};
-// Working-tree startup instrumentation (MAKEPAD_STARTUP_TRACE=1).
+// Working-tree startup instrumentation (`MAKEPAD_TRACE=startup`).
 pub use crate::cx::{
     startup_acc, startup_since_exec_ms, startup_trace, startup_trace_enabled, startup_trace_flush,
 };
@@ -223,7 +223,10 @@ pub use {
             XrState,
             XrUpdateEvent,
         },
-        file_dialogs::{FileDialog, FileDialogAction},
+        file_dialogs::{
+            FileDialog, FileDialogAction, VirtualFile, VirtualFileLimits,
+            DEFAULT_VIRTUAL_FILE_SIZE_LIMIT,
+        },
         game_input::*,
         geometry::{CxGeometry, Geometry, GeometryId, IndexData, VertexData},
         draw_shader::{DrawShaderAttrFormat, DrawShaderInputPacking, DrawShaderInputs},

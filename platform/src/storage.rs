@@ -978,6 +978,8 @@ pub(crate) mod native {
     }
 
     #[cfg(test)]
+    // Native filesystem tests use wall-clock values only to make temporary paths unique.
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
     mod tests {
         use super::*;
         use std::time::{SystemTime, UNIX_EPOCH};

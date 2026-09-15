@@ -20,7 +20,6 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::Instant;
 
 pub struct ScreenCaptureFrame<'a> {
     /// The window the presenting pass belongs to, when the backend knows it.
@@ -101,8 +100,7 @@ fn sinks() -> &'static Mutex<HashMap<u64, Sink>> {
 }
 
 fn now_ns() -> u64 {
-    static T0: OnceLock<Instant> = OnceLock::new();
-    T0.get_or_init(Instant::now).elapsed().as_nanos() as u64
+    (crate::Cx::monotonic_now() * 1_000_000_000.0) as u64
 }
 
 pub fn add_screen_capture<F>(options: ScreenCaptureOptions, f: F) -> u64

@@ -215,12 +215,25 @@ pub struct RemoteWheel {
     pub brake: f32,
     pub clutch: f32,
     pub steer_force: f32,
+    pub buttons: u32,
+}
+
+/// A flight stick's state (see the platform's `JoystickState`).
+#[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
+pub struct RemoteJoystick {
+    pub x: f32,
+    pub y: f32,
+    pub twist: f32,
+    pub throttle: f32,
+    pub hat: u8,
+    pub buttons: u32,
 }
 
 #[derive(Clone, Copy, Debug, SerBin, DeBin, SerJson, DeJson, PartialEq)]
 pub enum RemoteGameInput {
     Gamepad(RemoteGamepad),
     Wheel(RemoteWheel),
+    Joystick(RemoteJoystick),
 }
 
 impl Default for RemoteGameInput {

@@ -17,6 +17,8 @@ pub use self::android::{
 #[cfg(any(target_os = "ios", target_os = "macos", target_os = "tvos"))]
 pub mod apple;
 #[cfg(target_os = "linux")]
+// Linux socket workers are native-only and never compiled into a web app.
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 pub mod linux;
 #[cfg(target_arch = "wasm32")]
 pub mod web;

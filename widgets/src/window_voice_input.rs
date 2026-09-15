@@ -9,9 +9,8 @@ use makepad_ai_speech::vad::{SileroVad, VadStream};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
-use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const VOICE_TARGET_SAMPLE_RATE: f64 = 16_000.0;
 const VOICE_AUDIO_PACKET_SAMPLES: usize = 320; // 20ms @16k
@@ -137,8 +136,7 @@ impl Default for WindowVoiceInput {
 
 impl WindowVoiceInput {
     fn now_secs() -> f64 {
-        static START: OnceLock<Instant> = OnceLock::new();
-        START.get_or_init(Instant::now).elapsed().as_secs_f64()
+        Cx::monotonic_now()
     }
 
     fn chunk_rms(samples: &[f32]) -> f32 {
@@ -664,7 +662,7 @@ fn spawn_voice_worker(
         // machine election), on the machine node, on a LAN node, else the OS
         // engine. Loading happens on the session's own thread and reports
         // through `poll`, so this worker keeps eating audio meanwhile.
-        let session = SttSession::start(SttConfig::live_dictation());
+        let session = SttSession::start(SttConfig::local_whisper());
         // PCM mode (Whisper, Apple): we gate with VAD and hand over utterances.
         // Engine-mic mode (Android / Windows system recognizers): the engine
         // owns the microphone; we only relay its results.
