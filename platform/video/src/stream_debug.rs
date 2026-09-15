@@ -48,7 +48,6 @@ mod native {
         let _ = std::fs::write(name, bytes);
     }
 
-    /// `hr` as the mferror.h-style hex a reader can look up.
 }
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::{dump_packet, enabled, log};
@@ -63,6 +62,7 @@ pub fn log(_line: impl FnOnce() -> String) {}
 #[cfg(target_arch = "wasm32")]
 pub fn dump_packet(_index: u64, _bytes: &[u8]) {}
 
+/// `hr` as the mferror.h-style hex a reader can look up.
 pub fn hex_hr(hr: i32) -> String {
     format!("0x{:08X}", hr as u32)
 }

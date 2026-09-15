@@ -67,7 +67,10 @@ mod async_sink {
     use super::*;
     use std::sync::{atomic::{AtomicU64, Ordering}, mpsc::{sync_channel, SyncSender}, OnceLock};
 
-    type Message = Box<dyn FnOnce() + Send>;
+    pub(super) enum Message {
+        Record(Box<dyn FnOnce() + Send>),
+        Deferred(DeferredLog),
+    }
     static SINK: OnceLock<Option<SyncSender<Message>>> = OnceLock::new();
     static DROPPED: AtomicU64 = AtomicU64::new(0);
 
@@ -77,7 +80,10 @@ mod async_sink {
             std::thread::Builder::new().name("makepad-log".into()).spawn(move || {
                 let mut reported = 0;
                 while let Ok(message) = rx.recv() {
-                    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(message)).is_err() {
+                    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match message {
+                        Message::Record(write) => write(),
+                        Message::Deferred(record) => record.write(),
+                    })).is_err() {
                         DROPPED.fetch_add(1, Ordering::Relaxed);
                     }
                     let dropped = DROPPED.load(Ordering::Relaxed);
@@ -93,10 +99,20 @@ mod async_sink {
     }
 
     pub(super) fn submit(message: Message) {
-        if let Some(Some(tx)) = SINK.get() {
-            if tx.try_send(message).is_ok() { return; }
+        if try_submit(message).is_ok() {
+            return;
         }
         DROPPED.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(super) fn try_submit(message: Message) -> Result<(), Message> {
+        if let Some(Some(tx)) = SINK.get() {
+            return tx.try_send(message).map_err(|error| match error {
+                std::sync::mpsc::TrySendError::Full(value)
+                | std::sync::mpsc::TrySendError::Disconnected(value) => value,
+            });
+        }
+        Err(message)
     }
 
     pub(super) fn dropped() -> u64 { DROPPED.load(Ordering::Relaxed) }
@@ -111,24 +127,95 @@ pub fn dropped_log_records() -> u64 {
 }
 
 /// Move expensive diagnostic formatting to the logger along with its values.
-pub fn defer_log(file: &'static str, line: u32, column: u32,
-    format: impl FnOnce() -> String + Send + 'static) {
+pub struct DeferredLog {
+    file: &'static str,
+    line: u32,
+    column: u32,
+    format: Box<dyn FnOnce() -> String + Send>,
+}
+
+impl DeferredLog {
+    pub fn new(
+        file: &'static str,
+        line: u32,
+        column: u32,
+        format: impl FnOnce() -> String + Send + 'static,
+    ) -> Self {
+        Self {
+            file,
+            line,
+            column,
+            format: Box::new(format),
+        }
+    }
+
+    fn write(self) {
+        write_log_record(
+            self.file,
+            self.line,
+            self.column,
+            self.line,
+            self.column,
+            (self.format)(),
+            LogLevel::Log,
+        );
+    }
+
+    /// A caller that owes a diagnostic can retain and retry a full queue on
+    /// a later frame. No formatting, waiting, or dropped-record accounting
+    /// happens until the caller explicitly abandons that owned record.
+    pub fn try_submit(self) -> Result<(), Self> {
+        #[cfg(not(target_arch = "wasm32"))]
+        match async_sink::try_submit(async_sink::Message::Deferred(self)) {
+            Ok(()) => Ok(()),
+            Err(async_sink::Message::Deferred(record)) => Err(record),
+            Err(async_sink::Message::Record(_)) => unreachable!(),
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.write();
+            Ok(())
+        }
+    }
+}
+
+pub fn defer_log(
+    file: &'static str,
+    line: u32,
+    column: u32,
+    format: impl FnOnce() -> String + Send + 'static,
+) {
     #[cfg(not(target_arch = "wasm32"))]
-    async_sink::submit(Box::new(move || write_log_record(file, line, column, line, column,
-        format(), LogLevel::Log)));
+    async_sink::submit(async_sink::Message::Deferred(DeferredLog::new(
+        file, line, column, format,
+    )));
     #[cfg(target_arch = "wasm32")]
     write_log_record(file, line, column, line, column, format(), LogLevel::Log);
 }
 
 pub(crate) fn log_with_level_makepad_platform(
-    file_name: &str, line_start: u32, column_start: u32, line_end: u32,
-    column_end: u32, message: String, level: LogLevel,
+    file_name: &str,
+    line_start: u32,
+    column_start: u32,
+    line_end: u32,
+    column_end: u32,
+    message: String,
+    level: LogLevel,
 ) {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let file_name = file_name.to_owned();
-        async_sink::submit(Box::new(move || write_log_record(&file_name, line_start,
-            column_start, line_end, column_end, message, level)));
+        async_sink::submit(async_sink::Message::Record(Box::new(move || {
+            write_log_record(
+                &file_name,
+                line_start,
+                column_start,
+                line_end,
+                column_end,
+                message,
+                level,
+            )
+        })));
     }
     #[cfg(target_arch = "wasm32")]
     write_log_record(file_name, line_start, column_start, line_end, column_end, message, level);

@@ -38,6 +38,7 @@ use crate::{
 /// Wraps a `wl_egl_window` in an `EGLSurface`, or returns null when the driver refuses it —
 /// which it does for an extent it cannot allocate a buffer for, however willingly
 /// `wl_egl_window_create` accepted the same numbers.
+#[cfg(not(use_vulkan))]
 fn create_egl_window_surface(opengl_cx: &OpenglCx, wl_egl_surface: &WlEglSurface) -> EGLSurface {
     unsafe {
         (opengl_cx.libegl.eglCreateWindowSurface.unwrap())(
@@ -589,7 +590,9 @@ pub(crate) struct WaylandWindow {
     pub configured: bool,
     pub window_geom: WindowGeom,
     pub cal_size: Vec2d,
+    #[cfg(not(use_vulkan))]
     pub wl_egl_surface: WlEglSurface,
+    #[cfg(not(use_vulkan))]
     pub egl_surface: EGLSurface,
     csd_shadow: Option<WaylandCsdShadow>,
     /// The `(width, height, opaque)` the surface's opaque region was last set from, so a
@@ -609,7 +612,7 @@ impl WaylandWindow {
         icon_manager: Option<&xdg_toplevel_icon_manager_v1::XdgToplevelIconManagerV1>,
         shm: Option<&wl_shm::WlShm>,
         qhandle: &QueueHandle<WaylandState>,
-        opengl_cx: &OpenglCx,
+        #[cfg(not(use_vulkan))] opengl_cx: &OpenglCx,
         inner_size: Vec2d,
         position: Option<Vec2d>,
         title: &str,
@@ -618,6 +621,7 @@ impl WaylandWindow {
         decoration_preference: WaylandDecorationPreference,
     ) -> WaylandWindow {
         // Checked "downcast" of the EGL platform display to a X11 display.
+        #[cfg(not(use_vulkan))]
         assert_eq!(opengl_cx.egl_platform, egl_sys::EGL_PLATFORM_WAYLAND_KHR);
 
         let base_surface = compositer.create_surface(qhandle, ());
@@ -688,6 +692,8 @@ impl WaylandWindow {
         // `wl_egl_window_create` rejects a non-positive extent, and a float-to-int cast turns
         // both a negative and a NaN into zero, so the requested size is floored before the
         // call rather than allowed to panic an app at startup over a bad saved size.
+        #[cfg(not(use_vulkan))]
+        let (wl_egl_surface, egl_surface) = {
         let egl_w = surface_width;
         let egl_h = surface_height;
         let mut wl_egl_surface = match WlEglSurface::new(base_surface.id(), egl_w, egl_h) {
@@ -719,6 +725,8 @@ impl WaylandWindow {
             !egl_surface.is_null(),
             "eglCreateWindowSurface failed at the fallback size too"
         );
+            (wl_egl_surface, egl_surface)
+        };
 
         // let positioner = wm_base.create_positioner(qhandle, ());
         let position = position.unwrap_or_default();
@@ -752,7 +760,9 @@ impl WaylandWindow {
             window_id,
             cal_size: Vec2d::default(),
             window_geom: geom,
+            #[cfg(not(use_vulkan))]
             wl_egl_surface,
+            #[cfg(not(use_vulkan))]
             egl_surface,
             csd_shadow,
             opaque_region_state: None,
@@ -846,21 +856,24 @@ impl WaylandWindow {
         // wl_buf kept alive until compositor reads it (destroyed on drop)
     }
 
-    pub fn prepare_buffer_size(&mut self, opengl_cx: &OpenglCx) -> bool {
+    pub fn prepare_buffer_size(&mut self, #[cfg(not(use_vulkan))] opengl_cx: &OpenglCx) -> bool {
         let cal_size = Vec2d {
             x: self.window_geom.inner_size.x * self.window_geom.dpi_factor,
             y: self.window_geom.inner_size.y * self.window_geom.dpi_factor,
         };
         if self.cal_size != cal_size {
-            // NVIDIA's Wayland EGL platform may defer resizing a non-current
-            // EGLSurface until its next swap. Bind this exact surface first so
-            // the next frame cannot mix the old buffer with the new viewport.
-            if !opengl_cx.make_current_with_surface(self.egl_surface) {
-                return false;
+            #[cfg(not(use_vulkan))]
+            {
+                // NVIDIA's Wayland EGL platform may defer resizing a non-current
+                // EGLSurface until its next swap. Bind this exact surface first so
+                // the next frame cannot mix the old buffer with the new viewport.
+                if !opengl_cx.make_current_with_surface(self.egl_surface) {
+                    return false;
+                }
+                let pix_width = cal_size.x.max(1.0) as i32;
+                let pix_height = cal_size.y.max(1.0) as i32;
+                self.wl_egl_surface.resize(pix_width, pix_height, 0, 0);
             }
-            let pix_width = cal_size.x.max(1.0) as i32;
-            let pix_height = cal_size.y.max(1.0) as i32;
-            self.wl_egl_surface.resize(pix_width, pix_height, 0, 0);
             // Cache only a resize that was actually issued. A failed bind is
             // retried on the next paint rather than leaving stale buffers.
             self.cal_size = cal_size;
@@ -1012,9 +1025,13 @@ pub(crate) struct WaylandPopupWindow {
     pub xdg_popup: xdg_popup::XdgPopup,
     pub viewport: Option<wp_viewport::WpViewport>,
     pub fractional_scale: Option<wp_fractional_scale_v1::WpFractionalScaleV1>,
+    #[cfg(not(use_vulkan))]
     pub wl_egl_surface: Option<WlEglSurface>,
+    #[cfg(not(use_vulkan))]
     pub egl_surface: EGLSurface,
+    #[cfg(not(use_vulkan))]
     pub egl_display: egl_sys::EGLDisplay,
+    #[cfg(not(use_vulkan))]
     egl_destroy_surface_fn:
         unsafe extern "C" fn(egl_sys::EGLDisplay, EGLSurface) -> egl_sys::EGLBoolean,
     pub window_geom: WindowGeom,
@@ -1036,11 +1053,12 @@ impl WaylandPopupWindow {
         scale_manager: Option<&wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1>,
         viewporter: Option<&wp_viewporter::WpViewporter>,
         qhandle: &QueueHandle<WaylandState>,
-        opengl_cx: &OpenglCx,
+        #[cfg(not(use_vulkan))] opengl_cx: &OpenglCx,
         size: Vec2d,
         position: Vec2d,
         _grab_keyboard: bool,
     ) -> WaylandPopupWindow {
+        #[cfg(not(use_vulkan))]
         assert_eq!(opengl_cx.egl_platform, egl_sys::EGL_PLATFORM_WAYLAND_KHR);
 
         let base_surface = compositer.create_surface(qhandle, ());
@@ -1069,6 +1087,8 @@ impl WaylandPopupWindow {
         base_surface.commit();
         positioner.destroy();
 
+        #[cfg(not(use_vulkan))]
+        let (wl_egl_surface, egl_surface) = {
         let popup_w = size.x.max(1.0) as i32;
         let popup_h = size.y.max(1.0) as i32;
         let mut wl_egl_surface = WlEglSurface::new(base_surface.id(), popup_w, popup_h).unwrap();
@@ -1091,6 +1111,8 @@ impl WaylandPopupWindow {
             !egl_surface.is_null(),
             "eglCreateWindowSurface failed at the fallback size too"
         );
+            (wl_egl_surface, egl_surface)
+        };
 
         let geom = WindowGeom {
             xr_is_presenting: false,
@@ -1112,27 +1134,34 @@ impl WaylandPopupWindow {
             xdg_popup,
             viewport,
             fractional_scale,
+            #[cfg(not(use_vulkan))]
             wl_egl_surface: Some(wl_egl_surface),
+            #[cfg(not(use_vulkan))]
             egl_surface,
+            #[cfg(not(use_vulkan))]
             egl_display: opengl_cx.egl_display,
-            egl_destroy_surface_fn: opengl_cx.libegl.eglDestroySurface.unwrap(),
+            #[cfg(not(use_vulkan))]
+    egl_destroy_surface_fn: opengl_cx.libegl.eglDestroySurface.unwrap(),
             window_geom: geom,
             configured: false,
             cal_size: Vec2d::default(),
         }
     }
 
-    pub fn prepare_buffer_size(&mut self, opengl_cx: &OpenglCx) -> bool {
+    pub fn prepare_buffer_size(&mut self, #[cfg(not(use_vulkan))] opengl_cx: &OpenglCx) -> bool {
         let cal_size = Vec2d {
             x: self.window_geom.inner_size.x * self.window_geom.dpi_factor,
             y: self.window_geom.inner_size.y * self.window_geom.dpi_factor,
         };
         if self.cal_size != cal_size {
-            if !opengl_cx.make_current_with_surface(self.egl_surface) {
-                return false;
-            }
-            if let Some(ref wl_egl_surface) = self.wl_egl_surface {
-                wl_egl_surface.resize(cal_size.x.max(1.0) as i32, cal_size.y.max(1.0) as i32, 0, 0);
+            #[cfg(not(use_vulkan))]
+            {
+                if !opengl_cx.make_current_with_surface(self.egl_surface) {
+                    return false;
+                }
+                if let Some(ref wl_egl_surface) = self.wl_egl_surface {
+                    wl_egl_surface.resize(cal_size.x.max(1.0) as i32, cal_size.y.max(1.0) as i32, 0, 0);
+                }
             }
             self.cal_size = cal_size;
         }
@@ -1141,6 +1170,7 @@ impl WaylandPopupWindow {
 
     pub fn close_window(&mut self) {
         // Destroy EGL surface first — it holds a reference to the wl_egl_surface.
+        #[cfg(not(use_vulkan))]
         if !self.egl_surface.is_null() {
             unsafe {
                 (self.egl_destroy_surface_fn)(self.egl_display, self.egl_surface);
@@ -1149,6 +1179,7 @@ impl WaylandPopupWindow {
         }
         // Drop wl_egl_surface before Wayland objects — wl_egl_window_destroy
         // accesses the underlying wl_surface.
+        #[cfg(not(use_vulkan))]
         self.wl_egl_surface.take();
         // Destroy Wayland objects in protocol order: role-specific first,
         // then the base surface last.

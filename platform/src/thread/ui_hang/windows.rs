@@ -123,7 +123,7 @@ impl Target {
             let mut displacement = 0;
             if SymFromAddr(self.process as Handle, pc as u64, &mut displacement, &mut symbol) != 0 {
                 symbol.name[1023] = 0;
-                format!("{}+0x{displacement:x}", CStr::from_ptr(symbol.name.as_ptr().cast()).to_string_lossy())
+                format!("{}+0x{displacement:x}", super::demangle::demangle(&CStr::from_ptr(symbol.name.as_ptr().cast()).to_string_lossy()))
             } else { format!("0x{pc:x}") }
         }
     }

@@ -16,6 +16,9 @@ mod backend;
 #[path = "windows.rs"]
 mod backend;
 
+#[path = "demangle.rs"]
+mod demangle;
+
 const THRESHOLD: Duration = Duration::from_millis(250);
 const INTERVAL: Duration = Duration::from_millis(100);
 

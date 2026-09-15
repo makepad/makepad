@@ -299,6 +299,11 @@ pub struct GameMeshVertexSkin {
     /// surface through every pose because topology never changes.
     #[live]
     pub ao_uv: f32,
+    #[live]
+    pub color: f32,
+    #[live]
+    pub source_vertex: f32,
+
 }
 
 #[derive(Clone, Script, ScriptHook)]
@@ -596,7 +601,7 @@ impl GeometryGen {
         for _ in 0..3 {
             // pos, nrm, uv, joints(0,0,0,0), weights(1,0,0,0), ao_uv(0,0)
             g.vertices
-                .extend_from_slice(&[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, f32::from_bits(0xff), 0.0]);
+                .extend_from_slice(&[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, f32::from_bits(0xff), 0.0, f32::from_bits(0xffff_ffff), 0.0]);
         }
         g.indices.extend_from_slice(&[0, 1, 2]);
         g

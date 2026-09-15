@@ -1,4 +1,52 @@
 const SPLIT_SLOT_EXPORT_PREFIX = "$s";
+const MAKEPAD_WASM_PANIC_PREFIX = "__MAKEPAD_WASM_PANIC__:";
+const makepad_worker_started_at = Date.now();
+let makepad_worker_index = null;
+
+function makepad_worker_console_text(parts) {
+    try {
+        return parts.map(value => {
+            if (typeof value === "string") {
+                return value;
+            }
+            if (value instanceof Error) {
+                return value.stack || `${value.name}: ${value.message}`;
+            }
+            try {
+                return typeof value === "object" ? JSON.stringify(value) : String(value);
+            } catch (_error) {
+                return "[unprintable]";
+            }
+        }).join(" ").replace(/\s*\r?\n\s*/g, " ").slice(0, 300);
+    } catch (_error) {
+        return "[unprintable]";
+    }
+}
+
+for (const level of ["log", "warn", "error"]) {
+    try {
+        const original = console[level];
+        if (typeof original !== "function") {
+            continue;
+        }
+        console[level] = function (...parts) {
+            try {
+                postMessage({
+                    type: "breadcrumb",
+                    level,
+                    text: makepad_worker_console_text(parts),
+                    ms: Date.now() - makepad_worker_started_at,
+                    worker_index: makepad_worker_index
+                });
+            } catch (_error) {
+            }
+            // The page forwards this breadcrumb once. Logging here as well makes
+            // browsers show both the worker line and its forwarded copy.
+            return undefined;
+        };
+    } catch (_error) {
+    }
+}
 
 function patch_split_table(primary_exports, secondary_exports) {
     const split_table = primary_exports.$s;
@@ -19,6 +67,7 @@ function patch_split_table(primary_exports, secondary_exports) {
 
 onmessage = async function (e) {
     let thread_info = e.data;
+    makepad_worker_index = thread_info.request_id;
 
     async function instantiate_secondary(primary_wasm, env) {
         if (!thread_info.secondary_module) {
@@ -43,6 +92,7 @@ onmessage = async function (e) {
     let web_sockets = {}
     let network_web_sockets = {}
     let network_http_requests = new Map();
+    let worker_wait_word = new Int32Array(new SharedArrayBuffer(4));
 
     function id_to_key(lo, hi) {
         return `${lo}:${hi}`;
@@ -66,8 +116,21 @@ onmessage = async function (e) {
             return 1;
         },
 
+        js_worker_wait(timeout_ms) {
+            Atomics.wait(worker_wait_word, 0, 0, timeout_ms);
+        },
+
         js_console_error: (str_ptr, str_len) => {
-            console.error(u8_to_string(str_ptr, str_len))
+            const raw = u8_to_string(str_ptr, str_len);
+            const is_panic = raw.startsWith(MAKEPAD_WASM_PANIC_PREFIX);
+            const text = is_panic ? raw.slice(MAKEPAD_WASM_PANIC_PREFIX.length) : raw;
+            console.error(text);
+            if (is_panic) {
+                try {
+                    postMessage({ type: 'panic', text });
+                } catch (_error) {
+                }
+            }
         },
 
         js_console_log: (str_ptr, str_len) => {
@@ -195,7 +258,6 @@ onmessage = async function (e) {
                 signal: controller.signal,
                 redirect: "manual",
             }).then(async response => {
-                console.log("[makepad][http][req]", method, url);
                 let response_headers = "";
                 response.headers.forEach((value, key) => {
                     response_headers += `${key}: ${value}\r\n`;
@@ -230,7 +292,9 @@ onmessage = async function (e) {
                 }
                 let headers_u8 = string_to_u8(response_headers);
                 let body_u8 = array_to_u8(response_body);
-                console.log("[makepad][http][res]", response.status, url, response_body.length);
+                if (response.status >= 400) {
+                    console.error("[makepad][http][fail]", response.status, url);
+                }
                 wasm.exports.wasm_network_http_response(
                     request_id_lo,
                     request_id_hi,
@@ -400,7 +464,11 @@ onmessage = async function (e) {
         postMessage({
             kind: entry_started ? 'trapped' : 'failed_to_start',
             request_id: thread_info.request_id,
-            error: String(error)
+            error: String(error),
+            message: error && error.message ? String(error.message) : String(error),
+            filename: error && error.fileName ? String(error.fileName) : "",
+            lineno: error && error.lineNumber ? error.lineNumber : 0,
+            stack: error && error.stack ? String(error.stack) : ""
         });
     }
 }

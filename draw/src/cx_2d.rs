@@ -79,6 +79,89 @@ impl Drop for Cx2d<'_, '_> {
     }
 }
 
+/// Where the draw context's stacks stood when a host handed it to a guest
+/// whose draw may not return — a module tile's root, drawn under
+/// `catch_unwind`. [`Cx2d::unwind_to`] cuts them back to it: the turtles,
+/// alignment, clips and parent chain the guest left open, the passes and
+/// draw lists it began, the overlay scope it was inside — so the host's
+/// own `end_*` calls pair again and the frame finishes. What the guest
+/// already recorded into the current draw list stays for this frame; the
+/// host redraws it.
+#[derive(Clone, Copy, Debug)]
+pub struct DrawUnwindMark {
+    turtles: usize,
+    finished_rows: usize,
+    finished_walks: usize,
+    turtle_clips: usize,
+    align_list: usize,
+    draw_call_parent_stack: usize,
+    pass_stack: usize,
+    draw_list_stack: usize,
+    overlay_id: Option<DrawListId>,
+    overlay_pass_id: Option<DrawPassId>,
+    overlay_draw_depth: usize,
+    overlay_seq: u64,
+    nesting_depth: usize,
+}
+
+impl DrawUnwindMark {
+    /// Every stack that has to pair — turtles, clips, the parent chain,
+    /// passes, draw lists, the overlay scope, the nesting depth — stands
+    /// where it did in `other`. What a frame accumulates until its root
+    /// turtle ends (finished walks, alignment entries) is not a stack and
+    /// is not compared.
+    pub fn is_balanced_with(&self, other: &DrawUnwindMark) -> bool {
+        self.turtles == other.turtles
+            && self.turtle_clips == other.turtle_clips
+            && self.draw_call_parent_stack == other.draw_call_parent_stack
+            && self.pass_stack == other.pass_stack
+            && self.draw_list_stack == other.draw_list_stack
+            && self.overlay_id == other.overlay_id
+            && self.overlay_pass_id == other.overlay_pass_id
+            && self.overlay_draw_depth == other.overlay_draw_depth
+            && self.nesting_depth == other.nesting_depth
+    }
+}
+
+impl<'a, 'b> Cx2d<'a, 'b> {
+    pub fn unwind_mark(&self) -> DrawUnwindMark {
+        DrawUnwindMark {
+            turtles: self.turtles.len(),
+            finished_rows: self.finished_rows.len(),
+            finished_walks: self.finished_walks.len(),
+            turtle_clips: self.turtle_clips.len(),
+            align_list: self.align_list.len(),
+            draw_call_parent_stack: self.draw_call_parent_stack.len(),
+            pass_stack: self.cx.pass_stack.len(),
+            draw_list_stack: self.cx.draw_list_stack.len(),
+            overlay_id: self.overlay_id,
+            overlay_pass_id: self.overlay_pass_id,
+            overlay_draw_depth: self.overlay_draw_depth,
+            overlay_seq: self.overlay_seq,
+            nesting_depth: self.cx.cx.nesting_depth,
+        }
+    }
+
+    /// Back to `mark`, dropping everything begun after it. Only ever deeper
+    /// stacks are cut: a mark taken before a guest's draw is always at or
+    /// below where the guest left them.
+    pub fn unwind_to(&mut self, mark: DrawUnwindMark) {
+        self.turtles.truncate(mark.turtles);
+        self.finished_rows.truncate(mark.finished_rows);
+        self.finished_walks.truncate(mark.finished_walks);
+        self.turtle_clips.truncate(mark.turtle_clips);
+        self.align_list.truncate(mark.align_list);
+        self.draw_call_parent_stack.truncate(mark.draw_call_parent_stack);
+        self.cx.pass_stack.truncate(mark.pass_stack);
+        self.cx.draw_list_stack.truncate(mark.draw_list_stack);
+        self.overlay_id = mark.overlay_id;
+        self.overlay_pass_id = mark.overlay_pass_id;
+        self.overlay_draw_depth = mark.overlay_draw_depth;
+        self.overlay_seq = mark.overlay_seq;
+        self.cx.cx.nesting_depth = mark.nesting_depth;
+    }
+}
+
 impl<'a, 'b> Deref for Cx2d<'a, 'b> {
     type Target = CxDraw<'a>;
     fn deref(&self) -> &Self::Target {
