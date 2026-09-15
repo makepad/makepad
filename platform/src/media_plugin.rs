@@ -149,7 +149,7 @@ pub trait VideoFrameDecoder: Send {
 pub trait MediaVideoEncoder: Send + Sync {
     fn push_frame(&self, frame: CameraFrameRef<'_>);
 
-    #[cfg(all(any(target_os = "macos", target_os = "ios"), not(headless)))]
+    #[cfg(all(any(target_os = "macos", target_os = "ios"), not(gpusim)))]
     fn push_apple_pixel_buffer(
         &self,
         _pixel_buffer: crate::os::apple::apple_sys::CVPixelBufferRef,
@@ -214,7 +214,7 @@ pub trait MediaPlaybackSession {
         None
     }
     /// Optional Apple zero-copy present: biplanar NV12 `CVPixelBuffer` from VideoToolbox.
-    #[cfg(all(any(target_os = "macos", target_os = "ios"), not(headless)))]
+    #[cfg(all(any(target_os = "macos", target_os = "ios"), not(gpusim)))]
     fn take_metal_nv12_frame(&mut self) -> Option<crate::gpu_texture::MetalNv12Frame> {
         None
     }

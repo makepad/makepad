@@ -58,7 +58,7 @@ impl DrawVars {
             // function signatures, bodies, struct defs, and type names.
             output.backend = ShaderBackend::Rust;
             output.use_vulkan = false;
-            // The headless renderer folds annotated literals like any other:
+            // The gpusim renderer folds annotated literals like any other:
             // it is a reference rasterizer, not a tweaking surface.
             output.const_table = false;
             output.pre_collect_rust_instance_io(vm, io_self);
@@ -111,11 +111,11 @@ impl DrawVars {
                 (
                     count_varying_slots(&output, vm),
                     CxDrawShaderCode::Combined {
-                        code: format!("// makepad headless no-draw shader {:016x}", fnhash.0),
+                        code: format!("// makepad gpusim no-draw shader {:016x}", fnhash.0),
                     },
                 )
             } else {
-                let gen_result = generate_headless_rust_shader_module(&mut output, vm, io_self);
+                let gen_result = generate_gpusim_rust_shader_module(&mut output, vm, io_self);
                 (
                     gen_result.varying_total_slots,
                     CxDrawShaderCode::Combined {
@@ -196,7 +196,7 @@ impl DrawVars {
 }
 
 impl Cx {
-    pub(crate) fn headless_compile_shaders(&mut self) {
+    pub(crate) fn gpusim_compile_shaders(&mut self) {
         let compile_set = std::mem::take(&mut self.draw_shaders.compile_set);
         if self.os.no_draw {
             for shader_index in compile_set {
@@ -206,7 +206,7 @@ impl Cx {
                 }
                 let os_shader_id = self.draw_shaders.os_shaders.len();
                 self.draw_shaders.os_shaders.push(CxOsDrawShader {
-                    load_error: Some("headless --no-draw: raster/JIT disabled".to_string()),
+                    load_error: Some("gpusim --no-draw: raster/JIT disabled".to_string()),
                     ..Default::default()
                 });
                 cx_shader.os_shader_id = Some(os_shader_id);
@@ -223,7 +223,7 @@ impl Cx {
                 CxDrawShaderCode::Combined { code } => code.as_str(),
                 CxDrawShaderCode::Separate { vertex, fragment } => {
                     crate::warning!(
-                        "headless backend expected combined Rust source but got separate shaders; synthesizing module"
+                        "gpusim backend expected combined Rust source but got separate shaders; synthesizing module"
                     );
                     if vertex.len() > fragment.len() {
                         vertex.as_str()
@@ -261,36 +261,36 @@ impl Cx {
                     // Query RenderCx layout before storing module
                     if let Some(ref module) = jit_output.module {
                         type LayoutFn = extern "C" fn() -> u32;
-                        if let Ok(f) = module.symbol::<LayoutFn>("makepad_headless_render_cx_size")
+                        if let Ok(f) = module.symbol::<LayoutFn>("makepad_gpusim_render_cx_size")
                         {
                             os_shader.rcx_size = f() as usize;
                         }
-                        if let Ok(f) = module.symbol::<LayoutFn>("makepad_headless_rcx_vary_offset")
+                        if let Ok(f) = module.symbol::<LayoutFn>("makepad_gpusim_rcx_vary_offset")
                         {
                             os_shader.rcx_vary_offset = f() as usize;
                         }
                         if let Ok(f) =
-                            module.symbol::<LayoutFn>("makepad_headless_rcx_quad_mode_offset")
+                            module.symbol::<LayoutFn>("makepad_gpusim_rcx_quad_mode_offset")
                         {
                             os_shader.rcx_quad_mode_offset = f() as usize;
                         }
                         if let Ok(f) =
-                            module.symbol::<LayoutFn>("makepad_headless_flat_varying_slots")
+                            module.symbol::<LayoutFn>("makepad_gpusim_flat_varying_slots")
                         {
                             os_shader.flat_varying_slots = f() as usize;
                         }
                         if let Ok(f) =
-                            module.symbol::<LayoutFn>("makepad_headless_uses_derivatives")
+                            module.symbol::<LayoutFn>("makepad_gpusim_uses_derivatives")
                         {
                             os_shader.uses_derivatives = f() != 0;
                             has_derivative_export = true;
                         }
-                        if let Ok(f) = module.symbol::<LayoutFn>("makepad_headless_rcx_frag_offset")
+                        if let Ok(f) = module.symbol::<LayoutFn>("makepad_gpusim_rcx_frag_offset")
                         {
                             os_shader.rcx_frag_offset = f() as usize;
                         }
                         if let Ok(f) =
-                            module.symbol::<LayoutFn>("makepad_headless_rcx_discard_offset")
+                            module.symbol::<LayoutFn>("makepad_gpusim_rcx_discard_offset")
                         {
                             os_shader.rcx_discard_offset = f() as usize;
                         }
@@ -334,21 +334,21 @@ fn hash_string(s: &str) -> u64 {
 // Rust shader module code generation
 // ─────────────────────────────────────────────────────────────────────────────
 
-struct HeadlessShaderGenResult {
+struct GpusimShaderGenResult {
     source: String,
     varying_total_slots: usize,
 }
 
-fn generate_headless_rust_shader_module(
+fn generate_gpusim_rust_shader_module(
     output: &mut ShaderOutput,
     vm: &ScriptVm,
     io_self: crate::ScriptObject,
-) -> HeadlessShaderGenResult {
+) -> GpusimShaderGenResult {
     let mut out = String::with_capacity(8192);
     let io_self_idx = io_self.index();
 
     // ── File header ──
-    writeln!(out, "//! Auto-generated Makepad headless shader module.").ok();
+    writeln!(out, "//! Auto-generated Makepad gpusim shader module.").ok();
     writeln!(out, "//! io_self object index: {io_self_idx}").ok();
     writeln!(
         out,
@@ -398,20 +398,20 @@ fn generate_headless_rust_shader_module(
     writeln!(out, "#[no_mangle]").ok();
     writeln!(
         out,
-        "pub extern \"C\" fn makepad_headless_shader_version() -> u32 {{ 4 }}"
+        "pub extern \"C\" fn makepad_gpusim_shader_version() -> u32 {{ 4 }}"
     )
     .ok();
     writeln!(out, "#[no_mangle]").ok();
     writeln!(
         out,
-        "pub extern \"C\" fn makepad_headless_flat_varying_slots() -> u32 {{ {}u32 }}",
+        "pub extern \"C\" fn makepad_gpusim_flat_varying_slots() -> u32 {{ {}u32 }}",
         flat_varying_slots
     )
     .ok();
     writeln!(out, "#[no_mangle]").ok();
     writeln!(
         out,
-        "pub extern \"C\" fn makepad_headless_uses_derivatives() -> u32 {{ {}u32 }}",
+        "pub extern \"C\" fn makepad_gpusim_uses_derivatives() -> u32 {{ {}u32 }}",
         if uses_derivatives { 1 } else { 0 }
     )
     .ok();
@@ -429,7 +429,7 @@ fn generate_headless_rust_shader_module(
 
     write_fragment_entry(output, vm, &mut out);
 
-    HeadlessShaderGenResult {
+    GpusimShaderGenResult {
         source: out,
         varying_total_slots,
     }
@@ -585,7 +585,7 @@ fn write_render_cx_layout_exports(output: &ShaderOutput, _vm: &ScriptVm, out: &m
 
     // Total size in bytes
     writeln!(out, "#[no_mangle]").ok();
-    writeln!(out, "pub extern \"C\" fn makepad_headless_render_cx_size() -> u32 {{ std::mem::size_of::<RenderCx>() as u32 }}").ok();
+    writeln!(out, "pub extern \"C\" fn makepad_gpusim_render_cx_size() -> u32 {{ std::mem::size_of::<RenderCx>() as u32 }}").ok();
 
     // Varying region: byte offset of first varying field in Group 1.
     // Group 1 order is: DynInstance, RustInstance, Varying — must match vertex packing.
@@ -615,20 +615,20 @@ fn write_render_cx_layout_exports(output: &ShaderOutput, _vm: &ScriptVm, out: &m
         };
         offset_of(
             out,
-            "makepad_headless_rcx_vary_offset",
+            "makepad_gpusim_rcx_vary_offset",
             &format!("{prefix}{io_name}"),
         );
     } else {
         // No varyings — export 0
         writeln!(
             out,
-            "#[no_mangle]\npub extern \"C\" fn makepad_headless_rcx_vary_offset() -> u32 {{ 0 }}"
+            "#[no_mangle]\npub extern \"C\" fn makepad_gpusim_rcx_vary_offset() -> u32 {{ 0 }}"
         )
         .ok();
     }
 
     // Quad mode field byte offset (for 3-pass dFdx/dFdy)
-    offset_of(out, "makepad_headless_rcx_quad_mode_offset", "quad_mode");
+    offset_of(out, "makepad_gpusim_rcx_quad_mode_offset", "quad_mode");
 
     // Fragment output byte offset (frag_fb0)
     if output
@@ -636,11 +636,11 @@ fn write_render_cx_layout_exports(output: &ShaderOutput, _vm: &ScriptVm, out: &m
         .iter()
         .any(|io| matches!(io.kind, ShaderIoKind::FragmentOutput(0)))
     {
-        offset_of(out, "makepad_headless_rcx_frag_offset", "frag_fb0");
+        offset_of(out, "makepad_gpusim_rcx_frag_offset", "frag_fb0");
     }
 
     // Discard flag byte offset
-    offset_of(out, "makepad_headless_rcx_discard_offset", "discard");
+    offset_of(out, "makepad_gpusim_rcx_discard_offset", "discard");
 }
 
 /// Count the total number of varying float slots (dyn_inst + rust_inst + varyings).
@@ -718,7 +718,7 @@ fn write_shader_functions(output: &ShaderOutput, out: &mut String) {
     }
 }
 
-/// Emit `makepad_headless_fill_rcx` — fills uniforms and textures into a RenderCx buffer.
+/// Emit `makepad_gpusim_fill_rcx` — fills uniforms and textures into a RenderCx buffer.
 /// Called once per draw call (cold path). The host passes its pre-allocated rcx buffer
 /// plus uniform arrays and texture info. This entry writes the uniform/texture fields
 /// at the correct byte offsets so the fragment entry can use them zero-copy.
@@ -726,7 +726,7 @@ fn write_fill_rcx_entry(output: &ShaderOutput, vm: &ScriptVm, out: &mut String) 
     use crate::makepad_script::shader::ShaderIoKind;
 
     writeln!(out, "#[no_mangle]").ok();
-    writeln!(out, "pub extern \"C\" fn makepad_headless_fill_rcx(").ok();
+    writeln!(out, "pub extern \"C\" fn makepad_gpusim_fill_rcx(").ok();
     writeln!(out, "    rcx_ptr: *mut f32, rcx_f32s: u32,").ok();
     writeln!(
         out,
@@ -780,7 +780,7 @@ fn write_vertex_entry(output: &ShaderOutput, vm: &ScriptVm, out: &mut String) {
     use crate::makepad_script::shader::ShaderIoKind;
 
     writeln!(out, "#[no_mangle]").ok();
-    writeln!(out, "pub extern \"C\" fn makepad_headless_vertex(").ok();
+    writeln!(out, "pub extern \"C\" fn makepad_gpusim_vertex(").ok();
     writeln!(out, "    geom_ptr: *const f32, geom_len: u32,").ok();
     writeln!(out, "    inst_ptr: *const f32, inst_len: u32,").ok();
     writeln!(out, "    instance_index: u32,").ok();
@@ -979,7 +979,7 @@ fn write_vertex_entry(output: &ShaderOutput, vm: &ScriptVm, out: &mut String) {
 ///
 /// Signature: `fn(rcx_ptr: *mut f32, rcx_f32s: u32) -> u32`
 ///   - `rcx_ptr`: pointer to a host-allocated f32 buffer ≥ `size_of::<RenderCx>()` bytes
-///   - `rcx_f32s`: buffer size in f32s (host gets this from `makepad_headless_render_cx_f32s()`)
+///   - `rcx_f32s`: buffer size in f32s (host gets this from `makepad_gpusim_render_cx_f32s()`)
 ///   - returns: 0 = discard, 1 = write pixel
 ///
 /// The host pre-fills the buffer with varyings (group 1), derivatives (group 2),
@@ -990,7 +990,7 @@ fn write_fragment_entry(output: &ShaderOutput, _vm: &ScriptVm, out: &mut String)
     use crate::makepad_script::shader::ShaderIoKind;
 
     writeln!(out, "#[no_mangle]").ok();
-    writeln!(out, "pub extern \"C\" fn makepad_headless_fragment(").ok();
+    writeln!(out, "pub extern \"C\" fn makepad_gpusim_fragment(").ok();
     writeln!(out, "    rcx_ptr: *mut f32, rcx_f32s: u32,").ok();
     writeln!(out, ") -> u32 {{ unsafe {{").ok();
     // Validate buffer size
@@ -1097,8 +1097,8 @@ fn zero_val(_output: &ShaderOutput, ty_name: &str) -> String {
     }
 }
 
-/// Keep headless uniform unpack offsets consistent with draw shader mapping.
-fn headless_uniform_packing() -> DrawShaderInputPacking {
+/// Keep gpusim uniform unpack offsets consistent with draw shader mapping.
+fn gpusim_uniform_packing() -> DrawShaderInputPacking {
     #[cfg(any(target_arch = "wasm32"))]
     {
         return DrawShaderInputPacking::UniformsGLSL140;
@@ -1374,7 +1374,7 @@ fn write_uniform_unpack(output: &ShaderOutput, vm: &ScriptVm, out: &mut String, 
             .iter()
             .any(|io| matches!(io.kind, ShaderIoKind::Uniform));
         if has_dyn {
-            let mut dyn_layout = DrawShaderInputs::new(headless_uniform_packing());
+            let mut dyn_layout = DrawShaderInputs::new(gpusim_uniform_packing());
             for io in &output.io {
                 if !matches!(io.kind, ShaderIoKind::Uniform) {
                     continue;
@@ -1432,7 +1432,7 @@ fn write_uniform_unpack(output: &ShaderOutput, vm: &ScriptVm, out: &mut String, 
             .iter()
             .any(|io| matches!(io.kind, ShaderIoKind::ScopeUniform));
         if has_scope {
-            let mut scope_layout = DrawShaderInputs::new(headless_uniform_packing());
+            let mut scope_layout = DrawShaderInputs::new(gpusim_uniform_packing());
             for io in &output.io {
                 if !matches!(io.kind, ShaderIoKind::ScopeUniform) {
                     continue;

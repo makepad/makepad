@@ -17,13 +17,13 @@ pub fn should_run_stdin_loop_from_env() -> bool {
         })
 }
 
-#[cfg(headless)]
-pub(crate) fn should_disable_headless_draw_from_args() -> bool {
+#[cfg(gpusim)]
+pub(crate) fn should_disable_gpusim_draw_from_args() -> bool {
     std::env::args().any(|v| v == "--no-draw")
 }
 
-#[cfg(headless)]
-pub(crate) fn headless_draw_cycles_from_args() -> Option<usize> {
+#[cfg(gpusim)]
+pub(crate) fn gpusim_draw_cycles_from_args() -> Option<usize> {
     let mut args = std::env::args();
     while let Some(arg) = args.next() {
         if let Some(value) = arg.strip_prefix("--draws=") {
