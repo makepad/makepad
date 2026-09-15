@@ -682,6 +682,7 @@ impl CxOpenXr {
         &mut self,
         display: &CxAndroidDisplay,
         #[cfg(use_vulkan)] vulkan: Option<&mut CxVulkan>,
+        #[cfg(use_vulkan)] spawner: &crate::thread::ThreadSpawner,
         options: CxOpenXrOptions,
         os_type: &OsType,
     ) -> Result<(), String> {
@@ -695,6 +696,8 @@ impl CxOpenXr {
             display,
             #[cfg(use_vulkan)]
             vulkan,
+            #[cfg(use_vulkan)]
+            spawner,
             options,
         )?);
         if let Some(session) = &mut self.session {
@@ -1034,11 +1037,12 @@ impl CxOpenXrSession {
         instance: XrInstance,
         display: &CxAndroidDisplay,
         #[cfg(use_vulkan)] vulkan: Option<&mut CxVulkan>,
+        #[cfg(use_vulkan)] spawner: &crate::thread::ThreadSpawner,
         options: CxOpenXrOptions,
     ) -> Result<CxOpenXrSession, String> {
         #[cfg(use_vulkan)]
         if let Some(vulkan) = vulkan {
-            return Self::create_session_vulkan(xr, system_id, instance, vulkan, options);
+            return Self::create_session_vulkan(xr, system_id, instance, vulkan, spawner, options);
         }
 
         Self::create_session_gles(xr, system_id, instance, display, options)

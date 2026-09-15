@@ -12,6 +12,8 @@ pub enum TokenKind {
     Constant,
     Delimiter,
     Identifier,
+    Macro,
+    Attribute,
     LoopKeyword,
     OtherKeyword,
     Number,

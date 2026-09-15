@@ -568,6 +568,18 @@ impl PopupMenu {
     }
 
     pub fn draw_item(&mut self, cx: &mut Cx2d, item_id: PopupMenuItemId, label: &str) {
+        self.draw_item_dimmed(cx, item_id, label, false);
+    }
+
+    /// Draw a selectable item using the disabled palette. This is visual
+    /// metadata only: dimmed entries still receive pointer and keyboard input.
+    pub fn draw_item_dimmed(
+        &mut self,
+        cx: &mut Cx2d,
+        item_id: PopupMenuItemId,
+        label: &str,
+        dimmed: bool,
+    ) {
         self.count += 1;
 
         let menu_item = self.menu_item;
@@ -579,6 +591,14 @@ impl PopupMenu {
             .clone();
         if let Some(mut menu_item) = item.borrow_mut::<PopupMenuItem>() {
             menu_item.label = label.to_string();
+            menu_item.animator_cut(
+                cx,
+                if dimmed {
+                    ids!(disabled.on)
+                } else {
+                    ids!(disabled.off)
+                },
+            );
         }
         // Re-seat on every draw: one menu instance is shared by every dropdown
         // that uses the same template, so the items belong to whichever

@@ -418,9 +418,11 @@ pub struct CheckBox {
 
     #[visible]
     #[live(true)]
+    #[apply_state]
     pub visible: bool,
 
     #[live(None)]
+    #[apply_state]
     pub active: Option<bool>,
 
     #[live]

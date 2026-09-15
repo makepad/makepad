@@ -141,6 +141,9 @@ pub struct Browser {
     pressed_buttons: MouseButton,
     #[cfg(feature = "cef")]
     #[rust]
+    scroll_remainder: Vec2d,
+    #[cfg(feature = "cef")]
+    #[rust]
     suppress_next_paste_shortcut: bool,
     /// Size of the IOSurface-backed texture currently registered as the
     /// accelerated paint target (None on the software path).
@@ -302,6 +305,18 @@ impl Browser {
             out |= makepad_cef::EVENTFLAG_RIGHT_MOUSE_BUTTON;
         }
         out
+    }
+
+    /// Makepad ScrollEvent uses +y for down and +x for right; CEF uses the
+    /// opposite. Fractional pixels stay in `remainder` across events.
+    #[cfg(feature = "cef")]
+    pub fn cef_scroll_delta(delta: Vec2d, remainder: &mut Vec2d) -> (i32, i32) {
+        *remainder += -delta;
+        let dx = remainder.x as i32;
+        let dy = remainder.y as i32;
+        remainder.x -= dx as f64;
+        remainder.y -= dy as f64;
+        (dx, dy)
     }
 
     #[cfg(feature = "cef")]
@@ -614,16 +629,17 @@ impl Browser {
         let Some((x, y)) = self.cef_position(cx, abs) else {
             return;
         };
+        if self.cef_browser.is_none() {
+            return;
+        }
+        let (dx, dy) = Self::cef_scroll_delta(delta, &mut self.scroll_remainder);
+        if dx == 0 && dy == 0 {
+            return;
+        }
         let cef_modifiers = Self::cef_modifiers(modifiers, self.pressed_buttons)
             | makepad_cef::EVENTFLAG_PRECISION_SCROLLING_DELTA;
         if let Some(browser) = &mut self.cef_browser {
-            if let Err(err) = browser.send_mouse_wheel(
-                x,
-                y,
-                cef_modifiers,
-                delta.x.round() as i32,
-                delta.y.round() as i32,
-            ) {
+            if let Err(err) = browser.send_mouse_wheel(x, y, cef_modifiers, dx, dy) {
                 log!("Browser mouse wheel failed: {err}");
             }
         }

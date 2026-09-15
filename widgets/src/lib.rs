@@ -53,6 +53,7 @@ pub mod gauss_view;
 pub mod keyboard_view;
 pub mod nav_control;
 pub mod tweaker;
+pub mod ai_slot;
 #[cfg(feature = "voice")]
 pub mod voice_wave;
 pub mod window;
@@ -70,6 +71,7 @@ pub mod drop_slider;
 pub mod tip;
 pub mod value_input;
 pub mod fab_controls;
+pub mod menu_bar;
 
 pub mod splitter;
 
@@ -179,6 +181,7 @@ pub use crate::{
     // view_ui - no public exports
     label::*,
     link_label::*,
+    menu_bar::*,
     modal::*,
     nav_control::*,
     page_flip::*,
@@ -563,6 +566,8 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::tweaker::script_mod(vm);
     crate::gauss_view::script_mod(vm);
     crate::screen_cap::script_mod(vm);
+    // The AI slot before the window: its DSL names `AiChatSlot`.
+    crate::ai_slot::script_mod(vm);
     crate::window::script_mod(vm);
 
     crate::popup_menu::script_mod(vm);
@@ -574,6 +579,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::tip::script_mod(vm);
     crate::value_input::script_mod(vm);
     crate::fab_controls::script_mod(vm);
+    crate::menu_bar::script_mod(vm);
     crate::combo_box::script_mod(vm);
 
     crate::splitter::script_mod(vm);

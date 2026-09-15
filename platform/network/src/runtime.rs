@@ -79,7 +79,15 @@ impl NetworkRuntime {
     }
 
     pub fn recv_timeout(&self, duration: Duration) -> Option<NetworkResponse> {
-        self.receiver.lock().ok()?.recv_timeout(duration).ok()
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.receiver.lock().ok()?.recv_timeout(duration).ok()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = duration;
+            self.try_recv()
+        }
     }
 }
 

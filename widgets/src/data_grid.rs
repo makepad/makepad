@@ -415,6 +415,25 @@ struct GridViewport {
     total_h: f64,
 }
 
+impl GridViewport {
+    /// Move every cached rect by `delta`. The viewport is computed from the
+    /// turtle at draw time, but a parent that sizes itself by `Fill` can
+    /// still shift the whole widget afterwards (deferred alignment): the
+    /// instances move with it, the cached geometry does not. Re-anchoring
+    /// to where the widget actually landed keeps hit testing honest.
+    fn translate(&mut self, delta: DVec2) {
+        self.widget_rect.pos += delta;
+        self.data_rect.pos += delta;
+        self.col_header_rect.pos += delta;
+        self.row_header_rect.pos += delta;
+        self.corner_rect.pos += delta;
+        for (_, x, _) in &mut self.vis_cols {
+            *x += delta.x;
+        }
+        self.row0_y += delta.y;
+    }
+}
+
 struct CellIter {
     row: usize,
     y: f64,
@@ -1667,6 +1686,16 @@ impl WidgetNode for DataGrid {
 impl Widget for DataGrid {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.uid;
+
+        // Where the widget actually is this frame, after any deferred
+        // alignment by its parents; the cached viewport follows it.
+        let drawn = self.area.rect(cx);
+        if drawn.size.x > 0.0 && drawn.size.y > 0.0 {
+            let delta = drawn.pos - self.vp.widget_rect.pos;
+            if delta.x != 0.0 || delta.y != 0.0 {
+                self.vp.translate(delta);
+            }
+        }
 
         // Scroll bar drag / animation
         let mut sx = None;
