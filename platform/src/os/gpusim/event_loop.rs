@@ -21,13 +21,13 @@ use std::{
     time::Instant,
 };
 
-/// Backing-store scale for a headless window. Retina by default, because a
+/// Backing-store scale for a gpusim window. Retina by default, because a
 /// screenshot is expected to match what a real display would show. Rendering is
 /// a software rasteriser here, so the cost is per PIXEL: a suite that only
-/// asserts on logical geometry can set `MAKEPAD_HEADLESS_DPI=1` and do a
+/// asserts on logical geometry can set `MAKEPAD_GPUSIM_DPI=1` and do a
 /// quarter of the work.
-fn configured_headless_dpi() -> f64 {
-    std::env::var("MAKEPAD_HEADLESS_DPI")
+fn configured_gpusim_dpi() -> f64 {
+    std::env::var("MAKEPAD_GPUSIM_DPI")
         .ok()
         .and_then(|s| s.parse::<f64>().ok())
         .filter(|dpi| *dpi > 0.0)
@@ -35,7 +35,7 @@ fn configured_headless_dpi() -> f64 {
 }
 
 #[derive(Default)]
-struct HeadlessWindowState {
+struct GpusimWindowState {
     created: bool,
     width: u32,
     height: u32,
@@ -44,7 +44,7 @@ struct HeadlessWindowState {
     presentable_id: Option<PresentableImageId>,
 }
 
-impl HeadlessWindowState {
+impl GpusimWindowState {
     fn ensure_size_defaults(&mut self) {
         if self.width <= 1 {
             self.width = 1280;
@@ -68,34 +68,34 @@ impl Cx {
         } else {
             let draw_cycles = cx.borrow().os.draw_cycles;
             if let Some(draw_cycles) = draw_cycles {
-                cx.borrow_mut().headless_bounded_loop(draw_cycles);
+                cx.borrow_mut().gpusim_bounded_loop(draw_cycles);
             } else {
-                cx.borrow_mut().headless_single_frame();
+                cx.borrow_mut().gpusim_single_frame();
             }
         }
     }
 
-    pub fn headless_event_loop_for_draw_cycles(cx: Rc<RefCell<Cx>>, draw_cycles: usize) {
+    pub fn gpusim_event_loop_for_draw_cycles(cx: Rc<RefCell<Cx>>, draw_cycles: usize) {
         cx.borrow_mut().self_ref = Some(cx.clone());
-        cx.borrow_mut().headless_bounded_loop(draw_cycles.max(1));
+        cx.borrow_mut().gpusim_bounded_loop(draw_cycles.max(1));
     }
 
-    pub fn headless_no_draw_event_loop_for_draw_cycles(cx: Rc<RefCell<Cx>>, draw_cycles: usize) {
+    pub fn gpusim_no_draw_event_loop_for_draw_cycles(cx: Rc<RefCell<Cx>>, draw_cycles: usize) {
         cx.borrow_mut().self_ref = Some(cx.clone());
         {
             let mut cx_ref = cx.borrow_mut();
             cx_ref.os.no_draw = true;
             cx_ref.os.no_draw_initialized = false;
         }
-        cx.borrow_mut().headless_bounded_loop(draw_cycles.max(1));
+        cx.borrow_mut().gpusim_bounded_loop(draw_cycles.max(1));
     }
 
-    fn headless_single_frame(&mut self) {
+    fn gpusim_single_frame(&mut self) {
         let mut windows = Vec::new();
         self.call_event_handler(&Event::Startup);
-        self.headless_handle_platform_ops(&mut windows, false);
+        self.gpusim_handle_platform_ops(&mut windows, false);
         if windows.is_empty() {
-            windows.push(HeadlessWindowState {
+            windows.push(GpusimWindowState {
                 created: true,
                 width: 1280,
                 height: 720,
@@ -109,20 +109,20 @@ impl Cx {
             self.call_next_frame_event(time_now);
         }
         if self.os.no_draw || self.need_redrawing() {
-            let _ = self.headless_process_draw_cycle(&mut windows, false, time_now);
+            let _ = self.gpusim_process_draw_cycle(&mut windows, false, time_now);
         }
     }
 
-    fn headless_bounded_loop(&mut self, draw_cycles: usize) {
+    fn gpusim_bounded_loop(&mut self, draw_cycles: usize) {
         let mut windows = Vec::new();
         // Subsequent bounded calls continue this Cx. Replaying Startup both
         // reinitializes apps and injects startup logging into idle evidence.
         if !std::mem::replace(&mut self.os.bounded_started, true) {
             self.call_event_handler(&Event::Startup);
         }
-        let mut running = self.headless_handle_platform_ops(&mut windows, false);
+        let mut running = self.gpusim_handle_platform_ops(&mut windows, false);
         if windows.is_empty() {
-            windows.push(HeadlessWindowState {
+            windows.push(GpusimWindowState {
                 created: true,
                 width: 1280,
                 height: 720,
@@ -144,7 +144,7 @@ impl Cx {
             }
             // The `--remote` HTTP control surface and the studio control
             // channel: every windowed backend services them from its event
-            // loop; the bounded headless loop must too, or a headless
+            // loop; the bounded gpusim loop must too, or a gpusim
             // `--remote` session answers its metadata routes and then times
             // out on anything that needs the app (snap, click, grab).
             self.poll_control_channel();
@@ -156,7 +156,7 @@ impl Cx {
                 self.call_event_handler(&Event::Timer(event));
             }
 
-            running = self.headless_handle_platform_ops(&mut windows, false);
+            running = self.gpusim_handle_platform_ops(&mut windows, false);
             if !running {
                 break;
             }
@@ -166,7 +166,7 @@ impl Cx {
                 self.call_next_frame_event(time_now);
             }
             if self.os.no_draw || self.need_redrawing() {
-                let _ = self.headless_process_draw_cycle(&mut windows, false, time_now);
+                let _ = self.gpusim_process_draw_cycle(&mut windows, false, time_now);
             }
             completed_cycles += 1;
 
@@ -177,25 +177,25 @@ impl Cx {
         }
     }
 
-    fn headless_process_draw_cycle(
+    fn gpusim_process_draw_cycle(
         &mut self,
-        windows: &mut Vec<HeadlessWindowState>,
+        windows: &mut Vec<GpusimWindowState>,
         send_protocol: bool,
         time_now: f64,
     ) -> bool {
-        self.run_live_edit_if_needed("headless");
+        self.run_live_edit_if_needed("gpusim");
         if self.os.no_draw {
             self.call_draw_event(time_now);
             self.os.no_draw_initialized = true;
             return false;
         }
         self.call_draw_event(time_now);
-        self.headless_compile_shaders();
+        self.gpusim_compile_shaders();
         if send_protocol && self.screenshot_requests.is_empty() {
-            self.headless_render_all_passes(time_now);
+            self.gpusim_render_all_passes(time_now);
             true
         } else {
-            self.headless_emit_frames(windows, send_protocol, time_now)
+            self.gpusim_emit_frames(windows, send_protocol, time_now)
         }
     }
 
@@ -223,14 +223,14 @@ impl Cx {
             }
         });
 
-        let mut windows = Vec::<HeadlessWindowState>::new();
+        let mut windows = Vec::<GpusimWindowState>::new();
         write_stdout_msg(&AppToStudio::BeforeStartup);
         self.call_event_handler(&Event::Startup);
-        let mut running = self.headless_handle_platform_ops(&mut windows, true);
+        let mut running = self.gpusim_handle_platform_ops(&mut windows, true);
         if running {
             let time_now = self.seconds_since_app_start();
             if self.os.no_draw || self.need_redrawing() {
-                let _ = self.headless_process_draw_cycle(&mut windows, true, time_now);
+                let _ = self.gpusim_process_draw_cycle(&mut windows, true, time_now);
             }
         }
         write_stdout_msg(&AppToStudio::AfterStartup);
@@ -407,7 +407,7 @@ impl Cx {
                         self.call_event_handler(&Event::Timer(event));
                     }
 
-                    running = self.headless_handle_platform_ops(&mut windows, true);
+                    running = self.gpusim_handle_platform_ops(&mut windows, true);
                     if !running {
                         break;
                     }
@@ -419,7 +419,7 @@ impl Cx {
 
                     if self.os.no_draw || self.need_redrawing() {
                         let rendered =
-                            self.headless_process_draw_cycle(&mut windows, true, time_now);
+                            self.gpusim_process_draw_cycle(&mut windows, true, time_now);
 
                         if rendered
                             || !self.os.stdin_timers.timers.is_empty()
@@ -438,7 +438,7 @@ impl Cx {
                         break;
                     }
 
-                    running = self.headless_handle_platform_ops(&mut windows, true);
+                    running = self.gpusim_handle_platform_ops(&mut windows, true);
                     if !running {
                         break;
                     }
@@ -450,7 +450,7 @@ impl Cx {
 
                     if self.os.no_draw || self.need_redrawing() {
                         let rendered =
-                            self.headless_process_draw_cycle(&mut windows, true, time_now);
+                            self.gpusim_process_draw_cycle(&mut windows, true, time_now);
 
                         if rendered
                             || !self.os.stdin_timers.timers.is_empty()
@@ -468,24 +468,24 @@ impl Cx {
         }
     }
 
-    fn headless_emit_frames(
+    fn gpusim_emit_frames(
         &mut self,
-        windows: &mut [HeadlessWindowState],
+        windows: &mut [GpusimWindowState],
         send_protocol: bool,
         time_now: f64,
     ) -> bool {
-        let output_dir = self.headless_output_dir();
+        let output_dir = self.gpusim_output_dir();
         let mut rendered_any = false;
-        // `MAKEPAD_HEADLESS_FRAMES=off` skips the per-frame PNG files — a
+        // `MAKEPAD_GPUSIM_FRAMES=off` skips the per-frame PNG files — a
         // long-lived `--remote` sweep instance redraws continuously and the
         // per-frame encode+write is a disk flood; grabs (below) still work.
         // Default keeps every frame on disk, which is what the UI render
         // suites read.
         let write_files =
-            !matches!(std::env::var("MAKEPAD_HEADLESS_FRAMES").as_deref(), Ok("off"));
+            !matches!(std::env::var("MAKEPAD_GPUSIM_FRAMES").as_deref(), Ok("off"));
 
         // Render all passes using the real draw tree + JIT shaders
-        let framebuffers = self.headless_render_all_passes(time_now);
+        let framebuffers = self.gpusim_render_all_passes(time_now);
 
         for window_id in framebuffers {
             // Skip if we don't have a window state for this window
@@ -507,9 +507,9 @@ impl Cx {
             }
 
             // Pending grabs: the studio protocol drains them below; a plain
-            // headless run answers `--remote` /g requests right here — the
+            // gpusim run answers `--remote` /g requests right here — the
             // windowed backends do this from their GPU completion path, and
-            // without it a headless /g hangs forever.
+            // without it a gpusim /g hangs forever.
             let request_ids =
                 self.take_studio_screenshot_request_ids_for_window(0, Some(window_id));
             if send_protocol && request_ids.is_empty() {
@@ -533,7 +533,7 @@ impl Cx {
                 Ok(png) => png,
                 Err(err) => {
                     crate::error!(
-                        "headless png encode failed for window {} frame {}: {}",
+                        "gpusim png encode failed for window {} frame {}: {}",
                         window_id,
                         state.frame_id,
                         err
@@ -558,7 +558,7 @@ impl Cx {
                 ));
                 if let Err(err) = std::fs::write(&png_path, &png) {
                     crate::error!(
-                        "headless frame write failed for `{}`: {}",
+                        "gpusim frame write failed for `{}`: {}",
                         png_path.display(),
                         err
                     );
@@ -566,7 +566,7 @@ impl Cx {
                 }
                 if !send_protocol {
                     crate::log!(
-                        "headless frame written: {} ({}x{})",
+                        "gpusim frame written: {} ({}x{})",
                         png_path.display(),
                         width,
                         height
@@ -603,16 +603,16 @@ impl Cx {
         rendered_any
     }
 
-    fn headless_output_dir(&mut self) -> PathBuf {
+    fn gpusim_output_dir(&mut self) -> PathBuf {
         if let Some(path) = &self.os.frame_dir {
             return path.clone();
         }
-        let path = std::env::var("MAKEPAD_HEADLESS_OUT_DIR")
+        let path = std::env::var("MAKEPAD_GPUSIM_OUT_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         if let Err(err) = std::fs::create_dir_all(&path) {
             crate::error!(
-                "failed to create headless frame output dir `{}`: {}",
+                "failed to create gpusim frame output dir `{}`: {}",
                 path.display(),
                 err
             );
@@ -621,9 +621,9 @@ impl Cx {
         path
     }
 
-    fn headless_handle_platform_ops(
+    fn gpusim_handle_platform_ops(
         &mut self,
-        windows: &mut Vec<HeadlessWindowState>,
+        windows: &mut Vec<GpusimWindowState>,
         send_protocol: bool,
     ) -> bool {
         while let Some(op) = self.platform_ops.pop_front() {
@@ -641,7 +641,7 @@ impl Cx {
                         dvec2(1920.0, 1080.0)
                     };
                     let position = position.unwrap_or_else(|| dvec2(0.0, 0.0));
-                    let dpi_factor = configured_headless_dpi();
+                    let dpi_factor = configured_gpusim_dpi();
 
                     let state = &mut windows[window_id.id()];
                     state.created = true;
@@ -730,7 +730,7 @@ impl Cx {
                     return false;
                 }
                 CxOsOp::StartExternalDragging { .. } => {
-                    crate::error!("external file dragging is not implemented in headless mode");
+                    crate::error!("external file dragging is not implemented in gpusim mode");
                     self.call_event_handler(&Event::DragEnd);
                 }
                 // Track selection is currently implemented on Linux GStreamer only.
@@ -745,8 +745,8 @@ impl Cx {
 impl CxOsApi for Cx {
     fn init_cx_os(&mut self) {
         self.os.start_time = Some(Instant::now());
-        self.os.no_draw = crate::app_main::should_disable_headless_draw_from_args();
-        self.os.draw_cycles = crate::app_main::headless_draw_cycles_from_args();
+        self.os.no_draw = crate::app_main::should_disable_gpusim_draw_from_args();
+        self.os.draw_cycles = crate::app_main::gpusim_draw_cycles_from_args();
         if let Some(item) = std::option_env!("MAKEPAD_PACKAGE_DIR") {
             self.package_root = Some(item.to_string());
         }
@@ -760,7 +760,7 @@ impl CxOsApi for Cx {
     }
 
     fn open_url(&mut self, _url: &str, _in_place: OpenUrlInPlace) {
-        crate::warning!("open_url is ignored in headless mode");
+        crate::warning!("open_url is ignored in gpusim mode");
     }
 }
 
