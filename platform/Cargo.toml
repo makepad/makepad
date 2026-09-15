@@ -159,7 +159,5 @@ features = [
     "Storage_Streams",
 ]
 
-## The vast majority of the Rust ecosystem is currently on
-## `windows-targets` v0.52.*, so we use that version to avoid duplicates.
-[target.'cfg(windows)'.dependencies.windows-targets]
-version = "0.52"
+[target.'cfg(windows)'.dependencies.windows-link]
+path = "../libs/windows/windows-link"

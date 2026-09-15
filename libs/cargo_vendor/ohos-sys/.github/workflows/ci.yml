@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  code_quality:
+    name: Code Quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo fmt --check
+      - run: cargo clippy
+  build-toolchains:
+    strategy:
+      matrix:
+        toolchain: [stable, beta, nightly]
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+      - run: cargo build
+        name: Build default features
+      - run: cargo build --all-features
+        name: Build all features
+  api_feature_levels:
+    strategy:
+      matrix:
+        api_level: ["api-10", "api-11", "api-12"]
+    name: Build with API feature levels
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --features ${{ matrix.api_level }} --features all-components
+        name: Build with API features
+  api_minimal_featueres:
+    strategy:
+      matrix:
+        api_level: ["api-10"]
+        component: ["drawing", "hilog", "napi", "native_buffer", "native_window", "xcomponent"]
+    name: Build with minimal features
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --features ${{ matrix.api_level }} --features ${{ matrix.component }}
+        name: Build minimal features
+
+  rustdoc:
+    name: Build Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: Build docs
+        run: cargo doc --all-features --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: "--cfg=docsrs"

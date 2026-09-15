@@ -1,0 +1,37 @@
+[package]
+authors = [
+  "LongYinan <lynweklm@gmail.com>",
+  "Forehalo <forehalo@gmail.com>",
+  "southorange0929 <southorange0929@foxmail.com>",
+]
+description = "N-API procedural macros"
+edition = "2021"
+keywords = ["NodeJS", "FFI", "NAPI", "n-api"]
+license = "MIT"
+name = "napi-derive-ohos"
+readme = "README.md"
+repository = "https://github.com/ohos-rs/ohos-rs"
+rust-version = "1.65"
+version = "0.0.9"
+
+[package.metadata.workspaces]
+independent = true
+
+[features]
+compat-mode = []
+default     = ["compat-mode", "full"]
+full        = ["type-def", "strict"]
+noop        = ["napi-derive-backend-ohos/noop"]
+strict      = ["napi-derive-backend-ohos/strict"]
+type-def    = ["napi-derive-backend-ohos/type-def"]
+
+[dependencies]
+convert_case             = "0.6"
+napi-derive-backend-ohos = { version = "0.0.7", path = "../backend" }
+proc-macro2              = "1"
+quote                    = "1"
+syn                      = { version = "2", features = ["fold", "full", "extra-traits"] }
+cfg-if                   = "1.0"
+
+[lib]
+proc-macro = true
