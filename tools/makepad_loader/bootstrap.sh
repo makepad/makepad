@@ -18,7 +18,23 @@ case "$(uname -s)/$(uname -m)" in
     Linux/aarch64|Linux/arm64) builder_triple=aarch64-unknown-linux-gnu ;;
     *) printf '%s\n' 'Builder supports macOS or glibc Linux on x86_64 and ARM64.'; exit 1 ;;
 esac
+builder_tools="$builder_root/toolchain/rust/$builder_rust-$builder_triple"
+builder_prepare_host_tools() {
+    case "$builder_triple" in
+        *-apple-darwin)
+            # rust-objcopy resolves LLVM beside rustlib's host tools. Keep the
+            # link relative so moving this installation does not break it.
+            builder_host_lib="$1/lib/rustlib/$builder_triple/lib"
+            if [ -f "$1/lib/libLLVM.dylib" ] && [ ! -e "$builder_host_lib/libLLVM.dylib" ] && [ ! -L "$builder_host_lib/libLLVM.dylib" ]; then
+                mkdir -p "$builder_host_lib"
+                ln -s ../../../libLLVM.dylib "$builder_host_lib/libLLVM.dylib"
+            fi
+            "$1/lib/rustlib/$builder_triple/bin/rust-objcopy" --version >/dev/null
+            ;;
+    esac
+}
 if [ -x "$builder_root/makepad-builder" ] && [ "$(cat "$builder_root/.builder-version" 2>/dev/null || :)" = "$builder_commit $builder_rust $builder_triple" ]; then
+    builder_prepare_host_tools "$builder_tools"
     exec "$builder_root/makepad-builder" tui
 fi
 if ! mkdir "$builder_root/.setup-lock" 2>/dev/null; then
@@ -36,15 +52,25 @@ trap builder_cleanup EXIT
 trap 'exit 130' HUP INT TERM
 printf '\n  1 / 3   Check system tools\n'
 sh "$builder_root/check-tools.sh"
-builder_tools="$builder_root/toolchain/rust/$builder_rust-$builder_triple"
 mkdir -p "$builder_root/cache" "$builder_root/toolchain/rust" "$builder_root/cargo-home" "$builder_root/target" "$builder_root/tmp"
 builder_temp=$(mktemp -d "$builder_root/tmp/bootstrap.XXXXXX")
 builder_hash() {
     if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi
 }
 builder_download() {
+    builder_columns=${COLUMNS:-$(tput cols 2>/dev/null || printf 80)}
+    case "$builder_columns" in ''|*[!0-9]*) builder_columns=80 ;; esac
+    [ "$builder_columns" -ge 24 ] || builder_columns=24
     # No redirects, credentials, insecure TLS switches or downloaded shell code.
-    curl --fail --show-error --progress-bar --proto '=https' --tlsv1.2 --output "$2" "$1"
+    # Reserve the indent inside curl's width, and preserve its failure status
+    # across the POSIX pipeline (which otherwise reports only awk's status).
+    rm -f "$builder_temp/curl.status"
+    {
+        builder_curl_status=0
+        COLUMNS=$((builder_columns - 3)) curl --fail --show-error --progress-bar --proto '=https' --tlsv1.2 --output "$2" "$1" 2>&1 || builder_curl_status=$?
+        printf '%s' "$builder_curl_status" > "$builder_temp/curl.status"
+    } | awk 'BEGIN { RS="\r" } length { printf "\r   %s", $0; fflush() }' >&2
+    return "$(cat "$builder_temp/curl.status")"
 }
 printf '\n  2 / 3   Private Rust %s\n' "$builder_rust"
 if [ "$(cat "$builder_tools/.toolchain-version" 2>/dev/null || :)" != "$builder_rust $builder_triple" ] || [ ! -x "$builder_tools/bin/rustc" ] || [ ! -x "$builder_tools/bin/cargo" ]; then
@@ -91,11 +117,13 @@ if [ "$(cat "$builder_tools/.toolchain-version" 2>/dev/null || :)" != "$builder_
         [ "$#" = 1 ] && [ -d "$1/$builder_inner" ] || { printf '%s\n' 'Unexpected Rust archive layout.'; exit 1; }
         cp -R "$1/$builder_inner/." "$builder_temp/ready/"
     done
+    builder_prepare_host_tools "$builder_temp/ready"
     case "$("$builder_temp/ready/bin/rustc" --version)" in "rustc $builder_rust "*) ;; *) printf '%s\n' 'Private Rust failed its version check.'; exit 1 ;; esac
     "$builder_temp/ready/bin/cargo" --version
     printf '%s' "$builder_rust $builder_triple" > "$builder_temp/ready/.toolchain-version"
     mv "$builder_temp/ready" "$builder_tools"
 fi
+builder_prepare_host_tools "$builder_tools"
 printf '\n  3 / 3   Build the terminal menu\n'
 builder_sources="$builder_root/sources/$builder_release"
 builder_source="$builder_sources/makepad"

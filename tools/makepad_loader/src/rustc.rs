@@ -31,6 +31,7 @@ pub fn install_version(cache: &Path, dest: &Path, version: &str) -> Result<(), S
             .join(crate::runtime::exe("rustc"))
             .is_file()
     {
+        prepare_host_tools(dest)?;
         crate::progress::stage("Ready", &format!("Rust {stamp} already installed"), 1.0);
         return Ok(());
     }
@@ -70,6 +71,7 @@ pub fn install_version(cache: &Path, dest: &Path, version: &str) -> Result<(), S
     merge_component(&tmp.join("rustc"), &staged, "rustc")?;
     merge_component(&tmp.join("cargo"), &staged, "cargo")?;
     merge_std(&tmp.join("std"), &staged)?;
+    prepare_host_tools(&staged)?;
     crate::progress::stage("Checking compiler", "Running rustc --version", 0.0);
     let mut check = std::process::Command::new(staged.join("bin").join(crate::runtime::exe("rustc")));
     crate::runtime::hide_console(&mut check);
@@ -92,6 +94,27 @@ pub fn install_version(cache: &Path, dest: &Path, version: &str) -> Result<(), S
         return Err("rustc.exe missing after extract".into());
     }
     crate::progress::stage("Ready", "Rust installed and verified", 1.0);
+    Ok(())
+}
+
+pub(crate) fn prepare_host_tools(_dest: &Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let host = _dest.join("lib/rustlib").join(crate::catalog::platform());
+        let library = host.join("lib/libLLVM.dylib");
+        if _dest.join("lib/libLLVM.dylib").is_file() && !library.try_exists().map_err(|e| e.to_string())?
+            && !library.is_symlink()
+        {
+            fs::create_dir_all(host.join("lib")).map_err(|e| e.to_string())?;
+            std::os::unix::fs::symlink("../../../libLLVM.dylib", &library)
+                .map_err(|e| format!("Link private Rust LLVM library: {e}"))?;
+        }
+        let output = std::process::Command::new(host.join("bin/rust-objcopy"))
+            .arg("--version").output().map_err(|e| format!("Check private rust-objcopy: {e}"))?;
+        if !output.status.success() {
+            return Err(format!("Private rust-objcopy cannot load its LLVM library: {}", String::from_utf8_lossy(&output.stderr)));
+        }
+    }
     Ok(())
 }
 

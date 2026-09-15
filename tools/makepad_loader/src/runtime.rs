@@ -93,6 +93,7 @@ impl Environment {
         if !rust.join("bin").join(exe("cargo")).is_file() {
             return Err("Install the pinned Rust toolchain first".into());
         }
+        crate::rustc::prepare_host_tools(&rust)?;
         let mut vars = BTreeMap::new();
         let build = root.join("target");
         let tmp = root.join("tmp");
