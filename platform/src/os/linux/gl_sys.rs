@@ -63,6 +63,7 @@ pub const TEXTURE_CUBE_MAP_POSITIVE_Z: GLenum = 0x8519;
 pub const TEXTURE_CUBE_MAP_NEGATIVE_Z: GLenum = 0x851A;
 pub const TRIANGLES: GLenum = 0x0004;
 pub const UNSIGNED_INT: GLenum = 0x1405;
+pub const UNSIGNED_SHORT: GLenum = 0x1403;
 pub const INT: GLenum = 0x1404;
 pub const DEPTH_TEST: GLenum = 0x0B71;
 pub const LEQUAL: GLenum = 0x0203;
