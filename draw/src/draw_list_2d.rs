@@ -425,6 +425,10 @@ impl<'a> CxDraw<'a> {
         }
         let draw_item = draw_item.unwrap();
         let draw_call = draw_item.draw_call().unwrap();
+        if draw_call.total_instance_slots == 0 {
+            error!("Draw shader {:?} has no instance slots; nothing drawn", draw_call.draw_shader_id);
+            return Area::Empty;
+        }
         let instance_count = data.len() / draw_call.total_instance_slots;
         let check = data.len() % draw_call.total_instance_slots;
         if check > 0 {
@@ -480,6 +484,10 @@ impl<'a, 'b> Cx2d<'a, 'b> {
         }
         let draw_item = draw_item.unwrap();
         let draw_call = draw_item.draw_call().unwrap();
+        if draw_call.total_instance_slots == 0 {
+            error!("Draw shader {:?} has no instance slots; nothing drawn", draw_call.draw_shader_id);
+            return Area::Empty;
+        }
         let instance_count = data.len() / draw_call.total_instance_slots;
         let check = data.len() % draw_call.total_instance_slots;
         if check > 0 {

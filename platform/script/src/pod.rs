@@ -389,6 +389,65 @@ pub enum ScriptPodTy {
         align_of: usize,
         ty: Box<ScriptPodTypeInline>,
     },
+    /// Physical vertex/instance fetch format. Logical shader type is
+    /// `vec2f`/`vec4f`; fetch converts and normalizes where the name says.
+    Packed(ScriptPodPacked),
+}
+
+/// Compact GPU fetch formats used in `#[repr(C)]` vertex/instance structs.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum ScriptPodPacked {
+    F16x2,
+    F16x4,
+    U16x2,
+    I16x2,
+    U16x2Norm,
+    I16x2Norm,
+    U8x4Norm,
+    I8x4Norm,
+}
+
+impl ScriptPodPacked {
+    pub fn name(&self) -> LiveId {
+        match self {
+            Self::F16x2 => id!(f16x2),
+            Self::F16x4 => id!(f16x4),
+            Self::U16x2 => id!(u16x2),
+            Self::I16x2 => id!(i16x2),
+            Self::U16x2Norm => id!(unorm16x2),
+            Self::I16x2Norm => id!(snorm16x2),
+            Self::U8x4Norm => id!(unorm8x4),
+            Self::I8x4Norm => id!(snorm8x4),
+        }
+    }
+
+    pub fn size_of(&self) -> usize {
+        match self {
+            Self::F16x4 => 8,
+            _ => 4,
+        }
+    }
+
+    pub fn align_of(&self) -> usize {
+        match self {
+            Self::U8x4Norm | Self::I8x4Norm => 1,
+            Self::F16x2 | Self::F16x4 | Self::U16x2 | Self::I16x2 | Self::U16x2Norm | Self::I16x2Norm => {
+                2
+            }
+        }
+    }
+
+    /// Logical shader component count (`vec2f` = 2, `vec4f` = 4).
+    pub fn logical_slots(&self) -> usize {
+        match self {
+            Self::F16x4 | Self::U8x4Norm | Self::I8x4Norm => 4,
+            _ => 2,
+        }
+    }
+
+    pub fn is_vec4(&self) -> bool {
+        self.logical_slots() == 4
+    }
 }
 
 impl ScriptPodTy {
@@ -404,6 +463,72 @@ impl ScriptPodTy {
             Self::F32 | Self::F16 => true,
             Self::Vec(v) => matches!(v.elem_ty(), ScriptPodTy::F32 | ScriptPodTy::F16),
             Self::Mat(_) => true, // Matrices are float-based
+            Self::Packed(_) => true,
+            _ => false,
+        }
+    }
+
+    pub fn packed(&self) -> Option<ScriptPodPacked> {
+        match self {
+            Self::Packed(p) => Some(*p),
+            _ => None,
+        }
+    }
+
+    /// True when this type (or any struct field) uses a compact fetch format.
+    pub fn has_compact_format(&self) -> bool {
+        match self {
+            Self::Packed(_) => true,
+            Self::Struct { fields, .. } => fields.iter().any(|f| f.ty.data.ty.has_compact_format()),
+            Self::FixedArray { ty, .. } | Self::VariableArray { ty, .. } => {
+                ty.data.ty.has_compact_format()
+            }
+            _ => false,
+        }
+    }
+
+    /// Compact fetch supports a compact leaf, or one flat struct containing
+    /// direct scalar/float-vector leaves. Aggregate location/path lowering is
+    /// deliberately rejected until every backend implements it.
+    pub fn vertex_layout_supported(&self) -> bool {
+        fn direct_leaf(ty: &ScriptPodTy) -> bool {
+            matches!(
+                ty,
+                ScriptPodTy::F32
+                    | ScriptPodTy::F16
+                    | ScriptPodTy::U32
+                    | ScriptPodTy::I32
+                    | ScriptPodTy::Bool
+                    | ScriptPodTy::Packed(_)
+            ) || matches!(ty, ScriptPodTy::Vec(v) if matches!(v.elem_ty(), ScriptPodTy::F32 | ScriptPodTy::F16))
+        }
+
+        match self {
+            ty if direct_leaf(ty) => true,
+            Self::Struct { fields, .. } => {
+                !fields.is_empty() && fields.iter().all(|field| direct_leaf(&field.ty.data.ty))
+            }
+            _ => false,
+        }
+    }
+
+    /// All leaf fields are f32-family (the packed-lane GLSL/HLSL path).
+    pub fn is_f32_fetch_tree(&self) -> bool {
+        match self {
+            Self::F32 | Self::F16 => true,
+            Self::Vec(v) => matches!(
+                v.elem_ty(),
+                ScriptPodTy::F32 | ScriptPodTy::F16
+            ),
+            Self::Mat(_) => true,
+            Self::Packed(_) => false,
+            Self::U32 | Self::I32 | Self::Bool | Self::AtomicU32 | Self::AtomicI32 => false,
+            Self::Struct { fields, .. } => {
+                !fields.is_empty() && fields.iter().all(|f| f.ty.data.ty.is_f32_fetch_tree())
+            }
+            Self::FixedArray { ty, .. } | Self::VariableArray { ty, .. } => {
+                ty.data.ty.is_f32_fetch_tree()
+            }
             _ => false,
         }
     }
@@ -481,6 +606,7 @@ impl ScriptPodTy {
             Self::Enum { align_of, .. } => *align_of,
             Self::FixedArray { align_of, .. } => *align_of,
             Self::VariableArray { align_of, .. } => *align_of,
+            Self::Packed(p) => p.align_of(),
         }
     }
 
@@ -500,12 +626,18 @@ impl ScriptPodTy {
             Self::Enum { size_of, .. } => *size_of,
             Self::FixedArray { size_of, .. } => *size_of,
             Self::VariableArray { .. } => 0,
+            Self::Packed(p) => p.size_of(),
         }
     }
 
     /// Returns the number of float32-sized slots this type occupies.
     /// This is used for shader attribute/uniform layout calculations.
+    /// Compact fetch formats report their *logical* f32 component count so
+    /// reconstructed shader values stay vec2/vec4.
     pub fn slots(&self) -> usize {
+        if let Self::Packed(p) = self {
+            return p.logical_slots();
+        }
         // Each slot is 4 bytes (size of f32)
         // For f16, we round up to 1 slot
         let size = self.size_of();

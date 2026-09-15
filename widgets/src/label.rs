@@ -304,7 +304,10 @@ impl Widget for Label {
             return DrawStep::done();
         }
 
-        let walk = walk.with_add_padding(self.padding);
+        let walk = cx.resolve_walk(
+            walk.with_add_padding(self.padding),
+            ResolveAt::BeforeBegin,
+        );
         cx.begin_turtle(
             walk,
             Layout {

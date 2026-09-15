@@ -101,7 +101,10 @@ impl ScriptHeap {
         type_id: crate::traits::ScriptTypeId,
         builtins: &ScriptPodBuiltins,
     ) -> Option<ScriptPodType> {
-        use makepad_math::{Mat4f, Quat, Vec2f, Vec3f, Vec4f};
+        use makepad_math::{
+            F16x2, F16x4, I16x2, Mat4f, Quat, SNorm16x2, SNorm8x4, U16x2, UNorm16x2, UNorm8x4,
+            Vec2f, Vec3f, Vec4f,
+        };
         use std::any::TypeId;
 
         // Check primitive types
@@ -140,6 +143,31 @@ impl ScriptHeap {
         // Quat has same layout as Vec4f (x, y, z, w)
         if type_id == TypeId::of::<Quat>() {
             return Some(builtins.pod_vec4f);
+        }
+
+        if type_id == TypeId::of::<F16x2>() {
+            return Some(builtins.pod_f16x2);
+        }
+        if type_id == TypeId::of::<F16x4>() {
+            return Some(builtins.pod_f16x4);
+        }
+        if type_id == TypeId::of::<U16x2>() {
+            return Some(builtins.pod_u16x2);
+        }
+        if type_id == TypeId::of::<I16x2>() {
+            return Some(builtins.pod_i16x2);
+        }
+        if type_id == TypeId::of::<UNorm16x2>() {
+            return Some(builtins.pod_unorm16x2);
+        }
+        if type_id == TypeId::of::<SNorm16x2>() {
+            return Some(builtins.pod_snorm16x2);
+        }
+        if type_id == TypeId::of::<UNorm8x4>() {
+            return Some(builtins.pod_unorm8x4);
+        }
+        if type_id == TypeId::of::<SNorm8x4>() {
+            return Some(builtins.pod_snorm8x4);
         }
 
         // Check if this type has a registered ScriptTypeCheck with a pod type
@@ -1294,6 +1322,18 @@ impl ScriptHeap {
                     value.value_type()
                 );
             }
+            ScriptPodTy::Packed(p) => {
+                let words = (p.size_of() + 3) / 4;
+                let start = offset_of >> 2;
+                if let Some(other) = value.as_pod() {
+                    let other_data = &self.pods[other].data;
+                    for i in 0..words {
+                        if start + i < out_data.len() && i < other_data.len() {
+                            out_data[start + i] = other_data[i];
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1553,6 +1593,17 @@ impl ScriptHeap {
                             }
                             ScriptPodTy::VariableArray { .. } => {
                                 todo!()
+                            }
+                            ScriptPodTy::Packed(p) => {
+                                let range = (offset_of >> 2)..((offset_of + p.size_of()) >> 2);
+                                let pod_type = field.ty.self_ref;
+                                let out_pod_ptr = self.new_pod(pod_type);
+                                let mut out_data = Vec::new();
+                                std::mem::swap(&mut self.pods[out_pod_ptr].data, &mut out_data);
+                                out_data.clear();
+                                out_data.extend(&self.pods[pod_ptr].data[range]);
+                                std::mem::swap(&mut self.pods[out_pod_ptr].data, &mut out_data);
+                                return out_pod_ptr.into();
                             }
                         }
                     }
@@ -2272,6 +2323,9 @@ impl ScriptHeap {
                     offset_of += size_of;
                 }
                 write!(out, ")").ok();
+            }
+            ScriptPodTy::Packed(p) => {
+                write!(out, "{:?}@{offset_of}", p).ok();
             }
         }
     }

@@ -86,6 +86,7 @@ impl<'a> CxDraw<'a> {
             FontFamilyDefinition {
                 font_ids: vec![],
                 expected_member_count: 0,
+                diagnostics: Default::default(),
             },
         );
         cx.set_global(Rc::new(RefCell::new(fonts)));

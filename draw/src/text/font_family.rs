@@ -12,6 +12,23 @@ use {
     },
 };
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct FontDiagnostics {
+    pub role: String,
+    pub set: String,
+    pub tried: Vec<String>,
+}
+
+impl Default for FontDiagnostics {
+    fn default() -> Self {
+        Self {
+            role: "custom".to_string(),
+            set: "unknown".to_string(),
+            tried: Vec::new(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct FontFamilyId(u64);
 
@@ -32,11 +49,22 @@ pub struct FontFamily {
     id: FontFamilyId,
     shaper: Rc<RefCell<Shaper>>,
     fonts: Rc<[Rc<Font>]>,
+    diagnostics: Rc<FontDiagnostics>,
 }
 
 impl FontFamily {
-    pub fn new(id: FontFamilyId, shaper: Rc<RefCell<Shaper>>, fonts: Rc<[Rc<Font>]>) -> Self {
-        Self { id, shaper, fonts }
+    pub fn new(
+        id: FontFamilyId,
+        shaper: Rc<RefCell<Shaper>>,
+        fonts: Rc<[Rc<Font>]>,
+        diagnostics: FontDiagnostics,
+    ) -> Self {
+        Self {
+            id,
+            shaper,
+            fonts,
+            diagnostics: Rc::new(diagnostics),
+        }
     }
 
     pub fn id(&self) -> FontFamilyId {
@@ -51,11 +79,16 @@ impl FontFamily {
             letter_spacing: Ems(0.0),
             word_spacing: Ems(0.0),
             features: Rc::new(Vec::new()),
+            diagnostics: self.diagnostics.clone(),
         })
     }
 
     pub fn fonts(&self) -> &[Rc<Font>] {
         &self.fonts
+    }
+
+    pub fn diagnostics(&self) -> &FontDiagnostics {
+        &self.diagnostics
     }
 }
 

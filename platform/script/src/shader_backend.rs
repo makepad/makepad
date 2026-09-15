@@ -20,6 +20,149 @@ pub enum ShaderBackend {
     Rust,
 }
 
+#[cfg(test)]
+mod typed_vertex_tests {
+    use super::*;
+    use crate::{
+        pod::{ScriptPodField, ScriptPodTy, ScriptPodTypeInline},
+        shader::{ShaderIo, ShaderIoKind, ShaderOutput},
+        value::NIL,
+        vm::{ScriptVm, ScriptVmBase, ScriptVmHost},
+    };
+
+    fn field(
+        vm: &ScriptVmBase,
+        name: LiveId,
+        ty: ScriptPodType,
+    ) -> ScriptPodField {
+        ScriptPodField {
+            name,
+            default: NIL,
+            ty: ScriptPodTypeInline {
+                self_ref: ty,
+                data: vm.heap.pod_type_ref(ty).clone(),
+            },
+        }
+    }
+
+    #[test]
+    fn metal_emits_distinct_raw_and_logical_compact_structs() {
+        let mut vm = ScriptVmBase::new();
+        let half2 = vm.code.builtins.pod.pod_f16x2;
+        let f32_ty = vm.code.builtins.pod.pod_f32;
+        let fields = vec![field(&vm, id!(off), half2), field(&vm, id!(depth), f32_ty)];
+        let object = vm.heap.new_object();
+        let ty = vm.heap.new_pod_type(
+            object,
+            Some(id!(MixedVertex)),
+            ScriptPodTy::new_struct(fields),
+            NIL,
+        );
+        let roots = BTreeSet::from([ty]);
+        let mut source = String::new();
+        ShaderBackend::Metal.pod_struct_defs_mixed(&vm.heap, &roots, &roots, &mut source);
+
+        let name = ShaderBackend::Metal.map_pod_name(id!(MixedVertex));
+        let raw_half = ShaderBackend::Metal.map_packed_pod_name(id!(f16x2));
+        let logical_vec = ShaderBackend::Metal.map_pod_name(id!(vec2f));
+        let off = ShaderBackend::Metal.map_field_name(id!(off));
+        assert!(source.contains(&format!("struct {name}Raw {{")), "{source}");
+        assert!(source.contains(&format!("{raw_half} {off};")), "{source}");
+        assert!(source.contains(&format!("struct {name} {{")), "{source}");
+        assert!(source.contains(&format!("{logical_vec} {off};")), "{source}");
+
+        let mut packed_only = String::new();
+        ShaderBackend::Metal.pod_struct_defs_packed(&vm.heap, &roots, &mut packed_only);
+        assert!(packed_only.contains(&format!("struct {name} {{")), "{packed_only}");
+        assert!(!packed_only.contains(&format!("struct {name}Raw {{")), "{packed_only}");
+
+        let mut host = ScriptVmHost::new((), ());
+        let vm = ScriptVm {
+            host: &mut host,
+            bx: Box::new(vm),
+        };
+        let geometry_name = id!(geometry).to_string();
+        let output = ShaderOutput {
+            backend: ShaderBackend::Metal,
+            io: vec![ShaderIo {
+                kind: ShaderIoKind::VertexBuffer,
+                name: id!(geometry),
+                ty,
+                buffer_index: None,
+            }],
+            ..Default::default()
+        };
+        let mut fetch_source = String::new();
+        output.metal_create_vertex_buffer_struct(&vm, &mut fetch_source);
+        assert!(
+            fetch_source.contains(&format!("{name}Raw {geometry_name};")),
+            "{fetch_source}"
+        );
+        assert!(
+            fetch_source.contains(&format!("{name} {geometry_name};")),
+            "{fetch_source}"
+        );
+        assert!(
+            fetch_source.contains(&format!(
+                "out_geom.{geometry_name}.{off} = float2(raw.{geometry_name}.{off});"
+            )),
+            "{fetch_source}"
+        );
+    }
+
+    #[test]
+    fn compact_instances_and_nested_aggregates_are_compile_errors() {
+        let mut vm = ScriptVmBase::new();
+        let half2 = vm.code.builtins.pod.pod_f16x2;
+        let mut output = ShaderOutput::default();
+        output.validate_vertex_fetch_io(
+            &vm.heap,
+            &ShaderIoKind::DynInstance,
+            id!(inst),
+            half2,
+        );
+        assert!(output.error_report().contains("instance buffers are f32-backed"));
+
+        let half_inline = ScriptPodTypeInline {
+            self_ref: half2,
+            data: vm.heap.pod_type_ref(half2).clone(),
+        };
+        let array_object = vm.heap.new_object();
+        let array_ty = vm.heap.new_pod_type(
+            array_object,
+            Some(id!(NestedCompactVertex)),
+            ScriptPodTy::FixedArray {
+                align_of: 2,
+                size_of: 8,
+                len: 2,
+                ty: Box::new(half_inline),
+            },
+            NIL,
+        );
+        output.validate_vertex_fetch_io(
+            &vm.heap,
+            &ShaderIoKind::VertexBuffer,
+            id!(geom),
+            array_ty,
+        );
+        assert!(output.error_report().contains("cannot contain nested structs, arrays, matrices"));
+
+        let matrix_ty = vm.code.builtins.pod.pod_mat4x4f;
+        let mut matrix_output = ShaderOutput::default();
+        matrix_output.validate_vertex_fetch_io(
+            &vm.heap,
+            &ShaderIoKind::VertexBuffer,
+            id!(matrix_geom),
+            matrix_ty,
+        );
+        assert!(
+            matrix_output
+                .error_report()
+                .contains("cannot contain nested structs, arrays, matrices")
+        );
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ShaderIoPrefix {
     Prefix(&'static str),
@@ -88,7 +231,7 @@ impl ShaderBackend {
                         ),
                         SHADER_IO_VERTEX_BUFFER => (
                             ShaderIoKind::VertexBuffer,
-                            ShaderIoPrefix::Prefix("_io.vb[_iov.vid]."),
+                            ShaderIoPrefix::Prefix("_io.g->"),
                         ),
                         SHADER_IO_FRAGMENT_OUTPUT_0 => {
                             (ShaderIoKind::Varying, ShaderIoPrefix::Prefix(""))
@@ -1264,6 +1407,14 @@ impl ShaderBackend {
                     id!(mat4x2f) => id!(float4x2),
                     id!(mat4x3f) => id!(float4x3),
                     id!(mat4x4f) => id!(float4x4),
+                    id!(f16x2) => id!(packed_half2),
+                    id!(f16x4) => id!(packed_half4),
+                    id!(u16x2) => id!(packed_ushort2),
+                    id!(i16x2) => id!(packed_short2),
+                    id!(unorm16x2) => id!(packed_ushort2),
+                    id!(snorm16x2) => id!(packed_short2),
+                    id!(unorm8x4) => id!(uchar4),
+                    id!(snorm8x4) => id!(char4),
                     x => x,
                 }
             }
@@ -1355,7 +1506,29 @@ impl ShaderBackend {
             let pod_type = heap.pod_type_ref(ty);
             if let ScriptPodTy::Struct { .. } = &pod_type.ty {
                 let mut referenced = BTreeSet::new();
-                self.pod_type_def_impl(heap, ty, &mut referenced, out, false);
+                self.pod_type_def_impl(heap, ty, &mut referenced, out, false, false);
+            }
+        }
+    }
+
+    pub fn pod_struct_defs_packed(
+        &self,
+        heap: &ScriptHeap,
+        root_structs: &BTreeSet<ScriptPodType>,
+        out: &mut String,
+    ) {
+        let mut visited = BTreeSet::new();
+        let mut order = Vec::new();
+
+        for root in root_structs {
+            self.pod_struct_visit(heap, *root, &mut visited, &mut order);
+        }
+
+        for ty in order {
+            let pod_type = heap.pod_type_ref(ty);
+            if let ScriptPodTy::Struct { .. } = &pod_type.ty {
+                let mut referenced = BTreeSet::new();
+                self.pod_type_def_impl(heap, ty, &mut referenced, out, true, false);
             }
         }
     }
@@ -1373,7 +1546,7 @@ impl ShaderBackend {
             self.pod_struct_visit(heap, *root, &mut packed_visited, &mut packed_order);
         }
 
-        let mut plain_visited = packed_visited.clone();
+        let mut plain_visited = BTreeSet::new();
         let mut plain_order = Vec::new();
         for root in plain_root_structs {
             self.pod_struct_visit(heap, *root, &mut plain_visited, &mut plain_order);
@@ -1383,7 +1556,7 @@ impl ShaderBackend {
             let pod_type = heap.pod_type_ref(ty);
             if let ScriptPodTy::Struct { .. } = &pod_type.ty {
                 let mut referenced = BTreeSet::new();
-                self.pod_type_def_impl(heap, ty, &mut referenced, out, true);
+                self.pod_type_def_impl(heap, ty, &mut referenced, out, true, true);
             }
         }
 
@@ -1391,7 +1564,7 @@ impl ShaderBackend {
             let pod_type = heap.pod_type_ref(ty);
             if let ScriptPodTy::Struct { .. } = &pod_type.ty {
                 let mut referenced = BTreeSet::new();
-                self.pod_type_def_impl(heap, ty, &mut referenced, out, false);
+                self.pod_type_def_impl(heap, ty, &mut referenced, out, false, false);
             }
         }
     }
@@ -1439,7 +1612,7 @@ impl ShaderBackend {
         referenced: &mut BTreeSet<ScriptPodType>,
         out: &mut String,
     ) {
-        self.pod_type_def_impl(heap, pod_ty, referenced, out, false)
+        self.pod_type_def_impl(heap, pod_ty, referenced, out, false, false)
     }
 
     fn pod_type_def_impl(
@@ -1449,6 +1622,7 @@ impl ShaderBackend {
         referenced: &mut BTreeSet<ScriptPodType>,
         out: &mut String,
         packed_fields: bool,
+        raw_struct_names: bool,
     ) {
         let pod_type = heap.pod_type_ref(pod_ty);
         if let ScriptPodTy::Struct { fields, .. } = &pod_type.ty {
@@ -1457,7 +1631,12 @@ impl ShaderBackend {
                 writeln!(out, "#[repr(C)]").ok();
             }
             if let Some(name) = pod_type.name {
-                writeln!(out, "struct {} {{", self.map_pod_name(name)).ok();
+                let name = self.map_pod_name(name);
+                if raw_struct_names && matches!(self, Self::Metal) {
+                    writeln!(out, "struct {}Raw {{", name).ok();
+                } else {
+                    writeln!(out, "struct {} {{", name).ok();
+                }
             } else {
                 writeln!(out, "struct S{} {{", pod_ty.index).ok();
             };
@@ -1472,10 +1651,16 @@ impl ShaderBackend {
                                 referenced,
                                 out,
                                 packed_fields,
+                                raw_struct_names,
                             );
                         } else {
                             if packed_fields {
-                                self.pod_type_name_packed_referenced(&field.ty, referenced, out);
+                                self.pod_type_name_packed_referenced(
+                                    &field.ty,
+                                    referenced,
+                                    out,
+                                    raw_struct_names,
+                                );
                             } else {
                                 self.pod_type_name_referenced(&field.ty, referenced, out);
                             }
@@ -1543,6 +1728,7 @@ impl ShaderBackend {
         referenced: &mut BTreeSet<ScriptPodType>,
         out: &mut String,
         packed: bool,
+        raw_struct_names: bool,
     ) {
         let mut dims = String::new();
         let mut curr = ty;
@@ -1556,7 +1742,12 @@ impl ShaderBackend {
             }
         }
         if packed {
-            self.pod_type_name_packed_referenced(curr, referenced, out);
+            self.pod_type_name_packed_referenced(
+                curr,
+                referenced,
+                out,
+                raw_struct_names,
+            );
         } else {
             self.pod_type_name_referenced(curr, referenced, out);
         }
@@ -1596,22 +1787,37 @@ impl ShaderBackend {
         ty: &ScriptPodTypeInline,
         referenced: &mut BTreeSet<ScriptPodType>,
         out: &mut String,
+        raw_struct_names: bool,
     ) {
         match &ty.data.ty {
             ScriptPodTy::Struct { .. } => {
                 referenced.insert(ty.self_ref);
                 let name = ty.data.name.unwrap();
                 let name = self.map_pod_name(name);
-                write!(out, "{}", name).ok();
+                if raw_struct_names && matches!(self, Self::Metal) {
+                    write!(out, "{}Raw", name).ok();
+                } else {
+                    write!(out, "{}", name).ok();
+                }
             }
             ScriptPodTy::FixedArray { ty: inner, len, .. } => {
                 out.push_str("array<");
-                self.pod_type_name_packed_referenced(inner, referenced, out);
+                self.pod_type_name_packed_referenced(
+                    inner,
+                    referenced,
+                    out,
+                    raw_struct_names,
+                );
                 write!(out, ", {}>", len).ok();
             }
             ScriptPodTy::VariableArray { ty: inner, .. } => {
                 out.push_str("array<");
-                self.pod_type_name_packed_referenced(inner, referenced, out);
+                self.pod_type_name_packed_referenced(
+                    inner,
+                    referenced,
+                    out,
+                    raw_struct_names,
+                );
                 out.push_str(">");
             }
             _ => self.pod_type_name_packed(ty, out),
@@ -1667,6 +1873,17 @@ impl ShaderBackend {
             ScriptPodTy::Mat(m) => write!(out, "{}", self.map_packed_pod_name(m.name()))
                 .ok()
                 .unwrap_or(()),
+            ScriptPodTy::Packed(p) => write!(out, "{}", self.map_packed_pod_name(p.name()))
+                .ok()
+                .unwrap_or(()),
+            ScriptPodTy::Struct { .. } => {
+                let name = self.map_pod_name(ty.data.name.unwrap());
+                if matches!(self, Self::Metal) {
+                    write!(out, "{}Raw", name).ok().unwrap_or(())
+                } else {
+                    write!(out, "{}", name).ok().unwrap_or(())
+                }
+            }
             // For other types, fall back to regular type names
             _ => self.pod_type_name(ty, out),
         }
@@ -1715,6 +1932,17 @@ impl ShaderBackend {
                 out.push_str("array<");
                 self.pod_type_name(inner, out);
                 out.push_str(">");
+            }
+            // Compact fetch formats are logical vec2f / vec4f in shader code.
+            ScriptPodTy::Packed(p) => {
+                let logical = if p.is_vec4() {
+                    id!(vec4f)
+                } else {
+                    id!(vec2f)
+                };
+                write!(out, "{}", self.map_pod_name(logical))
+                    .ok()
+                    .unwrap_or(());
             }
             _ => out.push_str("unknown"),
         }
