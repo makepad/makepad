@@ -420,11 +420,11 @@ impl Setup {
                 .is_some_and(|r| r.installed(&self.root)),
         ]
     }
-    fn install_compiler(&self, release: &Release) -> Result<(), String> {
+    fn install_compiler(&self, release: &Release) -> Result<bool, String> {
         let ready = self.ready();
         if ready[0] && ready[1] {
             activity("Compiler is already installed.");
-            return Ok(());
+            return Ok(true);
         }
         let mut info = vec![format!("Compiler tools and Rust {}", release.rust)];
         if cfg!(windows) {
@@ -441,11 +441,12 @@ impl Setup {
         info.extend([
             "Rust: MIT and Apache 2.0 license notices".into(),
             "https://www.rust-lang.org/policies/licenses".into(),
+            format!("Then download the source, compile and open {} automatically.", release.title),
             "Install the compiler privately in this folder?".into(),
         ]);
         if !Screen::enter().confirm("Compiler license terms", &info)? {
             activity("Compiler installation cancelled.");
-            return Ok(());
+            return Ok(false);
         }
         if !cfg!(windows) && !ready[0] {
             let _pause = Screen::pause();
@@ -458,8 +459,18 @@ impl Setup {
             if !ready[1] {
                 runtime::dependency(&self.root, release, Dependency::Rust)?;
             }
-            Ok(())
+            Ok(true)
         })
+    }
+    fn install_and_run(&mut self) -> Result<(), String> {
+        // Resolve the release once so compiler setup and the following build
+        // cannot disagree if a newer release appears while installing tools.
+        let release = self.refresh()?;
+        if !self.install_compiler(&release)? {
+            return Ok(());
+        }
+        activity("Compiler ready. Continuing to download, compile and open the app.");
+        self.build_release(release)
     }
     fn install_cuda(&self, release: &Release) -> Result<(), String> {
         let info = [
@@ -478,7 +489,10 @@ impl Setup {
             return Err("Download the compiler first".into());
         }
         let release = self.refresh()?;
-        if !self.ready()[1] {
+        self.build_release(release)
+    }
+    fn build_release(&mut self, release: Release) -> Result<(), String> {
+        if !self.ready()[..2].iter().all(|ready| *ready) {
             return Err(format!("The latest source requires Rust {}. Choose Download compiler first.", release.rust));
         }
         with_progress(|| {
@@ -603,6 +617,12 @@ impl Setup {
         #[cfg(not(target_os = "macos"))]
         let executable = environment.app_binary(&release);
         let mut app = Command::new(executable);
+        #[cfg(target_os = "macos")]
+        if release.id == "scope" {
+            // This explicit Builder launch should open in front. Ordinary
+            // Makepad windows retain their default non-activating startup.
+            app.env("MAKEPAD_FOCUS", "1");
+        }
         runtime::hide_console(&mut app);
         #[cfg(unix)] {
             use std::os::unix::process::CommandExt;
@@ -697,6 +717,9 @@ pub fn run() -> Result<(), String> {
 fn show_menu(setup: &mut Setup, primary: bool) -> Result<(), String> {
     fs::write(setup.root.join("selected-app"), &setup.app).map_err(|e| e.to_string())?;
     let _screen = Screen::enter();
+    // Start setup once when Builder opens. Success, cancellation and failure
+    // all return to the normal menu; never restart the sequence on redraw.
+    let mut startup = primary;
     loop {
         let ready = setup.ready();
         let registered_title = catalog::apps()?.iter().find(|app| app.get("id").and_then(makepad_strict_json::Value::as_str) == Some(&setup.app))
@@ -747,18 +770,22 @@ fn show_menu(setup: &mut Setup, primary: bool) -> Result<(), String> {
         let mut disabled = Vec::new();
         if !compiler_ready { disabled.push("2"); }
         if !ready.into_iter().all(|v| v) { disabled.push(if primary { "5" } else { "3" }); }
-        let choice = Screen::enter().choose_state(
-            &heading,
-            &info,
-            &options,
-            Some([compiler_ready, built]),
-            &disabled,
-        )?;
+        let choice = if std::mem::take(&mut startup) {
+            "1".to_owned()
+        } else {
+            Screen::enter().choose_state(
+                &heading,
+                &info,
+                &options,
+                Some([compiler_ready, built]),
+                &disabled,
+            )?
+        };
         if choice == "q" {
             break;
         }
         let result = match choice.as_str() {
-            "1" => setup.release().and_then(|r| setup.install_compiler(&r)),
+            "1" => setup.install_and_run(),
             "2" => setup.build(),
             "3" if primary => setup.apps(),
             "4" if primary => setup.app_menu("wm"),

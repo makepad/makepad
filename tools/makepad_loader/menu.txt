@@ -1,4 +1,4 @@
-1|Download compiler|{tools} and the pinned private Rust compiler
+1|Download compiler|Set up {tools} and Rust, then compile and run {app}
 2|Compile and run {app}|Download/update source code, compile and open {app}
 3|Other Apps|Build other Makepad applications
 4|Window Manager|Compile and run the Makepad desktop

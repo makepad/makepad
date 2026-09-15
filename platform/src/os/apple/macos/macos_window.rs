@@ -347,6 +347,10 @@ impl MacosWindow {
                     let () = msg_send![self.window, orderFront: nil];
                 } else {
                     let () = msg_send![self.window, makeKeyAndOrderFront: nil];
+                    if std::env::var_os("MAKEPAD_FOCUS").is_some() {
+                        let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
+                        let () = msg_send![ns_app, activateIgnoringOtherApps: YES];
+                    }
                 }
             }
             crate::startup_trace("NSWindow ordered front");
