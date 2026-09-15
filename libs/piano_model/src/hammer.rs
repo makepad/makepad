@@ -20,6 +20,12 @@
 //   strain rates the agraffe-image chatter produces in the treble (letting
 //   either run free used to slam the force into the F_MAX safety clamp,
 //   which flatlined fortissimo dynamics up there).
+//   In the bottom two octaves the felt runs in a near-LINEAR regime
+//   (p ~ 1.05, no lock-up, no rate hysteresis — see params::feltp_bass):
+//   measured against the Salamander corpus the real bass hammer's
+//   sub-kHz pulse spectrum and contact time barely change from pp to ff,
+//   which only a linear contact gives; the felt nonlinearity that makes
+//   the treble bloom is the wrong mechanism for the bass.
 //
 //   On top of the integrated pulse, the emitted force carries a small
 //   multiplicative roughness (deterministic per-strike noise, depth rising
@@ -232,7 +238,9 @@ impl Hammer {
                     // the top-octave ff step: v112 and v127 landed on the
                     // same cap)
                     let x = self.lock_w * l2 * l2 * lock;
-                    let lockf = 1.0 + x * self.lock_cap / (x + self.lock_cap);
+                    // (max: a key with no lock-up at all — the gated bass
+                    // regime — has lock_w = lock_cap = 0, and 0/0 is NaN)
+                    let lockf = 1.0 + x * self.lock_cap / (x + self.lock_cap).max(1e-12);
                     // The loading/unloading (hysteresis) modulation is a
                     // linearisation valid for moderate felt strain rates;
                     // saturate it SMOOTHLY toward the same bounds the old
