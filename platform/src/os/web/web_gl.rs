@@ -157,6 +157,12 @@ impl Cx {
             if let Some(sub_list_id) =
                 self.draw_lists[draw_list_id].draw_items[draw_item_id].sub_list()
             {
+                // A retained sub-list its owner dropped between the parent's
+                // last record and this paint: the slot may already hold
+                // another widget's list. Nothing to draw here.
+                if self.draw_lists.is_id_freed(sub_list_id) {
+                    continue;
+                }
                 let child_resets_zbias = self.draw_lists[sub_list_id].reset_zbias;
                 let mut own_zbias = 0.0f32;
                 let child_zbias = if child_resets_zbias {
@@ -167,7 +173,16 @@ impl Cx {
                 // An overlay list carries a depth floor: this is what makes it
                 // composite above body content that uses `draw_depth`.
                 self.draw_lists[sub_list_id].raise_zbias_to_floor(child_zbias);
-                self.render_view(draw_pass_id, sub_list_id, child_zbias, zbias_step);
+                // A retained list is one unit of paint order: its calls all
+                // take the counter at entry, it advances by the layers the
+                // list reported. See `CxDrawList::zbias_hold`.
+                if let Some(steps) = self.draw_lists[sub_list_id].zbias_hold {
+                    let mut held = *child_zbias;
+                    self.render_view(draw_pass_id, sub_list_id, &mut held, 0.0);
+                    *child_zbias += steps as f32 * zbias_step;
+                } else {
+                    self.render_view(draw_pass_id, sub_list_id, child_zbias, zbias_step);
+                }
             } else {
                 let draw_list = &mut self.draw_lists[draw_list_id];
                 let draw_list_recording_gen = draw_list.recording_gen;
@@ -530,6 +545,8 @@ impl Cx {
 
     pub fn setup_render_pass(&mut self, draw_pass_id: DrawPassId, to_texture: bool) -> Vec2d {
         self.passes[draw_pass_id].paint_dirty = false;
+        // the bake transaction's paint receipt (whole draws: ranges ignored)
+        self.passes[draw_pass_id].painted_serial = self.repaint_id;
         let dpi_factor = self.passes[draw_pass_id].dpi_factor.unwrap();
         let pass_rect = self.get_pass_rect(draw_pass_id, dpi_factor).unwrap();
         let dpi_uniforms_gen = self.next_uniform_gen();
@@ -737,6 +754,11 @@ impl Cx {
         draw_list_id: DrawListId,
         draw_shader_ids: &mut BTreeSet<usize>,
     ) {
+        // A retained sub-list its owner dropped since the parent last
+        // recorded: not part of this pass (see `render_view`).
+        if self.draw_lists.is_id_freed(draw_list_id) {
+            return;
+        }
         let draw_list = &self.draw_lists[draw_list_id];
         for order_index in 0..draw_list.draw_item_order_len() {
             let Some(draw_item_id) = draw_list.draw_item_id_at_order_index(order_index) else {
@@ -961,6 +983,14 @@ pub struct CxOsDrawCall {
     pub uniforms_recording_gen: Option<u64>,
     pub draw_call_uniforms_gen: Option<u64>,
     pub user_uniforms_gen: Option<u64>,
+}
+
+impl CxOsDrawCall {
+    /// This backend keeps no per-publication backing lease on a draw item
+    /// (contract §10): nothing to release when the item's lease clears.
+    pub(crate) fn take_backing(&mut self) -> Option<u64> {
+        None
+    }
 }
 
 #[derive(Clone)]

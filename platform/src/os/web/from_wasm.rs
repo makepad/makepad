@@ -293,6 +293,21 @@ pub struct FromWasmAllocArrayBuffer {
 }
 
 #[derive(FromWasm)]
+pub struct FromWasmRetainedArrayBuffer {
+    pub buffer_id: usize,
+    pub data: WasmPtrF32,
+    pub first_slot: usize,
+}
+
+#[derive(FromWasm)]
+pub struct WCustomUniformBuffer {
+    pub block_name: String,
+    pub data: WasmPtrU8,
+    pub generation_lo: u32,
+    pub generation_hi: u32,
+}
+
+#[derive(FromWasm)]
 pub struct FromWasmAllocIndexBuffer {
     pub buffer_id: usize,
     pub data: WasmPtrU32,
@@ -417,6 +432,11 @@ pub struct FromWasmBeginRenderTexture {
 #[derive(FromWasm)]
 pub struct FromWasmRequestRenderTextureCapture {
     pub texture_id: usize,
+    pub register_only: bool,
+    pub ticket_lo: u32,
+    pub ticket_hi: u32,
+    pub width: usize,
+    pub height: usize,
 }
 
 #[derive(FromWasm)]
@@ -430,6 +450,7 @@ pub struct FromWasmSetDefaultDepthAndBlendMode {}
 
 #[derive(FromWasm)]
 pub struct FromWasmDrawCall {
+    pub custom_uniforms: Vec<WCustomUniformBuffer>,
     pub vao_id: usize,
     pub shader_id: usize,
     pub index_width: u32,

@@ -280,6 +280,7 @@ pub type TglGetTexLevelParameteriv =
     unsafe extern "C" fn(target: GLenum, level: GLint, pname: GLenum, params: *mut GLint) -> ();
 pub type TglDeleteTextures = unsafe extern "C" fn(n: GLsizei, textures: *const GLuint) -> ();
 pub type TglGenBuffers = unsafe extern "C" fn(n: GLsizei, buffers: *mut GLuint) -> ();
+pub type TglBufferSubData = unsafe extern "C" fn(target: GLenum, offset: isize, size: isize, data: *const std::ffi::c_void);
 pub type TglBufferData = unsafe extern "C" fn(
     target: GLenum,
     size: GLsizeiptr,
@@ -455,6 +456,7 @@ pub struct LibGl {
     pub glGetTexLevelParameteriv: TglGetTexLevelParameteriv,
     pub glGenBuffers: TglGenBuffers,
     pub glBufferData: TglBufferData,
+    pub glBufferSubData: TglBufferSubData,
     pub glUniform1i: TglUniform1i,
     pub glGetError: TglGetError,
     pub glGenSamplers: Option<TglGenSamplers>,
@@ -733,6 +735,7 @@ impl LibGl {
             glDeleteTextures: load!(loadfn, TglDeleteTextures, "glDeleteTextures")?,
             glGenBuffers: load!(loadfn, TglGenBuffers, "glGenBuffers", "glGenBuffersARB")?,
             glBufferData: load!(loadfn, TglBufferData, "glBufferData", "glBufferDataARB")?,
+            glBufferSubData: load!(loadfn, TglBufferSubData, "glBufferSubData", "glBufferSubDataARB")?,
             glUniform1i: load!(loadfn, TglUniform1i, "glUniform1i", "glUniform1iARB")?,
             glGetError: load!(loadfn, TglGetError, "glGetError")?,
             glGenSamplers: load!(loadfn, TglGenSamplers, "glGenSamplers").ok(),

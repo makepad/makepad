@@ -358,12 +358,29 @@ fn macro_and_attribute_tokens_respect_lexical_context_and_incremental_edits() {
 
 #[test]
 fn read_only_blocks_return_typing_paste_ime_undo_redo_cut_and_drop() {
+    assert_mutation_events_refused(doc("unchanged"), true);
+    let prepared = CodeDocument::prepare_diff(&[
+        diff_row(DiffRowKind::Removed, Some(0), None, 1),
+    ], "unchanged", "").unwrap();
+    assert_mutation_events_refused(CodeDocument::from_prepared_diff(prepared), false);
+}
+
+fn assert_mutation_events_refused(document: CodeDocument, explicit_read_only: bool) {
     use std::sync::{Arc, Mutex};
     let (mut cx, mut editor) = editor();
-    let mut session = CodeSession::new(doc("unchanged"));
+    let mut session = CodeSession::new(document);
+    record_editor(&mut cx, &mut editor, &mut session);
+    editor.set_key_focus(&mut cx);
+    cx.action(());
+    cx.handle_actions();
+    assert!(cx.has_key_focus(editor.scroll_bars.area()));
+    session.set_selection(pos(0, 0), Affinity::After, SelectionMode::All, NewGroup::No);
+    let copy = TextClipboardEvent { response: Default::default() };
+    editor.handle_event(&mut cx, &Event::TextCopy(copy.clone()), &mut Scope::empty(), &mut session);
+    assert_eq!(copy.response.borrow().as_deref(), Some("unchanged"));
     editor.blink_timer = cx.start_timeout(0.5);
-    editor.set_read_only(&mut cx, true);
-    assert_eq!(editor.blink_timer.0, 0);
+    editor.set_read_only(&mut cx, explicit_read_only);
+    if explicit_read_only { assert_eq!(editor.blink_timer.0, 0); }
     let mut events = Vec::new();
     for key_code in [
         KeyCode::ReturnKey,
@@ -549,4 +566,276 @@ fn tab_advances_to_the_next_stop() {
         "hit-test at pixel column 2 of a leading tab selects column 0"
     );
     assert_eq!(hit.rect.size.x, 32.0);
+}
+
+use crate::{
+    decoration::{Decoration, DecorationType, PreparedDecorationsError},
+    diff::{DiffEndpoint, DiffRowKind, DiffRowSpec, GutterMode, LineTerminator, PrepareDiffError, PreparedDiffDocument},
+    document::DocumentMutationError,
+};
+
+fn diff_row(kind: DiffRowKind, old_line: Option<u32>, new_line: Option<u32>, hunk: u32) -> DiffRowSpec {
+    DiffRowSpec { kind, old_line, new_line, hunk }
+}
+
+fn attach_diff(prepared: PreparedDiffDocument) -> CodeSession {
+    let view = CodeSession::prepare_view(prepared.document(), None);
+    CodeSession::from_prepared(CodeDocument::from_prepared_diff(prepared), view).unwrap()
+}
+
+#[test]
+fn diff_endpoint_token_context_survives_removed_multiline_comment() {
+    let old = "/* removed\nlet retained = 1;\n*/\nfn after() {}\n";
+    let new = "let retained = 1;\nfn after() {}\n";
+    let specs = [
+        diff_row(DiffRowKind::Removed, Some(0), None, 1),
+        diff_row(DiffRowKind::Equal, Some(1), Some(0), 1),
+        diff_row(DiffRowKind::Removed, Some(2), None, 2),
+        diff_row(DiffRowKind::Equal, Some(3), Some(1), 2),
+    ];
+    let prepared = CodeDocument::prepare_diff(&specs, old, new).unwrap();
+    let old_tokens = CodeDocument::prepare(old.into());
+    let new_tokens = CodeDocument::prepare(new.into());
+    for (row, spec) in specs.iter().enumerate() {
+        let expected = if let Some(line) = spec.new_line {
+            &new_tokens.layout().tokens[line as usize]
+        } else {
+            &old_tokens.layout().tokens[spec.old_line.unwrap() as usize]
+        };
+        assert_eq!(&prepared.document().layout().tokens[row], expected);
+    }
+    assert_eq!(prepared.document().layout().tokens[1][0].kind, TokenKind::OtherKeyword);
+    assert_eq!(prepared.document().layout().tokens[2][0].kind, TokenKind::Comment);
+    let combined = CodeDocument::prepare(prepared.as_text().clone());
+    assert_eq!(combined.layout().tokens[1][0].kind, TokenKind::Comment);
+    let tokens = prepared.document().layout().tokens.clone();
+    let mut session = attach_diff(prepared);
+    session.handle_changes();
+    assert_eq!(session.document().layout().tokens, tokens);
+}
+
+#[test]
+fn diff_equal_terminators_refine_and_reconstruct_both_endpoints() {
+    let old = "α\t界\r\n\r\nlast\r\n";
+    let new = "α\t界\n\nlast";
+    let rows = (0..3).map(|line| diff_row(DiffRowKind::Equal, Some(line), Some(line), 7)).collect::<Vec<_>>();
+    let prepared = CodeDocument::prepare_diff(&rows, old, new).unwrap();
+    assert_eq!(prepared.row_count(), 6);
+    assert_eq!(prepared.row_count(), prepared.as_text().as_lines().len());
+    assert!(!prepared.as_text().to_string().contains('\r'));
+    assert_eq!(prepared.reconstruct(DiffEndpoint::Old).as_bytes(), old.as_bytes());
+    assert_eq!(prepared.reconstruct(DiffEndpoint::New).as_bytes(), new.as_bytes());
+    let meta = prepared.metadata();
+    assert!(meta.old_final_newline);
+    assert!(!meta.new_final_newline);
+    assert_eq!(meta.old_to_row, [0, 2, 4]);
+    assert_eq!(meta.new_to_row, [1, 3, 5]);
+    assert_eq!(meta.hunks.len(), 1);
+    assert_eq!((meta.hunks[0].removed, meta.hunks[0].added), (3, 3));
+    assert!(meta.rows.iter().all(|row| row.gutter_mark == Some(DecorationType::DiffChangedGutter)));
+    assert_eq!(meta.rows[0].old.as_ref().unwrap().terminator, LineTerminator::CrLf);
+    for row in &meta.rows {
+        for (source, text, map) in [(row.old.as_ref(), old, &meta.old_to_row), (row.new.as_ref(), new, &meta.new_to_row)] {
+            if let Some(source) = source {
+                let display_row = map[source.line as usize];
+                assert_eq!(&text[source.bytes.clone()], prepared.as_text().as_lines()[display_row]);
+            }
+        }
+    }
+    let session = attach_diff(prepared);
+    assert_eq!(session.layout().height(), 6.0);
+    assert_eq!(session.layout().line(0).width(), "α\t界".column_count_at(0, 4) as f64);
+    assert_eq!(grid_column(&session, "α\t".len()), 4);
+    assert_eq!(grid_column(&session, "α\t界".len()), 6);
+}
+
+#[test]
+fn diff_empty_sentinel_and_final_newline_do_not_invent_source_rows() {
+    let empty = CodeDocument::prepare_diff(&[], "", "").unwrap();
+    assert_eq!(empty.row_count(), 1);
+    assert_eq!(empty.metadata().rows[0].kind, None);
+    assert!(empty.metadata().old_to_row.is_empty());
+    assert!(empty.metadata().new_to_row.is_empty());
+    assert!(empty.decorations().is_empty());
+    assert_eq!(empty.reconstruct(DiffEndpoint::Old), "");
+    assert_eq!(attach_diff(empty).layout().height(), 1.0);
+    for (old, new, kind, old_line, new_line) in [
+        ("", "\r\n", DiffRowKind::Added, None, Some(0)),
+        ("\n", "", DiffRowKind::Removed, Some(0), None),
+        ("bare\r", "", DiffRowKind::Removed, Some(0), None),
+        ("x\n", "x\n", DiffRowKind::Equal, Some(0), Some(0)),
+    ] {
+        let prepared = CodeDocument::prepare_diff(&[diff_row(kind, old_line, new_line, 0)], old, new).unwrap();
+        assert_eq!(prepared.row_count(), 1);
+        assert_eq!(prepared.reconstruct(DiffEndpoint::Old), old);
+        assert_eq!(prepared.reconstruct(DiffEndpoint::New), new);
+        let session = attach_diff(prepared);
+        assert_eq!(session.document().as_text().as_lines().len(), 1);
+        assert_eq!(session.layout().height(), 1.0);
+    }
+}
+
+#[test]
+fn diff_preparation_rejects_incomplete_or_invalid_maps() {
+    assert_eq!(CodeDocument::prepare_diff(&[], "x", "").unwrap_err(), PrepareDiffError::IncompleteEndpoints);
+    for rows in [
+        vec![diff_row(DiffRowKind::Removed, Some(1), None, 0)],
+        vec![diff_row(DiffRowKind::Added, Some(0), None, 0)],
+        vec![diff_row(DiffRowKind::Equal, Some(0), None, 0)],
+        vec![diff_row(DiffRowKind::Removed, Some(0), None, 0); 2],
+    ] {
+        assert!(matches!(CodeDocument::prepare_diff(&rows, "x", ""), Err(PrepareDiffError::InvalidRow { .. })));
+    }
+    assert_eq!(CodeDocument::prepare_diff(&[diff_row(DiffRowKind::Equal, Some(0), Some(0), 0)], "x", "y").unwrap_err(),
+        PrepareDiffError::UnequalContent { row: 0 });
+}
+
+#[test]
+fn diff_prepared_replacement_retains_runs_diagnostics_and_separate_hunks() {
+    let prepared = CodeDocument::prepare_diff(&[
+        diff_row(DiffRowKind::Removed, Some(0), None, 4),
+        diff_row(DiffRowKind::Removed, Some(1), None, 4),
+        diff_row(DiffRowKind::Added, None, Some(0), 4),
+        diff_row(DiffRowKind::Equal, Some(2), Some(1), 4),
+    ], "a\n\nb", "c\nb").unwrap();
+    assert_eq!(prepared.decorations().len(), 2);
+    assert_eq!(prepared.decorations()[0].start(), pos(0, 0));
+    assert_eq!(prepared.decorations()[0].end(), pos(2, 0));
+    let mut replacement = prepared.decorations().to_vec();
+    replacement.push(Decoration::new(100, pos(3, 0), pos(3, 1), DecorationType::Warning));
+    let mut set = DecorationSet::new();
+    set.replace_prepared(replacement.clone()).unwrap();
+    let retained = set.clone();
+    assert_eq!(set.replace_prepared(vec![replacement[1], replacement[0]]),
+        Err(PreparedDecorationsError::OverlappingOrUnsorted));
+    assert_eq!(set, retained);
+    set.add_decoration(Decoration::new(101, pos(3, 0), pos(3, 1), DecorationType::Error));
+    assert_eq!(set.len(), 3);
+    assert_eq!(set[2].ty, DecorationType::Error);
+    let mut document = CodeDocument::from_prepared_diff(prepared);
+    let hunks = document.diff_metadata().unwrap().clone();
+    document.replace_prepared_decorations(replacement.clone()).unwrap();
+    assert_eq!(&*document.decorations(), &replacement);
+    assert_eq!(document.diff_metadata(), Some(&hunks));
+    assert_eq!(document.version(), 0);
+}
+
+#[test]
+fn diff_blank_line_backgrounds_record_full_clipped_code_width() {
+    let prepared = CodeDocument::prepare_diff(&[
+        diff_row(DiffRowKind::Removed, Some(0), None, 1),
+        diff_row(DiffRowKind::Added, None, Some(0), 1),
+        diff_row(DiffRowKind::Added, None, Some(1), 1),
+    ], "\n", "\n\n").unwrap();
+    let mut session = attach_diff(prepared);
+    let (mut cx, mut editor) = editor();
+    editor.show_gutter = false;
+    editor.word_wrap = false;
+    record_editor(&mut cx, &mut editor, &mut session);
+    for (vars, row) in [(&editor.draw_diff_removed.draw_vars, 0), (&editor.draw_diff_added.draw_vars, 2)] {
+        let rect = editor.diff_row_rect(&session, row).unwrap();
+        let mut size = [0.0; 2];
+        let mut position = [0.0; 2];
+        assert!(vars.get_instance_on_area(&cx, live_id!(rect_size), &mut size));
+        assert!(vars.get_instance_on_area(&cx, live_id!(rect_pos), &mut position));
+        let mut color = [0.0; 4];
+        assert!(vars.get_instance_on_area(&cx, live_id!(color), &mut color));
+        assert!((color[3] - 0.14).abs() < 0.001);
+        assert_eq!(size, [rect.size.x as f32, rect.size.y as f32]);
+        assert_eq!(position, [rect.pos.x as f32, rect.pos.y as f32]);
+        assert_eq!(size[0], (480.0 - editor.pad_left_top.x) as f32);
+        assert!(size[1] > 0.0);
+    }
+    assert!(editor.draw_cursor.draw_vars.area().is_valid(&cx));
+    let mut blink = [-1.0];
+    assert!(editor.draw_cursor.draw_vars.get_instance_on_area(&cx, live_id!(blink), &mut blink));
+    assert_eq!(blink, [0.0]);
+    assert_eq!(editor.blink_timer.0, 0);
+    editor.viewport_rect.pos.x -= 80.0;
+    let rect = editor.diff_row_rect(&session, 0).unwrap();
+    assert_eq!(rect.pos.x, editor.unscrolled_rect.pos.x + editor.pad_left_top.x);
+    assert_eq!(rect.size.x, 480.0 - editor.pad_left_top.x);
+    editor.show_gutter = true;
+    record_editor(&mut cx, &mut editor, &mut session);
+    assert_eq!(editor.gutter_chars, 8);
+    assert!(editor.draw_diff_changed.draw_vars.area().is_valid(&cx));
+    let diff_width = editor.metrics(&session).gutter_width;
+    session.document().set_gutter_mode(GutterMode::Plain);
+    assert!(editor.metrics(&session).gutter_width < diff_width);
+    assert!(session.document().is_read_only());
+}
+
+#[test]
+fn diff_document_and_session_mutations_are_noops_but_removed_row_copy_works() {
+    let prepared = CodeDocument::prepare_diff(&[
+        diff_row(DiffRowKind::Removed, Some(0), None, 1),
+        diff_row(DiffRowKind::Added, None, Some(0), 1),
+    ], "removed", "target").unwrap();
+    let mut session = attach_diff(prepared);
+    let document = session.document().clone();
+    assert_eq!(document.ensure_editable(), Err(DocumentMutationError::ReadOnlyDiff));
+    session.set_selection(pos(0, 0), Affinity::After, SelectionMode::Simple, NewGroup::No);
+    session.move_to(pos(0, 7), Affinity::After, NewGroup::No);
+    assert_eq!(session.copy(), "removed");
+    let selection = session.selections().to_vec();
+    let digest = document.digest();
+    let tokens = document.layout().tokens.clone();
+    let decorations = document.decorations().to_vec();
+    session.insert("(".into());
+    session.paste("paste".into());
+    session.paste_grouped("paste".into(), 42);
+    session.enter();
+    session.delete();
+    session.backspace();
+    session.indent();
+    session.outdent();
+    assert!(!session.undo());
+    assert!(!session.redo());
+    document.replace("replacement".into());
+    edit(&document, Change::Insert(pos(0, 0), "direct".into()));
+    document.edit_linewise(SessionId::default(), EditKind::Other, &SelectionSet::new(), |_, _| panic!("diff must refuse before invoking editor"));
+    document.force_new_group();
+    assert!(!document.undo(SessionId::default(), &SelectionSet::new()));
+    assert!(!document.redo(SessionId::default(), &SelectionSet::new()));
+    session.handle_changes();
+    assert_eq!(&*session.selections(), &selection);
+    assert_eq!(document.as_text().to_string(), "removed\ntarget");
+    assert_eq!(document.version(), 0);
+    assert_eq!(document.digest(), digest);
+    assert_eq!(document.layout().tokens, tokens);
+    assert_eq!(&*document.decorations(), &decorations);
+}
+
+#[test]
+fn diff_admission_twenty_thousand_rows_off_thread() {
+    use std::time::Instant;
+    fn assert_send<T: Send>() {}
+    assert_send::<PreparedDiffDocument>();
+    let (prepared, view, prepare_ms) = std::thread::spawn(|| {
+        let old = "let old = 1;\n".repeat(10_000);
+        let new = "let new = 2;\n".repeat(10_000);
+        let rows = (0..10_000).flat_map(|line| [
+            diff_row(DiffRowKind::Removed, Some(line), None, line),
+            diff_row(DiffRowKind::Added, None, Some(line), line),
+        ]).collect::<Vec<_>>();
+        let start = Instant::now();
+        let prepared = CodeDocument::prepare_diff(&rows, &old, &new).unwrap();
+        let view = CodeSession::prepare_view(prepared.document(), None);
+        let prepare_ms = start.elapsed().as_secs_f64() * 1000.0;
+        (prepared, view, prepare_ms)
+    }).join().unwrap();
+    let row_count = prepared.row_count();
+    assert_eq!(row_count, 20_000);
+    let text_ptr = prepared.as_text().as_lines().as_ptr();
+    let rows_ptr = prepared.metadata().rows.as_ptr();
+    let decorations_ptr = prepared.decorations().as_ptr();
+    let start = Instant::now();
+    let session = CodeSession::from_prepared(CodeDocument::from_prepared_diff(prepared), view).unwrap();
+    let attach_ms = start.elapsed().as_secs_f64() * 1000.0;
+    println!("record=diff_admission rows={row_count} prepare_ms={prepare_ms:.6} attach_ms={attach_ms:.6}");
+    assert!(attach_ms <= 1.0, "diff attachment exceeded 1 ms: {attach_ms}");
+    assert_eq!(session.document().as_text().as_lines().as_ptr(), text_ptr);
+    assert_eq!(session.document().diff_metadata().unwrap().rows.as_ptr(), rows_ptr);
+    assert_eq!(session.document().decorations().as_ptr(), decorations_ptr);
+    assert_eq!(session.layout().height(), row_count as f64);
 }

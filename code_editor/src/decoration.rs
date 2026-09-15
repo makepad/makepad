@@ -7,6 +7,11 @@ use {
 pub enum DecorationType {
     Error,
     Warning,
+    /// Full display rows, with a half-open range ending at column zero.
+    DiffAdded,
+    DiffRemoved,
+    /// Gutter-only change mark; never an underline or a row tint.
+    DiffChangedGutter,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -73,6 +78,23 @@ impl DecorationSet {
         &self.decorations
     }
 
+    /// Replace the whole set with sorted, nonoverlapping worker-prepared runs.
+    /// Validation is linear and belongs on the worker, before document attachment.
+    /// Invalid input leaves the existing set intact. Include any diagnostics that
+    /// should survive in the replacement; `add_decoration` keeps its overlap policy.
+    pub fn replace_prepared(
+        &mut self,
+        decorations: Vec<Decoration>,
+    ) -> Result<(), PreparedDecorationsError> {
+        if decorations.windows(2).any(|pair| {
+            pair[0].start() > pair[1].start() || pair[0].overlaps_with(pair[1])
+        }) {
+            return Err(PreparedDecorationsError::OverlappingOrUnsorted);
+        }
+        self.decorations = decorations;
+        Ok(())
+    }
+
     pub fn add_decoration(&mut self, decoration: Decoration) {
         let index = match self
             .decorations
@@ -118,6 +140,11 @@ impl DecorationSet {
             self.decorations.remove(next_index);
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PreparedDecorationsError {
+    OverlappingOrUnsorted,
 }
 
 impl Default for DecorationSet {
