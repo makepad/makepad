@@ -142,6 +142,12 @@ impl Cx {
                 .kind
                 .sub_list()
             {
+                // A retained sub-list its owner dropped between the parent's
+                // last record and this paint: the slot may already hold
+                // another widget's list. Nothing to draw here.
+                if self.draw_lists.is_id_freed(sub_list_id) {
+                    continue;
+                }
                 let child_resets_zbias = self.draw_lists[sub_list_id].reset_zbias;
                 let mut own_zbias = 0.0f32;
                 let child_zbias = if child_resets_zbias {
@@ -152,7 +158,16 @@ impl Cx {
                 // An overlay list carries a depth floor: this is what makes it
                 // composite above body content that uses `draw_depth`.
                 self.draw_lists[sub_list_id].raise_zbias_to_floor(child_zbias);
-                self.render_view(pass_id, sub_list_id, child_zbias, zbias_step, d3d11_cx);
+                // A retained list is one unit of paint order: its calls all
+                // take the counter at entry, it advances by the layers the
+                // list reported. See `CxDrawList::zbias_hold`.
+                if let Some(steps) = self.draw_lists[sub_list_id].zbias_hold {
+                    let mut held = *child_zbias;
+                    self.render_view(pass_id, sub_list_id, &mut held, 0.0, d3d11_cx);
+                    *child_zbias += steps as f32 * zbias_step;
+                } else {
+                    self.render_view(pass_id, sub_list_id, child_zbias, zbias_step, d3d11_cx);
+                }
             } else {
                 let draw_list = &mut self.draw_lists[draw_list_id];
                 let draw_item = &mut draw_list.draw_items[draw_item_id];
@@ -533,6 +548,8 @@ impl Cx {
             );
         }
         self.passes[pass_id].paint_dirty = false;
+        // the bake transaction's paint receipt (whole draws: ranges ignored)
+        self.passes[pass_id].painted_serial = self.repaint_id;
 
         let uniforms_gen = self.next_uniform_gen();
         self.passes[pass_id].set_dpi_factor(dpi_factor, uniforms_gen);
@@ -757,7 +774,13 @@ impl Cx {
         // compositor kept it. Assuming it spent when it was not only costs one
         // paced wait; assuming it held when it was spent would remove the pacing
         // for this window entirely, so err on the side of waiting again.
-        try_with_win32_app(|app| app.spend_beat_credit(window_id));
+        try_with_win32_app(|app| {
+            app.spend_beat_credit(window_id);
+            if presented {
+                let now = app.time_now();
+                app.frame_trace.present(now);
+            }
+        });
         // Reveal the window only once a frame reached the compositor; showing it
         // earlier would flash an uncomposited black window.
         if presented && d3d11_window.first_draw {
@@ -1967,6 +1990,7 @@ impl D3d11Window {
                 // as not-presented and let the occlusion probe back us off, the same
                 // way the macOS backend handles `occlusionState`.
                 self.occluded_since.get_or_insert_with(std::time::Instant::now);
+                try_with_win32_app(|app| app.frame_trace.present_occluded());
                 return false;
             }
             if hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET {
@@ -2299,6 +2323,14 @@ pub struct CxOsDrawCall {
     pub draw_call_uniforms_gen: Option<u64>,
     #[cfg(test)]
     pub user_uniforms_gen: Option<u64>,
+}
+
+impl CxOsDrawCall {
+    /// This backend keeps no per-publication backing lease on a draw item
+    /// (contract §10): nothing to release when the item's lease clears.
+    pub(crate) fn take_backing(&mut self) -> Option<u64> {
+        None
+    }
 }
 
 #[derive(Default, Clone)]

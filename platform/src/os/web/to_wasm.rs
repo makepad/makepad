@@ -585,8 +585,12 @@ pub struct ToWasmStorageResult {
 #[derive(ToWasm)]
 pub struct ToWasmRenderTextureCapture {
     pub texture_id: usize,
+    pub ticket_lo: u32,
+    pub ticket_hi: u32,
     pub width: usize,
     pub height: usize,
+    pub offset: usize,
+    pub complete: bool,
     pub data: WasmDataU8,
     pub error: String,
 }

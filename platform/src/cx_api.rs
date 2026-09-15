@@ -44,6 +44,8 @@ pub enum OpenUrlInPlace {
 pub enum CxThreadPriority {
     #[default]
     Normal,
+    UserInteractive,
+    UserInitiated,
     Utility,
     Background,
     Idle,
@@ -730,12 +732,106 @@ impl Cx {
         self.textures.0.live_count()
     }
 
-    pub fn set_thread_priority(priority: CxThreadPriority) {
-        #[cfg(target_os = "android")]
-        crate::os::linux::android::android::set_current_thread_priority(priority);
-
-        #[cfg(not(target_os = "android"))]
-        let _ = priority;
+    /// Apply to the calling thread and read the OS setting back. `Applied`
+    /// confirms the requested class/nice value, not a scheduling guarantee.
+    pub fn set_thread_priority(priority: CxThreadPriority) -> crate::thread::PriorityStatus {
+        use crate::thread::PriorityStatus;
+        #[cfg(target_vendor = "apple")]
+        {
+            unsafe extern "C" {
+                fn pthread_set_qos_class_self_np(class: u32, relative: i32) -> i32;
+                fn pthread_self() -> *mut std::ffi::c_void;
+                fn pthread_get_qos_class_np(
+                    thread: *mut std::ffi::c_void,
+                    class: *mut u32,
+                    relative: *mut i32,
+                ) -> i32;
+            }
+            let (class, relative) = match priority {
+                CxThreadPriority::UserInteractive => (0x21, 0),
+                CxThreadPriority::UserInitiated => (0x19, 0),
+                CxThreadPriority::Normal => (0x15, 0),
+                CxThreadPriority::Utility => (0x11, 0),
+                CxThreadPriority::Background => (0x09, 0),
+                CxThreadPriority::Idle => (0x09, -15),
+            };
+            let mut actual_class = 0;
+            let mut actual_relative = 0;
+            let applied = unsafe {
+                pthread_set_qos_class_self_np(class, relative) == 0
+                    && pthread_get_qos_class_np(
+                        pthread_self(),
+                        &mut actual_class,
+                        &mut actual_relative,
+                    ) == 0
+                    && actual_class == class
+                    && actual_relative == relative
+            };
+            if applied {
+                PriorityStatus::Applied
+            } else {
+                PriorityStatus::Failed
+            }
+        }
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        {
+            unsafe extern "C" {
+                fn setpriority(which: i32, who: u32, priority: i32) -> i32;
+                fn getpriority(which: i32, who: u32) -> i32;
+            }
+            // Linux PRIO_PROCESS, who=0 addresses the current task/thread,
+            // not the whole process. Keep SCHED_OTHER; no realtime privilege.
+            // Interactive uses nice 0 (unprivileged), light 1 and utility 5.
+            let nice = match priority {
+                CxThreadPriority::Normal | CxThreadPriority::UserInteractive => 0,
+                CxThreadPriority::UserInitiated => 1,
+                CxThreadPriority::Utility => 5,
+                CxThreadPriority::Background => 10,
+                CxThreadPriority::Idle => 15,
+            };
+            let applied = unsafe { setpriority(0, 0, nice) == 0 && getpriority(0, 0) == nice };
+            if applied {
+                PriorityStatus::Applied
+            } else {
+                PriorityStatus::Failed
+            }
+        }
+        #[cfg(target_os = "windows")]
+        {
+            #[link(name = "kernel32")]
+            unsafe extern "system" {
+                fn GetCurrentThread() -> *mut std::ffi::c_void;
+                fn SetThreadPriority(thread: *mut std::ffi::c_void, priority: i32) -> i32;
+                fn GetThreadPriority(thread: *mut std::ffi::c_void) -> i32;
+            }
+            let value = match priority {
+                CxThreadPriority::UserInteractive => 2, // HIGHEST, not realtime
+                CxThreadPriority::UserInitiated => 1,   // ABOVE_NORMAL
+                CxThreadPriority::Normal => 0,
+                CxThreadPriority::Utility => -1,
+                CxThreadPriority::Background => -2,
+                CxThreadPriority::Idle => -15,
+            };
+            let applied = unsafe {
+                let thread = GetCurrentThread();
+                SetThreadPriority(thread, value) != 0 && GetThreadPriority(thread) == value
+            };
+            if applied {
+                PriorityStatus::Applied
+            } else {
+                PriorityStatus::Failed
+            }
+        }
+        #[cfg(not(any(
+            target_vendor = "apple",
+            target_os = "linux",
+            target_os = "android",
+            target_os = "windows"
+        )))]
+        {
+            let _ = priority;
+            PriorityStatus::BestEffortUnsupported
+        }
     }
 
     pub fn get_ref(&self) -> CxRef {
@@ -1500,6 +1596,27 @@ impl Cx {
         }
     }
 
+    /// What one texel of a BGRA8 render target costs on this backend: the
+    /// GPU backends allocate 4 bytes, the headless raster keeps float colour
+    /// (16 bytes). Caches that budget render targets charge this.
+    pub fn render_target_bytes_per_texel(&self) -> usize {
+        if cfg!(headless) { 16 } else { 4 }
+    }
+
+    /// What one texel of a `DepthD32` attachment costs (4 bytes everywhere).
+    pub fn depth_target_bytes_per_texel(&self) -> usize {
+        4
+    }
+
+    /// Whether a pass's depth attachment lives in its colour target's
+    /// storage: the headless raster keeps a depth plane per framebuffer, so
+    /// a retained render target painted with depth holds it for good; the
+    /// GPU backends keep one `TextureSize::Auto` depth texture per handle,
+    /// sized to the largest pass it served.
+    pub fn depth_target_rides_with_render_target(&self) -> bool {
+        cfg!(headless)
+    }
+
     pub fn get_pass_name(&self, draw_pass_id: DrawPassId) -> &str {
         &self.passes[draw_pass_id].debug_name
     }
@@ -1507,6 +1624,44 @@ impl Cx {
     pub fn repaint_pass(&mut self, draw_pass_id: DrawPassId) {
         let cxpass = &mut self.passes[draw_pass_id];
         cxpass.paint_dirty = true;
+        cxpass.repaint_requested = true;
+    }
+
+    /// Parent `child` under `parent` for painting order on behalf of
+    /// `attached_by`: the draw list being recorded, whose draw calls consume
+    /// the child's output. That list is remembered with its current redraw
+    /// id; when it is recorded again without calling this, the child is
+    /// orphaned and no longer painted. `None` (no list open) parents without
+    /// a record, like `DrawPass::set_pass_parent`.
+    pub fn attach_child_pass(
+        &mut self,
+        child: DrawPassId,
+        parent: DrawPassId,
+        attached_by: Option<DrawListId>,
+    ) {
+        let attached_by =
+            attached_by.map(|list_id| (list_id, self.draw_lists[list_id].redraw_id));
+        let cxpass = &mut self.passes[child];
+        cxpass.parent = CxDrawPassParent::DrawPass(parent);
+        cxpass.attached_by = attached_by;
+    }
+
+    /// True when the draw list that attached `draw_pass_id` has been recorded
+    /// again since without re-attaching it, or was freed: nothing samples the
+    /// pass any more. Its own draw list is frozen at the frame that last began
+    /// it, and the geometries and textures those draw calls name may since
+    /// have been freed and their slots reused — painting it would draw
+    /// whatever now sits in them (the gauss scene pass after the window stopped
+    /// capturing was re-encoded every pan frame with the map's evicted tile
+    /// geometries under other tiles' meshes: tens of millions of triangles into
+    /// a texture nobody read).
+    pub fn pass_attachment_is_stale(&self, draw_pass_id: DrawPassId) -> bool {
+        let Some((list_id, redraw_id)) = self.passes[draw_pass_id].attached_by else {
+            return false;
+        };
+        // A dropped list (its widget is gone) keeps its slot and generation
+        // until reuse; that orphans the pass just the same.
+        self.draw_lists.is_id_freed(list_id) || self.draw_lists[list_id].redraw_id != redraw_id
     }
 
     pub fn repaint_pass_and_child_passes(&mut self, draw_pass_id: DrawPassId) {

@@ -104,6 +104,7 @@ impl X11Cx {
         event: XlibEvent,
         opengl_windows: &mut Vec<OpenglWindow>,
     ) -> EventFlow {
+        let _phase = crate::thread::ui_phase(crate::thread::UiPhase::NativeEvent);
         if let EventFlow::Exit = self.handle_platform_ops(opengl_windows, xlib_app) {
             let mut cx = self.cx.borrow_mut();
             cx.call_event_handler(&Event::Shutdown);

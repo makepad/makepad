@@ -189,6 +189,7 @@ impl WaylandCx {
     }
 
     fn state_event_callback(&mut self, state: &mut WaylandState, event: XlibEvent) -> EventFlow {
+        let _phase = crate::thread::ui_phase(crate::thread::UiPhase::NativeEvent);
         state.pump_pending_clipboard_read();
         if let Some(input) = state.take_pending_paste_text_input() {
             let mut cx = self.cx.borrow_mut();
@@ -600,6 +601,7 @@ impl WaylandCx {
     }
 
     fn app_event_callback(&mut self, wayland_app: &mut WaylandApp, event: XlibEvent) -> EventFlow {
+        let _phase = crate::thread::ui_phase(crate::thread::UiPhase::NativeEvent);
         let event_flow = self.state_event_callback(&mut wayland_app.state, event);
         if let EventFlow::Exit = event_flow {
             wayland_app.terminate_event_loop();

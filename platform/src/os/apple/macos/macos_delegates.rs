@@ -683,6 +683,10 @@ pub fn define_cocoa_view_class() -> *const Class {
     }
 
     extern "C" fn mouse_moved(this: &Object, _sel: Sel, event: ObjcId) {
+        // no button is held during `mouseMoved:` (a held button moves as
+        // `mouseDragged:`): a button the window still counts down lost its up
+        let cw = get_cocoa_window(this);
+        cw.release_lost_buttons(get_event_key_modifier(event));
         mouse_motion(this, event);
     }
 

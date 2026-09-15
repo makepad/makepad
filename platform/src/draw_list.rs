@@ -221,6 +221,9 @@ impl Cx {
             };
             let draw_item = &draw_list.draw_items[draw_item_id];
             if let Some(sub_list_id) = draw_item.kind.sub_list() {
+                if self.draw_lists.is_id_freed(sub_list_id) {
+                    continue;
+                }
                 self.collect_gpu_metrics_for_draw_list(
                     sub_list_id,
                     draw_pass_id,
@@ -361,6 +364,46 @@ impl CxDrawListPool {
     }
 }
 
+impl CxDrawListPool {
+    /// Clear every retained draw call's binding of the given textures and
+    /// uniform buffers, wherever it lives. A hidden retained slot keeps its
+    /// bindings until it activates again, so a resource its owner released
+    /// can only be freed once those slots let go. No pass is marked for
+    /// repaint: a call binding a released resource draws nothing until its
+    /// owner rebinds it. Returns the number of bindings cleared.
+    pub fn release_bindings(
+        &mut self,
+        textures: &[crate::texture::TextureId],
+        uniform_buffers: &[crate::uniform_buffer::UniformBufferId],
+    ) -> usize {
+        let mut cleared = 0;
+        for list in 0..self.0.pool.len() {
+            let generation = self.0.pool[list].generation;
+            if !self.0.is_live_generation(list, generation) {
+                continue;
+            }
+            let items = &mut self.0.pool[list].item.draw_items;
+            for item in items.buffer.iter_mut() {
+                let Some(call) = item.kind.draw_call_mut() else {
+                    continue;
+                };
+                for slot in call.texture_slots.iter_mut() {
+                    if slot.as_ref().is_some_and(|t| textures.contains(&t.texture_id())) {
+                        *slot = None;
+                        cleared += 1;
+                    }
+                }
+                for slot in call.uniform_buffer_slots.iter_mut() {
+                    if slot.as_ref().is_some_and(|u| uniform_buffers.contains(&u.uniform_buffer_id())) {
+                        *slot = None;
+                        cleared += 1;
+                    }
+                }
+            }
+        }
+        cleared
+    }
+}
 impl std::ops::Index<DrawListId> for CxDrawListPool {
     type Output = CxDrawList;
     fn index(&self, index: DrawListId) -> &Self::Output {
@@ -678,6 +721,24 @@ pub struct CxDrawList {
 
     pub draw_list_uniforms: DrawListUniforms,
     pub draw_list_has_clip: bool,
+
+    /// Paint order for a RETAINED sub-list. `None` — every ordinary list —
+    /// lets the backend walk hand each draw call its own step of the
+    /// running paint-order counter, as always. `Some(steps)` makes the list
+    /// one unit of that counter: every draw call in it resolves its zbias
+    /// to the counter value at entry, the list's internal layering is
+    /// authored by its owner in the instances' `draw_depth` (in units of
+    /// `zbias_step`), and the counter advances by `steps` on exit.
+    ///
+    /// A list recorded once and re-attached on later frames cannot know
+    /// how many calls precede it, so its baked depths must be relative to
+    /// its entry; the map's tile lists bake the same layering the
+    /// immediate path produced (one layer per stream, faces with their
+    /// casing) and report the layers used. Every backend's `render_view`
+    /// honours this in exactly one place — the sub-list branch, beside
+    /// `reset_zbias` — by walking the child with a zero step and a copy of
+    /// the counter.
+    pub zbias_hold: Option<u32>,
 
     pub os: CxOsDrawList,
     pub rect_areas: Vec<CxRectArea>,
@@ -1095,7 +1156,7 @@ impl Cx {
         let mut out = std::collections::HashSet::new();
         let mut stack: Vec<DrawListId> = roots.into_iter().collect();
         while let Some(list_id) = stack.pop() {
-            if !out.insert(list_id) {
+            if self.draw_lists.is_id_freed(list_id) || !out.insert(list_id) {
                 continue;
             }
             let draw_list = &self.draw_lists[list_id];
@@ -1132,5 +1193,42 @@ mod tests {
         assert!(!merges(&none, &texture_t));
         assert!(!merges(&texture_t, &none));
         assert!(!merges(&texture_t, &texture_u));
+    }
+}
+
+#[cfg(test)]
+mod retained_sub_list_tests {
+    use super::*;
+
+    /// The retained-sub-list contract: a parent list may keep naming a child
+    /// list that its owner dropped (a map tile evicted at event time, a hidden
+    /// page). The dropped id stays dead — before AND after the pool hands its
+    /// slot to a new list, whose id differs by generation — and every tree
+    /// walk skips it rather than landing on whatever list now holds the slot.
+    #[test]
+    fn a_dropped_sub_list_stays_dead_across_slot_reuse() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let parent = DrawList::new(&mut cx);
+        let child = DrawList::new(&mut cx);
+        let child_id = child.id();
+        cx.draw_lists[parent.id()].append_sub_list(1, child_id);
+        assert!(!cx.draw_lists.is_id_freed(child_id));
+        assert!(cx.attached_draw_lists_from([parent.id()]).contains(&child_id));
+
+        drop(child);
+        assert!(cx.draw_lists.is_id_freed(child_id));
+        assert!(cx.draw_lists.checked_index(child_id).is_some(), "slot kept until reuse");
+        assert!(!cx.attached_draw_lists_from([parent.id()]).contains(&child_id));
+
+        let reused = DrawList::new(&mut cx);
+        assert_eq!(reused.id().index(), child_id.index(), "the freed slot is reused");
+        assert_ne!(reused.id().generation(), child_id.generation());
+        assert!(cx.draw_lists.is_id_freed(child_id));
+        assert!(cx.draw_lists.checked_index(child_id).is_none());
+        assert!(!cx.draw_lists.is_id_freed(reused.id()));
+        let attached = cx.attached_draw_lists_from([parent.id()]);
+        assert!(attached.contains(&parent.id()));
+        assert!(!attached.contains(&child_id));
+        assert!(!attached.contains(&reused.id()), "the stale entry must not reach the new list");
     }
 }
