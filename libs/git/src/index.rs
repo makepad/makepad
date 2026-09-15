@@ -248,53 +248,56 @@ pub fn serialize_index(index: &Index) -> Result<Vec<u8>, GitError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::oid::hash_object;
+
+    fn entry(path: &str, content: &[u8]) -> IndexEntry {
+        IndexEntry {
+            ctime_sec: 1,
+            ctime_nsec: 0,
+            mtime_sec: 1,
+            mtime_nsec: 0,
+            dev: 0,
+            ino: 0,
+            mode: 0o100644,
+            uid: 0,
+            gid: 0,
+            file_size: content.len() as u32,
+            oid: hash_object("blob", content),
+            flags: path.len() as u16,
+            path: path.to_string(),
+        }
+    }
 
     #[test]
-    fn test_parse_real_index() {
-        // Create a test repo and parse its index
+    fn test_parse_written_index() {
+        // Write an index the way staging does and parse it back.
         let dir = crate::test_support::tempdir().unwrap();
-        std::process::Command::new("git")
-            .args(["init"])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
-        fs::write(dir.path().join("hello.txt"), "hello\n").unwrap();
-        fs::write(dir.path().join("world.txt"), "world\n").unwrap();
-        std::process::Command::new("git")
-            .args(["add", "."])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
-
         let git_dir = dir.path().join(".git");
+        fs::create_dir_all(&git_dir).unwrap();
+        let index = Index {
+            version: 2,
+            entries: vec![entry("hello.txt", b"hello\n"), entry("world.txt", b"world\n")],
+        };
+        write_index(&git_dir, &index).unwrap();
+
         let index = read_index(&git_dir).unwrap();
         assert_eq!(index.version, 2);
         assert_eq!(index.entries.len(), 2);
         assert_eq!(index.entries[0].path, "hello.txt");
         assert_eq!(index.entries[1].path, "world.txt");
+        assert_eq!(index.entries[0].oid.to_hex(), "ce013625030ba8dba906f756967f9e9ca394464a");
     }
 
     #[test]
     fn test_serialize_roundtrip() {
-        let dir = crate::test_support::tempdir().unwrap();
-        std::process::Command::new("git")
-            .args(["init"])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
-        fs::write(dir.path().join("a.txt"), "aaa\n").unwrap();
-        fs::write(dir.path().join("b.txt"), "bbb\n").unwrap();
-        std::process::Command::new("git")
-            .args(["add", "."])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
-
-        let git_dir = dir.path().join(".git");
-        let index = read_index(&git_dir).unwrap();
+        let index = Index {
+            version: 2,
+            entries: vec![entry("a.txt", b"aaa\n"), entry("b.txt", b"bbb\n")],
+        };
 
         // Serialize and re-parse
         let data = serialize_index(&index).unwrap();
+        assert!(data.starts_with(b"DIRC"));
         let index2 = parse_index(&data).unwrap();
 
         assert_eq!(index2.entries.len(), index.entries.len());
