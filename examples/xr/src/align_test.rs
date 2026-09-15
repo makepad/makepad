@@ -179,6 +179,9 @@ impl AlignTest {
         size: Vec3f,
         color: Vec4f,
     ) {
+        // Remote markers are translucent (alpha 0.34): select blending per
+        // draw the way the environment boxes do; local markers stay opaque.
+        self.draw_cube.draw_vars.options.alpha_blend = color.w < 0.999;
         self.draw_cube.transform = Mat4f::mul(world, &Pose::new(Quat::default(), center).to_mat4());
         self.draw_cube.cube_pos = vec3f(0.0, 0.0, 0.0);
         self.draw_cube.cube_size = size;

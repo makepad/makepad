@@ -1,0 +1,13 @@
+# Regenerates libs/windows/windows-rs/src/Windows/mod.rs from filter.txt.
+# Standalone on purpose: windows-bindgen and its metadata are build tooling,
+# not something any app should link.
+[package]
+name = "makepad-windows-bindgen"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+windows-bindgen = "=0.62.1"

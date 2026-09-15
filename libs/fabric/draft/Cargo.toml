@@ -1,0 +1,9 @@
+[package]
+name = "makepad-fabric-draft"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Parametric sewing-pattern drafting from body measurements, with SVG and tiled-PDF output"
+
+[dependencies]
+makepad-fabric-measure = { path = "../measure" }
