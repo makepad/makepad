@@ -2805,6 +2805,15 @@ impl WidgetTreeState {
 
 pub trait CxWidgetExt {
     fn widget_tree(&self) -> &WidgetTree;
+    /// Inspect current branches eligible for interaction, including window focus.
+    /// Call outside widget dispatch/draw, while the UI root is unborrowed;
+    /// this does not use cached geometry or tree indices.
+    /// Repeated queries for the same widget reuse one weak path, checking current
+    /// eligibility and child membership at each ancestor. A new or changed path
+    /// falls back to a live search.
+    /// Warm queries enumerate only children along that path; worst-case searches
+    /// remain linear in the active hierarchy.
+    fn widget_is_active(&self, uid: WidgetUid) -> bool;
     fn widget_tree_mark_dirty(&mut self, uid: WidgetUid);
     fn widget_tree_insert_child(&mut self, parent_uid: WidgetUid, name: LiveId, widget: WidgetRef);
     fn widget_tree_insert_child_deep(
@@ -2841,9 +2850,22 @@ pub struct FlatTreeRow {
     pub has_children: bool,
 }
 
+#[derive(Default)]
+struct UiRoot {
+    widget: WidgetWeakRef,
+    // Cache a route, never visibility: every query validates the live path.
+    active_path: RefCell<Vec<WidgetWeakRef>>,
+}
+
+fn cancel_scope_resolver(cx: &Cx, candidate: &dyn Fn(u64) -> Option<u64>) -> Option<u64> {
+    cx.get_global_ref::<UiRoot>()?.widget.upgrade()?.resolve_cancel_scope(candidate)
+}
+
 pub fn set_ui_root(cx: &mut Cx, ui: &WidgetRef) {
     let state = get_or_init_state(cx);
     state.tree.set_root_widget(ui.clone());
+    *cx.global::<UiRoot>() = UiRoot { widget: ui.downgrade(), ..Default::default() };
+    cx.cancel_scope_resolver = Some(cancel_scope_resolver);
     cx.widget_tree_dump_callback = Some(compact_widget_tree_dump_callback);
     cx.widget_query_callback = Some(widget_query_callback);
     cx.widget_snapshot_callback = Some(widget_snapshot_callback);
@@ -2853,6 +2875,19 @@ pub fn set_ui_root(cx: &mut Cx, ui: &WidgetRef) {
 }
 
 impl CxWidgetExt for Cx {
+    fn widget_is_active(&self, uid: WidgetUid) -> bool {
+        let Some(ui) = self.get_global_ref::<UiRoot>() else { return false; };
+        let Some(root) = ui.widget.upgrade() else { return false; };
+        let mut uncached = Vec::new();
+        let mut cached = ui.active_path.try_borrow_mut().ok();
+        let path = cached.as_deref_mut().unwrap_or(&mut uncached);
+        if root.active_path_is_valid(uid, path) {
+            return true;
+        }
+        path.clear();
+        root.find_active_widget(uid, path)
+    }
+
     fn widget_tree(&self) -> &WidgetTree {
         if self.widget_tree_ptr.is_null() {
             static EMPTY: std::sync::OnceLock<WidgetTree> = std::sync::OnceLock::new();
@@ -2884,6 +2919,10 @@ impl CxWidgetExt for Cx {
 }
 
 impl<'a, 'b> CxWidgetExt for Cx2d<'a, 'b> {
+    fn widget_is_active(&self, uid: WidgetUid) -> bool {
+        { let cx: &Cx = self; cx.widget_is_active(uid) }
+    }
+
     fn widget_tree(&self) -> &WidgetTree {
         let cx: &Cx = self;
         if cx.widget_tree_ptr.is_null() {
@@ -2919,6 +2958,10 @@ impl<'a, 'b> CxWidgetExt for Cx2d<'a, 'b> {
 }
 
 impl<'a, 'b> CxWidgetExt for Cx3d<'a, 'b> {
+    fn widget_is_active(&self, uid: WidgetUid) -> bool {
+        { let cx: &Cx = self; cx.widget_is_active(uid) }
+    }
+
     fn widget_tree(&self) -> &WidgetTree {
         let cx: &Cx = self;
         if cx.widget_tree_ptr.is_null() {

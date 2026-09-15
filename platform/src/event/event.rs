@@ -541,7 +541,9 @@ impl Event {
             | Self::MouseMove(_)
             | Self::TweakRay(_)
             | Self::TouchUpdate(_)
-            | Self::Scroll(_) => true,
+            | Self::Scroll(_)
+            | Self::BackPressed { .. } => true,
+            Self::KeyDown(key) | Self::KeyUp(key) if key.key_code == KeyCode::Escape => true,
             _ => false,
         }
     }

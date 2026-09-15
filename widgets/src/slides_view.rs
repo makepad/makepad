@@ -193,6 +193,17 @@ impl WidgetNode for SlidesView {
         }
     }
 
+    fn cancel_children_impl(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
+        let first = self.current_slide.floor() as usize;
+        let count = if self.current_slide.fract() > 0.0 { 2 } else { 1 };
+        for id in self.draw_order.iter().skip(first).take(count) {
+            if let Some(slide) = self.slides.get(id) {
+                visit(*id, slide.clone());
+            }
+        }
+        true
+    }
+
     fn redraw(&mut self, cx: &mut Cx) {
         self.area.redraw(cx)
     }

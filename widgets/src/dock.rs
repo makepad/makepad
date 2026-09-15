@@ -363,6 +363,44 @@ impl WidgetNode for Dock {
         }
     }
 
+    fn cancel_children_impl(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
+        fn walk(dock: &Dock, id: LiveId, remaining: &mut usize, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
+            // Malformed restored layouts can contain cycles.
+            if *remaining == 0 {
+                return;
+            }
+            *remaining -= 1;
+            match dock.dock_items.get(&id) {
+                Some(DockItem::Splitter { a, b, .. }) => {
+                    walk(dock, *a, remaining, visit);
+                    walk(dock, *b, remaining, visit);
+                }
+                Some(DockItem::Tabs { tabs, selected, hide_tab_bar, .. }) => {
+                    if !hide_tab_bar {
+                        if let Some(tab_bar) = dock.tab_bars.get(&id) {
+                            for id in tabs {
+                                if let Some((name, tab)) = tab_bar.tab_bar.tab_ref(*id) {
+                                    visit(name, tab);
+                                }
+                            }
+                        }
+                    }
+                    if let Some(selected) = tabs.get(*selected) {
+                        walk(dock, *selected, remaining, visit);
+                    }
+                }
+                Some(DockItem::Tab { .. }) => {
+                    if let Some((_, widget)) = dock.items.get(&id) {
+                        visit(id, widget.clone());
+                    }
+                }
+                None => {}
+            }
+        }
+        walk(self, id!(root), &mut self.dock_items.len(), visit);
+        true
+    }
+
     fn redraw(&mut self, cx: &mut Cx) {
         self.area.redraw(cx);
         // A redraw of the dock is a redraw of everything it shows. Each

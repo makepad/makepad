@@ -769,7 +769,7 @@ impl ComboBox {
         }
         if !self.is_open {
             self.is_open = true;
-            self.cancel_scope = Some(cx.begin_cancel_scope());
+            self.cancel_scope = Some(self.begin_cancel_scope(cx));
             cx.sweep_lock(self.draw_bg.area());
         }
         self.hover_row = None;
@@ -865,7 +865,7 @@ impl ComboBox {
         self.state.set_filter(&self.labels, text, self.selected_item);
         if !self.is_open {
             self.is_open = true;
-            self.cancel_scope = Some(cx.begin_cancel_scope());
+            self.cancel_scope = Some(self.begin_cancel_scope(cx));
             cx.sweep_lock(self.draw_bg.area());
         }
         self.hover_row = None;
@@ -1181,8 +1181,13 @@ impl Widget for ComboBox {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.animator_handle_event(cx, event);
+        if self.is_open && crate::modal::ModalAction::is_dismissal(event) {
+            self.revert(cx);
+            return;
+        }
         if self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s))
-            && event.back_pressed()
+            && (matches!(event, Event::KeyDown(ke) if ke.key_code == KeyCode::Escape)
+                || event.back_pressed())
         {
             self.revert(cx);
             return;

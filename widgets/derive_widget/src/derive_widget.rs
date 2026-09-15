@@ -183,6 +183,11 @@ pub fn derive_widget_node_impl(input: TokenStream) -> TokenStream {
                 .ident(wrap_field)
                 .add(".children(visit)");
             tb.add("   }");
+            tb.add("   fn cancel_children_impl(&self, visit:&mut dyn FnMut(LiveId, WidgetRef))->bool{");
+            tb.add("       self.visible() && self.")
+                .ident(wrap_field)
+                .add(".visit_cancel(visit)");
+            tb.add("   }");
             tb.add("   fn skip_widget_tree_search(&self)->bool{");
             tb.add("       self.")
                 .ident(wrap_field)
@@ -290,6 +295,12 @@ pub fn derive_widget_node_impl(input: TokenStream) -> TokenStream {
                         .add(".children(visit);");
                 }
                 tb.add("    }");
+                tb.add("    fn cancel_children_impl(&self, visit:&mut dyn FnMut(LiveId, WidgetRef))->bool{");
+                tb.add("    if !self.visible() { return false; }");
+                for find_field in &find_fields {
+                    tb.add(&format!("    visit(live_id!({0}), self.{0}.clone());", find_field));
+                }
+                tb.add("    true }");
                 tb.add("    fn find_widgets_from_point(&self, cx:&Cx, point:DVec2, found:&mut dyn FnMut(&WidgetRef)){");
                 for find_field in &find_fields {
                     tb.add("    self.")
@@ -357,6 +368,10 @@ pub fn derive_widget_node_impl(input: TokenStream) -> TokenStream {
                 tb.add("       self.")
                     .ident(deref_field)
                     .add(".children(visit)");
+                tb.add("   }");
+                tb.add("   fn cancel_children_impl(&self, visit:&mut dyn FnMut(LiveId, WidgetRef))->bool{");
+                tb.add("       self.visible() && self.")
+                    .ident(deref_field).add(".visit_cancel(visit)");
                 tb.add("   }");
                 tb.add("   fn skip_widget_tree_search(&self)->bool{");
                 tb.add("       self.")
