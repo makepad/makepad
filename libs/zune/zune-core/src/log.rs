@@ -25,50 +25,86 @@ pub enum Level {
 }
 
 #[doc(hidden)]
+pub const ENABLED: bool = cfg!(feature = "log");
+
+// Format here, where alloc is available, rather than requiring every no_std
+// decoder module using these macros to import alloc::format. The sink is the
+// existing Makepad logger; this module only keeps the decoder macro interface.
+#[cfg(feature = "log")]
+#[doc(hidden)]
+pub fn write(
+    level: Level,
+    file: &str,
+    line: u32,
+    column: u32,
+    args: core::fmt::Arguments<'_>,
+) {
+    use makepad_error_log::LogLevel;
+    let level = match level {
+        Level::Error => LogLevel::Error,
+        Level::Warn => LogLevel::Warning,
+        Level::Info | Level::Debug | Level::Trace => LogLevel::Log,
+    };
+    makepad_error_log::log_with_level(
+        file, line - 1, column - 1, line - 1, column + 3,
+        alloc::fmt::format(args), level,
+    );
+}
+
+#[cfg(feature = "log")]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __zune_log {
+    ($level:ident, $($arg:tt)+) => {{
+        $crate::log::write(
+            $crate::log::Level::$level,
+            file!(), line!(), column!(), format_args!($($arg)+),
+        );
+    }};
+}
+
+#[cfg(not(feature = "log"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __zune_log {
+    ($level:ident, $($arg:tt)+) => {{}};
+}
+
+#[doc(hidden)]
 #[macro_export]
 macro_rules! __log_enabled {
     ($lvl:expr) => {{
         let _ = $lvl;
-        false
+        $crate::log::ENABLED
     }};
 }
 
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __error {
-    ($($arg:tt)+) => {
-        #[cfg(feature = "std")]
-        {
-            //eprintln!($($arg)+);
-        }
-    };
+    ($($arg:tt)+) => { $crate::__zune_log!(Error, $($arg)+) };
 }
 
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __warn {
-    ($($arg:tt)+) => {
-        #[cfg(feature = "std")]
-        {
-            //eprintln!($($arg)+);
-        }
-    };
+    ($($arg:tt)+) => { $crate::__zune_log!(Warn, $($arg)+) };
 }
 
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __info {
-    ($($arg:tt)+) => {};
+    ($($arg:tt)+) => { $crate::__zune_log!(Info, $($arg)+) };
 }
 
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __debug {
-    ($($arg:tt)+) => {};
+    ($($arg:tt)+) => { $crate::__zune_log!(Debug, $($arg)+) };
 }
 
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __trace {
-    ($($arg:tt)+) => {};
+    ($($arg:tt)+) => { $crate::__zune_log!(Trace, $($arg)+) };
 }

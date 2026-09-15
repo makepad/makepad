@@ -63,12 +63,10 @@ path = "../downcast-rs"
 version = "1.2"
 
 [dependencies.log]
-path = "../../vulkan/log"
-version = "0.4"
+package = "makepad-error-log"
+path = "../../error_log"
+version = "1.0.0"
 optional = true
-
-[dependencies.libc]
-version = "0.2"
 
 [dependencies.raw-window-handle]
 version = "0.5.0"

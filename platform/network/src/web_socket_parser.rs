@@ -205,8 +205,9 @@ impl WebSocketParser {
         let out_bytes = sha1.finalise();
         let base64 = base64_encode(&out_bytes);
         let response_ack = format!(
-            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n",
-            base64
+            "HTTP/1.1 101 Switching Protocols\r\n{}Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n",
+            crate::utils::LOW_LEVEL_SECURITY_HEADERS,
+            base64,
         );
         response_ack
     }
@@ -380,5 +381,18 @@ impl WebSocketParser {
 impl Default for WebSocketParser {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WebSocketParser;
+
+    #[test]
+    fn upgrade_response_keeps_isolation_headers() {
+        let response = WebSocketParser::create_upgrade_response("dGhlIHNhbXBsZSBub25jZQ==");
+        assert!(response.starts_with("HTTP/1.1 101 Switching Protocols\r\n"));
+        assert!(response.contains("Cross-Origin-Opener-Policy: same-origin\r\n"));
+        assert!(response.contains("Cross-Origin-Embedder-Policy: require-corp\r\n"));
     }
 }

@@ -10,6 +10,7 @@ use wayland_backend::{
     client::{Backend, ObjectData, ObjectId, ReadEventsGuard, WaylandError},
     protocol::{Argument, Message},
 };
+use wayland_sys::linux;
 
 use crate::{conn::SyncData, Connection, DispatchError, Proxy};
 
@@ -427,7 +428,7 @@ impl<State> EventQueue<State> {
                 crate::protocol::wl_display::Request::Sync {},
                 Some(done.clone()),
             )
-            .map_err(|_| WaylandError::Io(std::io::Error::from_raw_os_error(libc::EPIPE)))?;
+            .map_err(|_| WaylandError::Io(std::io::Error::from_raw_os_error(linux::EPIPE)))?;
 
         let mut dispatched = 0;
 
