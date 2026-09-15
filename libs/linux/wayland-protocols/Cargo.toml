@@ -71,6 +71,7 @@ path = "src/lib.rs"
 
 [dependencies.bitflags]
 version = "2"
+path = "../../bitflags"
 
 [dependencies.wayland-backend]
 path = "../wayland-backend"

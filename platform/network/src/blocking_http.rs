@@ -149,15 +149,33 @@ pub struct Request {
 #[derive(Clone, Copy)]
 enum Method {
     Get,
+    Head,
     Post,
+    Put,
+    Delete,
+    Connect,
+    Options,
+    Trace,
+    Patch,
 }
 
 impl Method {
     fn as_str(self) -> &'static str {
         match self {
             Method::Get => "GET",
+            Method::Head => "HEAD",
             Method::Post => "POST",
+            Method::Put => "PUT",
+            Method::Delete => "DELETE",
+            Method::Connect => "CONNECT",
+            Method::Options => "OPTIONS",
+            Method::Trace => "TRACE",
+            Method::Patch => "PATCH",
         }
+    }
+
+    fn is_head(self) -> bool {
+        matches!(self, Method::Head)
     }
 }
 
@@ -168,6 +186,21 @@ impl Request {
 
     pub fn post(url: impl Into<String>) -> Request {
         Request::new(Method::Post, url.into())
+    }
+
+    pub fn with_method(url: impl Into<String>, method: crate::types::HttpMethod) -> Request {
+        let method = match method {
+            crate::types::HttpMethod::GET => Method::Get,
+            crate::types::HttpMethod::HEAD => Method::Head,
+            crate::types::HttpMethod::POST => Method::Post,
+            crate::types::HttpMethod::PUT => Method::Put,
+            crate::types::HttpMethod::DELETE => Method::Delete,
+            crate::types::HttpMethod::CONNECT => Method::Connect,
+            crate::types::HttpMethod::OPTIONS => Method::Options,
+            crate::types::HttpMethod::TRACE => Method::Trace,
+            crate::types::HttpMethod::PATCH => Method::Patch,
+        };
+        Request::new(method, url.into())
     }
 
     fn new(method: Method, url: String) -> Request {
@@ -206,6 +239,11 @@ impl Request {
             req.body = bytes;
             req
         })
+    }
+
+    pub fn body(mut self, bytes: Vec<u8>) -> Request {
+        self.body = bytes;
+        self
     }
 
     pub fn limits(mut self, limits: Limits) -> Request {
@@ -1459,7 +1497,7 @@ fn read_response(
         }
         let raw_headers = parse_header_block(&header_block, &req.limits)?;
         let validated = validate_response_headers(raw_headers, &req.limits)?;
-        let no_body = status == 204 || status == 304;
+        let no_body = req.method.is_head() || status == 204 || status == 304;
         let body = if no_body {
             if !prefix.is_empty() {
                 return Err(Error::InvalidResponse);
@@ -1551,7 +1589,7 @@ fn read_sized(
     if want > req.limits.max_body_bytes {
         return Err(Error::ResponseTooLarge);
     }
-    let mut body = Vec::new();
+    let mut body = Vec::with_capacity(want);
     if prefix.len() > want {
         return Err(Error::InvalidResponse);
     }
@@ -1587,7 +1625,8 @@ fn read_until_close(
     }
     let mut tmp = [0u8; 8192];
     loop {
-        let n = match read_watch(transport, &mut tmp, &req.cancel, deadline) {
+        let read_len = capped_read_len(req.limits.max_body_bytes, body.len(), tmp.len());
+        let n = match read_watch(transport, &mut tmp[..read_len], &req.cancel, deadline) {
             Ok(0) => break,
             Ok(n) => n,
             Err(Error::Reset) => return Err(Error::Reset),
@@ -1596,6 +1635,9 @@ fn read_until_close(
         let new_len = body.len().checked_add(n).ok_or(Error::ResponseTooLarge)?;
         if new_len > req.limits.max_body_bytes {
             return Err(Error::ResponseTooLarge);
+        }
+        if req.limits.max_body_bytes != usize::MAX {
+            body.reserve_exact(n);
         }
         body.extend_from_slice(&tmp[..n]);
         req.report_body(body.len() as u64, None);
@@ -1657,6 +1699,9 @@ fn read_chunked(
         src.read_exact(&mut crlf, &req.cancel, deadline)?;
         if crlf != *b"\r\n" {
             return Err(Error::InvalidResponse);
+        }
+        if req.limits.max_body_bytes != usize::MAX {
+            body.reserve_exact(take);
         }
         body.extend_from_slice(&chunk);
     }
@@ -1737,6 +1782,15 @@ fn check_watch(cancel: &CancelToken, deadline: Instant) -> Result<(), Error> {
         return Err(Error::Timeout);
     }
     Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn capped_read_len(max_body: usize, received: usize, buffer_len: usize) -> usize {
+    max_body
+        .saturating_sub(received)
+        .saturating_add(1)
+        .min(buffer_len)
+        .max(1)
 }
 
 fn remaining(deadline: Instant) -> Result<Duration, Error> {
@@ -2175,7 +2229,10 @@ fn winhttp_fetch(req: &Request, url: &ParsedUrl, deadline: Instant) -> Result<Re
     let parsed = parse_header_block(&raw, &req.limits)?;
     let ValidatedHeaders { headers, content_length, chunked } =
         validate_response_headers(parsed, &req.limits)?;
-    let no_body = status == 204 || status == 304;
+    let no_body = req.method.is_head() || status == 204 || status == 304;
+    if !no_body && content_length.is_some_and(|len| len > req.limits.max_body_bytes as u64) {
+        return Err(Error::ResponseTooLarge);
+    }
     let body = if no_body {
         Vec::new()
     } else {
@@ -2400,11 +2457,12 @@ fn winhttp_read_body(
     loop {
         check_watch(cancel, deadline)?;
         let mut read = 0u32;
+        let read_len = capped_read_len(max_body, body.len(), buf.len());
         let ok = request.invoke(cancel, deadline, |p| unsafe {
             WinHttpReadData(
                 p,
                 buf.as_mut_ptr().cast::<std::ffi::c_void>(),
-                buf.len() as u32,
+                read_len as u32,
                 &mut read,
             )
         })?;
@@ -2421,6 +2479,9 @@ fn winhttp_read_body(
         let new_len = body.len().checked_add(n).ok_or(Error::ResponseTooLarge)?;
         if new_len > max_body {
             return Err(Error::ResponseTooLarge);
+        }
+        if max_body != usize::MAX {
+            body.reserve_exact(n);
         }
         body.extend_from_slice(&buf[..n]);
         if let Some(cb) = progress {

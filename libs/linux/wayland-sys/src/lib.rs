@@ -43,6 +43,9 @@ pub mod client;
 
 pub mod server;
 
+#[cfg(target_os = "linux")]
+pub mod linux;
+
 #[cfg(all(feature = "egl", feature = "client"))]
 pub mod egl;
 
@@ -50,7 +53,7 @@ pub mod egl;
 pub mod cursor;
 
 #[cfg(feature = "server")]
-pub use libc::{gid_t, pid_t, uid_t};
+pub use linux::{gid_t, pid_t, uid_t};
 
 // We cannot just reexport dlib::ffi_dispatch, because it'd then
 // use the "dlopen" feature *on the crate invoking it* rather than

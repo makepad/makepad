@@ -324,7 +324,7 @@ impl ConnectionState {
     #[inline]
     fn store_and_return_error(&mut self, err: std::io::Error) -> WaylandError {
         // check if it was actually a protocol error
-        let err = if err.raw_os_error() == Some(libc::EPROTO) {
+        let err = if err.raw_os_error() == Some(wayland_sys::linux::EPROTO) {
             let mut object_id = 0;
             let mut interface = std::ptr::null();
             let code = unsafe {

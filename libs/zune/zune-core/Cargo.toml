@@ -16,7 +16,8 @@ license = "MIT OR Apache-2.0 OR Zlib"
 # But if we enable it here, they can't disable it anymore.
 # See: https://github.com/rust-lang/cargo/issues/8366
 std = []
+log = ["dep:makepad-error-log"]
 
 [dependencies]
-log = { version = "0.4", optional = true }
+makepad-error-log = { path = "../../error_log", version = "1.0.0", optional = true }
 serde = { version = "1.0", optional = true }
