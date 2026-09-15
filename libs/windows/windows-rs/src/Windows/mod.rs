@@ -133343,7 +133343,7 @@ impl Default for ELEMDESC_0 {
     }
 }
 #[repr(C)]
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct EXCEPINFO {
     pub wCode: u16,
     pub wReserved: u16,
@@ -133354,6 +133354,24 @@ pub struct EXCEPINFO {
     pub pvReserved: *mut core::ffi::c_void,
     pub pfnDeferredFillIn: LPEXCEPFINO_DEFERRED_FILLIN,
     pub scode: i32,
+}
+impl PartialEq for EXCEPINFO {
+    fn eq(&self, other: &Self) -> bool {
+        let callback_matches = match (self.pfnDeferredFillIn, other.pfnDeferredFillIn) {
+            (Some(a), Some(b)) => core::ptr::fn_addr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        callback_matches
+            && self.wCode == other.wCode
+            && self.wReserved == other.wReserved
+            && self.bstrSource == other.bstrSource
+            && self.bstrDescription == other.bstrDescription
+            && self.bstrHelpFile == other.bstrHelpFile
+            && self.dwHelpContext == other.dwHelpContext
+            && self.pvReserved == other.pvReserved
+            && self.scode == other.scode
+    }
 }
 impl Default for EXCEPINFO {
     fn default() -> Self {
@@ -140296,7 +140314,7 @@ pub const WM_XBUTTONDOWN: u32 = 523u32;
 pub const WM_XBUTTONUP: u32 = 524u32;
 #[repr(C)]
 #[cfg(feature = "Win32_Graphics_Gdi")]
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct WNDCLASSEXW {
     pub cbSize: u32,
     pub style: WNDCLASS_STYLES,
@@ -140310,6 +140328,28 @@ pub struct WNDCLASSEXW {
     pub lpszMenuName: windows_core::PCWSTR,
     pub lpszClassName: windows_core::PCWSTR,
     pub hIconSm: HICON,
+}
+#[cfg(feature = "Win32_Graphics_Gdi")]
+impl PartialEq for WNDCLASSEXW {
+    fn eq(&self, other: &Self) -> bool {
+        let callback_matches = match (self.lpfnWndProc, other.lpfnWndProc) {
+            (Some(a), Some(b)) => core::ptr::fn_addr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        callback_matches
+            && self.cbSize == other.cbSize
+            && self.style == other.style
+            && self.cbClsExtra == other.cbClsExtra
+            && self.cbWndExtra == other.cbWndExtra
+            && self.hInstance == other.hInstance
+            && self.hIcon == other.hIcon
+            && self.hCursor == other.hCursor
+            && self.hbrBackground == other.hbrBackground
+            && self.lpszMenuName == other.lpszMenuName
+            && self.lpszClassName == other.lpszClassName
+            && self.hIconSm == other.hIconSm
+    }
 }
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

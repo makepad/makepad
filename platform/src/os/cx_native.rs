@@ -57,7 +57,9 @@ fn source_resource_path(path: &Path) -> Option<PathBuf> {
     let packages = PACKAGES.get_or_init(|| {
         let mut packages = HashMap::new();
         let Some(root) = exe_dir() else { return packages };
-        let Ok(text) = std::fs::read_to_string(root.join("makepad-package-paths")) else { return packages };
+        let own_map = std::env::current_exe().ok().and_then(|p| p.file_name().map(|n| root.join(format!("{}.makepad-package-paths", n.to_string_lossy()))));
+        let text = own_map.and_then(|p| std::fs::read_to_string(p).ok()).or_else(|| std::fs::read_to_string(root.join("makepad-package-paths")).ok());
+        let Some(text) = text else { return packages };
         for line in text.lines() {
             let Some((name, relative)) = line.split_once('\t') else { continue };
             let relative = Path::new(relative);
