@@ -6,10 +6,10 @@
 //! ("The Rollback Journal").
 
 use crate::error::{Error, Result};
+use crate::storage::{PageStore, PageStoreSet, StoreKind, StoreOpenOptions};
 use std::collections::HashSet;
-use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub const JOURNAL_MAGIC: [u8; 8] = [0xd9, 0xd5, 0x05, 0xf9, 0x20, 0xa1, 0x63, 0xd7];
 /// SQLite assumes 512-byte sectors unless the VFS says otherwise; the journal
@@ -44,7 +44,8 @@ pub fn journal_path(db_path: &Path) -> PathBuf {
 
 /// A journal being written for the current transaction.
 pub struct Journal {
-    file: File,
+    file: Arc<dyn PageStore>,
+    stores: Arc<dyn PageStoreSet>,
     path: PathBuf,
     page_size: usize,
     cksum_init: u32,
@@ -57,16 +58,27 @@ pub struct Journal {
 
 impl Journal {
     /// Create (or truncate) the journal for `db_path` and write its header.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn create(db_path: &Path, page_size: usize, initial_pages: u32, nonce: u32) -> Result<Journal> {
-        let path = journal_path(db_path);
-        let file = File::options()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(true)
-            .open(&path)?;
+        let stores: Arc<dyn PageStoreSet> = Arc::new(crate::storage::FileStoreSet::new(db_path));
+        Self::create_with(stores, page_size, initial_pages, nonce)
+    }
+
+    pub(crate) fn create_with(
+        stores: Arc<dyn PageStoreSet>,
+        page_size: usize,
+        initial_pages: u32,
+        nonce: u32,
+    ) -> Result<Journal> {
+        let path = stores
+            .path(StoreKind::Journal)
+            .unwrap_or_else(|| PathBuf::from(":memory:-journal"));
+        let file = stores
+            .open(StoreKind::Journal, StoreOpenOptions::CREATE_TRUNCATE)?
+            .expect("create always returns a store");
         let mut j = Journal {
             file,
+            stores,
             path,
             page_size,
             cksum_init: nonce,
@@ -87,8 +99,7 @@ impl Journal {
         hdr[16..20].copy_from_slice(&self.initial_pages.to_be_bytes());
         hdr[20..24].copy_from_slice(&(SECTOR_SIZE as u32).to_be_bytes());
         hdr[24..28].copy_from_slice(&(self.page_size as u32).to_be_bytes());
-        self.file.seek(SeekFrom::Start(0))?;
-        self.file.write_all(&hdr)?;
+        self.file.write_at(0, &hdr)?;
         Ok(())
     }
 
@@ -107,11 +118,11 @@ impl Journal {
             return Err(Error::corrupt("journalled page has the wrong size"));
         }
         let offset = SECTOR_SIZE as u64 + self.records as u64 * (self.page_size as u64 + 8);
-        self.file.seek(SeekFrom::Start(offset))?;
-        self.file.write_all(&pgno.to_be_bytes())?;
-        self.file.write_all(data)?;
+        self.file.write_at(offset, &pgno.to_be_bytes())?;
+        self.file.write_at(offset + 4, data)?;
         let cksum = page_checksum(self.cksum_init, data);
-        self.file.write_all(&cksum.to_be_bytes())?;
+        self.file
+            .write_at(offset + 4 + self.page_size as u64, &cksum.to_be_bytes())?;
         self.records += 1;
         self.journaled.insert(pgno);
         self.synced = false;
@@ -122,9 +133,9 @@ impl Journal {
     /// Flush every record and stamp the record count: after this returns, the
     /// journal alone can undo the whole transaction.
     pub fn commit_journal(&mut self) -> Result<()> {
-        crate::sync::sync(&self.file)?;
+        self.file.sync()?;
         self.write_header(self.records)?;
-        crate::sync::sync(&self.file)?;
+        self.file.sync()?;
         self.synced = true;
         Ok(())
     }
@@ -139,12 +150,9 @@ impl Journal {
 
     /// Remove the journal, which is what makes a transaction committed.
     pub fn finish(self) -> Result<()> {
-        drop(self.file);
-        match std::fs::remove_file(&self.path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(Error::Io(e)),
-        }
+        let Journal { file, stores, .. } = self;
+        drop(file);
+        stores.remove(StoreKind::Journal).map_err(Error::Io)
     }
 }
 
@@ -158,14 +166,13 @@ pub struct JournalHeader {
     pub page_size: u32,
 }
 
-pub fn read_header(file: &mut File) -> Result<Option<JournalHeader>> {
-    let len = file.metadata()?.len();
+pub fn read_header(file: &dyn PageStore) -> Result<Option<JournalHeader>> {
+    let len = file.len()?;
     if len < SECTOR_SIZE as u64 {
         return Ok(None);
     }
     let mut hdr = [0u8; 28];
-    file.seek(SeekFrom::Start(0))?;
-    file.read_exact(&mut hdr)?;
+    file.read_at(0, &mut hdr)?;
     if hdr[0..8] != JOURNAL_MAGIC {
         return Ok(None);
     }
@@ -189,18 +196,17 @@ pub fn read_header(file: &mut File) -> Result<Option<JournalHeader>> {
 /// Returns the number of pages restored. A journal whose header is missing or
 /// whose records are torn restores what it can and stops, exactly like SQLite:
 /// a record only counts once its checksum matches.
-pub fn rollback(db: &mut File, journal: &Path) -> Result<u32> {
-    let mut jf = match File::open(journal) {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(e) => return Err(Error::Io(e)),
+pub fn rollback(db: &dyn PageStore, stores: &dyn PageStoreSet) -> Result<u32> {
+    let jf = match stores.open(StoreKind::Journal, StoreOpenOptions::READ_ONLY)? {
+        Some(file) => file,
+        None => return Ok(0),
     };
-    let Some(hdr) = read_header(&mut jf)? else {
+    let Some(hdr) = read_header(jf.as_ref())? else {
         return Ok(0);
     };
     let page_size = hdr.page_size as usize;
     let record_size = page_size as u64 + 8;
-    let jlen = jf.metadata()?.len();
+    let jlen = jf.len()?;
     let start = hdr.sector_size as u64;
     let available = jlen.saturating_sub(start) / record_size;
     let want = if hdr.records == NREC_UNKNOWN {
@@ -214,14 +220,14 @@ pub fn rollback(db: &mut File, journal: &Path) -> Result<u32> {
     let mut num = [0u8; 4];
     let mut cks = [0u8; 4];
     for i in 0..want {
-        jf.seek(SeekFrom::Start(start + i * record_size))?;
-        if jf.read_exact(&mut num).is_err() {
+        let offset = start + i * record_size;
+        if jf.read_at(offset, &mut num).is_err() {
             break;
         }
-        if jf.read_exact(&mut buf).is_err() {
+        if jf.read_at(offset + 4, &mut buf).is_err() {
             break;
         }
-        if jf.read_exact(&mut cks).is_err() {
+        if jf.read_at(offset + 4 + page_size as u64, &mut cks).is_err() {
             break;
         }
         let pgno = u32::from_be_bytes(num);
@@ -229,24 +235,24 @@ pub fn rollback(db: &mut File, journal: &Path) -> Result<u32> {
         if pgno == 0 || page_checksum(hdr.cksum_init, &buf) != want_cksum {
             break; // torn record: everything after it is untrustworthy
         }
-        db.seek(SeekFrom::Start((pgno as u64 - 1) * page_size as u64))?;
-        db.write_all(&buf)?;
+        db.write_at((pgno as u64 - 1) * page_size as u64, &buf)?;
         restored += 1;
     }
     // Pages appended by the interrupted transaction go away.
-    db.set_len(hdr.initial_pages as u64 * page_size as u64)?;
-    crate::sync::sync(db)?;
+    db.truncate(hdr.initial_pages as u64 * page_size as u64)?;
+    db.sync()?;
     Ok(restored)
 }
 
 /// True when `db_path` has a journal that must be rolled back before the file
 /// can be read. Callers hold at least a SHARED lock while asking.
-pub fn hot_journal_exists(db_path: &Path) -> bool {
-    let path = journal_path(db_path);
-    match File::open(&path) {
-        Ok(mut f) => read_header(&mut f).ok().flatten().is_some(),
-        Err(_) => false,
-    }
+pub fn hot_journal_exists(stores: &dyn PageStoreSet) -> bool {
+    stores
+        .open(StoreKind::Journal, StoreOpenOptions::READ_ONLY)
+        .ok()
+        .flatten()
+        .and_then(|file| read_header(file.as_ref()).ok().flatten())
+        .is_some()
 }
 
 #[cfg(test)]
@@ -273,27 +279,32 @@ mod tests {
         let db_path = dir.join("t.db");
         let page_size = 512usize;
         let original: Vec<u8> = (0..page_size * 3).map(|i| (i % 251) as u8).collect();
-        std::fs::write(&db_path, &original).unwrap();
+        let sets: Vec<Arc<dyn PageStoreSet>> = vec![
+            Arc::new(crate::storage::FileStoreSet::new(&db_path)),
+            Arc::new(crate::storage::MemoryStoreSet::new()),
+        ];
+        for stores in sets {
+            let db = stores
+                .open(StoreKind::Main, StoreOpenOptions::CREATE_TRUNCATE)
+                .unwrap()
+                .unwrap();
+            db.write_at(0, &original).unwrap();
+            let mut journal =
+                Journal::create_with(stores.clone(), page_size, 3, 0x1234_5678).unwrap();
+            journal.record(2, &original[page_size..page_size * 2]).unwrap();
+            journal.commit_journal().unwrap();
 
-        let mut journal = Journal::create(&db_path, page_size, 3, 0x1234_5678).unwrap();
-        journal.record(2, &original[page_size..page_size * 2]).unwrap();
-        journal.commit_journal().unwrap();
-        let jpath = journal.path().to_path_buf();
+            // Scribble over page 2 and append a page, as an interrupted commit would.
+            db.write_at(page_size as u64, &vec![0xAA; page_size]).unwrap();
+            db.write_at((page_size * 3) as u64, &vec![0xBB; page_size]).unwrap();
+            drop(journal);
 
-        // Scribble over page 2 and append a page, as an interrupted commit would.
-        let mut db = File::options().write(true).read(true).open(&db_path).unwrap();
-        db.seek(SeekFrom::Start(page_size as u64)).unwrap();
-        db.write_all(&vec![0xAA; page_size]).unwrap();
-        db.seek(SeekFrom::End(0)).unwrap();
-        db.write_all(&vec![0xBB; page_size]).unwrap();
-        drop(db);
-        drop(journal);
-
-        let mut db = File::options().write(true).read(true).open(&db_path).unwrap();
-        let restored = rollback(&mut db, &jpath).unwrap();
-        assert_eq!(restored, 1);
-        drop(db);
-        assert_eq!(std::fs::read(&db_path).unwrap(), original);
+            let restored = rollback(db.as_ref(), stores.as_ref()).unwrap();
+            assert_eq!(restored, 1);
+            let mut actual = vec![0; original.len()];
+            db.read_at(0, &mut actual).unwrap();
+            assert_eq!(actual, original);
+        }
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -303,24 +314,37 @@ mod tests {
         let db_path = dir.join("t.db");
         let page_size = 512usize;
         let original: Vec<u8> = vec![7u8; page_size * 2];
-        std::fs::write(&db_path, &original).unwrap();
-        let mut journal = Journal::create(&db_path, page_size, 2, 99).unwrap();
-        journal.record(1, &original[..page_size]).unwrap();
-        journal.record(2, &original[page_size..]).unwrap();
-        journal.commit_journal().unwrap();
-        let jpath = journal.path().to_path_buf();
-        drop(journal);
+        let sets: Vec<Arc<dyn PageStoreSet>> = vec![
+            Arc::new(crate::storage::FileStoreSet::new(&db_path)),
+            Arc::new(crate::storage::MemoryStoreSet::new()),
+        ];
+        for stores in sets {
+            let db = stores
+                .open(StoreKind::Main, StoreOpenOptions::CREATE_TRUNCATE)
+                .unwrap()
+                .unwrap();
+            db.write_at(0, &original).unwrap();
+            let mut journal = Journal::create_with(stores.clone(), page_size, 2, 99).unwrap();
+            journal.record(1, &original[..page_size]).unwrap();
+            journal.record(2, &original[page_size..]).unwrap();
+            journal.commit_journal().unwrap();
+            drop(journal);
 
-        // Damage the second record's checksum.
-        let mut bytes = std::fs::read(&jpath).unwrap();
-        let at = SECTOR_SIZE + (page_size + 8) * 2 - 1;
-        bytes[at] ^= 0xff;
-        std::fs::write(&jpath, &bytes).unwrap();
+            // Damage the second record's checksum.
+            let jf = stores
+                .open(StoreKind::Journal, StoreOpenOptions::READ_WRITE)
+                .unwrap()
+                .unwrap();
+            let at = SECTOR_SIZE + (page_size + 8) * 2 - 1;
+            let mut byte = [0];
+            jf.read_at(at as u64, &mut byte).unwrap();
+            byte[0] ^= 0xff;
+            jf.write_at(at as u64, &byte).unwrap();
 
-        std::fs::write(&db_path, vec![0u8; page_size * 2]).unwrap();
-        let mut db = File::options().write(true).read(true).open(&db_path).unwrap();
-        let restored = rollback(&mut db, &jpath).unwrap();
-        assert_eq!(restored, 1, "replay must stop at the torn record");
+            db.write_at(0, &vec![0u8; page_size * 2]).unwrap();
+            let restored = rollback(db.as_ref(), stores.as_ref()).unwrap();
+            assert_eq!(restored, 1, "replay must stop at the torn record");
+        }
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -4,8 +4,8 @@ pub use makepad_widgets;
 use crate::makepad_micro_serde::*;
 use makepad_show_control as show;
 use makepad_widgets::*;
+use makepad_widgets::makepad_platform::thread::{CancellationToken, TaskHandle, ThreadOptions};
 use std::net::UdpSocket;
-use std::time::{Duration, Instant};
 
 app_main!(App);
 
@@ -473,6 +473,8 @@ pub struct App {
     midi_ports_summary: String,
     #[rust(FromUISender::default())]
     ui_controls: FromUISender<UiControlMessage>,
+    #[rust]
+    dmx_worker: Option<TaskHandle<()>>,
 }
 
 impl App {
@@ -554,13 +556,24 @@ impl App {
     }
 
     fn start_dmx_bridge(&mut self, cx: &mut Cx) {
+        if self.dmx_worker.is_some() {
+            return;
+        }
         let _ = std::fs::create_dir_all(PRESET_DIR);
 
         let mut midi_input = cx.midi_input();
         let state_sender = self.state_updates.sender();
-        let ui_receiver = self.ui_controls.receiver();
+        let ui_receiver = self
+            .ui_controls
+            .receiver()
+            .expect("DMX UI receiver is taken exactly once");
 
-        std::thread::spawn(move || {
+        let spawned = cx.thread_spawner().spawn_worker(
+            ThreadOptions {
+                name: Some("automate-dmx".into()),
+                ..Default::default()
+            },
+            move || {
             let _instance_lock = match UdpSocket::bind(show::CONTROLLER_INSTANCE_LOCK_ADDR) {
                 Ok(socket) => socket,
                 Err(err) => {
@@ -590,7 +603,8 @@ impl App {
             let mut dmx_packets: u64 = 0;
             let mut persist_counter: u32 = 0;
             let mut clock = 0.0f64;
-            let mut ui_scene_cooldown_until = Instant::now();
+            let mut ui_scene_cooldown_until = Cx::monotonic_now();
+            let wait = CancellationToken::new();
             let transport_notes = [91usize, 92, 93, 94, 95, 98, 99, 81, 89];
 
             loop {
@@ -630,8 +644,7 @@ impl App {
                                         );
                                     }
                                 }
-                                ui_scene_cooldown_until =
-                                    Instant::now() + Duration::from_millis(350);
+                                ui_scene_cooldown_until = Cx::monotonic_now() + 0.350;
                                 buttons.preset.fill(false);
                                 buttons.preset[index] = true;
                                 for channel in 0..8 {
@@ -723,7 +736,7 @@ impl App {
                                             );
                                         }
                                         if note.is_on {
-                                            if Instant::now() < ui_scene_cooldown_until {
+                                            if Cx::monotonic_now() < ui_scene_cooldown_until {
                                                 if DEBUG_SCENE_EVENTS {
                                                     println!(
                                                         "scene_change source=midi action=ignored slot={channel:02} note=52 ch={} reason=ui_cooldown",
@@ -775,7 +788,7 @@ impl App {
                                             );
                                         }
                                         if note.is_on {
-                                            if Instant::now() < ui_scene_cooldown_until {
+                                            if Cx::monotonic_now() < ui_scene_cooldown_until {
                                                 if DEBUG_SCENE_EVENTS {
                                                     println!(
                                                         "scene_change source=midi action=ignored slot={index:02} note={} ch={} reason=ui_cooldown",
@@ -854,9 +867,14 @@ impl App {
                     });
                 }
 
-                std::thread::sleep(Duration::from_secs_f64(show::DMX_FRAME_DT));
+                let _ = wait.wait_until(Cx::monotonic_now() + show::DMX_FRAME_DT);
             }
-        });
+        },
+        );
+        match spawned {
+            Ok(worker) => self.dmx_worker = Some(worker),
+            Err(error) => log!("automate: could not start DMX worker: {error}"),
+        }
     }
 }
 

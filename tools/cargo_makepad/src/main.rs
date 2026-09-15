@@ -10,11 +10,11 @@ mod check;
 #[cfg(not(target_arch = "wasm32"))]
 mod desktop;
 #[cfg(not(target_arch = "wasm32"))]
+mod font_assets;
+#[cfg(not(target_arch = "wasm32"))]
 mod open_harmony;
 #[cfg(not(target_arch = "wasm32"))]
 mod server_manager;
-#[cfg(not(target_arch = "wasm32"))]
-mod studio;
 #[cfg(not(target_arch = "wasm32"))]
 mod tunnel;
 #[cfg(not(target_arch = "wasm32"))]
@@ -41,8 +41,6 @@ pub use makepad_shell;
 pub use makepad_wasm_strip;
 #[cfg(not(target_arch = "wasm32"))]
 use open_harmony::*;
-#[cfg(not(target_arch = "wasm32"))]
-use studio::*;
 #[cfg(not(target_arch = "wasm32"))]
 use tunnel::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -72,13 +70,28 @@ fn show_help() {
     println!("       --port=8010                               The port to run the wasm webserver");
     println!("       --lan                                     Bind the webserver to your lan ip");
     println!(
+        "       --production                              Release profile, strip, Brotli, optional Binaryen -Oz"
+    );
+    println!(
+        "       --lto                                     With --production, opt into the small profile (fat LTO)"
+    );
+    println!(
         "       --strip                                   Shipping-size wasm optimization pass (implies custom-section stripping)"
     );
     println!(
         "       --strip-custom-sections                   Legacy mode: only strip custom wasm sections"
     );
     println!(
-        "       --wasm-opt                                Run Binaryen wasm-opt -Os for IR-level optimization (optional; requires binaryen)"
+        "       --wasm-opt                                Run Binaryen wasm-opt -Oz when a compatible version is on PATH"
+    );
+    println!(
+        "       --no-location-detail                      Omit panic file/line/column detail (nightly production diagnostic tradeoff)"
+    );
+    println!(
+        "       --size-report                             Print exact wasm section and split-artifact sizes"
+    );
+    println!(
+        "       --keep-names                              Keep <app>.names.wasm beside the packaged wasm"
     );
     println!(
         "       --split[=200]                             Split wasm payloads; bare --split uses a cold-first automatic split policy"
@@ -275,18 +288,7 @@ fn show_help() {
         "    tunnel <ip:port> shell <command...>          Run remote shell command (requires --all on server)"
     );
     println!();
-    println!("Studio commands:");
-    println!();
-    println!(
-        "    studio [options]                              Start filtered newline-JSON studio remote websocket"
-    );
-    println!("    [options]:");
-    println!("       --studio=127.0.0.1:8001                   Studio server ip:port");
-    println!(
-        "                                                 (or set STUDIO_HOST=127.0.0.1:8001)"
-    );
-    println!();
-    println!();
+
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -321,7 +323,6 @@ fn main() -> Result<(), Cow<'static, str>> {
         "ohos" => handle_open_harmony(&args[1..]),
         "check" => handle_check(&args[1..]),
         "tunnel" => handle_tunnel(&args[1..]),
-        "studio" => handle_studio(&args[1..]),
         unsupported => {
             show_help();
             Err(format!("unsupported command: '{unsupported}'").into())
