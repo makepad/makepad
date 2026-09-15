@@ -147,6 +147,13 @@ impl Font {
             Some(Rc::new(builder.finish(Rect::new(min, max - min), units_per_em)))
         });
 
+        // Fonts whose outlines live in Apple's proprietary `hvgl` table
+        // (PingFang on macOS 26+) parse fine but yield no outlines through
+        // ttf_parser; ask CoreText — which decodes hvgl in-OS — instead.
+        #[cfg(target_os = "macos")]
+        let outline = outline
+            .or_else(|| self.face.coretext_glyph_outline(glyph_id, units_per_em).map(Rc::new));
+
         {
             let mut cache = self.cached_glyph_outlines.borrow_mut();
             // Bound the per-font outline cache. The cap is generous, so this only triggers
