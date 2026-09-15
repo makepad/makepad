@@ -47,6 +47,39 @@ pub fn exe_relative_path(rel: impl AsRef<Path>) -> Option<PathBuf> {
     Some(exe_dir()?.join(rel))
 }
 
+/// A compile-on-device installation keeps resources in its downloaded sources.
+/// The adjacent map contains `crate_name<TAB>relative/source/directory` rows;
+/// neither resource lookup nor the map depends on the original install path.
+fn source_resource_path(path: &Path) -> Option<PathBuf> {
+    use std::collections::HashMap;
+    use std::path::Component;
+    static PACKAGES: OnceLock<HashMap<String, PathBuf>> = OnceLock::new();
+    let packages = PACKAGES.get_or_init(|| {
+        let mut packages = HashMap::new();
+        let Some(root) = exe_dir() else { return packages };
+        let Ok(text) = std::fs::read_to_string(root.join("makepad-package-paths")) else { return packages };
+        for line in text.lines() {
+            let Some((name, relative)) = line.split_once('\t') else { continue };
+            let relative = Path::new(relative);
+            if !name.is_empty() && name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+                && !relative.as_os_str().is_empty()
+                && relative.components().all(|c| matches!(c, Component::Normal(_)))
+            {
+                packages.insert(name.to_owned(), root.join(relative));
+            }
+        }
+        packages
+    });
+    let mut components = path.components().filter(|c| !matches!(c, Component::CurDir));
+    let Component::Normal(name) = components.next()? else { return None };
+    let mut resolved = packages.get(name.to_str()?)?.clone();
+    for component in components {
+        let Component::Normal(part) = component else { return None };
+        resolved.push(part);
+    }
+    Some(resolved)
+}
+
 /// Reads a file at `path`, falling back to the same path resolved against the executable's
 /// directory. Returns `None` when neither location holds a readable file.
 pub fn read_file_cwd_or_exe_relative(path: impl AsRef<Path>) -> Option<Vec<u8>> {
@@ -56,7 +89,8 @@ pub fn read_file_cwd_or_exe_relative(path: impl AsRef<Path>) -> Option<Vec<u8>> 
         Some(buffer)
     }
     let path = path.as_ref();
-    read(path).or_else(|| read(&exe_relative_path(path)?))
+    source_resource_path(path).and_then(|p| read(&p))
+        .or_else(|| read(path)).or_else(|| read(&exe_relative_path(path)?))
 }
 
 // lets start a websocket thread
