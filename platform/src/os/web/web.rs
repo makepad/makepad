@@ -9,13 +9,15 @@ use {
             TextClipboardEvent, TimerEvent, ToWasmMsgEvent, TouchUpdateEvent,
             VideoDecodingErrorEvent, VideoPlaybackCompletedEvent, VideoPlaybackPreparedEvent,
             VideoPlaybackResourcesReleasedEvent, VideoSource, VideoTextureUpdatedEvent, WindowGeom,
-            WindowGeomChangeEvent,
         },
         makepad_live_id::*,
         makepad_wasm_bridge::{FromWasm, FromWasmMsg, ToWasm, ToWasmMsg, WasmDataU8},
         permission::{Permission, PermissionResult, PermissionStatus},
-        thread::SignalToUI,
-        window::CxWindowPool,
+        storage::{
+            StorageError, StorageEstimate, StorageList, StorageOp, StorageRequestId,
+            StorageRequestKind, StorageResult, StorageStat,
+        },
+        thread::{lock_from_ui, SignalToUI},
         HttpError, HttpProgress, HttpResponse, Vec2d,
     },
     std::cell::RefCell,
@@ -105,6 +107,7 @@ impl Cx {
     pub fn process_to_wasm(&mut self, msg_ptr: u32) -> u32 {
         let mut to_wasm_msg = ToWasmMsg::take_ownership(msg_ptr);
         let mut network_responses = Vec::new();
+        let mut storage_responses = Vec::new();
         self.os.from_wasm = Some(FromWasmMsg::new());
         let mut to_wasm = to_wasm_msg.as_ref();
         let mut is_animation_frame = None;
@@ -122,15 +125,15 @@ impl Cx {
                     );
                     self.os_type = tw.browser_info.into();
                     self.xr_capabilities = tw.xr_capabilities.into();
-                    let id_zero = CxWindowPool::id_zero();
                     let mut new_geom: WindowGeom = tw.window_info.into();
-                    {
+                    self.os.native_window_geom = new_geom.clone();
+                    if let Some(id_zero) = self.windows.current_id_zero() {
                         let window = &mut self.windows[id_zero];
                         window.os_dpi_factor = Some(new_geom.dpi_factor);
                         new_geom = window.native_window_geom_to_layout(new_geom);
+                        window.window_geom = new_geom.clone();
                     }
-                    self.os.window_geom = new_geom.clone();
-                    self.windows[id_zero].window_geom = new_geom;
+                    self.os.window_geom = new_geom;
                     //self.default_inner_window_size = self.os.window_geom.inner_size;
 
                     self.set_physical_keyboard_state(true);
@@ -141,22 +144,12 @@ impl Cx {
 
                 live_id!(ToWasmResizeWindow) => {
                     let tw = ToWasmResizeWindow::read_to_wasm(&mut to_wasm);
-                    let old_geom = self.os.window_geom.clone();
-                    let mut new_geom: WindowGeom = tw.window_info.into();
-                    let id_zero = CxWindowPool::id_zero();
-                    {
-                        let window = &mut self.windows[id_zero];
-                        window.os_dpi_factor = Some(new_geom.dpi_factor);
-                        new_geom = window.native_window_geom_to_layout(new_geom);
-                    }
-                    if old_geom != new_geom {
-                        self.os.window_geom = new_geom.clone();
-                        self.windows[id_zero].window_geom = new_geom.clone();
-                        self.call_event_handler(&Event::WindowGeomChange(WindowGeomChangeEvent {
-                            window_id: id_zero,
-                            old_geom: old_geom,
-                            new_geom: new_geom,
-                        }));
+                    if let Some(event) = self.windows.web_resize_window_geom(
+                        &mut self.os.native_window_geom,
+                        &mut self.os.window_geom,
+                        tw.window_info.into(),
+                    ) {
+                        self.call_event_handler(&Event::WindowGeomChange(event));
                         self.redraw_all();
                     }
                 }
@@ -245,6 +238,56 @@ impl Cx {
                     }
                 }
 
+                live_id!(ToWasmStorageResult) => {
+                    let tw = ToWasmStorageResult::read_to_wasm(&mut to_wasm);
+                    let request_id = StorageRequestId(
+                        tw.request_id_lo as u64 | ((tw.request_id_hi as u64) << 32),
+                    );
+                    let Some(op) = StorageOp::from_u32(tw.op) else {
+                        if let Some(response) = self.finish_web_storage_protocol_error(
+                            request_id,
+                            format!("storage response had unknown operation {}", tw.op),
+                        ) {
+                            storage_responses.push(response);
+                        }
+                        to_wasm.block_skip(skip);
+                        continue;
+                    };
+                    let result = if !tw.error.is_empty() {
+                        Err(if tw.error_kind == 1 {
+                            StorageError::QuotaExceeded(tw.error)
+                        } else {
+                            StorageError::Backend(tw.error)
+                        })
+                    } else {
+                        Ok(match op {
+                            StorageOp::Get | StorageOp::GetRange => StorageResult::Value(
+                                tw.found.then(|| tw.value.into_vec_u8()),
+                            ),
+                            StorageOp::Set | StorageOp::Delete => StorageResult::Unit,
+                            StorageOp::List => StorageResult::List(StorageList {
+                                keys: tw.keys,
+                                next_cursor: tw.has_next.then_some(tw.next),
+                            }),
+                            StorageOp::Stat => StorageResult::Stat(tw.found.then_some(
+                                StorageStat {
+                                    len: tw.length_lo as u64
+                                        | ((tw.length_hi as u64) << 32),
+                                },
+                            )),
+                            StorageOp::Estimate => StorageResult::Estimate(StorageEstimate {
+                                usage: tw.usage_lo as u64 | ((tw.usage_hi as u64) << 32),
+                                quota: tw.quota_lo as u64 | ((tw.quota_hi as u64) << 32),
+                            }),
+                        })
+                    };
+                    if let Some(response) =
+                        self.finish_web_storage_request(request_id, op, result)
+                    {
+                        storage_responses.push(response);
+                    }
+                }
+
                 live_id!(ToWasmSignal) => {
                     let tw = ToWasmSignal::read_to_wasm(&mut to_wasm);
                     if tw.flags & 1 != 0 {
@@ -293,22 +336,29 @@ impl Cx {
                 }
 
                 live_id!(ToWasmWindowGotFocus) => {
-                    let window_id = CxWindowPool::id_zero();
-                    self.call_event_handler(&Event::WindowGotFocus(window_id));
+                    self.call_window_zero_focus_event(true);
                 }
 
                 live_id!(ToWasmWindowLostFocus) => {
-                    let window_id = CxWindowPool::id_zero();
-                    self.call_event_handler(&Event::WindowLostFocus(window_id));
+                    self.call_window_zero_focus_event(false);
                 }
 
                 live_id!(ToWasmRedrawAll) => {
                     self.redraw_all();
                 }
 
+                live_id!(ToWasmWebGLShadersDone) => {
+                    let tw = ToWasmWebGLShadersDone::read_to_wasm(&mut to_wasm);
+                    self.os.webgl_shaders_pending =
+                        self.os.webgl_shaders_pending.saturating_sub(tw.count);
+                }
+
                 live_id!(ToWasmPaintDirty) => {
-                    let main_pass_id = self.windows[CxWindowPool::id_zero()].main_pass_id.unwrap();
-                    self.passes[main_pass_id].paint_dirty = true;
+                    if let Some(window_id) = self.windows.current_id_zero() {
+                        if let Some(main_pass_id) = self.windows[window_id].main_pass_id {
+                            self.passes[main_pass_id].paint_dirty = true;
+                        }
+                    }
                 }
 
                 live_id!(ToWasmLiveFileChange) => {
@@ -518,11 +568,7 @@ impl Cx {
 
                 live_id!(ToWasmAudioDeviceList) => {
                     let tw = ToWasmAudioDeviceList::read_to_wasm(&mut to_wasm);
-                    self.os
-                        .web_audio()
-                        .lock()
-                        .unwrap()
-                        .to_wasm_audio_device_list(tw);
+                    lock_from_ui(&self.os.web_audio()).to_wasm_audio_device_list(tw);
                 }
                 live_id!(ToWasmMidiPortList) => {
                     let tw = ToWasmMidiPortList::read_to_wasm(&mut to_wasm);
@@ -565,8 +611,10 @@ impl Cx {
         if let Some(time) = is_animation_frame {
             if self.need_redrawing() {
                 self.call_draw_event(time);
-                self.webgl_compile_shaders();
             }
+            // Draw-event teardown may have freed passes/lists/resources. Drain
+            // them before computing and encoding this frame's pass graph.
+            self.retire_webgl_resources();
             self.handle_repaint(time);
         }
 
@@ -575,15 +623,23 @@ impl Cx {
             self.call_event_handler(&Event::NetworkResponses(network_responses));
         }
 
+        if !storage_responses.is_empty() {
+            self.call_event_handler(&Event::Storage(storage_responses));
+        }
+
         self.run_live_edit_if_needed("web");
 
         self.handle_platform_ops();
         self.handle_media_signals();
+        // Non-animation events can also drop the last owning handles. This is
+        // a cheap empty-queue check and bounded when work is pending.
+        self.retire_webgl_resources();
 
         if self.any_passes_dirty()
             || self.need_redrawing()
             || self.new_next_frames.len() != 0
             || self.demo_time_repaint
+            || self.has_pending_webgl_resource_retirements()
         {
             self.os.from_wasm(FromWasmRequestAnimationFrame {});
         }
@@ -598,7 +654,8 @@ impl Cx {
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
         for draw_pass_id in &passes_todo {
-            self.passes[*draw_pass_id].set_time(time as f32);
+            let uniforms_gen = self.next_uniform_gen();
+            self.passes[*draw_pass_id].set_time(time as f32, uniforms_gen);
             match self.passes[*draw_pass_id].parent.clone() {
                 CxDrawPassParent::Xr => {}
                 CxDrawPassParent::Window(_) => {
@@ -634,22 +691,12 @@ impl Cx {
 
                     self.os.from_wasm(FromWasmSetDocumentTitle { title });
 
-                    // Inherit the OS-reported scale factor recorded by
-                    // ToWasmGetInfo / ToWasmResizeWindow on id_zero so the
-                    // freshly-created window's `dpi_override` machinery has
-                    // a baseline.
-                    let id_zero_os_dpi = self.windows[CxWindowPool::id_zero()].os_dpi_factor;
-                    {
-                        let window = &mut self.windows[window_id];
-                        window.os_dpi_factor = id_zero_os_dpi;
-                        window.window_geom = self.os.window_geom.clone();
-                    }
-
-                    self.call_event_handler(&Event::WindowGeomChange(WindowGeomChangeEvent {
+                    let event = self.windows.web_create_window_geom(
                         window_id,
-                        old_geom: self.os.window_geom.clone(),
-                        new_geom: self.os.window_geom.clone(),
-                    }));
+                        &self.os.native_window_geom,
+                        &mut self.os.window_geom,
+                    );
+                    self.call_event_handler(&Event::WindowGeomChange(event));
 
                     self.windows[window_id].is_created = true;
                     self.redraw_all();
@@ -697,7 +744,13 @@ impl Cx {
                     // Bottom of the caret line (matches the pre-rect point); the
                     // hidden-textarea IME anchor only takes a point.
                     let pos = area.clipped_rect(self).pos + cursor_rect.pos + cursor_rect.size;
-                    let window_id = self.get_window_id_of(&area).unwrap_or(CxWindowPool::id_zero());
+                    let Some(window_id) = self
+                        .get_window_id_of(&area)
+                        .filter(|window_id| self.windows.is_valid(*window_id))
+                        .or_else(|| self.windows.current_id_zero())
+                    else {
+                        continue;
+                    };
                     let pos = self.windows[window_id].layout_vec2d_to_native_points(pos);
                     self.os
                         .from_wasm(FromWasmShowTextIME { x: pos.x, y: pos.y });
@@ -763,6 +816,95 @@ impl Cx {
                         request_id_lo: request_id.lo(),
                         request_id_hi: request_id.hi(),
                     });
+                }
+                CxOsOp::StorageRequest(request) => {
+                    let request_id_lo = request.request_id.0 as u32;
+                    let request_id_hi = (request.request_id.0 >> 32) as u32;
+                    let namespace = request.namespace;
+                    match request.kind {
+                        StorageRequestKind::Get { key } => {
+                            self.os.from_wasm(FromWasmStorageGet {
+                                request_id_lo,
+                                request_id_hi,
+                                namespace,
+                                key,
+                            });
+                        }
+                        StorageRequestKind::Set { key, value } => {
+                            self.os.from_wasm(FromWasmStorageSet {
+                                request_id_lo,
+                                request_id_hi,
+                                namespace,
+                                key,
+                                value: WasmDataU8::from_vec_u8(value),
+                            });
+                        }
+                        StorageRequestKind::Delete { key } => {
+                            self.os.from_wasm(FromWasmStorageDelete {
+                                request_id_lo,
+                                request_id_hi,
+                                namespace,
+                                key,
+                            });
+                        }
+                        StorageRequestKind::List {
+                            prefix,
+                            after,
+                            limit,
+                        } => {
+                            let has_after = after.is_some();
+                            self.os.from_wasm(FromWasmStorageList {
+                                request_id_lo,
+                                request_id_hi,
+                                namespace,
+                                prefix,
+                                after: after.unwrap_or_default(),
+                                has_after,
+                                limit,
+                            });
+                        }
+                        StorageRequestKind::GetRange {
+                            key,
+                            offset,
+                            len,
+                        } => {
+                            self.os.from_wasm(FromWasmStorageGetRange {
+                                request_id_lo,
+                                request_id_hi,
+                                namespace,
+                                key,
+                                offset_lo: offset as u32,
+                                offset_hi: (offset >> 32) as u32,
+                                len,
+                            });
+                        }
+                        StorageRequestKind::Stat { key } => {
+                            self.os.from_wasm(FromWasmStorageStat {
+                                request_id_lo,
+                                request_id_hi,
+                                namespace,
+                                key,
+                            });
+                        }
+                        StorageRequestKind::Estimate => {
+                            self.os.from_wasm(FromWasmStorageEstimate {
+                                request_id_lo,
+                                request_id_hi,
+                                namespace,
+                            });
+                        }
+                    }
+                }
+                CxOsOp::StorageRequestError {
+                    request_id,
+                    op,
+                    error,
+                } => {
+                    if let Some(response) =
+                        self.finish_web_storage_request(request_id, op, Err(error))
+                    {
+                        self.call_event_handler(&Event::Storage(vec![response]));
+                    }
                 }
                 CxOsOp::CheckPermission {
                     permission,
@@ -953,6 +1095,7 @@ impl CxOsApi for Cx {
     fn init_cx_os(&mut self) {
         super::web_network::install_network_backend_shim();
         self.package_root = Some(String::new());
+        self.os.start_time = Self::time_now();
 
         self.os.append_to_wasm_js(&[
             ToWasmInit::to_js_code(),
@@ -967,9 +1110,11 @@ impl CxOsApi for Cx {
             ToWasmKeyUp::to_js_code(),
             ToWasmTextInput::to_js_code(),
             ToWasmTextCopy::to_js_code(),
+            ToWasmStorageResult::to_js_code(),
             ToWasmTimerFired::to_js_code(),
             ToWasmPaintDirty::to_js_code(),
             ToWasmRedrawAll::to_js_code(),
+            ToWasmWebGLShadersDone::to_js_code(),
             ToWasmLiveFileChange::to_js_code(),
             ToWasmLocationChange::to_js_code(),
             ToWasmWindowGotFocus::to_js_code(),
@@ -1006,6 +1151,13 @@ impl CxOsApi for Cx {
             FromWasmSetDocumentTitle::to_js_code(),
             FromWasmSetMouseCursor::to_js_code(),
             FromWasmTextCopyResponse::to_js_code(),
+            FromWasmStorageGet::to_js_code(),
+            FromWasmStorageSet::to_js_code(),
+            FromWasmStorageDelete::to_js_code(),
+            FromWasmStorageList::to_js_code(),
+            FromWasmStorageGetRange::to_js_code(),
+            FromWasmStorageStat::to_js_code(),
+            FromWasmStorageEstimate::to_js_code(),
             FromWasmShowTextIME::to_js_code(),
             FromWasmHideTextIME::to_js_code(),
             FromWasmHTTPRequest::to_js_code(),
@@ -1023,6 +1175,7 @@ impl CxOsApi for Cx {
             FromWasmAllocArrayBuffer::to_js_code(),
             FromWasmAllocIndexBuffer::to_js_code(),
             FromWasmAllocVao::to_js_code(),
+            FromWasmFreeWebGLResources::to_js_code(),
             FromWasmAllocTextureImage2D_BGRAu8_32::to_js_code(),
             FromWasmAllocTextureImage2D_Ru8::to_js_code(),
             FromWasmAllocTextureImage2D_RGBAf32::to_js_code(),
@@ -1055,7 +1208,7 @@ impl CxOsApi for Cx {
     }
 
     fn seconds_since_app_start(&self) -> f64 {
-        0.0
+        (Self::time_now() - self.os.start_time).max(0.0)
     }
 
     #[cfg(target_feature = "atomics")]
@@ -1186,12 +1339,18 @@ pub unsafe extern "C" fn wasm_thread_alloc_tls_and_stack(tls_size: u32) -> u32 {
 // storage buffers for graphics API related platform
 pub struct CxOs {
     pub(crate) window_geom: WindowGeom,
+    pub(crate) native_window_geom: WindowGeom,
+    pub(crate) start_time: f64,
 
     pub from_wasm: Option<FromWasmMsg>,
 
     pub(crate) vertex_buffers: usize,
     pub(crate) index_buffers: usize,
     pub(crate) vaos: usize,
+    /// WebGL programs queued for compile that JavaScript has not yet reported
+    /// linked or failed (`ToWasmWebGLShadersDone`). While non-zero, draw calls
+    /// on those programs are dropped by the browser side.
+    pub(crate) webgl_shaders_pending: usize,
 
     pub(crate) to_wasm_js: Vec<String>,
     pub(crate) from_wasm_js: Vec<String>,
@@ -1203,12 +1362,15 @@ impl Default for CxOs {
     fn default() -> Self {
         Self {
             window_geom: WindowGeom::default(),
+            native_window_geom: WindowGeom::default(),
+            start_time: 0.0,
 
             from_wasm: Some(FromWasmMsg::new()),
 
             vertex_buffers: 0,
             index_buffers: 0,
             vaos: 0,
+            webgl_shaders_pending: 0,
 
             to_wasm_js: Vec::new(),
             from_wasm_js: Vec::new(),
@@ -1271,6 +1433,16 @@ pub unsafe extern "C" fn wasm_check_signal() -> u32 {
 #[export_name = "wasm_init_panic_hook"]
 pub unsafe extern "C" fn init_panic_hook() {
     pub fn panic_hook(info: &panic::PanicHookInfo) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            #[link(wasm_import_module = "env")]
+            extern "C" {
+                fn js_console_error(u8_ptr: u32, len: u32);
+            }
+            let message = format!("__MAKEPAD_WASM_PANIC__:{}", info);
+            unsafe { js_console_error(message.as_ptr() as u32, message.len() as u32) };
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         crate::error!("{}", info)
     }
     panic::set_hook(Box::new(panic_hook));

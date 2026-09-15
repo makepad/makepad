@@ -153,10 +153,11 @@ impl Cx {
     /// shader source is untouched. Every draw sharing this compiled shader
     /// changes together. Returns false for an unknown shader or index.
     pub fn shader_const_patch(&mut self, shader_id: DrawShaderId, index: usize, value: f32) -> bool {
+        let uniforms_gen = self.next_uniform_gen();
         let Some(sh) = self.draw_shaders.shaders.get_mut(shader_id.index) else {
             return false;
         };
-        if !sh.mapping.patch_table_const(index, value) {
+        if !sh.mapping.patch_table_const(index, value, uniforms_gen) {
             return false;
         }
         self.redraw_all();
@@ -1392,7 +1393,7 @@ impl CxDrawShaderMapping {
     /// Write one table constant's live value into its scope-uniform slot
     /// and bump the generation so GPU-side copies refresh. Returns false
     /// for an index the shader does not have.
-    pub fn patch_table_const(&mut self, index: usize, value: f32) -> bool {
+    pub fn patch_table_const(&mut self, index: usize, value: f32, uniforms_gen: u64) -> bool {
         let Some(tc) = self.table_consts.get_mut(index) else {
             return false;
         };
@@ -1401,7 +1402,8 @@ impl CxDrawShaderMapping {
         if let Some(slot) = self.scope_uniforms_buf.get_mut(input.offset) {
             *slot = value;
         }
-        self.scope_uniforms_gen = self.scope_uniforms_gen.wrapping_add(1);
+        debug_assert_ne!(uniforms_gen, 0);
+        self.scope_uniforms_gen = uniforms_gen;
         true
     }
 
