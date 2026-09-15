@@ -131,7 +131,7 @@ pub struct GpuDrawStats {
     pub missing_text_fonts: usize,
 }
 
-/// Makepad replay adapter for vector GPU and `MAKEPAD=headless` targets.
+/// Makepad replay adapter for vector GPU and `MAKEPAD=gpusim` targets.
 ///
 /// `DrawGlyph` stores one scale-independent curve/band representation per
 /// registered music outline. Visible glyph calls remain adjacent by font and
@@ -866,7 +866,7 @@ pub struct RasterTileRequest {
 
 /// Produces an offscreen request whose content is replayed through the same
 /// renderer. The app owns the render target/texture-array allocation; under
-/// `MAKEPAD=headless` the identical pass is software-rasterized and can be PNG
+/// `MAKEPAD=gpusim` the identical pass is software-rasterized and can be PNG
 /// encoded by the platform frame writer.
 pub fn raster_tile_request(key: TileKey, tile_size_px: u16, gutter_px: u8) -> RasterTileRequest {
     let level = key.level.px_per_sp();

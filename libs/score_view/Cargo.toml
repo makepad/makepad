@@ -1,0 +1,24 @@
+[package]
+name = "makepad-score-view"
+version = "0.1.0"
+edition = "2021"
+description = "Playback-free score engraving and Makepad score widget"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "makepad_score_view"
+
+[features]
+default = ["embed-bravura"]
+embed-bravura = []
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", version = "2.0.0" }
+makepad-score = { path = "../score", version = "1.0.0" }
+makepad-score-layout = { path = "../score_layout", version = "0.1.0" }
+makepad-score-render = { path = "../score_render", version = "0.1.0" }
+ttf-parser = { path = "../ttf-parser" }
+
+[dev-dependencies]
+makepad-test = { path = "../makepad_test", version = "0.1.0" }
+makepad-zune-png = { path = "../zune/zune-png", version = "0.5.2" }

@@ -1,0 +1,8 @@
+[package]
+name = "makepad-drumkit-phys"
+version = "0.1.0"
+edition = "2021"
+description = "Parked physically modelled drum kit: coupled-head membranes, strikers, snares and nonlinear cymbal plates"
+license = "MIT OR Apache-2.0"
+
+[dependencies]

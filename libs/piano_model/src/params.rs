@@ -99,10 +99,37 @@ design_params! {
     /// the listener flagged. Since the per-partial normal-mode reduction
     /// landed (keys.rs), the PROMPT loss is carried by the bridge
     /// coupling and this term is only the intrinsic winding loss the
-    /// aftersound decays at: at 2.0 the horizontal/anti modes of the
-    /// wound keys sit at sigma ~0.5-0.9 across the audible partials,
-    /// against measured real slow stages of 0.02-1.2.
-    a1_wound = 2.0,
+    /// aftersound decays at.
+    /// 2.0 -> 0.25, 2026-09-01, measured per partial against the REAL
+    /// multi-velocity corpus (Salamander C5, 48k/24bit): the real A0's
+    /// partials from 200 Hz to 850 Hz all decay at 2-12 dB/s over the
+    /// first second (sigma 0.25-1.4, no visible trend with frequency)
+    /// and at 1-5 dB/s after; C1 the same. At 2.0 the model's A0 partials
+    /// at 400-850 Hz fell at 15-40 dB/s (sigma 1.7-4.6, 3-8x the real)
+    /// and its 0.5-2 kHz share dropped from -3 dB to -25 dB over two
+    /// seconds where the real note HOLDS -8..-11 dB throughout: the note
+    /// collapsed to its p3-p6 cluster within half a second — a plucked
+    /// bass, "not a hammered string". A linear-in-f loss of 2/kHz is
+    /// simply not in the recordings below 1 kHz; the frequency-dependent
+    /// part of the real wound-string loss is the quadratic one below
+    /// (a2_wound), which only bites above ~1.5 kHz (the real A0's 2-8 kHz
+    /// band decays at ~18 dB/s, sigma ~2).
+    a1_wound = 0.25,
+    /// wound-string quadratic loss (1/s per kHz^2), scaled (1-t)^3 like
+    /// a1_wound: the viscous/air-drag loss of a thick copper-wound string
+    /// is larger than plain wire's (bigger diameter, rougher surface).
+    /// Sized so the real A0's ~18 dB/s at 2-8 kHz is met (sigma ~2.7 at
+    /// 3 kHz with the base a2) while 0.3-1 kHz stays at the measured
+    /// 0.3-0.7/s.
+    a2_wound = 0.12,
+    /// The linear-in-f term the PLAIN-WIRE keys keep (the old a1_wound
+    /// value, still scaled (1-t)^3): the wound law above is gated to the
+    /// copper-wound strings (idx < 24, ~A#2) with a short blend, because
+    /// the mid register was calibrated with this term in place and its
+    /// 1-2 kHz sustain is already hotter than the Salamander C4's
+    /// (real 1-2 kHz share 210-410 ms: -14 dB; model -8) — taking the
+    /// loss away there moved C4 the wrong way.
+    a1_plain = 2.0,
     /// quartic-in-frequency loss (1/s per kHz^4): real string losses grow
     /// FASTER than f^2 at the top of the band (air drag leaves the viscous
     /// regime, felt/termination micro-losses); with only the f^2 term one
@@ -181,9 +208,19 @@ design_params! {
     /// point and non-rigid termination keep real comb nulls shallow
     comb_fill = 0.20626157651445576,
     /// strike position x0/L = spos_lo - (spos_lo-spos_hi)*t^spos_pow
+    /// + spos_bass * max(0, 1 - t/spos_bass_t)
     spos_lo = 0.09877467490112493,
     spos_hi = 0.06120083330744137,
     spos_pow = 1.3,
+    /// Bass strike-point correction (2026-09-01): the Salamander A0 and C2
+    /// ladders carry their strike-comb nulls at partials 8, 16 and 24-26
+    /// at every layer, i.e. the real bass is struck at L/8, where the
+    /// searched law put A0 at L/10 (nulls at 10 and 20, right where the
+    /// recordings hold partials at -10 dB). Adds 0.0262 at A0 (-> 0.125),
+    /// fading linearly to nothing by G#3 so the middle and treble keep
+    /// their searched positions exactly.
+    spos_bass = 0.0262,
+    spos_bass_t = 0.40,
     // --- hammer / felt ---------------------------------------------------
     /// felt stiffness exponent of 10: feltk_lo + feltk_span*t
     feltk_lo = 7.44,
@@ -191,6 +228,60 @@ design_params! {
     /// felt power p: feltp_lo + feltp_span*t
     feltp_lo = 2.332016978017561,
     feltp_span = 1.4310157297332198,
+    /// Bass-hammer felt regime (2026-09-01, measured against the
+    /// Salamander corpus). Below felt_bass_t the felt exponent is lowered
+    /// by feltp_bass*(1 - t/felt_bass_t)^2 and log10 K by feltk_bass
+    /// times the same ramp, so the bottom octave's hammers work in a
+    /// nearly LINEAR-spring regime while everything from ~D#3 up is
+    /// untouched. Why: the real bass ladder is velocity-INVARIANT below
+    /// ~1 kHz — the Salamander A0's partials 8-20 sit at -25/-24/-24 dB
+    /// rel the strongest at pp/mf/ff, C2's at -31/-29/-27 — and the
+    /// measured bass contact time varies only ~20-30% over the dynamic
+    /// range (Askenfelt & Jansson). With the compass-wide felt law
+    /// (p 2.33 at A0) the model's A0 contact ran 6.2 -> 3.0 ms from pp
+    /// to ff and its p8-20 swung -35 -> -19 dB (16 dB where the real
+    /// instrument shows 1): pianissimo bass was a dull thud and forte a
+    /// bright pluck that then died. Heavy, deep, hysteretic bass felt
+    /// that never compacts under playing loads behaves far closer to a
+    /// linear spring (Stulov; Giordano & Winans report the lowest
+    /// dynamic exponents on bass hammers) — the effective exponent here
+    /// is that of the felt working against the string's yield, not the
+    /// rigid-anvil loading curve.
+    /// The bass regime's own felt law: exponent feltp_bass and
+    /// log10 K = feltk_bass_lo + feltk_bass_slope*t, blended into the
+    /// compass law with weight w = (1 - t/felt_bass_t)^felt_bass_pow
+    /// (w = 1 at A0, 0 from felt_bass_t up; felt_bass_t = 0 disables).
+    /// Blending log K and p linearly keeps the force at ~1 mm of felt
+    /// compression — hence the contact time — continuous across the
+    /// blend, so nothing steps.
+    /// Measured result at these values (A0 / C2, pp-mf-ff = Salamander
+    /// layers 4/9/14): contact 2.8/2.7/2.7 ms and 3.15/3.15/3.15 ms (the
+    /// old law: 6.2/3.8/3.0 and 5.5/3.8/3.2); partials 8-20 rel strongest
+    /// at 100 ms -25.9/-24.2/-21.2 dB vs real -25/-24/-24, and
+    /// -30/-27.5/-25.3 vs real -31.5/-28.7/-27.3. The hammer's
+    /// pianissimo-to-fortissimo brightening in the bass now comes from
+    /// where the recordings put it — the 2-8 kHz band (real A0 -57/-38/-29,
+    /// model -43/-37/-29) — not from the sub-kHz ladder.
+    feltp_bass = 1.05,
+    feltk_bass_lo = 4.3,
+    feltk_bass_slope = 2.2,
+    /// the regime holds fully (w = 1) up to felt_bass_t0 (~C2, the top of
+    /// the wound doubles), then ramps out to zero at felt_bass_t (~G#3;
+    /// A3 and C4 are untouched — C4's own velocity bloom already matches
+    /// the recordings, 17 vs 18 dB)
+    felt_bass_t0 = 0.17,
+    felt_bass_t = 0.40,
+    felt_bass_pow = 1.0,
+    /// Fraction of the felt's loading/unloading (hysteresis) rate
+    /// modulation removed on the same ramp. The (1 + lambda du/dt) factor
+    /// stiffens a forte blow's loading ~2.3x against ~1.5x at piano — a
+    /// velocity-dependent stiffness on top of the power law. Measured
+    /// with every other nonlinearity removed, it alone kept a 6 dB pp->ff
+    /// swing in A0's sub-kHz ladder (the real swing is 1 dB); with it
+    /// gone the bass pulse shape is exactly velocity-invariant and its
+    /// mean stiffening is folded into feltk_bass_lo. The mid/treble
+    /// hysteresis is unchanged.
+    lambda_bass = 1.0,
     /// extra resting hardness of the last half-octave's hammers, as an
     /// additional exponent of 10 on felt_k ramped over t = 0.75..1.0
     /// (zero at and below C6). The top hammers of a concert grand are
@@ -325,8 +416,17 @@ design_params! {
     sym_in = 0.002,
     sym_out = 0.35,
     // --- phantom partials / longitudinal modes (0 = off) ----------------
-    /// output gain of the per-voice longitudinal/phantom bank
-    ph_gain = 0.25,
+    /// output gain of the per-voice longitudinal/phantom bank.
+    /// 0.25 -> 0.08 (2026-09-01): with the bass hammer re-voiced, the FREE
+    /// longitudinal modes were the single largest 2-8 kHz source of a
+    /// forte C1 after the attack — the bank alone put the 50-100 ms
+    /// 2-8 kHz share at -14 dB against the recording's -33 (A0/C2 were
+    /// within 3 dB, C1's three modes at 2.0-2.7 kHz happen to sit inside
+    /// the high-passed drive). Bank & Sujbert measured the free
+    /// longitudinal mode of a real F1 dying in ~0.15 s and the sustained
+    /// phantom content coming from the FORCED response (ph_direct, kept);
+    /// the free modes are a colour, not a voice.
+    ph_gain = 0.08,
     /// FORCED-response phantom path: the high-passed quadratic signal
     /// itself, fed to the bridge alongside the free-mode bank. Bank &
     /// Sujbert (JASA 2005) measured exactly this split on a recorded F1:
