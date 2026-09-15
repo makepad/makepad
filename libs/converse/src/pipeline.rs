@@ -16,6 +16,7 @@ use crate::filter::{FilterDecision, FilterJob, FilterWorker, TranscriptFilter};
 use crate::speech::SpeechOutput;
 use crate::agent_seam::{Agent, AgentEvent, PromptId, SessionConfig, SessionId};
 use makepad_widgets::{Cx, Event};
+use makepad_widgets::makepad_draw::thread::ThreadSpawner;
 use std::collections::VecDeque;
 
 /// How many recent dialog lines the filter sees for context.
@@ -68,6 +69,7 @@ impl ConversePipeline {
     /// `make_filter` runs on the filter worker thread, so filters holding
     /// single-thread resources (a local LLM session) are fine.
     pub fn new(
+        spawner: ThreadSpawner,
         agent: Box<dyn Agent>,
         make_filter: impl FnOnce() -> Box<dyn TranscriptFilter> + Send + 'static,
         voice: &str,
@@ -77,8 +79,8 @@ impl ConversePipeline {
             session_id: None,
             current_prompt: None,
             queued_prompts: VecDeque::new(),
-            filter: FilterWorker::new(make_filter),
-            speech: SpeechOutput::new(voice),
+            filter: FilterWorker::new(spawner.clone(), make_filter),
+            speech: SpeechOutput::new(voice, spawner),
             recent_dialog: VecDeque::new(),
             reply_accum: String::new(),
             pending_actions: Vec::new(),

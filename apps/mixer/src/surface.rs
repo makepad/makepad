@@ -260,7 +260,7 @@ impl SurfaceBinder {
             // its text is the theme's deepest background — the one colour
             // guaranteed to read on every scribble hue.
             let text_rgb = if filled > 0.5 {
-                crate::theme::Palette::shared().rgb3("bg_dark")
+                crate::theme::Palette::for_cx(cx).rgb3("bg_dark")
             } else {
                 rgb
             };

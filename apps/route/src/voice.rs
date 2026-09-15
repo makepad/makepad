@@ -44,22 +44,25 @@ pub struct VoiceGate {
 }
 
 impl VoiceGate {
-    pub fn new() -> Self {
+    pub fn new(spawner: ThreadSpawner) -> Self {
         let (jobs, job_rx) = channel::<GateJob>();
         let (result_tx, results) = channel();
         let signal = SignalToUI::new();
         let worker_signal = signal.clone();
-        std::thread::Builder::new()
-            .name("voice-gate".into())
-            .spawn(move || {
+        let spawned = spawner.spawn_worker(
+            ThreadOptions {
+                name: Some("route-voice-gate".into()),
+                ..Default::default()
+            },
+            move || {
                 // QwenFilter is !Send — construct on this thread. Eager
                 // warm-up: the model otherwise loads on the FIRST spoken
                 // utterance, which is the worst moment for a 3s stall.
-                let t0 = std::time::Instant::now();
+                let t0 = Cx::monotonic_now();
                 let mut filter = QwenFilter::new(FILTER_MODEL, APP_CONTEXT);
                 let _ = filter.judge("warmup", &[]);
                 let _ = result_tx.send(GateResult::Ready {
-                    secs: t0.elapsed().as_secs_f64(),
+                    secs: Cx::monotonic_now() - t0,
                 });
                 worker_signal.set();
                 while let Ok(job) = job_rx.recv() {
@@ -79,8 +82,12 @@ impl VoiceGate {
                     }
                     worker_signal.set();
                 }
-            })
-            .ok();
+            },
+        );
+        match spawned {
+            Ok(handle) => handle.detach(),
+            Err(error) => log!("voice gate worker unavailable: {error}"),
+        }
         Self {
             jobs,
             results,

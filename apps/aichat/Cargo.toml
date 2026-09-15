@@ -1,0 +1,48 @@
+# aichat — the assistant, as an app.
+#
+# One conversation that drives every application through the AI services
+# layer. It is hosted three ways with one code base: under the window
+# manager as a special child seated in the pane slot (this binary,
+# `--stdin-loop`), standalone as its own window (this binary), and inside
+# any app's Window as the F10 overlay or inside the mobile/web superbuild
+# (this crate's lib, `makepad_aichat::script_mod` + `AiChatPanel{}`).
+#
+# The panel widget OWNS the engine: the service registry, the model, the
+# transcript. Hosts only feed it links (in-process) or bus frames (the
+# window manager's studio Custom frames) and give it a place to draw.
+#
+# Plan of record: repo-root aicontrol.md.
+
+[package]
+name = "makepad-aichat"
+version = "0.1.0"
+edition = "2021"
+default-run = "aichat"
+
+[lib]
+name = "makepad_aichat"
+path = "src/lib.rs"
+
+[[bin]]
+name = "aichat"
+path = "src/main.rs"
+
+[features]
+default = ["engine", "gen"]
+# The real models (the hub's local runtime, the cloud providers). Off for a
+# build without a model runtime — the web page answers with NoModel and the
+# tool console still works.
+engine = ["makepad-ai-services/engine"]
+# The assistant's own `gen` service (src/gen.rs): the creator runner picks
+# a fleet node and brings the picture back. Ordinary apps that embed the
+# overlay leave this off so they do not link the 3D renderer.
+gen = ["dep:makepad-asset-creator"]
+
+[dependencies]
+makepad-widgets = { path = "../../widgets" }
+makepad-wm-theme = { path = "../../libs/wm_theme" }
+makepad-wm-api = { path = "../../libs/wm_api" }
+makepad-ai-services = { path = "../../libs/ai/services", default-features = false }
+makepad-strict-json = { path = "../../libs/strict_json" }
+# The generative pipelines behind `gen`. Native only.
+makepad-asset-creator = { path = "../../libs/asset/creator", optional = true }
