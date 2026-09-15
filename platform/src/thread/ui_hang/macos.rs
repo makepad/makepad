@@ -81,7 +81,11 @@ impl Target {
                 return format!("{image}+0x{:x} [0x{pc:x}]", pc.saturating_sub(info.image_base as usize));
             }
             let name = CStr::from_ptr(info.symbol_name).to_string_lossy();
-            format!("{}+0x{:x} ({image})", demangle_legacy(&name), pc.saturating_sub(info.symbol_address as usize))
+            format!(
+                "{}+0x{:x} ({image})",
+                super::demangle::demangle(&name),
+                pc.saturating_sub(info.symbol_address as usize)
+            )
         }
     }
 }
@@ -98,20 +102,4 @@ fn strip_pointer(pointer: usize) -> usize {
     }
     #[cfg(not(target_arch = "aarch64"))]
     { pointer }
-}
-
-fn demangle_legacy(name: &str) -> String {
-    let Some(mut rest) = name.strip_prefix("_ZN").or_else(|| name.strip_prefix("__ZN")) else { return name.into(); };
-    let mut parts = Vec::new();
-    while rest != "E" && !rest.is_empty() {
-        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
-        let Some(len) = rest[..digits].parse::<usize>().ok() else { return name.into(); };
-        rest = &rest[digits..];
-        let Some(part) = rest.get(..len) else { return name.into(); };
-        if !(part.len() == 17 && part.starts_with('h') && part[1..].bytes().all(|b| b.is_ascii_hexdigit())) {
-            parts.push(part);
-        }
-        rest = &rest[len..];
-    }
-    parts.join("::").replace("$LT$", "<").replace("$GT$", ">").replace("$u20$", " ").replace("$RF$", "&").replace("..", "::")
 }

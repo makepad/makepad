@@ -112,7 +112,7 @@ pub fn define_url_session_data_delegate() -> *const Class {
                         headers: Default::default(),
                         metadata_id: context_box.metadata_id,
                         status_code: 0,
-                        body: Some(data_bytes.to_vec()),
+                        body: Some(data_bytes.to_vec().into()),
                     },
                 };
 

@@ -1,5 +1,6 @@
 pub use makepad_apple_sys::*;
 
+#[cfg(target_os = "macos")]
 pub(crate) mod ui_hang_sys;
 
 /// Foundation `NSActivityIdleSystemSleepDisabled` (`1ULL << 20`).

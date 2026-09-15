@@ -710,7 +710,6 @@ mod upload_tests {
             RetainedInstances::new(16, vec![0.25; 50 * 1024 * 1024 / 4].into()).unwrap();
         let mut copied = vec![0.0; publication.data().len()];
         let mut budget = RetainedUploadBudget::default();
-        let mut offset = 0;
         let mut frames = 0;
         // The whole block is copied in the frame that owes it (contract §7):
         // one copy, complete, counted once. The bounded, frame-shared pacing
@@ -725,10 +724,8 @@ mod upload_tests {
             budget.begin_frame(frames);
             assert_eq!(budget.stats.bytes, bytes);
             assert_eq!(budget.stats.instances_uploaded * 64, budget.stats.bytes);
-            offset = bytes;
             frames += 1;
         }
-        assert_eq!(offset, publication.byte_len());
         assert_eq!(frames, 1);
         assert_eq!(copied.as_slice(), publication.data());
         assert_eq!(budget.totals.bytes, publication.byte_len());
