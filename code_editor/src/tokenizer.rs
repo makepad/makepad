@@ -6,7 +6,7 @@ use crate::{
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Tokenizer {
-    state: Vec<Option<(State, State)>>,
+    state: Vec<Option<((State, usize), (State, usize))>>,
 }
 
 impl Tokenizer {
@@ -40,29 +40,60 @@ impl Tokenizer {
 
     pub fn update(&mut self, text: &Text, tokens: &mut [Vec<Token>]) {
         let mut state = State::default();
+        let mut attribute_depth = 0;
         for line in 0..text.as_lines().len() {
             match self.state[line] {
-                Some((start_state, end_state)) if state == start_state => {
-                    state = end_state;
+                Some((start_state, end_state)) if (state, attribute_depth) == start_state => {
+                    (state, attribute_depth) = end_state;
                 }
                 _ => {
-                    let start_state = state;
+                    let start_state = (state, attribute_depth);
                     let mut new_tokens = Vec::new();
                     let mut cursor = Cursor::new(&text.as_lines()[line]);
                     loop {
+                        let start = cursor.index;
+                        let initial = matches!(state, State::Initial(_));
                         let (next_state, token) = state.next(&mut cursor);
                         state = next_state;
                         match token {
-                            Some(token) => new_tokens.push(token),
+                            Some(mut token) => {
+                                let source = &text.as_lines()[line][start..];
+                                if initial
+                                    && attribute_depth == 0
+                                    && (source.starts_with("#[") || source.starts_with("#!["))
+                                {
+                                    attribute_depth = 1;
+                                }
+                                if attribute_depth > 0 {
+                                    // Only lexical delimiters affect nesting: brackets in strings
+                                    // and comments cannot terminate a multiline attribute.
+                                    if token.kind == TokenKind::Delimiter {
+                                        match source.as_bytes()[0] {
+                                            b'[' => attribute_depth += 1,
+                                            b']' => {
+                                                attribute_depth -= 1;
+                                                if attribute_depth == 1 {
+                                                    attribute_depth = 0;
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    token.kind = TokenKind::Attribute;
+                                }
+                                new_tokens.push(token);
+                            }
                             None => break,
                         }
                     }
-                    self.state[line] = Some((start_state, state));
+                    self.state[line] = Some((start_state, (state, attribute_depth)));
                     tokens[line] = new_tokens;
                 }
             }
         }
     }
+
+
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -219,6 +250,7 @@ impl InitialState {
         while cursor.skip_if(|char| char.is_identifier_continue()) {}
         let end = cursor.index;
         let string = &cursor.string[start..end];
+        if cursor.peek(0) == '!' { return (State::Initial(InitialState), TokenKind::Macro); }
         (
             State::Initial(InitialState),
             match string {

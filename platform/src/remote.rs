@@ -145,6 +145,8 @@ mod imp {
             tx: Sender<Reply>,
         },
         Dump(Sender<Reply>),
+        /// The task pool's one-line summary (workers, jobs, queue waits).
+        PoolSummary(Sender<Reply>),
         Snap {
             window: Option<usize>,
             needle: String,
@@ -851,6 +853,9 @@ mod imp {
                 };
                 let _ = tx.send(Reply::Text(dump));
             }
+            Cmd::PoolSummary(tx) => {
+                let _ = tx.send(Reply::Text(cx.task_pool_summary()));
+            }
             Cmd::ShaderConsts { shader, tx } => {
                 let _ = tx.send(Reply::Text(shader_consts_json(cx, shader)));
             }
@@ -940,6 +945,11 @@ mod imp {
                         widget.height,
                         widget.window_index,
                     ));
+                    out.push_str(&format!(
+                        ",\"window_id\":{},\"enabled\":{}",
+                        json_str(&widget.window_id),
+                        widget.enabled,
+                    ));
                     if let Some(text) = &widget.text {
                         if !text.is_empty() {
                             out.push_str(&format!(",\"t\":{}", json_str(text)));
@@ -950,6 +960,9 @@ mod imp {
                     }
                     if let Some(checked) = widget.checked {
                         out.push_str(&format!(",\"c\":{}", if checked { 1 } else { 0 }));
+                    }
+                    if let Some(selected) = &widget.selected {
+                        out.push_str(&format!(",\"selected\":{}", json_str(selected)));
                     }
                     if !widget.visible {
                         out.push_str(",\"v\":0");
@@ -1292,7 +1305,7 @@ mod imp {
              /snap?q=&w=&all=  widget rects, ready to click: {{\"s\":[{{\"i\":id,\"ty\":type,\"r\":[x,y,w,h],\"w\":win,\"t\":text}}]}}\n\
              \x20                 q= filters id/type/text (substring); default lists only visible, sized widgets\n\
              /d                whole widget tree as indented text (id, type, x y w h)\n\
-             /tweak?on=1|0     the TWEAKER design-feedback overlay (also F12 in-app). hover outlines widgets; click pins; buttons never fire\n\
+             /tweak?on=1|0     the TWEAKER design-feedback overlay (also Shift+F10 in-app). hover outlines widgets; click pins; buttons never fire\n\
              /tweak/state      selection + its editable properties + diff log + annotations, one JSON\n\
              /tweak/apply      POST {{\"path\":\"a.b.c\",\"splash\":\"{{padding: 20}}\"}} or {{\"path\":..,\"prop\":\"padding\",\"value\":\"20\"}} — live-apply + relayout\n\
              /tweak/diff       the raw edit log; POST /tweak/clear resets it\n\
@@ -1523,6 +1536,11 @@ mod imp {
     }
 
     fn route_log(p: &Params) -> Out {
+        // Asked before the ring is locked: the answer comes from the UI thread.
+        let pool = match ask(Cmd::PoolSummary, 2) {
+            Reply::Text(text) => text,
+            _ => String::new(),
+        };
         let ring = log_ring().lock().unwrap();
         let since = p.get(&["since"]).and_then(|v| v.parse::<u64>().ok());
         let count = p
@@ -1536,7 +1554,7 @@ mod imp {
         if since.is_none() && selected.len() > count {
             selected = selected.split_off(selected.len() - count);
         }
-        let mut out = format!("{{\"n\":{},\"l\":[", ring.next_seq);
+        let mut out = format!("{{\"n\":{},\"pool\":{},\"l\":[", ring.next_seq, json_str(&pool));
         for (index, (_, line)) in selected.iter().enumerate() {
             if index > 0 {
                 out.push(',');

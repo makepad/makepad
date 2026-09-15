@@ -222,6 +222,19 @@ impl ImageCacheImpl for Image {
 }
 
 impl Image {
+    /// Updates layout and aspect fitting without evaluating script. This is
+    /// useful for widgets owned by an isolated VM: their typed Rust state can
+    /// be changed safely even while the host VM is active.
+    pub fn set_walk_and_fit(&mut self, cx: &mut Cx, walk: Walk, fit: ImageFit) {
+        self.walk = walk;
+        self.fit = fit;
+        self.redraw(cx);
+    }
+
+    pub fn fit(&self) -> ImageFit {
+        self.fit
+    }
+
     fn load_from_resource(&mut self, cx: &mut Cx) {
         if self.src_loaded {
             return;
@@ -860,6 +873,13 @@ pub enum AsyncLoad {
 }
 
 impl ImageRef {
+    /// See [`Image::set_walk_and_fit`].
+    pub fn set_walk_and_fit(&self, cx: &mut Cx, walk: Walk, fit: ImageFit) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_walk_and_fit(cx, walk, fit);
+        }
+    }
+
     /// Loads the image at the given `image_path` resource into this `ImageRef`.
     pub fn load_image_dep_by_path(&self, cx: &mut Cx, image_path: &str) -> Result<(), ImageError> {
         if let Some(mut inner) = self.borrow_mut() {

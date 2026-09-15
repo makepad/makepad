@@ -22,6 +22,7 @@ script_mod! {
         // color: vec4(-1,-1,-1,-1) means "use original SVG colors"
         // Any non-negative color replaces the SVG color, preserving per-vertex alpha.
         color: vec4(-1.0, -1.0, -1.0, -1.0)
+        opacity: 1.0
 
         // GPU-side transform for cached SVG geometry
         svg_scale: uniform(vec2(1.0, 1.0))
@@ -120,9 +121,9 @@ script_mod! {
         get_color: fn() {
             let base = self.eval_gradient()
             if self.color.x >= 0.0 {
-                return vec4(self.color.rgb * self.color.a * base.a, self.color.a * base.a)
+                return vec4(self.color.rgb * self.color.a * base.a, self.color.a * base.a) * self.opacity
             }
-            return base
+            return base * self.opacity
         }
     }
 }
@@ -167,6 +168,8 @@ pub struct DrawSvg {
     pub draw_super: DrawVector,
     #[live(vec4(-1.0, -1.0, -1.0, -1.0))]
     pub color: Vec4f,
+    #[live(1.0)]
+    pub opacity: f32,
 }
 
 impl DrawSvg {
