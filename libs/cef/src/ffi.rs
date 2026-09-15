@@ -8,17 +8,59 @@ use std::os::raw::c_int;
 pub type cef_dictionary_value_t = c_void;
 pub type cef_preference_registrar_t = c_void;
 pub type cef_preferences_type_t = c_int;
-pub type cef_request_context_t = c_void;
 pub type cef_request_context_handler_t = c_void;
 pub type cef_render_process_handler_t = c_void;
 pub type cef_resource_bundle_handler_t = c_void;
 pub type cef_scheme_registrar_t = c_void;
+#[cfg(not(target_os = "linux"))]
 pub type cef_window_handle_t = *mut c_void;
+#[cfg(target_os = "linux")]
+pub type cef_window_handle_t = std::os::raw::c_ulong;
 pub type cef_string_userfree_t = *mut cef_string_t;
 pub type cef_string_list_t = *mut c_void;
 pub type cef_string_map_t = *mut c_void;
 pub type cef_accessibility_handler_t = c_void;
 pub type cef_color_t = u32;
+pub const CEF_COLOR_VARIANT_LIGHT: c_int = 1;
+pub const CEF_COLOR_VARIANT_DARK: c_int = 2;
+
+// CEF API 13800: the request context inherits the preference manager.
+// Keep every preceding callback slot even when the wrapper does not use it.
+#[repr(C)]
+pub struct cef_preference_manager_t {
+    pub base: cef_base_ref_counted_t,
+    pub has_preference: cef_unused_callback_t,
+    pub get_preference: cef_unused_callback_t,
+    pub get_all_preferences: cef_unused_callback_t,
+    pub can_set_preference: cef_unused_callback_t,
+    pub set_preference: cef_unused_callback_t,
+    pub add_preference_observer: cef_unused_callback_t,
+}
+
+#[repr(C)]
+pub struct cef_request_context_t {
+    pub base: cef_preference_manager_t,
+    pub is_same: cef_unused_callback_t,
+    pub is_sharing_with: cef_unused_callback_t,
+    pub is_global: cef_unused_callback_t,
+    pub get_handler: cef_unused_callback_t,
+    pub get_cache_path: cef_unused_callback_t,
+    pub get_cookie_manager: cef_unused_callback_t,
+    pub register_scheme_handler_factory: cef_unused_callback_t,
+    pub clear_scheme_handler_factories: cef_unused_callback_t,
+    pub clear_certificate_exceptions: cef_unused_callback_t,
+    pub clear_http_auth_credentials: cef_unused_callback_t,
+    pub close_all_connections: cef_unused_callback_t,
+    pub resolve_host: cef_unused_callback_t,
+    pub get_media_router: cef_unused_callback_t,
+    pub get_website_setting: cef_unused_callback_t,
+    pub set_website_setting: cef_unused_callback_t,
+    pub get_content_setting: cef_unused_callback_t,
+    pub set_content_setting: cef_unused_callback_t,
+    pub set_chrome_color_scheme: Option<unsafe extern "system" fn(
+        self_: *mut cef_request_context_t, variant: c_int, user_color: cef_color_t,
+    )>,
+}
 pub type cef_drag_data_t = c_void;
 pub type cef_drag_operations_mask_t = c_int;
 pub type cef_event_flags_t = u32;
@@ -91,11 +133,25 @@ pub struct cef_accelerated_paint_info_common_t {
 /// `cef_accelerated_paint_info_t` for macOS (include/internal/cef_types_mac.h):
 /// the shared texture handle is an `IOSurfaceRef` out of CEF's pool. It is
 /// only valid for the duration of `on_accelerated_paint`.
+#[cfg(target_os = "macos")]
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct cef_accelerated_paint_info_t {
     pub size: usize,
     pub shared_texture_io_surface: *mut c_void,
+    pub format: cef_color_type_t,
+    pub extra: cef_accelerated_paint_info_common_t,
+}
+
+/// `cef_accelerated_paint_info_t` for Windows (include/internal/cef_types_win.h):
+/// a D3D11 shared-texture `HANDLE`. Unused — Windows browsers paint in
+/// software.
+#[cfg(windows)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct cef_accelerated_paint_info_t {
+    pub size: usize,
+    pub shared_texture_handle: *mut c_void,
     pub format: cef_color_type_t,
     pub extra: cef_accelerated_paint_info_common_t,
 }
@@ -214,11 +270,21 @@ pub struct cef_command_line_t {
     >,
 }
 
+#[cfg(unix)]
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct cef_main_args_t {
     pub argc: c_int,
     pub argv: *mut *mut c_char,
+}
+
+/// `cef_main_args_t` for Windows (include/internal/cef_types_win.h): the
+/// module handle; CEF reads the command line from the process itself.
+#[cfg(windows)]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct cef_main_args_t {
+    pub instance: *mut c_void,
 }
 
 #[repr(C)]
@@ -282,8 +348,6 @@ pub struct cef_settings_t {
     pub chrome_policy_id: cef_string_t,
     pub chrome_app_icon_id: c_int,
     pub disable_signal_handlers: c_int,
-    #[cfg(makepad_cef_api_ge_14600)]
-    pub use_views_default_popup: c_int,
 }
 
 #[repr(C)]
@@ -319,6 +383,7 @@ pub struct cef_browser_settings_t {
     pub chrome_zoom_bubble: cef_state_t,
 }
 
+#[cfg(target_os = "macos")]
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct cef_window_info_t {
@@ -331,6 +396,42 @@ pub struct cef_window_info_t {
     pub shared_texture_enabled: c_int,
     pub external_begin_frame_enabled: c_int,
     pub view: cef_window_handle_t,
+    pub runtime_style: cef_runtime_style_t,
+}
+
+/// `cef_window_info_t` for Windows (include/internal/cef_types_win.h): the
+/// `CreateWindowEx` parameters first, then the windowless flags.
+#[cfg(windows)]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct cef_window_info_t {
+    pub size: usize,
+    pub ex_style: u32,
+    pub window_name: cef_string_t,
+    pub style: u32,
+    pub bounds: cef_rect_t,
+    pub parent_window: cef_window_handle_t,
+    pub menu: *mut c_void,
+    pub windowless_rendering_enabled: c_int,
+    pub shared_texture_enabled: c_int,
+    pub external_begin_frame_enabled: c_int,
+    pub window: cef_window_handle_t,
+    pub runtime_style: cef_runtime_style_t,
+}
+
+/// Linux CEF uses XID-sized window handles, including for windowless setup.
+#[cfg(target_os = "linux")]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct cef_window_info_t {
+    pub size: usize,
+    pub window_name: cef_string_t,
+    pub bounds: cef_rect_t,
+    pub parent_window: cef_window_handle_t,
+    pub windowless_rendering_enabled: c_int,
+    pub shared_texture_enabled: c_int,
+    pub external_begin_frame_enabled: c_int,
+    pub window: cef_window_handle_t,
     pub runtime_style: cef_runtime_style_t,
 }
 
@@ -969,7 +1070,9 @@ pub struct cef_browser_host_t {
     pub get_opener_identifier: cef_unused_callback_t,
     pub has_view: cef_unused_callback_t,
     pub get_client: cef_unused_callback_t,
-    pub get_request_context: cef_unused_callback_t,
+    pub get_request_context: Option<unsafe extern "system" fn(
+        self_: *mut cef_browser_host_t,
+    ) -> *mut cef_request_context_t>,
     pub can_zoom: cef_unused_callback_t,
     pub zoom: cef_unused_callback_t,
     pub get_default_zoom_level: cef_unused_callback_t,
@@ -994,7 +1097,9 @@ pub struct cef_browser_host_t {
     pub show_dev_tools: cef_unused_callback_t,
     pub close_dev_tools: cef_unused_callback_t,
     pub has_dev_tools: cef_unused_callback_t,
-    pub send_dev_tools_message: cef_unused_callback_t,
+    pub send_dev_tools_message: Option<unsafe extern "system" fn(
+        self_: *mut cef_browser_host_t, message: *const c_void, message_size: usize,
+    ) -> c_int>,
     pub execute_dev_tools_method: cef_unused_callback_t,
     pub add_dev_tools_message_observer: cef_unused_callback_t,
     pub get_navigation_entries: cef_unused_callback_t,
