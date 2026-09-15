@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 #[cfg(unix)]
@@ -696,7 +696,7 @@ impl IgnoreStack {
             return Ok(());
         }
         self.repo_exclude_loaded = true;
-        let exclude_path = root.join(".git").join("info").join("exclude");
+        let exclude_path = repo_exclude_path(root);
         self.push_ignore_file(root, root, &exclude_path)
     }
 
@@ -708,6 +708,15 @@ impl IgnoreStack {
             }
         }
         ignored
+    }
+}
+
+/// `info/exclude` of the repository `root` belongs to; a linked worktree's
+/// exclude file lives in the shared common dir.
+fn repo_exclude_path(root: &Path) -> PathBuf {
+    match crate::repo::repository_paths(root) {
+        Ok(Some(paths)) => paths.common_dir.join("info").join("exclude"),
+        _ => root.join(".git").join("info").join("exclude"),
     }
 }
 
@@ -858,25 +867,77 @@ pub fn checkout_tree(
 
             // Create index entry
             let metadata = fs::metadata(&file_path)?;
-            let ie = IndexEntry {
-                ctime_sec: metadata_mtime_sec(&metadata),
-                ctime_nsec: 0,
-                mtime_sec: metadata_mtime_sec(&metadata),
-                mtime_nsec: 0,
-                dev: metadata_dev(&metadata),
-                ino: metadata_ino(&metadata),
-                mode: entry.mode,
-                uid: metadata_uid(&metadata),
-                gid: metadata_gid(&metadata),
-                file_size: metadata.len() as u32,
-                oid: entry.oid,
-                flags: (path.len().min(0xFFF)) as u16,
-                path,
-            };
-            index_entries.push(ie);
+            index_entries.push(index_entry_from_metadata(path, entry.oid, entry.mode, &metadata));
         }
     }
     Ok(())
+}
+
+/// An index entry for a working-tree file whose stat data was just read.
+pub fn index_entry_from_metadata(
+    path: String,
+    oid: ObjectId,
+    mode: u32,
+    metadata: &fs::Metadata,
+) -> IndexEntry {
+    IndexEntry {
+        ctime_sec: metadata_mtime_sec(metadata),
+        ctime_nsec: 0,
+        mtime_sec: metadata_mtime_sec(metadata),
+        mtime_nsec: 0,
+        dev: metadata_dev(metadata),
+        ino: metadata_ino(metadata),
+        mode,
+        uid: metadata_uid(metadata),
+        gid: metadata_gid(metadata),
+        file_size: metadata.len() as u32,
+        oid,
+        flags: (path.len().min(0xFFF)) as u16,
+        path,
+    }
+}
+
+/// Write one blob to `workdir/path` (creating parents) with the mode's
+/// executable bit and return its fresh index entry.
+pub fn write_worktree_file(
+    workdir: &Path,
+    path: &str,
+    oid: ObjectId,
+    mode: u32,
+    data: &[u8],
+) -> Result<IndexEntry, GitError> {
+    let file_path = workdir.join(path);
+    if let Some(parent) = file_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&file_path, data)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let bits = if mode == 0o100755 { 0o755 } else { 0o644 };
+        fs::set_permissions(&file_path, fs::Permissions::from_mode(bits))?;
+    }
+    let metadata = fs::metadata(&file_path)?;
+    Ok(index_entry_from_metadata(path.to_string(), oid, mode, &metadata))
+}
+
+/// The blob id a working-tree file would hash to, streamed so large files
+/// are never held in memory.
+pub fn hash_file_blob(path: &Path) -> Result<ObjectId, GitError> {
+    use std::io::Read;
+    let mut file = fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    let mut hasher = crate::sha1::Sha1::new();
+    hasher.update(format!("blob {}\0", len).as_bytes());
+    let mut buffer = vec![0u8; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    Ok(ObjectId::from_bytes(hasher.finalize()))
 }
 
 /// Add a file to the index: hash the file content, write the blob object,
@@ -956,7 +1017,7 @@ pub fn remove_worktree_files(
             }
             // Try to remove empty parent directories
             if let Some(parent) = file_path.parent() {
-                let _ = remove_empty_dirs(parent, workdir);
+                remove_empty_dirs(parent, workdir);
             }
         }
     }
@@ -964,7 +1025,11 @@ pub fn remove_worktree_files(
 }
 
 /// Remove empty directories up to (but not including) the stop directory.
-fn remove_empty_dirs(dir: &Path, stop: &Path) -> Result<(), std::io::Error> {
+pub(crate) fn remove_empty_dirs(dir: &Path, stop: &Path) {
+    let _ = remove_empty_dirs_inner(dir, stop);
+}
+
+fn remove_empty_dirs_inner(dir: &Path, stop: &Path) -> Result<(), std::io::Error> {
     if dir == stop {
         return Ok(());
     }
@@ -972,7 +1037,7 @@ fn remove_empty_dirs(dir: &Path, stop: &Path) -> Result<(), std::io::Error> {
         if entries.next().is_none() {
             fs::remove_dir(dir)?;
             if let Some(parent) = dir.parent() {
-                let _ = remove_empty_dirs(parent, stop);
+                let _ = remove_empty_dirs_inner(parent, stop);
             }
         }
     }
