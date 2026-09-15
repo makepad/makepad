@@ -347,6 +347,7 @@ impl OpenglWindow {
         title: &str,
         app_id: &str,
         is_fullscreen: bool,
+        custom_window_chrome: bool,
     ) -> OpenglWindow {
         // Checked "downcast" of the EGL platform display to a X11 display.
         assert_eq!(opengl_cx.egl_platform, egl_sys::EGL_PLATFORM_X11_EXT);
@@ -387,7 +388,6 @@ impl OpenglWindow {
             visual_info
         };
 
-        let custom_window_chrome = false;
         xlib_window.init(
             title,
             app_id,
