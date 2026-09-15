@@ -24,7 +24,7 @@ use std::sync::mpsc::Sender;
 use std::time::Instant;
 
 pub(crate) fn wake_ui_event_loop() {
-    // Headless bounded loops do not sleep in an OS wait primitive.
+    // Gpusim bounded loops do not sleep in an OS wait primitive.
 }
 
 #[derive(Default, Clone)]
@@ -57,7 +57,7 @@ pub struct CxOsDrawShader {
     pub source_hash: u64,
     pub dylib_path: Option<PathBuf>,
     pub load_error: Option<String>,
-    pub module: Option<jit::HeadlessLoadedModule>,
+    pub module: Option<jit::GpusimLoadedModule>,
     pub shader_version: Option<u32>,
     /// Total number of f32 slots in the varying buffer passed between vertex and fragment shaders.
     pub varying_total_slots: usize,
@@ -77,7 +77,7 @@ pub struct CxOsDrawShader {
 pub struct CxOs {
     pub(crate) stdin_timers: PollTimers,
     pub(crate) start_time: Option<Instant>,
-    pub(crate) shader_jit: jit::HeadlessShaderJit,
+    pub(crate) shader_jit: jit::GpusimShaderJit,
     pub(crate) frame_dir: Option<PathBuf>,
     pub(crate) no_draw: bool,
     pub(crate) no_draw_initialized: bool,
@@ -87,17 +87,17 @@ pub struct CxOs {
     /// Rebuilding this per frame re-converted the whole glyph atlas on every
     /// draw, which cost more than rasterising the window did. Entries carry a
     /// signature and are redone when the texture reports pending updates.
-    pub(crate) texture_conversions: crate::os::headless::raster::TextureConversionCache,
+    pub(crate) texture_conversions: crate::os::gpusim::raster::TextureConversionCache,
     /// Offscreen (render-to-texture) pass framebuffers, kept ACROSS frames:
     /// a parent pass that repaints while its child stayed clean must still
     /// sample the child's last contents, and reusing the buffers keeps a
     /// window-sized 3D pass to one allocation instead of one per frame.
-    pub(crate) render_targets: crate::os::headless::raster::HeadlessRenderTargets,
+    pub(crate) render_targets: crate::os::gpusim::raster::GpusimRenderTargets,
     /// One framebuffer per window, kept across frames. Re-mapping tens of
     /// megabytes of colour and depth every frame costs more in first-touch page
     /// faults than the clear that follows it.
     pub(crate) window_framebuffers:
-        std::collections::HashMap<usize, crate::os::headless::virtual_gpu::Framebuffer>,
+        std::collections::HashMap<usize, crate::os::gpusim::virtual_gpu::Framebuffer>,
 }
 
 impl Default for CxOs {
@@ -183,10 +183,10 @@ impl CxMediaApi for Cx {
 
 impl Cx {
     pub(crate) fn poll_texture_readbacks(&mut self) {
-        self.headless_capture_texture_readbacks(None);
+        self.gpusim_capture_texture_readbacks(None);
     }
 
-    pub(crate) fn headless_capture_texture_readbacks(&mut self, pass: Option<crate::DrawPassId>) {
+    pub(crate) fn gpusim_capture_texture_readbacks(&mut self, pass: Option<crate::DrawPassId>) {
         use crate::texture::{ReadbackChannelOrder, ReadbackError, ReadbackOrigin};
         if self.textures.1.readbacks.slots.is_empty() { return; }
         for work in self.take_readback_work(pass, ReadbackChannelOrder::Bgra, ReadbackOrigin::TopLeft) {
@@ -198,7 +198,7 @@ impl Cx {
         }
     }
 
-    /// No-op in headless mode; the real macOS backend raises the app's windows.
+    /// No-op in gpusim mode; the real macOS backend raises the app's windows.
     #[cfg(target_os = "macos")]
     pub fn macos_activate_app(&mut self) {}
 
