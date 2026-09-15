@@ -1,0 +1,23 @@
+// Spriglet: a little amber-crowned walking seedling, facing +Z.
+// Original model.build source; metres, Y up, all positions in MODEL space.
+// Smooth stem, rigid crown/eyes/foot. Edit sway.pos to move the bend.
+csg.joint("holdfast", {pos: vec3(0, 0.1, 0)})
+csg.joint("crown", {parent: "sway", pos: vec3(0, 1.4, 0)})
+csg.joint("sway", {parent: "holdfast", pos: vec3(0, 0.8, 0)})
+
+let stem = csg.move(csg.scale(csg.sphere({r: 1, seg: 24}), vec3(0.16, 0.7, 0.16)), vec3(0, 0.8, 0))
+csg.part("stem", stem, {color: #55aa77})
+csg.bind("stem", {joints: ["holdfast", "sway"], radius: 0.12})
+
+csg.part("cap", csg.move(csg.scale(csg.sphere({r: 0.3, seg: 16}), vec3(1, 0.6, 1)), vec3(0, 1.5, 0)), {color: #ffaa33})
+csg.bind("cap", {rigid: "crown"})
+for i in 0..2 {
+    let n = ["eye-l", "eye-r"][i]
+    csg.part(n, csg.move(csg.sphere({r: 0.045, seg: 12}), vec3((i*2-1)*0.1, 1.5, 0.26)), {color: #223344})
+    csg.bind(n, {rigid: "crown"})
+}
+csg.part("foot", csg.move(csg.scale(csg.sphere({r: 0.25, seg: 16}), vec3(1, 0.4, 1)), vec3(0, 0.1, 0)), {color: #775533})
+csg.bind("foot", {rigid: "holdfast"})
+
+csg.clip("idle", [{joint: "sway", axis: "z", keys: [vec2(0,0), vec2(1,8), vec2(2,0)]}])
+csg.clip("walk", [{joint: "sway", axis: "z", keys: [vec2(0,0), vec2(0.5,45), vec2(1,0), vec2(1.5,-45), vec2(2,0)]}])

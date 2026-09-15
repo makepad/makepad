@@ -1,8 +1,11 @@
 //! Bounded Splash model programs for the exact polygonal CAD engine.
 //!
-//! The script surface is the frozen verbs in `apps/sandbox/CSG_API_REVIEW.md`
-//! plus its one reviewed follow-up, `csg.implicit`. Calls only build immutable
-//! nodes; all geometry and validation remain in `libs/csg`.
+//! Calls build immutable solids and an optional declarative joint rig;
+//! geometry, binding and validation remain in `libs/csg` on the worker.
+
+#[path = "rig.rs"]
+mod rig;
+pub use rig::MeshedRig;
 
 use crate::{
     difference_all_with, dvec3, intersection_all_with, union_all_with, FinishParams, Solid, Vec3d,
@@ -159,6 +162,7 @@ pub struct CsgDocument {
     warnings: Vec<String>,
     budgets: CsgBudgets,
     deadline: Instant,
+    rig: rig::RigDraft,
 }
 impl CsgDocument {
     pub fn node_count(&self) -> usize { self.nodes.len() }
@@ -188,9 +192,13 @@ pub struct MeshedModel {
     pub parts: Vec<MeshedPart>,
     pub triangles: usize,
     pub warnings: Vec<String>,
+    /// None for legacy documents and streamed rigid partial previews.
+    pub rig: Option<MeshedRig>,
 }
 #[derive(Clone, Debug)]
-pub struct PartPreview { pub completed: usize, pub total: usize, pub model: MeshedModel }
+/// One completed rigid part. The parent index refers to declaration order
+/// in the final model; the final bound rig is delivered only once at the end.
+pub struct PartPreview { pub completed: usize, pub total: usize, pub part: MeshedPart }
 #[derive(Clone, Debug)]
 pub struct Thumbnail { pub width: u32, pub height: u32, pub rgba: Vec<u8> }
 
@@ -202,6 +210,7 @@ struct EvalState {
     error: Option<String>,
     budgets: CsgBudgets,
     implicit: Vec<ImplicitSpec>,
+    rig: rig::RigDraft,
 }
 
 #[derive(Clone)]
@@ -725,8 +734,8 @@ pub fn evaluate_program(source: &str, budgets: CsgBudgets) -> Result<CsgDocument
     let started = Instant::now();
     let deadline = started.checked_add(budgets.max_eval_time).unwrap_or(started);
     let state = Rc::new(RefCell::new(EvalState { budgets, ..Default::default() }));
-    let (mut host, mut std) = ((), ());
-    let mut vm = ScriptVm { host: &mut host, std: &mut std, bx: Box::new(ScriptVmBase::new()) };
+    let mut host = ScriptVmHost::new((), ());
+    let mut vm = ScriptVm { host: &mut host, bx: Box::new(ScriptVmBase::new()) };
     let api_type = vm.new_handle_type(id_lut!(csg));
     let dispatch = state.clone();
     vm.set_handle_call(api_type, move |vm, args, method| match method {
@@ -746,17 +755,19 @@ pub fn evaluate_program(source: &str, budgets: CsgBudgets) -> Result<CsgDocument
         id if id == id!(mirror) => c_mirror(vm, &dispatch, args),
         id if id == id!(part) => c_part(vm, &dispatch, args),
         id if id == id!(anim) => c_anim(vm, &dispatch, args),
+        id if id == id!(joint) => rig::c_joint(vm, &dispatch, args),
+        id if id == id!(bind) => rig::c_bind(vm, &dispatch, args),
+        id if id == id!(clip) => rig::c_clip(vm, &dispatch, args),
         _ => dispatch.borrow_mut().fail(format!("unknown csg verb '{method}'")),
     });
     let handle = vm.bx.heap.new_handle(api_type, Box::new(CsgApiGc));
     vm.set_injected_global(id!(csg), handle.into());
     vm.bx.captured_errors = Some(Vec::new());
-    vm.bx.run_budget = Some(ScriptRunBudget {
-        soft_deadline: deadline,
-        hard_deadline: deadline,
-        sample_interval_instructions: 1_024,
-        instructions_until_sample: 1_024,
-    });
+    vm.bx.run_budget = Some(ScriptRunBudget::from_durations(
+        budgets.max_eval_time,
+        budgets.max_eval_time,
+        1_024,
+    ));
     let script = ScriptMod { file: "model.csg.splash".into(), line: 0, column: 1, code: format!("use mod.std.*\nuse mod.math.*\nuse mod.pod.*\n{source}\n;"), ..Default::default() };
     let _ = vm.with_heap_allocation_limit(budgets.max_heap_bytes, |vm| vm.with_instruction_limit(budgets.max_instructions, |vm| vm.eval(script)));
     let interpreter_instructions = budgets
@@ -765,6 +776,10 @@ pub fn evaluate_program(source: &str, budgets: CsgBudgets) -> Result<CsgDocument
     let mut errors = vm.take_errors();
     vm.bx.captured_errors = Some(Vec::new());
     let mut implicit_error = None;
+    if errors.is_empty() && state.borrow().error.is_none() {
+        let validation = { let state = state.borrow(); state.rig.validate(&state.parts) };
+        if let Err(error) = validation { state.borrow_mut().fail(error.to_string()); }
+    }
     if errors.is_empty() && state.borrow().error.is_none() {
         let implicit = state.borrow().implicit.clone();
         for (pending, spec) in implicit.iter().enumerate() {
@@ -794,7 +809,7 @@ pub fn evaluate_program(source: &str, budgets: CsgBudgets) -> Result<CsgDocument
     if !errors.is_empty() { return Err(CsgError::Eval(errors.join("\n"))) }
     if state.parts.is_empty() { return Err(CsgError::Invalid("program declared no csg.part".into())) }
     if Instant::now() >= deadline { return Err(CsgError::Budget { what: "eval-time", found: 1, limit: 0 }) }
-    Ok(CsgDocument { nodes: state.nodes, parts: state.parts, warnings: state.warnings, budgets, deadline })
+    Ok(CsgDocument { nodes: state.nodes, parts: state.parts, warnings: state.warnings, budgets, deadline, rig: state.rig })
 }
 
 fn check_running(document: &CsgDocument) -> Result<(), CsgError> {
@@ -834,8 +849,8 @@ fn mesh_node(document: Arc<CsgDocument>, id: NodeId) -> Result<Solid, CsgError> 
     Ok(solid)
 }
 
-/// Exact-mesh named parts in declaration order. Boolean children fan out on
-/// the shared CAD pool; every completed top-level part is a preview stage.
+/// Exact-mesh named parts in declaration order. Boolean children follow the
+/// active execution scope; each preview contains only its newly finished part.
 pub fn mesh_document(document: CsgDocument, mut preview: impl FnMut(PartPreview)) -> Result<MeshedModel, CsgError> {
     let document = Arc::new(document);
     let mut model = MeshedModel { warnings: document.warnings.clone(), ..Default::default() };
@@ -854,8 +869,10 @@ pub fn mesh_document(document: CsgDocument, mut preview: impl FnMut(PartPreview)
         let pivot = part.pivot.unwrap_or_else(|| { let b = mesh.bounding_box(); let c = (b.min + b.max) * 0.5; [c.x, c.y, c.z] });
         model.triangles = found;
         model.parts.push(MeshedPart { name: part.name, pivot: [pivot[0] as f32, pivot[1] as f32, pivot[2] as f32], color: part.color, parent: part.parent, animation: part.animation, mesh });
-        preview(PartPreview { completed: model.parts.len(), total, model: model.clone() });
+        preview(PartPreview { completed: model.parts.len(), total, part: model.parts.last().unwrap().clone() });
     }
+    model.rig = rig::bind_document(&document, &model)?;
+    if model.rig.is_some() { check_running(&document)?; }
     Ok(model)
 }
 
@@ -950,6 +967,29 @@ csg.anim("tail", {kind: "swing", axis: "y", degrees: 40, hz: 3})
             if let Err(error) = mesh_document(document, |_| {}) { panic!("stage {count}: {error}") }
         }
     }
+    #[test]
+    fn serial_nested_booleans_emit_single_part_deltas() {
+        thread_pool::with_serial(|| {
+            let owner = std::thread::current().id();
+            let mut solid = "csg.box({size:vec3(1,1,1)})".to_string();
+            for offset in 1..=6 {
+                solid = format!("csg.union({solid},csg.move(csg.box({{size:vec3(1,1,1)}}),vec3({},0,0)))", offset * 2);
+            }
+            let source = format!("csg.part(\"chain\",{solid},{{}})\ncsg.part(\"other\",csg.box({{size:vec3(1,1,1)}}),{{}})");
+            let doc = evaluate_program(&source, CsgBudgets::default()).unwrap();
+            let mut names = Vec::new();
+            let model = mesh_document(doc, |preview| {
+                assert_eq!(std::thread::current().id(), owner);
+                assert_eq!(thread_pool::thread_count(), 1);
+                assert_eq!(preview.total, 2);
+                assert_eq!(preview.completed, names.len() + 1);
+                names.push(preview.part.name);
+            }).unwrap();
+            assert_eq!(names, ["chain", "other"]);
+            assert_eq!(model.parts.len(), 2);
+        });
+    }
+
     #[test] fn budgets_timeout_and_cancel_fail_closed() {
         let mut b=CsgBudgets::default();b.max_nodes=1;assert!(matches!(evaluate_program(DOG,b),Err(CsgError::Eval(_))));
         let mut b=CsgBudgets::default();b.max_triangles=10;let d=evaluate_program(DOG,b).unwrap();assert!(matches!(mesh_document(d,|_|{}),Err(CsgError::Budget{what:"triangle",..})));

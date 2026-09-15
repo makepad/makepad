@@ -95,7 +95,10 @@ impl Value {
             Value::F64(f) => {
                 use std::fmt::Write;
                 if f.is_finite() {
-                    let _ = write!(out, "{f}");
+                    // Debug uses a shortest round-trippable representation,
+                    // including scientific notation for extreme magnitudes.
+                    // Display expands tiny/large floats past our digit caps.
+                    let _ = write!(out, "{f:?}");
                 } else {
                     out.push_str("null");
                 }
@@ -155,8 +158,15 @@ fn escape_into(out: &mut String, s: &str) {
 }
 
 pub fn parse(bytes: &[u8]) -> Result<Value, &'static str> {
+    parse_depth(bytes, MAX_DEPTH)
+}
+
+/// `parse` with an explicit nesting cap, for bodies whose schema is known to
+/// nest deeper than the default (a flow graph, for instance). Every other
+/// rule is unchanged.
+pub fn parse_depth(bytes: &[u8], max_depth: u32) -> Result<Value, &'static str> {
     let text = std::str::from_utf8(bytes).map_err(|_| "invalid utf-8")?;
-    let mut p = P { b: text.as_bytes(), i: 0 };
+    let mut p = P { b: text.as_bytes(), i: 0, max_depth };
     p.skip_ws();
     let v = p.value(0)?;
     p.skip_ws();
@@ -169,6 +179,7 @@ pub fn parse(bytes: &[u8]) -> Result<Value, &'static str> {
 struct P<'a> {
     b: &'a [u8],
     i: usize,
+    max_depth: u32,
 }
 
 impl<'a> P<'a> {
@@ -208,7 +219,7 @@ impl<'a> P<'a> {
     }
 
     fn value(&mut self, depth: u32) -> Result<Value, &'static str> {
-        if depth > MAX_DEPTH {
+        if depth > self.max_depth {
             return Err("nesting too deep");
         }
         match self.peek().ok_or("unexpected end")? {
@@ -459,6 +470,30 @@ mod tests {
         assert!(parse(b".5").is_err());
         let long_frac = format!("0.{}", "1".repeat(64));
         assert!(parse(long_frac.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn finite_float_writer_roundtrips_with_bounded_numbers() {
+        let check = |value: f64| {
+            let text = Value::F64(value).to_json();
+            assert!(text.len() <= 25, "oversized float: {text}");
+            let Value::F64(decoded) = parse(text.as_bytes()).unwrap() else {
+                panic!("float lost its type: {text}");
+            };
+            assert_eq!(decoded.to_bits(), value.to_bits(), "{text}");
+        };
+        for value in [0.0, -0.0, 1.0, -1.0, 1e-300, 1e300, f64::MAX,
+            f64::MIN, f64::MIN_POSITIVE, f64::from_bits(1)] {
+            check(value);
+        }
+        let mut bits = 0x6a09_e667_f3bc_c909u64;
+        for _ in 0..4096 {
+            bits = bits.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let value = f64::from_bits(bits);
+            if value.is_finite() {
+                check(value);
+            }
+        }
     }
 
     #[test]
