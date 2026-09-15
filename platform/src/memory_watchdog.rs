@@ -11,23 +11,30 @@
 //! Limits default to 24 GB soft / 48 GB hard, overridable with
 //! `MAKEPAD_MEM_LIMIT_GB` (hard; soft = half) or explicit arguments.
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+#[cfg(not(target_arch = "wasm32"))]
 static WATCHDOG_STARTED: AtomicBool = AtomicBool::new(false);
+#[cfg(not(target_arch = "wasm32"))]
 static ORPHAN_WATCHDOG_STARTED: AtomicBool = AtomicBool::new(false);
 
 /// How often the orphan guard looks at its parent. A hosted child must not
 /// outlive its host by more than about a second.
+#[cfg(not(target_arch = "wasm32"))]
 const ORPHAN_POLL_MS: u64 = 250;
 
 /// Unix seconds of the last message received from the studio host in
 /// `--stdin-loop` mode (0 = never / not in that mode).
+#[cfg(not(target_arch = "wasm32"))]
 static STDIN_LAST_HOST_MSG_UNIX: AtomicU64 = AtomicU64::new(0);
 /// A stdin-loop app that hears nothing from studio for this long is an
 /// abandoned build (ClearBuild leaves the websocket half-open — the
 /// historic zombie-instance leak) and exits itself.
+#[cfg(not(target_arch = "wasm32"))]
 const STDIN_HOST_SILENCE_LIMIT_S: u64 = 300;
 
+#[cfg(not(target_arch = "wasm32"))]
 fn now_unix() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -36,6 +43,7 @@ fn now_unix() -> u64 {
 }
 
 /// Called by the stdin event loop on every received host message.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn note_stdin_host_message() {
     STDIN_LAST_HOST_MSG_UNIX.store(now_unix(), Ordering::Relaxed);
 }
@@ -61,6 +69,8 @@ impl Default for MemoryLimits {
 }
 
 /// Start the watchdog thread (idempotent). `limits: None` = defaults/env.
+// Browser workers have no process footprint to guard.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn start_memory_watchdog(limits: Option<MemoryLimits>) {
     if WATCHDOG_STARTED.swap(true, Ordering::SeqCst) {
         return;
@@ -76,6 +86,10 @@ pub fn start_memory_watchdog(limits: Option<MemoryLimits>) {
         .ok();
 }
 
+#[cfg(target_arch = "wasm32")]
+pub fn start_memory_watchdog(_limits: Option<MemoryLimits>) {}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn gb(bytes: u64) -> f64 {
     bytes as f64 / 1e9
 }
@@ -85,6 +99,7 @@ fn gb(bytes: u64) -> f64 {
 /// has a flaky fallback), we are a zombie holding gigabytes and rendering
 /// into a void — the historic "157 GB map process". Detect the orphaning
 /// (reparented to init/launchd) and exit.
+#[cfg(not(target_arch = "wasm32"))]
 fn orphaned_stdin_app() -> bool {
     #[cfg(unix)]
     {
@@ -108,11 +123,13 @@ fn orphaned_stdin_app() -> bool {
 /// The host owns the child's whole reason to run: it draws into the host's
 /// swapchain and its only input is the host's message stream. When the host
 /// dies the child must follow, and its own event loop cannot be trusted to
-/// notice — a busy handler (an mpterm tile parsing a `yes` flood) can sit
+/// notice — a busy handler (an terminal tile parsing a `yes` flood) can sit
 /// between two socket reads for minutes, which is exactly how orphans that
-/// burn a core were surviving their mpwm. This is a separate, tiny thread so
+/// burn a core were surviving their wm. This is a separate, tiny thread so
 /// the check keeps running no matter what the event loop is doing, and it is
 /// independent of the (opt-in) memory watchdog, which almost no app starts.
+// Browser workers are never stdin-loop child processes.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn start_stdin_orphan_watchdog() {
     if !crate::app_main::should_run_stdin_loop_from_env() {
         return;
@@ -135,6 +152,11 @@ pub fn start_stdin_orphan_watchdog() {
         .ok();
 }
 
+#[cfg(target_arch = "wasm32")]
+pub fn start_stdin_orphan_watchdog() {}
+
+// Process sampling and termination are native-only watchdog operations.
+#[cfg(not(target_arch = "wasm32"))]
 fn watchdog_main(limits: MemoryLimits) {
     let mut last_warn = std::time::Instant::now() - std::time::Duration::from_secs(3600);
     let mut prev_sample: Option<(std::time::Instant, u64)> = None;
