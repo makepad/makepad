@@ -820,6 +820,10 @@ impl Window {
     /// When the window is too narrow, the padding gracefully reduces to 0,
     /// transitioning to a left-aligned title.
     fn sync_caption_centering(&mut self, cx: &mut Cx) {
+        // App toolbars own their layout, including padding supplied by a theme.
+        if self.caption_contains_app_content(cx) {
+            return;
+        }
         let bar_width = self.view(cx, ids!(caption_bar)).area().rect(cx).size.x;
         let buttons = self.view(cx, ids!(windows_buttons));
         let buttons_width = if buttons.visible() { buttons.area().rect(cx).size.x } else { 0.0 };
