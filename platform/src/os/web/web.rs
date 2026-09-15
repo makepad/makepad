@@ -5,10 +5,14 @@ use {
         cx_api::{CxOsApi, CxOsOp, OpenUrlInPlace},
         draw_pass::CxDrawPassParent,
         event::{
-            Event, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NetworkResponse, ScrollEvent,
-            TextClipboardEvent, TimerEvent, ToWasmMsgEvent, TouchUpdateEvent,
+            DragEvent, DragItem, DragResponse, DropEvent, Event, KeyModifiers, MouseDownEvent,
+            MouseMoveEvent, MouseUpEvent, NetworkResponse, ScrollEvent, TextClipboardEvent,
+            TimerEvent, ToWasmMsgEvent, TouchUpdateEvent,
             VideoDecodingErrorEvent, VideoPlaybackCompletedEvent, VideoPlaybackPreparedEvent,
             VideoPlaybackResourcesReleasedEvent, VideoSource, VideoTextureUpdatedEvent, WindowGeom,
+        },
+        file_dialogs::{
+            assemble_virtual_files, FileDialog, FileDialogAction, VirtualFileData,
         },
         makepad_live_id::*,
         makepad_wasm_bridge::{FromWasm, FromWasmMsg, ToWasm, ToWasmMsg, WasmDataU8},
@@ -20,12 +24,58 @@ use {
         thread::{lock_from_ui, SignalToUI},
         HttpError, HttpProgress, HttpResponse, Vec2d,
     },
-    std::cell::RefCell,
-    std::panic,
-    std::rc::Rc,
+    std::{
+        cell::RefCell,
+        panic,
+        rc::Rc,
+        sync::{Arc, Mutex},
+    },
 };
 
 impl Cx {
+    fn web_key_modifiers(modifiers: u32) -> KeyModifiers {
+        KeyModifiers {
+            shift: modifiers & 1 != 0,
+            control: modifiers & 2 != 0,
+            alt: modifiers & 4 != 0,
+            logo: modifiers & 8 != 0,
+        }
+    }
+
+    fn web_virtual_files(
+        files: Vec<WVirtualFile>,
+        limits: crate::VirtualFileLimits,
+    ) -> Result<Vec<crate::VirtualFile>, String> {
+        assemble_virtual_files(
+            files
+                .into_iter()
+                .map(|file| VirtualFileData {
+                    name: file.name,
+                    mime: file.mime,
+                    bytes: file.bytes.into_vec_u8(),
+                })
+                .collect(),
+            limits,
+        )
+    }
+
+    fn web_file_dialog_accept(dialog: &FileDialog) -> String {
+        let mut accept = Vec::<String>::new();
+        for filter in &dialog.filters {
+            for extension in &filter.extensions {
+                let extension = extension.trim().trim_start_matches('*').trim_start_matches('.');
+                if extension.is_empty() {
+                    return String::new();
+                }
+                let extension = format!(".{extension}");
+                if !accept.iter().any(|item| item.eq_ignore_ascii_case(&extension)) {
+                    accept.push(extension);
+                }
+            }
+        }
+        accept.join(",")
+    }
+
     /// WebGL cannot blit a private render target to CPU without an extra
     /// readPixels path that this backend does not expose yet.
     pub fn debug_read_render_texture(
@@ -105,6 +155,9 @@ impl Cx {
     // incoming to_wasm. There is absolutely no other entrypoint
     // to general rust codeflow than this function. Only the allocators and init
     pub fn process_to_wasm(&mut self, msg_ptr: u32) -> u32 {
+        // A panic=abort trap cannot run dispatch guards. Every JS ingress is
+        // a fresh top-level dispatch, so clear the bookkeeping it may leave.
+        self.reset_event_dispatch_state();
         let mut to_wasm_msg = ToWasmMsg::take_ownership(msg_ptr);
         let mut network_responses = Vec::new();
         let mut storage_responses = Vec::new();
@@ -117,7 +170,8 @@ impl Cx {
             match block_id {
                 live_id!(ToWasmInit) => {
                     let tw = ToWasmInit::read_to_wasm(&mut to_wasm);
-                    self.cpu_cores = tw.cpu_cores as usize;
+                    self.cpu_cores = (tw.cpu_cores as usize).max(1);
+                    crate::thread::set_web_available_parallelism(self.cpu_cores);
                     self.gpu_info.init_from_info(
                         tw.gpu_info.min_uniform_vectors,
                         tw.gpu_info.vendor,
@@ -139,7 +193,6 @@ impl Cx {
                     self.set_physical_keyboard_state(true);
                     self.call_event_handler(&Event::Startup);
                     self.redraw_all();
-                    //self.platform.from_wasm(FromWasmCreateThread{thread_id:1});
                 }
 
                 live_id!(ToWasmResizeWindow) => {
@@ -320,6 +373,7 @@ impl Cx {
                         }
                         4 => {
                             self.call_event_handler(&Event::Shutdown);
+                            self.thread_spawner.close_runtime();
                         }
                         _ => {}
                     }
@@ -373,6 +427,103 @@ impl Cx {
                     if self.update_web_location_state(tw.pathname, tw.search, tw.hash) {
                         self.call_event_handler(&Event::Signal);
                     }
+                }
+
+                live_id!(ToWasmFileDrag) => {
+                    let tw = ToWasmFileDrag::read_to_wasm(&mut to_wasm);
+                    let mut abs = if tw.left {
+                        crate::dvec2(-100000.0, -100000.0)
+                    } else {
+                        crate::dvec2(tw.x, tw.y)
+                    };
+                    if let Some(window_id) = self.windows.current_id_zero() {
+                        self.dpi_override_scale(&mut abs, window_id);
+                    }
+                    let items = (0..tw.file_count)
+                        .map(|_| {
+                            DragItem::VirtualFile(crate::VirtualFile {
+                                name: String::new(),
+                                mime: String::new(),
+                                bytes: Arc::from(Vec::<u8>::new()),
+                                size: 0,
+                            })
+                        })
+                        .collect();
+                    self.call_event_handler(&Event::Drag(DragEvent {
+                        modifiers: Self::web_key_modifiers(tw.modifiers),
+                        handled: Arc::new(Mutex::new(false)),
+                        abs,
+                        items: Arc::new(items),
+                        response: Arc::new(Mutex::new(DragResponse::None)),
+                    }));
+                    self.drag_drop.cycle_drag();
+                    if tw.left {
+                        self.call_event_handler(&Event::DragEnd);
+                        self.drag_drop.cycle_drag();
+                    }
+                }
+
+                live_id!(ToWasmFileDrop) => {
+                    let tw = ToWasmFileDrop::read_to_wasm(&mut to_wasm);
+                    match Self::web_virtual_files(tw.files, self.file_dialogs.limits()) {
+                        Ok(files) => {
+                            let mut abs = crate::dvec2(tw.x, tw.y);
+                            if let Some(window_id) = self.windows.current_id_zero() {
+                                self.dpi_override_scale(&mut abs, window_id);
+                            }
+                            self.call_event_handler(&Event::Drop(DropEvent {
+                                modifiers: Self::web_key_modifiers(tw.modifiers),
+                                handled: Arc::new(Mutex::new(false)),
+                                abs,
+                                items: Arc::new(
+                                    files.into_iter().map(DragItem::VirtualFile).collect(),
+                                ),
+                            }));
+                            self.drag_drop.cycle_drag();
+                        }
+                        Err(error) => crate::error!("web file drop rejected: {error}"),
+                    }
+                    self.call_event_handler(&Event::DragEnd);
+                    self.drag_drop.cycle_drag();
+                }
+
+                live_id!(ToWasmFileDropError) => {
+                    let tw = ToWasmFileDropError::read_to_wasm(&mut to_wasm);
+                    crate::error!("web file drop rejected: {}", tw.error);
+                    self.call_event_handler(&Event::DragEnd);
+                    self.drag_drop.cycle_drag();
+                }
+
+                live_id!(ToWasmFileDialogResult) => {
+                    let tw = ToWasmFileDialogResult::read_to_wasm(&mut to_wasm);
+                    let id = LiveId::from_lo_hi(tw.id_lo, tw.id_hi);
+                    let pending = self.file_dialogs.finish(id);
+                    let limits = pending
+                        .as_ref()
+                        .map(|pending| pending.limits)
+                        .unwrap_or_else(|| self.file_dialogs.limits());
+                    if pending.is_none() {
+                        crate::error!("web file dialog returned unknown id {:?}", id);
+                    }
+                    let action = if tw.cancelled || !tw.error.is_empty() {
+                        if !tw.error.is_empty() {
+                            crate::error!("web file dialog failed: {}", tw.error);
+                        }
+                        FileDialogAction::FileCancelled { id }
+                    } else {
+                        match Self::web_virtual_files(tw.files, limits) {
+                            Ok(files) if !files.is_empty() => {
+                                FileDialogAction::FileLoaded { id, files }
+                            }
+                            Ok(_) => FileDialogAction::FileCancelled { id },
+                            Err(error) => {
+                                crate::error!("web file dialog rejected: {error}");
+                                FileDialogAction::FileCancelled { id }
+                            }
+                        }
+                    };
+                    self.action(action);
+                    self.handle_actions();
                 }
 
                 live_id!(ToWasmHTTPResponse) => {
@@ -1058,6 +1209,27 @@ impl Cx {
                 CxOsOp::PrepareAudioPlayback(_, _, _, _) => {}
                 // Track selection is currently implemented on Linux GStreamer only.
                 CxOsOp::SelectVideoTrack(_, _) | CxOsOp::SelectAudioTrack(_, _) => {}
+                CxOsOp::SelectFileDialog(dialog) => {
+                    if !dialog.want_bytes {
+                        crate::log!(
+                            "web file dialog has no filesystem paths; returning FileLoaded bytes"
+                        );
+                    }
+                    let limits = self.file_dialogs.limits();
+                    self.os.from_wasm(FromWasmSelectFileDialog {
+                        id_lo: dialog.id.lo(),
+                        id_hi: dialog.id.hi(),
+                        accept: Self::web_file_dialog_accept(&dialog),
+                        multiple: dialog.multiple,
+                        max_file_size: limits.max_file_size as f64,
+                        max_total_size: limits.max_total_size as f64,
+                    });
+                }
+                CxOsOp::SaveFileDialog(dialog) => {
+                    crate::error!("web save file dialogs are not supported; download support is pending");
+                    self.action(FileDialogAction::FileCancelled { id: dialog.id });
+                    self.handle_actions();
+                }
                 e => {
                     crate::error!("Not implemented on this platform: CxOsOp::{:?}", e);
                 } /*
@@ -1095,7 +1267,7 @@ impl CxOsApi for Cx {
     fn init_cx_os(&mut self) {
         super::web_network::install_network_backend_shim();
         self.package_root = Some(String::new());
-        self.os.start_time = Self::time_now();
+        self.os.start_time = Self::monotonic_now();
 
         self.os.append_to_wasm_js(&[
             ToWasmInit::to_js_code(),
@@ -1126,6 +1298,10 @@ impl CxOsApi for Cx {
             ToWasmPermissionResult::to_js_code(),
             ToWasmLocationUpdate::to_js_code(),
             ToWasmLocationError::to_js_code(),
+            ToWasmFileDrag::to_js_code(),
+            ToWasmFileDrop::to_js_code(),
+            ToWasmFileDropError::to_js_code(),
+            ToWasmFileDialogResult::to_js_code(),
             /*ToWasmWebSocketOpen::to_js_code(),
             ToWasmWebSocketClose::to_js_code(),
             ToWasmWebSocketError::to_js_code(),
@@ -1160,6 +1336,8 @@ impl CxOsApi for Cx {
             FromWasmStorageEstimate::to_js_code(),
             FromWasmShowTextIME::to_js_code(),
             FromWasmHideTextIME::to_js_code(),
+            FromWasmSetVirtualFileLimits::to_js_code(),
+            FromWasmSelectFileDialog::to_js_code(),
             FromWasmHTTPRequest::to_js_code(),
             FromWasmCancelHTTPRequest::to_js_code(),
             FromWasmCheckPermission::to_js_code(),
@@ -1202,33 +1380,10 @@ impl CxOsApi for Cx {
             FromWasmSeekVideoPlayback::to_js_code(),
             FromWasmCleanupVideoPlaybackResources::to_js_code(),
         ]);
-        #[cfg(target_feature = "atomics")]
-        self.os
-            .append_from_wasm_js(&[FromWasmCreateThread::to_js_code()]);
     }
 
     fn seconds_since_app_start(&self) -> f64 {
-        (Self::time_now() - self.os.start_time).max(0.0)
-    }
-
-    #[cfg(target_feature = "atomics")]
-    fn spawn_thread<F>(&mut self, f: F)
-    where
-        F: FnOnce() + Send + 'static,
-    {
-        let closure_box: Box<dyn FnOnce() + Send + 'static> = Box::new(f);
-        let context_ptr = Box::into_raw(Box::new(closure_box));
-        self.os.from_wasm(FromWasmCreateThread {
-            context_ptr: context_ptr as u32,
-            timer: 0,
-        });
-    }
-
-    #[cfg(not(target_feature = "atomics"))]
-    fn spawn_thread<F>(&mut self, _f: F)
-    where
-        F: FnOnce() + Send + 'static,
-    {
+        (Self::monotonic_now() - self.os.start_time).max(0.0)
     }
 
     fn open_url(&mut self, url: &str, in_place: OpenUrlInPlace) {
@@ -1280,60 +1435,19 @@ impl CxOsApi for Cx {
 }
 
 impl Cx {
-    #[cfg(target_feature = "atomics")]
-    #[allow(dead_code)]
-    pub(crate) fn spawn_timer_thread<F>(&mut self, timer: u32, f: F)
-    where
-        F: Fn() + Send + 'static,
-    {
-        let closure_box: Box<dyn Fn() + Send + 'static> = Box::new(f);
-        let context_ptr = Box::into_raw(Box::new(closure_box));
-        self.os.from_wasm(FromWasmCreateThread {
-            context_ptr: context_ptr as u32,
-            timer,
-        });
-    }
-
-    #[cfg(not(target_feature = "atomics"))]
-    #[allow(dead_code)]
-    pub(crate) fn spawn_timer_thread<F>(&mut self, _timer: u32, _f: F)
-    where
-        F: Fn() + Send + 'static,
-    {
-    }
-
     pub fn time_now() -> f64 {
         unsafe { js_time_now() }
+    }
+
+    pub fn monotonic_now() -> f64 {
+        unsafe { js_monotonic_now() }
     }
 }
 
 #[link(wasm_import_module = "env")]
 extern "C" {
     pub fn js_time_now() -> f64;
-}
-
-#[export_name = "wasm_thread_entrypoint"]
-#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
-pub unsafe extern "C" fn wasm_thread_entrypoint(closure_ptr: u32) {
-    let closure = Box::from_raw(closure_ptr as *mut Box<dyn FnOnce() + Send + 'static>);
-    closure();
-}
-
-#[export_name = "wasm_thread_timer_entrypoint"]
-#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
-pub unsafe extern "C" fn wasm_thread_timer_entrypoint(closure_ptr: u32) {
-    let closure = Box::from_raw(closure_ptr as *mut Box<dyn Fn() + Send + 'static>);
-    closure();
-    let _ = Box::into_raw(closure);
-}
-
-#[export_name = "wasm_thread_alloc_tls_and_stack"]
-#[cfg(all(target_arch = "wasm32", target_feature = "atomics"))]
-pub unsafe extern "C" fn wasm_thread_alloc_tls_and_stack(tls_size: u32) -> u32 {
-    let mut v = Vec::<u64>::new();
-    v.reserve_exact(tls_size as usize);
-    let mut v = std::mem::ManuallyDrop::new(v);
-    v.as_mut_ptr() as u32
+    pub fn js_monotonic_now() -> f64;
 }
 
 // storage buffers for graphics API related platform

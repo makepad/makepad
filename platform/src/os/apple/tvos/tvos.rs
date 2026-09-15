@@ -18,10 +18,23 @@ use {
             metal::{DrawPassMode, MetalCx},
         },
         thread::SignalToUI,
+        makepad_objc_sys::objc_block,
         window::CxWindowPool,
     },
     std::{cell::RefCell, rc::Rc, time::Instant},
 };
+
+pub(crate) fn wake_ui_event_loop() {
+    unsafe {
+        let main_thread_block = objc_block!(move || {});
+        let main_queue: ObjcId = msg_send![class!(NSOperationQueue), mainQueue];
+        let operation: ObjcId = msg_send![
+            class!(NSBlockOperation),
+            blockOperationWithBlock: &main_thread_block
+        ];
+        let () = msg_send![main_queue, addOperation: operation];
+    }
+}
 
 impl Cx {
     pub fn trace(val: &str) {
@@ -279,13 +292,6 @@ impl CxOsApi for Cx {
         self.apple_bundle_load_dependencies();
         #[cfg(apple_sim)]
         self.native_load_dependencies();
-    }
-
-    fn spawn_thread<F>(&mut self, f: F)
-    where
-        F: FnOnce() + Send + 'static,
-    {
-        std::thread::spawn(f);
     }
 
     fn seconds_since_app_start(&self) -> f64 {

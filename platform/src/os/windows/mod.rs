@@ -32,3 +32,7 @@ pub mod windows_stdin;
 pub(crate) use crate::os::windows::d3d11::*;
 pub(crate) use crate::os::windows::windows::*;
 pub(crate) use crate::os::windows::winrt_midi::{OsMidiInput, OsMidiOutput};
+
+pub(crate) fn wake_ui_event_loop() {
+    win32_app::wake_ui_event_loop();
+}

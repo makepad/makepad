@@ -1,6 +1,30 @@
-use std::{collections::VecDeque, mem, os::raw::c_int, ptr, time::Instant};
+use std::{collections::VecDeque, mem, os::raw::c_int, ptr, sync::OnceLock, time::Instant};
 
 use self::super::libc_sys;
+
+fn ui_wake_pipe() -> [c_int; 2] {
+    static PIPE: OnceLock<[c_int; 2]> = OnceLock::new();
+    *PIPE.get_or_init(|| unsafe {
+        let mut fds = [-1, -1];
+        if libc_sys::pipe(fds.as_mut_ptr()) == 0 {
+            for fd in fds {
+                let flags = libc_sys::fcntl(fd, libc_sys::F_GETFL);
+                let _ = libc_sys::fcntl(fd, libc_sys::F_SETFL, flags | libc_sys::O_NONBLOCK);
+            }
+        }
+        fds
+    })
+}
+
+pub(crate) fn wake_ui_event_loop() {
+    let write_fd = ui_wake_pipe()[1];
+    if write_fd >= 0 {
+        let byte = 1_u8;
+        unsafe {
+            let _ = libc_sys::write(write_fd, (&byte as *const u8).cast(), 1);
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 pub struct SelectTimer {
@@ -36,6 +60,10 @@ impl SelectTimers {
             //       If we leave this here, it locks one CPU core to 100% when stdin is `/dev/null`,
             //       which occurs any time an app is run from a DE/WM and not a terminal
             libc_sys::FD_SET(fd, fds.as_mut_ptr());
+            let wake_fd = ui_wake_pipe()[0];
+            if wake_fd >= 0 {
+                libc_sys::FD_SET(wake_fd, fds.as_mut_ptr());
+            }
         }
         //libc_sys::FD_SET(self.signal_fds[0], fds.as_mut_ptr());
         // If there are any timers, we set the timeout for select to the `delta_timeout`
@@ -49,8 +77,9 @@ impl SelectTimers {
             tv_usec: (timer.delta_timeout.fract() * 1000_000.0) as libc_sys::time_t,
         });
         let _nfds = unsafe {
+            let wake_fd = ui_wake_pipe()[0];
             libc_sys::select(
-                fd + 1,
+                fd.max(wake_fd) + 1,
                 fds.as_mut_ptr(),
                 ptr::null_mut(),
                 ptr::null_mut(),
@@ -60,6 +89,13 @@ impl SelectTimers {
                     .unwrap_or(ptr::null_mut()),
             )
         };
+        let wake_fd = ui_wake_pipe()[0];
+        if wake_fd >= 0 {
+            let mut buffer = [0_u8; 64];
+            unsafe {
+                while libc_sys::read(wake_fd, buffer.as_mut_ptr().cast(), buffer.len()) > 0 {}
+            }
+        }
     }
 
     pub fn time_now(&self) -> f64 {

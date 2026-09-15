@@ -115,10 +115,14 @@ pub fn script_mod(vm: &mut ScriptVm) {
     }
 
     fn fresh_seed() -> u64 {
-        let mut seed = Cx::time_now().to_bits();
-        seed ^= std::process::id() as u64;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static SEQUENCE: AtomicU64 = AtomicU64::new(1);
+        let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let mut seed = Cx::time_now().to_bits()
+            ^ sequence.wrapping_mul(0x9e37_79b9_7f4a_7c15);
         if seed == 0 {
-            seed = 0x9e37_79b9_7f4a_7c15;
+            seed = sequence.max(1);
         }
         seed
     }

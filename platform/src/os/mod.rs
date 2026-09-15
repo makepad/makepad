@@ -7,6 +7,8 @@
     target_os = "tvos",
     target_os = "windows"
 ))]
+// Native clock backend: this is the implementation behind Cx's portable clock.
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 pub mod cx_native;
 
 #[macro_use]
@@ -18,6 +20,8 @@ pub mod shared_framebuf;
 pub(crate) mod termination_signal;
 
 #[cfg(headless)]
+// Headless process backend is native-only and never compiled into a web app.
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 pub mod headless;
 
 #[cfg(headless)]
@@ -27,6 +31,8 @@ pub use crate::os::headless::*;
     not(headless),
     any(target_os = "macos", target_os = "ios", target_os = "tvos")
 ))]
+// Apple process backend is native-only and never compiled into a web app.
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 pub mod apple;
 
 #[cfg(all(
@@ -42,6 +48,8 @@ pub use crate::os::apple::*;
 pub use crate::os::apple::apple_media::*;
 
 #[cfg(all(not(headless), target_os = "windows"))]
+// Windows process backend is native-only and never compiled into a web app.
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 pub mod windows;
 
 #[cfg(all(not(headless), target_os = "windows"))]
@@ -51,12 +59,16 @@ pub use crate::os::windows::*;
 //pub use crate::os::windows::windows_media::*;
 
 #[cfg(all(not(headless), any(target_os = "android", target_os = "linux")))]
+// Linux/Android process backends are native-only and never compiled into a web app.
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 pub mod linux;
 
 #[cfg(all(not(headless), any(target_os = "android", target_os = "linux")))]
 pub use crate::os::linux::*;
 
 #[cfg(all(test, not(headless), target_os = "macos"))]
+// Native Linux compatibility tests reuse OS-only timing code on macOS.
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 pub mod linux_test_stub;
 
 #[cfg(all(test, not(headless), target_os = "macos"))]
