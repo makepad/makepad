@@ -1,4 +1,5 @@
 use super::*;
+use crate::util::clock::Instant;
 
 pub(super) const XR_ALIGNMENT_CALLBACK_BUDGET_MILLIS: u64 = 25;
 pub(super) const XR_ALIGNMENT_CALLBACK_MAX_STEPS: usize = 4096;
@@ -278,7 +279,7 @@ impl AlignmentWorkerState {
         budget: Duration,
         max_steps: usize,
     ) -> AlignmentWorkerStepOutcome {
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         let mut aggregate = AlignmentWorkerStepOutcome::default();
         let mut steps = 0usize;
         while steps < max_steps {

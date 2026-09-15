@@ -1,0 +1,19 @@
+use super::*;
+fn decompose(m:Matrix4)->Result<Transform>{
+    if m.iter().flatten().any(|x|!x.is_finite())||(0..3).any(|i|m[3][i].abs()>1e-10)||(m[3][3]-1.).abs()>1e-10{return Err(Error::Invalid("mirror affine transform"));}
+    let mut columns:[[f64;3];3]=std::array::from_fn(|j|std::array::from_fn(|i|m[i][j]));let mut scale=columns.map(length);if scale.iter().any(|x|*x<1e-8){return Err(Error::Invalid("mirrored singular scale"));}
+    for i in 0..3{columns[i]=mul(columns[i],1./scale[i]);}
+    if dot(columns[0],columns[1]).abs()>1e-8||dot(columns[1],columns[2]).abs()>1e-8||dot(columns[0],columns[2]).abs()>1e-8{return Err(Error::Invalid("mirrored rest requires shear; select its parent chain or remove nonuniform parent scale"));}
+    if dot(columns[0],cross(columns[1],columns[2]))<0.{scale[0]= -scale[0];columns[0]=mul(columns[0],-1.);}
+    let r:[[f64;3];3]=std::array::from_fn(|i|std::array::from_fn(|j|columns[j][i]));let trace=r[0][0]+r[1][1]+r[2][2];let q=if trace>0.{let s=(trace+1.).sqrt()*2.;[(r[2][1]-r[1][2])/s,(r[0][2]-r[2][0])/s,(r[1][0]-r[0][1])/s,s/4.]}else if r[0][0]>r[1][1]&&r[0][0]>r[2][2]{let s=(1.+r[0][0]-r[1][1]-r[2][2]).sqrt()*2.;[s/4.,(r[0][1]+r[1][0])/s,(r[0][2]+r[2][0])/s,(r[2][1]-r[1][2])/s]}else if r[1][1]>r[2][2]{let s=(1.+r[1][1]-r[0][0]-r[2][2]).sqrt()*2.;[(r[0][1]+r[1][0])/s,s/4.,(r[1][2]+r[2][1])/s,(r[0][2]-r[2][0])/s]}else{let s=(1.+r[2][2]-r[0][0]-r[1][1]).sqrt()*2.;[(r[0][2]+r[2][0])/s,(r[1][2]+r[2][1])/s,s/4.,(r[1][0]-r[0][1])/s]};let mut rotation=quat_normalize(q)?;if rotation[3]<0.{rotation=rotation.map(|v|-v);}
+    let t=Transform{translation:[m[0][3],m[1][3],m[2][3]],rotation,scale};t.validate()?;let rebuilt=t.matrix()?;for i in 0..4{for j in 0..4{if (rebuilt[i][j]-m[i][j]).abs()>1e-7*(1.+m[i][j].abs()){return Err(Error::Invalid("mirrored rest cannot be represented as TRS"));}}}Ok(t)
+}
+pub(super) fn apply(state:&mut State,joints:&[u32],axis:usize,names:&BTreeMap<u32,String>,limits:&Limits,ctx:&mut mesh::Context<'_>)->Result<()> {
+    let skeleton=state.skeleton.as_ref().ok_or(Error::Invalid("mirror requires skeleton"))?;let selected=joints.iter().copied().collect::<BTreeSet<_>>();if axis>2||selected.is_empty()||selected.len()!=joints.len()||selected.iter().any(|j|*j as usize>=skeleton.joints.len())||names.keys().copied().collect::<BTreeSet<_>>()!=selected{return Err(Error::Invalid("mirror joint selection/names"));}
+    if selected.contains(&0){return Err(Error::Invalid("mirror a limb/subtree; skeleton root cannot be duplicated"));}
+    if skeleton.joints.len()+selected.len()>limits.max_joints.min(128){return Err(Error::Budget("mirrored joints"));}
+    let mut used=skeleton.joints.iter().map(|j|j.name.as_str()).collect::<BTreeSet<_>>();for value in names.values(){name(value,limits)?;if !used.insert(value){return Err(Error::Invalid("mirrored joint name collision"));}}
+    let world=state.rig.global_rest(skeleton)?;let mut reflection=IDENTITY_MATRIX;reflection[axis][axis]= -1.;let mut mapping=BTreeMap::new();let mut appended=Vec::new();let mut rests=Vec::new();let mut mirrored_world=BTreeMap::new();
+    for joint in selected{ctx.checkpoint(1)?;let old=&skeleton.joints[joint as usize];let mirrored=matrix_mul(matrix_mul(reflection,world[joint as usize]),reflection);let parent=old.parent.map(|p|mapping.get(&p).copied().unwrap_or(p));let parent_world=old.parent.map(|p|mirrored_world.get(&p).copied().unwrap_or(world[p as usize])).unwrap_or(IDENTITY_MATRIX);let local=decompose(matrix_mul(inverse(parent_world)?,mirrored))?;let new_index=(skeleton.joints.len()+appended.len()) as u32;mapping.insert(joint,new_index);mirrored_world.insert(joint,mirrored);rests.push((new_index,local));appended.push(crate::Joint{name:names[&joint].clone(),parent,translation:local.translation});}
+    ctx.checkpoint(0)?;state.skeleton.as_mut().unwrap().joints.extend(appended);state.rig.rests.extend(rests);Ok(())
+}
