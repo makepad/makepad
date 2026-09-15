@@ -685,6 +685,39 @@ fn qwen_turn_streams_partial_text_and_finishes() {
 }
 
 #[test]
+fn qwen_rolling_context_rebuilds_the_wire_on_the_same_conversation() {
+    let mut t = ScriptedFleet::default();
+    t.on_get("http://n1:8765/health", Ok(health(&["chat"])));
+    t.on_get("http://n1:8765/models", Ok(models(vec![model_row("qwen3.8-27b", "chat", true, "")])));
+    t.post_response = Some(json::obj(vec![("job_id", json::s("j-1"))]));
+    t.on_get("http://n1:8765/job/j-1", Ok(json::obj(vec![("state", json::s("done")), ("partial_text", json::s("answer"))])));
+    let posts = t.posts.clone();
+    let mut p = FleetQwenChatProvider::new(t, vec!["http://n1:8765".into()]);
+    let mut history = vec![ChatMessage::new(ChatRole::User, "original instructions")];
+    p.begin_turn(&TurnInput::new("SYS", history.clone())).unwrap();
+    let _ = p.poll();
+    history.push(ChatMessage::new(ChatRole::Assistant, "answer"));
+    history.push(ChatMessage::new(ChatRole::User, "obsolete middle request"));
+    p.begin_turn(&TurnInput::new("SYS", history.clone())).unwrap();
+    let _ = p.poll();
+    history.push(ChatMessage::new(ChatRole::Assistant, "answer"));
+    history.drain(1..3);
+    p.history_pruned(2);
+    history.push(ChatMessage::new(ChatRole::User, "continue the body"));
+    p.begin_turn(&TurnInput::new("SYS", history)).unwrap();
+    let bodies = posts.borrow();
+    let first = &bodies[0].1;
+    let last = &bodies[2].1;
+    assert_eq!(first.get("chat_session"), last.get("chat_session"));
+    let messages = last.get("chat_messages").and_then(Value::as_arr).unwrap();
+    assert_eq!(messages.len(), 3);
+    let wire = last.to_json();
+    assert!(wire.contains("original instructions") && wire.contains("continue the body"));
+    assert!(!wire.contains("obsolete middle request"));
+    let _ = p.poll();
+}
+
+#[test]
 fn qwen_cancel_posts_job_cancel() {
     let mut t = ScriptedFleet::default();
     t.on_get("http://n1:8765/health", Ok(health(&["chat"])));
@@ -1192,6 +1225,36 @@ fn responses_unsent_tail_uses_previous_response_id() {
     let input = second.get("input").and_then(Value::as_arr).unwrap();
     assert_eq!(input.len(), 1);
     assert_eq!(input[0].get("content").and_then(Value::as_str), Some("two"));
+}
+
+#[test]
+fn responses_rolling_context_keeps_the_chain_and_sends_only_new_messages() {
+    let t = ScriptedResponses::new(vec![
+        Ok(text_response("resp_1", "first")),
+        Ok(text_response("resp_2", "second")),
+        Ok(text_response("resp_3", "third")),
+    ]);
+    let mut p = openai_provider(t.clone());
+    let mut history = vec![ChatMessage::new(ChatRole::User, "one")];
+    p.begin_turn(&TurnInput::new("S", history.clone())).unwrap();
+    let _ = wait_poll(&mut p);
+    history.push(ChatMessage::new(ChatRole::Assistant, "first"));
+    history.push(ChatMessage::new(ChatRole::User, "two"));
+    p.begin_turn(&TurnInput::new("S", history.clone())).unwrap();
+    let _ = wait_poll(&mut p);
+    history.push(ChatMessage::new(ChatRole::Assistant, "second"));
+    // Pin the first instruction, drop an already-sent middle row, retain tail.
+    history.remove(1);
+    p.history_pruned(1);
+    history.push(ChatMessage::new(ChatRole::User, "three"));
+    p.begin_turn(&TurnInput::new("S", history)).unwrap();
+    let _ = wait_poll(&mut p);
+    let hops = t.hops();
+    let third = parse_recorded_json(&hops[2].body);
+    assert_eq!(third.get("previous_response_id").and_then(Value::as_str), Some("resp_2"));
+    let input = third.get("input").and_then(Value::as_arr).unwrap();
+    assert_eq!(input.len(), 1, "already-seen history must not be replayed");
+    assert_eq!(input[0].get("content").and_then(Value::as_str), Some("three"));
 }
 
 #[test]

@@ -55,7 +55,9 @@ mod import_classic;
 mod store_content;
 mod library;
 mod mask_paint;
-mod mesh_view;
+mod mesh_view {
+    pub use makepad_media_view::mesh_view::*;
+}
 mod music_page;
 use crate::mask_paint::{MaskPaint, MaskPaintAction};
 mod pipeline;
@@ -63,7 +65,9 @@ mod runs_chip;
 mod scheduler;
 mod store_views;
 mod thumbnail_renderer;
-mod video_player;
+mod video_player {
+    pub use makepad_media_view::{FileVideoPlayer as VideoPlayer, VideoDecoder};
+}
 mod webcam;
 
 use crate::artifact_io::{
@@ -244,7 +248,7 @@ use crate::store_views::{
     StoreListPanel, StoreRow,
     TileDelete,
 };
-use crate::video_player::VideoPlayer;
+use crate::video_player::{VideoDecoder, VideoPlayer};
 
 use makepad_micro_serde::SerJson;
 use makepad_widgets::*;
@@ -263,40 +267,40 @@ script_mod! {
     // ---- design language ----------------------------------------------------
     // Near-black canvas, elevated neutral surfaces, hairline (1px, ~8% white)
     // borders, 6px visual rounding (sdf radius 3), a 4/8px spacing rhythm.
-    // ONE accent (#x3d9bf0) reserved for: the primary action, progress fills
+    // ONE accent (theme.color_focus) reserved for: the primary action, progress fills
     // and the selected history item. Reds appear only on destructive hover.
 
     let PanelHeading = Label{
         margin: Inset{top: 10}
         draw_text +: {
-            color: #x8a939d
+            color: theme.color_text_disabled
             text_style: theme.font_bold{font_size: 8}
         }
     }
     let HintLabel = Label{
         draw_text +: {
-            color: #x555b62
+            color: theme.color_text_disabled
             text_style: theme.font_regular{font_size: 7.5}
         }
     }
     let MonoLabel = Label{
         width: Fill
         draw_text +: {
-            color: #x99a2ac
+            color: theme.color_text_disabled
             text_style: theme.font_regular{font_size: 8.5}
         }
     }
     let DimLabel = Label{
         width: Fill
         draw_text +: {
-            color: #x6a7178
+            color: theme.color_text_disabled
             text_style: theme.font_regular{font_size: 8}
         }
     }
     let BrightLabel = Label{
         width: Fill
         draw_text +: {
-            color: #xdfe6ec
+            color: theme.color_text
             text_style: theme.font_regular{font_size: 9}
         }
     }
@@ -306,23 +310,23 @@ script_mod! {
         margin: 0
         padding: Inset{left: 12 right: 12 top: 7 bottom: 7}
         draw_text +: {
-            color: #xffffff
-            color_hover: #xffffff
-            color_down: #xd5e6f7
-            color_focus: #xffffff
+            color: theme.color_text_on_accent
+            color_hover: theme.color_text_on_accent
+            color_down: theme.color_text_on_accent
+            color_focus: theme.color_text_on_accent
             text_style: theme.font_bold{font_size: 9.5}
         }
         draw_bg +: {
-            border_radius: 3.0
+            border_radius: theme.corner_radius
             border_size: 1.0
-            color: #x2f7fc9
-            color_hover: #x3d9bf0
-            color_down: #x2569aa
-            color_focus: #x2f7fc9
-            border_color: #x5fb1ff38
-            border_color_hover: #x5fb1ff60
-            border_color_down: #x5fb1ff38
-            border_color_focus: #x5fb1ff60
+            color: theme.color_focus
+            color_hover: theme.color_focus
+            color_down: theme.color_focus
+            color_focus: theme.color_focus
+            border_color: theme.color_focus
+            border_color_hover: theme.color_focus
+            border_color_down: theme.color_focus
+            border_color_focus: theme.color_focus
         }
     }
     // Secondary chip: one-click chains, in-viewer utilities.
@@ -330,23 +334,23 @@ script_mod! {
         margin: 0
         padding: Inset{left: 8 right: 8 top: 4 bottom: 4}
         draw_text +: {
-            color: #xaab3bd
-            color_hover: #xe6ebf0
-            color_down: #xffffff
-            color_focus: #xbac3cd
+            color: theme.color_text
+            color_hover: theme.color_text
+            color_down: theme.color_text
+            color_focus: theme.color_text
             text_style: theme.font_regular{font_size: 8.5}
         }
         draw_bg +: {
-            border_radius: 3.0
+            border_radius: theme.corner_radius
             border_size: 1.0
-            color: #x1b1b1f
-            color_hover: #x25252b
-            color_down: #x2b2b32
-            color_focus: #x1e1e23
-            border_color: #xffffff14
-            border_color_hover: #xffffff26
-            border_color_down: #xffffff30
-            border_color_focus: #xffffff1e
+            color: theme.color_inset
+            color_hover: theme.color_outset_hover
+            color_down: theme.color_outset_down
+            color_focus: theme.color_inset
+            border_color: theme.color_bevel_inset_2
+            border_color_hover: theme.color_bevel_inset_2
+            border_color_down: theme.color_bevel_inset_2
+            border_color_focus: theme.color_bevel_inset_2
         }
     }
     // View toggle: the two glyphs an asset browser uses, and the ACTIVE one
@@ -356,14 +360,14 @@ script_mod! {
         width: 30
         padding: Inset{left: 6 right: 6 top: 4 bottom: 4}
         draw_text +: {
-            color: #x6f7883
-            color_focus: #x7db8f0
-            color_hover: #xe6ebf0
+            color: theme.color_text_disabled
+            color_focus: theme.color_focus
+            color_hover: theme.color_text
             text_style: theme.font_regular{font_size: 11}
         }
         draw_bg +: {
-            color_focus: #x14283c
-            border_color_focus: #x3d9bf066
+            color_focus: theme.color_bg_highlight
+            border_color_focus: theme.color_bg_highlight
         }
     }
     // The two view glyphs are DRAWN, not typed. Borrowed box-drawing
@@ -378,9 +382,9 @@ script_mod! {
         height: 24
         padding: 0
         draw_bg +: {
-            color_glyph: uniform(#x6f7883)
-            color_glyph_hover: uniform(#xe6ebf0)
-            color_glyph_focus: uniform(#x7db8f0)
+            color_glyph: uniform(theme.color_text_disabled)
+            color_glyph_hover: uniform(theme.color_text)
+            color_glyph_focus: uniform(theme.color_focus)
         }
     }
     // Tiles: a classic 2x2 grid — four 5px rounded squares, 2px gutters.
@@ -458,18 +462,18 @@ script_mod! {
         visible: false
         text: "×"
         draw_text +: {
-            color: #x6a7178
-            color_hover: #xe6ebf0
-            color_down: #xffffff
-            color_focus: #x6a7178
+            color: theme.color_text_disabled
+            color_hover: theme.color_text
+            color_down: theme.color_text
+            color_focus: theme.color_text_disabled
             text_style: theme.font_regular{font_size: 7.5}
         }
         draw_bg +: {
-            border_radius: 2.0
+            border_radius: mod.theme.corner_radius
             border_size: 0.0
             color: #x00000000
-            color_hover: #xffffff14
-            color_down: #xffffff20
+            color_hover: theme.color_bevel_inset_2
+            color_down: theme.color_bevel_inset_2
             color_focus: #x00000000
             border_color: #x00000000
             border_color_hover: #x00000000
@@ -481,16 +485,16 @@ script_mod! {
     let GhostButton = ChipButton{
         padding: Inset{left: 7 right: 7 top: 3 bottom: 3}
         draw_text +: {
-            color: #x828a93
+            color: theme.color_text_disabled
         }
         draw_bg +: {
             color: #x00000000
-            color_hover: #xffffff10
-            color_down: #xffffff1a
+            color_hover: theme.color_bevel_inset_2
+            color_down: theme.color_bevel_inset_2
             color_focus: #x00000000
             border_color: #x00000000
-            border_color_hover: #xffffff1e
-            border_color_down: #xffffff28
+            border_color_hover: theme.color_bevel_inset_2
+            border_color_down: theme.color_bevel_inset_2
             border_color_focus: #x00000000
         }
     }
@@ -516,14 +520,14 @@ script_mod! {
         width: 22 height: 22
         padding: 0
         draw_text +: {
-            color: #xc6cfd8
-            color_hover: #xffffff
-            color_down: #xffffff
+            color: theme.color_text
+            color_hover: theme.color_text
+            color_down: theme.color_text
             text_style: theme.font_bold{font_size: 11}
         }
         draw_bg +: {
-            color: #xffffff0b
-            border_color: #xffffff14
+            color: theme.color_bevel_inset_2
+            border_color: theme.color_bevel_inset_2
             border_size: 1.0
         }
     }
@@ -532,10 +536,10 @@ script_mod! {
         width: Fill height: Fit
         flow: Down
         draw_bg +: {
-            color: #x18181c
-            border_color: #xffffff10
+            color: theme.color_bg_container
+            border_color: theme.color_bevel_inset_2
             border_size: 1.0
-            border_radius: 3.0
+            border_radius: theme.corner_radius
         }
     }
     // progress/color_fill are uniforms (driven via set_uniform from Rust —
@@ -544,8 +548,8 @@ script_mod! {
         width: Fill height: 6
         draw_bg +: {
             progress: uniform(0.0)
-            color_track: uniform(#x26262b)
-            color_fill: uniform(#x3d9bf0)
+            color_track: uniform(theme.color_outset)
+            color_fill: uniform(theme.color_focus)
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 sdf.box(0.0, 0.0, self.rect_size.x, self.rect_size.y, 1.5)
@@ -563,7 +567,7 @@ script_mod! {
     let Divider = SolidView{
         width: Fill height: 1
         margin: Inset{top: 8 bottom: 2}
-        draw_bg +: { color: #xffffff0d }
+        draw_bg +: { color: theme.color_bevel_inset_2 }
     }
 
     // ---- the card grammar ---------------------------------------------------
@@ -583,8 +587,8 @@ script_mod! {
         width: Fit height: Fit
         padding: Inset{left: 6 right: 6 top: 2 bottom: 2}
         draw_bg +: {
-            tone: uniform(#x8a939d)
-            border_radius: 2.5
+            tone: uniform(theme.color_text_disabled)
+            border_radius: mod.theme.corner_radius
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, self.border_radius)
@@ -595,7 +599,7 @@ script_mod! {
         }
         cs_label := Label{
             draw_text +: {
-                color: #xc6cfd8
+                color: theme.color_text
                 text_style: theme.font_regular{font_size: 7.5}
             }
         }
@@ -625,7 +629,7 @@ script_mod! {
                 card_dot := SolidView{
                     width: 8 height: 8
                     draw_bg +: {
-                        tone: uniform(#x3d9bf0)
+                        tone: uniform(theme.color_focus)
                         pixel: fn() {
                             let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                             sdf.circle(self.rect_size.x * 0.5, self.rect_size.y * 0.5, self.rect_size.x * 0.35)
@@ -638,7 +642,7 @@ script_mod! {
                     width: Fit
                     max_lines: 1
                     draw_text +: {
-                        color: #xdfe6ec
+                        color: theme.color_text
                         text_style: theme.font_bold{font_size: 8.5}
                     }
                 }
@@ -649,13 +653,13 @@ script_mod! {
                     max_lines: 1
                     text_overflow: TextOverflow.Ellipsis
                     draw_text +: {
-                        color: #x8a939d
+                        color: theme.color_text_disabled
                         text_style: theme.font_regular{font_size: 8.5}
                     }
                 }
                 card_time := Label{
                     draw_text +: {
-                        color: #x6a7178
+                        color: theme.color_text_disabled
                         text_style: theme.font_regular{font_size: 7.5}
                     }
                 }
@@ -672,7 +676,7 @@ script_mod! {
                 card_pct := Label{
                     width: 32
                     draw_text +: {
-                        color: #x99a2ac
+                        color: theme.color_text_disabled
                         text_style: theme.font_regular{font_size: 8}
                     }
                 }
@@ -683,7 +687,7 @@ script_mod! {
                 width: Fill
                 max_lines: 2
                 draw_text +: {
-                    color: #x8a939d
+                    color: theme.color_text_disabled
                     text_style: theme.font_regular{font_size: 8}
                 }
             }
@@ -717,7 +721,7 @@ script_mod! {
     let GroupTag = Label{
         width: 40
         draw_text +: {
-            color: #x555b62
+            color: theme.color_text_disabled
             text_style: theme.font_bold{font_size: 7}
         }
     }
@@ -745,12 +749,12 @@ script_mod! {
         // the card opens the item, not just its label button.
         cursor: MouseCursor.Hand
         draw_bg +: {
-            color: #x161619
-            border_color: #xffffff10
-            border_color_selected: #x3d9bf0
+            color: theme.color_bg_container
+            border_color: theme.color_bevel_inset_2
+            border_color_selected: theme.color_focus
             selected: instance(0.0)
             border_size: 1.0
-            border_radius: 3.0
+            border_radius: theme.corner_radius
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 sdf.box(
@@ -804,10 +808,10 @@ script_mod! {
         padding: Inset{left: 6 right: 6 top: 5 bottom: 5}
         cursor: MouseCursor.Hand
         draw_bg +: {
-            color: #x161619
-            border_color: #xffffff10
+            color: theme.color_bg_container
+            border_color: theme.color_bevel_inset_2
             border_size: 1.0
-            border_radius: 3.0
+            border_radius: theme.corner_radius
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 sdf.box(
@@ -828,7 +832,7 @@ script_mod! {
             light := SolidView{
                 width: 8 height: 8
                 draw_bg +: {
-                    color: #x5a616a
+                    color: theme.color_text_disabled
                     pixel: fn() {
                         let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                         sdf.circle(self.rect_size.x * 0.5, self.rect_size.y * 0.5, self.rect_size.x * 0.25)
@@ -902,7 +906,7 @@ script_mod! {
         mstate := SolidView{
             width: 7 height: 7
             draw_bg +: {
-                color: #x5a616a
+                color: theme.color_text_disabled
                 pixel: fn() {
                     let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                     sdf.circle(self.rect_size.x * 0.5, self.rect_size.y * 0.5, self.rect_size.x * 0.25)
@@ -946,12 +950,12 @@ script_mod! {
         align: Align{x: 0.5}
         cursor: MouseCursor.Hand
         draw_bg +: {
-            color: #x161619
-            border_color: #xffffff10
-            border_color_selected: #x3d9bf0
+            color: theme.color_bg_container
+            border_color: theme.color_bevel_inset_2
+            border_color_selected: theme.color_focus
             selected: instance(0.0)
             border_size: 1.0
-            border_radius: 3.0
+            border_radius: theme.corner_radius
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 sdf.box(
@@ -1033,14 +1037,14 @@ script_mod! {
         width: 18 height: 18
         cursor: MouseCursor.Grab
         draw_bg +: {
-            color: #x20252a
-            border_color: #x3d9bf055
+            color: theme.color_outset
+            border_color: theme.color_bg_highlight
             border_size: 1.0
-            border_radius: 3.0
+            border_radius: theme.corner_radius
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 sdf.box(0.5, 0.5, self.rect_size.x - 1.0, self.rect_size.y - 1.0, 3.0)
-                sdf.fill(#x20252a)
+                sdf.fill(theme.color_outset)
                 let dot = #x8fcdf0
                 sdf.circle(6.0, 5.0, 1.25)
                 sdf.fill(dot)
@@ -1123,11 +1127,11 @@ script_mod! {
                                 padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
                                 draw_bg +: {
                                     color: #x000000b4
-                                    border_radius: 2.0
+                                    border_radius: mod.theme.corner_radius
                                 }
                                 run_count_label := Label{
                                     draw_text +: {
-                                        color: #xaab3bd
+                                        color: theme.color_text
                                         text_style: theme.font_bold{font_size: 6.5}
                                     }
                                 }
@@ -1149,7 +1153,7 @@ script_mod! {
         padding: 6 spacing: 4
         candidate_title := Label{
             draw_text +: {
-                color: #xe6ebf0
+                color: theme.color_text
                 text_style: theme.font_bold{font_size: 8.5}
             }
         }
@@ -1162,14 +1166,14 @@ script_mod! {
         candidate_status := Label{
             width: Fill
             draw_text +: {
-                color: #xaab3bd
+                color: theme.color_text
                 text_style: theme.font_regular{font_size: 7}
             }
         }
         candidate_meta := Label{
             width: Fill
             draw_text +: {
-                color: #x626a73
+                color: theme.color_text_disabled
                 text_style: theme.font_regular{font_size: 6.5}
             }
         }
@@ -1222,10 +1226,10 @@ script_mod! {
             // well's height still keeps clear of its walls.
             padding: 3
             draw_bg +: {
-                color: #x101013
-                border_color: #xffffff08
+                color: theme.color_bg_app
+                border_color: theme.color_bevel_inset_2
                 border_size: 1.0
-                border_radius: 2.0
+                border_radius: mod.theme.corner_radius
             }
             // THE thumbnail widget — obeys the asset's declared views.
             grid_thumb := mod.widgets.AssetThumb{}
@@ -1242,7 +1246,7 @@ script_mod! {
             max_lines: 2
             text_overflow: TextOverflow.Ellipsis
             draw_text +: {
-                color: #xc6cfd8
+                color: theme.color_text
                 text_style: theme.font_regular{font_size: 8}
             }
         }
@@ -1297,14 +1301,14 @@ script_mod! {
                             max_lines: 1
                             text_overflow: TextOverflow.Ellipsis
                             draw_text +: {
-                                color: #xdfe6ec
+                                color: theme.color_text
                                 text_style: theme.font_bold{font_size: 9}
                             }
                         }
                         lr_meta := Label{
                             width: Fill
                             draw_text +: {
-                                color: #x9ec4ea
+                                color: theme.color_focus
                                 text_style: theme.font_regular{font_size: 8}
                             }
                         }
@@ -1313,7 +1317,7 @@ script_mod! {
                             max_lines: 1
                             text_overflow: TextOverflow.Ellipsis
                             draw_text +: {
-                                color: #x8a939d
+                                color: theme.color_text_disabled
                                 text_style: theme.font_regular{font_size: 7.5}
                             }
                         }
@@ -1321,7 +1325,7 @@ script_mod! {
                     lr_when := Label{
                         width: 190
                         draw_text +: {
-                            color: #x707a85
+                            color: theme.color_text_disabled
                             text_style: theme.font_regular{font_size: 7.5}
                         }
                     }
@@ -1353,7 +1357,7 @@ script_mod! {
                 padding: Inset{top: 10 bottom: 2}
                 section_label := Label{
                     draw_text +: {
-                        color: #x8a939d
+                        color: theme.color_text_disabled
                         text_style: theme.font_bold{font_size: 8}
                     }
                 }
@@ -1364,7 +1368,7 @@ script_mod! {
                 note_label := Label{
                     width: Fill
                     draw_text +: {
-                        color: #x6a7178
+                        color: theme.color_text_disabled
                         text_style: theme.font_regular{font_size: 8.5}
                     }
                 }
@@ -1382,7 +1386,7 @@ script_mod! {
                     stage_title := ButtonFlatter{
                         width: 190
                         draw_text +: {
-                            color: #xdfe6ec
+                            color: theme.color_text
                             text_style: theme.font_regular{font_size: 8.5}
                         }
                     }
@@ -1394,7 +1398,7 @@ script_mod! {
                         max_lines: 1
                         text_overflow: TextOverflow.Ellipsis
                         draw_text +: {
-                            color: #x8a939d
+                            color: theme.color_text_disabled
                             text_style: theme.font_regular{font_size: 8}
                         }
                     }
@@ -1429,7 +1433,7 @@ script_mod! {
                             pixel: fn() {
                                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                                 sdf.circle(self.rect_size.x * 0.5, self.rect_size.y * 0.5, self.rect_size.x * 0.35)
-                                sdf.fill(mix(#x3d4750, #x58c4a0, self.online))
+                                sdf.fill(mix(theme.color_bevel_inset_2, #x58c4a0, self.online))
                                 return sdf.result
                             }
                         }
@@ -1437,13 +1441,13 @@ script_mod! {
                     worker_title := Label{
                         width: Fill
                         draw_text +: {
-                            color: #xdfe6ec
+                            color: theme.color_text
                             text_style: theme.font_bold{font_size: 9}
                         }
                     }
                     worker_state := Label{
                         draw_text +: {
-                            color: #x8a939d
+                            color: theme.color_text_disabled
                             text_style: theme.font_regular{font_size: 8}
                         }
                     }
@@ -1458,7 +1462,7 @@ script_mod! {
                 record_title := BrightLabel{}
                 record_meta := Label{
                     draw_text +: {
-                        color: #x6a7178
+                        color: theme.color_text_disabled
                         text_style: theme.font_regular{font_size: 8}
                     }
                 }
@@ -1479,20 +1483,20 @@ script_mod! {
                 align: Align{x: 0.5 y: 0.5}
                 margin: Inset{top: 8}
                 draw_bg +: {
-                    color: #x141418
-                    border_color: #xffffff10
+                    color: theme.color_bg_container
+                    border_color: theme.color_bevel_inset_2
                     border_size: 1.0
-                    border_radius: 3.0
+                    border_radius: theme.corner_radius
                 }
                 disc_title := Label{
                     draw_text +: {
-                        color: #x8a939d
+                        color: theme.color_text_disabled
                         text_style: theme.font_bold{font_size: 10}
                     }
                 }
                 disc_detail := Label{
                     draw_text +: {
-                        color: #x555b62
+                        color: theme.color_text_disabled
                         text_style: theme.font_regular{font_size: 8}
                     }
                 }
@@ -1515,7 +1519,7 @@ script_mod! {
         active: true
         padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
         draw_text +: {
-            color: #x828a93
+            color: theme.color_text_disabled
             text_style: theme.font_regular{font_size: 8.5}
         }
     }
@@ -1537,44 +1541,44 @@ script_mod! {
         popup_font_px: 8.5
         input +: {
             draw_text +: {
-                color: #xaab3bd
-                color_hover: #xe6ebf0
-                color_focus: #xe6ebf0
-                color_down: #xe6ebf0
-                color_empty: #x5a616a
-                color_empty_hover: #x6a7178
-                color_empty_focus: #x6a7178
+                color: theme.color_text
+                color_hover: theme.color_text
+                color_focus: theme.color_text
+                color_down: theme.color_text
+                color_empty: theme.color_text_disabled
+                color_empty_hover: theme.color_text_disabled
+                color_empty_focus: theme.color_text_disabled
                 text_style: theme.font_regular{font_size: 8.5}
             }
         }
         scroll_bar +: {
             draw_bg +: {
-                color: #xffffff1e
-                color_hover: #xffffff38
-                color_drag: #xffffff50
+                color: theme.color_bevel_inset_2
+                color_hover: theme.color_text_disabled
+                color_drag: theme.color_text_disabled
             }
         }
         draw_item_text +: {
-            color: #xc6cfd8
-            color_hover: #xe6ebf0
-            color_active: #xe6ebf0
-            color_match: #x3d9bf0
-            color_dim: #x6a7178
+            color: theme.color_text
+            color_hover: theme.color_text
+            color_active: theme.color_text
+            color_match: theme.color_focus
+            color_dim: theme.color_text_disabled
             text_style: theme.font_regular{font_size: 8.5}
         }
         draw_bg +: {
-            border_radius: 3.0
+            border_radius: theme.corner_radius
             border_size: 1.0
-            color: #x1a1a1e
-            color_hover: #x202025
-            color_down: #x232328
-            color_focus: #x1c1c20
-            border_color: #xffffff14
-            border_color_hover: #xffffff22
-            border_color_down: #xffffff22
-            border_color_focus: #x3d9bf055
-            arrow_color: #x828a93
-            arrow_color_hover: #xc6cfd8
+            color: theme.color_inset
+            color_hover: theme.color_outset
+            color_down: theme.color_outset
+            color_focus: theme.color_inset
+            border_color: theme.color_bevel_inset_2
+            border_color_hover: theme.color_bevel_inset_2
+            border_color_down: theme.color_bevel_inset_2
+            border_color_focus: theme.color_bg_highlight
+            arrow_color: theme.color_text_disabled
+            arrow_color_hover: theme.color_text
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 sdf.box(
@@ -1605,15 +1609,15 @@ script_mod! {
             }
         }
         draw_popup_bg +: {
-            border_radius: 3.0
+            border_radius: theme.corner_radius
             border_size: 1.0
-            color: #x1a1a1e
-            border_color: #xffffff22
+            color: theme.color_inset
+            border_color: theme.color_bevel_inset_2
         }
         draw_item +: {
             color: #x00000000
-            color_hover: #x2a2a32
-            color_active: #x243044
+            color_hover: theme.color_outset_hover
+            color_active: theme.color_bg_highlight
         }
     }
     let FieldDrop2 = FieldDrop{}
@@ -1623,28 +1627,28 @@ script_mod! {
         margin: 0
         padding: Inset{left: 8 right: 8 top: 5 bottom: 5}
         draw_text +: {
-            color: #xc6cfd8
-            color_hover: #xe6ebf0
-            color_focus: #xe6ebf0
-            color_down: #xc6cfd8
-            color_empty: #x5a616a
-            color_empty_hover: #x6a7178
-            color_empty_focus: #x6a7178
+            color: theme.color_text
+            color_hover: theme.color_text
+            color_focus: theme.color_text
+            color_down: theme.color_text
+            color_empty: theme.color_text_disabled
+            color_empty_hover: theme.color_text_disabled
+            color_empty_focus: theme.color_text_disabled
             text_style: theme.font_regular{font_size: 8}
         }
         draw_bg +: {
-            border_radius: 3.0
+            border_radius: theme.corner_radius
             border_size: 1.0
-            color: #x161619
-            color_hover: #x18181c
-            color_focus: #x1a1a1e
-            color_down: #x1a1a1e
-            color_empty: #x161619
-            border_color: #xffffff14
-            border_color_hover: #xffffff20
-            border_color_focus: #x3d9bf066
-            border_color_down: #xffffff20
-            border_color_empty: #xffffff14
+            color: theme.color_bg_container
+            color_hover: theme.color_bg_container
+            color_focus: theme.color_inset
+            color_down: theme.color_inset
+            color_empty: theme.color_bg_container
+            border_color: theme.color_bevel_inset_2
+            border_color_hover: theme.color_bevel_inset_2
+            border_color_focus: theme.color_bg_highlight
+            border_color_down: theme.color_bevel_inset_2
+            border_color_empty: theme.color_bevel_inset_2
         }
     }
 
@@ -1653,9 +1657,9 @@ script_mod! {
         scroll_bars +: {
             scroll_bar_y +: {
                 draw_bg +: {
-                    color: #xffffff1e
-                    color_hover: #xffffff38
-                    color_drag: #xffffff50
+                    color: theme.color_bevel_inset_2
+                    color_hover: theme.color_text_disabled
+                    color_drag: theme.color_text_disabled
                 }
             }
         }
@@ -1670,7 +1674,7 @@ script_mod! {
     let SurfaceTitle = Label{
         width: Fill
         draw_text +: {
-            color: #xe6ebf0
+            color: theme.color_text
             text_style: theme.font_bold{font_size: 13}
         }
     }
@@ -1679,10 +1683,10 @@ script_mod! {
         flow: Down spacing: 8
         padding: 12
         draw_bg +: {
-            color: #x141418
-            border_color: #xffffff10
+            color: theme.color_bg_container
+            border_color: theme.color_bevel_inset_2
             border_size: 1.0
-            border_radius: 3.0
+            border_radius: theme.corner_radius
         }
     }
     let StoreEmpty = View{
@@ -1692,14 +1696,14 @@ script_mod! {
         Label{
             text: "No server data"
             draw_text +: {
-                color: #x8a939d
+                color: theme.color_text_disabled
                 text_style: theme.font_bold{font_size: 11}
             }
         }
         Label{
             text: "Disconnected — connect a real Asset Store transport to load this panel."
             draw_text +: {
-                color: #x555b62
+                color: theme.color_text_disabled
                 text_style: theme.font_regular{font_size: 8.5}
             }
         }
@@ -1709,10 +1713,10 @@ script_mod! {
         flow: Down spacing: 6
         padding: 10
         draw_bg +: {
-            color: #x18181c
-            border_color: #xffffff10
+            color: theme.color_bg_container
+            border_color: theme.color_bevel_inset_2
             border_size: 1.0
-            border_radius: 3.0
+            border_radius: theme.corner_radius
         }
     }
     let ImportRow = RoundedView{
@@ -1721,10 +1725,10 @@ script_mod! {
         padding: Inset{left: 8 right: 8 top: 5 bottom: 5}
         align: Align{y: 0.5}
         draw_bg +: {
-            color: #x18181c
-            border_color: #xffffff18
+            color: theme.color_bg_container
+            border_color: theme.color_bevel_inset_2
             border_size: 1.0
-            border_radius: 4.0
+            border_radius: mod.theme.corner_radius
         }
     }
 
@@ -1743,7 +1747,7 @@ script_mod! {
                     // Plain-View DrawQuad ignores `color` (its pixel returns
                     // transparent) — declare the instance + pixel to paint.
                     draw_bg +: {
-                        color: instance(#x0a0a0b)
+                        color: instance(theme.color_bg_app)
                         pixel: fn() {
                             return Pal.premul(self.color)
                         }
@@ -1753,7 +1757,7 @@ script_mod! {
                         width: 430
                         height: Fill
                         flow: Down
-                        draw_bg +: { color: #x121215 }
+                        draw_bg +: { color: theme.color_bg_app }
 
                         // Top: the whole authoring panel scrolls. Bottom: the
                         // Fleet box stays put (own splitter pane) so the box
@@ -1765,9 +1769,9 @@ script_mod! {
                             align: SplitterAlign.FromB(150.0)
                             size: 6.0
                             draw_bg +: {
-                                color: #x1a1a1f
-                                color_hover: #x3d9bf0
-                                color_drag: #x3d9bf0
+                                color: theme.color_inset
+                                color_hover: theme.color_focus
+                                color_drag: theme.color_focus
                             }
                             // The chat is the OTHER front door to the same
                             // generation machinery, so it lives next to the
@@ -1781,9 +1785,9 @@ script_mod! {
                             align: SplitterAlign.FromB(300.0)
                             size: 6.0
                             draw_bg +: {
-                                color: #x1a1a1f
-                                color_hover: #x3d9bf0
-                                color_drag: #x3d9bf0
+                                color: theme.color_inset
+                                color_hover: theme.color_focus
+                                color_drag: theme.color_focus
                             }
                             a: QuietScrollY{
                         width: Fill
@@ -1796,7 +1800,7 @@ script_mod! {
                             width: Fill height: Fit flow: Right
                             align: Align{y: 0.5}
                             spacing: 10
-                            H2{ text: "Asset UI" draw_text +: { color: #xe6ebf0 } }
+                            H2{ text: "Asset UI" draw_text +: { color: theme.color_text } }
                             View{ width: Fill height: Fit }
                             spinner := LoadingSpinner{ width: 22 height: 22 visible: false }
                         }
@@ -1867,27 +1871,27 @@ script_mod! {
                             empty_text: "Describe what to make — e.g. a weathered fishing trawler at dawn, misty harbor"
                             draw_text +: {
                                 text_style: theme.font_regular{font_size: 9}
-                                color: #xdfe6ec
-                                color_hover: #xe6ebf0
-                                color_focus: #xe6ebf0
-                                color_down: #xdfe6ec
-                                color_empty: #x5a616a
-                                color_empty_hover: #x6a7178
-                                color_empty_focus: #x6a7178
+                                color: theme.color_text
+                                color_hover: theme.color_text
+                                color_focus: theme.color_text
+                                color_down: theme.color_text
+                                color_empty: theme.color_text_disabled
+                                color_empty_hover: theme.color_text_disabled
+                                color_empty_focus: theme.color_text_disabled
                             }
                             draw_bg +: {
-                                border_radius: 3.0
+                                border_radius: theme.corner_radius
                                 border_size: 1.0
-                                color: #x161619
-                                color_hover: #x18181c
-                                color_focus: #x1a1a1e
-                                color_down: #x1a1a1e
-                                color_empty: #x161619
-                                border_color: #xffffff14
-                                border_color_hover: #xffffff20
-                                border_color_focus: #x3d9bf066
-                                border_color_down: #xffffff20
-                                border_color_empty: #xffffff14
+                                color: theme.color_bg_container
+                                color_hover: theme.color_bg_container
+                                color_focus: theme.color_inset
+                                color_down: theme.color_inset
+                                color_empty: theme.color_bg_container
+                                border_color: theme.color_bevel_inset_2
+                                border_color_hover: theme.color_bevel_inset_2
+                                border_color_focus: theme.color_bg_highlight
+                                border_color_down: theme.color_bevel_inset_2
+                                border_color_empty: theme.color_bevel_inset_2
                             }
                         }
 
@@ -1911,7 +1915,7 @@ script_mod! {
                             active: false
                             padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
                             draw_text +: {
-                                color: #x828a93
+                                color: theme.color_text_disabled
                                 text_style: theme.font_regular{font_size: 8.5}
                             }
                         }
@@ -1998,13 +2002,13 @@ script_mod! {
                                 empty_text: "empty = playable set · e.g. A person dances the robot"
                                 draw_text +: {
                                     text_style: theme.font_regular{font_size: 8.5}
-                                    color: #xdfe6ec
-                                    color_hover: #xe6ebf0
-                                    color_focus: #xe6ebf0
-                                    color_down: #xdfe6ec
-                                    color_empty: #x5a616a
-                                    color_empty_hover: #x6a7178
-                                    color_empty_focus: #x6a7178
+                                    color: theme.color_text
+                                    color_hover: theme.color_text
+                                    color_focus: theme.color_text
+                                    color_down: theme.color_text
+                                    color_empty: theme.color_text_disabled
+                                    color_empty_hover: theme.color_text_disabled
+                                    color_empty_focus: theme.color_text_disabled
                                 }
                             }
                         }
@@ -2016,7 +2020,7 @@ script_mod! {
                                 active: false
                                 padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
                                 draw_text +: {
-                                    color: #x828a93
+                                    color: theme.color_text_disabled
                                     text_style: theme.font_regular{font_size: 8.5}
                                 }
                             }
@@ -2047,7 +2051,7 @@ script_mod! {
                                 active: true
                                 padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
                                 draw_text +: {
-                                    color: #x828a93
+                                    color: theme.color_text_disabled
                                     text_style: theme.font_regular{font_size: 8.5}
                                 }
                             }
@@ -2083,7 +2087,7 @@ script_mod! {
                                 active: true
                                 padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
                                 draw_text +: {
-                                    color: #x828a93
+                                    color: theme.color_text_disabled
                                     text_style: theme.font_regular{font_size: 8.5}
                                 }
                             }
@@ -2136,7 +2140,7 @@ script_mod! {
                                 text: "Webcam"
                                 padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
                                 draw_text +: {
-                                    color: #x828a93
+                                    color: theme.color_text_disabled
                                     text_style: theme.font_regular{font_size: 8.5}
                                 }
                             }
@@ -2154,7 +2158,7 @@ script_mod! {
                                     text: "auto-run"
                                     padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
                                     draw_text +: {
-                                        color: #x828a93
+                                        color: theme.color_text_disabled
                                         text_style: theme.font_regular{font_size: 8.5}
                                     }
                                 }
@@ -2233,15 +2237,15 @@ script_mod! {
                                         empty_text: "make me a picture of a unicorn"
                                         draw_text +: {
                                             text_style: theme.font_regular{font_size: 9}
-                                            color: #xdfe6ec
-                                            color_empty: #x5a616a
+                                            color: theme.color_text
+                                            color_empty: theme.color_text_disabled
                                         }
                                         draw_bg +: {
-                                            border_radius: 3.0
+                                            border_radius: theme.corner_radius
                                             border_size: 1.0
-                                            color: #x161619
-                                            border_color: #xffffff14
-                                            border_color_focus: #x3d9bf066
+                                            color: theme.color_bg_container
+                                            border_color: theme.color_bevel_inset_2
+                                            border_color_focus: theme.color_bg_highlight
                                         }
                                     }
                                     chat_send_btn := PrimaryButton{ text: "Send" }
@@ -2299,7 +2303,7 @@ script_mod! {
                         height: Fill
                         flow: Down spacing: 6
                         padding: Inset{left: 12 right: 12 top: 12 bottom: 10}
-                        draw_bg +: { color: #x141418 }
+                        draw_bg +: { color: theme.color_bg_container }
                         View{
                             width: Fill height: Fit flow: Right spacing: 8
                             align: Align{y: 0.5}
@@ -2413,7 +2417,7 @@ script_mod! {
                             width: Fill height: Fit flow: Right spacing: 2
                             align: Align{y: 0.5}
                             padding: Inset{left: 10 right: 10 top: 5 bottom: 5}
-                            draw_bg +: { color: #x0f0f12 }
+                            draw_bg +: { color: theme.color_bg_app }
                             nav_create := SurfaceTab{ text: "● CREATE" }
                             nav_library := SurfaceTab{ text: "LIBRARY" }
                             nav_import := SurfaceTab{ text: "LOAD" }
@@ -2426,7 +2430,7 @@ script_mod! {
                             remote_connection := Label{
                                 text: "SERVER · DISCONNECTED"
                                 draw_text +: {
-                                    color: #x6a7178
+                                    color: theme.color_text_disabled
                                     text_style: theme.font_bold{font_size: 7}
                                 }
                             }
@@ -2442,10 +2446,10 @@ script_mod! {
                                 margin: 0
                                 padding: Inset{left: 6 right: 6 top: 2 bottom: 2}
                                 draw_text +: {
-                                    color: #x6a7178
-                                    color_hover: #xe6ebf0
-                                    color_down: #xffffff
-                                    color_focus: #x6a7178
+                                    color: theme.color_text_disabled
+                                    color_hover: theme.color_text
+                                    color_down: theme.color_text
+                                    color_focus: theme.color_text_disabled
                                     text_style: theme.font_bold{font_size: 7}
                                 }
                             }
@@ -2474,20 +2478,20 @@ script_mod! {
                                     width: Fill height: Fit flow: Right spacing: 8
                                     align: Align{y: 0.5}
                                     padding: Inset{left: 14 right: 14 top: 8 bottom: 8}
-                                    draw_bg +: { color: #x121215 }
+                                    draw_bg +: { color: theme.color_bg_app }
                                     viewer_badge := RoundedView{
                                         visible: false
                                         width: Fit height: Fit
                                         padding: Inset{left: 7 right: 7 top: 2 bottom: 2}
                                         draw_bg +: {
-                                            color: #x14283c
-                                            border_color: #x3d9bf04d
+                                            color: theme.color_bg_highlight
+                                            border_color: theme.color_bg_highlight
                                             border_size: 1.0
-                                            border_radius: 2.5
+                                            border_radius: mod.theme.corner_radius
                                         }
                                         viewer_badge_label := Label{
                                             draw_text +: {
-                                                color: #x7db8f0
+                                                color: theme.color_focus
                                                 text_style: theme.font_bold{font_size: 7.5}
                                             }
                                         }
@@ -2496,7 +2500,7 @@ script_mod! {
                                         width: Fill
                                         text: "Nothing selected — run a chain, or pick something from History below."
                                         draw_text +: {
-                                            color: #xb4bdc7
+                                            color: theme.color_text
                                             text_style: theme.font_regular{font_size: 9}
                                         }
                                     }
@@ -2511,7 +2515,7 @@ script_mod! {
                                         width: Fill height: Fill
                                         flow: Down spacing: 8
                                         padding: Inset{left: 12 right: 12 top: 10 bottom: 10}
-                                        draw_bg +: { color: #x0d0d10 }
+                                        draw_bg +: { color: theme.color_bg_app }
                                         View{
                                             width: Fill height: Fit flow: Right spacing: 8
                                             align: Align{y: 0.5}
@@ -2550,7 +2554,7 @@ script_mod! {
                                         padding: 16
                                         show_bg: true
                                         draw_bg +: {
-                                            color: instance(#x0d0d10)
+                                            color: instance(theme.color_bg_app)
                                             pixel: fn() {
                                                 return Pal.premul(self.color)
                                             }
@@ -2559,7 +2563,7 @@ script_mod! {
                                             width: Fill
                                             text: "Text results (prompt expansions, variants) appear here."
                                             draw_text +: {
-                                                color: #xc6cfd8
+                                                color: theme.color_text
                                                 text_style: theme.font_regular{font_size: 9.5}
                                             }
                                         }
@@ -2569,7 +2573,7 @@ script_mod! {
                                         width: Fill
                                         height: Fill
                                         flow: Down
-                                        draw_bg +: { color: #x0d0d10 }
+                                        draw_bg +: { color: theme.color_bg_app }
                                         image_tools := View{
                                             width: Fill height: Fit flow: Right
                                             padding: Inset{left: 10 right: 10 top: 6}
@@ -2604,7 +2608,7 @@ script_mod! {
                                                     // alpha_view flips to the matte —
                                                     // alpha as grayscale. Branchless:
                                                     // shader `if` on a uniform
-                                                    // mis-evaluates headless.
+                                                    // mis-evaluates on gpusim.
                                                     alpha_view: uniform(0.0)
                                                     pixel: fn() {
                                                         let color = self.get_color()
@@ -2612,7 +2616,7 @@ script_mod! {
                                                         let inside = step(0.0, uv.x) * step(uv.x, 1.0) * step(0.0, uv.y) * step(uv.y, 1.0)
                                                         let p = floor(self.pos * self.rect_size / 8.0)
                                                         let check = modf(p.x + p.y, 2.0)
-                                                        let board = mix(#x26262b, #x3c3c42, check)
+                                                        let board = mix(theme.color_outset, theme.color_bevel_inset_2, check)
                                                         let normal = vec4(mix(board.xyz, color.xyz, color.w * self.opacity), 1.0)
                                                         let matte = vec4(color.w, color.w, color.w, 1.0)
                                                         return Pal.premul(mix(normal, matte, self.alpha_view) * inside)
@@ -2628,7 +2632,7 @@ script_mod! {
                                         flow: Down
                                         padding: 16
                                         spacing: 10
-                                        draw_bg +: { color: #x0d0d10 }
+                                        draw_bg +: { color: theme.color_bg_app }
                                         audio_info := BrightLabel{
                                             text: "Audio results (wav) appear here."
                                         }
@@ -2678,7 +2682,7 @@ script_mod! {
                                         width: Fill
                                         height: Fill
                                         flow: Down
-                                        draw_bg +: { color: #x0d0d10 }
+                                        draw_bg +: { color: theme.color_bg_app }
                                         video_info := DimLabel{
                                             margin: Inset{left: 16 top: 10}
                                             text: "Video results (mp4) appear here."
@@ -2694,7 +2698,7 @@ script_mod! {
                                         width: Fill
                                         height: Fill
                                         flow: Down
-                                        draw_bg +: { color: #x0d0d10 }
+                                        draw_bg +: { color: theme.color_bg_app }
                                         mesh_view := MeshView{}
                                         // (MeshView draws its own orbit/zoom hint.)
                                         View{
@@ -2709,7 +2713,7 @@ script_mod! {
                                                 active: true
                                                 padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
                                                 draw_text +: {
-                                                    color: #x828a93
+                                                    color: theme.color_text_disabled
                                                     text_style: theme.font_regular{font_size: 8.5}
                                                 }
                                             }
@@ -2718,7 +2722,7 @@ script_mod! {
                                                 active: false
                                                 padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
                                                 draw_text +: {
-                                                    color: #x828a93
+                                                    color: theme.color_text_disabled
                                                     text_style: theme.font_regular{font_size: 8.5}
                                                 }
                                             }
@@ -2729,7 +2733,7 @@ script_mod! {
                                                 active: true
                                                 padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
                                                 draw_text +: {
-                                                    color: #x828a93
+                                                    color: theme.color_text_disabled
                                                     text_style: theme.font_regular{font_size: 8.5}
                                                 }
                                             }
@@ -2738,7 +2742,7 @@ script_mod! {
                                                 active: true
                                                 padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
                                                 draw_text +: {
-                                                    color: #x828a93
+                                                    color: theme.color_text_disabled
                                                     text_style: theme.font_regular{font_size: 8.5}
                                                 }
                                             }
@@ -2751,7 +2755,7 @@ script_mod! {
                                         width: Fill
                                         height: Fill
                                         flow: Down
-                                        draw_bg +: { color: #x0d0d10 }
+                                        draw_bg +: { color: theme.color_bg_app }
                                         billboard_view := BillboardView{}
                                     }
 
@@ -2759,7 +2763,7 @@ script_mod! {
                                         width: Fill
                                         height: Fill
                                         flow: Down
-                                        draw_bg +: { color: #x0d0d10 }
+                                        draw_bg +: { color: theme.color_bg_app }
                                         splat_scene := XrSceneView{
                                             width: Fill
                                             height: Fill
@@ -2795,7 +2799,7 @@ script_mod! {
                                     flow: Down
                                     padding: Inset{left: 10 right: 10 top: 6 bottom: 10}
                                     spacing: 6
-                                    draw_bg +: { color: #x121215 }
+                                    draw_bg +: { color: theme.color_bg_app }
                                     View{
                                         width: Fill height: Fit flow: Right
                                         align: Align{y: 0.5}
@@ -2815,7 +2819,7 @@ script_mod! {
                                 flow: Down
                                 padding: 12
                                 spacing: 8
-                                draw_bg +: { color: #x0d0d10 }
+                                draw_bg +: { color: theme.color_bg_app }
 
                                 View{
                                     width: Fill height: Fit flow: Right spacing: 8
@@ -2869,9 +2873,9 @@ script_mod! {
                                     align: SplitterAlign.FromB(330.0)
                                     size: 6.0
                                     draw_bg +: {
-                                        color: #x1a1a1f
-                                        color_hover: #x3d9bf0
-                                        color_drag: #x3d9bf0
+                                        color: theme.color_inset
+                                        color_hover: theme.color_focus
+                                        color_drag: theme.color_focus
                                     }
                                     a: View{
                                         width: Fill height: Fill flow: Down spacing: 6
@@ -2892,17 +2896,17 @@ script_mod! {
                                             align: Align{y: 0.5}
                                             padding: Inset{left: 8 right: 8 top: 5 bottom: 5}
                                             draw_bg +: {
-                                                color: #x121215
-                                                border_color: #xffffff10
+                                                color: theme.color_bg_app
+                                                border_color: theme.color_bevel_inset_2
                                                 border_size: 1.0
-                                                border_radius: 3.0
+                                                border_radius: theme.corner_radius
                                             }
                                             FieldCaption{ width: Fit text: "Maintenance" }
                                             gc_retain_check := CheckBox{
                                                 text: "trim history: keep newest 3 revisions"
                                                 padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
                                                 draw_text +: {
-                                                    color: #x828a93
+                                                    color: theme.color_text_disabled
                                                     text_style: theme.font_regular{font_size: 8.5}
                                                 }
                                             }
@@ -2937,7 +2941,7 @@ script_mod! {
                                             detail_preview := SolidView{
                                                 width: Fill height: Fit
                                                 flow: Overlay
-                                                draw_bg +: { color: #x0d0d10 }
+                                                draw_bg +: { color: theme.color_bg_app }
                                                 detail_preview_pages := PageFlip{
                                                     width: Fill height: Fit
                                                     active_page: @detail_preview_shared
@@ -3008,14 +3012,14 @@ script_mod! {
                                                     width: Fit height: Fit
                                                     padding: Inset{left: 7 right: 7 top: 2 bottom: 2}
                                                     draw_bg +: {
-                                                        color: #x14283c
-                                                        border_color: #x3d9bf04d
+                                                        color: theme.color_bg_highlight
+                                                        border_color: theme.color_bg_highlight
                                                         border_size: 1.0
-                                                        border_radius: 2.5
+                                                        border_radius: mod.theme.corner_radius
                                                     }
                                                     detail_badge_label := Label{
                                                         draw_text +: {
-                                                            color: #x7db8f0
+                                                            color: theme.color_focus
                                                             text_style: theme.font_bold{font_size: 7.5}
                                                         }
                                                     }
@@ -3024,7 +3028,7 @@ script_mod! {
                                                     width: Fill
                                                     text: "Nothing selected"
                                                     draw_text +: {
-                                                        color: #xdfe6ec
+                                                        color: theme.color_text
                                                         text_style: theme.font_bold{font_size: 10}
                                                     }
                                                 }
@@ -3060,7 +3064,7 @@ script_mod! {
                                                         active: false
                                                         padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
                                                         draw_text +: {
-                                                            color: #x828a93
+                                                            color: theme.color_text_disabled
                                                             text_style: theme.font_regular{font_size: 8.5}
                                                         }
                                                     }
@@ -3088,7 +3092,7 @@ script_mod! {
                                 flow: Down
                                 padding: 12
                                 spacing: 6
-                                draw_bg +: { color: #x0d0d10 }
+                                draw_bg +: { color: theme.color_bg_app }
                                 View{
                                     width: Fill height: Fit flow: Right spacing: 8
                                     align: Align{y: 0.5}
@@ -3106,7 +3110,7 @@ script_mod! {
                                 flow: Down
                                 padding: 12
                                 spacing: 8
-                                draw_bg +: { color: #x0d0d10 }
+                                draw_bg +: { color: theme.color_bg_app }
                                 View{
                                     width: Fill height: Fit flow: Right spacing: 8
                                     align: Align{y: 0.5}
@@ -3314,7 +3318,7 @@ script_mod! {
                                                 active: false
                                                 padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
                                                 draw_text +: {
-                                                    color: #x828a93
+                                                    color: theme.color_text_disabled
                                                     text_style: theme.font_regular{font_size: 8.5}
                                                 }
                                             }
@@ -3323,7 +3327,7 @@ script_mod! {
                                                 active: false
                                                 padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
                                                 draw_text +: {
-                                                    color: #x828a93
+                                                    color: theme.color_text_disabled
                                                     text_style: theme.font_regular{font_size: 8.5}
                                                 }
                                             }
@@ -3366,7 +3370,7 @@ script_mod! {
                                 flow: Down
                                 padding: 12
                                 spacing: 6
-                                draw_bg +: { color: #x0d0d10 }
+                                draw_bg +: { color: theme.color_bg_app }
                                 View{
                                     width: Fill height: Fit flow: Right spacing: 8
                                     align: Align{y: 0.5}
@@ -3392,10 +3396,10 @@ script_mod! {
                                 spacing: 10
                                 flow: Down
                                 draw_bg +: {
-                                    color: #x16161b
-                                    border_color: #xffffff18
+                                    color: theme.color_bg_container
+                                    border_color: theme.color_bevel_inset_2
                                     border_size: 1.0
-                                    border_radius: 6.0
+                                    border_radius: mod.theme.corner_radius
                                 }
                                 BrightLabel{
                                     text: "Consider donating to Kenney"
@@ -3431,10 +3435,10 @@ script_mod! {
                                 spacing: 10
                                 flow: Down
                                 draw_bg +: {
-                                    color: #x16161b
-                                    border_color: #xffffff18
+                                    color: theme.color_bg_container
+                                    border_color: theme.color_bevel_inset_2
                                     border_size: 1.0
-                                    border_radius: 6.0
+                                    border_radius: mod.theme.corner_radius
                                 }
                                 license_title := BrightLabel{
                                     text: "Model license"
@@ -3472,10 +3476,10 @@ script_mod! {
                                 spacing: 10
                                 flow: Down
                                 draw_bg +: {
-                                    color: #x16161b
-                                    border_color: #xffffff18
+                                    color: theme.color_bg_container
+                                    border_color: theme.color_bevel_inset_2
                                     border_size: 1.0
-                                    border_radius: 6.0
+                                    border_radius: mod.theme.corner_radius
                                 }
                                 lib_analyse_shown_title := BrightLabel{
                                     text: "Split the shown tracks into layers?"
@@ -3491,7 +3495,7 @@ script_mod! {
                                     active: false
                                     padding: Inset{left: 4 right: 4 top: 1 bottom: 1}
                                     draw_text +: {
-                                        color: #x828a93
+                                        color: theme.color_text_disabled
                                         text_style: theme.font_regular{font_size: 8.5}
                                     }
                                 }
@@ -3519,10 +3523,10 @@ script_mod! {
                                 spacing: 10
                                 flow: Down
                                 draw_bg +: {
-                                    color: #x16161b
-                                    border_color: #xffffff18
+                                    color: theme.color_bg_container
+                                    border_color: theme.color_bevel_inset_2
                                     border_size: 1.0
-                                    border_radius: 6.0
+                                    border_radius: mod.theme.corner_radius
                                 }
                                 lib_retire_shown_title := BrightLabel{
                                     text: "Retire the shown catalog assets?"
@@ -3557,10 +3561,10 @@ script_mod! {
                                 spacing: 10
                                 flow: Down
                                 draw_bg +: {
-                                    color: #x16161b
-                                    border_color: #xffffff18
+                                    color: theme.color_bg_container
+                                    border_color: theme.color_bevel_inset_2
                                     border_size: 1.0
-                                    border_radius: 6.0
+                                    border_radius: mod.theme.corner_radius
                                 }
                                 store_delete_title := BrightLabel{
                                     text: "Delete from store?"
@@ -3595,10 +3599,10 @@ script_mod! {
                                 spacing: 10
                                 flow: Down
                                 draw_bg +: {
-                                    color: #x16161b
-                                    border_color: #xffffff18
+                                    color: theme.color_bg_container
+                                    border_color: theme.color_bevel_inset_2
                                     border_size: 1.0
-                                    border_radius: 6.0
+                                    border_radius: mod.theme.corner_radius
                                 }
                                 gc_confirm_title := BrightLabel{
                                     text: "Collect garbage?"
@@ -3636,10 +3640,10 @@ script_mod! {
                                 spacing: 8
                                 flow: Down
                                 draw_bg +: {
-                                    color: #x16161b
-                                    border_color: #xffffff18
+                                    color: theme.color_bg_container
+                                    border_color: theme.color_bevel_inset_2
                                     border_size: 1.0
-                                    border_radius: 6.0
+                                    border_radius: mod.theme.corner_radius
                                 }
                                 View{
                                     width: Fill
@@ -4010,7 +4014,7 @@ pub struct App {
     fleet_timer: Timer,
     /// LAN beacon listener; polled on the fleet timer.
     #[rust]
-    discovered: Option<makepad_ai_hub::discovery::Discovered>,
+    discovered: Option<makepad_ai_hub::discovery::Discovery>,
     #[rust]
     job_timer: Timer,
     #[rust]
@@ -4036,6 +4040,8 @@ pub struct App {
     library: Option<Library>,
     #[rust]
     video: Option<VideoPlayer>,
+    #[rust]
+    video_decoder: Option<VideoDecoder>,
     /// The file the viewer's current video came from — Restart and the loop
     /// toggle re-open it.
     video_path: Option<PathBuf>,
@@ -4323,10 +4329,18 @@ impl App {
     // -- setup ---------------------------------------------------------------
 
     fn setup(&mut self, cx: &mut Cx) {
+        let pool = cx.task_pool();
+        let spawner = cx.thread_spawner();
+        let (video_decoder, mut video_audio) =
+            VideoDecoder::start(spawner.clone()).expect("asset-ui video decoder worker");
+        self.video_decoder = Some(video_decoder);
         let _ = std::fs::create_dir_all(artifacts_dir());
-        self.artifact_io = Some(ArtifactIo::start());
+        self.artifact_io = Some(ArtifactIo::start(spawner.clone()));
+        self.analysis = Some(AnalysisQueue::start(spawner.clone()));
+        self.import_page.set_task_pool(pool.clone());
+        self.music_import_page.set_task_pool(pool.clone());
         self.load_fleet_prefs();
-        self.library = Some(Library::open(repo_path("local/ai_content_library")));
+        self.library = Some(Library::open(makepad_asset_client::paths::library_root()));
         self.saved_presets = fast_presets::load(&fast_presets::store_path());
         if let Some(library) = &mut self.library {
             crate::enhance_meta::apply_catalog_names(library);
@@ -4349,7 +4363,11 @@ impl App {
         // The store hosts the embedded Asset Server; hand it the library it
         // must publish. Library::open ran above, so the product backfill is
         // already on disk when the watcher's first poll reads index.json.
-        self.store.start(PathBuf::from(repo_path("local/ai_content_library")));
+        self.store.start(
+            makepad_asset_client::paths::library_root(),
+            pool,
+            spawner,
+        );
         self.asset_store_timer = cx.start_interval(0.2);
         // Opening stays metadata-only; every missing preview is queued here
         // and regenerated a bounded slice at a time once frames are flowing.
@@ -4548,11 +4566,12 @@ impl App {
         self.refresh_voice_ui(cx);
         self.sync_preset_name_box(cx);
 
-        // Speakers: wav artifacts + video soundtrack.
+        // Speakers: both engines move into the callback and own their state.
+        let mut audio_engine = crate::audio::take_engine();
         cx.audio_output(0, move |info, output| {
             output.zero();
-            crate::audio::mix_into(output, info.sample_rate);
-            crate::video_player::mix_into(output, info.sample_rate);
+            audio_engine.mix_into(output, info.sample_rate);
+            video_audio.mix_into(output, info.sample_rate);
         });
 
         // Headless drive.
@@ -4691,7 +4710,7 @@ impl App {
     }
 
     fn fleet_prefs_path() -> PathBuf {
-        PathBuf::from(repo_path("local/ai_content_library/fleet_prefs.json"))
+        makepad_asset_client::paths::library_root().join("fleet_prefs.json")
     }
 
     fn load_fleet_prefs(&mut self) {
@@ -7541,7 +7560,7 @@ impl App {
                         // WAV must not call play() or a 200ms DS_* / Quake
                         // shot becomes a loop (play-at-end restarts).
                         if audition && audio::autoplay_one_shot(domain, pcm.seconds()) {
-                            crate::video_player::stop_audio();
+                            self.stop_video_audio();
                             audio::play();
                             self.arm_audio_pump(cx);
                         }
@@ -7589,7 +7608,8 @@ impl App {
             // behind a new open or an error state.
             self.stop_video_playback();
             self.clear_video_frame(cx);
-            match VideoPlayer::new(&path.to_string_lossy()) {
+            let decoder = self.video_decoder.as_ref().expect("video decoder started");
+            match VideoPlayer::new(&path.to_string_lossy(), decoder) {
                 Ok(player) => {
                     self.ui.label(cx, ids!(video_info)).set_text(
                         cx,
@@ -7720,7 +7740,7 @@ impl App {
         if self.file_drag_active {
             return;
         }
-        let managed_root = match std::fs::canonicalize(repo_path("local/ai_content_library")) {
+        let managed_root = match std::fs::canonicalize(makepad_asset_client::paths::library_root()) {
             Ok(path) => path,
             Err(error) => {
                 log!("library: cannot resolve managed root for outbound drag: {error}");
@@ -9101,7 +9121,7 @@ impl App {
                                 && audio::is_ready()
                                 && !audio::is_playing()
                             {
-                                crate::video_player::stop_audio();
+                                self.stop_video_audio();
                                 audio::play();
                                 self.arm_audio_pump(cx);
                                 self.sync_audio_ui(cx);
@@ -9901,15 +9921,7 @@ impl App {
                     label.to_string()
                 },
             );
-            let color = if active {
-                vec4(0.87, 0.92, 0.95, 1.0)
-            } else {
-                vec4(0.51, 0.54, 0.58, 1.0)
-            };
-            let mut widget = self.ui.widget(cx, tab);
-            script_apply_eval!(cx, widget, {
-                draw_text +: { color: #(color) }
-            });
+
         }
         match surface {
             Surface::Create => {}
@@ -9963,7 +9975,7 @@ impl App {
         if !self.chat.is_linked() {
             if let Some(endpoints) = self.store.endpoints {
                 let cache = session_config_from_env().cache_parent.join("cache-chat");
-                self.chat.connect(endpoints, self.store.token.clone(), cache);
+                self.chat.connect(cx, endpoints, self.store.token.clone(), cache);
                 // The pane says "waiting for the asset server" until
                 // something redraws it, and the feed only marks itself
                 // dirty once a turn runs — so the line would sit there
@@ -10714,7 +10726,8 @@ impl App {
                 if let Some(path) = item.as_ref().and_then(|item| item.payload.clone()) {
                     self.stop_video_playback();
                     self.clear_video_frame(cx);
-                    match VideoPlayer::new(&path.to_string_lossy()) {
+                    let decoder = self.video_decoder.as_ref().expect("video decoder started");
+                    match VideoPlayer::new(&path.to_string_lossy(), decoder) {
                         Ok(player) => {
                             self.library_video_file = Some(file.clone());
                             self.video = Some(player);
@@ -10789,7 +10802,8 @@ impl App {
                             self.library_audio_file = Some(file.clone());
                             // The transport: decoded off the frame thread and
                             // installed when it lands.
-                            let clip_gen = crate::audio::load_clip_async(bytes.clone());
+                            let pool = cx.task_pool();
+                            let clip_gen = crate::audio::load_clip_async(&pool, bytes.clone());
                             // And, exactly once per track, what the store
                             // already holds BESIDE the mixed audio: the four
                             // separated layers and the transcript. The clip
@@ -10930,11 +10944,9 @@ impl App {
 
     // -- "Split audio layers": the bake queue and its consumers -----------
 
-    /// The bake + fetch lanes, started on first use. Two threads parked on
-    /// a channel is the whole cost of having them.
+    /// The bake + fetch lanes, started once with the app and fed by channels.
     fn analysis(&mut self) -> &mut analysis::AnalysisQueue {
-        self.analysis
-            .get_or_insert_with(analysis::AnalysisQueue::start)
+        self.analysis.as_mut().expect("analysis workers started")
     }
 
     /// The selected catalog hit when it is an AUDIO asset: id and title.
@@ -12400,7 +12412,13 @@ impl App {
     /// [`Self::clear_video_frame`] is also called.
     fn stop_video_playback(&mut self) {
         self.video = None;
-        crate::video_player::stop_audio();
+        self.stop_video_audio();
+    }
+
+    fn stop_video_audio(&self) {
+        if let Some(decoder) = &self.video_decoder {
+            decoder.stop_audio();
+        }
     }
 
     /// Blank the actual video WIDGET texture (not only the app-side handle),
@@ -12792,7 +12810,8 @@ impl App {
     fn restart_viewer_video(&mut self, cx: &mut Cx) -> bool {
         let Some(path) = self.video_path.clone() else { return false };
         self.stop_video_playback();
-        match VideoPlayer::new(&path.to_string_lossy()) {
+        let decoder = self.video_decoder.as_ref().expect("video decoder started");
+        match VideoPlayer::new(&path.to_string_lossy(), decoder) {
             Ok(player) => {
                 self.video = Some(player);
                 self.sync_video_transport(cx);
@@ -14133,7 +14152,7 @@ impl MatchEvent for App {
                 } else {
                     // A user-resumed WAV preview wins over a stale video
                     // soundtrack in the shared device callback.
-                    crate::video_player::stop_audio();
+                    self.stop_video_audio();
                     audio::play();
                     self.arm_audio_pump(cx);
                 }
@@ -14434,13 +14453,11 @@ impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         crate::makepad_widgets::script_mod(vm);
         // Draw shaders must register before the widgets that declare them.
-        makepad_render::script_mod(vm);
-        makepad_xr::script_mod(vm);
+        makepad_media_view::script_mod(vm);
         // Shared preview widgets (ContentPreview / AudioView): the pool this
         // app draws catalog content with, and the same one the VJ and DJ
         // surfaces adopt.
         makepad_asset_widgets::script_mod(vm);
-        crate::mesh_view::script_mod(vm);
         crate::mask_paint::script_mod(vm);
         crate::billboard_view::script_mod(vm);
         crate::thumbnail_renderer::script_mod(vm);
@@ -14691,14 +14708,17 @@ impl AppMain for App {
             }
         }
         self.scrub_audio(cx, event);
-        if self.audio_timer.is_event(event).is_some() && audio::is_ready() {
-            self.sync_audio_ui(cx);
-            // The Library rail has its own transport over the same mixer.
-            if self.surface == Surface::Library && self.library_audio_file.is_some() {
-                self.refresh_library_audio(cx);
-                // Playback that started from the transport re-arms the
-                // transcript's own per-frame follow.
-                self.arm_lyrics_pump(cx);
+        if self.audio_timer.is_event(event).is_some() {
+            audio::pump();
+            if audio::is_ready() {
+                self.sync_audio_ui(cx);
+                // The Library rail has its own transport over the same mixer.
+                if self.surface == Surface::Library && self.library_audio_file.is_some() {
+                    self.refresh_library_audio(cx);
+                    // Playback that started from the transport re-arms the
+                    // transcript's own per-frame follow.
+                    self.arm_lyrics_pump(cx);
+                }
             }
         }
         if self.audio_timer.is_event(event).is_some() && self.webcam.capturing {
@@ -15918,6 +15938,13 @@ mod world_style_tests {
             namespace: namespace.to_string(),
             kind: Some(makepad_asset_data::AssetKind::World),
             title: title.to_string(),
+            creator: String::new(),
+            artist: String::new(),
+            artist_url: String::new(),
+            album: String::new(),
+            source_url: String::new(),
+            license: String::new(),
+            license_url: String::new(),
             snippet: String::new(),
             score: 0,
             live: true,
@@ -16065,4 +16092,9 @@ mod drop_tests {
         assert_eq!(dropped_file_kind(Path::new("/x/notes.txt")), None);
         assert_eq!(dropped_file_kind(Path::new("/x/noext")), None);
     }
+}
+
+#[cfg(test)]
+mod desktop_style_tests {
+    include!("../../../widgets/tests/support/app_style.rs");
 }

@@ -6,8 +6,8 @@
 //! without throwing away what already landed.
 
 use makepad_asset_client::{
-    Api, ApiEndpoints, AssetClient, BatchFlow, BatchFrame, BatchItem, ClientConfig, ClientError,
-    ClientRequest, ClientRuntime, HttpLimits, RuntimeConfig, SubmitOptions,
+    Api, ApiEndpoints, AssetClient, BatchFlow, BatchFrame, BatchItem, BlobContent, ClientConfig,
+    ClientError, ClientRequest, ClientRuntime, HttpLimits, RuntimeConfig, SubmitOptions,
 };
 use makepad_asset_data::BlobId;
 use makepad_asset_store::{AssetServer, ServerConfig};
@@ -328,17 +328,17 @@ fn the_runtime_fast_lane_coalesces_queued_thumb_fetches() {
         );
     }
 
-    let mut done: HashMap<u64, PathBuf> = HashMap::new();
+    let mut done: HashMap<u64, BlobContent> = HashMap::new();
     let deadline = Instant::now() + Duration::from_secs(30);
     while done.len() < ids.len() {
         assert!(Instant::now() < deadline, "runtime never finished: {}/{}", done.len(), ids.len());
         for event in runtime.poll() {
             match event {
                 makepad_asset_client::ClientEvent::Done { id, output } => {
-                    let makepad_asset_client::ClientOutput::Blob { path, .. } = output else {
+                    let makepad_asset_client::ClientOutput::Blob { content, .. } = output else {
                         panic!("wrong output");
                     };
-                    done.insert(id, path);
+                    done.insert(id, content);
                 }
                 makepad_asset_client::ClientEvent::Failed { id, error } => {
                     panic!("request {id} failed: {error}");
@@ -349,7 +349,7 @@ fn the_runtime_fast_lane_coalesces_queued_thumb_fetches() {
         std::thread::sleep(Duration::from_millis(2));
     }
     for (i, id) in ids.iter().enumerate() {
-        assert_eq!(std::fs::read(&done[id]).unwrap(), blobs[i].1);
+        assert_eq!(done[id].read_all().unwrap(), blobs[i].1);
     }
     // 24 thumbnails: a couple of batched requests over one keep-alive
     // connection — not 24 requests, and not 24 connections.

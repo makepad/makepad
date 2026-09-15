@@ -54,7 +54,7 @@ pub struct RouteCtx {
     /// thread. Catalog rows for those objects still commit on the state
     /// thread, after the bytes are durable — the admission ordering law is
     /// unchanged.
-    pub cas: std::sync::Arc<crate::cas::Cas>,
+    pub cas: std::sync::Arc<crate::FsCas>,
 }
 
 /// Serve one parsed request head to completion.
@@ -75,7 +75,8 @@ pub fn serve_request(
             if let Fail::Srv(
                 e @ (ServerError::Io { .. }
                 | ServerError::Db { .. }
-                | ServerError::UnsupportedSchema { .. }),
+                | ServerError::UnsupportedSchema { .. }
+                | ServerError::UnsupportedContentSchema { .. }),
             ) = &f
             {
                 // The client sees an opaque 500; the operator sees the cause.

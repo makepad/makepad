@@ -38,6 +38,7 @@ pub mod skybox;
 // because the Asset UI runs the same watcher in-process against its own
 // embedded Asset Server.
 pub mod import;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod watch;
 pub mod gen_publish;
 // The wired generation kinds (job kind <-> fleet domain <-> catalog shape)

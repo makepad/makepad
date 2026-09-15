@@ -192,8 +192,9 @@ impl ExtraNode {
         }
     }
 
-    /// A lift: the floor authored in its UP pose, resting UP, with a clip
-    /// that runs t=0 UP -> t=seconds DOWN (`travel` is negative).
+    /// A lift authored at one end of its travel. State order follows clip
+    /// order; a rising cab truthfully declares DOWN -> UP, not an "up"
+    /// default whose geometry is actually at the lower landing.
     pub fn lift(
         name: impl Into<String>,
         positions: Vec<[f32; 3]>,
@@ -204,25 +205,29 @@ impl ExtraNode {
         down_y: f32,
     ) -> Self {
         let travel = down_y - up_y;
+        let (initial, activated) = if travel > 0.0 {
+            ("down", "up")
+        } else {
+            ("up", "down")
+        };
         Self {
             name: name.into(),
             positions,
             uvs,
             indices,
             colors,
-            // Rest is UP: the level is baked with its lifts raised, which is
-            // where a walker meets them.
+            // Geometry remains at its authored starting pose.
             rest: [0.0, 0.0, 0.0],
             extras: vec![
                 ("kind".into(), json::s("lift")),
                 (
                     "states".into(),
-                    Value::Arr(vec![json::s("up"), json::s("down")]),
+                    Value::Arr(vec![json::s(initial), json::s(activated)]),
                 ),
-                ("default".into(), json::s("up")),
+                ("default".into(), json::s(initial)),
                 ("axis".into(), json::s("y")),
-                ("up".into(), Value::F64(up_y as f64)),
-                ("down".into(), Value::F64(down_y as f64)),
+                ("up".into(), Value::F64(up_y.max(down_y) as f64)),
+                ("down".into(), Value::F64(up_y.min(down_y) as f64)),
                 ("travel".into(), Value::F64(travel as f64)),
                 ("seconds".into(), Value::F64(DOOR_SECONDS as f64)),
                 ("wait".into(), Value::F64(LIFT_WAIT_SECONDS as f64)),

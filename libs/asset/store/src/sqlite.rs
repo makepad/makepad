@@ -15,7 +15,10 @@
 mod own_db {
     use crate::error::{ServerError, ServerResult};
     use makepad_sqlite::{Connection, Value};
+    #[cfg(all(feature = "native", not(any(target_arch = "wasm32", feature = "embedded"))))]
+    use makepad_sqlite::Database;
     use std::cell::RefCell;
+    #[cfg(all(feature = "native", not(any(target_arch = "wasm32", feature = "embedded"))))]
     use std::path::Path;
     use std::time::Duration;
 
@@ -33,24 +36,64 @@ mod own_db {
     }
 
     pub struct Db {
-        conn: RefCell<Connection>,
+        conn: RefCell<DbConnection>,
+    }
+
+    enum DbConnection {
+        ReadWrite(Connection),
+        #[cfg(all(feature = "native", not(any(target_arch = "wasm32", feature = "embedded"))))]
+        ReadOnly(Database),
     }
 
     impl Db {
+        #[cfg(all(feature = "native", not(any(target_arch = "wasm32", feature = "embedded"))))]
         pub fn open(path: &Path, busy_timeout_ms: u32) -> ServerResult<Db> {
-            let conn = Connection::open(path, Duration::from_millis(busy_timeout_ms as u64))
+            Self::open_with_timeout(makepad_sqlite::FileStoreSet::new(path), busy_timeout_ms)
+        }
+
+        #[cfg(all(feature = "native", not(any(target_arch = "wasm32", feature = "embedded"))))]
+        pub fn open_read_only(path: &Path) -> ServerResult<Db> {
+            let db = Database::open(path).map_err(|e| map_err("open read only", e))?;
+            Ok(Db {
+                conn: RefCell::new(DbConnection::ReadOnly(db)),
+            })
+        }
+
+        pub fn open_memory(busy_timeout_ms: u32) -> ServerResult<Db> {
+            Self::open_with_timeout(makepad_sqlite::MemoryStoreSet::new(), busy_timeout_ms)
+        }
+
+        pub fn open_with<S: makepad_sqlite::PageStoreSet + 'static>(
+            stores: S,
+            busy_timeout_ms: u32,
+        ) -> ServerResult<Db> {
+            Self::open_with_timeout(stores, busy_timeout_ms)
+        }
+
+        fn open_with_timeout<S: makepad_sqlite::PageStoreSet + 'static>(
+            stores: S,
+            busy_timeout_ms: u32,
+        ) -> ServerResult<Db> {
+            let conn = Connection::open_with_timeout(
+                stores,
+                Duration::from_millis(busy_timeout_ms as u64),
+            )
                 .map_err(|e| map_err("open", e))?;
             Ok(Db {
-                conn: RefCell::new(conn),
+                conn: RefCell::new(DbConnection::ReadWrite(conn)),
             })
         }
 
         /// One or more semicolon-separated statements that return no rows.
         pub fn exec(&self, op: &'static str, sql: &str) -> ServerResult<()> {
-            self.conn
-                .borrow_mut()
-                .execute_batch(sql)
-                .map_err(|e| map_err(op, e))
+            match &mut *self.conn.borrow_mut() {
+                DbConnection::ReadWrite(conn) => conn.execute_batch(sql).map_err(|e| map_err(op, e)),
+                #[cfg(all(feature = "native", not(any(target_arch = "wasm32", feature = "embedded"))))]
+                DbConnection::ReadOnly(_) => Err(ServerError::InvalidState {
+                    what: "read-only catalog",
+                    state: "write attempted",
+                }),
+            }
         }
 
         pub fn prepare(&self, op: &'static str, sql: &str) -> ServerResult<Stmt<'_>> {
@@ -67,7 +110,27 @@ mod own_db {
 
         /// Rows changed by the most recent INSERT/UPDATE/DELETE.
         pub fn changes(&self) -> u64 {
-            self.conn.borrow().changes()
+            match &*self.conn.borrow() {
+                DbConnection::ReadWrite(conn) => conn.changes(),
+                #[cfg(all(feature = "native", not(any(target_arch = "wasm32", feature = "embedded"))))]
+                DbConnection::ReadOnly(_) => 0,
+            }
+        }
+
+        #[cfg(all(feature = "native", not(any(target_arch = "wasm32", feature = "embedded"))))]
+        pub fn user_version(&self) -> ServerResult<i64> {
+            match &mut *self.conn.borrow_mut() {
+                DbConnection::ReadWrite(conn) => {
+                    let result = conn
+                        .query("PRAGMA user_version", &[])
+                        .map_err(|e| map_err("get user_version", e))?;
+                    Ok(match result.scalar() {
+                        Some(Value::Integer(value)) => *value,
+                        _ => 0,
+                    })
+                }
+                DbConnection::ReadOnly(db) => Ok(db.user_version() as i64),
+            }
         }
 
         pub fn tx<T>(&self, f: impl FnOnce(&Db) -> ServerResult<T>) -> ServerResult<T> {
@@ -155,12 +218,12 @@ mod own_db {
         /// Step once. `Ok(true)` = a row is available, `Ok(false)` = done.
         pub fn step(&mut self) -> ServerResult<bool> {
             if self.rows.is_none() {
-                let result = self
-                    .db
-                    .conn
-                    .borrow_mut()
-                    .query(&self.sql, &self.params)
-                    .map_err(|e| map_err(self.op, e))?;
+                let result = match &mut *self.db.conn.borrow_mut() {
+                    DbConnection::ReadWrite(conn) => conn.query(&self.sql, &self.params),
+                    #[cfg(all(feature = "native", not(any(target_arch = "wasm32", feature = "embedded"))))]
+                    DbConnection::ReadOnly(db) => db.query(&self.sql, &self.params),
+                }
+                .map_err(|e| map_err(self.op, e))?;
                 self.rows = Some(result.rows);
                 self.pos = 0;
             }

@@ -22,17 +22,22 @@ use crate::api::ApiEndpoints;
 use crate::client::{AssetClient, ClientConfig};
 use crate::discovery::{content_client_caps, DiscoveryListener};
 use crate::error::{ClientError, ClientResult};
+use crate::location::{BaseUrl, ClientLocation};
 use crate::runtime::{ClientRuntime, RuntimeConfig};
 use crate::subscriber::{CatalogSubscriber, CatalogSubscriberConfig};
 use crate::util::now_ms;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Clone, Debug)]
 pub struct SessionConfig {
+    /// Static configurations bypass discovery and select portable transport
+    /// and memory-cache primitives. Native configurations leave this `None`.
+    pub location: Option<ClientLocation>,
     /// Explicit endpoints; `None` = LAN discovery.
     pub endpoints: Option<ApiEndpoints>,
     /// Expected server identity. With discovery it selects the beacon; with
@@ -68,6 +73,7 @@ pub struct SessionConfig {
 impl SessionConfig {
     pub fn new(cache_parent: impl Into<PathBuf>) -> SessionConfig {
         SessionConfig {
+            location: None,
             endpoints: None,
             server_id: None,
             token: None,
@@ -83,7 +89,16 @@ impl SessionConfig {
         }
     }
 
+    pub fn static_site(base_url: BaseUrl) -> SessionConfig {
+        let mut config = SessionConfig::new(PathBuf::new());
+        config.location = Some(ClientLocation::StaticSite(base_url));
+        config
+    }
+
     fn validate(&self) -> ClientResult<()> {
+        if matches!(self.location, Some(ClientLocation::StaticSite(_))) && self.token.is_some() {
+            return Err(ClientError::InvalidInput { what: "static site bearer token" });
+        }
         self.subscriber.validate()?;
         if self.catalog_cache_leaf.is_empty()
             || self.media_lanes.is_empty()
@@ -118,13 +133,21 @@ pub struct SessionHandles {
     pub subscriber: CatalogSubscriber,
     pub server_label: String,
     pub server_id: [u8; 16],
-    /// Control/data planes of the verified session — enough for a second
-    /// client (chat broker) without re-discovering.
-    pub endpoints: ApiEndpoints,
+    /// The verified source. Static sessions expose their real URL here;
+    /// socket endpoints exist only for native dynamic-server sessions.
+    pub location: ClientLocation,
+    pub endpoints: Option<ApiEndpoints>,
     pub token: Option<String>,
+    pub capabilities: crate::location::StoreCapabilities,
 }
 
 impl SessionHandles {
+    pub fn native_endpoints(&self) -> ClientResult<ApiEndpoints> {
+        self.endpoints.ok_or(ClientError::Unavailable {
+            capability: "native_endpoints",
+            mode: self.location.mode(),
+        })
+    }
     /// Deterministic teardown: stop the subscriber's long-poll, then join
     /// every runtime worker. Call from a background/exit path — the runtime
     /// joins wait out any in-flight transfer.
@@ -156,11 +179,38 @@ pub enum SessionMsg {
 pub struct SessionConnector {
     rx: Receiver<SessionMsg>,
     stopping: Arc<AtomicBool>,
+    static_runtime: Option<ClientRuntime>,
+    local_msgs: VecDeque<SessionMsg>,
 }
 
 impl SessionConnector {
     pub fn start(config: SessionConfig) -> ClientResult<SessionConnector> {
         config.validate()?;
+        if let Some(ClientLocation::StaticSite(base)) = config.location.clone() {
+            let mut client_config = ClientConfig::static_site(base.clone());
+            client_config.token = config.token.clone();
+            client_config.validate()?;
+            let store = crate::static_store::StaticStore::platform(
+                base.clone(), client_config.cache.max_ram_bytes,
+            )?;
+            let runtime = ClientRuntime::start_static_store(store, config.catalog_runtime)?;
+            let (_tx, rx) = channel();
+            let mut local_msgs = VecDeque::new();
+            local_msgs.push_back(SessionMsg::Status(SessionStatus::Connecting {
+                server: base.to_string(),
+            }));
+            return Ok(SessionConnector {
+                rx,
+                stopping: Arc::new(AtomicBool::new(false)),
+                static_runtime: Some(runtime),
+                local_msgs,
+            });
+        }
+        let configured_endpoints = match config.location.as_ref() {
+            Some(ClientLocation::Native(endpoints)) => Some(*endpoints),
+            Some(ClientLocation::StaticSite(_)) => unreachable!(),
+            None => config.endpoints,
+        };
         let (tx, rx) = channel();
         let stopping = Arc::new(AtomicBool::new(false));
         let stop_worker = stopping.clone();
@@ -172,13 +222,13 @@ impl SessionConnector {
                 // ephemeral ports and UDP-announce the live pair; if the hint
                 // is stale, fall through to discovery instead of retrying a
                 // dead SocketAddr forever.
-                let mut allow_hint = config.endpoints.is_some();
+                let mut allow_hint = configured_endpoints.is_some();
                 loop {
                     if stop_worker.load(Ordering::Acquire) {
                         return;
                     }
                     let status = |s: SessionStatus| tx.send(SessionMsg::Status(s)).is_ok();
-                    let hinted = allow_hint.then_some(config.endpoints).flatten();
+                    let hinted = allow_hint.then_some(configured_endpoints).flatten();
                     let endpoints = match hinted {
                         Some(endpoints) => Some((endpoints, config.server_id)),
                         None => {
@@ -235,12 +285,42 @@ impl SessionConnector {
                 }
             })
             .map_err(|e| ClientError::Io { op: "spawn session connector", kind: e.kind() })?;
-        Ok(SessionConnector { rx, stopping })
+        Ok(SessionConnector {
+            rx, stopping, static_runtime: None, local_msgs: VecDeque::new(),
+        })
     }
 
     /// Drain pending status/handover messages without blocking a frame.
     pub fn poll(&mut self) -> Vec<SessionMsg> {
-        let mut out = Vec::new();
+        let mut out: Vec<_> = self.local_msgs.drain(..).collect();
+        if let Some(runtime) = &mut self.static_runtime {
+            let _ = runtime.poll();
+            if let Some(error) = runtime.connect_error().cloned() {
+                out.push(SessionMsg::Status(SessionStatus::Retrying {
+                    error: error.to_string(),
+                    in_secs: 0,
+                }));
+                self.static_runtime = None;
+            } else if runtime.is_ready() {
+                let runtime = self.static_runtime.take().expect("static runtime present");
+                let location = runtime.location().expect("static runtime location");
+                let server_id = runtime.server_id().expect("ready static identity");
+                let label = location.to_string();
+                let capabilities = location.capabilities();
+                out.push(SessionMsg::Up(Box::new(SessionHandles {
+                    catalog: runtime,
+                    media: Vec::new(),
+                    subscriber: CatalogSubscriber::null(),
+                    server_label: label.clone(),
+                    server_id,
+                    location,
+                    endpoints: None,
+                    token: None,
+                    capabilities,
+                })));
+                out.push(SessionMsg::Status(SessionStatus::Connected { server: label }));
+            }
+        }
         loop {
             match self.rx.try_recv() {
                 Ok(msg) => out.push(msg),
@@ -284,8 +364,8 @@ fn discover(
 ) -> Option<(ApiEndpoints, Option<[u8; 16]>)> {
     let mut listener =
         DiscoveryListener::start(config.discovery_port, 10_000, now_ms).ok()?;
-    let deadline =
-        std::time::Instant::now() + Duration::from_millis(config.discovery_wait_ms);
+    let deadline = makepad_platform::Cx::monotonic_now()
+        + Duration::from_millis(config.discovery_wait_ms).as_secs_f64();
     let found = loop {
         if stopping.load(Ordering::Acquire) {
             break None;
@@ -297,7 +377,7 @@ fn discover(
         if let Some(server) = candidate {
             break Some(server);
         }
-        if std::time::Instant::now() >= deadline {
+        if makepad_platform::Cx::monotonic_now() >= deadline {
             break None;
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -321,6 +401,7 @@ fn connect_all(
 ) -> Result<SessionHandles, String> {
     let client_config = |leaf: &str| {
         let mut c = ClientConfig::new(config.cache_parent.join(leaf));
+        c.location = Some(ClientLocation::Native(endpoints));
         c.token = config.token.clone();
         c
     };
@@ -340,13 +421,17 @@ fn connect_all(
         .map_err(|e| e.to_string())?;
     let catalog = ClientRuntime::start_with(catalog_client, config.catalog_runtime)
         .map_err(|e| e.to_string())?;
+    let location = ClientLocation::Native(endpoints);
+    let capabilities = location.capabilities();
     Ok(SessionHandles {
         catalog,
         media,
         subscriber,
         server_label: format!("{}", endpoints.control),
         server_id,
-        endpoints,
+        location,
+        endpoints: Some(endpoints),
         token: config.token.clone(),
+        capabilities,
     })
 }

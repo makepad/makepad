@@ -1113,7 +1113,7 @@ fn emit_sprites(
         };
         let (fw, fh) = structure_footprint(key);
         if is_wall(key) {
-            let count = shp.frames().len().min(16);
+            let count = shp.frames().len();
             if count == 0 {
                 continue;
             }
@@ -1127,13 +1127,7 @@ fn emit_sprites(
                     role: "structure",
                     facings: 1,
                     frames: frame_range(&shp, 0, count, palette, |_| 0),
-                    states: vec![SpriteState {
-                        name: "idle",
-                        first: 0,
-                        last: count,
-                        looping: true,
-                        fps: 6,
-                    }],
+                    states: super::wall_states(count),
                     unit: Some(UnitSpec {
                         manifest_lines: lines,
                     }),

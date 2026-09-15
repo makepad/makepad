@@ -15,6 +15,13 @@
 //! local file (typically the server root's `admin-token`, or a scoped
 //! publish token).
 
+#[cfg(target_arch = "wasm32")]
+fn main() {}
+
+// This CLI drives native files, sockets, and directory watchers; VJ depends on the library only.
+#[cfg(not(target_arch = "wasm32"))]
+mod native {
+
 // The library importer/watcher now lives in the crate's lib so the Asset UI
 // can run the same publication loop in-process against its embedded server.
 use makepad_asset_importer::{classic_import, games_import, import, music_import, pack_import, watch};
@@ -922,6 +929,12 @@ fn publish_classic_pack(
             categories: vec![source.id().into(), pack_name.to_string()],
             tags,
             creator: source.credits().to_string(),
+            artist: String::new(),
+            artist_url: String::new(),
+            album: String::new(),
+            source_url: String::new(),
+            license: String::new(),
+            license_url: String::new(),
             generator: "classic_import".into(),
             backend: "asset-importer-cli".into(),
             model: pack_name.to_string(),
@@ -942,7 +955,7 @@ fn publish_classic_pack(
     Ok((imported.created, imported.entries.len()))
 }
 
-fn main() {
+pub(super) fn run() {
     let args = parse_args();
     install_signal_handlers();
 
@@ -1330,4 +1343,11 @@ mod tests {
         assert_eq!(&pixels[..4], &[0, 0, 0, 0]);
         let _ = std::fs::remove_dir_all(staged);
     }
+}
+
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn main() {
+    native::run();
 }

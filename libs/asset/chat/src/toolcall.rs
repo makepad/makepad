@@ -99,6 +99,23 @@ pub fn extract(text: &str) -> Extract {
     match extract_line_start(&split.visible) {
         Extract::None => match extract_native(&split.visible) {
             Extract::None if !split.think_closed => extract_last_line_start(text),
+            // A synthetic `<think>` opener (qwen3.8) wraps the model's WHOLE
+            // reply: it writes its prose, its trained <tool_call> block, and
+            // only then closes the think — so the visible half is empty and
+            // the call sits in the reasoning half (observed 2026-09-02: a
+            // complete world.set_source carrying a world.plan, never
+            // executed, the turn hanging on "Talking to Qwen"). A tool call
+            // is never reasoning — take it from there; the prose before it
+            // is the clean text.
+            Extract::None if split.visible.trim().is_empty() => {
+                if split.thinking.contains(TOOL_MARKER) {
+                    extract_line_start(&split.thinking)
+                } else if split.thinking.contains("<tool_call>") {
+                    extract_native(&split.thinking)
+                } else {
+                    Extract::None
+                }
+            }
             other => other,
         },
         other => other,
@@ -117,11 +134,13 @@ pub fn extract(text: &str) -> Extract {
 /// </tool_call>
 /// ```
 ///
-/// Parameter values are raw text lines: they coerce to JSON when they
-/// parse as JSON (numbers, arrays, objects, booleans) and stay strings
-/// otherwise — multi-line values (a splash source) stay intact. Function
-/// names map through the same underscore→dotted table native providers
-/// use; dotted names are accepted as-is.
+/// Parameter values are raw text lines. Declared string parameters retain
+/// their literal text (including exact decimal seeds); quoted JSON strings
+/// still decode escapes. Other parameters parse as JSON when possible and
+/// stay strings otherwise. Multi-line values (a splash source) stay intact.
+/// Function names map through the same underscore→dotted table native
+/// providers use; dotted names are accepted as-is. JSON argument objects
+/// bypass this XML-specific decoding and retain their original types.
 fn extract_native(text: &str) -> Extract {
     const OPEN: &str = "<tool_call>";
     let Some(at) = text.find(OPEN) else {
@@ -187,6 +206,11 @@ fn extract_native(text: &str) -> Extract {
             }
         }
     }
+    let parameters = crate::tools::definitions()
+        .into_iter()
+        .chain(crate::tools::sandbox_definitions())
+        .find(|def| def.name == name)
+        .map(|def| def.parameters);
     let mut pairs: Vec<(String, Value)> = Vec::new();
     // Bound the parameter scan to THIS call's block: the model often emits
     // several <tool_call> blocks back to back, and an unbounded scan walked
@@ -215,10 +239,20 @@ fn extract_native(text: &str) -> Extract {
         let raw = value_body[..v_end]
             .strip_prefix('\n')
             .unwrap_or(&value_body[..v_end]);
-        let raw = raw.strip_suffix('\n').unwrap_or(raw).to_string();
-        let value = match json::parse(raw.as_bytes()) {
-            Ok(v) => v,
-            Err(_) => json::s(raw),
+        let raw = raw.strip_suffix('\n').unwrap_or(raw);
+        let is_string = parameters.as_ref()
+            .and_then(|schema| schema.get("properties"))
+            .and_then(|properties| properties.get(&key))
+            .and_then(|property| property.get("type"))
+            .and_then(Value::as_str) == Some("string");
+        // XML has no string delimiters. In particular, never round an
+        // exact seed through a JSON number before converting it to text.
+        // Unknown fields keep their prior decoding and still fail closed
+        // at the typed tool boundary; nested JSON is never coerced.
+        let value = if is_string && !raw.trim_start().starts_with('"') {
+            json::s(raw)
+        } else {
+            json::parse(raw.as_bytes()).unwrap_or_else(|_| json::s(raw))
         };
         // The model sometimes repeats a parameter to sneak two calls into
         // one block; first wins, deterministically (one call per block is
@@ -339,24 +373,58 @@ fn first_json_object(s: &str) -> Option<&str> {
 /// capability text (advertised profiles, or why none are available).
 pub fn render_system(defs: &[ToolDef], capabilities: &str) -> String {
     let mut out = String::new();
-    out.push_str(
-        "You are Qwen, the generation assistant for Makepad AI Content.\n\
-         You do work ONLY by emitting a tool call. Never claim an image, video, \
-         mesh, or other artifact exists unless a tool result said ok.\n\
-         If you reason, put ALL reasoning inside <think>...</think>. \
-         After </think>, emit exactly ONE tool call and STOP. \
-         Never put a tool call, backticks, or JSON examples inside thinking.\n",
-    );
+    // An AGENTIC session is one that advertises world tools — a running
+    // game. It legitimately carries image.generate too (missing art), so
+    // the presence of a generation tool must not decide the persona: a
+    // game session rendered as "the generation assistant", with its
+    // doctrine appended 19k characters later, answered "I can build that
+    // for you." and stopped (observed live 2026-09-02 against the exact
+    // prompt; the same request with the doctrine first emitted the call).
+    let agentic = defs.iter().any(|d| d.name.starts_with("world."));
+    // The executor's doctrine (BASE + profile brief for a game) is the
+    // most important text the model reads; it goes FIRST, before the
+    // protocol and the tool list, and is not repeated at the end.
+    let doctrine_first = agentic && !capabilities.trim().is_empty();
+    if doctrine_first {
+        out.push_str(capabilities.trim_end());
+        out.push_str("\n\n");
+    }
+    if agentic {
+        out.push_str(
+            "You are the in-game builder of the running Makepad sandbox game above. \
+             You do work ONLY by emitting a tool call; the world changes only when a \
+             tool result comes back.\n\
+             NEVER ask for confirmation, permission, or preferences before building: a \
+             request is an instruction, and the player is holding a controller, not a \
+             chat. Decide every open detail yourself, build it NOW in this turn, and say \
+             what you built afterwards in one or two sentences. Never end a turn with a \
+             question or an offer to build. Preserve the requested identity and image \
+             reference. If generation fails, repair it or use the editable model tools \
+             for the same subject; if blocked, report the failed stage and keep the \
+             current player. Never swap in an unrelated catalog character as a fallback.\n\
+             If you reason, put ALL reasoning inside <think>...</think>. \
+             After </think>, emit exactly ONE tool call and STOP. \
+             Never put a tool call, backticks, or JSON examples inside thinking.\n",
+        );
+    } else {
+        out.push_str(
+            "You are Qwen, the generation assistant for Makepad AI Content.\n\
+             You do work ONLY by emitting a tool call. Never claim an image, video, \
+             mesh, or other artifact exists unless a tool result said ok.\n\
+             If you reason, put ALL reasoning inside <think>...</think>. \
+             After </think>, emit exactly ONE tool call and STOP. \
+             Never put a tool call, backticks, or JSON examples inside thinking.\n",
+        );
+    }
     // Format + guidance follow the ADVERTISED surface. Generation sessions
     // (asset UI) keep the original `<<tool>>` JSON line unchanged; agentic
     // (game) sessions are taught the model's TRAINED tool template — the
     // format it reverts to under pressure anyway (harness law). The
     // extractor hears both either way.
-    let generation = defs.iter().any(|d| d.name == "image.generate");
-    if generation {
-        render_generation_guidance(&mut out);
-    } else {
+    if agentic {
         render_agentic_guidance(&mut out);
+    } else {
+        render_generation_guidance(&mut out);
     }
     // The serving box can carry a tool surface of its own (a "system
     // reminder" listing MCP functions: `mcp__gpt-image__gpt_image`,
@@ -380,7 +448,9 @@ pub fn render_system(defs: &[ToolDef], capabilities: &str) -> String {
         out.push('\n');
     }
     out.push('\n');
-    out.push_str(capabilities);
+    if !doctrine_first {
+        out.push_str(capabilities);
+    }
     out
 }
 
@@ -487,6 +557,20 @@ pub fn render_attachments(attachments: &[AttachmentBinding]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_tool_call_wrapped_in_a_synthetic_think_block_still_executes() {
+        let raw = "<think>I'll build that now — rolling terrain and a town.\n\n<tool_call>\n<function=world.set_source>\n<parameter=source>\nlet p = world.plan({seed: 11})\n</parameter>\n<parameter=note>\nrolling hills\n</parameter>\n</function>\n</tool_call></think>";
+        match super::extract(raw) {
+            super::Extract::Call { name, args, clean } => {
+                assert_eq!(name, "world.set_source");
+                let src = args.get("source").and_then(|v| v.as_str()).unwrap_or("");
+                assert!(src.contains("world.plan("), "{src}");
+                assert!(clean.contains("build that now"), "{clean}");
+            }
+            other => panic!("expected the wrapped call to extract, got {other:?}"),
+        }
+    }
+
     use super::*;
 
     #[test]

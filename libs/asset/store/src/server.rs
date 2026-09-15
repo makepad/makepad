@@ -12,16 +12,20 @@
 
 use crate::auth::Auth;
 use crate::budget::Budgets;
-use crate::cas::{BlobCommit, BlobWriter, Cas};
+use crate::cas::BlobCommit;
+use crate::cas_file::{BlobWriter, FsCas};
 use crate::catalog::{Catalog, CandidateState, CATALOG_SCHEMA};
+use crate::core::{
+    CatalogCore, PublicExportFilter, PublicExportPage, PublishBatchItem, PublishBatchOutcome,
+    SERVER_SCHEMA_VERSION,
+};
 use crate::error::{io_err, ServerError, ServerResult};
-use crate::search::AssetAnnotation;
 use crate::seed::{stock_asset_id, SeedReport, StockSeedSource};
 use crate::sqlite::Db;
-use makepad_asset_data::{
-    AssetAlias, AssetId, AssetManifest, AssetRevisionId, AssetRevisionRef, BlobId,
-};
+use makepad_asset_data::{AssetRevisionRef, BlobId};
 use std::path::Path;
+
+const STATIC_EXPORT_MIN_SCHEMA_VERSION: i64 = 9;
 
 /// The catalog schema version this build reads and writes, stored in
 /// SQLite's `user_version`.
@@ -65,15 +69,21 @@ use std::path::Path;
 ///   surface). Same copy+rename retrofit again.
 /// - v13: the search kind CHECK accepts `model-program` (editable CSG source
 ///   plus its derived render GLB).
+/// - v14: public music attribution fields on search annotations.
 ///
 /// `open` migrates older versions forward one step at a time, each step in
 /// its own transaction; a version newer than this build refuses to open.
-pub const SERVER_SCHEMA_VERSION: i64 = 13;
-
 pub struct AssetServerCore {
-    db: Db,
-    cas: Cas,
-    budgets: Budgets,
+    core: CatalogCore,
+    cas: FsCas,
+}
+
+impl std::ops::Deref for AssetServerCore {
+    type Target = CatalogCore;
+
+    fn deref(&self) -> &Self::Target {
+        &self.core
+    }
 }
 
 fn user_version(db: &Db) -> ServerResult<i64> {
@@ -108,7 +118,7 @@ fn table_has_column(db: &Db, table: &str, column: &str) -> ServerResult<bool> {
 /// openers serialize on the writer lock and every step applies exactly once;
 /// a crash between steps leaves a valid older version that the next open
 /// finishes migrating. Unknown versions (newer builds, corruption) refuse.
-fn migrate(db: &Db, cas: &Cas, budgets: &Budgets) -> ServerResult<()> {
+fn migrate(db: &Db, cas: &FsCas, budgets: &Budgets) -> ServerResult<()> {
     loop {
         let version = user_version(db)?;
         if version == SERVER_SCHEMA_VERSION {
@@ -243,6 +253,20 @@ fn migrate(db: &Db, cas: &Cas, budgets: &Budgets) -> ServerResult<()> {
                     }
                     db.exec("create search schema", crate::search::SEARCH_SCHEMA)?;
                 }
+                // v14: typed attribution travels with public annotations and
+                // static search documents. Defaults preserve old rows.
+                13 => {
+                    let columns = [
+                        "artist", "artist_url", "album", "source_url", "license", "license_url",
+                    ];
+                    for (column, sql) in
+                        columns.into_iter().zip(crate::search::ATTRIBUTION_MIGRATION_SQL)
+                    {
+                        if !table_has_column(db, "search_annotations", column)? {
+                            db.exec("add attribution column", sql)?;
+                        }
+                    }
+                }
                 other => return Err(ServerError::UnsupportedSchema { found: other }),
             }
             db.exec("set user_version", &format!("PRAGMA user_version={}", version + 1))
@@ -271,27 +295,6 @@ pub struct RefRescanPage {
     pub next: Option<BlobId>,
 }
 
-/// One asset of a batch publication: the complete publish an asset needs —
-/// canonical manifest bytes (already carrying its asset id and blob refs),
-/// its searchable annotation, and an optional alias head.
-#[derive(Clone, Debug)]
-pub struct PublishBatchItem {
-    pub namespace: String,
-    pub manifest_bytes: Vec<u8>,
-    pub annotation: AssetAnnotation,
-    pub alias: Option<AssetAlias>,
-}
-
-/// What one batch item became.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PublishBatchOutcome {
-    pub asset_id: AssetId,
-    pub revision: AssetRevisionId,
-    /// The revision was already published (a replayed page); annotation and
-    /// alias were refreshed idempotently.
-    pub already_published: bool,
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RecoverReport {
     pub cas_temps_removed: u64,
@@ -310,7 +313,7 @@ impl AssetServerCore {
         // integer-domain cast (c_int binds, i64 columns) relies on these.
         budgets.validate()?;
         std::fs::create_dir_all(root).map_err(io_err("server create root"))?;
-        let cas = Cas::open(&root.join("cas"), &budgets)?;
+        let cas = FsCas::open(&root.join("cas"), &budgets)?;
         let db = Db::open(&root.join("catalog.sqlite3"), budgets.db_busy_timeout_ms)?;
 
         // WAL is required, not a preference: it is what makes a reader crash
@@ -333,7 +336,24 @@ impl AssetServerCore {
         db.exec("set foreign keys", "PRAGMA foreign_keys=ON")?;
 
         migrate(&db, &cas, &budgets)?;
-        Ok(Self { db, cas, budgets })
+        Ok(Self { core: CatalogCore::from_parts(db, budgets), cas })
+    }
+
+    /// Open an existing store for static export without taking the server
+    /// lock, migrating the catalog, changing pragmas, or touching the CAS.
+    /// The read-only pager follows the live server's committed WAL snapshot.
+    pub fn open_read_only(root: &Path, budgets: Budgets) -> ServerResult<Self> {
+        budgets.validate()?;
+        if !root.is_dir() {
+            return Err(ServerError::NotFound { what: "server root" });
+        }
+        let cas = FsCas::open_read_only(&root.join("cas"), &budgets)?;
+        let db = Db::open_read_only(&root.join("catalog.sqlite3"))?;
+        let version = db.user_version()?;
+        if !(STATIC_EXPORT_MIN_SCHEMA_VERSION..=SERVER_SCHEMA_VERSION).contains(&version) {
+            return Err(ServerError::UnsupportedSchema { found: version });
+        }
+        Ok(Self { core: CatalogCore::from_parts(db, budgets), cas })
     }
 
     /// Restart recovery: purge orphan CAS temp files, finish or abandon blob
@@ -374,7 +394,7 @@ impl AssetServerCore {
         crate::variants::Variants { db: &self.db, budgets: &self.budgets }
     }
 
-    pub fn cas(&self) -> &Cas {
+    pub fn cas(&self) -> &FsCas {
         &self.cas
     }
 
@@ -384,6 +404,20 @@ impl AssetServerCore {
 
     pub fn gc(&self) -> crate::gc::Gc<'_> {
         crate::gc::Gc { db: &self.db, budgets: &self.budgets }
+    }
+
+    /// Enumerate a bounded page suitable for a public static export.
+    ///
+    /// This is the only catalog-wide read an exporter needs. It deliberately
+    /// projects only public annotations, live published alias heads, and the
+    /// normalized postings whose public weight is non-zero. Callers still
+    /// fetch canonical manifests and verified blobs through the established
+    /// public APIs; no catalog file or reference path is exposed here.
+    pub fn public_export_page(
+        &self,
+        filter: PublicExportFilter<'_>,
+    ) -> ServerResult<PublicExportPage> {
+        self.core.public_export_page(filter)
     }
 
     // ---- blob garbage collection -------------------------------------------
@@ -579,107 +613,7 @@ impl AssetServerCore {
         items: &[PublishBatchItem],
         now_ms: u64,
     ) -> ServerResult<Vec<PublishBatchOutcome>> {
-        // Decode + guard EVERYTHING before the first mutation, so a bad item
-        // refuses the batch without a rollback ever being needed.
-        let mut decoded: Vec<(AssetManifest, AssetRevisionId)> = Vec::with_capacity(items.len());
-        for item in items {
-            if item.manifest_bytes.len() as u64 > self.budgets.max_manifest_bytes {
-                return Err(ServerError::OverBudget {
-                    what: "asset manifest bytes",
-                    limit: self.budgets.max_manifest_bytes,
-                    found: item.manifest_bytes.len() as u64,
-                });
-            }
-            let manifest = AssetManifest::from_canonical_bytes(&item.manifest_bytes)?;
-            let revision = AssetRevisionId::hash_of(&item.manifest_bytes);
-            if let Some(alias) = &item.alias {
-                if alias.namespace() != item.namespace {
-                    return Err(ServerError::Conflict { what: "alias namespace" });
-                }
-            }
-            // Rights immutability: re-publishing an existing asset must not
-            // change its terms. Compared against the latest published head's
-            // immutable manifest; same-revision replays trivially pass.
-            let candidates = self.catalog().asset_candidates(&manifest.asset_id, 512)?;
-            let prev = candidates
-                .iter()
-                .filter(|c| c.state == CandidateState::Published && c.revision != revision)
-                .max_by_key(|c| c.published_ms.unwrap_or(0))
-                .map(|c| c.revision);
-            if let Some(prev) = prev {
-                if let Some(bytes) = self.catalog().asset_revision_manifest(&prev)? {
-                    if let Ok(previous) = AssetManifest::from_canonical_bytes(&bytes) {
-                        if previous.rights != manifest.rights {
-                            return Err(ServerError::Conflict {
-                                what: "published asset rights would change",
-                            });
-                        }
-                    }
-                }
-            }
-            decoded.push((manifest, revision));
-        }
-        let catalog = self.catalog();
-        let search = self.search();
-        self.db.tx(|db| {
-            let mut out = Vec::with_capacity(items.len());
-            for (item, (manifest, revision)) in items.iter().zip(&decoded) {
-                catalog.register_asset(&manifest.asset_id, &item.namespace, now_ms)?;
-                let already = match catalog.asset_candidate_state(&manifest.asset_id, revision)? {
-                    Some(CandidateState::Published) => true,
-                    Some(CandidateState::Quarantined) => {
-                        return Err(ServerError::InvalidState {
-                            what: "publish batch revision",
-                            state: "quarantined",
-                        });
-                    }
-                    Some(CandidateState::Staged) => {
-                        catalog.transition_in_tx(
-                            db,
-                            "asset",
-                            manifest.asset_id.as_bytes(),
-                            revision.as_bytes(),
-                            &[CandidateState::Staged],
-                            CandidateState::Published,
-                            now_ms,
-                        )?;
-                        false
-                    }
-                    None => {
-                        let staged = catalog.stage_asset_revision_in_tx(
-                            db,
-                            &item.manifest_bytes,
-                            now_ms,
-                        )?;
-                        catalog.transition_in_tx(
-                            db,
-                            "asset",
-                            manifest.asset_id.as_bytes(),
-                            staged.as_bytes(),
-                            &[CandidateState::Staged],
-                            CandidateState::Published,
-                            now_ms,
-                        )?;
-                        false
-                    }
-                };
-                search.set_annotation_in_tx(db, &manifest.asset_id, &item.annotation, now_ms)?;
-                if let Some(alias) = &item.alias {
-                    catalog.set_asset_alias_in_tx(
-                        db,
-                        alias,
-                        &AssetRevisionRef { asset_id: manifest.asset_id, revision: *revision },
-                        now_ms,
-                    )?;
-                }
-                out.push(PublishBatchOutcome {
-                    asset_id: manifest.asset_id,
-                    revision: *revision,
-                    already_published: already,
-                });
-            }
-            Ok(out)
-        })
+        self.core.publish_batch(items, now_ms)
     }
 
     // ---- deterministic stock seeding ---------------------------------------

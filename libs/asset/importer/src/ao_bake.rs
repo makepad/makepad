@@ -66,12 +66,19 @@ pub fn collect_glbs(root: &Path) -> Vec<PathBuf> {
     out
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn mtime(path: &Path) -> Option<std::time::SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn sidecar_fresh_vs(glb: &Path, sidecar: &Path) -> bool {
     matches!((mtime(glb), mtime(sidecar)), (Some(g), Some(s)) if s > g)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn sidecar_fresh_vs(_glb: &Path, _sidecar: &Path) -> bool {
+    false
 }
 
 /// Copy fresh AO/shadow sidecars from a source tree into `staged` so a
