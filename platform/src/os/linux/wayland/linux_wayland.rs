@@ -1314,7 +1314,12 @@ impl WaylandCx {
                         if !window.configured {
                             continue;
                         }
+                        #[cfg(not(use_vulkan))]
                         if !window.prepare_buffer_size(cx.os.opengl_cx.as_ref().unwrap()) {
+                            continue;
+                        }
+                        #[cfg(use_vulkan)]
+                        if !window.prepare_buffer_size() {
                             continue;
                         }
                         window.prepare_csd_shadow();
@@ -1323,8 +1328,9 @@ impl WaylandCx {
                         {
                             window.sync_opaque_region(compositor, qhandle, opaque);
                         }
-                        if std::env::var_os("MAKEPAD_WAYLAND_TRACE").is_some() {
-                            crate::log!(
+                        if crate::makepad_error_log::trace_enabled("wayland") {
+                            crate::trace!(
+                                "wayland",
                                 "Wayland paint window={:?} inner=({}, {}) dpi={} pix=({}, {})",
                                 window.window_id,
                                 window.window_geom.inner_size.x,
@@ -1387,7 +1393,12 @@ impl WaylandCx {
                         if !window.configured {
                             continue;
                         }
+                        #[cfg(not(use_vulkan))]
                         if !window.prepare_buffer_size(cx.os.opengl_cx.as_ref().unwrap()) {
+                            continue;
+                        }
+                        #[cfg(use_vulkan)]
+                        if !window.prepare_buffer_size() {
                             continue;
                         }
                         if let Some(viewport) = window.viewport.as_ref() {

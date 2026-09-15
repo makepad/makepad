@@ -1301,6 +1301,8 @@ impl CxGameInputApi for Cx {
         if let Some(game_input) = &self.os.apple_game_input {
             return game_input.raw_hid.output_handle(id);
         }
+        #[cfg(not(target_os = "macos"))]
+        let _ = id;
         None
     }
 
@@ -1314,6 +1316,8 @@ impl CxGameInputApi for Cx {
                     .unwrap_or_default();
             }
         }
+        #[cfg(not(target_os = "macos"))]
+        let _ = id;
         Default::default()
     }
 
@@ -1326,6 +1330,8 @@ impl CxGameInputApi for Cx {
                 }
             }
         }
+        #[cfg(not(target_os = "macos"))]
+        let _ = (id, pulse);
         false
     }
 }

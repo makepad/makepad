@@ -425,6 +425,7 @@ impl ShaderOutput {
         }
 
         writeln!(out, "    uint vid : SV_VertexID;").ok();
+        // Portable instance_index(); retained buffers bind their complete prefix.
         writeln!(out, "    uint iid : SV_InstanceID;").ok();
         writeln!(out, "}};").ok();
     }
@@ -509,7 +510,13 @@ impl ShaderOutput {
             writeln!(
                 out,
                 "{} _s{} : register(s{});",
-                if sampler.compare { "SamplerComparisonState" } else { "SamplerState" }, idx, idx
+                if sampler.compare {
+                    "SamplerComparisonState"
+                } else {
+                    "SamplerState"
+                },
+                idx,
+                idx
             )
             .ok();
         }

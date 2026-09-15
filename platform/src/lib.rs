@@ -53,6 +53,21 @@ mod draw_pass;
 mod draw_shader;
 mod draw_vars;
 
+// Native Linux display inventory (direct DRM/KMS outputs). Lives at the crate
+// root so headless logic builds of the WM see the same types and API; only the
+// direct Vulkan backend fills it in.
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[path = "os/linux/display.rs"]
+pub mod linux_display;
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[path = "os/linux/input.rs"]
+pub mod linux_input;
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[path = "os/linux/gpu.rs"]
+pub mod linux_gpu;
+
 #[cfg(all(not(gpusim), not(linux_direct), any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 mod app_icon;
 mod area;
@@ -104,7 +119,9 @@ pub mod pixel_probe;
 pub mod screen_capture;
 pub mod audio_output_tap;
 pub mod shader_error;
-pub use crate::app_main::{resolve_studio_http, should_run_stdin_loop_from_env};
+pub use crate::app_main::{
+    new_cx_with_font_set, resolve_studio_http, should_run_stdin_loop_from_env,
+};
 // Working-tree startup instrumentation (`MAKEPAD_TRACE=startup`).
 pub use crate::cx::{
     startup_acc, startup_since_exec_ms, startup_trace, startup_trace_enabled, startup_trace_flush,
@@ -146,9 +163,10 @@ pub use {
         cx_api::{AccessibilityUpdatePayload, CxOsApi, CxOsOp, CxThreadPriority, OpenUrlInPlace, ScreenEdges},
         display_context::{DisplayContext, SystemBarAppearance},
         font_policy::{
-            FontAsset, FontChain, FontPolicy, FontRole, FontSet,
-            FONT_ASSET_MANIFEST_SECTION, INTERNATIONAL_FONT_ASSET_MANIFEST,
-            LATIN_FONT_ASSET_MANIFEST, UI_SYMBOL_FALLBACK,
+            extend_font_asset_manifest, font_asset_manifest_len, FontAsset, FontChain, FontPolicy,
+            FontRole, FontSet, LazyFontAsset, LazyFontFamily, FONT_ASSET_MANIFEST_SECTION,
+            INTERNATIONAL_FONT_ASSET_MANIFEST, LATIN_FONT_ASSET_MANIFEST,
+            LATIN_FONT_ASSET_PACKAGE_MANIFEST, MATH_VIEW_FONT_ASSET, UI_SYMBOL_FALLBACK,
         },
         draw_list::{immediate_payload_hash, CxDrawCall, CxDrawItem, CxDrawListPool, CxRectArea, DrawList, DrawListId, DrawListRecordingStorage},
         shared_instances::{
