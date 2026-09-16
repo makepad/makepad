@@ -322,11 +322,20 @@ fn parse_catalog(bytes: &[u8]) -> Result<Vec<Release>, String> {
     entries.iter().map(Release::parse).collect()
 }
 pub fn fetch(service: &str, key: &str) -> Result<Vec<Release>, String> {
-    parse_catalog(&request(service, "catalog", key, None)?)
+    progress::stage("Checking sources", "Contacting the source service", 0.0);
+    let bytes = request(service, "catalog", key, None)?;
+    progress::stage("Checking sources", "Reading the release catalog", 0.0);
+    let releases = parse_catalog(&bytes)?;
+    progress::stage("Checking sources", "Release catalog ready", 0.0);
+    Ok(releases)
 }
 pub fn fetch_public(service: &str) -> Result<Release, String> {
+    progress::stage("Checking sources", "Contacting the public source service", 0.0);
     let response = http::fetch_method_progress("GET", &service_url(service, "public/catalog")?, &[], &[], None)?;
-    parse_catalog(&response.body)?.into_iter().find(|r| r.public).ok_or("Public Makepad source is unavailable".into())
+    progress::stage("Checking sources", "Reading the release catalog", 0.0);
+    let release = parse_catalog(&response.body)?.into_iter().find(|r| r.public).ok_or_else(|| "Public Makepad source is unavailable".to_owned())?;
+    progress::stage("Checking sources", "Release catalog ready", 0.0);
+    Ok(release)
 }
 pub fn apps() -> Result<Vec<Value>, String> {
     json::parse(include_bytes!("../apps.json")).map_err(str::to_owned)?.as_arr().map(<[Value]>::to_vec).ok_or("Invalid app registry".into())

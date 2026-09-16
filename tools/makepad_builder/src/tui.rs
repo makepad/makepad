@@ -434,7 +434,11 @@ impl Setup {
             self.email = catalog::email(&line("Scope access email: ")?)?;
         }
         let release = with_progress(|| {
-            progress::stage("Checking sources", "Reading the latest available release", 0.0);
+            progress::stage(
+                "Checking sources",
+                "The source service may refresh its Git cache while we wait",
+                0.0,
+            );
             if self.app == "scope" {
                 catalog::fetch(&self.service, &self.email)?.into_iter().find(|r| r.id == self.app).ok_or("This app is not available for this email".into())
             } else {
@@ -630,8 +634,23 @@ impl Setup {
             if self.cuda { "1" } else { "0" },
         )
         .map_err(|e| e.to_string())?;
-        activity("Build complete. Opening the app.");
-        self.open()
+        activity(&format!("Build complete. Opening {}.", release.title));
+        self.open()?;
+        activity(&format!("{} is running; Builder remains open.", release.title));
+        let launch_hint = if cfg!(target_os = "macos") {
+            format!("Keep {} in your Dock to launch it again later.", release.title)
+        } else if cfg!(windows) {
+            format!("Keep {} pinned to your taskbar to launch it again later.", release.title)
+        } else {
+            format!("You can launch {} again from Builder or its installed command.", release.title)
+        };
+        Screen::enter().message(
+            "Build complete",
+            &format!(
+                "{} is built and running.\n{}\nContinue to return to the Builder menu.",
+                release.title, launch_hint
+            ),
+        )
     }
     fn environment(&self, command: &mut Command) -> Result<(), String> {
         if let Some(release) = &self.release {
@@ -741,11 +760,11 @@ impl Setup {
             // Makepad windows retain their default non-activating startup.
             app.env("MAKEPAD_FOCUS", "1");
         }
-        runtime::hide_console(&mut app);
-        #[cfg(unix)] {
-            use std::os::unix::process::CommandExt;
-            app.process_group(0);
-        }
+        // The app is a GUI child of Builder. Give it its own process group (or
+        // detached Windows process) so closing the terminal that hosts Builder
+        // does not terminate an already launched app. Its output is redirected
+        // below, so no child console or terminal ownership is needed.
+        detach_application(&mut app);
         let log_path = environment.build.join(format!("{}-app.log", release.binary));
         let log = fs::File::create(&log_path).map_err(|e| e.to_string())?;
         activity(&format!("Running {}", release.title));
@@ -766,6 +785,37 @@ impl Setup {
         Ok(())
     }
 }
+
+fn detach_application(command: &mut Command) {
+    #[cfg(windows)] {
+        use std::os::windows::process::CommandExt;
+        // DETACHED_PROCESS prevents an accidental console window; the new
+        // process group keeps Ctrl+C and console teardown scoped to Builder.
+        const DETACHED_PROCESS: u32 = 0x00000008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    }
+    #[cfg(unix)]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        // Create a new session before exec. This removes the controlling
+        // terminal as well as its process group, so the app is independent of
+        // the shell hosting Builder on both macOS and Linux.
+        unsafe extern "C" {
+            fn setsid() -> i32;
+        }
+        command.pre_exec(|| {
+            if setsid() == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    #[cfg(not(any(windows, unix)))] {
+        let _ = command;
+    }
+}
+
 fn load_release(path: &Path) -> Option<Release> {
     Release::parse(&makepad_strict_json::parse(&fs::read(path).ok()?).ok()?).ok()
 }

@@ -551,7 +551,11 @@ pub fn with_progress<R>(work: impl FnOnce() -> R) -> R {
                 started = Instant::now();
                 baseline = p.loaded;
             }
-            if changed || detail != p.detail {
+            // File/object callbacks can arrive once per item. Keep their
+            // current detail in the progress dialog, but avoid turning the
+            // activity pane into a log of every path in a large repository.
+            let item_detail = matches!(p.unit, progress::Unit::Files | progress::Unit::Blocks | progress::Unit::Objects);
+            if changed || (detail != p.detail && !item_detail) {
                 activity(&format!("{}: {}", p.stage, p.detail));
                 detail = p.detail.clone();
             }

@@ -1,4 +1,9 @@
-use std::fs;
+use std::{
+    fs,
+    io,
+    process::{Command, Output},
+    time::Duration,
+};
 use std::path::Path;
 
 use crate::extract;
@@ -73,10 +78,9 @@ pub fn install_version(cache: &Path, dest: &Path, version: &str) -> Result<(), S
     merge_std(&tmp.join("std"), &staged)?;
     prepare_host_tools(&staged)?;
     crate::progress::stage("Checking compiler", "Running rustc --version", 0.0);
-    let mut check = std::process::Command::new(staged.join("bin").join(crate::runtime::exe("rustc")));
+    let mut check = Command::new(staged.join("bin").join(crate::runtime::exe("rustc")));
     crate::runtime::hide_console(&mut check);
-    let output = check.arg("--version")
-        .output()
+    let output = tool_output(check.arg("--version"), "rustc")
         .map_err(|e| format!("Run private rustc: {e}"))?;
     if !output.status.success()
         || !String::from_utf8_lossy(&output.stdout).starts_with(&format!("rustc {version} "))
@@ -109,13 +113,57 @@ pub(crate) fn prepare_host_tools(_dest: &Path) -> Result<(), String> {
             std::os::unix::fs::symlink("../../../libLLVM.dylib", &library)
                 .map_err(|e| format!("Link private Rust LLVM library: {e}"))?;
         }
-        let output = std::process::Command::new(host.join("bin/rust-objcopy"))
-            .arg("--version").output().map_err(|e| format!("Check private rust-objcopy: {e}"))?;
+        let mut command = Command::new(host.join("bin/rust-objcopy"));
+        let output = tool_output(command.arg("--version"), "rust-objcopy")
+            .map_err(|e| format!("Check private rust-objcopy: {e}"))?;
         if !output.status.success() {
             return Err(format!("Private rust-objcopy cannot load its LLVM library: {}", String::from_utf8_lossy(&output.stderr)));
         }
     }
     Ok(())
+}
+
+/// Windows security scanners can briefly deny access to a freshly unpacked
+/// executable. Retry only that transient class of failure, with a short
+/// bounded delay; all other errors are returned immediately and a persistent
+/// denial is returned after the final attempt.
+fn tool_output(command: &mut Command, tool: &str) -> io::Result<Output> {
+    #[cfg(windows)] {
+        const ATTEMPTS: usize = 6;
+        for attempt in 0..ATTEMPTS {
+            match command.output() {
+                Ok(output) => {
+                    let denied = !output.status.success()
+                        && String::from_utf8_lossy(&output.stderr)
+                            .to_ascii_lowercase()
+                            .contains("access is denied");
+                    if !denied || attempt + 1 == ATTEMPTS {
+                        return Ok(output);
+                    }
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::PermissionDenied
+                            | io::ErrorKind::WouldBlock
+                            | io::ErrorKind::Interrupted
+                    ) && attempt + 1 < ATTEMPTS => {}
+                Err(error) => return Err(error),
+            }
+            crate::progress::stage(
+                "Checking compiler",
+                &format!("Waiting for Windows security scan ({tool})"),
+                0.0,
+            );
+            std::thread::sleep(Duration::from_millis(80 * (attempt as u64 + 1)));
+        }
+        unreachable!("bounded compiler probe loop always returns")
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (tool, Duration::from_millis(0));
+        command.output()
+    }
 }
 
 fn merge_component(unpacked: &Path, dest: &Path, inner: &str) -> Result<(), String> {
