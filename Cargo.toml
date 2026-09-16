@@ -27,6 +27,7 @@ workspace.members = [
     "libs/diskmap",
     "libs/workspace",
     "libs/code_arch",
+    "libs/code_language",
     "apps/route",
     "apps/asset-ui",
     "apps/asset-server",

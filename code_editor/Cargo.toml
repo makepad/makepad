@@ -11,3 +11,4 @@ metadata.makepad-auto-version = "B5GwTEaMIZlein6K-VyZDRiCKek="
 
 [dependencies]
 makepad-widgets = { path = "../widgets", version="2.0.0"}
+makepad-code-language = { path = "../libs/code_language" }
