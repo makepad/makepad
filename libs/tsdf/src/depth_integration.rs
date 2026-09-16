@@ -27,9 +27,13 @@ const DEPTH_TSD_SUBMIT_SAMPLE_GRID_Y: usize = 4;
 const DEPTH_TSD_SUBMIT_SAMPLE_NDC_MARGIN: f32 = 0.82;
 const DEPTH_TSD_SUBMIT_FRONTIER_HORIZON_METERS: f32 = 3.0;
 const DEPTH_TSD_SUBMIT_FRONTIER_SURFACE_ABS_DISTANCE: f32 = 0.4;
+#[cfg(not(target_arch = "wasm32"))]
 const DEPTH_TSD_SUBMIT_MEDIUM_NOVELTY_SCORE: f32 = 3.0;
+#[cfg(not(target_arch = "wasm32"))]
 const DEPTH_TSD_SUBMIT_STRONG_NOVELTY_SCORE: f32 = 7.0;
+#[cfg(not(target_arch = "wasm32"))]
 const DEPTH_TSD_SUBMIT_MEDIUM_INTERVAL_MILLIS: u64 = 500;
+#[cfg(not(target_arch = "wasm32"))]
 const DEPTH_TSD_SUBMIT_STRONG_INTERVAL_MILLIS: u64 = 250;
 const DEPTH_TSD_SUBMIT_VERTICAL_BOUNDS_PADDING_METERS: f32 = 1.25;
 const DEPTH_TSD_NOVELTY_SAMPLE_GRID_X: usize = 16;
@@ -64,7 +68,9 @@ const DEPTH_ALIGN_VECTOR_SLICE_TOP_Y_METERS: f32 = 2.00;
 const DEPTH_ALIGN_VECTOR_SLICE_ISO_HEIGHT_METERS: f32 = 0.50;
 const DEPTH_ALIGN_VECTOR_SLICE_PLAYER_CUTOUT_RADIUS_METERS: f32 =
     DEPTH_PLAYER_EXCLUDE_RADIUS_METERS + 0.12;
+#[cfg(not(target_arch = "wasm32"))]
 const DEPTH_ALIGN_PROJECTED_HEIGHT_SAMPLES_PER_TICK: usize = 512;
+#[cfg(not(target_arch = "wasm32"))]
 const DEPTH_ALIGN_PROJECTED_HEIGHT_MAX_SAMPLES_PER_SLICE: usize =
     DEPTH_ALIGN_PROJECTED_HEIGHT_SAMPLES_PER_TICK * 8;
 pub const DEPTH_ALIGN_PROJECTED_HEIGHT_MAX_SLICE_CREDITS: usize = 4;
@@ -286,6 +292,7 @@ pub fn score_submit_depth_frame_novelty(
     novelty
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn submit_depth_readback_min_interval_millis(novelty: SubmitDepthFrameNovelty) -> u64 {
     if novelty.force_readback {
         DEPTH_TSD_SUBMIT_STRONG_INTERVAL_MILLIS

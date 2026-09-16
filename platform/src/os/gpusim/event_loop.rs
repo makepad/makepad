@@ -352,6 +352,17 @@ impl Cx {
                         phase: crate::event::ScrollPhase::None,
                     }));
                 }
+                StudioToApp::Pinch(e) => {
+                    let (window_id, pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
+                    self.call_event_handler(&Event::Pinch(crate::event::PinchEvent {
+                        abs: dvec2(e.x - pos.x, e.y - pos.y),
+                        window_id,
+                        scale: e.scale,
+                        phase: e.phase,
+                        modifiers: e.modifiers.into_key_modifiers(),
+                        time: e.time,
+                    }));
+                }
                 StudioToApp::WindowGeomChange {
                     dpi_factor,
                     left,

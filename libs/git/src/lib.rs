@@ -1,4 +1,5 @@
 pub mod attribution;
+pub mod blob_read;
 pub mod clone;
 mod bounded_read;
 pub mod commit;

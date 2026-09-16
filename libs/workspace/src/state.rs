@@ -149,6 +149,15 @@ pub struct Settings {
     /// The GPU API to render with on desktop Linux, `"vulkan"` or `"opengl"`
     /// (`None` = whatever this build is). See [`Settings::renderer`].
     pub renderer: Option<String>,
+    /// The print export's output width in pixels (`None` = 4096).
+    pub export_width: Option<u32>,
+    /// History browsing keeps the current zoom and framing instead of
+    /// fitting a step's changed files into view (`None` = off, the fitting
+    /// default).
+    pub history_keep_zoom: Option<bool>,
+    /// The map colour theme identifier (`None` = `"default"`). The widget
+    /// style and dark preference above are the OS chrome; this is the map.
+    pub map_theme: Option<String>,
 }
 
 const SETTINGS_FILE: &str = "settings.ron";
@@ -169,6 +178,16 @@ impl Settings {
     }
     pub fn set_renderer(&mut self, choice: Option<RendererChoice>) {
         self.renderer = choice.map(|choice| choice.as_setting_str().to_owned());
+    }
+    pub fn export_width(&self) -> u32 {
+        self.export_width.unwrap_or(4096).max(1)
+    }
+    pub fn history_keep_zoom(&self) -> bool {
+        self.history_keep_zoom.unwrap_or(false)
+    }
+    /// The saved map theme identifier, `"default"` when unset.
+    pub fn map_theme(&self) -> &str {
+        self.map_theme.as_deref().unwrap_or("default")
     }
     pub fn load(dir: &Path) -> Self {
         std::fs::read_to_string(dir.join(SETTINGS_FILE))
@@ -388,6 +407,18 @@ mod tests {
     }
 
     #[test]
+    fn settings_without_export_width_load_with_the_default() {
+        // a settings file written before the print export existed
+        let old = "(style: \"macos\", dark: true, architecture_indent_cells: 3, map_tiles: true)";
+        let s = Settings::deserialize_ron(old).unwrap();
+        assert_eq!(s.export_width, None);
+        assert_eq!(s.export_width(), 4096);
+        assert_eq!(s.code_indent_cells(), 3);
+        let s = Settings::deserialize_ron("(dark: false, export_width: Some(16384))").unwrap();
+        assert_eq!(s.export_width(), 16384);
+    }
+
+    #[test]
     fn settings_roundtrip_and_missing_file_is_default() {
         let dir = temp_dir("settings");
         assert_eq!(Settings::load(&dir), Settings::default());
@@ -398,6 +429,9 @@ mod tests {
             architecture_indent_cells: Some(2),
             map_tiles: Some(false),
             renderer: None,
+            export_width: Some(8192),
+            history_keep_zoom: None,
+            map_theme: None,
         };
         s.save(&dir).unwrap();
         assert_eq!(Settings::load(&dir), s);

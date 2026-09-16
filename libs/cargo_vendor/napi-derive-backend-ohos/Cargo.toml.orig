@@ -1,0 +1,28 @@
+[package]
+description  = "Codegen backend for napi-harmony procedural macro"
+edition      = "2021"
+license      = "MIT"
+name         = "napi-derive-backend-ohos"
+readme       = "README.md"
+repository   = "https://github.com/ohos-rs/ohos-rs"
+rust-version = "1.65"
+version      = "0.0.7"
+
+[package.metadata.workspaces]
+independent = true
+
+[features]
+noop     = []
+strict   = []
+type-def = ["regex"]
+
+[dependencies]
+convert_case = "0.6"
+proc-macro2  = "1"
+once_cell = "1"
+quote        = "1"
+syn          = { version = "2", features = ["fold", "full", "extra-traits"] }
+
+[dependencies.regex]
+optional = true
+version  = "1"

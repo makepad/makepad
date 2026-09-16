@@ -39,9 +39,6 @@ use crate::{
     Cx,
 };
 
-#[cfg(all(not(gpusim), not(linux_direct)))]
-use crate::texture::{TextureAlloc, TextureCategory, TexturePixel};
-
 #[cfg(any(
     target_os = "windows",
     all(target_os = "linux", not(any(target_env = "ohos", linux_direct))),
@@ -49,7 +46,7 @@ use crate::texture::{TextureAlloc, TextureCategory, TexturePixel};
     target_os = "ios",
 ))]
 #[cfg(not(gpusim))]
-use crate::texture::{CxTexturePool, TextureId};
+use crate::texture::{CxTexturePool, TextureAlloc, TextureCategory, TextureId, TexturePixel};
 
 /// Serializes hard-decode / media GPU work with Makepad present copies on the
 /// shared D3D11 device. Recursive so the same thread may nest lock calls

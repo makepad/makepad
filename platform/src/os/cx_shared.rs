@@ -828,6 +828,16 @@ impl Cx {
                     phase: crate::event::ScrollPhase::None,
                 }));
             }
+            StudioToApp::Pinch(e) => {
+                self.call_event_handler(&Event::Pinch(crate::event::PinchEvent {
+                    abs: self.stdin_pointer_abs(crate::makepad_math::dvec2(e.x, e.y), pos, window_id),
+                    window_id,
+                    scale: e.scale,
+                    phase: e.phase,
+                    modifiers: e.modifiers.into_key_modifiers(),
+                    time: e.time,
+                }));
+            }
             StudioToApp::GameInput(states) => {
                 // Replace wholesale rather than merge: Studio sends the whole
                 // set, so a pad that unplugs disappears by being absent.
@@ -1226,6 +1236,7 @@ impl Cx {
         if self.event_dispatch_is_reentrant(event) {
             return;
         }
+        crate::remote::note_user_event(self, event);
         #[cfg(any(target_arch = "wasm32", target_os = "linux", test))]
         if let Some(event) = self.drag_drop.internal_drag_event(event) {
             match event {

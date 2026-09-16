@@ -96,7 +96,7 @@ use crate::{
     cx::Cx,
     draw_list::{CxDrawKind, DrawListId},
     draw_pass::{CxDrawPassParent, CxDrawPassRect},
-    event::{Event, KeyCode, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollEvent},
+    event::{Event, KeyCode, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PinchEvent, ScrollEvent},
     makepad_math::*,
 };
 
@@ -678,6 +678,7 @@ impl Cx {
             Event::MouseDown(e) => e.abs,
             Event::MouseUp(e) => e.abs,
             Event::Scroll(e) => e.abs,
+            Event::Pinch(e) => e.abs,
             _ => return None,
         };
         if self.sploded_in_flat_band(abs) {
@@ -706,6 +707,7 @@ impl Cx {
             Event::MouseDown(e) => Event::MouseDown(MouseDownEvent { abs: p, ..e.clone() }),
             Event::MouseUp(e) => Event::MouseUp(MouseUpEvent { abs: p, ..e.clone() }),
             Event::Scroll(e) => Event::Scroll(ScrollEvent { abs: p, ..e.clone() }),
+            Event::Pinch(e) => Event::Pinch(PinchEvent { abs: p, ..e.clone() }),
             _ => unreachable!(),
         })
     }

@@ -1,0 +1,63 @@
+[package]
+name = "ohos-sys"
+version = "0.2.2"
+edition = "2021"
+description = "Bindings to the native API of OpenHarmony OS"
+license = "Apache-2.0"
+repository = "https://github.com/openharmony-rs/ohos-sys"
+keywords = ["OpenHarmony", "HarmonyOS", "ffi"]
+exclude = ["src/**/*_api11.rs", "src/**/*_api12.rs"]
+readme = "Readme.md"
+
+[workspace]
+members = ["components/drawing"]
+
+[dependencies]
+document-features = { version = "0.2", optional = true }
+ohos-drawing-sys = { path = "components/drawing", version = "0.1", optional = true}
+
+[features]
+default = ["api-10"]
+## Enables bindings to `native_drawing`. Re-exports `ohos-drawing-sys`.
+drawing = ["dep:ohos-drawing-sys"]
+## Enables bindings to `hilog`
+hilog = []
+## Enables bindings to `napi`
+napi = []
+## Enables bindings to `native_buffer`
+native_buffer = []
+## Enables bindings to `native_window`
+native_window = []
+## Enables bindings to `native_vsync`
+vsync = []
+## Enables bindings to `native_xcomponent`
+xcomponent = []
+## Enables all components listed above. Orthogonal to `api-XX` features.
+all-components = [
+    "drawing",
+    "hilog",
+    "napi",
+    "native_buffer",
+    "native_window",
+    "xcomponent",
+    "vsync"]
+
+#! ### OpenHarmony API level
+#! This crate by default exposes bindings for API-level 10.
+#! Optionally enable one of the `api-*` features to get access to bindings for newer
+#! OpenHarmony versions.
+
+## No effect. API-10 bindings can't be deselected. The feature exists for internal purposes.
+api-10 = []
+## Enables bindings for OpenHarmony API-level 11
+api-11 = ["api-10"]
+## **EXPERIMENTAL**: Enables bindings for OpenHarmony API-level 12 (beta-1).
+## Will stabilize once the final version has been released.
+api-12 = ["api-11"]
+## Document available features when building the documentation
+document-features = ["dep:document-features"]
+
+[package.metadata.docs.rs]
+features = ["document-features"]
+targets = ["aarch64-unknown-linux-ohos", "armv7-unknown-linux-ohos", "x86_64-unknown-linux-ohos"]
+all-features = true

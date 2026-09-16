@@ -250,6 +250,11 @@ impl X11Cx {
                 cx.dpi_override_scale(&mut e.abs, e.window_id);
                 cx.call_event_handler(&Event::Scroll(e.into()))
             }
+            XlibEvent::Pinch(mut e) => {
+                let mut cx = self.cx.borrow_mut();
+                cx.dpi_override_scale(&mut e.abs, e.window_id);
+                cx.call_event_handler(&Event::Pinch(e))
+            }
             XlibEvent::WindowDragQuery(mut e) => {
                 let mut cx = self.cx.borrow_mut();
                 cx.dpi_override_scale(&mut e.abs, e.window_id);

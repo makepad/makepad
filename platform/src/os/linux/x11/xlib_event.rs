@@ -1,7 +1,8 @@
 use crate::{
     event::{
         DragEvent, DropEvent, KeyEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-        PopupDismissedEvent, ScrollEvent, TextClipboardEvent, TextInputEvent, TimerEvent,
+        PinchEvent, PopupDismissedEvent, ScrollEvent, TextClipboardEvent, TextInputEvent,
+        TimerEvent,
         WindowCloseRequestedEvent, WindowClosedEvent, WindowDragQueryEvent, WindowGeomChangeEvent,
     },
     window::WindowId,
@@ -20,6 +21,8 @@ pub enum XlibEvent {
     MouseUp(MouseUpEvent),
     MouseMove(MouseMoveEvent),
     Scroll(ScrollEvent),
+    /// A trackpad pinch; only the Wayland backend produces one.
+    Pinch(PinchEvent),
 
     WindowDragQuery(WindowDragQueryEvent),
     WindowCloseRequested(WindowCloseRequestedEvent),

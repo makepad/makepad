@@ -29,6 +29,7 @@ mod vulkan_profile;
 #[cfg(all(target_os = "linux", linux_direct))]
 pub(crate) use desktop::DirectWait;
 
+use crate::retained_instances::{RetainedAllocation, RetainedInstances};
 use crate::{
     cx::Cx,
     draw_list::DrawListId,
@@ -53,6 +54,7 @@ use ash::vk;
 use ash::vk::Handle;
 use std::collections::{HashMap, HashSet};
 use std::ffi::CStr;
+use std::sync::Arc;
 use std::os::raw::c_void;
 #[cfg(target_os = "android")]
 use std::os::raw::c_char;
@@ -134,6 +136,47 @@ struct VulkanBuffer {
     size: vk::DeviceSize,
 }
 
+struct VulkanRetainedAllocation {
+    device: ash::Device,
+    buffer: VulkanBuffer,
+    // Frame-owned Arcs retain this lease until the real GPU fence completes.
+    // No repaint serial is needed: XR has a separate per-frame frontier.
+    _charge: RetainedAllocation,
+}
+
+impl Drop for VulkanRetainedAllocation {
+    fn drop(&mut self) {
+        // Every recorded use pins this allocation in its fence-owned frame.
+        unsafe {
+            self.device.destroy_buffer(self.buffer.buffer, None);
+            self.device.free_memory(self.buffer.memory, None);
+        }
+    }
+}
+
+struct VulkanRetainedEntry {
+    publication: RetainedInstances,
+    allocation: Arc<VulkanRetainedAllocation>,
+    pending_copy: Option<(vk::CommandBuffer, u64)>,
+}
+
+struct VulkanRetainedTransfers {
+    device: ash::Device,
+    pool: vk::CommandPool,
+    command_buffer: vk::CommandBuffer,
+    generation: u64,
+    ended: bool,
+}
+
+impl Drop for VulkanRetainedTransfers {
+    fn drop(&mut self) {
+        unsafe {
+            self.device
+                .free_command_buffers(self.pool, &[self.command_buffer]);
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct VulkanGeometryResource {
     vertex_buffer: VulkanBuffer,
@@ -142,6 +185,9 @@ struct VulkanGeometryResource {
 
 #[derive(Default)]
 struct FrameResources {
+    retained: Vec<Arc<VulkanRetainedAllocation>>,
+    retained_transfers: Option<VulkanRetainedTransfers>,
+    retained_updates: Vec<((DrawListId, usize), u64)>,
     buffers: Vec<VulkanBuffer>,
     descriptor_pools: Vec<vk::DescriptorPool>,
     descriptor_pool_cursor: usize,
@@ -221,6 +267,8 @@ struct VulkanDrawPacket {
     alpha_blend: bool,
     backface_culling: bool,
     instances: Vec<f32>,
+    retained_instances: Option<RetainedInstances>,
+    retained_owner: (DrawListId, usize),
     instance_ranges: Vec<std::ops::Range<u32>>,
     draw_call_uniforms: Vec<f32>,
     dyn_uniforms: Vec<f32>,
@@ -450,6 +498,9 @@ pub struct CxVulkan {
     pipelines: HashMap<VulkanPipelineKey, VulkanPipeline>,
     offscreen_render_passes: HashMap<VulkanRenderPassKey, vk::RenderPass>,
     geometries: HashMap<GeometryId, VulkanGeometryResource>,
+    retained_instances: HashMap<(DrawListId, usize), VulkanRetainedEntry>,
+    retained_prune_repaint: u64,
+    retained_transfer_generation: u64,
     textures: HashMap<VulkanTextureKey, VulkanTextureResource>,
     frame_resources: FrameResources,
     command_pool: vk::CommandPool,
@@ -816,6 +867,9 @@ impl CxVulkan {
             pipelines: HashMap::new(),
             offscreen_render_passes: HashMap::new(),
             geometries: HashMap::new(),
+            retained_instances: HashMap::new(),
+            retained_prune_repaint: u64::MAX,
+            retained_transfer_generation: 0,
             textures: HashMap::new(),
             frame_resources: FrameResources::default(),
             command_pool,
@@ -1218,6 +1272,9 @@ impl CxVulkan {
             pipelines: HashMap::new(),
             offscreen_render_passes: HashMap::new(),
             geometries: HashMap::new(),
+            retained_instances: HashMap::new(),
+            retained_prune_repaint: u64::MAX,
+            retained_transfer_generation: 0,
             textures: HashMap::new(),
             frame_resources: FrameResources::default(),
             command_pool,
@@ -1360,6 +1417,9 @@ impl CxVulkan {
                 device.free_memory(buffer.memory, None);
             }
         }
+        frame_resources.retained.clear();
+        frame_resources.retained_transfers = None;
+        frame_resources.retained_updates.clear();
         frame_resources.packet_buffer_used = 0;
         frame_resources.descriptor_pool_cursor = 0;
     }
@@ -1380,6 +1440,9 @@ impl CxVulkan {
                 self.device.free_memory(buffer.memory, None);
             }
         }
+        frame_resources.retained.clear();
+        frame_resources.retained_transfers = None;
+        frame_resources.retained_updates.clear();
         frame_resources.packet_buffer_used = 0;
         frame_resources.descriptor_pool_cursor = 0;
         Ok(())
@@ -4984,6 +5047,18 @@ impl CxVulkan {
     }
 
     fn submit_frame(&mut self, info: &vk::SubmitInfo<'_>) -> Result<(), String> {
+        // Retained segment transfers recorded this frame go first, in the
+        // same submission, so the draws that follow read complete buffers.
+        let mut command_buffers = Vec::new();
+        if let Some(transfer) = self.finish_retained_transfers()? {
+            command_buffers.push(transfer);
+        }
+        if info.command_buffer_count != 0 {
+            command_buffers.extend_from_slice(unsafe {
+                std::slice::from_raw_parts(info.p_command_buffers, info.command_buffer_count as usize)
+            });
+        }
+        let info = &(*info).command_buffers(&command_buffers);
         unsafe {
             self.device.reset_fences(&[self.in_flight_fence])
                 .map_err(|e| format!("reset Vulkan frame fence: {e:?}"))?;
@@ -5003,6 +5078,7 @@ impl CxVulkan {
                 return Err(format!("Vulkan queue submission failed: {err:?}"));
             }
         }
+        self.retained_transfers_submitted();
         Ok(())
     }
 
@@ -6037,6 +6113,24 @@ impl CxVulkan {
         draw_stats: &mut VulkanDrawStats,
         xr_depth_view: vk::ImageView,
     ) -> Result<(), String> {
+        if self.retained_prune_repaint != cx.repaint_id {
+            self.retained_prune_repaint = cx.repaint_id;
+            let transfer = self
+                .frame_resources
+                .retained_transfers
+                .as_ref()
+                .filter(|commands| !commands.ended)
+                .map(|commands| (commands.command_buffer, commands.generation));
+            self.retained_instances.retain(|&(list, item), entry| {
+                (entry.pending_copy.is_none() || entry.pending_copy == transfer)
+                    && !cx.draw_lists.is_id_freed(list)
+                    && item < cx.draw_lists[list].draw_items.len()
+                    && cx.draw_lists[list].draw_items[item]
+                        .retained_instances
+                        .is_some()
+                    && !cx.draw_lists[list].draw_items[item].retained_gpu_evicted
+            });
+        }
         let draw_order_len = cx.draw_lists[draw_list_id].draw_item_order_len();
         // Exploded z-layer view: z is the call's nesting depth, not paint order.
         let sploded = cx.passes[draw_pass_id].sploded.is_some();
@@ -6140,10 +6234,12 @@ impl CxVulkan {
                 // silently renumbers those lookups. Upload the backing prefix
                 // and select each range with Vulkan's firstInstance instead.
                 let slots = sh.mapping.instances.total_slots;
-                let (data, count, default_range) = if let Some(block) = draw_item.retained_instances.as_ref() {
-                    let data = block.data();
-                    let count = draw_item.retained_instance_count.min(data.len() / slots);
-                    (data, count, 0..count as u32)
+                // A retained publication never flattens: its segments live in
+                // a device buffer the packet binds directly.
+                let retained_instances = draw_item.retained_instances.clone();
+                let (data, count, default_range) = if let Some(block) = &retained_instances {
+                    let count = draw_item.retained_instance_count.min(block.float_len() / slots);
+                    (&[][..], count, 0..count as u32)
                 } else if let Some((block, range)) = draw_item.shared.as_ref() {
                     (block.data(), block.data().len() / slots, range.start as u32..range.end as u32)
                 } else if let Some(instances) = draw_item.instances.as_ref() {
@@ -6174,7 +6270,11 @@ impl CxVulkan {
                 }
                 draw_stats.instances += instance_count;
                 let uploaded_count = instance_ranges.iter().map(|range| range.end as usize).max().unwrap();
-                let instances = data[..uploaded_count * slots].to_vec();
+                let instances = if retained_instances.is_some() {
+                    Vec::new()
+                } else {
+                    data[..uploaded_count * slots].to_vec()
+                };
                 let geometry_id = if let Some(geometry_id) = draw_call.geometry_id {
                     geometry_id
                 } else {
@@ -6215,6 +6315,8 @@ impl CxVulkan {
                     alpha_blend: draw_call.options.alpha_blend,
                     backface_culling: draw_call.options.backface_culling,
                     instances,
+                    retained_instances,
+                    retained_owner: (draw_list_id, draw_item_id),
                     instance_ranges,
                     draw_call_uniforms: draw_call.draw_call_uniforms.as_slice().to_vec(),
                     dyn_uniforms: draw_call.dyn_uniforms[..sh
@@ -6310,7 +6412,7 @@ impl CxVulkan {
 
     fn record_draw_packet(
         &mut self,
-        cx: &Cx,
+        cx: &mut Cx,
         packet: &VulkanDrawPacket,
         render_pass_key: &VulkanRenderPassKey,
         geometry_resource: VulkanGeometryResource,
@@ -6320,6 +6422,14 @@ impl CxVulkan {
         draw_list_uniforms: &[f32],
         xr_depth_view: vk::ImageView,
     ) -> Result<bool, String> {
+        // A retained publication is bound from its own device-local buffer,
+        // kept current by segment copies; only immediate instances travel in
+        // the packet buffer.
+        let retained_buffer = if let Some(publication) = &packet.retained_instances {
+            Some(self.ensure_retained_instances(cx, packet.retained_owner, publication)?)
+        } else {
+            None
+        };
         self.ensure_pipeline(
             cx,
             packet.shader_index,
@@ -6376,7 +6486,10 @@ impl CxVulkan {
         if geometry_stride == 0 || instance_stride == 0 {
             return Ok(false);
         }
-        let instance_count = (packet.instances.len() as u64
+        let instance_count = (packet
+            .retained_instances
+            .as_ref()
+            .map_or(packet.instances.len(), |publication| publication.float_len()) as u64
             / (instance_stride / std::mem::size_of::<f32>() as u64))
             as u32;
         if instance_count == 0 || index_count == 0 {
@@ -6632,8 +6745,11 @@ impl CxVulkan {
         } else {
             None
         };
-        let vertex_buffers = [geometry_resource.vertex_buffer.buffer, packet_buffer.buffer];
-        let vertex_offsets = [0, packet_base_offset + instances_offset];
+        let vertex_buffers = [
+            geometry_resource.vertex_buffer.buffer,
+            retained_buffer.map_or(packet_buffer.buffer, |buffer| buffer.buffer),
+        ];
+        let vertex_offsets = [0, if retained_buffer.is_some() { 0 } else { packet_base_offset + instances_offset }];
 
         unsafe {
             self.device.cmd_bind_pipeline(
@@ -7154,6 +7270,247 @@ impl CxVulkan {
         } else {
             value.div_ceil(alignment) * alignment
         }
+    }
+
+    fn retained_transfer_commands(&mut self) -> Result<vk::CommandBuffer, String> {
+        if self.frame_resources.retained_transfers.is_none() {
+            let command_buffer = unsafe {
+                self.device.allocate_command_buffers(
+                    &vk::CommandBufferAllocateInfo::default()
+                        .command_pool(self.command_pool)
+                        .level(vk::CommandBufferLevel::PRIMARY)
+                        .command_buffer_count(1),
+                )
+            }
+            .map_err(|error| format!("allocate retained transfer commands: {error:?}"))?[0];
+            self.retained_transfer_generation = self.retained_transfer_generation.wrapping_add(1);
+            let commands = VulkanRetainedTransfers {
+                device: self.device.clone(),
+                pool: self.command_pool,
+                command_buffer,
+                generation: self.retained_transfer_generation,
+                ended: false,
+            };
+            unsafe {
+                self.device.begin_command_buffer(
+                    command_buffer,
+                    &vk::CommandBufferBeginInfo::default()
+                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+                )
+            }
+            .map_err(|error| format!("begin retained transfer commands: {error:?}"))?;
+            self.frame_resources.retained_transfers = Some(commands);
+        }
+        let commands = self.frame_resources.retained_transfers.as_ref().unwrap();
+        if commands.ended {
+            return Err("retained transfer commands already submitted".into());
+        }
+        Ok(commands.command_buffer)
+    }
+
+    fn finish_retained_transfers(&mut self) -> Result<Option<vk::CommandBuffer>, String> {
+        let Some(commands) = self.frame_resources.retained_transfers.as_mut() else {
+            return Ok(None);
+        };
+        if commands.ended {
+            return Ok(None);
+        }
+        if !commands.ended {
+            unsafe {
+                self.device.cmd_pipeline_barrier(
+                    commands.command_buffer,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::VERTEX_INPUT,
+                    vk::DependencyFlags::empty(),
+                    &[vk::MemoryBarrier::default()
+                        .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                        .dst_access_mask(vk::AccessFlags::VERTEX_ATTRIBUTE_READ)],
+                    &[],
+                    &[],
+                );
+                self.device
+                    .end_command_buffer(commands.command_buffer)
+                    .map_err(|error| format!("end retained transfer commands: {error:?}"))?;
+            }
+            commands.ended = true;
+        }
+        Ok(Some(commands.command_buffer))
+    }
+
+    fn retained_transfers_submitted(&mut self) {
+        for (owner, publication_id) in self.frame_resources.retained_updates.drain(..) {
+            if let Some(entry) = self.retained_instances.get_mut(&owner) {
+                if entry.publication.id() == publication_id {
+                    entry.pending_copy = None;
+                }
+            }
+        }
+    }
+
+    fn ensure_retained_instances(
+        &mut self,
+        cx: &mut Cx,
+        owner: (DrawListId, usize),
+        publication: &RetainedInstances,
+    ) -> Result<VulkanBuffer, String> {
+        // Repaint ids do not identify a submission: another pass may retry
+        // within the same repaint after a transfer command was abandoned.
+        // Validate the live command generation on every lookup, including
+        // publications used as sources for a later delta.
+        let live_transfer = self
+            .frame_resources
+            .retained_transfers
+            .as_ref()
+            .filter(|commands| !commands.ended)
+            .map(|commands| (commands.command_buffer, commands.generation));
+        if self.retained_instances.get(&owner).is_some_and(|entry| {
+            entry.pending_copy.is_some() && entry.pending_copy != live_transfer
+        }) {
+            self.retained_instances.remove(&owner);
+        }
+        if let Some(entry) = self.retained_instances.get(&owner) {
+            if entry.publication.id() == publication.id() {
+                self.frame_resources.retained.push(entry.allocation.clone());
+                return Ok(entry.allocation.buffer);
+            }
+        }
+        let started = Instant::now();
+        let previous = self.retained_instances.get(&owner);
+        let plan = previous.map(|entry| publication.upload_plan(&entry.publication));
+        let in_place = previous.is_some_and(|entry| {
+            // Arc leases exist until every referencing frame fence completes.
+            Arc::strong_count(&entry.allocation) == 1
+                && entry.allocation.buffer.size >= publication.byte_len() as u64
+                && plan.as_ref().unwrap().can_update_in_place()
+        });
+        let allocation = if in_place {
+            previous.unwrap().allocation.clone()
+        } else {
+            let capacity = publication.byte_len().next_power_of_two().max(256);
+            cx.draw_lists.1.allocations.collect_for_frame(
+                cx.repaint_id,
+                cx.textures
+                    .1
+                    .serials
+                    .completed
+                    .load(std::sync::atomic::Ordering::Acquire),
+            );
+            let charge = cx.draw_lists.1.allocations.reserve_visible(capacity);
+            Arc::new(VulkanRetainedAllocation {
+                device: self.device.clone(),
+                buffer: self.create_host_buffer(
+                    vk::BufferUsageFlags::VERTEX_BUFFER
+                        | vk::BufferUsageFlags::TRANSFER_SRC
+                        | vk::BufferUsageFlags::TRANSFER_DST,
+                    capacity as u64,
+                )?,
+                _charge: charge,
+            })
+        };
+        let mut uploaded = 0;
+        let full = vec![0..publication.float_len()];
+        let writes = plan
+            .as_ref()
+            .map_or(full.as_slice(), |plan| plan.writes.as_slice());
+        if !writes.is_empty() {
+            unsafe {
+                let mapped = self
+                    .device
+                    .map_memory(
+                        allocation.buffer.memory,
+                        0,
+                        allocation.buffer.size,
+                        vk::MemoryMapFlags::empty(),
+                    )
+                    .map_err(|error| format!("map retained instances: {error:?}"))?
+                    as *mut f32;
+                for range in writes {
+                    for (offset, data) in publication.data_slices(range.clone()) {
+                        std::ptr::copy_nonoverlapping(
+                            data.as_ptr(),
+                            mapped.add(offset),
+                            data.len(),
+                        );
+                        uploaded += std::mem::size_of_val(data);
+                    }
+                }
+                self.device.unmap_memory(allocation.buffer.memory);
+            }
+        }
+        let mut pending_copy = None;
+        if !in_place {
+            if let (Some(previous), Some(plan)) = (self.retained_instances.get(&owner), &plan) {
+                let source = previous.allocation.clone();
+                let copies: Vec<_> = plan
+                    .copies
+                    .iter()
+                    .map(|copy| {
+                        vk::BufferCopy::default()
+                            .src_offset((copy.source.start * 4) as u64)
+                            .dst_offset((copy.destination * 4) as u64)
+                            .size((copy.source.len() * 4) as u64)
+                    })
+                    .collect();
+                if !copies.is_empty() {
+                    let commands = self.retained_transfer_commands()?;
+                    pending_copy = Some((
+                        commands,
+                        self.frame_resources
+                            .retained_transfers
+                            .as_ref()
+                            .unwrap()
+                            .generation,
+                    ));
+                    unsafe {
+                        // Source can itself have been produced by a preceding
+                        // delta in this transfer command buffer.
+                        self.device.cmd_pipeline_barrier(
+                            commands,
+                            vk::PipelineStageFlags::TRANSFER | vk::PipelineStageFlags::HOST,
+                            vk::PipelineStageFlags::TRANSFER,
+                            vk::DependencyFlags::empty(),
+                            &[vk::MemoryBarrier::default()
+                                .src_access_mask(
+                                    vk::AccessFlags::TRANSFER_WRITE | vk::AccessFlags::HOST_WRITE,
+                                )
+                                .dst_access_mask(vk::AccessFlags::TRANSFER_READ)],
+                            &[],
+                            &[],
+                        );
+                        self.device.cmd_copy_buffer(
+                            commands,
+                            source.buffer.buffer,
+                            allocation.buffer.buffer,
+                            &copies,
+                        );
+                    }
+                    self.frame_resources.retained.push(source);
+                }
+            }
+        }
+        self.frame_resources.retained.push(allocation.clone());
+        let buffer = allocation.buffer;
+        self.retained_instances.insert(
+            owner,
+            VulkanRetainedEntry {
+                publication: publication.clone(),
+                allocation,
+                pending_copy,
+            },
+        );
+        if pending_copy.is_some() {
+            self.frame_resources
+                .retained_updates
+                .push((owner, publication.id()));
+        }
+        cx.draw_lists.1.stats.bytes = cx.draw_lists.1.stats.bytes.saturating_add(uploaded);
+        cx.draw_lists.1.stats.install_us = cx
+            .draw_lists
+            .1
+            .stats
+            .install_us
+            .saturating_add(started.elapsed().as_micros().min(u64::MAX as u128) as u64);
+        Ok(buffer)
     }
 
     fn create_host_buffer(
@@ -7843,6 +8200,9 @@ impl CxVulkan {
                     .map_err(|e| format!("reset_descriptor_pool(completed frame) failed: {e:?}"))?;
             }
         }
+        frame_resources.retained.clear();
+        frame_resources.retained_transfers = None;
+        frame_resources.retained_updates.clear();
         frame_resources.packet_buffer_used = 0;
         frame_resources.descriptor_pool_cursor = 0;
         Ok(())
@@ -7975,6 +8335,7 @@ impl Drop for CxVulkan {
         let destroy_parents = true;
         #[cfg(target_os = "android")]
         self.destroy_xr_in_flight_frames();
+        self.retained_instances.clear();
         self.destroy_geometry_resources();
         #[cfg(target_os = "linux")]
         self.destroy_shared_state();

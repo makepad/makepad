@@ -599,6 +599,50 @@ pub(crate) fn defer_platform_op(platform_ops: &mut VecDeque<CxOsOp>, op: CxOsOp)
 }
 
 impl Cx {
+    /// Update a named dynamic uniform on one retained draw item without
+    /// invalidating its immutable instance publication.
+    pub fn set_draw_item_uniform(
+        &mut self,
+        list: DrawListId,
+        item: usize,
+        name: LiveId,
+        value: &[f32],
+    ) -> bool {
+        let Some(shader) = self.draw_lists[list].draw_items[item]
+            .draw_call()
+            .map(|call| call.draw_shader_id)
+        else {
+            return false;
+        };
+        let Some(input) = self.draw_shaders[shader.index]
+            .mapping
+            .dyn_uniforms
+            .inputs
+            .iter()
+            .find(|input| input.id == name)
+        else {
+            return false;
+        };
+        let offset = input.offset;
+        let len = input.slots.min(value.len());
+        let draw_list = &mut self.draw_lists[list];
+        let changed = draw_list.draw_items.set_dyn_uniform(
+            item,
+            shader,
+            offset,
+            &value[..len],
+            &mut self.uniform_gen,
+        );
+        if changed {
+            if let Some(pass) = draw_list.draw_pass_id {
+                self.passes[pass].paint_dirty = true;
+            }
+        }
+        changed
+    }
+}
+
+impl Cx {
     pub fn in_draw_event(&self) -> bool {
         self.in_draw_event
     }

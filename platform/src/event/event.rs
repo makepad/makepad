@@ -206,6 +206,11 @@ pub enum Event {
     /// Do not match upon or handle this event directly; instead use the family of
     /// `hit` functions ([`Event::hits()`]) and handle the returned [`Hit::FingerScroll`].
     Scroll(ScrollEvent), // this is the MouseWheel / touch scroll event sent by the OS
+    /// The raw event of a trackpad pinch (macOS magnify, Wayland pointer gestures).
+    ///
+    /// Do not match upon or handle this event directly; instead use the family of
+    /// `hit` functions ([`Event::hits()`]) and handle the returned [`Hit::FingerPinch`].
+    Pinch(PinchEvent),
 
     Timer(TimerEvent),
 
@@ -315,6 +320,7 @@ impl Event {
             23 => "TouchUpdate",
             24 => "LongPress",
             25 => "Scroll",
+            74 => "Pinch",
 
             26 => "Timer",
 
@@ -407,6 +413,7 @@ impl Event {
             Self::TouchUpdate(_) => 23,
             Self::LongPress(_) => 24,
             Self::Scroll(_) => 25,
+            Self::Pinch(_) => 74,
 
             Self::Timer(_) => 26,
 
@@ -519,6 +526,7 @@ pub enum Hit {
     ImeAction(ImeActionEvent),
 
     FingerScroll(FingerScrollEvent),
+    FingerPinch(FingerPinchEvent),
     FingerDown(FingerDownEvent),
     FingerMove(FingerMoveEvent),
     FingerHoverIn(FingerHoverEvent),
@@ -547,6 +555,7 @@ impl Event {
             | Self::TweakRay(_)
             | Self::TouchUpdate(_)
             | Self::Scroll(_)
+            | Self::Pinch(_)
             | Self::BackPressed { .. } => true,
             Self::KeyDown(key) | Self::KeyUp(key) if key.key_code == KeyCode::Escape => true,
             _ => false,

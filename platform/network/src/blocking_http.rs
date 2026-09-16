@@ -8,21 +8,24 @@
 //! Responses can be collected or streamed to a writer (no SSE). Secrets must never appear in
 //! `Error` text; [`Request`] deliberately does not implement `Debug`.
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(not(target_os = "windows"), not(target_arch = "wasm32")))]
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 #[cfg(all(not(target_os = "windows"), not(target_arch = "wasm32")))]
 use std::sync::{Condvar, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(any(not(target_arch = "wasm32"), test))]
+use std::time::Instant;
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(not(target_os = "windows"), not(target_arch = "wasm32")))]
 use std::net::TcpStream;
 
 
 
+#[cfg(not(target_arch = "wasm32"))]
 const USER_AGENT: &str = "makepad-network/1.0";
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(not(target_os = "windows"), not(target_arch = "wasm32")))]
 const IO_SLICE: Duration = Duration::from_millis(200);
 
 // ----------------------------------------------------------------- public
@@ -138,6 +141,7 @@ impl Response {
 /// through formatting.
 pub struct Request {
     method: Method,
+    #[cfg(not(target_arch = "wasm32"))]
     url: String,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
@@ -159,6 +163,7 @@ enum Method {
     Patch,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Method {
     fn as_str(self) -> &'static str {
         match self {
@@ -204,8 +209,11 @@ impl Request {
     }
 
     fn new(method: Method, url: String) -> Request {
+        #[cfg(target_arch = "wasm32")]
+        let _ = url;
         Request {
             method,
+            #[cfg(not(target_arch = "wasm32"))]
             url,
             headers: Vec::new(),
             body: Vec::new(),
@@ -264,6 +272,7 @@ impl Request {
         self
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn report_body(&self, loaded: u64, total: Option<u64>) {
         if let Some(cb) = &self.body_progress {
             cb(loaded, total);
@@ -331,6 +340,7 @@ pub fn request_to_writer_no_redirect(
 
 // ------------------------------------------------------------------- url
 
+#[cfg(any(not(target_arch = "wasm32"), test))]
 struct ParsedUrl {
     https: bool,
     host: String,
@@ -338,6 +348,7 @@ struct ParsedUrl {
     target: String,
 }
 
+#[cfg(any(not(target_arch = "wasm32"), test))]
 fn parse_url(url: &str) -> Result<ParsedUrl, Error> {
     if url.is_empty() || url.len() > 4096 || url.bytes().any(is_forbidden_url_byte) {
         return Err(Error::InvalidUrl);
@@ -376,10 +387,12 @@ fn parse_url(url: &str) -> Result<ParsedUrl, Error> {
     Ok(ParsedUrl { https, host, port, target })
 }
 
+#[cfg(any(not(target_arch = "wasm32"), test))]
 fn is_forbidden_url_byte(b: u8) -> bool {
     b < 0x20 || b == 0x7f
 }
 
+#[cfg(any(not(target_arch = "wasm32"), test))]
 fn split_authority(authority: &str, default_port: u16) -> Result<(String, u16), Error> {
     if let Some(rest) = authority.strip_prefix('[') {
         let end = rest.find(']').ok_or(Error::InvalidUrl)?;
@@ -420,6 +433,7 @@ fn host_key(host: &str) -> &str {
     host.trim_matches(|c| c == '[' || c == ']')
 }
 
+#[cfg(any(not(target_arch = "wasm32"), test))]
 fn is_literal_loopback_host(host: &str) -> bool {
     host_key(host)
         .parse::<std::net::IpAddr>()
@@ -434,6 +448,7 @@ fn is_localhost_name(host: &str) -> bool {
 
 /// Windows: literal loopback IP only (no unwatched DNS). Other OS: also
 /// permit the name `localhost`, which is checked after resolve.
+#[cfg(any(not(target_arch = "wasm32"), test))]
 fn cleartext_host_permitted(host: &str) -> bool {
     if is_literal_loopback_host(host) {
         return true;
@@ -506,6 +521,7 @@ fn is_token_byte(b: u8) -> bool {
     )
 }
 
+#[cfg(any(not(target_arch = "wasm32"), test))]
 fn header_names_contain(headers: &[(String, String)], name: &str) -> bool {
     headers.iter().any(|(n, _)| n.eq_ignore_ascii_case(name))
 }
@@ -531,6 +547,7 @@ fn is_reserved_header(name: &str) -> bool {
     ) || n.starts_with("proxy-")
 }
 
+#[cfg(any(not(target_arch = "wasm32"), test))]
 fn validate_trailer_line(line: &str) -> Result<(), Error> {
     let (name, value) = split_header_line(line).ok_or(Error::InvalidResponse)?;
     if is_reserved_header(name) {
@@ -542,6 +559,7 @@ fn validate_trailer_line(line: &str) -> Result<(), Error> {
     Ok(())
 }
 
+#[cfg(any(not(target_arch = "wasm32"), test))]
 fn split_header_line(line: &str) -> Option<(&str, &str)> {
     let pos = line.find(':')?;
     let name = &line[..pos];
@@ -554,6 +572,7 @@ fn split_header_line(line: &str) -> Option<(&str, &str)> {
     Some((name, line[pos + 1..].trim()))
 }
 
+#[cfg(any(not(target_arch = "wasm32"), test))]
 fn parse_content_length(value: &str) -> Result<u64, Error> {
     let v = value.trim();
     if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) {
@@ -562,12 +581,14 @@ fn parse_content_length(value: &str) -> Result<u64, Error> {
     v.parse::<u64>().map_err(|_| Error::InvalidResponse)
 }
 
+#[cfg(any(not(target_arch = "wasm32"), test))]
 struct ValidatedHeaders {
     headers: Vec<(String, String)>,
     content_length: Option<u64>,
     chunked: bool,
 }
 
+#[cfg(any(not(target_arch = "wasm32"), test))]
 fn validate_response_headers(
     headers: Vec<(String, String)>,
     limits: &Limits,
@@ -1569,6 +1590,7 @@ fn find_head_end(buf: &[u8]) -> Option<usize> {
     buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4)
 }
 
+#[cfg(any(not(target_arch = "wasm32"), test))]
 fn parse_header_block(head: &str, limits: &Limits) -> Result<Vec<(String, String)>, Error> {
     let mut lines = head.split("\r\n");
     let _status = lines.next().ok_or(Error::InvalidResponse)?;
@@ -1796,6 +1818,7 @@ impl ChunkSrc<'_> {
 
 // ----------------------------------------------------------- watch / i/o
 
+#[cfg(any(not(target_arch = "wasm32"), test))]
 fn check_watch(cancel: &CancelToken, deadline: Instant) -> Result<(), Error> {
     if cancel.is_cancelled() {
         return Err(Error::Cancelled);
@@ -1815,6 +1838,7 @@ fn capped_read_len(max_body: usize, received: usize, buffer_len: usize) -> usize
         .max(1)
 }
 
+#[cfg(any(not(target_arch = "wasm32"), test))]
 fn remaining(deadline: Instant) -> Result<Duration, Error> {
     deadline.checked_duration_since(Instant::now()).ok_or(Error::Timeout)
 }

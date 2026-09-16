@@ -1071,6 +1071,7 @@ impl Cx {
             | MacosEvent::MouseMove(_)
             | MacosEvent::MouseUp(_)
             | MacosEvent::Scroll(_)
+            | MacosEvent::Pinch(_)
             | MacosEvent::KeyDown(_)
             | MacosEvent::KeyUp(_)
             | MacosEvent::TextInput(_) => {
@@ -1577,6 +1578,13 @@ impl Cx {
                 }
                 self.dpi_override_scale(&mut e.abs, e.window_id);
                 self.call_event_handler(&Event::Scroll(e.into()));
+            }
+            MacosEvent::Pinch(mut e) => {
+                if !self.windows.is_valid(e.window_id) || !self.windows[e.window_id].is_created {
+                    return EventFlow::Wait;
+                }
+                self.dpi_override_scale(&mut e.abs, e.window_id);
+                self.call_event_handler(&Event::Pinch(e));
             }
             MacosEvent::WindowDragQuery(mut e) => {
                 if !self.windows.is_valid(e.window_id) || !self.windows[e.window_id].is_created {

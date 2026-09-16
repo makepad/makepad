@@ -1,0 +1,98 @@
+[package]
+authors = [
+  "Nathan Sobo <nathan@github.com>",
+  "Yinan Long <lynweklm@gmail.com>",
+  "southorange0929 <southorange0929@foxmail.com>",
+]
+description = "N-API bindings"
+edition = "2021"
+keywords = ["NodeJS", "Node", "HarmonyOS", "NAPI", "n-api"]
+license = "MIT"
+name = "napi-ohos"
+readme = "README.md"
+repository = "https://github.com/ohos-rs/ohos-rs"
+rust-version = "1.65"
+version = "0.1.3"
+
+[lib]
+doctest = false
+
+[package.metadata.docs.rs]
+all-features = true
+
+[package.metadata.workspaces]
+independent = true
+
+[features]
+async              = ["tokio_rt"]
+chrono_date        = ["chrono", "napi5"]
+compat-mode        = []
+default            = ["ohos"]
+deferred_trace     = ["napi4"]
+error_anyhow       = ["anyhow"]
+experimental       = ["napi-sys-ohos/experimental"]
+full               = ["latin1", "ohos", "async", "serde-json", "experimental", "chrono_date"]
+object_indexmap    = ["indexmap"]
+latin1             = ["encoding_rs"]
+napi1              = []
+napi2              = ["napi1", "napi-sys-ohos/napi2"]
+napi3              = ["napi2", "napi-sys-ohos/napi3"]
+napi4              = ["napi3", "napi-sys-ohos/napi4"]
+napi5              = ["napi4", "napi-sys-ohos/napi5"]
+napi6              = ["napi5", "napi-sys-ohos/napi6"]
+napi7              = ["napi6", "napi-sys-ohos/napi7"]
+napi8              = ["napi7", "napi-sys-ohos/napi8"]
+napi9              = ["napi8", "napi-sys-ohos/napi9"]
+noop               = []
+serde-json         = ["serde", "serde_json"]
+serde-json-ordered = ["serde-json", "serde_json/preserve_order"]
+tokio_fs           = ["tokio/fs"]
+tokio_full         = ["tokio/full"]
+tokio_io_std       = ["tokio/io-std"]
+tokio_io_util      = ["tokio/io-util"]
+tokio_macros       = ["tokio/macros"]
+tokio_net          = ["tokio/net"]
+tokio_process      = ["tokio/process"]
+tokio_rt           = ["tokio", "napi4"]
+tokio_signal       = ["tokio/signal"]
+tokio_stats        = ["tokio/stats"]
+tokio_sync         = ["tokio/sync"]
+tokio_test_util    = ["tokio/test-util"]
+tokio_time         = ["tokio/time"]
+ohos               = ["napi1", "napi-sys-ohos/ohos", "compat-mode"]
+
+[dependencies]
+bitflags  = "2"
+ctor      = "0.2"
+once_cell = "1.19"
+
+[dependencies.anyhow]
+optional = true
+version  = "1"
+
+[dependencies.napi-sys-ohos]
+path    = "../sys"
+version = "0.0.1"
+
+[dependencies.encoding_rs]
+optional = true
+version  = "0.8"
+
+[dependencies.chrono]
+optional = true
+version  = "0.4"
+
+[target.'cfg(not(target_os = "wasm"))'.dependencies]
+tokio = { version = "1", optional = true, features = ["rt", "rt-multi-thread", "sync"] }
+
+[dependencies.serde]
+optional = true
+version  = "1"
+
+[dependencies.serde_json]
+optional = true
+version  = "1"
+
+[dependencies.indexmap]
+optional = true
+version  = "2"

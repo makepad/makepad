@@ -291,6 +291,10 @@ impl Cx {
                 let (window_id, pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
                 return self.dispatch_studio_msg(msg, window_id, pos);
             }
+            StudioToApp::Pinch(ref e) => {
+                let (window_id, pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
+                return self.dispatch_studio_msg(msg, window_id, pos);
+            }
             // Stdin-specific: window geometry and swapchain management.
             StudioToApp::WindowGeomChange {
                 dpi_factor,

@@ -1,0 +1,31 @@
+[package]
+authors      = [ "LongYinan <lynweklm@gmail.com>","southorange0929 <southornage0929@foxmail.com>"]
+description  = "Harmony N-API raw binding"
+edition      = "2021"
+include      = ["src/**/*", "Cargo.toml"]
+keywords     = ["NodeJS", "FFI", "NAPI", "n-api", "HarmonyOS"]
+license      = "MIT"
+name         = "napi-sys-ohos"
+readme       = "README.md"
+repository   = "https://github.com/southorange0929/napi-rs"
+rust-version = "1.65"
+version      = "0.0.1"
+
+[features]
+experimental = []
+napi1        = []
+napi2        = ["napi1"]
+napi3        = ["napi2"]
+napi4        = ["napi3"]
+napi5        = ["napi4"]
+napi6        = ["napi5"]
+napi7        = ["napi6"]
+napi8        = ["napi7"]
+napi9        = ["napi8"]
+ohos         = ["napi1"]
+
+[package.metadata.workspaces]
+independent = true
+
+[target.'cfg(windows)'.dependencies.libloading]
+version = "0.8"
