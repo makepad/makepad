@@ -1,0 +1,13 @@
+[package]
+name = "makepad-code-language"
+version = "0.1.0"
+edition = "2021"
+description = "Language identity, detection, and lexical providers shared by the public editor and private analysers"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "makepad_code_language"
+path = "src/lib.rs"
+
+[dependencies]
+pulldown-cmark = { path = "../pulldown-cmark", default-features = false }

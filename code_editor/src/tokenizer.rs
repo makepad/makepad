@@ -3,36 +3,83 @@ use crate::{
     token::TokenKind,
     Token,
 };
+use makepad_code_language::{
+    lexical_provider, provider_for_detection, Detection, LanguageId, LexContinuation, TokenRole,
+};
+
+/// One line of provider-owned continuation. Rust keeps its richer editor
+/// lexer in this slot; every other language uses `LexContinuation`.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+enum LineSlot {
+    Rust((State, usize), (State, usize)),
+    Generic(LexContinuation, LexContinuation),
+}
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Tokenizer {
-    state: Vec<Option<((State, usize), (State, usize))>>,
+    language: LanguageId,
+    initial: LexContinuation,
+    lines: Vec<Option<LineSlot>>,
 }
 
 impl Tokenizer {
     pub fn new(line_count: usize) -> Self {
+        Self::for_language(LanguageId::Rust, line_count)
+    }
+
+    pub fn for_language(language: LanguageId, line_count: usize) -> Self {
         Self {
-            state: (0..line_count).map(|_| None).collect(),
+            language,
+            initial: lexical_provider(language).initial(),
+            lines: (0..line_count).map(|_| None).collect(),
+        }
+    }
+
+    /// Dialect-aware initial continuation from a finished path detection.
+    pub fn for_detection(detection: Detection, line_count: usize) -> Self {
+        let (_provider, initial) = provider_for_detection(detection);
+        Self {
+            language: detection.language,
+            initial,
+            lines: (0..line_count).map(|_| None).collect(),
+        }
+    }
+
+    pub fn language(&self) -> LanguageId {
+        self.language
+    }
+
+    /// Changing language invalidates every line; same bytes in another language
+    /// must not keep the previous classification. Dialect is reset to the
+    /// language default.
+    pub fn set_language(&mut self, language: LanguageId) {
+        if self.language == language {
+            return;
+        }
+        self.language = language;
+        self.initial = lexical_provider(language).initial();
+        for slot in &mut self.lines {
+            *slot = None;
         }
     }
 
     pub fn apply_change(&mut self, change: &Change) {
         match *change {
             Change::Insert(point, ref text) => {
-                self.state[point.line_index] = None;
+                self.lines[point.line_index] = None;
                 let line_count = text.length().line_count;
                 if line_count > 0 {
                     let line = point.line_index + 1;
-                    self.state.splice(line..line, (0..line_count).map(|_| None));
+                    self.lines.splice(line..line, (0..line_count).map(|_| None));
                 }
             }
             Change::Delete(start, length) => {
-                self.state[start.line_index] = None;
+                self.lines[start.line_index] = None;
                 let line_count = length.line_count;
                 if line_count > 0 {
                     let start_line = start.line_index + 1;
                     let end_line = start_line + line_count;
-                    self.state.drain(start_line..end_line);
+                    self.lines.drain(start_line..end_line);
                 }
             }
         }
@@ -52,15 +99,29 @@ impl Tokenizer {
         tokens: &mut [Vec<Token>],
         cancel: &impl Fn() -> bool,
     ) -> Result<(), TokenizeCancelled> {
+        if self.language == LanguageId::Rust {
+            return self.update_rust(text, tokens, cancel);
+        }
+        self.update_provider(text, tokens, cancel)
+    }
+
+    fn update_rust(
+        &mut self,
+        text: &Text,
+        tokens: &mut [Vec<Token>],
+        cancel: &impl Fn() -> bool,
+    ) -> Result<(), TokenizeCancelled> {
         let mut state = State::default();
         let mut attribute_depth = 0;
         for line in 0..text.as_lines().len() {
             if line % TOKENIZE_BATCH_LINES == 0 && cancel() {
                 return Err(TokenizeCancelled);
             }
-            match self.state[line] {
-                Some((start_state, end_state)) if (state, attribute_depth) == start_state => {
-                    (state, attribute_depth) = end_state;
+            match &self.lines[line] {
+                Some(LineSlot::Rust(start_state, end_state))
+                    if (state, attribute_depth) == *start_state =>
+                {
+                    (state, attribute_depth) = *end_state;
                 }
                 _ => {
                     let start_state = (state, attribute_depth);
@@ -102,7 +163,10 @@ impl Tokenizer {
                             None => break,
                         }
                     }
-                    self.state[line] = Some((start_state, (state, attribute_depth)));
+                    self.lines[line] = Some(LineSlot::Rust(
+                        start_state,
+                        (state, attribute_depth),
+                    ));
                     tokens[line] = new_tokens;
                 }
             }
@@ -111,6 +175,77 @@ impl Tokenizer {
             return Err(TokenizeCancelled);
         }
         Ok(())
+    }
+
+    fn update_provider(
+        &mut self,
+        text: &Text,
+        tokens: &mut [Vec<Token>],
+        cancel: &impl Fn() -> bool,
+    ) -> Result<(), TokenizeCancelled> {
+        let provider = lexical_provider(self.language);
+        let mut state = self.initial.clone();
+        for line in 0..text.as_lines().len() {
+            if line % TOKENIZE_BATCH_LINES == 0 && cancel() {
+                return Err(TokenizeCancelled);
+            }
+            match &self.lines[line] {
+                Some(LineSlot::Generic(start, end)) if *start == state => {
+                    state = end.clone();
+                }
+                _ => {
+                    let start = state.clone();
+                    let spans = provider.lex_line(&text.as_lines()[line], &mut state);
+                    let mut new_tokens = Vec::new();
+                    let mut prev = 0usize;
+                    for span in spans {
+                        let end = span.end as usize;
+                        if end > prev {
+                            new_tokens.push(Token {
+                                len: end - prev,
+                                kind: token_kind_from_role(span.role),
+                            });
+                            prev = end;
+                        }
+                    }
+                    let line_len = text.as_lines()[line].len();
+                    if prev < line_len {
+                        new_tokens.push(Token {
+                            len: line_len - prev,
+                            kind: TokenKind::Unknown,
+                        });
+                    }
+                    self.lines[line] = Some(LineSlot::Generic(start, state.clone()));
+                    tokens[line] = new_tokens;
+                }
+            }
+        }
+        if cancel() {
+            return Err(TokenizeCancelled);
+        }
+        Ok(())
+    }
+}
+
+fn token_kind_from_role(role: TokenRole) -> TokenKind {
+    match role {
+        TokenRole::Unknown => TokenKind::Unknown,
+        TokenRole::Whitespace => TokenKind::Whitespace,
+        TokenRole::Comment => TokenKind::Comment,
+        TokenRole::Identifier => TokenKind::Identifier,
+        TokenRole::Keyword => TokenKind::OtherKeyword,
+        TokenRole::BranchKeyword => TokenKind::BranchKeyword,
+        TokenRole::LoopKeyword => TokenKind::LoopKeyword,
+        TokenRole::Typename => TokenKind::Typename,
+        TokenRole::Function => TokenKind::Function,
+        TokenRole::Macro => TokenKind::Macro,
+        TokenRole::Number => TokenKind::Number,
+        TokenRole::String => TokenKind::String,
+        TokenRole::Char => TokenKind::Constant,
+        TokenRole::Punctuator => TokenKind::Punctuator,
+        TokenRole::Delimiter => TokenKind::Delimiter,
+        TokenRole::Preprocessor => TokenKind::Attribute,
+        TokenRole::Constant => TokenKind::Constant,
     }
 }
 
@@ -144,11 +279,20 @@ pub fn tokenize_cancellable(
     text: &Text,
     cancel: &impl Fn() -> bool,
 ) -> Result<Vec<Vec<Token>>, TokenizeCancelled> {
+    tokenize_cancellable_for_language(LanguageId::Rust, text, cancel)
+}
+
+pub fn tokenize_cancellable_for_language(
+    language: LanguageId,
+    text: &Text,
+    cancel: &impl Fn() -> bool,
+) -> Result<Vec<Vec<Token>>, TokenizeCancelled> {
     if cancel() {
         return Err(TokenizeCancelled);
     }
     let mut tokens = vec![Vec::new(); text.as_lines().len()];
-    Tokenizer::new(tokens.len()).update_cancellable(text, &mut tokens, cancel)?;
+    Tokenizer::for_language(language, tokens.len())
+        .update_cancellable(text, &mut tokens, cancel)?;
     Ok(tokens)
 }
 

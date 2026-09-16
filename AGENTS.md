@@ -39,6 +39,11 @@ use current source for API signatures and working examples.
 
 ## Commit content and Studio iteration history
 
+- NEVER create or publish additional public branches in `makepad/makepad`.
+  Use only the established `local` → `work` → `dev` workflow. `local` remains
+  private and must never be pushed. Feature, test, release, packaging, and
+  distribution work do not authorize another public branch; using a separate
+  checkout or worktree does not change this rule.
 - Keep AI-generated Markdown, plans, reports, scratch helpers, logs, recordings,
   captures, build output, and other temporary artifacts out of commits. Existing
   instruction files such as `AGENTS.md` are the Markdown exception. Preserve
