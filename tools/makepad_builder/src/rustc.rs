@@ -129,7 +129,11 @@ pub(crate) fn prepare_host_tools(_dest: &Path) -> Result<(), String> {
 /// denial is returned after the final attempt.
 fn tool_output(command: &mut Command, tool: &str) -> io::Result<Output> {
     #[cfg(windows)] {
-        const ATTEMPTS: usize = 6;
+        // Defender and other endpoint scanners can hold a newly unpacked
+        // executable for several seconds. Eight bounded waits total about
+        // 7.85 seconds, with the delay capped so the UI remains responsive.
+        const RETRY_DELAYS_MS: [u64; 8] = [100, 250, 500, 1_000, 1_500, 1_500, 1_500, 1_500];
+        const ATTEMPTS: usize = RETRY_DELAYS_MS.len() + 1;
         for attempt in 0..ATTEMPTS {
             match command.output() {
                 Ok(output) => {
@@ -137,8 +141,17 @@ fn tool_output(command: &mut Command, tool: &str) -> io::Result<Output> {
                         && String::from_utf8_lossy(&output.stderr)
                             .to_ascii_lowercase()
                             .contains("access is denied");
-                    if !denied || attempt + 1 == ATTEMPTS {
+                    if !denied {
                         return Ok(output);
+                    }
+                    if attempt + 1 == ATTEMPTS {
+                        return Err(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            format!(
+                                "{tool} remained blocked by Windows security software after {} seconds",
+                                RETRY_DELAYS_MS.iter().sum::<u64>() as f64 / 1_000.0
+                            ),
+                        ));
                     }
                 }
                 Err(error)
@@ -148,14 +161,33 @@ fn tool_output(command: &mut Command, tool: &str) -> io::Result<Output> {
                             | io::ErrorKind::WouldBlock
                             | io::ErrorKind::Interrupted
                     ) && attempt + 1 < ATTEMPTS => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::PermissionDenied
+                            | io::ErrorKind::WouldBlock
+                            | io::ErrorKind::Interrupted
+                    ) => {
+                        return Err(io::Error::new(
+                            error.kind(),
+                            format!(
+                                "{tool} remained inaccessible after {} seconds: {error}",
+                                RETRY_DELAYS_MS.iter().sum::<u64>() as f64 / 1_000.0
+                            ),
+                        ));
+                    }
                 Err(error) => return Err(error),
             }
             crate::progress::stage(
                 "Checking compiler",
-                &format!("Waiting for Windows security scan ({tool})"),
+                &format!(
+                    "Waiting for Windows security scan ({tool}); retry {}/{}",
+                    attempt + 1,
+                    RETRY_DELAYS_MS.len()
+                ),
                 0.0,
             );
-            std::thread::sleep(Duration::from_millis(80 * (attempt as u64 + 1)));
+            std::thread::sleep(Duration::from_millis(RETRY_DELAYS_MS[attempt]));
         }
         unreachable!("bounded compiler probe loop always returns")
     }
