@@ -356,9 +356,23 @@ impl StemCache {
         }
         let (from, to) = self.span_range(span);
         let frames = (to - from) as usize;
+        // A span is written whole. The slot is exactly one step of the full
+        // geometry (the last slot, what is left of the track), and audio of
+        // any other length — a shorter chunk geometry's span, a run cut off
+        // mid-span — would be zero-filled to the slot and read back on the
+        // next load as separated silence.
+        for (index, stem) in stems.iter().enumerate() {
+            if stem.left.len() != frames || stem.right.len() != frames {
+                return Err(CacheError::Mismatch(format!(
+                    "span {span} stem {index} holds {}/{} frames, the slot holds {frames}",
+                    stem.left.len(),
+                    stem.right.len()
+                )));
+            }
+        }
         let mut buf = vec![0u8; frames * FRAME_BYTES as usize];
         for (index, stem) in stems.iter().enumerate() {
-            let n = frames.min(stem.frames());
+            let n = frames;
             let peak = stem.left[..n]
                 .iter()
                 .chain(&stem.right[..n])
@@ -370,9 +384,6 @@ impl StemCache {
                 let at = frame * 4;
                 buf[at..at + 2].copy_from_slice(&l.to_le_bytes());
                 buf[at + 2..at + 4].copy_from_slice(&r.to_le_bytes());
-            }
-            for byte in buf[n * 4..].iter_mut() {
-                *byte = 0;
             }
             let file = &mut self.files[index];
             file.seek(SeekFrom::Start(from * FRAME_BYTES))?;
@@ -686,6 +697,32 @@ mod tests {
         // hand the karaoke bake another track's vocals.
         let other = CacheHeader::for_track((frames + CHUNK_STEP) as u64);
         assert!(!is_complete_on_disk(&root, &digest, &other));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The cache is on the full geometry's grid and nothing else may land in
+    /// it: a bridge-length span, or a span cut short, written into a slot
+    /// would be padded with silence and served as stems on the next load.
+    #[test]
+    fn a_span_that_does_not_fill_its_slot_is_refused() {
+        let root = temp_root("wrong-length");
+        let frames = 2 * CHUNK_STEP + 100;
+        let header = CacheHeader::for_track(frames as u64);
+        let mut cache = StemCache::open(&root, "c0ffee", header).unwrap();
+        assert_eq!(cache.span_count(), 3);
+        assert!(cache.write_span(0, &ramp_stems(CHUNK_STEP - 1, 0.0)).is_err());
+        assert!(cache.write_span(0, &ramp_stems(CHUNK_STEP + 1, 0.0)).is_err());
+        assert!(
+            cache.write_span(0, &ramp_stems(ChunkGeometry::BRIDGE.step, 0.0)).is_err(),
+            "a bridge span must never reach the cache"
+        );
+        assert!(!cache.has_span(0), "a refused span leaves the slot empty");
+        cache.write_span(0, &ramp_stems(CHUNK_STEP, 0.0)).unwrap();
+        cache.write_span(CHUNK_STEP, &ramp_stems(CHUNK_STEP, 0.1)).unwrap();
+        // The tail slot holds what is left of the track, and only that.
+        assert!(cache.write_span(2 * CHUNK_STEP, &ramp_stems(CHUNK_STEP, 0.2)).is_err());
+        cache.write_span(2 * CHUNK_STEP, &ramp_stems(100, 0.2)).unwrap();
+        assert!(cache.is_complete());
         let _ = std::fs::remove_dir_all(&root);
     }
 

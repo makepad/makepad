@@ -24,7 +24,12 @@
 //! For playback that must start before the whole track is separated, drive
 //! [`Demixer`] instead: it yields one finished 5.5-second span per model
 //! forward, supports `seek`, and running it to the end reproduces
-//! [`demix_all`] exactly.
+//! [`demix_all`] exactly. [`DemixCursor`] is the same stream holding no
+//! model, for a thread that keeps one model and several tracks in flight.
+//!
+//! The chunk length is a runtime value, [`ChunkGeometry`]: the same weights
+//! run at the trained 11-second chunk and at a 2.76-second one that has
+//! stems for a playhead within a second, at a measured quality cost.
 
 pub mod cache;
 pub mod config;
@@ -35,13 +40,14 @@ pub mod stft;
 pub mod weights;
 
 pub use config::{
-    Stem, AUDIO_CHANNELS, CHUNK_SAMPLES, CHUNK_STEP, NUM_STEMS, SAMPLE_RATE, STEM_NAMES,
+    ChunkGeometry, Stem, AUDIO_CHANNELS, CHUNK_SAMPLES, CHUNK_STEP, NUM_STEMS, SAMPLE_RATE,
+    STEM_NAMES,
 };
 pub use cache::{
     is_complete_on_disk as cache_is_complete_on_disk, prune as prune_cache, CacheError,
     CacheHeader, PruneReport, StemCache, DEFAULT_BUDGET_BYTES as CACHE_BUDGET_BYTES,
 };
-pub use demix::{chunk_count, demix_all, Demixer, StemSpan};
+pub use demix::{chunk_count, demix_all, DemixCursor, Demixer, StemSpan};
 pub use model::{StemSet, StemsModel, StereoBuf};
 pub use weights::StemsWeights;
 
