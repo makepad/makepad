@@ -3,6 +3,7 @@
 use crate::{
     catalog::{self, Release},
     progress,
+    rustc,
     runtime::{self, Dependency, Environment, RustChoice},
 };
 #[cfg(not(windows))]
@@ -338,6 +339,7 @@ struct Setup {
     app: String,
     release: Option<Release>,
     cuda: bool,
+    compiler_retry: bool,
     rust_check: std::cell::RefCell<Option<RustCheck>>,
 }
 impl Setup {
@@ -522,7 +524,24 @@ impl Setup {
                 .is_some_and(|r| r.installed(&self.root)),
         ]
     }
-    fn install_compiler(&self, release: &Release) -> Result<bool, String> {
+    fn install_compiler(&mut self, release: &Release) -> Result<bool, String> {
+        if self.compiler_retry {
+            activity("Retrying the staged Rust compiler check; no download is needed.");
+            return match rustc::retry_staged(&runtime::rust_dir(&self.root, &release.rust), &release.rust) {
+                Ok(()) => {
+                    self.compiler_retry = false;
+                    activity("Compiler is ready.");
+                    Ok(true)
+                }
+                Err(error) if rustc::needs_compiler_retry(&error) => Err(
+                    "Windows security software is still scanning the staged Rust compiler. Choose Retry compiler check to try again.".into()
+                ),
+                Err(error) => {
+                    self.compiler_retry = false;
+                    Err(error)
+                }
+            };
+        }
         let mut ready = self.ready();
         if !cfg!(windows) && !ready[1] && self.choose_rust(&release.rust)? {
             ready = self.ready();
@@ -575,7 +594,7 @@ impl Setup {
             let _pause = Screen::pause();
             runtime::setup_system_tools()?;
         }
-        with_progress(|| {
+        let result: Result<bool, String> = with_progress(|| {
             if cfg!(windows) && !ready[0] {
                 runtime::dependency(&self.root, release, if cfg!(windows) { Dependency::Msvc } else { Dependency::System })?;
             }
@@ -583,12 +602,25 @@ impl Setup {
                 runtime::dependency(&self.root, release, Dependency::Rust)?;
             }
             Ok(true)
-        })
+        });
+        if let Err(error) = &result {
+            if rustc::needs_compiler_retry(error) {
+                self.compiler_retry = true;
+                return Err(
+                    "Windows security software is still scanning the staged Rust compiler. Choose Retry compiler check to try again.".into()
+                );
+            }
+        }
+        result
     }
     fn install_and_run(&mut self) -> Result<(), String> {
         // Resolve the release once so compiler setup and the following build
         // cannot disagree if a newer release appears while installing tools.
-        let release = self.refresh()?;
+        let release = if self.compiler_retry {
+            self.release.clone().ok_or("The compiler retry has no release metadata; choose Download compiler to start again")?
+        } else {
+            self.refresh()?
+        };
         if !self.install_compiler(&release)? {
             return Ok(());
         }
@@ -871,6 +903,7 @@ pub fn run() -> Result<(), String> {
         app: "scope".into(),
         release: None,
         cuda: fs::read_to_string(root.join("installed-cuda")).unwrap_or_default() == "1",
+        compiler_retry: false,
         rust_check: Default::default(),
         root,
     };
@@ -927,19 +960,24 @@ fn show_menu(setup: &mut Setup, primary: bool) -> Result<(), String> {
             .filter_map(|entry| {
                 let fields: Vec<_> = entry.split('|').collect();
                 (fields.len() == 3).then(|| {
+                    let retry_compiler = setup.compiler_retry && fields[0] == "1";
                     (
                         if !primary && fields[0] == "5" { "3".into() } else { fields[0].into() },
-                        fields[1].replace("{app}", &title),
-                        fields[2].replace("{app}", &title).replace(
-                            "{tools}",
-                            if cfg!(windows) {
-                                "Microsoft C++ tools and Windows SDK"
-                            } else if cfg!(target_os = "macos") {
-                                "Apple developer tools, SDK and Git"
-                            } else {
-                                "Distro development packages"
-                            },
-                        ),
+                        if retry_compiler { "Retry compiler check".into() } else { fields[1].replace("{app}", &title) },
+                        if retry_compiler {
+                            "Recheck the staged Rust compiler after Windows security scanning".into()
+                        } else {
+                            fields[2].replace("{app}", &title).replace(
+                                "{tools}",
+                                if cfg!(windows) {
+                                    "Microsoft C++ tools and Windows SDK"
+                                } else if cfg!(target_os = "macos") {
+                                    "Apple developer tools, SDK and Git"
+                                } else {
+                                    "Distro development packages"
+                                },
+                            )
+                        },
                     )
                 })
             })

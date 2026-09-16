@@ -10,6 +10,13 @@ use crate::extract;
 use crate::http;
 
 pub const DEFAULT_VERSION: &str = "1.98.0";
+/// Prefix used internally to keep a transient Windows executable lock
+/// distinct from a compiler that is permanently invalid.
+pub const RETRY_COMPILER_CHECK: &str = "retry-compiler-check:";
+
+pub fn needs_compiler_retry(error: &str) -> bool {
+    error.starts_with(RETRY_COMPILER_CHECK)
+}
 
 pub fn install(cache: &Path, dest: &Path) -> Result<(), String> {
     install_version(cache, dest, DEFAULT_VERSION)
@@ -77,18 +84,9 @@ pub fn install_version(cache: &Path, dest: &Path, version: &str) -> Result<(), S
     merge_component(&tmp.join("cargo"), &staged, "cargo")?;
     merge_std(&tmp.join("std"), &staged)?;
     prepare_host_tools(&staged)?;
-    crate::progress::stage("Checking compiler", "Running rustc --version", 0.0);
-    let mut check = Command::new(staged.join("bin").join(crate::runtime::exe("rustc")));
-    crate::runtime::hide_console(&mut check);
-    let output = tool_output(check.arg("--version"), "rustc")
-        .map_err(|e| format!("Run private rustc: {e}"))?;
-    if !output.status.success()
-        || !String::from_utf8_lossy(&output.stdout).starts_with(&format!("rustc {version} "))
-    {
-        return Err("Extracted Rust compiler failed its version check".into());
-    }
+    check_rustc(&staged, version)?;
     fs::write(staged.join(".toolchain-version"), stamp).map_err(|e| e.to_string())?;
-    fs::rename(&staged, dest).map_err(|e| e.to_string())?;
+    move_staged(&staged, dest)?;
     let _ = fs::remove_dir_all(&tmp);
     if !dest
         .join("bin")
@@ -97,6 +95,34 @@ pub fn install_version(cache: &Path, dest: &Path, version: &str) -> Result<(), S
     {
         return Err("rustc.exe missing after extract".into());
     }
+    crate::progress::stage("Ready", "Rust installed and verified", 1.0);
+    Ok(())
+}
+
+/// Re-check a compiler whose first post-extraction launch was blocked by
+/// Windows security software. The staged archive is retained by
+/// `install_version`, so this path performs no download or extraction.
+pub fn retry_staged(dest: &Path, version: &str) -> Result<(), String> {
+    if !cfg!(windows) {
+        return Err("Staged compiler retries are only available on Windows".into());
+    }
+    let staged = dest.with_extension("unpack").join("ready");
+    if !staged
+        .join("bin")
+        .join(crate::runtime::exe("rustc"))
+        .is_file()
+    {
+        return Err("The staged Rust compiler is no longer available; choose Download compiler to start again".into());
+    }
+    crate::progress::stage("Checking compiler", "Retrying rustc --version", 0.0);
+    check_rustc(&staged, version)?;
+    fs::write(
+        staged.join(".toolchain-version"),
+        format!("{version} {}", crate::catalog::platform()),
+    )
+    .map_err(|e| e.to_string())?;
+    move_staged(&staged, dest)?;
+    let _ = fs::remove_dir_all(dest.with_extension("unpack"));
     crate::progress::stage("Ready", "Rust installed and verified", 1.0);
     Ok(())
 }
@@ -121,6 +147,44 @@ pub(crate) fn prepare_host_tools(_dest: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn check_rustc(staged: &Path, version: &str) -> Result<(), String> {
+    crate::progress::stage("Checking compiler", "Running rustc --version", 0.0);
+    let mut check = Command::new(staged.join("bin").join(crate::runtime::exe("rustc")));
+    crate::runtime::hide_console(&mut check);
+    let output = tool_output(check.arg("--version"), "rustc").map_err(|error| {
+        if cfg!(windows) && error.kind() == io::ErrorKind::PermissionDenied {
+            format!(
+                "{RETRY_COMPILER_CHECK}Rust executable access is still blocked: {error}"
+            )
+        } else {
+            format!("Run private rustc: {error}")
+        }
+    })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if cfg!(windows) && stderr.to_ascii_lowercase().contains("access is denied") {
+            return Err(format!(
+                "{RETRY_COMPILER_CHECK}rustc reported access denied"
+            ));
+        }
+        return Err("Extracted Rust compiler failed its version check".into());
+    }
+    if !String::from_utf8_lossy(&output.stdout).starts_with(&format!("rustc {version} ")) {
+        return Err("Extracted Rust compiler failed its version check".into());
+    }
+    Ok(())
+}
+
+fn move_staged(staged: &Path, dest: &Path) -> Result<(), String> {
+    fs::rename(staged, dest).map_err(|error| {
+        if cfg!(windows) && error.kind() == io::ErrorKind::PermissionDenied {
+            format!("{RETRY_COMPILER_CHECK}Rust files are still locked by Windows security software: {error}")
+        } else {
+            error.to_string()
+        }
+    })
 }
 
 /// Windows security scanners can briefly deny access to a freshly unpacked
