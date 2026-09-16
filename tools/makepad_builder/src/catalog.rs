@@ -344,18 +344,16 @@ fn repository_installed(dest: &Path, repo: &Repository) -> bool {
         && dest.join(&repo.path).join(".git").is_dir()
 }
 
-struct CheckoutProgress { files: u64, total: u64 }
+/// The public `makepad-git` hook deliberately stays small: older published
+/// source packs only report checked-out paths. Keep the Builder compatible
+/// with that API and publish a determinate summary once the sync returns its
+/// report. During checkout the activity pane still advances for every file,
+/// while the final event supplies the total used by the progress bar.
+struct CheckoutProgress { files: u64 }
 impl HttpSyncHooks for CheckoutProgress {
-    fn on_import_progress(&mut self, phase: makepad_git::http_sync::ImportPhase, done: usize, total: usize) {
-        use makepad_git::http_sync::ImportPhase;
-        let stage=match phase {ImportPhase::Inflate=>"Unpacking Git objects",ImportPhase::Resolve=>"Resolving Git deltas",ImportPhase::Write=>"Saving Git objects",ImportPhase::SavePack=>"Saving Git pack"};
-        progress::measured(stage,"Repository objects",done as u64,total as u64,if matches!(phase,ImportPhase::SavePack) {progress::Unit::Bytes} else {progress::Unit::Objects});
-    }
-    fn on_checkout_start(&mut self, total: usize) {self.total=total as u64;}
-
     fn on_checkout_file(&mut self, path: &str) {
         self.files += 1;
-        progress::measured("Writing source files", path, self.files, self.total, progress::Unit::Files);
+        progress::measured("Writing source files", path, self.files, 0, progress::Unit::Files);
     }
 }
 
@@ -394,7 +392,11 @@ pub fn checkout(
         fs::create_dir(&stage).map_err(|e| format!("Source staging: {e}"))?;
         let result = (|| {
             progress::stage("Unpacking Git objects", &repo.name, 0.0);
-            apply_pack_and_checkout(&stage, &service_url(service, &format!("repository/{}", repo.name))?, ObjectId::from_hex(&repo.commit).map_err(|e| e.to_string())?, None, &bytes, &mut CheckoutProgress { files: 0, total: 0 }).map_err(|e| e.to_string())?;
+            let mut hooks = CheckoutProgress { files: 0 };
+            let report = apply_pack_and_checkout(&stage, &service_url(service, &format!("repository/{}", repo.name))?, ObjectId::from_hex(&repo.commit).map_err(|e| e.to_string())?, None, &bytes, &mut hooks).map_err(|e| e.to_string())?;
+            progress::measured("Unpacking Git objects", "Repository objects", report.imported_objects as u64, report.imported_objects as u64, progress::Unit::Objects);
+            progress::measured("Saving Git objects", "Repository pack", bytes.len() as u64, bytes.len() as u64, progress::Unit::Bytes);
+            progress::measured("Writing source files", "Repository files", report.checked_out_files as u64, report.checked_out_files as u64, progress::Unit::Files);
             fs::create_dir_all(checkout.parent().ok_or("Missing source parent")?).map_err(|e| e.to_string())?;
             fs::rename(&stage, &checkout).map_err(|e| e.to_string())?;
             fs::write(receipt_path(&dest, repo), receipt(repo)).map_err(|e| e.to_string())
