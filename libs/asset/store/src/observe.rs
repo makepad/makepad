@@ -48,6 +48,7 @@ use makepad_asset_client::{
 };
 use makepad_asset_data::{AssetKind, FileRole, MediaType, ThumbnailMedia};
 use makepad_filesystem_watcher::{FileSystemWatcher, WatchRoot};
+use crate::effect_doc::{effect_category, field_str};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -283,52 +284,6 @@ fn description_of(source: &str) -> String {
     out
 }
 
-/// The value of a top-level `key:` in the document, as written.
-///
-/// Deliberately a scanner and not a parser: this module publishes a
-/// document it does not evaluate (the VJ's own `EffectDoc::parse` is the
-/// only authority on what a document MEANS), and it needs exactly two
-/// facts out of it — what to call it and whether it belongs in the
-/// transition lane. `key` must OPEN its line (the document's own style) or
-/// follow a `{`/`,`, so neither `// engine: …` in the prose header nor an
-/// `engine:` inside a shader body is ever mistaken for the declaration.
-fn field_str(source: &str, key: &str) -> Option<String> {
-    let needle = format!("{key}:");
-    let bytes = source.as_bytes();
-    let mut from = 0usize;
-    while let Some(rel) = source[from..].find(&needle) {
-        let at = from + rel;
-        from = at + needle.len();
-        let line_start = bytes[..at]
-            .iter()
-            .rposition(|b| *b == b'\n')
-            .map(|i| i + 1)
-            .unwrap_or(0);
-        let opens_line = bytes[line_start..at].iter().all(u8::is_ascii_whitespace);
-        let prev = bytes[..at]
-            .iter()
-            .rev()
-            .find(|b| !b.is_ascii_whitespace())
-            .copied();
-        if !opens_line && !matches!(prev, None | Some(b'{') | Some(b',')) {
-            continue;
-        }
-        let rest = source[at + needle.len()..]
-            .lines()
-            .next()
-            .unwrap_or_default()
-            .trim();
-        let value = rest
-            .split(&[',', '}'][..])
-            .next()
-            .unwrap_or_default()
-            .trim()
-            .trim_matches('"');
-        return Some(value.to_string());
-    }
-    None
-}
-
 /// Is this document transition-suited? Three ways to be, cheapest first:
 /// it says so (`transition: true`), its engine is one of the
 /// picture-shaping families, or the embedder named its stem.
@@ -443,6 +398,8 @@ pub fn publish_doc(client: &mut AssetClient, path: &Path, config: &ObserveConfig
     let mut tags = vec!["vjeffect".to_string(), OBSERVED_TAG.to_string()];
     if declares_transition(&source, stem, &config.transition_stems) {
         tags.push(TRANSITION_TAG.to_string());
+    } else {
+        tags.extend(effect_category(&source).tags().iter().map(|t| t.to_string()));
     }
     bundle.tags = tags;
     bundle.generator = "observed origin".to_string();

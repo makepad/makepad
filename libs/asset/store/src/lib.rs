@@ -57,6 +57,7 @@ pub mod cas;
 mod cas_file;
 pub mod catalog;
 pub mod core;
+pub mod effect_doc;
 #[cfg(any(target_arch = "wasm32", feature = "embedded"))]
 pub mod embedded;
 pub mod error;
