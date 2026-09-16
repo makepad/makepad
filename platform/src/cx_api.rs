@@ -4,7 +4,7 @@ use {
     crate::{
         area::Area,
         cursor::MouseCursor,
-        cx::{Cx, CxRef, OsType, XrCapabilities},
+        cx::{Cx, CxRef, GpuBackend, OsType, XrCapabilities},
         display_context::SystemBarAppearance,
         draw_list::DrawListId,
         draw_pass::{CxDrawPassParent, CxDrawPassRect, DrawPassId},
@@ -1008,6 +1008,45 @@ impl Cx {
 
     pub fn os_type(&self) -> &OsType {
         &self.os_type
+    }
+
+    /// The GPU API compiled into this binary (see [`GpuBackend`]).
+    pub fn gpu_backend() -> GpuBackend {
+        #[cfg(gpusim)]
+        {
+            GpuBackend::Gpusim
+        }
+        #[cfg(not(gpusim))]
+        {
+            #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+            {
+                GpuBackend::Metal
+            }
+            #[cfg(target_os = "windows")]
+            {
+                GpuBackend::Direct3d11
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                GpuBackend::WebGl
+            }
+            #[cfg(all(
+                not(any(target_os = "macos", target_os = "ios", target_os = "tvos", target_os = "windows")),
+                not(target_arch = "wasm32"),
+                use_vulkan
+            ))]
+            {
+                GpuBackend::Vulkan
+            }
+            #[cfg(all(
+                not(any(target_os = "macos", target_os = "ios", target_os = "tvos", target_os = "windows")),
+                not(target_arch = "wasm32"),
+                not(use_vulkan)
+            ))]
+            {
+                GpuBackend::OpenGl
+            }
+        }
     }
 
     /// Returns the app's writable data directory path.
