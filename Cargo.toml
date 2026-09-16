@@ -62,6 +62,7 @@ workspace.members = [
     "libs/bounded_http",
     "libs/flow",
     "libs/strict_json",
+    "libs/loader_bundle",
     # === remesh (FaithC port) / xatlas (jpcy port) ===
     "libs/remesh",
     "libs/xatlas",
@@ -165,7 +166,7 @@ workspace.members = [
     # === necessary tools ===
     "platform/video",
     "tools/cargo_makepad",
-    "tools/makepad_loader",
+    "tools/makepad_builder",
     # === OSM PBF -> tile archive + nav artifact bake passes (CLI + in-app) ===
     "libs/map_build",
     "tools/map_tiles",
