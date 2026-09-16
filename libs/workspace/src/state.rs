@@ -4,7 +4,7 @@
 //! Layout of the state directory (`--state-dir <dir>`, default
 //! `~/.makepad/<app>`):
 //!
-//! - `settings.ron` — appearance choice (`Settings`)
+//! - `settings.ron` — appearance and renderer choice (`Settings`)
 //! - `dock.ron`     — the dock layout (`HashMap<LiveId, DockItem>`)
 
 use makepad_widgets::dock::DockItem;
@@ -68,6 +68,10 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Args {
             "--state-dir" => out.state_dir = args.next().map(PathBuf::from),
             "--cwd" => out.cwd = args.next().map(PathBuf::from),
             "--size" => out.window_size = args.next().and_then(|s| parse_size(&s)),
+            // Added by the renderer routing to the sibling build it starts
+            // (`Settings::renderer`); the routed process reads it as "do not
+            // route again" and there is nothing else to parse.
+            "--renderer-routed" => {}
             _ => {
                 if let Some(v) = arg.strip_prefix("--state-dir=") {
                     out.state_dir = Some(PathBuf::from(v));
@@ -92,7 +96,43 @@ fn parse_size(s: &str) -> Option<(u32, u32)> {
     }
 }
 
+/// The GPU API a desktop Linux build renders with. The API is chosen at
+/// build time, so an app honouring a saved choice starts the matching
+/// sibling binary instead of switching in place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RendererChoice {
+    Vulkan,
+    OpenGl,
+}
+
+impl RendererChoice {
+    /// The value `settings.ron` stores.
+    pub fn as_setting_str(self) -> &'static str {
+        match self {
+            RendererChoice::Vulkan => "vulkan",
+            RendererChoice::OpenGl => "opengl",
+        }
+    }
+
+    pub fn from_setting_str(value: &str) -> Option<Self> {
+        match value {
+            "vulkan" => Some(RendererChoice::Vulkan),
+            "opengl" => Some(RendererChoice::OpenGl),
+            _ => None,
+        }
+    }
+
+    /// The name the Settings panel shows.
+    pub fn label(self) -> &'static str {
+        match self {
+            RendererChoice::Vulkan => "Vulkan",
+            RendererChoice::OpenGl => "OpenGL",
+        }
+    }
+}
+
 /// Persisted user settings. Kept deliberately small for the shell slice.
+/// Every optional field may be absent from an older `settings.ron`.
 #[derive(Clone, Debug, Default, PartialEq, SerRon, DeRon)]
 pub struct Settings {
     /// Style family id (`"macos"`, `"windows-2000"`, ...); `None` follows the
@@ -106,6 +146,9 @@ pub struct Settings {
     /// The 2D texture-tile cache of the code map (`None` = on). Off draws
     /// the map through the direct renderer, as the 2.5D/3D projections do.
     pub map_tiles: Option<bool>,
+    /// The GPU API to render with on desktop Linux, `"vulkan"` or `"opengl"`
+    /// (`None` = whatever this build is). See [`Settings::renderer`].
+    pub renderer: Option<String>,
 }
 
 const SETTINGS_FILE: &str = "settings.ron";
@@ -117,6 +160,15 @@ impl Settings {
     }
     pub fn map_tiles(&self) -> bool {
         self.map_tiles.unwrap_or(true)
+    }
+    /// The saved renderer; `None` when unset or not a known value.
+    pub fn renderer(&self) -> Option<RendererChoice> {
+        self.renderer
+            .as_deref()
+            .and_then(RendererChoice::from_setting_str)
+    }
+    pub fn set_renderer(&mut self, choice: Option<RendererChoice>) {
+        self.renderer = choice.map(|choice| choice.as_setting_str().to_owned());
     }
     pub fn load(dir: &Path) -> Self {
         std::fs::read_to_string(dir.join(SETTINGS_FILE))
@@ -293,6 +345,46 @@ mod tests {
         assert_eq!(b.cwd, Some(PathBuf::from("/y")));
         assert_eq!(parse_args(Vec::<String>::new()), Args::default());
         assert!(Args::default().state_dir().ends_with("studio"));
+        // the renderer routing's flag is accepted and changes nothing
+        let c = parse_args(["--renderer-routed", "--cwd", "/z"].map(String::from));
+        assert_eq!(c.cwd, Some(PathBuf::from("/z")));
+        assert_eq!(parse_args(["--renderer-routed"].map(String::from)), Args::default());
+    }
+
+    #[test]
+    fn settings_without_renderer_still_load() {
+        // a settings.ron written before the Renderer row existed
+        let old = Settings::deserialize_ron(
+            "(style: \"macos\", dark: true, architecture_indent_cells: 3, map_tiles: false)",
+        )
+        .unwrap();
+        assert_eq!(old.renderer, None);
+        assert_eq!(old.renderer(), None);
+        assert_eq!(old.style.as_deref(), Some("macos"));
+        assert_eq!(old.code_indent_cells(), 3);
+        assert!(!old.map_tiles());
+        // the choice round-trips through the file text
+        let mut s = old.clone();
+        s.set_renderer(Some(RendererChoice::OpenGl));
+        assert_eq!(s.renderer.as_deref(), Some("opengl"));
+        let text = s.serialize_ron();
+        assert!(text.contains("renderer:") && text.contains("\"opengl\""), "{text}");
+        assert_eq!(Settings::deserialize_ron(&text).unwrap(), s);
+        assert_eq!(Settings::deserialize_ron(&text).unwrap().renderer(), Some(RendererChoice::OpenGl));
+        s.set_renderer(Some(RendererChoice::Vulkan));
+        assert_eq!(Settings::deserialize_ron(&s.serialize_ron()).unwrap().renderer(), Some(RendererChoice::Vulkan));
+        // an unknown value is no choice; clearing it drops the field
+        let junk = Settings::deserialize_ron("(dark: false, renderer: \"metal\")").unwrap();
+        assert_eq!(junk.renderer.as_deref(), Some("metal"));
+        assert_eq!(junk.renderer(), None);
+        s.set_renderer(None);
+        assert_eq!(s, old);
+        assert!(!s.serialize_ron().contains("renderer"));
+        assert_eq!(RendererChoice::Vulkan.label(), "Vulkan");
+        assert_eq!(RendererChoice::OpenGl.label(), "OpenGL");
+        for choice in [RendererChoice::Vulkan, RendererChoice::OpenGl] {
+            assert_eq!(RendererChoice::from_setting_str(choice.as_setting_str()), Some(choice));
+        }
     }
 
     #[test]
@@ -305,6 +397,7 @@ mod tests {
             dark: true,
             architecture_indent_cells: Some(2),
             map_tiles: Some(false),
+            renderer: None,
         };
         s.save(&dir).unwrap();
         assert_eq!(Settings::load(&dir), s);
