@@ -12,7 +12,9 @@
 //!   its words, the space between its cells — carries it too. That press
 //!   goes to the rows FIRST and is taken up only if nothing on the row
 //!   took the finger, so a button, a slider, a chip and a picker keep
-//!   their presses and a label does not;
+//!   their presses and a label does not -- and a control that holds the
+//!   mouse keeps it until the release, so a press it took never turns
+//!   into a carry however far the pointer wanders from it;
 //! - while the drag is live the widget tracks the insertion slot under the
 //!   pointer (row midpoints decide) and carries the whole row: the lifted
 //!   row is drawn under the pointer and over the rest, every row between
@@ -398,6 +400,14 @@ impl ReorderList {
                 _ => None,
             };
             if let Some(y) = moved_to {
+                // A press that has not become a carry yet belongs to
+                // whichever control holds the mouse, if one does: a
+                // slider dragged out of its own bounds is still the
+                // slider's, and the row under it stays where it is.
+                if !drag.active && cx.fingers.is_mouse_held_outside(&self.own_areas(cx, drag.from)) {
+                    self.cancel_drag(cx);
+                    return false;
+                }
                 let bands = std::mem::take(&mut self.bands);
                 let changed = drag.move_to(y, self.drag_threshold, &bands);
                 self.bands = bands;
@@ -507,6 +517,21 @@ impl ReorderList {
         }
     }
 
+    /// The areas a press on row `id` may be held by without that being a
+    /// control's hold: the list itself, which takes every press for its
+    /// drag-scroll, the row, and the gripper the drag is named after.
+    fn own_areas(&self, cx: &Cx, id: usize) -> Vec<Area> {
+        let mut own = vec![self.list.area()];
+        if let Some(item) = self.list.items().get(&id) {
+            own.push(item.widget.area());
+            let handle = item.widget.widget(cx, &[self.drag_handle]);
+            if !handle.is_empty() {
+                own.push(handle.area());
+            }
+        }
+        own
+    }
+
     /// A press the rows are about to see, which the list may carry once
     /// they have had it: the point, and the row it landed on. Taken before
     /// the event goes down, when the areas still say where the rows are.
@@ -541,6 +566,19 @@ impl ReorderList {
         });
         let row = item.widget.area().rect(cx);
         if press_carries(point, self.list.area().rect(cx), &self.bands, &taken) != Some(id) {
+            return;
+        }
+        // The press went to stopping a scroll: the inner list kept it from
+        // the rows, so whatever sits under the point never had the chance
+        // to take hold of it. It is not the row's either.
+        if self.list.was_scrolling() {
+            return;
+        }
+        // A control that took the press keeps the mouse until the release,
+        // wherever the pointer wanders meanwhile -- so the row does not
+        // carry, whether or not the walk above found the control. The
+        // list's own hold is the drag-scroll it takes on every press.
+        if cx.fingers.is_mouse_held_outside(&self.own_areas(cx, id)) {
             return;
         }
         // The inner list took the press for a drag-scroll of its own on the

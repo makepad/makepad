@@ -499,6 +499,16 @@ impl CxFingers {
         self.captures.iter().find(|v| v.area == area).is_some()
     }
 
+    /// Whether the mouse is held by an area other than these: a control
+    /// that took the press and keeps it until the release, wherever the
+    /// pointer goes meanwhile. A widget that would start something of its
+    /// own on a press -- a carry, a rubber band -- asks this with its own
+    /// areas, and stands down while the answer is yes.
+    pub fn is_mouse_held_outside(&self, own: &[Area]) -> bool {
+        let digit_id: DigitId = live_id!(mouse).into();
+        self.captures.iter().any(|c| c.digit_id == digit_id && !own.contains(&c.area))
+    }
+
     /// The area that captured the touch with the given uid, if any.
     /// Lets a raw `Event::LongPress` handler check which widget owns the press.
     pub fn touch_capture_area(&self, uid: u64) -> Option<Area> {

@@ -693,6 +693,13 @@ impl ScriptHook for PortalList {
 }
 
 impl PortalList {
+    /// Whether this list was scrolling when the most recent finger hit
+    /// occurred -- a press that stopped a coast, which the list keeps
+    /// from its rows, so nothing on them has had it.
+    pub fn was_scrolling(&self) -> bool {
+        self.was_scrolling
+    }
+
     fn begin(&mut self, cx: &mut Cx2d, walk: Walk) {
         // The outer turtle wraps the inner item turtle (Fill cross-axis, Fit
         // main-axis). If we let `self.layout.align` apply here, a non-zero
@@ -3457,7 +3464,7 @@ impl PortalListRef {
 
     /// Returns whether this PortalList was scrolling when the most recent finger hit occurred.
     pub fn was_scrolling(&self) -> bool {
-        self.borrow().is_some_and(|inner| inner.was_scrolling)
+        self.borrow().is_some_and(|inner| inner.was_scrolling())
     }
 
     /// Returns whether the given `actions` contain an action indicating that this PortalList
