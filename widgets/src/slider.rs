@@ -2310,6 +2310,16 @@ impl Widget for Slider {
                         cx.widget_action(uid, SliderAction::Slide(self.to_external()));
                         cx.widget_action(uid, SliderAction::EndSlide(self.to_external()));
                     }
+                    // The wheel a slider took is spent: a list or a
+                    // panel scrolling by the same wheel behind it -- an
+                    // effect rack's rows -- reads the mark and stays
+                    // where it is, so one notch moves the value and
+                    // never also slides the slider out from under the
+                    // pointer. Marked whenever the slider is the one
+                    // wearing a step, not only when the notch moved it,
+                    // so a slider at its end still holds the panel.
+                    event.set_scroll_handled(Vec2Index::X);
+                    event.set_scroll_handled(Vec2Index::Y);
                 }
             }
             Hit::FingerDown(FingerDownEvent {
