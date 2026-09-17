@@ -3,6 +3,7 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use super::frame_pacer::PacedBackend;
 use super::opengl_wayland::{WaylandPopupWindow, WaylandWindow};
 use super::wayland_state::WaylandState;
 use crate::cx_native::EventFlow;
@@ -94,14 +95,19 @@ pub(crate) struct WaylandCx {
     cx: Rc<RefCell<Cx>>,
     qhandle: Option<wayland_client::QueueHandle<WaylandState>>,
     /// Pace presents with `wl_surface::frame` callbacks: a window is only presented
-    /// once the callback for its previous frame has fired. The EGL swap interval is 0
-    /// on Wayland (see `OpenglCx::swap_interval`), so this is what caps the render
-    /// loop at the display rate, and it keeps redraws of occluded windows (whose
-    /// callbacks the compositor withholds) from wedging the event loop. Disabled by
+    /// while fewer of its presents still await their callback than the frame pacer
+    /// allows (one or two, see `frame_pacer.rs`). The EGL swap interval is 0 on Wayland (see
+    /// `OpenglCx::swap_interval`), so this is what caps the render loop at the
+    /// display rate, and it keeps redraws of occluded windows (whose callbacks the
+    /// compositor withholds) from wedging the event loop. Disabled by
     /// `MAKEPAD_NO_VSYNC` for uncapped benchmarking.
     frame_pacing: bool,
     decoration_preference_override: Option<WaylandDecorationPreference>,
 }
+
+/// How long the Paint arm may skip the app's next-frame and draw events while
+/// every surface waits for the compositor, before it resumes them anyway.
+const FRAME_GATE_STALL_LIMIT: std::time::Duration = std::time::Duration::from_millis(250);
 
 impl WaylandCx {
     pub fn event_loop_impl(cx: Rc<RefCell<Cx>>) {
@@ -122,8 +128,40 @@ impl WaylandCx {
         let display = conn.display();
 
         let display_ptr = conn.backend().display_ptr();
+        // The GPU API is chosen here, at runtime: a Vulkan-capable build tries
+        // Vulkan first and renders with OpenGL ES when no usable hardware device
+        // answers (no driver, only a software rasterizer, ...), so one binary
+        // works everywhere without configuration. `MAKEPAD_GPU` overrides the
+        // choice; see `os::linux::gpu_preference`.
+        // `Some` once Vulkan is rendering, carrying what the frame pacer needs
+        // to know about its swapchain (`CxVulkan::fifo_presents_queue`).
+        #[cfg(use_vulkan)]
+        let vulkan_fifo_presents_queue = {
+            use crate::os::linux::gpu_preference::{gpu_preference, GpuPreference};
+            let preference = gpu_preference();
+            if preference == GpuPreference::OpenGl {
+                None
+            } else {
+                match crate::os::linux::vulkan::CxVulkan::new_wayland(display_ptr.cast()) {
+                    Ok(vulkan) => {
+                        let fifo_presents_queue = vulkan.fifo_presents_queue();
+                        cx.borrow_mut().os.vulkan = Some(vulkan);
+                        Some(fifo_presents_queue)
+                    }
+                    Err(error) if preference == GpuPreference::Vulkan => {
+                        panic!("Wayland Vulkan initialization failed: {error}")
+                    }
+                    Err(error) => {
+                        crate::log!("Vulkan unavailable ({error}); rendering with OpenGL ES");
+                        None
+                    }
+                }
+            }
+        };
         #[cfg(not(use_vulkan))]
-        {
+        let vulkan_fifo_presents_queue: Option<bool> = None;
+        let vulkan_active = vulkan_fifo_presents_queue.is_some();
+        if !vulkan_active {
             cx.borrow_mut().os.opengl_cx = Some(unsafe {
                 OpenglCx::from_egl_platform_display(
                     egl_sys::EGL_PLATFORM_WAYLAND_KHR,
@@ -131,22 +169,23 @@ impl WaylandCx {
                 )
             });
         }
-        #[cfg(use_vulkan)]
-        {
-            cx.borrow_mut().os.vulkan = Some(
-                crate::os::linux::vulkan::CxVulkan::new_wayland(display_ptr.cast())
-                    .unwrap_or_else(|error| panic!("Wayland Vulkan initialization failed: {error}")),
-            );
-        }
+        crate::cx_api::set_active_gpu_backend(if vulkan_active {
+            crate::cx::GpuBackend::Vulkan
+        } else {
+            crate::cx::GpuBackend::OpenGl
+        });
 
-        #[cfg(use_vulkan)]
         if crate::app_main::should_run_stdin_loop_from_env() {
+            // Hosted (stdin-loop) rendering is decided before this loop starts
+            // (see `windowing_backend::event_loop`); a Vulkan-capable build
+            // never reaches this point in that mode.
+            #[cfg(use_vulkan)]
             panic!("Vulkan Wayland uses native windows; launch the standalone executable without --stdin-loop");
-        }
-        #[cfg(not(use_vulkan))]
-        if crate::app_main::should_run_stdin_loop_from_env() {
-            cx.borrow_mut().in_makepad_studio = true;
-            return cx.borrow_mut().stdin_event_loop();
+            #[cfg(not(use_vulkan))]
+            {
+                cx.borrow_mut().in_makepad_studio = true;
+                return cx.borrow_mut().stdin_event_loop();
+            }
         }
 
         let mut event_queue = conn.new_event_queue();
@@ -163,6 +202,10 @@ impl WaylandCx {
                 wayland_state.event_loop_running = false;
             }
         }));
+        state.frame_pacer.set_backend(match vulkan_fifo_presents_queue {
+            Some(fifo_presents_queue) => PacedBackend::Vulkan { fifo_presents_queue },
+            None => PacedBackend::OpenGl,
+        });
         while !state.available() {
             event_queue.roundtrip(&mut state).unwrap();
         }
@@ -334,6 +377,31 @@ impl WaylandCx {
                 cx.call_event_handler(&Event::PopupDismissed(event));
             }
             XlibEvent::Paint => {
+                // Every surface already has as many presents queued at the compositor
+                // as the pacer allows: a frame drawn now could not be presented and would be
+                // drawn again when the callback arrives. Wait for that wake instead
+                // (the callback, like any socket event or timer, ends the select).
+                if self.frame_pacing && state.all_windows_frame_callback_pending() {
+                    // Bounded: a compositor that withholds callbacks (an occluded
+                    // or minimised window) must not freeze the app's clocks. Past
+                    // the bound, next-frame and draw events run again at the
+                    // timer's cadence (presents stay gated per window in
+                    // handle_repaint) and a pending grab is always served.
+                    let since = *state.frame_gate_since.get_or_insert_with(std::time::Instant::now);
+                    let grab_pending = self.cx.borrow().screenshot_requests.len() > 0;
+                    if since.elapsed() < FRAME_GATE_STALL_LIMIT && !grab_pending {
+                        return EventFlow::Wait;
+                    }
+                } else {
+                    state.frame_gate_since = None;
+                }
+                // What this cycle costs the CPU tells the pacer whether OpenGL frames
+                // are slow enough to be started ahead of their callback.
+                let cycle_started = std::time::Instant::now();
+                state.presents_this_cycle = 0;
+                if let Some(opengl_cx) = self.cx.borrow().os.opengl_cx.as_ref() {
+                    opengl_cx.swap_wait.set(std::time::Duration::ZERO);
+                }
                 {
                     let mut cx = self.cx.borrow_mut();
                     let time_now = state.time_now();
@@ -342,8 +410,7 @@ impl WaylandCx {
                     }
                     if cx.need_redrawing() {
                         cx.call_draw_event(time_now);
-                        #[cfg(not(use_vulkan))]
-                        {
+                        if cx.os.opengl_cx.is_some() {
                             cx.os.opengl_cx.as_ref().unwrap().make_current();
                             cx.opengl_compile_shaders();
                         }
@@ -352,6 +419,24 @@ impl WaylandCx {
                 // ok here we send out to all our childprocesses
 
                 self.handle_repaint(state);
+                if state.presents_this_cycle != 0 {
+                    let swap_wait = self
+                        .cx
+                        .borrow()
+                        .os
+                        .opengl_cx
+                        .as_ref()
+                        .map_or(std::time::Duration::ZERO, |opengl_cx| opengl_cx.swap_wait.get());
+                    let cost = cycle_started.elapsed().saturating_sub(swap_wait);
+                    state.frame_pacer.frame_presented(cost);
+                    crate::trace!(
+                        "wl.pacer",
+                        "frame cost_ms={:.2} swap_wait_ms={:.2} {}",
+                        cost.as_secs_f64() * 1000.0,
+                        swap_wait.as_secs_f64() * 1000.0,
+                        state.frame_pacer.describe()
+                    );
+                }
 
                 {
                     let cx = self.cx.borrow();
@@ -522,8 +607,7 @@ impl WaylandCx {
                     if cx.os.video_players.is_empty() {
                         poll_pending_gstreamer_teardowns();
                     } else {
-                        #[cfg(not(use_vulkan))]
-                        {
+                        if cx.os.opengl_cx.is_some() {
                         cx.os.opengl_cx.as_ref().unwrap().make_current();
                         let gl: *const crate::os::linux::gl_sys::LibGl =
                             &cx.os.opengl_cx.as_ref().unwrap().libgl;
@@ -547,9 +631,8 @@ impl WaylandCx {
                         for event in video_events {
                             cx.call_event_handler(&event);
                         }
-                        }
-                        #[cfg(use_vulkan)]
-                        {
+                        } else {
+                            // Vulkan: no video texture import yet, audio-only events.
                             let mut players = std::mem::take(&mut cx.os.video_players);
                             for player in players.values_mut() {
                                 for event in crate::os::linux::linux_video_player::collect_linux_audio_player_events(player) {
@@ -738,8 +821,7 @@ impl WaylandCx {
             }
             match op {
                 CxOsOp::CreateWindow(window_id) => {
-                    #[cfg(not(use_vulkan))]
-                    let gl_cx = cx.os.opengl_cx.as_ref().unwrap();
+                    let gl_cx = cx.os.opengl_cx.as_ref();
                     let compositor = state.compositor.as_ref().unwrap();
                     let wm_base = state.wm_base.as_ref().unwrap();
                     let window = &cx.windows[window_id];
@@ -763,7 +845,6 @@ impl WaylandCx {
                         state.icon_manager.as_ref(),
                         state.shm.as_ref(),
                         self.qhandle.as_ref().unwrap(),
-                        #[cfg(not(use_vulkan))]
                         gl_cx,
                         create_inner_size,
                         create_position,
@@ -801,8 +882,7 @@ impl WaylandCx {
                     size,
                     grab_keyboard,
                 } => {
-                    #[cfg(not(use_vulkan))]
-                    let gl_cx = cx.os.opengl_cx.as_ref().unwrap();
+                    let gl_cx = cx.os.opengl_cx.as_ref();
                     let compositor = state.compositor.as_ref().unwrap();
                     let wm_base = state.wm_base.as_ref().unwrap();
                     if let Some(parent_xdg_surface) = state.xdg_surface_for_window(parent_window_id)
@@ -819,7 +899,6 @@ impl WaylandCx {
                             state.scale_manager.as_ref(),
                             state.viewporter.as_ref(),
                             self.qhandle.as_ref().unwrap(),
-                            #[cfg(not(use_vulkan))]
                             gl_cx,
                             size,
                             position,
@@ -1058,14 +1137,12 @@ impl WaylandCx {
                 // Mobile-only ops (soft keyboard, clipboard UI); no-op on desktop
                 CxOsOp::SyncImeState { .. } => {}
                 CxOsOp::HideClipboardActions => {}
-                #[cfg(use_vulkan)]
-                CxOsOp::PrepareVideoPlayback(video_id, ..) => {
+                CxOsOp::PrepareVideoPlayback(video_id, ..) if cx.os.vulkan_active() => {
                     cx.call_event_handler(&Event::VideoDecodingError(VideoDecodingErrorEvent {
                         video_id,
                         error: "Linux Vulkan video texture import is not implemented".to_owned(),
                     }));
                 }
-                #[cfg(not(use_vulkan))]
                 CxOsOp::PrepareVideoPlayback(
                     video_id,
                     source,
@@ -1286,8 +1363,9 @@ impl WaylandCx {
         if !cx.any_passes_dirty() && !cx.demo_time_repaint {
             return;
         }
-        #[cfg(not(use_vulkan))]
-        cx.os.opengl_cx.as_ref().unwrap().make_current();
+        if let Some(opengl_cx) = cx.os.opengl_cx.as_ref() {
+            opengl_cx.make_current();
+        }
         let mut passes_todo = Vec::new();
         cx.compute_pass_repaint_order(&mut passes_todo);
         cx.repaint_id += 1;
@@ -1319,12 +1397,7 @@ impl WaylandCx {
                         if !window.configured {
                             continue;
                         }
-                        #[cfg(not(use_vulkan))]
-                        if !window.prepare_buffer_size(cx.os.opengl_cx.as_ref().unwrap()) {
-                            continue;
-                        }
-                        #[cfg(use_vulkan)]
-                        if !window.prepare_buffer_size() {
+                        if !window.prepare_buffer_size(cx.os.opengl_cx.as_ref()) {
                             continue;
                         }
                         window.prepare_csd_shadow();
@@ -1363,17 +1436,9 @@ impl WaylandCx {
 
                         // Request the next frame callback before the swap; the swap
                         // performs the commit that carries the request.
-                        #[cfg(not(use_vulkan))]
-                        {
-                            if self.frame_pacing {
-                                window.base_surface.frame(self.qhandle.as_ref().unwrap(), window_id);
-                            }
-                            presented = cx.draw_pass_to_window(
-                                *draw_pass_id, window.egl_surface, pix_width, pix_height,
-                            );
-                        }
+                        let vulkan_active = cx.os.vulkan_active();
                         #[cfg(use_vulkan)]
-                        {
+                        if vulkan_active {
                             let mut vulkan = cx.os.vulkan.take().expect("Vulkan renderer initialized");
                             let prepared = vulkan.ensure_wayland_window(
                                 window_id, window.base_surface.id().as_ptr().cast(),
@@ -1392,18 +1457,21 @@ impl WaylandCx {
                                 Err(error) => panic!("Wayland Vulkan rendering failed: {error}"),
                             }
                         }
+                        if !vulkan_active {
+                            if self.frame_pacing {
+                                window.base_surface.frame(self.qhandle.as_ref().unwrap(), window_id);
+                            }
+                            presented = cx.draw_pass_to_window(
+                                *draw_pass_id, window.egl_surface, pix_width, pix_height,
+                            );
+                        }
                     } else if let Some(window) =
                         state.popups.iter_mut().find(|w| w.window_id == window_id)
                     {
                         if !window.configured {
                             continue;
                         }
-                        #[cfg(not(use_vulkan))]
-                        if !window.prepare_buffer_size(cx.os.opengl_cx.as_ref().unwrap()) {
-                            continue;
-                        }
-                        #[cfg(use_vulkan)]
-                        if !window.prepare_buffer_size() {
+                        if !window.prepare_buffer_size(cx.os.opengl_cx.as_ref()) {
                             continue;
                         }
                         if let Some(viewport) = window.viewport.as_ref() {
@@ -1421,17 +1489,9 @@ impl WaylandCx {
                             window.window_geom.inner_size.x * window.window_geom.dpi_factor;
                         let pix_height =
                             window.window_geom.inner_size.y * window.window_geom.dpi_factor;
-                        #[cfg(not(use_vulkan))]
-                        {
-                            if self.frame_pacing {
-                                window.base_surface.frame(self.qhandle.as_ref().unwrap(), window_id);
-                            }
-                            presented = cx.draw_pass_to_window(
-                                *draw_pass_id, window.egl_surface, pix_width, pix_height,
-                            );
-                        }
+                        let vulkan_active = cx.os.vulkan_active();
                         #[cfg(use_vulkan)]
-                        {
+                        if vulkan_active {
                             let mut vulkan = cx.os.vulkan.take().expect("Vulkan renderer initialized");
                             let prepared = vulkan.ensure_wayland_window(
                                 window_id, window.base_surface.id().as_ptr().cast(),
@@ -1450,6 +1510,14 @@ impl WaylandCx {
                                 Err(error) => panic!("Wayland Vulkan rendering failed: {error}"),
                             }
                         }
+                        if !vulkan_active {
+                            if self.frame_pacing {
+                                window.base_surface.frame(self.qhandle.as_ref().unwrap(), window_id);
+                            }
+                            presented = cx.draw_pass_to_window(
+                                *draw_pass_id, window.egl_surface, pix_width, pix_height,
+                            );
+                        }
                     }
                     // Only gate on the callback when a commit actually happened; a
                     // failed swap sends no commit, so its callback would never fire.
@@ -1459,10 +1527,9 @@ impl WaylandCx {
                 }
                 CxDrawPassParent::DrawPass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    #[cfg(not(use_vulkan))]
-                    cx.draw_pass_to_texture(*draw_pass_id, None);
+                    let vulkan_active = cx.os.vulkan_active();
                     #[cfg(use_vulkan)]
-                    {
+                    if vulkan_active {
                         let mut vulkan = cx.os.vulkan.take().expect("Vulkan renderer initialized");
                         let result = vulkan.draw_pass_to_texture(&mut cx, *draw_pass_id);
                         cx.os.vulkan = Some(vulkan);
@@ -1470,18 +1537,23 @@ impl WaylandCx {
                             panic!("Vulkan offscreen rendering failed: {error}");
                         }
                     }
+                    if !vulkan_active {
+                        cx.draw_pass_to_texture(*draw_pass_id, None);
+                    }
                 }
                 CxDrawPassParent::None => {
-                    #[cfg(not(use_vulkan))]
-                    cx.draw_pass_to_texture(*draw_pass_id, None);
+                    let vulkan_active = cx.os.vulkan_active();
                     #[cfg(use_vulkan)]
-                    {
+                    if vulkan_active {
                         let mut vulkan = cx.os.vulkan.take().expect("Vulkan renderer initialized");
                         let result = vulkan.draw_pass_to_texture(&mut cx, *draw_pass_id);
                         cx.os.vulkan = Some(vulkan);
                         if let Err(error) = result {
                             panic!("Vulkan offscreen rendering failed: {error}");
                         }
+                    }
+                    if !vulkan_active {
+                        cx.draw_pass_to_texture(*draw_pass_id, None);
                     }
                 }
             }

@@ -147,12 +147,25 @@ impl DesktopInit {
         })
     }
 
-    fn devices(&self) -> Result<Vec<vk::PhysicalDevice>, String> {
+    /// `allow_cpu`: a CPU rasterizer (lavapipe ships with the Mesa drivers on
+    /// most distributions) is a working Vulkan device that renders a desktop
+    /// window at a few frames per second. The presenting Wayland path passes
+    /// false unless Vulkan was insisted on, and falls back to OpenGL ES; the
+    /// offscreen (hosted) and direct renderers have no other API and take it.
+    fn devices(&self, allow_cpu: bool) -> Result<Vec<vk::PhysicalDevice>, String> {
         let instance = self.instance.as_ref().unwrap();
         let mut devices = unsafe { instance.enumerate_physical_devices() }
             .map_err(|e| format!("enumerate Vulkan devices: {e:?}"))?;
         devices.retain(|device| {
             let properties = unsafe { instance.get_physical_device_properties(*device) };
+            if !allow_cpu && properties.device_type == vk::PhysicalDeviceType::CPU {
+                let name = unsafe { CStr::from_ptr(properties.device_name.as_ptr()) };
+                crate::log!(
+                    "Vulkan: skipping software device {:?} (MAKEPAD_GPU=vulkan uses it anyway)",
+                    name.to_string_lossy()
+                );
+                return false;
+            }
             properties.api_version >= vk::API_VERSION_1_1
                 && unsafe { instance.enumerate_device_extension_properties(*device) }
                     .map(|extensions| {
@@ -179,7 +192,7 @@ impl DesktopInit {
         #[cfg(linux_direct)]
         {
             desktop.gpu.devices = self
-                .devices()?
+                .devices(true)?
                 .into_iter()
                 .map(|device| gpu_identity(instance, device))
                 .collect();
@@ -475,7 +488,7 @@ impl CxVulkan {
     pub(super) fn new_offscreen_on(uuid: Option<[u8; 16]>) -> Result<Self, String> {
         let init = DesktopInit::new(&[])?;
         let instance = init.instance.as_ref().unwrap();
-        let mut devices = init.devices()?;
+        let mut devices = init.devices(true)?;
         // An explicit pin is a contract: a frame rendered on any other GPU
         // cannot be shared with the compositor that asked for this one, so a
         // malformed or unavailable pin is an error, never a silent fallback.
@@ -515,7 +528,9 @@ impl CxVulkan {
         let instance = init.instance.as_ref().unwrap();
         let loader =
             ash::khr::wayland_surface::Instance::new(init.entry.as_ref().unwrap(), instance);
-        for physical_device in init.devices()? {
+        let allow_cpu = crate::os::linux::gpu_preference::gpu_preference()
+            == crate::os::linux::gpu_preference::GpuPreference::Vulkan;
+        for physical_device in init.devices(allow_cpu)? {
             let queues =
                 unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
             for (index, queue) in queues.iter().enumerate() {
@@ -544,6 +559,47 @@ impl CxVulkan {
             }
         }
         Err("No Vulkan 1.1 device with Wayland graphics/presentation support".into())
+    }
+
+    /// Whether this driver's FIFO swapchain queues a present behind the
+    /// previous one (through the compositor's `fifo-v1`) instead of waiting for
+    /// the previous present's frame callback inside `vkQueuePresentKHR`. Mesa
+    /// before 25 always waits there, with no timeout, so a second present
+    /// issued to an occluded window would hang the event loop; see
+    /// `wayland/frame_pacer.rs`. Drivers this cannot identify, and NVIDIA
+    /// releases older than the one this was verified on, answer false.
+    pub fn fifo_presents_queue(&self) -> bool {
+        let has_driver_properties = unsafe {
+            self.instance
+                .enumerate_device_extension_properties(self.physical_device)
+        }
+        .is_ok_and(|extensions| {
+            extensions.iter().any(|extension| {
+                extension.extension_name_as_c_str() == Ok(vk::KHR_DRIVER_PROPERTIES_NAME)
+            })
+        });
+        if !has_driver_properties {
+            return false;
+        }
+        let mut driver = vk::PhysicalDeviceDriverProperties::default();
+        let mut properties = vk::PhysicalDeviceProperties2::default().push_next(&mut driver);
+        unsafe {
+            self.instance
+                .get_physical_device_properties2(self.physical_device, &mut properties)
+        };
+        let driver_version = properties.properties.driver_version;
+        if driver.driver_id == vk::DriverId::NVIDIA_PROPRIETARY {
+            // NVIDIA packs its major version into the top ten bits.
+            return driver_version >> 22 >= 580;
+        }
+        driver
+            .driver_info_as_c_str()
+            .ok()
+            .and_then(|info| info.to_str().ok())
+            .and_then(|info| info.strip_prefix("Mesa "))
+            .and_then(|version| version.split('.').next())
+            .and_then(|major| major.parse::<u32>().ok())
+            .is_some_and(|major| major >= 25)
     }
 
     fn take_desktop_window(&mut self) -> DesktopWindow {
@@ -2085,7 +2141,7 @@ impl CxVulkan {
         let (physical_device, queue, desktop_extent, desktop) = {
             let instance = init.instance.as_ref().unwrap();
             let entry = init.entry.as_ref().unwrap();
-            let devices = init.devices()?;
+            let devices = init.devices(true)?;
             let mut direct = DirectState {
                 physical_device: vk::PhysicalDevice::null(),
                 display_loader: ash::khr::display::Instance::new(entry, instance),

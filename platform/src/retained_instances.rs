@@ -122,6 +122,7 @@ pub struct RetainedAllocationBudget {
     metadata_disposals: Vec<Arc<RetainedAllocationRecord>>,
     collect_cursor: usize,
     collected_frame: Option<u64>,
+    collected_backlog_frame: Option<u64>,
     refusals: usize,
     cache_pressure: std::cell::Cell<bool>,
     pending_backend_retirements: usize,
@@ -259,6 +260,7 @@ impl RetainedAllocationBudget {
             metadata_disposals: Vec::with_capacity(4096),
             collect_cursor: 0,
             collected_frame: None,
+            collected_backlog_frame: None,
             refusals: 0,
             cache_pressure: std::cell::Cell::new(false),
             pending_backend_retirements: 0,
@@ -361,6 +363,24 @@ impl RetainedAllocationBudget {
             } else {
                 self.collect_cursor += 1;
             }
+        }
+    }
+    /// Extra bounded sweeps while released records are queued. Every upload of
+    /// a draw item's instances leaves one released record behind and a pan
+    /// re-uploads hundreds of items per frame, so one 64-record sweep per
+    /// frame lets the backlog (and the retirement repaints it asks for) outlast
+    /// the interaction by tens of seconds. Each call stays within `collect`'s
+    /// bound; `max_calls` caps the frame's total.
+    pub fn collect_backlog(&mut self, frame: u64, completed: u64, max_calls: usize) {
+        if self.collected_backlog_frame == Some(frame) {
+            return;
+        }
+        self.collected_backlog_frame = Some(frame);
+        for _ in 0..max_calls {
+            if self.released.load(Ordering::Acquire) == 0 {
+                break;
+            }
+            self.collect(completed);
         }
     }
     pub fn collect_for_frame(&mut self, frame: u64, completed: u64) {
@@ -580,6 +600,31 @@ impl InstanceUploadPlan {
     }
 }
 
+/// Segment identity for `upload_plan`: the storage allocation's address.
+fn storage_key(segment: &InstanceSegment) -> usize {
+    Arc::as_ptr(&segment.storage) as usize
+}
+
+/// Addresses are already unique; one multiply spreads them over the table's
+/// control bits. `upload_plan` fills a map of thousands of these per call.
+#[derive(Default)]
+struct StorageKeyHasher(u64);
+impl std::hash::Hasher for StorageKeyHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.0 = (self.0 ^ byte as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        }
+    }
+    fn write_usize(&mut self, value: usize) {
+        self.0 = (value as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+}
+type StorageMap =
+    HashMap<usize, (usize, usize), std::hash::BuildHasherDefault<StorageKeyHasher>>;
+
 #[derive(Clone, Debug)]
 pub struct RetainedInstances(Arc<InstancePublication>);
 /// Observes storage held by independently retained draw recordings without
@@ -759,6 +804,17 @@ impl RetainedInstances {
     /// Diff immutable identities and lengths, never the float payloads. A
     /// repeated segment may reuse any valid previous occurrence; an occurrence
     /// at the same offset is preferred when it covers the reusable range.
+    ///
+    /// Identity is the storage allocation: an id is minted once per
+    /// `InstanceSegmentStorage`, so two segments share an id exactly when they
+    /// share the `Arc`. Comparing the pointers keeps this off the heap, which
+    /// matters because renderers call it for every changed buffer every frame.
+    /// A large map republishes thousands of segments of which a handful moved;
+    /// reading each id through its `Arc` and SipHashing it into a map cost
+    /// about 0.1 to 1.5 ms per plan. Segments that kept their slot and offset
+    /// now settle with three compares. The few that did not are looked up by
+    /// scanning pointers, and only a publication that moved many builds the
+    /// by-identity map, keyed by pointer with a multiplicative hash.
     pub fn upload_plan(&self, previous: &Self) -> InstanceUploadPlan {
         let mut result = InstanceUploadPlan::default();
         if self.slots() != previous.slots() {
@@ -769,24 +825,75 @@ impl RetainedInstances {
             result.copy(0..self.float_len(), 0);
             return result;
         }
-        let mut previous_segments = HashMap::with_capacity(previous.segments().len());
-        for (segment, &offset) in previous.0.segments.iter().zip(previous.0.offsets.iter()) {
-            let longest: &mut (usize, usize) = previous_segments
-                .entry(segment.id())
-                .or_insert((offset, segment.len));
-            if segment.len > longest.1 {
-                *longest = (offset, segment.len);
+        let previous_segments_list = &previous.0.segments;
+        let previous_offsets = &previous.0.offsets;
+        let mut previous_segments: Option<StorageMap> = None;
+        const SCANNED_LOOKUPS: usize = 8;
+        let mut unplaced = 0usize;
+        for (index, (segment, &destination)) in
+            self.0.segments.iter().zip(self.0.offsets.iter()).enumerate()
+        {
+            // Same storage, same offset, and at least as long as before: the
+            // bytes are already in place, whichever other occurrences exist.
+            if let (Some(before), Some(&before_offset)) =
+                (previous_segments_list.get(index), previous_offsets.get(index))
+            {
+                if before_offset == destination
+                    && before.len >= segment.len
+                    && Arc::ptr_eq(&before.storage, &segment.storage)
+                {
+                    result.copy(destination..destination + segment.len, destination);
+                    continue;
+                }
             }
-        }
-        for (segment, &destination) in self.0.segments.iter().zip(self.0.offsets.iter()) {
-            let Some(&(mut source, previous_len)) = previous_segments.get(&segment.id()) else {
+            // The longest previous occurrence of this storage, the first one
+            // winning a tie. The first few lookups scan the list by pointer,
+            // which is cheaper than hashing thousands of entries to answer a
+            // handful of questions; a publication that moved more than that
+            // pays for the map once.
+            unplaced += 1;
+            let longest = if unplaced <= SCANNED_LOOKUPS {
+                let mut longest: Option<(usize, usize)> = None;
+                for (before, &offset) in previous_segments_list.iter().zip(previous_offsets.iter())
+                {
+                    if Arc::ptr_eq(&before.storage, &segment.storage)
+                        && longest.is_none_or(|(_, len)| before.len > len)
+                    {
+                        longest = Some((offset, before.len));
+                    }
+                }
+                longest
+            } else {
+                previous_segments
+                    .get_or_insert_with(|| {
+                        let mut map = StorageMap::with_capacity_and_hasher(
+                            previous_segments_list.len(),
+                            Default::default(),
+                        );
+                        for (before, &offset) in
+                            previous_segments_list.iter().zip(previous_offsets.iter())
+                        {
+                            let longest: &mut (usize, usize) =
+                                map.entry(storage_key(before)).or_insert((offset, before.len));
+                            if before.len > longest.1 {
+                                *longest = (offset, before.len);
+                            }
+                        }
+                        map
+                    })
+                    .get(&storage_key(segment))
+                    .copied()
+            };
+            let Some((mut source, previous_len)) = longest else {
                 result.write(destination..destination + segment.len);
                 continue;
             };
             let reusable = previous_len.min(segment.len);
-            if let Ok(index) = previous.0.offsets.binary_search(&destination) {
-                let at_destination = &previous.0.segments[index];
-                if at_destination.id() == segment.id() && at_destination.len >= reusable {
+            if let Ok(index) = previous_offsets.binary_search(&destination) {
+                let at_destination = &previous_segments_list[index];
+                if Arc::ptr_eq(&at_destination.storage, &segment.storage)
+                    && at_destination.len >= reusable
+                {
                     source = destination;
                 }
             }

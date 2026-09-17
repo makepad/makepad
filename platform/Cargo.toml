@@ -10,9 +10,15 @@ repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "ue5pTU0e_KaMiNqLQpo2CaD-WeQ="
 
 [features]
-# Desktop Linux renders with Vulkan instead of OpenGL ES 3. An app opts in with
-# `makepad-platform = { features = ["vulkan"] }` under a Linux target table;
-# `MAKEPAD=gl` at build time overrides it back to OpenGL (see build.rs).
+# Desktop Linux gains the Vulkan renderer next to OpenGL ES 3. An app opts in
+# with `makepad-platform = { features = ["vulkan"] }` under a Linux target
+# table. Such a build picks the API when it starts: Vulkan on Wayland when a
+# hardware device answers, OpenGL ES otherwise (no driver, only a software
+# rasterizer, an X11 session), and `MAKEPAD_GPU` forces either one (see
+# os/linux/gpu_preference.rs). The hosted (`--stdin-loop`) and direct
+# renderers of such a build stay Vulkan-only, and Vulkan has no video texture
+# import yet, which is why this is not a default feature. `MAKEPAD=gl` at
+# build time overrides it back to an OpenGL-only binary (see build.rs).
 vulkan = []
 
 # AppKit cursor creation must run on the process main thread.

@@ -66,6 +66,14 @@ extern "C" {
     fn ANativeWindow_acquire(window: *mut ndk_sys::ANativeWindow);
 }
 
+/// Bound on waiting for the previous window frame's submission on Linux.
+#[cfg(target_os = "linux")]
+const FRAME_FENCE_WAIT_NS: u64 = 1_000_000_000;
+/// Bound on waiting for a FIFO swapchain image on Linux. The frame-callback
+/// pacing in `linux_wayland.rs` normally keeps one image free; this only
+/// limits how long a present can block when the compositor holds them all.
+#[cfg(target_os = "linux")]
+const SWAPCHAIN_ACQUIRE_WAIT_NS: u64 = 100_000_000;
 #[cfg(target_os = "android")]
 const XR_FRAGMENT_DENSITY_MAP_FORMAT: vk::Format = vk::Format::R8G8_UNORM;
 #[cfg(target_os = "android")]
@@ -195,6 +203,11 @@ struct FrameResources {
     render_passes: Vec<vk::RenderPass>,
     packet_buffer: Option<VulkanBuffer>,
     packet_buffer_used: vk::DeviceSize,
+    /// Host address of `packet_buffer`'s whole mapping (0 when unmapped). The
+    /// arena stays mapped for its lifetime so packets memcpy straight into it
+    /// instead of paying a vkMapMemory/vkUnmapMemory pair each. Kept as an
+    /// address rather than a pointer so the struct stays `Default` and `Send`.
+    packet_buffer_mapped: usize,
 }
 
 #[cfg(target_os = "android")]
@@ -1413,10 +1426,12 @@ impl CxVulkan {
                 device.free_memory(buffer.memory, None);
             }
             if let Some(buffer) = frame_resources.packet_buffer.take() {
+                // Freeing the memory unmaps the arena's persistent mapping.
                 device.destroy_buffer(buffer.buffer, None);
                 device.free_memory(buffer.memory, None);
             }
         }
+        frame_resources.packet_buffer_mapped = 0;
         frame_resources.retained.clear();
         frame_resources.retained_transfers = None;
         frame_resources.retained_updates.clear();
@@ -1468,11 +1483,22 @@ impl CxVulkan {
             if let Some(old_buffer) = self.frame_resources.packet_buffer.take() {
                 // Earlier draws in this command buffer still reference this
                 // allocation. Retire it with the frame, after its fence, not
-                // while recording the draw that grows the arena.
+                // while recording the draw that grows the arena. Freeing its
+                // memory later unmaps it implicitly.
                 self.frame_resources.buffers.push(old_buffer);
+                self.frame_resources.packet_buffer_mapped = 0;
             }
             let new_size = required_size.next_power_of_two().max(64 * 1024);
             let buffer = self.create_host_buffer(usage, new_size)?;
+            // Map the whole arena once; packets write through this mapping.
+            // Host-coherent memory needs no flush. If mapping fails, packets
+            // fall back to mapping their own span.
+            self.frame_resources.packet_buffer_mapped = unsafe {
+                self.device
+                    .map_memory(buffer.memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
+                    .map(|ptr| ptr as usize)
+                    .unwrap_or(0)
+            };
             self.frame_resources.packet_buffer = Some(buffer);
             self.frame_resources.packet_buffer_used = 0;
             offset = 0;
@@ -2918,6 +2944,7 @@ impl CxVulkan {
         if self.in_flight_fence == vk::Fence::null() {
             return Err("Vulkan frame synchronization is unavailable".into());
         }
+        let frame_started = Instant::now();
         // Direct display: the main target is a sampled composition image that
         // every acquired connector presents independently.
         #[cfg(all(target_os = "linux", linux_direct))]
@@ -2967,16 +2994,24 @@ impl CxVulkan {
         };
 
         unsafe {
+            // The single command buffer is re-recorded once the previous frame's
+            // GPU work is done. Wait for it, bounded: polling here and returning
+            // `Ok(false)` made the event loop spin (re-running the app's
+            // next-frame and draw events) for the whole GPU time of every frame.
+            // A frame that is still running after the bound is left dirty as
+            // before, so a wedged device cannot hang the UI thread.
             #[cfg(target_os = "linux")]
-            if !self.device.get_fence_status(self.in_flight_fence)
-                .map_err(|e| format!("get_fence_status failed: {e:?}"))? {
-                return Ok(false);
+            match self.device.wait_for_fences(&[self.in_flight_fence], true, FRAME_FENCE_WAIT_NS) {
+                Ok(()) => {}
+                Err(vk::Result::TIMEOUT) => return Ok(false),
+                Err(e) => return Err(format!("wait_for_fences failed: {e:?}")),
             }
             #[cfg(target_os = "android")]
             self.device
                 .wait_for_fences(&[self.in_flight_fence], true, u64::MAX)
                 .map_err(|e| format!("wait_for_fences failed: {e:?}"))?;
         }
+        let fence_waited = Instant::now();
         // The fence proved the previous submission complete: every receipt
         // and delivery proof marked with that repaint may now read
         // `completed` (the frontier this backend never advanced before).
@@ -2986,12 +3021,27 @@ impl CxVulkan {
         #[cfg(target_os = "linux")]
         self.profile.collect_pending(&self.device);
 
+        // The fence proved the previous frame complete, so its packet arena and
+        // descriptor pools can be reused in place (the offscreen and direct
+        // paths already do this) instead of being freed and re-allocated with
+        // several vkAllocateMemory/vkCreateDescriptorPool calls every frame.
+        #[cfg(target_os = "linux")]
+        self.recycle_completed_frame_resources()?;
+        #[cfg(not(target_os = "linux"))]
         self.destroy_frame_resources();
 
+        // FIFO presentation hands an image back as soon as the compositor releases
+        // one; on Linux wait for that (bounded) instead of returning `NOT_READY`,
+        // which left the pass dirty and the event loop spinning through draw
+        // events until an image freed up.
+        #[cfg(target_os = "linux")]
+        let acquire_timeout_ns = SWAPCHAIN_ACQUIRE_WAIT_NS;
+        #[cfg(not(target_os = "linux"))]
+        let acquire_timeout_ns = u64::MAX;
         let (image_index, acquire_suboptimal) = match unsafe {
             self.swapchain_loader.acquire_next_image(
                 self.swapchain,
-                if cfg!(target_os = "linux") { 0 } else { u64::MAX },
+                acquire_timeout_ns,
                 self.image_available_semaphore,
                 vk::Fence::null(),
             )
@@ -3011,6 +3061,7 @@ impl CxVulkan {
             }
         };
         self.acquired_image_pending = true;
+        let image_acquired = Instant::now();
         if self.swapchain_images.get(image_index as usize).is_none() {
             return Err(format!("invalid swapchain image index {image_index}"));
         }
@@ -3247,6 +3298,7 @@ impl CxVulkan {
             .swapchains(&swapchains)
             .image_indices(&image_indices);
 
+        let recorded = Instant::now();
         before_present();
         let present_suboptimal = match unsafe {
             self.swapchain_loader
@@ -3300,7 +3352,17 @@ impl CxVulkan {
             self.recreate_swapchain()?;
         }
 
-        crate::trace!("gpu.present", "present time={:.6}", crate::cx_api::CxOsApi::seconds_since_app_start(cx));
+        crate::trace!(
+            "gpu.present",
+            "present time={:.6} fence_wait_ms={:.3} acquire_wait_ms={:.3} record_ms={:.3} present_ms={:.3} packets={} instances={}",
+            crate::cx_api::CxOsApi::seconds_since_app_start(cx),
+            fence_waited.duration_since(frame_started).as_secs_f64() * 1000.0,
+            image_acquired.duration_since(fence_waited).as_secs_f64() * 1000.0,
+            recorded.duration_since(image_acquired).as_secs_f64() * 1000.0,
+            recorded.elapsed().as_secs_f64() * 1000.0,
+            draw_stats.packets_recorded,
+            draw_stats.instances,
+        );
         cx.passes[draw_pass_id].paint_dirty = false;
         // The bake transaction's paint receipt, after all selected ranges.
         cx.passes[draw_pass_id].painted_serial = cx.repaint_id;
@@ -6587,16 +6649,20 @@ impl CxVulkan {
             packet_base_alignment,
         )?;
         unsafe {
-            let mapped = self
-                .device
-                .map_memory(
-                    packet_buffer.memory,
-                    packet_base_offset,
-                    packet_span_size,
-                    vk::MemoryMapFlags::empty(),
-                )
-                .map_err(|e| format!("map_memory(packet_buffer) failed: {e:?}"))?;
-            let mapped_ptr = mapped as *mut u8;
+            let persistent = self.frame_resources.packet_buffer_mapped;
+            let mapped_ptr = if persistent != 0 {
+                (persistent as *mut u8).add(packet_base_offset as usize)
+            } else {
+                self.device
+                    .map_memory(
+                        packet_buffer.memory,
+                        packet_base_offset,
+                        packet_span_size,
+                        vk::MemoryMapFlags::empty(),
+                    )
+                    .map_err(|e| format!("map_memory(packet_buffer) failed: {e:?}"))?
+                    as *mut u8
+            };
             if instances_bytes != 0 {
                 std::ptr::copy_nonoverlapping(
                     packet.instances.as_ptr() as *const u8,
@@ -6611,7 +6677,9 @@ impl CxVulkan {
                     uniform.size as usize,
                 );
             }
-            self.device.unmap_memory(packet_buffer.memory);
+            if persistent == 0 {
+                self.device.unmap_memory(packet_buffer.memory);
+            }
         }
         self.xr_packet_buffer_count_this_frame += 1;
         self.xr_packet_buffer_bytes_this_frame += packet_span_size as u64;
@@ -7944,7 +8012,14 @@ impl CxVulkan {
             return Ok(());
         }
 
-        let mut image_count = capabilities.min_image_count.saturating_add(1);
+        // Desktop Linux: one image on screen, up to two queued behind the
+        // frame-callback pacing (`linux_wayland.rs`, two presents in flight)
+        // and one free to record into while the compositor is still releasing
+        // the oldest; with only one spare, acquiring blocked ~2 ms per frame
+        // waiting for that release. Android paces differently and keeps one
+        // spare, so it does not pay for an extra colour and depth target.
+        let spare_images = if cfg!(target_os = "linux") { 2 } else { 1 };
+        let mut image_count = capabilities.min_image_count.saturating_add(spare_images);
         if capabilities.max_image_count > 0 {
             image_count = image_count.min(capabilities.max_image_count);
         }

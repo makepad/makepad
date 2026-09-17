@@ -3571,6 +3571,13 @@ impl CxOs {
         &self.display.as_ref().unwrap().libgl
     }
 
+    /// True while the Vulkan renderer exists. A Vulkan build whose
+    /// `CxVulkan::new` failed renders with OpenGL ES and answers false.
+    #[cfg(use_vulkan)]
+    pub(crate) fn vulkan_active(&self) -> bool {
+        self.vulkan.is_some()
+    }
+
     /// Returns `true` only when it is currently safe to issue draw / swap-buffer
     /// calls against the active backend's window surface.
     ///

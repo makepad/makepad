@@ -73,7 +73,17 @@ impl DrawVars {
             let mut output = ShaderOutput::default();
             output.backend = ShaderBackend::Glsl;
             output.const_table = vm.host.cx().shader_const_table_mode();
-            output.use_vulkan = cfg!(use_vulkan);
+            // Shader source for the API this process renders with, not the one
+            // the binary was built with: a Vulkan-capable build that fell back
+            // to OpenGL ES compiles plain GLSL.
+            #[cfg(use_vulkan)]
+            {
+                output.use_vulkan = vm.host.cx().os.vulkan_active();
+            }
+            #[cfg(not(use_vulkan))]
+            {
+                output.use_vulkan = false;
+            }
             output.pre_collect_rust_instance_io(vm, io_self);
             output.pre_collect_shader_io(vm, io_self);
 
@@ -123,8 +133,10 @@ impl DrawVars {
             let mut compiled_vulkan_shader: [Option<CxVulkanShaderBinary>;
                 NUM_SHADER_VARIANTS] = std::array::from_fn(|_| None);
 
+            // Only while this process renders with Vulkan; a Vulkan-capable
+            // build that fell back to OpenGL ES compiles GLSL below instead.
             #[cfg(use_vulkan)]
-            {
+            if vm.host.cx().os.vulkan_active() {
                 for (shader_variant, xr_multiview) in [false, true].into_iter().enumerate() {
                     match crate::os::linux::vulkan_naga::compile_draw_shader_wgsl_to_spirv(
                         vm,
@@ -394,6 +406,15 @@ impl Cx {
                 .completed
                 .load(std::sync::atomic::Ordering::Acquire),
         );
+        self.draw_lists.1.allocations.collect_backlog(
+            self.repaint_id,
+            self.textures
+                .1
+                .serials
+                .completed
+                .load(std::sync::atomic::Ordering::Acquire),
+            8,
+        );
         let pool = self.task_pool();
         let gl = self.os.gl();
         if self
@@ -406,15 +427,28 @@ impl Cx {
                 std::mem::take(&mut os.inst_vb)
             })
         {
+            crate::trace!("gl.repaint", "retirements pending: {}", self.draw_lists.instance_retirement_terms());
             self.demo_time_repaint = true;
         }
         self.render_view_inner(pass, list, zbias, step);
         let serial = self.textures.1.serials.submit();
         self.readback_pass_submitted(pass, serial);
+        // Complete the previous frame's fence and arm one for this frame. Without
+        // this poll on the paint path the completion serial never advanced, so
+        // released instance allocations (one per upload) were never collected:
+        // the retirement queue grew without bound and its "still pending" answer
+        // kept the window repainting at rest. (The direct and OpenHarmony
+        // renderers do not track texture lifetimes.)
+        #[cfg(not(any(
+            linux_direct,
+            target_env = "ohos",
+            all(use_vulkan, not(target_os = "linux"))
+        )))]
+        self.poll_texture_lifetimes_for(false);
     }
 
     fn retained_adapter_bytes(&self) -> u64 {
-        #[cfg(not(any(use_vulkan, linux_direct, target_env = "ohos")))]
+        #[cfg(not(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux")))))]
         {
             #[cfg(target_os = "linux")]
             let display = self.os.opengl_cx.as_ref();
@@ -534,9 +568,6 @@ impl Cx {
                     // shader didnt compile somehow
                     continue;
                 }
-                if sh.mapping.uses_time {
-                    self.demo_time_repaint = true;
-                }
                 let shp = &mut self.draw_shaders.os_shaders[sh.os_shader_id.unwrap()];
                 shp.ensure_gl_shader_sources(self.os.gl(), &self.os_type);
                 shp.refresh_scope_uniforms(self.os.gl(), &sh.mapping);
@@ -554,6 +585,7 @@ impl Cx {
                     .as_ref()
                     .and_then(GlShaderState::as_ready)
                 else {
+                    crate::trace!("gl.repaint", "shader not ready");
                     self.demo_time_repaint = true;
                     continue;
                 };
@@ -579,12 +611,21 @@ impl Cx {
                             || draw_item.instances.as_ref().map_or(0, |v| v.len() * 4),
                             |p| p.byte_len(),
                         );
+                        let retained_plan = draw_item
+                            .retained_instances
+                            .as_ref()
+                            .and_then(|publication| {
+                                draw_item.os.inst_vb.retained_upload_plan(publication)
+                            });
                         let replaces =
                             draw_item
                                 .retained_instances
                                 .as_ref()
                                 .is_none_or(|publication| {
-                                    draw_item.os.inst_vb.retained_replaces(publication)
+                                    draw_item
+                                        .os
+                                        .inst_vb
+                                        .retained_replaces(publication, retained_plan.as_ref())
                                 });
                         let charge = if replaces {
                             let capacity = if draw_item.retained_instances.is_some() {
@@ -603,8 +644,14 @@ impl Cx {
                         let copy_started = std::time::Instant::now();
                         let uploaded = if let Some(retained) = &draw_item.retained_instances {
                             let Some(uploaded) =
-                                draw_item.os.inst_vb.update_retained_array(gl, retained)
+                                draw_item.os.inst_vb.update_retained_array(
+                                    gl,
+                                    retained,
+                                    retained_plan,
+                                    replaces,
+                                )
                             else {
+                                crate::trace!("gl.repaint", "retained upload pending");
                                 draw_item.instance_upload_pending = true;
                                 self.demo_time_repaint = true;
                                 break 'instance_upload;
@@ -636,14 +683,14 @@ impl Cx {
                             );
                     }
                 }
-                // update the zbias uniform if we have it.
-                draw_call.resolve_zbias(*zbias, sploded, uniforms_gen);
+                // Update the zbias uniform. The upload happens below, under the dirty
+                // gate, so the change is latched in `uniforms_dirty`: this call may
+                // still be skipped (no instances, stale geometry) and
+                // `resolve_zbias` reports a change only once.
+                if draw_call.resolve_zbias(*zbias, sploded, uniforms_gen) {
+                    draw_call.uniforms_dirty = true;
+                }
                 *zbias += zbias_step;
-
-                draw_item
-                    .os
-                    .draw_call_uniforms
-                    .update_uniform_buffer(gl, draw_call.draw_call_uniforms.as_slice());
 
                 let instances = if draw_item.retained_instances.is_some() {
                     draw_item.retained_instance_count as u64
@@ -654,6 +701,15 @@ impl Cx {
 
                 if instances == 0 {
                     continue;
+                }
+                // A time-driven shader keeps the pass repainting at display rate,
+                // but only while it has something to draw: the Vulkan backend
+                // checks after the empty-call skips too. Checking before them let a
+                // hidden loading spinner (zero instances, `draw_pass.time` in its
+                // shader) keep an OpenGL window presenting forever at rest.
+                if sh.mapping.uses_time {
+                    crate::trace!("gl.repaint", "shader uses time");
+                    self.demo_time_repaint = true;
                 }
 
                 if sh.mapping.flags.debug_draw {
@@ -727,12 +783,20 @@ impl Cx {
 
                 let indices = geometry.index_count;
 
-                if draw_call.uniforms_dirty {
+                // `DrawCallUniforms` used to be re-uploaded unconditionally above and
+                // then a second time here, so every draw call reallocated its uniform
+                // buffer (glBufferData) once or twice per frame whether or not anything
+                // in it had changed. Upload once: when the dirty flag is set (a zbias
+                // shift sets it above), or when the buffer does not exist yet.
+                let uniforms_dirty = draw_call.uniforms_dirty;
+                if uniforms_dirty || draw_item.os.draw_call_uniforms.gl_buffer.is_none() {
                     draw_call.uniforms_dirty = false;
                     draw_item
                         .os
                         .draw_call_uniforms
                         .update_uniform_buffer(gl, draw_call.draw_call_uniforms.as_slice());
+                }
+                if uniforms_dirty || draw_item.os.user_uniforms.gl_buffer.is_none() {
                     draw_item
                         .os
                         .user_uniforms
@@ -1338,7 +1402,7 @@ impl Cx {
             (self.os.gl().glBindFramebuffer)(gl_sys::FRAMEBUFFER, 0);
             //(gl.glFinish)();
         }
-        #[cfg(not(any(use_vulkan, linux_direct, target_env = "ohos")))]
+        #[cfg(not(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux")))))]
         if !self.textures.1.readbacks.slots.is_empty() {
             self.gl_capture_texture_readbacks(Some(draw_pass_id));
         }
@@ -1397,6 +1461,7 @@ impl Cx {
                     os_shader.gl_shader[SHADER_VARIANT_WINDOW],
                     Some(GlShaderState::Pending(_))
                 ) {
+                    crate::trace!("gl.repaint", "shader compile pending");
                     self.demo_time_repaint = true;
                 }
             }
@@ -1425,6 +1490,7 @@ impl Cx {
                     os_shader.gl_shader[SHADER_VARIANT_WINDOW],
                     Some(GlShaderState::Pending(_))
                 ) {
+                    crate::trace!("gl.repaint", "shader compile pending");
                     self.demo_time_repaint = true;
                 }
             }
@@ -3656,32 +3722,51 @@ pub struct OpenglBuffer {
 }
 
 impl OpenglBuffer {
+    /// The diff against what this buffer already holds, or `None` when there
+    /// is nothing resident to diff against. `upload_plan` hashes every segment
+    /// of the previous publication, so a frame computes it once per buffer and
+    /// hands the result to both `retained_replaces` and
+    /// `update_retained_array`; it used to be derived three times per changed
+    /// buffer per frame, which was the largest single cost of a heavy repaint.
+    fn retained_upload_plan(
+        &self,
+        publication: &crate::retained_instances::RetainedInstances,
+    ) -> Option<crate::retained_instances::InstanceUploadPlan> {
+        self.gl_buffer
+            .and(self.retained_publication.as_ref())
+            .map(|previous| publication.upload_plan(previous))
+    }
+
+    /// `plan` must come from `retained_upload_plan` for the same publication,
+    /// with no upload to this buffer in between.
     fn retained_replaces(
         &self,
         publication: &crate::retained_instances::RetainedInstances,
+        plan: Option<&crate::retained_instances::InstanceUploadPlan>,
     ) -> bool {
         self.gl_buffer.is_none()
             || publication.byte_len() > self.retained_capacity
-            || self.retained_publication.as_ref().is_none_or(|previous| {
-                let plan = publication.upload_plan(previous);
-                !plan.can_update_in_place()
-                    || plan
-                        .writes
-                        .iter()
-                        .any(|range| range.start < previous.float_len())
-            })
+            || match (self.retained_publication.as_ref(), plan) {
+                (Some(previous), Some(plan)) => {
+                    !plan.can_update_in_place()
+                        || plan
+                            .writes
+                            .iter()
+                            .any(|range| range.start < previous.float_len())
+                }
+                _ => true,
+            }
     }
 
+    /// `plan` and `replaces` as returned by `retained_upload_plan` and
+    /// `retained_replaces` for this publication.
     pub fn update_retained_array(
         &mut self,
         gl: &LibGl,
         publication: &crate::retained_instances::RetainedInstances,
+        plan: Option<crate::retained_instances::InstanceUploadPlan>,
+        replaces: bool,
     ) -> Option<usize> {
-        let plan = self
-            .gl_buffer
-            .and(self.retained_publication.as_ref())
-            .map(|previous| publication.upload_plan(previous));
-        let replaces = self.retained_replaces(publication);
         let previous = self.gl_buffer;
         let previous_capacity = self.retained_capacity;
         let mut uploaded = 0;
@@ -3935,7 +4020,7 @@ impl EglRenderBridge {
 
 // Resolved only for clients using the lifetime API; LibGl's ordinary draw path
 // gains no queries, scans, or fence calls. A zero timeout never waits for GPU work.
-#[cfg(not(any(use_vulkan, linux_direct, target_env = "ohos")))]
+#[cfg(not(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux")))))]
 #[derive(Default)]
 pub(crate) struct GlReadbacks {
     functions: Option<GlReadbackFunctions>,
@@ -3944,7 +4029,7 @@ pub(crate) struct GlReadbacks {
     device_lost: bool,
 }
 
-#[cfg(not(any(use_vulkan, linux_direct, target_env = "ohos")))]
+#[cfg(not(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux")))))]
 struct GlReadback {
     work: crate::texture::ReadbackWork,
     framebuffer: u32,
@@ -3955,7 +4040,7 @@ struct GlReadback {
     receive: Option<std::sync::mpsc::Receiver<std::sync::Arc<[u8]>>>,
 }
 
-#[cfg(not(any(use_vulkan, linux_direct, target_env = "ohos")))]
+#[cfg(not(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux")))))]
 #[derive(Clone, Copy)]
 struct GlReadbackFunctions {
     framebuffer_status: unsafe extern "C" fn(u32) -> u32,
@@ -3968,7 +4053,7 @@ struct GlReadbackFunctions {
     unmap: unsafe extern "C" fn(u32) -> u8,
 }
 
-#[cfg(not(any(use_vulkan, linux_direct, target_env = "ohos")))]
+#[cfg(not(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux")))))]
 impl Cx {
     fn gl_readback_functions(
         &mut self,
@@ -4029,6 +4114,12 @@ impl Cx {
     }
 
     pub(crate) fn poll_texture_readbacks(&mut self) {
+        // Vulkan windows serve grabs from their swapchain capture, not from here.
+        #[cfg(target_os = "linux")]
+        if self.os.vulkan_active() {
+            self.fail_pending_readbacks(crate::texture::ReadbackError::UnsupportedBackend);
+            return;
+        }
         if self.textures.1.readbacks.slots.is_empty()
             && self.textures.1.gl_readbacks.jobs.is_empty()
         {
@@ -4317,25 +4408,29 @@ impl Cx {
     }
 }
 
-#[cfg(not(any(use_vulkan, linux_direct, target_env = "ohos")))]
+#[cfg(not(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux")))))]
 type GlSync = *mut std::ffi::c_void;
-#[cfg(not(any(use_vulkan, linux_direct, target_env = "ohos")))]
+#[cfg(not(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux")))))]
 #[derive(Default)]
 pub(crate) struct TextureFence {
     functions: Option<TextureFenceFunctions>,
     pending: Option<(u64, GlSync)>,
     framebuffers: Vec<u32>,
 }
-#[cfg(not(any(use_vulkan, linux_direct, target_env = "ohos")))]
+#[cfg(not(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux")))))]
 struct TextureFenceFunctions {
     create: unsafe extern "C" fn(u32, u32) -> GlSync,
     poll: unsafe extern "C" fn(GlSync, u32, u64) -> u32,
     delete: unsafe extern "C" fn(GlSync),
     current: unsafe extern "C" fn() -> GlSync,
 }
-#[cfg(not(any(use_vulkan, linux_direct, target_env = "ohos")))]
+#[cfg(not(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux")))))]
 impl CxOsTexture {
     pub(crate) fn allocated_bytes(&self, cx: &Cx) -> Option<u64> {
+        #[cfg(target_os = "linux")]
+        if cx.os.vulkan_active() {
+            return None;
+        }
         if self.gl_texture.is_none() && self.gl_renderbuffer.is_none() {
             return None;
         }
@@ -4456,7 +4551,7 @@ impl CxOsTexture {
         }
     }
 }
-#[cfg(not(any(use_vulkan, linux_direct, target_env = "ohos")))]
+#[cfg(not(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux")))))]
 impl Cx {
     pub(crate) fn detach_released_texture(&mut self, id: crate::texture::TextureId) {
         for slot in &mut self.passes.0.pool {
@@ -4477,7 +4572,22 @@ impl Cx {
         }
     }
 
+    /// The explicit poll: `Cx::frame_completion_serial` and the texture release
+    /// path call this while they wait, so it always arms a fence for
+    /// outstanding work, as their contract promises.
     pub(crate) fn poll_texture_lifetimes(&mut self) {
+        self.poll_texture_lifetimes_for(true);
+    }
+
+    /// `waiting` is false on the paint path, which polls once per frame and
+    /// only arms a fence (and pays for the flush behind it) while something it
+    /// can see is waiting on the completion serial.
+    fn poll_texture_lifetimes_for(&mut self, waiting: bool) {
+        // Vulkan retires its resources on its own frame path.
+        #[cfg(target_os = "linux")]
+        if self.os.vulkan_active() {
+            return;
+        }
         // The adapter draws attached blocks here (no per-publication
         // backing): dropped blocks release from this poll, contract §3.3.
         self.publications.retire_without_backing();
@@ -4492,6 +4602,12 @@ impl Cx {
         let Some(get_proc) = display.libegl.eglGetProcAddress else {
             return;
         };
+        // Waiters the paint path can see: released retained-instance
+        // allocations awaiting collection, shared blocks awaiting retirement,
+        // and (checked below) retired textures.
+        let waiting = waiting
+            || self.draw_lists.1.allocations.has_pending_retirements()
+            || self.publications.has_retiring();
         let state = &mut self.textures.1;
         if state.gl.functions.is_none() {
             unsafe {
@@ -4525,8 +4641,16 @@ impl Cx {
         let functions = state.gl.functions.as_ref().unwrap();
         unsafe {
             if (functions.current)() != display.egl_context {
+                crate::trace!("gl.repaint", "lifetime poll: context not current");
                 return;
             }
+            crate::trace!(
+                "gl.repaint",
+                "lifetime poll: submitted={} completed={} fence_pending={}",
+                state.serials.submitted.load(std::sync::atomic::Ordering::Acquire),
+                state.serials.completed.load(std::sync::atomic::Ordering::Acquire),
+                state.gl.pending.is_some()
+            );
             for framebuffer in state.gl.framebuffers.drain(..) {
                 (display.libgl.glDeleteFramebuffers)(1, &framebuffer);
             }
@@ -4545,7 +4669,10 @@ impl Cx {
                 .serials
                 .completed
                 .load(std::sync::atomic::Ordering::Acquire);
-            if state.gl.pending.is_none() && submitted > completed {
+            if state.gl.pending.is_none()
+                && submitted > completed
+                && (waiting || !state.retired.is_empty())
+            {
                 let fence = (functions.create)(0x9117, 0); // SYNC_GPU_COMMANDS_COMPLETE
                 if !fence.is_null() {
                     state.gl.pending = Some((submitted, fence));
