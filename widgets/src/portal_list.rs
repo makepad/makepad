@@ -1532,6 +1532,36 @@ impl PortalList {
         &self.items
     }
 
+    /// Move one item's ink after the list has laid it out: `offset` slides
+    /// it, `lift` raises it out of the paint order so it draws over the
+    /// items the list painted after it. `false` when that entry drew
+    /// nothing this pass.
+    ///
+    /// For a list that carries a row under a pointer. The list's own layout
+    /// knows nothing of it: this runs once the draw pass is done, the item
+    /// ranges are still the ones this pass recorded, and the next pass
+    /// starts from an untouched list. The areas move with the ink, so an
+    /// offset item hit-tests where it is drawn — a caller that needs the
+    /// unmoved geometry takes it before it calls this.
+    pub fn offset_drawn_item(
+        &self,
+        cx: &mut Cx2d,
+        entry_id: usize,
+        offset: DVec2,
+        lift: f32,
+    ) -> bool {
+        let Some(item) = self.draw_align_list.iter().find(|item| item.index == entry_id) else {
+            return false;
+        };
+        if offset.x != 0.0 || offset.y != 0.0 {
+            cx.shift_align_range(&item.align_range, offset);
+        }
+        if lift != 0.0 {
+            cx.lift_align_range(&item.align_range, lift);
+        }
+        true
+    }
+
     pub fn set_item_range(&mut self, cx: &mut Cx, range_start: usize, range_end: usize) {
         let range_changed = self.range_start != range_start || self.range_end != range_end;
         self.range_start = range_start;
@@ -1587,7 +1617,10 @@ impl PortalList {
     /// rubber-band overshoot, and any OS momentum stream — returning the list to its
     /// resting state. Explicit navigation (keyboard, programmatic scrolls) calls this
     /// first, so no leftover motion resumes from wherever the viewport lands.
-    fn stop_all_scroll_motion(&mut self) {
+    /// Give up every scroll this list has in flight, the drag a press just
+    /// began included: for a widget built on this one whose own gesture
+    /// takes a press over once the rows have had it.
+    pub(crate) fn stop_all_scroll_motion(&mut self) {
         self.scroll_state = ScrollState::Stopped;
         self.momentum = MomentumStream::Idle;
         self.bounce_overshoot = 0.0;

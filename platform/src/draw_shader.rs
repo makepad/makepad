@@ -847,6 +847,10 @@ pub struct CxDrawShaderMapping {
     pub rect_pos: Option<usize>,
     pub rect_size: Option<usize>,
     pub draw_clip: Option<usize>,
+    /// Where an instance keeps the depth it is drawn at, when it keeps one:
+    /// the slot `Cx2d::lift_align_range` adds to so already-drawn ink wins
+    /// the depth test against ink painted after it.
+    pub draw_depth: Option<usize>,
     pub uniform_buffer_bindings: UniformBufferBindings,
     pub scope_uniforms: DrawShaderInputs,
     pub scope_uniform_sources: Vec<ScopeUniformSlot>,
@@ -1054,6 +1058,7 @@ impl CxDrawShaderMapping {
         let mut rect_pos = None;
         let mut rect_size = None;
         let mut draw_clip = None;
+        let mut draw_depth = None;
 
         // Memory layout: DynInstance fields first, then RustInstance fields
         // This matches metal_create_instance_struct
@@ -1087,6 +1092,13 @@ impl CxDrawShaderMapping {
             }
             if io.name == live_id!(draw_clip) {
                 draw_clip = Some(instances.total_slots);
+            }
+            // The depth slot, under either of the two names the shaders in
+            // this repo give it: quads, vectors and SVGs call it
+            // `draw_depth`, the glyph shaders `glyph_depth`. No shader has
+            // both, so one slot names the depth of any instance.
+            if io.name == live_id!(draw_depth) || io.name == live_id!(glyph_depth) {
+                draw_depth = Some(instances.total_slots);
             }
 
             let _ = attr_format;
@@ -1376,6 +1388,7 @@ impl CxDrawShaderMapping {
             rect_pos,
             rect_size,
             draw_clip,
+            draw_depth,
             uniform_buffer_bindings,
             scope_uniforms,
             scope_uniform_sources,

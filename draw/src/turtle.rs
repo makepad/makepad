@@ -5407,6 +5407,40 @@ impl<'a, 'b> Cx2d<'a, 'b> {
         self.move_align_list(range.start, range.end, shift.x, shift.y, true);
     }
 
+    /// Raise a range of ink already drawn this pass out of the paint order:
+    /// `depth` is added to every instance's own depth, so it beats ink
+    /// painted after it at the same depth.
+    ///
+    /// A 2D pass has one depth buffer and a vertex lands at
+    /// `world.z = draw_depth + draw_call.zbias`, so painting later buys only
+    /// a `zbias_step` and a widget that wants one of its own rows in front of
+    /// the rest cannot get there by drawing it last. This is how it gets
+    /// there. Only z moves: x, y and the clips are untouched, so hit testing
+    /// is exactly as it was. Keep `depth` well under
+    /// [`OVERLAY_Z_BASE`](crate::draw_list_2d::OVERLAY_Z_BASE), or the lifted
+    /// ink climbs into the band the overlays live in.
+    pub fn lift_align_range(&mut self, range: &TurtleAlignRange, depth: f32) {
+        let mut c = range.start;
+        while c < range.end {
+            if let AlignEntry::Area(Area::Instance(inst)) = &self.align_list[c] {
+                let draw_list = &mut self.cx.cx.draw_lists[inst.draw_list_id];
+                let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
+                if let Some(draw_call) = draw_item.draw_call() {
+                    let sh = &self.cx.cx.draw_shaders[draw_call.draw_shader_id.index];
+                    if let (Some(draw_depth), Some(inst_buf)) =
+                        (sh.mapping.draw_depth, draw_item.instances.as_mut())
+                    {
+                        let slots = sh.mapping.instances.total_slots;
+                        for i in 0..inst.instance_count {
+                            inst_buf[inst.instance_offset + draw_depth + i * slots] += depth;
+                        }
+                    }
+                }
+            }
+            c += 1;
+        }
+    }
+
     pub fn add_rect_area(&mut self, area: &mut Area, rect: Rect) {
         //let turtle = self.turtle();
         self.add_aligned_rect_area(area, rect)

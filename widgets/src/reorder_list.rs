@@ -8,15 +8,25 @@
 //!
 //! - the press on the gripper is captured HERE, before the inner list sees
 //!   it, so drag-to-scroll never fights the gesture;
+//! - with `drag_anywhere` on, a press on the row itself — its background,
+//!   its words, the space between its cells — carries it too. That press
+//!   goes to the rows FIRST and is taken up only if nothing on the row
+//!   took the finger, so a button, a slider, a chip and a picker keep
+//!   their presses and a label does not;
 //! - while the drag is live the widget tracks the insertion slot under the
-//!   pointer (row midpoints decide) and draws `draw_indicator` as a line
-//!   in the gap the row would land in; the lifted row is reported through
-//!   [`ReorderList::drag_state`] so the host can tint it;
+//!   pointer (row midpoints decide) and carries the whole row: the lifted
+//!   row is drawn under the pointer and over the rest, every row between
+//!   its own place and the slot shifts by its height so the gap it would
+//!   land in stands open, and `draw_indicator` draws a line in that gap.
+//!   The lifted row is reported through [`ReorderList::drag_state`] so the
+//!   host can tint it;
 //! - Escape cancels the gesture; a wheel scroll during it is swallowed so
 //!   the rows never slide under the pointer mid-drag;
 //! - the release emits [`ReorderListAction::Reordered`] with indices into
 //!   the host's item range. The widget itself moves nothing: item identity
 //!   and the model belong to the host, which applies the move and redraws.
+//!   The carry is ink, not layout — it is applied once the list's draw pass
+//!   is done, and the next pass starts from an untouched list.
 //!
 //! The host names the gripper in its item template and points at it:
 //!
@@ -88,28 +98,94 @@ pub fn slot_for(rows: &[RowBand], y: f64) -> Option<usize> {
     Some(slot)
 }
 
+/// The row a press at `point` carries, of the rows the list has drawn:
+/// the one whose band holds the pointer, and only when nothing on the row
+/// took the press. `taken` are the rects of the things that did — in the
+/// live widget, the row's own widgets holding the finger once the rows
+/// have had the event, which is a button, a slider, a chip or a picker
+/// and never a label or the row's background. `None` for a press outside
+/// the list, off the rows, or on one of those.
+pub fn press_carries(point: DVec2, list: Rect, rows: &[RowBand], taken: &[Rect]) -> Option<usize> {
+    if !list.contains(point) {
+        return None;
+    }
+    if taken.iter().any(|rect| rect.contains(point)) {
+        return None;
+    }
+    rows.iter()
+        .find(|(_, top, height)| point.y >= *top && point.y < top + height)
+        .map(|(id, _, _)| *id)
+}
+
+/// How far out of the paint order a carried row is lifted, so it draws over
+/// the rows the list painted after it. A 2D pass shares one depth buffer and
+/// painting later buys almost no z, so this is what puts the row on top; it
+/// stays well under the band the overlays live in (32), and clear of the 10
+/// the drop indicator spends.
+const CARRY_LIFT: f32 = 12.0;
+
 /// One live drag, from gripper press to release — a pure state machine
 /// (no `Cx`, no `Area`), so the whole gesture is unit-testable: pointer y
-/// in, slot out, commit or cancel at the end.
+/// in, slot and carry geometry out, commit or cancel at the end.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ReorderDrag {
     /// The item (list entry id) whose gripper was pressed.
     pub from: usize,
     /// Where the press landed.
     start_y: f64,
+    /// Where the press landed inside the row: pointer y less the row's top.
+    /// The carried row keeps it, so the row does not jump under the finger
+    /// as it is lifted.
+    grab: f64,
+    /// The lifted row's height, from the press. The gap the rows open for
+    /// it is this tall, wherever the pointer wanders.
+    height: f64,
     /// Insertion slot in entry-id space: the row would land BEFORE the
     /// current occupant of `slot`; `last visible + 1` means after the end.
     pub slot: usize,
     /// True once the press has moved past the threshold — only then does
-    /// the indicator draw and the release commit. A plain click on the
-    /// gripper stays a click.
+    /// the row carry and the release commit. A plain click on the gripper
+    /// stays a click.
     pub active: bool,
 }
 
 impl ReorderDrag {
     /// A fresh press on `from`'s gripper at pointer height `y`.
     pub fn press(from: usize, y: f64) -> Self {
-        Self { from, start_y: y, slot: from, active: false }
+        Self { from, start_y: y, grab: 0.0, height: 0.0, slot: from, active: false }
+    }
+
+    /// The row the press took hold of: its top and its height. The carry
+    /// hangs the row off the grab this fixes and opens a gap its height.
+    /// A machine that wants the slot alone and draws its own carry — the
+    /// kanban board's cards — leaves it off and carries nothing.
+    pub fn on_row(mut self, top: f64, height: f64) -> Self {
+        self.grab = self.start_y - top;
+        self.height = height;
+        self
+    }
+
+    /// Where the carried row's top is drawn for a pointer at `y`: the
+    /// pointer less the grab, kept inside the list's visible band so a row
+    /// carried past either end stays in sight instead of sliding out of the
+    /// list it belongs to.
+    pub fn carry_top(&self, y: f64, band_top: f64, band_bottom: f64) -> f64 {
+        let lowest = (band_bottom - self.height).max(band_top);
+        (y - self.grab).clamp(band_top, lowest)
+    }
+
+    /// How far row `id` is drawn from where the list laid it out, so the
+    /// gap the carried row would land in stands open: every row the carry
+    /// reaches over moves one row height the other way. The carried row
+    /// itself gets nothing here — [`Self::carry_top`] places that one.
+    pub fn gap_offset(&self, id: usize) -> f64 {
+        if self.slot > self.from && id > self.from && id < self.slot {
+            -self.height
+        } else if self.slot < self.from && id >= self.slot && id < self.from {
+            self.height
+        } else {
+            0.0
+        }
     }
 
     /// Advance with a new pointer `y` over the currently visible `rows`.
@@ -161,15 +237,30 @@ pub struct ReorderList {
     /// dragged row would land in.
     #[live]
     draw_indicator: DrawColor,
+    /// A press on the row itself, and not only on its gripper, carries it:
+    /// the row's background, its words, the space between its cells. Off by
+    /// default — on a list whose rows are all controls it would take presses
+    /// the host means for them, and it spends the row's own drag, which
+    /// scrolls the list otherwise.
+    #[live]
+    drag_anywhere: bool,
     /// Vertical travel (px) before a gripper press becomes a drag.
     #[live(4.0)]
     drag_threshold: f64,
     #[rust]
     drag: Option<ReorderDrag>,
     /// Pointer y of the live drag — read by the edge auto-scroll pump so a
-    /// finger HELD at the viewport's edge keeps scrolling between moves.
+    /// finger HELD at the viewport's edge keeps scrolling between moves,
+    /// and by the draw pass to put the carried row under the pointer.
     #[rust]
     drag_pointer_y: Option<f64>,
+    /// Every visible row as the last draw laid it out, taken BEFORE the
+    /// carry moved any ink. The drag machine and the edge crawl read these
+    /// and never the live areas: the carry moves the areas with the ink, so
+    /// a slot derived from them would chase itself. Refilled in place every
+    /// pass, so a live drag allocates nothing.
+    #[rust]
+    bands: Vec<RowBand>,
     #[rust]
     scroll_pump: NextFrame,
 }
@@ -219,31 +310,27 @@ impl ReorderList {
         None
     }
 
-    /// Currently drawn rows as `(entry id, rect)`, in entry order.
-    fn visible_rows(&self, cx: &Cx) -> Vec<(usize, Rect)> {
+    /// Take down where the list just put every visible row, in entry order.
+    /// Called with the draw pass done and before the carry moves anything,
+    /// so these are the list's own positions and not the carried ones.
+    fn capture_bands(&mut self, cx: &Cx) {
         let view = self.list.area().rect(cx);
-        let mut rows: Vec<(usize, Rect)> = self
-            .list
-            .items()
-            .iter()
-            .map(|(id, item): (&usize, &WidgetItem)| (*id, item.widget.area().rect(cx)))
-            .filter(|(_, r)| {
-                r.size.y > 0.0
-                    && r.pos.y + r.size.y > view.pos.y
-                    && r.pos.y < view.pos.y + view.size.y
-            })
-            .collect();
-        rows.sort_by_key(|(id, _)| *id);
-        rows
-    }
-
-    /// [`visible_rows`] in the drag machine's shape.
-    fn row_bands(&self, cx: &Cx) -> Vec<RowBand> {
-        self.visible_rows(cx).iter().map(|(id, r)| (*id, r.pos.y, r.size.y)).collect()
+        self.bands.clear();
+        for (id, item) in self.list.items().iter() {
+            let item: &WidgetItem = item;
+            let r = item.widget.area().rect(cx);
+            if r.size.y > 0.0
+                && r.pos.y + r.size.y > view.pos.y
+                && r.pos.y < view.pos.y + view.size.y
+            {
+                self.bands.push((*id, r.pos.y, r.size.y));
+            }
+        }
+        self.bands.sort_by_key(|(id, _, _)| *id);
     }
 
     /// End the gesture without committing (Escape, or the dragged row left
-    /// the virtualised viewport).
+    /// the virtualised viewport). The carry is redrawn away with it.
     fn cancel_drag(&mut self, cx: &mut Cx) {
         self.drag = None;
         self.drag_pointer_y = None;
@@ -285,8 +372,10 @@ impl ReorderList {
             // own animation steps on the very same frame.
             if self.scroll_pump.is_event(event).is_some() && drag.active {
                 if let Some(y) = self.drag_pointer_y {
-                    let bands = self.row_bands(cx);
-                    if drag.move_to(y, self.drag_threshold, &bands) {
+                    let bands = std::mem::take(&mut self.bands);
+                    let changed = drag.move_to(y, self.drag_threshold, &bands);
+                    self.bands = bands;
+                    if changed {
                         self.list.redraw(cx);
                     }
                     self.drag = Some(drag);
@@ -309,8 +398,13 @@ impl ReorderList {
                 _ => None,
             };
             if let Some(y) = moved_to {
-                let bands = self.row_bands(cx);
-                if drag.move_to(y, self.drag_threshold, &bands) {
+                let bands = std::mem::take(&mut self.bands);
+                let changed = drag.move_to(y, self.drag_threshold, &bands);
+                self.bands = bands;
+                // A carried row follows the pointer, not the slot, so every
+                // move of a live carry redraws — not only the ones that
+                // land the row in a new gap.
+                if changed || drag.active {
                     self.list.redraw(cx);
                 }
                 if drag.active {
@@ -354,7 +448,11 @@ impl ReorderList {
             }
             match event.hits(cx, handle.area()) {
                 Hit::FingerDown(e) if e.is_primary_hit() => {
-                    start = Some((*id, e.abs.y));
+                    // The row's own rect, not the gripper's: what is
+                    // carried is the whole row, and it is carried by the
+                    // point of it the press took hold of.
+                    let row = item.widget.area().rect(cx);
+                    start = Some((*id, e.abs.y, row.pos.y, row.size.y));
                 }
                 Hit::FingerHoverIn(_) | Hit::FingerHoverOver(_) => {
                     cx.set_cursor(MouseCursor::Grab);
@@ -362,8 +460,9 @@ impl ReorderList {
                 _ => {}
             }
         }
-        if let Some((from, y)) = start {
-            self.drag = Some(ReorderDrag::press(from, y));
+        if let Some((from, y, top, height)) = start {
+            self.drag = Some(ReorderDrag::press(from, y).on_row(top, height));
+            self.drag_pointer_y = Some(y);
             return true;
         }
         false
@@ -396,13 +495,10 @@ impl ReorderList {
                 self.scroll_pump = cx.new_next_frame();
             }
         } else if y > view.pos.y + view.size.y - BAND {
-            let last_fully_visible = self
-                .visible_rows(cx)
-                .last()
-                .is_some_and(|(id, rect)| {
-                    *id + 1 >= self.list.range_end()
-                        && rect.pos.y + rect.size.y <= view.pos.y + view.size.y + 1.0
-                });
+            let last_fully_visible = self.bands.last().is_some_and(|(id, top, height)| {
+                *id + 1 >= self.list.range_end()
+                    && top + height <= view.pos.y + view.size.y + 1.0
+            });
             if !last_fully_visible {
                 self.list.set_first_id_and_scroll(first, scroll - CRAWL);
                 self.list.redraw(cx);
@@ -411,19 +507,87 @@ impl ReorderList {
         }
     }
 
-    /// The line in the gap the dragged row would land in. Drawn after the
-    /// list's own pass, so it rides on top of the rows.
+    /// A press the rows are about to see, which the list may carry once
+    /// they have had it: the point, and the row it landed on. Taken before
+    /// the event goes down, when the areas still say where the rows are.
+    fn offer_row_press(&self, cx: &Cx, event: &Event) -> Option<(usize, DVec2)> {
+        if !self.drag_anywhere || self.drag.is_some() {
+            return None;
+        }
+        let point = match event {
+            Event::MouseDown(e) if e.button.is_primary() => e.abs,
+            Event::TouchUpdate(e) => e
+                .touches
+                .iter()
+                .find(|t| matches!(t.state, makepad_draw::makepad_platform::event::TouchState::Start))
+                .map(|t| t.abs)?,
+            _ => return None,
+        };
+        let id = press_carries(point, self.list.area().rect(cx), &self.bands, &[])?;
+        Some((id, point))
+    }
+
+    /// The rows have had the press: take it up as a carry unless one of the
+    /// row's own widgets holds the finger now, which is what a control does
+    /// with a press it means to keep.
+    fn take_row_press(&mut self, cx: &mut Cx, id: usize, point: DVec2) {
+        let Some(item) = self.list.items().get(&id) else { return };
+        let uid = item.widget.widget_uid();
+        let mut taken: Vec<Rect> = Vec::new();
+        item.widget.find_widgets_from_point(cx, point, &mut |widget| {
+            if widget.widget_uid() != uid && cx.fingers.is_area_captured(widget.area()) {
+                taken.push(widget.area().rect(cx));
+            }
+        });
+        let row = item.widget.area().rect(cx);
+        if press_carries(point, self.list.area().rect(cx), &self.bands, &taken) != Some(id) {
+            return;
+        }
+        // The inner list took the press for a drag-scroll of its own on the
+        // way down (it captures whatever a row did, by `capture_overload`).
+        // The carry swallows every event after this one, so that gesture
+        // would never see its own release: give it up now.
+        self.list.stop_all_scroll_motion();
+        self.drag = Some(ReorderDrag::press(id, point.y).on_row(row.pos.y, row.size.y));
+        self.drag_pointer_y = Some(point.y);
+    }
+
+    /// The carry itself: the lifted row drawn under the pointer and over
+    /// the rows the list painted after it, and every row the carry reaches
+    /// over shifted by the lifted row's height, so the gap it would land in
+    /// stands open. Ink only — run once the list's draw pass is done, and
+    /// gone again on the pass after the drag ends.
+    fn draw_carry(&mut self, cx: &mut Cx2d) {
+        let Some(drag) = self.drag.filter(|d| d.active) else { return };
+        let Some(y) = self.drag_pointer_y else { return };
+        let view = self.list.area().rect(cx);
+        let bands = std::mem::take(&mut self.bands);
+        for (id, top, _) in bands.iter() {
+            let (offset, lift) = if *id == drag.from {
+                (drag.carry_top(y, view.pos.y, view.pos.y + view.size.y) - top, CARRY_LIFT)
+            } else {
+                (drag.gap_offset(*id), 0.0)
+            };
+            if offset != 0.0 || lift != 0.0 {
+                self.list.offset_drawn_item(cx, *id, dvec2(0.0, offset), lift);
+            }
+        }
+        self.bands = bands;
+    }
+
+    /// The line in the gap the dragged row would land in — the gap the
+    /// carry holds open, so the line reads as the floor the row lands on.
+    /// Drawn after the list's own pass, so it rides on top of the rows.
     fn draw_drop_indicator(&mut self, cx: &mut Cx2d) {
         let Some(drag) = self.drag else { return };
         if !drag.active {
             return;
         }
-        let rows = self.visible_rows(cx);
-        let Some((last, last_rect)) = rows.last().copied() else { return };
-        let y = if let Some((_, rect)) = rows.iter().find(|(id, _)| *id == drag.slot) {
-            rect.pos.y - 4.0
+        let Some((last, last_top, last_height)) = self.bands.last().copied() else { return };
+        let y = if let Some((id, top, _)) = self.bands.iter().find(|(id, _, _)| *id == drag.slot) {
+            top + drag.gap_offset(*id) - 4.0
         } else if drag.slot == last + 1 {
-            last_rect.pos.y + last_rect.size.y + 2.0
+            last_top + drag.gap_offset(last) + last_height + 2.0
         } else {
             return;
         };
@@ -448,12 +612,21 @@ impl Widget for ReorderList {
         if self.handle_drag(cx, event) {
             return;
         }
+        // A press on the row itself goes to the rows first and is taken up
+        // only if nothing on them wanted it — the gripper is the other way
+        // round, since nothing else is ever under it.
+        let offered = self.offer_row_press(cx, event);
         self.list.handle_event(cx, event, scope);
+        if let Some((id, point)) = offered {
+            self.take_row_press(cx, id, point);
+        }
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let step = self.list.draw_walk(cx, scope, walk);
         if step.is_done() {
+            self.capture_bands(cx);
+            self.draw_carry(cx);
             self.draw_drop_indicator(cx);
         }
         step
@@ -462,11 +635,17 @@ impl Widget for ReorderList {
 
 #[cfg(test)]
 mod tests {
-    use super::{slot_for, ReorderDrag, RowBand};
+    use super::{press_carries, slot_for, ReorderDrag, RowBand};
+    use crate::makepad_draw::{dvec2, Rect};
 
     /// Four rows of height 60 starting at y=100: ids 0..3 at 100/160/220/280.
     fn rows() -> Vec<RowBand> {
         (0..4).map(|i| (i, 100.0 + i as f64 * 60.0, 60.0)).collect()
+    }
+
+    /// A press on row `id`'s gripper at pointer height `y`, over [`rows`].
+    fn press(id: usize, y: f64) -> ReorderDrag {
+        ReorderDrag::press(id, y).on_row(100.0 + id as f64 * 60.0, 60.0)
     }
 
     #[test]
@@ -483,7 +662,7 @@ mod tests {
     #[test]
     fn a_press_only_becomes_a_drag_past_the_threshold() {
         let rows = rows();
-        let mut drag = ReorderDrag::press(1, 170.0);
+        let mut drag = press(1, 170.0);
         assert!(!drag.active);
         assert!(!drag.move_to(172.0, 4.0, &rows), "2px of travel is still a click");
         assert!(!drag.active);
@@ -495,13 +674,13 @@ mod tests {
     #[test]
     fn the_slot_tracks_the_pointer_and_the_drop_commits_adjusted_indices() {
         let rows = rows();
-        let mut drag = ReorderDrag::press(0, 110.0);
+        let mut drag = press(0, 110.0);
         drag.move_to(255.0, 4.0, &rows);
         assert_eq!(drag.slot, 3, "pointer past row 2's midpoint: before row 3");
         // Slot 3 with the dragged row removed from index 0 = final index 2.
         assert_eq!(drag.commit(), Some((0, 2)));
         // Dragging upward: slot is the final index directly.
-        let mut drag = ReorderDrag::press(3, 290.0);
+        let mut drag = press(3, 290.0);
         drag.move_to(120.0, 4.0, &rows);
         assert_eq!(drag.slot, 0);
         assert_eq!(drag.commit(), Some((3, 0)));
@@ -512,12 +691,12 @@ mod tests {
         let rows = rows();
         // Down past the threshold but still before its own successor's
         // midpoint: slot 1 with from=0 adjusts back to index 0.
-        let mut drag = ReorderDrag::press(0, 110.0);
+        let mut drag = press(0, 110.0);
         drag.move_to(170.0, 4.0, &rows);
         assert_eq!(drag.slot, 1, "just under row 0: the gap between 0 and 1");
         assert_eq!(drag.commit(), None, "that gap IS index 0 — nothing moved");
         // Its own slot exactly.
-        let mut drag = ReorderDrag::press(2, 230.0);
+        let mut drag = press(2, 230.0);
         drag.move_to(225.0, 4.0, &rows);
         assert_eq!(drag.slot, 2);
         assert_eq!(drag.commit(), None);
@@ -526,11 +705,113 @@ mod tests {
     #[test]
     fn moves_keep_reporting_only_real_changes() {
         let rows = rows();
-        let mut drag = ReorderDrag::press(1, 170.0);
+        let mut drag = press(1, 170.0);
         assert!(drag.move_to(200.0, 4.0, &rows));
         assert!(!drag.move_to(201.0, 4.0, &rows), "same slot again: no redraw needed");
         assert!(drag.move_to(260.0, 4.0, &rows), "new slot: redraw");
         assert_eq!(drag.slot, 3);
+    }
+
+    #[test]
+    fn the_rows_a_carry_reaches_over_shift_by_the_carried_row_s_height() {
+        let rows = rows();
+        // Carrying row 0 down to the gap before row 3: rows 1 and 2 come up
+        // one row height, row 3 and the carried row stay put.
+        let mut drag = press(0, 110.0);
+        drag.move_to(255.0, 4.0, &rows);
+        assert_eq!(drag.slot, 3);
+        assert_eq!(drag.gap_offset(0), 0.0, "the carried row is placed, not shifted");
+        assert_eq!(drag.gap_offset(1), -60.0);
+        assert_eq!(drag.gap_offset(2), -60.0);
+        assert_eq!(drag.gap_offset(3), 0.0, "the slot's own row holds the gap's floor");
+        // And upward: carrying row 3 to the very top pushes 0, 1 and 2 down.
+        let mut drag = press(3, 290.0);
+        drag.move_to(120.0, 4.0, &rows);
+        assert_eq!(drag.slot, 0);
+        assert_eq!(drag.gap_offset(0), 60.0);
+        assert_eq!(drag.gap_offset(1), 60.0);
+        assert_eq!(drag.gap_offset(2), 60.0);
+        assert_eq!(drag.gap_offset(3), 0.0);
+    }
+
+    #[test]
+    fn a_carry_that_has_not_left_its_own_gap_shifts_nothing() {
+        let rows = rows();
+        // Down past the threshold but still in its own place: the gap it
+        // would land in is the one it came out of, so no row makes way.
+        let mut drag = press(0, 110.0);
+        drag.move_to(170.0, 4.0, &rows);
+        assert_eq!(drag.slot, 1);
+        for id in 0..4 {
+            assert_eq!(drag.gap_offset(id), 0.0, "row {id}");
+        }
+        // Past the end: every row after the carried one comes up.
+        let mut drag = press(0, 110.0);
+        drag.move_to(320.0, 4.0, &rows);
+        assert_eq!(drag.slot, 4, "after the last row");
+        assert_eq!(drag.gap_offset(1), -60.0);
+        assert_eq!(drag.gap_offset(3), -60.0, "the last row makes way too");
+    }
+
+    #[test]
+    fn the_carried_row_hangs_off_the_point_of_it_the_press_took_hold_of() {
+        // Pressed 10 points down row 1 (top 160): wherever the pointer
+        // goes, the row's top is drawn 10 points above it.
+        let mut drag = press(1, 170.0);
+        drag.move_to(300.0, 4.0, &rows());
+        assert_eq!(drag.carry_top(300.0, 100.0, 400.0), 290.0);
+        assert_eq!(drag.carry_top(170.0, 100.0, 400.0), 160.0, "back where it lay");
+        // The band holds it: above the top edge and below the bottom one it
+        // stops at the edge rather than sliding out of the list.
+        assert_eq!(drag.carry_top(-500.0, 100.0, 400.0), 100.0);
+        assert_eq!(drag.carry_top(5000.0, 100.0, 400.0), 340.0, "its bottom on the band's");
+        // A band shorter than the row pins it to the top rather than
+        // clamping backwards.
+        assert_eq!(drag.carry_top(5000.0, 100.0, 130.0), 100.0);
+    }
+
+    #[test]
+    fn the_row_carries_a_press_nothing_on_it_took() {
+        let rows = rows();
+        // The rows fill y 100..340 of a list that reaches to 400.
+        let list = Rect { pos: dvec2(10.0, 100.0), size: dvec2(400.0, 300.0) };
+        assert_eq!(
+            press_carries(dvec2(200.0, 250.0), list, &rows, &[]),
+            Some(2),
+            "the row's own background, and nothing took the press"
+        );
+        // Something on row 2 that took it — a button, a chip, a slider.
+        let control = Rect { pos: dvec2(180.0, 230.0), size: dvec2(60.0, 20.0) };
+        assert_eq!(
+            press_carries(dvec2(200.0, 240.0), list, &rows, &[control]),
+            None,
+            "on the control: the control's press, not the row's"
+        );
+        assert_eq!(
+            press_carries(dvec2(200.0, 260.0), list, &rows, &[control]),
+            Some(2),
+            "under it, the row again"
+        );
+        assert_eq!(
+            press_carries(dvec2(300.0, 240.0), list, &rows, &[control]),
+            Some(2),
+            "beside it, the row again"
+        );
+        assert_eq!(
+            press_carries(dvec2(500.0, 250.0), list, &rows, &[]),
+            None,
+            "outside the list"
+        );
+        assert_eq!(
+            press_carries(dvec2(200.0, 360.0), list, &rows, &[]),
+            None,
+            "inside the list but under the last row"
+        );
+        assert_eq!(
+            press_carries(dvec2(200.0, 100.0), list, &rows, &[]),
+            Some(0),
+            "the very top of the first row is still that row"
+        );
     }
 
     #[test]
@@ -539,7 +820,7 @@ mod tests {
         // copy afterwards would still be the caller's bug, and an inactive
         // one never commits anyway.
         let rows = rows();
-        let mut drag = ReorderDrag::press(0, 110.0);
+        let mut drag = press(0, 110.0);
         drag.move_to(300.0, 4.0, &rows);
         assert!(drag.commit().is_some(), "the drag WOULD commit");
         let cancelled: Option<ReorderDrag> = None;
