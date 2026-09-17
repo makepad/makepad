@@ -10,11 +10,12 @@
 //!   it, so drag-to-scroll never fights the gesture;
 //! - with `drag_anywhere` on, a press on the row itself — its background,
 //!   its words, the space between its cells — carries it too. That press
-//!   goes to the rows FIRST and is taken up only if nothing on the row
-//!   took the finger, so a button, a slider, a chip and a picker keep
-//!   their presses and a label does not -- and a control that holds the
-//!   mouse keeps it until the release, so a press it took never turns
-//!   into a carry however far the pointer wanders from it;
+//!   goes to the rows FIRST and is taken up only if it landed on the
+//!   row's bare background and nothing on the row took the finger, so a
+//!   button, a slider, a chip, a picker and a label all keep their
+//!   presses -- and a control that holds the mouse keeps it until the
+//!   release, so a press it took never turns into a carry however far
+//!   the pointer wanders from it;
 //! - while the drag is live the widget tracks the insertion slot under the
 //!   pointer (row midpoints decide) and carries the whole row: the lifted
 //!   row is drawn under the pointer and over the rest, every row between
@@ -566,6 +567,17 @@ impl ReorderList {
         });
         let row = item.widget.area().rect(cx);
         if press_carries(point, self.list.area().rect(cx), &self.bands, &taken) != Some(id) {
+            return;
+        }
+        // Only the row's bare background carries: a press over any widget
+        // of the row -- a control, its label, its readout -- is that
+        // widget's, whether or not it took the finger just now. Geometry
+        // alone, so it holds when a control did not get the press at all.
+        if item
+            .widget
+            .find_interactive_widget_from_point(cx, point)
+            .is_some_and(|widget| widget.widget_uid() != uid)
+        {
             return;
         }
         // The press went to stopping a scroll: the inner list kept it from
