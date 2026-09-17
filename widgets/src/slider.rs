@@ -1424,12 +1424,12 @@ script_mod! {
         // drawn at. Left at the family default of 0 a drag divides by the
         // control's own height, which is 95 on a stock Rotary and would be
         // 24 here -- four percent of the range per pixel, on the size this
-        // is built for -- and there is no modifier to slow it: the
-        // Shift/Ctrl ladder lives on the wheel only. The wheel is not the
-        // answer either. Nothing marks a scroll consumed, so a knob that
-        // took the wheel inside a scrolling panel would move its value AND
-        // scroll the panel with the same gesture; `scroll_step` stays off,
-        // here as everywhere else in the library.
+        // is built for. Shift does slow a drag down, but a rate a hand has
+        // to hold a key to get is not the rate a knob should sit at. The
+        // wheel is not the answer either: nothing marks a scroll consumed,
+        // so a knob that took the wheel inside a scrolling panel would move
+        // its value AND scroll the panel with the same gesture. `scroll_step`
+        // stays off, here as everywhere else in the library.
         drag_travel: 160.
 
         // SliderMinimal's `label_walk` is INHERITED, not replaced, and both
@@ -1760,10 +1760,24 @@ script_mod! {
 
 }
 
+/// The rate the modifiers held ask for: Shift fine (x0.2), plain (x1),
+/// Ctrl fast (x4), Ctrl and Shift together faster still (x10).
+///
+/// The wheel and the drag read the SAME ladder, so a knob answers a held
+/// Shift the same whichever gesture is moving it, and a hand that learns
+/// the rates on one has them on the other.
+pub(crate) fn modifier_ladder(modifiers: &KeyModifiers) -> f64 {
+    match (modifiers.control, modifiers.shift) {
+        (true, true) => 10.0,
+        (true, false) => 4.0,
+        (false, true) => 0.2,
+        (false, false) => 1.0,
+    }
+}
+
 /// Value delta for one scroll event: notch count (Windows wheels send 120
 /// units per notch; trackpads send smaller deltas that accumulate over the
-/// gesture) times the step fraction, scaled by the modifier ladder —
-/// Shift fine (x0.2), plain (x1), Ctrl coarse (x4), Ctrl+Shift (x10).
+/// gesture) times the step fraction, scaled by `modifier_ladder`.
 /// Scroll up (negative y) raises the value; a zero step disables wheel input.
 pub(crate) fn wheel_value_delta(
     scroll: Vec2d,
@@ -1774,13 +1788,7 @@ pub(crate) fn wheel_value_delta(
         return 0.0;
     }
     let axis = if scroll.y != 0.0 { -scroll.y } else { -scroll.x };
-    let ladder = match (modifiers.control, modifiers.shift) {
-        (true, true) => 10.0,
-        (true, false) => 4.0,
-        (false, true) => 0.2,
-        (false, false) => 1.0,
-    };
-    (axis / 120.0) * scroll_step * ladder
+    (axis / 120.0) * scroll_step * modifier_ladder(modifiers)
 }
 
 /// The pointer distance that covers a slider's whole range: the travel the
@@ -1799,6 +1807,54 @@ pub(crate) fn drag_span(drag_travel: f64, own: f64) -> f64 {
         drag_travel
     } else {
         own
+    }
+}
+
+/// How far ONE move of a drag takes the value: the pointer's movement since
+/// the move before it, read along an axis, at the rate the modifiers held
+/// ask for, over the span that covers the whole range.
+///
+/// Measured from the last move and not from the press, so the modifiers are
+/// read afresh every move: press Shift halfway through and the pointer moves
+/// the value five times finer FROM THERE ON, with the value staying exactly
+/// where it was rather than jumping to where a whole drag at the finer rate
+/// would have left it. Hold nothing and the moves add back up to the
+/// press-to-now distance over the span, which is the number the drag was
+/// before it was incremental.
+///
+/// `alt` swaps which way the pointer is read: a vertical knob or fader takes
+/// the pointer's horizontal movement, a horizontal slider its vertical, and
+/// right and up raise the value either way. The span does not swap with it --
+/// the same pointer distance still crosses the whole range, only measured
+/// across.
+///
+/// A span of nothing is not a span. Dividing by it gave an infinity, which
+/// pinned the value to a stop; a running total cannot hold an infinity, so
+/// the move takes the whole range instead, which leaves the value in the
+/// same place.
+pub(crate) fn drag_value_delta(
+    delta_px: Vec2d,
+    axis: DragAxis,
+    alt: bool,
+    modifiers: &KeyModifiers,
+    span: f64,
+) -> f64 {
+    let along = match (axis, alt) {
+        (DragAxis::Horizontal, false) => delta_px.x,
+        (DragAxis::Horizontal, true) => -delta_px.y,
+        (DragAxis::Vertical, false) => -delta_px.y,
+        (DragAxis::Vertical, true) => delta_px.x,
+    };
+    if along == 0.0 {
+        return 0.0;
+    }
+    let moved = along * modifier_ladder(modifiers) / span;
+    if moved.is_nan() {
+        0.0
+    } else if moved.is_infinite() {
+        moved.signum()
+    } else {
+        moved
     }
 }
 
@@ -2035,11 +2091,12 @@ pub struct Slider {
     /// drag axis, which is what every slider did before there was a number
     /// here: the taller the box, the finer the drag.
     ///
-    /// That is fine for a control drawn 95 points tall and useless for one
-    /// drawn 24 square, where it puts four percent of the range in a pixel
-    /// and there is no modifier to slow it down -- the Shift/Ctrl ladder in
-    /// `wheel_value_delta` is on the wheel only. A control that names a
-    /// travel keeps that resolution at any size.
+    /// That is fine for a control drawn 95 points tall and coarse on one
+    /// drawn 24 square, where it puts four percent of the range in a pixel.
+    /// A held Shift divides that rate by five and a held Ctrl multiplies it
+    /// by four -- `drag_value_delta` reads the same ladder on the drag as
+    /// `wheel_value_delta` does on the wheel -- but a control that names a
+    /// travel keeps its resolution at any size with no key held at all.
     #[live]
     drag_travel: f64,
 
@@ -2078,6 +2135,19 @@ pub struct Slider {
     pub relative_value: f64,
     #[rust]
     pub dragging: Option<f64>,
+
+    /// Where the pointer stood at the previous move of the drag in hand, so
+    /// that every move is measured from the one before it and the modifiers
+    /// held can be read afresh each time. Unset until the first move of a
+    /// drag, which measures from the press itself.
+    #[rust]
+    drag_from: Option<Vec2d>,
+    /// What the drag has added up to BEFORE the 0..1 clamp. A drag that runs
+    /// past a stop has to come back the same distance before the value
+    /// leaves that stop, which is what a drag measured from the press always
+    /// did.
+    #[rust]
+    drag_travelled: f64,
 }
 
 impl ScriptHook for Slider {
@@ -2348,6 +2418,8 @@ impl Widget for Slider {
 
                 self.animator_play(cx, ids!(drag.on));
                 self.dragging = Some(self.relative_value);
+                self.drag_from = None;
+                self.drag_travelled = self.relative_value;
                 cx.widget_action(uid, SliderAction::StartSlide);
                 cx.set_cursor(MouseCursor::Grabbing);
             }
@@ -2366,6 +2438,7 @@ impl Widget for Slider {
                     self.animator_play(cx, ids!(hover.off));
                 }
                 self.dragging = None;
+                self.drag_from = None;
                 // A TAP on the label puts the control back to its DSL
                 // default.
                 //
@@ -2404,18 +2477,33 @@ impl Widget for Slider {
                     return ();
                 }
 
-                let rel = fe.abs - fe.abs_start;
-                if let Some(start_pos) = self.dragging {
-                    if let DragAxis::Horizontal = self.axis {
-                        let span = drag_span(
+                if self.dragging.is_some() {
+                    // The span is the one the control's OWN axis names, held
+                    // even when Alt is turning the drag across it: what Alt
+                    // changes is which way the pointer is read, not how far
+                    // it has to go.
+                    let span = if let DragAxis::Horizontal = self.axis {
+                        drag_span(
                             self.drag_travel,
                             fe.rect.size.x - self.draw_bg.label_size as f64,
-                        );
-                        self.relative_value = (start_pos + rel.x / span).max(0.0).min(1.0);
+                        )
                     } else {
-                        let span = drag_span(self.drag_travel, fe.rect.size.y);
-                        self.relative_value = (start_pos - rel.y / span).max(0.0).min(1.0);
-                    }
+                        drag_span(self.drag_travel, fe.rect.size.y)
+                    };
+                    // From the move before, or from the press on the first
+                    // move, so the modifiers that count are the ones down
+                    // NOW and a key taken or let go mid-drag changes the
+                    // rate from here without moving the value.
+                    let from = self.drag_from.unwrap_or(fe.abs_start);
+                    self.drag_from = Some(fe.abs);
+                    self.drag_travelled += drag_value_delta(
+                        fe.abs - from,
+                        self.axis,
+                        fe.modifiers.alt,
+                        &fe.modifiers,
+                        span,
+                    );
+                    self.relative_value = self.drag_travelled.max(0.0).min(1.0);
                     self.set_internal(self.to_external());
                     self.draw_bg.redraw(cx);
                     self.update_text_input(cx);
@@ -2706,5 +2794,107 @@ mod drag_tests {
         assert_eq!(drag_span(160.0, 300.0), 160.0);
         // Neither zero nor a negative is a travel.
         assert_eq!(drag_span(-10.0, 24.0), 24.0);
+    }
+
+    fn mods(control: bool, shift: bool, alt: bool) -> KeyModifiers {
+        KeyModifiers { control, shift, alt, logo: false }
+    }
+
+    #[test]
+    fn a_drag_moves_as_far_as_before_with_no_modifier_held() {
+        // The drag used to be one sum, (pointer - press) over the span. It is
+        // a running total of moves now, and over the same pointer path with
+        // no key held the total is the same number: every slider in the
+        // library that nobody holds a key on drags exactly as it did.
+        let span = 160.0;
+        let path = [
+            Vec2d { x: 0.0, y: 0.0 },
+            Vec2d { x: 7.0, y: -13.0 },
+            Vec2d { x: 3.0, y: -40.0 },
+            Vec2d { x: -11.0, y: -12.5 },
+        ];
+        let whole = path[path.len() - 1] - path[0];
+        let plain = mods(false, false, false);
+
+        let mut summed = 0.0;
+        for step in path.windows(2) {
+            summed += drag_value_delta(step[1] - step[0], DragAxis::Vertical, false, &plain, span);
+        }
+        assert!((summed - (-whole.y / span)).abs() < 1e-12, "{}", summed);
+
+        let mut summed = 0.0;
+        for step in path.windows(2) {
+            summed += drag_value_delta(step[1] - step[0], DragAxis::Horizontal, false, &plain, span);
+        }
+        assert!((summed - (whole.x / span)).abs() < 1e-12, "{}", summed);
+    }
+
+    #[test]
+    fn shift_makes_a_drag_five_times_finer_and_ctrl_four_times_faster() {
+        let span = 160.0;
+        let up = Vec2d { x: 0.0, y: -16.0 };
+        let plain = drag_value_delta(up, DragAxis::Vertical, false, &mods(false, false, false), span);
+        assert!((plain - 0.1).abs() < 1e-12, "{}", plain);
+
+        let shift = drag_value_delta(up, DragAxis::Vertical, false, &mods(false, true, false), span);
+        assert!((shift - plain * 0.2).abs() < 1e-12, "{}", shift);
+        let ctrl = drag_value_delta(up, DragAxis::Vertical, false, &mods(true, false, false), span);
+        assert!((ctrl - plain * 4.0).abs() < 1e-12, "{}", ctrl);
+        let both = drag_value_delta(up, DragAxis::Vertical, false, &mods(true, true, false), span);
+        assert!((both - plain * 10.0).abs() < 1e-12, "{}", both);
+
+        // The wheel's ladder and the drag's are one ladder.
+        let notch = Vec2d { x: 0.0, y: -120.0 };
+        let wheel_plain = wheel_value_delta(notch, &mods(false, false, false), 0.025);
+        for held in [mods(false, true, false), mods(true, false, false), mods(true, true, false)] {
+            let by_wheel = wheel_value_delta(notch, &held, 0.025) / wheel_plain;
+            let by_drag = drag_value_delta(up, DragAxis::Vertical, false, &held, span) / plain;
+            assert!((by_wheel - by_drag).abs() < 1e-12, "{} vs {}", by_wheel, by_drag);
+        }
+    }
+
+    #[test]
+    fn alt_reads_a_vertical_sliders_drag_from_the_horizontal() {
+        let span = 100.0;
+        let right = Vec2d { x: 25.0, y: 0.0 };
+        let up = Vec2d { x: 0.0, y: -25.0 };
+        let plain = mods(false, false, false);
+
+        // Held on a knob or a fader: the pointer's across movement moves the
+        // value, right raising it as up does, and up does nothing.
+        assert!((drag_value_delta(right, DragAxis::Vertical, true, &plain, span) - 0.25).abs() < 1e-12);
+        assert_eq!(drag_value_delta(up, DragAxis::Vertical, true, &plain, span), 0.0);
+        // and on a horizontal slider the other way about.
+        assert!((drag_value_delta(up, DragAxis::Horizontal, true, &plain, span) - 0.25).abs() < 1e-12);
+        assert_eq!(drag_value_delta(right, DragAxis::Horizontal, true, &plain, span), 0.0);
+        // Not held, each reads its own way, up and right raising the value.
+        assert!((drag_value_delta(up, DragAxis::Vertical, false, &plain, span) - 0.25).abs() < 1e-12);
+        assert!((drag_value_delta(right, DragAxis::Horizontal, false, &plain, span) - 0.25).abs() < 1e-12);
+        // The rates go with it: Alt says which way, the ladder says how fast.
+        let fine = drag_value_delta(right, DragAxis::Vertical, true, &mods(false, true, false), span);
+        assert!((fine - 0.05).abs() < 1e-12, "{}", fine);
+    }
+
+    #[test]
+    fn changing_a_modifier_mid_drag_changes_the_rate_without_a_jump() {
+        let span = 100.0;
+        let step = Vec2d { x: 0.0, y: -10.0 };
+        let mut value = 0.0;
+        for _ in 0..3 {
+            value += drag_value_delta(step, DragAxis::Vertical, false, &mods(false, false, false), span);
+        }
+        assert!((value - 0.3).abs() < 1e-12, "{}", value);
+
+        // Shift goes down with the drag still in hand: the value stays where
+        // it stands and only the rate from here on is finer. It does not
+        // jump to the 0.06 a whole drag at the fine rate would have reached.
+        for _ in 0..3 {
+            value += drag_value_delta(step, DragAxis::Vertical, false, &mods(false, true, false), span);
+        }
+        assert!((value - 0.36).abs() < 1e-12, "{}", value);
+
+        // And let go again: the plain rate from that point, no jump back.
+        value += drag_value_delta(step, DragAxis::Vertical, false, &mods(false, false, false), span);
+        assert!((value - 0.46).abs() < 1e-12, "{}", value);
     }
 }
