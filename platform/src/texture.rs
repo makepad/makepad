@@ -14,17 +14,19 @@ use {
 
 /// Upload decoded images as mipmapped textures (`VecMipBGRAu8_32`) so minifying them on low-DPI
 /// screens uses a mip chain instead of aliasing into a blocky look. Only helps when the source
-/// has detail over the display size. Default on for OpenGL only; override with `MAKEPAD_IMAGE_MIPMAPS`.
+/// has detail over the display size. Override with `MAKEPAD_IMAGE_MIPMAPS`.
 pub fn image_cache_use_mipmaps() -> bool {
     if let Ok(v) = std::env::var("MAKEPAD_IMAGE_MIPMAPS") {
         return matches!(v.trim(), "1" | "true" | "on" | "yes");
     }
     // Desktop Linux picks its GPU API at startup; the gate lives here because
-    // the draw crate cannot ask the backend.
+    // the draw crate cannot ask the backend. Both backends build the chain:
+    // OpenGL with `glGenerateMipmap`, Vulkan by blitting each level from the
+    // one above (`CxVulkan::record_mip_chain`).
     cfg!(target_os = "linux")
         && matches!(
             crate::cx::Cx::gpu_backend(),
-            crate::cx::GpuBackend::OpenGl | crate::cx::GpuBackend::Gpusim
+            crate::cx::GpuBackend::OpenGl | crate::cx::GpuBackend::Gpusim | crate::cx::GpuBackend::Vulkan
         )
 }
 

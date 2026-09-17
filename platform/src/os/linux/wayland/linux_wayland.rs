@@ -176,16 +176,11 @@ impl WaylandCx {
         });
 
         if crate::app_main::should_run_stdin_loop_from_env() {
-            // Hosted (stdin-loop) rendering is decided before this loop starts
-            // (see `windowing_backend::event_loop`); a Vulkan-capable build
-            // never reaches this point in that mode.
-            #[cfg(use_vulkan)]
-            panic!("Vulkan Wayland uses native windows; launch the standalone executable without --stdin-loop");
-            #[cfg(not(use_vulkan))]
-            {
-                cx.borrow_mut().in_makepad_studio = true;
-                return cx.borrow_mut().stdin_event_loop();
-            }
+            // Hosted (stdin-loop) rendering with Vulkan is handled before this
+            // loop starts (see `windowing_backend::event_loop`); reaching here
+            // means OpenGL, whose context the block above has just created.
+            cx.borrow_mut().in_makepad_studio = true;
+            return cx.borrow_mut().stdin_event_loop();
         }
 
         let mut event_queue = conn.new_event_queue();
@@ -1140,7 +1135,10 @@ impl WaylandCx {
                 CxOsOp::PrepareVideoPlayback(video_id, ..) if cx.os.vulkan_active() => {
                     cx.call_event_handler(&Event::VideoDecodingError(VideoDecodingErrorEvent {
                         video_id,
-                        error: "Linux Vulkan video texture import is not implemented".to_owned(),
+                        error: "video and camera playback are not implemented on the \
+                                Linux Vulkan renderer; run with MAKEPAD_GPU=gl for an \
+                                app that needs them"
+                            .to_owned(),
                     }));
                 }
                 CxOsOp::PrepareVideoPlayback(

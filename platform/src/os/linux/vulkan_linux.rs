@@ -488,7 +488,14 @@ impl CxVulkan {
     pub(super) fn new_offscreen_on(uuid: Option<[u8; 16]>) -> Result<Self, String> {
         let init = DesktopInit::new(&[])?;
         let instance = init.instance.as_ref().unwrap();
-        let mut devices = init.devices(true)?;
+        // Same rule as a window: a software rasterizer is slower than the
+        // OpenGL ES fallback, so take it only when the host pinned a device or
+        // Vulkan was insisted on. Rejecting it here makes `new_offscreen` fail,
+        // and the caller hosts with OpenGL instead.
+        let allow_cpu = uuid.is_some()
+            || crate::os::linux::gpu_preference::gpu_preference()
+                == crate::os::linux::gpu_preference::GpuPreference::Vulkan;
+        let mut devices = init.devices(allow_cpu)?;
         // An explicit pin is a contract: a frame rendered on any other GPU
         // cannot be shared with the compositor that asked for this one, so a
         // malformed or unavailable pin is an error, never a silent fallback.

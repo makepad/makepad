@@ -67,17 +67,33 @@ pub enum WindowingProtocol {
 
 impl Cx {
     pub fn event_loop(cx: Rc<RefCell<Cx>>) {
+        // Hosted (`--stdin-loop`) rendering, chosen the same way as a window:
+        // Vulkan when a device answers, OpenGL ES otherwise, so a machine
+        // without a Vulkan driver still runs inside Studio or the wm. The
+        // OpenGL side falls through to the windowed loop below, which creates
+        // the EGL context before handing over to the same stdin loop.
         #[cfg(use_vulkan)]
-        if is_stdin_loop_mode() {
-            let mut cx = cx.borrow_mut();
-            cx.in_makepad_studio = true;
-            cx.os_type = crate::cx::OsType::LinuxWindow(crate::cx::LinuxWindowParams { custom_window_chrome: false });
-            cx.os.vulkan = Some(super::vulkan::CxVulkan::new_offscreen()
-                .unwrap_or_else(|error| panic!("Offscreen Vulkan initialization failed: {error}")));
-            crate::cx_api::set_active_gpu_backend(crate::cx::GpuBackend::Vulkan);
-            cx.stdin_event_loop();
-            drop(cx.os.vulkan.take());
-            return;
+        if is_stdin_loop_mode() && gpu_preference() != GpuPreference::OpenGl {
+            match super::vulkan::CxVulkan::new_offscreen() {
+                Ok(vulkan) => {
+                    let mut cx = cx.borrow_mut();
+                    cx.in_makepad_studio = true;
+                    cx.os_type = crate::cx::OsType::LinuxWindow(crate::cx::LinuxWindowParams {
+                        custom_window_chrome: false,
+                    });
+                    cx.os.vulkan = Some(vulkan);
+                    crate::cx_api::set_active_gpu_backend(crate::cx::GpuBackend::Vulkan);
+                    cx.stdin_event_loop();
+                    drop(cx.os.vulkan.take());
+                    return;
+                }
+                Err(error) if gpu_preference() == GpuPreference::Vulkan => {
+                    panic!("Offscreen Vulkan initialization failed: {error}")
+                }
+                Err(error) => {
+                    crate::log!("Vulkan unavailable ({error}); hosting with OpenGL ES");
+                }
+            }
         }
         let protocol = detect_windowing_protocol();
         // Vulkan windowing needs Wayland; an X11 session renders with OpenGL ES

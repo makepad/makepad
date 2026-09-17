@@ -301,6 +301,9 @@ struct VulkanTextureResource {
     face_views: [vk::ImageView; 6],
     width: u32,
     height: u32,
+    /// 1 for an ordinary texture; the full chain for a mipmapped image, which
+    /// `upload_vec_texture` fills by blitting each level from the one above.
+    mip_levels: u32,
     layers: u32,
     is_cube: bool,
     format: vk::Format,
@@ -4176,6 +4179,32 @@ impl CxVulkan {
         Ok(())
     }
 
+    /// The mip chain a format asks for, given its dimensions. Only the `Mip`
+    /// formats get one, and only where the device can linearly blit that
+    /// format; everything else stays single-level.
+    fn vec_texture_mip_levels(
+        &self,
+        format: &TextureFormat,
+        vk_format: vk::Format,
+        width: u32,
+        height: u32,
+    ) -> u32 {
+        if !matches!(format, TextureFormat::VecMipBGRAu8_32 { .. }) {
+            return 1;
+        }
+        let properties = unsafe {
+            self.instance
+                .get_physical_device_format_properties(self.physical_device, vk_format)
+        };
+        if !properties
+            .optimal_tiling_features
+            .contains(vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR)
+        {
+            return 1;
+        }
+        32 - width.max(height).max(1).leading_zeros()
+    }
+
     fn vec_texture_meta(format: &TextureFormat) -> Option<(u32, u32, u32, bool, vk::Format)> {
         match format {
             TextureFormat::VecBGRAu8_32 { width, height, .. } => Some((
@@ -4297,8 +4326,8 @@ impl CxVulkan {
                 data,
                 ..
             }
-            // VecMipBGRAu8_32: level 0 only for now (safe, no mip chain). Real mips
-            // (mip_levels>1 + vkCmdBlitImage) are a TODO for Vulkan.
+            // VecMipBGRAu8_32 uploads level 0 like any other image; the rest of
+            // the chain is blitted from it in `upload_vec_texture`.
             | TextureFormat::VecMipBGRAu8_32 {
                 width,
                 height,
@@ -4461,7 +4490,9 @@ impl CxVulkan {
         layers: u32,
         is_cube: bool,
         format: vk::Format,
+        mip_levels: u32,
     ) -> Result<VulkanTextureResource, String> {
+        let mip_levels = mip_levels.max(1);
         let image_flags = if is_cube {
             vk::ImageCreateFlags::CUBE_COMPATIBLE
         } else {
@@ -4476,11 +4507,22 @@ impl CxVulkan {
                 height: height.max(1),
                 depth: 1,
             })
-            .mip_levels(1)
+            .mip_levels(mip_levels)
             .array_layers(layers.max(1))
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
-            .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST | migration_image_usage())
+            // TRANSFER_SRC: each level below the first is blitted from the one
+            // above it, so the image reads from itself.
+            .usage(
+                vk::ImageUsageFlags::SAMPLED
+                    | vk::ImageUsageFlags::TRANSFER_DST
+                    | if mip_levels > 1 {
+                        vk::ImageUsageFlags::TRANSFER_SRC
+                    } else {
+                        vk::ImageUsageFlags::empty()
+                    }
+                    | migration_image_usage(),
+            )
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
         let image = unsafe { self.device.create_image(&image_info, None) }
@@ -4529,7 +4571,7 @@ impl CxVulkan {
                 vk::ImageSubresourceRange::default()
                     .aspect_mask(vk::ImageAspectFlags::COLOR)
                     .base_mip_level(0)
-                    .level_count(1)
+                    .level_count(mip_levels)
                     .base_array_layer(0)
                     .layer_count(layers.max(1)),
             );
@@ -4569,6 +4611,7 @@ impl CxVulkan {
             image,
             memory,
             view,
+            mip_levels,
             face_views,
             width: width.max(1),
             height: height.max(1),
@@ -4713,6 +4756,7 @@ impl CxVulkan {
             image,
             memory,
             view,
+            mip_levels: 1,
             face_views,
             width: width.max(1),
             height: height.max(1),
@@ -4903,6 +4947,7 @@ impl CxVulkan {
             image,
             memory,
             view,
+            mip_levels: 1,
             face_views: [vk::ImageView::null(); 6],
             width: width.max(1),
             height: height.max(1),
@@ -5015,6 +5060,7 @@ impl CxVulkan {
             image,
             memory,
             view,
+            mip_levels: 1,
             face_views: [vk::ImageView::null(); 6],
             width: width.max(1),
             height: height.max(1),
@@ -5331,6 +5377,7 @@ impl CxVulkan {
             image,
             memory,
             view,
+            mip_levels: 1,
             face_views: [vk::ImageView::null(); 6],
             width: width.max(1),
             height: height.max(1),
@@ -5552,6 +5599,7 @@ impl CxVulkan {
             image,
             memory,
             view,
+            mip_levels: 1,
             face_views: [vk::ImageView::null(); 6],
             width: width.max(1),
             height: height.max(1),
@@ -5831,6 +5879,7 @@ impl CxVulkan {
             image,
             memory,
             view: y_view,
+            mip_levels: 1,
             face_views: [vk::ImageView::null(); 6],
             width: width.max(1),
             height: height.max(1),
@@ -5847,6 +5896,7 @@ impl CxVulkan {
             image: vk::Image::null(),
             memory: vk::DeviceMemory::null(),
             view: u_view,
+            mip_levels: 1,
             face_views: [vk::ImageView::null(); 6],
             width: chroma_width,
             height: chroma_height,
@@ -5864,6 +5914,7 @@ impl CxVulkan {
             image: vk::Image::null(),
             memory: vk::DeviceMemory::null(),
             view: v_view,
+            mip_levels: 1,
             face_views: [vk::ImageView::null(); 6],
             width: chroma_width,
             height: chroma_height,
@@ -6005,7 +6056,7 @@ impl CxVulkan {
         texture_id: TextureId,
     ) -> Result<(), String> {
         let texture_key = Self::texture_key(texture_id);
-        let (alloc_changed, updated, width, height, layers, is_cube, format) = {
+        let (alloc_changed, updated, width, height, layers, is_cube, format, mip_levels) = {
             let cxtexture = &mut cx.textures[texture_id];
             if !cxtexture.format.is_vec() {
                 return Ok(());
@@ -6016,6 +6067,7 @@ impl CxVulkan {
                 Self::vec_texture_meta(&cxtexture.format).ok_or_else(|| {
                     format!("unsupported Vulkan texture format: {:?}", cxtexture.format)
                 })?;
+            let mip_levels = self.vec_texture_mip_levels(&cxtexture.format, format, width, height);
             (
                 alloc_changed,
                 updated,
@@ -6024,6 +6076,7 @@ impl CxVulkan {
                 layers,
                 is_cube,
                 format,
+                mip_levels,
             )
         };
 
@@ -6035,6 +6088,7 @@ impl CxVulkan {
                     || resource.layers != layers.max(1)
                     || resource.is_cube != is_cube
                     || resource.format != format
+                    || resource.mip_levels != mip_levels
             }
             None => true,
         };
@@ -6043,7 +6097,8 @@ impl CxVulkan {
             if let Some(old_resource) = self.textures.remove(&texture_key) {
                 self.destroy_texture_resource(old_resource);
             }
-            let resource = self.create_texture_resource(width, height, layers, is_cube, format)?;
+            let resource =
+                self.create_texture_resource(width, height, layers, is_cube, format, mip_levels)?;
             self.textures.insert(texture_key, resource);
         }
 
@@ -6089,7 +6144,9 @@ impl CxVulkan {
                 vk::ImageSubresourceRange::default()
                     .aspect_mask(vk::ImageAspectFlags::COLOR)
                     .base_mip_level(0)
-                    .level_count(1)
+                    // All of them: the levels below the first are written by
+                    // the blits, so they must leave UNDEFINED here too.
+                    .level_count(mip_levels)
                     .base_array_layer(0)
                     .layer_count(layer_count),
             );
@@ -6114,6 +6171,8 @@ impl CxVulkan {
                 height: upload.height,
                 depth: 1,
             });
+        // Every level at once: level 0 has just been written, and the rest are
+        // about to be, so one barrier covers the whole image.
         let to_shader = vk::ImageMemoryBarrier::default()
                 .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                 .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
@@ -6126,7 +6185,7 @@ impl CxVulkan {
                 vk::ImageSubresourceRange::default()
                     .aspect_mask(vk::ImageAspectFlags::COLOR)
                     .base_mip_level(0)
-                    .level_count(1)
+                    .level_count(mip_levels)
                     .base_array_layer(0)
                     .layer_count(layer_count),
             );
@@ -6147,6 +6206,9 @@ impl CxVulkan {
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                 &[copy_region],
             );
+            if mip_levels > 1 {
+                self.record_mip_chain(image, width, height, layer_count, mip_levels);
+            }
             self.device.cmd_pipeline_barrier(
                 self.command_buffer,
                 vk::PipelineStageFlags::TRANSFER,
@@ -6162,6 +6224,127 @@ impl CxVulkan {
         }
 
         Ok(())
+    }
+
+    /// Fill levels 1.. by halving the level above, the way `glGenerateMipmap`
+    /// does, so a minified image samples a chain instead of aliasing. The
+    /// caller has written level 0 and put the whole image in
+    /// `TRANSFER_DST_OPTIMAL`; every level is left in that layout, so the
+    /// caller's single barrier still covers them.
+    ///
+    /// # Safety
+    /// Records into `self.command_buffer`, which the caller has begun.
+    unsafe fn record_mip_chain(
+        &self,
+        image: vk::Image,
+        width: u32,
+        height: u32,
+        layer_count: u32,
+        mip_levels: u32,
+    ) {
+        let mut src_width = width.max(1) as i32;
+        let mut src_height = height.max(1) as i32;
+        for level in 1..mip_levels {
+            // The source level must finish being written before it is read.
+            let to_read = vk::ImageMemoryBarrier::default()
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                .image(image)
+                .subresource_range(
+                    vk::ImageSubresourceRange::default()
+                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                        .base_mip_level(level - 1)
+                        .level_count(1)
+                        .base_array_layer(0)
+                        .layer_count(layer_count),
+                );
+            let dst_width = (src_width / 2).max(1);
+            let dst_height = (src_height / 2).max(1);
+            let blit = vk::ImageBlit::default()
+                .src_subresource(
+                    vk::ImageSubresourceLayers::default()
+                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                        .mip_level(level - 1)
+                        .base_array_layer(0)
+                        .layer_count(layer_count),
+                )
+                .src_offsets([
+                    vk::Offset3D { x: 0, y: 0, z: 0 },
+                    vk::Offset3D {
+                        x: src_width,
+                        y: src_height,
+                        z: 1,
+                    },
+                ])
+                .dst_subresource(
+                    vk::ImageSubresourceLayers::default()
+                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                        .mip_level(level)
+                        .base_array_layer(0)
+                        .layer_count(layer_count),
+                )
+                .dst_offsets([
+                    vk::Offset3D { x: 0, y: 0, z: 0 },
+                    vk::Offset3D {
+                        x: dst_width,
+                        y: dst_height,
+                        z: 1,
+                    },
+                ]);
+            // Back to TRANSFER_DST_OPTIMAL so the caller's one barrier can move
+            // every level to SHADER_READ_ONLY_OPTIMAL together.
+            let to_write = vk::ImageMemoryBarrier::default()
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .src_access_mask(vk::AccessFlags::TRANSFER_READ)
+                .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .image(image)
+                .subresource_range(
+                    vk::ImageSubresourceRange::default()
+                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                        .base_mip_level(level - 1)
+                        .level_count(1)
+                        .base_array_layer(0)
+                        .layer_count(layer_count),
+                );
+            unsafe {
+                self.device.cmd_pipeline_barrier(
+                    self.command_buffer,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[to_read],
+                );
+                self.device.cmd_blit_image(
+                    self.command_buffer,
+                    image,
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &[blit],
+                    vk::Filter::LINEAR,
+                );
+                self.device.cmd_pipeline_barrier(
+                    self.command_buffer,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[to_write],
+                );
+            }
+            src_width = dst_width;
+            src_height = dst_height;
+        }
     }
 
     fn record_draw_list(
