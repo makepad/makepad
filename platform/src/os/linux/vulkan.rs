@@ -4192,14 +4192,23 @@ impl CxVulkan {
         if !matches!(format, TextureFormat::VecMipBGRAu8_32 { .. }) {
             return 1;
         }
+        // Desktop Linux only, matching `image_cache_use_mipmaps`, which is what
+        // asks for this format. Android and Quest share this file but neither
+        // requests a chain, and neither was measured with one.
+        if !cfg!(target_os = "linux") {
+            return 1;
+        }
         let properties = unsafe {
             self.instance
                 .get_physical_device_format_properties(self.physical_device, vk_format)
         };
-        if !properties
-            .optimal_tiling_features
-            .contains(vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR)
-        {
+        // `record_mip_chain` reads each level and writes the next with a linear
+        // blit, so the format needs all three: a device without them keeps a
+        // single level rather than recording an invalid command.
+        let required = vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR
+            | vk::FormatFeatureFlags::BLIT_SRC
+            | vk::FormatFeatureFlags::BLIT_DST;
+        if !properties.optimal_tiling_features.contains(required) {
             return 1;
         }
         32 - width.max(height).max(1).leading_zeros()

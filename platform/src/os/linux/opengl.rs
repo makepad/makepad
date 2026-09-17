@@ -75,10 +75,13 @@ impl DrawVars {
             output.const_table = vm.host.cx().shader_const_table_mode();
             // Shader source for the API this process renders with, not the one
             // the binary was built with: a Vulkan-capable build that fell back
-            // to OpenGL ES compiles plain GLSL.
+            // to OpenGL ES compiles plain GLSL. Only desktop Linux chooses at
+            // startup; an Android or Quest Vulkan build always renders with
+            // Vulkan, so it keeps the compiled answer.
             #[cfg(use_vulkan)]
             {
-                output.use_vulkan = vm.host.cx().os.vulkan_active();
+                output.use_vulkan =
+                    !cfg!(target_os = "linux") || vm.host.cx().os.vulkan_active();
             }
             #[cfg(not(use_vulkan))]
             {
@@ -134,9 +137,10 @@ impl DrawVars {
                 NUM_SHADER_VARIANTS] = std::array::from_fn(|_| None);
 
             // Only while this process renders with Vulkan; a Vulkan-capable
-            // build that fell back to OpenGL ES compiles GLSL below instead.
+            // desktop Linux build that fell back to OpenGL ES compiles GLSL
+            // below instead. Android and Quest have no such fallback.
             #[cfg(use_vulkan)]
-            if vm.host.cx().os.vulkan_active() {
+            if !cfg!(target_os = "linux") || vm.host.cx().os.vulkan_active() {
                 for (shader_variant, xr_multiview) in [false, true].into_iter().enumerate() {
                     match crate::os::linux::vulkan_naga::compile_draw_shader_wgsl_to_spirv(
                         vm,

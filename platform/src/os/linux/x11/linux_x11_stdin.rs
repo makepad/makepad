@@ -15,7 +15,11 @@ use crate::{
     window::CxWindowPool,
     CxOsApi,
 };
-use crate::{gl_sys, os::shared_framebuf::LinuxSharedSoftwareBuffer, texture::TextureSize};
+use crate::gl_sys;
+// Only the swapchain-import path below uses these, and the direct Vulkan build
+// compiles this file without it.
+#[cfg(not(all(use_vulkan, linux_direct)))]
+use crate::{os::shared_framebuf::LinuxSharedSoftwareBuffer, texture::TextureSize};
 use makepad_studio_protocol::{AppToStudio, GCSample, StudioToApp, StudioToAppVec};
 #[cfg(not(all(use_vulkan, linux_direct)))]
 use crate::os::shared_framebuf::shared_presentable_image_recv_fds_from_aux_chan;
@@ -1095,7 +1099,11 @@ impl Cx {
 
                 if self.need_redrawing() {
                     self.call_draw_event(time_now);
-                                        self.opengl_compile_shaders();
+                    // Only when OpenGL is the renderer: a hosted child that
+                    // started on Vulkan has no EGL context, and `gl()` panics.
+                    if self.os.opengl_cx.is_some() {
+                        self.opengl_compile_shaders();
+                    }
                 }
 
                 self.stdin_handle_repaint(stdin_windows);

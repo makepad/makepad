@@ -170,7 +170,7 @@ impl HostPresentableImage {
         #[cfg(not(all(target_os = "linux", use_vulkan, linux_direct)))]
         {
             let _ = (&cx, draw, width, height);
-            #[cfg(all(target_os = "linux", not(target_env = "ohos"), not(linux_direct)))]
+            #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
             if let Some(buffer) = self.software_buffer.as_ref() {
                 cx.upload_presentable_image_software_buffer(&self.texture, width, height, buffer.as_bytes());
             }
