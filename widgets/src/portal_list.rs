@@ -3181,10 +3181,17 @@ impl Widget for PortalList {
                         }
                     } else if self.drag_scrolling && fe.is_primary_hit()
                         && cx.is_scrolling_allowed_within(&self.area)
+                        // A MOUSE press a child holds is that child's until the
+                        // release: a slider dragged a few points off its track
+                        // must go on moving the slider, not scroll the list out
+                        // from under it. A finger keeps the drag-to-scroll over
+                        // controls that a touch list is used to.
+                        && !(fe.device.is_mouse() && cx.fingers.is_mouse_held_outside(&[self.area]))
                     {
-                        // Always enter drag state to enable drag-to-scroll even over
-                        // interactive widgets (buttons, links, etc.). The drag threshold
-                        // prevents micro-scrolling during taps/clicks, and child widgets
+                        // Enter drag state to enable drag-to-scroll even over
+                        // interactive widgets (buttons, links, etc.) that did not
+                        // take hold of the press. The drag threshold prevents
+                        // micro-scrolling during taps/clicks, and child widgets
                         // use `was_tap()` to distinguish taps from drags on FingerUp.
                         let initial = fe.abs.index(vi);
                         self.scroll_state = ScrollState::Drag {
