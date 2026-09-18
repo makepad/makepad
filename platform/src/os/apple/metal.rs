@@ -3094,7 +3094,7 @@ impl MetalCx {
         };
         let envelope =
             crate::retained_instances::retained_device_envelope(recommended, physical, unified);
-        crate::log!("retained-upload budgets: recommended_working_set_bytes={} physical_memory_bytes={} unified={} allocation_limit={} fraction=1/4 pool_fraction=1/16 residency_high_fraction=3/4 residency_low_fraction=5/8 source={}", recommended, physical, unified, envelope,
+        crate::trace!("gpu.upload", "retained-upload budgets: recommended_working_set_bytes={} physical_memory_bytes={} unified={} allocation_limit={} fraction=1/4 pool_fraction=1/16 residency_high_fraction=3/4 residency_low_fraction=5/8 source={}", recommended, physical, unified, envelope,
             if !unified && recommended != 0 { "recommendedMaxWorkingSetSize" } else { "physicalMemory/2" });
         let in_flight: InFlightQueue = Arc::new(Mutex::new(VecDeque::new()));
         let (submitter, submitter_thread) = spawn_submitter(in_flight.clone());

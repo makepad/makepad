@@ -687,7 +687,8 @@ impl Cx {
         self.memory_budget_initialized = true;
         let (budget, source) = platform_memory_budget(self.memory_budget_bytes);
         self.memory_budget_bytes = budget;
-        crate::log!(
+        crate::trace!(
+            "memory",
             "memory budget: {} MiB ({})",
             budget / (1024 * 1024),
             source

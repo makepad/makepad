@@ -318,7 +318,6 @@ impl Cx {
 
     fn start_studio_websocket(&mut self, studio_http: &str) {
         if studio_http.is_empty() {
-            crate::log!("studio websocket disabled: empty studio_http");
             return;
         }
         self.studio_http = studio_http.into();

@@ -925,7 +925,7 @@ impl Cx {
 
     pub(crate) fn warm_task_pool(&self) {
         let status = Cx::set_thread_priority(CxThreadPriority::UserInteractive);
-        crate::log!("UI thread priority UserInteractive: {status:?}");
+        crate::trace!("pool", "UI thread priority UserInteractive: {status:?}");
         let _ = self.task_pool();
     }
 
@@ -939,7 +939,7 @@ impl Cx {
 
     pub(crate) fn close_task_pool(&self) {
         if let Some(pool) = self.task_pool.get() {
-            crate::log!("{}", pool.summary());
+            crate::trace!("pool", "{}", pool.summary());
             pool.close(ShutdownMode::CancelPending);
         }
     }
@@ -1360,7 +1360,7 @@ impl PoolInner {
             self.next_report_us.store(due, Ordering::Relaxed);
         }
         if now >= due {
-            crate::log!("{}", self.summary());
+            crate::trace!("pool", "{}", self.summary());
             self.reported_completed.store(completed, Ordering::Relaxed);
             self.next_report_us
                 .store(now + POOL_REPORT_US, Ordering::Relaxed);
