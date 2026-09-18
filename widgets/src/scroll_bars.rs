@@ -413,9 +413,32 @@ impl ScrollBars {
     /// scroll never also activates a widget under the finger.
     ///
     /// It tests the raw press event against the content rect rather than `event.hits`, so it
-    /// fires even when a child would otherwise capture the press, and it must run before the
-    /// view dispatches the event to its children.
+    /// fires even when a child would otherwise capture THIS press, and it must run before the
+    /// view dispatches the event to its children. A pointer another control is ALREADY holding
+    /// is the one exception (see the body): that press is not the reader reaching for the
+    /// brake, it belongs to whatever the pointer is locked to.
     pub fn catch_fling_on_press(&mut self, cx: &mut Cx, event: &Event) -> bool {
+        // The pointer-capture rule's other half. Catching a fling CONSUMES the
+        // press, so while another control holds the mouse this must stand
+        // down: a press that arrives with the pointer already locked to a
+        // slider belongs to that slider, and the box would otherwise take a
+        // press-like state from a pointer it does not own. The box's own areas
+        // — the content and both handles — are not "outside", so a press on a
+        // handle still catches the fling the reader is reaching for, and a
+        // press during the box's own drag still counts.
+        //
+        // Touch captures are ignored by `is_mouse_held_outside`, so a finger
+        // may still catch a fling through a control, as it may still drag the
+        // content under one.
+        if matches!(event, Event::MouseDown(_))
+            && cx.fingers.is_mouse_held_outside(&[
+                self.area,
+                self.scroll_bar_x.area(),
+                self.scroll_bar_y.area(),
+            ])
+        {
+            return false;
+        }
         let area_rect = self.area.rect(cx);
         // The press time also gates the coast check below, so a momentum stream that
         // silently stopped reaching this view can't leave it eating presses.

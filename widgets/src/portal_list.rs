@@ -3343,7 +3343,27 @@ impl Widget for PortalList {
                     }
                 }
                 Hit::FingerDown(fe) => {
-                    if self.grab_key_focus {
+                    // Who owns this press? A control that is dragged
+                    // continuously — a slider, a fader, a scroll bar, a
+                    // resizer — takes the pointer on its press, and from then
+                    // until the release the interaction is locked to it:
+                    // nothing else may take a gesture, a hover or a focus from
+                    // that same pointer. This list is exactly the host that
+                    // would break that rule, because `capture_overload` makes
+                    // it co-capture every press landing inside it, child
+                    // controls included — so the answer has to be asked for
+                    // rather than assumed from having been handed a hit. Its
+                    // own co-capture is `mine` and does not count.
+                    //
+                    // Only the MOUSE locks. A touch that starts on a control
+                    // may still drag-scroll the list under it, the way every
+                    // native list behaves, so `is_mouse_held_outside` answers
+                    // `false` for touch captures and the touch paths below are
+                    // left exactly as they were.
+                    let held_elsewhere = cx.fingers.is_mouse_held_outside(&[self.area]);
+                    // A press a child control holds is that control's, so this
+                    // list does not pull the key focus off it on the way past.
+                    if self.grab_key_focus && !held_elsewhere {
                         cx.set_key_focus(self.area);
                     }
                     // A press that doesn't end up moving us off the end shouldn't stop
@@ -3389,7 +3409,12 @@ impl Widget for PortalList {
 
                     // Handle selection when selectable, but not if clicking on interactive items
                     let on_interactive = self.point_hits_interactive_item(cx, fe.abs);
-                    if self.selectable && fe.is_primary_hit() && !on_interactive {
+                    // A selection drag is a gesture of this list's, so it takes
+                    // a press only on bare text: not over an interactive item
+                    // (`on_interactive`), and not while a control owns the
+                    // mouse — a control whose own area the item walk misses
+                    // still holds the pointer, and `held_elsewhere` catches it.
+                    if self.selectable && fe.is_primary_hit() && !on_interactive && !held_elsewhere {
                         let hit = self.hit_test_selection(cx, fe.abs);
                         if let Some((item_id, char_idx)) = hit {
                             cx.set_key_focus(self.area);
@@ -3405,13 +3430,20 @@ impl Widget for PortalList {
                             });
                             self.update_item_selections(cx);
                         }
-                    } else if self.drag_scrolling && fe.is_primary_hit()
-                        && cx.is_scrolling_allowed_within(&self.area)
-                    {
-                        // Always enter drag state to enable drag-to-scroll even over
-                        // interactive widgets (buttons, links, etc.). The drag threshold
-                        // prevents micro-scrolling during taps/clicks, and child widgets
-                        // use `was_tap()` to distinguish taps from drags on FingerUp.
+                    } else if press_starts_drag_scroll(
+                        self.drag_scrolling,
+                        fe.is_primary_hit(),
+                        cx.is_scrolling_allowed_within(&self.area),
+                        fe.device.is_touch(),
+                        held_elsewhere,
+                    ) {
+                        // A touch enters the drag state over interactive widgets
+                        // too — that is how a finger scrolls a list of buttons —
+                        // and the threshold below keeps a tap from micro-scrolling;
+                        // children use `was_tap()` to tell a tap from a drag on
+                        // FingerUp. A mouse press a control holds never gets here:
+                        // dragging a slider's thumb must not also scroll the list
+                        // the slider sits in.
                         let initial = fe.abs.index(vi);
                         self.scroll_state = ScrollState::Drag {
                             samples: vec![ScrollSample {
@@ -3448,6 +3480,21 @@ impl Widget for PortalList {
                         // interactive-widget hit test for touch events entirely.
                         if !e.device.is_touch() && !self.point_hits_interactive_item(cx, e.abs) {
                             cx.set_cursor(MouseCursor::Default);
+                        }
+                        // The other half of the rule, asked again on every move:
+                        // a press and a child's capture can land in either order
+                        // within one event, and a control may take the pointer
+                        // after this drag started. The moment something else owns
+                        // the mouse this drag stands down — and gives the children
+                        // back the events it was swallowing.
+                        if matches!(self.scroll_state, ScrollState::Drag { .. })
+                            && drag_scroll_stands_down(
+                                e.device.is_touch(),
+                                cx.fingers.is_mouse_held_outside(&[self.area]),
+                            )
+                        {
+                            self.scroll_state = ScrollState::Stopped;
+                            self.suppress_child_events = false;
                         }
                         if let ScrollState::Drag {
                             samples,
@@ -3975,6 +4022,41 @@ impl PortalListRef {
 
 type ItemsWithActions = Vec<(usize, WidgetRef)>;
 
+/// Whether a press may start this list's drag-to-scroll.
+///
+/// Drag-to-scroll is a gesture the list starts from a press that is not its
+/// own: `capture_overload` hands it the FingerDown for every press inside it,
+/// including one a child control already captured. So it has to decide, and
+/// the rule it decides by is the app-wide one — a control that is dragged
+/// continuously locks the pointer, and any other gesture that would start from
+/// the same press stands down until the release.
+///
+/// `mouse_held_outside` is `CxFingers::is_mouse_held_outside` asked with this
+/// list's own area: true means a slider, fader, scroll bar or resizer owns the
+/// mouse right now. A mouse press it holds may not scroll the list; a TOUCH
+/// still may, because a finger that lands on a control and drags is scrolling
+/// the list in every native toolkit, and `is_mouse_held_outside` deliberately
+/// ignores touch captures so `is_touch` is the only exemption needed here.
+fn press_starts_drag_scroll(
+    drag_scrolling: bool,
+    is_primary_hit: bool,
+    scrolling_allowed: bool,
+    is_touch: bool,
+    mouse_held_outside: bool,
+) -> bool {
+    drag_scrolling && is_primary_hit && scrolling_allowed && (is_touch || !mouse_held_outside)
+}
+
+/// Whether a drag-to-scroll already under way must stand down on this move.
+///
+/// The press and a child's capture can land in either order inside one event,
+/// and a control can take the pointer after the drag began, so the question is
+/// re-asked on every move rather than only at the press. Touch is exempt for
+/// the same reason as in [`press_starts_drag_scroll`].
+fn drag_scroll_stands_down(is_touch: bool, mouse_held_outside: bool) -> bool {
+    !is_touch && mouse_held_outside
+}
+
 /// Whether a list keeps a scroll delta it is handed, which makes the delta
 /// spent: the event is marked handled, and no scroll view around the list
 /// moves by it as well. `delta` is positive toward the list's start.
@@ -4380,7 +4462,66 @@ mod tests {
         assert_eq!(filler_alternate(0, -2), 0.0);
     }
 
+    /// Drag-to-scroll asks one question at the press: does a control hold the
+    /// mouse? A mouse press one holds is that control's — the operator's rule,
+    /// and the bug it was written for: dragging a slider's thumb also drag-
+    /// scrolled the rack the slider sits in.
+    #[test]
+    fn a_mouse_press_a_control_holds_starts_no_drag_scroll() {
+        assert!(!press_starts_drag_scroll(true, true, true, false, true));
+        assert!(press_starts_drag_scroll(true, true, true, false, false));
+    }
+
+    /// The one exemption: a TOUCH that lands on a control still scrolls the
+    /// list under it, the way every native list behaves. `is_mouse_held_outside`
+    /// ignores touch captures, so this is about the finger's own press.
+    #[test]
+    fn a_touch_scrolls_the_list_even_from_a_control() {
+        assert!(press_starts_drag_scroll(true, true, true, true, true));
+    }
+
+    /// The list's own three conditions still each veto a drag on their own,
+    /// whoever holds the mouse.
+    #[test]
+    fn a_drag_scroll_still_needs_the_lists_own_leave() {
+        assert!(!press_starts_drag_scroll(false, true, true, true, false));
+        assert!(!press_starts_drag_scroll(true, false, true, true, false));
+        assert!(!press_starts_drag_scroll(true, true, false, true, false));
+    }
+
+    /// Asked again on every move: a control that takes the pointer after the
+    /// drag began ends it, and a finger's drag is never ended this way.
+    #[test]
+    fn a_drag_scroll_stands_down_the_move_a_control_takes_the_mouse() {
+        assert!(drag_scroll_stands_down(false, true));
+        assert!(!drag_scroll_stands_down(false, false));
+        assert!(!drag_scroll_stands_down(true, true));
+    }
+
     const PANE: DVec2 = dvec2(300.0, 120.0);
+
+    /// One draw of a widget over the whole pane, in a draw list of its own so
+    /// it overlaps whatever else the same pass drew: two widgets whose rects
+    /// both contain the press point, the way a slider sits inside a list row.
+    /// A separate draw list keeps its own redraw id, so neither draw
+    /// invalidates the other's area.
+    fn frame_over(
+        cx: &mut Cx,
+        widget: &mut dyn Widget,
+        pass: &DrawPass,
+        draw_list: &mut DrawList2d,
+    ) {
+        let event = DrawEvent::default();
+        let mut draw = CxDraw::new(cx, &event);
+        let mut cx2d = Cx2d::new(&mut draw);
+        cx2d.begin_pass(pass, None);
+        draw_list.begin_always(&mut cx2d);
+        cx2d.begin_root_turtle(PANE, Layout::flow_down());
+        let _ = widget.draw_walk(&mut cx2d, &mut Scope::empty(), Walk::fixed(PANE.x, PANE.y));
+        cx2d.end_pass_sized_turtle();
+        draw_list.end(&mut cx2d);
+        cx2d.end_pass(pass);
+    }
 
     /// One draw of the pane, in the pass and draw list the test keeps.
     fn frame(cx: &mut Cx, log: &mut LogList, pass: &DrawPass, draw_list: &mut DrawList2d) {
@@ -4572,5 +4713,153 @@ mod tests {
         assert_eq!(place(&cx, &log), (0, 0.0), "the wheel never reached the top");
         assert!(!wheel(&mut cx, &mut log, -60.0, false), "a wheel past the top was kept");
         assert!(wheel(&mut cx, &mut log, 60.0, false), "a wheel down from the top was handed on");
+    }
+
+    /// A press through the list's real pointer handling, at `at` over a log of
+    /// `lines` rows. The control is handed the event first, the way a row's own
+    /// widgets are handled before the list's hits, and it captures the digit;
+    /// then the list sees the same press through `capture_overload` and has to
+    /// decide whether that press is its to scroll by. Answers what the list did
+    /// with it: (entered a drag, stayed stopped).
+    ///
+    /// The stand-in for the slider is a `Button` drawn over the whole pane:
+    /// what the list asks is who holds the mouse, not what kind of control it
+    /// is, and a Button takes a press exactly as a Slider's thumb does.
+    fn press_over(lines: usize, at: DVec2, touch: bool, control: bool) -> (bool, bool) {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let mut log = cx.with_vm(LogList::script_new_with_default);
+        log.lines = (0..lines).map(|n| format!("log | line {n}")).collect();
+        let mut button = cx.with_vm(crate::button::Button::script_new_with_default);
+
+        let pass = DrawPass::new(&mut cx);
+        pass.set_size(&mut cx, PANE);
+        let mut draw_list = DrawList2d::new(&mut cx);
+        let mut button_list = DrawList2d::new(&mut cx);
+        for _ in 0..3 {
+            frame(&mut cx, &mut log, &pass, &mut draw_list);
+        }
+        frame_over(&mut cx, &mut button, &pass, &mut button_list);
+
+        // A console keeps out of the way of the app it is embedded in, so its
+        // own list drags nothing and leaves its rows their text selection.
+        // Turn it into an ordinary drag-to-scroll list — the widget under test.
+        {
+            let list = log.portal_list(&cx, ids!(list));
+            let mut list = list.borrow_mut().expect("the log holds no portal list");
+            list.drag_scrolling = true;
+            list.capture_overload = true;
+            list.selectable = false;
+            assert!(
+                list.area.is_valid(&cx) && list.area.clipped_rect(&cx).contains(at),
+                "the press point is not over the list"
+            );
+        }
+        assert!(
+            button.area().is_valid(&cx) && button.area().clipped_rect(&cx).contains(at),
+            "the press point is not over the control"
+        );
+
+        let event = if touch {
+            Event::TouchUpdate(crate::event::TouchUpdateEvent {
+                time: 0.0,
+                window_id: WindowId(1, 1),
+                modifiers: KeyModifiers::default(),
+                touches: vec![crate::event::TouchPoint {
+                    state: TouchState::Start,
+                    abs: at,
+                    time: 0.0,
+                    uid: 1,
+                    rotation_angle: 0.0,
+                    force: 1.0,
+                    radius: dvec2(1.0, 1.0),
+                    handled: Cell::new(Area::Empty),
+                    sweep_lock: Cell::new(Area::Empty),
+                }],
+            })
+        } else {
+            cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WindowId(1, 1)));
+            Event::MouseDown(MouseDownEvent {
+                abs: at,
+                button: MouseButton::PRIMARY,
+                window_id: WindowId(1, 1),
+                modifiers: KeyModifiers::default(),
+                handled: Cell::new(Area::Empty),
+                time: 0.0,
+            })
+        };
+        if control {
+            button.handle_event(&mut cx, &event, &mut Scope::empty());
+            assert!(
+                cx.fingers.any_areas_captured(),
+                "the control did not take the press, so this test proves nothing"
+            );
+        }
+        log.handle_event(&mut cx, &event, &mut Scope::empty());
+        cx.fingers.first_mouse_button = None;
+
+        let list = log.portal_list(&cx, ids!(list));
+        let list = list.borrow().expect("the log holds no portal list");
+        (
+            matches!(list.scroll_state, ScrollState::Drag { .. }),
+            matches!(list.scroll_state, ScrollState::Stopped),
+        )
+    }
+
+    /// One line drawn at the top of the pane leaves the rest of the list bare,
+    /// so a press down here is over the list and over nothing else of its own.
+    const BARE: DVec2 = dvec2(150.0, 100.0);
+
+    /// The bug, end to end: a mouse press a control holds does not put the list
+    /// around it into a drag, so dragging a slider's thumb cannot also scroll
+    /// the rack the slider sits in.
+    #[test]
+    fn a_control_holding_the_mouse_keeps_the_list_around_it_still() {
+        assert_eq!(
+            press_over(1, BARE, false, true),
+            (false, true),
+            "a press the control holds started the list's drag-to-scroll"
+        );
+    }
+
+    /// And the list is not broken while fixing it: the same press with nothing
+    /// holding the mouse is the list's own, and still starts its drag.
+    #[test]
+    fn a_press_on_bare_list_still_starts_its_drag_scroll() {
+        assert_eq!(
+            press_over(1, BARE, false, false),
+            (true, false),
+            "the list stopped drag-scrolling from a press nothing else holds"
+        );
+    }
+
+    /// The touch exemption, end to end: a finger that lands on a control still
+    /// scrolls the list under it.
+    #[test]
+    fn a_touch_on_a_control_still_scrolls_the_list_under_it() {
+        assert_eq!(
+            press_over(1, BARE, true, true),
+            (true, false),
+            "a finger on a control stopped scrolling the list under it"
+        );
+    }
+
+    /// The same rule with the control inside the list rather than over it: a
+    /// log's rows carry selectable text, which takes the press and drags a
+    /// selection with it. That press is the row's, so the list does not scroll
+    /// by it — and a finger's still does.
+    #[test]
+    fn a_row_holding_the_mouse_keeps_the_list_it_sits_in_still() {
+        let over_a_row = PANE * 0.5;
+        assert_eq!(
+            press_over(200, over_a_row, false, false),
+            (false, true),
+            "a press a row's own text holds started the list's drag-to-scroll"
+        );
+        assert_eq!(
+            press_over(200, over_a_row, true, false),
+            (true, false),
+            "a finger on a row stopped scrolling the list under it"
+        );
     }
 }

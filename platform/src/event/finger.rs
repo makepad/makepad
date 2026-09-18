@@ -510,6 +510,61 @@ impl CxFingers {
         self.captures.len() > 0
     }
 
+    /// Every capture of the MOUSE right now. Normally at most one, but
+    /// `capture_overload` lets a container co-capture a press a child
+    /// already took, so one press can have more than one owner.
+    fn mouse_captures(&self) -> impl Iterator<Item = &CxDigitCapture> {
+        let digit_id: DigitId = live_id!(mouse).into();
+        self.captures.iter().filter(move |c| c.digit_id == digit_id)
+    }
+
+    /// Is the mouse currently held by something that is NOT one of `mine`?
+    ///
+    /// Ask this from a gesture that starts on a RAW press (a list's
+    /// drag-to-scroll, a canvas pan, a rubber-band select) — code that never
+    /// goes through `Event::hits` and so never learns that another widget
+    /// took the press. Pass the areas the asking host owns (its own area,
+    /// its scroll bars); `true` means another control owns the pointer and
+    /// the gesture must stand down.
+    ///
+    /// # The rule this exists for
+    ///
+    /// Every control that is dragged continuously — a slider, a scrollbar, a
+    /// fader, a resizer, a long-press button — takes pointer capture on the
+    /// press. From then until the release the interaction is LOCKED to that
+    /// control: it keeps tracking the pointer outside its own bounds, and no
+    /// other element may take a hover, focus or press-like state from that
+    /// pointer on the way. A reorder carry, a scroll grab, or any other
+    /// gesture that would start from the same press stands down while
+    /// another control holds the mouse. The one exception is drag and drop:
+    /// there the source does NOT lock the pointer, because a global drag
+    /// state must let other components light their drag-over states and
+    /// accept the drop on release.
+    ///
+    /// `hits()` already implements the captured half: a press captures the
+    /// digit, and while a button is down no other area is handed hovers.
+    /// This is the other half — what a raw-press gesture has to ask for
+    /// itself, at the press AND on every move while it is still pending,
+    /// dropping itself the moment the answer is yes. The press and the
+    /// child's capture can land in either order within one event, so a raw
+    /// gesture must not rely on this alone at press time: it may only take a
+    /// press on BARE BACKGROUND, i.e. when
+    /// `find_interactive_widget_from_point` finds no widget but the host
+    /// itself under the point, whether or not that widget captured.
+    ///
+    /// Only the mouse locks: a TOUCH capture elsewhere answers `false`,
+    /// because a touch drag that begins on a control is still allowed to
+    /// scroll the list under it.
+    ///
+    /// Areas are matched by owner, not by handle: a redraw hands the caller
+    /// a fresh `Area` for the same widget (a new `redraw_id`) while the
+    /// capture still records the one taken at the press, and that is still
+    /// `mine`.
+    pub fn is_mouse_held_outside(&self, mine: &[Area]) -> bool {
+        self.mouse_captures()
+            .any(|c| !mine.iter().any(|m| same_owner(*m, c.area)))
+    }
+
     pub(crate) fn release_digit(&mut self, digit_id: DigitId) {
         while let Some(index) = self
             .captures
@@ -1846,5 +1901,113 @@ mod lock_nest_tests {
         // Popping an empty stack is harmless.
         fingers.block_scrolling_within_area(None);
         assert_eq!(fingers.blocked_scrolling_exception_area(), None);
+    }
+}
+
+/// The half of the pointer-capture rule a raw-press gesture has to ask for
+/// itself: `is_mouse_held_outside`. The capture list is plain state, so
+/// these drive it directly — no window, no event loop.
+#[cfg(test)]
+mod mouse_hold_tests {
+    use super::*;
+    use crate::area::RectArea;
+    use crate::draw_list::CxDrawListPool;
+
+    /// Three distinct, non-empty areas on one draw list, plus a redrawn
+    /// handle for the first one (same owner, later `redraw_id`).
+    fn areas() -> (Area, Area, Area, Area) {
+        let mut pool = CxDrawListPool::default();
+        let list = pool.alloc();
+        let rect = |rect_id, redraw_id| {
+            Area::Rect(RectArea {
+                draw_list_id: list.id(),
+                rect_id,
+                redraw_id,
+            })
+        };
+        (rect(0, 0), rect(1, 0), rect(2, 0), rect(0, 7))
+    }
+
+    fn press_mouse(fingers: &mut CxFingers, area: Area) {
+        fingers.mouse_down(MouseButton::PRIMARY, WindowId(0, 0));
+        fingers.capture_digit(
+            live_id!(mouse).into(),
+            area,
+            Area::Empty,
+            0.0,
+            Vec2d::default(),
+        );
+    }
+
+    #[test]
+    fn an_idle_mouse_holds_nothing() {
+        let (host, other, _, _) = areas();
+        let fingers = CxFingers::default();
+        assert!(!fingers.is_mouse_held_outside(&[host]));
+        assert!(!fingers.is_mouse_held_outside(&[host, other]));
+        assert!(!fingers.is_mouse_held_outside(&[]));
+    }
+
+    #[test]
+    fn a_control_holding_the_mouse_stands_a_host_gesture_down() {
+        let (host, slider, _, _) = areas();
+        let mut fingers = CxFingers::default();
+        press_mouse(&mut fingers, slider);
+        assert!(fingers.is_mouse_held_outside(&[host]));
+        // ...and the release hands the gesture back.
+        fingers.mouse_up(MouseButton::PRIMARY);
+        assert!(!fingers.is_mouse_held_outside(&[host]));
+    }
+
+    #[test]
+    fn my_own_capture_is_not_outside() {
+        let (host, scrollbar, other, _) = areas();
+        let mut fingers = CxFingers::default();
+        press_mouse(&mut fingers, scrollbar);
+        // The host owns its scroll bar too, so it names both.
+        assert!(!fingers.is_mouse_held_outside(&[host, scrollbar]));
+        assert!(fingers.is_mouse_held_outside(&[host, other]));
+    }
+
+    #[test]
+    fn a_redrawn_handle_is_still_mine() {
+        let (host, _, _, host_redrawn) = areas();
+        let mut fingers = CxFingers::default();
+        press_mouse(&mut fingers, host);
+        // The caller asks with the handle its latest draw produced.
+        assert!(!fingers.is_mouse_held_outside(&[host_redrawn]));
+    }
+
+    #[test]
+    fn a_touch_elsewhere_does_not_hold_the_mouse() {
+        let (host, slider, _, _) = areas();
+        let mut fingers = CxFingers::default();
+        fingers.capture_digit(
+            live_id_num!(touch, 3).into(),
+            slider,
+            Area::Empty,
+            0.0,
+            Vec2d::default(),
+        );
+        assert!(!fingers.is_mouse_held_outside(&[host]));
+    }
+
+    #[test]
+    fn a_co_captured_press_is_still_held_by_the_child() {
+        let (host, child, _, _) = areas();
+        let mut fingers = CxFingers::default();
+        press_mouse(&mut fingers, child);
+        // `capture_overload`: the host co-captures the same digit.
+        fingers.capture_digit(
+            live_id!(mouse).into(),
+            host,
+            Area::Empty,
+            0.0,
+            Vec2d::default(),
+        );
+        assert!(fingers.is_mouse_held_outside(&[host]));
+        // Once the host promotes itself to sole owner, nothing is outside.
+        assert!(fingers.promote_capture_over(host));
+        assert!(!fingers.is_mouse_held_outside(&[host]));
     }
 }

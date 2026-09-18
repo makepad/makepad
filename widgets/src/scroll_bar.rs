@@ -801,6 +801,14 @@ impl ScrollBar {
         cx.fingers.is_area_captured(self.draw_bg.area())
     }
 
+    /// This bar's handle area. A host names it, along with its own content
+    /// area, as one of "mine" when asking [`CxFingers::is_mouse_held_outside`]
+    /// whether some other control holds the pointer: a press on a bar of its
+    /// own is the host's own press, not an outside one.
+    pub fn area(&self) -> Area {
+        self.draw_bg.area()
+    }
+
     /// Whether a momentum fling is currently animating this bar.
     pub fn is_flinging(&self) -> bool {
         matches!(self.scroll_state, ScrollState::Flick { .. })
@@ -885,6 +893,47 @@ impl ScrollBar {
             if self.overscroll != 0.0 {
                 self.overscroll = 0.0;
                 dispatch_action(cx, self.make_scroll_action());
+            }
+            return;
+        }
+
+        // THE POINTER-CAPTURE RULE. Dragging the content is a gesture that
+        // starts from a press on whatever happens to be under the pointer, so
+        // it stands down the whole time the MOUSE is held by anything that is
+        // not this box — at the press, and again on every move while the drag
+        // is still running.
+        //
+        // `hits` below already refuses a press another widget marked handled,
+        // but that flag lives on the event and is not the whole answer. A
+        // widget that ALREADY holds the mouse is handed its `FingerDown`
+        // straight off the capture list without marking the event at all
+        // (`hits`' "if we already captured it just return it immediately"
+        // path), so every press delivered while a control is being dragged
+        // arrives here looking like bare background. A `capture_overload`
+        // co-capture, a capture promoted away from a child, and a capture
+        // taken after this drag began are invisible to the flag as well. So
+        // ask the capture list itself.
+        //
+        // Only the mouse locks. `is_mouse_held_outside` ignores touch
+        // captures, so a TOUCH drag that begins on a control may still scroll
+        // the box under it; that asymmetry is the rule, not an oversight.
+        //
+        // A fling or a bounce is deliberately NOT stopped here: it is not this
+        // pointer's gesture, and a press on some unrelated control must not
+        // freeze a spring in mid-flight.
+        // ...and that asymmetry has to be enforced here, not merely stated:
+        // this guard sits in front of `hits`, so applied to every event it
+        // would drop TOUCH moves and ups as well and kill finger scrolling
+        // whenever a mouse happened to be held anywhere. A touch event is let
+        // through to the gesture below; only a mouse-driven one stands down.
+        let touch_event = matches!(event, Event::TouchUpdate(_));
+        if !touch_event && cx.fingers.is_mouse_held_outside(&[scroll_area]) {
+            if matches!(self.scroll_state, ScrollState::Drag { .. }) {
+                self.scroll_state = ScrollState::Stopped;
+                if self.overscroll != 0.0 {
+                    self.overscroll = 0.0;
+                    dispatch_action(cx, self.make_scroll_action());
+                }
             }
             return;
         }
@@ -1299,5 +1348,311 @@ impl ScrollBar {
         }
 
         self.scroll_pos
+    }
+}
+
+/// The pointer-capture rule, as it applies to a box that drag-scrolls its
+/// content: while another control holds the MOUSE, the box's own gestures
+/// stand down; a TOUCH held elsewhere changes nothing.
+#[cfg(test)]
+mod pointer_capture_tests {
+    use super::*;
+    use crate::button::ButtonAction;
+    use crate::event::{ScrollEvent, TouchPoint, TouchState, TouchUpdateEvent};
+    use crate::makepad_draw::cx_draw::CxDraw;
+    use crate::view::View;
+    use crate::widget::*;
+    use std::cell::Cell;
+
+    const SIZE: Vec2d = Vec2d { x: 800.0, y: 600.0 };
+    const WINDOW: WindowId = WindowId(1, 1);
+
+    /// A 300x200 box holding 1000 points of content, so it really scrolls,
+    /// with a button under it to hold the pointer with.
+    fn scene(cx: &mut Cx) -> WidgetRef {
+        cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    page := ScrollYView{
+                        width: 300.
+                        height: 200.
+                        flow: Down
+                        inner := Button{width: 100. height: 40. text: "inner"}
+                        tall := View{width: Fill height: 1000.}
+                    }
+                    grab := Button{width: 100. height: 40. text: "grab"}
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        })
+    }
+
+    struct Target {
+        pass: DrawPass,
+        draw_list: DrawList2d,
+    }
+
+    impl Target {
+        fn new(cx: &mut Cx) -> Self {
+            Target {
+                pass: DrawPass::new(cx),
+                draw_list: DrawList2d::new(cx),
+            }
+        }
+
+        fn draw(&mut self, cx: &mut Cx, root: &WidgetRef) {
+            self.pass.set_size(cx, SIZE);
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&self.pass, None);
+            self.draw_list.begin_always(&mut cx2d);
+            cx2d.begin_root_turtle(SIZE, Layout::flow_down());
+            root.draw_all(&mut cx2d, &mut Scope::empty());
+            cx2d.end_pass_sized_turtle();
+            self.draw_list.end(&mut cx2d);
+            cx2d.end_pass(&self.pass);
+        }
+    }
+
+    fn press(abs: Vec2d) -> Event {
+        Event::MouseDown(MouseDownEvent {
+            abs,
+            button: MouseButton::PRIMARY,
+            window_id: WINDOW,
+            modifiers: KeyModifiers::default(),
+            handled: Cell::new(Area::Empty),
+            time: 0.0,
+        })
+    }
+
+    fn mouse_move(abs: Vec2d) -> Event {
+        Event::MouseMove(MouseMoveEvent {
+            abs,
+            lock_delta: Vec2d::default(),
+            window_id: WINDOW,
+            modifiers: KeyModifiers::default(),
+            time: 0.02,
+            handled: Cell::new(Area::Empty),
+        })
+    }
+
+    fn release(abs: Vec2d) -> Event {
+        Event::MouseUp(MouseUpEvent {
+            abs,
+            button: MouseButton::PRIMARY,
+            window_id: WINDOW,
+            modifiers: KeyModifiers::default(),
+            time: 0.04,
+        })
+    }
+
+    fn touch_press(abs: Vec2d) -> Event {
+        Event::TouchUpdate(TouchUpdateEvent {
+            time: 0.0,
+            window_id: WINDOW,
+            modifiers: KeyModifiers::default(),
+            touches: vec![TouchPoint {
+                state: TouchState::Start,
+                abs,
+                time: 0.0,
+                uid: 7,
+                rotation_angle: 0.0,
+                force: 1.0,
+                radius: dvec2(1.0, 1.0),
+                handled: Cell::new(Area::Empty),
+                sweep_lock: Cell::new(Area::Empty),
+            }],
+        })
+    }
+
+    /// One finger-driven trackpad delta over `abs`. It leaves the box counting
+    /// as moving for the next `FINGER_SCROLL_SETTLE_WINDOW`, which is what arms
+    /// the press-to-catch below without an animation frame in sight.
+    fn trackpad_scroll(abs: Vec2d, dy: f64) -> Event {
+        Event::Scroll(ScrollEvent {
+            window_id: WINDOW,
+            scroll: dvec2(0.0, dy),
+            abs,
+            modifiers: KeyModifiers::default(),
+            handled_x: Cell::new(false),
+            handled_y: Cell::new(false),
+            is_mouse: false,
+            time: 0.0,
+            phase: ScrollPhase::Changed,
+        })
+    }
+
+    fn send(cx: &mut Cx, root: &WidgetRef, event: Event) {
+        cx.capture_actions(|cx| root.handle_event(cx, &event, &mut Scope::empty()));
+    }
+
+    /// Whether `button` heard a press out of this event.
+    fn pressed(cx: &mut Cx, root: &WidgetRef, event: Event, button: &WidgetRef) -> bool {
+        let actions = cx.capture_actions(|cx| root.handle_event(cx, &event, &mut Scope::empty()));
+        actions
+            .iter()
+            .filter_map(|action| action.as_widget_action())
+            .any(|action| {
+                action.widget_uid == button.widget_uid()
+                    && matches!(action.cast::<ButtonAction>(), ButtonAction::Pressed(_))
+            })
+    }
+
+    /// Press, move, release - the whole drag through the widget tree.
+    fn drag(cx: &mut Cx, root: &WidgetRef, from: Vec2d, to: Vec2d) {
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        send(cx, root, press(from));
+        send(cx, root, mouse_move(to));
+        send(cx, root, release(to));
+        cx.fingers.first_mouse_button = None;
+    }
+
+    /// Press something and DON'T let go: the pointer is now locked to it, the
+    /// way it is locked to a slider's thumb being dragged.
+    fn hold(cx: &mut Cx, root: &WidgetRef, at: Vec2d) {
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        send(cx, root, press(at));
+    }
+
+    fn middle(cx: &Cx, widget: &WidgetRef) -> Vec2d {
+        let rect = widget.area().rect(cx);
+        assert!(rect.size.x > 0.0 && rect.size.y > 0.0, "not drawn");
+        rect.pos + rect.size * 0.5
+    }
+
+    fn scroll_y(widget: &WidgetRef) -> f64 {
+        widget
+            .borrow::<View>()
+            .unwrap()
+            .scroll_extent()
+            .unwrap()
+            .pos
+            .y
+    }
+
+    fn start(cx: &mut Cx) -> (WidgetRef, WidgetRef, WidgetRef) {
+        cx.init_cx_os();
+        cx.with_vm(crate::script_mod);
+        let root = scene(cx);
+        let mut target = Target::new(cx);
+        target.draw(cx, &root);
+        let page = root.widget(cx, ids!(page));
+        let grab = root.widget(cx, ids!(grab));
+        assert_eq!(scroll_y(&page), 0.0, "starts at the top");
+        (root, page, grab)
+    }
+
+    /// The control: with nothing else holding the pointer, a drag upward over
+    /// the content scrolls the box. Without this the two tests below would
+    /// pass on a box that never scrolled at all.
+    #[test]
+    fn a_drag_on_bare_content_scrolls_the_box() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, page, _grab) = start(&mut cx);
+        drag(&mut cx, &root, dvec2(50.0, 150.0), dvec2(50.0, 90.0));
+        assert_eq!(
+            scroll_y(&page),
+            60.0,
+            "60 points of finger travel moved the content 60 points"
+        );
+    }
+
+    /// The operator's bug: a press the pointer is already locked to must not
+    /// also drag-scroll a box around it.
+    ///
+    /// A widget that already holds the mouse is handed its `FingerDown`
+    /// straight off the capture list, and that path marks nothing on the
+    /// event - so the press reaches the box looking exactly like a press on
+    /// bare background. Asking the capture list is the only way to tell.
+    #[test]
+    fn a_press_another_control_holds_never_drag_scrolls() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, page, grab) = start(&mut cx);
+        let on_grab = middle(&cx, &grab);
+        hold(&mut cx, &root, on_grab);
+        assert!(
+            cx.fingers.is_mouse_held_outside(&[page.area()]),
+            "the button holds the pointer"
+        );
+        // The same drag as above, with the pointer locked to the button.
+        send(&mut cx, &root, press(dvec2(50.0, 150.0)));
+        send(&mut cx, &root, mouse_move(dvec2(50.0, 90.0)));
+        assert_eq!(
+            scroll_y(&page),
+            0.0,
+            "the box stayed put while another control held the pointer"
+        );
+        // The same press and move on an unheld pointer scrolls it 60 points -
+        // that is `a_drag_on_bare_content_scrolls_the_box` above. It cannot be
+        // asserted here as well: there is no event loop in this harness to end
+        // the button's capture on the release, so the pointer stays locked for
+        // the rest of this `Cx`.
+        cx.fingers.first_mouse_button = None;
+    }
+
+    /// Only the mouse locks. A finger held on a control does not stop a drag
+    /// of the content - that half of the rule is deliberate, and asking
+    /// "is anything captured" instead of "is the MOUSE held" would break it.
+    #[test]
+    fn a_touch_held_on_a_control_does_not_stand_the_drag_down() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, page, grab) = start(&mut cx);
+        let on_grab = middle(&cx, &grab);
+        send(&mut cx, &root, touch_press(on_grab));
+        assert!(
+            cx.fingers.any_areas_captured(),
+            "the finger is on the button"
+        );
+        assert!(
+            !cx.fingers.is_mouse_held_outside(&[page.area()]),
+            "but the mouse is not held by anything"
+        );
+        drag(&mut cx, &root, dvec2(50.0, 150.0), dvec2(50.0, 90.0));
+        assert_eq!(scroll_y(&page), 60.0, "so the drag still scrolls");
+    }
+
+    /// `catch_fling_on_press` is the box's other press-driven gesture: a press
+    /// on moving content is spent stopping it, and is not passed on. That is
+    /// right for a reader reaching for the brake, and wrong for a pointer that
+    /// is already locked to a control - that press was never the box's to
+    /// spend. Whether the widget under the pointer should hear a press while
+    /// the pointer is held elsewhere is `hits`' half of the rule; what is
+    /// asserted here is only that the scroll box stopped taking it.
+    #[test]
+    fn a_press_on_a_locked_pointer_is_not_eaten_as_a_fling_catch() {
+        let on_content = dvec2(50.0, 150.0);
+
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, _page, _grab) = start(&mut cx);
+        let inner = root.widget(&cx, ids!(inner));
+        let on_inner = middle(&cx, &inner);
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        send(&mut cx, &root, trackpad_scroll(on_content, 10.0));
+        assert!(
+            !pressed(&mut cx, &root, press(on_inner), &inner),
+            "the press that stops moving content is spent on stopping it"
+        );
+
+        // The same press, with the pointer already locked to the button
+        // outside the box.
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, page, grab) = start(&mut cx);
+        let inner = root.widget(&cx, ids!(inner));
+        let on_inner = middle(&cx, &inner);
+        let on_grab = middle(&cx, &grab);
+        hold(&mut cx, &root, on_grab);
+        assert!(cx.fingers.is_mouse_held_outside(&[page.area()]));
+        send(&mut cx, &root, trackpad_scroll(on_content, 10.0));
+        assert!(
+            pressed(&mut cx, &root, press(on_inner), &inner),
+            "the box did not consume a press belonging to a locked pointer"
+        );
+        cx.fingers.first_mouse_button = None;
     }
 }
