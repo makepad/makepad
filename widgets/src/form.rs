@@ -54,7 +54,7 @@
 //! because the script layer offers no way to read a `bind` property off an
 //! arbitrary widget without the heap that made it.
 use crate::{
-    field::FieldWellWidgetRefExt,
+    field_well::FieldWellWidgetRefExt,
     makepad_derive_widget::*,
     makepad_draw::*,
     text_input::TextInputWidgetRefExt,

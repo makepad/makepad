@@ -44,7 +44,7 @@
 //! with a face on it.
 use crate::{
     badge::measure,
-    field::FieldWell,
+    field_well::FieldWell,
     makepad_derive_widget::*,
     makepad_draw::{
         text::selection::{Cursor, Selection},

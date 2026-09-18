@@ -48,20 +48,20 @@ pub mod button;
 pub mod button_group;
 pub mod floating_action;
 pub mod textinput;
-pub mod field;
+pub mod field_well;
 pub mod number_field;
 pub mod slider;
 pub mod range_slider;
 pub mod rotary;
 pub mod rating;
-pub mod tags;
+pub mod tag_field;
 pub mod date_picker;
 pub mod calendar;
 pub mod time_picker;
 pub mod color;
-pub mod upload;
+pub mod dropzone;
 pub mod form;
-pub mod drag_number;
+pub mod property_inspector;
 pub mod checkbox;
 pub mod radio_group;
 pub mod select;
@@ -171,20 +171,20 @@ pub fn script_mod(vm: &mut ScriptVm) {
     floating_action::script_mod(vm);
     // 7 Inputs
     textinput::script_mod(vm);
-    field::script_mod(vm);
+    field_well::script_mod(vm);
     number_field::script_mod(vm);
     slider::script_mod(vm);
     range_slider::script_mod(vm);
     rotary::script_mod(vm);
     rating::script_mod(vm);
-    tags::script_mod(vm);
+    tag_field::script_mod(vm);
     date_picker::script_mod(vm);
     calendar::script_mod(vm);
     time_picker::script_mod(vm);
     color::script_mod(vm);
-    upload::script_mod(vm);
+    dropzone::script_mod(vm);
     form::script_mod(vm);
-    drag_number::script_mod(vm);
+    property_inspector::script_mod(vm);
     // 8 Selection
     checkbox::script_mod(vm);
     radio_group::script_mod(vm);
@@ -304,20 +304,20 @@ pub fn tables() -> &'static [&'static [Story]] {
         floating_action::STORIES,
         // 7 Inputs
         textinput::STORIES,
-        field::STORIES,
+        field_well::STORIES,
         number_field::STORIES,
         slider::STORIES,
         range_slider::STORIES,
         rotary::STORIES,
         rating::STORIES,
-        tags::STORIES,
+        tag_field::STORIES,
         date_picker::STORIES,
         calendar::STORIES,
         time_picker::STORIES,
         color::STORIES,
-        upload::STORIES,
+        dropzone::STORIES,
         form::STORIES,
-        drag_number::STORIES,
+        property_inspector::STORIES,
         // 8 Selection
         checkbox::STORIES,
         radio_group::STORIES,

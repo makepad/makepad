@@ -47,7 +47,7 @@
 use crate::{
     button::ButtonWidgetRefExt,
     calendar::CivilDate,
-    field::FieldWell,
+    field_well::FieldWell,
     makepad_derive_widget::*,
     makepad_draw::*,
     popover::PopoverWidgetRefExt,

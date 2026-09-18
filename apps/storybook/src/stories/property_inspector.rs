@@ -1,7 +1,7 @@
 //! The property inspector story: an object's properties as a column of rows,
 //! how a row decides what kind of editor it is, and the row controls the
 //! panel is built from.
-use crate::makepad_widgets::drag_number::{Prop, PropertyInspectorWidgetRefExt};
+use crate::makepad_widgets::property_inspector::{Prop, PropertyInspectorWidgetRefExt};
 use crate::makepad_widgets::fab_controls::{FabColorPickWidgetRefExt, FabValueInputWidgetRefExt};
 use crate::makepad_widgets::*;
 use crate::registry::Story;

@@ -87,7 +87,7 @@ pub mod window_menu;
 mod window_voice_input;
 
 pub mod combo_box;
-pub mod field;
+pub mod field_well;
 pub mod drop_down;
 pub mod drop_down2;
 pub mod popup_menu;
@@ -126,7 +126,7 @@ pub mod calendar;
 pub mod date_picker;
 pub mod time_picker;
 pub mod rating;
-pub mod tags;
+pub mod tag_field;
 pub mod radio_group;
 pub mod kbd;
 pub mod typography;
@@ -143,7 +143,7 @@ pub mod waveform;
 pub mod chat;
 pub mod code_block;
 pub mod carousel;
-pub mod upload;
+pub mod dropzone;
 pub mod form;
 pub mod color;
 pub mod column_picker;
@@ -152,7 +152,7 @@ pub mod pie_menu;
 pub mod radial_menu;
 pub mod floating_action;
 pub mod hamburger_menu;
-pub mod drag_number;
+pub mod property_inspector;
 pub mod chart_more;
 pub mod toolbar;
 pub mod masonry;
@@ -260,7 +260,7 @@ pub use crate::{
     callout_tooltip::*,
     check_box::*,
     combo_box::*,
-    field::*,
+    field_well::*,
     desktop_button::*,
     dock::*,
 
@@ -305,7 +305,7 @@ pub use crate::{
     date_picker::*,
     time_picker::*,
     rating::*,
-    tags::*,
+    tag_field::*,
     radio_group::*,
     kbd::*,
     typography::*,
@@ -321,7 +321,7 @@ pub use crate::{
     chat::*,
     code_block::*,
     carousel::*,
-    upload::*,
+    dropzone::*,
     form::*,
     color::*,
     column_picker::*,
@@ -330,7 +330,7 @@ pub use crate::{
     radial_menu::*,
     floating_action::*,
     hamburger_menu::*,
-    drag_number::*,
+    property_inspector::*,
     chart_more::*,
     toolbar::*,
     masonry::*,
@@ -564,7 +564,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::fab_controls::script_mod(vm);
     crate::menu_bar::script_mod(vm);
     crate::combo_box::script_mod(vm);
-    crate::field::script_mod(vm);
+    crate::field_well::script_mod(vm);
     crate::number_field::script_mod(vm);
 
     crate::splitter::script_mod(vm);
@@ -604,7 +604,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::date_picker::script_mod(vm);
     crate::time_picker::script_mod(vm);
     crate::rating::script_mod(vm);
-    crate::tags::script_mod(vm);
+    crate::tag_field::script_mod(vm);
     crate::radio_group::script_mod(vm);
     crate::kbd::script_mod(vm);
     crate::wheel_picker::script_mod(vm);
@@ -621,14 +621,14 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::chat::script_mod(vm);
     crate::code_block::script_mod(vm);
     crate::carousel::script_mod(vm);
-    crate::upload::script_mod(vm);
+    crate::dropzone::script_mod(vm);
     crate::form::script_mod(vm);
     crate::color::script_mod(vm);
     crate::column_picker::script_mod(vm);
     crate::command_palette::script_mod(vm);
     crate::pie_menu::script_mod(vm);
     crate::radial_menu::script_mod(vm);
-    crate::drag_number::script_mod(vm);
+    crate::property_inspector::script_mod(vm);
     crate::tour::script_mod(vm);
     crate::chart_more::script_mod(vm);
     crate::toolbar::script_mod(vm);

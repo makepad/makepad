@@ -1,6 +1,6 @@
 //! The upload story: a target that takes a dropped file, a list of what is
 //! going, and a square that holds a picture.
-use crate::makepad_widgets::upload::*;
+use crate::makepad_widgets::dropzone::*;
 use crate::makepad_widgets::*;
 use crate::registry::{Control, ControlKind, Story};
 

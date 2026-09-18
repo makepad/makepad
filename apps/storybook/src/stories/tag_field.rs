@@ -1,6 +1,6 @@
 //! The tag field story: chips for what has been chosen, a box for the next
 //! one, and the two rules the field enforces out loud.
-use crate::makepad_widgets::tags::TagFieldWidgetRefExt;
+use crate::makepad_widgets::tag_field::TagFieldWidgetRefExt;
 use crate::makepad_widgets::*;
 use crate::registry::{Control, ControlKind, Story};
 
