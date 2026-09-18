@@ -267,6 +267,9 @@ impl DesktopInit {
         }
         let mut renderer = CxVulkan {
             frame_serial_in_flight: 0,
+            retained_instances: HashMap::new(),
+            retained_prune_repaint: u64::MAX,
+            retained_transfer_generation: 0,
             _entry: self.entry.take().unwrap(),
             instance: self.instance.take().unwrap(),
             desktop,

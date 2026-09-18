@@ -39,9 +39,6 @@ use crate::{
     Cx,
 };
 
-#[cfg(all(not(gpusim), not(linux_direct)))]
-use crate::texture::{TextureAlloc, TextureCategory, TexturePixel};
-
 #[cfg(any(
     target_os = "windows",
     all(target_os = "linux", not(any(target_env = "ohos", linux_direct))),
@@ -49,7 +46,11 @@ use crate::texture::{TextureAlloc, TextureCategory, TexturePixel};
     target_os = "ios",
 ))]
 #[cfg(not(gpusim))]
-use crate::texture::{CxTexturePool, TextureId};
+use crate::texture::{CxTexturePool, TextureAlloc, TextureCategory, TextureId, TexturePixel};
+// Android's adopt API (OES / GL 2D) fills allocations but has none of the
+// pool-level helpers; the web build uses none of these.
+#[cfg(all(target_os = "android", not(gpusim)))]
+use crate::texture::{TextureAlloc, TextureCategory, TexturePixel};
 
 /// Serializes hard-decode / media GPU work with Makepad present copies on the
 /// shared D3D11 device. Recursive so the same thread may nest lock calls
@@ -1138,7 +1139,7 @@ pub use android_api::{
 /// Linux desktop (X11 / Wayland) GL texture adopt hooks for app-owned video /
 /// camera / effect surfaces. Same ownership rules as the module docs: borrowed
 /// by default (`gl_texture_owned = false`).
-#[cfg(all(target_os = "linux", not(any(target_env = "ohos", linux_direct))))]
+#[cfg(all(target_os = "linux", not(any(target_env = "ohos", linux_direct, gpusim))))]
 mod linux_api {
     use super::*;
     use crate::os::gl_sys::LibGl;
@@ -1365,7 +1366,7 @@ mod linux_api {
     }
 }
 
-#[cfg(all(target_os = "linux", not(any(target_env = "ohos", linux_direct))))]
+#[cfg(all(target_os = "linux", not(any(target_env = "ohos", linux_direct, gpusim))))]
 pub use crate::os::linux::linux_video_gpu::{
     present_dmabuf_nv12, present_gl_memory_rgba, LinuxDmabufNv12Frame, LinuxDmabufPlane,
     LinuxDmabufPresentCache, LinuxGlMemoryPresentCache, LinuxGlMemoryRgbaFrame,

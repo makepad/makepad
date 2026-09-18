@@ -254,6 +254,30 @@ pub struct RemoteScroll {
     pub modifiers: RemoteKeyModifiers,
 }
 
+/// The phase of a trackpad pinch (the platform's `PinchEvent`, shared here
+/// like `KeyModifiers` so a remote pinch needs no conversion).
+#[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq, Eq)]
+pub enum PinchPhase {
+    /// Two fingers started pinching; the scale is 1.
+    #[default]
+    Begin,
+    /// The fingers moved; the scale is the change since the previous event.
+    Update,
+    /// The fingers lifted, or the system cancelled the gesture; the scale is 1.
+    End,
+}
+
+#[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
+pub struct RemotePinch {
+    pub time: f64,
+    pub x: f64,
+    pub y: f64,
+    /// Multiplicative, relative to the previous event of the gesture.
+    pub scale: f64,
+    pub phase: PinchPhase,
+    pub modifiers: RemoteKeyModifiers,
+}
+
 #[derive(SerBin, DeBin, SerJson, DeJson, Debug, Clone)]
 pub enum AppToStudio {
     LogItem(StudioLogItem),
@@ -434,6 +458,7 @@ pub enum StudioToApp {
     TextCopy,
     TextCut,
     Scroll(RemoteScroll),
+    Pinch(RemotePinch),
     /// The full set of game controllers Studio can see, resent whenever it
     /// changes. Level state rather than edges, because that is what the OS
     /// APIs report and what `Cx::game_input_states` hands back.

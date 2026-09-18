@@ -1152,6 +1152,7 @@ fn studio_msg_name(msg: &StudioToApp) -> &'static str {
         StudioToApp::TextCopy => "TextCopy",
         StudioToApp::TextCut => "TextCut",
         StudioToApp::Scroll(_) => "Scroll",
+        StudioToApp::Pinch(_) => "Pinch",
         StudioToApp::GameInput(_) => "GameInput",
         StudioToApp::Custom(_) => "Custom",
         StudioToApp::None => "None",

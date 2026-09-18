@@ -101,7 +101,7 @@ pub fn host_family(cx: &Cx) -> DesktopStyle {
 
 /// Query AppKit on the UI thread, without subprocesses or a worker lock.
 /// Matching Aqua/DarkAqua also handles the accessibility contrast variants.
-/// Other platforms retain their existing manual appearance fallback.
+/// Windows reads the per-user application theme; other hosts keep the manual fallback.
 pub fn host_dark() -> Option<bool> {
     #[cfg(all(target_os = "macos", not(gpusim)))]
     unsafe {
@@ -130,7 +130,24 @@ pub fn host_dark() -> Option<bool> {
         let () = msg_send![pool, drain];
         return result;
     }
-    #[cfg(not(all(target_os = "macos", not(gpusim))))]
+    #[cfg(all(target_os = "windows", not(gpusim)))]
+    unsafe {
+        use std::ffi::c_void;
+        #[link(name = "advapi32")]
+        extern "system" {
+            fn RegGetValueW(key: *mut c_void, subkey: *const u16, value: *const u16,
+                flags: u32, kind: *mut u32, data: *mut c_void, size: *mut u32) -> i32;
+        }
+        let key: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize".encode_utf16().chain(Some(0)).collect();
+        let name: Vec<u16> = "AppsUseLightTheme".encode_utf16().chain(Some(0)).collect();
+        let mut value = 1u32;
+        let mut size = 4u32;
+        let result = RegGetValueW((0x80000001u32 as i32 as isize) as *mut c_void,
+            key.as_ptr(), name.as_ptr(), 0x10, std::ptr::null_mut(),
+            (&mut value as *mut u32).cast(), &mut size);
+        return (result == 0 && size == 4 && value <= 1).then_some(value == 0);
+    }
+    #[cfg(not(any(all(target_os = "macos", not(gpusim)), all(target_os = "windows", not(gpusim)))))]
     None
 }
 

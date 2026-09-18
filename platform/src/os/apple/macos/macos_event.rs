@@ -2,7 +2,7 @@ use crate::{
     event::window::PopupDismissedEvent,
     event::{
         DragEvent, DropEvent, GameInputConnectedEvent, KeyEvent, MouseDownEvent, MouseMoveEvent,
-        MouseUpEvent, ScrollEvent, TextClipboardEvent, TextInputEvent, TimerEvent,
+        MouseUpEvent, PinchEvent, ScrollEvent, TextClipboardEvent, TextInputEvent, TimerEvent,
         WindowCloseRequestedEvent, WindowClosedEvent, WindowDragQueryEvent, WindowGeomChangeEvent,
     },
     makepad_live_id::*,
@@ -38,6 +38,7 @@ pub enum MacosEvent {
     MouseUp(MouseUpEvent),
     MouseMove(MouseMoveEvent),
     Scroll(ScrollEvent),
+    Pinch(PinchEvent),
 
     WindowDragQuery(WindowDragQueryEvent),
     WindowCloseRequested(WindowCloseRequestedEvent),

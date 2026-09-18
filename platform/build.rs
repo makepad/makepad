@@ -132,6 +132,23 @@ fn main() {
     println!("cargo:rerun-if-env-changed=MAKEPAD_BUNDLE_IDENTIFIER");
     println!("cargo:rerun-if-env-changed=IPHONEOS_DEPLOYMENT_TARGET");
 
+    // The GPU API on desktop Linux: OpenGL ES 3 unless the build asks for
+    // Vulkan, either with `MAKEPAD=vulkan` (the workspace-wide switch) or by
+    // an app depending on this crate with `features = ["vulkan"]` (a
+    // per-app default; scope does this). `MAKEPAD=gl` wins over the feature
+    // so such an app can still be built for OpenGL, and the simulated GPU
+    // (`MAKEPAD=gpusim`) is never combined with either.
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_VULKAN");
+    let makepad_configs: Vec<String> = env::var("MAKEPAD")
+        .map(|configs| configs.split(['+', ',']).map(str::to_string).collect())
+        .unwrap_or_default();
+    let names_gpu_api = makepad_configs
+        .iter()
+        .any(|config| matches!(config.as_str(), "gl" | "vulkan" | "use_vulkan" | "gpusim" | "quest"));
+    if target_os == "linux" && env::var("CARGO_FEATURE_VULKAN").is_ok() && !names_gpu_api {
+        println!("cargo:rustc-cfg=use_vulkan");
+    }
+
     if let Ok(configs) = env::var("MAKEPAD") {
         for config in configs.split(['+', ',']) {
             match config {
@@ -148,6 +165,9 @@ fn main() {
                 "gpusim" => println!("cargo:rustc-cfg=gpusim"),
                 "use_gles_3" => println!("cargo:rustc-cfg=use_gles_3"),
                 "vulkan" | "use_vulkan" => println!("cargo:rustc-cfg=use_vulkan"),
+                // OpenGL ES 3 is the Linux default; the word only overrides the
+                // `vulkan` cargo feature above.
+                "gl" => {}
                 _ => {}
             }
         }
