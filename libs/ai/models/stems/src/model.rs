@@ -29,7 +29,7 @@ pub const CB_MAX_OPS: usize = 32;
 /// it never becomes the binding constraint by accident.
 pub const CB_MAX_BYTES: usize = 8 << 30;
 
-fn command_buffer_ops_limit() -> Option<usize> {
+pub(crate) fn command_buffer_ops_limit() -> Option<usize> {
     parse_cb_ops(std::env::var("MAKEPAD_STEMS_CB_OPS").ok().as_deref())
 }
 
@@ -50,7 +50,7 @@ fn parse_cb_ops(value: Option<&str>) -> Option<usize> {
 /// Worker threads for the per-(stem, channel) inverse STFT. Eight independent
 /// transforms exist per chunk; the default deliberately leaves cores for a
 /// host app's UI and audio threads rather than taking every core for ~100 ms.
-fn istft_threads() -> usize {
+pub(crate) fn istft_threads() -> usize {
     let cores = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
@@ -327,7 +327,11 @@ pub fn feature_index(bin: usize, channel: usize, re_im: usize) -> usize {
 
 /// Interleaves the two channels' spectra into the graph's `[4100, frames]`
 /// input.
-fn pack_features(spectrum: &[Vec<f32>; AUDIO_CHANNELS], out: &mut [f32], frames: usize) {
+pub(crate) fn pack_features(
+    spectrum: &[Vec<f32>; AUDIO_CHANNELS],
+    out: &mut [f32],
+    frames: usize,
+) {
     for bin in 0..FREQ_BINS {
         for ch in 0..AUDIO_CHANNELS {
             let src = &spectrum[ch];
@@ -345,7 +349,13 @@ fn pack_features(spectrum: &[Vec<f32>; AUDIO_CHANNELS], out: &mut [f32], frames:
 }
 
 /// Complex product of one channel's spectrum with the stem's ratio mask.
-fn apply_mask(spectrum: &[f32], mask: &[f32], channel: usize, out: &mut [f32], frames: usize) {
+pub(crate) fn apply_mask(
+    spectrum: &[f32],
+    mask: &[f32],
+    channel: usize,
+    out: &mut [f32],
+    frames: usize,
+) {
     for bin in 0..FREQ_BINS {
         let re_at = feature_index(bin, channel, 0);
         let im_at = feature_index(bin, channel, 1);
@@ -361,11 +371,11 @@ fn apply_mask(spectrum: &[f32], mask: &[f32], channel: usize, out: &mut [f32], f
     }
 }
 
-fn as_bytes(values: &[f32]) -> &[u8] {
+pub(crate) fn as_bytes(values: &[f32]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(values.as_ptr() as *const u8, values.len() * 4) }
 }
 
-fn f32_from_bytes(bytes: &[u8]) -> Result<&[f32]> {
+pub(crate) fn f32_from_bytes(bytes: &[u8]) -> Result<&[f32]> {
     if bytes.len() % 4 != 0 {
         return Err(DiffusionError::model(format!(
             "stems: graph output has {} bytes, not a multiple of 4",

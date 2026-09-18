@@ -216,7 +216,7 @@ pub fn build_graph(weights: &mut StemsWeights, frames: usize) -> Result<StemsGra
 // feed-forward block, both residual.
 // ---------------------------------------------------------------------------
 
-fn transformer(
+pub(crate) fn transformer(
     ctx: &mut Context,
     x: TensorId,
     positions: TensorId,
@@ -323,13 +323,17 @@ fn transformer(
 // helpers
 // ---------------------------------------------------------------------------
 
-fn weights_id(ctx: &Context, name: &str) -> Result<TensorId> {
+pub(crate) fn weights_id(ctx: &Context, name: &str) -> Result<TensorId> {
     ctx.get_tensor(name)
         .ok_or_else(|| DiffusionError::model(format!("stems graph: no tensor '{name}'")))
 }
 
 /// `rms_norm(x) * gamma`; the Metal planner fuses the pair into one kernel.
-fn norm_scale(ctx: &mut Context, x: TensorId, gamma: TensorId) -> Result<TensorId> {
+pub(crate) fn norm_scale(
+    ctx: &mut Context,
+    x: TensorId,
+    gamma: TensorId,
+) -> Result<TensorId> {
     let n = ctx
         .rms_norm_eps(x, NORM_EPS, ACT)
         .map_err(DiffusionError::model)?;
@@ -337,7 +341,7 @@ fn norm_scale(ctx: &mut Context, x: TensorId, gamma: TensorId) -> Result<TensorI
         .map_err(DiffusionError::model)
 }
 
-fn add(ctx: &mut Context, x: TensorId, bias: TensorId) -> Result<TensorId> {
+pub(crate) fn add(ctx: &mut Context, x: TensorId, bias: TensorId) -> Result<TensorId> {
     ctx.binary_like_a(Op::Add, x, bias, ACT)
         .map_err(DiffusionError::model)
 }
@@ -350,7 +354,7 @@ fn swap12(ctx: &mut Context, x: TensorId) -> Result<TensorId> {
 
 /// `swap12` followed by `cont` — the layout flip as one call, so the borrow
 /// checker sees a single sequential use of the context.
-fn swap12_cont(ctx: &mut Context, x: TensorId) -> Result<TensorId> {
+pub(crate) fn swap12_cont(ctx: &mut Context, x: TensorId) -> Result<TensorId> {
     let permuted = swap12(ctx, x)?;
     contiguous(ctx, permuted)
 }
@@ -400,7 +404,7 @@ fn concat_all(ctx: &mut Context, parts: &[TensorId], dim: usize) -> Result<Tenso
 }
 
 /// Position indices 0..n as the I32 tensor RoPE reads.
-fn positions(ctx: &mut Context, name: &str, n: usize) -> Result<TensorId> {
+pub(crate) fn positions(ctx: &mut Context, name: &str, n: usize) -> Result<TensorId> {
     let id = ctx
         .new_named_tensor(name, TensorType::I32, 1, &[n as i64], BufferUsage::Weights)
         .map_err(DiffusionError::model)?;
@@ -412,7 +416,7 @@ fn positions(ctx: &mut Context, name: &str, n: usize) -> Result<TensorId> {
     Ok(id)
 }
 
-fn debug_assert_extents(
+pub(crate) fn debug_assert_extents(
     ctx: &Context,
     id: TensorId,
     want: &[i64],

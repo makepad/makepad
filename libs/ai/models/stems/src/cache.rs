@@ -16,6 +16,15 @@
 //!   `<stem>.pcm`  — interleaved stereo i16 at the track's sample rate,
 //!                   pre-sized to the full track, written span by span.
 //!
+//! Which stems an entry holds is DATA, not a constant of the crate: the header
+//! names its lanes in the separator's order, and there is one `<lane>.pcm` and
+//! one gain per span for each. The four-stem model's header names none, which
+//! means `drums,bass,other,vocals`; its text is compared byte for byte by
+//! builds still in use, so it goes on being written exactly as it always was.
+//! A separator with other lanes, or another span grid, keeps its entries
+//! under a root of its own: one `<digest>` directory holds one separation,
+//! and opening it for a different one replaces it.
+//!
 //! i16 is deliberate: it is what a mixer consumes and it is 4x smaller than f32
 //! (a 4-minute track is 169 MB across four stems rather than 677 MB). It is
 //! NOT safe to clamp at full scale, though: BS-RoFormer's masks are complex
@@ -32,7 +41,7 @@
 //! never evicted out from under itself.
 
 use crate::config::*;
-use crate::model::StemSet;
+use crate::model::{StemSet, StereoBuf};
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -79,6 +88,35 @@ impl From<std::io::Error> for CacheError {
 
 type Result<T> = std::result::Result<T, CacheError>;
 
+/// What a separator is, as a cache header records it: the model, the
+/// checkpoint file and its hash, and the two provenance lines a person reads.
+/// Each separator brings its own, so the cache itself knows about none of
+/// them; [`BS_ROFORMER_4STEM`](Self::BS_ROFORMER_4STEM) is the one every
+/// entry was made by before there was a second.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ModelIdentity {
+    pub model_id: &'static str,
+    pub checkpoint: &'static str,
+    pub checkpoint_sha256: &'static str,
+    /// The licence line as the HEADER carries it. For the four-stem model
+    /// that is the frozen [`crate::CACHE_HEADER_LICENSE`], not the statement
+    /// of record.
+    pub license: &'static str,
+    pub source: &'static str,
+}
+
+impl ModelIdentity {
+    /// The four-stem BS-RoFormer, exactly as [`CacheHeader::for_track`] has
+    /// always written it.
+    pub const BS_ROFORMER_4STEM: ModelIdentity = ModelIdentity {
+        model_id: crate::MODEL_ID,
+        checkpoint: crate::MODEL_CHECKPOINT,
+        checkpoint_sha256: crate::MODEL_SHA256,
+        license: crate::CACHE_HEADER_LICENSE,
+        source: crate::MODEL_SOURCE,
+    };
+}
+
 /// Identity of what produced the cached audio. A mismatch on any field means
 /// the cached spans are not the ones this build would compute, so the entry is
 /// rebuilt rather than trusted.
@@ -93,6 +131,41 @@ pub struct CacheHeader {
     pub frames: u64,
     pub span_samples: u64,
     pub span_count: u64,
+    /// The lanes the entry holds, in the separator's order: one `<lane>.pcm`
+    /// and one gain per span for each. The four-stem model's
+    /// `drums,bass,other,vocals` is what a header that names none means.
+    pub stems: Vec<String>,
+}
+
+/// Whether `stems` is the four-stem model's lane list, in its order — the
+/// one list a header leaves unwritten, and the only one a [`StemSet`] can
+/// stand for.
+fn is_four_stem_lanes(stems: &[String]) -> bool {
+    stems.iter().map(String::as_str).eq(STEM_NAMES)
+}
+
+/// A lane name becomes a file name and one item of a comma-separated header
+/// line, so it is held to letters, digits, `-` and `_`: nothing that could
+/// leave the entry's directory, split the list or end the line.
+fn check_lanes(stems: &[String]) -> Result<()> {
+    if stems.is_empty() {
+        return Err(CacheError::Mismatch("header names no lanes".into()));
+    }
+    for (index, lane) in stems.iter().enumerate() {
+        let plain = !lane.is_empty()
+            && lane
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        if !plain {
+            return Err(CacheError::Mismatch(format!(
+                "lane name {lane:?} is not a bare word"
+            )));
+        }
+        if stems[..index].contains(lane) {
+            return Err(CacheError::Mismatch(format!("lane {lane:?} is named twice")));
+        }
+    }
+    Ok(())
 }
 
 impl CacheHeader {
@@ -102,6 +175,10 @@ impl CacheHeader {
     /// reads, not what the bytes depend on -- so a model described in new
     /// words is still the model that made these stems, and hours of
     /// separation are not thrown away over a sentence.
+    ///
+    /// The lanes ARE what the bytes depend on: they size the gains file and
+    /// name the audio files, so two headers that differ in them are never
+    /// the same separation, whatever else agrees.
     pub fn same_separation(&self, other: &CacheHeader) -> bool {
         self.model_id == other.model_id
             && self.checkpoint == other.checkpoint
@@ -110,23 +187,51 @@ impl CacheHeader {
             && self.frames == other.frames
             && self.span_samples == other.span_samples
             && self.span_count == other.span_count
+            && self.stems == other.stems
     }
 
+    /// The four-stem model's header for a track of `frames`, on the full
+    /// geometry's grid.
     pub fn for_track(frames: u64) -> Self {
+        Self::for_model(
+            &ModelIdentity::BS_ROFORMER_4STEM,
+            CHUNK_STEP as u64,
+            frames,
+            &STEM_NAMES,
+        )
+    }
+
+    /// The header of a track of `frames` separated by `identity` into
+    /// `stems`, cached in spans of `span_samples` — the step of the chunk
+    /// geometry that separator's full-quality stream runs at, since one
+    /// forward finishes one span and a span is written whole.
+    pub fn for_model(
+        identity: &ModelIdentity,
+        span_samples: u64,
+        frames: u64,
+        stems: &[&str],
+    ) -> Self {
         Self {
-            model_id: crate::MODEL_ID.to_string(),
-            checkpoint: crate::MODEL_CHECKPOINT.to_string(),
-            checkpoint_sha256: crate::MODEL_SHA256.to_string(),
-            license: crate::CACHE_HEADER_LICENSE.to_string(),
-            source: crate::MODEL_SOURCE.to_string(),
+            model_id: identity.model_id.to_string(),
+            checkpoint: identity.checkpoint.to_string(),
+            checkpoint_sha256: identity.checkpoint_sha256.to_string(),
+            license: identity.license.to_string(),
+            source: identity.source.to_string(),
             sample_rate: SAMPLE_RATE,
             frames,
-            span_samples: CHUNK_STEP as u64,
+            span_samples,
             // TRACK spans, not model chunks: with the reference's leading
             // reflect pad the first model chunk finalizes only padding, so the
             // padded chunk index and the track span index differ by one. The
-            // cache is addressed in track coordinates (`start / CHUNK_STEP`).
-            span_count: (frames as usize).div_ceil(CHUNK_STEP) as u64,
+            // cache is addressed in track coordinates (`start / span_samples`).
+            // A grid of zero has no spans; `open` makes such an entry and
+            // `write_span` refuses it, rather than this dividing by it.
+            span_count: if span_samples == 0 {
+                0
+            } else {
+                frames.div_ceil(span_samples)
+            },
+            stems: stems.iter().map(|lane| lane.to_string()).collect(),
         }
     }
 
@@ -149,6 +254,16 @@ impl CacheHeader {
             out.push_str(key);
             out.push('=');
             out.push_str(&value);
+            out.push('\n');
+        }
+        // The four-stem lanes are never written. Builds that know nothing of
+        // lanes compare this text byte for byte and delete an entry that
+        // differs, so that model's header must stay the nine lines above and
+        // nothing more; any other list is a line of its own.
+        if !is_four_stem_lanes(&self.stems) {
+            debug_assert!(check_lanes(&self.stems).is_ok());
+            out.push_str("stems=");
+            out.push_str(&self.stems.join(","));
             out.push('\n');
         }
         out
@@ -182,6 +297,12 @@ impl CacheHeader {
             frames: num("frames")?,
             span_samples: num("span_samples")?,
             span_count: num("span_count")?,
+            // Every header written before lanes were data has no such line,
+            // and every one of them is a four-stem entry.
+            stems: match fields.get("stems") {
+                Some(list) => list.split(',').map(|lane| lane.to_string()).collect(),
+                None => STEM_NAMES.iter().map(|lane| lane.to_string()).collect(),
+            },
         })
     }
 }
@@ -190,7 +311,7 @@ impl CacheHeader {
 /// byte of it.
 ///
 /// [`StemCache::open`] is the separator's door: it creates the entry, sizes
-/// four sparse stem files to the whole track and REPLACES one whose header
+/// a sparse file per lane to the whole track and REPLACES one whose header
 /// disagrees. That is right for a caller about to write spans and wrong for
 /// one that only wants to know — a deck served its stems from the store never
 /// separates locally, and opening the entry to ask about it would leave an
@@ -225,8 +346,9 @@ pub struct StemCache {
     dir: PathBuf,
     header: CacheHeader,
     present: Vec<bool>,
-    /// Per-span, per-stem normalization peak, `span * NUM_STEMS + stem`.
+    /// Per-span, per-lane normalization peak, `span * lanes + lane`.
     gains: Vec<f32>,
+    /// One per lane, in the header's order.
     files: Vec<File>,
     spans_file: File,
     gains_file: File,
@@ -241,6 +363,9 @@ impl StemCache {
                 "digest {digest:?} is not a bare content hash"
             )));
         }
+        // Before anything is created or replaced: a lane name is about to
+        // become a file name.
+        check_lanes(&header.stems)?;
         let dir = root.as_ref().join(digest);
         let header_path = dir.join("header");
         if header_path.is_file() {
@@ -291,7 +416,7 @@ impl StemCache {
             .create(true)
             .truncate(false)
             .open(dir.join("gains"))?;
-        let gain_bytes = (span_count * NUM_STEMS * 4) as u64;
+        let gain_bytes = (span_count * header.stems.len() * 4) as u64;
         gains_file.set_len(gain_bytes)?;
         let mut gain_raw = vec![0u8; gain_bytes as usize];
         gains_file.seek(SeekFrom::Start(0))?;
@@ -302,14 +427,14 @@ impl StemCache {
             .collect();
 
         let bytes = header.frames * FRAME_BYTES;
-        let mut files = Vec::with_capacity(NUM_STEMS);
-        for stem in Stem::ALL {
+        let mut files = Vec::with_capacity(header.stems.len());
+        for lane in &header.stems {
             let file = OpenOptions::new()
                 .read(true)
                 .write(true)
                 .create(true)
                 .truncate(false)
-                .open(dir.join(format!("{}.pcm", stem.name())))?;
+                .open(dir.join(format!("{lane}.pcm")))?;
             file.set_len(bytes)?;
             files.push(file);
         }
@@ -335,6 +460,21 @@ impl StemCache {
 
     pub fn header(&self) -> &CacheHeader {
         &self.header
+    }
+
+    /// The lanes this entry holds, in the order every lane-generic call
+    /// takes and returns them.
+    pub fn lanes(&self) -> &[String] {
+        &self.header.stems
+    }
+
+    pub fn lane_count(&self) -> usize {
+        self.files.len()
+    }
+
+    /// Where `name` sits among [`lanes`](Self::lanes), if the entry has it.
+    pub fn lane_index(&self, name: &str) -> Option<usize> {
+        self.header.stems.iter().position(|lane| lane == name)
     }
 
     pub fn span_count(&self) -> usize {
@@ -363,9 +503,39 @@ impl StemCache {
         (start, end.max(start))
     }
 
+    /// A [`StemSet`] is four lanes in `Stem::ALL` order and says so nowhere
+    /// but in its type, so the calls that speak it serve an entry with
+    /// exactly those lanes and refuse any other: handing the third of three
+    /// lanes back as "other" would be a wrong answer with nothing to show
+    /// for it.
+    fn four_stems_only(&self, call: &str) -> Result<()> {
+        if is_four_stem_lanes(&self.header.stems) {
+            return Ok(());
+        }
+        Err(CacheError::Mismatch(format!(
+            "{call} speaks the four-stem set, this entry holds {}",
+            self.header.stems.join(",")
+        )))
+    }
+
     /// Writes one finished span. `start` is in track frames and must land on a
     /// span boundary.
     pub fn write_span(&mut self, start: usize, stems: &StemSet) -> Result<()> {
+        self.four_stems_only("write_span")?;
+        self.write_span_lanes(start, stems)
+    }
+
+    /// Writes one finished span of an entry with any lanes: one buffer per
+    /// lane, in the entry's order. `start` is in track frames and must land
+    /// on a span boundary.
+    pub fn write_span_lanes(&mut self, start: usize, lanes: &[StereoBuf]) -> Result<()> {
+        if lanes.len() != self.files.len() {
+            return Err(CacheError::Mismatch(format!(
+                "a span of {} lanes was handed to an entry of {}",
+                lanes.len(),
+                self.files.len()
+            )));
+        }
         if self.header.span_samples == 0 {
             return Err(CacheError::Mismatch("span_samples is zero".into()));
         }
@@ -389,7 +559,7 @@ impl StemCache {
         // any other length — a shorter chunk geometry's span, a run cut off
         // mid-span — would be zero-filled to the slot and read back on the
         // next load as separated silence.
-        for (index, stem) in stems.iter().enumerate() {
+        for (index, stem) in lanes.iter().enumerate() {
             if stem.left.len() != frames || stem.right.len() != frames {
                 return Err(CacheError::Mismatch(format!(
                     "span {span} stem {index} holds {}/{} frames, the slot holds {frames}",
@@ -399,7 +569,7 @@ impl StemCache {
             }
         }
         let mut buf = vec![0u8; frames * FRAME_BYTES as usize];
-        for (index, stem) in stems.iter().enumerate() {
+        for (index, stem) in lanes.iter().enumerate() {
             let n = frames;
             let peak = stem.left[..n]
                 .iter()
@@ -416,7 +586,7 @@ impl StemCache {
             let file = &mut self.files[index];
             file.seek(SeekFrom::Start(from * FRAME_BYTES))?;
             file.write_all(&buf)?;
-            let slot = span * NUM_STEMS + index;
+            let slot = span * lanes.len() + index;
             self.gains[slot] = if peak > 0.0 { peak } else { 1.0 };
             self.gains_file.seek(SeekFrom::Start(slot as u64 * 4))?;
             self.gains_file.write_all(&self.gains[slot].to_le_bytes())?;
@@ -434,26 +604,80 @@ impl StemCache {
         Ok(())
     }
 
+    /// Decodes one lane of one span into `left` and `right`, each exactly the
+    /// span long. `buf` is the caller's scratch, the span's size in bytes.
+    fn decode_span_lane(
+        &mut self,
+        span: usize,
+        lane: usize,
+        buf: &mut [u8],
+        left: &mut [f32],
+        right: &mut [f32],
+    ) -> Result<()> {
+        let (from, _) = self.span_range(span);
+        let gain = self.gains[span * self.files.len() + lane];
+        let file = &mut self.files[lane];
+        file.seek(SeekFrom::Start(from * FRAME_BYTES))?;
+        file.read_exact(buf)?;
+        for frame in 0..left.len() {
+            let at = frame * 4;
+            left[frame] = dequantize(i16::from_le_bytes([buf[at], buf[at + 1]])) * gain;
+            right[frame] = dequantize(i16::from_le_bytes([buf[at + 2], buf[at + 3]])) * gain;
+        }
+        Ok(())
+    }
+
+    /// Decodes the given lanes across the whole track, one buffer per lane
+    /// asked for, reading no file but theirs. Errors if any span is missing.
+    fn decode_track(&mut self, lanes: &[usize]) -> Result<Vec<StereoBuf>> {
+        if let Some(span) = self.missing_spans().next() {
+            return Err(CacheError::Mismatch(format!("span {span} is missing")));
+        }
+        let frames = self.header.frames as usize;
+        let mut out: Vec<StereoBuf> = lanes.iter().map(|_| StereoBuf::silence(frames)).collect();
+        let mut buf = Vec::new();
+        for span in 0..self.span_count() {
+            let (from, to) = self.span_range(span);
+            let (from, to) = (from as usize, to as usize);
+            buf.resize((to - from) * FRAME_BYTES as usize, 0u8);
+            for (dst, lane) in out.iter_mut().zip(lanes) {
+                let StereoBuf { left, right } = dst;
+                self.decode_span_lane(
+                    span,
+                    *lane,
+                    &mut buf,
+                    &mut left[from..to],
+                    &mut right[from..to],
+                )?;
+            }
+        }
+        Ok(out)
+    }
+
     /// Reads one span back, or `None` if it has not been written.
     pub fn read_span(&mut self, span: usize) -> Result<Option<StemSet>> {
+        self.four_stems_only("read_span")?;
+        match self.read_span_lanes(span)? {
+            Some(lanes) => Ok(Some(into_stem_set(lanes)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Reads one span of an entry with any lanes back, one buffer per lane in
+    /// the entry's order, or `None` if it has not been written.
+    pub fn read_span_lanes(&mut self, span: usize) -> Result<Option<Vec<StereoBuf>>> {
         if !self.has_span(span) {
             return Ok(None);
         }
         let (from, to) = self.span_range(span);
         let frames = (to - from) as usize;
-        let mut out = crate::model::empty_stem_set(frames);
+        let mut out: Vec<StereoBuf> = (0..self.files.len())
+            .map(|_| StereoBuf::silence(frames))
+            .collect();
         let mut buf = vec![0u8; frames * FRAME_BYTES as usize];
-        for (index, stem) in out.iter_mut().enumerate() {
-            let file = &mut self.files[index];
-            file.seek(SeekFrom::Start(from * FRAME_BYTES))?;
-            file.read_exact(&mut buf)?;
-            let gain = self.gains[span * NUM_STEMS + index];
-            for frame in 0..frames {
-                let at = frame * 4;
-                stem.left[frame] = dequantize(i16::from_le_bytes([buf[at], buf[at + 1]])) * gain;
-                stem.right[frame] =
-                    dequantize(i16::from_le_bytes([buf[at + 2], buf[at + 3]])) * gain;
-            }
+        for (index, lane) in out.iter_mut().enumerate() {
+            let StereoBuf { left, right } = lane;
+            self.decode_span_lane(span, index, &mut buf, left, right)?;
         }
         Ok(Some(out))
     }
@@ -461,22 +685,38 @@ impl StemCache {
     /// Reads a whole track back, for the "already separated, just play it"
     /// path. Errors if any span is missing.
     pub fn read_all(&mut self) -> Result<StemSet> {
-        let frames = self.header.frames as usize;
-        let mut out = crate::model::empty_stem_set(frames);
-        for span in 0..self.span_count() {
-            let (from, _) = self.span_range(span);
-            let Some(part) = self.read_span(span)? else {
-                return Err(CacheError::Mismatch(format!("span {span} is missing")));
-            };
-            for (stem, src) in part.iter().enumerate() {
-                let at = from as usize;
-                let n = src.frames().min(frames - at);
-                out[stem].left[at..at + n].copy_from_slice(&src.left[..n]);
-                out[stem].right[at..at + n].copy_from_slice(&src.right[..n]);
-            }
-        }
-        Ok(out)
+        self.four_stems_only("read_all")?;
+        into_stem_set(self.read_all_lanes()?)
     }
+
+    /// Reads a whole track of an entry with any lanes back, one buffer per
+    /// lane in the entry's order. Errors if any span is missing.
+    pub fn read_all_lanes(&mut self) -> Result<Vec<StereoBuf>> {
+        let every: Vec<usize> = (0..self.files.len()).collect();
+        self.decode_track(&every)
+    }
+
+    /// Reads ONE lane of the whole track back, by name, without opening a
+    /// byte of the others: a player that wants the vocals of a four-lane
+    /// entry pays for a quarter of it, in time and in memory. Errors if the
+    /// entry has no such lane or any span is missing.
+    pub fn read_lane(&mut self, name: &str) -> Result<StereoBuf> {
+        let Some(lane) = self.lane_index(name) else {
+            return Err(CacheError::Mismatch(format!(
+                "entry has no lane {name:?}, it holds {}",
+                self.header.stems.join(",")
+            )));
+        };
+        let mut only = self.decode_track(&[lane])?;
+        Ok(only.remove(0))
+    }
+}
+
+/// Four lanes as the four-stem set. The buffers are moved, not copied.
+fn into_stem_set(lanes: Vec<StereoBuf>) -> Result<StemSet> {
+    lanes.try_into().map_err(|lanes: Vec<StereoBuf>| {
+        CacheError::Mismatch(format!("{} lanes do not make a four-stem set", lanes.len()))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1066,6 +1306,399 @@ mod tests {
         let mut cache =
             StemCache::open(&root, "0f0f", CacheHeader::for_track(2 * CHUNK_STEP as u64)).unwrap();
         assert!(cache.write_span(7, &ramp_stems(16, 0.0)).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---- lanes as data ------------------------------------------------------
+
+    /// A second separator as the cache sees one: another identity, one lane,
+    /// and the 4-second grid of an 8-second chunk. The words are made up;
+    /// only the shape matters here.
+    const VOCAL_MODEL: ModelIdentity = ModelIdentity {
+        model_id: "vocal-model-under-test",
+        checkpoint: "vocal-model-under-test.ckpt",
+        checkpoint_sha256: "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+        license: "a licence line",
+        source: "an address",
+    };
+    const VOCAL_STEP: usize = 176_400;
+
+    fn vocal_header(frames: usize) -> CacheHeader {
+        CacheHeader::for_model(&VOCAL_MODEL, VOCAL_STEP as u64, frames as u64, &["vocals"])
+    }
+
+    fn ramp_lanes(lanes: usize, frames: usize, seed: f32) -> Vec<StereoBuf> {
+        (0..lanes)
+            .map(|index| {
+                let mut lane = StereoBuf::silence(frames);
+                for frame in 0..frames {
+                    let t = frame as f32 / frames.max(1) as f32;
+                    lane.left[frame] = ((t + seed + index as f32 * 0.25) % 1.0) * 2.0 - 1.0;
+                    lane.right[frame] = -lane.left[frame];
+                }
+                lane
+            })
+            .collect()
+    }
+
+    fn same_bits(a: &StereoBuf, b: &StereoBuf) -> bool {
+        let bits = |v: &[f32]| v.iter().map(|s| s.to_bits()).collect::<Vec<u32>>();
+        bits(&a.left) == bits(&b.left) && bits(&a.right) == bits(&b.right)
+    }
+
+    /// Every one-lane span of a track of `frames`, written.
+    fn filled_vocal_entry(root: &Path, digest: &str, frames: usize) -> StemCache {
+        let mut cache = StemCache::open(root, digest, vocal_header(frames)).unwrap();
+        for span in 0..cache.span_count() {
+            let start = span * VOCAL_STEP;
+            let len = (frames - start).min(VOCAL_STEP);
+            cache
+                .write_span_lanes(start, &ramp_lanes(1, len, span as f32 * 0.1))
+                .unwrap();
+        }
+        cache
+    }
+
+    /// Builds that know nothing of lanes share cache roots with this one,
+    /// compare the header text byte for byte and DELETE an entry that
+    /// differs. So the four-stem header is these nine lines and not a byte
+    /// more, whatever else a header learns to say about other models.
+    #[test]
+    fn the_four_stem_header_is_written_byte_for_byte_as_it_always_was() {
+        let text = CacheHeader::for_track(1_000_000).encode();
+        assert_eq!(
+            text,
+            "model_id=bs-roformer-4stem\n\
+             checkpoint=model_bs_roformer_ep_17_sdr_9.6568.ckpt\n\
+             checkpoint_sha256=3e9daecd70aaed5b5a0d1f861cc4d77eaa45afb3fc6301b1cf32c1be0f5868fb\n\
+             license=MIT (ZFTurbo/Music-Source-Separation-Training, (c) 2024 Roman Solovyev)\n\
+             source=https://github.com/ZFTurbo/Music-Source-Separation-Training\n\
+             sample_rate=44100\n\
+             frames=1000000\n\
+             span_samples=242550\n\
+             span_count=5\n"
+        );
+        // And what reaches the disk is that text, not a rendering of it.
+        let root = temp_root("pinned-header");
+        let cache = StemCache::open(&root, "feed0001", CacheHeader::for_track(1_000_000)).unwrap();
+        assert_eq!(std::fs::read(cache.dir().join("header")).unwrap(), text.as_bytes());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Every entry made before lanes were data has no lane line, and every
+    /// one of them holds the four stems. A header that does name its lanes
+    /// says so on a line of its own, after the nine an older reader knows.
+    #[test]
+    fn a_header_that_names_no_lanes_means_the_four_stems() {
+        let four = CacheHeader::for_track(1_000_000);
+        assert_eq!(four.stems, STEM_NAMES);
+        assert!(!four.encode().contains("stems"));
+        assert_eq!(CacheHeader::decode(&four.encode()).unwrap().stems, STEM_NAMES);
+
+        // Named outright they are the same header, and are still not written.
+        let named = format!("{}stems=drums,bass,other,vocals\n", four.encode());
+        let decoded = CacheHeader::decode(&named).unwrap();
+        assert_eq!(decoded, four);
+        assert_eq!(decoded.encode(), four.encode());
+
+        let one = vocal_header(1_000_000);
+        assert_eq!(one.stems, ["vocals"]);
+        assert_eq!(one.span_samples, VOCAL_STEP as u64);
+        assert_eq!(one.span_count, 6);
+        assert!(one.encode().ends_with("span_count=6\nstems=vocals\n"), "{}", one.encode());
+        assert_eq!(CacheHeader::decode(&one.encode()).unwrap(), one);
+
+        let two = CacheHeader::for_model(&VOCAL_MODEL, 176_400, 1_000_000, &["vocals", "rest"]);
+        assert!(two.encode().ends_with("stems=vocals,rest\n"));
+        assert_eq!(CacheHeader::decode(&two.encode()).unwrap(), two);
+    }
+
+    /// The identity the four-stem header is built from is the crate's own
+    /// constants, with the FROZEN licence line rather than the statement of
+    /// record.
+    #[test]
+    fn the_four_stem_identity_is_the_one_for_track_has_always_written() {
+        let identity = ModelIdentity::BS_ROFORMER_4STEM;
+        assert_eq!(identity.model_id, crate::MODEL_ID);
+        assert_eq!(identity.checkpoint, crate::MODEL_CHECKPOINT);
+        assert_eq!(identity.checkpoint_sha256, crate::MODEL_SHA256);
+        assert_eq!(identity.license, crate::CACHE_HEADER_LICENSE);
+        assert_eq!(identity.source, crate::MODEL_SOURCE);
+        for frames in [0u64, 1, CHUNK_STEP as u64, CHUNK_STEP as u64 + 1, 8_653_008] {
+            assert_eq!(
+                CacheHeader::for_model(&identity, CHUNK_STEP as u64, frames, &STEM_NAMES),
+                CacheHeader::for_track(frames)
+            );
+            assert_eq!(
+                CacheHeader::for_track(frames).span_count,
+                (frames as usize).div_ceil(CHUNK_STEP) as u64
+            );
+        }
+    }
+
+    #[test]
+    fn a_single_lane_entry_round_trips_on_its_own_grid() {
+        let root = temp_root("one-lane");
+        let frames = 3 * VOCAL_STEP + 1234;
+        let header = vocal_header(frames);
+        let digest = "0123abcd";
+        let mut cache = StemCache::open(&root, digest, header.clone()).unwrap();
+        assert_eq!(cache.span_count(), 4);
+        assert_eq!(cache.lanes(), ["vocals"]);
+        assert_eq!(cache.lane_count(), 1);
+        assert_eq!(cache.lane_index("vocals"), Some(0));
+        assert_eq!(cache.lane_index("drums"), None);
+        assert!(!is_complete_on_disk(&root, digest, &header));
+
+        let mut written = Vec::new();
+        for span in 0..cache.span_count() {
+            let start = span * VOCAL_STEP;
+            let len = (frames - start).min(VOCAL_STEP);
+            let lanes = ramp_lanes(1, len, span as f32 * 0.1);
+            cache.write_span_lanes(start, &lanes).unwrap();
+            let back = cache.read_span_lanes(span).unwrap().unwrap();
+            assert_eq!(back.len(), 1);
+            assert_eq!(back[0].frames(), len, "span {span}");
+            for frame in 0..len {
+                let (want, got) = (lanes[0].left[frame], back[0].left[frame]);
+                assert!(
+                    (want - got).abs() < 1.0 / 16384.0,
+                    "span {span} frame {frame}: {want} vs {got}"
+                );
+                assert_eq!(back[0].right[frame], -got);
+            }
+            written.push(back);
+        }
+        assert!(cache.is_complete());
+        assert!(is_complete_on_disk(&root, digest, &header));
+
+        // One lane on disk, sized to the track, and one gain per span.
+        let dir = cache.dir().to_path_buf();
+        assert_eq!(
+            std::fs::metadata(dir.join("vocals.pcm")).unwrap().len(),
+            frames as u64 * FRAME_BYTES
+        );
+        assert_eq!(std::fs::metadata(dir.join("gains")).unwrap().len(), 4 * 4);
+        for stem in ["drums", "bass", "other"] {
+            assert!(!dir.join(format!("{stem}.pcm")).exists(), "{stem}");
+        }
+
+        // The whole track, as every lane and as the one lane by name.
+        let all = cache.read_all_lanes().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].frames(), frames);
+        for (span, part) in written.iter().enumerate() {
+            let from = span * VOCAL_STEP;
+            let to = from + part[0].frames();
+            assert_eq!(&all[0].left[from..to], &part[0].left[..], "span {span}");
+            assert_eq!(&all[0].right[from..to], &part[0].right[..], "span {span}");
+        }
+        assert!(same_bits(&cache.read_lane("vocals").unwrap(), &all[0]));
+        assert!(cache.read_lane("drums").is_err());
+        drop(cache);
+
+        // And it is all still there for the next session.
+        let mut reopened = StemCache::open(&root, digest, header).unwrap();
+        assert!(reopened.is_complete());
+        assert!(same_bits(&reopened.read_lane("vocals").unwrap(), &all[0]));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A slot of this grid holds one step of THIS grid, and the entry's
+    /// lanes, all of them; and the calls that speak the four-stem set answer
+    /// an entry that is not one with an error, not a panic or a guess.
+    #[test]
+    fn a_single_lane_entry_refuses_what_is_not_its_own() {
+        let root = temp_root("one-lane-refusals");
+        let frames = 2 * VOCAL_STEP;
+        let mut cache = StemCache::open(&root, "0123abcd", vocal_header(frames)).unwrap();
+        assert!(cache.write_span_lanes(0, &ramp_lanes(1, CHUNK_STEP, 0.0)).is_err());
+        assert!(cache.write_span_lanes(CHUNK_STEP, &ramp_lanes(1, VOCAL_STEP, 0.0)).is_err());
+        assert!(cache.write_span_lanes(0, &ramp_lanes(2, VOCAL_STEP, 0.0)).is_err());
+        assert!(cache.write_span_lanes(0, &[]).is_err());
+        assert!(cache.write_span(0, &ramp_stems(VOCAL_STEP, 0.0)).is_err());
+        assert!(!cache.has_span(0), "a refused span leaves the slot empty");
+
+        cache.write_span_lanes(0, &ramp_lanes(1, VOCAL_STEP, 0.0)).unwrap();
+        assert!(cache.read_span(0).is_err());
+        assert!(cache.read_all().is_err());
+        assert!(cache.read_all_lanes().is_err(), "half a track is not a track");
+        assert!(cache.read_lane("vocals").is_err());
+        cache.write_span_lanes(VOCAL_STEP, &ramp_lanes(1, VOCAL_STEP, 0.5)).unwrap();
+        assert!(cache.read_all().is_err(), "complete, and still not four stems");
+        assert_eq!(cache.read_all_lanes().unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Same track, same digest, another set of lanes: never the same
+    /// separation, even with every other field forced equal. It is why the
+    /// two kinds of entry are kept under different roots — the door replaces
+    /// what it does not recognise.
+    #[test]
+    fn a_one_lane_header_is_never_the_four_lane_header_of_the_same_track() {
+        let frames = 4 * CHUNK_STEP;
+        let four = CacheHeader::for_track(frames as u64);
+        let one = vocal_header(frames);
+        assert!(!one.same_separation(&four));
+        assert!(!four.same_separation(&one));
+
+        let mut only_the_lanes_differ = four.clone();
+        only_the_lanes_differ.stems = vec!["vocals".to_string()];
+        assert!(!only_the_lanes_differ.same_separation(&four));
+        assert!(!four.same_separation(&only_the_lanes_differ));
+        assert!(four.same_separation(&four.clone()));
+
+        let root = temp_root("lanes-differ");
+        let digest = "d".repeat(64);
+        filled_entry(&root, &digest, 4, 100);
+        assert!(is_complete_on_disk(&root, &digest, &four));
+        assert!(!is_complete_on_disk(&root, &digest, &only_the_lanes_differ));
+        assert!(!is_complete_on_disk(&root, &digest, &one));
+        assert!(
+            root.join(&digest).join("drums.pcm").is_file(),
+            "and asking changed nothing"
+        );
+        let replaced = StemCache::open(&root, &digest, only_the_lanes_differ).unwrap();
+        assert!(!replaced.is_complete(), "the door starts the entry again");
+        assert!(!replaced.dir().join("drums.pcm").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The four-stem calls are the lane calls with a fixed shape: the same
+    /// bytes reach the disk and the same samples come back, whichever pair a
+    /// caller uses on a four-stem entry.
+    #[test]
+    fn the_lane_calls_and_the_four_stem_calls_agree_on_a_four_stem_entry() {
+        let root = temp_root("four-as-lanes");
+        let frames = 2 * CHUNK_STEP + 4321;
+        let header = CacheHeader::for_track(frames as u64);
+        let mut by_set = StemCache::open(&root, "aaaa0001", header.clone()).unwrap();
+        let mut by_lanes = StemCache::open(&root, "bbbb0002", header).unwrap();
+        assert_eq!(by_lanes.lanes(), STEM_NAMES);
+        assert_eq!(by_lanes.lane_count(), NUM_STEMS);
+        assert_eq!(by_lanes.lane_index("vocals"), Some(Stem::Vocals.index()));
+        for span in 0..by_set.span_count() {
+            let start = span * CHUNK_STEP;
+            let stems = ramp_stems((frames - start).min(CHUNK_STEP), span as f32 * 0.1);
+            by_set.write_span(start, &stems).unwrap();
+            by_lanes.write_span_lanes(start, &stems.to_vec()).unwrap();
+        }
+        let files = ["header", "spans", "gains", "drums.pcm", "bass.pcm", "other.pcm", "vocals.pcm"];
+        for file in files {
+            assert_eq!(
+                std::fs::read(by_set.dir().join(file)).unwrap(),
+                std::fs::read(by_lanes.dir().join(file)).unwrap(),
+                "{file}"
+            );
+        }
+        for span in 0..by_set.span_count() {
+            let set = by_set.read_span(span).unwrap().unwrap();
+            let lanes = by_set.read_span_lanes(span).unwrap().unwrap();
+            assert_eq!(lanes.len(), NUM_STEMS);
+            for stem in 0..NUM_STEMS {
+                assert!(same_bits(&set[stem], &lanes[stem]), "span {span} stem {stem}");
+            }
+        }
+        assert!(by_set.read_span(99).unwrap().is_none());
+        assert!(by_set.read_span_lanes(99).unwrap().is_none());
+        let set = by_lanes.read_all().unwrap();
+        let lanes = by_lanes.read_all_lanes().unwrap();
+        for stem in Stem::ALL {
+            assert!(same_bits(&set[stem.index()], &lanes[stem.index()]), "{stem:?}");
+            assert!(
+                same_bits(&by_lanes.read_lane(stem.name()).unwrap(), &set[stem.index()]),
+                "{stem:?} by name"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A lane name becomes a file name. One that could leave the entry's
+    /// directory, split the header's list or name a lane twice is refused
+    /// before anything is created.
+    #[test]
+    fn a_lane_name_that_is_not_a_bare_word_is_refused() {
+        let root = temp_root("lane-names");
+        let bad: [&[&str]; 8] = [
+            &[],
+            &[""],
+            &["../vocals"],
+            &["a/b"],
+            &["a\\b"],
+            &["with.dot"],
+            &["vocals,drums"],
+            &["vocals", "vocals"],
+        ];
+        for stems in bad {
+            let header = CacheHeader::for_model(&VOCAL_MODEL, VOCAL_STEP as u64, 1000, stems);
+            assert!(StemCache::open(&root, "abcd", header).is_err(), "{stems:?}");
+            assert!(!root.join("abcd").exists(), "{stems:?} left an entry behind");
+        }
+        let fine = CacheHeader::for_model(&VOCAL_MODEL, VOCAL_STEP as u64, 1000, &["lead-vox_2"]);
+        assert!(StemCache::open(&root, "abcd", fine).is_ok());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A second separator's entries live in a dot-named directory inside the
+    /// four-stem root. The four-stem budget neither counts nor evicts them,
+    /// and the same prune pointed AT that directory keeps it in a budget of
+    /// its own.
+    #[test]
+    fn a_prune_walks_past_a_dot_directory_and_works_inside_one() {
+        let root = temp_root("budget-dot-root");
+        let four = filled_entry(&root, "aaaa1111", 1, 100);
+        let vocal_root = root.join(".vocal-model");
+        let cache = filled_vocal_entry(&vocal_root, "aaaa1111", 2 * VOCAL_STEP);
+        let one = entry_bytes(cache.dir());
+        drop(cache);
+        assert!(one > 0 && one < four, "one lane of 8 s against four of 5.5 s: {one} vs {four}");
+
+        let report = prune(&root, 0, &[]).unwrap();
+        assert_eq!(report.before, four, "the dot directory is not counted");
+        assert_eq!(report.removed, vec![("aaaa1111".to_string(), four)]);
+        assert!(!root.join("aaaa1111").exists());
+        assert!(is_complete_on_disk(&vocal_root, "aaaa1111", &vocal_header(2 * VOCAL_STEP)));
+
+        let kept = prune(&vocal_root, 0, &["aaaa1111"]).unwrap();
+        assert!(kept.removed.is_empty(), "a pin holds there as well: {kept:?}");
+        let report = prune(&vocal_root, 0, &[]).unwrap();
+        assert_eq!(report.removed, vec![("aaaa1111".to_string(), one)]);
+        assert_eq!(report.after, 0);
+        assert!(!vocal_root.join("aaaa1111").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A digest is one directory name under the root it is asked about. With
+    /// a second root INSIDE the first, a digest that is a path could reach
+    /// across; the probe and the door both refuse one, for either kind of
+    /// header, even where the path leads to a real and complete entry.
+    #[test]
+    fn a_digest_that_is_a_path_cannot_reach_into_another_root() {
+        let root = temp_root("digest-paths");
+        let vocal_root = root.join(".vocal-model");
+        let frames = 2 * VOCAL_STEP;
+        let header = vocal_header(frames);
+        drop(filled_vocal_entry(&vocal_root, "abcd", frames));
+        assert!(is_complete_on_disk(&vocal_root, "abcd", &header));
+
+        for digest in [".vocal-model/abcd", ".vocal-model\\abcd"] {
+            assert!(!is_complete_on_disk(&root, digest, &header), "{digest:?}");
+            assert!(StemCache::open(&root, digest, header.clone()).is_err(), "{digest:?}");
+        }
+        for digest in ["abcd/../abcd", "abcd\\..\\abcd", "./abcd", "abcd.", "abcd/", "abcd\\", ""] {
+            assert!(!is_complete_on_disk(&vocal_root, digest, &header), "{digest:?}");
+            assert!(
+                StemCache::open(&vocal_root, digest, header.clone()).is_err(),
+                "{digest:?}"
+            );
+            let four = CacheHeader::for_track(frames as u64);
+            assert!(!is_complete_on_disk(&vocal_root, digest, &four), "{digest:?}");
+            assert!(StemCache::open(&vocal_root, digest, four).is_err(), "{digest:?}");
+        }
+        assert!(
+            is_complete_on_disk(&vocal_root, "abcd", &header),
+            "and none of the asking touched the entry"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }
