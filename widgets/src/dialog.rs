@@ -512,6 +512,12 @@ pub struct Dialog {
     /// Where the pointer took hold, and how far open the panel was then.
     #[rust]
     drag_from: Option<(f64, f64)>,
+    /// Whether the press now being held landed ON the card. Its release is
+    /// then that control's, wherever it lands; see the scrim check in
+    /// `handle_event`. False when no press has been seen at all, which
+    /// leaves a release nobody claims free to dismiss as it always was.
+    #[rust]
+    press_on_card: bool,
     /// How far in the panel is, 0 at its edge and 1 in place.
     #[rust]
     slide: f64,
@@ -534,6 +540,7 @@ impl Dialog {
         // not the same panel coming back.
         self.extent_dressed = false;
         self.drag_from = None;
+        self.press_on_card = false;
         // A panel given no time to slide is in place from its first frame.
         // Sliding from its edge over the one frame the floor still takes, it
         // stood at its edge on that frame, and a press there was a press on
@@ -605,6 +612,25 @@ impl Dialog {
     /// drawn, and a key must not press a button nobody can see.
     fn has_default_answer(&self) -> bool {
         !self.confirm_text.is_empty()
+    }
+
+    /// The areas this dialog counts as its own for the pointer-capture rule:
+    /// the scrim, the card, and the grabber.
+    ///
+    /// The sheet's grabber and the dismissing release are read off raw
+    /// events, which never learn that another widget took the press (see
+    /// `Fingers::is_mouse_held_outside`). A press on the scrim IS captured —
+    /// by the modal's own bg, which it hit tests unconditionally — and a
+    /// press on a control inside the card is captured by that control. Only
+    /// the second kind means somebody else holds the mouse, so the first has
+    /// to be named here or every sheet drag would stand down at once.
+    fn pointer_areas(&self, cx: &Cx) -> Vec<Area> {
+        let content = self.modal.widget(cx, ids!(content));
+        let grab = content.widget(cx, ids!(grab)).area();
+        [self.modal.scrim_area(), content.area(), grab]
+            .into_iter()
+            .filter(|area| !area.is_empty())
+            .collect()
     }
 
     /// Whether the grabber is drawn and heard: only a panel on an edge has
@@ -816,11 +842,60 @@ impl Widget for Dialog {
                         .widget(cx, ids!(grab))
                         .area()
                         .rect(cx);
-                    if grab.size.x > 0.0 && grab.contains(me.abs) {
+                    // A resizer, and a resizer only starts on a press
+                    // nothing else is holding. A control inside the sheet
+                    // that took this press owns the pointer until it is let
+                    // go, and the panel must not move out from under it —
+                    // a slider in the body, a scroll bar, the close mark
+                    // pressed and dragged over the handle. The content is
+                    // dispatched above this, so a capture it took is already
+                    // on the list by the time the press is read here.
+                    //
+                    // The check rather than a capture of its own, and that
+                    // is a structural answer rather than a lazy one. A
+                    // dialog IS a modal, and by the time this block runs the
+                    // modal has taken its sweep lock back:
+                    // `Modal::handle_event` lifts it only around the
+                    // content's own dispatch. `hits` turns away every area
+                    // whose sweep area is not the lock holder's, so a plain
+                    // `hits` here answers Nothing at all; and handing it the
+                    // scrim as a sweep area unlocks it only by putting it in
+                    // SWEEP mode, where the first move off the handle comes
+                    // back as a swept `FingerUp` and the capture is dropped
+                    // — the one thing a resizer must not do. Capturing
+                    // without `hits` means `CxFingers::capture_digit`, which
+                    // the platform keeps to itself.
+                    //
+                    // So this control keeps the OTHER half of the rule, and
+                    // keeps it whole: asked here at the press, and asked
+                    // again on every move below for as long as the drag is
+                    // pending.
+                    let mine = self.pointer_areas(cx);
+                    if grab.size.x > 0.0
+                        && grab.contains(me.abs)
+                        && !cx.fingers.is_mouse_held_outside(&mine)
+                    {
                         self.drag_from = Some((along(me.abs), self.live_extent));
                     }
                 }
                 Event::MouseMove(me) => {
+                    // The other half of the rule, asked again on every move
+                    // while the drag is pending. A press and another
+                    // control's capture can land in either order within one
+                    // event, and a control can take the pointer after this
+                    // drag started; the moment one does, the drag lets go —
+                    // and puts the panel back where the press found it,
+                    // because a resize made with a pointer that belongs to
+                    // someone else is not a resize anybody asked for. The
+                    // move itself is not this panel's to consume.
+                    if let Some((_, held_extent)) = self.drag_from {
+                        let mine = self.pointer_areas(cx);
+                        if cx.fingers.is_mouse_held_outside(&mine) {
+                            self.drag_from = None;
+                            self.live_extent = held_extent;
+                            self.modal.redraw(cx);
+                        }
+                    }
                     if let Some((held_at, held_extent)) = self.drag_from {
                         // Which way makes the panel bigger depends on the
                         // edge it came from: a bottom sheet grows upward.
@@ -863,12 +938,28 @@ impl Widget for Dialog {
         // A press that lands outside the card leaves without answering. The
         // modal has already stopped it reaching the page underneath.
         if self.dismissable {
-            if let Event::MouseUp(me) = event {
-                let card = self.modal.widget(cx, ids!(content)).area().rect(cx);
-                if card.size.x > 0.0 && !card.contains(me.abs) {
-                    self.answer(cx, DialogAction::Dismissed);
-                    return;
+            let card = self.modal.widget(cx, ids!(content)).area().rect(cx);
+            let off_card = |abs: DVec2| card.size.x > 0.0 && !card.contains(abs);
+            match event {
+                // Where the press landed decides whose release this is. A
+                // press inside the card belongs to whatever it landed on —
+                // a slider, a scroll bar, the sheet's own grabber — and that
+                // control keeps the pointer until it is let go, which for a
+                // drag is routinely far outside the card. Reading the
+                // release alone shut the dialog on the user mid-drag.
+                //
+                // Only a press ON the card is taken away, so a release with
+                // no press of its own behind it still dismisses, as it did
+                // before: the press that opened the dialog landed while
+                // there was no dialog to hear it.
+                Event::MouseDown(me) => self.press_on_card = !off_card(me.abs),
+                Event::MouseUp(me) => {
+                    if !std::mem::take(&mut self.press_on_card) && off_card(me.abs) {
+                        self.answer(cx, DialogAction::Dismissed);
+                        return;
+                    }
                 }
+                _ => {}
             }
         }
         if let Event::Actions(actions) = event {
@@ -1500,6 +1591,117 @@ mod tests {
         assert_eq!(reports(&actions, &drawer), vec![DialogAction::Dismissed], "and says so once");
         assert!(drawer.as_dialog().dismissed(&actions), "so a lookup by widget finds the drawer's own report");
         assert_eq!(cx.sweep_lock_area(), None, "and gives the pointer back");
+    }
+
+    /// A press another control is holding is not the sheet's to use. The
+    /// close mark takes the press and keeps it, so the grabber does not
+    /// start a resize under it, and the release — far outside the card, as
+    /// the end of a drag usually is — is not read as a press on the scrim.
+    #[test]
+    fn a_press_another_control_holds_neither_drags_the_sheet_nor_dismisses_it() {
+        let mut cx = cx();
+        let root = cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    flow: Overlay
+                    sheet := BottomSheet{title: "Choices"}
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        let mut target = Target::new(&mut cx);
+        target.draw(&mut cx, &root);
+        open_in_place(&mut cx, &mut target, &root, ids!(sheet));
+        let sheet = root.widget(&cx, ids!(sheet));
+        let panel = |cx: &Cx| sheet.widget(cx, ids!(content)).area().rect(cx);
+        let was = panel(&cx).size.y;
+
+        // The close mark is a control inside the card: its press captures
+        // the mouse and holds it until the release.
+        let close = sheet.widget(&cx, ids!(close)).area();
+        let close_rect = close.rect(&cx);
+        assert!(close_rect.size.x > 0.0, "the close mark is drawn");
+        sheet.handle_event(&mut cx, &press(close_rect.pos + close_rect.size * 0.5), &mut Scope::empty());
+        assert!(cx.fingers.is_area_captured(close), "the close mark holds the mouse");
+
+        // A press that reaches the grabber while it is held starts nothing.
+        let grab = sheet.widget(&cx, ids!(grab)).area().rect(&cx);
+        let held = grab.pos + grab.size * 0.5;
+        sheet.handle_event(&mut cx, &press(held), &mut Scope::empty());
+        sheet.handle_event(&mut cx, &drag(held + dvec2(0.0, 120.0)), &mut Scope::empty());
+        target.draw(&mut cx, &root);
+        assert_eq!(panel(&cx).size.y, was, "the panel stood still");
+
+        // And letting go outside the card ends that drag, nothing else.
+        let outside = dvec2(20.0, 20.0);
+        assert!(!panel(&cx).contains(outside), "the release lands off the card");
+        let actions = cx.capture_actions(|cx| sheet.handle_event(cx, &release(outside), &mut Scope::empty()));
+        assert_eq!(reports(&actions, &sheet), vec![], "no answer of any kind");
+        assert!(sheet.as_dialog().is_open(), "the sheet stayed up");
+    }
+
+    /// A control that takes the pointer AFTER the drag started stops it
+    /// there. The press on the grabber was the sheet's — nothing held the
+    /// mouse then — but the rule is asked at the press and on every move,
+    /// and the moment another control owns the pointer the resize lets go
+    /// and the panel goes back to where the press found it.
+    #[test]
+    fn a_sheet_lets_go_when_another_control_takes_the_pointer_mid_drag() {
+        let mut cx = cx();
+        let root = cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    flow: Overlay
+                    sheet := BottomSheet{title: "Choices"}
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        let mut target = Target::new(&mut cx);
+        target.draw(&mut cx, &root);
+        open_in_place(&mut cx, &mut target, &root, ids!(sheet));
+        let sheet = root.widget(&cx, ids!(sheet));
+        let panel = |cx: &Cx| sheet.widget(cx, ids!(content)).area().rect(cx);
+        let was = panel(&cx).size.y;
+
+        // A press nothing else is holding: the grabber takes it, and the
+        // sheet follows the hand.
+        let grab = sheet.widget(&cx, ids!(grab)).area().rect(&cx);
+        let held = grab.pos + grab.size * 0.5;
+        sheet.handle_event(&mut cx, &press(held), &mut Scope::empty());
+        sheet.handle_event(&mut cx, &drag(held + dvec2(0.0, 60.0)), &mut Scope::empty());
+        target.draw(&mut cx, &root);
+        assert_eq!(panel(&cx).size.y, was - 60.0, "the drag started and the sheet moved");
+
+        // Now a control inside the card takes the mouse.
+        let close = sheet.widget(&cx, ids!(close)).area();
+        let close_rect = close.rect(&cx);
+        sheet.handle_event(&mut cx, &press(close_rect.pos + close_rect.size * 0.5), &mut Scope::empty());
+        assert!(cx.fingers.is_area_captured(close), "the close mark holds the mouse");
+
+        // From here the moves are not the sheet's, and the resize that was
+        // under way is undone rather than carried on with.
+        sheet.handle_event(&mut cx, &drag(held + dvec2(0.0, 120.0)), &mut Scope::empty());
+        target.draw(&mut cx, &root);
+        assert_eq!(panel(&cx).size.y, was, "the sheet let go and went back");
+        sheet.handle_event(&mut cx, &drag(held + dvec2(0.0, 180.0)), &mut Scope::empty());
+        target.draw(&mut cx, &root);
+        assert_eq!(panel(&cx).size.y, was, "and stays put for the rest of the drag");
+
+        // And letting go settles nothing: there was no drag left to end.
+        let actions = cx.capture_actions(|cx| {
+            sheet.handle_event(cx, &release(held + dvec2(0.0, 180.0)), &mut Scope::empty())
+        });
+        assert_eq!(reports(&actions, &sheet), vec![], "no rung was chosen by a pointer we did not own");
+        assert!(sheet.as_dialog().is_open(), "and the sheet is still up");
     }
 
     /// The grabber is a handle: the sheet follows it, settles at the rung

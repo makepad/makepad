@@ -1759,6 +1759,26 @@ impl PortalList {
         }
     }
 
+    /// Every area this list owns for the question "whose press is this": its
+    /// own area and its scroll bar's handle.
+    ///
+    /// [`CxFingers::is_mouse_held_outside`] is asked with the areas the host
+    /// owns, and a bar of its own is one of them — a reader grabbing this
+    /// list's bar is working this list, not some outside control, so the list
+    /// still takes the key focus that press carries. The helper matches
+    /// captures by owner, so a handle redrawn mid-drag still counts even
+    /// though its `redraw_id` has moved on.
+    ///
+    /// This set is deliberately NOT used for the list's own raw-press gestures
+    /// (drag-to-scroll, the selection drag). Those must stand down against the
+    /// list's own bar just as they stand down against a slider: the bar is a
+    /// continuously dragged control holding the pointer, and a drag of the bar
+    /// that also drag-scrolled the list would move it twice, in opposite
+    /// directions. They ask with `self.area` alone.
+    pub fn own_press_areas(&self) -> [Area; 2] {
+        [self.area, self.scroll_bar.area()]
+    }
+
     pub fn update_scroll_bar(&mut self, cx: &mut Cx) {
         // Use pixel-based position from height_tree
         if let Some(ref tree) = self.height_tree {
@@ -3360,10 +3380,18 @@ impl Widget for PortalList {
                     // native list behaves, so `is_mouse_held_outside` answers
                     // `false` for touch captures and the touch paths below are
                     // left exactly as they were.
+                    // The gestures below ask with `self.area` alone: this
+                    // list's own scroll bar IS an outside holder to them, for
+                    // the reason spelled out on `own_press_areas`.
                     let held_elsewhere = cx.fingers.is_mouse_held_outside(&[self.area]);
                     // A press a child control holds is that control's, so this
                     // list does not pull the key focus off it on the way past.
-                    if self.grab_key_focus && !held_elsewhere {
+                    // The focus asks with everything the list owns, its bar
+                    // included: a press on its own bar is its own press and
+                    // still brings the keyboard here.
+                    let held_by_another_widget =
+                        cx.fingers.is_mouse_held_outside(&self.own_press_areas());
+                    if self.grab_key_focus && !held_by_another_widget {
                         cx.set_key_focus(self.area);
                     }
                     // A press that doesn't end up moving us off the end shouldn't stop
@@ -3460,6 +3488,22 @@ impl Widget for PortalList {
                     }
                 }
                 Hit::FingerMove(e) => {
+                    // The other half of the rule for the selection drag, asked
+                    // again on every move for the same reason the scroll drag
+                    // below asks again: the press and a control's capture can
+                    // land in either order inside one event, so a control can
+                    // take the pointer after this selection began. The moment
+                    // it does the selection stands down, keeping what it has
+                    // already selected but extending it no further.
+                    if self.is_selecting
+                        && selection_drag_stands_down(
+                            e.device.is_touch(),
+                            cx.fingers.is_mouse_held_outside(&[self.area]),
+                        )
+                    {
+                        self.is_selecting = false;
+                        self.select_scroll_state = None;
+                    }
                     // Handle selection when selecting
                     if self.is_selecting {
                         cx.set_cursor(MouseCursor::Text);
@@ -4055,6 +4099,19 @@ fn press_starts_drag_scroll(
 /// the same reason as in [`press_starts_drag_scroll`].
 fn drag_scroll_stands_down(is_touch: bool, mouse_held_outside: bool) -> bool {
     !is_touch && mouse_held_outside
+}
+
+/// Whether a text-selection drag already under way must stand down on this
+/// move.
+///
+/// A selection drag is a gesture of the list's own, started from a raw press
+/// the same way drag-to-scroll is, so it answers to the same rule and for the
+/// same reasons as [`drag_scroll_stands_down`]: asked again on every move
+/// because the press and a control's capture can land in either order, and
+/// touch exempt because a finger that lands on a control may still work the
+/// list under it.
+fn selection_drag_stands_down(is_touch: bool, mouse_held_outside: bool) -> bool {
+    drag_scroll_stands_down(is_touch, mouse_held_outside)
 }
 
 /// Whether a list keeps a scroll delta it is handed, which makes the delta
@@ -4861,5 +4918,178 @@ mod tests {
             (true, false),
             "a finger on a row stopped scrolling the list under it"
         );
+    }
+    /// A log of 200 lines drawn until it settles: a real list, taller than its
+    /// pane, with a scroll bar showing.
+    fn drawn_log(cx: &mut Cx) -> (LogList, DrawPass, DrawList2d) {
+        let mut log = cx.with_vm(LogList::script_new_with_default);
+        log.lines = (0..200).map(|n| format!("log | line {n}")).collect();
+        let pass = DrawPass::new(cx);
+        pass.set_size(cx, PANE);
+        let mut draw_list = DrawList2d::new(cx);
+        for _ in 0..3 {
+            frame(cx, &mut log, &pass, &mut draw_list);
+        }
+        (log, pass, draw_list)
+    }
+
+    fn mouse_down(at: DVec2) -> Event {
+        Event::MouseDown(MouseDownEvent {
+            abs: at,
+            button: MouseButton::PRIMARY,
+            window_id: WindowId(1, 1),
+            modifiers: KeyModifiers::default(),
+            handled: Cell::new(Area::Empty),
+            time: 1.0,
+        })
+    }
+
+    fn mouse_move(at: DVec2) -> Event {
+        Event::MouseMove(MouseMoveEvent {
+            abs: at,
+            lock_delta: dvec2(0.0, 0.0),
+            window_id: WindowId(1, 1),
+            modifiers: KeyModifiers::default(),
+            time: 2.0,
+            handled: Cell::new(Area::Empty),
+        })
+    }
+
+    /// The areas a list owns for the "whose press is this" question are its
+    /// own and its bar's. Naming only its own area is how a list comes to read
+    /// its own scroll bar as an outsider holding the pointer.
+    #[test]
+    fn a_lists_own_areas_include_its_scroll_bar() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let (log, _pass, _list) = drawn_log(&mut cx);
+        let list_ref = log.portal_list(&cx, ids!(list));
+        let list = list_ref.borrow().expect("the log holds no portal list");
+        let mine = list.own_press_areas();
+        assert_eq!(mine[0], list.area, "a list left itself out of its own areas");
+        assert_eq!(
+            mine[1],
+            list.scroll_bar.area(),
+            "a list left its scroll bar out of its own areas"
+        );
+        assert!(
+            mine[1].is_valid(&cx) && mine[0] != mine[1],
+            "the bar drew no area of its own, so this test proves nothing"
+        );
+    }
+
+    /// A press on the list's OWN scroll bar belongs to the bar and to nothing
+    /// else. The list starts no drag-to-scroll and no selection from it: the
+    /// bar is a continuously dragged control holding the pointer, and a list
+    /// that also drag-scrolled would move itself twice, the two ways at once.
+    ///
+    /// Today the list never even reaches its own press path for this press —
+    /// `handle_event` skips its whole hit block while its bar is captured —
+    /// and this pins that outcome, whichever of the two guards is the one
+    /// holding it up.
+    #[test]
+    fn a_press_on_the_lists_own_bar_is_the_bars_alone() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let (mut log, _pass, _list) = drawn_log(&mut cx);
+        let list_ref = log.portal_list(&cx, ids!(list));
+        let bar = {
+            // A console keeps out of the way of the app around it, so its own
+            // list drags nothing. Turn it into an ordinary drag-to-scroll list,
+            // selection and all, so both gestures are armed and a press that
+            // started either one would show.
+            let mut list = list_ref.borrow_mut().expect("the log holds no portal list");
+            list.drag_scrolling = true;
+            list.capture_overload = true;
+            list.selectable = true;
+            list.scroll_bar.area()
+        };
+        assert!(bar.is_valid(&cx), "the list drew no scroll bar to press");
+        let rect = bar.clipped_rect(&cx);
+        let at = rect.pos + rect.size * 0.5;
+
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WindowId(1, 1)));
+        log.handle_event(&mut cx, &mouse_down(at), &mut Scope::empty());
+        assert!(
+            cx.fingers.is_area_captured(bar),
+            "the bar did not take the press, so this test proves nothing"
+        );
+        let list = list_ref.borrow().expect("the log holds no portal list");
+        assert!(
+            !matches!(list.scroll_state, ScrollState::Drag { .. }),
+            "the list drag-scrolled itself off a press its own scroll bar is holding"
+        );
+        assert!(
+            !list.is_selecting,
+            "the list started a text selection off a press on its own scroll bar"
+        );
+        drop(list);
+        cx.fingers.first_mouse_button = None;
+    }
+
+    /// The other half of the rule for the selection drag: a control can take
+    /// the pointer AFTER the drag began — the press and the capture land in
+    /// either order — so the question is re-asked on every move, not only at
+    /// the press.
+    ///
+    /// The order is built here by handing the list the press first, while
+    /// nothing holds the mouse, and the control the same press after. A Button
+    /// stands in for any continuously dragged control.
+    #[test]
+    fn a_selection_drag_stands_down_when_a_control_takes_the_mouse() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let (mut log, pass, _draw_list) = drawn_log(&mut cx);
+        let mut button = cx.with_vm(crate::button::Button::script_new_with_default);
+        let mut button_list = DrawList2d::new(&mut cx);
+        frame_over(&mut cx, &mut button, &pass, &mut button_list);
+
+        let list_ref = log.portal_list(&cx, ids!(list));
+        list_ref
+            .borrow_mut()
+            .expect("the log holds no portal list")
+            .selectable = true;
+
+        let at = PANE * 0.5;
+        assert!(
+            button.area().is_valid(&cx) && button.area().clipped_rect(&cx).contains(at),
+            "the control is not over the press point"
+        );
+
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WindowId(1, 1)));
+        let press = mouse_down(at);
+        log.handle_event(&mut cx, &press, &mut Scope::empty());
+        assert!(
+            list_ref
+                .borrow()
+                .expect("the log holds no portal list")
+                .is_selecting,
+            "no selection drag started, so this test proves nothing"
+        );
+
+        // The control takes the pointer after the drag has begun. The press is
+        // un-marked first, because the list co-capturing it marked it handled:
+        // what this stands in for is any control that takes the pointer
+        // without the list's own press having consumed it — an overlay that
+        // captures through the overload, a control that captures off a later
+        // raw event such as a long press.
+        if let Event::MouseDown(e) = &press {
+            e.handled.set(Area::Empty);
+        }
+        button.handle_event(&mut cx, &press, &mut Scope::empty());
+        assert!(
+            cx.fingers.is_area_captured(button.area()),
+            "the control did not take the press, so this test proves nothing"
+        );
+
+        log.handle_event(&mut cx, &mouse_move(at + dvec2(0.0, 8.0)), &mut Scope::empty());
+        assert!(
+            !list_ref
+                .borrow()
+                .expect("the log holds no portal list")
+                .is_selecting,
+            "the selection drag kept running while a control held the mouse"
+        );
+        cx.fingers.first_mouse_button = None;
     }
 }

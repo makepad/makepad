@@ -360,6 +360,19 @@ impl Modal {
         self.is_open
     }
 
+    /// The scrim's area: what this modal holds the pointer with, and what a
+    /// press on the scrim captures.
+    ///
+    /// A widget built on a modal needs it to tell its OWN pointer from
+    /// another control's. While a control holds the mouse the interaction is
+    /// locked to that control, so a raw gesture on the panel — a sheet's
+    /// grabber, a press read straight off the event — must stand down; but a
+    /// press on the scrim is captured by this area and is the panel's own,
+    /// not somebody else's. See `Fingers::is_mouse_held_outside`.
+    pub fn scrim_area(&self) -> Area {
+        self.draw_bg.area()
+    }
+
     pub fn open(&mut self, cx: &mut Cx) {
         if !self.is_open {
             // Before this modal moves the keyboard into its content.

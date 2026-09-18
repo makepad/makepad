@@ -694,6 +694,18 @@ impl ScrollBars {
         self.area
     }
 
+    /// The two bar handles this box owns, for the pointer-capture rule.
+    ///
+    /// A bar captures the mouse on its press exactly like any other
+    /// continuously dragged control, so a host that asked
+    /// [`CxFingers::is_mouse_held_outside`] with its content area alone would
+    /// read its own bar as an outsider holding the pointer and stand down
+    /// against itself. Hosts name these alongside their own area; see
+    /// [`ScrollBar::area`] for the same note one level down.
+    pub fn bar_areas(&self) -> [Area; 2] {
+        [self.scroll_bar_x.area(), self.scroll_bar_y.area()]
+    }
+
     pub fn redraw(&self, cx: &mut Cx) {
         self.area.redraw(cx);
     }

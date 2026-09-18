@@ -536,14 +536,29 @@ pub struct ChartView {
 
 impl Widget for ChartView {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        // Who owns this pointer? The hit below is taken with
+        // `capture_overload`, so this chart co-captures EVERY press landing
+        // inside it, one a child control already holds included — the answer
+        // therefore has to be asked for rather than assumed from having been
+        // handed a hit. The chart's own co-capture is `mine` and does not
+        // count. Asked once, before the hit, and used at the press and on
+        // every move: the press and a child's capture can land in either
+        // order inside one event.
+        let held_outside = cx.fingers.is_mouse_held_outside(&[self.draw_bg.area()]);
         match event.hits_with_capture_overload(cx, self.draw_bg.area(), true) {
-            Hit::FingerDown(fe) if fe.is_primary_hit() => {
+            Hit::FingerDown(fe) if press_starts_pan(fe.is_primary_hit(), held_outside) => {
                 self.drag_start_abs = Some(fe.abs);
                 self.drag_start_viewport = self.viewport.clone();
                 cx.set_cursor(MouseCursor::Grabbing);
             }
             Hit::FingerMove(fe) => {
-                if let Some(start_abs) = self.drag_start_abs {
+                if pan_stands_down(held_outside) {
+                    // Handed back mid-gesture: whatever took the pointer owns
+                    // the rest of this press, and a half-finished pan left
+                    // waiting here would resume the moment that control let
+                    // go.
+                    self.drag_start_abs = None;
+                } else if let Some(start_abs) = self.drag_start_abs {
                     let delta = fe.abs - start_abs;
                     let pr = &self.plot_rect;
                     if pr.size.x > 0.0 && pr.size.y > 0.0 {
@@ -2300,12 +2315,71 @@ impl TrendChartRef {
     }
 }
 
+/// Whether a press may start the chart's pan.
+///
+/// Panning is a gesture the chart starts from a press that is not
+/// necessarily its own: the hit is taken with `capture_overload`, so the
+/// chart is handed the `FingerDown` for every press inside it, including one
+/// a child control already captured. So it has to decide, and the rule it
+/// decides by is the app-wide one — a control that is dragged continuously
+/// locks the pointer, and any other gesture that would start from the same
+/// press stands down until the release.
+///
+/// `mouse_held_outside` is [`CxFingers::is_mouse_held_outside`] asked with
+/// the chart's own area: true means a slider, fader, scroll bar or resizer
+/// owns the mouse right now, and this press is that control's. A TOUCH
+/// capture answers `false` there by design, so a finger that lands on a
+/// control may still pan the chart under it, the way it may still drag a
+/// list — which is why no touch exemption is spelled out here.
+fn press_starts_pan(is_primary_hit: bool, mouse_held_outside: bool) -> bool {
+    is_primary_hit && !mouse_held_outside
+}
+
+/// Whether a pan already under way must stand down on this move.
+///
+/// The press and a child's capture can land in either order inside one
+/// event, and a control can take the pointer AFTER the pan began, so the
+/// question is re-asked on every move rather than only at the press.
+fn pan_stands_down(mouse_held_outside: bool) -> bool {
+    mouse_held_outside
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn close(a: f64, b: f64) -> bool {
         (a - b).abs() < 1e-9
+    }
+
+    /// The operator's rule, on the chart's own gesture: a press the pointer
+    /// is already locked to must not also pan the chart under it.
+    ///
+    /// `capture_overload` is what makes this reachable — a press a child
+    /// slider captured is handed to the chart as well, and without the
+    /// question being asked the chart would pan through the whole of that
+    /// control's drag.
+    #[test]
+    fn a_press_another_control_holds_never_starts_a_pan() {
+        assert!(
+            press_starts_pan(true, false),
+            "an ordinary press on the chart pans it"
+        );
+        assert!(
+            !press_starts_pan(true, true),
+            "a press the pointer is locked to belongs to whatever holds it"
+        );
+        // A secondary button is not a pan on an unheld pointer either.
+        assert!(!press_starts_pan(false, false));
+        assert!(!press_starts_pan(false, true));
+    }
+
+    /// And the other half, asked again on every move: a control that takes
+    /// the pointer after the pan began ends the pan there and then.
+    #[test]
+    fn a_pan_stands_down_the_move_a_control_takes_the_mouse() {
+        assert!(pan_stands_down(true));
+        assert!(!pan_stands_down(false), "an unheld pointer keeps panning");
     }
 
     #[test]

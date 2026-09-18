@@ -538,6 +538,87 @@ fn reaches_parts(disabled: bool, event: &Event) -> bool {
     !disabled || matches!(event, Event::NextFrame(_) | Event::KeyFocusLost(_))
 }
 
+/// Whether a press on the field body may start the value scrub.
+///
+/// `mouse_held_outside` is [`CxFingers::is_mouse_held_outside`] asked with the
+/// field and its TEXT BOX as `mine`, and it is the app-wide rule: a control
+/// that is dragged continuously locks the pointer on its press, and every
+/// other gesture that would start from the same press stands down. The box is
+/// `mine` because the two deliberately share a press and split it by
+/// direction; the STEP COLUMN is not, so a press the column holds — which it
+/// turns into a drag on this very axis — starts no second scrub here.
+fn body_press_starts_scrub(is_primary: bool, is_touch: bool, mouse_held_outside: bool) -> bool {
+    is_primary && !is_touch && !mouse_held_outside
+}
+
+/// Whether this event is a press the field may CO-CAPTURE.
+///
+/// `hits` takes the capture before it has looked at which button was
+/// pressed — the only button test that runs after it is the one comparing
+/// against the digit already down — so an overload asked for on every event
+/// hands the field a co-capture of a SECONDARY press as well. That press can
+/// never become a scrub, `body_press_starts_scrub` refuses everything but
+/// the primary button; but for as long as it is held it makes every other
+/// widget asking `is_mouse_held_outside` stand down, for a gesture that was
+/// never going to happen. So only a press that could BECOME a scrub asks for
+/// the overload.
+///
+/// A touch start is refused for the same reason: the body scrub is a mouse
+/// gesture (see the note on `is_mouse_held_outside` below), and a touch
+/// co-captured here would be held for nothing.
+///
+/// Nothing else is a press, and `capture_overload` is read nowhere else in
+/// `hits`: the hover, the wheel, and the moves and the release of a press
+/// the field already co-captured all arrive whatever this answers.
+fn press_may_overload_capture(event: &Event) -> bool {
+    match event {
+        Event::MouseDown(e) => e.button.is_primary(),
+        _ => false,
+    }
+}
+
+/// What a press in flight on the field body has become.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum BodyDragMove {
+    /// Still neither: the pointer has not moved far enough to say.
+    Undecided,
+    /// Up and down: the press is the value's.
+    Scrubbing,
+    /// Given up — across, or to whatever now holds the pointer.
+    Given,
+}
+
+/// What a move does to a press in flight on the field body.
+///
+/// `dx` is how far the pointer has gone sideways from the press and `dy` how
+/// far UP (so positive is more). A gesture becomes a scrub once it has gone
+/// further up or down than across and past the slop; one that wanders sideways
+/// first is somebody selecting the number to retype, and this lets go of it.
+///
+/// `mouse_held_outside` is asked again on every move, not only at the press:
+/// the press and a control's capture can land in either order inside one
+/// event, and a control can take the pointer after the scrub began. Either way
+/// the scrub gives the press up for good rather than pausing, because the
+/// control that holds the pointer keeps it until the release.
+fn body_drag_after_move(
+    dx: f64,
+    dy: f64,
+    scrubbing: bool,
+    mouse_held_outside: bool,
+) -> BodyDragMove {
+    if mouse_held_outside {
+        BodyDragMove::Given
+    } else if scrubbing {
+        BodyDragMove::Scrubbing
+    } else if dy.abs() > BODY_DRAG_SLOP && dy.abs() > dx {
+        BodyDragMove::Scrubbing
+    } else if dx > BODY_DRAG_SLOP {
+        BodyDragMove::Given
+    } else {
+        BodyDragMove::Undecided
+    }
+}
+
 impl NumberField {
     fn format(&self) -> String {
         readout(self.value, self.precision, &self.suffix)
@@ -783,55 +864,88 @@ impl Widget for NumberField {
         }
 
         // Dragging the FIELD changes the value, not only dragging the
-        // step column. Watched as raw mouse events rather than through
-        // `hits`, because the text box covers the field and would take
-        // the press first: by the time a hit came back the input would
-        // already be selecting text.
+        // step column. A plain `hits` would never see it: the text box
+        // covers the field and captures the press first. So the field asks
+        // for the press with `capture_overload`, which makes it a
+        // CO-CAPTURER of that same press — which is what the app-wide rule
+        // asks of anything dragged continuously. The scrub now holds the
+        // pointer for real: the moves arrive here for as long as the button
+        // is down, inside the field's bounds or outside them, instead of
+        // being read raw off the event stream where a field scrolled out of
+        // sight still answered (the raw test used the UNCLIPPED rect) and
+        // anything else's press inside the same rect started a scrub too.
+        //
+        // Only a press that could become one asks for the overload, which is
+        // what `press_may_overload_capture` is: the capture is taken before
+        // `hits` looks at the button, so asking for it on every press co-
+        // captured a right-click too and stood the rest of the application
+        // down until it came up.
+        //
+        // Whose press it is still has to be asked. The field's own parts are
+        // `mine`: the text box captures every press on the number, and
+        // vertical-versus-horizontal is how those two share it. The STEP
+        // COLUMN is deliberately NOT — it runs its own drag on the very same
+        // axis, so a press it holds would otherwise be counted twice, once
+        // by the column and once again by this scrub.
+        //
+        // Mouse only, as before. `is_mouse_held_outside` ignores touch
+        // captures by design, so a touch would slip the stand-down above and
+        // step the value twice with the column; a touch scrub is a feature
+        // this field has never had and is not one to grow by accident.
         //
         // Vertical is the value, horizontal is the text. Whichever way
         // the pointer commits to first wins the gesture, so selecting a
         // number to retype still works and a drag up still counts.
-        let rect = self.draw_bg.area().rect(cx);
-        match event {
-            Event::MouseDown(e) if rect.contains(e.abs) => {
-                self.body_drag = Some((e.abs, 0.0, false));
+        let mine = [self.draw_bg.area(), self.input.area()];
+        match event.hits_with_capture_overload(
+            cx,
+            self.draw_bg.area(),
+            press_may_overload_capture(event),
+        ) {
+            Hit::FingerDown(fe) => {
+                if body_press_starts_scrub(
+                    fe.device.is_primary_hit(),
+                    fe.device.is_touch(),
+                    cx.fingers.is_mouse_held_outside(&mine),
+                ) {
+                    self.body_drag = Some((fe.abs, 0.0, false));
+                }
             }
-            Event::MouseMove(e) => {
+            Hit::FingerMove(fe) => {
                 if let Some((from, reported, scrubbing)) = self.body_drag {
-                    let dx = (e.abs.x - from.x).abs();
-                    let dy = from.y - e.abs.y;
-                    if !scrubbing {
-                        // Not decided yet. It becomes a scrub only when
-                        // the pointer has gone further up or down than
-                        // across; a press that wanders sideways is
-                        // somebody selecting the number.
-                        if dy.abs() > BODY_DRAG_SLOP && dy.abs() > dx {
-                            self.body_drag = Some((from, 0.0, true));
-                        } else if dx > BODY_DRAG_SLOP {
-                            self.body_drag = None;
-                        }
-                    }
-                    if let Some((from, reported, true)) = self.body_drag {
-                        let want = ((from.y - e.abs.y) / DRAG_POINTS_PER_STEP).trunc();
-                        if want != reported {
-                            let v = self.value + (want - reported) * self.step;
-                            self.commit(cx, v);
+                    match body_drag_after_move(
+                        (fe.abs.x - from.x).abs(),
+                        from.y - fe.abs.y,
+                        scrubbing,
+                        cx.fingers.is_mouse_held_outside(&mine),
+                    ) {
+                        BodyDragMove::Given => self.body_drag = None,
+                        BodyDragMove::Undecided => {}
+                        BodyDragMove::Scrubbing => {
+                            // A scrub that has only just begun has reported
+                            // nothing yet, and counts from the press point:
+                            // the travel that decided the axis is part of
+                            // the gesture, not spent on deciding it.
+                            let reported = if scrubbing { reported } else { 0.0 };
+                            let want = ((from.y - fe.abs.y) / DRAG_POINTS_PER_STEP).trunc();
+                            if want != reported {
+                                let v = self.value + (want - reported) * self.step;
+                                self.commit(cx, v);
+                            }
                             self.body_drag = Some((from, want, true));
                         }
                     }
-                    let _ = reported;
                 }
             }
-            Event::MouseUp(_) => {
+            Hit::FingerUp(_) => {
                 self.body_drag = None;
             }
-            _ => {}
-        }
-
-        // The wheel works anywhere over the field, including over the text,
-        // because there is nothing to aim at and every other numeric control
-        // in the library answers to it.
-        match event.hits(cx, self.draw_bg.area()) {
+            // The hover and the wheel come off the SAME hit as the scrub,
+            // not off a second `hits` call on this area. Two calls stopped
+            // being harmless the moment one of them overloaded the capture:
+            // the first would take the FingerHoverIn and the second would
+            // only ever see a FingerHoverOver behind it, and the field would
+            // never learn it was hovered at all.
             Hit::FingerHoverIn(_) => {
                 self.hovered = true;
                 self.draw_bg.redraw(cx);
@@ -849,15 +963,20 @@ impl Widget for NumberField {
                 self.hovered = false;
                 self.draw_bg.redraw(cx);
             }
-            _ => {}
-        }
-        if let Hit::FingerScroll(e) = event.hits(cx, self.draw_bg.area()) {
-            let notches = -e.scroll.y.signum();
-            if notches != 0.0 {
-                let bite = if e.modifiers.shift { 10.0 } else { 1.0 };
-                let v = self.value + notches * self.step * bite;
-                self.commit(cx, v);
+            // The wheel works anywhere over the field, including over the
+            // text, because there is nothing to aim at and every other
+            // numeric control in the library answers to it. It is not a
+            // gesture taken from a press and stands down for nothing:
+            // `capture_overload` is not consulted for a scroll at all.
+            Hit::FingerScroll(e) => {
+                let notches = -e.scroll.y.signum();
+                if notches != 0.0 {
+                    let bite = if e.modifiers.shift { 10.0 } else { 1.0 };
+                    let v = self.value + notches * self.step * bite;
+                    self.commit(cx, v);
+                }
             }
+            _ => {}
         }
     }
 
@@ -890,6 +1009,7 @@ impl NumberFieldRef {
 mod tests {
     use super::*;
     use crate::makepad_draw::cx_draw::CxDraw;
+    use std::cell::Cell;
 
     /// The bounding and rounding on their own, without a script heap.
     struct Bounds {
@@ -974,6 +1094,73 @@ mod tests {
     fn an_apply_leaves_an_edit_in_progress_alone() {
         let text = readout(1.0, 0, " pcs");
         assert_eq!(text_after_apply("17", &text, true), None);
+    }
+
+    #[test]
+    fn a_press_nothing_else_holds_starts_the_body_scrub() {
+        assert!(body_press_starts_scrub(true, false, false));
+    }
+
+    #[test]
+    fn a_press_the_step_column_holds_starts_no_second_scrub() {
+        // The column captures its own press and turns it into a drag on this
+        // very axis. Were this to return true the value would move twice per
+        // point of travel — the bug the rule is about.
+        assert!(!body_press_starts_scrub(true, false, true));
+    }
+
+    #[test]
+    fn only_the_primary_button_and_only_a_mouse_scrub_the_body() {
+        assert!(!body_press_starts_scrub(false, false, false));
+        assert!(!body_press_starts_scrub(true, true, false));
+    }
+
+    #[test]
+    fn a_press_that_has_barely_moved_is_still_neither() {
+        assert_eq!(
+            body_drag_after_move(1.0, 1.0, false, false),
+            BodyDragMove::Undecided
+        );
+    }
+
+    #[test]
+    fn going_up_further_than_across_makes_it_a_scrub() {
+        assert_eq!(
+            body_drag_after_move(2.0, BODY_DRAG_SLOP + 1.0, false, false),
+            BodyDragMove::Scrubbing
+        );
+        assert_eq!(
+            body_drag_after_move(2.0, -(BODY_DRAG_SLOP + 1.0), false, false),
+            BodyDragMove::Scrubbing
+        );
+    }
+
+    #[test]
+    fn going_across_first_hands_the_press_to_the_text() {
+        assert_eq!(
+            body_drag_after_move(BODY_DRAG_SLOP + 1.0, 1.0, false, false),
+            BodyDragMove::Given
+        );
+    }
+
+    #[test]
+    fn a_scrub_under_way_stays_a_scrub_however_it_wanders() {
+        assert_eq!(
+            body_drag_after_move(500.0, 1.0, true, false),
+            BodyDragMove::Scrubbing
+        );
+    }
+
+    #[test]
+    fn a_control_taking_the_mouse_mid_scrub_ends_the_scrub() {
+        assert_eq!(
+            body_drag_after_move(0.0, 100.0, true, true),
+            BodyDragMove::Given
+        );
+        assert_eq!(
+            body_drag_after_move(0.0, 100.0, false, true),
+            BodyDragMove::Given
+        );
     }
 
     fn press() -> Event {
@@ -1157,5 +1344,72 @@ mod tests {
         run_frames(&mut cx, &mut field, &[2.0, 2.1, 2.5, 3.0]);
         draw(&mut cx, &mut field, &pass, &mut list);
         assert_eq!(drawn(&cx, field.input.area(), id!(disabled)), Some(0.0), "switched on again");
+    }
+
+    fn mouse_down(at: DVec2, button: MouseButton) -> Event {
+        Event::MouseDown(MouseDownEvent {
+            abs: at,
+            button,
+            window_id: WindowId(1, 1),
+            modifiers: KeyModifiers::default(),
+            handled: Cell::new(Area::Empty),
+            time: 0.0,
+        })
+    }
+
+    #[test]
+    fn only_a_press_that_could_scrub_asks_for_the_overload() {
+        let at = dvec2(10.0, 10.0);
+        assert!(press_may_overload_capture(&mouse_down(at, MouseButton::PRIMARY)));
+        assert!(!press_may_overload_capture(&mouse_down(at, MouseButton::SECONDARY)));
+        assert!(!press_may_overload_capture(&mouse_down(at, MouseButton::MIDDLE)));
+        // Not a press at all. `hits` reads the flag on a press only, so the
+        // moves and the release of a press already co-captured arrive
+        // whatever this answers — and a hover must never take a capture.
+        assert!(!press_may_overload_capture(&Event::MouseMove(MouseMoveEvent {
+            abs: at,
+            lock_delta: dvec2(0.0, 0.0),
+            window_id: WindowId(1, 1),
+            modifiers: KeyModifiers::default(),
+            time: 0.0,
+            handled: Cell::new(Area::Empty),
+        })));
+    }
+
+    /// A press at the middle of a drawn field, and whether the FIELD's own
+    /// area ends up holding the pointer. Nothing else stands in the way of
+    /// the press — no digit is down, nobody holds a lock — so what turns one
+    /// away is the narrowing and nothing else.
+    fn co_captures(button: MouseButton) -> bool {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut field = new_field(&mut cx);
+        let pass = DrawPass::new(&mut cx);
+        pass.set_size(&mut cx, FIELD);
+        let mut list = DrawList2d::new(&mut cx);
+        draw(&mut cx, &mut field, &pass, &mut list);
+        let rect = field.draw_bg.area().rect(&cx);
+        assert!(rect.size.x > 0.0, "the field was not drawn");
+        let event = mouse_down(rect.pos + rect.size * 0.5, button);
+        field.handle_event(&mut cx, &event, &mut Scope::empty());
+        cx.fingers.is_area_captured(field.draw_bg.area())
+    }
+
+    /// The press the scrub is made of takes the pointer: the text box over
+    /// the number captures it first, and the field co-captures the same
+    /// press — which is how the gesture is locked to the pointer for as long
+    /// as the button is down.
+    #[test]
+    fn a_primary_press_on_the_body_co_captures_the_pointer() {
+        assert!(co_captures(MouseButton::PRIMARY));
+    }
+
+    /// And a press that could never become a scrub does not take it. It
+    /// would hold the pointer for a gesture that is never going to happen,
+    /// and every widget asking `is_mouse_held_outside` would stand down
+    /// until the button came back up.
+    #[test]
+    fn a_secondary_press_on_the_body_takes_no_capture() {
+        assert!(!co_captures(MouseButton::SECONDARY));
+        assert!(!co_captures(MouseButton::MIDDLE));
     }
 }

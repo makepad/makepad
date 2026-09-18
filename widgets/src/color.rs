@@ -1195,20 +1195,34 @@ impl Widget for ColorWheel {
             return;
         }
         let uid = self.widget_uid();
-        match event.hits(cx, self.draw_bg.area()) {
+        // The RING is the control, not the square of screen it is drawn in.
+        //
+        // The hole is a hole: in a picker the saturation/value square is
+        // drawn through it, and the corners belong to whatever is behind.
+        // The hole test used to sit in the `FingerDown` arm below, which is
+        // one step too late -- `hits` has captured the pointer and marked
+        // the press handled by the time it answers, so the ring swallowed
+        // every press in its bounding box and then declined to do anything
+        // with it. A capture is a claim on the pointer: under the
+        // pointer-capture rule everything around it stands its own gesture
+        // down for the life of that press, so a press in the hole froze the
+        // list the wheel sits in for as long as the button was held.
+        //
+        // Given to `hits` as the hit test, the ring only ever takes the
+        // presses it is going to use -- and then keeps them, because a
+        // capture tracks the pointer wherever it goes and the moves below
+        // arrive whether or not they are still over the ring.
+        match event.hits_with_test(cx, self.draw_bg.area(), |abs, rect, _| {
+            let size = rect.size.x.min(rect.size.y);
+            ring_contains(abs - rect.pos, size)
+        }) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Crosshair);
             }
             Hit::FingerDown(fe) if fe.device.is_primary_hit() => {
-                let rect = self.draw_bg.area().rect(cx);
-                let size = rect.size.x.min(rect.size.y);
-                // A press in the hole belongs to whatever is drawn there —
-                // in a picker, the saturation/value square.
-                if ring_contains(fe.abs - rect.pos, size) {
-                    cx.set_key_focus(self.draw_bg.area());
-                    self.dragging = true;
-                    self.track(cx, uid, fe.abs, false);
-                }
+                cx.set_key_focus(self.draw_bg.area());
+                self.dragging = true;
+                self.track(cx, uid, fe.abs, false);
             }
             Hit::FingerMove(fe) => {
                 if self.dragging {
@@ -3071,5 +3085,163 @@ mod tests {
         let black = channel_hsva(blue, 2, 0.0);
         assert!(black.v < 1.0 / 255.0, "{}", black.v);
         assert!(close(black.h, blue.h), "{} {}", black.h, blue.h);
+    }
+}
+
+/// THE POINTER-CAPTURE RULE, as it applies to the hue ring.
+///
+/// The ring is a continuously dragged control, so it takes the pointer on its
+/// press and keeps it until the release. The HOLE is not the ring: the
+/// saturation square is drawn through it and the corners belong to whatever
+/// is behind. A press there must leave the pointer alone, or every host
+/// around the wheel stands its own gesture down for a press the wheel was
+/// never going to use.
+#[cfg(test)]
+mod pointer_capture_tests {
+    #![allow(dead_code)]
+    use super::*;
+    use crate::makepad_draw::cx_draw::CxDraw;
+    use std::cell::Cell;
+
+    const SIZE: Vec2d = Vec2d { x: 800.0, y: 600.0 };
+    const WINDOW: WindowId = WindowId(1, 1);
+
+    struct Target {
+        pass: DrawPass,
+        draw_list: DrawList2d,
+    }
+
+    impl Target {
+        fn new(cx: &mut Cx) -> Self {
+            Target { pass: DrawPass::new(cx), draw_list: DrawList2d::new(cx) }
+        }
+
+        fn draw(&mut self, cx: &mut Cx, root: &WidgetRef) {
+            self.pass.set_size(cx, SIZE);
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&self.pass, None);
+            self.draw_list.begin_always(&mut cx2d);
+            cx2d.begin_root_turtle(SIZE, Layout::flow_down());
+            root.draw_all(&mut cx2d, &mut Scope::empty());
+            cx2d.end_pass_sized_turtle();
+            self.draw_list.end(&mut cx2d);
+            cx2d.end_pass(&self.pass);
+        }
+    }
+
+    fn press(abs: Vec2d) -> Event {
+        Event::MouseDown(MouseDownEvent {
+            abs,
+            button: MouseButton::PRIMARY,
+            window_id: WINDOW,
+            modifiers: KeyModifiers::default(),
+            handled: Cell::new(Area::Empty),
+            time: 0.0,
+        })
+    }
+
+    fn send(cx: &mut Cx, root: &WidgetRef, event: &Event) -> ActionsBuf {
+        cx.capture_actions(|cx| root.handle_event(cx, event, &mut Scope::empty()))
+    }
+
+    fn middle(cx: &Cx, widget: &WidgetRef) -> Vec2d {
+        let rect = widget.area().rect(cx);
+        assert!(rect.size.x > 0.0 && rect.size.y > 0.0, "not drawn");
+        rect.pos + rect.size * 0.5
+    }
+
+    const WHEEL: f64 = 200.0;
+
+    fn scene(cx: &mut Cx) -> WidgetRef {
+        cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    hue := ColorWheel{
+                        width: 200.
+                        height: 200.
+                    }
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        })
+    }
+
+    fn start(cx: &mut Cx) -> (WidgetRef, WidgetRef) {
+        cx.init_cx_os();
+        cx.with_vm(crate::script_mod);
+        let root = scene(cx);
+        let mut target = Target::new(cx);
+        target.draw(cx, &root);
+        let hue = root.widget(cx, ids!(hue));
+        (root, hue)
+    }
+
+    /// Straight up from the middle, half way across the band.
+    fn on_the_ring(cx: &Cx, hue: &WidgetRef) -> Vec2d {
+        let rect = hue.area().rect(cx);
+        assert_eq!(rect.size.x, WHEEL, "the wheel drew at the size asked for");
+        let radius = (RING_INNER_FRACTION + RING_OUTER_FRACTION) * 0.5 * WHEEL;
+        assert!(
+            ring_contains(dvec2(WHEEL * 0.5, WHEEL * 0.5 - radius), WHEEL),
+            "the point this test presses really is on the band"
+        );
+        rect.pos + dvec2(WHEEL * 0.5, WHEEL * 0.5 - radius)
+    }
+
+    fn changed(actions: &ActionsBuf, hue: &WidgetRef) -> bool {
+        actions.iter().filter_map(|a| a.as_widget_action()).any(|a| {
+            a.widget_uid == hue.widget_uid()
+                && matches!(a.cast::<ColorAction>(), ColorAction::Changed(_))
+        })
+    }
+
+    /// The control: a press on the band is the ring's, and it takes the
+    /// pointer for the drag that follows.
+    #[test]
+    fn a_press_on_the_band_is_taken_and_held() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, hue) = start(&mut cx);
+        let at = on_the_ring(&cx, &hue);
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        let actions = send(&mut cx, &root, &press(at));
+        assert!(changed(&actions, &hue), "the hue moved to the press");
+        assert!(
+            cx.fingers.is_area_captured(hue.area()),
+            "and the ring holds the pointer for the drag"
+        );
+        cx.fingers.first_mouse_button = None;
+    }
+
+    /// The bug: the hole test used to sit in the FingerDown arm, one step
+    /// after `hits` had already captured the pointer and marked the press
+    /// handled. The wheel swallowed every press in its bounding box and then
+    /// did nothing with it.
+    #[test]
+    fn a_press_in_the_hole_is_not_the_rings_to_hold() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, hue) = start(&mut cx);
+        let at = middle(&cx, &hue);
+        assert!(
+            !ring_contains(dvec2(WHEEL * 0.5, WHEEL * 0.5), WHEEL),
+            "the middle of the wheel is the hole"
+        );
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        let event = press(at);
+        let actions = send(&mut cx, &root, &event);
+        assert!(!changed(&actions, &hue), "nothing was chosen");
+        assert!(
+            !cx.fingers.any_areas_captured(),
+            "and nothing was held: the press is still there for the square"
+        );
+        let Event::MouseDown(e) = &event else { unreachable!() };
+        assert!(e.handled.get().is_empty(), "nor was it marked as spoken for");
+        cx.fingers.first_mouse_button = None;
     }
 }

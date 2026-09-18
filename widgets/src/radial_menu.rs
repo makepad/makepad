@@ -588,6 +588,30 @@ fn press_is_outside(r: f64, reach: f64, slop: f64) -> bool {
     r > reach + slop
 }
 
+/// Whether an open menu may follow the pointer: aim at a wedge, and pick one
+/// on the release.
+///
+/// `mouse_held_outside` is [`CxFingers::is_mouse_held_outside`] asked with
+/// the menu's own field. It is the app-wide rule: a control that is dragged
+/// continuously locks the pointer on its press, and nothing else may take a
+/// hover, a focus or a press-like state from that pointer until the release.
+/// The rings read raw events — they reach far past the field — so `hits`'
+/// half of that rule never runs for them and the question is asked here.
+///
+/// `opening_press` is the menu's own stroke: the press that opened it is
+/// still down, so the pointer is the menu's however it was captured, and a
+/// flick out to a wedge and a release on it is one gesture. A menu opened
+/// while something else was already being dragged (`open_at` from a host, a
+/// key) has no such claim and stands down until that release.
+///
+/// Standing down is not closing: a press that lands off the rings dismisses
+/// whatever holds the mouse, so a menu left up over a drag is still
+/// dismissable. A TOUCH press answers `mouse_held_outside` false by design,
+/// so a finger driving the rings is untouched.
+fn menu_follows_pointer(mouse_held_outside: bool, opening_press: bool) -> bool {
+    !mouse_held_outside || opening_press
+}
+
 /// Where the rings may go in a pass of `pass` points: inside the safe area
 /// and a further `EDGE` in.
 fn fit_bounds(pass: DVec2, left: f64, top: f64, right: f64, bottom: f64) -> Rect {
@@ -2027,7 +2051,11 @@ impl RadialMenu {
         self.choose(cx, pick);
     }
 
-    fn press_while_open(&mut self, cx: &mut Cx, at: DVec2) {
+    /// A press while the menu is up. `follows` is [`menu_follows_pointer`]:
+    /// false means another control has the pointer, and then the press aims
+    /// at nothing — but it still dismisses, because dismissal is not a
+    /// gesture that stands down.
+    fn press_while_open(&mut self, cx: &mut Cx, at: DVec2, follows: bool) {
         let Some(open) = self.open.as_ref() else { return };
         let r = (at - open.centre).length();
         let reach = self.bands().reach(self.rings_for(open).len() - 1);
@@ -2037,7 +2065,7 @@ impl RadialMenu {
                 let uid = self.uid;
                 cx.widget_action(uid, RadialAction::Cancelled);
             }
-        } else {
+        } else if follows {
             self.aim_at(cx, at);
         }
     }
@@ -2112,20 +2140,33 @@ impl RadialMenu {
     /// Raw events rather than hits: the rings reach far past the field, and
     /// `hits` only reports what lands on the field.
     fn handle_open_input(&mut self, cx: &mut Cx, event: &Event) -> bool {
+        // Who owns the pointer, asked once for the whole event. The press
+        // that opened the rings is the menu's own stroke; a press another
+        // control took before they went up is not, and until it is let go of
+        // the rings light nothing and pick nothing. See
+        // [`menu_follows_pointer`].
+        let follows = menu_follows_pointer(
+            cx.fingers.is_mouse_held_outside(&[self.field_area]),
+            self.open.as_ref().map_or(false, |open| open.opening_press),
+        );
         match event {
             Event::MouseMove(me) => {
-                self.pointer_at(cx, me.abs);
+                if follows {
+                    self.pointer_at(cx, me.abs);
+                }
                 false
             }
             Event::MouseDown(me) => {
                 if me.handled.get().is_empty() {
                     me.handled.set(self.field_area);
                 }
-                self.press_while_open(cx, me.abs);
+                self.press_while_open(cx, me.abs, follows);
                 true
             }
             Event::MouseUp(me) => {
-                self.release_at(cx, me.abs);
+                if follows {
+                    self.release_at(cx, me.abs);
+                }
                 true
             }
             Event::TouchUpdate(te) => {
@@ -2143,7 +2184,9 @@ impl RadialMenu {
                         if touch.handled.get().is_empty() {
                             touch.handled.set(self.field_area);
                         }
-                        self.press_while_open(cx, touch.abs);
+                        // A finger is not the mouse: a touch on the rings
+                        // works them while a mouse elsewhere is held down.
+                        self.press_while_open(cx, touch.abs, true);
                     }
                     TouchState::Move | TouchState::Stable => {
                         self.touch = Some(touch.uid);
@@ -3331,7 +3374,7 @@ mod tests {
                 assert_eq!(menu.open_path(), &[1], "just past the resting edge is a crossing, swing or not");
                 menu.close(cx);
                 menu.open_at(cx, dvec2(400.0, 300.0));
-                menu.press_while_open(cx, toward(c, 180.0, past));
+                menu.press_while_open(cx, toward(c, 180.0, past), true);
                 assert!(!menu.is_open(), "a press past the resting edge is off the menu");
             });
         });
@@ -3756,9 +3799,9 @@ mod tests {
     fn a_press_past_the_slop_cancels_and_eats_its_release() {
         let reports = drive(|menu, cx| {
             menu.open_at(cx, dvec2(400.0, 300.0));
-            menu.press_while_open(cx, dvec2(400.0, 300.0 - 119.0));
+            menu.press_while_open(cx, dvec2(400.0, 300.0 - 119.0), true);
             assert!(menu.is_open(), "inside the slop");
-            menu.press_while_open(cx, dvec2(400.0, 300.0 - 200.0));
+            menu.press_while_open(cx, dvec2(400.0, 300.0 - 200.0), true);
             assert!(!menu.is_open());
             assert!(menu.swallow_up, "the release is still to be eaten");
         });
@@ -3833,7 +3876,7 @@ mod tests {
             menu.open_at(cx, dvec2(400.0, 300.0));
             let c = menu.centre().unwrap();
             let at = toward(c, 55.0, 110.0);
-            menu.press_while_open(cx, at);
+            menu.press_while_open(cx, at, true);
             assert!(menu.open_path().is_empty(), "a press opens no ring");
             assert_eq!(menu.hot_key().as_deref(), Some("share"));
             menu.release_at(cx, at);
@@ -3962,6 +4005,117 @@ mod tests {
 
         root.handle_event(&mut cx, &mouse_down(at, MouseButton::SECONDARY), &mut Scope::empty());
         assert!(context.is_open(), "with the pointer free the same press opens it");
+    }
+
+    fn mouse_move(abs: DVec2) -> Event {
+        Event::MouseMove(MouseMoveEvent {
+            abs,
+            lock_delta: DVec2::default(),
+            window_id: WindowId(1, 1),
+            modifiers: KeyModifiers::default(),
+            time: 0.0,
+            handled: std::cell::Cell::new(Area::Empty),
+        })
+    }
+
+    /// A button to hold the pointer down on and an overlay menu raised only
+    /// from Rust, drawn once into an 800 by 600 window.
+    fn button_and_menu(cx: &mut Cx) -> (WidgetRef, Target) {
+        let root = cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: 800
+                    height: 600
+                    flow: Down
+                    grab := Button{text: "Grab"}
+                    subject := RadialMenu{width: 200 height: 200 trigger: RadialTrigger.Manual}
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        root.widget(cx, ids!(subject)).as_radial_menu().set_items(cx, page_tree());
+        let mut target = Target::new(cx);
+        target.draw(cx, &root, dvec2(800.0, 600.0));
+        (root, target)
+    }
+
+    fn hot_key_of(root: &WidgetRef, cx: &Cx) -> Option<String> {
+        root.widget(cx, ids!(subject)).borrow::<RadialMenu>().expect("a radial menu").hot_key()
+    }
+
+    /// The app-wide rule: a control that is dragged continuously holds the
+    /// pointer until the release. A menu a host raises over such a drag aims
+    /// at nothing on the way and picks nothing when the drag lets go.
+    #[test]
+    fn rings_raised_over_a_drag_aim_at_nothing_and_pick_nothing() {
+        let mut cx = drawn_cx();
+        let (root, _target) = button_and_menu(&mut cx);
+        let menu = root.widget(&cx, ids!(subject)).as_radial_menu();
+
+        let grab = root.widget(&cx, ids!(grab)).area().rect(&cx);
+        root.handle_event(&mut cx, &mouse_down(grab.center(), MouseButton::PRIMARY), &mut Scope::empty());
+        assert!(cx.fingers.is_mouse_held_outside(&[]), "the button took the pointer");
+
+        let centre = dvec2(400.0, 300.0);
+        menu.open_at(&mut cx, centre);
+        let at = toward(centre, 90.0, 110.0);
+        root.handle_event(&mut cx, &mouse_move(at), &mut Scope::empty());
+        assert_eq!(hot_key_of(&root, &cx), None, "no wedge is aimed at by a pointer another control holds");
+
+        let actions = cx.capture_actions(|cx| {
+            root.handle_event(cx, &mouse_up(at, MouseButton::PRIMARY), &mut Scope::empty());
+        });
+        assert!(
+            !reports_in(&actions).iter().any(|report| matches!(report, RadialAction::Picked(_))),
+            "and its release picks nothing"
+        );
+        assert!(menu.is_open(), "the menu is still up: standing down is not closing");
+    }
+
+    /// The exception: the press that opened the rings is the menu's own
+    /// stroke however the capture fell — a press in the field can be taken
+    /// by a control sitting there — so that one gesture goes on aiming and
+    /// still picks on its release.
+    #[test]
+    fn the_rings_own_opening_press_still_aims_and_picks() {
+        let mut cx = drawn_cx();
+        let (root, _target) = button_and_menu(&mut cx);
+        let menu = root.widget(&cx, ids!(subject)).as_radial_menu();
+
+        let grab = root.widget(&cx, ids!(grab)).area().rect(&cx);
+        root.handle_event(&mut cx, &mouse_down(grab.center(), MouseButton::PRIMARY), &mut Scope::empty());
+        assert!(cx.fingers.is_mouse_held_outside(&[]), "something else holds the capture");
+
+        let centre = dvec2(400.0, 300.0);
+        menu.open_at(&mut cx, centre);
+        // The press that is down is the one that opened the rings.
+        root.widget(&cx, ids!(subject))
+            .borrow_mut::<RadialMenu>()
+            .expect("a radial menu")
+            .open
+            .as_mut()
+            .expect("open")
+            .opening_press = true;
+
+        let at = toward(centre, 90.0, 110.0);
+        root.handle_event(&mut cx, &mouse_move(at), &mut Scope::empty());
+        assert_eq!(hot_key_of(&root, &cx).as_deref(), Some("rotate"), "its own stroke still aims");
+
+        let actions = cx.capture_actions(|cx| {
+            root.handle_event(cx, &mouse_up(at, MouseButton::PRIMARY), &mut Scope::empty());
+        });
+        assert!(reports_in(&actions).contains(&picked("rotate", &[2])), "and still picks on the release");
+    }
+
+    /// The rule and its exception in one place.
+    #[test]
+    fn rings_follow_only_a_pointer_that_is_their_own() {
+        assert!(menu_follows_pointer(false, false), "a free pointer is everyone's");
+        assert!(!menu_follows_pointer(true, false), "another control is being dragged");
+        assert!(menu_follows_pointer(true, true), "the press that opened the rings is still down");
+        assert!(menu_follows_pointer(false, true));
     }
 
     /// Opened before its first draw the field has no area, which can take

@@ -762,7 +762,19 @@ impl Widget for TreeSelect {
                         }
                     }
                 }
-                Event::MouseMove(me) => self.hover_at(cx, me.abs),
+                // A hover is a press-like state, and while another control
+                // holds the mouse nothing else may take one from that
+                // pointer. Reached raw, so `hits`' half of the rule never
+                // runs and the question has to be asked here. The face's own
+                // capture — the press that opened the panel, still held — is
+                // `mine`, so press-drag-over-the-rows still lights them; and
+                // a TOUCH capture answers false there by design, so a finger
+                // driving the panel is untouched.
+                Event::MouseMove(me) => {
+                    if !cx.fingers.is_mouse_held_outside(&[self.draw_bg.area()]) {
+                        self.hover_at(cx, me.abs);
+                    }
+                }
                 Event::KeyDown(ke) => {
                     let rows = self.rows_drawn();
                     match ke.key_code {

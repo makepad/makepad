@@ -1528,6 +1528,21 @@ impl LineMenu {
         if !(self.bg_hovered || self.reveal_state.shown || self.reveal_state.pending.is_some()) {
             return;
         }
+        // A pointer another control holds is not this menu's to read. From
+        // the press until the release the interaction is locked to whatever
+        // took it, and a row lighting up — or a card of names unfolding —
+        // under a hand that is dragging a scroll bar somewhere else is
+        // exactly the hover the rule forbids. This is read off the raw move,
+        // which never learns of that press the way `hits` does.
+        //
+        // Held still rather than cleared: the drag ends, the next move finds
+        // the pointer where it is and the menu catches up. Clearing would
+        // fold the names away mid-drag, which is the same flinch seen from
+        // the other side.
+        let mine = [self.draw_bg.area(), self.draw_card.area()];
+        if cx.fingers.is_mouse_held_outside(&mine) {
+            return;
+        }
         let over = abs.map_or(false, |abs| {
             (self.bg_hovered && self.rect.contains(abs))
                 || (self.reveal_state.shown && self.drawn_card.map_or(false, |card| card.card.contains(abs)))
@@ -2518,6 +2533,28 @@ mod tests {
         }
     }
 
+    fn press(abs: DVec2) -> Event {
+        Event::MouseDown(MouseDownEvent {
+            abs,
+            button: MouseButton::PRIMARY,
+            window_id: WindowId(1, 1),
+            modifiers: KeyModifiers::default(),
+            handled: std::cell::Cell::new(Area::Empty),
+            time: 0.0,
+        })
+    }
+
+    fn moved(abs: DVec2) -> Event {
+        Event::MouseMove(MouseMoveEvent {
+            abs,
+            lock_delta: DVec2::default(),
+            window_id: WindowId(1, 1),
+            modifiers: KeyModifiers::default(),
+            time: 0.0,
+            handled: std::cell::Cell::new(Area::Empty),
+        })
+    }
+
     /// A menu of two sections following a 300-point shadow view whose two
     /// 500-point blocks are the sections' targets, drawn once.
     fn followed_article() -> (Cx, WidgetRef, Target) {
@@ -2699,6 +2736,82 @@ mod tests {
             assert!(!cx.new_draw_event.will_redraw(), "frame {frame} repainted a page that had not moved");
         }
         assert_eq!(menu.last_time, 0.0, "the watch stopped arming itself");
+    }
+
+    /// A pointer another control holds scrubs no row here. The names are out
+    /// by the keyboard, which takes no pointer of its own (see
+    /// `apply_reveal`), so a button can still hold a press while the card is
+    /// over the page — and the raw move would otherwise drag the highlight
+    /// across it under a hand that is dragging something else entirely.
+    #[test]
+    fn a_pointer_another_control_holds_scrubs_no_row() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        cx.with_vm(crate::script_mod);
+        let root = cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: 800
+                    height: 400
+                    flow: Right
+                    toc := LineMenu{
+                        sections: [
+                            {target: "a" label: "Alpha" level: 1}
+                            {target: "b" label: "Beta" level: 1}
+                        ]
+                    }
+                    held := Button{width: 200. height: 40. text: "Held"}
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        let mut target = Target::new(&mut cx);
+        target.draw(&mut cx, &root);
+
+        let toc = root.widget(&cx, ids!(toc));
+        {
+            let mut menu = toc.borrow_mut::<LineMenu>().expect("toc is a line menu");
+            menu.refresh_rect(&mut cx);
+            menu.reveal_state.shown = true;
+            menu.apply_reveal(&mut cx, Some(true), RevealedBy::Keys);
+            let _ = menu.advance_reveal(0.0);
+            menu.reveal.settle();
+            assert!(!menu.locked, "a keyboard reveal takes no pointer");
+        }
+        target.draw(&mut cx, &root);
+        let row = {
+            let menu = toc.borrow::<LineMenu>().unwrap();
+            assert!(menu.drawn_card.is_some(), "the card is drawn");
+            menu.row_rects()[1]
+        };
+        let over = row.pos + row.size * 0.5;
+
+        // With nothing holding the pointer the move reads as it always did.
+        root.handle_event(&mut cx, &moved(over), &mut Scope::empty());
+        assert_eq!(toc.borrow::<LineMenu>().unwrap().hot_row, Some(1), "the row under the pointer lights");
+
+        // Put out by hand, so what follows cannot pass on leftover state:
+        // held still means held still, and a frozen menu keeps whatever it
+        // had, so it must be given nothing.
+        {
+            let mut menu = toc.borrow_mut::<LineMenu>().unwrap();
+            menu.hot_row = None;
+            menu.pointer_over = false;
+        }
+
+        // The button takes a press and holds the mouse with it.
+        let button = root.widget(&cx, ids!(held)).area();
+        let on_button = button.rect(&cx);
+        assert!(on_button.size.x > 0.0, "the button is drawn");
+        root.handle_event(&mut cx, &press(on_button.pos + on_button.size * 0.5), &mut Scope::empty());
+        assert!(cx.fingers.is_area_captured(button), "the button holds the mouse");
+
+        root.handle_event(&mut cx, &moved(over), &mut Scope::empty());
+        let menu = toc.borrow::<LineMenu>().unwrap();
+        assert_eq!(menu.hot_row, None, "no row lit under a pointer the button holds");
+        assert!(!menu.pointer_over, "and the menu does not count itself hovered");
     }
 
     /// A spring swings the lines past their revealed length and back. The

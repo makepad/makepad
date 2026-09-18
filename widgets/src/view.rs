@@ -1,5 +1,5 @@
 use {
-    crate::makepad_draw::event::FingerLongPressEvent,
+    crate::makepad_draw::event::{DigitId, FingerLongPressEvent},
     crate::{
         animator::*,
         makepad_derive_widget::*,
@@ -133,6 +133,16 @@ pub struct View {
 
     #[rust]
     scroll_bars_obj: Option<Box<ScrollBars>>,
+    /// The digit of a press this View stood down from, cleared by its release.
+    ///
+    /// `capture_overload` hands a View the FingerDown for a press a child
+    /// control already captured. While that control holds the pointer the
+    /// press is not the View's to take, so it takes no key focus, reports no
+    /// `ViewAction::FingerDown` and plays no `down` state — and it must not
+    /// report the matching FingerUp either: an up for a press it never took is
+    /// the same press-like state, arriving one event later.
+    #[rust]
+    stood_down_press: Option<DigitId>,
     #[rust]
     view_size: Option<Vec2d>,
     // Forces the next Texture-mode draw to re-render its offscreen pass instead of cache-hitting.
@@ -621,6 +631,293 @@ mod contextual_size_tests {
     }
 }
 
+#[cfg(test)]
+mod pointer_capture_tests {
+    use super::*;
+    use crate::makepad_draw::cx_draw::CxDraw;
+    use std::cell::Cell;
+
+    const PANE: DVec2 = dvec2(300.0, 120.0);
+
+    /// One draw of a widget over the whole pane. Each widget gets its own draw
+    /// list, so two of them can overlap — a control over a view, the way a
+    /// child sits inside its container — without either draw invalidating the
+    /// other's area.
+    fn frame(cx: &mut Cx, widget: &mut dyn Widget, pass: &DrawPass, draw_list: &mut DrawList2d) {
+        let event = DrawEvent::default();
+        let mut draw = CxDraw::new(cx, &event);
+        let mut cx2d = Cx2d::new(&mut draw);
+        cx2d.begin_pass(pass, None);
+        draw_list.begin_always(&mut cx2d);
+        cx2d.begin_root_turtle(PANE, Layout::flow_down());
+        let _ = widget.draw_walk(&mut cx2d, &mut Scope::empty(), Walk::fixed(PANE.x, PANE.y));
+        cx2d.end_pass_sized_turtle();
+        draw_list.end(&mut cx2d);
+        cx2d.end_pass(pass);
+    }
+
+    /// What one press and its release got out of the View.
+    struct Pressed {
+        /// Where the key focus ended up.
+        focus: Area,
+        button: Area,
+        view: Area,
+        /// Whether the View reported the press out to the app.
+        reported_down: bool,
+        /// And whether it reported the release.
+        reported_up: bool,
+    }
+
+    /// The View's own action out of the batch a just-handled event left
+    /// pending, before `handle_actions` drains it.
+    fn reported(cx: &Cx, uid: WidgetUid) -> Option<ViewAction> {
+        cx.new_actions
+            .find_widget_action(uid)
+            .map(|action| action.cast::<ViewAction>())
+    }
+
+    fn mouse_down(at: DVec2) -> Event {
+        Event::MouseDown(MouseDownEvent {
+            abs: at,
+            button: MouseButton::PRIMARY,
+            window_id: WindowId(1, 1),
+            modifiers: KeyModifiers::default(),
+            handled: Cell::new(Area::Empty),
+            time: 1.0,
+        })
+    }
+
+    fn mouse_up(at: DVec2) -> Event {
+        Event::MouseUp(MouseUpEvent {
+            abs: at,
+            button: MouseButton::PRIMARY,
+            window_id: WindowId(1, 1),
+            modifiers: KeyModifiers::default(),
+            time: 2.0,
+        })
+    }
+
+    /// A press in the middle of a `capture_overload` View with a Button drawn
+    /// over it, and the release that follows. With `control`, the button is
+    /// handed the press first — the way a container's children are handled
+    /// before its own hits — and captures the mouse; the View then sees the
+    /// same press through the overload and has to decide how much of it is
+    /// its to take.
+    ///
+    /// A Button stands in for any continuously dragged control: what the rule
+    /// asks is who holds the mouse, not what kind of control it is.
+    fn press(control: bool) -> Pressed {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let mut view = cx.with_vm(View::script_new_with_default);
+        let mut button = cx.with_vm(crate::button::Button::script_new_with_default);
+        // The two things that make a View hit-test its own area at all.
+        view.capture_overload = true;
+        view.cursor = Some(MouseCursor::Default);
+        let uid = view.widget_uid();
+
+        let pass = DrawPass::new(&mut cx);
+        pass.set_size(&mut cx, PANE);
+        let mut view_list = DrawList2d::new(&mut cx);
+        let mut button_list = DrawList2d::new(&mut cx);
+        frame(&mut cx, &mut view, &pass, &mut view_list);
+        frame(&mut cx, &mut button, &pass, &mut button_list);
+
+        let at = PANE * 0.5;
+        assert!(
+            view.area().is_valid(&cx) && view.area().clipped_rect(&cx).contains(at),
+            "the press point is not over the view"
+        );
+        assert!(
+            button.area().is_valid(&cx) && button.area().clipped_rect(&cx).contains(at),
+            "the press point is not over the control"
+        );
+
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WindowId(1, 1)));
+        let event = mouse_down(at);
+        if control {
+            button.handle_event(&mut cx, &event, &mut Scope::empty());
+            assert!(
+                cx.fingers.any_areas_captured(),
+                "the control did not take the press, so this test proves nothing"
+            );
+        }
+        view.handle_event(&mut cx, &event, &mut Scope::empty());
+        let reported_down = matches!(reported(&cx, uid), Some(ViewAction::FingerDown(_)));
+        // `set_key_focus` only records the request; the focus moves when the
+        // cycle runs, which it does after the press's actions are dispatched.
+        cx.handle_actions();
+        let focus = cx.key_focus();
+
+        // The same pointer let go. The control that held it still holds it —
+        // nothing releases a digit in a test — so the release is the tail of
+        // exactly the press above.
+        let event = mouse_up(at);
+        if control {
+            button.handle_event(&mut cx, &event, &mut Scope::empty());
+        }
+        view.handle_event(&mut cx, &event, &mut Scope::empty());
+        let reported_up = matches!(reported(&cx, uid), Some(ViewAction::FingerUp(_)));
+        cx.fingers.first_mouse_button = None;
+        cx.handle_actions();
+
+        Pressed {
+            focus,
+            button: button.area(),
+            view: view.area(),
+            reported_down,
+            reported_up,
+        }
+    }
+
+    /// The rule, for the one press a View can be handed that is not its own: a
+    /// control holding the mouse keeps the keyboard it took with that press,
+    /// and the container co-capturing the same press does not pull the focus
+    /// out from under it.
+    #[test]
+    fn a_control_holding_the_mouse_keeps_the_key_focus_it_took() {
+        let pressed = press(true);
+        assert_eq!(
+            pressed.focus, pressed.button,
+            "the container took the control's key focus"
+        );
+        assert_ne!(
+            pressed.focus, pressed.view,
+            "the container took the control's key focus"
+        );
+    }
+
+    /// And the View is not broken while fixing it: a press nothing else holds
+    /// is its own, and still moves the keyboard to it.
+    #[test]
+    fn a_press_nothing_else_holds_still_focuses_the_view() {
+        let pressed = press(false);
+        assert_eq!(
+            pressed.focus, pressed.view,
+            "the view stopped grabbing key focus from its own press"
+        );
+    }
+
+    /// The focus is only one of the press-like states the rule names. A View
+    /// that stood down from the press must not report it either: a
+    /// `ViewAction::FingerDown` out to the app is the container claiming a
+    /// press the control holding the pointer already owns.
+    #[test]
+    fn a_control_holding_the_mouse_keeps_the_press_from_being_reported() {
+        assert!(
+            !press(true).reported_down,
+            "the container reported a press a control was holding"
+        );
+        assert!(
+            press(false).reported_down,
+            "the view stopped reporting its own press"
+        );
+    }
+
+    /// And the release that ends it. A View that stood down at the press has
+    /// no press to end, so an up for it would hand the app half a click out of
+    /// a gesture that was never the View's.
+    #[test]
+    fn a_press_a_view_stood_down_from_reports_no_release() {
+        assert!(
+            !press(true).reported_up,
+            "the container reported the release of a press it never took"
+        );
+        assert!(
+            press(false).reported_up,
+            "the view stopped reporting the release of its own press"
+        );
+    }
+
+    /// A View that scrolls, with content four panes tall so its vertical bar
+    /// has somewhere to run. Answers the View and the pass state that has to
+    /// outlive it.
+    fn scrolling_view(cx: &mut Cx) -> (View, DrawPass, DrawList2d) {
+        let mut view = cx.with_vm(View::script_new_with_default);
+        view.capture_overload = true;
+        view.cursor = Some(MouseCursor::Default);
+        view.scroll_bars_obj = Some(Box::new(cx.with_vm(ScrollBars::script_new_with_default)));
+
+        let mut tall = cx.with_vm(View::script_new_with_default);
+        tall.walk = Walk::fixed(PANE.x, PANE.y * 4.0);
+        view.children
+            .push((live_id!(tall), WidgetRef::new_with_inner(Box::new(tall))));
+
+        let pass = DrawPass::new(cx);
+        pass.set_size(cx, PANE);
+        let mut draw_list = DrawList2d::new(cx);
+        // Twice: the first draw is what tells the bars how tall the content is.
+        for _ in 0..2 {
+            frame(cx, &mut view, &pass, &mut draw_list);
+        }
+        (view, pass, draw_list)
+    }
+
+    /// The areas a View owns are its own and its bars': the set it hands
+    /// `is_mouse_held_outside`, which is what keeps it from reading its own
+    /// scroll bar as an outsider.
+    #[test]
+    fn a_views_own_areas_include_its_scroll_bars() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let (view, _pass, _list) = scrolling_view(&mut cx);
+        let bars = view
+            .scroll_bars_obj
+            .as_ref()
+            .expect("the view lost its scroll bars")
+            .bar_areas();
+        let mine = view.pointer_areas();
+        assert_eq!(
+            mine.as_slice(),
+            &[view.area(), bars[0], bars[1]],
+            "a view asked about the pointer with something other than everything it owns"
+        );
+    }
+
+    /// FIX 2, the one a View can hit on its own: a press on its OWN scroll bar
+    /// is a press on its own furniture. The bar captures the mouse like any
+    /// dragged control, and a View that named only its content area would read
+    /// that as an outsider and stand down against itself — dropping the focus
+    /// and the press report for a press that was its all along.
+    #[test]
+    fn a_view_does_not_stand_down_against_its_own_scroll_bar() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let (mut view, _pass, _list) = scrolling_view(&mut cx);
+        let uid = view.widget_uid();
+
+        let bar = view.pointer_areas()[2];
+        assert!(
+            bar.is_valid(&cx),
+            "the view drew no vertical scroll bar, so this test proves nothing"
+        );
+        let rect = bar.clipped_rect(&cx);
+        let at = rect.pos + rect.size * 0.5;
+
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WindowId(1, 1)));
+        let event = mouse_down(at);
+        view.handle_event(&mut cx, &event, &mut Scope::empty());
+        assert!(
+            cx.fingers.is_area_captured(bar),
+            "the scroll bar did not take the press, so this test proves nothing"
+        );
+        let reported = matches!(reported(&cx, uid), Some(ViewAction::FingerDown(_)));
+        cx.handle_actions();
+        let focus = cx.key_focus();
+        cx.fingers.first_mouse_button = None;
+
+        assert!(
+            reported,
+            "the view stood down from a press on its own scroll bar"
+        );
+        assert_eq!(
+            focus,
+            view.area(),
+            "the view refused the key focus of a press on its own scroll bar"
+        );
+    }
+}
+
 impl ViewSet {
     pub fn animator_cut(&self, cx: &mut Cx, state: &[LiveId; 2]) {
         for item in self.iter() {
@@ -996,20 +1293,67 @@ impl Widget for View {
         if !fling_caught && (self.visible && self.cursor.is_some() || self.animator.is_defined) {
             match event.hits_with_capture_overload(cx, self.area(), self.capture_overload) {
                 Hit::FingerDown(e) => {
-                    if self.grab_key_focus {
-                        cx.set_key_focus(self.area());
-                    }
-                    cx.widget_action(uid, ViewAction::FingerDown(e));
-                    if self.animator.is_defined {
-                        self.animator_play(cx, ids!(down.on));
+                    // `capture_overload` hands this View the FingerDown for a
+                    // press one of its children already captured, so the press
+                    // reaching here is not necessarily its own. A control that
+                    // is dragged continuously owns the pointer from its press
+                    // until the release, and while it does, nothing else may
+                    // take a focus or a press-like state from that pointer on
+                    // the way past. For a View that is all three of these: the
+                    // keyboard the control took with the press (a text input's
+                    // caret, a list's selection), the `ViewAction::FingerDown`
+                    // it would report out to the app, and the `down` state that
+                    // makes it look pressed. It stands down from the whole
+                    // press, not only from the focus.
+                    //
+                    // Without `capture_overload` nothing else can hold this
+                    // press, so the question only ever bites there. Its own
+                    // scroll bars are `mine` (see `pointer_areas`), so a press
+                    // on a bar of its own is still its own press. Mouse only,
+                    // deliberately: `is_mouse_held_outside` ignores touch
+                    // captures.
+                    if cx.fingers.is_mouse_held_outside(&self.pointer_areas()) {
+                        // Remembered, because the release has to stand down
+                        // too: reporting an up for a press this View never took
+                        // would hand the app half a click out of a gesture that
+                        // was never its own.
+                        self.stood_down_press = Some(e.digit_id);
+                    } else {
+                        if self.stood_down_press == Some(e.digit_id) {
+                            self.stood_down_press = None;
+                        }
+                        if self.grab_key_focus {
+                            cx.set_key_focus(self.area());
+                        }
+                        cx.widget_action(uid, ViewAction::FingerDown(e));
+                        if self.animator.is_defined {
+                            self.animator_play(cx, ids!(down.on));
+                        }
                     }
                 }
-                Hit::FingerMove(e) => cx.widget_action(uid, ViewAction::FingerMove(e)),
-                Hit::FingerLongPress(e) => cx.widget_action(uid, ViewAction::FingerLongPress(e)),
+                Hit::FingerMove(e) => {
+                    // The moves of a press this View stood down from are the
+                    // holding control's drag, not this View's gesture.
+                    if self.stood_down_press != Some(e.digit_id) {
+                        cx.widget_action(uid, ViewAction::FingerMove(e));
+                    }
+                }
+                Hit::FingerLongPress(e) => {
+                    if self.stood_down_press != Some(e.digit_id) {
+                        cx.widget_action(uid, ViewAction::FingerLongPress(e));
+                    }
+                }
                 Hit::FingerUp(e) => {
-                    cx.widget_action(uid, ViewAction::FingerUp(e));
-                    if self.animator.is_defined {
-                        self.animator_play(cx, ids!(down.off));
+                    if self.stood_down_press == Some(e.digit_id) {
+                        // The press ends as it began, unreported. `down.off` is
+                        // not played either: it would be the tail of an
+                        // animation that never started.
+                        self.stood_down_press = None;
+                    } else {
+                        cx.widget_action(uid, ViewAction::FingerUp(e));
+                        if self.animator.is_defined {
+                            self.animator_play(cx, ids!(down.off));
+                        }
                     }
                 }
                 Hit::FingerHoverIn(e) => {
@@ -1320,6 +1664,27 @@ impl View {
 
     pub fn area(&self) -> Area {
         self.area
+    }
+
+    /// Every area this View owns, for the pointer-capture rule: its own
+    /// content area and, when it scrolls, both of its scroll bar handles.
+    ///
+    /// [`CxFingers::is_mouse_held_outside`] is asked with the areas the host
+    /// owns, and a scroll bar of its own is one of them. The bar captures the
+    /// mouse on its press like any dragged control, so a View that named only
+    /// `self.area` would read its own bar as something else holding the
+    /// pointer and stand down against itself — refusing the key focus and the
+    /// press report for a press on its own furniture.
+    ///
+    /// The helper matches captures by owner, so a handle redrawn mid-drag
+    /// still counts as one of these even though its `redraw_id` has moved on.
+    pub fn pointer_areas(&self) -> SmallVec<[Area; 3]> {
+        let mut areas = SmallVec::new();
+        areas.push(self.area);
+        if let Some(bars) = &self.scroll_bars_obj {
+            areas.extend(bars.bar_areas());
+        }
+        areas
     }
 
     /// Switch this view's draw optimization at runtime (e.g. toggle texture caching per frame).

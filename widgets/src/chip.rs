@@ -1082,8 +1082,30 @@ impl Widget for ChipGroup {
         // answer. A chip that is already on does not toggle, so it reports
         // nothing, so the focus would stay on whatever the hand had touched
         // last and the arrows would answer nobody.
+        //
+        // THE POINTER-CAPTURE RULE. This reads the raw press instead of a
+        // hit, so nothing has told it that the pointer may already be locked
+        // to a control -- and nothing can: a widget that ALREADY holds the
+        // mouse is handed its press straight off the capture list without
+        // marking the event at all, so a press arriving mid-drag looks
+        // exactly like a fresh one from here. While something else owns the
+        // pointer the row takes no focus from it.
+        //
+        // The row's OWN areas are not "something else". Its chips are its
+        // answers, and a press on one is still the row's to answer -- that
+        // is the whole point of the arm. Only the mouse locks, so a finger
+        // held on a control elsewhere leaves this alone.
         if let Event::MouseDown(e) = event {
-            if !self.area.is_empty() && self.area.rect(cx).contains(e.abs) {
+            let mut mine = vec![self.area];
+            mine.extend(
+                self.chips()
+                    .iter()
+                    .filter_map(|chip| chip.borrow::<Chip>().map(|inner| inner.draw_bg.area())),
+            );
+            if !cx.fingers.is_mouse_held_outside(&mine)
+                && !self.area.is_empty()
+                && self.area.rect(cx).contains(e.abs)
+            {
                 cx.set_key_focus(self.area);
             }
         }
@@ -1200,5 +1222,152 @@ mod tests {
         assert!(small.height < medium.height && medium.height < large.height);
         assert!(small.pad_x < medium.pad_x && medium.pad_x < large.pad_x);
         assert!(small.mark < medium.mark && medium.mark < large.mark);
+    }
+}
+
+/// THE POINTER-CAPTURE RULE, as it applies to a row of chips.
+///
+/// The row moves the keyboard onto itself from a RAW press, so that the arrows
+/// answer from wherever the hand last touched. Nothing tells a raw press that
+/// the pointer may already be locked to a control -- a widget that already
+/// holds the mouse is handed its press off the capture list without marking
+/// the event at all -- so the row has to ask the capture list itself, and take
+/// no focus from a pointer that is not free.
+#[cfg(test)]
+mod pointer_capture_tests {
+    #![allow(dead_code)]
+    use super::*;
+    use crate::makepad_draw::cx_draw::CxDraw;
+    use std::cell::Cell;
+
+    const SIZE: Vec2d = Vec2d { x: 800.0, y: 600.0 };
+    const WINDOW: WindowId = WindowId(1, 1);
+
+    struct Target {
+        pass: DrawPass,
+        draw_list: DrawList2d,
+    }
+
+    impl Target {
+        fn new(cx: &mut Cx) -> Self {
+            Target { pass: DrawPass::new(cx), draw_list: DrawList2d::new(cx) }
+        }
+
+        fn draw(&mut self, cx: &mut Cx, root: &WidgetRef) {
+            self.pass.set_size(cx, SIZE);
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&self.pass, None);
+            self.draw_list.begin_always(&mut cx2d);
+            cx2d.begin_root_turtle(SIZE, Layout::flow_down());
+            root.draw_all(&mut cx2d, &mut Scope::empty());
+            cx2d.end_pass_sized_turtle();
+            self.draw_list.end(&mut cx2d);
+            cx2d.end_pass(&self.pass);
+        }
+    }
+
+    fn press(abs: Vec2d) -> Event {
+        Event::MouseDown(MouseDownEvent {
+            abs,
+            button: MouseButton::PRIMARY,
+            window_id: WINDOW,
+            modifiers: KeyModifiers::default(),
+            handled: Cell::new(Area::Empty),
+            time: 0.0,
+        })
+    }
+
+    /// One press, handed to `widget` alone -- the way the tree hands a press
+    /// to one branch at a time. Dispatching through the whole root instead
+    /// would let the button that is holding the pointer answer the SECOND
+    /// press as well (it is handed its own FingerDown off the capture list)
+    /// and take the keyboard back, which would hide what is being tested.
+    fn send(cx: &mut Cx, widget: &WidgetRef, at: Vec2d) {
+        widget.handle_event(cx, &press(at), &mut Scope::empty());
+    }
+
+    fn middle(cx: &Cx, widget: &WidgetRef) -> Vec2d {
+        let rect = widget.area().rect(cx);
+        assert!(rect.size.x > 0.0 && rect.size.y > 0.0, "not drawn");
+        rect.pos + rect.size * 0.5
+    }
+
+    fn scene(cx: &mut Cx) -> WidgetRef {
+        cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    grab := Button{width: 100. height: 40. text: "grab"}
+                    row := ChipGroup{
+                        flow: Right
+                        one := Chip{text: "one" selectable: true}
+                        two := Chip{text: "two" selectable: true}
+                    }
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        })
+    }
+
+    /// `set_key_focus` only records the request; the focus moves when the
+    /// action cycle runs. A bare press raises no action in this scene, so one
+    /// is pushed to turn the handle.
+    fn settle(cx: &mut Cx) {
+        cx.action(ChipGroupAction::None);
+        cx.handle_actions();
+    }
+
+    /// Presses the first chip, with the pointer already locked to the button
+    /// above the row when `held`. Answers (where the keyboard ended up, the
+    /// row's own area).
+    fn press_a_chip(held: bool) -> (Area, Area) {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        cx.with_vm(crate::script_mod);
+        let root = scene(&mut cx);
+        let mut target = Target::new(&mut cx);
+        target.draw(&mut cx, &root);
+
+        let grab = root.widget(&cx, ids!(grab));
+        let row = root.widget(&cx, ids!(row));
+        let one = root.widget(&cx, ids!(row.one));
+        let row_area = row.borrow::<ChipGroup>().unwrap().area;
+        let on_chip = middle(&cx, &one);
+
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        if held {
+            let on_grab = middle(&cx, &grab);
+            send(&mut cx, &grab, on_grab);
+            assert!(
+                cx.fingers.is_mouse_held_outside(&[row_area]),
+                "the button did not take the pointer, so this test proves nothing"
+            );
+        }
+        send(&mut cx, &row, on_chip);
+        cx.fingers.first_mouse_button = None;
+        settle(&mut cx);
+        (cx.key_focus(), row_area)
+    }
+
+    /// The control: a press on a chip with nothing else holding the pointer is
+    /// the row's, and the keyboard follows the hand onto it.
+    #[test]
+    fn a_press_nothing_else_holds_moves_the_keyboard_onto_the_row() {
+        let (focus, row) = press_a_chip(false);
+        assert_eq!(focus, row, "the row stopped taking the keyboard from its own press");
+    }
+
+    /// The rule: a press that arrives while another control holds the mouse is
+    /// that control's, and the row takes no keyboard from it.
+    #[test]
+    fn a_press_another_control_holds_moves_no_keyboard() {
+        let (focus, row) = press_a_chip(true);
+        assert_ne!(focus, row, "the row pulled the keyboard off a control mid-drag");
     }
 }

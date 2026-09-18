@@ -2808,15 +2808,27 @@ enum Press {
 /// left the hover open would light up a field under the glass and paint its
 /// I-beam over painted glass, and then answer the click itself; the pointer
 /// and the press have to agree about who owns a place.
+///
+/// `held_elsewhere` is the other way a press can already belong to someone:
+/// [`CxFingers::is_mouse_held_outside`] asked with this surface's own area.
+/// `handled` only ever catches a widget asked EARLIER in this same event,
+/// and a control that is dragged continuously — a slider, a scroll bar,
+/// another surface's edge — holds the mouse from its press until its
+/// release, across every event in between. While it does, the pointer is
+/// its own: this surface starts no drag from it and lights nothing under
+/// it. `Taken` is the same answer for both, and deliberately so — the
+/// pointer showing belongs to whoever holds the press, and is not ours to
+/// set or to put back.
 fn press_on(
     frame: Frame,
     at: Vec2d,
     grab: f64,
     handled: bool,
+    held_elsewhere: bool,
     movable: bool,
     resizable: bool,
 ) -> Press {
-    if handled {
+    if handled || held_elsewhere {
         return Press::Taken;
     }
     if resizable {
@@ -3229,6 +3241,70 @@ impl GlassFloatingSurface {
         let uid = self.widget_uid();
         cx.widget_action(uid, action);
     }
+
+    /// Whether the mouse is out on loan to a control that is not this
+    /// surface. The surface draws its whole subtree into one area, so that
+    /// area is the whole of what it owns — a press a control ON the glass
+    /// holds is inside it and is not "elsewhere", which is what leaves a
+    /// slider on a sheet free to be dragged.
+    fn mouse_held_elsewhere(&self, cx: &Cx, area: Area) -> bool {
+        cx.fingers.is_mouse_held_outside(&[area])
+    }
+
+    /// Whether a drag in flight has to stand down — and ends it if it does.
+    ///
+    /// A gesture is re-asked for as long as it is pending, not only at the
+    /// press: the press and another control's capture can land in either
+    /// order inside one event, and a control can take the pointer after this
+    /// drag began. Whoever holds it keeps it until the release, so this does
+    /// not pause and wait for the pointer back — it ENDS the drag where it
+    /// had got to and says `Placed` for it, so a host that writes the frame
+    /// down on a release is told the same thing here.
+    ///
+    /// A control ON the glass is not "elsewhere" (see `mouse_held_elsewhere`),
+    /// and neither is this surface's own capture, so a drag that took the
+    /// pointer properly never stands down for itself.
+    fn drag_stands_down(&mut self, cx: &mut Cx, area: Area) -> bool {
+        if !self.mouse_held_elsewhere(cx, area) {
+            return false;
+        }
+        if self.drag.take().is_some() {
+            self.hot = 0.0;
+            let (pos, size) = (self.pos, self.size);
+            self.say(cx, GlassFloatingSurfaceAction::Placed { pos, size });
+            self.redraw(cx);
+        }
+        true
+    }
+
+    /// Take the mouse for a drag that is starting.
+    ///
+    /// The surface cannot run its gestures through `hits` — they are claimed
+    /// at opposite ends of its own subtree's dispatch and `hits` claims at
+    /// one point only — but it can still ask `hits` for the CAPTURE at the
+    /// moment a drag begins, and the capture is the half that matters here:
+    /// until the release the mouse belongs to this surface, so nothing else
+    /// takes a hover or a press from a pointer that is busy carrying a sheet
+    /// of glass around. The band reaches `grab_margin` OUTSIDE the painted
+    /// glass, so the hit test is widened by the same amount or a press in
+    /// the outward half would find no area to capture.
+    ///
+    /// A `hits` that answers anything else — something holds a sweep lock,
+    /// say, or a digit is already down on a different button — means the
+    /// press is not this surface's to take, and the answer is HONOURED:
+    /// both callers leave the drag unstarted rather than falling back to
+    /// the uncaptured raw-move drag that was here before. An uncaptured
+    /// drag is the thing the rule is against — the sheet would follow the
+    /// pointer while another control still believed it held it.
+    #[must_use]
+    fn grab_pointer(&self, cx: &mut Cx, event: &Event, area: Area) -> bool {
+        let m = self.grab_margin;
+        let margin = Inset { left: m, top: m, right: m, bottom: m };
+        matches!(
+            event.hits_with_options(cx, area, HitOptions::new().with_margin(margin)),
+            Hit::FingerDown(_)
+        )
+    }
 }
 
 impl Widget for GlassFloatingSurface {
@@ -3275,6 +3351,7 @@ impl Widget for GlassFloatingSurface {
                     me.abs,
                     self.grab_margin,
                     !me.handled.get().is_empty(),
+                    self.mouse_held_elsewhere(cx, area),
                     self.movable,
                     self.resizable,
                 ) {
@@ -3283,25 +3360,40 @@ impl Widget for GlassFloatingSurface {
                     // returning and cutting the dispatch short.
                     Press::Taken | Press::Elsewhere => {}
                     Press::Size(grip) if me.button.is_primary() => {
-                        // The frame claims a press BEFORE the contents see
-                        // it. The band is a few points wide and lies over
-                        // whatever the caller put against the edge, and a
-                        // resize that begins by dropping a caret into a
-                        // field is a resize the person then has to undo.
-                        self.drag = Some(Drag::Size {
-                            grip,
-                            held_at: me.abs,
-                            from: frame,
-                        });
-                        // Nobody after us answers this press either. The page
-                        // under the surface keeps working — it just does not
-                        // get to act on a press aimed at the surface's edge.
-                        me.handled.set(area);
-                        self.take_key_focus(cx, area);
-                        cx.set_cursor(grip.cursor());
-                        self.hot = 1.0;
-                        self.redraw(cx);
-                        return;
+                        // The mouse goes with the resize: a resize is a
+                        // continuously dragged control, so it holds the
+                        // pointer until the release and nothing else hears
+                        // from it meanwhile. Asked FIRST, because the answer
+                        // decides whether there is a drag at all — a press
+                        // this surface cannot take the pointer for is not
+                        // its press.
+                        if self.grab_pointer(cx, event, area) {
+                            // The frame claims a press BEFORE the contents
+                            // see it. The band is a few points wide and lies
+                            // over whatever the caller put against the edge,
+                            // and a resize that begins by dropping a caret
+                            // into a field is a resize the person then has to
+                            // undo.
+                            self.drag = Some(Drag::Size {
+                                grip,
+                                held_at: me.abs,
+                                from: frame,
+                            });
+                            // Nobody after us answers this press either. The
+                            // page under the surface keeps working — it just
+                            // does not get to act on a press aimed at the
+                            // surface's edge.
+                            me.handled.set(area);
+                            self.take_key_focus(cx, area);
+                            cx.set_cursor(grip.cursor());
+                            self.hot = 1.0;
+                            self.redraw(cx);
+                            return;
+                        }
+                        // Refused: fall through with the press unclaimed, as
+                        // the two arms above do. Whoever `hits` is keeping it
+                        // for is welcome to it, and the contents see it on
+                        // the way past.
                     }
                     // A secondary press sizes nothing, so the band is only
                     // more sheet to it: the contents get first refusal and
@@ -3325,6 +3417,9 @@ impl Widget for GlassFloatingSurface {
                     held_at,
                     from,
                 }) => {
+                    if self.drag_stands_down(cx, area) {
+                        return;
+                    }
                     let (pos, size) = from.resized(grip, me.abs - held_at);
                     let moved = (pos, size) != (self.pos, self.size);
                     self.pos = pos;
@@ -3337,6 +3432,9 @@ impl Widget for GlassFloatingSurface {
                     return;
                 }
                 Some(Drag::Move { held_at, from }) => {
+                    if self.drag_stands_down(cx, area) {
+                        return;
+                    }
                     let pos = from + (me.abs - held_at);
                     if pos != self.pos {
                         self.pos = pos;
@@ -3359,14 +3457,19 @@ impl Widget for GlassFloatingSurface {
                     // over a widget that will answer the press as well, so
                     // the frame promises nothing there.
                     //
-                    // The two drag branches above are deliberately NOT gated
-                    // this way: a drag that has begun owns the pointer and
-                    // has to keep hearing about it wherever it goes.
+                    // The two drag branches above ask a narrower question of
+                    // their own (`drag_stands_down`) rather than this one: a
+                    // drag that has begun owns the pointer and goes on
+                    // hearing about it wherever it goes, over a widget that
+                    // has claimed the move included — but it still gives the
+                    // gesture up the moment another control takes the pointer
+                    // out from under it.
                     let verdict = press_on(
                         self.frame(),
                         me.abs,
                         self.grab_margin,
                         !me.handled.get().is_empty(),
+                        self.mouse_held_elsewhere(cx, area),
                         self.movable,
                         self.resizable,
                     );
@@ -3411,9 +3514,21 @@ impl Widget for GlassFloatingSurface {
         // changed `handled` by now, and the surface leaves it alone.
         if let (Some((held_at, from, moves)), Event::MouseDown(me)) = (offered_sheet, event) {
             if me.handled.get() == claimed_before.unwrap_or_default() {
+                // The pointer first, while the press is still unclaimed:
+                // `hits` turns away a press another area has already stamped,
+                // and the stamp below is this surface's own.
+                //
+                // And the sheet only starts moving if the pointer came with
+                // it. A sheet carried by raw moves while something else
+                // believes it holds the pointer is the uncaptured drag the
+                // rule is against; a press that could not be grabbed stays a
+                // press, which is what a sheet that may not move does with
+                // one anyway — claimed, so it does not fall through painted
+                // glass, and carrying nothing.
+                let carries = moves && self.grab_pointer(cx, event, area);
                 me.handled.set(area);
                 self.take_key_focus(cx, area);
-                if moves {
+                if carries {
                     self.drag = Some(Drag::Move { held_at, from });
                 }
             }
@@ -3598,6 +3713,10 @@ impl GlassFloatingSurfaceRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::makepad_draw::cx_draw::CxDraw;
+    use std::cell::Cell;
+
+    const PANE: DVec2 = dvec2(600.0, 400.0);
 
     /// A surface at 100,100 sized 200x150, with the preset's floor and no
     /// ceiling of its own.
@@ -3677,6 +3796,146 @@ mod tests {
         assert_eq!((button.hover_ink, button.down_ink, button.disabled_ink), (0.65, 0.25, 0.4));
         assert_eq!(slider.walk.height.to_fixed(), Some(32.0));
         assert_eq!(segmented.walk.height.to_fixed(), Some(38.0));
+    }
+
+    /// The rect the tests press in: the sheet of `surface()`.
+    fn sheet_rect() -> Rect {
+        let f = surface();
+        Rect { pos: f.pos, size: f.size }
+    }
+
+    /// A surface from the preset, a pass and a draw list to put areas in.
+    fn glass_surface() -> (Cx, GlassFloatingSurface, DrawPass) {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let surface = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            GlassFloatingSurface::script_new_with_default(vm)
+        });
+        let pass = DrawPass::new(&mut cx);
+        pass.set_size(&mut cx, PANE);
+        (cx, surface, pass)
+    }
+
+    /// One quad drawn into `list`, and the area it left behind. `hits` wants
+    /// an area with a real draw list under it — a fabricated one is not
+    /// valid and is answered Nothing whatever else is true.
+    fn draw_quad(
+        cx: &mut Cx,
+        pass: &DrawPass,
+        list: &mut DrawList2d,
+        quad: &mut DrawQuad,
+        rect: Rect,
+    ) -> Area {
+        let event = DrawEvent::default();
+        let mut draw = CxDraw::new(cx, &event);
+        let mut cx2d = Cx2d::new(&mut draw);
+        cx2d.begin_pass(pass, None);
+        list.begin_always(&mut cx2d);
+        cx2d.begin_root_turtle(PANE, Layout::flow_down());
+        quad.draw_abs(&mut cx2d, rect);
+        cx2d.end_pass_sized_turtle();
+        list.end(&mut cx2d);
+        cx2d.end_pass(pass);
+        quad.area()
+    }
+
+    fn press(at: DVec2) -> Event {
+        Event::MouseDown(MouseDownEvent {
+            abs: at,
+            button: MouseButton::PRIMARY,
+            window_id: WindowId(1, 1),
+            modifiers: KeyModifiers::default(),
+            handled: Cell::new(Area::Empty),
+            time: 0.0,
+        })
+    }
+
+    /// The press the surface takes the pointer with. The drag that follows
+    /// is only a drag because of this: until the release the mouse is the
+    /// surface's, and nothing else is handed a hover or a press from it.
+    #[test]
+    fn a_grab_with_the_pointer_free_takes_it_and_says_so() {
+        let (mut cx, mut surface, pass) = glass_surface();
+        let mut list = DrawList2d::new(&mut cx);
+        let area = draw_quad(&mut cx, &pass, &mut list, &mut surface.draw_grip, sheet_rect());
+        let event = press(sheet_rect().pos + sheet_rect().size * 0.5);
+        assert!(surface.grab_pointer(&mut cx, &event, area), "the press was there to take");
+        assert!(cx.fingers.is_area_captured(area), "and the pointer came with it");
+    }
+
+    /// A press the surface cannot take the pointer for is not the surface's
+    /// press. Both refusals below were discarded before: the sheet went on
+    /// to be dragged by raw moves, uncaptured, while the owner that turned
+    /// the grab away still believed it held the mouse.
+    #[test]
+    fn a_grab_somebody_elses_sweep_lock_turns_away_takes_nothing() {
+        let (mut cx, mut surface, pass) = glass_surface();
+        // Each area in its own list, so they are two owners and not one.
+        let mut other_list = DrawList2d::new(&mut cx);
+        let mut list = DrawList2d::new(&mut cx);
+        let elsewhere = Rect { pos: dvec2(400.0, 40.0), size: dvec2(80.0, 24.0) };
+        let other = draw_quad(&mut cx, &pass, &mut other_list, &mut surface.draw_grip, elsewhere);
+        let area = draw_quad(&mut cx, &pass, &mut list, &mut surface.draw_grip, sheet_rect());
+        cx.sweep_lock(other);
+
+        let event = press(sheet_rect().pos + sheet_rect().size * 0.5);
+        assert!(!surface.grab_pointer(&mut cx, &event, area), "the lock holds the press");
+        assert!(!cx.fingers.is_area_captured(area), "and nothing was captured for a drag");
+    }
+
+    /// The other refusal: a digit is already down on a different button, so
+    /// `hits` answers this press to nobody.
+    #[test]
+    fn a_grab_with_another_button_already_down_takes_nothing() {
+        let (mut cx, mut surface, pass) = glass_surface();
+        let mut list = DrawList2d::new(&mut cx);
+        let area = draw_quad(&mut cx, &pass, &mut list, &mut surface.draw_grip, sheet_rect());
+        cx.fingers.first_mouse_button = Some((MouseButton::SECONDARY, WindowId(1, 1)));
+
+        let event = press(sheet_rect().pos + sheet_rect().size * 0.5);
+        assert!(!surface.grab_pointer(&mut cx, &event, area), "the digit down is not this one");
+        assert!(!cx.fingers.is_area_captured(area));
+    }
+
+    /// A gesture is re-asked while it is pending. A drag already under way
+    /// stands down the moment another control takes the pointer — it does
+    /// not wait for it back, and it reports where it stopped, so a host that
+    /// writes the frame down on a release hears the same thing.
+    #[test]
+    fn a_drag_gives_the_gesture_up_when_another_control_takes_the_pointer() {
+        let (mut cx, mut surface, pass) = glass_surface();
+        let mut other_list = DrawList2d::new(&mut cx);
+        let mut list = DrawList2d::new(&mut cx);
+        let elsewhere = Rect { pos: dvec2(400.0, 40.0), size: dvec2(80.0, 24.0) };
+        let other = draw_quad(&mut cx, &pass, &mut other_list, &mut surface.draw_grip, elsewhere);
+        let area = draw_quad(&mut cx, &pass, &mut list, &mut surface.draw_grip, sheet_rect());
+
+        let held_at = sheet_rect().pos + sheet_rect().size * 0.5;
+        surface.pos = sheet_rect().pos;
+        surface.size = sheet_rect().size;
+        surface.drag = Some(Drag::Move { held_at, from: surface.pos });
+        assert!(!surface.drag_stands_down(&mut cx, area), "nothing holds the mouse yet");
+        assert!(surface.drag.is_some(), "and the drag is untouched");
+
+        // A control elsewhere takes a press of its own, the way any
+        // continuously dragged control does.
+        let taken = press(elsewhere.pos + elsewhere.size * 0.5);
+        assert!(
+            matches!(taken.hits(&mut cx, other), Hit::FingerDown(_)),
+            "the other control did not take the press, so this test proves nothing"
+        );
+
+        let actions = cx.capture_actions(|cx| {
+            assert!(surface.drag_stands_down(cx, area), "the pointer is not the surface's");
+        });
+        assert!(surface.drag.is_none(), "the drag went on without the pointer");
+        assert!(
+            actions.iter().filter_map(|a| a.as_widget_action()).any(|a| matches!(
+                a.cast::<GlassFloatingSurfaceAction>(),
+                GlassFloatingSurfaceAction::Placed { .. }
+            )),
+            "the gesture ended without saying where it left the surface"
+        );
     }
 
     fn glass_button() -> (Cx, GlassButton) {
@@ -3816,16 +4075,16 @@ mod tests {
     #[test]
     fn a_press_someone_answered_already_is_not_the_surfaces() {
         let f = surface();
-        assert_eq!(press_on(f, dvec2(100.0, 175.0), 8.0, true, true, true), Press::Taken);
-        assert_eq!(press_on(f, dvec2(200.0, 175.0), 8.0, true, true, true), Press::Taken);
+        assert_eq!(press_on(f, dvec2(100.0, 175.0), 8.0, true, false, true, true), Press::Taken);
+        assert_eq!(press_on(f, dvec2(200.0, 175.0), 8.0, true, false, true, true), Press::Taken);
         // The same two presses, with nobody having taken them first.
         assert_eq!(
-            press_on(f, dvec2(100.0, 175.0), 8.0, false, true, true),
+            press_on(f, dvec2(100.0, 175.0), 8.0, false, false, true, true),
             Press::Size(grip(true, false, false, false)),
             "the left edge is the surface's when it is free"
         );
         assert_eq!(
-            press_on(f, dvec2(200.0, 175.0), 8.0, false, true, true),
+            press_on(f, dvec2(200.0, 175.0), 8.0, false, false, true, true),
             Press::Sheet { moves: true },
             "and so is the body"
         );
@@ -3838,16 +4097,16 @@ mod tests {
     fn a_sheet_that_cannot_move_or_size_still_claims_its_own_press() {
         let f = surface();
         assert_eq!(
-            press_on(f, dvec2(200.0, 175.0), 8.0, false, false, false),
+            press_on(f, dvec2(200.0, 175.0), 8.0, false, false, false, false),
             Press::Sheet { moves: false }
         );
         assert_eq!(
-            press_on(f, dvec2(100.0, 175.0), 8.0, false, false, false),
+            press_on(f, dvec2(100.0, 175.0), 8.0, false, false, false, false),
             Press::Sheet { moves: false },
             "with sizing switched off the edge is just more sheet"
         );
         assert_eq!(
-            press_on(f, dvec2(500.0, 500.0), 8.0, false, false, false),
+            press_on(f, dvec2(500.0, 500.0), 8.0, false, false, false, false),
             Press::Elsewhere,
             "and the page beyond it is still the page's"
         );
@@ -3860,17 +4119,17 @@ mod tests {
     fn the_frame_is_taken_before_the_sheet_and_the_page_after_it() {
         let f = surface();
         assert_eq!(
-            press_on(f, dvec2(94.0, 175.0), 8.0, false, true, true),
+            press_on(f, dvec2(94.0, 175.0), 8.0, false, false, true, true),
             Press::Size(grip(true, false, false, false)),
             "outside the painted glass but inside the band"
         );
         assert_eq!(
-            press_on(f, dvec2(91.0, 175.0), 8.0, false, true, true),
+            press_on(f, dvec2(91.0, 175.0), 8.0, false, false, true, true),
             Press::Elsewhere,
             "three points further out and it is the page's"
         );
         assert_eq!(
-            press_on(f, dvec2(100.0, 175.0), 8.0, false, true, false),
+            press_on(f, dvec2(100.0, 175.0), 8.0, false, false, true, false),
             Press::Sheet { moves: true },
             "with sizing off, a press on the edge moves it instead"
         );
@@ -4062,6 +4321,39 @@ mod tests {
         assert_eq!(grip(true, false, false, false).cursor(), MouseCursor::EwResize);
         assert_eq!(grip(false, false, false, true).cursor(), MouseCursor::NsResize);
         assert_eq!(Grip::default().cursor(), MouseCursor::Arrow);
+    }
+
+    /// A mouse another control already holds is not the surface's to act
+    /// on: neither the edge band nor the sheet takes a gesture from it, and
+    /// the hover it would have lit is not lit either — both read the same
+    /// answer, which is why one flag does for the two.
+    ///
+    /// This is the half `handled` cannot see. A slider's press is stamped on
+    /// the event that started it, events ago; the move arriving over this
+    /// surface now carries no stamp at all, and without the capture list
+    /// being asked, the band under it lights up and offers a resize that the
+    /// slider's release will cancel.
+    #[test]
+    fn nothing_starts_while_another_control_holds_the_mouse() {
+        let f = surface();
+        let on_the_edge = dvec2(100.0, 175.0);
+        let on_the_sheet = dvec2(200.0, 175.0);
+        // Free: the edge sizes and the sheet moves, as ever.
+        assert_eq!(
+            press_on(f, on_the_edge, 8.0, false, false, true, true),
+            Press::Size(grip(true, false, false, false))
+        );
+        assert_eq!(
+            press_on(f, on_the_sheet, 8.0, false, false, true, true),
+            Press::Sheet { moves: true }
+        );
+        // Held elsewhere: both are somebody else's press.
+        assert_eq!(press_on(f, on_the_edge, 8.0, false, true, true, true), Press::Taken);
+        assert_eq!(press_on(f, on_the_sheet, 8.0, false, true, true, true), Press::Taken);
+        // And `Taken` is what keeps the pointer alone: only `Elsewhere`
+        // gives the cursor back, so the control doing the dragging keeps
+        // the say over what the pointer looks like.
+        assert_ne!(press_on(f, on_the_sheet, 8.0, false, true, true, true), Press::Elsewhere);
     }
 
     /// A grab margin of zero leaves the edges exactly on the boundary rather

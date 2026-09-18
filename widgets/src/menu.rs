@@ -417,6 +417,38 @@ impl Level {
 /// first letter, and the platform's key codes carry no character of their
 /// own. Anything that is not a letter or a digit answers `None`, so the
 /// keys a menu already means something by are never swallowed.
+/// Whether the mouse press that is still held is the one that raised a menu
+/// anchored on `anchor`.
+///
+/// Press the title, drag down the rows, release on one: that is a single
+/// gesture belonging to the control that opened the menu, and the menu is
+/// the far end of it. The press that raised it landed on the control the
+/// menu is anchored to, which is what tells it apart from a press some other
+/// control took before the menu ever went up. A context menu's anchor is the
+/// point itself, and `Rect::contains` is inclusive, so the press that raised
+/// one is inside its own anchor too.
+fn raised_by_the_press(anchor: Rect, held_press: Option<DVec2>) -> bool {
+    held_press.map_or(false, |at| anchor.contains(at))
+}
+
+/// Whether an open menu may follow the pointer: light the row under it, arm
+/// a row on a press, choose one on the release.
+///
+/// `mouse_held_outside` is [`CxFingers::is_mouse_held_outside`] asked with
+/// this layer's own area. It is the app-wide rule: a control that is dragged
+/// continuously locks the pointer on its press, and nothing else may take a
+/// hover, a focus or a press-like state from that pointer until the release.
+/// A menu reads raw events, so `hits`' half of that rule never runs for it
+/// and it has to ask the question itself.
+///
+/// The menu stands down, it does not close: DISMISSAL never asks this, so a
+/// menu left up while a control elsewhere is dragged is still closed by a
+/// press outside it. And a TOUCH press answers `mouse_held_outside` false by
+/// design, so a finger walking a menu is untouched.
+fn menu_follows_pointer(mouse_held_outside: bool, raised_by_the_press: bool) -> bool {
+    !mouse_held_outside || raised_by_the_press
+}
+
 fn typed_letter(key: KeyCode) -> Option<char> {
     let c = match key {
         KeyCode::KeyA => 'a',
@@ -651,6 +683,16 @@ pub struct MenuLayer {
     /// menu.
     #[rust]
     swallow_up: bool,
+    /// Where the mouse went down, while it is still down. The layer reads
+    /// raw presses, so it sees every press without a capture of its own,
+    /// which is how a menu raised mid-press can tell whose press it is.
+    #[rust]
+    held_press: Option<DVec2>,
+    /// The press still held is the one that raised the open menu, so this
+    /// menu is the far end of that gesture and goes on tracking it. See
+    /// [`raised_by_the_press`].
+    #[rust]
+    raised_by_held_press: bool,
     #[rust]
     opened_at: f64,
     #[rust]
@@ -802,6 +844,7 @@ impl MenuLayer {
             MenuPlace::At => Rect { pos: anchor.pos, size: dvec2(0.0, 0.0) },
             _ => anchor,
         };
+        self.raised_by_held_press = raised_by_the_press(anchor, self.held_press);
         let placed = place_overlay(&PlaceRequest {
             anchor,
             size,
@@ -1190,6 +1233,22 @@ impl Widget for MenuLayer {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        // Worked out before this event moves the pointer state on: the
+        // release that ends a press-drag is still part of that gesture, and
+        // the capture it belongs to is only let go of after the whole tree
+        // has been handed the release.
+        let follows_pointer = menu_follows_pointer(
+            cx.fingers.is_mouse_held_outside(&[self.area]),
+            self.raised_by_held_press,
+        );
+        match event {
+            Event::MouseDown(me) => self.held_press = Some(me.abs),
+            Event::MouseUp(_) => {
+                self.held_press = None;
+                self.raised_by_held_press = false;
+            }
+            _ => {}
+        }
         if self.next_frame.is_event(event).is_some() && !self.levels.is_empty() {
             self.tick_hover(cx);
         }
@@ -1236,6 +1295,8 @@ impl Widget for MenuLayer {
         // coming, so the grab must not wait for it either.
         if matches!(event, Event::WindowLostFocus(_) | Event::Pause | Event::Background) {
             self.swallow_up = false;
+            self.held_press = None;
+            self.raised_by_held_press = false;
             self.close(cx);
             self.unlock_input(cx);
         }
@@ -1244,19 +1305,28 @@ impl Widget for MenuLayer {
         }
         match event {
             Event::MouseMove(e) => {
-                if let Some((li, row)) = self.hit(e.abs) {
-                    self.point_at(cx, li, Some(row));
-                } else if let Some(li) = self.inside_any(e.abs) {
-                    self.point_at(cx, li, None);
+                // The highlight is a hover, and a hover taken from a pointer
+                // another control is holding is the thing the rule forbids.
+                if follows_pointer {
+                    if let Some((li, row)) = self.hit(e.abs) {
+                        self.point_at(cx, li, Some(row));
+                    } else if let Some(li) = self.inside_any(e.abs) {
+                        self.point_at(cx, li, None);
+                    }
                 }
                 self.tick_hover(cx);
             }
             Event::MouseDown(e) => {
                 if let Some((li, row)) = self.hit(e.abs) {
-                    self.point_at(cx, li, Some(row));
-                    if self.levels[li].selectable(row) {
-                        self.levels[li].press = Some(row);
-                        self.redraw_menus(cx);
+                    // A second button pressed while a control elsewhere has
+                    // the mouse arms nothing; the press is over the menu all
+                    // the same, so it is not a click-away either.
+                    if follows_pointer {
+                        self.point_at(cx, li, Some(row));
+                        if self.levels[li].selectable(row) {
+                            self.levels[li].press = Some(row);
+                            self.redraw_menus(cx);
+                        }
                     }
                 } else if self.inside_any(e.abs).is_none() {
                     // Click-away. The grab is held until the release rather
@@ -1272,10 +1342,15 @@ impl Widget for MenuLayer {
                 for level in &mut self.levels {
                     level.press = None;
                 }
-                if let Some((li, row)) = self.hit(e.abs) {
-                    self.activate(cx, li, row);
-                } else {
-                    self.redraw_menus(cx);
+                // Choosing a row on a release is what a press-drag menu is
+                // for, and exactly what a drag that belongs to another
+                // control must never do: letting go of a fader over an open
+                // menu would otherwise fire the row it happened to end on.
+                match self.hit(e.abs).filter(|_| follows_pointer) {
+                    Some((li, row)) => {
+                        self.activate(cx, li, row);
+                    }
+                    None => self.redraw_menus(cx),
                 }
             }
             Event::KeyDown(ke) => {
@@ -1437,5 +1512,225 @@ mod tests {
             "close before open"
         );
         assert_eq!(open.set(None), vec![MenuChange::Closed(live_id!(b))]);
+    }
+
+    /// The app-wide rule and its one exception, in one place: a menu follows
+    /// the pointer only while nothing else holds it, or while the press that
+    /// raised the menu is the one holding it.
+    #[test]
+    fn a_menu_follows_only_a_pointer_that_is_its_own() {
+        assert!(menu_follows_pointer(false, false), "a free pointer is everyone's");
+        assert!(!menu_follows_pointer(true, false), "another control is being dragged");
+        assert!(menu_follows_pointer(true, true), "the press that raised it is still down");
+        assert!(menu_follows_pointer(false, true));
+    }
+
+    /// Whose press it is, read from where it landed: on the control the menu
+    /// hangs off, or somewhere else entirely.
+    #[test]
+    fn the_press_that_raised_a_menu_is_the_one_that_landed_on_its_anchor() {
+        let anchor = Rect { pos: dvec2(100.0, 40.0), size: dvec2(80.0, 20.0) };
+        assert!(raised_by_the_press(anchor, Some(dvec2(140.0, 50.0))));
+        assert!(!raised_by_the_press(anchor, Some(dvec2(400.0, 300.0))), "a press on something else");
+        assert!(!raised_by_the_press(anchor, None), "no press is being held at all");
+        // A context menu hangs off the point itself, and the press that
+        // raised it IS that point.
+        let at = dvec2(400.0, 300.0);
+        assert!(raised_by_the_press(Rect { pos: at, size: dvec2(0.0, 0.0) }, Some(at)));
+    }
+}
+
+/// The rule driven through the real event path, with a button holding the
+/// pointer the way any control that is dragged continuously holds it.
+#[cfg(test)]
+mod pointer_tests {
+    use super::*;
+    use crate::makepad_draw::cx_draw::CxDraw;
+    use std::cell::Cell;
+
+    const SIZE: DVec2 = DVec2 { x: 800.0, y: 600.0 };
+
+    /// A pass and a list to draw a page into, the way a window holds one.
+    struct Target {
+        pass: DrawPass,
+        draw_list: DrawList2d,
+        overlay: Overlay,
+    }
+
+    impl Target {
+        fn new(cx: &mut Cx) -> Self {
+            let overlay = cx.with_vm(|vm| Overlay::script_new(vm));
+            Target { pass: DrawPass::new(cx), draw_list: DrawList2d::new(cx), overlay }
+        }
+
+        fn draw(&mut self, cx: &mut Cx, root: &WidgetRef) {
+            self.pass.set_size(cx, SIZE);
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&self.pass, None);
+            self.draw_list.begin_always(&mut cx2d);
+            self.overlay.begin(&mut cx2d);
+            cx2d.begin_root_turtle(SIZE, Layout::flow_down());
+            root.draw_all(&mut cx2d, &mut Scope::empty());
+            cx2d.end_pass_sized_turtle();
+            self.overlay.end(&mut cx2d);
+            self.draw_list.end(&mut cx2d);
+            cx2d.end_pass(&self.pass);
+        }
+    }
+
+    fn cx() -> Cx {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        cx.with_vm(crate::script_mod);
+        cx
+    }
+
+    /// A button to hold the pointer down on, and a layer to raise menus in.
+    fn page(cx: &mut Cx) -> WidgetRef {
+        cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    grab := Button{text: "Grab"}
+                    menus := MenuLayer{}
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        })
+    }
+
+    fn press(abs: DVec2) -> Event {
+        Event::MouseDown(MouseDownEvent {
+            abs,
+            button: MouseButton::PRIMARY,
+            window_id: WindowId(1, 1),
+            modifiers: KeyModifiers::default(),
+            handled: Cell::new(Area::Empty),
+            time: 0.0,
+        })
+    }
+
+    fn drag(abs: DVec2) -> Event {
+        Event::MouseMove(MouseMoveEvent {
+            abs,
+            lock_delta: DVec2::default(),
+            window_id: WindowId(1, 1),
+            modifiers: KeyModifiers::default(),
+            time: 0.0,
+            handled: Cell::new(Area::Empty),
+        })
+    }
+
+    fn release(abs: DVec2) -> Event {
+        Event::MouseUp(MouseUpEvent {
+            abs,
+            button: MouseButton::PRIMARY,
+            window_id: WindowId(1, 1),
+            modifiers: KeyModifiers::default(),
+            time: 0.0,
+        })
+    }
+
+    fn rows() -> Vec<MenuRow> {
+        vec![MenuRow::new(live_id!(open), "Open"), MenuRow::new(live_id!(save), "Save")]
+    }
+
+    fn open_menu(cx: &mut Cx, root: &WidgetRef, anchor: Rect) {
+        let layer = root.widget(cx, ids!(menus));
+        let mut inner = layer.borrow_mut::<MenuLayer>().expect("a menu layer");
+        inner.open_root(cx, live_id!(owner), rows(), anchor, MenuPlace::Below);
+    }
+
+    /// The middle of row `row` of the open menu, on screen.
+    fn row_point(cx: &Cx, root: &WidgetRef, row: usize) -> DVec2 {
+        let layer = root.widget(cx, ids!(menus));
+        let inner = layer.borrow::<MenuLayer>().expect("a menu layer");
+        inner.levels[0].row_rect(row).center()
+    }
+
+    /// The label of the row lit right now, empty when none is.
+    fn lit(cx: &Cx, root: &WidgetRef) -> String {
+        let layer = root.widget(cx, ids!(menus));
+        let inner = layer.borrow::<MenuLayer>().expect("a menu layer");
+        inner.text()
+    }
+
+    fn is_open(cx: &Cx, root: &WidgetRef) -> bool {
+        let layer = root.widget(cx, ids!(menus));
+        let inner = layer.borrow::<MenuLayer>().expect("a menu layer");
+        inner.is_open()
+    }
+
+    /// A control that is dragged continuously holds the pointer until the
+    /// release, and a menu that happens to be up takes nothing from it: no
+    /// row lights under the drag, and letting go over a row does not choose
+    /// it.
+    #[test]
+    fn a_menu_stands_down_for_a_drag_it_was_not_raised_by() {
+        let mut cx = cx();
+        let root = page(&mut cx);
+        let mut target = Target::new(&mut cx);
+        target.draw(&mut cx, &root);
+
+        let grab = root.widget(&cx, ids!(grab)).area().rect(&cx);
+        root.handle_event(&mut cx, &press(grab.center()), &mut Scope::empty());
+        assert!(cx.fingers.is_mouse_held_outside(&[]), "the button took the pointer");
+
+        // Raised somewhere else entirely while that press is still down, so
+        // the held press is the button's and nobody else's.
+        open_menu(&mut cx, &root, Rect { pos: dvec2(500.0, 40.0), size: dvec2(80.0, 20.0) });
+        let row = row_point(&cx, &root, 1);
+        root.handle_event(&mut cx, &drag(row), &mut Scope::empty());
+        assert_eq!(lit(&cx, &root), "", "no row lights from a pointer another control holds");
+        root.handle_event(&mut cx, &release(row), &mut Scope::empty());
+        assert!(is_open(&cx, &root), "and the release chooses nothing");
+    }
+
+    /// The other half: a menu raised BY the press that is still held is the
+    /// far end of that same gesture — press the control, drag down the rows,
+    /// release on one — and goes on walking and choosing.
+    #[test]
+    fn a_menu_raised_by_the_held_press_still_walks_and_chooses() {
+        let mut cx = cx();
+        let root = page(&mut cx);
+        let mut target = Target::new(&mut cx);
+        target.draw(&mut cx, &root);
+
+        let grab = root.widget(&cx, ids!(grab)).area().rect(&cx);
+        root.handle_event(&mut cx, &press(grab.center()), &mut Scope::empty());
+        assert!(cx.fingers.is_mouse_held_outside(&[]), "the button took the pointer");
+
+        open_menu(&mut cx, &root, grab);
+        let row = row_point(&cx, &root, 1);
+        root.handle_event(&mut cx, &drag(row), &mut Scope::empty());
+        assert_eq!(lit(&cx, &root), "Save", "the gesture's own pointer still lights rows");
+        root.handle_event(&mut cx, &release(row), &mut Scope::empty());
+        assert!(!is_open(&cx, &root), "and the release chooses the row it ended on");
+    }
+
+    /// Dismissal is not a gesture that stands down: a menu left up while
+    /// something else is being dragged is still closed by a press outside
+    /// it, or nothing could ever take it down.
+    #[test]
+    fn a_press_outside_still_dismisses_a_menu_while_another_control_is_dragged() {
+        let mut cx = cx();
+        let root = page(&mut cx);
+        let mut target = Target::new(&mut cx);
+        target.draw(&mut cx, &root);
+
+        let grab = root.widget(&cx, ids!(grab)).area().rect(&cx);
+        root.handle_event(&mut cx, &press(grab.center()), &mut Scope::empty());
+        open_menu(&mut cx, &root, Rect { pos: dvec2(500.0, 40.0), size: dvec2(80.0, 20.0) });
+        assert!(is_open(&cx, &root));
+
+        // The second button, since the first is down on the control.
+        root.handle_event(&mut cx, &press(dvec2(40.0, 560.0)), &mut Scope::empty());
+        assert!(!is_open(&cx, &root), "a press nowhere near the menu closes it all the same");
     }
 }

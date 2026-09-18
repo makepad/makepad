@@ -491,6 +491,23 @@ impl Widget for RadioGroup {
         self.view.handle_event(cx, event, scope);
 
         let area = self.view.area();
+        // THE POINTER-CAPTURE RULE, asked once for both of this group's
+        // focus grabs. Both start from a press and neither is told that the
+        // pointer may already be locked to a control somewhere else: the raw
+        // arm below never could be, and the `hits` arm further down cannot
+        // be trusted to be either, because a widget that ALREADY holds the
+        // mouse is handed its press off the capture list without marking the
+        // event -- so the press reaches this group looking like bare
+        // background. The capture list is the only thing that knows.
+        //
+        // The group's own area and its answer rows are not "somewhere else":
+        // a press on a row is still the group's to take a focus from. Only
+        // the mouse locks, so a finger held on a control elsewhere leaves
+        // this alone.
+        let mut mine = vec![area];
+        mine.extend(self.items.iter().map(|item| item.area()));
+        let held_elsewhere = cx.fingers.is_mouse_held_outside(&mine);
+
         // A press anywhere in the group leaves the keyboard with the GROUP
         // and not with the row that was pressed. Taken after the rows have
         // had the press, because a row claims the focus itself on the way
@@ -498,7 +515,7 @@ impl Widget for RadioGroup {
         // the answer that is already taken raises nothing at all and the
         // focus would be stranded on a row the arrows do not reach.
         if let Event::MouseDown(me) = event {
-            if area.rect(cx).contains(me.abs) {
+            if !held_elsewhere && area.rect(cx).contains(me.abs) {
                 cx.set_key_focus(area);
             }
         }
@@ -519,7 +536,9 @@ impl Widget for RadioGroup {
             // The MouseDown arm above covers a pointer; this covers a finger,
             // which sends no mouse press at all.
             Hit::FingerDown(_) => {
-                cx.set_key_focus(area);
+                if !held_elsewhere {
+                    cx.set_key_focus(area);
+                }
             }
             // The ring is drawn from the focus, so the focus changing is a
             // repaint.
@@ -719,5 +738,154 @@ mod tests {
         let enabled = [true, false, true];
         assert_eq!(step_choice(&enabled, 9, 1, false), Some(0));
         assert_eq!(step_choice(&enabled, 9, -1, false), Some(2));
+    }
+}
+
+/// THE POINTER-CAPTURE RULE, as it applies to a group of answers.
+///
+/// The group moves the keyboard onto ITSELF from a press, so that the arrows
+/// move the answer rather than the focus. Both of its focus grabs start from a
+/// press, and neither can be told by the press itself whether the pointer is
+/// already locked to a control somewhere else -- a widget that already holds
+/// the mouse is handed its press off the capture list without marking the
+/// event. So the capture list is asked, and a press it does not own moves no
+/// keyboard.
+#[cfg(test)]
+mod pointer_capture_tests {
+    #![allow(dead_code)]
+    use super::*;
+    use crate::makepad_draw::cx_draw::CxDraw;
+    use std::cell::Cell;
+
+    const SIZE: Vec2d = Vec2d { x: 800.0, y: 600.0 };
+    const WINDOW: WindowId = WindowId(1, 1);
+
+    struct Target {
+        pass: DrawPass,
+        draw_list: DrawList2d,
+    }
+
+    impl Target {
+        fn new(cx: &mut Cx) -> Self {
+            Target { pass: DrawPass::new(cx), draw_list: DrawList2d::new(cx) }
+        }
+
+        fn draw(&mut self, cx: &mut Cx, root: &WidgetRef) {
+            self.pass.set_size(cx, SIZE);
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&self.pass, None);
+            self.draw_list.begin_always(&mut cx2d);
+            cx2d.begin_root_turtle(SIZE, Layout::flow_down());
+            root.draw_all(&mut cx2d, &mut Scope::empty());
+            cx2d.end_pass_sized_turtle();
+            self.draw_list.end(&mut cx2d);
+            cx2d.end_pass(&self.pass);
+        }
+    }
+
+    fn press(abs: Vec2d) -> Event {
+        Event::MouseDown(MouseDownEvent {
+            abs,
+            button: MouseButton::PRIMARY,
+            window_id: WINDOW,
+            modifiers: KeyModifiers::default(),
+            handled: Cell::new(Area::Empty),
+            time: 0.0,
+        })
+    }
+
+    /// One press, handed to `widget` alone -- the way the tree hands a press
+    /// to one branch at a time. Dispatching through the whole root instead
+    /// would let the button that is holding the pointer answer the SECOND
+    /// press as well (it is handed its own FingerDown off the capture list)
+    /// and take the keyboard back, which would hide what is being tested.
+    fn send(cx: &mut Cx, widget: &WidgetRef, at: Vec2d) {
+        widget.handle_event(cx, &press(at), &mut Scope::empty());
+    }
+
+    fn middle(cx: &Cx, widget: &WidgetRef) -> Vec2d {
+        let rect = widget.area().rect(cx);
+        assert!(rect.size.x > 0.0 && rect.size.y > 0.0, "not drawn");
+        rect.pos + rect.size * 0.5
+    }
+
+    fn scene(cx: &mut Cx) -> WidgetRef {
+        cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    grab := Button{width: 100. height: 40. text: "grab"}
+                    q := RadioGroup{
+                        a := RadioButton{text: "a"}
+                        b := RadioButton{text: "b"}
+                    }
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        })
+    }
+
+    /// `set_key_focus` only records the request; the focus moves when the
+    /// action cycle runs. A bare press raises no action in this scene, so one
+    /// is pushed to turn the handle.
+    fn settle(cx: &mut Cx) {
+        cx.action(RadioGroupAction::None);
+        cx.handle_actions();
+    }
+
+    /// Presses the first answer, with the pointer already locked to the button
+    /// above the group when `held`. Answers (where the keyboard ended up, the
+    /// group's area, the answer's area).
+    fn press_an_answer(held: bool) -> (Area, Area, Area) {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        cx.with_vm(crate::script_mod);
+        let root = scene(&mut cx);
+        let mut target = Target::new(&mut cx);
+        target.draw(&mut cx, &root);
+
+        let grab = root.widget(&cx, ids!(grab));
+        let q = root.widget(&cx, ids!(q));
+        let a = root.widget(&cx, ids!(q.a));
+        let (group_area, answer_area) = (q.area(), a.area());
+        let on_answer = middle(&cx, &a);
+
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        if held {
+            let on_grab = middle(&cx, &grab);
+            send(&mut cx, &grab, on_grab);
+            assert!(
+                cx.fingers.is_mouse_held_outside(&[group_area, answer_area]),
+                "the button did not take the pointer, so this test proves nothing"
+            );
+        }
+        send(&mut cx, &q, on_answer);
+        cx.fingers.first_mouse_button = None;
+        settle(&mut cx);
+        (cx.key_focus(), group_area, answer_area)
+    }
+
+    /// The control: a press nothing else holds leaves the keyboard with the
+    /// GROUP, not with the row that was pressed. That is the whole point of
+    /// the group being one tab stop.
+    #[test]
+    fn a_press_nothing_else_holds_leaves_the_keyboard_with_the_group() {
+        let (focus, group, answer) = press_an_answer(false);
+        assert_eq!(focus, group, "the group stopped taking its own press");
+        assert_ne!(focus, answer, "and it did not leave the keyboard on the row");
+    }
+
+    /// The rule: a press that arrives while another control holds the mouse is
+    /// that control's, and the group takes no keyboard from it.
+    #[test]
+    fn a_press_another_control_holds_moves_no_keyboard() {
+        let (focus, group, _answer) = press_an_answer(true);
+        assert_ne!(focus, group, "the group pulled the keyboard off a control mid-drag");
     }
 }
