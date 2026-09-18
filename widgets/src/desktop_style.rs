@@ -203,11 +203,10 @@ pub fn current(vm: &mut ScriptVm) -> Option<StyleSheet> {
     if let Some(sheet) = vm.cx_mut().global::<Styles>().heaps.get(&key).cloned() {
         return Some(sheet);
     }
-    let name = std::env::var("MAKEPAD_WIDGET_STYLE").ok().or_else(|| match vm.cx().os_type() {
-        OsType::Ios(_) => Some("ios".into()),
-        OsType::Android(_) => Some("android".into()),
-        _ => None,
-    })?;
+    // Opt-in only. Picking a sheet from OsType restyled every app that had
+    // never asked for one, and an app that calls `theme_mod` + `widgets_mod`
+    // without `script_mod` got the theme half of it and not the widget half.
+    let name = std::env::var("MAKEPAD_WIDGET_STYLE").ok()?;
     let style = DesktopStyle::parse(&name)?;
     let sheet = StyleSheet::load_with_appearance(style, name.ends_with("-dark"));
     install(vm, sheet.clone());
