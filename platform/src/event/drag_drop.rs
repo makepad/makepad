@@ -96,8 +96,10 @@ pub struct CxDragDrop {
     next_drag_area: Area,
     #[cfg(any(target_arch = "wasm32", target_os = "linux", test))]
     internal_drag_items: Option<Arc<Vec<DragItem>>>,
+    /// Set while the pointer event that produced a drag event is itself being
+    /// dispatched, so that dispatch doesn't produce the same drag event again.
     #[cfg(any(target_arch = "wasm32", target_os = "linux", test))]
-    internal_drag_moved: bool,
+    internal_drag_dispatching: bool,
 }
 
 #[cfg(any(target_arch = "wasm32", target_os = "linux", test))]
@@ -111,15 +113,16 @@ impl CxDragDrop {
     pub(crate) fn start_internal_drag(&mut self, items: Vec<DragItem>) {
         assert!(self.internal_drag_items.is_none(), "start drag twice");
         self.internal_drag_items = Some(Arc::new(items));
-        self.internal_drag_moved = false;
     }
 
     #[cfg(any(target_arch = "wasm32", target_os = "linux", test))]
     pub(crate) fn internal_drag_event(&mut self, event: &Event) -> Option<InternalDragEvent> {
+        if self.internal_drag_dispatching {
+            return None;
+        }
         match event {
             Event::MouseMove(event) => {
                 let items = self.internal_drag_items.as_ref()?.clone();
-                self.internal_drag_moved = true;
                 Some(InternalDragEvent::Drag(DragEvent {
                     modifiers: event.modifiers,
                     handled: Arc::new(Mutex::new(false)),
@@ -130,9 +133,6 @@ impl CxDragDrop {
             }
             Event::MouseUp(event) if event.button.is_primary() => {
                 let items = self.internal_drag_items.take()?;
-                if !std::mem::take(&mut self.internal_drag_moved) {
-                    return None;
-                }
                 Some(InternalDragEvent::Drop(DropEvent {
                     modifiers: event.modifiers,
                     handled: Arc::new(Mutex::new(false)),
@@ -142,6 +142,12 @@ impl CxDragDrop {
             }
             _ => None,
         }
+    }
+
+    /// Brackets the dispatch of the pointer event a drag event came from.
+    #[cfg(any(target_arch = "wasm32", target_os = "linux", test))]
+    pub(crate) fn set_internal_drag_dispatching(&mut self, dispatching: bool) {
+        self.internal_drag_dispatching = dispatching;
     }
 
     #[allow(dead_code)]
@@ -247,7 +253,7 @@ mod tests {
     use std::{cell::Cell, cell::RefCell, rc::Rc};
 
     #[test]
-    fn internal_drag_replaces_moves_and_release_with_drag_drop_end() {
+    fn internal_drag_appends_drag_drop_end_to_the_pointer_events() {
         let sequence = Rc::new(RefCell::new(Vec::new()));
         let seen = sequence.clone();
         let item = DragItem::String {
@@ -291,12 +297,15 @@ mod tests {
 
         assert_eq!(
             sequence.borrow().as_slice(),
-            ["MouseDown", "Drag", "Drag", "Drop", "DragEnd"]
+            [
+                "MouseDown", "MouseMove", "Drag", "MouseMove", "Drag", "MouseUp", "Drop",
+                "DragEnd"
+            ]
         );
     }
 
     #[test]
-    fn internal_drag_without_movement_remains_a_click() {
+    fn internal_drag_without_movement_still_ends_the_drag() {
         let sequence = Rc::new(RefCell::new(Vec::new()));
         let seen = sequence.clone();
         let mut cx = Cx::new(Box::new(move |cx, event| {
@@ -326,6 +335,11 @@ mod tests {
             time: 2.0,
         }));
 
-        assert_eq!(sequence.borrow().as_slice(), ["MouseDown", "MouseUp"]);
+        // A release that never moved still has to unwind whatever `start_dragging`
+        // set up, so a drop target isn't left painting a ghost of the dragged item.
+        assert_eq!(
+            sequence.borrow().as_slice(),
+            ["MouseDown", "MouseUp", "Drop", "DragEnd"]
+        );
     }
 }
