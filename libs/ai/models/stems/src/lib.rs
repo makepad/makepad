@@ -93,6 +93,10 @@ pub const MODEL_LICENSE: &str = "code MIT (ZFTurbo/Music-Source-Separation-Train
 /// person reads, and not this, which only a comparison does.
 pub const CACHE_HEADER_LICENSE: &str =
     "MIT (ZFTurbo/Music-Source-Separation-Training, (c) 2024 Roman Solovyev)";
+/// The source line of the same header, frozen for the same reason. It is
+/// [`MODEL_SOURCE`] today; if that address ever moves, this does not.
+pub const CACHE_HEADER_SOURCE: &str =
+    "https://github.com/ZFTurbo/Music-Source-Separation-Training";
 /// Whether these weights may go into something sold. They may not: the
 /// checkpoint carries no licence and its training set is academic-only. A
 /// host that ships to customers must refuse to bundle or install them.

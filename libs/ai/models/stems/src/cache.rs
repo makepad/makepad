@@ -22,8 +22,9 @@
 //! means `drums,bass,other,vocals`; its text is compared byte for byte by
 //! builds still in use, so it goes on being written exactly as it always was.
 //! A separator with other lanes, or another span grid, keeps its entries
-//! under a root of its own: one `<digest>` directory holds one separation,
-//! and opening it for a different one replaces it.
+//! under a root of its own: one `<digest>` directory holds one separation.
+//! Opening it for another rendering by the same model replaces it; opening
+//! it for another model, or for other lanes, is refused and changes nothing.
 //!
 //! i16 is deliberate: it is what a mixer consumes and it is 4x smaller than f32
 //! (a 4-minute track is 169 MB across four stems rather than 677 MB). It is
@@ -113,13 +114,14 @@ impl ModelIdentity {
         checkpoint: crate::MODEL_CHECKPOINT,
         checkpoint_sha256: crate::MODEL_SHA256,
         license: crate::CACHE_HEADER_LICENSE,
-        source: crate::MODEL_SOURCE,
+        source: crate::CACHE_HEADER_SOURCE,
     };
 }
 
 /// Identity of what produced the cached audio. A mismatch on any field means
 /// the cached spans are not the ones this build would compute, so the entry is
-/// rebuilt rather than trusted.
+/// never trusted: rebuilt where the same model made it, refused where another
+/// did.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CacheHeader {
     pub model_id: String,
@@ -307,23 +309,85 @@ impl CacheHeader {
     }
 }
 
+/// A digest is one directory name and nothing else: letters and digits. Not a
+/// separator, not a dot, and not the colon that makes `D:` a drive when it
+/// is joined to a root.
+fn is_bare_digest(digest: &str) -> bool {
+    !digest.is_empty() && digest.bytes().all(|byte| byte.is_ascii_alphanumeric())
+}
+
+/// Builds that are still in use compare the four-stem header byte for byte,
+/// ignore any lane line and DELETE what differs. So under that model's id a
+/// header is the one [`CacheHeader::for_track`] writes -- its frozen licence
+/// and source lines over the four lanes in their order -- or it is refused
+/// before it can reach a disk those builds share.
+fn check_four_stem_header(header: &CacheHeader) -> Result<()> {
+    if header.model_id != crate::MODEL_ID {
+        return Ok(());
+    }
+    if header.license != crate::CACHE_HEADER_LICENSE
+        || header.source != crate::CACHE_HEADER_SOURCE
+        || !is_four_stem_lanes(&header.stems)
+    {
+        return Err(CacheError::Mismatch(format!(
+            "a {} header is built by CacheHeader::for_track and no other way",
+            crate::MODEL_ID
+        )));
+    }
+    Ok(())
+}
+
+/// The header, written beside and renamed into place: no reader, and no
+/// crash, ever finds a header that is there and empty.
+fn write_header(dir: &Path, header: &CacheHeader) -> std::io::Result<()> {
+    let fresh = dir.join("header.tmp");
+    let mut file = File::create(&fresh)?;
+    file.write_all(header.encode().as_bytes())?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(&fresh, dir.join("header"))
+}
+
+/// Whether the entry's span record claims anything at all.
+fn records_a_span(dir: &Path) -> bool {
+    std::fs::read(dir.join("spans")).is_ok_and(|spans| spans.iter().any(|present| *present != 0))
+}
+
+/// An entry this model made of another rendering of the track goes the way
+/// an evicted one does: renamed first, so that whatever interrupts the
+/// delete, nothing is left under the digest that could be opened as audio.
+/// Only the rename has to succeed; the next prune finishes a delete that did
+/// not.
+fn replace_stale(root: &Path, digest: &str) -> std::io::Result<()> {
+    let to = root.join(format!("{EVICTING_PREFIX}{digest}"));
+    let _ = std::fs::remove_dir_all(&to);
+    std::fs::rename(root.join(digest), &to)?;
+    let _ = std::fs::remove_dir_all(&to);
+    Ok(())
+}
+
 /// Whether `digest` is separated end to end under `root`, WITHOUT touching a
 /// byte of it.
 ///
 /// [`StemCache::open`] is the separator's door: it creates the entry, sizes
-/// a sparse file per lane to the whole track and REPLACES one whose header
-/// disagrees. That is right for a caller about to write spans and wrong for
+/// a sparse file per lane to the whole track and REPLACES one the same model
+/// made of another rendering. That is right for a caller about to write spans and wrong for
 /// one that only wants to know — a deck served its stems from the store never
 /// separates locally, and opening the entry to ask about it would leave an
 /// empty one behind on every load and put it in front of the budget.
 ///
-/// Same two checks `open` makes before it trusts an entry, in the same order:
-/// the header must be this exact track under this exact model, and every span
-/// byte must be set. Anything unreadable, short or stale reads as "not
+/// The same checks `open` makes before it trusts an entry, in the same order:
+/// the header must be this exact track under this exact model, every span
+/// byte must be set, and the gains and every lane must be the size that
+/// header makes them -- a span record beside missing audio is what an
+/// interrupted delete leaves. Anything unreadable, short or stale reads as "not
 /// complete" — the question is only ever asked to decide whether work can be
 /// SKIPPED, so uncertainty has to answer no.
 pub fn is_complete_on_disk(root: impl AsRef<Path>, digest: &str, header: &CacheHeader) -> bool {
-    if digest.is_empty() || digest.contains(['/', '\\', '.']) {
+    if !is_bare_digest(digest)
+        || check_lanes(&header.stems).is_err()
+        || check_four_stem_header(header).is_err()
+    {
         return false;
     }
     let dir = root.as_ref().join(digest);
@@ -336,9 +400,17 @@ pub fn is_complete_on_disk(root: impl AsRef<Path>, digest: &str, header: &CacheH
     let Ok(spans) = std::fs::read(dir.join("spans")) else {
         return false;
     };
+    let sized = |name: &str, bytes: u64| {
+        std::fs::metadata(dir.join(name)).is_ok_and(|meta| meta.is_file() && meta.len() == bytes)
+    };
     spans.len() as u64 == header.span_count
         && header.span_count > 0
         && spans.iter().all(|present| *present != 0)
+        && sized("gains", header.span_count * header.stems.len() as u64 * 4)
+        && header
+            .stems
+            .iter()
+            .all(|lane| sized(&format!("{lane}.pcm"), header.frames * FRAME_BYTES))
 }
 
 /// A per-track cache directory, opened for read+write.
@@ -355,68 +427,115 @@ pub struct StemCache {
 }
 
 impl StemCache {
-    /// Opens (or creates) the cache entry for `digest`. An existing entry whose
-    /// header disagrees with `header` is REPLACED, not silently reused.
+    /// Opens (or creates) the cache entry for `digest`.
+    ///
+    /// An entry this same model made of another rendering of the track --
+    /// another checkpoint, length or span grid -- is REPLACED, not silently
+    /// reused. An entry ANOTHER model made, or one with other lanes, is
+    /// refused and left exactly as it is: no caller means to put two
+    /// separators' work in one directory, so finding one there is a wrong
+    /// root or a wrong header, and the answer to a mistake is never to
+    /// delete hours of separation.
+    ///
+    /// An entry is trusted for what it can show. One with no header, or
+    /// whose span record, gains or lanes are not the size this header makes
+    /// them, is what an interrupted delete or move leaves behind: it is
+    /// adopted with every span forgotten, never read back as audio.
     pub fn open(root: impl AsRef<Path>, digest: &str, header: CacheHeader) -> Result<StemCache> {
-        if digest.is_empty() || digest.contains(['/', '\\', '.']) {
+        if !is_bare_digest(digest) {
             return Err(CacheError::Mismatch(format!(
                 "digest {digest:?} is not a bare content hash"
             )));
         }
         // Before anything is created or replaced: a lane name is about to
-        // become a file name.
+        // become a file name, and a four-stem header is about to be read by
+        // builds that delete what they do not recognise.
         check_lanes(&header.stems)?;
-        let dir = root.as_ref().join(digest);
+        check_four_stem_header(&header)?;
+        let root = root.as_ref();
+        let dir = root.join(digest);
         let header_path = dir.join("header");
         if header_path.is_file() {
             let mut text = String::new();
             File::open(&header_path)?.read_to_string(&mut text)?;
-            let (stale, reworded) = match CacheHeader::decode(&text) {
-                Ok(existing) => (!existing.same_separation(&header), existing != header),
-                Err(_) => (true, false),
-            };
-            if stale {
-                std::fs::remove_dir_all(&dir)?;
-            } else if reworded {
-                // Same stems, newer words about them: the record is brought
-                // up to date beside the audio, which stays exactly where it
-                // is. Written beside and renamed, so a crash here cannot
-                // leave a header that reads as no header at all -- which the
-                // next open would answer by deleting the track.
-                let fresh = dir.join("header.tmp");
-                let mut file = File::create(&fresh)?;
-                file.write_all(header.encode().as_bytes())?;
-                file.sync_all()?;
-                drop(file);
-                std::fs::rename(&fresh, &header_path)?;
+            match CacheHeader::decode(&text) {
+                Ok(existing) if existing.same_separation(&header) => {
+                    if existing != header {
+                        // Same stems, newer words about them: the record is
+                        // brought up to date beside the audio, which stays
+                        // exactly where it is.
+                        write_header(&dir, &header)?;
+                    }
+                }
+                Ok(existing)
+                    if existing.model_id != header.model_id || existing.stems != header.stems =>
+                {
+                    return Err(CacheError::Mismatch(format!(
+                        "{} holds {} ({}), not {} ({}); it is left as it is",
+                        dir.display(),
+                        existing.model_id,
+                        existing.stems.join(","),
+                        header.model_id,
+                        header.stems.join(",")
+                    )));
+                }
+                Ok(_) => replace_stale(root, digest)?,
+                Err(_) => {
+                    // A header nothing can read says nothing about the audio
+                    // beside it. With spans recorded that audio may be
+                    // somebody's hours; with none there is nothing to lose.
+                    if records_a_span(&dir) {
+                        return Err(CacheError::Mismatch(format!(
+                            "{} has a header that cannot be read and spans on record; it is \
+                             left as it is",
+                            dir.display()
+                        )));
+                    }
+                    replace_stale(root, digest)?;
+                }
             }
         }
         std::fs::create_dir_all(&dir)?;
-        if !header_path.is_file() {
-            let mut file = File::create(&header_path)?;
-            file.write_all(header.encode().as_bytes())?;
-            file.sync_all()?;
-        }
+        let adopted = !header_path.is_file();
 
         let span_count = header.span_count as usize;
-        let mut spans_file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(dir.join("spans"))?;
+        let gain_bytes = (span_count * header.stems.len() * 4) as u64;
+        let lane_bytes = header.frames * FRAME_BYTES;
+        let open_in_place = |name: &str| {
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(dir.join(name))
+        };
+        let mut spans_file = open_in_place("spans")?;
+        let mut gains_file = open_in_place("gains")?;
+        let mut files = Vec::with_capacity(header.stems.len());
+        for lane in &header.stems {
+            files.push(open_in_place(&format!("{lane}.pcm"))?);
+        }
+        let sized = |file: &File, bytes: u64| file.metadata().is_ok_and(|meta| meta.len() == bytes);
+        let whole = !adopted
+            && sized(&spans_file, span_count as u64)
+            && sized(&gains_file, gain_bytes)
+            && files.iter().all(|file| sized(file, lane_bytes));
+        if !whole {
+            // Forgotten BEFORE the header is written or a file is resized, so
+            // that no crash from here on can leave a record of spans beside
+            // files that do not hold them.
+            spans_file.set_len(0)?;
+            spans_file.sync_data()?;
+        }
+        if adopted {
+            write_header(&dir, &header)?;
+        }
+
         spans_file.set_len(span_count as u64)?;
         let mut present_bytes = vec![0u8; span_count];
         spans_file.seek(SeekFrom::Start(0))?;
         spans_file.read_exact(&mut present_bytes)?;
 
-        let mut gains_file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(dir.join("gains"))?;
-        let gain_bytes = (span_count * header.stems.len() * 4) as u64;
         gains_file.set_len(gain_bytes)?;
         let mut gain_raw = vec![0u8; gain_bytes as usize];
         gains_file.seek(SeekFrom::Start(0))?;
@@ -426,17 +545,8 @@ impl StemCache {
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
 
-        let bytes = header.frames * FRAME_BYTES;
-        let mut files = Vec::with_capacity(header.stems.len());
-        for lane in &header.stems {
-            let file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(dir.join(format!("{lane}.pcm")))?;
-            file.set_len(bytes)?;
-            files.push(file);
+        for file in &files {
+            file.set_len(lane_bytes)?;
         }
 
         // Opening IS using: the LRU order the budget prunes by is the order
@@ -591,12 +701,14 @@ impl StemCache {
             self.gains_file.seek(SeekFrom::Start(slot as u64 * 4))?;
             self.gains_file.write_all(&self.gains[slot].to_le_bytes())?;
         }
-        // The presence flag is written LAST, so a crash mid-write leaves the
-        // span marked absent and it is simply recomputed.
+        // The presence flag is written LAST, and only once the audio it
+        // vouches for has reached the disk, so a crash or a power cut
+        // mid-write leaves the span marked absent and it is simply
+        // recomputed.
         for file in self.files.iter_mut() {
-            file.flush()?;
+            file.sync_data()?;
         }
-        self.gains_file.flush()?;
+        self.gains_file.sync_data()?;
         self.spans_file.seek(SeekFrom::Start(span as u64))?;
         self.spans_file.write_all(&[1u8])?;
         self.spans_file.flush()?;
@@ -784,6 +896,11 @@ pub fn prune(root: impl AsRef<Path>, budget_bytes: u64, keep: &[&str]) -> Result
             continue;
         }
         if name.starts_with('.') {
+            continue;
+        }
+        // Only what is an entry is ever a candidate: a directory somebody
+        // else put under the root is not this cache's to count or delete.
+        if !path.join("header").is_file() {
             continue;
         }
         let bytes = entry_bytes(&path);
@@ -1002,12 +1119,13 @@ mod tests {
     fn a_model_described_in_new_words_keeps_the_stems_it_made() {
         let root = temp_root("reworded");
         let frames = 2 * CHUNK_STEP;
-        let mut old = CacheHeader::for_track(frames as u64);
+        let new = CacheHeader::for_track(frames as u64);
+        let mut old = new.clone();
         old.license = "an earlier wording".to_string();
         old.source = "an earlier address".to_string();
         let digest = "b".repeat(64);
         {
-            let mut cache = StemCache::open(&root, &digest, old.clone()).unwrap();
+            let mut cache = StemCache::open(&root, &digest, new.clone()).unwrap();
             for span in 0..cache.span_count() {
                 cache
                     .write_span(span * CHUNK_STEP, &ramp_stems(CHUNK_STEP, 0.3))
@@ -1015,7 +1133,9 @@ mod tests {
             }
             assert!(cache.is_complete());
         }
-        let new = CacheHeader::for_track(frames as u64);
+        // What a build with other words for the model left behind. No
+        // caller of this one can write it, so it is put there by hand.
+        std::fs::write(root.join(&digest).join("header"), old.encode()).unwrap();
         assert_ne!(old, new);
         assert!(is_complete_on_disk(&root, &digest, &new), "the probe still finds it");
         let cache = StemCache::open(&root, &digest, new.clone()).unwrap();
@@ -1176,7 +1296,7 @@ mod tests {
     #[test]
     fn rejects_a_digest_that_is_a_path() {
         let root = temp_root("path");
-        for bad in ["../escape", "a/b", "with.dot", ""] {
+        for bad in ["../escape", "a/b", "with.dot", "", "D:", "a:b", "two words", "abcd-1"] {
             assert!(
                 StemCache::open(&root, bad, CacheHeader::for_track(CHUNK_STEP as u64)).is_err(),
                 "{bad:?} should be refused"
@@ -1558,9 +1678,11 @@ mod tests {
             root.join(&digest).join("drums.pcm").is_file(),
             "and asking changed nothing"
         );
-        let replaced = StemCache::open(&root, &digest, only_the_lanes_differ).unwrap();
-        assert!(!replaced.is_complete(), "the door starts the entry again");
-        assert!(!replaced.dir().join("drums.pcm").exists());
+        // The door refuses both and starts nothing again.
+        assert!(StemCache::open(&root, &digest, only_the_lanes_differ).is_err());
+        assert!(StemCache::open(&root, &digest, one).is_err());
+        assert!(is_complete_on_disk(&root, &digest, &four));
+        assert!(root.join(&digest).join("drums.pcm").is_file());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1665,6 +1787,148 @@ mod tests {
         assert_eq!(report.removed, vec![("aaaa1111".to_string(), one)]);
         assert_eq!(report.after, 0);
         assert!(!vocal_root.join("aaaa1111").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Two separators never share a directory. One that finds the other's
+    /// entry where its own would go has been handed the wrong root, and says
+    /// so; what is there stays there, whichever of the two came first.
+    #[test]
+    fn an_entry_of_another_model_is_refused_and_left_whole() {
+        let root = temp_root("foreign-entry");
+        filled_entry(&root, "aaaa1111", 2, 100);
+        let four = CacheHeader::for_track(2 * CHUNK_STEP as u64);
+        let before = std::fs::read(root.join("aaaa1111").join("vocals.pcm")).unwrap();
+        assert!(matches!(
+            StemCache::open(&root, "aaaa1111", vocal_header(2 * CHUNK_STEP)),
+            Err(CacheError::Mismatch(_))
+        ));
+        assert!(is_complete_on_disk(&root, "aaaa1111", &four));
+        assert_eq!(std::fs::read(root.join("aaaa1111").join("vocals.pcm")).unwrap(), before);
+        assert!(root.join("aaaa1111").join("drums.pcm").is_file());
+
+        let vocal_root = root.join(".vocal-model");
+        drop(filled_vocal_entry(&vocal_root, "bbbb2222", 2 * VOCAL_STEP));
+        assert!(matches!(
+            StemCache::open(&vocal_root, "bbbb2222", CacheHeader::for_track(2 * VOCAL_STEP as u64)),
+            Err(CacheError::Mismatch(_))
+        ));
+        assert!(is_complete_on_disk(&vocal_root, "bbbb2222", &vocal_header(2 * VOCAL_STEP)));
+        assert!(!vocal_root.join("bbbb2222").join("drums.pcm").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Under the four-stem model's id a header is `for_track`'s and no
+    /// other: older builds delete an entry whose licence or source line
+    /// reads differently, and read silence out of one whose lanes do.
+    #[test]
+    fn a_four_stem_header_built_any_other_way_is_refused() {
+        let root = temp_root("four-stem-guard");
+        filled_entry(&root, "aaaa1111", 1, 100);
+        let right = CacheHeader::for_track(CHUNK_STEP as u64);
+        let text = std::fs::read(root.join("aaaa1111").join("header")).unwrap();
+
+        let mut reworded = right.clone();
+        reworded.license = crate::MODEL_LICENSE.to_string();
+        let mut moved = right.clone();
+        moved.source = "https://example.invalid/".to_string();
+        let mut fewer = right.clone();
+        fewer.stems = vec!["vocals".to_string()];
+        let mut reordered = right.clone();
+        reordered.stems.reverse();
+        for wrong in [reworded, moved, fewer, reordered] {
+            assert!(!is_complete_on_disk(&root, "aaaa1111", &wrong), "{wrong:?}");
+            assert!(StemCache::open(&root, "aaaa1111", wrong.clone()).is_err(), "{wrong:?}");
+            assert!(StemCache::open(&root, "cccc3333", wrong).is_err());
+            assert!(!root.join("cccc3333").exists(), "nor does it start an entry");
+        }
+        assert_eq!(std::fs::read(root.join("aaaa1111").join("header")).unwrap(), text);
+        assert!(is_complete_on_disk(&root, "aaaa1111", &right));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A span record is a claim about the files beside it. When they are
+    /// gone or short -- a delete or a move that died halfway -- the claim is
+    /// void: the probe says no, and the door adopts the directory with every
+    /// span forgotten instead of reading zeros back as finished stems.
+    #[test]
+    fn an_entry_that_lost_its_audio_is_not_complete() {
+        let root = temp_root("lost-audio");
+        let header = CacheHeader::for_track(2 * CHUNK_STEP as u64);
+        let holds_nothing = |digest: &str| {
+            assert!(!is_complete_on_disk(&root, digest, &header), "{digest}");
+            let cache = StemCache::open(&root, digest, header.clone()).unwrap();
+            assert!(!cache.has_span(0) && !cache.has_span(1), "{digest}");
+            drop(cache);
+            assert!(!is_complete_on_disk(&root, digest, &header), "{digest}");
+            assert_eq!(std::fs::read(root.join(digest).join("spans")).unwrap(), vec![0u8, 0]);
+        };
+
+        // The delete got as far as the header and stopped.
+        filled_entry(&root, "aaaa1111", 2, 100);
+        for name in ["bass.pcm", "drums.pcm", "gains", "header"] {
+            std::fs::remove_file(root.join("aaaa1111").join(name)).unwrap();
+        }
+        holds_nothing("aaaa1111");
+
+        // The header survived and a lane did not.
+        filled_entry(&root, "bbbb2222", 2, 100);
+        std::fs::remove_file(root.join("bbbb2222").join("bass.pcm")).unwrap();
+        holds_nothing("bbbb2222");
+
+        // A lane that is there and short.
+        filled_entry(&root, "cccc3333", 2, 100);
+        OpenOptions::new()
+            .write(true)
+            .open(root.join("cccc3333").join("vocals.pcm"))
+            .unwrap()
+            .set_len(CHUNK_STEP as u64 * FRAME_BYTES)
+            .unwrap();
+        holds_nothing("cccc3333");
+
+        // And one that lost nothing is believed, as before.
+        filled_entry(&root, "dddd4444", 2, 100);
+        assert!(is_complete_on_disk(&root, "dddd4444", &header));
+        assert!(StemCache::open(&root, "dddd4444", header.clone()).unwrap().is_complete());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A header nothing can read is no reason to delete spans that are on
+    /// record beside it; with none on record there is nothing to lose and
+    /// the entry starts again.
+    #[test]
+    fn a_header_that_cannot_be_read_does_not_cost_the_spans_beside_it() {
+        let root = temp_root("unreadable-header");
+        filled_entry(&root, "aaaa1111", 1, 100);
+        let dir = root.join("aaaa1111");
+        let header = CacheHeader::for_track(CHUNK_STEP as u64);
+        std::fs::write(dir.join("header"), "").unwrap();
+        assert!(StemCache::open(&root, "aaaa1111", header.clone()).is_err());
+        assert!(dir.join("vocals.pcm").is_file());
+        assert_eq!(std::fs::read(dir.join("spans")).unwrap(), vec![1u8]);
+
+        std::fs::write(dir.join("spans"), [0u8]).unwrap();
+        let cache = StemCache::open(&root, "aaaa1111", header.clone()).unwrap();
+        assert!(!cache.has_span(0));
+        let text = std::fs::read_to_string(dir.join("header")).unwrap();
+        assert_eq!(CacheHeader::decode(&text).unwrap(), header);
+        assert!(!dir.join("header.tmp").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The budget is this cache's own. A directory under the root that is
+    /// not an entry is neither counted nor deleted.
+    #[test]
+    fn a_prune_takes_only_what_is_an_entry() {
+        let root = temp_root("budget-not-an-entry");
+        let bytes = filled_entry(&root, "aaaa1111", 1, 100);
+        let stray = root.join("notes");
+        std::fs::create_dir_all(&stray).unwrap();
+        std::fs::write(stray.join("keep.txt"), vec![7u8; 4096]).unwrap();
+        let report = prune(&root, 0, &[]).unwrap();
+        assert_eq!(report.before, bytes, "{report:?}");
+        assert_eq!(report.removed, vec![("aaaa1111".to_string(), bytes)]);
+        assert!(stray.join("keep.txt").is_file());
         let _ = std::fs::remove_dir_all(&root);
     }
 

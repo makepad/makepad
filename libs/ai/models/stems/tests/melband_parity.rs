@@ -16,9 +16,12 @@
 //! looked for at `MAKEPAD_MELBAND_CKPT` (default
 //! `local/stems_ref/ckpt/MelBandRoformer.ckpt`) and `MAKEPAD_MELBAND_TAPS`
 //! (default `local/melband_ref/taps`), and every test here SKIPS when one is
-//! absent or no device will run the graph, so a machine without them stays
-//! green; on a machine that has them, they are the contract.
+//! absent or the machine has no device runtime, so a machine without them
+//! stays green. On a machine that has all three they are the contract: a
+//! separator that then fails to build is a FAILURE, not a skip -- a renamed
+//! tensor or a wrong extent would otherwise turn every gate here green.
 
+use makepad_ai_common::backend::DeviceRuntime;
 use makepad_ai_stems::config::{AUDIO_CHANNELS, DIM, FEATURES, FREQ_BINS};
 use makepad_ai_stems::melband::config::{
     band_feature_offset, band_mask_offset, band_width, BAND_FEATURES, DEPTH, NUM_BANDS,
@@ -26,7 +29,7 @@ use makepad_ai_stems::melband::config::{
 use makepad_ai_stems::melband::{instrumental, Stage, StageProbe, CHUNK};
 use makepad_ai_stems::model::feature_index;
 use makepad_ai_stems::stft::Stft;
-use makepad_ai_stems::{StereoBuf, VocalsModel};
+use makepad_ai_stems::{demix_all_lanes, ChunkSeparator, StereoBuf, VocalsModel};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -62,6 +65,18 @@ fn fixtures(needs_checkpoint: bool) -> Option<(PathBuf, PathBuf)> {
         return None;
     }
     Some((ckpt, taps))
+}
+
+/// Whether this machine can run a graph at all. The one failure of a load
+/// that is a reason to skip; every other one is the port's.
+fn device_present() -> bool {
+    match DeviceRuntime::new() {
+        Ok(_) => true,
+        Err(e) => {
+            eprintln!("SKIP: no device runtime on this machine: {e}");
+            false
+        }
+    }
 }
 
 /// Minimal `.npy` reader: little-endian f32, C order — everything the oracle
@@ -165,11 +180,11 @@ impl Diff {
     }
 }
 
-/// The band of a `[frame][band][384]` trunk stage that agrees least with the
-/// oracle, and its SNR: a fault in one band's weights or offsets shows here
-/// long before it moves the figure for the whole stage.
-fn worst_band(got: &[f32], want: &[f32], frames: usize) -> (usize, f64) {
-    let mut worst = (0usize, f64::INFINITY);
+/// The SNR of each band of a `[frame][band][384]` trunk stage against the
+/// oracle: a fault in one band's weights or offsets shows here long before
+/// it moves the figure for the whole stage.
+fn band_snrs(got: &[f32], want: &[f32], frames: usize) -> Vec<f64> {
+    let mut snrs = Vec::with_capacity(NUM_BANDS);
     for band in 0..NUM_BANDS {
         let mut err = 0.0f64;
         let mut sig = 0.0f64;
@@ -181,12 +196,16 @@ fn worst_band(got: &[f32], want: &[f32], frames: usize) -> (usize, f64) {
                 sig += (*w as f64) * (*w as f64);
             }
         }
-        let snr = if err > 0.0 { 10.0 * (sig / err).log10() } else { f64::INFINITY };
-        if snr < worst.1 {
-            worst = (band, snr);
-        }
+        snrs.push(if err > 0.0 { 10.0 * (sig / err).log10() } else { f64::INFINITY });
     }
-    worst
+    snrs
+}
+
+/// The band of `bands` that agrees least, and its SNR.
+fn worst_of(snrs: &[f64], bands: std::ops::Range<usize>) -> (usize, f64) {
+    bands
+        .map(|band| (band, snrs[band]))
+        .fold((0, f64::INFINITY), |worst, this| if this.1 < worst.1 { this } else { worst })
 }
 
 #[test]
@@ -198,17 +217,11 @@ fn one_chunk_matches_the_reference_forward() {
     let frames = CHUNK.frames;
 
     let _device = DEVICE.lock().unwrap_or_else(|e| e.into_inner());
+    if !device_present() {
+        return;
+    }
     let load = std::time::Instant::now();
-    let mut model = match VocalsModel::load(&ckpt) {
-        Ok(model) => model,
-        Err(e) => {
-            // A box with no usable device runtime is a valid skip: the
-            // arithmetic is what is under test, and it needs a device to
-            // produce anything at all.
-            eprintln!("SKIP: could not build the separator: {e}");
-            return;
-        }
-    };
+    let mut model = VocalsModel::load(&ckpt).expect("the separator builds from its checkpoint");
     eprintln!("load+compile: {:.2}s", load.elapsed().as_secs_f64());
 
     let run = std::time::Instant::now();
@@ -258,14 +271,17 @@ fn one_chunk_matches_the_reference_forward() {
     // that the difference is numerical noise and not a wrong graph. A layout
     // or convention bug (a band offset in the wrong unit, the GLU halves
     // swapped, a missing output norm, the wrong RoPE flavour) scores
-    // single-digit dB, so both gates are sharp.
+    // single-digit dB. The subtle ones score far higher -- a DC bin left
+    // in on one frame of 801 still reaches some 68 dB -- so the gates sit
+    // close under what the port achieves on this excerpt (masks 89.9 dB,
+    // vocal 119.6 dB), not close above what a gross fault scores.
     assert!(
-        mask.snr_db() >= 50.0,
+        mask.snr_db() >= 75.0,
         "mask SNR vs the oracle is only {:.1} dB",
         mask.snr_db()
     );
     assert!(
-        worst_snr >= 55.0,
+        worst_snr >= 100.0,
         "vocal SNR vs the oracle is only {worst_snr:.1} dB"
     );
     // Absolute ceiling relative to full scale, so a loud passage cannot hide
@@ -306,44 +322,59 @@ fn every_stage_matches_the_reference_forward() {
     // One floor serves every stage. Each band is normalised on its own, so a
     // band with next to nothing in it (the top two or three, above 17 kHz, on
     // most programme material) is scaled up to unit level together with
-    // whatever rounding the transform left there: the production STFT builds
-    // its window in f32 as torch does and the oracle builds it exactly, and
-    // the runtime's norm adds its epsilon under the root where the reference
-    // clamps the norm. On such a band the two forwards part at some 55-75 dB
+    // whatever rounding the transform left there: the production STFT runs
+    // in f32 and builds its window in f32 as torch does, where the oracle
+    // does both in float64. On such a band the two forwards part at some 55-75 dB
     // while every other band agrees past 100, and the stage as a whole lands
     // between. A wrong layout or convention lands in single digits, so 60 dB
     // still tells the two apart with room on both sides.
     const STAGE_FLOOR_DB: f64 = 60.0;
+    // The whole-stage figure is an average over sixty bands, and an average
+    // hides one band that is wrong by a little: so each band is held to a
+    // floor of its own. On this excerpt bands 0-56 agree to 88-137 dB at
+    // every stage and the three above them to 56-86 dB, for the reason
+    // given above; both floors sit some 6-8 dB under the worst observed.
+    const QUIET_BANDS_FROM: usize = 57;
+    const BODY_BAND_FLOOR_DB: f64 = 80.0;
+    const QUIET_BAND_FLOOR_DB: f64 = 50.0;
     let _device = DEVICE.lock().unwrap_or_else(|e| e.into_inner());
+    if !device_present() {
+        return;
+    }
     let mut stages = vec![(Stage::BandSplit, "02_band_split".to_string())];
     for block in 0..DEPTH {
         stages.push((Stage::Layer(block), format!("03_layer_{block}")));
     }
     for (stage, name) in stages {
-        let mut probe = match StageProbe::load(&ckpt, CHUNK, stage) {
-            Ok(probe) => probe,
-            Err(e) => {
-                eprintln!("SKIP: could not build the separator: {e}");
-                return;
-            }
-        };
+        let mut probe =
+            StageProbe::load(&ckpt, CHUNK, stage).expect("the stage builds from its checkpoint");
         let got = probe.run(&chunk).expect("run stage");
         let (shape, want) = read_npy(&taps.join(format!("{name}.npy")));
         assert_eq!(shape, vec![frames, NUM_BANDS, DIM]);
         let diff = Diff::of(&got, &want);
-        let (worst_band, worst_band_db) = worst_band(&got, &want, frames);
+        let snrs = band_snrs(&got, &want, frames);
+        let (body_band, body_db) = worst_of(&snrs, 0..QUIET_BANDS_FROM);
+        let (top_band, top_db) = worst_of(&snrs, QUIET_BANDS_FROM..NUM_BANDS);
         eprintln!(
-            "  {name}: max_abs {:.3e}  snr {:.1} dB  (rms {:.6}); worst band {worst_band} at \
-             {worst_band_db:.1} dB",
+            "  {name}: max_abs {:.3e}  snr {:.1} dB  (rms {:.6}); worst band below \
+             {QUIET_BANDS_FROM}: {body_band} at {body_db:.1} dB; from it up: {top_band} at \
+             {top_db:.1} dB",
             diff.max_abs,
             diff.snr_db(),
             diff.rms_signal
         );
         assert!(
             diff.snr_db() >= STAGE_FLOOR_DB,
-            "{name} is only {:.1} dB against the oracle (worst band {worst_band}, \
-             {worst_band_db:.1} dB)",
+            "{name} is only {:.1} dB against the oracle",
             diff.snr_db()
+        );
+        assert!(
+            body_db >= BODY_BAND_FLOOR_DB,
+            "{name}: band {body_band} is only {body_db:.1} dB against the oracle"
+        );
+        assert!(
+            top_db >= QUIET_BAND_FLOOR_DB,
+            "{name}: band {top_band} is only {top_db:.1} dB against the oracle"
         );
     }
 
@@ -388,6 +419,123 @@ fn every_stage_matches_the_reference_forward() {
         assert!(
             diff.snr_db() >= STAGE_FLOOR_DB,
             "the {what}'s mask is only {:.1} dB against the oracle",
+            diff.snr_db()
+        );
+    }
+}
+
+/// The model through the crate's streaming overlap-add, against the
+/// reference's chunked inference written out here in the plainest way: the
+/// whole track reflect-padded by one border, chunks one step apart, a short
+/// chunk reflect-padded when more than half of it is audio and zero-padded
+/// otherwise, linear fades of a tenth of a chunk that the first chunk's head
+/// and the last chunk's tail do without, and the sum divided by the sum of
+/// the windows. The cursor is proven against a batch loop with stand-in
+/// separators elsewhere; this is the real separator, on its own geometry,
+/// over a track whose last two chunks take one tail rule each.
+#[test]
+fn a_track_of_several_chunks_is_the_reference_overlap_add() {
+    let Some((ckpt, taps)) = fixtures(true) else {
+        return;
+    };
+    let _device = DEVICE.lock().unwrap_or_else(|e| e.into_inner());
+    if !device_present() {
+        return;
+    }
+    // Programme material longer than a chunk: the excerpt, then the excerpt
+    // backwards, cut off the span grid.
+    const LEN: usize = 640_000;
+    let input = read_input(&taps);
+    let mut track = StereoBuf::silence(LEN);
+    for ch in 0..AUDIO_CHANNELS {
+        let src = input.channel(ch);
+        for (i, sample) in track.channel_mut(ch).iter_mut().enumerate() {
+            *sample = if i < src.len() { src[i] } else { src[2 * src.len() - 1 - i] };
+        }
+    }
+
+    let mut model = VocalsModel::load(&ckpt).expect("the separator builds from its checkpoint");
+    let (samples, step, fade, border) = (CHUNK.samples, CHUNK.step, CHUNK.fade, CHUNK.border);
+    assert!(LEN > 2 * border, "the track is long enough to be padded");
+    let padded_len = LEN + 2 * border;
+    let padded = |ch: usize, at: usize| -> f32 {
+        let src = track.channel(ch);
+        let index = at as isize - border as isize;
+        let index = if index < 0 {
+            -index
+        } else if index >= LEN as isize {
+            2 * (LEN as isize - 1) - index
+        } else {
+            index
+        };
+        src[index as usize]
+    };
+    let mut sum = vec![vec![0.0f64; padded_len]; AUDIO_CHANNELS];
+    let mut weight = vec![0.0f64; padded_len];
+    let mut tails = (0usize, 0usize);
+    let mut start = 0usize;
+    while start < padded_len {
+        let chunk_len = (padded_len - start).min(samples);
+        let mut part = StereoBuf::silence(samples);
+        for ch in 0..AUDIO_CHANNELS {
+            let dst = part.channel_mut(ch);
+            for i in 0..chunk_len {
+                dst[i] = padded(ch, start + i);
+            }
+            if chunk_len < samples && chunk_len > samples / 2 {
+                for i in chunk_len..samples {
+                    dst[i] = dst[2 * chunk_len - 2 - i];
+                }
+            }
+        }
+        if chunk_len < samples {
+            if chunk_len > samples / 2 {
+                tails.0 += 1;
+            } else {
+                tails.1 += 1;
+            }
+        }
+        let estimate = model.separate(&part).expect("separate a chunk").remove(0);
+        let first = start == 0;
+        let last = !first && start + samples >= padded_len;
+        for i in 0..chunk_len {
+            let mut w = if i < fade {
+                i as f64 / (fade - 1) as f64
+            } else if i >= samples - fade {
+                (samples - 1 - i) as f64 / (fade - 1) as f64
+            } else {
+                1.0
+            };
+            if (first && i < fade) || (last && i >= samples - fade) {
+                w = 1.0;
+            }
+            for ch in 0..AUDIO_CHANNELS {
+                sum[ch][start + i] += estimate.channel(ch)[i] as f64 * w;
+            }
+            weight[start + i] += w;
+        }
+        start += step;
+    }
+    assert_eq!(tails, (1, 1), "one short chunk of each kind");
+
+    let got = demix_all_lanes(&mut model, &track, |_, _| {}).expect("demix the track");
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].frames(), LEN);
+    for ch in 0..AUDIO_CHANNELS {
+        let want: Vec<f32> = (0..LEN)
+            .map(|i| (sum[ch][border + i] / weight[border + i]) as f32)
+            .collect();
+        let diff = Diff::of(got[0].channel(ch), &want);
+        eprintln!(
+            "  several chunks ch{ch}: max_abs {:.3e}  snr {:.1} dB  (rms {:.6})",
+            diff.max_abs,
+            diff.snr_db(),
+            diff.rms_signal
+        );
+        assert!(diff.rms_signal > 1e-3, "the vocal is near silent on ch{ch}");
+        assert!(
+            diff.snr_db() >= 110.0,
+            "ch{ch} is only {:.1} dB from the reference procedure",
             diff.snr_db()
         );
     }

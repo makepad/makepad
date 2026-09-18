@@ -1114,9 +1114,12 @@ mod tests {
                 // Seek to the last span, a few samples in.
                 let last = (len - 1) / step;
                 let seek_to = last * step + 5;
+                four.forwards = 0;
+                one.forwards = 0;
                 let four_spans = spans_across_a_seek(&mut four, &track, seek_to);
                 let one_spans = spans_across_a_seek(&mut one, &track, seek_to);
                 assert_eq!(four_spans.len(), one_spans.len());
+                assert_eq!(one.forwards, four.forwards, "a seek costs either shape the same");
                 assert_eq!(
                     one_spans.iter().map(|s| s.start).collect::<Vec<_>>(),
                     vec![0, last * step],
@@ -1136,6 +1139,35 @@ mod tests {
                     };
                     assert!(same_bits(&a.lanes[0], &straight), "span at {}", a.start);
                 }
+            }
+        }
+    }
+
+    /// A seek costs the two chunks that cover the span it lands on, however
+    /// far into the track that is. On a track of twenty spans, the first
+    /// span, a seek to the last and the run to the end are five forwards --
+    /// two for the first span, two for the seek and one for the chunk that
+    /// holds only the trailing padding -- where the straight run is over
+    /// twenty. For one lane as for four, at every geometry.
+    #[test]
+    fn a_seek_costs_the_chunks_that_cover_its_span_and_no_more() {
+        for geometry in lane_geometries() {
+            let step = geometry.step;
+            let len = 20 * step;
+            let track = noise_track(len);
+            assert!(geometry.chunk_count(len) > 20);
+            for targets in [1, NUM_STEMS] {
+                let mut separator = FakeSeparator::new(geometry, targets, 0);
+                let spans = spans_across_a_seek(&mut separator, &track, 19 * step + 5);
+                assert_eq!(
+                    spans.iter().map(|span| span.start).collect::<Vec<_>>(),
+                    vec![0, 19 * step]
+                );
+                assert_eq!(
+                    separator.forwards, 5,
+                    "chunk {} with {targets} lanes",
+                    geometry.samples
+                );
             }
         }
     }

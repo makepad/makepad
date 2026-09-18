@@ -51,8 +51,9 @@ impl ModelIdentity {
 /// `vocals` lane in 4-second spans, the step of [`CHUNK`].
 ///
 /// An entry under this header must live under a root of its own. Opening it
-/// on a directory that holds a four-stem entry of the same track replaces
-/// that entry, exactly as any other foreign header would.
+/// on a directory that holds a four-stem entry of the same track is refused
+/// and leaves that entry alone, but builds that know nothing of lanes share
+/// the four-stem root, and they delete what they do not recognise.
 pub fn cache_header(frames: u64) -> CacheHeader {
     CacheHeader::for_model(
         &ModelIdentity::MEL_BAND_VOCALS,

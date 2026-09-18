@@ -29,7 +29,8 @@ use super::config::*;
 use super::weights::{band_bias, band_gamma, band_weight, mask_name, norm_name};
 use crate::config::{DIM, FEATURES};
 use crate::graph::{
-    add, debug_assert_extents, norm_scale, positions, swap12_cont, transformer, weights_id,
+    add, debug_assert_extents, norm_scale, norm_scale_eps, positions, swap12_cont, transformer,
+    weights_id,
 };
 use crate::weights::StemsWeights;
 use makepad_ai_common::{
@@ -38,6 +39,15 @@ use makepad_ai_common::{
 
 const ACT: BufferUsage = BufferUsage::Activations;
 const F32_SIZE: usize = 4;
+/// The epsilon of the band-split norm, the one norm here that sees the raw
+/// spectrogram. The reference divides by the band's norm and only clamps
+/// that at 1e-12, which floors nothing a recording holds: a band with next
+/// to no energy in it is brought up to unit level like any other, and the
+/// network was trained on exactly that. The runtime adds its epsilon under
+/// the root of the MEAN square instead, where the shared 1e-12 would hold
+/// every band quieter than -120 dBFS below unit level. 1e-30 keeps an
+/// all-zero band finite and floors nothing either.
+const BAND_NORM_EPS: f32 = 1e-30;
 
 /// How far into the forward a graph is built.
 ///
@@ -145,7 +155,7 @@ fn forward(
         let x = ctx
             .cont_3d(slice, w, frames_i, 1)
             .map_err(DiffusionError::model)?;
-        let x = norm_scale(ctx, x, weights_id(ctx, &band_gamma(band))?)?;
+        let x = norm_scale_eps(ctx, x, weights_id(ctx, &band_gamma(band))?, BAND_NORM_EPS)?;
         let x = ctx
             .mul_mat(weights_id(ctx, &band_weight(band))?, x, ACT)
             .map_err(DiffusionError::model)?;

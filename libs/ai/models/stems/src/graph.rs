@@ -334,8 +334,19 @@ pub(crate) fn norm_scale(
     x: TensorId,
     gamma: TensorId,
 ) -> Result<TensorId> {
+    norm_scale_eps(ctx, x, gamma, NORM_EPS)
+}
+
+/// [`norm_scale`] with the epsilon of the caller's choosing, for a graph
+/// whose input is not at the scale [`NORM_EPS`] was chosen for.
+pub(crate) fn norm_scale_eps(
+    ctx: &mut Context,
+    x: TensorId,
+    gamma: TensorId,
+    eps: f32,
+) -> Result<TensorId> {
     let n = ctx
-        .rms_norm_eps(x, NORM_EPS, ACT)
+        .rms_norm_eps(x, eps, ACT)
         .map_err(DiffusionError::model)?;
     ctx.binary_like_a(Op::Mul, n, gamma, ACT)
         .map_err(DiffusionError::model)
