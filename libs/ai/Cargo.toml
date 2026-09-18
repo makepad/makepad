@@ -28,4 +28,10 @@ members = [
     "models/notes",
     "models/trellis",
 ]
+# hub_ui and services sit in this directory but are members of the root
+# workspace, so cargo has to be told they aren't ours.
+exclude = [
+    "hub_ui",
+    "services",
+]
 resolver = "2"
