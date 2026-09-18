@@ -7,7 +7,7 @@ use {
     crate::makepad_platform::studio::WidgetSnapshot,
     crate::radio_button::RadioButton,
     crate::text_input::TextInput,
-    crate::widget::{WidgetRef, WidgetRegistry, WidgetUid, WidgetWeakRef},
+    crate::widget::{SnapshotPart, WidgetRef, WidgetRegistry, WidgetUid, WidgetWeakRef},
     crate::widget_async::update_global_ui_handle,
     crate::window::Window,
     std::any::TypeId,
@@ -67,6 +67,99 @@ pub(crate) fn widget_type_names(cx: &Cx) -> HashMap<TypeId, LiveId> {
         widget_type_names.insert(*type_id, info.name);
     }
     widget_type_names
+}
+
+/// The rows a widget's drawn parts add to the snapshot, in the window of the
+/// widget that drew them. A part is only as visible as the widget it belongs
+/// to: a hidden bar's items must not look pressable to a test. Parts with no
+/// size are left out, as a dock header with no size is.
+fn snapshot_part_rows(
+    parts: Vec<SnapshotPart>,
+    node_visible: bool,
+    window_id: &str,
+    window_index: usize,
+    offset: (i64, i64),
+) -> Vec<WidgetSnapshot> {
+    parts
+        .into_iter()
+        .filter_map(|part| {
+            let width = part.rect.size.x.round() as i64;
+            let height = part.rect.size.y.round() as i64;
+            if width <= 0 || height <= 0 {
+                return None;
+            }
+            Some(WidgetSnapshot {
+                id: live_id_token(part.id),
+                widget_type: part.widget_type.to_string(),
+                window_id: window_id.to_string(),
+                window_index,
+                visible: node_visible,
+                enabled: part.enabled,
+                x: part.rect.pos.x.round() as i64 + offset.0,
+                y: part.rect.pos.y.round() as i64 + offset.1,
+                width,
+                height,
+                selected: part.selected.then(|| part.text.clone()),
+                checked: Some(part.selected),
+                text: Some(part.text),
+                value: None,
+            })
+        })
+        .collect()
+}
+
+/// What a widget reported about itself through the `Widget` snapshot hooks.
+#[derive(Default)]
+struct SnapshotHooks {
+    checked: Option<bool>,
+    value: Option<String>,
+    selected: Option<String>,
+}
+
+/// What the tree can still read from the five widget types it knew before
+/// the hooks existed, plus the widget's plain text.
+#[derive(Default)]
+struct SnapshotFallback {
+    checked: Option<bool>,
+    selected: Option<String>,
+    is_button: bool,
+    is_text_input: bool,
+    text: String,
+}
+
+struct SnapshotState {
+    text: Option<String>,
+    value: Option<String>,
+    checked: Option<bool>,
+    selected: Option<String>,
+}
+
+/// The rules the snapshot has always followed, with the hooks in front:
+/// a text input reports its contents as `value` and no `text`; buttons and
+/// anything with a checked state always report `text`, even empty; any
+/// other widget reports `text` only when it has some; a selection also
+/// becomes the row's `text`.
+fn merge_snapshot_state(hooks: SnapshotHooks, fallback: SnapshotFallback) -> SnapshotState {
+    let checked = hooks.checked.or(fallback.checked);
+    let selected = hooks.selected.or(fallback.selected);
+    let mut value = hooks.value;
+    let mut text = None;
+    if fallback.is_text_input {
+        if value.is_none() {
+            value = Some(fallback.text);
+        }
+    } else if fallback.is_button || checked.is_some() || !fallback.text.is_empty() {
+        text = Some(fallback.text);
+    }
+    if let Some(selected) = &selected {
+        text = Some(selected.clone());
+    }
+    SnapshotState {
+        text,
+        value,
+        checked,
+        selected,
+    }
 }
 
 /// The screen rect a viewer actually sees for `area`, or `None` when the area
@@ -2241,6 +2334,34 @@ impl WidgetTree {
                     }
                 }
                 dump_index += 1;
+
+                // The parts a widget draws for itself, in the shape of the
+                // dock's lines below, so a query can find an item no widget
+                // node holds. Only for a widget drawn this frame, as its own
+                // line is: parts cached from an earlier draw would give a
+                // test coordinates for something no longer on screen.
+                for part in widget.snapshot_parts(cx) {
+                    let x = part.rect.pos.x.round() as i64;
+                    let y = part.rect.pos.y.round() as i64;
+                    let w = part.rect.size.x.round() as i64;
+                    let h = part.rect.size.y.round() as i64;
+                    if w <= 0 || h <= 0 {
+                        continue;
+                    }
+                    let id_token = live_id_token(part.id);
+                    if matches_query(mode, needle, &id_token, part.widget_type) {
+                        rects.push(format!(
+                            "PP {} {} {} {} {} {}",
+                            id_token, part.widget_type, x, y, w, h
+                        ));
+                        if rects.len() >= 256 {
+                            break;
+                        }
+                    }
+                }
+            }
+            if rects.len() >= 256 {
+                break;
             }
 
             let dock_dump = widget.borrow::<Dock>().map(|dock| dock.compact_dump(cx));
@@ -2393,6 +2514,10 @@ impl WidgetTree {
             // [0,0,0,0] — one big wheel left 100 of those in the snapshot.
             let node_visible = effective_visible(index) && width > 0 && height > 0;
 
+            // Each downcast in its own statement: `borrow::<T>()` hands back
+            // a `Ref` guard, and a guard born inside a longer expression
+            // lives to the end of that expression, where `widget.text()`
+            // would find the cell already borrowed.
             let is_button = widget.borrow::<Button>().is_some();
             let button_enabled = widget.borrow::<Button>().map(|button| button.enabled());
             let check_box_active = widget
@@ -2405,69 +2530,71 @@ impl WidgetTree {
                 .borrow::<DropDown>()
                 .map(|drop_down| drop_down.selected_item_label());
             let is_text_input = widget.borrow::<TextInput>().is_some();
+            let widget_text = widget.text();
 
-            let mut text = None;
-            let mut value = None;
-            if is_text_input {
-                value = Some(widget.text());
-            } else {
-                let widget_text = widget.text();
-                if is_button
-                    || check_box_active.is_some()
-                    || radio_active.is_some()
-                    || !widget_text.is_empty()
-                {
-                    text = Some(widget_text);
-                }
-            }
-            if let Some(selected) = dropdown_selected.clone() {
-                text = Some(selected.clone());
-                widgets.push(WidgetSnapshot {
-                    id,
-                    widget_type,
-                    window_id: window_context
-                        .as_ref()
-                        .map(|context| context.id.clone())
-                        .unwrap_or_default(),
-                    window_index: window_context
-                        .as_ref()
-                        .map(|context| context.index)
-                        .unwrap_or_default(),
-                    visible: node_visible,
-                    enabled: button_enabled.unwrap_or_else(|| !widget.disabled(cx)),
-                    x,
-                    y,
-                    width,
-                    height,
-                    text,
-                    value,
-                    checked: check_box_active.or(radio_active),
-                    selected: Some(selected),
-                });
-            } else {
-                widgets.push(WidgetSnapshot {
-                    id,
-                    widget_type,
-                    window_id: window_context
-                        .as_ref()
-                        .map(|context| context.id.clone())
-                        .unwrap_or_default(),
-                    window_index: window_context
-                        .as_ref()
-                        .map(|context| context.index)
-                        .unwrap_or_default(),
-                    visible: node_visible,
-                    enabled: button_enabled.unwrap_or_else(|| !widget.disabled(cx)),
-                    x,
-                    y,
-                    width,
-                    height,
-                    text,
-                    value,
-                    checked: check_box_active.or(radio_active),
-                    selected: None,
-                });
-            }
+            // What the widget says about itself comes first; the downcasts
+            // above only answer for the five original types when it says
+            // nothing, so a widget the tree has never heard of can still be
+            // waited on by `wait_checked`/`wait_value`.
+            let hooks = SnapshotHooks {
+                checked: widget.snapshot_checked(cx),
+                value: widget.snapshot_value(cx),
+                selected: widget.snapshot_selected(cx),
+            };
+            let fallback = SnapshotFallback {
+                checked: check_box_active.or(radio_active),
+                selected: dropdown_selected,
+                is_button,
+                is_text_input,
+                text: widget_text,
+            };
+            let state = merge_snapshot_state(hooks, fallback);
+
+            widgets.push(WidgetSnapshot {
+                id,
+                widget_type,
+                window_id: window_context
+                    .as_ref()
+                    .map(|context| context.id.clone())
+                    .unwrap_or_default(),
+                window_index: window_context
+                    .as_ref()
+                    .map(|context| context.index)
+                    .unwrap_or_default(),
+                visible: node_visible,
+                enabled: button_enabled.unwrap_or_else(|| !widget.disabled(cx)),
+                x,
+                y,
+                width,
+                height,
+                text: state.text,
+                value: state.value,
+                checked: state.checked,
+                selected: state.selected,
+            });
+
+            let window_offset = window_context
+                .as_ref()
+                .map(|context| {
+                    (
+                        context.position.x.round() as i64,
+                        context.position.y.round() as i64,
+                    )
+                })
+                .unwrap_or_default();
+            widgets.extend(snapshot_part_rows(
+                widget.snapshot_parts(cx),
+                node_visible,
+                &window_context
+                    .as_ref()
+                    .map(|context| context.id.clone())
+                    .unwrap_or_default(),
+                window_context
+                    .as_ref()
+                    .map(|context| context.index)
+                    .unwrap_or_default(),
+                window_offset,
+            ));
 
             let dock_dump = widget.borrow::<Dock>().map(|dock| dock.compact_dump(cx));
             if let Some(dock_dump) = dock_dump {
@@ -2547,7 +2674,9 @@ impl WidgetTree {
 
     /// The live widget hierarchy flattened depth-first for the tweaker's
     /// tree tab: (uid, name, type, depth). Every alive node appears; depth
-    /// is the tree distance from its window root.
+    /// is the tree distance from its window root. A row whose widget is an
+    /// inspector says so, read from its type rather than its name, so the
+    /// tree tab can leave every inspector out without guessing.
     pub fn flat_tree(&self, cx: &Cx) -> Vec<FlatTreeRow> {
         self.sync_dirty();
         let inner = self.inner.borrow();
@@ -2571,8 +2700,8 @@ impl WidgetTree {
                 continue;
             };
             let name = inner.names[index];
-            let ty = widget
-                .widget_type_id()
+            let type_id = widget.widget_type_id();
+            let ty = type_id
                 .and_then(|type_id| widget_type_names.get(&type_id).copied())
                 .unwrap_or(LiveId(0));
             out.push(FlatTreeRow {
@@ -2581,6 +2710,7 @@ impl WidgetTree {
                 ty: live_id_token(ty),
                 depth,
                 has_children: !children[index].is_empty(),
+                inspector: type_id == Some(TypeId::of::<crate::tweaker::Tweaker>()),
             });
             for child in children[index].iter().rev() {
                 stack.push((*child, depth + 1));
@@ -2887,6 +3017,9 @@ pub struct FlatTreeRow {
     pub ty: String,
     pub depth: u32,
     pub has_children: bool,
+    /// The widget is an inspector (a `Tweaker`). False when its type could
+    /// not be read, which is the case while it is borrowed.
+    pub inspector: bool,
 }
 
 #[derive(Default)]
@@ -3280,6 +3413,13 @@ mod tests {
         let root = make_widget(root_uid, vec![(name("node"), w.clone())]);
         tree.observe_node(root_uid, name("root"), root.clone(), None);
         tree.observe_node(uid, name("node"), w.clone(), Some(root_uid));
+
+        // find_within searches WITHIN a subtree, so a node never answers to
+        // its own name from inside itself - the walk skips the root it was
+        // handed. Asking the node for itself finds nothing.
+        assert!(tree.find_within(uid, &[name("node")]).is_empty());
+
+        // Asking its parent does.
         let found = tree.find_within(root_uid, &[name("node")]);
         assert!(!found.is_empty());
         assert_eq!(found.widget_uid(), uid);
@@ -4859,5 +4999,270 @@ mod tests {
             new_label_uid,
             "WidgetRef::widget should refresh the same dynamic branch that child_by_path sees"
         );
+    }
+
+    /// A widget that draws its own targets, the way a bar of items drawn
+    /// in Rust does, and reports them through the parts hook.
+    struct PartsTestWidget {
+        uid: WidgetUid,
+        area: Area,
+        parts: Vec<SnapshotPart>,
+    }
+
+    impl ScriptApply for PartsTestWidget {
+        fn script_apply(
+            &mut self,
+            _vm: &mut ScriptVm,
+            _apply: &Apply,
+            _scope: &mut Scope,
+            _value: ScriptValue,
+        ) {
+        }
+    }
+
+    impl WidgetNode for PartsTestWidget {
+        fn widget_uid(&self) -> WidgetUid {
+            self.uid
+        }
+        fn children(&self, _visit: &mut dyn FnMut(LiveId, WidgetRef)) {}
+        fn walk(&mut self, _cx: &mut Cx) -> Walk {
+            Walk::default()
+        }
+        fn area(&self) -> Area {
+            self.area
+        }
+        fn redraw(&mut self, _cx: &mut Cx) {}
+    }
+
+    impl Widget for PartsTestWidget {
+        fn draw_walk(&mut self, _cx: &mut Cx2d, _scope: &mut Scope, _walk: Walk) -> DrawStep {
+            DrawStep::done()
+        }
+        fn snapshot_parts(&self, _cx: &Cx) -> Vec<SnapshotPart> {
+            self.parts.clone()
+        }
+    }
+
+    fn part(id: &str, rect: Rect, text: &str, selected: bool, enabled: bool) -> SnapshotPart {
+        SnapshotPart {
+            // Through the lookup table, so the tree can spell the id back.
+            id: LiveId::from_str_with_lut(id).unwrap(),
+            widget_type: "PillNavItem",
+            rect,
+            text: text.to_string(),
+            selected,
+            enabled,
+        }
+    }
+
+    /// Items a widget draws for itself show in the test tree as rows after
+    /// the widget's own, with their type, words and state, and a query
+    /// finds them by type or id; an item with no size is left out.
+    #[test]
+    fn snapshot_reports_the_parts_a_widget_draws() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        drop(cx.components.get_or_create::<WidgetRegistry>());
+        let (_list, area) = snapshot_area(&mut cx);
+        let parts = vec![
+            part("home", Rect { pos: dvec2(10.0, 20.0), size: dvec2(60.4, 24.6) }, "Home", true, true),
+            part("docs", Rect { pos: dvec2(72.0, 20.0), size: dvec2(50.0, 24.0) }, "Docs", false, false),
+            part("gone", Rect { pos: dvec2(130.0, 20.0), size: dvec2(0.0, 24.0) }, "Gone", false, true),
+        ];
+        let uid = WidgetUid::new();
+        let bar = WidgetRef::new_with_inner(Box::new(PartsTestWidget { uid, area, parts }));
+        let tree = WidgetTree::default();
+        tree.observe_node(uid, LiveId::from_str_with_lut("bar").unwrap(), bar.clone(), None);
+
+        let rows = tree.snapshot(&cx);
+        assert_eq!(rows.len(), 3, "the widget and its two parts with a size");
+        assert_eq!(rows[0].id, "bar");
+        let home = &rows[1];
+        assert_eq!((home.id.as_str(), home.widget_type.as_str()), ("home", "PillNavItem"));
+        assert_eq!((home.x, home.y, home.width, home.height), (10, 20, 60, 25));
+        assert_eq!(home.text.as_deref(), Some("Home"));
+        assert_eq!(home.checked, Some(true));
+        assert_eq!(home.selected.as_deref(), Some("Home"));
+        assert_eq!(home.value, None);
+        assert!(home.visible && home.enabled);
+        let docs = &rows[2];
+        assert_eq!((docs.id.as_str(), docs.text.as_deref()), ("docs", Some("Docs")));
+        assert_eq!((docs.checked, docs.selected.as_deref()), (Some(false), None));
+        assert!(docs.visible && !docs.enabled);
+
+        assert_eq!(
+            tree.query_rects(&cx, "type:PillNavItem"),
+            vec!["PP home PillNavItem 10 20 60 25", "PP docs PillNavItem 72 20 50 24"]
+        );
+        assert_eq!(tree.query_rects(&cx, "id:docs"), vec!["PP docs PillNavItem 72 20 50 24"]);
+        drop(bar);
+    }
+
+    /// A widget not drawn this frame has no line in a query, and its parts
+    /// none either: rects cached from an earlier draw would send a test to
+    /// press something no longer on screen.
+    #[test]
+    fn a_widget_not_drawn_this_frame_reports_no_parts() {
+        let cx = Cx::new(Box::new(|_, _| {}));
+        drop(cx.components.get_or_create::<WidgetRegistry>());
+        let parts = vec![part("stale", Rect { pos: dvec2(10.0, 20.0), size: dvec2(60.0, 24.0) }, "Stale", false, true)];
+        let uid = WidgetUid::new();
+        let bar = WidgetRef::new_with_inner(Box::new(PartsTestWidget { uid, area: Area::Empty, parts }));
+        let tree = WidgetTree::default();
+        tree.observe_node(uid, LiveId::from_str_with_lut("bar").unwrap(), bar.clone(), None);
+        assert!(tree.query_rects(&cx, "type:PillNavItem").is_empty());
+        assert!(tree.query_rects(&cx, "id:stale").is_empty());
+        drop(bar);
+    }
+
+    /// A part sits in its widget's window: the window's offset is added as
+    /// it is to the widget's own row, and a hidden widget's parts are hidden.
+    #[test]
+    fn snapshot_parts_take_their_window_and_visibility_from_the_widget() {
+        let parts = vec![part("home", Rect { pos: dvec2(10.0, 20.0), size: dvec2(60.0, 24.0) }, "Home", false, true)];
+        let rows = snapshot_part_rows(parts.clone(), true, "main_window", 2, (100, 50));
+        assert_eq!(rows.len(), 1);
+        assert_eq!((rows[0].x, rows[0].y), (110, 70));
+        assert_eq!((rows[0].window_id.as_str(), rows[0].window_index), ("main_window", 2));
+        assert!(rows[0].visible);
+        let hidden = snapshot_part_rows(parts, false, "main_window", 2, (100, 50));
+        assert!(!hidden[0].visible, "a hidden widget's items are not pressable");
+    }
+
+    fn plain_fallback(text: &str) -> SnapshotFallback {
+        SnapshotFallback {
+            text: text.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn snapshot_hooks_come_before_the_downcasts() {
+        let state = merge_snapshot_state(
+            SnapshotHooks {
+                checked: Some(false),
+                value: Some("7".into()),
+                selected: Some("B".into()),
+            },
+            SnapshotFallback {
+                checked: Some(true),
+                selected: Some("A".into()),
+                ..plain_fallback("x")
+            },
+        );
+        assert_eq!(state.checked, Some(false));
+        assert_eq!(state.value.as_deref(), Some("7"));
+        assert_eq!(state.selected.as_deref(), Some("B"));
+        assert_eq!(state.text.as_deref(), Some("B"));
+    }
+
+    #[test]
+    fn snapshot_downcasts_still_answer_when_the_hooks_are_silent() {
+        let state = merge_snapshot_state(
+            SnapshotHooks::default(),
+            SnapshotFallback {
+                checked: Some(true),
+                ..plain_fallback("")
+            },
+        );
+        assert_eq!(state.checked, Some(true));
+        assert_eq!(state.text.as_deref(), Some(""));
+        assert_eq!(state.value, None);
+        assert_eq!(state.selected, None);
+    }
+
+    #[test]
+    fn snapshot_text_input_reports_a_value_and_no_text() {
+        let state = merge_snapshot_state(
+            SnapshotHooks::default(),
+            SnapshotFallback {
+                is_text_input: true,
+                ..plain_fallback("typed")
+            },
+        );
+        assert_eq!(state.value.as_deref(), Some("typed"));
+        assert_eq!(state.text, None);
+        let hooked = merge_snapshot_state(
+            SnapshotHooks {
+                value: Some("hooked".into()),
+                ..Default::default()
+            },
+            SnapshotFallback {
+                is_text_input: true,
+                ..plain_fallback("typed")
+            },
+        );
+        assert_eq!(hooked.value.as_deref(), Some("hooked"));
+        assert_eq!(hooked.text, None);
+    }
+
+    #[test]
+    fn snapshot_plain_widgets_report_text_only_when_they_have_some() {
+        assert_eq!(
+            merge_snapshot_state(SnapshotHooks::default(), plain_fallback("")).text,
+            None
+        );
+        assert_eq!(
+            merge_snapshot_state(SnapshotHooks::default(), plain_fallback("hi"))
+                .text
+                .as_deref(),
+            Some("hi")
+        );
+        let button = merge_snapshot_state(
+            SnapshotHooks::default(),
+            SnapshotFallback {
+                is_button: true,
+                ..plain_fallback("")
+            },
+        );
+        assert_eq!(button.text.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn flat_tree_marks_every_tweaker_as_an_inspector_by_its_type() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let tree = WidgetTree::default();
+        // Two windows, each carrying a real inspector, and in each an app
+        // widget that only shares the inspector's name. The nodes are weak,
+        // so every widget is held to the end.
+        let mut held = Vec::new();
+        let mut inspectors = Vec::new();
+        for window in ["out_window", "main_window"] {
+            let tweaker = WidgetRef::new_with_inner(Box::new(
+                cx.with_vm(crate::tweaker::Tweaker::script_new),
+            ));
+            let namesake_uid = WidgetUid::new();
+            let namesake = make_widget(namesake_uid, vec![]);
+            let body_uid = WidgetUid::new();
+            let body = make_widget(body_uid, vec![(name("tweaker"), namesake.clone())]);
+            let window_uid = WidgetUid::new();
+            let root = make_widget(
+                window_uid,
+                vec![(name("body"), body.clone()), (name("tweaker"), tweaker.clone())],
+            );
+            tree.observe_node(window_uid, name(window), root.clone(), None);
+            tree.observe_node(body_uid, name("body"), body.clone(), Some(window_uid));
+            tree.observe_node(namesake_uid, name("tweaker"), namesake.clone(), Some(body_uid));
+            tree.observe_node(tweaker.widget_uid(), name("tweaker"), tweaker.clone(), Some(window_uid));
+            inspectors.push(tweaker.clone());
+            held.extend([root, body, namesake, tweaker]);
+        }
+        let inspector_uids: Vec<u64> = inspectors.iter().map(|w| w.widget_uid().0).collect();
+        let rows = tree.flat_tree(&cx);
+        assert_eq!(rows.len(), 8);
+        for row in &rows {
+            assert_eq!(row.inspector, inspector_uids.contains(&row.uid), "row {} {}", row.uid, row.name);
+        }
+        // Borrowed, as the one hosting a read is: neither its type nor its
+        // uid can be read, so nothing marks it and it reads uid 0. The other
+        // window's inspector is still marked.
+        let host = inspectors[1].borrow_mut::<crate::tweaker::Tweaker>().unwrap();
+        let rows = tree.flat_tree(&cx);
+        assert_eq!(
+            rows.iter().filter(|row| row.inspector).map(|row| row.uid).collect::<Vec<_>>(),
+            vec![inspector_uids[0]]
+        );
+        assert!(rows.iter().any(|row| row.uid == 0 && !row.inspector));
+        drop(host);
     }
 }

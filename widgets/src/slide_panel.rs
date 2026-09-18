@@ -49,6 +49,7 @@ pub enum SlideSide {
     Left,
     Right,
     Top,
+    Bottom,
 }
 
 #[derive(Script, ScriptHook, Widget, Animator)]
@@ -134,6 +135,11 @@ impl Widget for SlidePanel {
                 parent_rect.pos.x + parent_rect.size.x - panel_rect.size.x
                     + panel_rect.size.x * self.active,
                 parent_rect.pos.y,
+            ),
+            SlideSide::Bottom => dvec2(
+                parent_rect.pos.x,
+                parent_rect.pos.y + parent_rect.size.y - panel_rect.size.y
+                    + panel_rect.size.y * self.active,
             ),
         };
 

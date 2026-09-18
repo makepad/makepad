@@ -24,6 +24,18 @@ script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
 
+    // The quad one continuation row is drawn with. It carries no colours of
+    // its own, so nothing anybody can see is drawn until a list says what its
+    // ruling is.
+    set_type_default() do #(DrawFillerQuad::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        color_row: uniform(#0000)
+        color_row_alt: uniform(#0000)
+        pixel: fn() {
+            return self.color_row.mix(self.color_row_alt, self.alternate)
+        }
+    }
+
     mod.widgets.PortalListBase = #(PortalList::register_widget(vm))
 
     mod.widgets.PortalList = set_type_default() do mod.widgets.PortalListBase {
@@ -32,6 +44,45 @@ script_mod! {
         capture_overload: true
         scroll_bar: mod.widgets.ScrollBar {}
         flow: Down
+
+        // The ruling the continuation rows carry on with: the same theme pair
+        // every other ruled list in the library stripes by, so a list whose
+        // own rows use the house colours agrees with its own filler for free.
+        // Drawn only when `filler_rows` is on, which it is not by default.
+        filler +: {
+            color_row: theme.color_bg_even
+            color_row_alt: theme.color_bg_odd
+        }
+
+        // The kinetic knobs, restated here so the design overlay can reach
+        // them. A `#[live]` default alone gives the panel a value with no
+        // bounds, so it renders as a bare number with no scrubber; the
+        // bounds live in the annotation, and the annotation lives in the
+        // DSL. These are the only such knobs the overlay can reach at all:
+        // it expands an object one level, so a View's `scroll_bars.` rows
+        // stop at the bar itself, while this list's are its own fields.
+        /** the slowest release that still throws the list 0.05..2 step 0.05 */
+        flick_scroll_minimum: 0.2
+        /** the fastest a hard flick may throw it 20..600 step 10 */
+        flick_scroll_maximum: 240.0
+        // Interpolated rather than copied: the default is one number in
+        // scroll_motion.rs and restating it here by hand is how the two
+        // quietly stop agreeing.
+        /** how fast a flick runs down, per millisecond 0.98..0.9999 step 0.0005 */
+        fling_decel: #(crate::scroll_motion::FLING_DECEL_RATE_PER_MS)
+        /** rubber-band past the top edge 0..1 step 1 */
+        bounce_at_start: true
+        /** rubber-band past the bottom edge 0..1 step 1 */
+        bounce_at_end: true
+        /** how fast the tail follows new content 0.05..1 step 0.05 */
+        smooth_tail_speed: 0.25
+        // Named here only so the panel can say what they are. Both are read
+        // by nothing: a knob that silently does nothing is worse than one
+        // that says it does nothing.
+        /** DEAD: the fling speed comes from the measured release now */
+        flick_scroll_scaling: 0.005
+        /** DEAD: the run-down rate is fling_decel now */
+        flick_scroll_decay: 0.97
     }
 }
 
@@ -41,6 +92,70 @@ const SMOOTH_SCROLL_MAXIMUM_WINDOW: usize = 20;
 /// How many frames a `smooth_scroll_to_end` animation takes, whatever the
 /// distance, so a long list doesn't crawl at a fixed pixels-per-frame rate.
 const SMOOTH_SCROLL_TO_END_FRAMES: f64 = 24.0;
+
+/// The quad one continuation row is drawn with.
+///
+/// `alternate` is `0.0` on an even row index and `1.0` on an odd one, which is
+/// the parity a host's own row background stripes by, so the ruling carries on
+/// in the colour the next real row would have had.
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+struct DrawFillerQuad {
+    #[deref]
+    draw_super: DrawQuad,
+    #[live]
+    alternate: f32,
+}
+
+/// The most continuation rows one draw will put in the gap. A pitch smaller
+/// than [`FILLER_MIN_PITCH`] is refused outright, so this only ever bites on a
+/// viewport tall enough to want hundreds of rows, where the ones past it are
+/// off screen anyway.
+const MAX_FILLER_ROWS: usize = 256;
+
+/// The smallest gap worth ruling, and the smallest row pitch worth ruling it
+/// with, in pixels. Below either, the filler draws nothing: sub-pixel rows are
+/// a hairline of the wrong colour, not a table.
+const FILLER_MIN_PITCH: f64 = 0.5;
+
+/// Where a short list's continuation rows go, relative to the viewport's own
+/// start along the scroll axis.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FillerBand {
+    /// The edge of the content the rows continue from.
+    origin: f64,
+    /// How much room there is to rule.
+    gap: f64,
+    /// `1` when the rows run on past the content, `-1` when they run back
+    /// before it.
+    step: isize,
+}
+
+/// How many continuation rows fit in a gap, and how tall the last one is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FillerRun {
+    /// The number of rows to draw, the last of them clamped.
+    rows: usize,
+    /// The size of the final row, which is what was left over.
+    last: f64,
+}
+
+/// Everything the continuation rows need, worked out while the drawn rows are
+/// still on hand and used once the borrow on them is released.
+#[derive(Clone, Copy)]
+struct FillerPlan {
+    /// The viewport the rows run inside.
+    viewport: Rect,
+    /// Which way they run, from where, and how far.
+    band: FillerBand,
+    /// One row's size along the scroll axis, taken from the row the filler
+    /// continues from: this list has no uniform row height, so the pitch can
+    /// only come from a row that was actually measured.
+    pitch: f64,
+    /// The index of that row, which is where the striping's parity continues
+    /// from.
+    from_index: usize,
+}
 
 enum ScrollState {
     Stopped,
@@ -556,6 +671,39 @@ pub struct PortalList {
     #[live(false)]
     reuse_items: bool,
 
+    /// Whether a list whose rows don't fill the viewport carries its ruling on
+    /// past the last row, so the leftover space reads as blank paper rather
+    /// than as the list stopping mid-air.
+    ///
+    /// Off by default, and worth turning on only for a list that is already
+    /// ruled: a table, a ledger, a directory listing. On a list drawn over a
+    /// plain ground it would sprout stripes out of nowhere.
+    ///
+    /// The rows are drawn with [`Self::filler`], at the pitch of the row the
+    /// filler continues from — this list has no uniform row height, so the
+    /// pitch can only come from a row that was measured — and the last one is
+    /// clamped to whatever room is left. A list resting at its end instead of
+    /// its start (`align_top_when_empty: false`) keeps its gap at the leading
+    /// edge, so the ruling runs the other way, back before the first row. An
+    /// empty list draws none of this: an empty state is what answers that.
+    #[live(false)]
+    filler_rows: bool,
+    /// The quad one continuation row is drawn with; see [`Self::filler_rows`].
+    #[live]
+    filler: DrawFillerQuad,
+
+    /// A row the host asked to keep on screen, honoured at the end of the next
+    /// draw and then forgotten. `None` — the default — leaves the list
+    /// positioned by scrolling alone.
+    #[rust]
+    keep_visible_in_draw: Option<usize>,
+    /// How many rows a recalled row lands short of the edge it came back over
+    /// (see [`Self::keep_index_visible`]). One row by default: a row pinned
+    /// flush against an edge reads as the end of the list, with nothing beyond
+    /// it to say the list goes on.
+    #[live(1)]
+    keep_visible_lead: usize,
+
     // Templates stored as rooted ScriptObjectRef - populated in on_after_apply
     #[rust]
     templates: HashMap<LiveId, ScriptObjectRef>,
@@ -689,6 +837,7 @@ impl PortalList {
 
         let vi = self.vec_index;
         let mut visible_items = 0;
+        let mut filler_plan = None;
 
         if let Some(ListDrawState::End { viewport }) = self.draw_state.get() {
             let list = &mut self.draw_align_list;
@@ -705,12 +854,16 @@ impl PortalList {
                 let mut last_pos = self.first_scroll;
                 let mut last_item_pos = None;
                 let mut last_drawn_index = None;
+                // The size of that same last row, which is the pitch the
+                // continuation rows take when there are any.
+                let mut last_drawn_size = 0.0;
                 for i in first_index..list.len() {
                     let item = &list[i];
                     last_pos += item.size.index(vi);
                     if item.index < self.range_end {
                         last_item_pos = Some(last_pos);
                         last_drawn_index = Some(item.index);
+                        last_drawn_size = item.size.index(vi);
                     } else {
                         break;
                     }
@@ -723,6 +876,12 @@ impl PortalList {
                 // a zero-size item appears in the middle of the visible range.
                 let drew_last_item = last_drawn_index == Some(self.range_end.saturating_sub(1));
 
+                // How far the two branches below move the whole run of rows
+                // from where `first_pos`/`last_item_pos` measured it. Adding it
+                // back is what puts the content's two edges in the viewport's
+                // own coordinates, which is all the filler needs. Both branches
+                // set it before anything reads it.
+                let content_shift;
                 let mut total_at_start = None;
                 if list[0].index == self.range_start {
                     let mut total = 0.0;
@@ -773,6 +932,7 @@ impl PortalList {
                     };
 
                     let mut pos = first_pos.min(min);
+                    content_shift = pos - first_pos;
                     for item in list.iter() {
                         let shift = Vec2d::from_index_pair(vi, pos, 0.0);
                         cx.shift_align_range(
@@ -817,6 +977,7 @@ impl PortalList {
                         0.0
                     };
 
+                    content_shift = shift;
                     let mut first_id_changed = false;
                     let start_pos = self.first_scroll + shift;
                     let mut pos = start_pos;
@@ -862,6 +1023,36 @@ impl PortalList {
                         self.first_scroll = start_pos;
                     }
                 }
+
+                // Where the continuation rows go, worked out here where the
+                // drawn rows and their settled positions are both on hand. The
+                // drawing itself waits for the borrow on the rows to be
+                // released, at the end of this block.
+                if self.filler_rows && self.not_filling_viewport {
+                    if let (Some(last_index), Some(last_pos)) =
+                        (last_drawn_index, last_item_pos)
+                    {
+                        let first = &list[0];
+                        let (from_index, pitch) = if self.align_top_when_empty {
+                            (last_index, last_drawn_size)
+                        } else {
+                            (first.index, first.size.index(vi))
+                        };
+                        filler_plan = filler_band(
+                            self.align_top_when_empty,
+                            first_pos + content_shift,
+                            last_pos + content_shift,
+                            viewport.size.index(vi),
+                        )
+                        .map(|band| FillerPlan {
+                            viewport,
+                            band,
+                            pitch,
+                            from_index,
+                        });
+                    }
+                }
+
                 // Capture measured heights into height_tree and height_cache
                 for item in list.iter() {
                     if item.index >= self.range_start && item.index < self.range_end {
@@ -944,6 +1135,12 @@ impl PortalList {
                     }
                 }
             }
+        }
+
+        // After the rows and before the scroll bar: the ruling is the ground
+        // the rows sit on, and the bar sits over both.
+        if let Some(plan) = filler_plan {
+            self.draw_filler_rows(cx, plan);
         }
 
         let rect = cx.turtle().rect();
@@ -1086,7 +1283,42 @@ impl PortalList {
                 cx.widget_action(self.widget_uid(), PortalListAction::Scroll);
             }
         }
+
+        // A row the host asked to hold, judged last of all: against the window
+        // this draw actually landed on, so a list whose rows moved under it is
+        // measured where it now is rather than where it was, and after the
+        // notifications above, which belong to the position just drawn.
+        self.apply_keep_visible(cx);
 }
+
+    /// Draws the continuation rows of a short list: one quad per row, at the
+    /// pitch of the row the ruling continues from, with the row nearest the
+    /// viewport edge clamped to what is left. Nothing is allocated here — the
+    /// run is two numbers and the quad is reused for every row.
+    fn draw_filler_rows(&mut self, cx: &mut Cx2d, plan: FillerPlan) {
+        let vi = self.vec_index;
+        let run = filler_run(plan.band.gap, plan.pitch, MAX_FILLER_ROWS);
+        let mut pos = plan.band.origin;
+        for n in 0..run.rows {
+            let size = if n + 1 == run.rows { run.last } else { plan.pitch };
+            // Running backwards, a row is laid out from its own far edge.
+            let start = if plan.band.step > 0 { pos } else { pos - size };
+            self.filler.alternate =
+                filler_alternate(plan.from_index, plan.band.step * (n as isize + 1));
+            let rect = match vi {
+                Vec2Index::Y => Rect {
+                    pos: dvec2(plan.viewport.pos.x, plan.viewport.pos.y + start),
+                    size: dvec2(plan.viewport.size.x, size),
+                },
+                Vec2Index::X => Rect {
+                    pos: dvec2(plan.viewport.pos.x + start, plan.viewport.pos.y),
+                    size: dvec2(size, plan.viewport.size.y),
+                },
+            };
+            self.filler.draw_abs(cx, rect);
+            pos += if plan.band.step > 0 { size } else { -size };
+        }
+    }
 
     /// Returns the index of the next visible item that will be drawn by this PortalList.
     pub fn next_visible_item(&mut self, cx: &mut Cx2d) -> Option<usize> {
@@ -1527,6 +1759,26 @@ impl PortalList {
         }
     }
 
+    /// Every area this list owns for the question "whose press is this": its
+    /// own area and its scroll bar's handle.
+    ///
+    /// [`CxFingers::is_mouse_held_outside`] is asked with the areas the host
+    /// owns, and a bar of its own is one of them — a reader grabbing this
+    /// list's bar is working this list, not some outside control, so the list
+    /// still takes the key focus that press carries. The helper matches
+    /// captures by owner, so a handle redrawn mid-drag still counts even
+    /// though its `redraw_id` has moved on.
+    ///
+    /// This set is deliberately NOT used for the list's own raw-press gestures
+    /// (drag-to-scroll, the selection drag). Those must stand down against the
+    /// list's own bar just as they stand down against a slider: the bar is a
+    /// continuously dragged control holding the pointer, and a drag of the bar
+    /// that also drag-scrolled the list would move it twice, in opposite
+    /// directions. They ask with `self.area` alone.
+    pub fn own_press_areas(&self) -> [Area; 2] {
+        [self.area, self.scroll_bar.area()]
+    }
+
     pub fn update_scroll_bar(&mut self, cx: &mut Cx) {
         // Use pixel-based position from height_tree
         if let Some(ref tree) = self.height_tree {
@@ -1564,6 +1816,23 @@ impl PortalList {
         self.stretching = false;
         self.was_scrolling = false;
         self.caught_fling = None;
+    }
+
+    /// Whether this list keeps a scroll delta it is about to apply (positive
+    /// toward the start), judged from where it rests now; see
+    /// [`list_keeps_scroll_delta`]. `finger_driven` is a trackpad gesture with
+    /// the fingers down, the only input that stretches a rubber band.
+    fn keeps_scroll_delta(&self, delta: f64, finger_driven: bool) -> bool {
+        let empty = self.range_start == self.range_end;
+        let at_start = empty || (self.first_id == self.range_start && self.first_scroll >= 0.0);
+        let at_end = empty || self.at_end;
+        let band = finger_driven
+            && !empty
+            && ((delta > 0.0 && self.bounce_at_start)
+                || (delta < 0.0 && self.bounce_at_end)
+                || (self.first_id == self.range_start && self.first_scroll > 0.0)
+                || self.bounce_overshoot > 0.0);
+        list_keeps_scroll_delta(delta, at_start, at_end, band)
     }
 
     /// Whether a press at `time` belongs to a touch that just stopped live motion.
@@ -1730,6 +1999,70 @@ impl PortalList {
     /// Enables or disables auto-tracking the last item in the list.
     pub fn set_tail_range(&mut self, tail_range: bool) {
         self.tail_range = tail_range;
+    }
+
+    /// Keeps the row at `index` on screen.
+    ///
+    /// A row that is already showing holds the list exactly where it is: this
+    /// is the whole point of asking for it rather than scrolling to the row,
+    /// which would move a list that had no need to move. A row that has gone
+    /// off either edge is brought back the shortest way, landing
+    /// `keep_visible_lead` rows short of the edge it came back over so it is
+    /// not pinned flush against it.
+    ///
+    /// Ask for this whenever the row the host cares about may have moved under
+    /// the list: after rows were inserted or removed above it (its index has
+    /// changed, so the list is showing a different stretch of the data than
+    /// the host thinks), or when the current item is chosen somewhere else
+    /// entirely and this list is one of the places that shows it. It is a
+    /// one-shot request, honoured at the end of the next draw and then
+    /// forgotten, so the user is free to scroll the row off afterwards — the
+    /// list never drags it back on its own.
+    ///
+    /// Two positions the list already holds win over the request, and it is
+    /// dropped rather than fought: a list that is tailing (`auto_tail` or
+    /// [`Self::set_tail_range`]) is already following its last row, and a
+    /// finger or a fling that owns the scroll is the user's, not the host's.
+    pub fn keep_index_visible(&mut self, cx: &mut Cx, index: usize) {
+        self.keep_visible_in_draw = Some(index);
+        self.area.redraw(cx);
+    }
+
+    /// Consumes a [`Self::keep_index_visible`] request at the end of a draw,
+    /// where the window that was actually drawn is known.
+    fn apply_keep_visible(&mut self, cx: &mut Cx2d) {
+        let Some(index) = self.keep_visible_in_draw.take() else {
+            return;
+        };
+        if index >= self.range_end {
+            return;
+        }
+        // The tail owns a tailing list, and a gesture owns a list being
+        // scrolled; either way the request has nothing to correct.
+        if self.tail_range
+            || matches!(
+                self.scroll_state,
+                ScrollState::Flick { .. }
+                    | ScrollState::Pulldown { .. }
+                    | ScrollState::Drag { .. }
+            )
+        {
+            return;
+        }
+        if let Some(first_id) = first_id_keeping_index_visible(
+            index,
+            self.first_id,
+            self.visible_items,
+            self.range_start,
+            self.keep_visible_lead,
+        ) {
+            self.first_id = first_id;
+            self.first_scroll = 0.0;
+            // The list was repositioned by code, so showing an end of it now
+            // is news again — the same rule `set_first_id_and_scroll` follows.
+            self.forget_reached_edges();
+            self.area.redraw(cx);
+        }
     }
 
     /// Sets the flow direction, e.g. to switch a list between a vertical
@@ -2767,7 +3100,14 @@ impl Widget for PortalList {
         if !self.scroll_bar.is_area_captured(cx) || is_scroll {
             let hit = event.hits_with_capture_overload(cx, self.area, self.capture_overload);
             match hit {
+                // A scroll view in one of the rows already moved by this delta.
+                Hit::FingerScroll(_) if event.scroll_handled(vi) => {}
                 Hit::FingerScroll(e) => {
+                    // Whatever this list moves by is its own: the event is marked
+                    // handled, so the scroll views around the list, which see it
+                    // after, don't move by it as well. A delta pointing past an edge
+                    // the list rests on is left for them (`keeps_scroll_delta`).
+                    //
                     // Trackpad scrolling on macOS is a gesture with phases: user-driven deltas
                     // while the fingers move (`Began`/`Changed`), then the OS's own decaying
                     // `Momentum` deltas after they lift. Both are applied exactly as delivered,
@@ -2825,6 +3165,10 @@ impl Widget for PortalList {
                                 {
                                     self.area.redraw(cx);
                                 }
+                                // Pinned, the coast chains on to the scroll view around.
+                                if !matches!(self.momentum, MomentumStream::Pinned { .. }) {
+                                    event.set_scroll_handled(vi);
+                                }
                             }
                         }
                         ScrollPhase::MomentumEnded => {
@@ -2866,6 +3210,9 @@ impl Widget for PortalList {
                             // Fingers lifted. Apply the final delta; the OS momentum stream
                             // that may follow is now expected. A stretched rubber band
                             // springs back from here instead (and takes no momentum).
+                            // The final delta clips at the edges like a wheel's; a stretch
+                            // left showing is the list's, and its spring starts below.
+                            let keeps = self.keeps_scroll_delta(delta, false);
                             self.was_scrolling = false;
                             self.scroll_state = ScrollState::Stopped;
                             self.momentum = MomentumStream::Expected { since: e.time };
@@ -2900,6 +3247,9 @@ impl Widget for PortalList {
                                 self.delta_top_scroll(cx, delta, true, false, 0.0, false, true);
                                 self.area.redraw(cx);
                             }
+                            if keeps || matches!(self.scroll_state, ScrollState::Pulldown { .. }) {
+                                event.set_scroll_handled(vi);
+                            }
                         }
                         // Finger-driven deltas apply directly, stretching the rubber band
                         // past an edge. A user-driven delta also stops any in-progress
@@ -2914,11 +3264,17 @@ impl Widget for PortalList {
                                 self.last_finger_scroll_time = Some(e.time);
                             }
                             self.scroll_state = ScrollState::Stopped;
+                            if self.keeps_scroll_delta(delta, true) {
+                                event.set_scroll_handled(vi);
+                            }
                             self.delta_top_scroll(cx, delta, false, false, 0.0, false, true);
                             self.area.redraw(cx);
                         }
                         // `None` (wheels) applies the delta directly and clips at the edges.
                         _ => {
+                            if self.keeps_scroll_delta(delta, false) {
+                                event.set_scroll_handled(vi);
+                            }
                             self.tail_range = false;
                             self.detect_tail_in_draw = true;
                             self.was_scrolling = false;
@@ -3019,7 +3375,35 @@ impl Widget for PortalList {
                     }
                 }
                 Hit::FingerDown(fe) => {
-                    if self.grab_key_focus {
+                    // Who owns this press? A control that is dragged
+                    // continuously — a slider, a fader, a scroll bar, a
+                    // resizer — takes the pointer on its press, and from then
+                    // until the release the interaction is locked to it:
+                    // nothing else may take a gesture, a hover or a focus from
+                    // that same pointer. This list is exactly the host that
+                    // would break that rule, because `capture_overload` makes
+                    // it co-capture every press landing inside it, child
+                    // controls included — so the answer has to be asked for
+                    // rather than assumed from having been handed a hit. Its
+                    // own co-capture is `mine` and does not count.
+                    //
+                    // Only the MOUSE locks. A touch that starts on a control
+                    // may still drag-scroll the list under it, the way every
+                    // native list behaves, so `is_mouse_held_outside` answers
+                    // `false` for touch captures and the touch paths below are
+                    // left exactly as they were.
+                    // The gestures below ask with `self.area` alone: this
+                    // list's own scroll bar IS an outside holder to them, for
+                    // the reason spelled out on `own_press_areas`.
+                    let held_elsewhere = cx.fingers.is_mouse_held_outside(&[self.area]);
+                    // A press a child control holds is that control's, so this
+                    // list does not pull the key focus off it on the way past.
+                    // The focus asks with everything the list owns, its bar
+                    // included: a press on its own bar is its own press and
+                    // still brings the keyboard here.
+                    let held_by_another_widget =
+                        cx.fingers.is_mouse_held_outside(&self.own_press_areas());
+                    if self.grab_key_focus && !held_by_another_widget {
                         cx.set_key_focus(self.area);
                     }
                     // A press that doesn't end up moving us off the end shouldn't stop
@@ -3065,7 +3449,12 @@ impl Widget for PortalList {
 
                     // Handle selection when selectable, but not if clicking on interactive items
                     let on_interactive = self.point_hits_interactive_item(cx, fe.abs);
-                    if self.selectable && fe.is_primary_hit() && !on_interactive {
+                    // A selection drag is a gesture of this list's, so it takes
+                    // a press only on bare text: not over an interactive item
+                    // (`on_interactive`), and not while a control owns the
+                    // mouse — a control whose own area the item walk misses
+                    // still holds the pointer, and `held_elsewhere` catches it.
+                    if self.selectable && fe.is_primary_hit() && !on_interactive && !held_elsewhere {
                         let hit = self.hit_test_selection(cx, fe.abs);
                         if let Some((item_id, char_idx)) = hit {
                             cx.set_key_focus(self.area);
@@ -3081,13 +3470,20 @@ impl Widget for PortalList {
                             });
                             self.update_item_selections(cx);
                         }
-                    } else if self.drag_scrolling && fe.is_primary_hit()
-                        && cx.is_scrolling_allowed_within(&self.area)
-                    {
-                        // Always enter drag state to enable drag-to-scroll even over
-                        // interactive widgets (buttons, links, etc.). The drag threshold
-                        // prevents micro-scrolling during taps/clicks, and child widgets
-                        // use `was_tap()` to distinguish taps from drags on FingerUp.
+                    } else if press_starts_drag_scroll(
+                        self.drag_scrolling,
+                        fe.is_primary_hit(),
+                        cx.is_scrolling_allowed_within(&self.area),
+                        fe.device.is_touch(),
+                        held_elsewhere,
+                    ) {
+                        // A touch enters the drag state over interactive widgets
+                        // too — that is how a finger scrolls a list of buttons —
+                        // and the threshold below keeps a tap from micro-scrolling;
+                        // children use `was_tap()` to tell a tap from a drag on
+                        // FingerUp. A mouse press a control holds never gets here:
+                        // dragging a slider's thumb must not also scroll the list
+                        // the slider sits in.
                         let initial = fe.abs.index(vi);
                         self.scroll_state = ScrollState::Drag {
                             samples: vec![ScrollSample {
@@ -3104,6 +3500,22 @@ impl Widget for PortalList {
                     }
                 }
                 Hit::FingerMove(e) => {
+                    // The other half of the rule for the selection drag, asked
+                    // again on every move for the same reason the scroll drag
+                    // below asks again: the press and a control's capture can
+                    // land in either order inside one event, so a control can
+                    // take the pointer after this selection began. The moment
+                    // it does the selection stands down, keeping what it has
+                    // already selected but extending it no further.
+                    if self.is_selecting
+                        && selection_drag_stands_down(
+                            e.device.is_touch(),
+                            cx.fingers.is_mouse_held_outside(&[self.area]),
+                        )
+                    {
+                        self.is_selecting = false;
+                        self.select_scroll_state = None;
+                    }
                     // Handle selection when selecting
                     if self.is_selecting {
                         cx.set_cursor(MouseCursor::Text);
@@ -3124,6 +3536,21 @@ impl Widget for PortalList {
                         // interactive-widget hit test for touch events entirely.
                         if !e.device.is_touch() && !self.point_hits_interactive_item(cx, e.abs) {
                             cx.set_cursor(MouseCursor::Default);
+                        }
+                        // The other half of the rule, asked again on every move:
+                        // a press and a child's capture can land in either order
+                        // within one event, and a control may take the pointer
+                        // after this drag started. The moment something else owns
+                        // the mouse this drag stands down — and gives the children
+                        // back the events it was swallowing.
+                        if matches!(self.scroll_state, ScrollState::Drag { .. })
+                            && drag_scroll_stands_down(
+                                e.device.is_touch(),
+                                cx.fingers.is_mouse_held_outside(&[self.area]),
+                            )
+                        {
+                            self.scroll_state = ScrollState::Stopped;
+                            self.suppress_child_events = false;
                         }
                         if let ScrollState::Drag {
                             samples,
@@ -3340,6 +3767,13 @@ impl PortalListRef {
     pub fn set_tail_range(&self, tail_range: bool) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.tail_range = tail_range;
+        }
+    }
+
+    /// See [`PortalList::keep_index_visible()`].
+    pub fn keep_index_visible(&self, cx: &mut Cx, index: usize) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.keep_index_visible(cx, index);
         }
     }
 
@@ -3644,6 +4078,190 @@ impl PortalListRef {
 
 type ItemsWithActions = Vec<(usize, WidgetRef)>;
 
+/// Whether a press may start this list's drag-to-scroll.
+///
+/// Drag-to-scroll is a gesture the list starts from a press that is not its
+/// own: `capture_overload` hands it the FingerDown for every press inside it,
+/// including one a child control already captured. So it has to decide, and
+/// the rule it decides by is the app-wide one — a control that is dragged
+/// continuously locks the pointer, and any other gesture that would start from
+/// the same press stands down until the release.
+///
+/// `mouse_held_outside` is `CxFingers::is_mouse_held_outside` asked with this
+/// list's own area: true means a slider, fader, scroll bar or resizer owns the
+/// mouse right now. A mouse press it holds may not scroll the list; a TOUCH
+/// still may, because a finger that lands on a control and drags is scrolling
+/// the list in every native toolkit, and `is_mouse_held_outside` deliberately
+/// ignores touch captures so `is_touch` is the only exemption needed here.
+fn press_starts_drag_scroll(
+    drag_scrolling: bool,
+    is_primary_hit: bool,
+    scrolling_allowed: bool,
+    is_touch: bool,
+    mouse_held_outside: bool,
+) -> bool {
+    drag_scrolling && is_primary_hit && scrolling_allowed && (is_touch || !mouse_held_outside)
+}
+
+/// Whether a drag-to-scroll already under way must stand down on this move.
+///
+/// The press and a child's capture can land in either order inside one event,
+/// and a control can take the pointer after the drag began, so the question is
+/// re-asked on every move rather than only at the press. Touch is exempt for
+/// the same reason as in [`press_starts_drag_scroll`].
+fn drag_scroll_stands_down(is_touch: bool, mouse_held_outside: bool) -> bool {
+    !is_touch && mouse_held_outside
+}
+
+/// Whether a text-selection drag already under way must stand down on this
+/// move.
+///
+/// A selection drag is a gesture of the list's own, started from a raw press
+/// the same way drag-to-scroll is, so it answers to the same rule and for the
+/// same reasons as [`drag_scroll_stands_down`]: asked again on every move
+/// because the press and a control's capture can land in either order, and
+/// touch exempt because a finger that lands on a control may still work the
+/// list under it.
+fn selection_drag_stands_down(is_touch: bool, mouse_held_outside: bool) -> bool {
+    drag_scroll_stands_down(is_touch, mouse_held_outside)
+}
+
+/// Whether a list keeps a scroll delta it is handed, which makes the delta
+/// spent: the event is marked handled, and no scroll view around the list
+/// moves by it as well. `delta` is positive toward the list's start.
+///
+/// A delta the list has room for is kept, even when the room is smaller than
+/// the delta. So is one a rubber band takes (`band`: the fingers are on the
+/// trackpad and the edge stretches, or a stretch is showing that the delta may
+/// unwind). A delta pointing past an edge the list already rests on is not, and
+/// the scroll view around the list moves by it instead — the rule a
+/// `ScrollBar` pinned at its limit follows, so nested scroll views and lists
+/// hand a wheel on the same way.
+///
+/// The list is judged before the delta is applied, and `at_end` comes from its
+/// last draw: a delta toward the end is added to the scroll even when the last
+/// row already sits on the bottom, and only the next draw pins it back, so the
+/// scroll changing is no proof the list moved.
+fn list_keeps_scroll_delta(delta: f64, at_start: bool, at_end: bool, band: bool) -> bool {
+    if delta == 0.0 {
+        false
+    } else if band {
+        true
+    } else if delta > 0.0 {
+        !at_start
+    } else {
+        !at_end
+    }
+}
+
+/// Where a list must sit so the row at `index` is on screen, or `None` when it
+/// already is and the list must not move at all.
+///
+/// The window is the `visible_items` rows from `first_id`, the stretch the last
+/// draw put on screen. A row that went off the start comes back `lead` rows
+/// down from the start of the window, and one that went off the end comes back
+/// `lead` rows up from the end of it, so the row the host cares about always
+/// has a neighbour beyond it saying the list goes on. Both are clamped so the
+/// row itself stays in the window, which is what a list too short for the lead,
+/// or a row too near the start of the range for it, comes down to.
+///
+/// A window of no rows means nothing was drawn, so the row is off screen by
+/// definition and comes back at the start of the window.
+fn first_id_keeping_index_visible(
+    index: usize,
+    first_id: usize,
+    visible_items: usize,
+    range_start: usize,
+    lead: usize,
+) -> Option<usize> {
+    if visible_items > 0 && index >= first_id && index < first_id + visible_items {
+        return None;
+    }
+    if index < first_id || visible_items == 0 {
+        return Some(index.saturating_sub(lead).max(range_start));
+    }
+    // Off the end: put the row `lead` rows up from the bottom of the window,
+    // never so far that the row itself goes off the top of it.
+    let first = index
+        .saturating_add(lead)
+        .saturating_add(1)
+        .saturating_sub(visible_items)
+        .max(range_start)
+        .min(index);
+    Some(first)
+}
+
+/// Where a short list's continuation rows go, and which way they run, from the
+/// content's two edges in the viewport's own coordinates.
+///
+/// A list resting at its start leaves its gap after the last row and the ruling
+/// runs on past it. A list resting at its end (`align_top_when_empty: false`)
+/// leaves the gap at the leading edge instead, so the ruling runs the other
+/// way, back before the first row. `None` when there is no gap worth ruling.
+fn filler_band(
+    align_top: bool,
+    content_start: f64,
+    content_end: f64,
+    viewport: f64,
+) -> Option<FillerBand> {
+    let band = if align_top {
+        FillerBand {
+            origin: content_end,
+            gap: viewport - content_end,
+            step: 1,
+        }
+    } else {
+        FillerBand {
+            origin: content_start,
+            gap: content_start,
+            step: -1,
+        }
+    };
+    (band.gap > FILLER_MIN_PITCH).then_some(band)
+}
+
+/// How many continuation rows of `pitch` fit in `gap`, and how tall the last of
+/// them is once it is clamped to what is left.
+///
+/// A gap shorter than one row is one clamped row, not none: that sliver is the
+/// top of the row the list would have drawn next, and leaving it blank is the
+/// ragged edge the ruling exists to remove. A gap or a pitch too small to rule,
+/// or one that isn't a number, draws nothing at all.
+fn filler_run(gap: f64, pitch: f64, max_rows: usize) -> FillerRun {
+    let none = FillerRun { rows: 0, last: 0.0 };
+    if !(gap > FILLER_MIN_PITCH) || !(pitch > FILLER_MIN_PITCH) || max_rows == 0 {
+        return none;
+    }
+    let whole = (gap / pitch).floor();
+    // A float too big for a usize saturates rather than wrapping, and the cap
+    // below catches it either way.
+    let mut rows = whole as usize;
+    let mut last = pitch;
+    let rest = gap - whole * pitch;
+    if rest > FILLER_MIN_PITCH {
+        rows += 1;
+        last = rest;
+    }
+    if rows > max_rows {
+        rows = max_rows;
+        last = pitch;
+    }
+    FillerRun { rows, last }
+}
+
+/// The striping of the continuation row `offset` rows past `from_index`
+/// (negative for the rows before it): `0.0` on an even row index and `1.0` on
+/// an odd one, the parity a ruled list's own rows stripe by, so the ruling
+/// carries on in the colour the next real row would have had.
+fn filler_alternate(from_index: usize, offset: isize) -> f32 {
+    let index = from_index as i64 + offset as i64;
+    if index.rem_euclid(2) == 0 {
+        0.0
+    } else {
+        1.0
+    }
+}
+
 impl PortalListSet {
     pub fn set_first_id(&self, id: usize) {
         for list in self.iter() {
@@ -3657,5 +4275,833 @@ impl PortalListSet {
             list.items_with_actions_vec(actions, &mut set);
         }
         set
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::event::ScrollEvent;
+    use crate::log_list::LogList;
+    use crate::makepad_draw::cx_draw::CxDraw;
+    use std::cell::Cell;
+
+    // Deltas are positive toward the start: a wheel rolled up.
+    const UP: f64 = 60.0;
+    const DOWN: f64 = -60.0;
+
+    /// Between its edges a list keeps every wheel, whichever way it rolls, so
+    /// the page around it stays put.
+    #[test]
+    fn a_list_between_its_edges_keeps_the_wheel_both_ways() {
+        assert!(list_keeps_scroll_delta(UP, false, false, false));
+        assert!(list_keeps_scroll_delta(DOWN, false, false, false));
+    }
+
+    /// At the top, a wheel rolled up has nowhere to take the list and goes on
+    /// to the page; rolled down it still moves the list and stays.
+    #[test]
+    fn at_the_top_only_the_wheel_toward_the_top_passes_on() {
+        assert!(!list_keeps_scroll_delta(UP, true, false, false));
+        assert!(list_keeps_scroll_delta(DOWN, true, false, false));
+    }
+
+    /// The same at the bottom, the other way round.
+    #[test]
+    fn at_the_bottom_only_the_wheel_toward_the_bottom_passes_on() {
+        assert!(!list_keeps_scroll_delta(DOWN, false, true, false));
+        assert!(list_keeps_scroll_delta(UP, false, true, false));
+    }
+
+    /// A list whose rows all fit rests on both edges and never scrolls, so
+    /// it takes no wheel from the page it sits on.
+    #[test]
+    fn a_list_that_fits_passes_every_wheel_on() {
+        assert!(!list_keeps_scroll_delta(UP, true, true, false));
+        assert!(!list_keeps_scroll_delta(DOWN, true, true, false));
+    }
+
+    /// A rubber band past an edge is the list moving: fingers stretching it
+    /// keep the delta even at that edge.
+    #[test]
+    fn a_rubber_band_keeps_what_it_stretches_by() {
+        assert!(list_keeps_scroll_delta(UP, true, true, true));
+        assert!(list_keeps_scroll_delta(DOWN, true, true, true));
+    }
+
+    /// No delta along the list's axis is nothing to keep: the other axis of
+    /// the same event stays free for a scroll view that runs across it.
+    #[test]
+    fn no_delta_is_never_kept() {
+        assert!(!list_keeps_scroll_delta(0.0, false, false, false));
+        assert!(!list_keeps_scroll_delta(0.0, false, false, true));
+    }
+
+    // A list showing five rows from row 10, i.e. rows 10 to 14.
+    const FIRST: usize = 10;
+    const WINDOW: usize = 5;
+    /// One row of daylight between a recalled row and the edge it came over.
+    const LEAD: usize = 1;
+
+    /// Asking for a row that is already showing is not a scroll request: the
+    /// list holds exactly where it is, wherever in the window the row sits.
+    #[test]
+    fn a_row_already_on_screen_holds_the_list_still() {
+        for index in FIRST..FIRST + WINDOW {
+            assert_eq!(
+                first_id_keeping_index_visible(index, FIRST, WINDOW, 0, LEAD),
+                None,
+                "the list moved for row {index}, which was already showing"
+            );
+        }
+    }
+
+    /// A row that went off the top comes back with the lead above it, so it
+    /// isn't pinned to the very edge.
+    #[test]
+    fn a_row_off_the_top_comes_back_short_of_the_top() {
+        assert_eq!(
+            first_id_keeping_index_visible(3, FIRST, WINDOW, 0, LEAD),
+            Some(2)
+        );
+        assert_eq!(
+            first_id_keeping_index_visible(9, FIRST, WINDOW, 0, 3),
+            Some(6)
+        );
+    }
+
+    /// The same off the bottom: the row lands one row up from the end of the
+    /// window rather than half off it.
+    #[test]
+    fn a_row_off_the_bottom_comes_back_short_of_the_bottom() {
+        let first = first_id_keeping_index_visible(20, FIRST, WINDOW, 0, LEAD).unwrap();
+        assert_eq!(first, 17);
+        // 17..22 shows the row with one row after it.
+        assert!(first <= 20 && 20 < first + WINDOW);
+        assert_eq!(20 - first + LEAD, WINDOW - 1);
+    }
+
+    /// The lead is daylight, not a promise: near the start of the range there
+    /// is none to be had, and the list stops at the first row it has.
+    #[test]
+    fn the_lead_never_runs_past_the_start_of_the_range() {
+        assert_eq!(
+            first_id_keeping_index_visible(0, FIRST, WINDOW, 0, LEAD),
+            Some(0)
+        );
+        assert_eq!(
+            first_id_keeping_index_visible(5, FIRST, WINDOW, 5, LEAD),
+            Some(5)
+        );
+    }
+
+    /// A window with no room for the lead still shows the row itself: the row
+    /// is the request, the lead is the manners.
+    #[test]
+    fn a_window_too_short_for_the_lead_still_shows_the_row() {
+        assert_eq!(
+            first_id_keeping_index_visible(20, FIRST, 1, 0, LEAD),
+            Some(20)
+        );
+        assert_eq!(
+            first_id_keeping_index_visible(20, FIRST, 2, 0, 4),
+            Some(20)
+        );
+    }
+
+    /// A list that drew nothing has no window to judge against, so the row is
+    /// off screen by definition and comes back at the start of one.
+    #[test]
+    fn a_list_that_drew_nothing_brings_the_row_to_its_start() {
+        assert_eq!(
+            first_id_keeping_index_visible(FIRST, FIRST, 0, 0, LEAD),
+            Some(FIRST - LEAD)
+        );
+    }
+
+    /// A short list resting at its start leaves its gap after the last row,
+    /// and the ruling runs on past it.
+    #[test]
+    fn a_list_resting_at_its_start_rules_the_gap_after_its_last_row() {
+        assert_eq!(
+            filler_band(true, 0.0, 80.0, 120.0),
+            Some(FillerBand {
+                origin: 80.0,
+                gap: 40.0,
+                step: 1
+            })
+        );
+    }
+
+    /// A short list resting at its end leaves the gap at the other edge, so
+    /// the ruling runs back before the first row instead.
+    #[test]
+    fn a_list_resting_at_its_end_rules_the_gap_before_its_first_row() {
+        assert_eq!(
+            filler_band(false, 40.0, 120.0, 120.0),
+            Some(FillerBand {
+                origin: 40.0,
+                gap: 40.0,
+                step: -1
+            })
+        );
+    }
+
+    /// Rows that reach the edge leave nothing to rule, whichever edge the list
+    /// rests on — and neither does a sliver too thin to be a row.
+    #[test]
+    fn rows_that_fill_the_viewport_leave_nothing_to_rule() {
+        assert_eq!(filler_band(true, 0.0, 120.0, 120.0), None);
+        assert_eq!(filler_band(false, 0.0, 120.0, 120.0), None);
+        assert_eq!(filler_band(true, 0.0, 119.7, 120.0), None);
+    }
+
+    /// The gap takes whole rows at the pitch of the row it continues, and the
+    /// last one takes what is left over.
+    #[test]
+    fn whole_rows_fill_the_gap_and_the_last_one_takes_what_is_left() {
+        assert_eq!(
+            filler_run(45.0, 20.0, MAX_FILLER_ROWS),
+            FillerRun {
+                rows: 3,
+                last: 5.0
+            }
+        );
+        assert_eq!(
+            filler_run(40.0, 20.0, MAX_FILLER_ROWS),
+            FillerRun {
+                rows: 2,
+                last: 20.0
+            }
+        );
+    }
+
+    /// A gap shorter than one row is one clamped row: that sliver is the top
+    /// of the row the list would have drawn next, and leaving it blank is the
+    /// ragged edge the ruling is there to remove.
+    #[test]
+    fn a_gap_shorter_than_a_row_is_one_clamped_row() {
+        assert_eq!(
+            filler_run(5.0, 20.0, MAX_FILLER_ROWS),
+            FillerRun {
+                rows: 1,
+                last: 5.0
+            }
+        );
+    }
+
+    /// Nothing is ruled without a gap and a row height to rule it by, and a
+    /// number that isn't one rules nothing either.
+    #[test]
+    fn a_row_with_no_height_rules_nothing() {
+        let none = FillerRun {
+            rows: 0,
+            last: 0.0,
+        };
+        assert_eq!(filler_run(40.0, 0.0, MAX_FILLER_ROWS), none);
+        assert_eq!(filler_run(0.0, 20.0, MAX_FILLER_ROWS), none);
+        assert_eq!(filler_run(0.2, 20.0, MAX_FILLER_ROWS), none);
+        assert_eq!(filler_run(f64::NAN, 20.0, MAX_FILLER_ROWS), none);
+        assert_eq!(filler_run(40.0, f64::NAN, MAX_FILLER_ROWS), none);
+        assert_eq!(filler_run(40.0, 20.0, 0), none);
+    }
+
+    /// However thin the rows, one draw only ever puts so many of them down;
+    /// the rest would be off the far edge anyway.
+    #[test]
+    fn the_run_of_rows_is_capped() {
+        assert_eq!(
+            filler_run(1000.0, 1.0, 8),
+            FillerRun {
+                rows: 8,
+                last: 1.0
+            }
+        );
+        assert_eq!(filler_run(f64::INFINITY, 1.0, 8).rows, 8);
+    }
+
+    /// The striping carries on from the row it continues, forwards past the
+    /// last row and backwards before the first.
+    #[test]
+    fn the_striping_carries_on_from_the_row_it_continues() {
+        assert_eq!(filler_alternate(4, 1), 1.0);
+        assert_eq!(filler_alternate(4, 2), 0.0);
+        assert_eq!(filler_alternate(5, 1), 0.0);
+        assert_eq!(filler_alternate(0, -1), 1.0);
+        assert_eq!(filler_alternate(0, -2), 0.0);
+    }
+
+    /// Drag-to-scroll asks one question at the press: does a control hold the
+    /// mouse? A mouse press one holds is that control's — the operator's rule,
+    /// and the bug it was written for: dragging a slider's thumb also drag-
+    /// scrolled the rack the slider sits in.
+    #[test]
+    fn a_mouse_press_a_control_holds_starts_no_drag_scroll() {
+        assert!(!press_starts_drag_scroll(true, true, true, false, true));
+        assert!(press_starts_drag_scroll(true, true, true, false, false));
+    }
+
+    /// The one exemption: a TOUCH that lands on a control still scrolls the
+    /// list under it, the way every native list behaves. `is_mouse_held_outside`
+    /// ignores touch captures, so this is about the finger's own press.
+    #[test]
+    fn a_touch_scrolls_the_list_even_from_a_control() {
+        assert!(press_starts_drag_scroll(true, true, true, true, true));
+    }
+
+    /// The list's own three conditions still each veto a drag on their own,
+    /// whoever holds the mouse.
+    #[test]
+    fn a_drag_scroll_still_needs_the_lists_own_leave() {
+        assert!(!press_starts_drag_scroll(false, true, true, true, false));
+        assert!(!press_starts_drag_scroll(true, false, true, true, false));
+        assert!(!press_starts_drag_scroll(true, true, false, true, false));
+    }
+
+    /// Asked again on every move: a control that takes the pointer after the
+    /// drag began ends it, and a finger's drag is never ended this way.
+    #[test]
+    fn a_drag_scroll_stands_down_the_move_a_control_takes_the_mouse() {
+        assert!(drag_scroll_stands_down(false, true));
+        assert!(!drag_scroll_stands_down(false, false));
+        assert!(!drag_scroll_stands_down(true, true));
+    }
+
+    const PANE: DVec2 = dvec2(300.0, 120.0);
+
+    /// One draw of a widget over the whole pane, in a draw list of its own so
+    /// it overlaps whatever else the same pass drew: two widgets whose rects
+    /// both contain the press point, the way a slider sits inside a list row.
+    /// A separate draw list keeps its own redraw id, so neither draw
+    /// invalidates the other's area.
+    fn frame_over(
+        cx: &mut Cx,
+        widget: &mut dyn Widget,
+        pass: &DrawPass,
+        draw_list: &mut DrawList2d,
+    ) {
+        let event = DrawEvent::default();
+        let mut draw = CxDraw::new(cx, &event);
+        let mut cx2d = Cx2d::new(&mut draw);
+        cx2d.begin_pass(pass, None);
+        draw_list.begin_always(&mut cx2d);
+        cx2d.begin_root_turtle(PANE, Layout::flow_down());
+        let _ = widget.draw_walk(&mut cx2d, &mut Scope::empty(), Walk::fixed(PANE.x, PANE.y));
+        cx2d.end_pass_sized_turtle();
+        draw_list.end(&mut cx2d);
+        cx2d.end_pass(pass);
+    }
+
+    /// One draw of the pane, in the pass and draw list the test keeps.
+    fn frame(cx: &mut Cx, log: &mut LogList, pass: &DrawPass, draw_list: &mut DrawList2d) {
+        let event = DrawEvent::default();
+        let mut draw = CxDraw::new(cx, &event);
+        let mut cx2d = Cx2d::new(&mut draw);
+        cx2d.begin_pass(pass, None);
+        draw_list.begin_always(&mut cx2d);
+        cx2d.begin_root_turtle(PANE, Layout::flow_down());
+        let _ = log.draw_walk(&mut cx2d, &mut Scope::empty(), Walk::fixed(PANE.x, PANE.y));
+        cx2d.end_pass_sized_turtle();
+        draw_list.end(&mut cx2d);
+        cx2d.end_pass(pass);
+    }
+
+    /// A wheel rolled over the middle of the pane, `dy` toward the end, and
+    /// whether the list kept it — which is all a scroll view around the list
+    /// reads before moving by the same wheel.
+    fn wheel(cx: &mut Cx, log: &mut LogList, dy: f64, handled: bool) -> bool {
+        let event = Event::Scroll(ScrollEvent {
+            window_id: WindowId(1, 1),
+            scroll: dvec2(0.0, dy),
+            abs: PANE * 0.5,
+            modifiers: KeyModifiers::default(),
+            handled_x: Cell::new(false),
+            handled_y: Cell::new(handled),
+            is_mouse: true,
+            time: 0.0,
+            phase: ScrollPhase::None,
+        });
+        log.handle_event(cx, &event, &mut Scope::empty());
+        event.scroll_handled(Vec2Index::Y)
+    }
+
+    /// The first row showing and how far it is scrolled, to a hundredth of a
+    /// point: a draw re-measures the rows, and that alone moves the scroll by
+    /// millionths.
+    fn place(cx: &Cx, log: &LogList) -> (usize, f64) {
+        let list = log.portal_list(cx, ids!(list));
+        let list = list.borrow().expect("the log holds no portal list");
+        (list.first_id(), (list.first_scroll() * 100.0).round() / 100.0)
+    }
+
+    /// How many rows the list last drew.
+    fn window(cx: &Cx, log: &LogList) -> usize {
+        log.portal_list(cx, ids!(list)).visible_items()
+    }
+
+    /// Ask the list to keep `index` on screen.
+    fn keep(cx: &mut Cx, log: &LogList, index: usize) {
+        let list = log.portal_list(cx, ids!(list));
+        list.keep_index_visible(cx, index);
+    }
+
+    /// Keeping a row, through a real list: a row that is showing holds the
+    /// list exactly where it is, and one that has gone off either edge comes
+    /// back with a row to spare beyond it.
+    #[test]
+    fn the_list_holds_the_row_it_was_asked_to_keep() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let mut log = cx.with_vm(LogList::script_new_with_default);
+        log.lines = (0..200).map(|n| format!("log | line {n}")).collect();
+        let pass = DrawPass::new(&mut cx);
+        pass.set_size(&mut cx, PANE);
+        let mut draw_list = DrawList2d::new(&mut cx);
+        for _ in 0..3 {
+            frame(&mut cx, &mut log, &pass, &mut draw_list);
+        }
+        // Off the tail: a tailing list follows its last row and a request to
+        // keep another one is dropped rather than fought.
+        for _ in 0..2 {
+            wheel(&mut cx, &mut log, -600.0, false);
+            frame(&mut cx, &mut log, &pass, &mut draw_list);
+        }
+        let (first, _) = place(&cx, &log);
+        let rows = window(&cx, &log);
+        assert!(
+            first > 40 && first + rows + 20 < 200,
+            "the log did not settle in its middle: {first} + {rows}"
+        );
+
+        // A row that is showing is not a scroll request.
+        let before = place(&cx, &log);
+        keep(&mut cx, &log, first + 1);
+        frame(&mut cx, &mut log, &pass, &mut draw_list);
+        assert_eq!(place(&cx, &log), before, "a row already showing moved the list");
+
+        // A row off the top comes back one row short of it.
+        keep(&mut cx, &log, first - 20);
+        frame(&mut cx, &mut log, &pass, &mut draw_list);
+        frame(&mut cx, &mut log, &pass, &mut draw_list);
+        assert_eq!(
+            place(&cx, &log).0,
+            first - 21,
+            "the recalled row landed pinned to the top edge"
+        );
+
+        // And a row off the bottom comes back with a row to spare below it.
+        let far = first + 20;
+        keep(&mut cx, &log, far);
+        frame(&mut cx, &mut log, &pass, &mut draw_list);
+        frame(&mut cx, &mut log, &pass, &mut draw_list);
+        let (now, _) = place(&cx, &log);
+        let rows = window(&cx, &log);
+        assert!(
+            now <= far && far < now + rows,
+            "the row the list was asked to keep is off screen: {now} + {rows} for {far}"
+        );
+        assert!(
+            far + LEAD < now + rows,
+            "the recalled row landed pinned to the bottom edge: {now} + {rows} for {far}"
+        );
+    }
+
+    /// The continuation rows are ground, not layout: turning them on under a
+    /// list too short to fill its viewport leaves every real row exactly where
+    /// it was.
+    #[test]
+    fn the_continuation_rows_leave_the_real_rows_alone() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let mut log = cx.with_vm(LogList::script_new_with_default);
+        log.lines = (0..3).map(|n| format!("log | line {n}")).collect();
+        let pass = DrawPass::new(&mut cx);
+        pass.set_size(&mut cx, PANE);
+        let mut draw_list = DrawList2d::new(&mut cx);
+        for _ in 0..3 {
+            frame(&mut cx, &mut log, &pass, &mut draw_list);
+        }
+        let before = place(&cx, &log);
+        {
+            let list = log.portal_list(&cx, ids!(list));
+            let mut list = list.borrow_mut().expect("the log holds no portal list");
+            assert!(
+                !list.is_filling_viewport(),
+                "three lines filled the pane, so there is no gap to rule"
+            );
+            list.filler_rows = true;
+        }
+        for _ in 0..2 {
+            frame(&mut cx, &mut log, &pass, &mut draw_list);
+        }
+        assert_eq!(place(&cx, &log), before, "the ruling moved the rows it fills after");
+    }
+
+    /// The wheel over a list inside a scrolling page: the list keeps every
+    /// wheel it moves by, so the page stays put, and hands on the one that
+    /// points past the edge it rests on, so the page moves instead. A log
+    /// follows its newest line, which puts this one at its bottom to start.
+    #[test]
+    fn a_list_keeps_the_wheel_it_moves_by_and_hands_on_the_wheel_past_its_edge() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let mut log = cx.with_vm(LogList::script_new_with_default);
+        log.lines = (0..200).map(|n| format!("log | line {n}")).collect();
+        let pass = DrawPass::new(&mut cx);
+        pass.set_size(&mut cx, PANE);
+        let mut draw_list = DrawList2d::new(&mut cx);
+        for _ in 0..3 {
+            frame(&mut cx, &mut log, &pass, &mut draw_list);
+        }
+        let bottom = place(&cx, &log);
+        assert!(bottom.0 > 150, "the log did not open on its newest lines: {bottom:?}");
+
+        assert!(!wheel(&mut cx, &mut log, 60.0, false), "a wheel past the bottom was kept");
+        // The draw is what pins the list back on its bottom.
+        frame(&mut cx, &mut log, &pass, &mut draw_list);
+        assert_eq!(place(&cx, &log), bottom, "the list moved past its bottom");
+        assert!(wheel(&mut cx, &mut log, -60.0, false), "a wheel up the list was handed on");
+        frame(&mut cx, &mut log, &pass, &mut draw_list);
+        assert_ne!(place(&cx, &log), bottom, "the kept wheel did not move the list");
+        assert!(wheel(&mut cx, &mut log, 30.0, false), "off the bottom, a wheel down is the list's");
+        frame(&mut cx, &mut log, &pass, &mut draw_list);
+
+        // A wheel a row's own scroll view already used moves nothing here.
+        let before = place(&cx, &log);
+        assert!(wheel(&mut cx, &mut log, -60.0, true));
+        frame(&mut cx, &mut log, &pass, &mut draw_list);
+        assert_eq!(place(&cx, &log), before, "the list moved by a wheel already used");
+
+        for _ in 0..200 {
+            if place(&cx, &log) == (0, 0.0) {
+                break;
+            }
+            wheel(&mut cx, &mut log, -600.0, false);
+            frame(&mut cx, &mut log, &pass, &mut draw_list);
+        }
+        assert_eq!(place(&cx, &log), (0, 0.0), "the wheel never reached the top");
+        assert!(!wheel(&mut cx, &mut log, -60.0, false), "a wheel past the top was kept");
+        assert!(wheel(&mut cx, &mut log, 60.0, false), "a wheel down from the top was handed on");
+    }
+
+    /// A press through the list's real pointer handling, at `at` over a log of
+    /// `lines` rows. The control is handed the event first, the way a row's own
+    /// widgets are handled before the list's hits, and it captures the digit;
+    /// then the list sees the same press through `capture_overload` and has to
+    /// decide whether that press is its to scroll by. Answers what the list did
+    /// with it: (entered a drag, stayed stopped).
+    ///
+    /// The stand-in for the slider is a `Button` drawn over the whole pane:
+    /// what the list asks is who holds the mouse, not what kind of control it
+    /// is, and a Button takes a press exactly as a Slider's thumb does.
+    fn press_over(lines: usize, at: DVec2, touch: bool, control: bool) -> (bool, bool) {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let mut log = cx.with_vm(LogList::script_new_with_default);
+        log.lines = (0..lines).map(|n| format!("log | line {n}")).collect();
+        let mut button = cx.with_vm(crate::button::Button::script_new_with_default);
+
+        let pass = DrawPass::new(&mut cx);
+        pass.set_size(&mut cx, PANE);
+        let mut draw_list = DrawList2d::new(&mut cx);
+        let mut button_list = DrawList2d::new(&mut cx);
+        for _ in 0..3 {
+            frame(&mut cx, &mut log, &pass, &mut draw_list);
+        }
+        frame_over(&mut cx, &mut button, &pass, &mut button_list);
+
+        // A console keeps out of the way of the app it is embedded in, so its
+        // own list drags nothing and leaves its rows their text selection.
+        // Turn it into an ordinary drag-to-scroll list — the widget under test.
+        {
+            let list = log.portal_list(&cx, ids!(list));
+            let mut list = list.borrow_mut().expect("the log holds no portal list");
+            list.drag_scrolling = true;
+            list.capture_overload = true;
+            list.selectable = false;
+            assert!(
+                list.area.is_valid(&cx) && list.area.clipped_rect(&cx).contains(at),
+                "the press point is not over the list"
+            );
+        }
+        assert!(
+            button.area().is_valid(&cx) && button.area().clipped_rect(&cx).contains(at),
+            "the press point is not over the control"
+        );
+
+        let event = if touch {
+            Event::TouchUpdate(crate::event::TouchUpdateEvent {
+                time: 0.0,
+                window_id: WindowId(1, 1),
+                modifiers: KeyModifiers::default(),
+                touches: vec![crate::event::TouchPoint {
+                    state: TouchState::Start,
+                    abs: at,
+                    time: 0.0,
+                    uid: 1,
+                    rotation_angle: 0.0,
+                    force: 1.0,
+                    radius: dvec2(1.0, 1.0),
+                    handled: Cell::new(Area::Empty),
+                    sweep_lock: Cell::new(Area::Empty),
+                }],
+            })
+        } else {
+            cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WindowId(1, 1)));
+            Event::MouseDown(MouseDownEvent {
+                abs: at,
+                button: MouseButton::PRIMARY,
+                window_id: WindowId(1, 1),
+                modifiers: KeyModifiers::default(),
+                handled: Cell::new(Area::Empty),
+                time: 0.0,
+            })
+        };
+        if control {
+            button.handle_event(&mut cx, &event, &mut Scope::empty());
+            assert!(
+                cx.fingers.any_areas_captured(),
+                "the control did not take the press, so this test proves nothing"
+            );
+        }
+        log.handle_event(&mut cx, &event, &mut Scope::empty());
+        cx.fingers.first_mouse_button = None;
+
+        let list = log.portal_list(&cx, ids!(list));
+        let list = list.borrow().expect("the log holds no portal list");
+        (
+            matches!(list.scroll_state, ScrollState::Drag { .. }),
+            matches!(list.scroll_state, ScrollState::Stopped),
+        )
+    }
+
+    /// One line drawn at the top of the pane leaves the rest of the list bare,
+    /// so a press down here is over the list and over nothing else of its own.
+    const BARE: DVec2 = dvec2(150.0, 100.0);
+
+    /// The bug, end to end: a mouse press a control holds does not put the list
+    /// around it into a drag, so dragging a slider's thumb cannot also scroll
+    /// the rack the slider sits in.
+    #[test]
+    fn a_control_holding_the_mouse_keeps_the_list_around_it_still() {
+        assert_eq!(
+            press_over(1, BARE, false, true),
+            (false, true),
+            "a press the control holds started the list's drag-to-scroll"
+        );
+    }
+
+    /// And the list is not broken while fixing it: the same press with nothing
+    /// holding the mouse is the list's own, and still starts its drag.
+    #[test]
+    fn a_press_on_bare_list_still_starts_its_drag_scroll() {
+        assert_eq!(
+            press_over(1, BARE, false, false),
+            (true, false),
+            "the list stopped drag-scrolling from a press nothing else holds"
+        );
+    }
+
+    /// The touch exemption, end to end: a finger that lands on a control still
+    /// scrolls the list under it.
+    #[test]
+    fn a_touch_on_a_control_still_scrolls_the_list_under_it() {
+        assert_eq!(
+            press_over(1, BARE, true, true),
+            (true, false),
+            "a finger on a control stopped scrolling the list under it"
+        );
+    }
+
+    /// The same rule with the control inside the list rather than over it: a
+    /// log's rows carry selectable text, which takes the press and drags a
+    /// selection with it. That press is the row's, so the list does not scroll
+    /// by it — and a finger's still does.
+    #[test]
+    fn a_row_holding_the_mouse_keeps_the_list_it_sits_in_still() {
+        let over_a_row = PANE * 0.5;
+        assert_eq!(
+            press_over(200, over_a_row, false, false),
+            (false, true),
+            "a press a row's own text holds started the list's drag-to-scroll"
+        );
+        assert_eq!(
+            press_over(200, over_a_row, true, false),
+            (true, false),
+            "a finger on a row stopped scrolling the list under it"
+        );
+    }
+    /// A log of 200 lines drawn until it settles: a real list, taller than its
+    /// pane, with a scroll bar showing.
+    fn drawn_log(cx: &mut Cx) -> (LogList, DrawPass, DrawList2d) {
+        let mut log = cx.with_vm(LogList::script_new_with_default);
+        log.lines = (0..200).map(|n| format!("log | line {n}")).collect();
+        let pass = DrawPass::new(cx);
+        pass.set_size(cx, PANE);
+        let mut draw_list = DrawList2d::new(cx);
+        for _ in 0..3 {
+            frame(cx, &mut log, &pass, &mut draw_list);
+        }
+        (log, pass, draw_list)
+    }
+
+    fn mouse_down(at: DVec2) -> Event {
+        Event::MouseDown(MouseDownEvent {
+            abs: at,
+            button: MouseButton::PRIMARY,
+            window_id: WindowId(1, 1),
+            modifiers: KeyModifiers::default(),
+            handled: Cell::new(Area::Empty),
+            time: 1.0,
+        })
+    }
+
+    fn mouse_move(at: DVec2) -> Event {
+        Event::MouseMove(MouseMoveEvent {
+            abs: at,
+            lock_delta: dvec2(0.0, 0.0),
+            window_id: WindowId(1, 1),
+            modifiers: KeyModifiers::default(),
+            time: 2.0,
+            handled: Cell::new(Area::Empty),
+        })
+    }
+
+    /// The areas a list owns for the "whose press is this" question are its
+    /// own and its bar's. Naming only its own area is how a list comes to read
+    /// its own scroll bar as an outsider holding the pointer.
+    #[test]
+    fn a_lists_own_areas_include_its_scroll_bar() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let (log, _pass, _list) = drawn_log(&mut cx);
+        let list_ref = log.portal_list(&cx, ids!(list));
+        let list = list_ref.borrow().expect("the log holds no portal list");
+        let mine = list.own_press_areas();
+        assert_eq!(mine[0], list.area, "a list left itself out of its own areas");
+        assert_eq!(
+            mine[1],
+            list.scroll_bar.area(),
+            "a list left its scroll bar out of its own areas"
+        );
+        assert!(
+            mine[1].is_valid(&cx) && mine[0] != mine[1],
+            "the bar drew no area of its own, so this test proves nothing"
+        );
+    }
+
+    /// A press on the list's OWN scroll bar belongs to the bar and to nothing
+    /// else. The list starts no drag-to-scroll and no selection from it: the
+    /// bar is a continuously dragged control holding the pointer, and a list
+    /// that also drag-scrolled would move itself twice, the two ways at once.
+    ///
+    /// Today the list never even reaches its own press path for this press —
+    /// `handle_event` skips its whole hit block while its bar is captured —
+    /// and this pins that outcome, whichever of the two guards is the one
+    /// holding it up.
+    #[test]
+    fn a_press_on_the_lists_own_bar_is_the_bars_alone() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let (mut log, _pass, _list) = drawn_log(&mut cx);
+        let list_ref = log.portal_list(&cx, ids!(list));
+        let bar = {
+            // A console keeps out of the way of the app around it, so its own
+            // list drags nothing. Turn it into an ordinary drag-to-scroll list,
+            // selection and all, so both gestures are armed and a press that
+            // started either one would show.
+            let mut list = list_ref.borrow_mut().expect("the log holds no portal list");
+            list.drag_scrolling = true;
+            list.capture_overload = true;
+            list.selectable = true;
+            list.scroll_bar.area()
+        };
+        assert!(bar.is_valid(&cx), "the list drew no scroll bar to press");
+        let rect = bar.clipped_rect(&cx);
+        let at = rect.pos + rect.size * 0.5;
+
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WindowId(1, 1)));
+        log.handle_event(&mut cx, &mouse_down(at), &mut Scope::empty());
+        assert!(
+            cx.fingers.is_area_captured(bar),
+            "the bar did not take the press, so this test proves nothing"
+        );
+        let list = list_ref.borrow().expect("the log holds no portal list");
+        assert!(
+            !matches!(list.scroll_state, ScrollState::Drag { .. }),
+            "the list drag-scrolled itself off a press its own scroll bar is holding"
+        );
+        assert!(
+            !list.is_selecting,
+            "the list started a text selection off a press on its own scroll bar"
+        );
+        drop(list);
+        cx.fingers.first_mouse_button = None;
+    }
+
+    /// The other half of the rule for the selection drag: a control can take
+    /// the pointer AFTER the drag began — the press and the capture land in
+    /// either order — so the question is re-asked on every move, not only at
+    /// the press.
+    ///
+    /// The order is built here by handing the list the press first, while
+    /// nothing holds the mouse, and the control the same press after. A Button
+    /// stands in for any continuously dragged control.
+    #[test]
+    fn a_selection_drag_stands_down_when_a_control_takes_the_mouse() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let (mut log, pass, _draw_list) = drawn_log(&mut cx);
+        let mut button = cx.with_vm(crate::button::Button::script_new_with_default);
+        let mut button_list = DrawList2d::new(&mut cx);
+        frame_over(&mut cx, &mut button, &pass, &mut button_list);
+
+        let list_ref = log.portal_list(&cx, ids!(list));
+        list_ref
+            .borrow_mut()
+            .expect("the log holds no portal list")
+            .selectable = true;
+
+        let at = PANE * 0.5;
+        assert!(
+            button.area().is_valid(&cx) && button.area().clipped_rect(&cx).contains(at),
+            "the control is not over the press point"
+        );
+
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WindowId(1, 1)));
+        let press = mouse_down(at);
+        log.handle_event(&mut cx, &press, &mut Scope::empty());
+        assert!(
+            list_ref
+                .borrow()
+                .expect("the log holds no portal list")
+                .is_selecting,
+            "no selection drag started, so this test proves nothing"
+        );
+
+        // The control takes the pointer after the drag has begun. The press is
+        // un-marked first, because the list co-capturing it marked it handled:
+        // what this stands in for is any control that takes the pointer
+        // without the list's own press having consumed it — an overlay that
+        // captures through the overload, a control that captures off a later
+        // raw event such as a long press.
+        if let Event::MouseDown(e) = &press {
+            e.handled.set(Area::Empty);
+        }
+        button.handle_event(&mut cx, &press, &mut Scope::empty());
+        assert!(
+            cx.fingers.is_area_captured(button.area()),
+            "the control did not take the press, so this test proves nothing"
+        );
+
+        log.handle_event(&mut cx, &mouse_move(at + dvec2(0.0, 8.0)), &mut Scope::empty());
+        assert!(
+            !list_ref
+                .borrow()
+                .expect("the log holds no portal list")
+                .is_selecting,
+            "the selection drag kept running while a control held the mouse"
+        );
+        cx.fingers.first_mouse_button = None;
     }
 }

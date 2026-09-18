@@ -8620,7 +8620,7 @@ impl MapView {
                         self.redraw(cx);
                     }
                     TouchGestureMode::Tilt => {
-                        // Phone convention (Apple/Google Maps): two fingers
+                        // The phone convention the common map apps share: two fingers
                         // sliding UP tilt the camera into 3D, sliding down
                         // flatten it — the opposite sign of the desktop
                         // right-drag.
@@ -9341,8 +9341,8 @@ impl MapView {
         // zoom-about-cursor and pan, and small rotation/tilt deltas ride the
         // 2x2 camera matrix — but only at identical zoom (rotation+zoom
         // compose non-affinely with the cached-screen transform). Within
-        // half a zoom level the glyphs scale acceptably (pinch behaviour a
-        // la Google Maps: labels stay pinned to the map through the gesture).
+        // half a zoom level the glyphs scale acceptably (the pinch behaviour
+        // of the common map apps: labels stay pinned through the gesture).
         let cache_drawable = self.label_cache_valid
             && ((rot_delta == 0.0 && !tilt_delta) || self.label_cache_zoom == view_zoom)
             && (self.label_cache_zoom - view_zoom).abs() < 0.5;

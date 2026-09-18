@@ -238,6 +238,24 @@ pub trait WidgetNode: ScriptApply {
     }
 }
 
+/// One target a widget draws for itself — a bar item, a panel row, a line in
+/// a stack — reported to the test tree as a row of its own, so a test can find
+/// and press it the way it presses a button. The tree only knows widget
+/// nodes; without this, anything drawn in Rust rather than built from child
+/// widgets is invisible to `/snap`.
+#[derive(Clone, Debug)]
+pub struct SnapshotPart {
+    pub id: LiveId,
+    /// The row's type in the tree, e.g. "PillNavItem".
+    pub widget_type: &'static str,
+    /// Window-local layout points, already clipped to what is on screen.
+    pub rect: Rect,
+    pub text: String,
+    /// The part is the current / chosen one.
+    pub selected: bool,
+    pub enabled: bool,
+}
+
 pub trait Widget: WidgetNode {
     /// Visit the current active children and report whether this widget can own
     /// cancel input. Return false without visiting when inactive. Override this
@@ -362,6 +380,34 @@ pub trait Widget: WidgetNode {
 
     fn disabled(&self, _cx: &Cx) -> bool {
         false
+    }
+
+    /// What a checkbox-like widget reports to the test tree: `Some(true)`
+    /// while it is on, `Some(false)` while it is off. A widget with no
+    /// on/off state leaves the default `None`, and the snapshot then falls
+    /// back to the tree's own downcasts.
+    fn snapshot_checked(&self, _cx: &Cx) -> Option<bool> {
+        None
+    }
+
+    /// What a value-carrying widget reports to the test tree: the value the
+    /// viewer sees, spelled the way the widget shows it (a slider gives its
+    /// readout, an input its text). `None` when the widget carries no value.
+    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
+        None
+    }
+
+    /// What a selection-carrying widget reports to the test tree: the label
+    /// of the current choice. `None` when nothing is selectable. A reported
+    /// selection also becomes the row's `text`, as a drop-down's does.
+    fn snapshot_selected(&self, _cx: &Cx) -> Option<String> {
+        None
+    }
+
+    /// The targets this widget draws for itself, each reported to the test
+    /// tree as a row after the widget's own. Default: none.
+    fn snapshot_parts(&self, _cx: &Cx) -> Vec<SnapshotPart> {
+        Vec::new()
     }
 
     fn ref_cast_type_id(&self) -> TypeId
@@ -1330,6 +1376,34 @@ impl WidgetRef {
             return inner.widget.disabled(cx);
         }
         true
+    }
+
+    pub fn snapshot_checked(&self, cx: &Cx) -> Option<bool> {
+        if let Some(inner) = self.0.borrow().as_ref() {
+            return inner.widget.snapshot_checked(cx);
+        }
+        None
+    }
+
+    pub fn snapshot_value(&self, cx: &Cx) -> Option<String> {
+        if let Some(inner) = self.0.borrow().as_ref() {
+            return inner.widget.snapshot_value(cx);
+        }
+        None
+    }
+
+    pub fn snapshot_selected(&self, cx: &Cx) -> Option<String> {
+        if let Some(inner) = self.0.borrow().as_ref() {
+            return inner.widget.snapshot_selected(cx);
+        }
+        None
+    }
+
+    pub fn snapshot_parts(&self, cx: &Cx) -> Vec<SnapshotPart> {
+        if let Some(inner) = self.0.borrow().as_ref() {
+            return inner.widget.snapshot_parts(cx);
+        }
+        Vec::new()
     }
 
     pub fn draw_all(&self, cx: &mut Cx2d, scope: &mut Scope) {

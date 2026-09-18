@@ -305,6 +305,49 @@ script_mod! {
         }
     }
 
+    // A RoundedShadowView lifted by one elevation step of the theme: the
+    // shadow's blur, drop and colour come from the elevation_N tokens, so
+    // every card, menu and dialog built on these agrees on how high it sits.
+    mod.widgets.ElevatedView1 = mod.widgets.RoundedShadowView{
+        draw_bg +: {
+            shadow_radius: uniform(theme.elevation_1_radius)
+            shadow_offset: uniform(vec2(0., theme.elevation_1_offset_y))
+            shadow_color: instance(theme.color_elevation_1)
+        }
+    }
+
+    mod.widgets.ElevatedView2 = mod.widgets.RoundedShadowView{
+        draw_bg +: {
+            shadow_radius: uniform(theme.elevation_2_radius)
+            shadow_offset: uniform(vec2(0., theme.elevation_2_offset_y))
+            shadow_color: instance(theme.color_elevation_2)
+        }
+    }
+
+    mod.widgets.ElevatedView3 = mod.widgets.RoundedShadowView{
+        draw_bg +: {
+            shadow_radius: uniform(theme.elevation_3_radius)
+            shadow_offset: uniform(vec2(0., theme.elevation_3_offset_y))
+            shadow_color: instance(theme.color_elevation_3)
+        }
+    }
+
+    mod.widgets.ElevatedView4 = mod.widgets.RoundedShadowView{
+        draw_bg +: {
+            shadow_radius: uniform(theme.elevation_4_radius)
+            shadow_offset: uniform(vec2(0., theme.elevation_4_offset_y))
+            shadow_color: instance(theme.color_elevation_4)
+        }
+    }
+
+    mod.widgets.ElevatedView5 = mod.widgets.RoundedShadowView{
+        draw_bg +: {
+            shadow_radius: uniform(theme.elevation_5_radius)
+            shadow_offset: uniform(vec2(0., theme.elevation_5_offset_y))
+            shadow_color: instance(theme.color_elevation_5)
+        }
+    }
+
     mod.widgets.RoundedView = mod.widgets.ViewBase {
         show_bg: true
         draw_bg +: {

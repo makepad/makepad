@@ -382,6 +382,18 @@ impl WidgetNode for PdfPageView {
 }
 
 impl Widget for PdfPageView {
+    /// A page is paper, not a control, and saying so is what keeps a PDF
+    /// draggable. The list above it scrolls under a drag, a gesture that
+    /// starts from a raw press and may therefore only take a press on bare
+    /// background — `find_interactive_widget_from_point` finding nothing
+    /// but the list itself under the point. A page that called itself
+    /// interactive would be that something, and the one gesture a reader
+    /// has would stop working.
+    ///
+    /// It costs nothing to say it: a page owns no gesture at all. Its text
+    /// selection is driven from outside through the `WidgetNode` selection
+    /// hooks above, by the list that does hold the press, so a page never
+    /// needs the pointer for itself.
     fn is_interactive(&self) -> bool {
         false
     }
@@ -1423,5 +1435,48 @@ fn color_from_vals(v: &[f64], a: f32) -> [f32; 4] {
             [r, g, b, a]
         }
         _ => [0., 0., 0., a],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cx() -> Cx {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        cx
+    }
+
+    /// A page takes no press: it captures nothing, marks nothing handled
+    /// and calls itself non-interactive, so the drag that scrolls the
+    /// document still finds bare background under the pointer wherever on
+    /// the paper it starts. The day a page grows a gesture of its own,
+    /// that gesture has to hold the pointer and this has to change with
+    /// it — which is what the assertions are here to notice.
+    #[test]
+    fn a_page_takes_no_press_so_the_document_still_drags_to_scroll() {
+        let mut cx = cx();
+        let mut page = cx.with_vm(PdfPageView::script_new_with_default);
+        assert!(
+            !page.is_interactive(),
+            "paper claims presses: a drag on a page would no longer scroll the document"
+        );
+        let down = Event::MouseDown(MouseDownEvent {
+            abs: dvec2(10.0, 10.0),
+            button: MouseButton::PRIMARY,
+            window_id: WindowId(1, 1),
+            modifiers: KeyModifiers::default(),
+            handled: std::cell::Cell::new(Area::Empty),
+            time: 0.0,
+        });
+        page.handle_event(&mut cx, &down, &mut Scope::empty());
+        assert!(
+            !cx.fingers.any_areas_captured(),
+            "a page captured the pointer"
+        );
+        if let Event::MouseDown(e) = &down {
+            assert!(e.handled.get().is_empty(), "a page took a press");
+        }
     }
 }

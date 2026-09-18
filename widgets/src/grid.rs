@@ -61,6 +61,11 @@ impl Default for TrackLen {
 }
 
 impl ScriptHook for TrackLen {
+    fn on_custom_to_value(&self, vm: &mut ScriptVm) -> Option<ScriptValue> {
+        let text = track_len_css(vm, *self)?;
+        Some(vm.bx.heap.new_string_from_str(&text))
+    }
+
     fn on_type_check(_heap: &ScriptHeap, value: ScriptValue) -> bool {
         value.is_number() || value.is_string_like() || value.is_object()
     }
@@ -129,6 +134,11 @@ impl Default for Track {
 }
 
 impl ScriptHook for Track {
+    fn on_custom_to_value(&self, vm: &mut ScriptVm) -> Option<ScriptValue> {
+        let text = track_css(vm, self)?;
+        Some(vm.bx.heap.new_string_from_str(&text))
+    }
+
     fn on_type_check(_heap: &ScriptHeap, value: ScriptValue) -> bool {
         value.is_number() || value.is_string_like() || value.is_object()
     }
@@ -160,6 +170,51 @@ impl ScriptHook for Track {
             return true;
         }
         false
+    }
+}
+
+/// A track length the way it is written: `70px`, `20%`, `1fr`, or the
+/// expression's own text. None for an expression the store does not hold.
+fn track_len_css(vm: &mut ScriptVm, len: TrackLen) -> Option<String> {
+    Some(match len {
+        TrackLen::Px(value) => format!("{}px", css_number(value)),
+        TrackLen::Pct(value) => format!("{}%", css_number(value * 100.0)),
+        TrackLen::Fr(value) => format!("{}fr", css_number(value)),
+        TrackLen::Expr(id) => vm.cx().get_global_ref::<SizeExprStore>()?.source(id)?.to_string(),
+    })
+}
+
+/// A track the way it is written, `minmax()` and `repeat()` included.
+fn track_css(vm: &mut ScriptVm, track: &Track) -> Option<String> {
+    Some(match track {
+        Track::Px(value) => format!("{}px", css_number(*value)),
+        Track::Pct(value) => format!("{}%", css_number(*value * 100.0)),
+        Track::Fr(value) => format!("{}fr", css_number(*value)),
+        Track::Expr(id) => vm.cx().get_global_ref::<SizeExprStore>()?.source(*id)?.to_string(),
+        Track::MinMax { min, max } => {
+            format!("minmax({}, {})", track_len_css(vm, *min)?, track_len_css(vm, *max)?)
+        }
+        Track::Repeat { mode, min, max } => {
+            let mode = match mode {
+                RepeatMode::Count(count) => count.to_string(),
+                RepeatMode::AutoFill => "auto-fill".to_string(),
+                RepeatMode::AutoFit => "auto-fit".to_string(),
+            };
+            format!(
+                "repeat({mode}, minmax({}, {}))",
+                track_len_css(vm, *min)?,
+                track_len_css(vm, *max)?
+            )
+        }
+    })
+}
+
+/// `70`, not `70.0`; four decimals at most, as a person would write them.
+fn css_number(value: f64) -> String {
+    if value.fract() == 0.0 && value.abs() < 1.0e15 {
+        format!("{}", value as i64)
+    } else {
+        format!("{}", (value * 10000.0).round() / 10000.0)
     }
 }
 
@@ -955,8 +1010,13 @@ impl Grid {
             let cell = self.child_walks[index].cell.unwrap_or_default();
             let col_span = normalized_span(cell.col_span).min(MAX_TRACKS);
             let row_span = normalized_span(cell.row_span).min(MAX_TRACKS);
-            let fixed_col = (cell.col != 0).then_some(cell.col as usize - 1);
-            let fixed_row = (cell.row != 0).then_some(cell.row as usize - 1);
+            // `then`, not `then_some`: the latter takes its argument by
+            // value and so evaluates it whatever the condition says. With a
+            // cell at column zero that is `0usize - 1`, which panics in debug
+            // and — far worse — wraps to usize::MAX in release, handing the
+            // placer a fixed column that cannot exist.
+            let fixed_col = (cell.col != 0).then(|| cell.col as usize - 1);
+            let fixed_row = (cell.row != 0).then(|| cell.row as usize - 1);
             let placement = find_auto_placement(
                 &self.occupancy,
                 self.expanded_columns.len(),

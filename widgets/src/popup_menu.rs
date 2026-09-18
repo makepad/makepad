@@ -2,6 +2,7 @@ use crate::{
     animator::{Animator, AnimatorAction, AnimatorImpl, Play},
     makepad_derive_widget::*,
     makepad_draw::*,
+    overlay_place::span_inboard,
     widget::*,
     widget_async::CxSplashVmExt,
     widget_tree::CxWidgetExt,
@@ -42,6 +43,22 @@ script_mod! {
                     .mix(self.color_hover, self.hover)
                     .mix(self.color_disabled, self.disabled)
             }
+        }
+
+        /** The per-item icon ink. Flat rather than state-mixed like `draw_text`,
+        because a chrome glyph has to stay readable against the row's active
+        fill; the row itself already carries the state. */
+        draw_icon +: {
+            color: theme.color_label_inner
+        }
+
+        /** The icon sits in front of the label with a small gap. This is only
+        walked when the dropdown handed this row an icon, so a menu without
+        icons keeps exactly its old metrics. */
+        icon_walk: Walk{
+            width: 10
+            height: Fit
+            margin: Inset{right: 5.0}
         }
 
         draw_bg +: {
@@ -380,6 +397,17 @@ pub struct PopupMenuItem {
     draw_bg: DrawQuad,
     #[live]
     draw_text: DrawText,
+    /// The row's icon, seated by the menu before each draw the same way `label`
+    /// is. Left empty by every caller that does not pass one, and an empty
+    /// `DrawSvg` is never walked, so an icon-less menu keeps its old metrics.
+    #[live]
+    draw_icon: DrawSvg,
+    /// Hold the icon slot open on a row that has no icon of its own, so a list
+    /// where only some items carry one still reads as a column of labels. Off
+    /// unless the menu says otherwise, which is what keeps an icon-less menu on
+    /// its old metrics.
+    #[rust]
+    reserve_icon: bool,
 
     #[layout]
     layout: Layout,
@@ -432,6 +460,11 @@ pub struct PopupMenu {
     pub tree_parent: WidgetUid,
     #[rust]
     init_select_item: Option<PopupMenuItemId>,
+    /// Whether this pass draws an icon column. Set per open by whoever fills
+    /// the menu, alongside `tree_parent`, since one menu instance is shared by
+    /// every dropdown on the same template and only some of them have icons.
+    #[rust]
+    pub icon_column: bool,
 
     #[rust]
     count: usize,
@@ -477,8 +510,26 @@ pub enum PopupMenuAction {
 pub struct PopupMenuItemId(pub LiveId);
 
 impl PopupMenuItem {
+    /// Point the row's icon at `svg`, or clear it. Only writes on an actual
+    /// change: a `ScriptHandleRef` is a GC root, and re-seating one every frame
+    /// churns the root table and makes `DrawSvg` think the document moved.
+    pub fn set_icon(&mut self, svg: Option<&ScriptHandleRef>) {
+        let want = svg.map(|s| s.as_handle());
+        if self.draw_icon.svg.as_ref().map(|s| s.as_handle()) != want {
+            self.draw_icon.svg = svg.cloned();
+        }
+    }
+
     pub fn draw_item(&mut self, cx: &mut Cx2d, label: &str) {
         self.draw_bg.begin(cx, self.walk, self.layout);
+        // Guarded rather than left to `DrawSvg`'s own empty-document bail, so
+        // the turtle provably never sees the icon walk when there is no icon
+        // and no column to hold open.
+        if self.draw_icon.svg.is_some() {
+            self.draw_icon.draw_walk(cx, self.icon_walk);
+        } else if self.reserve_icon {
+            cx.walk_turtle(self.icon_walk);
+        }
         self.draw_text
             .draw_walk(cx, Walk::fit(), Align::default(), label);
         self.draw_bg.end(cx);
@@ -572,6 +623,23 @@ impl PopupMenu {
     pub fn end(&mut self, cx: &mut Cx2d, shift_area: Area, shift: Vec2d) {
         self.draw_bg.end(cx);
 
+        // The caller's shift is a WANT, not an answer. The turtle translates
+        // the menu by trigger.pos + shift and never asks whether the result
+        // is still on screen, so a dropdown low in a window opened a menu
+        // whose last rows fell past the bottom edge — not merely clipped,
+        // unreachable, since this menu has no scroll and never flips.
+        // Pull the span back inside the pass on both axes first.
+        const MENU_MARGIN: f64 = 4.0;
+        let menu = self.draw_bg.area().rect(cx);
+        let trigger = shift_area.rect(cx);
+        let pass = cx.current_pass_size();
+        let want = menu.pos + trigger.pos + shift;
+        let placed = dvec2(
+            span_inboard(want.x, menu.size.x, MENU_MARGIN, pass.x - MENU_MARGIN * 2.0),
+            span_inboard(want.y, menu.size.y, MENU_MARGIN, pass.y - MENU_MARGIN * 2.0),
+        );
+        let shift = shift + (placed - want);
+
         cx.end_pass_sized_turtle_with_shift(shift_area, shift);
         self.draw_list.end(cx);
         self.menu_items.retain_visible();
@@ -585,7 +653,18 @@ impl PopupMenu {
     }
 
     pub fn draw_item(&mut self, cx: &mut Cx2d, item_id: PopupMenuItemId, label: &str) {
-        self.draw_item_dimmed(cx, item_id, label, false);
+        self.draw_item_full(cx, item_id, label, None, false)
+    }
+
+    /// As `draw_item`, plus the icon to draw in front of the label.
+    pub fn draw_item_with_icon(
+        &mut self,
+        cx: &mut Cx2d,
+        item_id: PopupMenuItemId,
+        label: &str,
+        icon: Option<&ScriptHandleRef>,
+    ) {
+        self.draw_item_full(cx, item_id, label, icon, false)
     }
 
     /// Draw a selectable item using the disabled palette. This is visual
@@ -597,11 +676,30 @@ impl PopupMenu {
         label: &str,
         dimmed: bool,
     ) {
+        self.draw_item_full(cx, item_id, label, None, dimmed)
+    }
+
+    /// Both at once: an icon in front of the label, and the disabled
+    /// palette over the whole row.
+    ///
+    /// The three above are kept as their own entry points so no caller had
+    /// to change: each names the one thing it cares about and takes the
+    /// default for the other.
+    pub fn draw_item_full(
+        &mut self,
+        cx: &mut Cx2d,
+        item_id: PopupMenuItemId,
+        label: &str,
+        icon: Option<&ScriptHandleRef>,
+        dimmed: bool,
+    ) {
         self.count += 1;
 
         let item = self.item(cx, item_id);
         if let Some(mut menu_item) = item.borrow_mut::<PopupMenuItem>() {
             menu_item.label = label.to_string();
+            menu_item.set_icon(icon);
+            menu_item.reserve_icon = self.icon_column;
             menu_item.animator_cut(
                 cx,
                 if dimmed {

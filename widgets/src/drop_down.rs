@@ -24,7 +24,13 @@ script_mod! {
     mod.widgets.DropDownFlat = set_type_default() do mod.widgets.DropDownBase{
         width: Fit
         height: Fit
-        align: TopLeft
+        // Centred, not TopLeft: a face carrying an icon beside its label
+        // gives the shorter of the two the slack, and top-aligning it put
+        // the icon three points above the words it belongs to. The popup's
+        // own rows already centre, so this is the two halves of one control
+        // agreeing. A label-only face has one walk and no slack, which is
+        // every call site that predates icons — the change cannot move them.
+        align: Align{x: 0.0, y: 0.5}
 
         padding: theme.mspace_1{left: theme.space_2, right: 22.5}
         margin: theme.mspace_v_1{}
@@ -71,6 +77,23 @@ script_mod! {
                     self.disabled
                 )
             }
+        }
+
+        /** The selected item's icon ink. Flat rather than state-mixed like
+        `draw_text`, because a chrome glyph has to stay readable over the
+        pressed face; the face itself already carries the state. */
+        draw_icon +: {
+            color: theme.color_label_inner
+        }
+
+        /** The icon sits in front of the label with a small gap, which
+        `icon_only` drops again since there is then nothing to separate from.
+        Only walked for a dropdown that was given `icons`, so a dropdown
+        without them keeps exactly its old metrics. */
+        icon_walk: Walk{
+            width: 10
+            height: Fit
+            margin: Inset{right: 5.0}
         }
 
         /** The dropdown face: an SDF box with a bevel stroke and a filled corner arrow. */
@@ -462,6 +485,13 @@ pub struct DropDown {
     draw_bg: DrawQuad,
     #[live]
     draw_text: DrawLabelText,
+    /// Re-pointed at the selected item's icon on every draw, and left empty for
+    /// a dropdown that was given none — an empty `DrawSvg` is never walked, so
+    /// the face keeps its old metrics.
+    #[live]
+    draw_icon: DrawSvg,
+    #[live]
+    icon_walk: Walk,
 
     #[walk]
     walk: Walk,
@@ -476,6 +506,18 @@ pub struct DropDown {
 
     #[live]
     labels: Vec<String>,
+
+    /// Icons parallel to `labels`, one per item. Short is fine: an item past
+    /// the end of this list simply draws no icon, so a caller can give icons to
+    /// the few entries that have one and leave the rest as words.
+    #[live]
+    icons: Vec<DropDownIcon>,
+
+    /// Draw the closed face as the selected item's icon alone, for a console
+    /// too narrow for words. The popup still shows icon and label both — the
+    /// list is where the operator reads what an item means.
+    #[live]
+    icon_only: bool,
 
     /// Popup rows drawn with the disabled palette while remaining selectable.
     #[rust]
@@ -518,6 +560,40 @@ struct PopupMenuKey {
     // Cx-global, so the heap is part of their identity too.
     heap: usize,
     template: ScriptValue,
+}
+
+/// One entry of `DropDown::icons`.
+///
+/// A `Vec` field only accepts elements the script layer marks as derivable, so
+/// the bare `Option<ScriptHandleRef>` that `DrawSvg::svg` uses cannot be the
+/// element type directly. Wrapping it in a derived struct earns that marker;
+/// `on_custom_apply` then takes the resource handle a `crate_resource(...)` in
+/// the DSL array evaluates to, so the call site stays a flat list of handles
+/// rather than a list of one-field objects.
+#[derive(Script)]
+pub struct DropDownIcon {
+    #[live]
+    svg: Option<ScriptHandleRef>,
+}
+
+impl ScriptHook for DropDownIcon {
+    fn on_type_check(_heap: &ScriptHeap, value: ScriptValue) -> bool {
+        value.is_nil() || value.as_handle().is_some()
+    }
+
+    fn on_custom_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        apply: &Apply,
+        scope: &mut Scope,
+        value: ScriptValue,
+    ) -> bool {
+        if value.as_handle().is_none() {
+            return false;
+        }
+        self.svg.script_apply(vm, apply, scope, value);
+        true
+    }
 }
 
 #[derive(Script, ScriptHook)]
@@ -636,15 +712,53 @@ impl DropDown {
         self.draw_bg.end(cx);
     }
 
+    /// The icon for item `index`, or `None` where the caller gave fewer icons
+    /// than labels (or none at all).
+    fn icon_at(&self, index: usize) -> Option<&ScriptHandleRef> {
+        self.icons.get(index).and_then(|icon| icon.svg.as_ref())
+    }
+
+    /// Point `draw_icon` at item `index`'s icon and report whether there is one.
+    /// Only writes on an actual change: a `ScriptHandleRef` is a GC root, and
+    /// re-seating one every frame churns the root table for nothing.
+    fn seat_icon(&mut self, index: usize) -> bool {
+        let want = self.icons.get(index).and_then(|icon| icon.svg.as_ref());
+        if self.draw_icon.svg.as_ref().map(|s| s.as_handle()) != want.map(|s| s.as_handle()) {
+            self.draw_icon.svg = want.cloned();
+        }
+        self.draw_icon.svg.is_some()
+    }
+
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.draw_bg.begin(cx, walk, self.layout);
 
-        if let Some(val) = self.labels.get(self.selected_item) {
-            self.draw_text
-                .draw_walk(cx, Walk::fit(), Align::default(), val);
-        } else {
-            self.draw_text
-                .draw_walk(cx, Walk::fit(), Align::default(), " ");
+        let has_icon = self.seat_icon(self.selected_item);
+        if has_icon {
+            // The gap in `icon_walk` exists to hold the label off the glyph;
+            // with the label gone there is nothing to hold off, and a collapsed
+            // face should be as narrow as the icon.
+            let icon_walk = if self.icon_only {
+                Walk {
+                    margin: Inset::default(),
+                    ..self.icon_walk
+                }
+            } else {
+                self.icon_walk
+            };
+            self.draw_icon.draw_walk(cx, icon_walk);
+        }
+
+        // `icon_only` lets the icon stand in for the words. An item that was
+        // given no icon has nothing to stand in for them, so it keeps them
+        // rather than leaving the operator a blank face.
+        if !(self.icon_only && has_icon) {
+            if let Some(val) = self.labels.get(self.selected_item) {
+                self.draw_text
+                    .draw_walk(cx, Walk::fit(), Align::default(), val);
+            } else {
+                self.draw_text
+                    .draw_walk(cx, Walk::fit(), Align::default(), " ");
+            }
         }
         self.draw_bg.end(cx);
 
@@ -658,6 +772,7 @@ impl DropDown {
             // One menu instance serves every dropdown with the same template,
             // so claim its items for this dropdown while they draw.
             popup_menu.tree_parent = self.uid;
+            popup_menu.icon_column = !self.icons.is_empty();
             popup_menu.begin(cx);
 
             match self.popup_menu_position {
@@ -668,10 +783,11 @@ impl DropDown {
                         if i == self.selected_item {
                             item_pos = Some(cx.turtle().pos());
                         }
-                        popup_menu.draw_item_dimmed(
+                        popup_menu.draw_item_full(
                             cx,
                             node_id,
                             &item,
+                            self.icon_at(i),
                             self.dimmed_items.get(i).copied().unwrap_or(false),
                         );
                     }
@@ -690,10 +806,11 @@ impl DropDown {
                 PopupMenuPosition::BelowInput => {
                     for (i, item) in self.labels.iter().enumerate() {
                         let node_id = LiveId(i as u64).into();
-                        popup_menu.draw_item_dimmed(
+                        popup_menu.draw_item_full(
                             cx,
                             node_id,
                             &item,
+                            self.icon_at(i),
                             self.dimmed_items.get(i).copied().unwrap_or(false),
                         );
                     }
@@ -771,6 +888,10 @@ impl Widget for DropDown {
         self.animator_in_state(cx, ids!(disabled.on))
     }
 
+    fn snapshot_selected(&self, _cx: &Cx) -> Option<String> {
+        Some(self.selected_item_label())
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         self.animator_handle_event(cx, event);
         let uid = self.widget_uid();
@@ -812,6 +933,17 @@ impl Widget for DropDown {
                 if !menu.menu_contains_pos(cx, e.abs) {
                     self.set_closed(cx);
                     self.animator_play(cx, ids!(hover.off));
+                    // The press that closes the list is the list's. What was
+                    // walked before this saw the lock and nothing else; what
+                    // is walked after would see no lock, now it is released,
+                    // and take the press as its own: a tab beside the page
+                    // switched as the list closed. Marked on the event as it
+                    // came in, which `transform_popup_event` copied.
+                    if let Event::MouseDown(e) = event {
+                        if e.handled.get().is_empty() {
+                            e.handled.set(self.draw_bg.area());
+                        }
+                    }
                     return;
                 }
             }
@@ -983,6 +1115,25 @@ impl DropDownRef {
         0
     }
 
+    /// Collapse the closed face to the selected item's icon, or spell it out
+    /// again. The host drives this off its own width, so it fires on every
+    /// resize step — hence the guard against redrawing for an unchanged value.
+    pub fn set_icon_only(&self, cx: &mut Cx, icon_only: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            if inner.icon_only != icon_only {
+                inner.icon_only = icon_only;
+                inner.draw_bg.redraw(cx);
+            }
+        }
+    }
+
+    pub fn icon_only(&self) -> bool {
+        if let Some(inner) = self.borrow() {
+            return inner.icon_only;
+        }
+        false
+    }
+
     pub fn selected_label(&self) -> String {
         if let Some(inner) = self.borrow() {
             return inner.labels[inner.selected_item].clone();
@@ -999,6 +1150,155 @@ impl DropDownRef {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod outside_press_tests {
+    use super::*;
+    use crate::button::ButtonAction;
+    use crate::combo_box::ComboBoxWidgetRefExt;
+    use crate::makepad_draw::cx_draw::CxDraw;
+    use std::cell::Cell;
+
+    const SIZE: DVec2 = DVec2 { x: 800.0, y: 600.0 };
+
+    struct Target {
+        pass: DrawPass,
+        draw_list: DrawList2d,
+        overlay: Overlay,
+    }
+
+    impl Target {
+        fn new(cx: &mut Cx) -> Self {
+            let overlay = cx.with_vm(|vm| Overlay::script_new(vm));
+            Target { pass: DrawPass::new(cx), draw_list: DrawList2d::new(cx), overlay }
+        }
+
+        fn draw(&mut self, cx: &mut Cx, root: &WidgetRef) {
+            self.pass.set_size(cx, SIZE);
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&self.pass, None);
+            self.draw_list.begin_always(&mut cx2d);
+            self.overlay.begin(&mut cx2d);
+            cx2d.begin_root_turtle(SIZE, Layout::flow_down());
+            root.draw_all(&mut cx2d, &mut Scope::empty());
+            cx2d.end_pass_sized_turtle();
+            self.overlay.end(&mut cx2d);
+            self.draw_list.end(&mut cx2d);
+            cx2d.end_pass(&self.pass);
+        }
+    }
+
+    fn press(abs: DVec2) -> Event {
+        Event::MouseDown(MouseDownEvent {
+            abs,
+            button: MouseButton::PRIMARY,
+            window_id: WindowId(1, 1),
+            modifiers: KeyModifiers::default(),
+            handled: Cell::new(Area::Empty),
+            time: 0.0,
+        })
+    }
+
+    fn release(abs: DVec2) -> Event {
+        Event::MouseUp(MouseUpEvent {
+            abs,
+            button: MouseButton::PRIMARY,
+            window_id: WindowId(1, 1),
+            modifiers: KeyModifiers::default(),
+            time: 0.0,
+        })
+    }
+
+    /// A press and its release through the whole page, in tree order, and
+    /// whether the button heard the press.
+    fn click(cx: &mut Cx, root: &WidgetRef, at: DVec2, button: &WidgetRef) -> bool {
+        let mut heard = false;
+        for event in [press(at), release(at)] {
+            let actions = cx.capture_actions(|cx| root.handle_event(cx, &event, &mut Scope::empty()));
+            heard |= actions
+                .iter()
+                .filter_map(|action| action.as_widget_action())
+                .any(|action| {
+                    action.widget_uid == button.widget_uid()
+                        && matches!(action.cast::<ButtonAction>(), ButtonAction::Pressed(_))
+                });
+        }
+        heard
+    }
+
+    fn middle(cx: &Cx, widget: &WidgetRef) -> DVec2 {
+        let rect = widget.area().rect(cx);
+        assert!(rect.size.x > 0.0, "not drawn");
+        rect.pos + rect.size * 0.5
+    }
+
+    /// An open list, a drop-down's or a combo box's, closes on a press
+    /// outside it, and the press goes no further: a button walked after the
+    /// list does not hear it, though the list's lock is gone by the time
+    /// the button is walked. The next press reaches the button.
+    ///
+    /// Each list has a button of its own, and each opens from Rust: with no
+    /// event loop here to end a capture on release, a widget that once took
+    /// a press would take every later one.
+    #[test]
+    fn a_press_outside_an_open_list_closes_it_and_reaches_nothing_after_it() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        cx.with_vm(crate::script_mod);
+        let root = cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    spacing: 20.
+                    // The lists before the buttons, as a page is walked
+                    // before the side panel beside it.
+                    event_order: EventOrder.Down
+                    pick := DropDown{width: 150.}
+                    combo := ComboBox{width: 150.}
+                    after_pick := Button{width: 150. height: 40. margin: Inset{top: 200.} text: "after"}
+                    after_combo := Button{width: 150. height: 40. text: "after"}
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        let labels = || vec!["One".to_string(), "Two".to_string(), "Three".to_string()];
+        root.drop_down(&cx, ids!(pick)).set_labels(&mut cx, labels());
+        let combo = root.widget(&cx, ids!(combo)).as_combo_box();
+        combo.set_labels(&mut cx, labels());
+        let mut target = Target::new(&mut cx);
+        target.draw(&mut cx, &root);
+        let pick = root.widget(&cx, ids!(pick));
+        let is_active = |pick: &WidgetRef| pick.borrow::<DropDown>().unwrap().is_active;
+
+        let after = root.widget(&cx, ids!(after_pick));
+        let on_after = middle(&cx, &after);
+        pick.borrow_mut::<DropDown>().unwrap().set_active(&mut cx);
+        target.draw(&mut cx, &root);
+        assert!(is_active(&pick));
+        assert!(!click(&mut cx, &root, on_after, &after), "the button heard the press that closed the drop-down's list");
+        assert!(!is_active(&pick), "the press outside closed the drop-down's list");
+        assert_eq!(cx.sweep_lock_area(), None);
+        target.draw(&mut cx, &root);
+        assert!(click(&mut cx, &root, on_after, &after), "with the list closed the button hears its press");
+
+        let after = root.widget(&cx, ids!(after_combo));
+        let on_after = middle(&cx, &after);
+        combo.open_list(&mut cx);
+        target.draw(&mut cx, &root);
+        assert!(combo.is_open());
+        assert!(!click(&mut cx, &root, on_after, &after), "the button heard the press that closed the combo box's list");
+        assert!(!combo.is_open(), "the press outside closed the combo box's list");
+        assert_eq!(cx.sweep_lock_area(), None);
+        target.draw(&mut cx, &root);
+        assert!(click(&mut cx, &root, on_after, &after), "with the list closed the button hears its press");
     }
 }
 

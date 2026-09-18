@@ -376,11 +376,20 @@ pub struct Window {
     /// Used to only emit a platform op when the resolved value actually changes.
     #[rust]
     system_bar_dark_icons: Option<bool>,
-    /// Cached `(caption_bar visible, caption rect, buttons rect)` for `WindowDragQuery`. It is
-    /// refreshed only after layout finishes, so a synchronous native hit-test between configure
-    /// and redraw cannot preserve rectangles from the previous window size.
+    /// Cached `(caption_bar visible, caption rect, buttons rect, caption bar area)` for
+    /// `WindowDragQuery`. It is refreshed only after layout finishes, so a synchronous native
+    /// hit-test between configure and redraw cannot preserve rectangles from the previous
+    /// window size.
+    ///
+    /// That event fires once per `WM_NCHITTEST` — i.e. on every mouse move on Windows — and
+    /// resolving the views + their areas each time runs widget-tree lookups, a real source of
+    /// scroll jitter when the mouse is moved during a fling.
+    ///
+    /// The area is what the caption question passes as its own (see
+    /// `caption_press_is_clients`). A cached handle is a handle from an earlier draw, which is
+    /// exactly what `is_mouse_held_outside` matches by owner rather than by handle.
     #[rust]
-    drag_query_cache: Option<(bool, Rect, Rect)>,
+    drag_query_cache: Option<(bool, Rect, Rect, Area)>,
     /// Whether a completed draw has made this frame's areas authoritative, so a geometry
     /// computed now may be cached. Between a configure and the redraw that answers it the
     /// areas still describe the previous size, and a query in that window is answered live
@@ -864,19 +873,22 @@ impl Window {
         }
     }
 
-    fn caption_drag_geometry(&self, cx: &mut Cx) -> (bool, Rect, Rect) {
+    fn caption_drag_geometry(&self, cx: &mut Cx) -> (bool, Rect, Rect, Area) {
         // Each `self.view` is a widget-tree walk, so the caption bar is resolved once
         // rather than once per field read.
         let caption = self.view(cx, ids!(caption_bar));
         let visible = caption.visible();
-        let caption_rect = caption.area().rect(cx);
+        // The handle as well as the rect: the caption press question is asked with the
+        // areas this window owns, and an owner is what a capture is matched by.
+        let caption_area = caption.area();
+        let caption_rect = caption_area.rect(cx);
         let buttons = self.view(cx, ids!(windows_buttons));
         let buttons_rect = if buttons.visible() {
             buttons.area().rect(cx)
         } else {
             Rect::default()
         };
-        (visible, caption_rect, buttons_rect)
+        (visible, caption_rect, buttons_rect, caption_area)
     }
 
     fn sync_caption_bar_height(&mut self, cx: &mut Cx) {
@@ -1071,7 +1083,7 @@ impl Window {
         // The exploded view owns the body pass; it does not nest inside the
         // other two scene mechanisms.
         self.use_sploded =
-            cx.sploded_active() && !self.use_gauss_capture && !self.use_ssaa;
+            cx.sploded_transformed() && !self.use_gauss_capture && !self.use_ssaa;
 
         if self.use_sploded {
             self.sploded_stack.begin_scene(cx);
@@ -1080,7 +1092,10 @@ impl Window {
             self.overlay
                 .begin_for_pass(cx, self.pass.handle.draw_pass_id());
         } else if self.use_gauss_capture {
-            self.gauss_stack.begin_scene(cx);
+            // The platform pass, not the live copy on ScriptDrawPass: a host
+            // that called set_window_clear_color wrote only the former.
+            let clear = cx.passes[self.pass.handle.draw_pass_id()].clear_color;
+            self.gauss_stack.begin_scene(cx, clear);
             self.overlay
                 .begin_for_pass(cx, self.pass.handle.draw_pass_id());
         } else if self.use_ssaa {
@@ -1275,6 +1290,33 @@ impl Window {
     }
 }
 
+/// Whether a press in the caption bar is the client's rather than the window
+/// manager's drag-to-move.
+///
+/// Moving the window is a gesture started from a press, and it obeys the
+/// app-wide rule like any other: it may start only on BARE background, and it
+/// stands down while something else holds the pointer. The window manager asks
+/// this question per mouse-move (`WM_NCHITTEST` and its equivalents), so the
+/// question is re-asked all through a drag rather than only at the press —
+/// which is what the last of the three answers is for.
+///
+/// * `over_content` — the caption doubles as the app's own toolbar, the window
+///   chrome buttons are under the point, or the design overlay's panel owns it.
+///   This is the press half of the rule, and it is enumerated rather than asked
+///   of the widget tree on purpose: `find_interactive_widget_from_point` counts
+///   every widget that has not opted out — a caption's own title Label and icon
+///   among them — so asking it here would answer Client over the title and
+///   leave the window undraggable by its own caption bar.
+/// * `mouse_held_outside` — `CxFingers::is_mouse_held_outside`: a control owns
+///   the mouse right now. Answering Caption then hands the pointer to the
+///   window manager and the control loses the rest of its drag. It is asked
+///   with the areas the window itself owns — its root view and its caption
+///   bar — so that only a capture by something ELSE stands the caption down;
+///   the caller has the whole of that reasoning.
+fn caption_press_is_clients(over_content: bool, mouse_held_outside: bool) -> bool {
+    over_content || mouse_held_outside
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1286,6 +1328,28 @@ mod tests {
             gauss_render_texture_y_flip_for_os(&OsType::Android(Default::default())),
             1.0
         );
+    }
+
+    /// The bare caption is the window manager's to drag — that is the whole
+    /// point of a caption bar, and the fix must not take it away.
+    #[test]
+    fn a_press_on_bare_caption_still_drags_the_window() {
+        assert!(!caption_press_is_clients(false, false));
+    }
+
+    /// A control that holds the mouse keeps it: this query arrives per
+    /// mouse-move, so a fader dragged up into the caption must not hand the
+    /// pointer to the window manager half way through its drag.
+    #[test]
+    fn a_control_holding_the_mouse_never_drags_the_window() {
+        assert!(caption_press_is_clients(false, true));
+    }
+
+    /// And the press half, unchanged: the chrome buttons, the app's own
+    /// toolbar and the design panel keep their presses.
+    #[test]
+    fn a_press_over_caption_content_is_the_clients() {
+        assert!(caption_press_is_clients(true, false));
     }
 
     #[test]
@@ -1505,6 +1569,11 @@ impl Widget for Window {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        // Before anything under the window can hit-test this event against a
+        // lock whose owner no longer exists.
+        crate::overlay_place::release_orphaned_sweep_locks(cx);
+        // And the scroll blocks of a modal dropped while it was open.
+        crate::modal::release_orphaned_scroll_blocks(cx);
         self.handle_direct_mouse_cursor(cx, event);
         crate::desktop_style::handle_event(cx, event);
         if let Event::Custom(json) = event {
@@ -1704,7 +1773,7 @@ impl Widget for Window {
                             live
                         }
                     };
-                    let (visible, mut caption_rect, buttons_rect) = geometry;
+                    let (visible, mut caption_rect, buttons_rect, caption_area) = geometry;
                     if !cache_ready {
                         caption_rect = configured_window_caption_rect(
                             caption_rect,
@@ -1725,6 +1794,38 @@ impl Widget for Window {
                             && !self.window.handle.uses_wayland_client_side_decorations(cx))
                         || (matches!(cx.os_type(), OsType::Macos)
                             && self.window.handle.is_fullscreen(cx));
+                    // The design overlay's panel is drawn OVER the caption bar, top of the
+                    // window down. Answering Caption there hands the press to the OS as a
+                    // window drag and the panel never sees it — its filter field could not be
+                    // focused at all. The chrome buttons need no clause of their own: a point
+                    // over them is already the client's by the classification below.
+                    let over_content = content_toolbar || crate::tweaker::panel_owns_pointer(dq.abs);
+                    // And a control that already holds the mouse keeps it: this query arrives
+                    // per mouse-move, so without it a fader dragged up into the caption would
+                    // hand the pointer to the window manager mid-drag.
+                    //
+                    // Asked with what the window itself owns: its root view and the caption
+                    // bar it draws. A capture by either is the window's own chrome and says
+                    // nothing about a client gesture — while an EMPTY list claimed the window
+                    // owned nothing at all, so a press held ANYWHERE in the application
+                    // answered "the client's" here and left this caption undraggable for as
+                    // long as it was held.
+                    //
+                    // The chrome BUTTONS are deliberately not ours: a min/max/close button
+                    // holding the press is a control holding the press, and the caption stands
+                    // down for it exactly as it does for a fader — which is what keeps the
+                    // pointer with the button when it is dragged off the button and along the
+                    // bar. Content a host hangs in the caption is not ours either, for the
+                    // same reason.
+                    //
+                    // What is left: a capture records no window, so a drag in ANOTHER window
+                    // of the same application still reads as held here. That one cannot be
+                    // told apart from this side.
+                    let mine = [self.view.area(), caption_area];
+                    let mouse_held = cx.fingers.is_mouse_held_outside(&mine);
+                    // A press on the caption that is the client's rather than the window
+                    // manager's, for the `Caption` arm below.
+                    let caption_is_clients = caption_press_is_clients(over_content, mouse_held);
                     match classify_window_drag_query(
                         visible,
                         caption_rect,
@@ -1736,7 +1837,7 @@ impl Widget for Window {
                             dq.response.set(WindowDragQueryResponse::Client);
                             cx.set_cursor(MouseCursor::Default);
                         }
-                        WindowDragQueryResponse::Caption if content_toolbar => {
+                        WindowDragQueryResponse::Caption if caption_is_clients => {
                             dq.response.set(WindowDragQueryResponse::Client);
                             cx.set_cursor(MouseCursor::Default);
                         }

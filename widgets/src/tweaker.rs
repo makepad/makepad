@@ -23,6 +23,64 @@
 //! * `/tweak/final` answers the coalesced end state so the AI integrates
 //!   once instead of tracking every intermediate edit.
 //!
+//! # The Spec tab and the prompt strip — the human's side of the channel
+//!
+//! Everything above is the AI reading the app. The SPEC tab is the person
+//! writing back. It carries three fields: NOTES, what a widget is about,
+//! written for whoever reads it next; RULES, what must stay true of it; and
+//! under a divider the rules that stand over the whole APP. A note describes
+//! and a rule constrains, and they are kept apart so that an agent reading
+//! the state can tell "here is context" from "do not break this". The
+//! app-wide field is why the tab works with nothing selected at all.
+//!
+//! `Insert` or `Ctrl+Shift+N` shows the tab on the selection (the panel's
+//! `note` button does the same for keyboards without an Insert), and so does
+//! a click on a pin badge or a right click on a widget. A badge means
+//! something is written about that widget.
+//!
+//! The PROMPT is one box pinned below the tabs, outside them, so whichever
+//! tab is up the box is in the same place and the tab body scrolls above it.
+//! One box for the whole panel, not one per widget: a send attributes what
+//! is in it to whatever is selected at that moment, and with nothing
+//! selected the ask is about the app. `Ctrl+Enter` sends, `Alt+Enter`
+//! queues a message to go out with the next send, and Up and Down walk what
+//! was sent before while the box is empty.
+//!
+//! Sending does not push anything — the bridge is a server — it raises the
+//! record's `sent` count, which `/tweak/state` reports as `"ask": N` and the
+//! log ring carries as `TWEAK ask #N`. A polling agent reads either and
+//! knows the difference between a note left lying around and one it is being
+//! asked to act on NOW.
+//!
+//! Notes and rules are written to `.makepad-notes.txt` beside the running
+//! app and the app-wide document to `.makepad-rules.txt` — plain
+//! tab-separated text — so both survive the process and are readable
+//! without it.
+//!
+//! Typing `@` into a note arms a widget pick: the hover turns amber and the
+//! next click writes that widget's reference into the note, leaving the
+//! selection alone. A pinned note also marks its widget with a small amber
+//! pin, which opens it.
+//!
+//! References are readable paths ([`readable_paths`]): the widget's name
+//! where it has one, its type where it does not, `_1`/`_2` only where
+//! siblings collide, and the head every path in the app shares dropped, so
+//! they start where the app does — `dock.tOverview.View.View.Label_1`. That
+//! is what the footer copies and what a note is keyed by. An `@` writes the
+//! same thing, or the shorter relative form when there is one: `./Label_2`
+//! for a sibling, `../Button` one container out.
+//!
+//! And with a selection standing, the arrow keys walk the live tree the way
+//! a scene editor does: parent, first child, previous/next sibling. With
+//! nothing selected they still belong to the exploded view's orbit.
+//!
+//! Two smaller readouts round the selection out: a full-width line at the
+//! top of the Layout section prints what the layout actually produced, above
+//! the Fill/Fit/number controls that asked for it, and clicking the footer's
+//! path line copies the whole path
+//! to the clipboard — the panel can only show it head-clipped, and a path
+//! you cannot select is a path you cannot quote.
+//!
 //! Containment (the plan of record, tweaker.md): everything UI-side lives
 //! HERE; `Window` hosts the widget and calls [`window_intercept`] — a few
 //! lines; the `/tweak` routes in `platform/src/remote.rs` stay thin and
@@ -32,10 +90,14 @@
 
 use crate::{
     check_box::{CheckBox, CheckBoxAction},
-    fab_controls::{format_hex, parse_hex, rgb_to_hsv, FabColorPick, FabColorPickAction, FabValueInput, FabValueInputAction},
+    fab_controls::{format_hex, parse_hex, rgb_to_hsv, FabColorPick, FabColorPickAction, FabValueInput, FabValueInputAction, FabValueInputWidgetRefExt},
     makepad_draw::makepad_platform::devtools,
     makepad_draw::makepad_platform::sploded::{SPLODED_SPREAD_DEFAULT, SPLODED_SPREAD_MAX, SPLODED_SPREAD_MIN},
+    dock::DockWidgetRefExt,
+    drop_down::{DropDownAction, DropDownWidgetRefExt},
     file_tree::{FileTree, FileTreeAction},
+    fold_header::{FoldHeader, FoldHeaderWidgetRefExt},
+    page_flip::PageFlipWidgetRefExt,
     label::Label,
     makepad_derive_widget::*,
     makepad_draw::*,
@@ -48,6 +110,7 @@ use crate::{
 use crate::makepad_script::script_eval;
 use crate::Animate;
 use crate::ButtonAction;
+use crate::button::ButtonWidgetRefExt;
 use crate::tooltip::Tooltip;
 use crate::animator::{AnimatorState, Ease as AnimEase, Play};
 use crate::makepad_draw::makepad_platform::DrawShaderId;
@@ -93,6 +156,10 @@ pub struct TweakPick {
 #[derive(Clone, Copy, PartialEq)]
 enum PickStyle {
     Hover,
+    /// Hovering while a note's `@` is waiting for a widget: amber, and
+    /// heavier than the ordinary hover, because this click does something
+    /// different — it writes a name into the note instead of selecting.
+    Mention,
     Pinned,
     /// Pinned while a value is actively moving: hairline stipple only.
     PinnedQuiet,
@@ -118,15 +185,859 @@ pub struct TweakDiffEntry {
     pub scope: String,
 }
 
-/// A Ctrl+Space note card, attached to a widget by path: it rides with
-/// the widget's live rect at (dx, dy) offset and is the human's text
+/// A note card, attached to a widget by path: it rides with the widget's
+/// live rect at (dx, dy) offset, sized (w, h), and is the human's text
 /// channel to the AI (/tweak/state carries it).
 #[derive(Clone, Debug)]
 pub struct TweakNote {
     pub path: String,
+    /// The NOTE: what this widget is about, written for whoever reads it
+    /// next — you, tomorrow, or an agent looking for standing context. It is
+    /// never cleared by sending; only you empty it.
     pub text: String,
-    pub dx: f64,
-    pub dy: f64,
+    /// The RULES: what must stay true of this widget. A note describes, a
+    /// rule constrains -- they are kept apart because an agent reading the
+    /// state must be able to tell "here is context" from "do not break
+    /// this". Saved beside the note.
+    pub rules: String,
+    /// Bumped every time the human sends the note to the AI (the sparkle
+    /// button / Ctrl+Enter). `/tweak/state` reports the note as `ask` while
+    /// this is above the count the AI last acknowledged, so a polling agent
+    /// can tell "there is a note here" from "act on this note NOW".
+    pub sent: u64,
+}
+
+
+/// How much one wheel notch changes the magnification.
+const ZOOM_WHEEL_STEP: f32 = 0.15;
+
+/// How much one wheel notch opens or closes the exploded stack.
+const SPREAD_WHEEL_STEP: f32 = 0.04;
+
+/// What a badge says about its widget. A mark this size has one thing to
+/// say with -- its colour -- so it says the most useful thing: whether what
+/// is written here is a description, a constraint, or both.
+#[derive(Clone, Copy, PartialEq)]
+enum BadgeKind {
+    /// A note only: someone described this.
+    Note,
+    /// A rule only: something here must stay true.
+    Rule,
+    /// Both.
+    Both,
+}
+
+impl BadgeKind {
+    /// Which of the three pre-coloured pins draws this badge. They are three
+    /// separate widgets rather than one recoloured per badge: an apply does
+    /// not land before the draw_walk that follows it, so a single shared
+    /// icon paints each badge in the NEXT badge's colour.
+    fn index(self) -> usize {
+        match self {
+            BadgeKind::Note => 0,
+            BadgeKind::Rule => 1,
+            BadgeKind::Both => 2,
+        }
+    }
+}
+
+/// The least a Spec field may be squeezed to: two lines plus the padding.
+/// Below that a box says less than its own placeholder. It is also, in the
+/// other direction, the only ceiling a field has -- one can grow until the
+/// others are at their floor, and no further, because the three share the
+/// tab's height rather than adding to it.
+const SPEC_FIELD_MIN: f64 = 48.0;
+
+/// How the Spec tab's height is shared between its three fields. These are
+/// flex weights -- `grid-template-rows: repeat(3, minmax(48px, 1fr))`, in
+/// effect -- so the split is a proportion of whatever height the tab has,
+/// and a window that changes size keeps the proportion rather than an
+/// absolute number that no longer fits. Zero means "never dragged" and
+/// resolves to an equal share. Like the panel's own width they live on the
+/// session and not on disk, so a drag lasts the run. Notes, rules, app
+/// rules, in that order.
+fn spec_weight(index: usize) -> f64 {
+    let weights = session().lock().unwrap().spec_weights;
+    // "Never dragged" is all three at zero, not this one: a drag writes the
+    // whole triple, and a row dragged down to its floor legitimately holds
+    // a weight of exactly zero -- treating that as unset handed it an equal
+    // share back the moment it got there.
+    if weights.iter().all(|w| *w <= 0.0) {
+        1.0
+    } else {
+        weights[index].max(0.0)
+    }
+}
+
+/// One message waiting in the strip's queue. Taken on the tab it was
+/// written on: from the Shader tab it carries the draw layer that tab was
+/// showing and the fn sources for it, and goes out as a shader-fn rewrite
+/// rather than a plain ask -- the same channel the Shader tab's own box
+/// used to be, folded into the one box everybody types into.
+#[derive(Clone, Debug)]
+pub struct Outgoing {
+    pub path: String,
+    pub text: String,
+    /// (layer, fn sources) when this is about a shader.
+    pub shader: Option<(String, String)>,
+}
+
+/// The pin badge's clickable square, in points.
+const BADGE_SIZE: f64 = 13.0;
+/// How often the badge targets are re-resolved (a whole-tree walk).
+const BADGE_REFRESH: f64 = 0.5;
+
+/// How far the pinned widget's dashed ring stands off the widget itself.
+/// The leader measures to THAT — the outline is what the eye sees as the
+/// edge of the selection.
+const SELECTION_RING_OUTSET: f64 = 4.0;
+
+impl TweakNote {
+    fn new(path: String) -> Self {
+        Self {
+            path,
+            text: String::new(),
+            rules: String::new(),
+            sent: 0,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// the note store — pinned notes outlive the process
+//
+// One line per note, tab-separated, in the process's working directory. A
+// flat text file on purpose: `cat .makepad-notes.txt` is a readable list of
+// what the human asked for, and the AI that drives the session can read it
+// without the app running.
+
+const NOTE_STORE: &str = ".makepad-notes.txt";
+/// The rules that stand over the WHOLE app, in their own file beside the
+/// notes. Its own file rather than a row in the note store because it is
+/// not about a widget: nothing keys it, and a person editing it by hand
+/// should not have to find it among a hundred paths.
+const RULES_STORE: &str = ".makepad-rules.txt";
+
+/// Read the app-wide rules back. A missing file is an empty document, not
+/// an error -- most apps will never have one.
+fn app_rules_load() -> String {
+    std::fs::read_to_string(RULES_STORE).unwrap_or_default()
+}
+
+/// Write the app-wide rules out, or take the file away when they are
+/// emptied -- an empty file beside the app says something is there when
+/// nothing is.
+fn app_rules_save(text: &str) {
+    if text.trim().is_empty() {
+        let _ = std::fs::remove_file(RULES_STORE);
+        return;
+    }
+    if let Err(error) = std::fs::write(RULES_STORE, text) {
+        log!("TWEAK rules store write failed: {error}");
+    }
+}
+/// Custom names live beside the notes and outlive the process the same way:
+/// a name typed into the Props tab is a request the AI carries out in the
+/// source, and it must still be there when the AI gets to it — including
+/// after a rebuild, which is exactly when a rename lands.
+const NAME_STORE: &str = ".makepad-names.txt";
+/// Layout conversions asked for on the Props tab -- a View that should be
+/// a Grid, or the other way, or a container that should sit in a Dock as
+/// its one tab -- one per line, the same three columns as the name store
+/// and, on a dock line only, a fourth with the size it was asked at. A
+/// widget cannot change its type or its parent while it runs; the agent
+/// edits the source, and the ask survives here until it has.
+const LAYOUT_STORE: &str = ".makepad-layouts.txt";
+
+/// A name the person gave a widget. `from` is what the tree calls it today
+/// (empty for an anonymous widget), `to` what they want it called.
+#[derive(Clone, Debug)]
+pub struct TweakRename {
+    pub reference: String,
+    pub from: String,
+    pub to: String,
+}
+
+/// Read the requested names back.
+fn name_store_load() -> Vec<TweakRename> {
+    let Ok(body) = std::fs::read_to_string(NAME_STORE) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for line in body.lines() {
+        if line.starts_with('#') || line.trim().is_empty() {
+            continue;
+        }
+        let cols: Vec<&str> = line.split('\t').collect();
+        if cols.len() < 3 {
+            continue;
+        }
+        out.push(TweakRename {
+            reference: cols[0].to_string(),
+            from: note_store_unescape(cols[1]),
+            to: note_store_unescape(cols[2]),
+        });
+    }
+    out
+}
+
+fn name_store_save(renames: &[TweakRename]) {
+    if renames.is_empty() {
+        let _ = std::fs::remove_file(NAME_STORE);
+        return;
+    }
+    let mut out = String::from(
+        "# makepad widget names — typed in the Shift+F10 Props tab, one per line\n\
+         # reference\tcurrent name\twanted name\n",
+    );
+    for rename in renames {
+        out.push_str(&format!(
+            "{}\t{}\t{}\n",
+            rename.reference,
+            note_store_escape(&rename.from),
+            note_store_escape(&rename.to)
+        ));
+    }
+    if let Err(error) = std::fs::write(NAME_STORE, out) {
+        log!("TWEAK name store write failed: {error}");
+    }
+}
+
+/// One layout conversion asked for: which widget, what it is, what it
+/// should become (`grid`, `flex` or `dock`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TweakConvert {
+    pub reference: String,
+    pub from: String,
+    pub to: String,
+    /// A dock ask's size when it was made, in layout points. A Dock cannot
+    /// fit its content, so an axis that fits today needs a number in the
+    /// source, and the one the person was looking at is the honest one.
+    /// `None` for grid and flex, and for a dock ask with nothing measured.
+    pub size: Option<(f64, f64)>,
+}
+
+fn layout_store_load() -> Vec<TweakConvert> {
+    let Ok(body) = std::fs::read_to_string(LAYOUT_STORE) else {
+        return Vec::new();
+    };
+    layout_store_parse(&body)
+}
+
+/// The parser on its own, so the file's shapes can be tested without one
+/// on disk.
+fn layout_store_parse(body: &str) -> Vec<TweakConvert> {
+    let mut out = Vec::new();
+    for line in body.lines() {
+        if line.starts_with('#') || line.trim().is_empty() {
+            continue;
+        }
+        let cols: Vec<&str> = line.split('\t').collect();
+        if cols.len() < 3 {
+            continue;
+        }
+        // The fourth column is a dock ask's `WxH`. Files from before dock
+        // asks have three, and a size that does not read is no size rather
+        // than no ask: the ask is what matters, the size only helps.
+        let size = cols.get(3).and_then(|cell| {
+            let (w, h) = cell.trim().split_once('x')?;
+            let (w, h) = (w.parse::<f64>().ok()?, h.parse::<f64>().ok()?);
+            (w > 0.0 && h > 0.0).then_some((w, h))
+        });
+        out.push(TweakConvert {
+            reference: cols[0].to_string(),
+            from: cols[1].to_string(),
+            to: cols[2].to_string(),
+            size,
+        });
+    }
+    out
+}
+
+/// The file's text. Grid and flex lines come first: a binary from before
+/// dock asks reads only the first three columns and keeps the first ask it
+/// meets for a widget, so this way the one it keeps is one it understands.
+fn layout_store_text(converts: &[TweakConvert]) -> String {
+    let mut out = String::from(
+        "# makepad layout conversions \u{2014} asked for in the Shift+F10 Props tab, one per line\n\
+         # reference\tcurrent type\twanted layout\tsize asked at (dock only, WxH points)\n",
+    );
+    let layout = converts.iter().filter(|c| !is_dock_ask(&c.to));
+    let dock = converts.iter().filter(|c| is_dock_ask(&c.to));
+    for convert in layout.chain(dock) {
+        out.push_str(&format!("{}\t{}\t{}", convert.reference, convert.from, convert.to));
+        if let (true, Some((w, h))) = (is_dock_ask(&convert.to), convert.size) {
+            out.push_str(&format!("\t{}x{}", fmt_measure(w), fmt_measure(h)));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+fn layout_store_save(converts: &[TweakConvert]) {
+    if converts.is_empty() {
+        let _ = std::fs::remove_file(LAYOUT_STORE);
+        return;
+    }
+    if let Err(error) = std::fs::write(LAYOUT_STORE, layout_store_text(converts)) {
+        log!("TWEAK layout store write failed: {error}");
+    }
+}
+
+/// Is this ask the dock kind? Asks come in two families and one widget can
+/// hold one of each: `grid` / `flex` changes the container's own type,
+/// `dock` wraps it in a Dock inside its parent. The two source edits never
+/// touch the same text and both can be done (the tab's body becomes the
+/// Grid), so standing one up must never take the other back.
+fn is_dock_ask(to: &str) -> bool {
+    to == "dock"
+}
+
+/// The standing ask of one family (`dock` or not) for a widget.
+fn convert_for<'a>(
+    converts: &'a [TweakConvert],
+    reference: &str,
+    dock: bool,
+) -> Option<&'a TweakConvert> {
+    converts
+        .iter()
+        .find(|c| c.reference == reference && is_dock_ask(&c.to) == dock)
+}
+
+/// Stand an ask up (`want`) or take it back. It replaces whatever stood in
+/// its own family for the same widget and leaves the other family alone.
+/// Returns whether one stood before.
+fn converts_set(converts: &mut Vec<TweakConvert>, ask: TweakConvert, want: bool) -> bool {
+    let dock = is_dock_ask(&ask.to);
+    let same = |c: &TweakConvert| c.reference == ask.reference && is_dock_ask(&c.to) == dock;
+    let had = converts.iter().any(same);
+    converts.retain(|c| !same(c));
+    if want {
+        converts.push(ask);
+    }
+    had
+}
+
+/// Fold the stored asks in behind the session's own: an ask made this run
+/// wins over what the file said, and there is one per widget per family.
+fn converts_merge(session: &mut Vec<TweakConvert>, stored: Vec<TweakConvert>) {
+    for convert in stored {
+        if convert_for(session, &convert.reference, is_dock_ask(&convert.to)).is_none() {
+            session.push(convert);
+        }
+    }
+}
+
+/// `/tweak/state`'s `converts` array. Grid and flex entries are the three
+/// fields they always were. A dock entry also carries the name it wraps
+/// under, the size it was asked at and `do`, the whole edit spelled out:
+/// the person ticked a box, and the agent reading this has nothing else
+/// to go on. It is written here, when the state is read, from the ask and
+/// whatever else stands for the widget, so the store never holds prose
+/// that a later rename or grid ask would make wrong.
+fn converts_json(converts: &[TweakConvert], renames: &[TweakRename]) -> String {
+    let mut out = String::from("[");
+    for (i, convert) in converts.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&format!(
+            "{{\"ref\":{},\"from\":{},\"to\":{}",
+            json_str(&convert.reference),
+            json_str(&convert.from),
+            json_str(&convert.to)
+        ));
+        if is_dock_ask(&convert.to) {
+            let rename = renames
+                .iter()
+                .find(|r| r.reference == convert.reference)
+                .map(|r| r.to.as_str());
+            let layout = convert_for(converts, &convert.reference, false).map(|c| c.to.as_str());
+            out.push_str(&format!(
+                ",\"name\":{}",
+                json_str(&dock_name(&convert.reference, rename))
+            ));
+            if let Some((w, h)) = convert.size {
+                out.push_str(&format!(",\"size\":[{},{}]", fmt_measure(w), fmt_measure(h)));
+            }
+            out.push_str(&format!(
+                ",\"do\":{}",
+                json_str(&dock_transform_text(
+                    &convert.reference,
+                    &convert.from,
+                    convert.size,
+                    rename,
+                    layout
+                ))
+            ));
+        }
+        out.push('}');
+    }
+    out.push(']');
+    out
+}
+
+/// Whether the Props tab offers a dock ask for the selection.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+enum DockGate {
+    /// Not a container a Dock can take: no dock row.
+    #[default]
+    No,
+    /// A named container with something in it: the checkbox shows.
+    Can,
+    /// Already a tab's body in a Dock: the ask has been carried out.
+    InDock,
+}
+
+/// What the tree says about a selection, as far as a dock ask cares. Kept
+/// apart from the tree so the rules can be tested without one.
+#[derive(Clone, Copy)]
+struct DockFacts<'a> {
+    /// The registered type: the Rust struct's name, so a SolidView and a
+    /// RoundedView both read `View`.
+    ty: &'a str,
+    parent_ty: &'a str,
+    has_children: bool,
+    /// It has a name in the tree, or a rename ask gives it one.
+    named: bool,
+    /// Some ancestor builds its items from a template.
+    in_list: bool,
+    /// It is under the window's body: the app's content, not the window's
+    /// own chrome (its caption bar and what is in that) and not the
+    /// inspector, which sits beside the body.
+    in_body: bool,
+    /// It is part of the inspector itself.
+    in_panel: bool,
+}
+
+/// Lists whose items are built from a template: nothing under one has a
+/// spot of its own in the source for a Dock to go.
+const TEMPLATE_LISTS: [&str; 4] = ["PortalList", "FlatList", "TileList", "NavList"];
+
+/// Parents a wrapped container can sit in: the ones that lay their children
+/// out by flow and never look one up by name. The wrap renames the slot to
+/// `<name>_dock`, and any other parent may depend on it: a PageFlip finds
+/// its pages by name, a Popover its `content`, a Window its `body`, and a
+/// widget that inserts its children from Rust has none written in the
+/// source for the edit to find.
+const FLOW_PARENTS: [&str; 3] = ["View", "Grid", "KeyboardView"];
+
+/// Which selections a dock ask is offered for. Only `View` and `Grid`: the
+/// wrap moves the container's walk onto the Dock and makes the body fill
+/// the tab, and only the plain containers size the way that promises -- a
+/// Button, a Window or a Dock itself does not. Only in a flow parent (see
+/// [`FLOW_PARENTS`]) and under the window's body, since the window's own
+/// chrome is not the app's source; a list item is a template; an anonymous
+/// container has no findable spot in the source and no id to name the
+/// dock, tab and body after; an empty one has nothing for a tab. A parent
+/// whose type cannot be read (borrowed mid-dispatch) is no flow parent.
+fn dock_gate_of(facts: &DockFacts) -> DockGate {
+    if facts.in_panel || !facts.in_body || !matches!(facts.ty, "View" | "Grid") {
+        return DockGate::No;
+    }
+    // A Dock registers a tab's body in the tree under itself, so a parent
+    // that is a Dock means the wrap is done: say so, rather than offer it.
+    if facts.parent_ty == "Dock" {
+        return DockGate::InDock;
+    }
+    if !FLOW_PARENTS.contains(&facts.parent_ty)
+        || facts.in_list
+        || !facts.has_children
+        || !facts.named
+    {
+        return DockGate::No;
+    }
+    DockGate::Can
+}
+
+/// The dock ask a tab's body in a Dock was made from, if one stands. The
+/// wrap moves the container a level down, `<parent>/<name>` to
+/// `<parent>/<dock>/<name>`, so the ask no longer matches the reference it
+/// was made on, and without this nothing could show it again to be taken
+/// back. The tab is named after the container, or after a rename that
+/// stands with the ask (done in the same edit); the dock's own name is not
+/// read, since the edit may have had to pick another.
+fn dock_ask_done_by<'a>(
+    converts: &'a [TweakConvert],
+    renames: &[TweakRename],
+    body: &str,
+) -> Option<&'a TweakConvert> {
+    let (dock_path, _) = body.rsplit_once('/')?;
+    let (parent, _) = dock_path.rsplit_once('/')?;
+    let tab = dock_name(body, None);
+    converts.iter().find(|ask| {
+        let rename = renames
+            .iter()
+            .find(|r| r.reference == ask.reference)
+            .map(|r| r.to.as_str());
+        is_dock_ask(&ask.to)
+            && ask.reference.rsplit_once('/').is_some_and(|(p, _)| p == parent)
+            && dock_name(&ask.reference, rename) == tab
+    })
+}
+
+/// The name a dock ask wraps under: the wanted name when a rename ask
+/// stands, since that rename is done in the same edit, else the reference's
+/// last segment without its sibling index (`frame.2` is still `frame`).
+fn dock_name(reference: &str, rename: Option<&str>) -> String {
+    if let Some(to) = rename.filter(|to| !to.is_empty()) {
+        return to.to_string();
+    }
+    let last = reference.rsplit('/').next().unwrap_or(reference);
+    match last.rsplit_once('.') {
+        Some((head, index))
+            if !head.is_empty() && !index.is_empty() && index.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            head.to_string()
+        }
+        _ => last.to_string(),
+    }
+}
+
+/// The ids a dock wrap uses, from the container's name: (dock, tab, body
+/// template, tab title). The tab takes the container's own name because a
+/// Dock registers a body under its tab id, so `ids!(name)` still finds it.
+/// The body template needs a different key (tab ids and template keys share
+/// the Dock's key space), and `<PascalName>Body` reads as what it is.
+/// The title is the name as words: `side_panel` is "Side panel".
+fn dock_ids(name: &str) -> (String, String, String, String) {
+    fn capitalised(word: &str) -> String {
+        let mut chars = word.chars();
+        match chars.next() {
+            Some(first) => first.to_uppercase().chain(chars).collect(),
+            None => String::new(),
+        }
+    }
+    let pascal: String = name.split('_').map(capitalised).collect();
+    let title = capitalised(name.replace('_', " ").trim());
+    (format!("{name}_dock"), name.to_string(), format!("{pascal}Body"), title)
+}
+
+/// A size in points the way the DSL writes a float: `412.`, `412.5`.
+fn dsl_points(v: f64) -> String {
+    let text = fmt_measure(v);
+    if text.contains('.') { text } else { format!("{text}.") }
+}
+
+/// The dock ask's `do`: the edit, whole, for the container at `reference`.
+/// `from` is the Rust type the ask was made on, `size` what it measured,
+/// `rename` a standing rename's wanted name, `layout` a standing `grid` or
+/// `flex` ask for the same widget.
+fn dock_transform_text(
+    reference: &str,
+    from: &str,
+    size: Option<(f64, f64)>,
+    rename: Option<&str>,
+    layout: Option<&str>,
+) -> String {
+    let name = dock_name(reference, rename);
+    let (dock, tab, body, title) = dock_ids(&name);
+    // The Dock's tab bar is a TabBar, whose height is this expression.
+    let bar = "max(theme.tab_height, 25.)";
+    let mut out = format!(
+        "Put `{name}` ({reference}) in a Dock as its one tab. In its parent, where it is written, it becomes \
+         `{dock} := Dock{{<its walk> root := DockTabs{{tabs: [@{tab}] selected: 0 closable: false}} \
+         {tab} := DockTab{{name: \"{title}\" template: @PermanentTab kind: @{body}}} \
+         {body} := <its type as written>{{width: Fill height: Fill <the rest of it>}}}}`. "
+    );
+    if let Some(to) = rename.filter(|to| !to.is_empty()) {
+        out.push_str(&format!(
+            "A rename to `{to}` stands for it: these names already use it, so do the rename in the same edit. "
+        ));
+    }
+    out.push_str(&format!(
+        "If `{dock}` is taken among its siblings, use another free name. \
+         `root` is required: a Dock draws from it and nothing else. \
+         The Dock takes every width, height, margin, abs_pos, min_width, max_width, min_height, max_height, \
+         aspect and cell the container sets, values and theme references moved as written, but it draws its \
+         tab bar inside its own height: a height, min_height or max_height that is a number or a theme \
+         reference gets the bar added, `<value> + {bar}`, so the body keeps the height it had. An axis it \
+         does not set stays at the Dock's Fill default. A Dock cannot size to its content, so it needs a fixed \
+         size on an axis that is Fit, set or inherited, and on one that is Fill or not set where the parent \
+         fits that axis, since a Fill Dock collapses to nothing there. "
+    ));
+    match size {
+        Some((w, h)) => out.push_str(&format!(
+            "That size is the one measured when this was asked, the bar added to the height: width: {} and \
+             height: {} + {bar}. A fixed size clips content that grows later. ",
+            dsl_points(w),
+            dsl_points(h)
+        )),
+        None => out.push_str(&format!(
+            "Nothing was measured when this was asked, so read that size off the running app and add {bar} \
+             to the height. "
+        )),
+    }
+    out.push_str(
+        "If the app's theme sets dock_border_size, the Dock pads its body by it on the left, right and bottom: \
+         add that to the size as well. ",
+    );
+    out.push_str(&format!(
+        "`{body}` fills the tab: width: Fill height: Fill, and no margin, abs_pos or cell. Everything else \
+         stays: its type as written in the source (`{from}` is only the Rust type), its layout, draw props, \
+         container_id and children. "
+    ));
+    match layout {
+        Some("grid") => out.push_str(&format!(
+            "A grid ask stands for it too: `{body}` is a Grid instead of the type it has now. "
+        )),
+        Some("flex") => out.push_str(&format!(
+            "A flex ask stands for it too: `{body}` is a View instead of a Grid. "
+        )),
+        _ => {}
+    }
+    let parent = reference.rsplit_once('/').map_or("", |(parent, _)| parent);
+    out.push_str(&format!(
+        "One tab, @PermanentTab and closable: false: no cross and nothing can empty the dock, so no drag or \
+         close handlers are needed; wire them as the Dock story does only if more tabs or docks should trade \
+         places. Rust code that applies walk properties to `{name}` (a script_apply_eval! of width, height or \
+         margin) now targets `{dock}`; lookups of its layout, draw props and children stay on `{name}`. \
+         If `{name}` already sits in a Dock as a tab's body, the wrap is done: do not wrap it again. \
+         The ask stands until dockable is unticked in the Props tab. Once the source is changed this \
+         reference is {parent}/{dock}/{tab}; picking that shows the box still ticked, as a tab in a dock, \
+         and unticking it there clears the ask."
+    ));
+    out
+}
+
+fn note_store_escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => {}
+            '\t' => out.push_str("\\t"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+fn note_store_unescape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('\\') => out.push('\\'),
+            Some(other) => out.push(other),
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
+/// Put a mentioned widget's path into the note text, right after the `@`
+/// that armed the pick. With no `@` (the arming character was deleted mid
+/// pick) it is appended, so a click is never silently lost.
+fn insert_mention(text: &str, path: &str) -> String {
+    match text.rfind('@') {
+        Some(at) => {
+            let mut out = String::with_capacity(text.len() + path.len());
+            out.push_str(&text[..=at]);
+            out.push_str(path);
+            out.push_str(&text[at + 1..]);
+            out
+        }
+        None => {
+            let mut out = text.to_string();
+            if !out.is_empty() && !out.ends_with(char::is_whitespace) {
+                out.push(' ');
+            }
+            out.push('@');
+            out.push_str(path);
+            out
+        }
+    }
+}
+
+/// `target` written relative to the noted widget, in URL notation — the one
+/// notation the whole scheme uses:
+///
+/// * `/dock/tOverview/View/Label_1` is absolute, from the root,
+/// * `./child` is inside the widget the note is on,
+/// * `../Label_2` is a SIBLING (up to the parent, then down), and
+/// * `../../Button` is one level further out.
+///
+/// This is what the person sees in the card, because `../Label_2` says "the
+/// one next to this", which no absolute path can say however short it is.
+/// What leaves the app — the clipboard, `/tweak/state` — is always absolute:
+/// a reference read somewhere else has no "here" to be relative to.
+///
+/// `None` when the two share no root, or when the target is a bare ancestor
+/// (`../` alone names it but says nothing about WHAT it is).
+fn relative_path(base: &str, target: &str) -> Option<String> {
+    let split = |p: &str| -> Vec<String> {
+        p.split('/').filter(|s| !s.is_empty()).map(str::to_string).collect()
+    };
+    let base = split(base);
+    let target = split(target);
+    let shared = base
+        .iter()
+        .zip(target.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    if shared == 0 {
+        return None; // different trees: relative would be a lie
+    }
+    let down = target[shared..].join("/");
+    if down.is_empty() {
+        return None;
+    }
+    let ups = base.len() - shared;
+    let mut out = if ups == 0 {
+        "./".to_string()
+    } else {
+        "../".repeat(ups)
+    };
+    out.push_str(&down);
+    Some(out)
+}
+
+/// The absolute path a mention names. `./` and `../` are read against the
+/// noted widget (see [`relative_path`]); anything else is already absolute.
+fn absolute_mention(base: &str, mention: &str) -> String {
+    if !mention.starts_with("./") && !mention.starts_with("../") {
+        // Already absolute — give it the leading slash if it was written
+        // without one.
+        return if mention.starts_with('/') {
+            mention.to_string()
+        } else {
+            format!("/{mention}")
+        };
+    }
+    let mut rest = mention;
+    let mut ups = 0;
+    while let Some(tail) = rest.strip_prefix("../") {
+        ups += 1;
+        rest = tail;
+    }
+    let rest = rest.strip_prefix("./").unwrap_or(rest);
+    let base: Vec<&str> = base.split('/').filter(|s| !s.is_empty()).collect();
+    let keep = base.len().saturating_sub(ups);
+    let mut out: Vec<&str> = base[..keep].to_vec();
+    if !rest.is_empty() {
+        out.extend(rest.split('/').filter(|s| !s.is_empty()));
+    }
+    format!("/{}", out.join("/"))
+}
+
+/// Every widget a note points at: each `@` in its text followed by a run of
+/// path characters, resolved to absolute against the note's own widget.
+/// Derived rather than stored, so it survives a hand-edited note store and
+/// can never drift from what the text actually says.
+fn note_mentions(base: &str, text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'@' {
+            i += 1;
+            continue;
+        }
+        let start = i + 1;
+        let mut end = start;
+        while end < bytes.len()
+            && (bytes[end].is_ascii_alphanumeric()
+                || matches!(bytes[end], b'.' | b'_' | b'-' | b'/'))
+        {
+            end += 1;
+        }
+        // A trailing dot is sentence punctuation, and a trailing slash names
+        // nothing further — neither is part of the reference.
+        while end > start && matches!(bytes[end - 1], b'.' | b'/') {
+            end -= 1;
+        }
+        if end > start {
+            let path = absolute_mention(base, &text[start..end]);
+            if !out.contains(&path) {
+                out.push(path);
+            }
+        }
+        i = end.max(start);
+    }
+    out
+}
+
+/// Read the pinned notes back. Anything malformed is skipped rather than
+/// fatal: the file is meant to be hand-editable.
+fn note_store_load() -> Vec<TweakNote> {
+    let Ok(body) = std::fs::read_to_string(NOTE_STORE) else {
+        return Vec::new();
+    };
+    note_store_parse(&body)
+}
+
+/// The parser on its own, so both shapes of the file can be tested without
+/// one on disk.
+fn note_store_parse(body: &str) -> Vec<TweakNote> {
+    let mut out = Vec::new();
+    for line in body.lines() {
+        if line.starts_with('#') || line.trim().is_empty() {
+            continue;
+        }
+        let cols: Vec<&str> = line.split('\t').collect();
+        // Two shapes are read. The current one is `path\tnotes\trules`.
+        // The old one carried the card's geometry in columns 1-4 with the
+        // text in column 5, and files written by it still exist: take the
+        // text from where it was and drop the geometry, which describes a
+        // card that no longer exists.
+        let (path, text, rules) = match cols.len() {
+            0 | 1 => continue,
+            2 => (cols[0], note_store_unescape(cols[1]), String::new()),
+            3..=5 => (
+                cols[0],
+                note_store_unescape(cols[1]),
+                note_store_unescape(cols[2]),
+            ),
+            _ => (cols[0], note_store_unescape(cols[5]), String::new()),
+        };
+        out.push(TweakNote {
+            path: path.to_string(),
+            text,
+            rules,
+            sent: 0,
+        });
+    }
+    out
+}
+
+/// Write every pinned note out. Called on each pin toggle and on each text
+/// commit of a pinned note — the file is tiny and the write is rare.
+fn note_store_save(notes: &[TweakNote]) {
+    // Pinning is gone: anything written about a widget is worth keeping, so
+    // every record that says something is saved and empty ones are not.
+    let pinned: Vec<&TweakNote> = notes
+        .iter()
+        .filter(|n| !n.text.trim().is_empty() || !n.rules.trim().is_empty())
+        .collect();
+    if pinned.is_empty() {
+        // Nothing pinned any more: take the file away rather than leave an
+        // empty one lying beside the app.
+        let _ = std::fs::remove_file(NOTE_STORE);
+        return;
+    }
+    let mut out = String::from(
+        "# makepad tweak notes \u{2014} written in the Shift+F10 Spec tab, one per line\n\
+         # path\\tnotes\\trules (\\\\n for newlines)\n",
+    );
+    for note in pinned {
+        out.push_str(&format!(
+            "{}\t{}\t{}\n",
+            note.path,
+            note_store_escape(&note.text),
+            note_store_escape(&note.rules)
+        ));
+    }
+    if let Err(error) = std::fs::write(NOTE_STORE, out) {
+        log!("TWEAK note store write failed: {error}");
+    }
 }
 
 /// One undoable edit gesture. Value: a contiguous run of applies to one
@@ -160,13 +1071,32 @@ pub struct TweakStroke {
     pub widgets: Vec<String>,
 }
 
+/// The tweak session's state. Crate-visible only so the theme edit path can
+/// name its undo sink's type; the fields stay this module's own.
 #[derive(Default)]
-struct TweakSession {
+pub(crate) struct TweakSession {
     /// Guards against N windows toggling N times on one Shift+F10 event.
     toggle_event_id: u64,
+    /// The same guard for an arrow key walking the selection: every window's
+    /// inspector hears the key, and one press is one step.
+    walk_event_id: u64,
     /// The pinned selection (click pins; remote applies re-pin by path).
     pinned: Option<TweakPick>,
     hover: Option<TweakPick>,
+    /// The "isolated" toggle is OFF: an "all" edit reaches the whole app
+    /// even while a branch is isolated. Stored inverted so the derived
+    /// default is the confined one — with the rest of the app covered,
+    /// editing it unseen is the surprising answer, not the safe one.
+    scope_unconfined: bool,
+    /// The widget isolation is locked onto (0 = not isolating), mirrored
+    /// from the panel so the apply path can confine a fan-out to it.
+    isolate_uid: u64,
+    /// The selection is LOCKED: the overlay has handed the mouse back to the
+    /// app. Nothing on the canvas hovers or picks, so buttons, sliders and
+    /// tabs work under the pointer as they always would, and what is
+    /// selected stays selected for the panel to keep editing. False — the
+    /// overlay picking — is the ordinary state.
+    selection_locked: bool,
     /// Live pointer position (window abs), for hover-revealed handles.
     pointer_abs: Vec2d,
     diff: Vec<TweakDiffEntry>,
@@ -200,6 +1130,9 @@ struct TweakSession {
     /// A remote pulse request: a theme colour name (or #rrggbbaa) to pulse
     /// app-wide until an empty request clears it; consumed by the tweaker.
     pulse_req: Option<String>,
+    /// The Spec tab's three field weights, dragged by the splitters between
+    /// them. See [`spec_weight`].
+    spec_weights: [f64; 3],
     /// The open colour popover's window rect, for /tweak/state.
     popup: Option<Rect>,
     /// A remote lock on the pulse mix (deterministic grabs): the pulse
@@ -239,6 +1172,20 @@ struct TweakSession {
     climb_origin: u64,
     /// Sidebar width in points (0 = use the default).
     sidebar_width: f64,
+    /// The panel band and the note card, in window coordinates, as of the
+    /// last draw — the chrome that OWNS the pointer where it sits. Read by
+    /// [`panel_owns_pointer`] from outside the widget.
+    ///
+    /// Two fields, not one list: the card is published by the overlay draw
+    /// and the band by the sidebar draw, which runs after it in the same
+    /// frame. Sharing a list meant whichever wrote second erased the other,
+    /// and it was always the card that lost — so a note dragged up against
+    /// the top of the window went back to being unclickable.
+    chrome_band: Option<Rect>,
+    /// The chrome that FLOATS over the app: the note card and the extrusion
+    /// readout. Published by the overlay draw, which is why it cannot share
+    /// a slot with the band — the sidebar draws after it.
+    chrome_float: Vec<Rect>,
     /// The on-canvas selection outline hides until this time: an edit was
     /// applied within the last beat, so the widget must be seen exactly as
     /// it renders. Extended by every apply (sidebar or remote).
@@ -252,8 +1199,55 @@ struct TweakSession {
     /// Vibecode prompts sent this session: (sel path, layer, prompt).
     /// Surfaced in /tweak/state as the agent's work queue.
     vibes: Vec<(String, String, String, String)>,
-    /// Ctrl+Space note cards, keyed by widget path (one per widget).
+    /// A press in the EXPLODED view whose pick is waiting for the release:
+    /// the position it went down at, or `None` when no press is held. A
+    /// release further than [`CLIMB_SLOP`] from it was an orbit, and an
+    /// orbit selects nothing.
+    press_pick: Option<Vec2d>,
+    /// Names the person asked for on the identity row. Reported in
+    /// `/tweak/state` for the AI to carry out in the source — the running app
+    /// cannot rename its own widgets without lying about them — and kept in
+    /// [`NAME_STORE`] so the ask survives until it is done.
+    renames: Vec<TweakRename>,
+    /// The name store has been read back: once per process.
+    renames_loaded: bool,
+    /// Layout conversions asked for on the Props tab (`make grid`, `make
+    /// flex`, `dockable`), reported in `/tweak/state` and kept in
+    /// [`LAYOUT_STORE`].
+    converts: Vec<TweakConvert>,
+    converts_loaded: bool,
+    /// Messages written and queued but not yet sent: (note key, text). They
+    /// wake nobody until a Ctrl+Enter releases the batch.
+    outbox: Vec<Outgoing>,
+    /// The prompt strip's text. ONE box for the whole panel, not one per
+    /// widget: a send attributes it to whatever is selected at that moment,
+    /// which is what the `TWEAK ask #N <path>` line already recorded. In
+    /// memory only -- a half-typed instruction is not worth a file.
+    prompt: String,
+    /// Everything ever sent or queued from the strip, oldest first. Sending
+    /// CLEARS the box, so this is where a message goes to stay recallable.
+    prompt_history: Vec<String>,
+    /// How far back through `prompt_history` Up has walked;
+    /// `prompt_history.len()` is the empty draft being typed now.
+    prompt_at: usize,
+    /// What the strip says under the box: "2 queued", "sent", or why not.
+    prompt_status: String,
+    /// The rules that stand over the whole app, read once from their file.
+    app_rules: String,
+    app_rules_loaded: bool,
+    /// A note is mid-@mention: an `@` was just typed into the open card, so
+    /// the next click in the app names a widget INTO the note instead of
+    /// changing the selection. The hover outline turns amber to say so.
+    mention: bool,
+    /// Which box the `@` was typed into, because that is where the name
+    /// lands: the prompt strip is present on every tab, so the tab cannot
+    /// say.
+    mention_from_prompt: bool,
+    /// Note cards, keyed by widget path (one per widget).
     notes: Vec<TweakNote>,
+    /// The pinned notes have been read back from the store: once per process,
+    /// at the first note the session touches.
+    notes_loaded: bool,
     /// The undo stack over edit gestures (Cmd+Z / Cmd+Shift+Z).
     undo: Vec<UndoStep>,
     redo: Vec<UndoStep>,
@@ -269,6 +1263,86 @@ fn session() -> &'static Mutex<TweakSession> {
     static S: OnceLock<Mutex<TweakSession>> = OnceLock::new();
     S.get_or_init(|| Mutex::new(TweakSession::default()))
 }
+
+impl TweakSession {
+    /// Pull the pinned notes in, once per process. Anything already open in
+    /// this session wins over the stored copy — the human is looking at it.
+    fn load_notes(&mut self) {
+        if self.notes_loaded {
+            return;
+        }
+        self.notes_loaded = true;
+        let stored = note_store_load();
+        if !stored.is_empty() {
+            log!("TWEAK note store: {} pinned note(s) from {NOTE_STORE}", stored.len());
+        }
+        for note in stored {
+            if !self.notes.iter().any(|n| n.path == note.path) {
+                self.notes.push(note);
+            }
+        }
+    }
+
+    /// Pull the app-wide rules in, once per process. Same shape as
+    /// `load_notes`: the file is read lazily, because most sessions never
+    /// open the Spec tab at all.
+    fn load_app_rules(&mut self) {
+        if self.app_rules_loaded {
+            return;
+        }
+        self.app_rules_loaded = true;
+        self.app_rules = app_rules_load();
+        if !self.app_rules.trim().is_empty() {
+            log!("TWEAK rules store: app rules read from {RULES_STORE}");
+        }
+    }
+
+    /// Pull the requested names in, once per process.
+    fn load_renames(&mut self) {
+        if self.renames_loaded {
+            return;
+        }
+        self.renames_loaded = true;
+        let stored = name_store_load();
+        if !stored.is_empty() {
+            log!("TWEAK name store: {} wanted name(s) from {NAME_STORE}", stored.len());
+        }
+        for rename in stored {
+            if !self.renames.iter().any(|r| r.reference == rename.reference) {
+                self.renames.push(rename);
+            }
+        }
+    }
+
+    fn load_converts(&mut self) {
+        if self.converts_loaded {
+            return;
+        }
+        self.converts_loaded = true;
+        let stored = layout_store_load();
+        if !stored.is_empty() {
+            log!("TWEAK layout store: {} conversion(s) asked for, from {LAYOUT_STORE}", stored.len());
+        }
+        converts_merge(&mut self.converts, stored);
+    }
+}
+
+/// The pinned selection's outline rect: the widget, held off by
+/// [`SELECTION_RING_OUTSET`] so the edge pixels being judged stay clean.
+fn selection_ring(rect: Rect) -> Rect {
+    Rect {
+        pos: dvec2(rect.pos.x - SELECTION_RING_OUTSET, rect.pos.y - SELECTION_RING_OUTSET),
+        size: dvec2(
+            rect.size.x + SELECTION_RING_OUTSET * 2.0,
+            rect.size.y + SELECTION_RING_OUTSET * 2.0,
+        ),
+    }
+}
+
+/// How far a second click may land from the first and still count as the
+/// same click — the gesture that climbs to the parent. A hand does not put
+/// the pointer back on the same pixel.
+const CLIMB_SLOP: f64 = 3.0;
 
 /// A complete current design delta. Empty entries mean all edits were undone.
 /// No source files are written by the tweaker or this export.
@@ -322,8 +1396,38 @@ pub fn feedback_snapshot(after_generation: u64) -> Option<TweakFeedbackSnapshot>
 const DEFAULT_SIDEBAR_WIDTH: f64 = 280.0;
 const SPLITTER_WIDTH: f64 = 5.0;
 
+/// How long the footer says "path copied" before showing the path again.
+const FOOTER_COPIED_LINGER: f64 = 1.2;
+
 /// How long the selection outline stays quiet after the last applied edit.
 const SUPPRESS_LINGER: f64 = 0.5;
+
+/// A thick red frame round the whole window while the bridge is driving.
+/// The one thing a person watching a scripted run needs to know is that
+/// the pointer and the keyboard are spoken for, and a frame the size of the
+/// window says it from across the room. Lit by the bridge itself for a few
+/// seconds after any injected input, or held up by `/handsoff?on=1`.
+///
+/// Returns whether it drew, so the caller can keep the frames coming until
+/// it has gone quiet -- the frame must disappear on its own, not wait for
+/// the next thing that happens to redraw.
+fn draw_hands_off_frame(cx: &mut Cx2d, outline: &mut DrawTweakOutline) -> bool {
+    if !makepad_platform::remote::hands_off_active() {
+        return false;
+    }
+    let size = cx.current_pass_size();
+    const T: f64 = 6.0;
+    outline.fill_color = vec4(0.93, 0.13, 0.13, 0.95);
+    for rect in [
+        Rect { pos: dvec2(0.0, 0.0), size: dvec2(size.x, T) },
+        Rect { pos: dvec2(0.0, size.y - T), size: dvec2(size.x, T) },
+        Rect { pos: dvec2(0.0, 0.0), size: dvec2(T, size.y) },
+        Rect { pos: dvec2(size.x - T, 0.0), size: dvec2(T, size.y) },
+    ] {
+        outline.draw_abs(cx, rect);
+    }
+    true
+}
 
 fn sidebar_width() -> f64 {
     let width = session().lock().unwrap().sidebar_width;
@@ -353,7 +1457,14 @@ pub fn set_tweak_on(cx: &mut Cx, on: bool) {
                 cx.sploded_toggle();
             }
             cx.sploded_set_marks(None, None);
+            cx.sploded_set_selected(false);
+            {
+                let mut s = session().lock().unwrap();
+                s.chrome_band = None;
+                s.chrome_float.clear();
+            }
             cx.sploded_set_flat_band(None);
+            cx.sploded_set_flat_rects(Vec::new());
         }
         log!("TWEAK mode {}", if on { "on" } else { "off" });
         cx.redraw_all();
@@ -470,6 +1581,63 @@ fn is_navigation_pick(cx: &mut Cx, uid: WidgetUid) -> bool {
     false
 }
 
+/// Bring a widget into view: open whatever is holding it shut.
+///
+/// A tree row can name something on a dock tab that is not selected, inside a
+/// fold that is closed, on a page that is not showing — in which case
+/// selecting it outlines nothing and the panel fills with a widget the person
+/// cannot see. So walk the ancestors and ask each container that hides its
+/// children to show the branch the target is on: the Dock selects the tab,
+/// the FoldHeader opens, the PageFlip flips.
+///
+/// Top-down, because opening an outer container is what makes the inner ones
+/// exist to be opened.
+fn reveal_widget(cx: &mut Cx, uid: u64) {
+    // The chain from the target up, each step remembering which child it came
+    // through — that child IS the tab / page to switch to.
+    let mut chain: Vec<(WidgetUid, LiveId)> = Vec::new();
+    let mut cur = WidgetUid(uid);
+    for _ in 0..64 {
+        let Some(parent) = cx.widget_tree().parent_of(cur) else { break };
+        let Some(name) = cx.widget_tree().name_of(cur) else { break };
+        chain.push((parent, name));
+        cur = parent;
+    }
+    let mut opened = 0;
+    for (parent, child) in chain.into_iter().rev() {
+        let widget = cx.widget_tree().widget(parent);
+        if widget.is_empty() {
+            continue;
+        }
+        let ty = widget
+            .widget_type_id()
+            .and_then(|type_id| widget_type_names(cx).get(&type_id).copied())
+            .map(live_id_token)
+            .unwrap_or_default();
+        match ty.as_str() {
+            "Dock" => {
+                widget.as_dock().select_tab(cx, child);
+                opened += 1;
+            }
+            "FoldHeader" => {
+                let fold = widget.as_fold_header();
+                if !fold.is_open(cx) {
+                    fold.set_is_open(cx, true, Animate::No);
+                    opened += 1;
+                }
+            }
+            "PageFlip" => {
+                widget.as_page_flip().set_active_page(cx, child);
+                opened += 1;
+            }
+            _ => {}
+        }
+    }
+    if opened > 0 {
+        cx.redraw_all();
+    }
+}
+
 fn is_design_transparent(widget: &WidgetRef) -> bool {
     widget
         .borrow::<View>()
@@ -486,6 +1654,10 @@ fn walk_pick(
     best: &mut Option<(WidgetRef, Rect, usize)>,
 ) {
     if !widget.visible() {
+        return;
+    }
+    // The inspector's own panel is never a pick, wherever an app has put it.
+    if widget.widget_type_id() == Some(std::any::TypeId::of::<Tweaker>()) {
         return;
     }
     // Exploded view: the cursor is on ONE plane. A widget nested deeper than
@@ -695,6 +1867,18 @@ fn pick_of_widget(
     Some(TweakPick { uid: uid.0, path, ty, rect, window_id, band, level })
 }
 
+/// The registered type name of a widget, `View`, `Grid`, `Label`.
+fn type_name_of(cx: &mut Cx, uid: u64) -> Option<String> {
+    let widget = cx.widget_tree().widget(WidgetUid(uid));
+    if widget.is_empty() {
+        return None;
+    }
+    widget
+        .widget_type_id()
+        .and_then(|type_id| widget_type_names(cx).get(&type_id).copied())
+        .map(live_id_token)
+}
+
 /// Window owns the inspector: reflecting it from the inspector's draw/event
 /// would re-enter Window's active mutable borrow. Remote edits run between
 /// events and may still target it; keep the last inspectable selection.
@@ -822,6 +2006,106 @@ fn ancestor_pick(
 /// Called by `Window::handle_event` in place of ordinary dispatch. Returns
 /// `true` when the event was swallowed (the window must NOT hand it to its
 /// view children). Off: one atomic load (plus a shortcut check on key events).
+/// Commit a pick: climb if this is a repeat click on the same spot, pin what
+/// was resolved, and take the caret off the panel.
+///
+/// Split out of the press handler because in the exploded view the press is
+/// not yet a click — it may be the first pixel of an orbit — so the commit
+/// waits for a release that never travelled.
+fn commit_pick(
+    cx: &mut Cx,
+    tweaker: &WidgetRef,
+    abs: Vec2d,
+    window_id: usize,
+    pick: Option<TweakPick>,
+) {
+            let deep_uid = pick.as_ref().map_or(0, |p| p.uid);
+            // CLICK-TO-CLIMB: clicking the SAME widget again walks the
+            // pin UP one ancestor per click — the only way a container
+            // fully covered by its children (the pane that draws the
+            // rounded background) can ever be reached. At the top the
+            // climb wraps back to the deepest pick. The climb continues
+            // only while the presses land on the widget it started from:
+            // a press on a different widget inside the pinned container
+            // picks that widget. (Every press inside the container used
+            // to climb — a click on a sibling button after re-clicking
+            // one landed on a bare View, and its draw_bg well was empty.)
+            let (pick, climbed) = {
+                let (pinned, origin) = {
+                    let s = session().lock().unwrap();
+                    (s.pinned.clone(), s.climb_origin)
+                };
+                match (pick, pinned) {
+                    (Some(deep), Some(pin))
+                        if pin.window_id == window_id
+                            && pin.rect.contains(abs)
+                            && (deep.uid == pin.uid
+                                || (origin == deep.uid
+                                    && is_ancestor_of(cx, pin.uid, deep.uid))) =>
+                    {
+                        (
+                            Some(
+                                ancestor_pick(cx, &pin, abs, window_id)
+                                    .unwrap_or(deep),
+                            ),
+                            true,
+                        )
+                    }
+                    (deep, _) => (deep, false),
+                }
+            };
+            let mut s = session().lock().unwrap();
+            s.climb_origin = deep_uid;
+            match &pick {
+                Some(pick) => {
+                    log!(
+                        "TWEAK pick {} ({}) rect {:.0},{:.0} {:.0}x{:.0}{}{}",
+                        pick.path,
+                        pick.ty,
+                        pick.rect.pos.x,
+                        pick.rect.pos.y,
+                        pick.rect.size.x,
+                        pick.rect.size.y,
+                        match &pick.band {
+                            Some(band) => format!(" band {band}"),
+                            None => String::new(),
+                        },
+                        if climbed { " (climb)" } else { "" }
+                    );
+                    s.pinned = Some(pick.clone());
+                }
+                None => {
+                    s.pinned = None;
+                }
+            }
+            drop(s);
+            // A pick in the body takes the caret off whatever panel
+            // field held it. The keys that act on a SELECTION — the
+            // hierarchy arrows, Cmd+Z — are only ever ours when nothing
+            // is being typed into, and a click on the app is the moment
+            // the typing ended.
+            cx.set_key_focus(Area::Empty);
+            sidebar_refresh(cx, tweaker);
+            redraw_tweaker(cx, tweaker);
+}
+
+/// Does the design overlay's own chrome sit under `abs`?
+///
+/// The caption bar spans the whole window and the panel is drawn OVER it, so
+/// the window's `WindowDragQuery` would answer "title bar" for the top of the
+/// panel — and a press there starts an OS window drag instead of reaching the
+/// app. Nothing in that strip can be clicked, which is the filter field, the
+/// note button and the extrusion scrub. The window asks this first and
+/// answers Client where the overlay is.
+pub fn panel_owns_pointer(abs: Vec2d) -> bool {
+    if !tweak_is_on() {
+        return false;
+    }
+    let s = session().lock().unwrap();
+    s.chrome_band.is_some_and(|r| r.contains(abs))
+        || s.chrome_float.iter().any(|r| r.contains(abs))
+}
+
 pub fn window_intercept(
     cx: &mut Cx,
     event: &Event,
@@ -933,6 +2217,25 @@ pub fn window_intercept(
     // app scrolls, and the overlay re-reads live rects each frame so the
     // outlines follow the content.
     if kind == PointerKind::Scroll {
+        // ISOLATED: the wheel magnifies instead of scrolling. There is one
+        // thing on screen and the rest is covered, so scrolling the app under
+        // it is not what the wheel is for any more. The gate is the panel's
+        // Zoom field's, `view_focus_rule`, so the two never disagree.
+        let zooms = tweaker
+            .borrow::<Tweaker>()
+            .is_some_and(|tw| tw.view_focus_rule().controls_enabled);
+        if zooms {
+            if let Event::Scroll(e) = event {
+                let step = if e.scroll.y > 0.0 { -ZOOM_WHEEL_STEP } else { ZOOM_WHEEL_STEP };
+                if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
+                    let next = tw.view_state().zoom_stepped(step);
+                    tw.set_view_state(next);
+                    tw.view_focus_pending = true;
+                }
+                redraw_tweaker(cx, &tweaker);
+                return true;
+            }
+        }
         let in_band = tweaker
             .borrow::<Tweaker>()
             .map(|tw| tw.band.size.x > 0.0 && tw.band.contains(abs))
@@ -941,30 +2244,96 @@ pub fn window_intercept(
             tweaker.handle_event(cx, event, &mut Scope::empty());
             return true;
         }
+        // EXPLODED, nothing isolated: the wheel opens and closes the stack.
+        // The extrusion is the one thing the eye is adjusting in that mode,
+        // and it is the only control for it that does not mean crossing the
+        // window to the panel's scrub field.
+        if cx.sploded_active() {
+            if let Event::Scroll(e) = event {
+                let step = if e.scroll.y > 0.0 {
+                    -SPREAD_WHEEL_STEP
+                } else {
+                    SPREAD_WHEEL_STEP
+                };
+                let spread = cx.sploded_spread() + step;
+                cx.sploded_set_spread(spread);
+                redraw_tweaker(cx, &tweaker);
+                return true;
+            }
+        }
         return false;
     }
 
+    // A pin badge is a mark on the canvas that opens its note. It is checked
+    // before anything else picks, because it sits ON the widget it belongs to
+    // and a click there means the note, not the widget. With the selection
+    // locked it stops answering: opening a badge re-selects its widget, which
+    // is the one thing the lock forbids, and a mark that ate a button press
+    // would undo the point of handing the mouse back.
+    if kind == PointerKind::Down && !session().lock().unwrap().selection_locked {
+        let hit = tweaker.borrow::<Tweaker>().and_then(|tw| {
+            tw.badge_rects
+                .iter()
+                .find(|(rect, _)| rect.contains(abs))
+                .map(|(_, uid)| *uid)
+        });
+        if let Some(uid) = hit {
+            if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
+                tw.badge_open = Some(uid);
+            }
+            session().lock().unwrap().down_consumed = true;
+            redraw_tweaker(cx, &tweaker);
+            return true;
+        }
+    }
+
     // The note card lives on the CANVAS but belongs to the tweaker: input
-    // inside it goes to ordinary dispatch (never picked through).
+    // inside it goes to ordinary dispatch (never picked through). The card
+    // is OPAQUE to picking — nothing behind it can be hovered or selected,
+    // however much of the app it covers — and while it is being dragged or
+    // resized the gesture owns the pointer wherever it wanders.
     {
-        let note_hit = tweaker
-            .borrow::<Tweaker>()
-            .and_then(|tw| tw.note_rect)
-            .map(|rect| {
-                if let Event::MouseDown(e) = event {
-                    rect.contains(e.abs)
-                } else if let Event::MouseMove(e) = event {
-                    rect.contains(e.abs)
-                } else if let Event::MouseUp(e) = event {
-                    rect.contains(e.abs)
-                } else {
-                    false
-                }
+        // A SCRUB leaves the control it started on within a few pixels, and
+        // from then on the moves have to keep reaching it — otherwise the
+        // value follows the pointer for three pixels and then stops dead,
+        // which is the extrusion field becoming un-draggable the moment it
+        // left the panel. The press claims the pointer; the release frees it.
+        let spread_drag = tweaker.borrow::<Tweaker>().map(|tw| tw.spread_drag).unwrap_or(false);
+        // The extrusion readout is the same kind of thing: the tweaker's own
+        // chrome sitting on the canvas, and a press in it is a scrub, never
+        // a pick.
+        let spread_rect = tweaker.borrow::<Tweaker>().and_then(|tw| tw.spread_rect);
+        let hits = |rect: Option<Rect>| {
+            rect.map(|rect| match event {
+                Event::MouseDown(e) => rect.contains(e.abs),
+                Event::MouseMove(e) => rect.contains(e.abs),
+                Event::MouseUp(e) => rect.contains(e.abs),
+                _ => false,
             })
-            .unwrap_or(false);
-        if note_hit {
+            .unwrap_or(false)
+        };
+        let on_spread = hits(spread_rect);
+        if kind == PointerKind::Down && on_spread {
+            if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
+                tw.spread_drag = true;
+            }
+        }
+        if kind == PointerKind::Up && spread_drag {
+            if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
+                tw.spread_drag = false;
+            }
+        }
+        if on_spread || spread_drag {
             if kind == PointerKind::Down {
-                log!("TWEAK press {:.0},{:.0} on the note card: not a pick", abs.x, abs.y);
+                log!("TWEAK press {:.0},{:.0} on the tweaker's chrome: not a pick", abs.x, abs.y);
+            }
+            if kind == PointerKind::Move {
+                // Whatever was outlined under the card stops being: the
+                // pointer is on the note, not on the app.
+                let had_hover = session().lock().unwrap().hover.take().is_some();
+                if had_hover {
+                    redraw_tweaker(cx, &tweaker);
+                }
             }
             return false;
         }
@@ -1085,9 +2454,31 @@ pub fn window_intercept(
     };
     let annotate = session().lock().unwrap().annotate || alt_held;
 
+    // SELECT OFF: the overlay hands the mouse back to the app.
+    //
+    // Everything above this line is the overlay's OWN surfaces — the panel
+    // band, the splitter, the note card, its popovers — and they keep working
+    // because they are not the app. Everything below is picking: hover
+    // outlines, the click that selects, the direct-manipulation handles. All
+    // of it stands down, so a button under the pointer is just a button, and
+    // the selection stays exactly where it was for the panel to keep editing.
+    // Annotate is its own mode and is exempt: sketching over a live app is
+    // precisely what it is for.
+    if !annotate && session().lock().unwrap().selection_locked {
+        if kind == PointerKind::Move {
+            let stale = session().lock().unwrap().hover.take().is_some();
+            if stale {
+                redraw_tweaker(cx, &tweaker);
+            }
+        }
+        return false;
+    }
+
     // Direct manipulation first: the corner handles of a radius-carrying
-    // selection own their presses before picking does.
-    if !annotate {
+    // selection own their presses before picking does — unless the view is
+    // centred or zoomed, in which case the handles are not drawn and must
+    // not swallow presses at the layout corners they no longer sit on.
+    if !annotate && !cx.sploded_transformed() {
         match kind {
             PointerKind::Down => {
                 let pinned = session().lock().unwrap().pinned.clone();
@@ -1182,6 +2573,8 @@ pub fn window_intercept(
             // (the panel never sees these moves).
             if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
                 tw.doc_tip_hover(cx, abs);
+                tw.scope_tip_hover(cx, abs);
+                tw.chrome_tip_hover(cx, abs);
                 tw.states_hover(cx, abs);
                 tw.pulse_hover(cx, abs);
             }
@@ -1210,6 +2603,37 @@ pub fn window_intercept(
             }
         }
         PointerKind::Down => {
+            // MIDDLE CLICK: in and out of the exploded view. The mode is a
+            // way of LOOKING at the app, and reaching for a key or crossing
+            // to the panel to get into it interrupts the looking. Only over
+            // the body — a middle click in the panel band never reaches here
+            // — and only while the overlay is up, so an ordinary app keeps
+            // whatever it does with the wheel button.
+            if let Event::MouseDown(e) = event {
+                if e.button.is_middle() {
+                    cx.sploded_toggle();
+                    session().lock().unwrap().down_consumed = true;
+                    redraw_tweaker(cx, &tweaker);
+                    return true;
+                }
+                // RIGHT CLICK: say something about this one. It selects the
+                // widget and opens its note in a single gesture, which is
+                // the whole point — writing a note used to mean a click to
+                // select and then a key to open. Never a toggle: a right
+                // click means "the note for THAT", so a card already open on
+                // another widget moves rather than closing.
+                if e.button.is_secondary() {
+                    let pick = resolve_pick(cx, &body, abs, window_id.id());
+                    if let Some(pick) = pick {
+                        if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
+                            tw.badge_open = Some(pick.uid);
+                        }
+                    }
+                    session().lock().unwrap().down_consumed = true;
+                    redraw_tweaker(cx, &tweaker);
+                    return true;
+                }
+            }
             {
                 session().lock().unwrap().down_consumed = true;
             }
@@ -1249,68 +2673,98 @@ pub fn window_intercept(
                 session().lock().unwrap().live_stroke = Some(stroke);
             } else {
                 let pick = resolve_pick(cx, &body, abs, window_id.id());
-                let deep_uid = pick.as_ref().map_or(0, |p| p.uid);
-                // CLICK-TO-CLIMB: clicking the SAME widget again walks the
-                // pin UP one ancestor per click — the only way a container
-                // fully covered by its children (the pane that draws the
-                // rounded background) can ever be reached. At the top the
-                // climb wraps back to the deepest pick. The climb continues
-                // only while the presses land on the widget it started from:
-                // a press on a different widget inside the pinned container
-                // picks that widget. (Every press inside the container used
-                // to climb — a click on a sibling button after re-clicking
-                // one landed on a bare View, and its draw_bg well was empty.)
-                let (pick, climbed) = {
-                    let (pinned, origin) = {
-                        let s = session().lock().unwrap();
-                        (s.pinned.clone(), s.climb_origin)
-                    };
-                    match (pick, pinned) {
-                        (Some(deep), Some(pin))
-                            if pin.window_id == window_id.id()
-                                && pin.rect.contains(abs)
-                                && (deep.uid == pin.uid
-                                    || (origin == deep.uid
-                                        && is_ancestor_of(cx, pin.uid, deep.uid))) =>
-                        {
-                            (
-                                Some(
-                                    ancestor_pick(cx, &pin, abs, window_id.id())
-                                        .unwrap_or(deep),
-                                ),
-                                true,
-                            )
+                // @MENTION: an `@` in the open note armed a reference. This
+                // click names a widget INTO the note text and leaves the
+                // selection alone — the note still belongs to the widget it
+                // was opened on; the mention is what it points AT.
+                if session().lock().unwrap().mention {
+                    session().lock().unwrap().mention = false;
+                    // The field a mention lands in is the one the @ was
+                    // typed into, remembered at arming: the prompt strip is
+                    // on every tab, so which tab is up says nothing. A pick
+                    // made for a mention never moves the selection (this arm
+                    // returns before `commit_pick`), so the tab stays on the
+                    // widget the note is about.
+                    let into_notes = !session().lock().unwrap().mention_from_prompt;
+                    let field = tweaker.borrow::<Tweaker>().and_then(|tw| {
+                        tw.sidebar.as_ref().map(|sidebar| {
+                            if into_notes {
+                                sidebar
+                                    .child(live_id!(spec_col))
+                                    .child(live_id!(notes_box))
+                                    .child(live_id!(spec_notes))
+                            } else {
+                                sidebar.child(live_id!(prompt_row)).child(live_id!(prompt_field))
+                            }
+                        })
+                    });
+                    match (field, &pick) {
+                        (Some(field), Some(pick)) => {
+                            // The reference is the mentioned widget's INDEXED
+                            // path — the only form that names one widget —
+                            // written relative to the note's own widget when
+                            // the absolute form is too long for the card. Both
+                            // resolve to the same thing; the short one is just
+                            // readable.
+                            // The base is the note the field is SHOWING, not
+                            // whatever happens to be pinned: those can differ
+                            // for a frame, and writing one note's text into
+                            // another's is how a note gets lost.
+                            let base = tweaker
+                                .borrow::<Tweaker>()
+                                .map(|tw| tw.note_key_shown.clone())
+                                .unwrap_or_default();
+                            if base.is_empty() {
+                                return true;
+                            }
+                            // Two ways to say it: the widget's own reference,
+                            // and its position relative to the noted widget.
+                            // Take whichever is shorter — the relative form
+                            // usually wins for anything nearby, and it says
+                            // MORE while it does: `./Label_2` is "the one
+                            // next to this".
+                            let target = indexed_path(cx, pick.uid);
+                            let reference = relative_path(&base, &target)
+                                .into_iter()
+                                .chain(std::iter::once(target.clone()))
+                                .min_by_key(|form| form.len())
+                                .unwrap_or_else(|| target.clone());
+                            let text = insert_mention(&field.text(), &reference);
+                            field.set_text(cx, &text);
+                            log!("TWEAK @mention {reference} -> {target} ({})", pick.ty);
+                            // Into whichever side is on screen: a mention
+                            // typed into the prompt is part of the
+                            // instruction, not of the note.
+                            if into_notes {
+                                let notes = {
+                                    let mut s = session().lock().unwrap();
+                                    if let Some(note) =
+                                        s.notes.iter_mut().find(|n| n.path == base)
+                                    {
+                                        note.text = text;
+                                    }
+                                    s.notes.clone()
+                                };
+                                note_store_save(&notes);
+                            } else {
+                                session().lock().unwrap().prompt = text;
+                            }
                         }
-                        (deep, _) => (deep, false),
+                        _ => log!("TWEAK @mention: nothing under the click"),
                     }
-                };
-                let mut s = session().lock().unwrap();
-                s.climb_origin = deep_uid;
-                match &pick {
-                    Some(pick) => {
-                        log!(
-                            "TWEAK pick {} ({}) rect {:.0},{:.0} {:.0}x{:.0}{}{}",
-                            pick.path,
-                            pick.ty,
-                            pick.rect.pos.x,
-                            pick.rect.pos.y,
-                            pick.rect.size.x,
-                            pick.rect.size.y,
-                            match &pick.band {
-                                Some(band) => format!(" band {band}"),
-                                None => String::new(),
-                            },
-                            if climbed { " (climb)" } else { "" }
-                        );
-                        s.pinned = Some(pick.clone());
-                    }
-                    None => {
-                        s.pinned = None;
-                    }
+                    session().lock().unwrap().down_consumed = true;
+                    redraw_tweaker(cx, &tweaker);
+                    return true;
                 }
-                drop(s);
-                sidebar_refresh(cx, &tweaker);
-                redraw_tweaker(cx, &tweaker);
+                // In the exploded view a press is not yet a click: it may
+                // be the first pixel of an ORBIT, and an orbit is a change of
+                // viewpoint, not of selection. Hold the pick for the release
+                // and take it only if the pointer stayed where it was put.
+                if cx.sploded_active() {
+                    session().lock().unwrap().press_pick = Some(abs);
+                } else {
+                    commit_pick(cx, &tweaker, abs, window_id.id(), pick.clone());
+                }
                 // Navigation stays reachable: the press flows on to the
                 // tab / fold / dropdown as well, and so will its release.
                 if let Some(pick) = &pick {
@@ -1339,6 +2793,21 @@ pub fn window_intercept(
                 return true;
             }
             s.down_consumed = false;
+            // The held press: a release that has not travelled is a click,
+            // and only now is it safe to say so.
+            if let Some(down) = s.press_pick.take() {
+                let still = (down.x - abs.x).abs() <= CLIMB_SLOP
+                    && (down.y - abs.y).abs() <= CLIMB_SLOP;
+                if still {
+                    drop(s);
+                    let pick = resolve_pick(cx, &body, down, window_id.id());
+                    commit_pick(cx, &tweaker, down, window_id.id(), pick);
+                    return true;
+                }
+                // Travelled: it was an orbit. The guard is still held and
+                // must stay that way — re-locking it here deadlocks the
+                // session mutex against itself, which hangs the app.
+            }
             if let Some(mut stroke) = s.live_stroke.take() {
                 stroke.points.push((abs.x, abs.y));
                 // Tag the widgets the stroke touches: resolve its endpoints
@@ -1570,13 +3039,684 @@ fn fmt_scalar(heap: &ScriptHeap, value: ScriptValue) -> Option<String> {
 }
 
 /// Splash-ish one-line rendering of a value, `depth` levels of objects deep.
+/// How an enum value is written out. `Full` names the enum and carries
+/// every field that is set, so the text re-applies exactly under
+/// `Apply::Eval`; `Display` is for a row's eye and drops the enum's name and
+/// the fields equal to the variant's own defaults.
+#[derive(Clone, Copy, PartialEq)]
+enum EnumFmt {
+    Full,
+    Display,
+}
+
+/// (enum, variant) for an object that came from a derived enum, else None.
+/// The derive stamps `__enum` on every variant object -- a bare variant, a
+/// tuple, a named one -- and instances inherit it through the proto chain;
+/// the variant itself is the first bare id in that chain.
+fn enum_info(heap: &ScriptHeap, obj: ScriptObject) -> Option<(LiveId, LiveId)> {
+    let en = heap.value(obj, live_id!(__enum).into(), NoTrap).as_id()?;
+    let mut ptr = obj;
+    for _ in 0..8 {
+        let proto = heap.proto(ptr);
+        if let Some(id) = proto.as_id() {
+            return Some((en, id));
+        }
+        ptr = proto.as_object()?;
+    }
+    None
+}
+
+/// The nearest proto that is an object: for an instance of a named variant
+/// that is the frozen variant itself, which holds the field defaults.
+fn enum_variant_proto(heap: &ScriptHeap, obj: ScriptObject) -> Option<ScriptObject> {
+    heap.proto(obj).as_object()
+}
+
+/// `Flow.Down`, `Size.Fixed(200)`, `Size.Fill{weight: 100 basis: 0 shrink: 0}`.
+/// A relative size prints as the CSS it was written as: `50%`, `25vw`.
+fn fmt_enum(heap: &ScriptHeap, obj: ScriptObject, fmt: EnumFmt) -> Option<String> {
+    let (en, var) = enum_info(heap, obj)?;
+    let en_name = live_id_token(en);
+    let var_name = live_id_token(var);
+
+    // A relative size is a string in the person's head, not a struct.
+    if var_name == "Rel" && (en_name == "Size" || en_name == "FitBound") {
+        let factor = heap.value(obj, live_id!(factor).into(), NoTrap).as_number();
+        let base = heap
+            .value(obj, live_id!(base).into(), NoTrap)
+            .as_object()
+            .and_then(|b| enum_info(heap, b))
+            .map(|(_, v)| live_id_token(v));
+        if let (Some(factor), Some(base)) = (factor, base) {
+            let unit = match base.as_str() {
+                "Parent" => Some("%"),
+                "Vw" => Some("vw"),
+                "Vh" => Some("vh"),
+                "Cqw" => Some("cqw"),
+                "Cqh" => Some("cqh"),
+                _ => None,
+            };
+            if let Some(unit) = unit {
+                // Quoted: this text is what a reset or an undo re-applies,
+                // and `50%` bare is an operator with nothing after it.
+                return Some(format!("\"{}{unit}\"", fmt_f64(factor * 100.0)));
+            }
+        }
+    }
+
+    let head = match fmt {
+        EnumFmt::Full => format!("{en_name}.{var_name}"),
+        EnumFmt::Display => var_name.clone(),
+    };
+
+    // Tuple: the positional values.
+    let len = heap.vec_len(obj);
+    if len > 0 {
+        let mut out = head;
+        out.push('(');
+        for index in 0..len {
+            if index > 0 {
+                out.push_str(", ");
+            }
+            let value = heap.vec_value_if_exist(obj, index)?;
+            out.push_str(&fmt_value(heap, value, 2).unwrap_or_else(|| "?".to_string()));
+        }
+        out.push(')');
+        return Some(out);
+    }
+
+    // Named: the instance's own fields first, in the order they were set,
+    // then the variant's defaults it did not set. Hidden keys stay hidden.
+    let mut keys: Vec<LiveId> = Vec::new();
+    collect_prop_keys(heap, obj, &mut keys);
+    keys.retain(|k| *k != live_id!(__enum) && !live_id_token(*k).starts_with('_'));
+    if keys.is_empty() {
+        return Some(head); // bare
+    }
+    let defaults = enum_variant_proto(heap, obj);
+    let mut out = head.clone();
+    out.push('{');
+    let mut first = true;
+    for key in keys {
+        let value = heap.value(obj, key.into(), NoTrap);
+        if value.is_nil() {
+            continue; // an Option that is None
+        }
+        let Some(text) = fmt_value(heap, value, 2) else { continue };
+        if fmt == EnumFmt::Display {
+            if let Some(defaults) = defaults {
+                let default = heap.value(defaults, key.into(), NoTrap);
+                if fmt_value(heap, default, 2).as_deref() == Some(text.as_str()) {
+                    continue;
+                }
+            }
+        }
+        if !first {
+            out.push(' ');
+        }
+        first = false;
+        out.push_str(&live_id_token(key));
+        out.push_str(": ");
+        out.push_str(&text);
+    }
+    if first {
+        // Nothing to say beyond the variant: every field is its default
+        // (Display) or none is set. `Fill`, not `Fill{}`.
+        return Some(head);
+    }
+    out.push('}');
+    Some(out)
+}
+
+/// One axis of a size, as the Props tab reads it off a reflected row. The
+/// row's text is whatever `fmt_enum` wrote -- `Size.Fill{weight: 100 ..}`,
+/// `Size.Fixed(200)`, `Fit`, a bare number from an older row, `"50%"` or
+/// `"calc(100% - 20px)"` for the CSS spellings -- and every one of them
+/// has to come back as the same handful of shapes the editor draws.
+#[derive(Clone, Debug, PartialEq)]
+enum SizeText {
+    Fill(FillText),
+    Fit,
+    Fixed(f64),
+    /// `50%`, `25vw`, `60cqw`: a size relative to something, as written.
+    Rel(String),
+    /// `calc(..)`, `min(..)`, `clamp(..)`: a size the layout pass works out.
+    Expr(String),
+}
+
+/// What a `Fill` carries: how much of the free space it takes against its
+/// siblings, where it starts from, how it gives way, and the margin-box
+/// bounds a Fill has always had. Read off the printed row and written back
+/// whole, since a field of a variant is not a property of its own.
+#[derive(Clone, Debug, PartialEq)]
+struct FillText {
+    weight: f64,
+    /// `0`, `25%`, `calc(100% - 20px)`: the basis as written.
+    basis: String,
+    shrink: f64,
+    min: Option<f64>,
+    max: Option<f64>,
+}
+
+impl FillText {
+    /// A Fill with nothing said about it.
+    fn plain() -> Self {
+        FillText { weight: 100.0, basis: "0".to_string(), shrink: 0.0, min: None, max: None }
+    }
+
+    /// The chunk that sets the axis to this Fill.
+    fn chunk(&self, axis: &str) -> String {
+        let mut out = format!(
+            "{axis}: Size.Fill{{weight: {} basis: {} shrink: {}",
+            fmt_f64(self.weight),
+            size_literal(&self.basis),
+            fmt_f64(self.shrink)
+        );
+        if let Some(min) = self.min {
+            out.push_str(&format!(" min: {}", fmt_f64(min)));
+        }
+        if let Some(max) = self.max {
+            out.push_str(&format!(" max: {}", fmt_f64(max)));
+        }
+        out.push('}');
+        out
+    }
+}
+
+/// A size as the engine reads it: a number stays bare, anything else --
+/// `25%`, `calc(100% - 20px)` -- is a string for its parser.
+fn size_literal(text: &str) -> String {
+    let text = text.trim().trim_matches('"').trim();
+    if text.parse::<f64>().is_ok() {
+        text.to_string()
+    } else {
+        format!("\"{text}\"")
+    }
+}
+
+/// The fields of a printed `Size.Fill{weight: 100 basis: FitBound.Abs(0)
+/// shrink: 0}`; anything missing is the engine's own default.
+fn parse_fill_text(text: &str) -> FillText {
+    FillText {
+        weight: field_number(text, "weight").unwrap_or(100.0),
+        basis: fill_field(text, "basis").map(bound_text).unwrap_or_else(|| "0".to_string()),
+        shrink: field_number(text, "shrink").unwrap_or(0.0),
+        min: field_number(text, "min"),
+        max: field_number(text, "max"),
+    }
+}
+
+/// One field of a printed Fill, up to the next field or the closing brace;
+/// a quoted value -- an expression with spaces in it -- is taken whole.
+fn fill_field<'a>(text: &'a str, field: &str) -> Option<&'a str> {
+    let key = format!("{field}: ");
+    let start = text.find(&key)? + key.len();
+    let rest = &text[start..];
+    if let Some(quoted) = rest.strip_prefix('"') {
+        let end = quoted.find('"')?;
+        return Some(&quoted[..end]);
+    }
+    let end = [" weight:", " basis:", " shrink:", " min:", " max:", "}"]
+        .iter()
+        .filter_map(|stop| rest.find(stop))
+        .min()
+        .unwrap_or(rest.len());
+    Some(rest[..end].trim())
+}
+
+/// A bound as printed -- `FitBound.Abs(120)`, `50%`, `"calc(100% - 20px)"`
+/// -- as the text of its field: `120`, `50%`, `calc(100% - 20px)`.
+fn bound_text(printed: &str) -> String {
+    let text = printed.trim().trim_matches('"').trim();
+    if text == "null" {
+        return String::new(); // cleared: the row stays, the bound is gone
+    }
+    let head = text.split(['{', '(']).next().unwrap_or("").trim();
+    if head.rsplit('.').next() == Some("Abs") {
+        let inner = text.split('(').nth(1).unwrap_or("").trim_end_matches(')').trim();
+        return inner.parse::<f64>().map(fmt_f64).unwrap_or_else(|_| inner.to_string());
+    }
+    text.to_string()
+}
+
+/// What was typed into a min / max field: nothing clears the bound, a
+/// number is points, and a spelling the engine parses goes in quotes.
+/// Fill and Fit mean nothing for a bound, and half-typed text is not sent.
+fn bound_chunk(prop: &str, typed: &str) -> Option<String> {
+    let typed = typed.trim().trim_matches('"').trim();
+    if typed.is_empty() || typed == "-" || typed == "\u{2013}" || typed.eq_ignore_ascii_case("none") {
+        return Some(format!("{prop}: nil"));
+    }
+    match parse_size_text(typed) {
+        SizeText::Fixed(v) => Some(format!("{prop}: {}", fmt_f64(v))),
+        SizeText::Rel(text) | SizeText::Expr(text) => Some(format!("{prop}: \"{text}\"")),
+        SizeText::Fill(_) | SizeText::Fit => None,
+    }
+}
+
+/// What was typed into the aspect field: nothing clears it, `16:9` or
+/// `16/9` is a ratio, a number is width over height; `3:` on the way to
+/// `3:2` is not sent.
+fn aspect_chunk(typed: &str) -> Option<String> {
+    let typed = typed.trim();
+    if typed.is_empty() || typed == "-" || typed == "\u{2013}" || typed.eq_ignore_ascii_case("none") {
+        return Some("aspect: nil".to_string());
+    }
+    if let Some((w, h)) = typed.split_once([':', '/']) {
+        let (w, h) = (w.trim().parse::<f64>().ok()?, h.trim().parse::<f64>().ok()?);
+        return (h != 0.0).then(|| format!("aspect: {}", fmt_f64(w / h)));
+    }
+    typed.parse::<f64>().ok().map(|v| format!("aspect: {}", fmt_f64(v)))
+}
+
+impl SizeText {
+    /// The value the field shows for it.
+    fn field_text(&self) -> String {
+        match self {
+            SizeText::Fill(_) => "Fill".to_string(),
+            SizeText::Fit => "Fit".to_string(),
+            SizeText::Fixed(v) => fmt_f64(*v),
+            SizeText::Rel(text) | SizeText::Expr(text) => text.clone(),
+        }
+    }
+}
+
+/// Read a size row's text. Tolerant of every spelling the panel has ever
+/// shown for one, because rows come from `fmt_value` today and came from
+/// dotted fragments and bare numbers before it.
+fn parse_size_text(text: &str) -> SizeText {
+    let text = text.trim().trim_matches('"').trim();
+    if text.is_empty() {
+        return SizeText::Fit;
+    }
+    if let Ok(v) = text.parse::<f64>() {
+        return SizeText::Fixed(v);
+    }
+    // `Size.Fill{weight: 100 ..}`, `Fill{..}`, `Fill`, and the Fit / Fixed
+    // shapes: the variant is the word after the last dot before any brace
+    // or paren. Tried FIRST, because a printed Fill carries `Abs(0)` inside
+    // it and a paren alone would read as an expression.
+    let head = text.split(['{', '(']).next().unwrap_or("").trim();
+    let variant = head.rsplit('.').next().unwrap_or("").trim();
+    match variant {
+        "Fill" => return SizeText::Fill(parse_fill_text(text)),
+        "Fit" => return SizeText::Fit,
+        "Fixed" => {
+            // `Fixed(` on the way to `Fixed(300)` is not a size yet, and
+            // certainly not a size of nothing.
+            let inner = text.split('(').nth(1).unwrap_or("").trim_end_matches(')').trim();
+            return match inner.parse() {
+                Ok(v) => SizeText::Fixed(v),
+                Err(_) => SizeText::Fit,
+            };
+        }
+        _ => {}
+    }
+    let lower = text.to_ascii_lowercase();
+    // An expression is kept as written and emitted back as the same
+    // string -- once it is one: `calc(` on the way to `calc(100% - 20px)`
+    // reads as nothing, so nothing is sent for it.
+    if lower.contains('(') {
+        let balanced = lower.matches('(').count() == lower.matches(')').count();
+        return if balanced && lower.ends_with(')') {
+            SizeText::Expr(text.to_string())
+        } else {
+            SizeText::Fit
+        };
+    }
+    if let Some(num) = lower
+        .strip_suffix("cqw")
+        .or_else(|| lower.strip_suffix("cqh"))
+        .or_else(|| lower.strip_suffix("vw"))
+        .or_else(|| lower.strip_suffix("vh"))
+        .or_else(|| lower.strip_suffix('%'))
+        .or_else(|| lower.strip_suffix("px"))
+    {
+        if num.trim().parse::<f64>().is_ok() {
+            // The unit goes lowercase: the engine's parser knows `vw`,
+            // not `VW`, and the field shows what was accepted.
+            return if lower.ends_with("px") {
+                SizeText::Fixed(num.trim().parse().unwrap_or(0.0))
+            } else {
+                SizeText::Rel(lower.clone())
+            };
+        }
+    }
+    SizeText::Fit
+}
+
+/// `weight: 100` out of a printed named variant, when the field is a plain
+/// number.
+fn field_number(text: &str, field: &str) -> Option<f64> {
+    let key = format!("{field}: ");
+    let start = text.find(&key)? + key.len();
+    let rest = &text[start..];
+    let end = rest.find([' ', '}', ',']).unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
+/// The direction a container lays its children out in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum FlowDir {
+    Right,
+    Down,
+    Overlay,
+}
+
+/// How the walks in one wrapped row line up vertically.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum RowAlignText {
+    Top,
+    Center,
+    Bottom,
+}
+
+impl RowAlignText {
+    fn name(self) -> &'static str {
+        match self {
+            RowAlignText::Top => "Top",
+            RowAlignText::Center => "Center",
+            RowAlignText::Bottom => "Bottom",
+        }
+    }
+}
+
+/// A `flow` row as the Props tab reads it: `Flow.Right{row_align:
+/// RowAlign.Top wrap: true}`, `Flow.Down`, or the bare `Right` of a
+/// hand-written source. The wrap and the row alignment only mean anything
+/// for `Right`; they are kept across a change of direction so that going
+/// Down and back does not lose them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FlowText {
+    dir: FlowDir,
+    wrap: bool,
+    row_align: RowAlignText,
+}
+
+impl FlowText {
+    /// Children go left to right and onto a new row when the width runs out.
+    fn wraps(&self) -> bool {
+        self.dir == FlowDir::Right && self.wrap
+    }
+
+    fn with_dir(self, dir: FlowDir) -> Self {
+        FlowText { dir, ..self }
+    }
+
+    /// The wrap button: on a Right flow it toggles; on any other it turns
+    /// the flow into a wrapping Right one, which is what pressing "wrap"
+    /// on a Down container can only mean.
+    fn toggled_wrap(self) -> Self {
+        FlowText { dir: FlowDir::Right, wrap: !self.wraps(), ..self }
+    }
+
+    fn with_row_align(self, row_align: RowAlignText) -> Self {
+        FlowText { dir: FlowDir::Right, row_align, ..self }
+    }
+
+    /// The chunk that sets it: always the whole value. A field of a
+    /// variant is not a property, so `flow.wrap: true` is never emitted.
+    fn chunk(&self) -> String {
+        match self.dir {
+            FlowDir::Down => "flow: Flow.Down".to_string(),
+            FlowDir::Overlay => "flow: Flow.Overlay".to_string(),
+            FlowDir::Right => format!(
+                "flow: Flow.Right{{wrap: {} row_align: RowAlign.{}}}",
+                self.wrap,
+                self.row_align.name()
+            ),
+        }
+    }
+}
+
+/// Read a flow row's text, in every spelling it has had: the printed
+/// `Flow.Right{row_align: RowAlign.Top wrap: true}`, a bare `Down`, the
+/// `Right{wrap: true}` of a source, and the `RightWrap` an older panel
+/// wrote. Anything else reads as Down, the commonest container.
+fn parse_flow_text(text: &str) -> FlowText {
+    let text = text.trim();
+    let head = text.split(['{', '(']).next().unwrap_or("").trim();
+    let variant = head.rsplit('.').next().unwrap_or("").trim();
+    let dir = match variant {
+        "Right" | "RightWrap" => FlowDir::Right,
+        "Overlay" => FlowDir::Overlay,
+        _ => FlowDir::Down,
+    };
+    let wrap = variant == "RightWrap" || text.contains("wrap: true");
+    let row_align = match field_word(text, "row_align") {
+        Some("Center") => RowAlignText::Center,
+        Some("Bottom") => RowAlignText::Bottom,
+        _ => RowAlignText::Top,
+    };
+    FlowText { dir, wrap, row_align }
+}
+
+/// `row_align: RowAlign.Center` out of a printed named variant, as the bare
+/// variant word after any enum prefix.
+fn field_word<'a>(text: &'a str, field: &str) -> Option<&'a str> {
+    let key = format!("{field}: ");
+    let start = text.find(&key)? + key.len();
+    let rest = &text[start..];
+    let end = rest.find([' ', '}', ',']).unwrap_or(rest.len());
+    Some(rest[..end].rsplit('.').next().unwrap_or(""))
+}
+
+/// The strings out of a printed list -- `["70px" "20%" "1fr"]` -- joined
+/// with `sep`; a list that is not strings comes back as it was printed.
+fn quoted_list_text(printed: &str, sep: &str) -> String {
+    let inner = printed.trim().trim_start_matches('[').trim_end_matches(']').trim();
+    if inner.is_empty() {
+        return String::new();
+    }
+    if !inner.starts_with('"') {
+        return inner.to_string();
+    }
+    let mut out = Vec::new();
+    let mut rest = inner;
+    while let Some(start) = rest.find('"') {
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('"') else { break };
+        out.push(&after[..end]);
+        rest = &after[end + 1..];
+    }
+    out.join(sep)
+}
+
+/// Split a track list on spaces, keeping `minmax(60px, 1fr)` together.
+fn split_tracks(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut cur = String::new();
+    for ch in text.chars() {
+        match ch {
+            '(' => {
+                depth += 1;
+                cur.push(ch);
+            }
+            ')' => {
+                depth = depth.saturating_sub(1);
+                cur.push(ch);
+            }
+            ' ' | '\t' | ',' if depth == 0 => {
+                if !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+            }
+            _ => cur.push(ch),
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// A track length as the engine's parser takes it: a number, or one with
+/// `px`, `%` or `fr`, or a balanced expression such as `calc(...)`.
+fn track_len_ok(text: &str) -> bool {
+    let text = text.trim();
+    if text.is_empty() {
+        return false;
+    }
+    let bare = text
+        .strip_suffix("px")
+        .or_else(|| text.strip_suffix("fr"))
+        .or_else(|| text.strip_suffix('%'))
+        .unwrap_or(text);
+    if bare.trim().parse::<f64>().is_ok_and(|v| v >= 0.0) {
+        return true;
+    }
+    let lower = text.to_ascii_lowercase();
+    ["calc(", "min(", "max(", "clamp("].iter().any(|f| lower.starts_with(f))
+        && lower.ends_with(')')
+        && lower.matches('(').count() == lower.matches(')').count()
+}
+
+/// A function's arguments, split on the commas at its own depth, so
+/// `minmax(min(10px, 5%), 1fr)` gives two, the way the engine reads it.
+fn split_args(body: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (index, ch) in body.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                out.push(body[start..index].trim());
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(body[start..].trim());
+    out
+}
+
+/// One track as the engine's parser takes it: a length, `minmax(a, b)`, or
+/// `repeat(n | auto-fill | auto-fit, minmax(a, b))`.
+fn track_ok(text: &str) -> bool {
+    let text = text.trim();
+    if let Some(body) = text.strip_prefix("minmax(").and_then(|b| b.strip_suffix(')')) {
+        let parts = split_args(body);
+        return parts.len() == 2 && parts.iter().all(|p| track_len_ok(p));
+    }
+    if let Some(body) = text.strip_prefix("repeat(").and_then(|b| b.strip_suffix(')')) {
+        let parts = split_args(body);
+        if parts.len() != 2 {
+            return false;
+        }
+        let (count, segment) = (parts[0], parts[1]);
+        let count_ok = count == "auto-fill" || count == "auto-fit" || count.parse::<u32>().is_ok();
+        return count_ok && segment.starts_with("minmax(") && track_ok(segment);
+    }
+    track_len_ok(text)
+}
+
+/// What was typed into a tracks field, as the list the engine takes; a
+/// half-typed track is not sent, and no tracks at all is an empty list.
+fn tracks_chunk(prop: &str, typed: &str) -> Option<String> {
+    let tracks = split_tracks(typed);
+    if !tracks.iter().all(|t| track_ok(t)) {
+        return None;
+    }
+    let quoted: Vec<String> = tracks.iter().map(|t| format!("\"{}\"", t.trim())).collect();
+    Some(format!("{prop}: [{}]", quoted.join(" ")))
+}
+
+/// What was typed into the areas field: rows separated by `/`, each a row
+/// of names with `.` for an empty cell. Rows of unequal length are a row
+/// still being typed, and are not sent.
+fn areas_chunk(typed: &str) -> Option<String> {
+    let rows: Vec<String> = typed
+        .split('/')
+        .map(|row| row.trim().replace('"', ""))
+        .filter(|row| !row.is_empty())
+        .collect();
+    let width = rows.first().map(|row| row.split_whitespace().count());
+    if rows.iter().any(|row| Some(row.split_whitespace().count()) != width) {
+        return None;
+    }
+    let quoted: Vec<String> = rows.iter().map(|row| format!("\"{row}\"")).collect();
+    Some(format!("areas: [{}]", quoted.join(" ")))
+}
+
+/// Where a child sits in its Grid, as the rows say: 0 is wherever the
+/// fill order puts it.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct CellText {
+    col: u32,
+    row: u32,
+    col_span: u32,
+    row_span: u32,
+    area: String,
+}
+
+impl CellText {
+    /// The chunk that places it; a cell that says nothing is no cell.
+    fn chunk(&self) -> String {
+        if self.col == 0 && self.row == 0 && self.col_span == 0 && self.row_span == 0 && self.area.is_empty() {
+            return "cell: nil".to_string();
+        }
+        let area = if self.area.is_empty() { "nil".to_string() } else { format!("@{}", self.area) };
+        format!(
+            "cell: CellPlacement{{col: {} row: {} col_span: {} row_span: {} area: {area}}}",
+            self.col, self.row, self.col_span, self.row_span
+        )
+    }
+}
+
+/// A container name as the chunk that sets it: an id, so letters, digits
+/// and underscores, not starting with a digit; anything else is not sent.
+fn container_chunk(typed: &str) -> Option<String> {
+    let name = typed.trim().trim_start_matches('@');
+    let valid = !name.is_empty()
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !name.starts_with(|c: char| c.is_ascii_digit());
+    valid.then(|| format!("container_id: @{name}"))
+}
+
+/// `vec2f(10 20)` as printed, or `vec2(10, 20)` as written, to its numbers.
+fn parse_vec2_text(text: &str) -> Option<(f64, f64)> {
+    let inner = text.split('(').nth(1)?.trim_end_matches(')');
+    let mut parts = inner.split([' ', ',']).filter(|p| !p.is_empty());
+    let x = parts.next()?.parse().ok()?;
+    let y = parts.next()?.parse().ok()?;
+    Some((x, y))
+}
+
+/// What a person typed into a size field, as the chunk that sets it. A bare
+/// word is a mode, a number is points, a percent or a viewport unit or a
+/// function is the CSS spelling and goes in quotes so the engine's string
+/// parser sees it. Text that reads as none of those -- the half of a word
+/// still being typed -- is not sent.
+fn size_chunk(axis: &str, typed: &str) -> Option<String> {
+    let typed = typed.trim().trim_matches('"').trim();
+    match typed.to_ascii_lowercase().as_str() {
+        "fill" => return Some(format!("{axis}: Fill")),
+        "fit" => return Some(format!("{axis}: Fit")),
+        _ => {}
+    }
+    match parse_size_text(typed) {
+        SizeText::Fixed(v) => Some(format!("{axis}: {}", fmt_f64(v))),
+        SizeText::Rel(text) | SizeText::Expr(text) => Some(format!("{axis}: \"{text}\"")),
+        SizeText::Fill(_) => Some(format!("{axis}: Fill")),
+        SizeText::Fit => None,
+    }
+}
+
 fn fmt_value(heap: &ScriptHeap, value: ScriptValue, depth: usize) -> Option<String> {
     if let Some(text) = fmt_scalar(heap, value) {
         return Some(text);
     }
     if let Some(array) = value.as_array() {
         let mut out = String::from("[");
-        let len = heap.array_len(array).min(8);
+        // A list of plain values -- tracks, area rows -- prints whole, since
+        // an editor writes the printed list back; a list of objects is a
+        // dump and stops at eight.
+        let full = heap.array_len(array);
+        let objects = full > 0 && heap.array_index(array, 0, NoTrap).as_object().is_some();
+        let len = if objects { full.min(8) } else { full.min(4096) };
         for index in 0..len {
             if index > 0 {
                 out.push(' ');
@@ -1602,6 +3742,10 @@ fn fmt_value(heap: &ScriptHeap, value: ScriptValue, depth: usize) -> Option<Stri
                 return None; // texture/buffer declarations, not values
             }
             return fmt_value(heap, inner, depth);
+        }
+        // A derived enum prints as one whole value, never as its fields.
+        if let Some(text) = fmt_enum(heap, obj, EnumFmt::Full) {
+            return Some(text);
         }
         if depth == 0 {
             return Some("{..}".to_string());
@@ -1669,8 +3813,10 @@ fn is_noise(text: &str) -> bool {
 /// `script_to_value` — the Rust fields serialized back to script — so runtime
 /// applies are visible; the `#[source]` object's own map (what the DSL
 /// explicitly applied) supplies the `set` flag. This is both the sidebar's
-/// data and the before/after capture the diff log works from.
-fn reflect_flat(cx: &mut Cx, widget: &WidgetRef) -> Vec<(String, String, bool)> {
+/// data and the before/after capture the diff log works from. Part of the
+/// [`crate::reflect`] surface: the same read a catalogue app's Docs and
+/// Controls panels build on.
+pub fn reflect_flat(cx: &mut Cx, widget: &WidgetRef) -> Vec<(String, String, bool)> {
     cx.with_vm(|vm| {
         // Serializing a widget back to script trips harmless type-check
         // complaints on fn-ref fields (`on_click` serializes to a value its
@@ -1710,6 +3856,15 @@ fn reflect_flat(cx: &mut Cx, widget: &WidgetRef) -> Vec<(String, String, bool)> 
             let name = live_id_token(key);
             if let Some(obj) = value.as_object() {
                 if heap.as_fn(obj).is_some() {
+                    continue;
+                }
+                // An enum is one row, whole -- `width: Size.Fill{weight: 100}`
+                // -- and is never dotted into `width.weight`: a field of a
+                // variant is not a property a person can set on its own.
+                if enum_info(heap, obj).is_some() {
+                    if let Some(text) = fmt_enum(heap, obj, EnumFmt::Full) {
+                        out.push((name, text, is_set));
+                    }
                     continue;
                 }
                 // One level of dotted expansion for typed sub-structs
@@ -1770,6 +3925,23 @@ fn reflect_flat(cx: &mut Cx, widget: &WidgetRef) -> Vec<(String, String, bool)> 
                 let value = heap.value(source, key.into(), NoTrap);
                 if let Some(obj) = value.as_object() {
                     if heap.as_fn(obj).is_some() {
+                        continue;
+                    }
+                    if enum_info(heap, obj).is_some() {
+                        if !out.iter().any(|(existing, _, _)| *existing == name) {
+                            if let Some(text) = fmt_enum(heap, obj, EnumFmt::Full) {
+                                out.push((name, text, false));
+                            }
+                        }
+                        continue;
+                    }
+                    // The live value answered for this key with nothing --
+                    // `cell: null` after it was cleared -- so the source's
+                    // fields under it are what WAS, not what is. A live
+                    // object that dumped whole still gets its declared
+                    // inputs read out of the source (a draw layer's
+                    // `color`, `border_size`), which only live there.
+                    if out.iter().any(|(existing, text, _)| *existing == name && text == "null") {
                         continue;
                     }
                     let mut sub_keys = Vec::new();
@@ -2269,7 +4441,7 @@ fn capture_material_mirror(cx: &Cx, widget: &WidgetRef, area: Area, base: &DrawV
 /// to the same prop merge while the gesture is open (a scrub = one step);
 /// any new user gesture clears the redo branch. Undo/redo replays pass
 /// origin "undo"/"redo" and are not tracked.
-fn track_undo(s: &mut TweakSession, entry: &TweakDiffEntry) {
+pub(crate) fn track_undo(s: &mut TweakSession, entry: &TweakDiffEntry) {
     s.redo.clear();
     if s.undo_open {
         if let Some(UndoStep::Value { path, prop, new, .. }) = s.undo.last_mut() {
@@ -2325,7 +4497,6 @@ enum StructKind {
     Vec4,
     Inset,
     Metrics,
-    SizeField,
     /// Recognized as structured but with no editor yet (a big nested
     /// struct like a full text_style): shown collapsed, never dumped.
     NoEditor,
@@ -2654,16 +4825,19 @@ fn hook_sync(cx: &mut Cx) {
     cx.post_draw_hook = if live { Some(Box::new(pulse_after_draw)) } else { None };
 }
 
-/// One global theme value: a colour or a number.
-#[derive(Clone, Copy)]
-enum ThemeVal {
+/// One global theme value: a colour (packed `0xrrggbbaa`) or a number.
+/// Part of the [`crate::reflect`] surface.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ThemeVal {
     Color(u32),
     Num(f64),
 }
 
 /// The app's theme: every colour and number in `mod.theme`, with the
-/// level (file:line) that defines it. Read from the script cascade.
-fn theme_values(cx: &mut Cx) -> Vec<(String, LiveId, ThemeVal, String)> {
+/// level (file:line) that defines it. Read from the script cascade. Part of
+/// the [`crate::reflect`] surface: a theme panel's rows and the probe behind
+/// `/tweak/op?op=theme&name=`.
+pub fn theme_values(cx: &mut Cx) -> Vec<(String, LiveId, ThemeVal, String)> {
     let mut out: Vec<(String, LiveId, ThemeVal, String)> = Vec::new();
     cx.with_vm(|vm| {
         let theme = vm.module(id!(theme));
@@ -2721,6 +4895,144 @@ fn theme_heap_set(cx: &mut Cx, key: LiveId, value: ScriptValue) -> bool {
     hit
 }
 
+/// One theme value as the text the ledger, the sidebar and the remote op
+/// all show: `#rrggbbaa` for a colour, `fmt_f64` for a number.
+pub(crate) fn theme_val_text(value: ThemeVal) -> String {
+    match value {
+        ThemeVal::Color(c) => hex_of(c),
+        ThemeVal::Num(f) => fmt_f64(f),
+    }
+}
+
+/// The text a theme edit applies. `theme.other` as a value means "what
+/// `other` is right now", so a colour can be pointed at another token
+/// without copying its hex; anything else is taken as written.
+pub(crate) fn theme_edit_text(
+    values: &[(String, LiveId, ThemeVal, String)],
+    text: &str,
+) -> Result<String, String> {
+    match text.strip_prefix("theme.") {
+        Some(other) => values
+            .iter()
+            .find(|(n, _, _, _)| n == other)
+            .map(|(_, _, v, _)| theme_val_text(*v))
+            .ok_or_else(|| format!("no theme value {other:?}")),
+        None => Ok(text.to_string()),
+    }
+}
+
+/// Where a theme edit's undo step goes: the session's own stack
+/// ([`track_undo`]) for a fresh gesture, nothing for an undo/redo replay
+/// that is re-applying a step already on it.
+pub(crate) type UndoSink = fn(&mut TweakSession, &TweakDiffEntry);
+
+/// The ONE way a theme value changes at runtime, shared by the overlay's
+/// sidebar, its reset and undo/redo, the remote `op=theme` and
+/// [`crate::reflect::theme_set_value`]. A colour is retargeted in every
+/// draw-buffer slot that holds it through the pulse's identity ledger
+/// (re-applied after each draw while the edit lives) and written into the
+/// theme object in the script heap so later applies bake it too; a number
+/// only lands in the heap (layouts re-flow when the edit reaches the
+/// source). Every change is ledgered under the token's own definition site
+/// with scope "theme" and, given a sink, pushed as an undo step.
+///
+/// The session is the process global behind [`session`]; it is not a
+/// parameter because the pulse helpers this path calls
+/// (`theme_overrides_sync`, `hook_sync`) address that same global, so
+/// passing another lock in would only pretend to be injection.
+///
+/// Returns the value's kind before the edit and the text applied (with
+/// `theme.x` aliases resolved), or `None` when the value already was what
+/// was asked and nothing was touched.
+pub(crate) fn theme_apply(
+    cx: &mut Cx,
+    name: &str,
+    text: &str,
+    origin: &str,
+    undo: Option<UndoSink>,
+) -> Result<Option<(ThemeVal, String)>, String> {
+    let values = theme_values(cx);
+    let (key, value, loc) = values
+        .iter()
+        .find(|(n, _, _, _)| n == name)
+        .map(|(_, k, v, l)| (*k, *v, l.clone()))
+        .ok_or_else(|| format!("no theme value {name:?}"))?;
+    let text = theme_edit_text(&values, text)?;
+    let old_text = theme_val_text(value);
+    let overridden = session().lock().unwrap().theme_overrides.iter().any(|(n, _)| n == name);
+    if old_text == text && !overridden {
+        return Ok(None);
+    }
+    match value {
+        ThemeVal::Color(current) => {
+            let (rgba, _) = parse_hex(&text).ok_or_else(|| format!("{text:?} is not a colour"))?;
+            let new = packed_of(rgba);
+            // The theme module is immutable to scripts; a design tool
+            // edits the value in place, at the level that defines it.
+            theme_heap_set(cx, key, ScriptValue::from_color(new));
+            let mut s = session().lock().unwrap();
+            match s.theme_overrides.iter().position(|(n, _)| n == name) {
+                Some(i) => {
+                    if new == packed_of(s.theme_overrides[i].1.target) {
+                        // Back at the original: restore and forget.
+                        let (_, st) = s.theme_overrides.remove(i);
+                        drop(s);
+                        pulse_restore(cx, &st);
+                    } else {
+                        s.theme_overrides[i].1.fixed = Some(rgba);
+                        drop(s);
+                    }
+                }
+                None => {
+                    let mut st = PulseState::new(current);
+                    st.fixed = Some(rgba);
+                    s.theme_overrides.push((name.to_string(), st));
+                    drop(s);
+                }
+            }
+            theme_overrides_sync(cx);
+            hook_sync(cx);
+            let overrides = std::mem::take(&mut session().lock().unwrap().theme_overrides);
+            for (_, st) in &overrides {
+                pulse_repaint(cx, st);
+            }
+            session().lock().unwrap().theme_overrides = overrides;
+        }
+        ThemeVal::Num(_) => {
+            let f: f64 = text.parse().map_err(|_| format!("{text:?} is not a number"))?;
+            // Numbers are baked into layouts at apply time: the heap
+            // holds the new value for everything applied from now on
+            // and the ledger carries it to the source; existing layout
+            // re-flows when the edit lands (a live reload cannot
+            // redefine the immutable widget modules today).
+            theme_heap_set(cx, key, ScriptValue::from_f64(f));
+        }
+    }
+    let now = cx.seconds_since_app_start();
+    let mut s = session().lock().unwrap();
+    s.suppress_until = now + SUPPRESS_LINGER;
+    s.apply_gen += 1;
+    s.next_seq += 1;
+    let entry = TweakDiffEntry {
+        seq: s.next_seq,
+        path: "theme".to_string(),
+        prop: name.to_string(),
+        old: old_text,
+        new: text.clone(),
+        origin: loc,
+        siblings: 0,
+        scope: "theme".to_string(),
+    };
+    if let Some(track) = undo {
+        log!("TWEAK {} theme {} {} -> {} ({})", origin, entry.prop, entry.old, entry.new, entry.origin);
+        track(&mut s, &entry);
+    }
+    s.diff.push(entry);
+    drop(s);
+    cx.redraw_all();
+    Ok(Some((value, text)))
+}
+
 fn rgba_of(c: u32) -> [f32; 4] {
     [
         ((c >> 24) & 0xff) as f32 / 255.0,
@@ -2737,6 +5049,18 @@ fn packed_of(rgba: [f32; 4]) -> u32 {
         | ((rgba[3] * 255.0).round() as u32)
 }
 
+/// A measured length for the eye: one decimal at most, and no trailing `.0`.
+/// `fmt_f64` keeps four, which turns a Fill width into `420.7333` and pushes
+/// the readout past the panel's edge.
+fn fmt_measure(v: f64) -> String {
+    let rounded = (v * 10.0).round() / 10.0;
+    if (rounded - rounded.round()).abs() < f64::EPSILON {
+        format!("{}", rounded.round() as i64)
+    } else {
+        format!("{rounded:.1}")
+    }
+}
+
 fn hex_of(c: u32) -> String {
     format_hex(rgba_of(c), true)
 }
@@ -2744,38 +5068,305 @@ fn hex_of(c: u32) -> String {
 /// The theme rows' place in `rows_uid`: no widget, the theme itself.
 const THEME_ROWS: u64 = u64::MAX;
 
-/// Selected state by fill, never by brackets in the label.
-fn set_button_fill(cx: &mut Cx, btn: WidgetRef, selected: bool) {
-    let mut btn = btn;
-    let color: Vec4f = if selected { vec4(0.31, 0.34, 0.44, 1.0) } else { vec4(0.20, 0.20, 0.21, 1.0) };
-    script_apply_eval!(cx, btn, { draw_bg +: { color: #(color) } });
+/// What the Tree tab's view controls may do, given whether a branch is
+/// isolated. Center and Zoom act on the isolated branch — they hold it in
+/// the middle of the screen and bring it closer — so without one they are
+/// inert, and the view is back at rest: nothing centred, life size.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ViewFocusRule {
+    /// Center and Zoom take input and read as live.
+    controls_enabled: bool,
+    /// Where Center stands under the rule.
+    center: bool,
+    /// Where Zoom stands under the rule, 1..4.
+    zoom: f32,
 }
 
-/// The selection's path for people: anonymous segments (`-`, list
-/// indices) read as the widget's type, joined with ›.
-fn display_path(cx: &Cx, uid: u64) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    let mut cur = Some(WidgetUid(uid));
-    while let Some(u) = cur {
-        let (name, parent, ty) = {
-            let tree = cx.widget_tree();
-            let name = tree.name_of(u).map(live_id_token).unwrap_or_else(|| "-".to_string());
-            let ty = tree.widget(u).widget_type_id();
-            (name, tree.parent_of(u), ty)
-        };
-        let anon = name == "-" || name.chars().all(|c| c.is_ascii_digit());
-        let label = if anon {
-            ty.and_then(|t| widget_type_names(cx).get(&t).copied())
-                .map(live_id_token)
-                .unwrap_or(name)
-        } else {
-            name
-        };
-        parts.push(label);
-        cur = parent;
+fn view_focus_rule(isolated: bool, center: bool, zoom: f32) -> ViewFocusRule {
+    if isolated {
+        ViewFocusRule { controls_enabled: true, center, zoom: zoom.clamp(1.0, 4.0) }
+    } else {
+        ViewFocusRule { controls_enabled: false, center: false, zoom: 1.0 }
     }
-    parts.reverse();
-    parts.join(" \u{203a} ")
+}
+
+/// The Tree tab's view state: the isolation lock, and Center / Zoom, which
+/// act on what is locked. Every change goes through one of the transitions
+/// here, so the gate — no lock, no Center, no Zoom — is in one place, and
+/// the head row, the button, the field and the wheel all read it the same.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ViewState {
+    tree_isolate: bool,
+    isolate_uid: u64,
+    center: bool,
+    zoom: f32,
+}
+
+impl ViewState {
+    /// Is the Tree tab locked onto one branch?
+    fn isolated(&self) -> bool {
+        self.tree_isolate && self.isolate_uid != 0
+    }
+
+    fn rule(&self) -> ViewFocusRule {
+        view_focus_rule(self.isolated(), self.center, self.zoom)
+    }
+
+    /// Nothing locked, and the view at rest with it: Center off, life size.
+    fn rested(self) -> Self {
+        let rule = view_focus_rule(false, self.center, self.zoom);
+        Self { tree_isolate: false, isolate_uid: 0, center: rule.center, zoom: rule.zoom }
+    }
+
+    /// The lock checked against its target: a target that is not on screen
+    /// any more (`target_presence`) is let go, and the view rests with it.
+    /// Nothing locked, nothing to check.
+    fn settled(self, presence: TargetPresence) -> Self {
+        if self.isolated() && presence != TargetPresence::Shown {
+            self.rested()
+        } else {
+            self
+        }
+    }
+
+    /// The Center button. Inert while nothing is locked.
+    fn center_toggled(self) -> Self {
+        if !self.rule().controls_enabled {
+            return self;
+        }
+        Self { center: !self.center, ..self }
+    }
+
+    /// The Zoom field, held to 1..4. Inert while nothing is locked.
+    fn zoom_set(self, zoom: f32) -> Self {
+        if !self.rule().controls_enabled {
+            return self;
+        }
+        Self { zoom: view_focus_rule(true, self.center, zoom).zoom, ..self }
+    }
+
+    /// The wheel over the isolated view: one step of the field.
+    fn zoom_stepped(self, step: f32) -> Self {
+        self.zoom_set(self.zoom.max(1.0) + step)
+    }
+}
+
+/// Where the lock's target stands in the frame its window last drew.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum TargetPresence {
+    /// On screen, or nothing says otherwise.
+    Shown,
+    /// Dropped from the widget tree: a story switched, a list rebuilt.
+    Gone,
+    /// Alive, but not in what its window last drew: its draw list was
+    /// redrawn without it, or the list hangs off no pass (a Dock page that is
+    /// not the selected tab).
+    NotDrawn,
+    /// Drawn, and shut away by a closed fold above it.
+    FoldedShut,
+}
+
+impl TargetPresence {
+    /// The log's word for it.
+    fn reason(self) -> &'static str {
+        match self {
+            TargetPresence::Shown => "is shown",
+            TargetPresence::Gone => "is gone",
+            TargetPresence::NotDrawn => "is not drawn",
+            TargetPresence::FoldedShut => "is folded shut",
+        }
+    }
+}
+
+/// What was seen of the lock's target. Everything past `in_tree` is read
+/// off the draw lists, so only between frames (`Tweaker::settle_isolation`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TargetSighting {
+    /// Still in the widget tree.
+    in_tree: bool,
+    /// It has an area that was drawn at some point, so there is something
+    /// to judge by. No area of its own, or borrowed mid-event: nothing is.
+    drawn_once: bool,
+    /// Its draw list has not been redrawn since that area was recorded.
+    current: bool,
+    /// Its draw list hangs off a pass.
+    attached: bool,
+    /// Some of it lies inside its clip.
+    shows: bool,
+    /// A fold above it is closed, done closing, and itself on screen.
+    under_shut_fold: bool,
+}
+
+/// The rule `ViewState::settled` applies. What is off screen for good lets
+/// the lock go; what is only out of sight keeps it. A widget clipped or
+/// scrolled out of a scrolling view is still drawn and scrolls back, so it
+/// holds however little of it shows, and so does a fold's body while the
+/// fold is still moving. A closed fold is the exception that needs naming:
+/// it keeps DRAWING its body, clamped to no height and scrolled away, so
+/// the body reads as drawn and only the fold says it is shut. A fold's
+/// header still shows, which is what keeps it out of that.
+fn target_presence(seen: TargetSighting) -> TargetPresence {
+    if !seen.in_tree {
+        TargetPresence::Gone
+    } else if !seen.drawn_once {
+        TargetPresence::Shown
+    } else if !seen.current || !seen.attached {
+        TargetPresence::NotDrawn
+    } else if seen.under_shut_fold && !seen.shows {
+        TargetPresence::FoldedShut
+    } else {
+        TargetPresence::Shown
+    }
+}
+
+/// Look at the lock's target: the tree, and with `in_frame` the frame too.
+fn sight_target(cx: &Cx, uid: u64, in_frame: bool) -> TargetSighting {
+    let widget = cx.widget_tree().widget(WidgetUid(uid));
+    let mut seen = TargetSighting {
+        in_tree: !widget.is_empty(),
+        drawn_once: false,
+        current: true,
+        attached: true,
+        shows: true,
+        under_shut_fold: false,
+    };
+    // Borrowed means an ancestor of this panel, mid-event: there, and its
+    // area is not to be read.
+    if !in_frame || !seen.in_tree || widget.try_widget_uid().is_none() {
+        return seen;
+    }
+    let area = widget.area();
+    let (Some(list_id), Some(redraw_id)) = (area.draw_list_id(), area.redraw_id()) else {
+        return seen;
+    };
+    seen.drawn_once = true;
+    // Stale is a list redrawn AFTER the area was recorded. The other way
+    // round is a retained list whose widget recorded where it is again (see
+    // `Area::clipped_rect_union_attached`): on screen.
+    seen.current = !cx.draw_lists.is_id_freed(list_id)
+        && cx
+            .draw_lists
+            .checked_index(list_id)
+            .is_some_and(|list| list.redraw_id <= redraw_id);
+    if !seen.current {
+        return seen;
+    }
+    seen.attached = area.is_attached(cx, &attached_lists_of(cx, &widget));
+    let has_size = |rect: Rect| rect.size.x > 0.0 && rect.size.y > 0.0;
+    seen.shows = has_size(area.clipped_rect_union(cx));
+    let mut up = cx.widget_tree().parent_of(WidgetUid(uid));
+    for _ in 0..64 {
+        let Some(at) = up else { break };
+        let ancestor = cx.widget_tree().widget(at);
+        // Borrowed: the window this panel sits in, or above it. No folds.
+        if ancestor.is_empty() || ancestor.try_widget_uid().is_none() {
+            break;
+        }
+        if ancestor.widget_type_id() == Some(std::any::TypeId::of::<FoldHeader>()) {
+            let fold = ancestor.as_fold_header();
+            if !fold.is_open(cx)
+                && fold.opened() <= 0.0
+                && has_size(ancestor.area().clipped_rect_union(cx))
+            {
+                seen.under_shut_fold = true;
+                break;
+            }
+        }
+        up = cx.widget_tree().parent_of(at);
+    }
+    seen
+}
+
+/// Selected state by fill, never by brackets in the label.
+///
+/// ALL FIVE fills, not just the resting one. A Button's face is
+/// `color`/`color_hover`/`color_down`/`color_focus` mixed by the animator,
+/// and it takes key focus on click — so setting `color` alone left every
+/// toggle you had just clicked painting the theme's focus grey instead of
+/// its own state, indefinitely. The state was correct and invisible: the
+/// last button touched always looked the same whichever way it was set,
+/// which is what made the whole row unreadable. The gradient end stops go
+/// flat (negative alpha) for the same reason — the theme gives the hover and
+/// focus states a second stop, and a two-tone face reads as a third state
+/// that does not exist.
+/// One colour off the fab palette, ready to apply. Opaque: these are FILLS,
+/// and a role that carries an alpha (the base theme's well is a translucent
+/// black) would let the panel's ground through a control that is meant to
+/// sit on it.
+fn fab_fill(cx: &mut Cx, key: LiveId) -> Vec4f {
+    let rgba = cx.with_vm(|vm| {
+        let fab = vm.module(id!(fab));
+        vm.bx.heap.value(fab, key.into(), NoTrap).as_color().unwrap_or(0)
+    });
+    vec4(
+        ((rgba >> 24) & 0xff) as f32 / 255.0,
+        ((rgba >> 16) & 0xff) as f32 / 255.0,
+        ((rgba >> 8) & 0xff) as f32 / 255.0,
+        1.0,
+    )
+}
+
+fn set_button_fill(cx: &mut Cx, btn: WidgetRef, selected: bool) {
+    let mut btn = btn;
+    // Worn (the Theme tab's "wear" switch), the literals below would be a
+    // dark slab under a light theme with the panel's now-dark words on it --
+    // unreadable, and on every switch in the panel at once. So worn, the two
+    // states come off the palette instead: the accent's own CONTAINER for
+    // on, which is the tint that role exists to carry ink on, and the well
+    // tone for off. Both keep `fab.color_text` readable, which is what the
+    // button draws its word in; `worn_the_panel_takes_the_themes_colours_and_still_reads`
+    // holds that to a number under every sheet.
+    let (base, hover, down): (Vec4f, Vec4f, Vec4f) = if crate::fab_controls::panel_wears_theme(cx) {
+        if selected {
+            (
+                fab_fill(cx, live_id!(color_accent_dim)),
+                fab_fill(cx, live_id!(color_accent)),
+                fab_fill(cx, live_id!(color_accent_dim)),
+            )
+        } else {
+            (
+                fab_fill(cx, live_id!(color_input)),
+                fab_fill(cx, live_id!(color_input_hover)),
+                fab_fill(cx, live_id!(color_input_active)),
+            )
+        }
+    } else if selected {
+        (
+            vec4(0.23, 0.45, 0.83, 1.0),
+            vec4(0.31, 0.54, 0.92, 1.0),
+            vec4(0.17, 0.35, 0.67, 1.0),
+        )
+    } else {
+        (
+            vec4(0.17, 0.17, 0.18, 1.0),
+            vec4(0.27, 0.27, 0.29, 1.0),
+            vec4(0.12, 0.12, 0.13, 1.0),
+        )
+    };
+    let flat: Vec4f = vec4(-1.0, -1.0, -1.0, -1.0);
+    script_apply_eval!(cx, btn, {
+        draw_bg +: {
+            color: #(base)
+            color_hover: #(hover)
+            color_down: #(down)
+            color_focus: #(base)
+            color_2: #(flat)
+            color_2_hover: #(flat)
+            color_2_down: #(flat)
+            color_2_focus: #(flat)
+        }
+    });
+}
+
+/// A Button live or off, as one thing. Its `enabled` is what makes it
+/// inert and its disabled track is what makes it look so, and neither
+/// drives the other; this sets both. Guarded on the track, so a sidebar
+/// redraw does not restart the fade.
+fn set_button_live(cx: &mut Cx, btn: &WidgetRef, live: bool) {
+    btn.as_button().set_enabled(cx, live);
+    if btn.disabled(cx) == live {
+        btn.set_disabled(cx, !live);
+    }
 }
 
 /// Keep the leaf visible: `…` then the last `keep` chars.
@@ -3015,17 +5606,16 @@ fn parse_struct(value: &str) -> (StructKind, Vec<f64>) {
                 ],
             );
         }
-        if v.contains("min:") && v.contains("max:") {
-            // A Size: Fill carries a weight, Fit does not (a fixed number
-            // is a plain Num row, never a dump).
-            return (StructKind::SizeField, vec![if v.contains("weight:") { 1.0 } else { 0.0 }]);
-        }
         return (StructKind::NoEditor, Vec::new());
     }
     (StructKind::None, Vec::new())
 }
 
-fn collect_row_docs(cx: &mut Cx, widget: &WidgetRef) -> HashMap<String, String> {
+/// Every `/** */` annotation behind a widget's properties, gathered up its
+/// construction chain: property name (dotted for a sub-object's field, as
+/// [`reflect_flat`] names it) to the doc's text. Part of the
+/// [`crate::reflect`] surface: a Docs panel's third column.
+pub fn collect_row_docs(cx: &mut Cx, widget: &WidgetRef) -> HashMap<String, String> {
     let mut out = HashMap::new();
     let source = widget.script_source();
     if source == ScriptObject::ZERO {
@@ -3107,11 +5697,241 @@ fn cascade_levels(cx: &mut Cx, widget: &WidgetRef) -> Vec<CascadeLevel> {
     })
 }
 
-fn resolve_widget_by_path(cx: &Cx, path: &str) -> Result<WidgetRef, String> {
+/// Every widget's path, in names a person can read.
+///
+/// `WidgetTree::path_to` renders an unnamed node as `-` and a list item as a
+/// bare index, so a real path came out as `-0.main_window.body.dock.-.-.3` —
+/// the same string for every unnamed sibling, and no help to anyone reading
+/// it. Here each segment is, in order of preference:
+///
+/// * the node's own name (`dock`, `tOverview`, `press_demo`), or
+/// * its TYPE when it has no name of its own (`View`, `Label`), and
+/// * `.1`, `.2`… appended when siblings would otherwise collide — four
+///   unnamed Labels under one View become `Label.1`..`Label.4`. The slash is
+///   the hierarchy; a dot is only which one of several.
+///
+/// The head is dropped, because it is on every path in the app and therefore
+/// tells nobody anything: the tree root (which has neither a name nor a
+/// reliably-registered type), any single-child chain under it, and the
+/// `Window`'s own `body` container. What is left starts at the first thing
+/// the app itself put on screen — `dock.tOverview.View.View.Label_1`.
+///
+/// Built from `flat_tree`, whose depth-first order and depth column give both
+/// the parent chain and the sibling order. That is a whole-tree walk, so this
+/// is for CLICKS (copy, @mention, a selection change) — never for hover.
+fn readable_paths(cx: &Cx) -> Vec<(u64, String)> {
+    let rows = cx.widget_tree().flat_tree(cx);
+    let n = rows.len();
+    // The parent of each row, read straight off the depth-first order.
+    let mut parent: Vec<Option<usize>> = vec![None; n];
+    let mut stack: Vec<usize> = Vec::new();
+    for (i, row) in rows.iter().enumerate() {
+        stack.truncate(row.depth as usize);
+        parent[i] = stack.last().copied();
+        stack.push(i);
+    }
+    let mut children: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (i, p) in parent.iter().enumerate() {
+        if let Some(p) = p {
+            children[*p].push(i);
+        }
+    }
+    let mut segment: Vec<String> = rows
+        .iter()
+        .map(|row| readable_segment(&row.name, &row.ty))
+        .collect();
+    // Siblings that want the same segment get numbered, in child order.
+    let roots: Vec<usize> = (0..n).filter(|i| parent[*i].is_none()).collect();
+    let sibling_groups = children
+        .iter()
+        .cloned()
+        .chain(std::iter::once(roots.clone()))
+        .filter(|group| group.len() > 1);
+    for group in sibling_groups {
+        let clashing: Vec<usize> = group
+            .iter()
+            .copied()
+            .filter(|i| group.iter().filter(|j| segment[**j] == segment[*i]).count() > 1)
+            .collect();
+        let mut ordinal: HashMap<String, usize> = HashMap::new();
+        for i in clashing {
+            let base = segment[i].clone();
+            let next = ordinal.entry(base.clone()).or_insert(0);
+            *next += 1;
+            segment[i] = format!("{base}.{next}");
+        }
+    }
+    // How many leading segments are the shared, meaningless head: the root
+    // itself, then any node that is the only way down, then the Window's
+    // `body`. Never so many that a path runs out.
+    let mut skip = 1usize; // the root
+    if roots.len() == 1 {
+        let mut cur = roots[0];
+        while children[cur].len() == 1 {
+            let next = children[cur][0];
+            if children[next].is_empty() {
+                break; // the chain ends here: this node IS the path
+            }
+            cur = next;
+            skip += 1;
+        }
+        // The Window's content container. It is named by the framework, it
+        // wraps everything an app draws, and it is on every path.
+        for child in children[cur].iter() {
+            if segment[*child] == "body" && !children[*child].is_empty() {
+                skip += 1;
+                break;
+            }
+        }
+    }
+    let mut full: Vec<String> = Vec::with_capacity(n);
+    for i in 0..n {
+        let depth = rows[i].depth as usize;
+        let path = match parent[i] {
+            Some(_) if depth <= skip => format!("/{}", segment[i]),
+            Some(p) => format!("{}/{}", full[p], segment[i]),
+            None => format!("/{}", segment[i]),
+        };
+        full.push(path);
+    }
+    rows.iter().map(|row| row.uid).zip(full).collect()
+}
+
+/// The app's rows without the inspectors: every inspector's subtree, in every
+/// window. A panel is in the widget tree so a remote /snap can drive its
+/// fields, but a Tree tab that listed one would be listing itself — and every
+/// window carries an inspector of its own, so the one hosting this read is
+/// not the only panel in the tree. `flat_tree` is depth-first, so a subtree
+/// is its root's row and every row after it that sits deeper, up to the next
+/// row that does not; `has_children` is re-read from what is left, since a
+/// panel's parent may have had nothing else in it.
+///
+/// A root is any row `flat_tree` marked as an inspector by its type. The
+/// hosting one needs more: the inspector reads its tree while it is drawing
+/// or handling an event, when it is itself borrowed and `flat_tree` can read
+/// neither its type nor its uid (0). So it is also found by its own uid,
+/// `root`, or failing that as the parent of a row with `inside`'s uid — the
+/// panel it built is not borrowed, and sits right under it. 0 is never a key.
+fn rows_without_inspectors(
+    rows: Vec<crate::widget_tree::FlatTreeRow>,
+    root: u64,
+    inside: u64,
+) -> Vec<crate::widget_tree::FlatTreeRow> {
+    let by_root = (root != 0).then(|| rows.iter().position(|row| row.uid == root)).flatten();
+    let by_child = || {
+        if inside == 0 {
+            return None;
+        }
+        let child = rows.iter().position(|row| row.uid == inside)?;
+        let depth = rows[child].depth;
+        rows[..child].iter().rposition(|row| row.depth + 1 == depth)
+    };
+    let host = by_root.or_else(by_child);
+    let mut out = Vec::with_capacity(rows.len());
+    // The depth of the subtree being cut, while inside one.
+    let mut cutting: Option<u32> = None;
+    for (i, row) in rows.into_iter().enumerate() {
+        if let Some(depth) = cutting {
+            if row.depth > depth {
+                continue;
+            }
+            cutting = None;
+        }
+        if row.inspector || host == Some(i) {
+            cutting = Some(row.depth);
+            continue;
+        }
+        out.push(row);
+    }
+    for i in 0..out.len() {
+        let next_depth = out.get(i + 1).map(|next| next.depth);
+        out[i].has_children = next_depth == Some(out[i].depth + 1);
+    }
+    out
+}
+
+/// The name the widget tree calls a widget, or empty when it has none worth
+/// the word: `-` for anonymous, and a bare index for a list item.
+fn tree_name_of(cx: &Cx, uid: u64) -> String {
+    cx.widget_tree()
+        .name_of(WidgetUid(uid))
+        .map(live_id_token)
+        .filter(|name| name != "-" && !name.bytes().all(|b| b.is_ascii_digit()))
+        .unwrap_or_default()
+}
+
+/// One path segment, as a person would say it: the node's name, else its
+/// type, else a last-resort placeholder. A name that is only digits (a list
+/// item's index) is no name at all, so those take the type too.
+fn readable_segment(name: &str, ty: &str) -> String {
+    let named =
+        !name.is_empty() && name != "-" && !name.bytes().all(|b| b.is_ascii_digit());
+    if named {
+        return name.to_string();
+    }
+    if !ty.is_empty() && ty != "-" {
+        return ty.to_string();
+    }
+    "Widget".to_string()
+}
+
+/// One widget's readable path (`/window/body/Button.2`). See
+/// [`readable_paths`]. Part of the [`crate::reflect`] surface: how an action
+/// log names its sender.
+pub fn indexed_path(cx: &Cx, uid: u64) -> String {
+    readable_paths(cx)
+        .into_iter()
+        .find(|(u, _)| *u == uid)
+        .map(|(_, path)| path)
+        .unwrap_or_else(|| format!("uid:{uid}"))
+}
+
+/// The widget a path names. An exact match wins; otherwise anything whose
+/// path ENDS with it, which is what makes a shortened, hand-written or
+/// previously-stored tail still resolve.
+fn resolve_indexed(cx: &Cx, path: &str) -> Option<WidgetUid> {
+    let path = path.trim();
+    if path.is_empty() || path == "/" {
+        return None;
+    }
+    // A reference written or pasted without its leading slash still means
+    // the same thing. Dots are NOT separators here — `Label.2` is one
+    // segment, the second Label — so nothing else is normalised.
+    let wanted = format!("/{}", path.trim_start_matches('/'));
+    let paths = readable_paths(cx);
+    if let Some((uid, _)) = paths.iter().find(|(_, full)| **full == wanted) {
+        return Some(WidgetUid(*uid));
+    }
+    paths
+        .iter()
+        .find(|(_, full)| full.ends_with(&wanted))
+        .map(|(uid, _)| WidgetUid(*uid))
+}
+
+/// Is this segment an anonymous node's numbered stand-in (`-`, `-2`)? Those
+/// are positions, not names, so the loose finder must not turn them into ids.
+fn is_anonymous_segment(segment: &str) -> bool {
+    segment == "-"
+        || (segment.starts_with('-') && segment.len() > 1 && segment[1..].bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// The widget a readable path names: an indexed path (`/window/body/Button.2`)
+/// taken as written, else a waypoint search over the named segments. Part
+/// of the [`crate::reflect`] surface: how a story names its subject.
+pub fn resolve_widget_by_path(cx: &Cx, path: &str) -> Result<WidgetRef, String> {
     let tree = cx.widget_tree();
+    // An indexed path names one widget and nothing else: take it as written
+    // before falling back to the waypoint search below, which drops the
+    // anonymous segments and can only land on the nearest named ancestor.
+    if let Some(uid) = resolve_indexed(cx, path) {
+        let found = tree.widget(uid);
+        if !found.is_empty() {
+            return Ok(found);
+        }
+    }
     let ids: Vec<LiveId> = path
-        .split('.')
-        .filter(|segment| !segment.is_empty() && *segment != "-")
+        .split(['.', '/'])
+        .filter(|segment| !segment.is_empty() && !is_anonymous_segment(segment))
         .map(LiveId::from_str)
         .collect();
     if ids.is_empty() {
@@ -3164,7 +5984,12 @@ fn type_origin(cx: &mut Cx, widget: &WidgetRef) -> String {
 
 /// Every other live widget of the same widget type — "every Button in the
 /// system".
-fn type_siblings(cx: &mut Cx, widget: &WidgetRef) -> Vec<WidgetRef> {
+///
+/// `confine` narrows that to one subtree (0 = the whole app). Isolation is
+/// what sets it: with one branch on screen and the rest covered, "all
+/// Buttons" plainly means the ones you can see, and an edit that also
+/// reached the app you deliberately hid would be a surprise.
+fn type_siblings(cx: &mut Cx, widget: &WidgetRef, confine: u64) -> Vec<WidgetRef> {
     let Some(ty) = widget.widget_type_id() else {
         return Vec::new();
     };
@@ -3187,6 +6012,9 @@ fn type_siblings(cx: &mut Cx, widget: &WidgetRef) -> Vec<WidgetRef> {
             .iter()
             .any(|id| *id == live_id!(tweaker));
         if in_tweaker {
+            continue;
+        }
+        if confine != 0 && row.uid != confine && !is_ancestor_of(cx, confine, row.uid) {
             continue;
         }
         out.push(other);
@@ -3450,15 +6278,37 @@ pub fn apply_splash_chunk(
     // names: "this" = template siblings only (a tab is every tab) and the
     // instance's own site; "all" = every live widget of the TYPE and the
     // type's definition site.
-    let scope_all = session().lock().unwrap().scope_all;
-    let scope_name = if scope_all { "all" } else { "this" };
-    let origin_site = if scope_all {
+    let (scope_all, isolate) = {
+        let s = session().lock().unwrap();
+        (s.scope_all, if s.scope_unconfined { 0 } else { s.isolate_uid })
+    };
+    // "all" confined to the isolated branch is a different promise from
+    // "all" across the app, and it must not be recorded as the same thing:
+    // the type's DEFINITION is the wrong place to write a change that was
+    // deliberately kept to one branch, so the ledger names the branch's own
+    // site and says which scope it was.
+    let confined = scope_all && isolate != 0;
+    let scope_name = if confined {
+        "all in isolation"
+    } else if scope_all {
+        "all"
+    } else {
+        "this"
+    };
+    let origin_site = if confined {
+        let root = cx.widget_tree().widget(WidgetUid(isolate));
+        if root.is_empty() {
+            type_origin(cx, widget)
+        } else {
+            source_origin(cx, &root)
+        }
+    } else if scope_all {
         type_origin(cx, widget)
     } else {
         source_origin(cx, widget)
     };
     let fan_out = if scope_all {
-        type_siblings(cx, widget)
+        type_siblings(cx, widget, isolate)
     } else {
         template_siblings(cx, widget)
     };
@@ -3833,6 +6683,12 @@ pub fn tweak_callback(
             if let Some(pick) = &pinned {
                 out.push_str(",\"sel\":");
                 out.push_str(&pick_json(pick));
+                // "ref" is the EXACT reference: the indexed path, where every
+                // anonymous node carries its position. `path` renders those
+                // as a bare `-`, so a run of unnamed containers reads the same
+                // for all of them; `ref` is the one to quote and to feed back
+                // to /tweak/apply, and it is what a note is keyed by.
+                out.push_str(&format!(",\"ref\":{}", json_str(&indexed_path(cx, pick.uid))));
                 // Resolve by UID first: paths with anonymous numeric
                 // segments (a list item's `demos.1` Slider) do not
                 // round-trip through the path finder, but the uid is
@@ -3918,25 +6774,120 @@ pub fn tweak_callback(
                     out.push(']');
                 }
             }
+            {
+                // Written and waiting, on purpose: NOT requests. An agent
+                // sees them so it knows something is being composed, and
+                // acts only when they arrive as asks.
+                let outbox = session().lock().unwrap().outbox.clone();
+                if !outbox.is_empty() {
+                    out.push_str(",\"queued\":[");
+                    for (i, item) in outbox.iter().enumerate() {
+                        let (path, text) = (&item.path, &item.text);
+                        if i > 0 {
+                            out.push(',');
+                        }
+                        out.push_str(&format!(
+                            "{{\"path\":{},\"text\":{}}}",
+                            json_str(path),
+                            json_str(text)
+                        ));
+                    }
+                    out.push(']');
+                }
+            }
+            {
+                // Both under one lock: a dock ask's `do` names the widget by
+                // the rename that stands for it.
+                let (renames, converts) = {
+                    let mut s = session().lock().unwrap();
+                    s.load_renames();
+                    s.load_converts();
+                    (s.renames.clone(), s.converts.clone())
+                };
+                if !renames.is_empty() {
+                    out.push_str(",\"renames\":[");
+                    for (i, rename) in renames.iter().enumerate() {
+                        if i > 0 {
+                            out.push(',');
+                        }
+                        out.push_str(&format!(
+                            "{{\"ref\":{},\"from\":{},\"to\":{}}}",
+                            json_str(&rename.reference),
+                            json_str(&rename.from),
+                            json_str(&rename.to)
+                        ));
+                    }
+                    out.push(']');
+                }
+                if !converts.is_empty() {
+                    out.push_str(",\"converts\":");
+                    out.push_str(&converts_json(&converts, &renames));
+                }
+            }
             if let Some(pick) = &hover {
                 out.push_str(",\"hover\":");
                 out.push_str(&pick_json(pick));
             }
             {
-                let notes = session().lock().unwrap().notes.clone();
+                let notes = {
+                    // Pinned notes are part of the state whether or not a
+                    // card has been opened this run.
+                    let mut s = session().lock().unwrap();
+                    s.load_notes();
+                    s.notes.clone()
+                };
                 if !notes.is_empty() {
                     out.push_str(",\"notes\":[");
                     for (i, note) in notes.iter().enumerate() {
                         if i > 0 {
                             out.push(',');
                         }
+                        let mentions = note_mentions(&note.path, &note.text);
+                        let mentions = if mentions.is_empty() {
+                            String::new()
+                        } else {
+                            format!(
+                                ",\"mentions\":[{}]",
+                                mentions
+                                    .iter()
+                                    .map(|m| json_str(m))
+                                    .collect::<Vec<_>>()
+                                    .join(",")
+                            )
+                        };
                         out.push_str(&format!(
-                            "{{\"path\":{},\"text\":{}}}",
+                            "{{\"path\":{},\"text\":{}{}{}{}}}",
                             json_str(&note.path),
-                            json_str(&note.text)
+                            json_str(&note.text),
+                            // A rule is not a note: an agent reading this
+                            // must be able to tell what it may not break
+                            // from what it is merely told.
+                            if note.rules.trim().is_empty() {
+                                String::new()
+                            } else {
+                                format!(",\"rules\":{}", json_str(&note.rules))
+                            },
+                            mentions,
+                            // "ask": the human pressed Ctrl+Enter / the
+                            // sparkle on this note — act on it, do not just
+                            // read it. The count rises with every send.
+                            if note.sent > 0 { format!(",\"ask\":{}", note.sent) } else { String::new() },
                         ));
                     }
                     out.push(']');
+                }
+            }
+            {
+                // The app-wide rules ride alongside the notes, so a standing
+                // rule is readable without the app running and without
+                // guessing which widget it might have been attached to.
+                let rules = {
+                    let mut s = session().lock().unwrap();
+                    s.load_app_rules();
+                    s.app_rules.clone()
+                };
+                if !rules.trim().is_empty() {
+                    out.push_str(&format!(",\"app_rules\":{}", json_str(&rules)));
                 }
             }
             {
@@ -3992,10 +6943,10 @@ pub fn tweak_callback(
             let value = arg(args, &["value"]).unwrap_or("").to_string();
             if value.is_empty() {
                 // No value: report the theme's current one.
-                let current = theme_values(cx).into_iter().find(|(n, _, _, _)| *n == name).map(|(_, _, v, _)| match v {
-                    ThemeVal::Color(c) => hex_of(c),
-                    ThemeVal::Num(f) => fmt_f64(f),
-                });
+                let current = theme_values(cx)
+                    .into_iter()
+                    .find(|(n, _, _, _)| *n == name)
+                    .map(|(_, _, v, _)| theme_val_text(v));
                 return Ok(format!(
                     "{{\"ok\":1,\"theme\":{},\"value\":{}}}",
                     json_str(&name),
@@ -4184,6 +7135,19 @@ pub fn tweak_callback(
 script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.View
+
+    // The inspector panel's own ink, over the fab palette its chrome is
+    // built from. The fab grades of dim and muted are set for 8.5 pt words
+    // on a fab row, and the menu bar reads them too; the panel's small
+    // words are 7.5 pt and its placeholders sit on the wells, so they take
+    // a brighter grade — 6:1 and 3.8:1 on the panel ground. `face_off` is
+    // where a control that answers nothing sinks to: the well tone, under
+    // the muted ink.
+    mod.tweak_panel = {
+        text_dim: #xb4b4b4
+        text_muted: #x8c8c8c
+        face_off: #x1d1d1d
+    }
 
     set_type_default() do #(DrawTweakOutline::script_shader(vm)){
         ..mod.draw.DrawQuad
@@ -4499,7 +7463,10 @@ fn classify_prop(prop: &str, value: &str) -> SectionKind {
     match first {
         "width" | "height" | "abs_pos" | "margin" | "padding" | "spacing" | "line_spacing"
         | "align" | "flow" | "clip_x" | "clip_y" | "scroll" | "wrap_spacing" | "layout"
-        | "metrics" => return SectionKind::Layout,
+        | "metrics" | "distribute" | "container_id" | "min_width" | "max_width"
+        | "min_height" | "max_height" | "aspect" | "cell" | "columns" | "rows" | "areas"
+        | "column_gap" | "row_gap" | "auto_flow" | "justify_items" | "align_items"
+        | "implicit_column_size" | "implicit_row_size" => return SectionKind::Layout,
         "text" | "empty_text" | "label" | "title" | "suffix" => return SectionKind::Text,
         "visible" | "enabled" | "grab_key_focus" | "cursor" | "trigger_on_press"
         | "enable_long_press" | "reset_hover_on_click" | "block_signal_event"
@@ -4549,17 +7516,36 @@ fn section_rank(section: SectionKind, prop: &str) -> (u32, u32, String) {
             let major = match first {
                 "width" => 0,
                 "height" => 1,
-                "abs_pos" => 2,
-                "margin" => 3,
-                "padding" => 4,
-                "spacing" => 5,
-                "line_spacing" => 6,
-                "align" => 7,
-                "flow" => 8,
-                "clip_x" => 9,
-                "clip_y" => 10,
-                "scroll" => 11,
-                _ => 20,
+                "min_width" => 2,
+                "max_width" => 3,
+                "min_height" => 4,
+                "max_height" => 5,
+                "aspect" => 6,
+                "abs_pos" => 7,
+                "cell" => 8,
+                "margin" => 9,
+                "padding" => 10,
+                "spacing" => 11,
+                "wrap_spacing" => 12,
+                "line_spacing" => 13,
+                "align" => 14,
+                "distribute" => 15,
+                "flow" => 16,
+                "clip_x" => 17,
+                "clip_y" => 18,
+                "scroll" => 19,
+                "container_id" => 20,
+                "columns" => 21,
+                "rows" => 22,
+                "column_gap" => 23,
+                "row_gap" => 24,
+                "auto_flow" => 25,
+                "areas" => 26,
+                "justify_items" => 27,
+                "align_items" => 28,
+                "implicit_column_size" => 29,
+                "implicit_row_size" => 29,
+                _ => 30,
             };
             let minor = match first {
                 "margin" | "padding" => inset_leg_rank(leaf),
@@ -4669,8 +7655,6 @@ struct RowBinding {
     comp_vals: Vec<f64>,
     /// The uids of the component number fields, in component order.
     comp_uids: Vec<u64>,
-    /// The uids of a SizeField's Fill/Fit buttons ([fill, fit]).
-    mode_uids: Vec<u64>,
     /// Field uids of this row's top-section copy: (uid, is_swatch).
     alt_uids: Vec<(u64, bool)>,
     /// A shader-constant row: an annotated literal inside a draw layer's
@@ -4709,6 +7693,130 @@ enum PanelTab {
     Tree,
     /// The global theme: its colours, spacing and font sizes, edited live.
     Theme,
+    /// What is WRITTEN about the selection -- its notes and its rules -- and
+    /// the rules that stand over the whole app. The app-wide field is why
+    /// this tab has to work with nothing selected.
+    Spec,
+}
+
+/// One built-in thing the Theme tab's picker offers: a theme the library is
+/// written in, or a style sheet laid over one. Both are permanent -- they
+/// live in the binary, and nothing in the panel can remove one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ThemePreset {
+    Base(crate::BaseTheme),
+    Sheet(crate::desktop_style::DesktopStyle, bool),
+}
+
+impl ThemePreset {
+    /// What the button says.
+    fn label(self) -> String {
+        match self {
+            Self::Base(base) => base.label().to_string(),
+            Self::Sheet(style, false) => style.label().to_string(),
+            Self::Sheet(style, true) => format!("{} dark", style.label()),
+        }
+    }
+}
+
+/// Everything the strip offers, in the order it offers it: the base themes,
+/// then every sheet the library ships, each followed by its dark appearance
+/// where it has one.
+///
+/// Read off the library's own lists rather than written out here, so a theme
+/// or a sheet added there turns up in the panel without anybody remembering
+/// to add it, and so the panel names none of them itself.
+fn theme_presets() -> Vec<ThemePreset> {
+    let mut out: Vec<ThemePreset> = crate::BaseTheme::ALL
+        .into_iter()
+        .map(ThemePreset::Base)
+        .collect();
+    for style in crate::desktop_style::DesktopStyle::ALL {
+        out.push(ThemePreset::Sheet(style, false));
+        if style.supports_dark() {
+            out.push(ThemePreset::Sheet(style, true));
+        }
+    }
+    out
+}
+
+/// One row of the Theme tab's picker.
+///
+/// The two halves are kept apart on purpose, because only one of them may be
+/// deleted: a `Builtin` is the library's own and is permanent, a `Saved` is
+/// the person's and is the only kind [`crate::theme_store::delete`] will
+/// touch. The panel never decides that itself -- it asks the store, which
+/// enforces the same rule again.
+#[derive(Clone, Debug, PartialEq)]
+enum ThemeChoice {
+    /// A base theme or a style sheet, from the library's own lists.
+    Builtin(ThemePreset),
+    /// A theme the person saved, by the name the store files it under.
+    Saved(String),
+}
+
+impl ThemeChoice {
+    /// What the picker shows for this row.
+    fn label(&self) -> String {
+        match self {
+            Self::Builtin(preset) => preset.label(),
+            Self::Saved(name) => name.clone(),
+        }
+    }
+}
+
+/// A question the Theme tab has asked and is waiting on a second press to
+/// answer, and the name it was asked about.
+///
+/// One field holds both, rather than a flag per command, so there is one
+/// place a question is asked, one place it is answered and one place it
+/// lapses -- and so asking one question CANCELS the other. Two flags would
+/// have let a "save again to replace it" still standing answer a delete, or
+/// the other way round, which is the class of bug a confirmation exists to
+/// prevent.
+#[derive(Clone, Debug, PartialEq)]
+enum ThemeConfirm {
+    /// "save as" has offered to write over this saved theme.
+    Replace(String),
+    /// "delete" has offered to remove this saved theme from disk.
+    Delete(String),
+}
+
+/// Everything the picker offers, in the order it offers it: every built-in
+/// first, in the library's own order, then whatever the store holds.
+///
+/// `saved` is the store's list as the panel last read it, rather than a read
+/// from here: this is called on every frame the Theme tab draws, and
+/// [`crate::theme_store::list`] is a directory read.
+fn theme_choices(saved: &[String]) -> Vec<ThemeChoice> {
+    let mut out: Vec<ThemeChoice> = theme_presets()
+        .into_iter()
+        .map(ThemeChoice::Builtin)
+        .collect();
+    out.extend(saved.iter().map(|name| ThemeChoice::Saved(name.clone())));
+    out
+}
+
+/// Which preset the library is running under right now: the sheet
+/// `desktop_style` has installed, or the base theme when there is none.
+/// Read once, when the panel is built -- an app may well have put a sheet on
+/// before the panel existed, and the picker must not claim otherwise.
+fn current_theme_preset(cx: &mut Cx) -> usize {
+    let sheet = cx.with_vm(|vm| crate::desktop_style::current_name(vm));
+    let base = crate::base_theme(cx);
+    let wanted = match sheet
+        .as_deref()
+        .and_then(|name| {
+            crate::desktop_style::DesktopStyle::parse(name)
+                .map(|style| (style, name.ends_with("-dark")))
+        }) {
+        Some((style, dark)) => ThemePreset::Sheet(style, dark),
+        None => ThemePreset::Base(base),
+    };
+    theme_presets()
+        .iter()
+        .position(|preset| *preset == wanted)
+        .unwrap_or(0)
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -4732,12 +7840,28 @@ enum VisKind {
     Prop(usize),
     /// width + height compacted onto one row.
     Size,
+    /// The measured rect, as one full-width line above the size controls.
+    Measured,
+    /// The selection's identity at the very top: its name, editable, and its
+    /// type. Everything below is what it LOOKS like; this is what it IS.
+    Identity,
     /// Four-sided box editor (mini rectangle, drag-to-scrub legs).
     BoxInset(BoxKind),
     /// spacing + flow on one row.
     FlowSpacing,
-    /// The 9-dot align picker.
+    /// justify (main axis, with the distribution) and align (cross axis).
     AlignGrid,
+    /// A heading over the rows that are about the selection in its parent,
+    /// or over the rows that are about its children.
+    Group(GroupKind),
+    /// flex or grid, the ask to become the other, and the container name.
+    Container,
+    /// Out of the flow, at a position in the parent.
+    Absolute,
+    /// A Grid's tracks, gaps, fill order and named areas.
+    GridTracks,
+    /// Where the selection sits in its parent Grid.
+    Cell,
     /// "show all (N)": the section's long tail, folded by default.
     More(SectionKind, usize),
     /// A material card header: layer name + live shader preview swatch
@@ -4754,6 +7878,33 @@ enum VisKind {
     InputsHeader(usize),
     /// One level of the selection's cascade (index into Tweaker::cascade).
     CascadeLevel(usize),
+}
+
+/// Which of the Layout section's two halves a heading opens: the rows
+/// about the selection where it sits, or the rows about what it holds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum GroupKind {
+    Item,
+    Container,
+}
+
+impl VisKind {
+    /// Same composite row? Only the kinds `composite_of` names ever reach
+    /// this, so the box editors compare their side and the rest their tag.
+    fn same_row(&self, other: &VisKind) -> bool {
+        match (self, other) {
+            (VisKind::Size, VisKind::Size)
+            | (VisKind::FlowSpacing, VisKind::FlowSpacing)
+            | (VisKind::AlignGrid, VisKind::AlignGrid)
+            | (VisKind::Container, VisKind::Container)
+            | (VisKind::Absolute, VisKind::Absolute)
+            | (VisKind::GridTracks, VisKind::GridTracks)
+            | (VisKind::Cell, VisKind::Cell) => true,
+            (VisKind::BoxInset(a), VisKind::BoxInset(b)) => a == b,
+            (VisKind::Group(a), VisKind::Group(b)) => a == b,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -4817,6 +7968,28 @@ pub struct Tweaker {
     /// The search box's input uid, captured at draw.
     #[rust]
     search_uid: u64,
+    /// The filter box searches instead of filtering: every row stays on
+    /// screen, the hits are counted, and the arrows (F3, Shift+F3) walk
+    /// them.
+    /// What the edits and the prompt are aimed at: the file and whether it
+    /// is this instance, the type, or the isolated branch. Shown on the
+    /// prompt bar.
+    #[rust]
+    target_line: String,
+    /// The label's tooltip: what that file means under the scope.
+    #[rust]
+    target_tip: String,
+    #[rust]
+    search_mode: bool,
+    /// Which hit the walk is on, modulo the count.
+    #[rust]
+    search_hit: usize,
+    #[rust]
+    find_uid: u64,
+    #[rust]
+    prev_uid: u64,
+    #[rust]
+    next_uid: u64,
     /// Double-click detection on row labels: (time, row index).
     #[rust]
     last_label_click: Option<(f64, usize)>,
@@ -4834,6 +8007,10 @@ pub struct Tweaker {
     /// Re-check the outline suppression window when it expires.
     #[rust]
     next_frame: NextFrame,
+    /// Asked for by every draw while a branch is isolated: the event it
+    /// brings reads that frame for the target (`settle_isolation`).
+    #[rust]
+    settle_frame: NextFrame,
     /// Long-tail expansion per section ("show all (N)" clicked).
     #[rust]
     expanded: [bool; 6],
@@ -4841,9 +8018,6 @@ pub struct Tweaker {
     /// Value/text changes from these uids apply like ordinary rows.
     #[rust]
     composite_fields: Vec<(u64, String)>,
-    /// The 9 align dots drawn this frame: (uid, align.x, align.y).
-    #[rust]
-    composite_align: Vec<(u64, f64, f64)>,
     /// Segment buttons drawn this frame: (uid, splash chunk they apply).
     #[rust]
     composite_clicks: Vec<(u64, String)>,
@@ -4871,17 +8045,34 @@ pub struct Tweaker {
     /// The exploded-view toggle button beside the filter.
     #[rust]
     sploded_uid: u64,
+    /// The select toggle: lit while the overlay is picking, dark while the
+    /// selection is locked and the mouse belongs to the app.
+    #[rust]
+    select_uid: u64,
     /// The exploded view's level-separation scrub field (visible only
     /// while the mode is up).
     spread_uid: u64,
-    /// The panel's note button: the same note as the Insert key, for
-    /// keyboards without one.
-    note_uid: u64,
+    /// The extrusion readout, floating in the app's own top-right corner
+    /// rather than in the panel: it belongs to the picture it is changing,
+    /// and the eye is on the stack, not on the sidebar, while it moves.
+    #[rust]
+    spread_ui: Option<WidgetRef>,
+    /// Where it drew, so the pointer knows it is chrome and not canvas.
+    #[rust]
+    spread_rect: Option<Rect>,
+    /// A scrub of that field is in progress: the pointer belongs to it until
+    /// the button comes up, wherever it travels.
+    #[rust]
+    spread_drag: bool,
     /// The scope toggle's buttons.
     #[rust]
     scope_this_uid: u64,
     #[rust]
     scope_all_uid: u64,
+    /// The "isolated" modifier beside them: confine an `all` fan-out to the
+    /// isolated branch.
+    #[rust]
+    scope_isolated_uid: u64,
     /// The Shader tab's editor and the live-code loop: every change arms a
     /// short debounce; at settle the fn text is applied through the ledger
     /// (one entry per settle, like a scrub gesture). A compile error keeps
@@ -4911,6 +8102,21 @@ pub struct Tweaker {
     shader_doc_full: String,
     #[rust]
     doc_tip_shown: bool,
+    /// Which scope button the tooltip is up for (0 = none, 1 = this, 2 = all).
+    #[rust]
+    scope_tip_shown: u8,
+    /// The text the panel's own control under the pointer last showed in
+    /// that same bubble; empty when none. See `chrome_tip_hover`.
+    #[rust]
+    chrome_tip_shown: String,
+    /// The tooltip's measured size. It sits ABOVE the buttons because the
+    /// footer is pinned to the bottom of the panel and anything below the
+    /// row would be off the window; and it is pulled left to stay inside the
+    /// window, because a scope button near the panel's right edge would
+    /// otherwise push it off the side. Measured after the first show; the
+    /// fallback is only ever used for one frame.
+    #[rust(dvec2(246.0, 46.0))]
+    scope_tip_size: Vec2d,
     #[rust]
     fn_external_seen: u64,
     /// The shown layer's script-defined fns: (name, file:line, source).
@@ -4956,9 +8162,13 @@ pub struct Tweaker {
     /// The Props list's viewport (props_wrap below the scope control).
     #[rust]
     props_viewport: Option<Rect>,
-    /// The theme's colour palette (name, rgba, defined-at), read once.
+    /// The theme's colour palette (name, rgba, defined-at), read when the
+    /// sidebar is built and again after a theme edit made elsewhere.
     #[rust]
     theme_colors: Vec<(String, u32, String)>,
+    /// The session's apply generation the palette was read at.
+    #[rust]
+    palette_gen: u64,
     /// The colour being hover-pulsed app-wide (and when it started).
     #[rust]
     pulse: Option<(u32, f64)>,
@@ -4979,7 +8189,7 @@ pub struct Tweaker {
     /// the viewport (estimates and clamping cannot diverge it).
     #[rust]
     tree_scroll_tries: Option<u8>,
-    /// Set by the note button; the next event opens the card.
+    /// Set by the note button; the next event shows the Spec tab.
     note_request: bool,
     /// Armed state for the 2.5D exploded z-layer view (M3 wires the
     /// renderer; until then this is the mode flag + visual state).
@@ -4994,7 +8204,68 @@ pub struct Tweaker {
     vibe_layer: Option<String>,
     /// Tab-bar button uids, captured at draw.
     #[rust]
-    tab_uids: [u64; 4],
+    tab_uids: [u64; 5],
+    /// The Theme tab's picker and its three commands, captured at draw. A
+    /// click arrives as a uid and nothing else; 0 is no widget, so a control
+    /// that is not on screen routes nothing.
+    #[rust]
+    theme_pick_uid: u64,
+    #[rust]
+    theme_name_uid: u64,
+    #[rust]
+    theme_save_uid: u64,
+    #[rust]
+    theme_delete_uid: u64,
+    /// The switch that puts the panel itself in the chosen theme.
+    #[rust]
+    theme_wear_uid: u64,
+    /// Which built-in preset the picker shows as the one in force.
+    #[rust]
+    theme_preset: usize,
+    /// The store's list, as the Theme tab last read it. Re-read when the
+    /// panel opens, when the tab is entered and after a save or a delete --
+    /// never per frame, because it is a directory read.
+    #[rust]
+    theme_saved_names: Vec<String>,
+    /// The picker's rows as it was last filled, so the index a click carries
+    /// means the same thing here as it did on screen, and so the labels are
+    /// only pushed at the widget when they actually change.
+    #[rust]
+    theme_entries: Vec<ThemeChoice>,
+    /// The saved theme in force, or `None` when a built-in is. Kept beside
+    /// `theme_preset` rather than folded into it: deleting a saved theme has
+    /// to fall back to something, and the built-in last picked is it.
+    #[rust]
+    theme_saved: Option<String>,
+    /// The name box's text, mirrored here so a click on "save as" can read it
+    /// without going back through the widget.
+    #[rust]
+    theme_name: String,
+    /// A name to put INTO the box on the next draw (after a saved theme is
+    /// picked). Taken, not held, so it never fights the caret.
+    #[rust]
+    theme_name_seed: Option<String>,
+    /// The question the Theme tab has asked and is waiting on a second press
+    /// to answer. A second press of the SAME command on the SAME name is the
+    /// answer; anything else -- another name typed, another theme picked, the
+    /// tab entered again -- clears it, so an answer is never carried over to
+    /// a question that was not the one asked.
+    #[rust]
+    theme_confirm: Option<ThemeConfirm>,
+    /// What the store last said, shown under the save row. Empty hides it.
+    #[rust]
+    theme_msg: String,
+    /// A saved theme's own tokens, waiting for the style reload to land:
+    /// `script_mod` rebuilds `mod.theme` from the base theme and the sheet,
+    /// so tokens pinned before that would only be rebuilt away.
+    #[rust]
+    pending_theme_script: Option<(String, String)>,
+    /// Frames left to re-read the theme after a preset switch. The switch
+    /// lands on a later tick (`request_style_reload` re-runs `script_mod`
+    /// from the event loop), so the rows and the palette are read from the
+    /// theme the panel just left for a frame or two unless it keeps looking.
+    #[rust]
+    theme_reload_frames: u8,
     /// The two PortalLists' uids (props, tree), captured at ensure.
     #[rust]
     props_list_uid: u64,
@@ -5021,28 +8292,146 @@ pub struct Tweaker {
     /// Child indices per tree row.
     #[rust]
     tree_children: Vec<Vec<usize>>,
+    /// Isolate: the Tree tab lists ONLY the selection and what is inside it.
+    /// A whole app's widget tree is thousands of rows; when the question is
+    /// about one pane, the rest is noise to scroll past.
+    #[rust]
+    tree_isolate: bool,
+    /// WHICH widget isolation is locked to. Captured when the toggle goes on
+    /// and held until it goes off — selecting a child inside an isolated
+    /// subtree must not re-isolate onto the child, or every click would
+    /// narrow the view and you could never look at the thing you opened.
+    #[rust]
+    isolate_uid: u64,
+    /// The Isolate toggle's own uid.
+    #[rust]
+    tree_isolate_uid: u64,
+    /// Center: hold the isolated widget in the middle of the screen.
+    #[rust]
+    view_center: bool,
+    #[rust]
+    view_center_uid: u64,
+    /// Magnification, 1..4. The wheel drives it too while isolated.
+    #[rust]
+    view_zoom: f32,
+    /// The wheel moved the zoom mid-dispatch; push it onto the view at the
+    /// next event, where a `&mut Cx` is to hand.
+    #[rust]
+    view_focus_pending: bool,
+    #[rust]
+    view_zoom_uid: u64,
     /// Open the readable default levels once per tree refresh.
     #[rust]
     tree_open_defaults_pending: bool,
     /// The prompt TextInput's uid, captured at draw.
     #[rust]
-    vibe_prompt_uid: u64,
-    /// The Ctrl+Space note card: visible for the current selection.
-    #[rust]
-    note_open: bool,
-    #[rust]
-    note_ui: Option<WidgetRef>,
-    /// The card's on-screen rect (intercept exemption + grip dragging).
-    #[rust]
-    note_rect: Option<Rect>,
-    /// A grip drag in flight: pointer offset from the card origin.
-    #[rust]
-    note_drag: Option<Vec2d>,
     #[rust]
     note_text_uid: u64,
-    /// Seed the card's TextInput once per open (never clobber typing).
+    /// The identity row's name field.
     #[rust]
-    note_seed_pending: bool,
+    identity_uid: u64,
+    /// The container row's `make grid` / `make flex` button.
+    #[rust]
+    convert_uid: u64,
+    /// The absolute row's checkbox.
+    #[rust]
+    abs_uid: u64,
+    /// The container row's `dockable` checkbox, 0 while it is not offered.
+    #[rust]
+    dock_uid: u64,
+    /// Whether the selection can be asked into a Dock, already is a tab's
+    /// body in one, or is not a container a Dock can take.
+    #[rust]
+    sel_dock: DockGate,
+    /// The selection is a Grid: its children's half shows tracks, not a
+    /// flow. It sits in a Grid: its own half shows a cell.
+    #[rust]
+    sel_is_grid: bool,
+    #[rust]
+    sel_in_grid: bool,
+    /// The footer's copy receipt is shown until this time: a click on the
+    /// path line put it on the clipboard, and that has to be visible.
+    #[rust]
+    footer_copied_until: f64,
+    /// How many `@`s the note text held at the last change: one more means
+    /// a mention was just armed, one fewer means it was taken back.
+    #[rust]
+    note_at_count: usize,
+    /// Pinned notes' badge widgets: (uid, note key), refreshed on a slow
+    /// timer rather than every frame — resolving a note path walks the whole
+    /// widget tree, and the rects are read live off the uids anyway.
+    #[rust]
+    badge_targets: Vec<(u64, String, BadgeKind)>,
+    /// When `badge_targets` was last resolved.
+    #[rust]
+    badges_at: f64,
+    /// Where the badges landed this frame, for hit-testing the click that
+    /// opens one.
+    #[rust]
+    badge_rects: Vec<(Rect, u64)>,
+    /// The pin badge itself: one Icon, drawn once per badge.
+    #[rust]
+    badge_ui: Option<[WidgetRef; 3]>,
+    /// A badge click, consumed by the tweaker's event loop.
+    #[rust]
+    badge_open: Option<u64>,
+    /// The selection's indexed path, cached by uid. Computing it walks the
+    /// whole widget tree, so it happens when the selection CHANGES, not on
+    /// every frame that reads it.
+    #[rust]
+    sel_ref: (u64, String),
+    /// The strip's box has been emptied by a send: clear the TextInput on
+    /// the next draw rather than fighting it mid-keystroke.
+    #[rust]
+    prompt_clear_field: bool,
+    #[rust]
+    prompt_queue_uid: u64,
+    #[rust]
+    prompt_send_uid: u64,
+    /// The prompt box's own uid, so an `@` typed into it arms a pick the
+    /// same way one typed into the notes field does.
+    #[rust]
+    prompt_field_uid: u64,
+    /// Put the caret back in the box the frame after a send or a queue. A
+    /// message going out must not cost you the box you were writing in:
+    /// without this, Up after a send walks nothing, because the strip's keys
+    /// are claimed only while the caret is actually there.
+    #[rust]
+    prompt_focus_pending: bool,
+    /// A splitter being dragged: which boundary (0 is notes/rules, 1 is
+    /// rules/app), where the press landed, the three weights as they were
+    /// at the press, and how much weight one point of pointer travel is
+    /// worth. The weights are the only truth. An earlier version measured
+    /// the boxes on screen at each press and turned pixels back into
+    /// weights, and that snapped: the walk lands a frame after the weight
+    /// changes, the measured rects a frame after that, so the second handle
+    /// grabbed was reading a split that was already gone.
+    #[rust]
+    spec_resize: Option<(usize, f64, [f64; 3], f64)>,
+    /// The weights last pushed at the boxes. An apply per frame would be
+    /// three applies per frame forever; this makes it three per drag step.
+    #[rust]
+    spec_applied_w: [f64; 3],
+    /// The cross that empties the notes field.
+    #[rust]
+    spec_clear_uid: u64,
+    /// Something in the Spec tab was typed into and is not on disk yet.
+    /// Flushed when the caret leaves the tab's fields -- a write per
+    /// keystroke would be a file write per frame.
+    #[rust]
+    spec_dirty: bool,
+    /// The prompt box's own `@` count -- see `note_at_count`, and why they
+    /// are two: one counter for two fields let typing in one arm or disarm
+    /// the other's mention, and a disarmed mention click falls through to a
+    /// pick and moves the selection the pending ask is about.
+    #[rust]
+    prompt_at_count: usize,
+    /// Which note the Spec tab is actually SHOWING. The tab follows the
+    /// selection, so the note being saved to and the text on screen can drift
+    /// apart for a frame — and a save in that window would write one note's
+    /// text over another's. Nothing is written unless these agree.
+    #[rust]
+    note_key_shown: String,
     /// Previous tweak-mode state, to detect the on edge.
     #[rust]
     was_on: bool,
@@ -5075,6 +8464,14 @@ pub struct Tweaker {
     /// The body's own margin.right before the panel compressed it.
     #[rust]
     saved_body_right: Option<f64>,
+    /// Set when the body has been applied from its own DSL again, which
+    /// throws the panel's runtime margin away. See
+    /// [`body_margin_needs_apply`].
+    #[rust]
+    margin_stale: bool,
+    /// The palette the sidebar was built from. See [`fab_palette_stamp`].
+    #[rust]
+    sidebar_palette: u64,
     #[rust]
     splitter_drag: bool,
     /// Held for as long as `splitter_drag` is, including the event that starts it.
@@ -5082,10 +8479,102 @@ pub struct Tweaker {
     cancel_scope: Option<CancelScope>,
 }
 
+/// What the panel's chrome is painted from right now, as one number.
+///
+/// The sidebar is built ONCE, from a runtime splash chunk, and it reads
+/// `mod.fab` as it is built -- so nothing that changes the palette afterwards
+/// reaches it. That is the point: the panel is immune to whatever theme the
+/// app is wearing. But it also means the Theme tab's "wear" switch, which
+/// changes the palette and nothing else, would leave the panel in the
+/// colours it was built with until somebody closed and reopened it.
+///
+/// So the panel watches the PALETTE rather than the switch. That way it also
+/// follows a theme change made while the switch is on, and a switch thrown
+/// from anywhere else, without either having to remember to tell it. Three
+/// entries are enough to tell one palette from another, and this is three
+/// reads of a table already in memory. With the switch off the palette never
+/// moves, so the stamp never changes and the panel is built exactly once, as
+/// it always was.
+fn fab_palette_stamp(cx: &mut Cx) -> u64 {
+    cx.with_vm(|vm| {
+        let fab = vm.module(id!(fab));
+        let read = |key: LiveId| -> u64 {
+            vm.bx.heap.value(fab, key.into(), NoTrap).as_color().unwrap_or(0) as u64
+        };
+        // Folded rather than packed: five 32-bit colours do not fit in 64
+        // bits side by side, and two palettes that collided would be a
+        // repaint that never happened.
+        let mut stamp = 0xcbf2_9ce4_8422_2325u64;
+        for key in [
+            live_id!(color_area),
+            live_id!(color_text),
+            live_id!(color_accent),
+            live_id!(color_input),
+            live_id!(color_button),
+        ] {
+            stamp = (stamp ^ read(key)).wrapping_mul(0x100_0000_01b3);
+        }
+        stamp
+    })
+}
+
+/// Is the body's right margin due to be applied again?
+///
+/// `desired` alone is not enough to answer this. The margin is a RUNTIME
+/// override on a widget the APP declares in its own splash, so any script
+/// re-apply puts the body back to what its own DSL says and the override is
+/// gone -- while `applied_margin` here still says it is on. A theme switch
+/// is exactly that: it goes through `request_style_reload`, `script_mod`
+/// runs again and every widget is re-applied. The app then draws at full
+/// width UNDER the panel, which is the right-hand side of the app
+/// "disappearing"; toggling the panel off and on was the only way back,
+/// because that drives `desired` to 0 and back and so defeats the guard.
+///
+/// The guard itself has to stay: without it this runs an eval against the
+/// body on every frame the panel draws.
+///
+/// The apply generation the palette follows (`palette_gen`) is deliberately
+/// NOT what this hangs off: that moves on every property apply, so scrubbing
+/// a single value would re-evaluate the body's margin on every frame of the
+/// drag. `stale` is set by [`Tweaker::on_after_reload`] instead, which fires
+/// on precisely the applies that wipe the override -- the body is re-applied
+/// by the same pass that re-applies this widget, so the flag and the wipe
+/// cannot come apart.
+fn body_margin_needs_apply(applied: f64, desired: f64, stale: bool) -> bool {
+    stale || (applied - desired).abs() >= 0.5
+}
+
+/// The body's OWN right margin, as read back off the widget -- or `None`
+/// when what came back is the panel's own compression still standing on it,
+/// in which case the body's own is whatever was remembered before.
+///
+/// Releasing the panel gives the body back this value, so filing the panel's
+/// own width as "what the body had before" would indent the app by a sidebar
+/// for the rest of the session. A re-apply can run either side of the wipe
+/// -- after it, the body is back to its DSL and what is read back really is
+/// its own; before it (a splitter drag, a release), what is read back is
+/// what this panel wrote -- so the two cases are told apart by value rather
+/// than assumed.
+fn body_own_right(read_back: f64, applied: f64) -> Option<f64> {
+    if applied > 0.5 && (read_back - applied).abs() < 0.5 {
+        None
+    } else {
+        Some(read_back)
+    }
+}
+
 impl ScriptHook for Tweaker {
     fn on_after_new(&mut self, vm: &mut ScriptVm) {
         self.overlay_list = Some(DrawList2d::script_new(vm));
         self.sidebar_list = Some(DrawList2d::script_new(vm));
+    }
+    /// A reload -- a live edit, a `request_script_reapply`, or the style
+    /// reload a theme switch asks for -- has just re-applied this widget
+    /// from its DSL. The same pass re-applied the window body, so the
+    /// runtime margin the panel had put on it is gone and has to be put back
+    /// even though nothing about the panel's own geometry changed.
+    fn on_after_reload(&mut self, _vm: &mut ScriptVm) {
+        self.margin_stale = true;
     }
 }
 
@@ -5117,7 +8606,7 @@ impl Tweaker {
     /// size of the sidebar band, through the ordinary apply machinery so the
     /// relayout is the real one. Not a user edit — never enters the diff.
     fn ensure_body_margin(&mut self, cx: &mut Cx, desired: f64) {
-        if (self.applied_margin - desired).abs() < 0.5 {
+        if !body_margin_needs_apply(self.applied_margin, desired, self.margin_stale) {
             return;
         }
         let Some(body) = self.find_body(cx) else {
@@ -5138,8 +8627,14 @@ impl Tweaker {
         let left = leg("margin.left").or(scalar).unwrap_or(0.0);
         let top = leg("margin.top").or(scalar).unwrap_or(0.0);
         let bottom = leg("margin.bottom").or(scalar).unwrap_or(0.0);
-        if self.saved_body_right.is_none() {
-            self.saved_body_right = Some(leg("margin.right").or(scalar).unwrap_or(0.0));
+        // What the body itself carries -- unless the panel's own
+        // compression is still standing on it, which is not the body's own
+        // and must never replace what was remembered.
+        if let Some(own) = body_own_right(
+            leg("margin.right").or(scalar).unwrap_or(0.0),
+            self.applied_margin,
+        ) {
+            self.saved_body_right = Some(own);
         }
         let right = if desired > 0.5 {
             desired
@@ -5152,12 +8647,14 @@ impl Tweaker {
         match eval_chunk(cx, &body, &chunk) {
             Ok(()) => {
                 self.applied_margin = desired;
+                self.margin_stale = false;
                 cx.redraw_all();
             }
             Err(error) => {
                 log!("TWEAK body compress failed: {error}");
                 // Don't retry every frame.
                 self.applied_margin = desired;
+                self.margin_stale = false;
             }
         }
     }
@@ -5165,13 +8662,49 @@ impl Tweaker {
     /// Build the sidebar widget from a runtime splash chunk, once (every
     /// widget type — the fab controls included — is registered by then).
     fn ensure_sidebar(&mut self, cx: &mut Cx) {
+        let palette = fab_palette_stamp(cx);
         if self.sidebar.is_some() {
-            return;
+            if self.sidebar_palette == palette {
+                return;
+            }
+            // The chrome moved underneath it -- the Theme tab's "wear"
+            // switch, or a theme change while that switch is on. The chunk
+            // below is where every fab colour lands, and it is evaluated
+            // here and nowhere else, so the only way to repaint the panel is
+            // to build it again. Everything the panel REMEMBERS is on this
+            // struct rather than in those widgets, so what is lost is what
+            // was typed into the panel's own boxes, which is the price of
+            // changing its skin on purpose.
+            //
+            // Two of those boxes are MIRRORED on this struct, though, and a
+            // box that comes back empty beside a mirror that did not would
+            // leave the panel filtering by a word nobody can see and
+            // offering to save under a name nobody typed. The name is
+            // re-seeded through the channel that already exists for it; the
+            // filter is dropped, because its mirror is lower-cased and
+            // putting that back would change what the person wrote.
+            if !self.theme_name.is_empty() {
+                self.theme_name_seed = Some(self.theme_name.clone());
+            }
+            self.filter.clear();
+            // The property list is a NEW, empty list; the rows are refilled
+            // only when this says they are stale. The reload that changed
+            // the palette bumps the apply generation and would do it anyway,
+            // but a rebuild asked for any other way would leave the panel
+            // showing an empty tab.
+            self.rows_uid = 0;
+            self.sidebar = None;
         }
         if self.theme_colors.is_empty() {
             self.theme_colors = theme_palette(cx);
+            self.palette_gen = session().lock().unwrap().apply_gen;
             log!("TWEAK theme palette: {} colours", self.theme_colors.len());
         }
+        self.sidebar_palette = palette;
+        // What the app is already running under, before the picker offers
+        // to change it: a sheet installed at startup is the selected row.
+        self.theme_preset = current_theme_preset(cx);
+        self.refresh_saved_themes();
         // The shader source view is a plain multiline TextInput, on purpose:
         // the real code editor as a sidebar child would put a CodeView in
         // the main window's widget tree for every app the tweaker rides in.
@@ -5180,12 +8713,466 @@ impl Tweaker {
         let sidebar = cx.with_vm(|vm| {
             let value = script_eval!(vm, {
                 use mod.prelude.widgets.*
+                use mod.prelude.fab_internal.*
                 use mod.widgets.*
+
+                // The panel's own ink. Its chrome is the fab palette whatever
+                // the app's theme, so every word on it has to be too: a stock
+                // Button or TextInput takes the theme's label colour, which
+                // over a light app is dark grey on the panel's dark grey.
+                // The dim grades are the panel's, not fab's: see
+                // `mod.tweak_panel`.
+                let panel = mod.tweak_panel
+                // The panel's command button, and the same trap
+                // `PanelDropDown` below exists to dodge -- these three now
+                // sit in the Theme tab beside it, where the control that
+                // picks the theme must stay usable under every theme.
+                //
+                // `windows-2000` and `nextstep` REPLACE
+                // `mod.widgets.Button.draw_bg.pixel` outright in their
+                // `widgets.splash` and hard-code that desktop's own palette
+                // (a #d4d0c8 face with black-and-white bevels), which over
+                // the panel's dark ground is a light slab with the panel's
+                // own colours ignored. `android` and `ios` set `min_height`
+                // to 48 and 44 and a 10px vertical padding, which a walk
+                // applies whatever the height asked for, so the save row
+                // would grow to more than twice its height. Every sheet
+                // moves `border_radius`, `border_size` and `color_2`, and
+                // the padding and the margin ride the theme's own space
+                // tokens even where a sheet says nothing.
+                //
+                // So every one of those is written out here, on the TEMPLATE
+                // rather than on the instances: a control added to the panel
+                // later inherits the immunity instead of having to remember
+                // it.
+                // The numbers are the ones the default theme already gives
+                // -- `space_factor` is 6, so `mspace_1` is 3 and `space_2` is
+                // 6 -- so pinning them moves nothing that is on screen today
+                // and stops everything moving under a sheet: the sheets set
+                // `space_factor` anywhere from 5 to 7 and the skeleton base
+                // sets 10. The bevel and the corner are `PanelDropDown`'s, so
+                // the save row reads as one set of controls rather than three
+                // borrowed from the theme and one that is not.
+                let PanelButton = Button {
+                    min_height: 0
+                    padding: Inset{left: 6 right: 6 top: 3 bottom: 3}
+                    margin: Inset{left: 0 right: 0 top: 3 bottom: 3}
+                    spacing: 6
+                    draw_bg +: {
+                        border_size: 1.0
+                        border_radius: 2.0
+                        color_dither: 0.0
+                        color: fab.color_button
+                        color_hover: fab.color_button_hover
+                        color_down: fab.color_button_down
+                        color_focus: fab.color_button
+                        color_disabled: panel.face_off
+                        // Flat, in every state. The stock Button's face and
+                        // bevel are gradients, and the shader decides on the
+                        // REST stop alone whether to run them: with that one
+                        // left on, the other states' -1 stops are mixed in
+                        // as colours, and the off state grows a bright rim.
+                        color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+                        color_2_hover: vec4(-1.0, -1.0, -1.0, -1.0)
+                        color_2_down: vec4(-1.0, -1.0, -1.0, -1.0)
+                        color_2_focus: vec4(-1.0, -1.0, -1.0, -1.0)
+                        color_2_disabled: vec4(-1.0, -1.0, -1.0, -1.0)
+                        border_color: fab.color_border
+                        border_color_hover: fab.color_border_light
+                        border_color_down: fab.color_border
+                        border_color_focus: fab.color_focus_ring
+                        border_color_disabled: fab.color_border
+                        border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+                        border_color_2_hover: vec4(-1.0, -1.0, -1.0, -1.0)
+                        border_color_2_down: vec4(-1.0, -1.0, -1.0, -1.0)
+                        border_color_2_focus: vec4(-1.0, -1.0, -1.0, -1.0)
+                        border_color_2_disabled: vec4(-1.0, -1.0, -1.0, -1.0)
+                        // The panel's own face, so a sheet that replaces the
+                        // stock one replaces something this button does not
+                        // use. Flat fill, one hairline, the same state mix
+                        // order the stock face has. The wait spinner is left
+                        // out on purpose: no button on this panel is ever put
+                        // in the loading state, and the arc is the one part
+                        // of the stock face that is not just a box.
+                        pixel: fn() {
+                            let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                            sdf.box(
+                                self.border_size
+                                self.border_size
+                                self.rect_size.x - self.border_size * 2.
+                                self.rect_size.y - self.border_size * 2.
+                                self.border_radius
+                            )
+                            sdf.fill_keep(
+                                self.color
+                                    .mix(self.color_focus, self.focus)
+                                    .mix(self.color_hover, self.hover)
+                                    .mix(self.color_down, self.down)
+                                    .mix(self.color_disabled, self.disabled)
+                            )
+                            sdf.stroke(
+                                self.border_color
+                                    .mix(self.border_color_focus, self.focus)
+                                    .mix(self.border_color_hover, self.hover)
+                                    .mix(self.border_color_down, self.down)
+                                    .mix(self.border_color_disabled, self.disabled)
+                                self.border_size
+                            )
+                            return sdf.result
+                        }
+                    }
+                    draw_text +: {
+                        color: fab.color_text
+                        color_hover: fab.color_text_active
+                        color_down: fab.color_text_active
+                        color_focus: fab.color_text
+                        color_disabled: panel.text_muted
+                    }
+                }
+                // The panel's text field, hardened the same way and for the
+                // same reasons: `windows-2000` and `nextstep` replace
+                // `mod.widgets.TextInput.draw_bg.pixel` with a sunken white
+                // Win95 field, `android` and `ios` set `min_height` to 48 and
+                // 44 with a 10px vertical padding, and every sheet moves the
+                // corner and the bevel.
+                let PanelInput = TextInput {
+                    min_height: 0
+                    padding: Inset{left: 6 right: 6 top: 3 bottom: 3}
+                    margin: Inset{left: 0 right: 0 top: 3 bottom: 3}
+                    draw_bg +: {
+                        border_size: 1.0
+                        border_radius: 2.0
+                        color_dither: 0.0
+                        color: fab.color_input
+                        color_hover: fab.color_input_hover
+                        color_focus: fab.color_input_active
+                        color_down: fab.color_input_active
+                        color_empty: fab.color_input
+                        color_disabled: fab.color_input
+                        border_color: fab.color_border
+                        border_color_hover: fab.color_border_light
+                        border_color_focus: fab.color_focus_ring
+                        border_color_down: fab.color_border
+                        border_color_empty: fab.color_border
+                        border_color_disabled: fab.color_border
+                        // The panel's own field face. The `empty` state is
+                        // mixed first, exactly as the stock face mixes it, or
+                        // the placeholder row would lose its ground.
+                        pixel: fn() {
+                            let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                            sdf.box(
+                                self.border_size
+                                self.border_size
+                                self.rect_size.x - self.border_size * 2.
+                                self.rect_size.y - self.border_size * 2.
+                                self.border_radius
+                            )
+                            sdf.fill_keep(
+                                self.color
+                                    .mix(self.color_empty, self.empty)
+                                    .mix(self.color_focus, self.focus)
+                                    .mix(self.color_hover.mix(self.color_down, self.down), self.hover)
+                                    .mix(self.color_disabled, self.disabled)
+                            )
+                            sdf.stroke(
+                                self.border_color
+                                    .mix(self.border_color_empty, self.empty)
+                                    .mix(self.border_color_focus, self.focus)
+                                    .mix(self.border_color_hover.mix(self.border_color_down, self.down), self.hover)
+                                    .mix(self.border_color_disabled, self.disabled)
+                                self.border_size
+                            )
+                            return sdf.result
+                        }
+                    }
+                    draw_text +: {
+                        color: fab.color_text
+                        color_hover: fab.color_text_active
+                        color_focus: fab.color_text_active
+                        color_down: fab.color_text_active
+                        color_disabled: panel.text_muted
+                        color_empty: panel.text_muted
+                        color_empty_hover: panel.text_dim
+                        color_empty_focus: panel.text_dim
+                    }
+                    draw_selection +: {
+                        color: fab.color_selection_bg
+                        color_hover: fab.color_selection_bg
+                        color_focus: fab.color_selection_bg
+                        color_down: fab.color_selection_bg
+                        color_empty: fab.color_selection_bg
+                        color_disabled: fab.color_selection_bg
+                    }
+                    draw_cursor +: {
+                        color: fab.color_text_active
+                    }
+                }
+                // The Tree tab's rows, on the panel's surfaces.
+                let PanelTreeNode = FileTreeNode {
+                    draw_bg +: {
+                        color_1: fab.color_area
+                        color_2: fab.color_panel_sub
+                        color_active: fab.color_selection_bg
+                    }
+                    draw_icon +: {
+                        color: panel.text_dim
+                        color_active: fab.color_text_active
+                    }
+                    draw_text +: {
+                        color: fab.color_text
+                        color_active: fab.color_text_active
+                    }
+                }
+                // The panel's small words, in its own dim grade.
+                let PanelLabelDim = FabLabelDim {
+                    draw_text +: { color: panel.text_dim }
+                }
+                let PanelLabelSmall = FabLabelSmall {
+                    draw_text +: { color: panel.text_dim }
+                }
+                // The Props tab's booleans, as wells: a stock CheckBox takes
+                // the theme's inset and bevel, which over a light app is a
+                // (43,43,43) box on the panel's (48,48,48) ground.
+                let PanelCheckBox = CheckBox {
+                    draw_bg +: {
+                        color: fab.color_input
+                        color_hover: fab.color_input_hover
+                        color_down: fab.color_input_active
+                        color_active: fab.color_input
+                        color_focus: fab.color_input
+                        color_disabled: fab.color_input
+                        border_color: fab.color_border
+                        border_color_hover: fab.color_border_light
+                        border_color_down: fab.color_border
+                        border_color_active: fab.color_border
+                        border_color_focus: fab.color_focus_ring
+                        border_color_disabled: fab.color_border
+                        mark_color_active: fab.color_text_active
+                        mark_color_active_hover: fab.color_text_active
+                        mark_color_mixed: fab.color_text_active
+                        mark_color_disabled: panel.text_muted
+                    }
+                    draw_text +: {
+                        color: fab.color_text
+                        color_hover: fab.color_text_active
+                        color_down: fab.color_text_active
+                        color_focus: fab.color_text
+                        color_active: fab.color_text
+                        color_disabled: panel.text_muted
+                    }
+                }
+
+                // The Theme tab's picker, and the trap it exists to dodge.
+                //
+                // `windows-2000` and `nextstep` each REPLACE
+                // `mod.widgets.DropDown.draw_bg.pixel` outright in their
+                // `widgets.splash`, and the replacement reads only `active`,
+                // `disabled` and `down` and hard-codes that desktop's own
+                // palette. A stock DropDown on this panel would therefore go
+                // unreadable -- a white field on the panel's dark ground, no
+                // hover, no focus -- the moment one of those sheets is
+                // picked, and the control that picks the theme is the one
+                // control that must stay readable under every theme. So it
+                // carries its own shader and its own metrics, the popup half
+                // with it: a picker you cannot read is a picker you cannot
+                // leave.
+                //
+                // The panel's face and size for it, likewise: a sheet moves
+                // `theme.font_regular` (android takes Roboto, ios Inter) and
+                // `theme.font_size_p` with it, and this is chrome, not app
+                // text. Latin-only is safe here and nowhere else -- every
+                // label is a theme name, and the store admits no character
+                // outside `[a-z0-9_]`.
+                let PanelFont = mod.text.TextStyle{
+                    font_family: mod.text.FontFamily{
+                        latin := mod.text.FontMember{
+                            res: crate_resource("self:resources/IBMPlexSans-Text.ttf")
+                            asc: -0.1
+                            desc: 0.0
+                        }
+                    }
+                    line_spacing: 1.2
+                    font_size: 8.0
+                }
+                // One row of the open list. Its ground, its hover and the
+                // row in force, all the panel's own.
+                let PanelMenuItem = PopupMenuItem {
+                    width: Fill
+                    height: Fit
+                    align: Align{x: 0.0 y: 0.5}
+                    padding: Inset{left: 7 right: 7 top: 3 bottom: 3}
+                    draw_text +: {
+                        color: fab.color_text
+                        color_hover: fab.color_text_active
+                        color_active: fab.color_text_active
+                        color_disabled: panel.text_muted
+                        text_style: PanelFont{}
+                    }
+                    draw_icon +: { color: fab.color_text }
+                    draw_bg +: {
+                        border_size: 0.0
+                        border_radius: 2.0
+                        color: fab.color_popover
+                        color_hover: fab.color_row_hover
+                        color_active: fab.color_selection_bg
+                        color_disabled: fab.color_popover
+                        color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+                        color_2_hover: vec4(-1.0, -1.0, -1.0, -1.0)
+                        color_2_active: vec4(-1.0, -1.0, -1.0, -1.0)
+                        color_2_disabled: vec4(-1.0, -1.0, -1.0, -1.0)
+                        border_color: vec4(0.0, 0.0, 0.0, 0.0)
+                        border_color_hover: vec4(0.0, 0.0, 0.0, 0.0)
+                        border_color_active: vec4(0.0, 0.0, 0.0, 0.0)
+                        border_color_disabled: vec4(0.0, 0.0, 0.0, 0.0)
+                        border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+                        mark_color: vec4(0.0, 0.0, 0.0, 0.0)
+                        mark_color_active: vec4(0.0, 0.0, 0.0, 0.0)
+                        mark_color_disabled: vec4(0.0, 0.0, 0.0, 0.0)
+                        pixel: fn() {
+                            let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                            sdf.box(0.0, 0.0, self.rect_size.x, self.rect_size.y, self.border_radius)
+                            sdf.fill(
+                                self.color
+                                    .mix(self.color_active, self.active)
+                                    .mix(self.color_hover, self.hover)
+                                    .mix(self.color_disabled, self.disabled)
+                            )
+                            return sdf.result
+                        }
+                    }
+                }
+                // The open list's own plate: the popover tone, one hairline,
+                // and no theme token anywhere in it.
+                let PanelPopupMenu = PopupMenu {
+                    width: 224.
+                    height: Fit
+                    flow: Down
+                    padding: Inset{left: 3 right: 3 top: 3 bottom: 3}
+                    menu_item: PanelMenuItem{}
+                    draw_bg +: {
+                        border_size: 1.0
+                        border_radius: 3.0
+                        color: fab.color_popover
+                        color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+                        border_color: fab.color_popover_border
+                        border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+                        pixel: fn() {
+                            let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                            sdf.box(
+                                0.5
+                                0.5
+                                self.rect_size.x - 1.0
+                                self.rect_size.y - 1.0
+                                self.border_radius
+                            )
+                            sdf.fill_keep(self.color)
+                            sdf.stroke(self.border_color, self.border_size)
+                            return sdf.result
+                        }
+                    }
+                }
+                // The closed face. Every metric a sheet could reach is
+                // written out here -- `min_height`, the padding, the margin,
+                // the bevel and the corner -- and the shader is this
+                // panel's, not the theme's.
+                let PanelDropDown = DropDown {
+                    width: Fill
+                    height: 20
+                    min_height: 0
+                    align: Align{x: 0.0 y: 0.5}
+                    padding: Inset{left: 6 right: 18 top: 2 bottom: 2}
+                    margin: Inset{left: 0 right: 0 top: 0 bottom: 0}
+                    popup_menu: PanelPopupMenu{}
+                    draw_text +: {
+                        color: fab.color_text
+                        color_hover: fab.color_text_active
+                        color_focus: fab.color_text_active
+                        color_down: fab.color_text_active
+                        color_disabled: panel.text_muted
+                        text_style: PanelFont{}
+                    }
+                    draw_icon +: { color: fab.color_text }
+                    draw_bg +: {
+                        border_size: 1.0
+                        border_radius: 2.0
+                        color_dither: 0.0
+                        color: fab.color_input
+                        color_hover: fab.color_input_hover
+                        color_focus: fab.color_input
+                        color_down: fab.color_input_active
+                        color_disabled: panel.face_off
+                        // Flat in every state, like PanelButton: with a
+                        // gradient stop left on, the other states' -1 stops
+                        // are mixed in as colours.
+                        color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+                        color_2_hover: vec4(-1.0, -1.0, -1.0, -1.0)
+                        color_2_focus: vec4(-1.0, -1.0, -1.0, -1.0)
+                        color_2_down: vec4(-1.0, -1.0, -1.0, -1.0)
+                        color_2_disabled: vec4(-1.0, -1.0, -1.0, -1.0)
+                        border_color: fab.color_border
+                        border_color_hover: fab.color_border_light
+                        border_color_focus: fab.color_focus_ring
+                        border_color_down: fab.color_border
+                        border_color_disabled: fab.color_border
+                        border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+                        border_color_2_hover: vec4(-1.0, -1.0, -1.0, -1.0)
+                        border_color_2_focus: vec4(-1.0, -1.0, -1.0, -1.0)
+                        border_color_2_down: vec4(-1.0, -1.0, -1.0, -1.0)
+                        border_color_2_disabled: vec4(-1.0, -1.0, -1.0, -1.0)
+                        arrow_color: panel.text_dim
+                        arrow_color_hover: fab.color_text_active
+                        arrow_color_focus: fab.color_text_active
+                        arrow_color_down: fab.color_text_active
+                        arrow_color_disabled: panel.text_muted
+                        pixel: fn() {
+                            let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                            // The arrow goes down FIRST and the face over
+                            // it, exactly as the stock face does it: the
+                            // path leaves a clip behind that the fill reads.
+                            let c = vec2(self.rect_size.x - 10.0, self.rect_size.y * 0.5)
+                            let sz = 2.5
+                            sdf.move_to(c.x - sz, c.y - sz + 1.0)
+                            sdf.line_to(c.x + sz, c.y - sz + 1.0)
+                            sdf.line_to(c.x, c.y + sz * 0.25 + 1.0)
+                            sdf.close_path()
+                            sdf.fill_keep(
+                                self.arrow_color
+                                    .mix(self.arrow_color_focus, self.focus)
+                                    .mix(self.arrow_color_hover, self.hover)
+                                    .mix(self.arrow_color_down, self.down)
+                                    .mix(self.arrow_color_disabled, self.disabled)
+                            )
+                            sdf.box(
+                                self.border_size
+                                self.border_size
+                                self.rect_size.x - self.border_size * 2.
+                                self.rect_size.y - self.border_size * 2.
+                                self.border_radius
+                            )
+                            sdf.fill_keep(
+                                self.color
+                                    .mix(self.color_focus, self.focus)
+                                    .mix(self.color_hover, self.hover)
+                                    .mix(self.color_down, self.down * self.hover)
+                                    .mix(self.color_disabled, self.disabled)
+                            )
+                            sdf.stroke(
+                                self.border_color
+                                    .mix(self.border_color_focus, self.focus)
+                                    .mix(self.border_color_hover, self.hover)
+                                    .mix(self.border_color_down, self.down * self.hover)
+                                    .mix(self.border_color_disabled, self.disabled)
+                                self.border_size
+                            )
+                            return sdf.result
+                        }
+                    }
+                }
 
                 // Row templates, hoisted: one source of truth for the Props list,
                 // the Shader tab INPUTS list and the shader-constant rows.
                 let SectionRowT = FabSection {
-                    count := FabLabelSmall { width: Fit margin: Inset{left: 4 top: 1 right: 0 bottom: 0} text: "" }
+                    count := PanelLabelSmall { width: Fit margin: Inset{left: 4 top: 1 right: 0 bottom: 0} text: "" }
                 }
                 let CascadeRowT = View {
                     width: Fill
@@ -5215,15 +9202,15 @@ impl Tweaker {
                             width: Fit height: Fit
                             padding: Inset{left: 5 right: 5 top: 1 bottom: 1}
                             draw_bg +: { color: #x555555 radius: 3. }
-                            lbl := FabLabelSmall { width: Fit text: "L0" draw_text +: { color: #x151515 } }
+                            lbl := PanelLabelSmall { width: Fit text: "L0" draw_text +: { color: #x151515 } }
                         }
-                        loc := FabLabelDim { width: Fill text: "" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
+                        loc := PanelLabelDim { width: Fill text: "" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
                     }
                     sets_wrap := View { width: Fill height: Fit visible: false
-                        sets := FabLabelSmall { width: Fill margin: Inset{left: 22 top: 0 right: 0 bottom: 0} text: "" }
+                        sets := PanelLabelSmall { width: Fill margin: Inset{left: 22 top: 0 right: 0 bottom: 0} text: "" }
                     }
                     overridden_wrap := View { width: Fill height: Fit visible: false
-                        overridden := FabLabelSmall { width: Fill margin: Inset{left: 22 top: 0 right: 0 bottom: 0} text: "" }
+                        overridden := PanelLabelSmall { width: Fill margin: Inset{left: 22 top: 0 right: 0 bottom: 0} text: "" }
                     }
                 }
                 let MaterialRowT = View {
@@ -5233,7 +9220,7 @@ impl Tweaker {
                     spacing: 6
                     align: Align{x: 0.0 y: 0.5}
                     padding: Inset{left: 8 right: 6 top: 3 bottom: 3}
-                    name := mod.widgets.FabLabelDim {
+                    name := PanelLabelDim {
                         width: 70
                         text: ""
                     }
@@ -5256,76 +9243,101 @@ impl Tweaker {
                     height: 24
                     flow: Right
                     align: Align{x: 0.0 y: 0.5}
-                    padding: Inset{left: 8 right: 6 top: 0 bottom: 0}
-                    spacing: 6
-                    name := FabLabelDim {
+                    // Tight on the right: every point between the swatch and
+                    // the panel edge is a point the NAME does not get, and
+                    // the name is the thing that was being truncated.
+                    padding: Inset{left: 8 right: 2 top: 0 bottom: 0}
+                    spacing: 4
+                    name := PanelLabelDim {
                         width: Fill
                         text: ""
                         max_lines: 1
                         text_overflow: TextOverflow.Ellipsis
                     }
+                    // Sized to the value column, not to the value: the
+                    // widest thing that has to fit anywhere in it is a
+                    // `#00000000`, and every point past that is a point
+                    // stolen from the name, which is what gets truncated.
                     value := FabValueInput {
-                        width: 150
+                        width: 106
                         height: 18
                     }
-                    origin := FabLabelSmall { width: 12 margin: Inset{left: 2 top: 2 right: 0 bottom: 0} text: "" }
+                    origin := PanelLabelSmall { width: 8 margin: Inset{left: 0 top: 2 right: 0 bottom: 0} text: "" }
                 }
                 let BoolRowT = View {
                     width: Fill
                     height: 24
                     flow: Right
                     align: Align{x: 0.0 y: 0.5}
-                    padding: Inset{left: 8 right: 6 top: 0 bottom: 0}
-                    spacing: 6
-                    name := FabLabelDim {
+                    // Tight on the right: every point between the swatch and
+                    // the panel edge is a point the NAME does not get, and
+                    // the name is the thing that was being truncated.
+                    padding: Inset{left: 8 right: 2 top: 0 bottom: 0}
+                    spacing: 4
+                    name := PanelLabelDim {
                         width: Fill
                         text: ""
                         max_lines: 1
                         text_overflow: TextOverflow.Ellipsis
                     }
-                    value := CheckBox {
+                    value := PanelCheckBox {
                         width: Fit
                         height: Fit
                         text: ""
                     }
-                    origin := FabLabelSmall { width: 12 margin: Inset{left: 2 top: 2 right: 0 bottom: 0} text: "" }
+                    origin := PanelLabelSmall { width: 8 margin: Inset{left: 0 top: 2 right: 0 bottom: 0} text: "" }
                 }
                 let TextRowT = View {
                     width: Fill
                     height: 24
                     flow: Right
                     align: Align{x: 0.0 y: 0.5}
-                    padding: Inset{left: 8 right: 6 top: 0 bottom: 0}
-                    spacing: 6
-                    name := FabLabelDim {
+                    // Tight on the right: every point between the swatch and
+                    // the panel edge is a point the NAME does not get, and
+                    // the name is the thing that was being truncated.
+                    padding: Inset{left: 8 right: 2 top: 0 bottom: 0}
+                    spacing: 4
+                    name := PanelLabelDim {
                         width: Fill
                         text: ""
                         max_lines: 1
                         text_overflow: TextOverflow.Ellipsis
                     }
-                    value := TextInput {
-                        width: 150
+                    value := PanelInput {
+                        width: 106
                         height: 18
                         empty_text: ""
                         draw_bg +: {
-                            color: #x1d1d1d
                             border_radius: 2.0
                         }
                         draw_text +: {
                             ink_centered: true
-                            color: #xe6e6e6
                             text_style +: {
                                 font_size: 8.5
                             }
                         }
                     }
-                    origin := FabLabelSmall { width: 12 margin: Inset{left: 2 top: 2 right: 0 bottom: 0} text: "" }
+                    origin := PanelLabelSmall { width: 8 margin: Inset{left: 0 top: 2 right: 0 bottom: 0} text: "" }
                 }
                 let InfoRowT = FabPropRow {
-                    value := FabLabelSmall {
+                    value := PanelLabelSmall {
                         width: Fill
                         margin: Inset{left: 0 top: 2 right: 0 bottom: 0}
                         text: ""
+                    }
+                }
+                // One size field, in the person's own words: a number, a
+                // percentage, an expression.
+                let SizeInputT = PanelInput {
+                    height: 18
+                    empty_text: ""
+                    label_align: Align{x: 0.5 y: 0.5}
+                    draw_bg +: {
+                        border_radius: 2.0
+                    }
+                    draw_text +: {
+                        ink_centered: true
+                        text_style +: { font_size: 8.5 }
                     }
                 }
                 let SizeRowT = FabPropRow {
@@ -5341,27 +9353,46 @@ impl Tweaker {
                             flow: Right
                             spacing: 4
                             align: Align{x: 0.0 y: 0.5}
-                            w_axis := FabLabelSmall { width: 12 text: "W" }
+                            w_axis := PanelLabelSmall { width: 12 text: "W" }
                             w_seg := View { width: Fit height: Fit flow: Right spacing: 1
-                                w_fill := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
-                                w_fit := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
-                                w_fix := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                w_fill := PanelButton { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                w_fit := PanelButton { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                w_fix := PanelButton { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
                             }
-                            w_input := TextInput {
-                                width: Fill
-                                height: 18
-                                empty_text: ""
-                                label_align: Align{x: 0.5 y: 0.5}
-                                draw_bg +: {
-                                    color: #x1d1d1d
-                                    border_radius: 2.0
-                                }
-                                draw_text +: {
-                                    ink_centered: true
-                                    color: #xe6e6e6
-                                    text_style +: { font_size: 8.5 }
-                                }
-                            }
+                            w_input := SizeInputT { width: Fill }
+                        }
+                        // The content-box clamps, under the axis they bound.
+                        w_clamp := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            spacing: 4
+                            align: Align{x: 0.0 y: 0.5}
+                            w_min_label := PanelLabelSmall { width: Fit text: "min" }
+                            w_min := SizeInputT { width: 42 empty_text: "\u{2013}" }
+                            w_max_label := PanelLabelSmall { width: Fit margin: Inset{left: 4 top: 0 right: 0 bottom: 0} text: "max" }
+                            w_max := SizeInputT { width: 42 empty_text: "\u{2013}" }
+                        }
+                        // A Fill's own fields; the lines are not there otherwise.
+                        w_grow := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            spacing: 4
+                            align: Align{x: 0.0 y: 0.5}
+                            w_grow_label := PanelLabelSmall { width: Fit text: "grow" }
+                            w_weight := FabValueInput { width: 42 height: 18 precision: 1 padding: Inset{left: 4 right: 4 top: 0 bottom: 0} }
+                            w_shrink_label := PanelLabelSmall { width: Fit margin: Inset{left: 4 top: 0 right: 0 bottom: 0} text: "shrink" }
+                            w_shrink := FabValueInput { width: 42 height: 18 precision: 1 padding: Inset{left: 4 right: 4 top: 0 bottom: 0} }
+                        }
+                        w_basis := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            spacing: 4
+                            align: Align{x: 0.0 y: 0.5}
+                            w_basis_label := PanelLabelSmall { width: Fit text: "basis" }
+                            w_basis_in := SizeInputT { width: Fill }
                         }
                         h_row := View {
                             width: Fill
@@ -5369,28 +9400,105 @@ impl Tweaker {
                             flow: Right
                             spacing: 4
                             align: Align{x: 0.0 y: 0.5}
-                            h_axis := FabLabelSmall { width: 12 text: "H" }
+                            h_axis := PanelLabelSmall { width: 12 text: "H" }
                             h_seg := View { width: Fit height: Fit flow: Right spacing: 1
-                                h_fill := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
-                                h_fit := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
-                                h_fix := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                h_fill := PanelButton { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                h_fit := PanelButton { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                h_fix := PanelButton { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
                             }
-                            h_input := TextInput {
-                                width: Fill
-                                height: 18
-                                empty_text: ""
-                                label_align: Align{x: 0.5 y: 0.5}
-                                draw_bg +: {
-                                    color: #x1d1d1d
-                                    border_radius: 2.0
-                                }
-                                draw_text +: {
-                                    ink_centered: true
-                                    color: #xe6e6e6
-                                    text_style +: { font_size: 8.5 }
-                                }
-                            }
+                            h_input := SizeInputT { width: Fill }
                         }
+                        // The content-box clamps, under the axis they bound.
+                        h_clamp := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            spacing: 4
+                            align: Align{x: 0.0 y: 0.5}
+                            h_min_label := PanelLabelSmall { width: Fit text: "min" }
+                            h_min := SizeInputT { width: 42 empty_text: "\u{2013}" }
+                            h_max_label := PanelLabelSmall { width: Fit margin: Inset{left: 4 top: 0 right: 0 bottom: 0} text: "max" }
+                            h_max := SizeInputT { width: 42 empty_text: "\u{2013}" }
+                        }
+                        // A Fill's own fields; the lines are not there otherwise.
+                        h_grow := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            spacing: 4
+                            align: Align{x: 0.0 y: 0.5}
+                            h_grow_label := PanelLabelSmall { width: Fit text: "grow" }
+                            h_weight := FabValueInput { width: 42 height: 18 precision: 1 padding: Inset{left: 4 right: 4 top: 0 bottom: 0} }
+                            h_shrink_label := PanelLabelSmall { width: Fit margin: Inset{left: 4 top: 0 right: 0 bottom: 0} text: "shrink" }
+                            h_shrink := FabValueInput { width: 42 height: 18 precision: 1 padding: Inset{left: 4 right: 4 top: 0 bottom: 0} }
+                        }
+                        h_basis := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            spacing: 4
+                            align: Align{x: 0.0 y: 0.5}
+                            h_basis_label := PanelLabelSmall { width: Fit text: "basis" }
+                            h_basis_in := SizeInputT { width: Fill }
+                        }
+                        aspect_row := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            spacing: 4
+                            align: Align{x: 0.0 y: 0.5}
+                            aspect_label := PanelLabelSmall { width: Fit text: "aspect" }
+                            aspect_in := SizeInputT { width: 42 empty_text: "\u{2013}" }
+                            aspect_hint := PanelLabelSmall { width: Fit text: "width : height" }
+                        }
+                    }
+                }
+                // What the size fields ASK for is Fill / Fit / a number; this
+                // says what the layout actually gave. Its own full-width line
+                // at the top of the Layout section, above the controls it
+                // reports on, so the numbers are not squeezed into a column.
+                // The selection's identity: a name you can change and the
+                // type you cannot. The name is a TextInput because renaming
+                // an anonymous widget is the commonest thing to want to say
+                // about it; the type is a label because it is a fact.
+                let IdentityRowT = View {
+                    width: Fill
+                    height: Fit
+                    flow: Right
+                    spacing: 6
+                    align: Align{x: 0.0 y: 0.5}
+                    padding: Inset{left: 8 right: 8 top: 3 bottom: 5}
+                    name_field := PanelInput {
+                        // 70 / 30 against the type beside it: a name is
+                        // usually short, and a type that gets ellipsised is
+                        // no use at all.
+                        width: Fill{weight: 70.0}
+                        height: 20
+                        empty_text: "unnamed \u{2014} type a name"
+                        draw_bg +: {
+                            border_radius: 2.0
+                        }
+                        draw_text +: {
+                            text_style +: { font_size: 8.5 }
+                        }
+                    }
+                    type_label := PanelLabelDim {
+                        width: Fill{weight: 30.0}
+                        text: ""
+                        max_lines: 1
+                        text_overflow: TextOverflow.Ellipsis
+                    }
+                }
+                let MeasuredRowT = View {
+                    width: Fill
+                    height: Fit
+                    flow: Right
+                    padding: Inset{left: 8 right: 8 top: 1 bottom: 3}
+                    measured := PanelLabelSmall {
+                        width: Fill
+                        text: ""
+                        max_lines: 1
+                        text_overflow: TextOverflow.Ellipsis
                     }
                 }
                 let BoxRowT = FabPropRow {
@@ -5437,56 +9545,217 @@ impl Tweaker {
                             leg_bottom := FabValueInput { width: 64 height: 16 }
                         }
                     }
-                    link := CheckBox {
+                    link := PanelCheckBox {
                         width: Fit
                         height: Fit
                         text: ""
                     }
                 }
+                // The container's flow on two lines: the direction, the
+                // wrap and how a wrapped row lines up; then the gaps.
                 let FlowRowT = FabPropRow {
-                    spacing_input := FabValueInput {
-                        width: 70
-                        height: 18
-                    }
-                    flow_seg := View { width: Fit height: Fit flow: Right spacing: 1 margin: Inset{left: 6 right: 0 top: 0 bottom: 0}
-                        f_right := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
-                        f_down := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
-                        f_over := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
-                        f_wrap := Button { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
-                    }
-                    flow_field := FabLabelSmall {
-                        width: Fill
-                        margin: Inset{left: 4 top: 2 right: 0 bottom: 0}
-                        text: ""
-                    }
-                }
-                let AlignRowT = FabPropRow {
                     height: Fit
-                    grid := View {
-                        width: Fit
+                    flow_col := View {
+                        width: Fill
                         height: Fit
                         flow: Down
                         spacing: 2
-                        row0 := View { width: Fit height: Fit flow: Right spacing: 2
-                            d0 := Button { width: 15 height: 15 text: "" padding: Inset{left:0 right:0 top:0 bottom:0} }
-                            d1 := Button { width: 15 height: 15 text: "" padding: Inset{left:0 right:0 top:0 bottom:0} }
-                            d2 := Button { width: 15 height: 15 text: "" padding: Inset{left:0 right:0 top:0 bottom:0} }
+                        dir_row := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            spacing: 4
+                            align: Align{x: 0.0 y: 0.5}
+                            flow_seg := View { width: Fit height: Fit flow: Right spacing: 1
+                                f_right := PanelButton { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                f_down := PanelButton { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                f_over := PanelButton { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                            }
+                            f_wrap := PanelButton { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                            ra_seg := View { width: Fit height: Fit flow: Right spacing: 1 margin: Inset{left: 4 right: 0 top: 0 bottom: 0}
+                                ra_top := PanelButton { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                ra_mid := PanelButton { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                ra_bottom := PanelButton { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                            }
                         }
-                        row1 := View { width: Fit height: Fit flow: Right spacing: 2
-                            d3 := Button { width: 15 height: 15 text: "" padding: Inset{left:0 right:0 top:0 bottom:0} }
-                            d4 := Button { width: 15 height: 15 text: "" padding: Inset{left:0 right:0 top:0 bottom:0} }
-                            d5 := Button { width: 15 height: 15 text: "" padding: Inset{left:0 right:0 top:0 bottom:0} }
-                        }
-                        row2 := View { width: Fit height: Fit flow: Right spacing: 2
-                            d6 := Button { width: 15 height: 15 text: "" padding: Inset{left:0 right:0 top:0 bottom:0} }
-                            d7 := Button { width: 15 height: 15 text: "" padding: Inset{left:0 right:0 top:0 bottom:0} }
-                            d8 := Button { width: 15 height: 15 text: "" padding: Inset{left:0 right:0 top:0 bottom:0} }
+                        gap_row := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            spacing: 4
+                            align: Align{x: 0.0 y: 0.5}
+                            gap_label := PanelLabelSmall { width: Fit text: "gap" }
+                            spacing_input := FabValueInput { width: 56 height: 18 }
+                            wrap_box := View { width: Fit height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
+                                wrap_label := PanelLabelSmall { width: Fit margin: Inset{left: 4 top: 0 right: 0 bottom: 0} text: "rows" }
+                                wrap_input := FabValueInput { width: 56 height: 18 }
+                            }
                         }
                     }
-                    xy_label := FabLabelSmall {
+                }
+                // The children along the flow and across it. Which is x
+                // and which is y follows the direction, so the labels say.
+                let AlignRowT = FabPropRow {
+                    height: Fit
+                    align_col := View {
                         width: Fill
-                        margin: Inset{left: 8 top: 2 right: 0 bottom: 0}
-                        text: ""
+                        height: Fit
+                        flow: Down
+                        spacing: 2
+                        just_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
+                            just_label := PanelLabelSmall { width: 34 text: "justify" }
+                            just_seg := View { width: Fit height: Fit flow: Right spacing: 1
+                                j_stretch := PanelButton { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                j_start := PanelButton { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                j_mid := PanelButton { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                j_end := PanelButton { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                            }
+                            just_axis := PanelLabelSmall { width: Fit text: "" }
+                        }
+                        space_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
+                            space_label := PanelLabelSmall { width: 34 text: "space" }
+                            space_seg := View { width: Fit height: Fit flow: Right spacing: 1
+                                s_between := PanelButton { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                s_around := PanelButton { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                s_evenly := PanelButton { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                            }
+                        }
+                        cross_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
+                            cross_label := PanelLabelSmall { width: 34 text: "align" }
+                            cross_seg := View { width: Fit height: Fit flow: Right spacing: 1
+                                c_stretch := PanelButton { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                c_start := PanelButton { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                c_mid := PanelButton { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                c_end := PanelButton { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                            }
+                            cross_axis := PanelLabelSmall { width: Fit text: "" }
+                        }
+                    }
+                }
+                // A heading inside the Layout section: the rows under it are
+                // about the selection in its parent, or about its children.
+                let GroupRowT = View {
+                    width: Fill
+                    height: 20
+                    flow: Right
+                    align: Align{x: 0.0 y: 1.0}
+                    padding: Inset{left: 8 right: 6 top: 0 bottom: 2}
+                    title := PanelLabelSmall { width: Fill text: "" }
+                }
+                // What kind of container it is, the ask to become the other
+                // kind, and the name its children can size against.
+                let ContainerRowT = FabPropRow {
+                    height: Fit
+                    ctr_col := View {
+                        width: Fill
+                        height: Fit
+                        flow: Down
+                        spacing: 2
+                        mode_row := View { width: Fill height: Fit flow: Right spacing: 6 align: Align{x: 0.0 y: 0.5}
+                            mode_label := PanelLabelSmall { width: Fit text: "" }
+                            convert := PanelButton { width: Fit height: Fit padding: Inset{left: 4 right: 4 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                        }
+                        // The ask to put it in a Dock as its one tab. Beside
+                        // the grid/flex ask, not instead of it: that one
+                        // changes the container's type, this one wraps it in
+                        // its parent, and both can stand.
+                        dock_row := View { width: Fill height: Fit flow: Right spacing: 6 align: Align{x: 0.0 y: 0.5}
+                            dock_check := PanelCheckBox { width: Fit height: Fit text: "" }
+                            dock_label := PanelLabelSmall { width: Fit text: "dockable" }
+                        }
+                        // What a standing ask means, on a line of its own: the
+                        // column is too narrow for it beside the box, and a
+                        // Fill label wraps where a Fit one runs off the panel.
+                        dock_hint := PanelLabelSmall { width: Fill text: "" }
+                        name_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
+                            ctr_label := PanelLabelSmall { width: Fit text: "named" }
+                            ctr_name := SizeInputT { width: Fill empty_text: "\u{2013}" label_align: Align{x: 0.0 y: 0.5} draw_text +: { ink_centered: false } }
+                        }
+                    }
+                }
+                // Out of the flow: a checkbox, and the place in the parent
+                // once it is.
+                let AbsRowT = FabPropRow {
+                    height: Fit
+                    abs_col := View {
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 6
+                        align: Align{x: 0.0 y: 0.5}
+                        abs_check := PanelCheckBox { width: Fit height: Fit text: "" }
+                        abs_label := PanelLabelSmall { width: Fit text: "absolute" }
+                        abs_xy := View { width: Fit height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
+                            x_label := PanelLabelSmall { width: Fit text: "x" }
+                            abs_x := FabValueInput { width: 44 height: 18 }
+                            y_label := PanelLabelSmall { width: Fit text: "y" }
+                            abs_y := FabValueInput { width: 44 height: 18 }
+                        }
+                    }
+                }
+                // A Grid's own layout: the tracks as CSS, the gaps, which way
+                // cells without a place are filled in, and the named areas.
+                let GridRowT = FabPropRow {
+                    height: Fit
+                    grid_col := View {
+                        width: Fill
+                        height: Fit
+                        flow: Down
+                        spacing: 2
+                        cols_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
+                            cols_label := PanelLabelSmall { width: 40 text: "columns" }
+                            cols_in := SizeInputT { width: Fill label_align: Align{x: 0.0 y: 0.5} draw_text +: { ink_centered: false } }
+                        }
+                        rows_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
+                            rows_label := PanelLabelSmall { width: 40 text: "rows" }
+                            rows_in := SizeInputT { width: Fill label_align: Align{x: 0.0 y: 0.5} draw_text +: { ink_centered: false } }
+                        }
+                        gaps_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
+                            gap_label := PanelLabelSmall { width: 34 text: "gap" }
+                            gap_x := PanelLabelSmall { width: Fit text: "\u{2194}" }
+                            gap_col := FabValueInput { width: 40 height: 18 }
+                            gap_y := PanelLabelSmall { width: Fit margin: Inset{left: 4 top: 0 right: 0 bottom: 0} text: "\u{2195}" }
+                            gap_row_in := FabValueInput { width: 40 height: 18 }
+                        }
+                        fill_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
+                            fill_label := PanelLabelSmall { width: 40 text: "fill" }
+                            fill_seg := View { width: Fit height: Fit flow: Right spacing: 1
+                                f_rows := PanelButton { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                                f_cols := PanelButton { width: Fit height: Fit padding: Inset{left: 3 right: 3 top: 1 bottom: 1} margin: Inset{left:0 right:0 top:0 bottom:0} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                            }
+                        }
+                        areas_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
+                            areas_label := PanelLabelSmall { width: 40 text: "areas" }
+                            areas_in := SizeInputT { width: Fill label_align: Align{x: 0.0 y: 0.5} draw_text +: { ink_centered: false } }
+                        }
+                    }
+                }
+                // Where a child of a Grid sits: a column and row (0 is wherever
+                // the fill order puts it), how many of each it spans, or an
+                // area by name.
+                let CellRowT = FabPropRow {
+                    height: Fit
+                    cell_col := View {
+                        width: Fill
+                        height: Fit
+                        flow: Down
+                        spacing: 2
+                        place_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
+                            col_label := PanelLabelSmall { width: Fit text: "col" }
+                            cell_c := FabValueInput { width: 40 height: 18 min: 0.0 step: 1.0 precision: 0 }
+                            row_label := PanelLabelSmall { width: Fit margin: Inset{left: 4 top: 0 right: 0 bottom: 0} text: "row" }
+                            cell_r := FabValueInput { width: 40 height: 18 min: 0.0 step: 1.0 precision: 0 }
+                        }
+                        span_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
+                            span_label := PanelLabelSmall { width: Fit text: "span" }
+                            cell_cs := FabValueInput { width: 40 height: 18 min: 0.0 step: 1.0 precision: 0 }
+                            by_label := PanelLabelSmall { width: Fit text: "\u{00d7}" }
+                            cell_rs := FabValueInput { width: 40 height: 18 min: 0.0 step: 1.0 precision: 0 }
+                        }
+                        area_row := View { width: Fill height: Fit flow: Right spacing: 4 align: Align{x: 0.0 y: 0.5}
+                            area_label := PanelLabelSmall { width: Fit text: "area" }
+                            cell_area := SizeInputT { width: Fill empty_text: "\u{2013}" label_align: Align{x: 0.0 y: 0.5} draw_text +: { ink_centered: false } }
+                        }
                     }
                 }
                 let MoreRowT = FabSection {}
@@ -5495,43 +9764,47 @@ impl Tweaker {
                     height: 24
                     flow: Right
                     align: Align{x: 0.0 y: 0.5}
-                    padding: Inset{left: 8 right: 6 top: 0 bottom: 0}
-                    spacing: 6
-                    name := FabLabelDim {
+                    // Tight on the right: every point between the swatch and
+                    // the panel edge is a point the NAME does not get, and
+                    // the name is the thing that was being truncated.
+                    padding: Inset{left: 8 right: 2 top: 0 bottom: 0}
+                    spacing: 4
+                    name := PanelLabelDim {
                         width: Fill
                         text: ""
                         max_lines: 1
                         text_overflow: TextOverflow.Ellipsis
                     }
-                    value := TextInput {
-                        width: 110
+                    // 80 + spacing + the swatch is exactly the 106 the number
+                    // rows use, so both columns end on the same edge — and 80
+                    // is what `#00000000` actually needs.
+                    value := PanelInput {
+                        width: 80
                         height: 18
                         empty_text: "#rrggbbaa"
                         draw_bg +: {
-                            color: #x1d1d1d
                             border_radius: 2.0
                         }
                         draw_text +: {
                             ink_centered: true
-                            color: #xe6e6e6
                             text_style +: {
                                 font_size: 8.5
                             }
                         }
                     }
                     swatch := FabColorPick {
-                        width: 28
+                        width: 22
                         height: 16
                     }
                     tname_wrap := View { width: Fit height: Fit visible: false
-                        tname := Button { width: Fit height: 16 padding: Inset{left: 4 right: 4 top: 1 bottom: 1} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                        tname := PanelButton { width: Fit height: 16 padding: Inset{left: 4 right: 4 top: 1 bottom: 1} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
                     }
-                    origin := FabLabelSmall { width: 12 margin: Inset{left: 2 top: 2 right: 0 bottom: 0} text: "" }
+                    origin := PanelLabelSmall { width: 8 margin: Inset{left: 0 top: 2 right: 0 bottom: 0} text: "" }
                 }
                 let VecRowT = View {
                     width: Fill height: 24 flow: Right align: Align{x: 0.0 y: 0.5}
                     padding: Inset{left: 8 right: 6 top: 0 bottom: 0} spacing: 4
-                    name := FabLabelDim { width: Fill text: "" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
+                    name := PanelLabelDim { width: Fill text: "" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
                     vx := FabValueInput { width: 46 height: 18 }
                     vy := FabValueInput { width: 46 height: 18 }
                     vz_wrap := View { width: Fit height: Fit visible: false
@@ -5544,7 +9817,7 @@ impl Tweaker {
                 let InsetRowT = View {
                     width: Fill height: 24 flow: Right align: Align{x: 0.0 y: 0.5}
                     padding: Inset{left: 8 right: 6 top: 0 bottom: 0} spacing: 3
-                    name := FabLabelDim { width: Fill text: "" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
+                    name := PanelLabelDim { width: Fill text: "" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
                     il := FabValueInput { width: 40 height: 18 }
                     it := FabValueInput { width: 40 height: 18 }
                     ir := FabValueInput { width: 40 height: 18 }
@@ -5553,24 +9826,16 @@ impl Tweaker {
                 let MetricsRowT = View {
                     width: Fill height: 24 flow: Right align: Align{x: 0.0 y: 0.5}
                     padding: Inset{left: 8 right: 6 top: 0 bottom: 0} spacing: 4
-                    name := FabLabelDim { width: Fill text: "" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
+                    name := PanelLabelDim { width: Fill text: "" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
                     m0 := FabValueInput { width: 44 height: 18 }
                     m1 := FabValueInput { width: 44 height: 18 }
                     m2 := FabValueInput { width: 44 height: 18 }
                 }
-                let SizeFieldRowT = View {
-                    width: Fill height: 24 flow: Right align: Align{x: 0.0 y: 0.5}
-                    padding: Inset{left: 8 right: 6 top: 0 bottom: 0} spacing: 4
-                    name := FabLabelDim { width: Fill text: "" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
-                    sf_fill := Button { width: Fit height: 16 padding: Inset{left: 5 right: 5 top: 1 bottom: 1} text: "Fill" draw_text +: { text_style +: { font_size: 7.0 } } }
-                    sf_fit := Button { width: Fit height: 16 padding: Inset{left: 5 right: 5 top: 1 bottom: 1} text: "Fit" draw_text +: { text_style +: { font_size: 7.0 } } }
-                    sf_num := FabValueInput { width: 56 height: 18 }
-                }
                 let NoEditorRowT = View {
                     width: Fill height: 24 flow: Right align: Align{x: 0.0 y: 0.5}
                     padding: Inset{left: 8 right: 6 top: 0 bottom: 0} spacing: 6
-                    name := FabLabelDim { width: Fill text: "" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
-                    ne := FabLabelSmall { width: Fit text: "no editor yet" }
+                    name := PanelLabelDim { width: Fill text: "" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
+                    ne := PanelLabelSmall { width: Fit text: "no editor yet" }
                 }
                 View {
                     width: Fill
@@ -5578,7 +9843,10 @@ impl Tweaker {
                     flow: Down
                     show_bg: true
                     draw_bg +: {
-                        color: #x303030
+                        // The panel's ground, off the palette rather than
+                        // written out: the same colour it has always been,
+                        // but one the Theme tab's "wear" switch can move.
+                        color: fab.color_area
                     }
                     padding: Inset{left: 4 right: 4 top: 6 bottom: 4}
                     spacing: 4
@@ -5589,7 +9857,44 @@ impl Tweaker {
                         spacing: 4
                         align: Align{x: 0.0 y: 0.5}
                         search := FabSearch {}
-                        sploded := Button {
+                        // Search mode: how many hits, and the arrows that
+                        // walk them. Only there while searching.
+                        nav := View {
+                            width: Fit
+                            height: Fit
+                            flow: Right
+                            spacing: 1
+                            align: Align{x: 0.0 y: 0.5}
+                            visible: false
+                            hits := PanelLabelSmall { width: Fit margin: Inset{left: 0 right: 3 top: 0 bottom: 0} text: "" }
+                            prev := PanelButton { width: 18 height: 22 padding: Inset{left: 4 right: 4 top: 1 bottom: 3} margin: Inset{left:0 right:0 top:0 bottom:0} text: "\u{2039}" draw_text +: { text_style +: { font_size: 10.0 } } }
+                            next := PanelButton { width: 18 height: 22 padding: Inset{left: 4 right: 4 top: 1 bottom: 3} margin: Inset{left:0 right:0 top:0 bottom:0} text: "\u{203a}" draw_text +: { text_style +: { font_size: 10.0 } } }
+                        }
+                        find := PanelButton {
+                            width: 28
+                            height: 24
+                            padding: Inset{left: 7 right: 7 top: 5 bottom: 5}
+                            margin: Inset{left: 0 right: 4 top: 0 bottom: 0}
+                            text: ""
+                            icon_walk: Walk{width: 12 height: Fit}
+                            draw_icon +: {
+                                color: #xd8d8d8
+                                svg: crate_resource("self:resources/icons/icon_search.svg")
+                            }
+                        }
+                        select := PanelButton {
+                            width: 28
+                            height: 24
+                            padding: Inset{left: 6 right: 6 top: 4 bottom: 4}
+                            margin: Inset{left: 0 right: 4 top: 0 bottom: 0}
+                            text: ""
+                            icon_walk: Walk{width: 13 height: Fit}
+                            draw_icon +: {
+                                color: #xd8d8d8
+                                svg: crate_resource("self:resources/icons/icon_select.svg")
+                            }
+                        }
+                        sploded := PanelButton {
                             width: 28
                             height: 24
                             padding: Inset{left: 5 right: 5 top: 3 bottom: 3}
@@ -5601,23 +9906,6 @@ impl Tweaker {
                                 svg: crate_resource("self:resources/icons/sploded.svg")
                             }
                         }
-                        note := Button {
-                            width: Fit
-                            height: 24
-                            padding: Inset{left: 6 right: 6 top: 3 bottom: 3}
-                            margin: Inset{left: 0 right: 4 top: 0 bottom: 0}
-                            text: "note"
-                        }
-                        spread_wrap := View {
-                            width: Fit
-                            height: Fit
-                            visible: false
-                            spread := FabValueInput {
-                                width: 44
-                                height: 18
-                                margin: Inset{left: 0 right: 4 top: 0 bottom: 0}
-                            }
-                        }
                     }
                     tab_row := View {
                         width: Fill
@@ -5625,10 +9913,107 @@ impl Tweaker {
                         flow: Right
                         spacing: 2
                         padding: Inset{left: 4 right: 4 top: 0 bottom: 0}
-                        tab_props := Button { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Props" draw_text +: { text_style +: { font_size: 8.0 } } }
-                        tab_shader := Button { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Shader" draw_text +: { text_style +: { font_size: 8.0 } } }
-                        tab_tree := Button { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Tree" draw_text +: { text_style +: { font_size: 8.0 } } }
-                        tab_theme := Button { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Theme" draw_text +: { text_style +: { font_size: 8.0 } } }
+                        tab_props := PanelButton { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Props" draw_text +: { text_style +: { font_size: 8.0 } } }
+                        tab_shader := PanelButton { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Shader" draw_text +: { text_style +: { font_size: 8.0 } } }
+                        tab_tree := PanelButton { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Tree" draw_text +: { text_style +: { font_size: 8.0 } } }
+                        tab_theme := PanelButton { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Theme" draw_text +: { text_style +: { font_size: 8.0 } } }
+                        tab_spec := PanelButton { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Spec" draw_text +: { text_style +: { font_size: 8.0 } } }
+                    }
+                    // The Theme tab's head: which theme the whole library
+                    // is running under, and what may be done with it. It
+                    // sits above the rows because it decides what they are
+                    // rows OF -- pick a theme and every value under it is a
+                    // different value.
+                    //
+                    // A dropdown rather than a strip of buttons because the
+                    // list now grows: every theme the person saves joins it,
+                    // and a wrapping strip of those would push the rows off
+                    // the bottom of the panel.
+                    theme_head := View {
+                        visible: false
+                        width: Fill
+                        height: Fit
+                        flow: Down
+                        spacing: 3
+                        padding: Inset{left: 4 right: 4 top: 0 bottom: 3}
+                        // The picker, and beside it the switch that decides
+                        // whether the PANEL wears what the picker chose. One
+                        // row, because they are one question asked from two
+                        // sides: which theme, and who is wearing it.
+                        theme_pick_row := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            spacing: 3
+                            align: Align{x: 0.0 y: 0.5}
+                            theme_pick := PanelDropDown {
+                                width: Fill
+                                height: 20
+                            }
+                            // A TOGGLE and not a command: it lights while
+                            // the panel is wearing the theme and goes out
+                            // when the panel is back in its own palette --
+                            // the same on/off fill the filter row's search,
+                            // select and explode switches use
+                            // (`set_button_fill`), so the panel has one way
+                            // of showing a mode you are in.
+                            //
+                            // Off is the default and has to stay the
+                            // default: this panel is the tool a theme is
+                            // diagnosed WITH, so it has to be able to stand
+                            // outside the theme under test. The switch is
+                            // for the other question -- what a theme
+                            // actually looks like to work in.
+                            theme_wear := PanelButton {
+                                width: Fit
+                                height: 20
+                                padding: Inset{left: 7 right: 7 top: 2 bottom: 2}
+                                text: "wear"
+                                draw_text +: { text_style +: { font_size: 7.5 } }
+                            }
+                        }
+                        theme_save_row := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            spacing: 3
+                            align: Align{x: 0.0 y: 0.5}
+                            theme_name := PanelInput {
+                                width: Fill
+                                height: 20
+                                empty_text: "name this theme"
+                                draw_bg +: { border_radius: 2.0 }
+                                draw_text +: { text_style +: { font_size: 8.0 } }
+                            }
+                            theme_save := PanelButton {
+                                width: Fit
+                                height: 20
+                                padding: Inset{left: 7 right: 7 top: 2 bottom: 2}
+                                text: "save as"
+                                draw_text +: { text_style +: { font_size: 7.5 } }
+                            }
+                            // Offered for a SAVED theme and for nothing else.
+                            // A built-in gets no delete affordance at all --
+                            // not a dead one that answers with a refusal,
+                            // which only teaches that the button lies.
+                            theme_delete := PanelButton {
+                                visible: false
+                                width: Fit
+                                height: 20
+                                padding: Inset{left: 7 right: 7 top: 2 bottom: 2}
+                                text: "delete"
+                                draw_text +: { text_style +: { font_size: 7.5 } }
+                            }
+                        }
+                        // What the store said. Shown rather than logged: a
+                        // save that refuses itself in the terminal is a save
+                        // that failed silently.
+                        theme_msg := PanelLabelSmall {
+                            visible: false
+                            width: Fill
+                            text: ""
+                            max_lines: 2
+                        }
                     }
                     shader_col := ScrollYView {
                         width: Fill
@@ -5640,7 +10025,7 @@ impl Tweaker {
                             width: Fill
                             text: ""
                         }
-                        shader_doc := FabLabelSmall {
+                        shader_doc := PanelLabelSmall {
                             width: Fill
                             text: ""
                             max_lines: 1
@@ -5656,29 +10041,29 @@ impl Tweaker {
                             flow: Down
                             spacing: 8
                             visible: false
-                            states_pause := Button { width: Fit height: 18 padding: Inset{left: 6 right: 6 top: 1 bottom: 1} text: "pause" draw_text +: { text_style +: { font_size: 8.0 } } }
+                            states_pause := PanelButton { width: Fit height: 18 padding: Inset{left: 6 right: 6 top: 1 bottom: 1} text: "pause" draw_text +: { text_style +: { font_size: 8.0 } } }
                             st0 := View { width: Fill height: Fit flow: Down spacing: 2 visible: false
-                                lbl := FabLabelSmall { text: "" }
+                                lbl := PanelLabelSmall { text: "" }
                                 sw := TweakMaterialSwatch { width: Fill height: 150 }
                             }
                             st1 := View { width: Fill height: Fit flow: Down spacing: 2 visible: false
-                                lbl := FabLabelSmall { text: "" }
+                                lbl := PanelLabelSmall { text: "" }
                                 sw := TweakMaterialSwatch { width: Fill height: 150 }
                             }
                             st2 := View { width: Fill height: Fit flow: Down spacing: 2 visible: false
-                                lbl := FabLabelSmall { text: "" }
+                                lbl := PanelLabelSmall { text: "" }
                                 sw := TweakMaterialSwatch { width: Fill height: 150 }
                             }
                             st3 := View { width: Fill height: Fit flow: Down spacing: 2 visible: false
-                                lbl := FabLabelSmall { text: "" }
+                                lbl := PanelLabelSmall { text: "" }
                                 sw := TweakMaterialSwatch { width: Fill height: 150 }
                             }
                             st4 := View { width: Fill height: Fit flow: Down spacing: 2 visible: false
-                                lbl := FabLabelSmall { text: "" }
+                                lbl := PanelLabelSmall { text: "" }
                                 sw := TweakMaterialSwatch { width: Fill height: 150 }
                             }
                             st5 := View { width: Fill height: Fit flow: Down spacing: 2 visible: false
-                                lbl := FabLabelSmall { text: "" }
+                                lbl := PanelLabelSmall { text: "" }
                                 sw := TweakMaterialSwatch { width: Fill height: 150 }
                             }
                         }
@@ -5698,19 +10083,25 @@ impl Tweaker {
                             TextRow := TextRowT {}
                             InfoRow := InfoRowT {}
                             SizeRow := SizeRowT {}
+                            MeasuredRow := MeasuredRowT {}
+                            IdentityRow := IdentityRowT {}
                             BoxRow := BoxRowT {}
                             FlowRow := FlowRowT {}
                             AlignRow := AlignRowT {}
+                            GroupRow := GroupRowT {}
+                            ContainerRow := ContainerRowT {}
+                            AbsRow := AbsRowT {}
+                            GridRow := GridRowT {}
+                            CellRow := CellRowT {}
                             MoreRow := MoreRowT {}
                             ColorRow := ColorRowT {}
                             VecRow := VecRowT {}
                             InsetRow := InsetRowT {}
                             MetricsRow := MetricsRowT {}
-                            SizeFieldRow := SizeFieldRowT {}
                             NoEditorRow := NoEditorRowT {}
                         }
                         }
-                        src_fold := Button {
+                        src_fold := PanelButton {
                             width: Fit
                             height: 20
                             padding: Inset{left: 8 right: 8 top: 2 bottom: 2}
@@ -5723,7 +10114,7 @@ impl Tweaker {
                             show_bg: true
                             draw_bg +: { color: #x1b1b1b }
                             padding: Inset{left: 6 right: 6 top: 4 bottom: 4}
-                            shader_src := TextInput {
+                            shader_src := PanelInput {
                                 width: Fill
                                 height: Fit
                                 is_multiline: true
@@ -5734,29 +10125,6 @@ impl Tweaker {
                                     text_style +: { font_size: 7.5 }
                                 }
                             }
-                        }
-                        prompt := TextInput {
-                            width: Fill
-                            height: 64
-                            is_multiline: true
-                            empty_text: "what should this shader's CODE do differently\u{2026} Ctrl+Enter sends"
-                            draw_bg +: {
-                                color: #x1b1b1b
-                                border_radius: 3.0
-                            }
-                            draw_text +: {
-                                color: #xe6e6e6
-                                text_style +: { font_size: 8.5 }
-                            }
-                        }
-                        vibe_status := FabLabelSmall {
-                            width: Fill
-                            text: ""
-                            draw_text +: { color: #xffa040 }
-                        }
-                        vibe_hint := FabLabelSmall {
-                            width: Fill
-                            text: "Ctrl+Enter sends \u{00b7} the agent rewrites only the fn code \u{00b7} colours and sizes stay in Props"
                         }
                         doc_tip := Tooltip {
                             width: 0
@@ -5773,9 +10141,128 @@ impl Tweaker {
                                     border_color: #x555555
                                     radius: 3.
                                 }
-                                tooltip_label := FabLabelSmall {
+                                tooltip_label := PanelLabelSmall {
                                     width: 220
                                     text: ""
+                                }
+                            }
+                        }
+                    }
+                    spec_col := View {
+                        width: Fill
+                        height: Fill
+                        flow: Down
+                        spacing: 4
+                        padding: Inset{left: 8 right: 8 top: 6 bottom: 6}
+                        spec_for := PanelLabelSmall {
+                            width: Fill
+                            text: ""
+                            max_lines: 1
+                            text_overflow: TextOverflow.Ellipsis
+                        }
+                        notes_head := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            align: Align{x: 0.0 y: 0.5}
+                            notes_label := FabHeaderLabel {
+                                width: Fill
+                                text: "notes"
+                            }
+                            notes_clear := PanelButton {
+                                width: 15
+                                height: 15
+                                padding: Inset{left: 0 right: 0 top: 0 bottom: 0}
+                                margin: Inset{left: 0 right: 0 top: 0 bottom: 0}
+                                align: Align{x: 0.5 y: 0.5}
+                                text: "\u{00d7}"
+                                draw_bg +: { color: #x00000000 }
+                                draw_text +: {
+                                    color: #x8a8a94
+                                    text_style +: { font_size: 10.0 }
+                                }
+                            }
+                        }
+                        notes_box := View {
+                            width: Fill
+                            height: Fill{weight: 1.0 min: 48.0}
+                            spec_notes := PanelInput {
+                                width: Fill
+                                height: Fill
+                                is_multiline: true
+                                empty_text: "what this widget is about \u{2014} for whoever reads it next"
+                                draw_bg +: {
+                                    color: #x1b1b1b
+                                    border_radius: 3.0
+                                }
+                                draw_text +: {
+                                    text_style +: { font_size: 8.5 }
+                                }
+                            }
+                        }
+                        rules_head := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            align: Align{x: 0.0 y: 0.5}
+                            rules_label := FabHeaderLabel {
+                                width: Fill
+                                text: "rules"
+                            }
+                            grip := RoundedView {
+                                width: 28
+                                height: 3
+                                margin: Inset{left: 0 right: 4 top: 0 bottom: 0}
+                                draw_bg +: { color: #x5c5c68 radius: 1.5 }
+                            }
+                        }
+                        rules_box := View {
+                            width: Fill
+                            height: Fill{weight: 1.0 min: 48.0}
+                            spec_rules := PanelInput {
+                                width: Fill
+                                height: Fill
+                                is_multiline: true
+                                empty_text: "what must stay true of this widget"
+                                draw_bg +: {
+                                    color: #x1b1b1b
+                                    border_radius: 3.0
+                                }
+                                draw_text +: {
+                                    text_style +: { font_size: 8.5 }
+                                }
+                            }
+                        }
+                        app_head := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            align: Align{x: 0.0 y: 0.5}
+                            app_label := FabHeaderLabel {
+                                width: Fill
+                                text: "app rules"
+                            }
+                            grip := RoundedView {
+                                width: 28
+                                height: 3
+                                margin: Inset{left: 0 right: 4 top: 0 bottom: 0}
+                                draw_bg +: { color: #x5c5c68 radius: 1.5 }
+                            }
+                        }
+                        app_box := View {
+                            width: Fill
+                            height: Fill{weight: 1.0 min: 48.0}
+                            spec_app := PanelInput {
+                                width: Fill
+                                height: Fill
+                                is_multiline: true
+                                empty_text: "rules that stand over the whole app \u{2014} no selection needed"
+                                draw_bg +: {
+                                    color: #x1b1b1b
+                                    border_radius: 3.0
+                                }
+                                draw_text +: {
+                                    text_style +: { font_size: 8.5 }
                                 }
                             }
                         }
@@ -5784,7 +10271,64 @@ impl Tweaker {
                         width: Fill
                         height: Fill
                         flow: Down
-                        tree := FileTree {}
+                        tree_head := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            spacing: 4
+                            align: Align{x: 0.0 y: 0.5}
+                            padding: Inset{left: 8 right: 8 top: 3 bottom: 3}
+                            isolate := PanelButton {
+                                width: Fit
+                                height: 18
+                                padding: Inset{left: 8 right: 8 top: 1 bottom: 1}
+                                text: "Isolate"
+                                draw_text +: { text_style +: { font_size: 8.0 } }
+                            }
+                            center := PanelButton {
+                                width: Fit
+                                height: 18
+                                padding: Inset{left: 8 right: 8 top: 1 bottom: 1}
+                                text: "Center"
+                                draw_text +: { text_style +: { font_size: 8.0 } }
+                            }
+                            zoom_label := PanelLabelSmall { width: Fit text: "zoom" }
+                            // 1.00 is life size and the floor: below it the
+                            // view would shrink the app away from the very
+                            // detail Zoom exists to bring closer.
+                            zoom := FabValueInput { width: 44 height: 18 min: 1.0 max: 4.0 }
+                            isolate_hint := PanelLabelSmall {
+                                width: Fill
+                                text: ""
+                                max_lines: 1
+                                text_overflow: TextOverflow.Ellipsis
+                            }
+                        }
+                        tree := FileTree {
+                            file_node: PanelTreeNode {
+                                is_folder: false
+                                draw_bg +: {is_folder: 0.0}
+                                draw_text +: {is_folder: 0.0}
+                                draw_icon +: {
+                                    color: panel.text_muted
+                                    color_active: panel.text_muted
+                                }
+                            }
+                            folder_node: PanelTreeNode {
+                                is_folder: true
+                                draw_bg +: {is_folder: 1.0}
+                                draw_text +: {is_folder: 1.0}
+                            }
+                            filler +: {
+                                pixel: fn() {
+                                    return mix(
+                                        mix(fab.color_area, fab.color_panel_sub, self.is_even),
+                                        fab.color_selection_bg,
+                                        self.active
+                                    )
+                                }
+                            }
+                        }
                     }
                     props_wrap := View {
                         width: Fill
@@ -5808,17 +10352,120 @@ impl Tweaker {
                         InfoRow := InfoRowT {}
                         CascadeRow := CascadeRowT {}
                         SizeRow := SizeRowT {}
+                        MeasuredRow := MeasuredRowT {}
+                        IdentityRow := IdentityRowT {}
                         BoxRow := BoxRowT {}
                         FlowRow := FlowRowT {}
                         AlignRow := AlignRowT {}
+                        GroupRow := GroupRowT {}
+                        ContainerRow := ContainerRowT {}
+                        AbsRow := AbsRowT {}
+                        GridRow := GridRowT {}
+                        CellRow := CellRowT {}
                         MoreRow := MoreRowT {}
                         ColorRow := ColorRowT {}
                         VecRow := VecRowT {}
                         InsetRow := InsetRowT {}
                         MetricsRow := MetricsRowT {}
-                        SizeFieldRow := SizeFieldRowT {}
                         NoEditorRow := NoEditorRowT {}
                     }
+                        app_grip := View {
+                            width: Fill
+                            height: 6
+                            align: Align{x: 0.5 y: 0.5}
+                            // A plain View's draw_bg is a bare DrawQuad whose
+                            // default pixel fn returns #0000, so show_bg plus a
+                            // colour paints nothing. RoundedView has a pixel fn.
+                            bar := RoundedView {
+                                width: 28
+                                height: 3
+                                draw_bg +: { color: #x5c5c68 radius: 1.5 }
+                            }
+                        }
+                    }
+                    prompt_row := View {
+                        width: Fill
+                        height: Fit
+                        flow: Down
+                        spacing: 3
+                        padding: Inset{left: 8 right: 8 top: 4 bottom: 4}
+                        show_bg: true
+                        draw_bg +: { color: #x242429 }
+                        prompt_field := PanelInput {
+                            width: Fill
+                            height: 56
+                            is_multiline: true
+                            empty_text: "what should change\u{2026} Ctrl+Enter sends \u{00b7} Alt+Enter queues"
+                            draw_bg +: {
+                                color: #x1b1b1b
+                                border_radius: 3.0
+                            }
+                            draw_text +: {
+                                color: #xe8e8d0
+                                text_style +: { font_size: 8.5 }
+                            }
+                        }
+                        prompt_bar := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            align: Align{x: 0.0 y: 0.5}
+                            target_wrap := View {
+                                width: Fill
+                                height: Fit
+                                target_label := PanelLabelSmall {
+                                    width: Fill
+                                    text: ""
+                                    max_lines: 1
+                                    text_overflow: TextOverflow.Ellipsis
+                                }
+                            }
+                            prompt_status := PanelLabelSmall {
+                                width: Fit
+                                margin: Inset{left: 6 right: 6 top: 0 bottom: 0}
+                                text: ""
+                                max_lines: 1
+                                draw_text +: { color: #xffa040 }
+                            }
+                            queue := PanelButton {
+                                width: Fit
+                                height: 15
+                                padding: Inset{left: 3 right: 5 top: 0 bottom: 0}
+                                margin: Inset{left: 0 right: 2 top: 0 bottom: 0}
+                                spacing: 3
+                                align: Align{x: 0.5 y: 0.5}
+                                icon_walk: Walk{width: 9 height: Fit}
+                                text: "queue"
+                                draw_bg +: { color: #x00000000 }
+                                draw_text +: {
+                                    color: #xc8c8d4
+                                    text_style +: { font_size: 7.5 }
+                                }
+                                draw_icon +: {
+                                    color: #xc8c8d4
+                                    svg: crate_resource("self:resources/icons/note_queue.svg")
+                                }
+                            }
+                            send := PanelButton {
+                                width: Fit
+                                height: 15
+                                padding: Inset{left: 3 right: 5 top: 0 bottom: 0}
+                                margin: Inset{left: 0 right: 0 top: 0 bottom: 0}
+                                spacing: 3
+                                align: Align{x: 0.5 y: 0.5}
+                                icon_walk: Walk{width: 9 height: Fit}
+                                text: "send"
+                                draw_bg +: { color: #x00000000 }
+                                draw_text +: {
+                                    color: #x8fd8ff
+                                    text_style +: { font_size: 7.5 }
+                                }
+                                draw_icon +: {
+                                    color: #x8fd8ff
+                                    svg: crate_resource("self:resources/icons/note_send.svg")
+                                }
+                            }
+                        }
                     }
                     ident_footer := View {
                         width: Fill
@@ -5841,15 +10488,48 @@ impl Tweaker {
                                 flow: Right
                                 spacing: 4
                                 align: Align{x: 0.0 y: 0.5}
-                                scope_label := FabLabelSmall { width: Fit text: "scope" }
-                                scope_this := Button { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "this" draw_text +: { text_style +: { font_size: 8.0 } } }
-                                scope_all := Button { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "all" draw_text +: { text_style +: { font_size: 8.0 } } }
+                                scope_label := PanelLabelSmall { width: Fit text: "scope" }
+                                scope_this := PanelButton { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "this" draw_text +: { text_style +: { font_size: 8.0 } } }
+                                scope_all := PanelButton { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "all" draw_text +: { text_style +: { font_size: 8.0 } } }
+                                scope_isolated := PanelButton { width: Fit height: 18 padding: Inset{left: 8 right: 8 top: 1 bottom: 1} text: "isolated" draw_text +: { text_style +: { font_size: 8.0 } } }
                             }
-                            scope_doc := FabLabelSmall { width: Fill text: "" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
-                            scope_origin := FabLabelSmall { width: Fill text: "" }
+                            // What the buttons MEAN belongs on the buttons,
+                            // not on a permanent line under them: it is read
+                            // once and then it is just a line taking up the
+                            // footer for the rest of the session.
+                            scope_tip := Tooltip {
+                                width: 0
+                                height: 0
+                                clip_x: false
+                                clip_y: false
+                                content := RoundedView {
+                                    width: Fit
+                                    height: Fit
+                                    padding: Inset{left: 8 right: 8 top: 6 bottom: 6}
+                                    draw_bg +: {
+                                        color: #x2a2a2a
+                                        border_size: 1.0
+                                        border_color: #x555555
+                                        radius: 3.
+                                    }
+                                    tooltip_label := PanelLabelSmall {
+                                        width: 230
+                                        text: ""
+                                    }
+                                }
+                            }
                         }
-                        title_label := FabLabelDim { width: Fill text: "tweak" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
-                        path_label := FabLabelSmall { width: Fill text: "click a widget to inspect it" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
+                        title_label := PanelLabelDim { width: Fill text: "tweak" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
+                        // The path line is wrapped so the CLICK has a rect
+                        // to hit: a Label's own area reports a few points
+                        // wide whatever it renders, a View's is the real
+                        // one. Clicking it copies the full path.
+                        path_row := View {
+                            width: Fill
+                            height: Fit
+                            flow: Down
+                            path_label := PanelLabelSmall { width: Fill text: "click a widget to inspect it" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
+                        }
                     }
                 }
             });
@@ -5869,6 +10549,10 @@ impl Tweaker {
             .child(live_id!(tree))
             .widget_uid()
             .0;
+        let tree_head = sidebar.child(live_id!(tree_wrap)).child(live_id!(tree_head));
+        self.tree_isolate_uid = tree_head.child(live_id!(isolate)).widget_uid().0;
+        self.view_center_uid = tree_head.child(live_id!(center)).widget_uid().0;
+        self.view_zoom_uid = tree_head.child(live_id!(zoom)).widget_uid().0;
         self.shader_list_uid = sidebar
             .child(live_id!(shader_col))
             .child(live_id!(shader_rows))
@@ -5877,48 +10561,1221 @@ impl Tweaker {
         self.sidebar = Some(sidebar);
     }
 
-    fn ensure_note_ui(&mut self, cx: &mut Cx) {
-        if self.note_ui.is_some() {
+    /// The floating extrusion readout: a label and a scrub field, parked in
+    /// the app's top-right while the exploded view is up.
+    fn ensure_spread_ui(&mut self, cx: &mut Cx) {
+        if self.spread_ui.is_some() {
             return;
         }
         let ui = cx.with_vm(|vm| {
             let value = script_eval!(vm, {
                 use mod.prelude.widgets.*
                 use mod.widgets.*
+                // No plate of its own: the readout sits ON the app, and a
+                // panel-coloured slab in the corner would read as another
+                // piece of sidebar that had come loose. The field keeps its
+                // own background — that one is telling you it can be typed
+                // in and dragged.
                 View {
-                    width: Fill
-                    height: 72
-                    flow: Down
-                    show_bg: true
-                    draw_bg +: {
-                        color: #x2d2d36
-                    }
-                    grip := View {
-                        width: Fill
-                        height: 11
-                        show_bg: true
-                        draw_bg +: {
-                            color: #x444452
-                        }
-                    }
-                    note_text := TextInput {
-                        width: Fill
-                        height: 54
-                        empty_text: "note on this item \u{2014} Insert or the note button: pinned, else hovered \u{00b7} Esc closes"
-                        draw_bg +: {
-                            color: #x22222a
-                        }
-                        draw_text +: {
-                            color: #xe8e8d0
-                            text_style +: { font_size: 8.5 }
-                        }
-                    }
+                    width: 116
+                    height: Fit
+                    flow: Right
+                    spacing: 5
+                    align: Align{x: 0.0 y: 0.5}
+                    padding: Inset{left: 8 right: 6 top: 4 bottom: 4}
+                    caption := FabLabelSmall { width: Fit text: "extrude" }
+                    value := FabValueInput { width: 48 height: 18 }
                 }
             });
             WidgetRef::script_from_value(vm, value)
         });
-        cx.widget_tree_insert_child(self.uid, live_id!(note), ui.clone());
-        self.note_ui = Some(ui);
+        self.spread_uid = ui.child(live_id!(value)).widget_uid().0;
+        if let Some(mut field) = ui.child(live_id!(value)).borrow_mut::<FabValueInput>() {
+            field.set_hint(
+                Some(SPLODED_SPREAD_MIN as f64),
+                Some(SPLODED_SPREAD_MAX as f64),
+                Some(0.01),
+            );
+        }
+        cx.widget_tree_insert_child(self.uid, live_id!(spread_hud), ui.clone());
+        self.spread_ui = Some(ui);
+    }
+
+    /// Record a rename the person asked for: `/tweak/state` reports it as a
+    /// `rename` alongside the selection, and the log ring carries it, so the
+    /// AI can do it in the source where it belongs.
+    fn request_rename(&mut self, cx: &mut Cx, to: &str) {
+        let Some(sel) = session().lock().unwrap().pinned.clone() else { return };
+        let reference = self.sel_ref(cx, sel.uid);
+        let from = tree_name_of(cx, sel.uid);
+        let renames = {
+            let mut s = session().lock().unwrap();
+            s.load_renames();
+            s.renames.retain(|r| r.reference != reference);
+            if !to.is_empty() && to != from {
+                s.renames.push(TweakRename {
+                    reference: reference.clone(),
+                    from: from.clone(),
+                    to: to.to_string(),
+                });
+                s.vibe_status = format!("wants to be called `{to}` \u{2014} the AI renames it");
+            }
+            s.renames.clone()
+        };
+        name_store_save(&renames);
+        if to.is_empty() || to == from {
+            log!("TWEAK rename request dropped for {reference}");
+        } else {
+            log!("TWEAK rename request {reference} ({}) -> {to}", sel.ty);
+        }
+        // A dock ask needs a name to derive its ids from, and a rename ask
+        // gives an anonymous container one: the dock row comes and goes
+        // with it.
+        self.sel_dock = self.dock_gate(cx, sel.uid);
+        self.redraw_sidebar(cx);
+    }
+
+    /// Ask for the selection to become a grid or a flex container. A
+    /// widget's type cannot change through an apply, so this is recorded the
+    /// way a rename is and the agent edits the source; asking again takes
+    /// the request back. Only a grid or flex ask counts as the one to take
+    /// back: a dock ask on the same widget stands on its own.
+    fn request_convert(&mut self, cx: &mut Cx, to: &str) {
+        let Some(uid) = session().lock().unwrap().pinned.as_ref().map(|p| p.uid) else { return };
+        let reference = self.sel_ref(cx, uid);
+        let had = {
+            let mut s = session().lock().unwrap();
+            s.load_converts();
+            convert_for(&s.converts, &reference, false).is_some()
+        };
+        self.set_convert(cx, reference, to, !had, None);
+    }
+
+    /// Ask for the pinned container to sit in a Dock as its one tab, or take
+    /// the ask back. Moving a widget into a new parent is no more a live
+    /// apply than changing its type, so it is recorded beside the grid and
+    /// flex asks. The size goes with it, off the widget's own rect: the
+    /// pick's rect is clipped by whatever scrolls the widget, and the size
+    /// is what the Dock is written with where the container fits today.
+    /// An untick takes back the ask the box shows, which on a tab's body is
+    /// the one made on the container before it was wrapped.
+    fn request_dock(&mut self, cx: &mut Cx, on: bool) {
+        let Some(uid) = session().lock().unwrap().pinned.as_ref().map(|p| p.uid) else { return };
+        if !on {
+            let Some(reference) = self.dock_ask_ref(cx, uid) else { return };
+            self.set_convert(cx, reference, "dock", false, None);
+            return;
+        }
+        // The box only shows for a container that qualifies; a tick that
+        // lands on anything else (the selection moved under it) is no ask,
+        // and the next draw puts the box back.
+        if self.sel_dock != DockGate::Can {
+            return;
+        }
+        let rect = cx.widget_tree().widget(WidgetUid(uid)).area().rect(cx);
+        let size = (rect.size.x > 0.0 && rect.size.y > 0.0).then_some((rect.size.x, rect.size.y));
+        let reference = self.sel_ref(cx, uid);
+        self.set_convert(cx, reference, "dock", true, size);
+    }
+
+    /// The reference the pinned selection's dock ask stands at, if one
+    /// does: its own, or on a tab's body in a Dock the ask that put it
+    /// there, so the box shows that ask and an untick takes it back.
+    fn dock_ask_ref(&mut self, cx: &Cx, uid: u64) -> Option<String> {
+        let reference = self.sel_ref(cx, uid);
+        let in_dock = self.sel_dock == DockGate::InDock;
+        let mut s = session().lock().unwrap();
+        s.load_converts();
+        if let Some(ask) = convert_for(&s.converts, &reference, true) {
+            return Some(ask.reference.clone());
+        }
+        if !in_dock {
+            return None;
+        }
+        s.load_renames();
+        let s = &*s;
+        dock_ask_done_by(&s.converts, &s.renames, &reference).map(|ask| ask.reference.clone())
+    }
+
+    /// Stand a layout ask up at `reference` or take it back, keyed by the
+    /// widget and the ask's family, then save the store.
+    fn set_convert(
+        &mut self,
+        cx: &mut Cx,
+        reference: String,
+        to: &str,
+        want: bool,
+        size: Option<(f64, f64)>,
+    ) {
+        let Some(sel) = session().lock().unwrap().pinned.clone() else { return };
+        let dock = is_dock_ask(to);
+        let (converts, had) = {
+            let mut s = session().lock().unwrap();
+            s.load_converts();
+            let ask = TweakConvert {
+                reference: reference.clone(),
+                from: sel.ty.clone(),
+                to: to.to_string(),
+                size,
+            };
+            let had = converts_set(&mut s.converts, ask, want);
+            if want {
+                s.vibe_status = if dock {
+                    "wants to be dockable \u{2014} the AI wraps it in a Dock".to_string()
+                } else {
+                    format!("wants to be a {to} \u{2014} the AI changes the type")
+                };
+            } else if dock && had {
+                s.vibe_status = "dock ask taken back".to_string();
+            }
+            (s.converts.clone(), had)
+        };
+        if want || had {
+            layout_store_save(&converts);
+        }
+        if want {
+            log!("TWEAK layout request {reference} ({}) -> {to}", sel.ty);
+        } else if dock && had {
+            log!("TWEAK layout request taken back for {reference} -> dock");
+        } else if had {
+            log!("TWEAK layout request taken back for {reference}");
+        }
+        self.redraw_sidebar(cx);
+    }
+
+    /// The panel's own uid, 0 until it is built. The Tree tab reads the
+    /// tree from inside this widget's draw, where the widget itself is
+    /// borrowed and reads as uid 0; the panel under it is what identifies
+    /// the subtree to leave out.
+    fn sidebar_uid(&self) -> u64 {
+        self.sidebar.as_ref().map_or(0, |sidebar| sidebar.widget_uid().0)
+    }
+
+    /// Read a selection's [`DockFacts`] off the tree and judge them. The
+    /// type names are looked up once: a list ancestor can be many levels up.
+    fn dock_gate(&mut self, cx: &mut Cx, uid: u64) -> DockGate {
+        let names = widget_type_names(cx);
+        let type_of = |cx: &mut Cx, uid: WidgetUid| {
+            cx.widget_tree()
+                .widget(uid)
+                .widget_type_id()
+                .and_then(|type_id| names.get(&type_id).copied())
+                .map(live_id_token)
+                .unwrap_or_default()
+        };
+        let ty = type_of(cx, WidgetUid(uid));
+        let parent = cx.widget_tree().parent_of(WidgetUid(uid));
+        let parent_ty = parent.map(|p| type_of(cx, p)).unwrap_or_default();
+        let mut has_children = false;
+        cx.widget_tree()
+            .widget(WidgetUid(uid))
+            .children(&mut |_id, _child| has_children = true);
+        let mut in_list = false;
+        let mut cur = parent;
+        for _ in 0..64 {
+            let Some(up) = cur else { break };
+            if TEMPLATE_LISTS.contains(&type_of(cx, up).as_str()) {
+                in_list = true;
+                break;
+            }
+            cur = cx.widget_tree().parent_of(up);
+        }
+        let named = !tree_name_of(cx, uid).is_empty() || {
+            let reference = self.sel_ref(cx, uid);
+            let mut s = session().lock().unwrap();
+            s.load_renames();
+            s.renames.iter().any(|r| r.reference == reference && !r.to.is_empty())
+        };
+        // Picks already skip the inspector and the Tree tab cuts its panel
+        // out; this is the guard for a selection that arrives some other
+        // way. The inspector puts more than the panel in the tree (the
+        // spread readout sits under the inspector itself), so all of it.
+        let inspector = [self.uid.0, self.sidebar_uid()];
+        let in_panel = inspector
+            .into_iter()
+            .any(|root| root != 0 && (uid == root || is_ancestor_of(cx, root, uid)));
+        let body = self.find_body(cx).map_or(0, |body| body.widget_uid().0);
+        let in_body = body != 0 && is_ancestor_of(cx, body, uid);
+        dock_gate_of(&DockFacts {
+            ty: &ty,
+            parent_ty: &parent_ty,
+            has_children,
+            named,
+            in_list,
+            in_body,
+            in_panel,
+        })
+    }
+
+    /// The lock and the view on it, as `ViewState` reads them.
+    fn view_state(&self) -> ViewState {
+        ViewState {
+            tree_isolate: self.tree_isolate,
+            isolate_uid: self.isolate_uid,
+            center: self.view_center,
+            zoom: self.view_zoom,
+        }
+    }
+
+    fn set_view_state(&mut self, state: ViewState) {
+        self.tree_isolate = state.tree_isolate;
+        self.isolate_uid = state.isolate_uid;
+        self.view_center = state.center;
+        self.view_zoom = state.zoom;
+    }
+
+    /// Is the Tree tab locked onto one branch?
+    fn isolated(&self) -> bool {
+        self.view_state().isolated()
+    }
+
+    /// The view controls under the current isolation: see `view_focus_rule`.
+    fn view_focus_rule(&self) -> ViewFocusRule {
+        self.view_state().rule()
+    }
+
+    /// The lock checked against its target, once per event and per draw: a
+    /// target that is off the screen — a story switched, a page flipped, its
+    /// fold closed (`target_presence`) — is let go, and the view rests with
+    /// it, so Center and Zoom dim instead of holding a zoom on nothing. Says
+    /// whether anything moved; the caller pushes the view.
+    ///
+    /// `in_frame` reads the draw lists as well as the tree, and that is only
+    /// sound between frames: mid-draw an open list has not drawn what comes
+    /// after this panel yet, and a list links into its parent only when it
+    /// ends. So the draw asks for `settle_frame`, and the event it brings,
+    /// right after the window drew, is where the frame is read. Every other
+    /// call reads the tree alone.
+    fn settle_isolation(&mut self, cx: &mut Cx, in_frame: bool) -> bool {
+        let state = self.view_state();
+        if !state.isolated() {
+            return false;
+        }
+        let presence = target_presence(sight_target(cx, state.isolate_uid, in_frame));
+        let next = state.settled(presence);
+        if next == state {
+            return false;
+        }
+        self.set_view_state(next);
+        log!("TWEAK tree isolate off: uid {} {}", state.isolate_uid, presence.reason());
+        self.tree_scrolled_uid = 0;
+        self.redraw_sidebar(cx);
+        self.redraw_overlay(cx);
+        true
+    }
+
+    /// Push Center / Zoom down onto the view transform.
+    fn apply_view_focus(&mut self, cx: &mut Cx) {
+        let zoom = self.view_zoom.max(1.0);
+        let (center, level) = match self.focus_point(cx) {
+            Some((point, level)) => (Some(point), level),
+            None => (None, 0.0),
+        };
+        cx.sploded_set_focus(center, level, zoom);
+    }
+
+    /// The layout point the view holds in the middle of the screen, or
+    /// `None` when Centre is off (the window centres on itself).
+    ///
+    /// Centre acts on the ISOLATED branch: it is only ever on while one is
+    /// locked (`view_focus_rule`) and goes off with the isolation.
+    ///
+    /// "The middle of the screen" is the middle of what is left of it — the
+    /// panel band covers the right edge — but that correction belongs in
+    /// screen pixels, not here: see `SplodedParams::pan`.
+    /// The plane is part of the answer: in the exploded view the rotation
+    /// displaces a layer across the screen in proportion to its depth, so
+    /// centring needs to know WHICH sheet the widget is on, not just where
+    /// it sits on that sheet.
+    fn focus_point(&self, cx: &Cx) -> Option<(Vec2d, f32)> {
+        if !self.view_center {
+            return None;
+        }
+        if !self.isolated() {
+            return None;
+        }
+        let uid = self.isolate_uid;
+        let widget = cx.widget_tree().widget(WidgetUid(uid));
+        if widget.is_empty() {
+            return None;
+        }
+        let rect = widget.area().clipped_rect_union(cx);
+        if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
+            return None;
+        }
+        let level = cx.sploded_depth_of(uid).unwrap_or(0) as f32;
+        Some((
+            dvec2(
+                rect.pos.x + rect.size.x * 0.5,
+                rect.pos.y + rect.size.y * 0.5,
+            ),
+            level,
+        ))
+    }
+
+    /// A pin badge was clicked: make its widget the selection and put its
+    /// note on screen, open and focused. Unlike the hotkey this never
+    /// toggles — clicking a pin means "show me that note".
+    fn open_badged_note(&mut self, cx: &mut Cx, uid: u64) {
+        let widget = cx.widget_tree().widget(WidgetUid(uid));
+        if widget.is_empty() {
+            return;
+        }
+        let rect = widget.area().clipped_rect_union(cx);
+        let center = dvec2(rect.pos.x + rect.size.x * 0.5, rect.pos.y + rect.size.y * 0.5);
+        let window_id = self.my_window.unwrap_or(0);
+        let Some(pick) = pick_of_widget(cx, &widget, center, window_id) else {
+            return;
+        };
+        let path = self.sel_ref(cx, uid);
+        log!("TWEAK note on {path}");
+        {
+            let mut s = session().lock().unwrap();
+            s.pinned = Some(pick);
+            // The badge callers always have a note already; the right click
+            // may be the first thing ever said about this widget, so make
+            // one — without it the tab had nothing to show at all.
+            s.load_notes();
+            if !s.notes.iter().any(|n| n.path == path) {
+                s.notes.push(TweakNote::new(path));
+            }
+        }
+        cx.set_key_focus(Area::Empty);
+        self.panel_tab = PanelTab::Spec;
+        self.rows_uid = 0;
+        self.redraw_sidebar(cx);
+        self.redraw_overlay(cx);
+    }
+
+    /// Open or close the note card on the item we are IN — the pinned
+    /// selection, else the widget under the hover (which becomes the
+    /// selection, so the tab has something to be about).
+    fn toggle_note(&mut self, cx: &mut Cx) {
+        let sel_uid = {
+            let mut s = session().lock().unwrap();
+            if s.pinned.is_none() {
+                if let Some(hover) = s.hover.clone() {
+                    s.pinned = Some(hover);
+                }
+            }
+            s.pinned.as_ref().map(|p| p.uid)
+        };
+        let Some(uid) = sel_uid else { return };
+        let path = self.sel_ref(cx, uid);
+        // There is nothing to open or shut any more: writing about a widget
+        // is a tab, so this toggles between that tab and the one before it.
+        if self.panel_tab == PanelTab::Spec {
+            self.panel_tab = PanelTab::Props;
+            self.note_key_shown.clear();
+            let mut s = session().lock().unwrap();
+            s.notes.retain(|n| !n.text.trim().is_empty() || !n.rules.trim().is_empty());
+        } else {
+            self.panel_tab = PanelTab::Spec;
+            let mut s = session().lock().unwrap();
+            s.load_notes();
+            if !s.notes.iter().any(|n| n.path == path) {
+                s.notes.push(TweakNote::new(path));
+            }
+        }
+        self.redraw_overlay(cx);
+    }
+
+    /// Is something being TYPED into? The keys that act on a selection — the
+    /// hierarchy arrows, Cmd+Z — belong to the caret whenever there is one,
+    /// and to the selection whenever there is not. Asking the panel's own
+    /// fields directly is what lets the arrows keep working while the TREE
+    /// has focus: a tree row is a selection, not a text cursor, so walking
+    /// the hierarchy from it is exactly what the arrows should do.
+    fn focus_is_text(&self, cx: &Cx) -> bool {
+        if cx.key_focus() == Area::Empty {
+            return false;
+        }
+        let mut fields: Vec<Area> = Vec::new();
+        if let Some(sidebar) = self.sidebar.as_ref() {
+            fields.push(sidebar.child(live_id!(filter_row)).child(live_id!(search)).area());
+            fields.push(sidebar.child(live_id!(prompt_row)).child(live_id!(prompt_field)).area());
+            for index in 0..3 {
+                if let Some(field) = self.spec_field(index) {
+                    fields.push(field.area());
+                }
+            }
+        }
+        // The property rows' own inputs come and go with the selection, so
+        // ask the live ones rather than keeping a list.
+        for row in self.visible.iter() {
+            fields.push(row.item.child(live_id!(value)).area());
+            fields.push(row.item.child(live_id!(name_field)).area());
+        }
+        fields.iter().any(|area| !area.is_empty() && cx.has_key_focus(*area))
+    }
+
+    /// The selection's exact reference: its indexed path. This is what a note
+    /// is keyed by, what the footer copies and what an @mention writes — a
+    /// bare `path` renders every unnamed widget as `-` and would key three
+    /// different containers to one note.
+    fn sel_ref(&mut self, cx: &Cx, uid: u64) -> String {
+        if self.sel_ref.0 != uid || self.sel_ref.1.is_empty() {
+            self.sel_ref = (uid, indexed_path(cx, uid));
+        }
+        self.sel_ref.1.clone()
+    }
+
+    /// The Spec tab's note key, by the current selection.
+    fn note_path(&mut self, cx: &Cx) -> Option<String> {
+        if self.panel_tab != PanelTab::Spec {
+            return None;
+        }
+        let uid = session().lock().unwrap().pinned.as_ref().map(|p| p.uid)?;
+        Some(self.sel_ref(cx, uid))
+    }
+
+    /// Take the card's live text into the session (the TextInput only
+    /// reports on commit, and a send must carry what is on screen).
+
+    /// The Spec tab: what is written ABOUT the selection, and the rules
+    /// that stand over the whole app.
+    ///
+    /// Each field is read back into the model while it HAS the caret and
+    /// seeded from the model while it does not. That asymmetry is the whole
+    /// trick: seeding unconditionally overwrites what is being typed every
+    /// frame, and reading unconditionally lets a stale field overwrite the
+    /// model when the selection changes under it.
+    fn draw_spec(&mut self, cx: &mut Cx2d, sel: Option<&TweakPick>) {
+        let Some(sidebar) = self.sidebar.clone() else { return };
+        let col = sidebar.child(live_id!(spec_col));
+        let path = sel.map(|p| self.sel_ref(cx, p.uid));
+        let path_for_seed = path.clone();
+
+        col.child(live_id!(spec_for)).set_text(
+            cx,
+            &match (&path, sel) {
+                (Some(path), Some(sel)) => format!("{}  \u{2022}  {}", sel.ty, tail_ellipsis(path, 40)),
+                _ => "nothing selected \u{2014} the app rules below still work".to_string(),
+            },
+        );
+
+        // notes and rules belong to the selection; with nothing selected
+        // there is nothing for them to be about, so they say so and stay
+        // out of the way rather than writing to a record that has no path.
+        // One View carries all four, because only a View's visibility can be
+        // toggled: `TextInput` has no `visible` of its own, so `set_visible`
+        // on the fields themselves was silently nothing -- the headers hid
+        // (Label declares one) and the boxes stayed.
+        let have = path.is_some();
+        for index in 0..2 {
+            if let Some((head, bx, _)) = self.spec_row(index) {
+                head.set_visible(cx, have);
+                bx.set_visible(cx, have);
+            }
+        }
+        self.note_text_uid = self.spec_field(0).map(|f| f.widget_uid().0).unwrap_or(0);
+        // The dragged split, in case it changed while the tab was not up.
+        self.spec_apply_weights(cx);
+        // The splitters only exist while there is something above them to
+        // split with: with nothing selected the two upper rows are gone and
+        // the app rules header is just a header.
+        for index in 1..3 {
+            if let Some((head, _, _)) = self.spec_row(index) {
+                head.child(live_id!(grip)).set_visible(cx, have);
+            }
+        }
+        {
+            // The cross is only there when there is something to clear: an
+            // always-present one invites a click that does nothing, and this
+            // is the only control in the tab that destroys what you wrote.
+            if let Some((head, _, field)) = self.spec_row(0) {
+                let clear = head.child(live_id!(notes_clear));
+                self.spec_clear_uid = clear.widget_uid().0;
+                clear.set_visible(cx, !field.text().is_empty());
+            }
+        }
+
+        if let Some(path) = path_for_seed {
+            let (mut notes, mut rules) = {
+                let mut s = session().lock().unwrap();
+                s.load_notes();
+                match s.notes.iter().find(|n| n.path == path) {
+                    Some(note) => (note.text.clone(), note.rules.clone()),
+                    None => (String::new(), String::new()),
+                }
+            };
+            // `note_key_shown` is the path the two fields were last SEEDED
+            // for, and it is written here and nowhere else. The frame the
+            // selection moves, the fields still hold the old widget's text
+            // -- and if that frame read them back, it would commit the old
+            // widget's words to the new widget's record, destroying whatever
+            // the new one had. So a changed path seeds, unconditionally,
+            // caret or no caret; only a field seeded for THIS path is ever
+            // read back into it.
+            let seeded = self.note_key_shown == path;
+            let mut changed = false;
+            for (index, slot) in [(0usize, &mut notes), (1usize, &mut rules)] {
+                let Some(field) = self.spec_field(index) else { continue };
+                let focused = field.area() != Area::Empty && cx.has_key_focus(field.area());
+                if seeded && focused {
+                    let typed = field.text();
+                    if typed != *slot {
+                        *slot = typed;
+                        changed = true;
+                    }
+                } else if field.text() != *slot {
+                    field.set_text(cx, slot);
+                }
+            }
+            self.note_key_shown = path.clone();
+            if changed {
+                let mut s = session().lock().unwrap();
+                if !s.notes.iter().any(|n| n.path == path) {
+                    s.notes.push(TweakNote::new(path.clone()));
+                }
+                if let Some(note) = s.notes.iter_mut().find(|n| n.path == path) {
+                    note.text = notes;
+                    note.rules = rules;
+                }
+                drop(s);
+                self.spec_dirty = true;
+            }
+        }
+
+        if path.is_none() {
+            self.note_key_shown.clear();
+        }
+
+        // The app rules need no selection -- that is the reason this tab
+        // has to draw with nothing picked at all.
+        {
+            let Some(field) = self.spec_field(2) else { return };
+            let live = {
+                let mut s = session().lock().unwrap();
+                s.load_app_rules();
+                s.app_rules.clone()
+            };
+            if field.area() != Area::Empty && cx.has_key_focus(field.area()) {
+                let typed = field.text();
+                if typed != live {
+                    session().lock().unwrap().app_rules = typed;
+                    self.spec_dirty = true;
+                }
+            } else if field.text() != live {
+                field.set_text(cx, &live);
+            }
+        }
+
+        // Nothing in the tab has the caret any more, so what was typed is
+        // finished: put it on disk.
+        if self.spec_dirty
+            && !(0..3).any(|index| {
+                let Some(field) = self.spec_field(index) else { return false };
+                let area = field.area();
+                !area.is_empty() && cx.has_key_focus(area)
+            })
+        {
+            self.spec_flush();
+        }
+    }
+
+    /// A one-line explanation for the control under the pointer, if it is
+    /// one of the panel's own. The property rows already explain themselves
+    /// through `row_docs`; this covers everything else a person can press --
+    /// the tabs, the filter row, the tree head, the scope buttons, the Spec
+    /// tab's cross and splitters, the strip's buttons, the shader fold, the
+    /// footer's path line, the extrusion readout, and the segments inside a
+    /// hovered row (flow, align, size mode, the box legs).
+    ///
+    /// Shown through the same Tooltip the scope buttons use -- see
+    /// `chrome_tip_hover` -- so every control in the panel explains itself
+    /// in one voice.
+    fn chrome_doc(&self, cx: &Cx, abs: Vec2d) -> Option<(Rect, String)> {
+        fn place(rect: Rect, text: &str) -> (Rect, String) {
+            (rect, text.to_string())
+        }
+        fn hit(cx: &Cx, w: &WidgetRef, abs: Vec2d) -> Option<Rect> {
+            let r = w.area().rect(cx);
+            (r.size.x > 0.0 && r.size.y > 0.0 && r.contains(abs)).then_some(r)
+        }
+
+        // The extrusion readout floats over the app, outside the band.
+        if let Some(ui) = self.spread_ui.as_ref() {
+            if let Some(r) = hit(cx, &ui.child(live_id!(value)), abs) {
+                return Some(place(r, "how far the exploded layers stand apart \u{00b7} drag to scrub, wheel to extrude"));
+            }
+        }
+        let sidebar = self.sidebar.as_ref()?;
+        if self.band.size.x <= 0.0 || abs.x < self.band.pos.x {
+            return None;
+        }
+
+        // A hovered property row's own segments first: those ids repeat in
+        // every row, so they are only meaningful inside the row under the
+        // pointer.
+        if let Some(row) = self
+            .visible
+            .iter()
+            .find(|row| {
+                let r = row.item.area().clipped_rect(cx);
+                r.size.y > 0.0 && r.contains(abs)
+            })
+        {
+            let item = &row.item;
+            let inner: [(&[LiveId], &str); 64] = [
+                (&[live_id!(flow_col), live_id!(dir_row), live_id!(flow_seg), live_id!(f_right)], "children flow left to right"),
+                (&[live_id!(flow_col), live_id!(dir_row), live_id!(flow_seg), live_id!(f_down)], "children flow top to bottom"),
+                (&[live_id!(flow_col), live_id!(dir_row), live_id!(flow_seg), live_id!(f_over)], "children stack on top of each other"),
+                (&[live_id!(flow_col), live_id!(dir_row), live_id!(f_wrap)], "children that run out of width start a new row"),
+                (&[live_id!(flow_col), live_id!(dir_row), live_id!(ra_seg), live_id!(ra_top)], "the children of a row line up along its top"),
+                (&[live_id!(flow_col), live_id!(dir_row), live_id!(ra_seg), live_id!(ra_mid)], "the children of a row line up on its centre line"),
+                (&[live_id!(flow_col), live_id!(dir_row), live_id!(ra_seg), live_id!(ra_bottom)], "the children of a row sit on its baseline"),
+                (&[live_id!(flow_col), live_id!(gap_row), live_id!(spacing_input)], "space between the children, in points"),
+                (&[live_id!(flow_col), live_id!(gap_row), live_id!(wrap_box), live_id!(wrap_input)], "space between wrapped rows, in points"),
+                (&[live_id!(align_col), live_id!(just_row), live_id!(just_seg), live_id!(j_start)], "children gather at the start of the flow"),
+                (&[live_id!(align_col), live_id!(just_row), live_id!(just_seg), live_id!(j_mid)], "children gather in the middle of the flow"),
+                (&[live_id!(align_col), live_id!(just_row), live_id!(just_seg), live_id!(j_end)], "children gather at the end of the flow"),
+                (&[live_id!(align_col), live_id!(space_row), live_id!(space_seg), live_id!(s_between)], "the free space goes between the children"),
+                (&[live_id!(align_col), live_id!(space_row), live_id!(space_seg), live_id!(s_around)], "each child gets an equal share of free space on both sides"),
+                (&[live_id!(align_col), live_id!(space_row), live_id!(space_seg), live_id!(s_evenly)], "every gap, edges included, gets the same free space"),
+                (&[live_id!(align_col), live_id!(cross_row), live_id!(cross_seg), live_id!(c_start)], "across the flow, children sit at the start"),
+                (&[live_id!(align_col), live_id!(cross_row), live_id!(cross_seg), live_id!(c_mid)], "across the flow, children sit in the middle"),
+                (&[live_id!(align_col), live_id!(cross_row), live_id!(cross_seg), live_id!(c_end)], "across the flow, children sit at the end"),
+                (&[live_id!(ctr_col), live_id!(mode_row), live_id!(convert)], "ask the agent to change this container's type in the source \u{00b7} press again to take it back"),
+                (&[live_id!(ctr_col), live_id!(dock_row), live_id!(dock_check)], "ask the agent to put this container in a Dock as its one tab \u{00b7} untick to take the ask back"),
+                (&[live_id!(ctr_col), live_id!(name_row), live_id!(ctr_name)], "name this container so its children can size in cqw / cqh of it"),
+                (&[live_id!(abs_col), live_id!(abs_check)], "take it out of the flow and place it at x, y in its parent"),
+                (&[live_id!(abs_col), live_id!(abs_xy), live_id!(abs_x)], "points from the parent's left"),
+                (&[live_id!(abs_col), live_id!(abs_xy), live_id!(abs_y)], "points from the parent's top"),
+                (&[live_id!(align_col), live_id!(just_row), live_id!(just_seg), live_id!(j_stretch)], "each cell's child stretches across its column"),
+                (&[live_id!(align_col), live_id!(cross_row), live_id!(cross_seg), live_id!(c_stretch)], "each cell's child stretches down its row"),
+                (&[live_id!(grid_col), live_id!(cols_row), live_id!(cols_in)], "the columns, as CSS \u{00b7} 70px 20% 1fr minmax(60px, 1fr) repeat(2, minmax(50px, 1fr))"),
+                (&[live_id!(grid_col), live_id!(rows_row), live_id!(rows_in)], "the rows, as CSS \u{00b7} 48px 1fr minmax(40px, auto-fit)"),
+                (&[live_id!(grid_col), live_id!(gaps_row), live_id!(gap_col)], "space between columns, in points"),
+                (&[live_id!(grid_col), live_id!(gaps_row), live_id!(gap_row_in)], "space between rows, in points"),
+                (&[live_id!(grid_col), live_id!(fill_row), live_id!(fill_seg), live_id!(f_rows)], "children without a place fill each row before the next"),
+                (&[live_id!(grid_col), live_id!(fill_row), live_id!(fill_seg), live_id!(f_cols)], "children without a place fill each column before the next"),
+                (&[live_id!(grid_col), live_id!(areas_row), live_id!(areas_in)], "named areas: one row per / and a . for an empty cell \u{00b7} hero hero . / . . ."),
+                (&[live_id!(cell_col), live_id!(place_row), live_id!(cell_c)], "the column it starts in, from 1 \u{00b7} 0 lets the fill order place it"),
+                (&[live_id!(cell_col), live_id!(place_row), live_id!(cell_r)], "the row it starts in, from 1 \u{00b7} 0 lets the fill order place it"),
+                (&[live_id!(cell_col), live_id!(span_row), live_id!(cell_cs)], "how many columns it spans \u{00b7} 0 for one"),
+                (&[live_id!(cell_col), live_id!(span_row), live_id!(cell_rs)], "how many rows it spans \u{00b7} 0 for one"),
+                (&[live_id!(cell_col), live_id!(area_row), live_id!(cell_area)], "the named area it fills, from the grid's areas"),
+                (&[live_id!(link)], "one value for all four sides"),
+                (&[live_id!(size_col), live_id!(w_row), live_id!(w_seg), live_id!(w_fill)], "width: fill whatever the parent leaves"),
+                (&[live_id!(size_col), live_id!(w_row), live_id!(w_seg), live_id!(w_fit)], "width: fit the content"),
+                (&[live_id!(size_col), live_id!(w_row), live_id!(w_seg), live_id!(w_fix)], "width: a fixed size, in points"),
+                (&[live_id!(size_col), live_id!(w_row), live_id!(w_input)], "the width \u{00b7} a number, or a size such as 50% or calc(100% - 20px)"),
+                (&[live_id!(size_col), live_id!(h_row), live_id!(h_seg), live_id!(h_fill)], "height: fill whatever the parent leaves"),
+                (&[live_id!(size_col), live_id!(h_row), live_id!(h_seg), live_id!(h_fit)], "height: fit the content"),
+                (&[live_id!(size_col), live_id!(h_row), live_id!(h_seg), live_id!(h_fix)], "height: a fixed size, in points"),
+                (&[live_id!(size_col), live_id!(h_row), live_id!(h_input)], "the height \u{00b7} a number, or a size such as 50% or calc(100% - 20px)"),
+                (&[live_id!(size_col), live_id!(w_clamp), live_id!(w_min)], "never narrower than this \u{00b7} empty for no bound"),
+                (&[live_id!(size_col), live_id!(w_clamp), live_id!(w_max)], "never wider than this \u{00b7} empty for no bound"),
+                (&[live_id!(size_col), live_id!(h_clamp), live_id!(h_min)], "never shorter than this \u{00b7} empty for no bound"),
+                (&[live_id!(size_col), live_id!(h_clamp), live_id!(h_max)], "never taller than this \u{00b7} empty for no bound"),
+                (&[live_id!(size_col), live_id!(w_grow), live_id!(w_weight)], "its share of the free width against its siblings"),
+                (&[live_id!(size_col), live_id!(w_grow), live_id!(w_shrink)], "how readily it gives up width when there is too little \u{00b7} 0 never"),
+                (&[live_id!(size_col), live_id!(w_basis), live_id!(w_basis_in)], "the width it starts from before the free space is shared"),
+                (&[live_id!(size_col), live_id!(h_grow), live_id!(h_weight)], "its share of the free height against its siblings"),
+                (&[live_id!(size_col), live_id!(h_grow), live_id!(h_shrink)], "how readily it gives up height when there is too little \u{00b7} 0 never"),
+                (&[live_id!(size_col), live_id!(h_basis), live_id!(h_basis_in)], "the height it starts from before the free space is shared"),
+                (&[live_id!(size_col), live_id!(aspect_row), live_id!(aspect_in)], "width over height \u{00b7} 1.5 or 3:2 \u{00b7} empty for none"),
+                (&[live_id!(box_col), live_id!(top_row), live_id!(leg_top)], "the top side, in points"),
+                (&[live_id!(box_col), live_id!(mid_row), live_id!(leg_left)], "the left side, in points"),
+                (&[live_id!(box_col), live_id!(mid_row), live_id!(leg_right)], "the right side, in points"),
+                (&[live_id!(box_col), live_id!(bot_row), live_id!(leg_bottom)], "the bottom side, in points"),
+                (&[live_id!(tname_wrap), live_id!(tname)], "ask the agent to give this widget a name in the source"),
+                (&[live_id!(value)], "the value \u{00b7} drag to scrub, double-click the label to reset"),
+            ];
+            for (path, text) in inner {
+                let mut w = item.clone();
+                for id in path {
+                    w = w.child(*id);
+                }
+                if let Some(r) = hit(cx, &w, abs) {
+                    return Some(place(r, text));
+                }
+            }
+        }
+
+        let chrome: [(&[LiveId], &str); 27] = [
+            (&[live_id!(theme_head), live_id!(theme_pick_row), live_id!(theme_wear)], "put this panel in the theme above too \u{00b7} off, the panel keeps its own colours whatever the app is wearing"),
+            (&[live_id!(filter_row), live_id!(search)], "filter the properties by name \u{00b7} or search them, with the magnifier"),
+            (&[live_id!(filter_row), live_id!(find)], "search instead of filter: every row stays, the hits are counted \u{00b7} F3 next, Shift+F3 previous"),
+            (&[live_id!(filter_row), live_id!(nav), live_id!(prev)], "the previous hit (Shift+F3)"),
+            (&[live_id!(filter_row), live_id!(nav), live_id!(next)], "the next hit (F3)"),
+            (&[live_id!(filter_row), live_id!(select)], "hand the mouse back to the app: its buttons work, the selection stays"),
+            (&[live_id!(filter_row), live_id!(sploded)], "explode the widget tree into layers \u{00b7} wheel extrudes, drag orbits"),
+            (&[live_id!(tab_row), live_id!(tab_props)], "the selection's properties, edited live"),
+            (&[live_id!(tab_row), live_id!(tab_shader)], "the selection's draw layers: preview, source, states"),
+            (&[live_id!(tab_row), live_id!(tab_tree)], "the widget tree: isolate a branch, centre, zoom"),
+            (&[live_id!(tab_row), live_id!(tab_theme)], "the theme's colours and values, edited live everywhere"),
+            (&[live_id!(tab_row), live_id!(tab_spec)], "notes and rules about the selection, and rules for the whole app"),
+            (&[live_id!(tree_wrap), live_id!(tree_head), live_id!(isolate)], "show only the selection and what is inside it"),
+            (&[live_id!(tree_wrap), live_id!(tree_head), live_id!(center)], "keep the view centred on the selection"),
+            (&[live_id!(tree_wrap), live_id!(tree_head), live_id!(zoom)], "magnify the app view \u{00b7} 1 is life size"),
+            (&[live_id!(shader_col), live_id!(src_fold)], "show the shader's source \u{00b7} Ctrl+Enter applies an edit"),
+            (&[live_id!(shader_col), live_id!(states_row), live_id!(states_pause)], "pause the animated state previews"),
+            (&[live_id!(spec_col), live_id!(notes_head), live_id!(notes_clear)], "empty the notes"),
+            (&[live_id!(spec_col), live_id!(rules_head), live_id!(grip)], "drag to share the tab's height between the fields"),
+            (&[live_id!(spec_col), live_id!(app_head), live_id!(grip)], "drag to share the tab's height between the fields"),
+            (&[live_id!(prompt_row), live_id!(prompt_field)], "tell the agent what should change about the selection"),
+            (&[live_id!(prompt_row), live_id!(prompt_bar), live_id!(queue)], "hold this message for the next send (Alt+Enter)"),
+            (&[live_id!(prompt_row), live_id!(prompt_bar), live_id!(send)], "send to the agent now (Ctrl+Enter)"),
+            (&[live_id!(ident_footer), live_id!(scope_row), live_id!(scope_line), live_id!(scope_this)], "edits change this instance only"),
+            (&[live_id!(ident_footer), live_id!(scope_row), live_id!(scope_line), live_id!(scope_all)], "edits change the type, so every widget of this type"),
+            (&[live_id!(ident_footer), live_id!(scope_row), live_id!(scope_line), live_id!(scope_isolated)], "keep 'all' inside the isolated branch"),
+            (&[live_id!(ident_footer), live_id!(path_row), live_id!(path_label)], "the selection's address \u{00b7} click copies it"),
+        ];
+        for (path, text) in chrome {
+            let mut w = sidebar.clone();
+            for id in path {
+                w = w.child(*id);
+            }
+            if let Some(r) = hit(cx, &w, abs) {
+                return Some(place(r, text));
+            }
+        }
+        // The target label's tip is the selection's, not a fixed line.
+        if !self.target_tip.is_empty() {
+            let label = sidebar
+                .child(live_id!(prompt_row))
+                .child(live_id!(prompt_bar))
+                .child(live_id!(target_wrap));
+            if let Some(r) = hit(cx, &label, abs) {
+                return Some(place(r, &self.target_tip));
+            }
+        }
+        None
+    }
+
+    /// The Spec tab's rows by index -- 0 notes, 1 rules, 2 app rules -- as
+    /// (header, box, field). The header carries the label and, for the two
+    /// lower rows, the splitter; the box is the flex row that shares the
+    /// tab's height; the field is the TextInput inside it.
+    fn spec_row(&self, index: usize) -> Option<(WidgetRef, WidgetRef, WidgetRef)> {
+        let col = self.sidebar.as_ref()?.child(live_id!(spec_col));
+        let (head, bx, field) = match index {
+            0 => (live_id!(notes_head), live_id!(notes_box), live_id!(spec_notes)),
+            1 => (live_id!(rules_head), live_id!(rules_box), live_id!(spec_rules)),
+            _ => (live_id!(app_head), live_id!(app_box), live_id!(spec_app)),
+        };
+        let bx = col.child(bx);
+        Some((col.child(head), bx.clone(), bx.child(field)))
+    }
+
+    /// Push the session's weights at the three boxes, whichever have
+    /// changed since last time -- see `spec_applied_w`. Called from the
+    /// draw, and from the drag itself, so a move lands on the very next
+    /// layout pass instead of the one after.
+    ///
+    /// Set through the typed walk, not the script: the apply macro
+    /// evaluates without the markup's prelude, so `Fill` is not in scope
+    /// there, and a split set that way never landed at all.
+    fn spec_apply_weights(&mut self, cx: &mut Cx) {
+        for index in 0..3 {
+            let w = spec_weight(index);
+            if (self.spec_applied_w[index] - w).abs() <= 0.01 {
+                continue;
+            }
+            self.spec_applied_w[index] = w;
+            let Some((_, bx, _)) = self.spec_row(index) else { continue };
+            // A named guard, so it is dropped before `bx` rather than after
+            // it: an if-let's temporary lives to the end of the statement,
+            // which here is the end of the loop body, past the local it
+            // borrows.
+            let guard = bx.borrow_mut::<crate::View>();
+            if let Some(mut view) = guard {
+                view.walk.height = Size::Fill {
+                    weight: w,
+                    basis: crate::makepad_draw::FitBound::Abs(0.0),
+                    shrink: 0.0,
+                    min: Some(SPEC_FIELD_MIN),
+                    max: None,
+                };
+                view.redraw(cx);
+            }
+        }
+    }
+
+    fn spec_field(&self, index: usize) -> Option<WidgetRef> {
+        self.spec_row(index).map(|(_, _, field)| field)
+    }
+
+    /// Which splitter is under this point, if any: 0 is the boundary
+    /// between notes and rules, 1 between rules and app rules. A splitter IS
+    /// the header row of the lower field -- a row that was already there,
+    /// costing the tab no height of its own -- and it only answers while
+    /// the field above it is on screen: with nothing selected the app rules
+    /// header has nothing above it to split with.
+    ///
+    /// Read at event time, so it answers for the frame already on screen,
+    /// the rule the property rows follow.
+    fn spec_grip_hit(&self, cx: &Cx, abs: Vec2d) -> Option<usize> {
+        if self.panel_tab != PanelTab::Spec {
+            return None;
+        }
+        (0..2).find(|&k| {
+            let Some((_, above, _)) = self.spec_row(k) else { return false };
+            let Some((head, _, _)) = self.spec_row(k + 1) else { return false };
+            if above.area().rect(cx).size.y <= 0.0 {
+                return false;
+            }
+            let r = head.area().rect(cx);
+            r.size.y > 0.0
+                && abs.x >= r.pos.x
+                && abs.x <= r.pos.x + r.size.x
+                && abs.y >= r.pos.y - 2.0
+                && abs.y <= r.pos.y + r.size.y + 2.0
+        })
+    }
+
+    /// Empty the notes field, and the record behind it. Written through
+    /// straight away rather than left for the caret to leave: a clear is a
+    /// decision, and there is nothing half-typed to protect.
+    fn spec_clear_notes(&mut self, cx: &mut Cx) {
+        let Some(sidebar) = self.sidebar.clone() else { return };
+        sidebar
+            .child(live_id!(spec_col))
+            .child(live_id!(notes_box))
+            .child(live_id!(spec_notes))
+            .set_text(cx, "");
+        let path = self.note_key_shown.clone();
+        if !path.is_empty() {
+            let mut s = session().lock().unwrap();
+            if let Some(note) = s.notes.iter_mut().find(|n| n.path == path) {
+                note.text.clear();
+            }
+        }
+        self.spec_flush();
+        self.redraw_sidebar(cx);
+    }
+
+    /// Put what the Spec tab holds on disk: the per-widget records in the
+    /// note store, the app-wide document in its own file.
+    fn spec_flush(&mut self) {
+        self.spec_dirty = false;
+        let (notes, rules) = {
+            let s = session().lock().unwrap();
+            (s.notes.clone(), s.app_rules.clone())
+        };
+        note_store_save(&notes);
+        app_rules_save(&rules);
+    }
+
+    /// Is the caret in the prompt strip's box? Every one of the strip's
+    /// keys is claimed only there -- Ctrl+Enter belongs to the shader
+    /// prompt when the caret is in THAT, and to nothing at all when the
+    /// caret is in a property field.
+    fn prompt_field_focused(&self, cx: &Cx) -> bool {
+        let Some(sidebar) = self.sidebar.as_ref() else { return false };
+        let area = sidebar.child(live_id!(prompt_row)).child(live_id!(prompt_field)).area();
+        !area.is_empty() && cx.has_key_focus(area)
+    }
+
+    /// Nothing typed yet -- the only state in which Up walks the history
+    /// instead of moving the caret.
+    fn prompt_field_empty(&self) -> bool {
+        let Some(sidebar) = self.sidebar.as_ref() else { return false };
+        sidebar.child(live_id!(prompt_row)).child(live_id!(prompt_field)).text().is_empty()
+    }
+
+    /// Which widget a send is ABOUT. One box serves every widget, so the
+    /// attribution is read at the moment of sending rather than carried by
+    /// the box. With nothing selected the ask is about the app itself, which
+    /// is a real thing to say and must not be dropped on the floor.
+    fn prompt_target(&mut self, cx: &Cx) -> String {
+        let uid = session().lock().unwrap().pinned.as_ref().map(|p| p.uid);
+        match uid {
+            Some(uid) => self.sel_ref(cx, uid),
+            None => "app".to_string(),
+        }
+    }
+
+    /// The strip's field into the session. The TextInput is the truth while
+    /// the caret is in it; the session is the truth across redraws.
+    fn prompt_sync_text(&mut self, cx: &mut Cx) {
+        let Some(sidebar) = self.sidebar.clone() else { return };
+        let field = sidebar.child(live_id!(prompt_row)).child(live_id!(prompt_field));
+        if field.area() == Area::Empty {
+            return;
+        }
+        let text = field.text();
+        let mut s = session().lock().unwrap();
+        if s.prompt != text {
+            s.prompt = text;
+        }
+        let _ = cx;
+    }
+
+    /// Take what is written into the outbox and EMPTY the box, the way a
+    /// message box empties when you press send. The text is not lost: it
+    /// goes into the recall history, where Up brings it back.
+    ///
+    /// Returns false when there was nothing written.
+    fn prompt_take_draft(&mut self, cx: &mut Cx) -> bool {
+        let path = self.prompt_target(cx);
+        let text = {
+            let mut s = session().lock().unwrap();
+            let text = s.prompt.trim().to_string();
+            if text.is_empty() {
+                return false;
+            }
+            s.prompt_history.push(text.clone());
+            s.prompt_at = s.prompt_history.len();
+            s.prompt.clear();
+            text
+        };
+        // From the Shader tab the message is about the layer that tab is
+        // showing, and the agent needs the fn sources to rewrite it: both
+        // ride with the message, so a queued shader ask still says which
+        // layer it meant after the tab has moved on.
+        let shader = (self.panel_tab == PanelTab::Shader).then(|| {
+            let layer = self.vibe_layer.clone().unwrap_or_else(|| "draw_bg".to_string());
+            let fns = self
+                .vibe_fn_sources
+                .iter()
+                .map(|(name, loc, src)| format!("// {name} \u{2014} {loc}\n{src}"))
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            (layer, fns)
+        });
+        {
+            // The ask is counted on the record for the widget it is about,
+            // so make one if this is the first thing ever said about it.
+            let mut s = session().lock().unwrap();
+            s.load_notes();
+            if !s.notes.iter().any(|n| n.path == path) {
+                s.notes.push(TweakNote::new(path.clone()));
+            }
+            s.outbox.push(Outgoing { path, text, shader });
+        }
+        self.prompt_clear_field = true;
+        true
+    }
+
+    /// Ctrl+Enter: hand the queue to the AI. Same channel the card used --
+    /// `/tweak/state` carries the ask and a `TWEAK ask` line lands in the
+    /// log ring -- but from one box under the tabs instead of a card.
+    fn prompt_send(&mut self, cx: &mut Cx) {
+        self.prompt_sync_text(cx);
+        self.prompt_take_draft(cx);
+        let sent: Vec<Outgoing> = {
+            let mut s = session().lock().unwrap();
+            std::mem::take(&mut s.outbox)
+        };
+        if sent.is_empty() {
+            session().lock().unwrap().prompt_status =
+                "nothing to send: the box is empty".to_string();
+        } else {
+            for item in &sent {
+                let (note_path, text) = (&item.path, &item.text);
+                if let Some((layer, fns)) = &item.shader {
+                    // A shader ask: the execute bundle on the AI's ear (the
+                    // log and /tweak/state carry it), scoped to exactly this
+                    // draw layer. Code only -- colours and sizes are the
+                    // Props rows' business.
+                    log!("TWEAK vibe sel={note_path} layer={layer} prompt={text}");
+                    let mut s = session().lock().unwrap();
+                    s.vibe_status = format!("sent to the AI \u{00b7} waiting\u{2026} \u{2014} {text}");
+                    s.vibe_pending = Some((note_path.clone(), layer.clone()));
+                    s.vibes.push((note_path.clone(), layer.clone(), text.clone(), fns.clone()));
+                    continue;
+                }
+                let seq = {
+                    let mut s = session().lock().unwrap();
+                    match s.notes.iter_mut().find(|n| n.path == *note_path) {
+                        Some(note) => {
+                            note.sent += 1;
+                            note.sent
+                        }
+                        None => 0,
+                    }
+                };
+                log!("TWEAK ask #{seq} {note_path}: {text}");
+            }
+            session().lock().unwrap().prompt_status = if sent.len() == 1 {
+                "sent to the AI".to_string()
+            } else {
+                format!("{} messages sent to the AI", sent.len())
+            };
+        }
+        self.prompt_focus_pending = true;
+        self.redraw_sidebar(cx);
+    }
+
+    /// Alt+Enter: put this message in the queue and wake nobody. It goes out
+    /// with the next Ctrl+Enter -- deliberately NOT logged as an ask,
+    /// because an ask is what an agent watching the log acts on.
+    fn prompt_queue(&mut self, cx: &mut Cx) {
+        self.prompt_sync_text(cx);
+        if !self.prompt_take_draft(cx) {
+            session().lock().unwrap().prompt_status =
+                "nothing to queue: the box is empty".to_string();
+            self.redraw_sidebar(cx);
+            return;
+        }
+        let count = session().lock().unwrap().outbox.len();
+        session().lock().unwrap().prompt_status = match count {
+            1 => "1 queued \u{00b7} Ctrl+Enter sends the queue".to_string(),
+            n => format!("{n} queued \u{00b7} Ctrl+Enter sends the queue"),
+        };
+        log!("TWEAK note queued \u{00b7} {count} waiting");
+        self.prompt_focus_pending = true;
+        self.redraw_sidebar(cx);
+    }
+
+    /// Up / Down in an EMPTY box walks the history, the way a shell prompt
+    /// does -- so a message just sent is one keypress from being sent again,
+    /// or edited and sent again. Only while empty, or Up would be fighting
+    /// the caret in a message being written.
+    fn prompt_recall(&mut self, cx: &mut Cx, back: bool) {
+        let text = {
+            let mut s = session().lock().unwrap();
+            if s.prompt_history.is_empty() {
+                return;
+            }
+            let len = s.prompt_history.len();
+            if back {
+                s.prompt_at = s.prompt_at.saturating_sub(1);
+            } else if s.prompt_at < len {
+                s.prompt_at += 1;
+            }
+            let at = s.prompt_at;
+            let text = s.prompt_history.get(at).cloned().unwrap_or_default();
+            s.prompt = text.clone();
+            text
+        };
+        if let Some(sidebar) = self.sidebar.clone() {
+            let field = sidebar.child(live_id!(prompt_row)).child(live_id!(prompt_field));
+            field.set_text(cx, &text);
+        }
+        self.redraw_sidebar(cx);
+    }
+
+    /// Leaving the tab: put what was typed on disk, keeping the text.
+    fn note_close(&mut self, cx: &mut Cx) {
+        self.spec_flush();
+        // A record opened and left without a word written in it is not a
+        // note. Dropping the empties keeps /tweak/state a list of things the
+        // person actually said, rather than everywhere they pressed Insert.
+        {
+            let mut s = session().lock().unwrap();
+            s.notes.retain(|n| !n.text.trim().is_empty() || !n.rules.trim().is_empty());
+        }
+        self.note_key_shown.clear();
+        session().lock().unwrap().mention = false;
+        // Nothing is being typed into any more, so the arrows go back to
+        // walking the hierarchy.
+        cx.set_key_focus(Area::Empty);
+        self.redraw_overlay(cx);
+    }
+
+    /// Walk the live widget tree with the arrow keys, the way a scene
+    /// editor does: up to the parent, down to the first child, left/right to
+    /// the previous/next sibling. Only ever reached with something selected
+    /// — with nothing selected the arrows still orbit the exploded view.
+    fn walk_selection(&mut self, cx: &mut Cx, dir: KeyCode) {
+        // Every window carries an inspector and each one hears the key, so
+        // the first to hear it walks and the rest stand down. One that has
+        // never drawn its panel leaves the walk to one that has: it reads
+        // the tree while it is borrowed, and only its panel can find its own
+        // row in it.
+        if self.sidebar.is_none() {
+            return;
+        }
+        let sel = {
+            let mut s = session().lock().unwrap();
+            if s.walk_event_id == cx.event_id() {
+                return;
+            }
+            s.walk_event_id = cx.event_id();
+            let Some(sel) = s.pinned.clone() else {
+                return;
+            };
+            sel
+        };
+        // The same hierarchy the Tree tab shows: no inspector is in it.
+        let rows = rows_without_inspectors(
+            cx.widget_tree().flat_tree(cx),
+            self.uid.0,
+            self.sidebar_uid(),
+        );
+        let Some(at) = rows.iter().position(|row| row.uid == sel.uid) else {
+            return;
+        };
+        let depth = rows[at].depth;
+        // flat_tree is depth-first: the parent is the nearest earlier row one
+        // level up, the siblings are the same-depth rows that share it, and
+        // the first child is the very next row when it is one level deeper.
+        let parent = rows[..at].iter().rposition(|row| row.depth + 1 == depth);
+        let sibling = |step: isize| -> Option<usize> {
+            let mut index = at as isize;
+            loop {
+                index += step;
+                if index < 0 || index as usize >= rows.len() {
+                    return None;
+                }
+                let row = &rows[index as usize];
+                if row.depth < depth {
+                    return None; // left the parent: no sibling that way
+                }
+                if row.depth == depth {
+                    return Some(index as usize);
+                }
+            }
+        };
+        let target = match dir {
+            KeyCode::ArrowUp => parent,
+            KeyCode::ArrowDown => rows
+                .get(at + 1)
+                .filter(|row| row.depth == depth + 1)
+                .map(|_| at + 1),
+            KeyCode::ArrowLeft => sibling(-1),
+            KeyCode::ArrowRight => sibling(1),
+            _ => None,
+        };
+        let Some(target) = target else {
+            log!("TWEAK walk {dir:?}: nothing that way from {}", sel.path);
+            return;
+        };
+        let uid = rows[target].uid;
+        let widget = cx.widget_tree().widget(WidgetUid(uid));
+        if widget.is_empty() {
+            return;
+        }
+        // Walking into a widget on an unselected tab or inside a closed fold
+        // has to OPEN it first, exactly as clicking its tree row does —
+        // otherwise the arrows stop at the edge of whatever happens to be
+        // showing, which is not the hierarchy.
+        reveal_widget(cx, uid);
+        let center = {
+            let rect = widget.area().clipped_rect_union(cx);
+            dvec2(rect.pos.x + rect.size.x * 0.5, rect.pos.y + rect.size.y * 0.5)
+        };
+        // A widget revealed a moment ago has not been drawn yet, so it has no
+        // rect to pick from. Pin it anyway with what is known: the overlay
+        // re-reads live rects every frame and the outline lands as soon as it
+        // draws.
+        let pick = pick_of_widget(cx, &widget, center, sel.window_id).unwrap_or_else(|| {
+            let path = cx
+                .widget_tree()
+                .path_to(WidgetUid(uid))
+                .iter()
+                .map(|id| live_id_token(*id))
+                .collect::<Vec<_>>()
+                .join(".");
+            TweakPick {
+                uid,
+                path,
+                ty: rows[target].ty.clone(),
+                rect: Rect::default(),
+                window_id: sel.window_id,
+                band: None,
+                level: 0,
+            }
+        });
+        log!("TWEAK walk {dir:?} \u{2192} {} ({})", pick.path, pick.ty);
+        session().lock().unwrap().pinned = Some(pick);
+        self.rows_uid = 0;
+        self.redraw_sidebar(cx);
+        self.redraw_overlay(cx);
     }
 
     /// Rebuild the row bindings from the selection's reflected properties:
@@ -5971,7 +11828,6 @@ impl Tweaker {
                 struct_kind: StructKind::None,
                 comp_vals: Vec::new(),
                 comp_uids: Vec::new(),
-                mode_uids: Vec::new(),
                 alt_uids: Vec::new(),
                 const_ref: None,
                 theme_match: None,
@@ -6007,109 +11863,30 @@ impl Tweaker {
         }
     }
 
-    /// Set one global theme value. A colour: every draw buffer slot
-    /// holding it is retargeted live, app-wide, through the pulse's
-    /// identity ledger (kept in sync after each draw), and the theme
-    /// object in the script heap follows, so widgets applied from now on
-    /// bake the new colour too. A number: the heap value (see below).
-    /// Ledgered at the theme's own definition site with scope "theme";
-    /// undoable.
+    /// Set one global theme value through [`theme_apply`], the path shared
+    /// with the remote op and [`crate::reflect::theme_set_value`]. A colour:
+    /// every draw buffer slot holding it is retargeted live, app-wide,
+    /// through the pulse's identity ledger (kept in sync after each draw),
+    /// and the theme object in the script heap follows, so widgets applied
+    /// from now on bake the new colour too. A number: the heap value (see
+    /// there). Ledgered at the theme's own definition site with scope
+    /// "theme"; undoable, unless origin is an undo/redo replay of a step
+    /// already on the stack. The method's own share is the overlay's state:
+    /// the palette chips after a colour edit, and the sidebar row for the
+    /// value.
     fn theme_set(&mut self, cx: &mut Cx, name: &str, text: &str, origin: &str) -> Result<(), String> {
-        let values = theme_values(cx);
-        let (key, value, loc) = values
-            .iter()
-            .find(|(n, _, _, _)| n == name)
-            .map(|(_, k, v, l)| (*k, *v, l.clone()))
-            .ok_or_else(|| format!("no theme value {name:?}"))?;
-        // `theme.color_y` as a value: that colour's current hex.
-        let text = match text.strip_prefix("theme.") {
-            Some(other) => match values.iter().find(|(n, _, _, _)| n == other).map(|(_, _, v, _)| *v) {
-                Some(ThemeVal::Color(c)) => hex_of(c),
-                Some(ThemeVal::Num(f)) => fmt_f64(f),
-                None => return Err(format!("no theme value {other:?}")),
-            },
-            None => text.to_string(),
-        };
-        let old_text = match value {
-            ThemeVal::Color(c) => hex_of(c),
-            ThemeVal::Num(f) => fmt_f64(f),
-        };
-        let overridden = session().lock().unwrap().theme_overrides.iter().any(|(n, _)| n == name);
-        if old_text == text && !overridden {
+        let undo = (origin != "undo" && origin != "redo").then_some(track_undo as UndoSink);
+        let Some((was, applied)) = theme_apply(cx, name, text, origin, undo)? else {
             return Ok(());
-        }
-        match value {
-            ThemeVal::Color(current) => {
-                let (rgba, _) = parse_hex(&text).ok_or_else(|| format!("{text:?} is not a colour"))?;
-                let new = packed_of(rgba);
-                // The theme module is immutable to scripts; a design tool
-                // edits the value in place, at the level that defines it.
-                theme_heap_set(cx, key, ScriptValue::from_color(new));
-                let mut s = session().lock().unwrap();
-                match s.theme_overrides.iter().position(|(n, _)| n == name) {
-                    Some(i) => {
-                        if new == packed_of(s.theme_overrides[i].1.target) {
-                            // Back at the original: restore and forget.
-                            let (_, st) = s.theme_overrides.remove(i);
-                            drop(s);
-                            pulse_restore(cx, &st);
-                        } else {
-                            s.theme_overrides[i].1.fixed = Some(rgba);
-                            drop(s);
-                        }
-                    }
-                    None => {
-                        let mut st = PulseState::new(current);
-                        st.fixed = Some(rgba);
-                        s.theme_overrides.push((name.to_string(), st));
-                        drop(s);
-                    }
-                }
-                theme_overrides_sync(cx);
-                hook_sync(cx);
-                let overrides = std::mem::take(&mut session().lock().unwrap().theme_overrides);
-                for (_, st) in &overrides {
-                    pulse_repaint(cx, st);
-                }
-                session().lock().unwrap().theme_overrides = overrides;
-                self.theme_colors = theme_palette(cx);
-            }
-            ThemeVal::Num(_) => {
-                let f: f64 = text.parse().map_err(|_| format!("{text:?} is not a number"))?;
-                // Numbers are baked into layouts at apply time: the heap
-                // holds the new value for everything applied from now on
-                // and the ledger carries it to the source; existing layout
-                // re-flows when the edit lands (a live reload cannot
-                // redefine the immutable widget modules today).
-                theme_heap_set(cx, key, ScriptValue::from_f64(f));
-            }
-        }
-        let now = cx.seconds_since_app_start();
-        let mut s = session().lock().unwrap();
-        s.suppress_until = now + SUPPRESS_LINGER;
-        s.apply_gen += 1;
-        s.next_seq += 1;
-        let entry = TweakDiffEntry {
-            seq: s.next_seq,
-            path: "theme".to_string(),
-            prop: name.to_string(),
-            old: old_text,
-            new: text.clone(),
-            origin: loc,
-            siblings: 0,
-            scope: "theme".to_string(),
         };
-        if origin != "undo" && origin != "redo" {
-            log!("TWEAK {} theme {} {} -> {} ({})", origin, entry.prop, entry.old, entry.new, entry.origin);
-            track_undo(&mut s, &entry);
+        if matches!(was, ThemeVal::Color(_)) {
+            self.theme_colors = theme_palette(cx);
+            self.palette_gen = session().lock().unwrap().apply_gen;
         }
-        s.diff.push(entry);
-        drop(s);
         if let Some(row) = self.rows.iter_mut().find(|r| r.prop == name) {
-            row.value = text;
+            row.value = applied;
             row.changed = true;
         }
-        cx.redraw_all();
         Ok(())
     }
 
@@ -6123,6 +11900,14 @@ impl Tweaker {
         }
         self.rows.clear();
         self.doc_row = None;
+        self.sel_is_grid = type_name_of(cx, sel_uid).as_deref() == Some("Grid");
+        self.sel_in_grid = cx
+            .widget_tree()
+            .parent_of(WidgetUid(sel_uid))
+            .and_then(|parent| type_name_of(cx, parent.0))
+            .as_deref()
+            == Some("Grid");
+        self.sel_dock = self.dock_gate(cx, sel_uid);
         for (name, value, is_set) in reflect_flat(cx, &widget) {
             let (kind, display, quoted) = if value.starts_with('#') && parse_hex(&value).is_some()
             {
@@ -6152,7 +11937,6 @@ impl Tweaker {
                 struct_kind,
                 comp_vals,
                 comp_uids: Vec::new(),
-                mode_uids: Vec::new(),
                 alt_uids: Vec::new(),
                 const_ref: None,
                 theme_match: None,
@@ -6252,7 +12036,6 @@ impl Tweaker {
                         struct_kind: StructKind::None,
                         comp_vals: Vec::new(),
                         comp_uids: Vec::new(),
-                        mode_uids: Vec::new(),
                         alt_uids: Vec::new(),
                         const_ref: Some(ConstRef { layer: layer.clone(), name, initial }),
                         theme_match: None,
@@ -6284,8 +12067,64 @@ impl Tweaker {
         let first = prop.split('.').next().unwrap_or("");
         matches!(
             first,
-            "width" | "height" | "margin" | "padding" | "spacing" | "flow" | "align"
+            "width" | "height" | "min_width" | "max_width" | "min_height" | "max_height" | "aspect"
+                | "margin" | "padding" | "spacing" | "wrap_spacing" | "flow" | "align"
+                | "distribute" | "abs_pos" | "container_id" | "cell" | "columns" | "rows"
+                | "areas" | "column_gap" | "row_gap" | "auto_flow" | "justify_items"
+                | "align_items"
         )
+    }
+
+    /// The words a LAYOUT composite answers to in the filter box.
+    ///
+    /// The composite's label is what a person sees and types — "size",
+    /// "margin", "align" — and not one of them is a property name. Without
+    /// this the filter can only reach the raw `width` / `margin.left` rows
+    /// the composite replaced, so typing the name of a row plainly on screen
+    /// makes it vanish.
+    fn composite_terms(kind: &VisKind) -> &'static str {
+        match kind {
+            VisKind::Measured => "measured size width height pixels device",
+            VisKind::Size => "size width height fit fill min max clamp aspect ratio grow shrink basis weight percent",
+            VisKind::BoxInset(BoxKind::Margin) => "margin",
+            VisKind::BoxInset(BoxKind::Padding) => "padding",
+            VisKind::FlowSpacing => "spacing flow gap wrap direction rows overlay",
+            VisKind::AlignGrid => "align alignment justify distribute space between around evenly centre center start end",
+            VisKind::Container => "layout container flex grid name cqw cqh dock dockable tab panel",
+            VisKind::Absolute => "absolute position abs_pos x y",
+            VisKind::GridTracks => "grid columns rows tracks gap areas fill auto_flow fr minmax repeat",
+            VisKind::Cell => "cell col row span area place",
+            _ => "",
+        }
+    }
+
+    /// The rows a View lays its children out by, which a Grid ignores.
+    fn flow_only(prop: &str) -> bool {
+        matches!(
+            prop.split('.').next().unwrap_or(""),
+            "flow" | "spacing" | "wrap_spacing" | "align" | "distribute"
+        )
+    }
+
+    /// Which composite, if any, has swallowed `prop`.
+    fn composite_of(prop: &str) -> Option<VisKind> {
+        match prop.split('.').next().unwrap_or("") {
+            "width" | "height" | "min_width" | "max_width" | "min_height" | "max_height" | "aspect" => {
+                Some(VisKind::Size)
+            }
+            "margin" => Some(VisKind::BoxInset(BoxKind::Margin)),
+            "padding" => Some(VisKind::BoxInset(BoxKind::Padding)),
+            "spacing" | "wrap_spacing" | "flow" => Some(VisKind::FlowSpacing),
+            "align" | "distribute" => Some(VisKind::AlignGrid),
+            "container_id" => Some(VisKind::Container),
+            "abs_pos" => Some(VisKind::Absolute),
+            "cell" => Some(VisKind::Cell),
+            "columns" | "rows" | "areas" | "column_gap" | "row_gap" | "auto_flow" => {
+                Some(VisKind::GridTracks)
+            }
+            "justify_items" | "align_items" => Some(VisKind::AlignGrid),
+            _ => None,
+        }
     }
 
     /// The curated STYLE row set: colors and the handful of numbers a
@@ -6314,10 +12153,92 @@ impl Tweaker {
             .map(|row| row.value.as_str())
     }
 
+    /// The selection's cell as the rows say it.
+    fn cell_text(&self) -> CellText {
+        let num = |key: &str| {
+            self.row_value(&format!("cell.{key}"))
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or(0.0)
+                .max(0.0) as u32
+        };
+        CellText {
+            col: num("col"),
+            row: num("row"),
+            col_span: num("col_span"),
+            row_span: num("row_span"),
+            area: self
+                .row_value("cell.area")
+                .map(|v| v.trim_start_matches('@'))
+                .filter(|v| *v != "-")
+                .unwrap_or("")
+                .to_string(),
+        }
+    }
+
+    /// The cell with one field -- col, row, a span, the area -- replaced by
+    /// what was typed, as the chunk that places the whole of it. An area
+    /// that is not an id is not sent.
+    fn cell_chunk(&self, key: &str, typed: &str) -> Option<String> {
+        let mut cell = self.cell_text();
+        match key {
+            "area" => {
+                let name = typed.trim().trim_start_matches('@');
+                let valid = name.is_empty()
+                    || (name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                        && !name.starts_with(|c: char| c.is_ascii_digit()));
+                if !valid {
+                    return None;
+                }
+                cell.area = name.to_string();
+            }
+            _ => {
+                let value = typed.trim().parse::<f64>().ok()?.max(0.0) as u32;
+                match key {
+                    "col" => cell.col = value,
+                    "row" => cell.row = value,
+                    "col_span" => cell.col_span = value,
+                    "row_span" => cell.row_span = value,
+                    _ => return None,
+                }
+            }
+        }
+        Some(cell.chunk())
+    }
+
+    /// The absolute position with one coordinate replaced.
+    fn abs_chunk(&self, key: &str, value: f64) -> String {
+        let (x, y) = self.row_value("abs_pos").and_then(parse_vec2_text).unwrap_or((0.0, 0.0));
+        let (x, y) = if key == "x" { (value, y) } else { (x, value) };
+        format!("abs_pos: vec2({}, {})", fmt_f64(x), fmt_f64(y))
+    }
+
+    /// The axis's Fill with one field -- weight, shrink, basis -- replaced
+    /// by what was typed, as the chunk that sets the whole of it.
+    fn fill_chunk(&self, axis: &str, key: &str, typed: &str) -> String {
+        let mut fill = match parse_size_text(self.row_value(axis).unwrap_or("")) {
+            SizeText::Fill(fill) => fill,
+            _ => FillText::plain(),
+        };
+        match key {
+            "weight" => fill.weight = typed.trim().parse().unwrap_or(fill.weight),
+            "shrink" => fill.shrink = typed.trim().parse().unwrap_or(fill.shrink),
+            "basis" => fill.basis = typed.trim().trim_matches('"').trim().to_string(),
+            _ => {}
+        }
+        fill.chunk(axis)
+    }
+
     /// A row matches the filter on its name, its value text, or its
     /// `/** */` annotation (docs are searchable: "banding" finds
     /// color_dither through its doc line).
     fn row_matches_filter(&self, row: &RowBinding) -> bool {
+        // A search keeps every row; the hits are marked, not selected.
+        self.search_mode || self.row_hit(row)
+    }
+
+    /// Does the box's text land on this row: its name, its value, or the
+    /// annotation under it. True for no text at all.
+    fn row_hit(&self, row: &RowBinding) -> bool {
         self.filter.is_empty()
             || row.prop.to_lowercase().contains(&self.filter)
             || row.value.to_lowercase().contains(&self.filter)
@@ -6325,6 +12246,62 @@ impl Tweaker {
                 .row_docs
                 .get(&row.prop)
                 .is_some_and(|doc| doc.to_lowercase().contains(&self.filter))
+    }
+
+    /// The entries a search lands on: rows by name, value or doc, and the
+    /// composite rows by the words they answer to.
+    fn search_hits(&self, entries: &[VisKind]) -> Vec<usize> {
+        if self.filter.is_empty() {
+            return Vec::new();
+        }
+        entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| match entry {
+                VisKind::Prop(index) | VisKind::Tweakable(index) => self.row_hit(&self.rows[*index]),
+                VisKind::Section(..)
+                | VisKind::More(..)
+                | VisKind::Group(_)
+                | VisKind::Identity
+                | VisKind::Measured
+                | VisKind::Material(_)
+                | VisKind::TweakHeader(..)
+                | VisKind::InputsHeader(_)
+                | VisKind::CascadeLevel(_) => false,
+                other => Self::composite_terms(other).contains(self.filter.as_str()),
+            })
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// Bring the hit the walk is on to the top of the list.
+    fn scroll_to_hit(&mut self, cx: &mut Cx) {
+        let entries = self.build_visible();
+        let hits = self.search_hits(&entries);
+        if !hits.is_empty() {
+            let target = hits[self.search_hit % hits.len()];
+            if let Some(sidebar) = self.sidebar.as_ref() {
+                let list_ref = sidebar.child(live_id!(props_wrap)).child(live_id!(props));
+                {
+                    if let Some(mut list) = list_ref.borrow_mut::<PortalList>() {
+                        list.set_first_id_and_scroll(target, 0.0);
+                    }
+                }
+                drop(list_ref);
+            }
+        }
+        self.redraw_sidebar(cx);
+    }
+
+    /// One hit forward or back, round the end.
+    fn search_step(&mut self, cx: &mut Cx, delta: isize) {
+        let count = self.search_hits(&self.build_visible()).len();
+        if count == 0 {
+            return;
+        }
+        let at = (self.search_hit % count) as isize;
+        self.search_hit = (at + delta).rem_euclid(count as isize) as usize;
+        self.scroll_to_hit(cx);
     }
 
     /// The visible entry list: sections in order, folded sections
@@ -6335,8 +12312,17 @@ impl Tweaker {
     /// suspends (a long-tail match shows regardless) and sections stay
     /// open.
     fn build_visible(&self) -> Vec<VisKind> {
-        let filtering = !self.filter.is_empty();
+        // A search keeps everything on screen -- sections open, tails
+        // shown -- so any hit can be walked to; a filter narrows.
+        let searching = self.search_mode && !self.filter.is_empty();
+        let filtering = !self.filter.is_empty() && !searching;
         let mut out = Vec::new();
+        // WHAT IT IS, before what it looks like: the selection's own name —
+        // editable, because "this one needs a name" is the commonest thing
+        // to want to say about an anonymous widget — and its type.
+        if !filtering && self.panel_tab != PanelTab::Theme && self.rows_uid != 0 {
+            out.push(VisKind::Identity);
+        }
         // SHADER CONSTANTS: the annotated literals inside the draw layers'
         // fn bodies — "actual values IN shader code" — each with its doc
         // line. Absent when the widget's shaders carry none. (Annotated
@@ -6381,23 +12367,56 @@ impl Tweaker {
                 .map(|(index, _)| index)
                 .collect();
             let theme = self.panel_tab == PanelTab::Theme;
-            let composites: Vec<VisKind> = if section == SectionKind::Layout && !filtering && !theme {
+            let composites: Vec<VisKind> = if section == SectionKind::Layout && !theme {
+                // A filter NARROWS the panel; it does not dismantle its
+                // grammar. A composite survives filtering when the words it
+                // answers to match — so "size" finds the size row rather
+                // than emptying the section.
+                let wanted = |kind: &VisKind| {
+                    !filtering || Self::composite_terms(kind).contains(self.filter.as_str())
+                };
                 let mut list = Vec::new();
+                // The measurement first, then the controls that produced
+                // it: read what it IS, then change what it asks for.
+                list.push(VisKind::Measured);
+                // The first half is the selection in its parent: its size,
+                // its margin, whether it sits in the flow at all.
+                list.push(VisKind::Group(GroupKind::Item));
                 // Always present: an axis with no reflected row IS the Fit
                 // state — the segments must still show it.
                 list.push(VisKind::Size);
                 if self.rows.iter().any(|r| r.prop.starts_with("margin")) {
                     list.push(VisKind::BoxInset(BoxKind::Margin));
                 }
+                list.push(VisKind::Absolute);
+                if self.sel_in_grid {
+                    list.push(VisKind::Cell);
+                }
+                // The second half is what it holds. A spacing row is what
+                // makes it a container; a Label flows its text and has a
+                // flow row, but nothing to space. A Grid places its
+                // children by track, so it shows tracks where a View shows
+                // a flow, and its cells' alignment where a View shows the
+                // children's.
+                if self.row_index("spacing").is_some() {
+                    list.push(VisKind::Group(GroupKind::Container));
+                    list.push(VisKind::Container);
+                }
+                if self.sel_is_grid {
+                    list.push(VisKind::GridTracks);
+                    list.push(VisKind::AlignGrid);
+                } else {
+                    if self.row_index("spacing").is_some() || self.row_index("flow").is_some() {
+                        list.push(VisKind::FlowSpacing);
+                    }
+                    if self.row_index("align.x").is_some() {
+                        list.push(VisKind::AlignGrid);
+                    }
+                }
                 if self.rows.iter().any(|r| r.prop.starts_with("padding")) {
                     list.push(VisKind::BoxInset(BoxKind::Padding));
                 }
-                if self.row_index("spacing").is_some() || self.row_index("flow").is_some() {
-                    list.push(VisKind::FlowSpacing);
-                }
-                if self.row_index("align.x").is_some() {
-                    list.push(VisKind::AlignGrid);
-                }
+                list.retain(|kind| wanted(kind));
                 list
             } else {
                 Vec::new()
@@ -6405,13 +12424,13 @@ impl Tweaker {
             if members.is_empty() && composites.is_empty() {
                 continue;
             }
-            let open = filtering || !self.collapsed[section.index()];
+            let open = filtering || searching || !self.collapsed[section.index()];
             out.push(VisKind::Section(section, members.len(), open));
             if !open {
                 continue;
             }
             out.extend(composites.iter().copied());
-            let expanded = filtering || self.expanded[section.index()];
+            let expanded = filtering || searching || self.expanded[section.index()];
             // A section with no primary row read as an empty header over a
             // "show all": lead with its first three rows instead.
             let primary = members
@@ -6433,12 +12452,21 @@ impl Tweaker {
                 let in_tail = match section {
                     _ if theme => false,
                     SectionKind::Layout => {
-                        !filtering && Self::layout_composited(&row.prop)
+                        // Folded away exactly when the composite that owns
+                        // it is on screen — filtering included, or a filter
+                        // that keeps the size row would print width and
+                        // height a second time underneath it.
+                        Self::composite_of(&row.prop)
+                            .is_some_and(|kind| composites.iter().any(|c| c.same_row(&kind)))
                             || (!expanded && !Self::layout_composited(&row.prop))
+                            || (self.sel_is_grid && Self::flow_only(&row.prop))
                     }
                     SectionKind::Style => !expanded && !Self::style_curated(row),
                     _ => false,
                 };
+                if filtering && in_tail {
+                    continue;
+                }
                 if !filtering && in_tail && forced < force_show {
                     forced += 1;
                 } else if !filtering && in_tail {
@@ -6482,6 +12510,13 @@ impl Tweaker {
             size: dvec2(width, pass_size.y),
         };
         self.band = band;
+        // The window's hit-test needs this from outside the widget — see
+        // `panel_owns_pointer`. The note card joins it in the overlay draw.
+        {
+            let mut sess = session().lock().unwrap();
+            sess.chrome_band = Some(band);
+            sess.isolate_uid = if self.tree_isolate { self.isolate_uid } else { 0 };
+        }
         // The panel is flat chrome over the exploded view: pointer events
         // inside the band flow through in plain window coordinates.
         cx.sploded_set_flat_band(Some(band));
@@ -6503,11 +12538,14 @@ impl Tweaker {
         if self.panel_tab == PanelTab::Theme {
             let colours = self.rows.iter().filter(|r| r.kind == RowKind::Color).count();
             let footer = sidebar.child(live_id!(ident_footer));
+            footer.child(live_id!(title_label)).set_visible(cx, true);
             footer
                 .child(live_id!(title_label))
                 .set_text(cx, &format!("Theme  \u{2022}  {colours} colours  \u{2022}  {} values", self.rows.len() - colours));
             let site = self.theme_site.split(':').next().unwrap_or("").to_string();
-            footer.child(live_id!(path_label)).set_text(cx, &format!("edits land in {site}"));
+            footer.child(live_id!(path_row)).child(live_id!(path_label)).set_text(cx, &site);
+            self.target_line = format!("target {site}");
+            self.target_tip = format!("edits are written to {site}");
             footer.child(live_id!(scope_row)).set_visible(cx, false);
         } else {
             sidebar.child(live_id!(ident_footer)).child(live_id!(scope_row)).set_visible(cx, sel.is_some());
@@ -6515,24 +12553,40 @@ impl Tweaker {
         match sel {
             _ if self.panel_tab == PanelTab::Theme => {}
             Some(sel) => {
-                let head = {
-                    let mut head = format!("{}  \u{2022}  {} props", sel.ty, self.rows.len());
-                    // Depth readout: which plane the selection sits on in
-                    // the exploded view ("is it stacked deep, or is the
-                    // z-step just insane?").
-                    if cx.sploded_active() {
-                        if let Some(level) = cx.sploded_depth_of(sel.uid) {
-                            head.push_str(&format!("  \u{2022}  L{level}/{}", cx.sploded_max_level()));
-                        }
-                    }
-                    head
+                // The title line used to say "Label - 29 props": a row of
+                // the footer spent on a count nobody acts on. It now shows
+                // only while the exploded view is up, and then only the depth
+                // readout -- which plane the selection sits on ("is it
+                // stacked deep, or is the z-step just insane?").
+                let depth = if cx.sploded_active() {
+                    cx.sploded_depth_of(sel.uid)
+                        .map(|level| format!("L{level}/{}", cx.sploded_max_level()))
+                } else {
+                    None
+                };
+                let title = sidebar.child(live_id!(ident_footer)).child(live_id!(title_label));
+                title.set_visible(cx, depth.is_some());
+                if let Some(depth) = depth {
+                    title.set_text(cx, &depth);
+                }
+                let now = cx.seconds_since_app_start();
+                let shown_path = if now < self.footer_copied_until {
+                    // The click's receipt, in place of the path it copied.
+                    self.next_frame = cx.new_next_frame();
+                    "path copied to the clipboard".to_string()
+                } else {
+                    // The footer shows the REFERENCE itself, not a prettier
+                    // rendering of it: this line is what the click copies,
+                    // and two spellings of one thing is how a person ends up
+                    // pasting something the tools do not accept. Only the
+                    // head is clipped, so the tail — the part that says which
+                    // widget — always survives.
+                    let reference = self.sel_ref(cx, sel.uid);
+                    tail_ellipsis(&reference, 48)
                 };
                 sidebar
-                    .child(live_id!(ident_footer)).child(live_id!(title_label))
-                    .set_text(cx, &head);
-                let shown_path = tail_ellipsis(&display_path(cx, sel.uid), 48);
-                sidebar
                     .child(live_id!(ident_footer))
+                    .child(live_id!(path_row))
                     .child(live_id!(path_label))
                     .set_text(cx, &shown_path);
                 {
@@ -6542,26 +12596,67 @@ impl Tweaker {
                     row.child(live_id!(scope_line)).child(live_id!(scope_all)).set_text(cx, &format!("all {}s", sel.ty));
                     set_button_fill(cx, row.child(live_id!(scope_line)).child(live_id!(scope_this)), !all);
                     set_button_fill(cx, row.child(live_id!(scope_line)).child(live_id!(scope_all)), all);
-                    row.child(live_id!(scope_doc)).set_text(
-                        cx,
-                        &format!("this: only this instance \u{00b7} all {}s: every {} in the app (edits the type's definition)", sel.ty, sel.ty),
-                    );
+                    // The modifier: confine an `all` fan-out to the isolated
+                    // branch. Lit when it is ON and there is an isolation for
+                    // it to be on ABOUT; the label greys when there is not,
+                    // so a dark button is never ambiguous between "off" and
+                    // "nothing here to act on".
+                    let isolating = self.tree_isolate && self.isolate_uid != 0;
+                    let on = !session().lock().unwrap().scope_unconfined;
+                    let confined = isolating && on;
+                    {
+                        let btn = row.child(live_id!(scope_line)).child(live_id!(scope_isolated));
+                        set_button_fill(cx, btn.clone(), confined);
+                        let mut btn = btn;
+                        let color: Vec4f = if isolating && all {
+                            vec4(0.92, 0.92, 0.94, 1.0)
+                        } else {
+                            vec4(0.42, 0.42, 0.45, 1.0)
+                        };
+                        script_apply_eval!(cx, btn, { draw_text +: { color: #(color) } });
+                    }
                     let widget = cx.widget_tree().widget(WidgetUid(sel.uid));
+                    // Same three-way answer the apply itself gives: a
+                    // confined "all" does not touch the type's definition,
+                    // so the footer must not promise that it does.
+                    let root = cx.widget_tree().widget(WidgetUid(self.isolate_uid));
                     let origin = if widget.is_empty() {
                         String::new()
+                    } else if all && confined && !root.is_empty() {
+                        source_origin(cx, &root)
                     } else if all {
                         type_origin(cx, &widget)
                     } else {
                         source_origin(cx, &widget)
                     };
                     let base = origin.rsplit('/').next().unwrap_or(&origin).to_string();
-                    row.child(live_id!(scope_origin)).set_text(cx, &if base.is_empty() { String::new() } else { format!("edits land in {base}") });
+                    // The path line below is the widget's ADDRESS in the
+                    // running tree; this line is the FILE an edit is written
+                    // to, which changes with the scope -- "this" edits where
+                    // the instance is declared, "all Labels" edits the Label
+                    // type where it is defined. Two different questions, and
+                    // a line that only named the file read as a contradiction
+                    // of the path under it.
+                    self.target_line = if base.is_empty() { String::new() } else { format!("target {base}") };
+                    self.target_tip = if base.is_empty() {
+                        String::new()
+                    } else if all && confined && !root.is_empty() {
+                        format!("edits are written to {base}: the isolated branch, so every {} in it", sel.ty)
+                    } else if all {
+                        format!("edits are written to {base}: the {} type, so every {}", sel.ty, sel.ty)
+                    } else {
+                        format!("edits are written to {base}: this instance only")
+                    };
                 }
             }
             None => {
-                sidebar.child(live_id!(ident_footer)).child(live_id!(title_label)).set_text(cx, "tweak");
+                let title = sidebar.child(live_id!(ident_footer)).child(live_id!(title_label));
+                title.set_visible(cx, true);
+                title.set_text(cx, "tweak");
+                self.target_line.clear();
+                self.target_tip.clear();
                 sidebar
-                    .child(live_id!(ident_footer)).child(live_id!(path_label))
+                    .child(live_id!(ident_footer)).child(live_id!(path_row)).child(live_id!(path_label))
                     .set_text(cx, "click a widget to inspect it");
             }
         }
@@ -6571,32 +12666,24 @@ impl Tweaker {
             .child(live_id!(input))
             .widget_uid()
             .0;
-        self.sploded_uid = sidebar
-            .child(live_id!(filter_row))
-            .child(live_id!(sploded))
-            .widget_uid()
-            .0;
-        self.note_uid = sidebar
-            .child(live_id!(filter_row))
-            .child(live_id!(note))
-            .widget_uid()
-            .0;
+        {
+            // The two that were never lit: the exploded-view toggle and the
+            // note. Both are modes you can be IN, and a mode you cannot see
+            // yourself in is the same complaint as the scope row's.
+            let sploded = sidebar.child(live_id!(filter_row)).child(live_id!(sploded));
+            self.sploded_uid = sploded.widget_uid().0;
+            let armed = cx.sploded_will_be_active();
+            set_button_fill(cx, sploded, armed);
+        }
+        {
+            let select = sidebar.child(live_id!(filter_row)).child(live_id!(select));
+            self.select_uid = select.widget_uid().0;
+            let picking = !session().lock().unwrap().selection_locked;
+            set_button_fill(cx, select, picking);
+        }
         self.scope_this_uid = sidebar.child(live_id!(ident_footer)).child(live_id!(scope_row)).child(live_id!(scope_line)).child(live_id!(scope_this)).widget_uid().0;
         self.scope_all_uid = sidebar.child(live_id!(ident_footer)).child(live_id!(scope_row)).child(live_id!(scope_line)).child(live_id!(scope_all)).widget_uid().0;
-        let spread_wrap = sidebar.child(live_id!(filter_row)).child(live_id!(spread_wrap));
-        let spread = spread_wrap.child(live_id!(spread));
-        self.spread_uid = spread.widget_uid().0;
-        if let Some(mut field) = spread.borrow_mut::<FabValueInput>() {
-            field.set_hint(
-                Some(SPLODED_SPREAD_MIN as f64),
-                Some(SPLODED_SPREAD_MAX as f64),
-                Some(0.01),
-            );
-            let spread_now = cx.sploded_spread() as f64;
-            field.set_value(cx, spread_now);
-        }
-        let spread_on = cx.sploded_will_be_active();
-        spread_wrap.set_visible(cx, spread_on);
+        self.scope_isolated_uid = sidebar.child(live_id!(ident_footer)).child(live_id!(scope_row)).child(live_id!(scope_line)).child(live_id!(scope_isolated)).widget_uid().0;
         if self.focus_search_pending {
             let input = sidebar
                 .child(live_id!(filter_row))
@@ -6607,7 +12694,8 @@ impl Tweaker {
                 self.focus_search_pending = false;
             }
         }
-        // The panel tabs: Props / Shader / Tree, one content visible.
+        // The panel tabs: Props / Shader / Tree / Theme / Spec, one content
+        // visible.
         {
             let tab = self.panel_tab;
             sidebar
@@ -6619,18 +12707,221 @@ impl Tweaker {
             sidebar
                 .child(live_id!(tree_wrap))
                 .set_visible(cx, tab == PanelTab::Tree);
+            sidebar
+                .child(live_id!(spec_col))
+                .set_visible(cx, tab == PanelTab::Spec);
+            sidebar
+                .child(live_id!(theme_head))
+                .set_visible(cx, tab == PanelTab::Theme);
+            if tab == PanelTab::Tree {
+                // The toggle shows its state by fill, like the scope buttons,
+                // and says what it is isolating — a tree cut down to one
+                // subtree must announce that it is cut down.
+                let head = sidebar.child(live_id!(tree_wrap)).child(live_id!(tree_head));
+                set_button_fill(cx, head.child(live_id!(isolate)), self.tree_isolate);
+                set_button_fill(cx, head.child(live_id!(center)), self.view_center);
+                // Center and Zoom follow Isolate: live while a branch is
+                // isolated, dimmed and inert otherwise.
+                let live = self.view_focus_rule().controls_enabled;
+                set_button_live(cx, &head.child(live_id!(center)), live);
+                let zoom_field = head.child(live_id!(zoom));
+                zoom_field.as_fab_value_input().set_enabled(cx, live);
+                if zoom_field.area() == Area::Empty || !cx.has_key_focus(zoom_field.area()) {
+                    // A FabValueInput holds a number, not a string: set_text
+                    // leaves its own value at zero and the field reads 0.00.
+                    zoom_field
+                        .as_fab_value_input()
+                        .set_value(cx, self.view_zoom.max(1.0) as f64);
+                }
+                let hint = match (self.tree_isolate, sel.as_ref()) {
+                    (true, Some(sel)) => format!("{} and what is inside it", sel.ty),
+                    (true, None) => "select something to isolate".to_string(),
+                    (false, _) => String::new(),
+                };
+                head.child(live_id!(isolate_hint)).set_text(cx, &hint);
+            }
+            if tab == PanelTab::Theme {
+                // The picker, the save box and the delete button. Their uids
+                // are cached here because a click arrives as a uid and
+                // nothing else.
+                let head = sidebar.child(live_id!(theme_head));
+                let pick_row = head.child(live_id!(theme_pick_row));
+                let pick = pick_row.child(live_id!(theme_pick));
+                self.theme_pick_uid = pick.widget_uid().0;
+                // The switch beside it, lit while the panel is wearing the
+                // theme. Read off the palette rather than off a flag of this
+                // widget's own, so what the switch SAYS and what the panel
+                // is actually painted in cannot drift apart.
+                let wear = pick_row.child(live_id!(theme_wear));
+                self.theme_wear_uid = wear.widget_uid().0;
+                let worn = crate::fab_controls::panel_wears_theme(cx);
+                set_button_fill(cx, wear, worn);
+                let entries = self.theme_entry_list();
+                // Only when they actually changed: `set_labels` redraws, and
+                // this runs on every frame the tab is up.
+                if self.theme_entries != entries {
+                    self.theme_entries = entries.clone();
+                    pick.as_drop_down()
+                        .set_labels(cx, entries.iter().map(|e| e.label()).collect());
+                }
+                pick.as_drop_down()
+                    .set_selected_item(cx, self.theme_choice_index(&entries));
+                let row = head.child(live_id!(theme_save_row));
+                let name = row.child(live_id!(theme_name));
+                self.theme_name_uid = name.widget_uid().0;
+                if let Some(seed) = self.theme_name_seed.take() {
+                    name.set_text(cx, &seed);
+                    self.theme_name = seed;
+                }
+                self.theme_save_uid = row.child(live_id!(theme_save)).widget_uid().0;
+                // A built-in has no delete affordance AT ALL, and the route
+                // to one is closed with it: a uid of 0 is no widget. Read off
+                // the row the picker is actually SHOWING rather than off the
+                // remembered name, so the button and the picker can never
+                // disagree about what would be deleted.
+                let deletable = matches!(
+                    entries.get(self.theme_choice_index(&entries)),
+                    Some(ThemeChoice::Saved(_))
+                );
+                let del = row.child(live_id!(theme_delete));
+                del.set_visible(cx, deletable);
+                self.theme_delete_uid = if deletable { del.widget_uid().0 } else { 0 };
+                let msg = head.child(live_id!(theme_msg));
+                msg.set_visible(cx, !self.theme_msg.is_empty());
+                msg.set_text(cx, &self.theme_msg);
+            }
+            {
+                // The filter works on the row list, which the Shader and
+                // Spec tabs do not have. A box that looks live and does
+                // nothing is worse than none, so on those tabs it says so
+                // and goes quiet.
+                let filters_here = !matches!(tab, PanelTab::Shader | PanelTab::Spec);
+                let input = sidebar
+                    .child(live_id!(filter_row))
+                    .child(live_id!(search))
+                    .child(live_id!(input));
+                if let Some(mut input) = input.borrow_mut::<crate::TextInput>() {
+                    let hint = if !filters_here {
+                        "no filter on this tab"
+                    } else if self.search_mode && tab != PanelTab::Tree {
+                        "Search"
+                    } else {
+                        "Filter"
+                    };
+                    if input.empty_text() != hint {
+                        input.set_empty_text(cx, hint.to_string());
+                    }
+                }
+                let text: Vec4f = if filters_here {
+                    vec4(0.90, 0.90, 0.92, 1.0)
+                } else {
+                    vec4(0.42, 0.42, 0.46, 1.0)
+                };
+                let bg: Vec4f = if filters_here {
+                    vec4(0.106, 0.106, 0.106, 1.0)
+                } else {
+                    vec4(0.16, 0.16, 0.17, 1.0)
+                };
+                let mut input = input;
+                script_apply_eval!(cx, input, {
+                    draw_text +: { color: #(text) }
+                    draw_bg +: { color: #(bg) }
+                });
+                // The search toggle lights while on; the count and the
+                // arrows show only then, and only where rows are searched
+                // (the Tree tab keeps its filter).
+                let searches_here = filters_here && tab != PanelTab::Tree;
+                let row = sidebar.child(live_id!(filter_row));
+                let find = row.child(live_id!(find));
+                self.find_uid = find.widget_uid().0;
+                set_button_fill(cx, find.clone(), self.search_mode && searches_here);
+                let nav = row.child(live_id!(nav));
+                nav.set_visible(cx, self.search_mode && searches_here);
+                self.prev_uid = nav.child(live_id!(prev)).widget_uid().0;
+                self.next_uid = nav.child(live_id!(next)).widget_uid().0;
+                if self.search_mode && searches_here {
+                    let hits = self.search_hits(&self.build_visible());
+                    let count = if self.filter.is_empty() {
+                        String::new()
+                    } else if hits.is_empty() {
+                        "0".to_string()
+                    } else {
+                        format!("{}/{}", self.search_hit % hits.len() + 1, hits.len())
+                    };
+                    nav.child(live_id!(hits)).set_text(cx, &count);
+                }
+            }
             let tab_row = sidebar.child(live_id!(tab_row));
             let tabs = [
                 (live_id!(tab_props), PanelTab::Props, "Props"),
                 (live_id!(tab_shader), PanelTab::Shader, "Shader"),
                 (live_id!(tab_tree), PanelTab::Tree, "Tree"),
                 (live_id!(tab_theme), PanelTab::Theme, "Theme"),
+                (live_id!(tab_spec), PanelTab::Spec, "Spec"),
             ];
             for (i, (id, t, label)) in tabs.into_iter().enumerate() {
                 let btn = tab_row.child(id);
                 btn.set_text(cx, label);
                 set_button_fill(cx, btn.clone(), t == tab);
                 self.tab_uids[i] = btn.widget_uid().0;
+            }
+            if tab == PanelTab::Spec {
+                self.draw_spec(cx, sel);
+            } else if self.spec_dirty {
+                // Left the tab with something unsaved: flush it now rather
+                // than wait for a focus change that may never come.
+                self.spec_flush();
+            }
+            // The prompt strip lives OUTSIDE the tabs: it is pinned between
+            // the tab bodies and the footer, so whichever tab is up, the box
+            // is in the same place and the body scrolls above it.
+            {
+                let row = sidebar.child(live_id!(prompt_row));
+                let bar = row.child(live_id!(prompt_bar));
+                self.prompt_queue_uid = bar.child(live_id!(queue)).widget_uid().0;
+                self.prompt_send_uid = bar.child(live_id!(send)).widget_uid().0;
+                // On the Shader tab the box is a shader ask and the status
+                // line is that channel's -- "waiting", "live", or the error.
+                let shader_tab = tab == PanelTab::Shader;
+                let status = {
+                    let s = session().lock().unwrap();
+                    if shader_tab && !s.vibe_status.is_empty() {
+                        s.vibe_status.clone()
+                    } else {
+                        s.prompt_status.clone()
+                    }
+                };
+                bar.child(live_id!(prompt_status)).set_text(cx, &status);
+                bar.child(live_id!(target_wrap))
+                    .child(live_id!(target_label))
+                    .set_text(cx, &self.target_line);
+                let field = row.child(live_id!(prompt_field));
+                self.prompt_field_uid = field.widget_uid().0;
+                if let Some(mut input) = field.borrow_mut::<crate::TextInput>() {
+                    let hint = if shader_tab {
+                        let layer = self.vibe_layer.clone().unwrap_or_else(|| "draw_bg".to_string());
+                        format!("what should {layer}'s code do differently\u{2026} Ctrl+Enter sends \u{00b7} colours and sizes stay in Props")
+                    } else {
+                        "what should change\u{2026} Ctrl+Enter sends \u{00b7} Alt+Enter queues".to_string()
+                    };
+                    if input.empty_text() != hint {
+                        input.set_empty_text(cx, hint);
+                    }
+                }
+                if self.prompt_clear_field {
+                    // A send emptied the box. Clear it here rather than in
+                    // the send, so the field is written exactly once a frame
+                    // and never while the caret is mid-keystroke.
+                    self.prompt_clear_field = false;
+                    field.set_text(cx, "");
+                } else if field.area() == Area::Empty || !cx.has_key_focus(field.area()) {
+                    // The anti-clobber guard: without it, typing is
+                    // overwritten from the session every frame.
+                    let live = session().lock().unwrap().prompt.clone();
+                    if field.text() != live {
+                        field.set_text(cx, &live);
+                    }
+                }
             }
             // Shader tab content: the layer's live preview + doc + prompt.
             if tab == PanelTab::Shader {
@@ -6642,10 +12933,6 @@ impl Tweaker {
                     .or_else(|| self.materials.first().cloned())
                     .unwrap_or_else(|| "draw_bg".to_string());
                 let col = sidebar.child(live_id!(shader_col));
-                {
-                    let status = session().lock().unwrap().vibe_status.clone();
-                    col.child(live_id!(vibe_status)).set_text(cx, &status);
-                }
                 // The layer the Shader tab shows is the one a prompt or an
                 // editor apply targets.
                 self.vibe_layer = Some(layer.clone());
@@ -6678,7 +12965,6 @@ impl Tweaker {
                     .child(live_id!(shader_src))
                     .widget_uid()
                     .0;
-                self.vibe_prompt_uid = col.child(live_id!(prompt)).widget_uid().0;
                 // The source editor unfolds on demand only; folded, the tab
                 // is the swatch + doc + prompt.
                 let fold = col.child(live_id!(src_fold));
@@ -6793,7 +13079,11 @@ impl Tweaker {
             // Tree tab data: refresh on generation change.
             if tab == PanelTab::Tree && self.tree_rows_gen != self.rows_gen.wrapping_add(1)
             {
-                self.tree_rows = cx.widget_tree().flat_tree(cx);
+                self.tree_rows = rows_without_inspectors(
+                    cx.widget_tree().flat_tree(cx),
+                    self.uid.0,
+                    self.sidebar_uid(),
+                );
                 self.tree_rows_gen = self.rows_gen.wrapping_add(1);
                 // Parent links from the depth-first order: the nearest
                 // earlier row one level up.
@@ -6826,7 +13116,6 @@ impl Tweaker {
         }
 
         self.composite_fields.clear();
-        self.composite_align.clear();
         self.composite_clicks.clear();
         self.open_popup = None;
         session().lock().unwrap().popup = None;
@@ -6926,6 +13215,8 @@ impl Tweaker {
                     rows: &[crate::widget_tree::FlatTreeRow],
                     children: &[Vec<usize>],
                     keep: Option<&Vec<bool>>,
+                    locked: u64,
+                    pinned: &[u64],
                     index: usize,
                 ) {
                     if let Some(keep) = keep {
@@ -6934,11 +13225,26 @@ impl Tweaker {
                         }
                     }
                     let row = &rows[index];
-                    let label = format!("{} \u{00b7} {}", row.name, row.ty);
+                    // The row isolation is LOCKED to wears a mark, so it stays
+                    // obvious which one the view is held on even after the
+                    // selection has moved to a child inside it.
+                    // A widget carrying a PINNED note wears the same mark
+                    // here as it does on the canvas: the tree is the other
+                    // way of finding what has already been said about what.
+                    let mark = if pinned.contains(&row.uid) {
+                        "\u{1f4cc} "
+                    } else {
+                        ""
+                    };
+                    let label = if row.uid == locked {
+                        format!("\u{25c9} {mark}{} \u{00b7} {}", row.name, row.ty)
+                    } else {
+                        format!("{mark}{} \u{00b7} {}", row.name, row.ty)
+                    };
                     if row.has_children {
                         if tree.begin_folder(cx, LiveId(row.uid), &label).is_ok() {
                             for &child in &children[index] {
-                                emit(tree, cx, rows, children, keep, child);
+                                emit(tree, cx, rows, children, keep, locked, pinned, child);
                             }
                             tree.end_folder();
                         }
@@ -6946,16 +13252,60 @@ impl Tweaker {
                         tree.file(cx, LiveId(row.uid), &label);
                     }
                 }
-                for index in 0..self.tree_rows.len() {
-                    if self.tree_parents[index].is_none() {
+                // The pin marks come from the same place the canvas badges
+                // do, refreshed on the same throttle — but the tree shows
+                // them whether or not a note card happens to be open.
+                self.refresh_badges(cx);
+                let pinned_uids: Vec<u64> =
+                    self.badge_targets.iter().map(|(uid, _, _)| *uid).collect();
+                // Isolate: one root — the selection — instead of the app's.
+                // With nothing selected there is nothing to isolate, so the
+                // whole tree stands.
+                let isolate_root = if self.tree_isolate && self.isolate_uid != 0 {
+                    self.tree_rows
+                        .iter()
+                        .position(|row| row.uid == self.isolate_uid)
+                } else {
+                    None
+                };
+                match isolate_root {
+                    Some(root) => {
+                        // The isolated root has to be open or the subtree it
+                        // was opened for is exactly what stays hidden.
+                        if self.tree_rows[root].has_children {
+                            tree.set_folder_is_open(
+                                cx,
+                                LiveId(self.tree_rows[root].uid),
+                                true,
+                                Animate::No,
+                            );
+                        }
                         emit(
                             &mut tree,
                             cx,
                             &self.tree_rows,
                             &self.tree_children,
                             keep.as_ref(),
-                            index,
+                            self.isolate_uid,
+                            &pinned_uids,
+                            root,
                         );
+                    }
+                    None => {
+                        for index in 0..self.tree_rows.len() {
+                            if self.tree_parents[index].is_none() {
+                                emit(
+                                    &mut tree,
+                                    cx,
+                                    &self.tree_rows,
+                                    &self.tree_children,
+                                    keep.as_ref(),
+                                    self.isolate_uid,
+                                    &pinned_uids,
+                                    index,
+                                );
+                            }
+                        }
                     }
                 }
                 if let Some(tries) = self.tree_scroll_tries {
@@ -6985,12 +13335,17 @@ impl Tweaker {
                 continue;
             };
             let entries = if in_shader_tab { &shader_entries } else { &entries_all };
+            let hits = if self.search_mode && !in_shader_tab {
+                self.search_hits(entries)
+            } else {
+                Vec::new()
+            };
+            let current_hit = (!hits.is_empty()).then(|| hits[self.search_hit % hits.len()]);
             list.set_item_range(cx, 0, entries.len());
             // A row can draw twice (TWEAKABLES + its home section); every
             // draw registers its fields, so the sets start empty per frame.
             for row in &mut self.rows {
                 row.comp_uids.clear();
-                row.mode_uids.clear();
                 row.alt_uids.clear();
             }
             while let Some(entry_id) = list.next_visible_item(cx) {
@@ -7003,16 +13358,22 @@ impl Tweaker {
                     VisKind::More(..) => live_id!(MoreRow),
                     VisKind::Material(_) => live_id!(MaterialRow),
                     VisKind::Size => live_id!(SizeRow),
+                    VisKind::Measured => live_id!(MeasuredRow),
+                    VisKind::Identity => live_id!(IdentityRow),
                     VisKind::BoxInset(_) => live_id!(BoxRow),
                     VisKind::FlowSpacing => live_id!(FlowRow),
                     VisKind::AlignGrid => live_id!(AlignRow),
+                    VisKind::Group(_) => live_id!(GroupRow),
+                    VisKind::Container => live_id!(ContainerRow),
+                    VisKind::Absolute => live_id!(AbsRow),
+                    VisKind::GridTracks => live_id!(GridRow),
+                    VisKind::Cell => live_id!(CellRow),
                     VisKind::TweakHeader(..) | VisKind::InputsHeader(_) => live_id!(SectionRow),
                     VisKind::CascadeLevel(_) => live_id!(CascadeRow),
                     VisKind::Prop(index) | VisKind::Tweakable(index) => match self.rows[index].struct_kind {
                         StructKind::Vec2 | StructKind::Vec3 | StructKind::Vec4 => live_id!(VecRow),
                         StructKind::Inset => live_id!(InsetRow),
                         StructKind::Metrics => live_id!(MetricsRow),
-                        StructKind::SizeField => live_id!(SizeFieldRow),
                         StructKind::NoEditor => live_id!(NoEditorRow),
                         StructKind::None => match self.rows[index].kind {
                             RowKind::Num => live_id!(NumRow),
@@ -7106,16 +13467,85 @@ impl Tweaker {
                             }
                         }
                     }
+                    VisKind::Identity => {
+                        let sel = session().lock().unwrap().pinned.clone();
+                        let (name, wanted, ty) = match sel {
+                            Some(sel) => {
+                                let reference = self.sel_ref(cx, sel.uid);
+                                let wanted = {
+                                    let mut s = session().lock().unwrap();
+                                    s.load_renames();
+                                    s.renames
+                                        .iter()
+                                        .find(|r| r.reference == reference)
+                                        .map(|r| r.to.clone())
+                                };
+                                (tree_name_of(cx, sel.uid), wanted, sel.ty)
+                            }
+                            None => (String::new(), None, String::new()),
+                        };
+                        let field = item.child(live_id!(name_field));
+                        self.identity_uid = field.widget_uid().0;
+                        // A name that has been asked for but not yet carried
+                        // out shows in amber: it is what the person wants the
+                        // widget called, not what it is called.
+                        let mut field_ref = field.clone();
+                        let color: Vec4f = if wanted.is_some() {
+                            vec4(1.0, 0.78, 0.29, 1.0)
+                        } else {
+                            vec4(0.902, 0.902, 0.902, 1.0)
+                        };
+                        script_apply_eval!(cx, field_ref, { draw_text +: { color: #(color) } });
+                        // Never while it is being typed in.
+                        if field.area() == Area::Empty || !cx.has_key_focus(field.area()) {
+                            field.set_text(cx, wanted.as_deref().unwrap_or(&name));
+                        }
+                        item.child(live_id!(type_label)).set_text(cx, &ty);
+                    }
+                    VisKind::Measured => {
+                        // Straight off the selection: what the layout gave,
+                        // in the unit the size fields take, and — only when
+                        // the screen is not 1:1, where the two differ — the
+                        // device pixels it actually covers.
+                        let rect = session()
+                            .lock()
+                            .unwrap()
+                            .pinned
+                            .as_ref()
+                            .map(|p| p.rect)
+                            .unwrap_or_default();
+                        let dpi = cx.current_dpi_factor();
+                        let text = if rect.size.x <= 0.0 && rect.size.y <= 0.0 {
+                            String::new()
+                        } else if (dpi - 1.0).abs() < 0.001 {
+                            format!(
+                                "measured {} \u{00d7} {} px",
+                                fmt_measure(rect.size.x),
+                                fmt_measure(rect.size.y)
+                            )
+                        } else {
+                            format!(
+                                "measured {} \u{00d7} {} = {} \u{00d7} {} device px",
+                                fmt_measure(rect.size.x),
+                                fmt_measure(rect.size.y),
+                                fmt_measure((rect.size.x * dpi).round()),
+                                fmt_measure((rect.size.y * dpi).round())
+                            )
+                        };
+                        item.child(live_id!(measured)).set_text(cx, &text);
+                    }
                     VisKind::Size => {
                         item.child(live_id!(name)).set_text(cx, "size");
                         let size_col = item.child(live_id!(size_col));
-                        for (axis, row_id, seg_id, input_id, segs) in [
+                        for (axis, row_id, seg_id, input_id, segs, lines, fields) in [
                             (
                                 "width",
                                 live_id!(w_row),
                                 live_id!(w_seg),
                                 live_id!(w_input),
                                 [live_id!(w_fill), live_id!(w_fit), live_id!(w_fix)],
+                                [live_id!(w_clamp), live_id!(w_grow), live_id!(w_basis)],
+                                [live_id!(w_min), live_id!(w_max), live_id!(w_weight), live_id!(w_shrink), live_id!(w_basis_in)],
                             ),
                             (
                                 "height",
@@ -7123,25 +13553,29 @@ impl Tweaker {
                                 live_id!(h_seg),
                                 live_id!(h_input),
                                 [live_id!(h_fill), live_id!(h_fit), live_id!(h_fix)],
+                                [live_id!(h_clamp), live_id!(h_grow), live_id!(h_basis)],
+                                [live_id!(h_min), live_id!(h_max), live_id!(h_weight), live_id!(h_shrink), live_id!(h_basis_in)],
                             ),
                         ] {
                             let row = size_col.child(row_id);
-                            let fixed = self
-                                .row_value(axis)
-                                .and_then(|v| v.parse::<f64>().ok());
-                            let filled =
-                                self.row_index(&format!("{axis}.weight")).is_some();
+                            // The row is ONE value now -- `Size.Fill{..}`,
+                            // `Size.Fixed(200)`, `"50%"` -- read as such.
+                            let size = parse_size_text(self.row_value(axis).unwrap_or("Fit"));
+                            let fixed = match &size {
+                                SizeText::Fixed(v) => Some(*v),
+                                _ => None,
+                            };
                             // The autolayout convention: Fill spreads
-                            // (arrows out), Fit hugs (arrows in), Fixed is
-                            // a number — the value field lights only then.
+                            // (arrows out), Fit hugs (arrows in), and the
+                            // third is a size in the person's own words --
+                            // a number of points, `50%`, `25vw`, or an
+                            // expression -- which the field then shows.
                             let seg = row.child(seg_id);
                             let labels = ["\u{2194}", "\u{2192}\u{2190}", "#"];
-                            let active = if fixed.is_some() {
-                                2
-                            } else if filled {
-                                0
-                            } else {
-                                1
+                            let active = match size {
+                                SizeText::Fill { .. } => 0,
+                                SizeText::Fit => 1,
+                                _ => 2,
                             };
                             for (i, seg_child) in segs.into_iter().enumerate() {
                                 let btn = seg.child(seg_child);
@@ -7160,16 +13594,63 @@ impl Tweaker {
                             let input = row.child(input_id);
                             if input.area() == Area::Empty || !cx.has_key_focus(input.area())
                             {
-                                let text = match fixed {
-                                    Some(v) => fmt_f64(v),
-                                    None if filled => "Fill".to_string(),
-                                    None => "Fit".to_string(),
-                                };
-                                input.set_text(cx, &text);
+                                input.set_text(cx, &size.field_text());
                             }
                             self.composite_fields
                                 .push((input.widget_uid().0, axis.to_string()));
+                            // The content-box clamps. A row only exists once
+                            // a bound is set, so no row reads as none.
+                            let clamp = size_col.child(lines[0]);
+                            for (child, prop) in
+                                [(fields[0], format!("min_{axis}")), (fields[1], format!("max_{axis}"))]
+                            {
+                                let field = clamp.child(child);
+                                if field.area() == Area::Empty || !cx.has_key_focus(field.area()) {
+                                    let text = self.row_value(&prop).map(bound_text).unwrap_or_default();
+                                    field.set_text(cx, &text);
+                                }
+                                self.composite_fields.push((field.widget_uid().0, prop));
+                            }
+                            // A Fill's own fields, on their lines under the
+                            // axis; the lines are not there for anything else.
+                            let fill = match &size {
+                                SizeText::Fill(fill) => Some(fill.clone()),
+                                _ => None,
+                            };
+                            let grow = size_col.child(lines[1]);
+                            let basis = size_col.child(lines[2]);
+                            grow.set_visible(cx, fill.is_some());
+                            basis.set_visible(cx, fill.is_some());
+                            if let Some(fill) = fill {
+                                for (child, key, value) in
+                                    [(fields[2], "weight", fill.weight), (fields[3], "shrink", fill.shrink)]
+                                {
+                                    let field = grow.child(child);
+                                    if let Some(mut input) = field.borrow_mut::<FabValueInput>() {
+                                        input.set_value(cx, value);
+                                    }
+                                    self.composite_fields
+                                        .push((field.widget_uid().0, format!("{axis}#{key}")));
+                                }
+                                let field = basis.child(fields[4]);
+                                if field.area() == Area::Empty || !cx.has_key_focus(field.area()) {
+                                    field.set_text(cx, &fill.basis);
+                                }
+                                self.composite_fields
+                                    .push((field.widget_uid().0, format!("{axis}#basis")));
+                            }
                         }
+                        // The aspect, width over height, under both axes.
+                        let field = size_col.child(live_id!(aspect_row)).child(live_id!(aspect_in));
+                        if field.area() == Area::Empty || !cx.has_key_focus(field.area()) {
+                            let text = self
+                                .row_value("aspect")
+                                .and_then(|v| v.parse::<f64>().ok())
+                                .map(fmt_f64)
+                                .unwrap_or_default();
+                            field.set_text(cx, &text);
+                        }
+                        self.composite_fields.push((field.widget_uid().0, "aspect".to_string()));
                     }
                     VisKind::BoxInset(kind) => {
                         let base = kind.prop();
@@ -7205,8 +13686,56 @@ impl Tweaker {
                         self.box_link_uids[link_index] = link.widget_uid().0;
                     }
                     VisKind::FlowSpacing => {
-                        item.child(live_id!(name)).set_text(cx, "spacing");
-                        let field = item.child(live_id!(spacing_input));
+                        item.child(live_id!(name)).set_text(cx, "flow");
+                        // The row is one value -- `Flow.Right{wrap: true ..}`
+                        // -- and every button writes the whole of it back.
+                        let flow = parse_flow_text(self.row_value("flow").unwrap_or(""));
+                        let col = item.child(live_id!(flow_col));
+                        let dir_row = col.child(live_id!(dir_row));
+                        let seg = dir_row.child(live_id!(flow_seg));
+                        let dirs = [
+                            (live_id!(f_right), "\u{2192}", FlowDir::Right),
+                            (live_id!(f_down), "\u{2193}", FlowDir::Down),
+                            (live_id!(f_over), "stack", FlowDir::Overlay),
+                        ];
+                        for (child, label, dir) in dirs {
+                            let btn = seg.child(child);
+                            btn.set_text(cx, label);
+                            set_button_fill(cx, btn.clone(), flow.dir == dir);
+                            self.composite_clicks
+                                .push((btn.widget_uid().0, flow.with_dir(dir).chunk()));
+                        }
+                        let wrap_btn = dir_row.child(live_id!(f_wrap));
+                        wrap_btn.set_text(cx, "wrap");
+                        set_button_fill(cx, wrap_btn.clone(), flow.wraps());
+                        self.composite_clicks
+                            .push((wrap_btn.widget_uid().0, flow.toggled_wrap().chunk()));
+                        // How a row lines up only means anything left to
+                        // right; the segment is not shown otherwise.
+                        let ra_seg = dir_row.child(live_id!(ra_seg));
+                        ra_seg.set_visible(cx, flow.dir == FlowDir::Right);
+                        let aligns = [
+                            (live_id!(ra_top), "\u{2191}", RowAlignText::Top),
+                            (live_id!(ra_mid), "\u{2195}", RowAlignText::Center),
+                            (live_id!(ra_bottom), "\u{2193}", RowAlignText::Bottom),
+                        ];
+                        for (child, label, row_align) in aligns {
+                            let btn = ra_seg.child(child);
+                            btn.set_text(cx, label);
+                            set_button_fill(
+                                cx,
+                                btn.clone(),
+                                flow.dir == FlowDir::Right && flow.row_align == row_align,
+                            );
+                            self.composite_clicks
+                                .push((btn.widget_uid().0, flow.with_row_align(row_align).chunk()));
+                        }
+                        // The gaps: between children, and between wrapped
+                        // rows. A Label flows its text but has no spacing,
+                        // so the line only shows where there is one to set.
+                        let gap_row = col.child(live_id!(gap_row));
+                        gap_row.set_visible(cx, self.row_index("spacing").is_some());
+                        let field = gap_row.child(live_id!(spacing_input));
                         if let Some(mut input) = field.borrow_mut::<FabValueInput>() {
                             let v = self
                                 .row_value("spacing")
@@ -7216,57 +13745,334 @@ impl Tweaker {
                         }
                         self.composite_fields
                             .push((field.widget_uid().0, "spacing".into()));
-                        let seg = item.child(live_id!(flow_seg));
-                        let flows = [
-                            (live_id!(f_right), "R", "flow: Right"),
-                            (live_id!(f_down), "D", "flow: Down"),
-                            (live_id!(f_over), "O", "flow: Overlay"),
-                            (live_id!(f_wrap), "W", "flow: RightWrap"),
-                        ];
-                        for (child, label, chunk) in flows {
+                        let wrap_box = gap_row.child(live_id!(wrap_box));
+                        wrap_box.set_visible(
+                            cx,
+                            flow.wraps() && self.row_index("wrap_spacing").is_some(),
+                        );
+                        let field = wrap_box.child(live_id!(wrap_input));
+                        if let Some(mut input) = field.borrow_mut::<FabValueInput>() {
+                            let v = self
+                                .row_value("wrap_spacing")
+                                .and_then(|v| v.parse::<f64>().ok())
+                                .unwrap_or(0.0);
+                            input.set_value(cx, v);
+                        }
+                        self.composite_fields
+                            .push((field.widget_uid().0, "wrap_spacing".into()));
+                    }
+                    VisKind::AlignGrid => if self.sel_is_grid {
+                        // A Grid aligns each child inside its cell: along
+                        // the columns and along the rows, stretch included.
+                        item.child(live_id!(name)).set_text(cx, "cells");
+                        let col = item.child(live_id!(align_col));
+                        col.child(live_id!(space_row)).set_visible(cx, false);
+                        for (row_id, seg_id, axis_id, prop, arrow, ids) in [
+                            (
+                                live_id!(just_row),
+                                live_id!(just_seg),
+                                live_id!(just_axis),
+                                "justify_items",
+                                "",
+                                [live_id!(j_stretch), live_id!(j_start), live_id!(j_mid), live_id!(j_end)],
+                            ),
+                            (
+                                live_id!(cross_row),
+                                live_id!(cross_seg),
+                                live_id!(cross_axis),
+                                "align_items",
+                                "",
+                                [live_id!(c_stretch), live_id!(c_start), live_id!(c_mid), live_id!(c_end)],
+                            ),
+                        ] {
+                            let row = col.child(row_id);
+                            row.child(axis_id).set_text(cx, arrow);
+                            let current = self
+                                .row_value(prop)
+                                .map(|v| v.rsplit('.').next().unwrap_or("").to_string())
+                                .unwrap_or_else(|| "Stretch".to_string());
+                            let seg = row.child(seg_id);
+                            for (child, label, variant) in [
+                                (ids[0], "stretch", "Stretch"),
+                                (ids[1], "start", "Start"),
+                                (ids[2], "centre", "Center"),
+                                (ids[3], "end", "End"),
+                            ] {
+                                let btn = seg.child(child);
+                                btn.set_visible(cx, true);
+                                btn.set_text(cx, label);
+                                set_button_fill(cx, btn.clone(), current == variant);
+                                self.composite_clicks
+                                    .push((btn.widget_uid().0, format!("{prop}: CellAlign.{variant}")));
+                            }
+                        }
+                    } else {
+                            item.child(live_id!(name)).set_text(cx, "align");
+                            let ax = self
+                                .row_value("align.x")
+                                .and_then(|v| v.parse::<f64>().ok())
+                                .unwrap_or(0.0);
+                            let ay = self
+                                .row_value("align.y")
+                                .and_then(|v| v.parse::<f64>().ok())
+                                .unwrap_or(0.0);
+                            // Which axis is along the flow and which across
+                            // follows the direction; the labels carry the arrow.
+                            let dir = parse_flow_text(self.row_value("flow").unwrap_or("")).dir;
+                            let down = dir == FlowDir::Down;
+                            let (main, cross) = if down { (ay, ax) } else { (ax, ay) };
+                            let distribute = self
+                                .row_value("distribute")
+                                .map(|v| v.rsplit('.').next().unwrap_or("").to_string())
+                                .unwrap_or_else(|| "Start".to_string());
+                            let col = item.child(live_id!(align_col));
+                            col.child(live_id!(space_row)).set_visible(cx, true);
+                            let just_row = col.child(live_id!(just_row));
+                            just_row
+                                .child(live_id!(just_axis))
+                                .set_text(cx, if down { "\u{2195}" } else { "\u{2194}" });
+                            let seg = just_row.child(live_id!(just_seg));
+                            seg.child(live_id!(j_stretch)).set_visible(cx, false);
+                            for (child, label, value) in [
+                                (live_id!(j_start), "start", 0.0),
+                                (live_id!(j_mid), "centre", 0.5),
+                                (live_id!(j_end), "end", 1.0),
+                            ] {
+                                let btn = seg.child(child);
+                                btn.set_text(cx, label);
+                                set_button_fill(
+                                    cx,
+                                    btn.clone(),
+                                    distribute == "Start" && (main - value).abs() < 0.25,
+                                );
+                                let (x, y) = if down { (ax, value) } else { (value, ay) };
+                                self.composite_clicks.push((
+                                    btn.widget_uid().0,
+                                    format!(
+                                        "align: Align{{x: {} y: {}}} distribute: Distribute.Start",
+                                        fmt_f64(x),
+                                        fmt_f64(y)
+                                    ),
+                                ));
+                            }
+                            let seg = col.child(live_id!(space_row)).child(live_id!(space_seg));
+                            for (child, label, variant) in [
+                                (live_id!(s_between), "between", "SpaceBetween"),
+                                (live_id!(s_around), "around", "SpaceAround"),
+                                (live_id!(s_evenly), "evenly", "SpaceEvenly"),
+                            ] {
+                                let btn = seg.child(child);
+                                btn.set_text(cx, label);
+                                set_button_fill(cx, btn.clone(), distribute == variant);
+                                self.composite_clicks
+                                    .push((btn.widget_uid().0, format!("distribute: Distribute.{variant}")));
+                            }
+                            let cross_row = col.child(live_id!(cross_row));
+                            cross_row
+                                .child(live_id!(cross_axis))
+                                .set_text(cx, if down { "\u{2194}" } else { "\u{2195}" });
+                            let seg = cross_row.child(live_id!(cross_seg));
+                            seg.child(live_id!(c_stretch)).set_visible(cx, false);
+                            for (child, label, value) in [
+                                (live_id!(c_start), "start", 0.0),
+                                (live_id!(c_mid), "centre", 0.5),
+                                (live_id!(c_end), "end", 1.0),
+                            ] {
+                                let btn = seg.child(child);
+                                btn.set_text(cx, label);
+                                set_button_fill(cx, btn.clone(), (cross - value).abs() < 0.25);
+                                let (x, y) = if down { (value, ay) } else { (ax, value) };
+                                self.composite_clicks.push((
+                                    btn.widget_uid().0,
+                                    format!("align: Align{{x: {} y: {}}}", fmt_f64(x), fmt_f64(y)),
+                                ));
+                            }
+                        }
+                    VisKind::GridTracks => {
+                        item.child(live_id!(name)).set_text(cx, "grid");
+                        let col = item.child(live_id!(grid_col));
+                        // The tracks, as the CSS they were written in.
+                        for (row_id, input_id, prop) in [
+                            (live_id!(cols_row), live_id!(cols_in), "columns"),
+                            (live_id!(rows_row), live_id!(rows_in), "rows"),
+                        ] {
+                            let field = col.child(row_id).child(input_id);
+                            if field.area() == Area::Empty || !cx.has_key_focus(field.area()) {
+                                field.set_text(cx, &quoted_list_text(self.row_value(prop).unwrap_or(""), " "));
+                            }
+                            self.composite_fields.push((field.widget_uid().0, prop.to_string()));
+                        }
+                        let gaps = col.child(live_id!(gaps_row));
+                        for (child, prop) in
+                            [(live_id!(gap_col), "column_gap"), (live_id!(gap_row_in), "row_gap")]
+                        {
+                            let field = gaps.child(child);
+                            if let Some(mut input) = field.borrow_mut::<FabValueInput>() {
+                                let v = self
+                                    .row_value(prop)
+                                    .and_then(|v| v.parse::<f64>().ok())
+                                    .unwrap_or(0.0);
+                                input.set_value(cx, v);
+                            }
+                            self.composite_fields.push((field.widget_uid().0, prop.to_string()));
+                        }
+                        // Which way the cells without a place are filled in.
+                        let auto = self
+                            .row_value("auto_flow")
+                            .map(|v| v.rsplit('.').next().unwrap_or("").to_string())
+                            .unwrap_or_else(|| "Row".to_string());
+                        let seg = col.child(live_id!(fill_row)).child(live_id!(fill_seg));
+                        for (child, label, variant) in [
+                            (live_id!(f_rows), "by row", "Row"),
+                            (live_id!(f_cols), "by column", "Column"),
+                        ] {
                             let btn = seg.child(child);
                             btn.set_text(cx, label);
+                            set_button_fill(cx, btn.clone(), auto == variant);
                             self.composite_clicks
-                                .push((btn.widget_uid().0, chunk.to_string()));
+                                .push((btn.widget_uid().0, format!("auto_flow: AutoFlow.{variant}")));
                         }
-                        let flow_text = self
-                            .row_value("flow")
-                            .map(|v| format!("flow {v}"))
-                            .unwrap_or_default();
-                        item.child(live_id!(flow_field)).set_text(cx, &flow_text);
+                        let field = col.child(live_id!(areas_row)).child(live_id!(areas_in));
+                        if field.area() == Area::Empty || !cx.has_key_focus(field.area()) {
+                            field.set_text(cx, &quoted_list_text(self.row_value("areas").unwrap_or(""), " / "));
+                        }
+                        self.composite_fields.push((field.widget_uid().0, "areas".to_string()));
                     }
-                    VisKind::AlignGrid => {
-                        item.child(live_id!(name)).set_text(cx, "align");
-                        let ax = self
-                            .row_value("align.x")
-                            .and_then(|v| v.parse::<f64>().ok())
-                            .unwrap_or(0.0);
-                        let ay = self
-                            .row_value("align.y")
-                            .and_then(|v| v.parse::<f64>().ok())
-                            .unwrap_or(0.0);
-                        let dots = [
-                            live_id!(d0), live_id!(d1), live_id!(d2),
-                            live_id!(d3), live_id!(d4), live_id!(d5),
-                            live_id!(d6), live_id!(d7), live_id!(d8),
-                        ];
-                        for (i, dot_id) in dots.into_iter().enumerate() {
-                            let dx = (i % 3) as f64 * 0.5;
-                            let dy = (i / 3) as f64 * 0.5;
-                            let dot = item
-                                .child(live_id!(grid))
-                                .child(match i / 3 {
-                                    0 => live_id!(row0),
-                                    1 => live_id!(row1),
-                                    _ => live_id!(row2),
-                                })
-                                .child(dot_id);
-                            let on = (ax - dx).abs() < 0.25 && (ay - dy).abs() < 0.25;
-                            dot.set_text(cx, if on { "\u{2022}" } else { "" });
-                            self.composite_align.push((dot.widget_uid().0, dx, dy));
+                    VisKind::Cell => {
+                        item.child(live_id!(name)).set_text(cx, "cell");
+                        let cell = self.cell_text();
+                        let col = item.child(live_id!(cell_col));
+                        for (row_id, child, key, value) in [
+                            (live_id!(place_row), live_id!(cell_c), "col", cell.col),
+                            (live_id!(place_row), live_id!(cell_r), "row", cell.row),
+                            (live_id!(span_row), live_id!(cell_cs), "col_span", cell.col_span),
+                            (live_id!(span_row), live_id!(cell_rs), "row_span", cell.row_span),
+                        ] {
+                            let field = col.child(row_id).child(child);
+                            if let Some(mut input) = field.borrow_mut::<FabValueInput>() {
+                                input.set_value(cx, value as f64);
+                            }
+                            self.composite_fields
+                                .push((field.widget_uid().0, format!("cell#{key}")));
                         }
-                        item.child(live_id!(xy_label))
-                            .set_text(cx, &format!("x {ax:.2}  y {ay:.2}"));
+                        let field = col.child(live_id!(area_row)).child(live_id!(cell_area));
+                        if field.area() == Area::Empty || !cx.has_key_focus(field.area()) {
+                            field.set_text(cx, &cell.area);
+                        }
+                        self.composite_fields
+                            .push((field.widget_uid().0, "cell#area".to_string()));
+                    }
+                    VisKind::Group(kind) => {
+                        item.child(live_id!(title)).set_text(
+                            cx,
+                            match kind {
+                                GroupKind::Item => "in its parent",
+                                GroupKind::Container => "its children",
+                            },
+                        );
+                    }
+                    VisKind::Container => {
+                        item.child(live_id!(name)).set_text(cx, "layout");
+                        let sel = session().lock().unwrap().pinned.clone();
+                        let (ty, wanted, dock_wanted) = match sel {
+                            Some(sel) => {
+                                let reference = self.sel_ref(cx, sel.uid);
+                                // Each family lights its own control: a dock
+                                // ask must not light `make grid`.
+                                let wanted = {
+                                    let mut s = session().lock().unwrap();
+                                    s.load_converts();
+                                    convert_for(&s.converts, &reference, false).map(|c| c.to.clone())
+                                };
+                                let dock_wanted = self.dock_ask_ref(cx, sel.uid).is_some();
+                                (sel.ty, wanted, dock_wanted)
+                            }
+                            None => (String::new(), None, false),
+                        };
+                        let is_grid = ty == "Grid";
+                        let col = item.child(live_id!(ctr_col));
+                        let mode_row = col.child(live_id!(mode_row));
+                        mode_row
+                            .child(live_id!(mode_label))
+                            .set_text(cx, if is_grid { "grid" } else { "flex" });
+                        // The ask is a toggle: lit while it stands, and a
+                        // second press takes it back.
+                        let btn = mode_row.child(live_id!(convert));
+                        btn.set_text(cx, if is_grid { "make flex" } else { "make grid" });
+                        set_button_fill(cx, btn.clone(), wanted.is_some());
+                        self.convert_uid = btn.widget_uid().0;
+                        // A standing dock ask keeps its box even when the
+                        // selection no longer qualifies (a stored ask, a
+                        // name taken away), and a tab's body shows the ask
+                        // that put it in its Dock: the person must be able
+                        // to take back what they can see was asked, before
+                        // the source is changed or after.
+                        let gate = self.sel_dock;
+                        let can_tick = gate == DockGate::Can || dock_wanted;
+                        let in_dock = gate == DockGate::InDock;
+                        let dock_row = col.child(live_id!(dock_row));
+                        dock_row.set_visible(cx, can_tick || in_dock);
+                        let check = dock_row.child(live_id!(dock_check));
+                        check.set_visible(cx, can_tick);
+                        if let Some(mut check) = check.borrow_mut::<CheckBox>() {
+                            check.set_active(cx, dock_wanted, Animate::No);
+                        }
+                        self.dock_uid = if can_tick { check.widget_uid().0 } else { 0 };
+                        let mut label = dock_row.child(live_id!(dock_label));
+                        label.set_text(cx, if in_dock { "a tab in a dock" } else { "dockable" });
+                        // Amber while the ask stands, as a wanted name is: it
+                        // is what the person wants, not what the source says.
+                        let color: Vec4f = if dock_wanted {
+                            vec4(1.0, 0.78, 0.29, 1.0)
+                        } else {
+                            vec4(0.706, 0.706, 0.706, 1.0)
+                        };
+                        script_apply_eval!(cx, label, { draw_text +: { color: #(color) } });
+                        let hint = col.child(live_id!(dock_hint));
+                        hint.set_visible(cx, dock_wanted);
+                        hint.set_text(
+                            cx,
+                            match (dock_wanted, in_dock) {
+                                (true, true) => "done \u{00b7} untick to clear the ask",
+                                (true, false) => "asked \u{00b7} the AI wraps it in a Dock",
+                                (false, _) => "",
+                            },
+                        );
+                        let field = col.child(live_id!(name_row)).child(live_id!(ctr_name));
+                        if field.area() == Area::Empty || !cx.has_key_focus(field.area()) {
+                            let text = self
+                                .row_value("container_id")
+                                .map(|v| v.trim_start_matches('@'))
+                                .filter(|v| *v != "-")
+                                .unwrap_or("");
+                            field.set_text(cx, text);
+                        }
+                        self.composite_fields
+                            .push((field.widget_uid().0, "container_id".to_string()));
+                    }
+                    VisKind::Absolute => {
+                        item.child(live_id!(name)).set_text(cx, "position");
+                        let pos = self.row_value("abs_pos").and_then(parse_vec2_text);
+                        let col = item.child(live_id!(abs_col));
+                        let check = col.child(live_id!(abs_check));
+                        if let Some(mut check) = check.borrow_mut::<CheckBox>() {
+                            check.set_active(cx, pos.is_some(), Animate::No);
+                        }
+                        self.abs_uid = check.widget_uid().0;
+                        let xy = col.child(live_id!(abs_xy));
+                        xy.set_visible(cx, pos.is_some());
+                        if let Some((x, y)) = pos {
+                            for (child, key, value) in
+                                [(live_id!(abs_x), "x", x), (live_id!(abs_y), "y", y)]
+                            {
+                                let field = xy.child(child);
+                                if let Some(mut input) = field.borrow_mut::<FabValueInput>() {
+                                    input.set_value(cx, value);
+                                }
+                                self.composite_fields
+                                    .push((field.widget_uid().0, format!("abs_pos#{key}")));
+                            }
+                        }
                     }
                     VisKind::Prop(index) | VisKind::Tweakable(index) => {
                         let as_tweakable = matches!(entry, VisKind::Tweakable(_));
@@ -7379,16 +14185,6 @@ impl Tweaker {
                                         }
                                     }
                                 }
-                                StructKind::SizeField => {
-                                    self.rows[index]
-                                        .mode_uids
-                                        .push(item.child(live_id!(sf_fill)).widget_uid().0);
-                                    self.rows[index]
-                                        .mode_uids
-                                        .push(item.child(live_id!(sf_fit)).widget_uid().0);
-                                    let f = item.child(live_id!(sf_num));
-                                    self.rows[index].comp_uids.push(f.widget_uid().0);
-                                }
                                 StructKind::NoEditor | StructKind::None => {}
                             }
                         } else {
@@ -7495,6 +14291,29 @@ impl Tweaker {
                         }
                     }
                 }
+                // A search hit reads in blue and the one the walk is on
+                // brighter; a composite's label goes back to dim otherwise,
+                // since its item is reused and keeps what it was given.
+                if let Some(mut label) = item.child(live_id!(name)).borrow_mut::<Label>() {
+                    if current_hit == Some(entry_id) {
+                        label.draw_text.color = vec4(0.62, 0.82, 1.0, 1.0);
+                    } else if hits.contains(&entry_id) {
+                        label.draw_text.color = vec4(0.38, 0.62, 0.92, 1.0);
+                    } else if matches!(
+                        entry,
+                        VisKind::Size
+                            | VisKind::Measured
+                            | VisKind::BoxInset(_)
+                            | VisKind::FlowSpacing
+                            | VisKind::AlignGrid
+                            | VisKind::Container
+                            | VisKind::Absolute
+                            | VisKind::GridTracks
+                            | VisKind::Cell
+                    ) {
+                        label.draw_text.color = vec4(0.604, 0.604, 0.604, 1.0);
+                    }
+                }
                 item.draw_all(cx, &mut Scope::empty());
                 // The colour popover's rect is known once it has drawn:
                 // input priority for the popup, and /tweak/state's `popup`.
@@ -7512,26 +14331,6 @@ impl Tweaker {
             }
         }
         self.visible = visible_rects;
-        // The doc tooltip chip: annotation text for the hovered row,
-        // clamped into the band.
-        if let Some(hover) = self.hover_doc.clone() {
-            let label_height = 16.0;
-            let approx = (hover.text.chars().count() as f64) * 5.4 + 10.0;
-            let mut pos = hover.pos;
-            pos.x = pos
-                .x
-                .clamp(band.pos.x, (band.pos.x + band.size.x - approx).max(band.pos.x));
-            pos.y = pos.y.max(0.0);
-            self.draw_label_bg.draw_abs(
-                cx,
-                Rect {
-                    pos,
-                    size: dvec2(approx, label_height),
-                },
-            );
-            self.draw_label
-                .draw_abs(cx, pos + dvec2(5.0, 2.0), &hover.text);
-        }
     }
 
     /// Apply one sidebar-originated chunk to the selection (same path the
@@ -7776,6 +14575,171 @@ impl Tweaker {
         }
     }
 
+    /// The scope buttons explain themselves under the pointer.
+    ///
+    /// Which one is under it decides what is said: the two scopes differ in
+    /// who else takes the edit AND in which file it lands in, and a single
+    /// line covering both was the reason the old standing text had to be
+    /// truncated to fit.
+    /// The panel's own controls explain themselves on hover, through the
+    /// scope buttons' Tooltip: one bubble, one look. Called from the pointer
+    /// intercept on every move over the panel, after `scope_tip_hover`,
+    /// which owns the bubble while the pointer is on a scope button and
+    /// leaves it alone otherwise.
+    fn chrome_tip_hover(&mut self, cx: &mut Cx, abs: Vec2d) {
+        if self.scope_tip_shown != 0 {
+            return;
+        }
+        let Some(sidebar) = self.sidebar.as_ref() else { return };
+        let found = if tweak_is_on() { self.chrome_doc(cx, abs) } else { None };
+        let text = found.as_ref().map(|(_, t)| t.clone()).unwrap_or_default();
+        if text == self.chrome_tip_shown {
+            return;
+        }
+        let tip = sidebar
+            .child(live_id!(ident_footer))
+            .child(live_id!(scope_row))
+            .child(live_id!(scope_tip));
+        // Measure what is on screen before it changes, so the next show can
+        // place itself against a real height instead of the fallback.
+        let measured = tip.child(live_id!(content)).area().clipped_rect(cx);
+        if measured.size.y > 0.0 {
+            self.scope_tip_size = measured.size;
+        }
+        self.chrome_tip_shown = text.clone();
+        let Some(mut tip) = tip.borrow_mut::<Tooltip>() else { return };
+        let Some((rect, _)) = found else {
+            tip.hide(cx);
+            return;
+        };
+        // Above the control, or below it for the two rows at the very top,
+        // where "above" is off the window. Kept inside the window's right
+        // edge, which is the band's.
+        let size = self.scope_tip_size;
+        let window_x = self.band.pos.x + self.band.size.x;
+        let y = if rect.pos.y < 44.0 {
+            rect.pos.y + rect.size.y + 4.0
+        } else {
+            rect.pos.y - size.y - 4.0
+        };
+        let x = rect.pos.x.min(window_x - size.x - 6.0).max(4.0);
+        tip.show_with_options(cx, dvec2(x, y), &text);
+    }
+
+    fn scope_tip_hover(&mut self, cx: &mut Cx, abs: Vec2d) {
+        let Some(sidebar) = self.sidebar.as_ref() else { return };
+        let row = sidebar
+            .child(live_id!(ident_footer))
+            .child(live_id!(scope_row));
+        let line = row.child(live_id!(scope_line));
+        let over = if !tweak_is_on() {
+            0
+        } else {
+            let hit = |id: WidgetRef| {
+                let rect = id.area().clipped_rect(cx);
+                rect.size.x > 0.0 && rect.contains(abs)
+            };
+            if hit(line.child(live_id!(scope_this))) {
+                1
+            } else if hit(line.child(live_id!(scope_all))) {
+                2
+            } else if hit(line.child(live_id!(scope_isolated))) {
+                3
+            } else {
+                0
+            }
+        };
+        if over == self.scope_tip_shown {
+            return;
+        }
+        self.scope_tip_shown = over;
+        let tip = row.child(live_id!(scope_tip));
+        // Measure what is on screen before hiding it, so the next show can
+        // place itself against a real height instead of the fallback.
+        let measured = tip.child(live_id!(content)).area().clipped_rect(cx);
+        if measured.size.y > 0.0 {
+            self.scope_tip_size = measured.size;
+        }
+        let ty = session()
+            .lock()
+            .unwrap()
+            .pinned
+            .as_ref()
+            .map(|p| p.ty.clone())
+            .unwrap_or_else(|| "widget".to_string());
+        let isolating = self.tree_isolate && self.isolate_uid != 0;
+        let confined = isolating && !session().lock().unwrap().scope_unconfined;
+        // The band's right edge IS the window's: it is laid out from the
+        // pass width every sidebar draw.
+        let window_x = self.band.pos.x + self.band.size.x;
+        let size = self.scope_tip_size;
+        let place = |rect: Rect| {
+            dvec2(
+                rect.pos.x.min(window_x - size.x - 6.0).max(4.0),
+                rect.pos.y - size.y - 4.0,
+            )
+        };
+        let Some(mut tip) = tip.borrow_mut::<Tooltip>() else { return };
+        match over {
+            1 => {
+                let rect = line.child(live_id!(scope_this)).area().clipped_rect(cx);
+                tip.show_with_options(
+                    cx,
+                    place(rect),
+                    "this: this instance, and anything built from the same \
+                     template as it (one tab is every tab). The edit is \
+                     recorded against the instance's own site.",
+                );
+            }
+            2 if confined => {
+                let rect = line.child(live_id!(scope_all)).area().clipped_rect(cx);
+                tip.show_with_options(
+                    cx,
+                    place(rect),
+                    &format!(
+                        "all {ty}s, held to the isolated branch: every {ty} \
+                         inside it and none outside. Recorded against that \
+                         branch, not the {ty} type."
+                    ),
+                );
+            }
+            2 => {
+                let rect = line.child(live_id!(scope_all)).area().clipped_rect(cx);
+                tip.show_with_options(
+                    cx,
+                    place(rect),
+                    &format!(
+                        "all {ty}s: every {ty} in the app. The edit is \
+                         recorded against the type's own definition, so it \
+                         is the type that changes."
+                    ),
+                );
+            }
+            3 => {
+                let rect = line.child(live_id!(scope_isolated)).area().clipped_rect(cx);
+                tip.show_with_options(
+                    cx,
+                    place(rect),
+                    if !isolating {
+                        "isolated: holds an \"all\" edit to the isolated \
+                         branch. Nothing is isolated at the moment, so it \
+                         changes nothing until something is."
+                    } else if confined {
+                        "isolated is ON: an \"all\" edit stays inside the \
+                         isolated branch, and is recorded against that \
+                         branch rather than the type. Turn it off to reach \
+                         the whole app."
+                    } else {
+                        "isolated is OFF: an \"all\" edit reaches every one \
+                         in the app, including the part the isolation is \
+                         covering."
+                    },
+                );
+            }
+            _ => tip.hide(cx),
+        }
+    }
+
     /// Live code: apply the editor's text as it stands; a compile error
     /// puts the last good text back (the app never shows a blank widget)
     /// and says why under the editor.
@@ -7857,7 +14821,6 @@ impl Tweaker {
                 let key = ["descender", "line_gap", "line_scale"].get(comp)?;
                 Some(format!("{prop}.{key}: {}", fmt_f64(v)))
             }
-            StructKind::SizeField => Some(format!("{prop}: {}", fmt_f64(v))),
             StructKind::NoEditor | StructKind::None => None,
         }
     }
@@ -7905,6 +14868,12 @@ impl Tweaker {
         if widget.is_empty() {
             return;
         }
+        // What the printer wrote for nothing -- `null` for a None, `@-` for
+        // the empty id -- the script spells `nil`.
+        let original = match original.as_str() {
+            "null" | "@-" => "nil".to_string(),
+            _ => original,
+        };
         let chunk = format!("{prop}: {original}");
         match eval_chunk(cx, &widget, &chunk) {
             Ok(()) => {
@@ -8098,60 +15067,100 @@ impl Tweaker {
             let Some(widget_action) = action.as_widget_action() else {
                 continue;
             };
-            if self.note_text_uid != 0 && widget_action.widget_uid.0 == self.note_text_uid {
+            // The extrusion readout, likewise: it acts on the VIEW, not on a
+            // widget, and the exploded view is usually entered with nothing
+            // selected at all. Handled in the second loop it went nowhere —
+            // that one returns early when there is no selection, so the
+            // number moved under the finger and the stack never opened.
+            if self.spread_uid != 0 && widget_action.widget_uid.0 == self.spread_uid {
+                match widget_action.cast::<FabValueInputAction>() {
+                    FabValueInputAction::Changed(v) | FabValueInputAction::Ended(v) => {
+                        cx.sploded_set_spread(v as f32);
+                    }
+                    FabValueInputAction::Reset => {
+                        cx.sploded_set_spread(SPLODED_SPREAD_DEFAULT);
+                        if let Some(ui) = self.spread_ui.as_ref() {
+                            let field = ui.child(live_id!(value));
+                            if let Some(mut field) = field.borrow_mut::<FabValueInput>() {
+                                field.set_value(cx, SPLODED_SPREAD_DEFAULT as f64);
+                            };
+                        }
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+            if (self.note_text_uid != 0 && widget_action.widget_uid.0 == self.note_text_uid)
+                || (self.prompt_field_uid != 0
+                    && widget_action.widget_uid.0 == self.prompt_field_uid)
+            {
                 if let TextInputAction::Changed(text) = widget_action.cast::<TextInputAction>() {
-                    let sel = session().lock().unwrap().pinned.clone();
-                    if let Some(sel) = sel {
+                    let is_notes = widget_action.widget_uid.0 == self.note_text_uid;
+                    if !is_notes {
+                        // The prompt box is synced on every keystroke, not
+                        // only on send: the draw re-seeds the box from the
+                        // session whenever the caret is elsewhere, and a
+                        // session that only knew about sent messages handed
+                        // back an empty box -- or the last recalled one --
+                        // the moment you clicked the widget you were writing
+                        // about, with the caret left mid-string.
+                        session().lock().unwrap().prompt = text.clone();
+                    }
+                    // A fresh `@` arms a widget pick: the next click in the
+                    // app names something INTO the note. Counted rather than
+                    // matched at the end, so an `@` typed mid-sentence arms
+                    // it too, and deleting one disarms. Each box keeps its
+                    // own count.
+                    let ats = text.matches('@').count();
+                    let before = if is_notes { self.note_at_count } else { self.prompt_at_count };
+                    if ats > before {
                         let mut s = session().lock().unwrap();
-                        if let Some(note) = s.notes.iter_mut().find(|n| n.path == sel.path) {
+                        s.mention = true;
+                        s.mention_from_prompt = !is_notes;
+                        drop(s);
+                        log!("TWEAK @mention armed: click the widget to name it");
+                        self.redraw_overlay(cx);
+                    } else if ats < before {
+                        session().lock().unwrap().mention = false;
+                        self.redraw_overlay(cx);
+                    }
+                    if is_notes {
+                        self.note_at_count = ats;
+                    } else {
+                        self.prompt_at_count = ats;
+                    }
+                    // The notes field is the only one whose text belongs to a
+                    // record; the prompt's box belongs to nobody until it is
+                    // sent. Guard on the field being SEEDED for the path,
+                    // because the selection and the field can differ for a
+                    // frame.
+                    let showing = self.note_path(cx).as_deref()
+                        == Some(self.note_key_shown.as_str());
+                    let path = self.note_path(cx).filter(|_| showing && is_notes);
+                    if let Some(path) = path {
+                        let mut s = session().lock().unwrap();
+                        let mut pinned = false;
+                        if let Some(note) = s.notes.iter_mut().find(|n| n.path == path) {
                             note.text = text.clone();
+                            pinned = !note.text.trim().is_empty();
+                        }
+                        if pinned {
+                            let notes = s.notes.clone();
+                            drop(s);
+                            note_store_save(&notes);
                         }
                     }
                 }
             }
-            if self.vibe_prompt_uid != 0
-                && widget_action.widget_uid.0 == self.vibe_prompt_uid
-            {
+            // The identity row's name field: a rename is a REQUEST, not a
+            // live edit. The name is a LiveId the source assigned and every
+            // `ids!(…)` lookup depends on, so renaming it under the running
+            // app would break the app and leave the source lying. The AI does
+            // the rename properly; this records what was asked for.
+            if self.identity_uid != 0 && widget_action.widget_uid.0 == self.identity_uid {
                 if let TextInputAction::Returned(text, _) = widget_action.cast::<TextInputAction>()
                 {
-                    let text = text.trim().to_string();
-                    if !text.is_empty() {
-                        let (path, layer) = {
-                            let s = session().lock().unwrap();
-                            (
-                                s.pinned
-                                    .as_ref()
-                                    .map(|p| p.path.clone())
-                                    .unwrap_or_default(),
-                                self.vibe_layer.clone().unwrap_or_default(),
-                            )
-                        };
-                        // The execute bundle, on the AI's ear (the TWEAK
-                        // log + /tweak/state carry it to the driving
-                        // agent): scope = exactly this draw layer.
-                        // Code only: the fn sources (with their file:line)
-                        // ride along; colours/sizes are the Props rows'.
-                        let fns = self
-                            .vibe_fn_sources
-                            .iter()
-                            .map(|(name, loc, src)| format!("// {name} \u{2014} {loc}\n{src}"))
-                            .collect::<Vec<_>>()
-                            .join("\n\n");
-                        log!("TWEAK vibe sel={path} layer={layer} fns={} prompt={text}", self.vibe_fn_sources.iter().map(|(n, l, _)| format!("{n}@{l}")).collect::<Vec<_>>().join(","));
-                        {
-                            let mut s = session().lock().unwrap();
-                            s.vibe_status = format!("sent to the AI \u{00b7} waiting\u{2026} \u{2014} {text}");
-                            s.vibe_pending = Some((path.clone(), layer.clone()));
-                            s.vibes.push((path, layer, text, fns));
-                        }
-                        if let Some(sidebar) = self.sidebar.as_ref() {
-                            let col = sidebar.child(live_id!(shader_col));
-                            col.child(live_id!(prompt)).set_text(cx, "");
-                            let status = session().lock().unwrap().vibe_status.clone();
-                            col.child(live_id!(vibe_status)).set_text(cx, &status);
-                        }
-                        cx.redraw_all();
-                    }
+                    self.request_rename(cx, text.trim());
                 }
             }
             if self.tab_uids.contains(&widget_action.widget_uid.0)
@@ -8167,9 +15176,67 @@ impl Tweaker {
                         1 => PanelTab::Shader,
                         2 => PanelTab::Tree,
                         3 => PanelTab::Theme,
+                        4 => PanelTab::Spec,
                         _ => PanelTab::Props,
                     };
+                    // Entering the Theme tab is the moment to look at the
+                    // theme folder again: another window, another app or the
+                    // person's own editor may have changed what is in it.
+                    if self.panel_tab == PanelTab::Theme {
+                        self.refresh_saved_themes();
+                        // ...and the moment to drop what the tab last said.
+                        // A note is the answer to a press, so a "deleted
+                        // sunset" still sitting there on the way back in
+                        // reports something that happened a tab ago as if it
+                        // had just happened. The question that goes with it
+                        // lapses for the same reason: coming back to the tab
+                        // is not an answer to anything.
+                        self.theme_msg.clear();
+                        self.theme_confirm = None;
+                    }
                     self.redraw_sidebar(cx);
+                }
+            }
+            if self.theme_pick_uid != 0 && widget_action.widget_uid.0 == self.theme_pick_uid {
+                if let DropDownAction::Select(index) = widget_action.cast::<DropDownAction>() {
+                    self.apply_theme_choice(cx, index);
+                }
+            }
+            if self.theme_wear_uid != 0 && widget_action.widget_uid.0 == self.theme_wear_uid {
+                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                    let on = !crate::fab_controls::panel_wears_theme(cx);
+                    self.set_panel_wears_theme(cx, on);
+                }
+            }
+            if self.theme_name_uid != 0 && widget_action.widget_uid.0 == self.theme_name_uid {
+                match widget_action.cast::<TextInputAction>() {
+                    TextInputAction::Changed(text) => {
+                        // A different name is a different question, so the
+                        // offer to replace the last one lapses -- and so does
+                        // an offer to DELETE, which was asked about a theme
+                        // and not about whatever is being typed now.
+                        let typed = crate::theme_store::normalize_name(&text);
+                        if self.pending_replace() != typed.as_deref() {
+                            self.theme_confirm = None;
+                        }
+                        self.theme_name = text;
+                    }
+                    // Enter in the box is the same press as the button.
+                    TextInputAction::Returned(text, _) => {
+                        self.theme_name = text;
+                        self.save_theme_as(cx);
+                    }
+                    _ => {}
+                }
+            }
+            if self.theme_save_uid != 0 && widget_action.widget_uid.0 == self.theme_save_uid {
+                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                    self.save_theme_as(cx);
+                }
+            }
+            if self.theme_delete_uid != 0 && widget_action.widget_uid.0 == self.theme_delete_uid {
+                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                    self.delete_saved_theme(cx);
                 }
             }
             if self.tree_list_uid != 0 && widget_action.widget_uid.0 == self.tree_list_uid {
@@ -8178,6 +15245,11 @@ impl Tweaker {
                         // Tree node click: pin that widget, exactly like a
                         // body pick (drives 2D outline AND the 3D view).
                         let target = id.0;
+                        // ...and put it ON SCREEN first. Selecting something
+                        // behind an unselected tab or a closed fold outlines
+                        // nothing and fills the panel with a widget nobody
+                        // can see.
+                        reveal_widget(cx, target);
                         let widget = cx.widget_tree().widget(WidgetUid(target));
                         if widget.try_widget_uid().is_some() {
                             let rect = widget.area().clipped_rect_union(cx);
@@ -8238,6 +15310,25 @@ impl Tweaker {
                     _ => {}
                 }
             }
+            if self.select_uid != 0 && widget_action.widget_uid.0 == self.select_uid {
+                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                    let locked = {
+                        let mut s = session().lock().unwrap();
+                        s.selection_locked = !s.selection_locked;
+                        // Nothing is under the pointer as far as the overlay
+                        // is concerned any more; a stale hover outline would
+                        // sit there until something else redrew it away.
+                        s.hover = None;
+                        s.selection_locked
+                    };
+                    log!(
+                        "TWEAK select {}",
+                        if locked { "off - selection locked, mouse to the app" } else { "on" }
+                    );
+                    self.redraw_sidebar(cx);
+                    self.redraw_overlay(cx);
+                }
+            }
             if self.sploded_uid != 0 && widget_action.widget_uid.0 == self.sploded_uid {
                 if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
                     // The 2.5D exploded z-layer view. Inspection-only while
@@ -8246,23 +15337,43 @@ impl Tweaker {
                     // The toggle is deferred to the next event; read the
                     // state it WILL have, not the one it still has.
                     self.sploded_armed = cx.sploded_will_be_active();
-                    if let Some(sidebar) = self.sidebar.as_ref() {
-                        let spread_wrap = sidebar.child(live_id!(filter_row)).child(live_id!(spread_wrap));
-                        let spread = spread_wrap.child(live_id!(spread));
-                        let spread_now = cx.sploded_spread() as f64;
-                        if let Some(mut field) = spread.borrow_mut::<FabValueInput>() {
-                            field.set_value(cx, spread_now);
-                        };
-                        spread_wrap.set_visible(cx, self.sploded_armed);
-                    }
                     log!("TWEAK sploded view {}", if self.sploded_armed { "ON" } else { "off" });
+                }
+            }
+            if self.find_uid != 0 && widget_action.widget_uid.0 == self.find_uid {
+                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                    self.search_mode = !self.search_mode;
+                    self.search_hit = 0;
+                    log!("TWEAK filter box {}", if self.search_mode { "searches" } else { "filters" });
+                    if self.search_mode {
+                        self.scroll_to_hit(cx);
+                    }
+                    self.redraw_sidebar(cx);
+                }
+            }
+            if self.prev_uid != 0 && widget_action.widget_uid.0 == self.prev_uid {
+                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                    self.search_step(cx, -1);
+                }
+            }
+            if self.next_uid != 0 && widget_action.widget_uid.0 == self.next_uid {
+                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                    self.search_step(cx, 1);
                 }
             }
             if self.search_uid != 0 && widget_action.widget_uid.0 == self.search_uid {
                 match widget_action.cast::<TextInputAction>() {
                     TextInputAction::Changed(text) => {
                         self.filter = text.to_lowercase();
+                        self.search_hit = 0;
+                        if self.search_mode {
+                            self.scroll_to_hit(cx);
+                        }
                         self.redraw_sidebar(cx);
+                    }
+                    // Enter walks the hits, like the arrows.
+                    TextInputAction::Returned(_, modifiers) if self.search_mode => {
+                        self.search_step(cx, if modifiers.shift { -1 } else { 1 });
                     }
                     TextInputAction::Escaped => {
                         self.filter.clear();
@@ -8312,6 +15423,20 @@ impl Tweaker {
                 self.live_timer = cx.start_timeout(0.2);
                 continue;
             }
+            if action_uid != 0 && action_uid == self.scope_isolated_uid {
+                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                    let confined = {
+                        let mut s = session().lock().unwrap();
+                        s.scope_unconfined = !s.scope_unconfined;
+                        !s.scope_unconfined
+                    };
+                    log!(
+                        "TWEAK scope isolated {}",
+                        if confined { "on: all stays inside the isolated branch" } else { "off: all reaches the whole app" }
+                    );
+                    self.redraw_sidebar(cx);
+                }
+            }
             if action_uid != 0 && (action_uid == self.scope_this_uid || action_uid == self.scope_all_uid) {
                 if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
                     let all = action_uid == self.scope_all_uid;
@@ -8344,10 +15469,76 @@ impl Tweaker {
                 }
                 continue;
             }
-            if self.note_uid != 0 && action_uid == self.note_uid {
+            // Center and Zoom act on the isolated branch. Without one the
+            // controls are off; an action that still arrives (a remote edit
+            // by uid) is dropped the same way.
+            if self.view_center_uid != 0 && action_uid == self.view_center_uid {
                 if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
-                    self.note_request = true;
-                    cx.redraw_all();
+                    let next = self.view_state().center_toggled();
+                    if next != self.view_state() {
+                        self.set_view_state(next);
+                        self.apply_view_focus(cx);
+                        self.redraw_sidebar(cx);
+                    }
+                }
+                continue;
+            }
+            if self.view_zoom_uid != 0 && action_uid == self.view_zoom_uid {
+                if let FabValueInputAction::Changed(v) =
+                    widget_action.cast::<FabValueInputAction>()
+                {
+                    let next = self.view_state().zoom_set(v as f32);
+                    if next != self.view_state() {
+                        self.set_view_state(next);
+                        self.apply_view_focus(cx);
+                    }
+                }
+                continue;
+            }
+            if self.tree_isolate_uid != 0 && action_uid == self.tree_isolate_uid {
+                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                    if self.tree_isolate {
+                        // Off lets go, and the view rests with it: Center
+                        // off, life size — apply_view_focus below pushes it.
+                        let rested = self.view_state().rested();
+                        self.set_view_state(rested);
+                        log!("TWEAK tree isolate off");
+                    } else if self.rows_uid != 0 && self.rows_uid != THEME_ROWS {
+                        // Lock onto what is selected NOW, and stay there.
+                        self.tree_isolate = true;
+                        self.isolate_uid = self.rows_uid;
+                        log!("TWEAK tree isolate on \u{2192} uid {}", self.isolate_uid);
+                    } else {
+                        session().lock().unwrap().vibe_status =
+                            "select something to isolate".to_string();
+                    }
+                    // The tree is rebuilt from a different root, so the
+                    // reveal has to run again for the new shape.
+                    self.tree_scrolled_uid = 0;
+                    self.apply_view_focus(cx);
+                    self.redraw_sidebar(cx);
+                    self.redraw_overlay(cx);
+                }
+                continue;
+            }
+            // The prompt strip's buttons and the Spec tab's cross. These sat
+            // inside the note card's action block and went out with it; the
+            // keys kept working, which is why nothing looked wrong.
+            if self.spec_clear_uid != 0 && action_uid == self.spec_clear_uid {
+                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                    self.spec_clear_notes(cx);
+                }
+                continue;
+            }
+            if self.prompt_queue_uid != 0 && action_uid == self.prompt_queue_uid {
+                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                    self.prompt_queue(cx);
+                }
+                continue;
+            }
+            if self.prompt_send_uid != 0 && action_uid == self.prompt_send_uid {
+                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                    self.prompt_send(cx);
                 }
                 continue;
             }
@@ -8355,27 +15546,6 @@ impl Tweaker {
                 if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
                     self.shader_src_open = !self.shader_src_open;
                     self.redraw_sidebar(cx);
-                }
-                continue;
-            }
-            if self.spread_uid != 0 && action_uid == self.spread_uid {
-                match widget_action.cast::<FabValueInputAction>() {
-                    FabValueInputAction::Changed(v) | FabValueInputAction::Ended(v) => {
-                        cx.sploded_set_spread(v as f32);
-                    }
-                    FabValueInputAction::Reset => {
-                        cx.sploded_set_spread(SPLODED_SPREAD_DEFAULT);
-                        if let Some(sidebar) = self.sidebar.as_ref() {
-                            let spread = sidebar
-                                .child(live_id!(filter_row))
-                                .child(live_id!(spread_wrap))
-                                .child(live_id!(spread));
-                            if let Some(mut field) = spread.borrow_mut::<FabValueInput>() {
-                                field.set_value(cx, SPLODED_SPREAD_DEFAULT as f64);
-                            };
-                        }
-                    }
-                    _ => {}
                 }
                 continue;
             }
@@ -8393,6 +15563,21 @@ impl Tweaker {
                         continue;
                     }
                     FabValueInputAction::Changed(v) => {
+                        // A Fill's weight or shrink: the whole Fill goes
+                        // back, with the one field changed.
+                        if let Some((axis, key)) = prop.split_once('#') {
+                            let chunk = if axis == "abs_pos" {
+                                Some(self.abs_chunk(key, v))
+                            } else if axis == "cell" {
+                                self.cell_chunk(key, &fmt_f64(v))
+                            } else {
+                                Some(self.fill_chunk(axis, key, &fmt_f64(v)))
+                            };
+                            if let Some(chunk) = chunk {
+                                edits.push(Edit::Apply(chunk));
+                            }
+                            continue;
+                        }
                         // Linked box editor: one leg drives all four.
                         let link_index = if prop.starts_with("margin.") {
                             Some(0)
@@ -8422,8 +15607,40 @@ impl Tweaker {
                 match widget_action.cast::<TextInputAction>() {
                     TextInputAction::Changed(text) => {
                         let text = text.trim().to_string();
-                        if !text.is_empty() {
-                            edits.push(Edit::Apply(format!("{prop}: {text}")));
+                        // A size field takes a mode, points, a CSS spelling
+                        // or an expression; a bound or the aspect takes the
+                        // same and, emptied, clears; the chunk is the one
+                        // the engine accepts for each.
+                        let chunk = if prop == "width" || prop == "height" {
+                            size_chunk(&prop, &text)
+                        } else if let Some((axis, key)) = prop.split_once('#') {
+                            if axis == "cell" {
+                                self.cell_chunk(key, &text)
+                            } else {
+                                (!text.is_empty()).then(|| self.fill_chunk(axis, key, &text))
+                            }
+                        } else if prop == "columns" || prop == "rows" {
+                            tracks_chunk(&prop, &text)
+                        } else if prop == "areas" {
+                            areas_chunk(&text)
+                        } else if prop.starts_with("min_") || prop.starts_with("max_") {
+                            bound_chunk(&prop, &text)
+                        } else if prop == "aspect" {
+                            aspect_chunk(&text)
+                        } else if prop == "container_id" {
+                            // A name is an id; emptied, the source's own
+                            // value comes back, since an id cannot be nil.
+                            if text.is_empty() {
+                                resets.push(prop.clone());
+                                None
+                            } else {
+                                container_chunk(&text)
+                            }
+                        } else {
+                            (!text.is_empty()).then(|| format!("{prop}: {text}"))
+                        };
+                        if let Some(chunk) = chunk {
+                            edits.push(Edit::Apply(chunk));
                         }
                         continue;
                     }
@@ -8442,13 +15659,25 @@ impl Tweaker {
                 }
                 continue;
             }
-            if let Some(&(_, ax, ay)) = self
-                .composite_align
-                .iter()
-                .find(|(uid, _, _)| *uid == action_uid)
-            {
+            if self.abs_uid != 0 && action_uid == self.abs_uid {
+                if let CheckBoxAction::Change(on) = widget_action.cast::<CheckBoxAction>() {
+                    edits.push(Edit::Apply(
+                        if on { "abs_pos: vec2(0, 0)" } else { "abs_pos: nil" }.to_string(),
+                    ));
+                }
+                continue;
+            }
+            if self.dock_uid != 0 && action_uid == self.dock_uid {
+                if let CheckBoxAction::Change(on) = widget_action.cast::<CheckBoxAction>() {
+                    self.request_dock(cx, on);
+                }
+                continue;
+            }
+            if self.convert_uid != 0 && action_uid == self.convert_uid {
                 if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
-                    edits.push(Edit::Apply(format!("align: Align{{x: {ax} y: {ay}}}")));
+                    let ty = session().lock().unwrap().pinned.as_ref().map(|s| s.ty.clone());
+                    let to = if ty.as_deref() == Some("Grid") { "flex" } else { "grid" };
+                    self.request_convert(cx, to);
                 }
                 continue;
             }
@@ -8477,20 +15706,6 @@ impl Tweaker {
                     }
                     FabValueInputAction::Ended(_) => edits.push(Edit::HoldOff),
                     _ => {}
-                }
-                continue;
-            }
-            // A SizeField's Fill / Fit button.
-            if let Some((index, is_fill)) = self.rows.iter().enumerate().find_map(|(i, b)| {
-                b.mode_uids
-                    .iter()
-                    .position(|u| *u == action_uid)
-                    .map(|p| (i, p % 2 == 0))
-            }) {
-                self.doc_row = Some(index);
-                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
-                    let word = if is_fill { "Fill" } else { "Fit" };
-                    edits.push(Edit::Apply(format!("{}: {}", self.rows[index].prop, word)));
                 }
                 continue;
             }
@@ -8744,6 +15959,286 @@ impl Tweaker {
         let _ = cx;
     }
 
+    /// Put the whole library under another preset.
+    ///
+    /// A sheet goes on with `desktop_style::install`; a base theme takes the
+    /// last one off again, or a sheet tried once would stay under every
+    /// theme picked after it. Neither is visible until `script_mod` runs
+    /// again -- `theme_mod` is where the base is emitted and where a sheet's
+    /// tokens are read -- so the switch lands on `request_style_reload`,
+    /// which re-runs it and then re-applies the tree with
+    /// `Apply::ScriptReapply`: typed text and running animations survive,
+    /// which the `Apply::Reload` of a plain live edit would not.
+    fn apply_theme_preset(&mut self, cx: &mut Cx, index: usize) {
+        let Some(preset) = theme_presets().get(index).copied() else {
+            return;
+        };
+        self.theme_preset = index;
+        // A built-in is now in force, so nothing saved is, and a saved
+        // theme's tokens that had not landed yet must not land on top of it.
+        self.theme_saved = None;
+        self.pending_theme_script = None;
+        match preset {
+            ThemePreset::Base(base) => {
+                crate::set_base_theme(cx, base);
+                cx.with_vm(|vm| crate::desktop_style::uninstall(vm));
+            }
+            ThemePreset::Sheet(style, dark) => {
+                // A sheet is laid over the dark base, exactly as it is when
+                // one arrives from the window manager.
+                crate::set_base_theme(cx, crate::BaseTheme::Dark);
+                let sheet =
+                    crate::desktop_style::StyleSheet::load_with_appearance(style, dark);
+                cx.with_vm(|vm| crate::desktop_style::install(vm, sheet));
+            }
+        }
+        log!("TWEAK theme preset: {}", preset.label());
+        self.theme_reload_frames = 6;
+        self.next_frame = cx.new_next_frame();
+        cx.request_style_reload();
+        self.redraw_sidebar(cx);
+    }
+
+    /// Put the panel itself in the theme the picker is showing, or back in
+    /// its own palette.
+    ///
+    /// Only the CHOICE is made here. The palette is built by
+    /// `fab_controls::script_mod`, so what this does is record the switch and
+    /// ask for the style reload that re-runs it; the panel then notices that
+    /// its chrome has moved and builds itself again ([`fab_palette_stamp`]).
+    ///
+    /// Deliberately not the other way round -- dropping the sidebar here and
+    /// letting the next draw rebuild it. `request_style_reload` lands a tick
+    /// or more later, so that rebuild would run against the palette that had
+    /// not changed yet and the panel would come back in the colours it was
+    /// already in. `theme_reload_frames` is the same answer the theme picker
+    /// already needed for the same reason.
+    fn set_panel_wears_theme(&mut self, cx: &mut Cx, on: bool) {
+        crate::fab_controls::set_panel_wears_theme(cx, on);
+        log!(
+            "TWEAK panel skin: {}",
+            if on { "the theme the app is wearing" } else { "its own palette" }
+        );
+        self.theme_reload_frames = 6;
+        self.next_frame = cx.new_next_frame();
+        cx.request_style_reload();
+        self.redraw_sidebar(cx);
+    }
+
+    /// Re-read the store's list of saved themes.
+    ///
+    /// Done when the panel opens, when the Theme tab is entered and after a
+    /// save or a delete -- deliberately not per frame: the picker is refilled
+    /// on every frame the tab is up, and this is a directory read.
+    fn refresh_saved_themes(&mut self) {
+        self.theme_saved_names = crate::theme_store::list();
+        // A theme that is no longer there is no longer the one in force, as
+        // far as the picker is concerned: another window or the person's own
+        // editor may have removed the file. Letting the name stand would
+        // leave the picker highlighting nothing and the delete button
+        // offering to remove something twice.
+        if self
+            .theme_saved
+            .as_deref()
+            .is_some_and(|name| !self.theme_saved_names.iter().any(|n| n == name))
+        {
+            self.theme_saved = None;
+        }
+    }
+
+    /// Everything the picker offers right now.
+    fn theme_entry_list(&self) -> Vec<ThemeChoice> {
+        theme_choices(&self.theme_saved_names)
+    }
+
+    /// Which row the picker shows as the one in force. A saved theme is found
+    /// by name rather than by a remembered index, because the list it sits in
+    /// changes under it -- a save inserts a row, a delete removes one.
+    fn theme_choice_index(&self, entries: &[ThemeChoice]) -> usize {
+        match &self.theme_saved {
+            Some(name) => entries
+                .iter()
+                .position(|entry| matches!(entry, ThemeChoice::Saved(saved) if saved == name))
+                .unwrap_or(0),
+            None => self.theme_preset.min(entries.len().saturating_sub(1)),
+        }
+    }
+
+    /// A row of the picker was chosen. The built-ins come first and in
+    /// `theme_presets()` order, so a built-in row's index is its preset's.
+    fn apply_theme_choice(&mut self, cx: &mut Cx, index: usize) {
+        let entries = self.theme_entry_list();
+        match entries.get(index) {
+            Some(ThemeChoice::Builtin(_)) => {
+                self.theme_msg.clear();
+                self.theme_confirm = None;
+                self.apply_theme_preset(cx, index);
+            }
+            Some(ThemeChoice::Saved(name)) => {
+                let name = name.clone();
+                self.apply_saved_theme(cx, &name);
+            }
+            None => {}
+        }
+    }
+
+    /// Put a saved theme on. Its base theme and its sheet go on the way a
+    /// preset's do; its own tokens follow in `pending_theme_script`, because
+    /// the style reload that carries the sheet rebuilds `mod.theme` from the
+    /// base and would rebuild them away. See the `Event::LiveEdit` arm in
+    /// `handle_event` for where they land.
+    fn apply_saved_theme(&mut self, cx: &mut Cx, name: &str) {
+        let theme = match crate::theme_store::load(name) {
+            Ok(theme) => theme,
+            Err(error) => {
+                self.theme_note(cx, &error.to_string());
+                return;
+            }
+        };
+        let base = match theme.base {
+            crate::theme_tokens::Scheme::Dark => crate::BaseTheme::Dark,
+            crate::theme_tokens::Scheme::Light => crate::BaseTheme::Light,
+            crate::theme_tokens::Scheme::Skeleton => crate::BaseTheme::Skeleton,
+        };
+        crate::set_base_theme(cx, base);
+        match theme.sheet {
+            Some((style, dark)) => {
+                let sheet = crate::desktop_style::StyleSheet::load_with_appearance(style, dark);
+                cx.with_vm(|vm| crate::desktop_style::install(vm, sheet));
+            }
+            // A theme saved over a bare base theme must take the last sheet
+            // OFF, or it wears whatever was tried before it.
+            None => cx.with_vm(|vm| crate::desktop_style::uninstall(vm)),
+        }
+        log!("TWEAK theme: {}", theme.name);
+        self.theme_saved = Some(theme.name.clone());
+        self.theme_name_seed = Some(theme.name.clone());
+        self.pending_theme_script = Some((theme.name.clone(), theme.script()));
+        self.theme_msg.clear();
+        self.theme_confirm = None;
+        self.theme_reload_frames = 6;
+        self.next_frame = cx.new_next_frame();
+        cx.request_style_reload();
+        self.redraw_sidebar(cx);
+    }
+
+    /// "Save as": the theme in force, under the name in the box.
+    ///
+    /// The name is normalised first and the answer shown back, so nobody is
+    /// left guessing what was actually written. A collision with something
+    /// already saved is a QUESTION -- press save again and it is answered --
+    /// while a built-in name is refused by the store outright and no second
+    /// press changes that.
+    fn save_theme_as(&mut self, cx: &mut Cx) {
+        let typed = self.theme_name.clone();
+        let Some(name) = crate::theme_store::normalize_name(&typed) else {
+            self.theme_note(cx, "name it first: lower-case letters, digits and _");
+            return;
+        };
+        let theme = match crate::theme_store::snapshot(cx, &name) {
+            Ok(theme) => theme,
+            Err(error) => {
+                self.theme_confirm = None;
+                self.theme_note(cx, &error.to_string());
+                return;
+            }
+        };
+        let answered = self.pending_replace() == Some(name.as_str());
+        let written = if answered {
+            crate::theme_store::save_replacing(&theme)
+        } else {
+            crate::theme_store::save(&theme)
+        };
+        match written {
+            Ok(path) => {
+                log!("TWEAK theme saved: {}", path.display());
+                self.theme_confirm = None;
+                self.refresh_saved_themes();
+                // What was saved is a snapshot of what is in force, so it is
+                // already on: the picker only has to say so.
+                self.theme_saved = Some(name.clone());
+                if name != typed {
+                    self.theme_name_seed = Some(name.clone());
+                }
+                let count = theme.overrides.len();
+                self.theme_note(cx, &format!("saved {name} ({count} values)"));
+            }
+            Err(crate::theme_store::StoreError::Exists(_)) => {
+                self.theme_confirm = Some(ThemeConfirm::Replace(name.clone()));
+                self.theme_note(cx, &format!("{name} exists \u{2014} save again to replace it"));
+            }
+            Err(error) => {
+                self.theme_confirm = None;
+                self.theme_note(cx, &error.to_string());
+            }
+        }
+    }
+
+    /// The name a question has been asked about, when it is the question
+    /// "save again to replace it".
+    fn pending_replace(&self) -> Option<&str> {
+        match &self.theme_confirm {
+            Some(ThemeConfirm::Replace(name)) => Some(name.as_str()),
+            _ => None,
+        }
+    }
+
+    /// The name a question has been asked about, when it is the question
+    /// "press delete again".
+    fn pending_delete(&self) -> Option<&str> {
+        match &self.theme_confirm {
+            Some(ThemeConfirm::Delete(name)) => Some(name.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Delete the saved theme in force. Only ever reached with one in force —
+    /// a built-in has no delete button and no uid to route one — and the
+    /// store refuses a built-in again regardless.
+    ///
+    /// Takes TWO presses. Removing the file is the only thing this panel does
+    /// that cannot be undone, and the far milder overwrite already asks
+    /// (`save_theme_as` refuses a collision once and writes on the second
+    /// press of the same name); a one-click delete beside a two-click
+    /// overwrite had the asymmetry backwards. It is the same mechanism, not a
+    /// second one: the first press asks the question into `theme_confirm` and
+    /// only a second press about the same name answers it, so picking another
+    /// theme, typing another name, saving or leaving the tab all let it lapse.
+    fn delete_saved_theme(&mut self, cx: &mut Cx) {
+        let Some(name) = self.theme_saved.clone() else {
+            return;
+        };
+        if self.pending_delete() != Some(name.as_str()) {
+            self.theme_confirm = Some(ThemeConfirm::Delete(name.clone()));
+            self.theme_note(cx, &format!("delete {name}? \u{2014} press delete again to remove it"));
+            return;
+        }
+        self.theme_confirm = None;
+        if let Err(error) = crate::theme_store::delete(&name) {
+            // A delete that did not go through still changed what the picker
+            // knows: the file may have gone out from under it, or its folder
+            // may have. Re-read before saying so, or the row that could not
+            // be deleted stays in the list with a live delete button on it.
+            self.refresh_saved_themes();
+            self.theme_note(cx, &error.to_string());
+            return;
+        }
+        log!("TWEAK theme deleted: {name}");
+        self.refresh_saved_themes();
+        // Nothing may go on pointing at a theme that is gone: back to the
+        // built-in the picker was last on, which is one that cannot go away.
+        let preset = self.theme_preset;
+        self.apply_theme_preset(cx, preset);
+        self.theme_note(cx, &format!("deleted {name}"));
+    }
+
+    /// What the store said, on the panel rather than only in the terminal.
+    fn theme_note(&mut self, cx: &mut Cx, text: &str) {
+        log!("TWEAK theme: {text}");
+        self.theme_msg = text.to_string();
+        self.redraw_sidebar(cx);
+    }
+
     fn redraw_sidebar(&mut self, cx: &mut Cx) {
         if let Some(sidebar) = &self.sidebar {
             sidebar.redraw(cx);
@@ -8808,6 +16303,33 @@ impl Tweaker {
         }
     }
 
+    /// Where a layout rect lands ON SCREEN once the view transform has had
+    /// its say.
+    ///
+    /// The overlay draws on the WINDOW pass, which carries no camera; the app
+    /// draws through the scene pass, which does. So the moment the view is
+    /// centred or zoomed, a widget's layout rect and the pixels it covers are
+    /// two different places, and an outline drawn at the layout rect sits
+    /// where the widget used to be. Projecting by hand puts it back on its
+    /// widget. Flat transforms are a scale about a point, so a rect stays a
+    /// rect and two corners are enough. Identity when nothing is transforming.
+    fn screen_rect(&self, cx: &Cx2d, rect: Rect) -> Rect {
+        // The explode has its own route — marks handed to the pass owner,
+        // drawn on the widget's own plane — so this is the flat transform's
+        // business only.
+        if rect.size.x <= 0.0 || !cx.sploded_transformed() || cx.sploded_active() {
+            return rect;
+        }
+        let pass = cx.current_pass_size();
+        let Some(tl) = cx.sploded_project(pass, rect.pos, 0.0) else {
+            return rect;
+        };
+        let br = cx
+            .sploded_project(pass, rect.pos + rect.size, 0.0)
+            .unwrap_or(rect.pos + rect.size);
+        Rect { pos: tl, size: br - tl }
+    }
+
     /// Clip a rect to the app viewport; None when nothing remains visible.
     fn clip_to_viewport(&self, cx: &Cx2d, rect: Rect) -> Option<Rect> {
         let max_x = self.overlay_max_x(cx.current_pass_size());
@@ -8829,19 +16351,38 @@ impl Tweaker {
         self.draw_outline.dpi = dpi;
         match style {
             PickStyle::Pinned => {
-                // The SELECTION never wears a box: the whole point of
-                // pinning a widget is seeing how it actually renders, and
-                // an outline sits exactly on the edge pixels being judged.
-                // Four viewfinder corners at a healthy distance mark the
-                // selection and leave the widget — and the margin space
-                // around it — untouched for direct manipulation.
+                // The SELECTION never wears a box ON its edge: the whole
+                // point of pinning a widget is seeing how it actually
+                // renders, and an outline sits exactly on the edge pixels
+                // being judged. Four viewfinder corners mark it instead.
+                //
+                // The corners alone were too quiet though — hovering drew a
+                // full blue box and clicking replaced it with four small
+                // ticks, which reads as "the click did nothing". So the
+                // brackets now come with a dashed hairline held 4pt OFF the
+                // widget: unmistakably still selected, and not one pixel of
+                // the thing being judged is touched.
+                let ring = selection_ring(pick.rect);
+                self.draw_outline.border_color = vec4(0.19, 0.78, 1.0, 0.55);
+                self.draw_outline.fill_color = vec4(0.0, 0.0, 0.0, 0.0);
+                self.draw_outline.border_size = 1.0;
+                self.draw_outline.dash = 1.0;
+                if let Some(ring) = self.clip_to_viewport(cx, ring) {
+                    self.draw_outline.draw_abs(cx, ring);
+                }
                 self.draw_corner_brackets(cx, pick.rect);
-                return; // no outline, no fill, no label chip
+                return; // no fill, no label chip
             }
             PickStyle::Hover => {
                 self.draw_outline.border_color = vec4(0.19, 0.78, 1.0, 1.0);
                 self.draw_outline.fill_color = vec4(0.0, 0.0, 0.0, 0.0);
                 self.draw_outline.border_size = 1.0;
+                self.draw_outline.dash = 0.0;
+            }
+            PickStyle::Mention => {
+                self.draw_outline.border_color = vec4(1.0, 0.78, 0.13, 1.0);
+                self.draw_outline.fill_color = vec4(1.0, 0.78, 0.13, 0.07);
+                self.draw_outline.border_size = 2.0;
                 self.draw_outline.dash = 0.0;
             }
             PickStyle::PinnedQuiet => {
@@ -8947,6 +16488,256 @@ impl Tweaker {
         }
     }
 
+    /// Is `abs` on the footer's path line? Read at event time, so it answers
+    /// for the frame actually on screen.
+    fn footer_path_hit(&self, cx: &Cx, abs: Vec2d) -> bool {
+        let Some(sidebar) = self.sidebar.as_ref() else { return false };
+        let rect = sidebar
+            .child(live_id!(ident_footer))
+            .child(live_id!(path_row))
+            .area()
+            .clipped_rect(cx);
+        rect.size.y > 0.0 && rect.contains(abs)
+    }
+
+    /// Put the selection's full path on the clipboard. The label shows a
+    /// head-clipped version because the panel is narrow; what gets copied is
+    /// the whole id path — the same string `/tweak/apply` and `/snap` take,
+    /// so it is a reference anything can act on, not just read.
+    fn copy_footer_path(&mut self, cx: &mut Cx) {
+        let Some(sel) = session().lock().unwrap().pinned.clone() else { return };
+        let path = self.sel_ref(cx, sel.uid);
+        cx.copy_to_clipboard(&path);
+        log!("TWEAK copied the selection path: {path}");
+        // Say so where the path was: a clipboard write is invisible
+        // otherwise, and a click that shows nothing reads as a dead click.
+        // `draw_sidebar` puts the path back when the beat is up.
+        self.footer_copied_until = cx.seconds_since_app_start() + FOOTER_COPIED_LINGER;
+        self.next_frame = cx.new_next_frame();
+        self.redraw_sidebar(cx);
+    }
+
+    /// ISOLATE, in the app itself: everything outside the isolated widget is
+    /// covered, so the one thing being worked on stands alone.
+    ///
+    /// The hole is a QUAD, not a rect, because in the exploded view a widget
+    /// sits on a tilted plane and its rect projects to a parallelogram — the
+    /// flat four-band cover that works in 2D would blank the very thing it is
+    /// meant to reveal. Scanline strips take the general shape for both: one
+    /// strip per couple of points, each clipped to where the quad actually is
+    /// at that height.
+    ///
+    /// Nothing is hidden, moved or re-laid-out: the widget renders exactly
+    /// where and how it normally does, which is the only way what you see is
+    /// what you are judging. Input is untouched too — you can still click
+    /// your way out.
+    fn draw_isolate_scrim(&mut self, cx: &mut Cx2d, hole: [Vec2d; 4]) {
+        /// Scanline height. Small enough that a tilted edge reads as a line
+        /// rather than a staircase, large enough not to flood the draw list.
+        const STRIP: f64 = 2.0;
+        let size = cx.current_pass_size();
+        let max_x = self.overlay_max_x(size);
+        let top = hole.iter().map(|p| p.y).fold(f64::INFINITY, f64::min).max(0.0);
+        let bottom = hole
+            .iter()
+            .map(|p| p.y)
+            .fold(f64::NEG_INFINITY, f64::max)
+            .min(size.y);
+        self.draw_outline.dpi = cx.current_dpi_factor().max(1.0) as f32;
+        self.draw_outline.dash = 0.0;
+        self.draw_outline.border_size = 0.0;
+        self.draw_outline.border_color = vec4(0.0, 0.0, 0.0, 0.0);
+        // Opaque, not a dim: a scrim that lets a few percent through shows a
+        // seam wherever it meets different content behind it, which reads as
+        // a rendering bug rather than as "the rest is out of the way".
+        self.draw_outline.fill_color = vec4(0.09, 0.09, 0.10, 1.0);
+        let mut band = |this: &mut Self, cx: &mut Cx2d, x: f64, y: f64, w: f64, h: f64| {
+            if w > 0.0 && h > 0.0 {
+                this.draw_outline
+                    .draw_abs(cx, Rect { pos: dvec2(x, y), size: dvec2(w, h) });
+            }
+        };
+        band(self, cx, 0.0, 0.0, max_x, top);
+        band(self, cx, 0.0, bottom, max_x, size.y - bottom);
+        let mut y = top;
+        while y < bottom {
+            let h = STRIP.min(bottom - y);
+            match Self::quad_span_at(&hole, y + h * 0.5) {
+                Some((left, right)) => {
+                    band(self, cx, 0.0, y, left.min(max_x), h);
+                    band(self, cx, right.max(0.0), y, max_x - right, h);
+                }
+                None => band(self, cx, 0.0, y, max_x, h),
+            }
+            y += h;
+        }
+    }
+
+    /// Where a convex quad spans horizontally at height `y` — the two points
+    /// its edges cross that line. `None` when the line misses it entirely.
+    fn quad_span_at(quad: &[Vec2d; 4], y: f64) -> Option<(f64, f64)> {
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for i in 0..4 {
+            let (a, b) = (quad[i], quad[(i + 1) % 4]);
+            if (a.y - y) * (b.y - y) > 0.0 || (a.y - b.y).abs() < 1.0e-9 {
+                continue;
+            }
+            let t = (y - a.y) / (b.y - a.y);
+            let x = a.x + (b.x - a.x) * t;
+            lo = lo.min(x);
+            hi = hi.max(x);
+        }
+        (hi >= lo).then_some((lo, hi))
+    }
+
+    /// The pin badge: a small amber pin on every widget that carries a PINNED
+    /// note, so a note written last week announces itself instead of waiting
+    /// to be stumbled on. Not a button — a mark you can click.
+    fn ensure_badge_ui(&mut self, cx: &mut Cx) {
+        if self.badge_ui.is_some() {
+            return;
+        }
+        // Amber describes, blue constrains, green does both. The colour is
+        // baked into each instance, not applied per badge.
+        let note = cx.with_vm(|vm| {
+            let value = script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                Icon {
+                    width: Fit
+                    height: Fit
+                    icon_walk: Walk{width: 11 height: Fit}
+                    draw_icon +: {
+                        color: #xffc74a
+                        svg: crate_resource("self:resources/icons/note_pin.svg")
+                    }
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        let rule = cx.with_vm(|vm| {
+            let value = script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                Icon {
+                    width: Fit
+                    height: Fit
+                    icon_walk: Walk{width: 11 height: Fit}
+                    draw_icon +: {
+                        color: #x59b3ff
+                        svg: crate_resource("self:resources/icons/note_pin.svg")
+                    }
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        let both = cx.with_vm(|vm| {
+            let value = script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                Icon {
+                    width: Fit
+                    height: Fit
+                    icon_walk: Walk{width: 11 height: Fit}
+                    draw_icon +: {
+                        color: #x57d98a
+                        svg: crate_resource("self:resources/icons/note_pin.svg")
+                    }
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        self.badge_ui = Some([note, rule, both]);
+    }
+
+    /// Re-resolve which widgets carry a pinned note. Walks the whole tree, so
+    /// it runs on a timer, not per frame; the badges themselves ride the live
+    /// rects of the uids it finds.
+    fn refresh_badges(&mut self, cx: &mut Cx2d) {
+        let now = cx.seconds_since_app_start();
+        if now < self.badges_at + BADGE_REFRESH {
+            return;
+        }
+        self.badges_at = now;
+        // A badge means "something is written about this widget", which is
+        // the only test left once pinning is gone: a record exists for every
+        // widget a prompt was ever sent about, and those must not all wear a
+        // mark. Which KIND it is comes back with it.
+        let keys: Vec<(String, BadgeKind)> = {
+            let mut s = session().lock().unwrap();
+            s.load_notes();
+            s.notes
+                .iter()
+                .filter_map(|n| {
+                    let note = !n.text.trim().is_empty();
+                    let rule = !n.rules.trim().is_empty();
+                    let kind = match (note, rule) {
+                        (true, true) => BadgeKind::Both,
+                        (true, false) => BadgeKind::Note,
+                        (false, true) => BadgeKind::Rule,
+                        (false, false) => return None,
+                    };
+                    Some((n.path.clone(), kind))
+                })
+                .collect()
+        };
+        self.badge_targets.clear();
+        if keys.is_empty() {
+            return;
+        }
+        for (uid, path) in readable_paths(cx) {
+            if let Some((_, kind)) = keys.iter().find(|(key, _)| *key == path) {
+                self.badge_targets.push((uid, path, *kind));
+            }
+        }
+    }
+
+    /// Draw a pin on each badged widget and remember where it landed.
+    fn draw_badges(&mut self, cx: &mut Cx2d, scope: &mut Scope, window_id: Option<usize>) {
+        self.badge_rects.clear();
+        if self.badge_targets.is_empty() {
+            return;
+        }
+        self.ensure_badge_ui(cx);
+        let pins = self.badge_ui.as_ref().unwrap().clone();
+        let max_x = self.overlay_max_x(cx.current_pass_size());
+        let targets = self.badge_targets.clone();
+        for (uid, _, kind) in targets {
+            let widget = cx.widget_tree().widget(WidgetUid(uid));
+            if widget.is_empty() {
+                continue;
+            }
+            let rect = live_rect(cx, &widget);
+            if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
+                continue; // not drawn this frame
+            }
+            let _ = window_id;
+            // Top-right, just outside the selection ring, so it never sits on
+            // the widget's own pixels.
+            let badge = |r: Rect| {
+                dvec2(
+                    (r.pos.x + r.size.x - 4.0).min(max_x - BADGE_SIZE - 1.0),
+                    (r.pos.y - BADGE_SIZE + 2.0).max(0.0),
+                )
+            };
+            // Drawn where the widget IS on screen, remembered where it is in
+            // LAYOUT: the badge is painted on the window pass but clicked
+            // with a pointer the view transform has already un-projected.
+            let pos = badge(self.screen_rect(cx, rect));
+            if pos.x < 0.0 {
+                continue;
+            }
+            let mut walk = Walk::fit();
+            walk.abs_pos = Some(pos);
+            let _ = pins[kind.index()].draw_walk(cx, scope, walk);
+            self.badge_rects.push((
+                Rect { pos: badge(rect), size: dvec2(BADGE_SIZE, BADGE_SIZE) },
+                uid,
+            ));
+        }
+    }
+
     fn draw_stroke_points(&mut self, cx: &mut Cx2d, points: &[(f64, f64)]) {
         let max_x = self.overlay_max_x(cx.current_pass_size());
         let points: Vec<(f64, f64)> = points
@@ -9013,11 +16804,8 @@ impl Widget for Tweaker {
         if let Some(sidebar) = &self.sidebar {
             visit(id!(sidebar), sidebar.clone());
         }
-        if self.note_open {
-            if let Some(note) = &self.note_ui {
-                visit(id!(note), note.clone());
-            }
-        }
+        // Upstream's cancel walk also visited the floating note card. This
+        // fork removed that card, so there is nothing here to visit.
         true
     }
 
@@ -9034,6 +16822,10 @@ impl Widget for Tweaker {
             return;
         }
         discard_unavailable_picks(cx);
+        let in_frame = self.settle_frame.is_event(event).is_some();
+        if self.settle_isolation(cx, in_frame) {
+            self.apply_view_focus(cx);
+        }
         // An eyedropper sample in flight: apply it the moment the frame
         // has been read back, else look again next frame.
         let probe = session().lock().unwrap().eyedrop_probe.clone();
@@ -9069,6 +16861,32 @@ impl Widget for Tweaker {
         if self.live_timer.is_event(event).is_some() {
             self.live_apply(cx);
         }
+        // A saved theme's own tokens, at the one moment they will survive.
+        // `request_style_reload` re-runs `script_mod` from the event loop,
+        // which rebuilds `mod.theme` out of the base theme and the sheet;
+        // `Event::LiveEdit` reaches a widget AFTER that rebuild and after the
+        // tree has been re-applied over it, so this is where the tokens go
+        // on. A frame count would be a guess; this is the event itself.
+        if matches!(event, Event::LiveEdit) {
+            if let Some((name, code)) = self.pending_theme_script.take() {
+                cx.with_vm(|vm| {
+                    vm.eval(ScriptMod {
+                        cargo_manifest_path: env!("CARGO_MANIFEST_DIR").into(),
+                        module_path: format!("theme_store_{name}"),
+                        file: format!("themes/{name}.{}", crate::theme_store::FILE_EXTENSION),
+                        line: 0,
+                        column: 0,
+                        code,
+                        values: vec![],
+                    });
+                });
+                // Re-apply rather than reload: typed text and running
+                // animations survive, which is the whole point of the
+                // sanctioned override path.
+                cx.request_script_reapply();
+                self.redraw_sidebar(cx);
+            }
+        }
         // The guard must drop before undo/redo take the session lock again
         // (an `if let` scrutinee's temporary lives for the whole body).
         let pending_undo = session().lock().unwrap().undo_redo.take();
@@ -9103,6 +16921,8 @@ impl Widget for Tweaker {
         }
         if let Event::MouseMove(e) = event {
             self.doc_tip_hover(cx, e.abs);
+            self.scope_tip_hover(cx, e.abs);
+            self.chrome_tip_hover(cx, e.abs);
             self.states_hover(cx, e.abs);
             self.pulse_hover(cx, e.abs);
         }
@@ -9185,6 +17005,13 @@ impl Widget for Tweaker {
                 (s.suppress_until, s.edit_hold)
             };
             let now = cx.seconds_since_app_start();
+            // The footer's "path copied" receipt has had its beat: put the
+            // path back. (Frames keep arriving until then because the draw
+            // asks for one while the receipt is up.)
+            if self.footer_copied_until > 0.0 && now >= self.footer_copied_until {
+                self.footer_copied_until = 0.0;
+                self.redraw_sidebar(cx);
+            }
             if now < until || hold {
                 self.next_frame = cx.new_next_frame();
             } else {
@@ -9197,12 +17024,49 @@ impl Widget for Tweaker {
         match event {
             Event::MouseDown(e) if Some(e.window_id.id()) == self.my_window => {
                 let x = self.band.pos.x;
+                let grip = self.spec_grip_hit(cx, e.abs);
                 if e.abs.x >= x - 3.0
                     && e.abs.x <= x + SPLITTER_WIDTH + 3.0
                     && e.abs.y >= self.band.pos.y
                 {
                     self.splitter_drag = true;
                     self.cancel_scope = Some(self.begin_cancel_scope(cx));
+                } else if let Some(k) = grip {
+                    // Grab where it was grabbed: the boundary moves by how far
+                    // the pointer has moved since, not to where it is. The
+                    // weights are taken as they are; the screen is measured
+                    // ONLY for the exchange rate between a point of travel
+                    // and a unit of weight, where a frame of staleness costs
+                    // a little speed and no position.
+                    let weights = [spec_weight(0), spec_weight(1), spec_weight(2)];
+                    // Only the height ABOVE the floors is shared by weight:
+                    // the engine reserves each row's minimum first and hands
+                    // out what is left in proportion. So the exchange rate
+                    // between a point of travel and a unit of weight is
+                    // measured against that remainder, not the whole -- with
+                    // the whole, a 64-point drag moved the boundary 44.
+                    let (mut rows, mut on_screen) = (0.0, 0.0);
+                    for index in 0..3 {
+                        if let Some((_, bx, _)) = self.spec_row(index) {
+                            let h = bx.area().rect(cx).size.y;
+                            if h > 0.0 {
+                                rows += 1.0;
+                                on_screen += h;
+                            }
+                        }
+                    }
+                    let free = on_screen - rows * SPEC_FIELD_MIN;
+                    if free > 0.0 {
+                        let per_point = weights.iter().sum::<f64>() / free;
+                        self.spec_resize = Some((k, e.abs.y, weights, per_point));
+                    }
+                } else if e.abs.x > x && self.footer_path_hit(cx, e.abs) {
+                    // The footer's path line is the selection's ADDRESS, and
+                    // it is shown head-clipped because it does not fit. One
+                    // click puts the whole thing on the clipboard, so it can
+                    // be pasted into a note, an issue or a prompt as the
+                    // unambiguous name of what is selected.
+                    self.copy_footer_path(cx);
                 } else if e.abs.x > x
                     && !self
                         .open_popup
@@ -9247,9 +17111,16 @@ impl Widget for Tweaker {
                                 }
                             }
                             VisKind::Size
+                            | VisKind::Measured
+                            | VisKind::Identity
                             | VisKind::BoxInset(_)
                             | VisKind::FlowSpacing
-                            | VisKind::AlignGrid => {}
+                            | VisKind::AlignGrid
+                            | VisKind::Group(_)
+                            | VisKind::Container
+                            | VisKind::Absolute
+                            | VisKind::GridTracks
+                            | VisKind::Cell => {}
                             VisKind::Prop(row_index) => {
                                 // The origin-dot zone is the right edge:
                                 // click jumps the cascade to that level.
@@ -9313,7 +17184,8 @@ impl Widget for Tweaker {
                 if ke.key_code == KeyCode::ReturnKey
                     && (ke.modifiers.control || ke.modifiers.logo)
                     && tweak_is_on()
-                    && self.panel_tab == PanelTab::Shader =>
+                    && self.panel_tab == PanelTab::Shader
+                    && !self.prompt_field_focused(cx) =>
             {
                 let text = self
                     .sidebar
@@ -9325,14 +17197,12 @@ impl Widget for Tweaker {
                             .text()
                     })
                     .unwrap_or_default();
-                // The prompt box owns Ctrl+Enter when IT has focus (the AI
-                // loop); the editor's edit applies otherwise.
-                let prompt_focused = self
-                    .sidebar
-                    .as_ref()
-                    .map(|s| cx.has_key_focus(s.child(live_id!(shader_col)).child(live_id!(prompt)).area()))
-                    .unwrap_or(false);
-                if !prompt_focused && text.contains("fn") {
+                // The strip owns Ctrl+Enter when IT has focus (the AI loop).
+                // That is settled in this arm's guard rather than here, so
+                // that the strip's own arm -- which comes later in the match
+                // -- actually receives the key; the editor's edit applies
+                // otherwise.
+                if text.contains("fn") {
                     if let Err(error) = apply_fn_edit(cx, self, &text) {
                         self.live_revert(cx, &error);
                     } else {
@@ -9341,76 +17211,108 @@ impl Widget for Tweaker {
                     }
                 }
             }
-            Event::KeyDown(ke) if ke.key_code == KeyCode::Insert && tweak_is_on() => {
-                // Insert: a note on the item we are IN — the pinned
-                // selection, else the widget under the hover (which becomes
-                // the selection so the card has something to ride with).
-                // (Ctrl+Space is macOS's input-source switch; the user
-                // picked Insert, with the panel's note button as the
-                // fallback for keyboards without one.)
-                let sel_path = {
-                    let mut s = session().lock().unwrap();
-                    if s.pinned.is_none() {
-                        if let Some(h) = s.hover.clone() {
-                            s.pinned = Some(h);
-                        }
-                    }
-                    s.pinned.as_ref().map(|p| p.path.clone())
-                };
-                if let Some(path) = sel_path {
-                    self.note_open = !self.note_open;
-                    if self.note_open {
-                        let mut s = session().lock().unwrap();
-                        if !s.notes.iter().any(|n| n.path == path) {
-                            s.notes.push(TweakNote {
-                                path,
-                                text: String::new(),
-                                dx: 8.0,
-                                dy: -78.0,
-                            });
-                        }
-                        self.note_seed_pending = true;
-                    } else {
-                        self.note_rect = None;
-                    }
-                    self.redraw_overlay(cx);
-                }
+            // The note hotkey. Insert is the natural key and stays bound,
+            // but half the keyboards in use (laptops, 60% boards) reach it
+            // only through Fn — so Ctrl+Shift+N (Cmd+Shift+N on mac) opens
+            // the same card, and unlike a bare key it also works while the
+            // caret sits in one of the panel's fields.
+            Event::KeyDown(ke)
+                if tweak_is_on()
+                    && (ke.key_code == KeyCode::Insert
+                        || (ke.key_code == KeyCode::KeyN
+                            && ke.modifiers.shift
+                            && (ke.modifiers.control || ke.modifiers.logo))) =>
+            {
+                self.toggle_note(cx);
             }
             _ if self.note_request && tweak_is_on() => {
                 self.note_request = false;
-                // Insert: a note on the item we are IN — the pinned
-                // selection, else the widget under the hover (which becomes
-                // the selection so the card has something to ride with).
-                // (Ctrl+Space is macOS's input-source switch; the user
-                // picked Insert, with the panel's note button as the
-                // fallback for keyboards without one.)
-                let sel_path = {
-                    let mut s = session().lock().unwrap();
-                    if s.pinned.is_none() {
-                        if let Some(h) = s.hover.clone() {
-                            s.pinned = Some(h);
-                        }
-                    }
-                    s.pinned.as_ref().map(|p| p.path.clone())
-                };
-                if let Some(path) = sel_path {
-                    self.note_open = !self.note_open;
-                    if self.note_open {
-                        let mut s = session().lock().unwrap();
-                        if !s.notes.iter().any(|n| n.path == path) {
-                            s.notes.push(TweakNote {
-                                path,
-                                text: String::new(),
-                                dx: 8.0,
-                                dy: -78.0,
-                            });
-                        }
-                        self.note_seed_pending = true;
-                    } else {
-                        self.note_rect = None;
-                    }
+                self.toggle_note(cx);
+            }
+            _ if self.view_focus_pending && tweak_is_on() => {
+                self.view_focus_pending = false;
+                self.apply_view_focus(cx);
+                self.redraw_sidebar(cx);
+            }
+            // A pin badge was clicked: select its widget and open its note.
+            _ if self.badge_open.is_some() && tweak_is_on() => {
+                let uid = self.badge_open.take().unwrap();
+                self.open_badged_note(cx, uid);
+            }
+            // Ctrl+Enter in the prompt strip: send the queue. The field
+            // would otherwise take Return, so this arm runs before it.
+            Event::KeyDown(ke)
+                if tweak_is_on()
+                    && matches!(ke.key_code, KeyCode::ReturnKey | KeyCode::NumpadEnter)
+                    && (ke.modifiers.control || ke.modifiers.logo)
+                    && self.prompt_field_focused(cx) =>
+            {
+                self.prompt_send(cx);
+            }
+            // Alt+Enter queues instead of sending: write against several
+            // widgets first, then release the batch with one Ctrl+Enter.
+            Event::KeyDown(ke)
+                if tweak_is_on()
+                    && matches!(ke.key_code, KeyCode::ReturnKey | KeyCode::NumpadEnter)
+                    && ke.modifiers.alt
+                    && !ke.modifiers.control
+                    && !ke.modifiers.logo
+                    && self.prompt_field_focused(cx) =>
+            {
+                self.prompt_queue(cx);
+            }
+            // Up / Down in an EMPTY box walks the history. Only while empty:
+            // in a message being written those keys belong to the caret.
+            Event::KeyDown(ke)
+                if tweak_is_on()
+                    && matches!(ke.key_code, KeyCode::ArrowUp | KeyCode::ArrowDown)
+                    && !ke.modifiers.any()
+                    && self.prompt_field_focused(cx)
+                    && self.prompt_field_empty() =>
+            {
+                self.prompt_recall(cx, ke.key_code == KeyCode::ArrowUp);
+            }
+            // Escape calls off an armed @mention first — something is still
+            // being written in — and only leaves the tab once there is no
+            // pick outstanding.
+            Event::KeyDown(ke)
+                if self.panel_tab == PanelTab::Spec
+                    && tweak_is_on()
+                    && ke.key_code == KeyCode::Escape =>
+            {
+                if session().lock().unwrap().mention {
+                    session().lock().unwrap().mention = false;
                     self.redraw_overlay(cx);
+                } else {
+                    self.note_close(cx);
                 }
+            }
+            // F3 walks the search hits forward, Shift+F3 back, from
+            // anywhere in the app while the box is searching.
+            Event::KeyDown(ke)
+                if tweak_is_on() && self.search_mode && ke.key_code == KeyCode::F3 =>
+            {
+                self.search_step(cx, if ke.modifiers.shift { -1 } else { 1 });
+            }
+            // The arrows walk the hierarchy while something is selected —
+            // parent / first child / previous / next sibling, the scene
+            // editor's vocabulary. With NOTHING selected they belong to the
+            // exploded view's orbit (platform/src/sploded.rs stands down
+            // for exactly this case), and with a caret anywhere they belong
+            // to the caret.
+            Event::KeyDown(ke)
+                if tweak_is_on()
+                    && matches!(
+                        ke.key_code,
+                        KeyCode::ArrowUp
+                            | KeyCode::ArrowDown
+                            | KeyCode::ArrowLeft
+                            | KeyCode::ArrowRight
+                    )
+                    && !self.focus_is_text(cx)
+                    && session().lock().unwrap().pinned.is_some() =>
+            {
+                self.walk_selection(cx, ke.key_code);
             }
             Event::KeyDown(ke)
                 if ke.key_code == KeyCode::KeyZ
@@ -9438,11 +17340,49 @@ impl Widget for Tweaker {
                 // overlay with the freshly-read rects.
                 self.redraw_overlay(cx);
             }
+            // A field is being resized: its height follows the pointer from
+            // where the strip was grabbed.
+            Event::MouseMove(e) if self.spec_resize.is_some() => {
+                let (k, from_y, from, per_point) = self.spec_resize.unwrap();
+                // The pair either side of the boundary trade weight between
+                // them; their sum is fixed, and neither may go below the
+                // floor -- which is what stops one growing forever. The
+                // third row is not touched, so it keeps exactly its share.
+                // A weight of zero IS the floor -- the engine's reserved
+                // minimum is all that row then gets -- so the clamp is on
+                // the pair's weight itself, not on some pixel figure.
+                let pair = from[k] + from[k + 1];
+                let above = (from[k] + (e.abs.y - from_y) * per_point).clamp(0.0, pair);
+                let mut weights = from;
+                weights[k] = above;
+                weights[k + 1] = pair - above;
+                session().lock().unwrap().spec_weights = weights;
+                // Applied here, at event time, so the next layout pass is
+                // already the new split rather than the one after it.
+                self.spec_apply_weights(cx);
+                cx.set_cursor(MouseCursor::NsResize);
+                self.redraw_sidebar(cx);
+            }
+            // The strip says what it is before it is grabbed.
+            Event::MouseMove(e)
+                if Some(e.window_id.id()) == self.my_window
+                    && tweak_is_on()
+                    && self.spec_grip_hit(cx, e.abs).is_some() =>
+            {
+                cx.set_cursor(MouseCursor::NsResize);
+            }
             Event::MouseMove(e)
                 if Some(e.window_id.id()) == self.my_window
                     && !self.splitter_drag
                     && tweak_is_on() =>
             {
+                // The footer's path line copies on click, so it says so
+                // with the hand before it is clicked.
+                if self.footer_path_hit(cx, e.abs)
+                    && session().lock().unwrap().pinned.is_some()
+                {
+                    cx.set_cursor(MouseCursor::Hand);
+                }
                 // The doc tooltip: a row whose prop carries doc-channel
                 // text shows it, anchored to the row (no per-pixel churn).
                 // Tree tab: hovering a row outlines its widget in the body.
@@ -9528,6 +17468,7 @@ impl Widget for Tweaker {
             // must never outlive the press.
             Event::MouseUp(_) | Event::WindowLostFocus(_) => {
                 self.splitter_drag = false;
+                self.spec_resize = None;
                 self.cancel_scope = None;
             }
             _ if self.splitter_drag
@@ -9536,7 +17477,16 @@ impl Widget for Tweaker {
                     || event.back_pressed()) =>
             {
                 self.splitter_drag = false;
+                self.spec_resize = None;
                 self.cancel_scope = None;
+            }
+            // The spec-row resize is a drag of its own with no cancel scope
+            // behind it, so Escape ends it here rather than through the arm
+            // above — which is gated on owning the splitter's scope.
+            Event::KeyDown(ke)
+                if ke.key_code == KeyCode::Escape && self.spec_resize.is_some() =>
+            {
+                self.spec_resize = None;
             }
             _ => {}
         }
@@ -9576,48 +17526,12 @@ impl Widget for Tweaker {
                 sidebar.handle_event(cx, event, scope);
             }
         }
-        if self.note_open {
-            if let Some(ui) = self.note_ui.clone() {
-                ui.handle_event(cx, event, scope);
-            }
-            match event {
-                Event::MouseDown(e) if e.button.is_primary() => {
-                    if let Some(rect) = self.note_rect {
-                        let grip = Rect {
-                            pos: rect.pos,
-                            size: dvec2(rect.size.x, 12.0),
-                        };
-                        if grip.contains(e.abs) {
-                            self.note_drag = Some(dvec2(
-                                e.abs.x - rect.pos.x,
-                                e.abs.y - rect.pos.y,
-                            ));
-                        }
-                    }
-                }
-                Event::MouseMove(e) => {
-                    if let Some(grab) = self.note_drag {
-                        let sel = session().lock().unwrap().pinned.clone();
-                        if let Some(sel) = sel {
-                            let mut s = session().lock().unwrap();
-                            if let Some(note) =
-                                s.notes.iter_mut().find(|n| n.path == sel.path)
-                            {
-                                note.dx = e.abs.x - grab.x - sel.rect.pos.x;
-                                note.dy = e.abs.y - grab.y - sel.rect.pos.y;
-                            }
-                            drop(s);
-                            self.redraw_overlay(cx);
-                        }
-                    }
-                }
-                Event::MouseUp(_) => {
-                    self.note_drag = None;
-                }
-                _ => {}
-            }
+        // The floating extrusion readout takes its own input, whether or not
+        // a note card happens to be open — it was nested inside the note's
+        // block, so the field only answered while a note was up.
+        if let Some(ui) = self.spread_ui.clone() {
+            ui.handle_event(cx, event, scope);
         }
-
         if let Event::Actions(actions) = event {
             self.handle_sidebar_actions(cx, actions);
         }
@@ -9627,6 +17541,16 @@ impl Widget for Tweaker {
         let on = tweak_is_on();
         if on {
             discard_unavailable_picks(cx);
+            // The head row below reads the lock, so it settles first. The
+            // view itself is pushed at the next event, where it is set from.
+            if self.settle_isolation(cx, false) {
+                self.view_focus_pending = true;
+                self.next_frame = cx.new_next_frame();
+            }
+            // Whether the target is in THIS frame is read once it is drawn.
+            if self.isolated() {
+                self.settle_frame = cx.new_next_frame();
+            }
         }
         if on && !self.was_on {
             // Opening the panel lands the caret in the filter.
@@ -9635,7 +17559,29 @@ impl Widget for Tweaker {
         if !on && self.was_on {
             self.cancel_interactions(cx);
         }
+        if self.view_zoom < 1.0 {
+            self.view_zoom = 1.0;
+        }
         self.was_on = on;
+        // A preset switch re-runs `script_mod` from the event loop, a tick
+        // or more after the click, so for a frame or two the rows and the
+        // palette would still be the ones read under the theme just left.
+        // Both hang off the apply generation, so keep bumping it until the
+        // switch has landed.
+        if self.theme_reload_frames > 0 {
+            self.theme_reload_frames -= 1;
+            session().lock().unwrap().apply_gen += 1;
+            self.next_frame = cx.new_next_frame();
+        }
+        // A theme edit made outside this overlay (a tool going through
+        // `reflect::theme_set_value`) bumps the session's apply generation;
+        // the palette strip and the swatch names follow it here instead of
+        // keeping the values they were read with.
+        let apply_gen = session().lock().unwrap().apply_gen;
+        if !self.theme_colors.is_empty() && self.palette_gen != apply_gen {
+            self.theme_colors = theme_palette(cx);
+            self.palette_gen = apply_gen;
+        }
         let window_id = cx.get_current_window_id().map(|id| id.id());
         self.my_window = window_id;
         // Compress the app's UI while the sidebar is up; release it when the
@@ -9649,15 +17595,30 @@ impl Widget for Tweaker {
             // slot and its last items), so skipping them here left the
             // panel, the outlines and the note card painted after Shift+F10.
             // Begin and end them empty so nothing of the mode remains.
-            for list in [self.overlay_list.as_mut(), self.sidebar_list.as_mut()]
+            // The design surface is going away, so the app must go back to
+            // life size and its own centre with it.
+            if cx.sploded_focus() != (None, 0.0, 1.0) {
+                cx.sploded_set_focus(None, 0.0, 1.0);
+            }
+            let mut hands_off = false;
+            for (index, list) in [self.overlay_list.as_mut(), self.sidebar_list.as_mut()]
                 .into_iter()
                 .flatten()
+                .enumerate()
             {
                 list.begin_overlay_reuse(cx);
                 let size = cx.current_pass_size();
                 cx.begin_root_turtle(size, Layout::flow_down());
+                // The mode is off, but the bridge may still be driving: the
+                // frame that says so is drawn into the topmost list.
+                if index == 1 && draw_hands_off_frame(cx, &mut self.draw_outline) {
+                    hands_off = true;
+                }
                 cx.end_pass_sized_turtle();
                 list.end(cx);
+            }
+            if hands_off {
+                self.next_frame = cx.new_next_frame();
             }
             return DrawStep::done();
         }
@@ -9741,6 +17702,32 @@ impl Widget for Tweaker {
             }
             pick
         });
+        // Centre TRACKS. The subject moves — the selection changes, a list
+        // scrolls, the window resizes — and a centre computed once at the
+        // click would hold the middle of the screen on wherever the widget
+        // happened to be then. Recompute against the live rects and hand it
+        // to the next frame; applying it here would redraw from inside a
+        // draw.
+        if self.view_center {
+            let want = self.focus_point(cx);
+            let (have, have_level, _) = cx.sploded_focus();
+            let moved = match (want, have) {
+                (Some((a, level)), Some(b)) => {
+                    (a.x - b.x).abs() > 0.5
+                        || (a.y - b.y).abs() > 0.5
+                        || (level - have_level).abs() > 1.0e-4
+                }
+                (a, b) => a.is_some() != b.is_some(),
+            };
+            if moved {
+                self.view_focus_pending = true;
+                self.next_frame = cx.new_next_frame();
+            }
+        }
+        // Whether the arrows orbit the exploded view or walk the hierarchy
+        // turns on this, so it is reported every frame and independently of
+        // whether the selection happens to be drawing.
+        cx.sploded_set_selected(pinned.is_some());
         // Exploded view: the outlines belong on their widgets' planes inside
         // the body pass, not flat on the window pass — hand them to the
         // pass owner as marks and draw nothing here.
@@ -9758,10 +17745,45 @@ impl Widget for Tweaker {
             let pinned_mark = pinned.as_ref().and_then(|p| mark(cx, p));
             cx.sploded_set_marks(hover_mark, pinned_mark);
         }
+        // Isolate covers the app around the selection, under every mark the
+        // overlay draws — the marks belong on top of the isolated widget, not
+        // under the cover.
+        if self.tree_isolate && self.isolate_uid != 0 {
+            let widget = cx.widget_tree().widget(WidgetUid(self.isolate_uid));
+            let rect = if widget.is_empty() { Rect::default() } else { live_rect(cx, &widget) };
+            if rect.size.x > 0.0 && rect.size.y > 0.0 {
+                let corners = [
+                    rect.pos,
+                    dvec2(rect.pos.x + rect.size.x, rect.pos.y),
+                    dvec2(rect.pos.x + rect.size.x, rect.pos.y + rect.size.y),
+                    dvec2(rect.pos.x, rect.pos.y + rect.size.y),
+                ];
+                // Exploded: the widget is on a plane, so the hole is where
+                // that plane puts it, not where the flat layout does.
+                let level = cx.sploded_depth_of(self.isolate_uid).unwrap_or(0) as f32;
+                let pass = cx.current_pass_size();
+                let hole = corners
+                    .map(|p| cx.sploded_project(pass, p, level).unwrap_or(p));
+                self.draw_isolate_scrim(cx, hole);
+            }
+        }
         // NOT an early return: the overlay list and its root turtle were
         // begun above and are ended below — leaving them open let the
         // window's deferred Fill walk resolve against this turtle instead
         // of its own (an index-out-of-bounds in `resolve_fill`).
+        // Everything below draws flat on the window pass, so from here the
+        // rects are SCREEN rects: the outline, the handles hanging off it,
+        // the note card that rides the selection and its leader line all
+        // follow the widget through a centre or a zoom instead of staying
+        // behind at the layout coordinates.
+        let pinned = pinned.map(|mut pick| {
+            pick.rect = self.screen_rect(cx, pick.rect);
+            pick
+        });
+        let hover = hover.map(|mut pick| {
+            pick.rect = self.screen_rect(cx, pick.rect);
+            pick
+        });
         let flat_outlines = !cx.sploded_active();
         if flat_outlines {
         if let Some(pick) = &pinned {
@@ -9777,7 +17799,11 @@ impl Widget for Tweaker {
                 // selection's corners they read as chrome and hide the very
                 // pixels being judged. They appear when the pointer comes
                 // within reach of a corner and vanish with it.
-                if self.radius_prop.is_some() {
+                // ...and they stand down while the view is centred or
+                // zoomed: the handle is grabbed in layout coordinates and
+                // painted in screen ones, so under a transform it would
+                // answer to a place it is not.
+                if self.radius_prop.is_some() && !cx.sploded_transformed() {
                     let pointer = session().lock().unwrap().pointer_abs;
                     let near = Self::radius_handle_centers(pick.rect).iter().any(|c| {
                         let dx = pointer.x - c.x;
@@ -9790,11 +17816,16 @@ impl Widget for Tweaker {
                 }
             }
         }
-        if !quiet {
+        let mention = session().lock().unwrap().mention;
+        if !quiet || mention {
             if let Some(pick) = &hover {
                 let same = pinned.as_ref().is_some_and(|p| p.uid == pick.uid);
-                if Some(pick.window_id) == window_id && !same {
-                    self.draw_pick(cx, pick, PickStyle::Hover);
+                // An armed mention outlines whatever is under the pointer,
+                // the current selection included: naming the widget the note
+                // is already on is a legitimate thing to want.
+                if Some(pick.window_id) == window_id && (!same || mention) {
+                    let style = if mention { PickStyle::Mention } else { PickStyle::Hover };
+                    self.draw_pick(cx, pick, style);
                 }
             }
         }
@@ -9809,38 +17840,56 @@ impl Widget for Tweaker {
                 self.draw_stroke_points(cx, &stroke.points);
             }
         }
-        // The Ctrl+Space note card rides the SELECTION's live rect.
-        self.note_rect = None;
-        if self.note_open {
-            if let Some(pick) = &pinned {
-                let note = {
-                    let s = session().lock().unwrap();
-                    s.notes.iter().find(|n| n.path == pick.path).cloned()
-                };
-                if let Some(note) = note {
-                    self.ensure_note_ui(cx);
-                    let ui = self.note_ui.as_ref().unwrap().clone();
-                    let field = ui.child(live_id!(note_text));
-                    self.note_text_uid = field.widget_uid().0;
-                    if self.note_seed_pending {
-                        field.set_text(cx, &note.text);
-                        self.note_seed_pending = false;
-                    }
-                    let pos = dvec2(
-                        (pick.rect.pos.x + note.dx).max(0.0),
-                        (pick.rect.pos.y + note.dy).max(0.0),
-                    );
-                    let mut walk = Walk::fit();
-                    walk.abs_pos = Some(pos);
-                    walk.width = Size::Fixed(210.0);
-                    let _ = ui.draw_walk(cx, scope, walk);
-                    let rect = ui.area().rect(cx);
-                    if rect.size.x > 0.0 {
-                        self.note_rect = Some(rect);
+        // Pin badges: every widget carrying a PINNED note wears one, so old
+        // notes announce themselves. Drawn before the card, which may cover
+        // one of them.
+        // Note mode: while a card is open, every widget carrying a pinned
+        // note wears a pin, so the others announce themselves and can be
+        // opened with a click. Outside note mode they would be chrome on the
+        // canvas answering a question nobody asked.
+        if flat_outlines && self.panel_tab == PanelTab::Spec {
+            self.refresh_badges(cx);
+            self.draw_badges(cx, scope, window_id);
+        } else {
+            self.badge_rects.clear();
+        }
+
+        // The extrusion readout, top-right of the APP — not the panel. It
+        // is the one control the eye needs while it is on the stack, and
+        // crossing the window to a sidebar field to reach it meant looking
+        // away from the thing being adjusted.
+        self.spread_rect = None;
+        if cx.sploded_will_be_active() {
+            self.ensure_spread_ui(cx);
+            let ui = self.spread_ui.as_ref().unwrap().clone();
+            {
+                let field = ui.child(live_id!(value));
+                let live = cx.sploded_spread() as f64;
+                if field.area() == Area::Empty || !cx.has_key_focus(field.area()) {
+                    if let Some(mut field) = field.borrow_mut::<FabValueInput>() {
+                        field.set_value(cx, live);
                     }
                 }
             }
+            const HUD_W: f64 = 116.0;
+            let max_x = self.overlay_max_x(cx.current_pass_size());
+            let mut walk = Walk::fit();
+            walk.abs_pos = Some(dvec2((max_x - HUD_W - 8.0).max(0.0), 8.0));
+            walk.width = Size::Fixed(HUD_W);
+            let _ = ui.draw_walk(cx, scope, walk);
+            let rect = ui.area().rect(cx);
+            if rect.size.x > 0.0 {
+                self.spread_rect = Some(rect);
+            }
         }
+
+        // The extrusion readout is drawn FLAT on the window pass, so in the
+        // exploded view the mode must not re-address the pointer over it: it
+        // would be painted in one place and clicked in another. Same
+        // exemption the panel band has, but this one moves.
+        let floating: Vec<Rect> = self.spread_rect.into_iter().collect();
+        cx.sploded_set_flat_rects(floating.clone());
+        session().lock().unwrap().chrome_float = floating;
 
         cx.end_pass_sized_turtle();
         self.overlay_list.as_mut().unwrap().end(cx);
@@ -9854,6 +17903,53 @@ impl Widget for Tweaker {
         let size = cx.current_pass_size();
         cx.begin_root_turtle(size, Layout::flow_down());
         self.draw_sidebar(cx, scope, sel.as_ref());
+        // The caret goes back into the prompt box AFTER the sidebar has been
+        // drawn, not while it is being laid out: before the draw the box's
+        // area is last frame's, and the focus set against it does not
+        // survive the field being drawn again. Without this a send or a
+        // queue drops the caret, and every key after it is handled by the
+        // APP -- typing walks its tabs instead of writing the next message.
+        if self.prompt_focus_pending {
+            let field = self
+                .sidebar
+                .as_ref()
+                .map(|s| s.child(live_id!(prompt_row)).child(live_id!(prompt_field)));
+            if let Some(area) = field.map(|f| f.area()).filter(|a| *a != Area::Empty) {
+                self.prompt_focus_pending = false;
+                cx.set_key_focus(area);
+                self.next_frame = cx.new_next_frame();
+            }
+        }
+        // The doc chip for whatever the pointer is over -- a property row's
+        // annotation, or one of the panel's own controls. Drawn HERE, after
+        // the sidebar, rather than inside its draw: painted in there, every
+        // widget the panel drew afterwards lay on top of it, and a chip under
+        // the tab row was a dark plate with the tabs showing through.
+        if let Some(hover) = self.hover_doc.clone() {
+            let band = self.band;
+            let label_height = 16.0;
+            // MEASURED, not counted: the words are drawn at their true
+            // advances, so the plate is sized from the same run. The count
+            // is only the fallback for text the layout engine returns no
+            // row for.
+            let approx = self
+                .draw_label
+                .prepare_single_line_run(cx, &hover.text)
+                .map(|run| run.width_in_lpxs as f64)
+                .unwrap_or_else(|| (hover.text.chars().count() as f64) * 5.4)
+                + 10.0;
+            let mut pos = hover.pos;
+            pos.x = pos
+                .x
+                .clamp(band.pos.x, (band.pos.x + band.size.x - approx).max(band.pos.x));
+            pos.y = pos.y.max(0.0);
+            self.draw_label_bg.draw_abs(cx, Rect { pos, size: dvec2(approx, label_height) });
+            self.draw_label.draw_abs(cx, pos + dvec2(5.0, 2.0), &hover.text);
+        }
+        // Last into the topmost list, so it lies over the panel too.
+        if draw_hands_off_frame(cx, &mut self.draw_outline) {
+            self.next_frame = cx.new_next_frame();
+        }
         cx.end_pass_sized_turtle();
         self.sidebar_list.as_mut().unwrap().end(cx);
 
@@ -9864,6 +17960,1105 @@ impl Widget for Tweaker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_theme_picker_offers_every_base_theme_and_every_sheet_the_library_ships() {
+        let presets = theme_presets();
+        // The base themes first, in the library's own order.
+        for (slot, base) in crate::BaseTheme::ALL.into_iter().enumerate() {
+            assert_eq!(presets[slot], ThemePreset::Base(base));
+        }
+        // Then every sheet, each followed by its dark appearance where it
+        // has one -- read off `DesktopStyle::ALL`, never written out here.
+        let mut expect = Vec::new();
+        for style in crate::desktop_style::DesktopStyle::ALL {
+            expect.push(ThemePreset::Sheet(style, false));
+            if style.supports_dark() {
+                expect.push(ThemePreset::Sheet(style, true));
+            }
+        }
+        assert_eq!(&presets[crate::BaseTheme::ALL.len()..], &expect[..]);
+        // And every label says something.
+        for preset in presets {
+            assert!(!preset.label().trim().is_empty(), "{preset:?}");
+        }
+    }
+
+    /// The picker's rows are the library's own two lists followed by the
+    /// store's, and nothing else: the panel names no theme itself, so a base
+    /// theme or a sheet added to the library turns up here without anybody
+    /// remembering to come back for it.
+    #[test]
+    fn the_picker_lists_every_builtin_then_every_saved_theme() {
+        let saved = vec!["my_sunset".to_string(), "studio".to_string()];
+        let entries = theme_choices(&saved);
+        let presets = theme_presets();
+        assert_eq!(entries.len(), presets.len() + saved.len());
+        // The built-ins first, in the library's order and unchanged.
+        for (at, preset) in presets.iter().enumerate() {
+            assert_eq!(entries[at], ThemeChoice::Builtin(*preset));
+            assert_eq!(entries[at].label(), preset.label());
+        }
+        // Then the store's, in the order it gave them, labelled by name.
+        for (at, name) in saved.iter().enumerate() {
+            let entry = &entries[presets.len() + at];
+            assert_eq!(*entry, ThemeChoice::Saved(name.clone()));
+            assert_eq!(entry.label(), *name);
+        }
+        // An empty store is the built-ins alone -- never an empty picker.
+        assert_eq!(theme_choices(&[]).len(), presets.len());
+    }
+
+    /// Not one built-in is deletable, whatever the picker shows for it. The
+    /// panel offers `delete` only for a `ThemeChoice::Saved`, and this is the
+    /// other half of that rule: every name the picker can be sitting on for a
+    /// built-in row is one the store itself refuses to remove.
+    #[test]
+    fn no_row_the_library_ships_can_be_deleted() {
+        for preset in theme_presets() {
+            let name = match preset {
+                ThemePreset::Base(base) => base.id().to_string(),
+                ThemePreset::Sheet(style, false) => style.id().to_string(),
+                ThemePreset::Sheet(style, true) => format!("{}-dark", style.id()),
+            };
+            assert!(
+                crate::theme_store::is_builtin(&name),
+                "{name} is offered as a built-in but the store does not know it as one"
+            );
+            assert!(!crate::theme_store::can_delete(&name), "{name}");
+        }
+    }
+
+    /// Every DSL spelling the Theme tab's head brings into the panel's own
+    /// splash chunk, against the real widget module: the re-skinned dropdown
+    /// with its own shader, the re-skinned popup and row, the panel's own
+    /// text style, and the head that holds them. That chunk is evaluated
+    /// once, when somebody first opens the panel, so nothing else here would
+    /// catch a spelling the VM turns down.
+    ///
+    /// The re-skin is not decoration. `windows-2000` and `nextstep` each
+    /// replace `mod.widgets.DropDown.draw_bg.pixel` wholesale, so a stock
+    /// dropdown in this panel would be unreadable under either -- and it is
+    /// the control that picks the theme, so it must stay readable under all
+    /// of them.
+    #[test]
+    fn the_theme_head_and_its_reskinned_dropdown_evaluate() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            vm.bx.captured_errors = Some(Vec::new());
+            let value = script_eval!(vm, {
+                use mod.prelude.widgets.*
+
+                let PanelFont = mod.text.TextStyle{
+                    font_family: mod.text.FontFamily{
+                        latin := mod.text.FontMember{
+                            res: crate_resource("self:resources/IBMPlexSans-Text.ttf")
+                            asc: -0.1
+                            desc: 0.0
+                        }
+                    }
+                    line_spacing: 1.2
+                    font_size: 8.0
+                }
+                let PanelMenuItem = PopupMenuItem {
+                    width: Fill
+                    height: Fit
+                    align: Align{x: 0.0 y: 0.5}
+                    padding: Inset{left: 7 right: 7 top: 3 bottom: 3}
+                    draw_text +: {
+                        color: #xe6e6e6
+                        color_hover: #xffffff
+                        color_active: #xffffff
+                        color_disabled: #x8c8c8c
+                        text_style: PanelFont{}
+                    }
+                    draw_icon +: { color: #xe6e6e6 }
+                    draw_bg +: {
+                        border_size: 0.0
+                        border_radius: 2.0
+                        color: #x1a1a1a
+                        color_hover: #x3a3a3a
+                        color_active: #x334d80
+                        color_disabled: #x1a1a1a
+                        color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+                        color_2_hover: vec4(-1.0, -1.0, -1.0, -1.0)
+                        color_2_active: vec4(-1.0, -1.0, -1.0, -1.0)
+                        color_2_disabled: vec4(-1.0, -1.0, -1.0, -1.0)
+                        border_color: vec4(0.0, 0.0, 0.0, 0.0)
+                        border_color_hover: vec4(0.0, 0.0, 0.0, 0.0)
+                        border_color_active: vec4(0.0, 0.0, 0.0, 0.0)
+                        border_color_disabled: vec4(0.0, 0.0, 0.0, 0.0)
+                        border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+                        mark_color: vec4(0.0, 0.0, 0.0, 0.0)
+                        mark_color_active: vec4(0.0, 0.0, 0.0, 0.0)
+                        mark_color_disabled: vec4(0.0, 0.0, 0.0, 0.0)
+                        pixel: fn() {
+                            let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                            sdf.box(0.0, 0.0, self.rect_size.x, self.rect_size.y, self.border_radius)
+                            sdf.fill(
+                                self.color
+                                    .mix(self.color_active, self.active)
+                                    .mix(self.color_hover, self.hover)
+                                    .mix(self.color_disabled, self.disabled)
+                            )
+                            return sdf.result
+                        }
+                    }
+                }
+                let PanelPopupMenu = PopupMenu {
+                    width: 224.
+                    height: Fit
+                    flow: Down
+                    padding: Inset{left: 3 right: 3 top: 3 bottom: 3}
+                    menu_item: PanelMenuItem{}
+                    draw_bg +: {
+                        border_size: 1.0
+                        border_radius: 3.0
+                        color: #x1a1a1a
+                        color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+                        border_color: #x545454
+                        border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+                        pixel: fn() {
+                            let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                            sdf.box(
+                                0.5
+                                0.5
+                                self.rect_size.x - 1.0
+                                self.rect_size.y - 1.0
+                                self.border_radius
+                            )
+                            sdf.fill_keep(self.color)
+                            sdf.stroke(self.border_color, self.border_size)
+                            return sdf.result
+                        }
+                    }
+                }
+                let PanelDropDown = DropDown {
+                    width: Fill
+                    height: 20
+                    min_height: 0
+                    align: Align{x: 0.0 y: 0.5}
+                    padding: Inset{left: 6 right: 18 top: 2 bottom: 2}
+                    margin: Inset{left: 0 right: 0 top: 0 bottom: 0}
+                    popup_menu: PanelPopupMenu{}
+                    draw_text +: {
+                        color: #xe6e6e6
+                        color_hover: #xffffff
+                        color_focus: #xffffff
+                        color_down: #xffffff
+                        color_disabled: #x8c8c8c
+                        text_style: PanelFont{}
+                    }
+                    draw_icon +: { color: #xe6e6e6 }
+                    draw_bg +: {
+                        border_size: 1.0
+                        border_radius: 2.0
+                        color_dither: 0.0
+                        color: #x1d1d1d
+                        color_hover: #x232323
+                        color_focus: #x1d1d1d
+                        color_down: #x161616
+                        color_disabled: #x1d1d1d
+                        color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+                        color_2_hover: vec4(-1.0, -1.0, -1.0, -1.0)
+                        color_2_focus: vec4(-1.0, -1.0, -1.0, -1.0)
+                        color_2_down: vec4(-1.0, -1.0, -1.0, -1.0)
+                        color_2_disabled: vec4(-1.0, -1.0, -1.0, -1.0)
+                        border_color: #x161616
+                        border_color_hover: #x4a4a4a
+                        border_color_focus: #x7aa2e8
+                        border_color_down: #x161616
+                        border_color_disabled: #x161616
+                        border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+                        border_color_2_hover: vec4(-1.0, -1.0, -1.0, -1.0)
+                        border_color_2_focus: vec4(-1.0, -1.0, -1.0, -1.0)
+                        border_color_2_down: vec4(-1.0, -1.0, -1.0, -1.0)
+                        border_color_2_disabled: vec4(-1.0, -1.0, -1.0, -1.0)
+                        arrow_color: #xb4b4b4
+                        arrow_color_hover: #xffffff
+                        arrow_color_focus: #xffffff
+                        arrow_color_down: #xffffff
+                        arrow_color_disabled: #x8c8c8c
+                        pixel: fn() {
+                            let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                            let c = vec2(self.rect_size.x - 10.0, self.rect_size.y * 0.5)
+                            let sz = 2.5
+                            sdf.move_to(c.x - sz, c.y - sz + 1.0)
+                            sdf.line_to(c.x + sz, c.y - sz + 1.0)
+                            sdf.line_to(c.x, c.y + sz * 0.25 + 1.0)
+                            sdf.close_path()
+                            sdf.fill_keep(
+                                self.arrow_color
+                                    .mix(self.arrow_color_focus, self.focus)
+                                    .mix(self.arrow_color_hover, self.hover)
+                                    .mix(self.arrow_color_down, self.down)
+                                    .mix(self.arrow_color_disabled, self.disabled)
+                            )
+                            sdf.box(
+                                self.border_size
+                                self.border_size
+                                self.rect_size.x - self.border_size * 2.
+                                self.rect_size.y - self.border_size * 2.
+                                self.border_radius
+                            )
+                            sdf.fill_keep(
+                                self.color
+                                    .mix(self.color_focus, self.focus)
+                                    .mix(self.color_hover, self.hover)
+                                    .mix(self.color_down, self.down * self.hover)
+                                    .mix(self.color_disabled, self.disabled)
+                            )
+                            sdf.stroke(
+                                self.border_color
+                                    .mix(self.border_color_focus, self.focus)
+                                    .mix(self.border_color_hover, self.hover)
+                                    .mix(self.border_color_down, self.down * self.hover)
+                                    .mix(self.border_color_disabled, self.disabled)
+                                self.border_size
+                            )
+                            return sdf.result
+                        }
+                    }
+                }
+                View {
+                    visible: false
+                    width: Fill
+                    height: Fit
+                    flow: Down
+                    spacing: 3
+                    padding: Inset{left: 4 right: 4 top: 0 bottom: 3}
+                    theme_pick := PanelDropDown {
+                        width: Fill
+                        height: 20
+                    }
+                    theme_save_row := View {
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 3
+                        align: Align{x: 0.0 y: 0.5}
+                        theme_name := TextInput {
+                            width: Fill
+                            height: 20
+                            empty_text: "name this theme"
+                            draw_bg +: { border_radius: 2.0 }
+                            draw_text +: { text_style +: { font_size: 8.0 } }
+                        }
+                        theme_save := Button {
+                            width: Fit
+                            height: 20
+                            padding: Inset{left: 7 right: 7 top: 2 bottom: 2}
+                            text: "save as"
+                            draw_text +: { text_style +: { font_size: 7.5 } }
+                        }
+                        theme_delete := Button {
+                            visible: false
+                            width: Fit
+                            height: 20
+                            padding: Inset{left: 7 right: 7 top: 2 bottom: 2}
+                            text: "delete"
+                            draw_text +: { text_style +: { font_size: 7.5 } }
+                        }
+                    }
+                    theme_msg := Label {
+                        visible: false
+                        width: Fill
+                        text: ""
+                        max_lines: 2
+                    }
+                }
+            });
+            assert!(value.as_object().is_some());
+            assert!(vm.take_errors().is_empty());
+        });
+    }
+
+    /// The panel's kit and the chunk that uses it have to agree by NAME, and
+    /// the splash is a macro body no compiler checks: every id the Theme tab
+    /// addresses from Rust is declared once in the splash, and the re-skinned
+    /// dropdown really is what the picker is built from.
+    /// Everything before `#[cfg(test)]`: the panel itself, without the tests
+    /// that talk about it. A test looking for a spelling in the whole file
+    /// finds its own words and passes on them.
+    fn panel_source() -> &'static str {
+        include_str!("tweaker.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the file has a first half")
+    }
+
+    #[test]
+    fn every_theme_head_id_the_panel_addresses_is_declared_in_the_splash() {
+        let src = panel_source();
+        for (id, ty) in [
+            ("theme_head", "View"),
+            ("theme_pick_row", "View"),
+            ("theme_pick", "PanelDropDown"),
+            ("theme_wear", "PanelButton"),
+            ("theme_save_row", "View"),
+            ("theme_name", "PanelInput"),
+            ("theme_save", "PanelButton"),
+            ("theme_delete", "PanelButton"),
+            ("theme_msg", "PanelLabelSmall"),
+        ] {
+            let decl = format!("{id} := {ty}");
+            assert_eq!(
+                src.matches(&decl).count(),
+                1,
+                "`{id}` is addressed by the panel but not declared once as `{decl}`"
+            );
+            // And it is addressed: an id declared and never used is a
+            // control nothing drives.
+            assert!(src.contains(&format!("live_id!({id})")), "`{id}` is declared but never addressed");
+        }
+        // The picker's kit, and the popup half with it: a face re-skinned
+        // over a stock list is still a list a sheet can reach.
+        for (name, ty) in [
+            ("PanelDropDown", "DropDown"),
+            ("PanelPopupMenu", "PopupMenu"),
+            ("PanelMenuItem", "PopupMenuItem"),
+        ] {
+            assert!(
+                src.contains(&format!("let {name} = {ty} {{")),
+                "the panel's picker is missing `{name}`"
+            );
+        }
+        assert!(src.contains(&format!("popup_menu: {}{{}}", "PanelPopupMenu")));
+        assert!(src.contains(&format!("menu_item: {}{{}}", "PanelMenuItem")));
+        // The strip it replaced is gone, buttons and all.
+        assert!(
+            !src.contains(&format!("preset{}row", "_")),
+            "the old preset strip is still here"
+        );
+    }
+
+    /// The one property a style sheet is known to take off a `DropDown` is
+    /// its shader, and the panel's own dropdown must therefore carry one.
+    /// Read off the shipped sheets rather than named here, so a sheet that
+    /// starts overriding `DropDown` later is caught by this test rather than
+    /// by somebody finding an unreadable picker.
+    #[test]
+    fn the_panels_dropdown_answers_what_the_sheets_override() {
+        let kit = panel_source()
+            .split("let PanelDropDown = DropDown {")
+            .nth(1)
+            .expect("the panel declares its own dropdown");
+        for sheet in ["windows-2000", "nextstep"] {
+            let text = std::fs::read_to_string(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("themes")
+                    .join(sheet)
+                    .join("widgets.splash"),
+            )
+            .expect("the sheet is in the tree");
+            for line in text.lines() {
+                let Some(prop) = line
+                    .trim()
+                    .strip_prefix("mod.widgets.DropDown.")
+                    .and_then(|rest| rest.split([' ', '=']).next())
+                else {
+                    continue;
+                };
+                // `draw_bg.pixel` is answered by declaring `pixel:` inside
+                // this template's own `draw_bg`.
+                let leaf = prop.rsplit('.').next().unwrap_or(prop);
+                assert!(
+                    kit.contains(&format!("{leaf}:")),
+                    "the sheets override `{prop}` on a DropDown and the panel's own does not declare `{leaf}`"
+                );
+            }
+        }
+    }
+
+    /// The same question of the other two templates the Theme tab is built
+    /// from, and of EVERY sheet rather than the two that replace a shader.
+    ///
+    /// `PanelButton` and `PanelInput` were left open when `PanelDropDown`
+    /// was hardened: `windows-2000` and `nextstep` replace
+    /// `Button.draw_bg.pixel` and `TextInput.draw_bg.pixel` outright with a
+    /// hard-coded Win95 palette, and `android` and `ios` set a 44-48px
+    /// `min_height` and their own padding, which a walk applies whatever
+    /// height the instance asked for. Read off the sheets, so a sheet that
+    /// starts overriding something else is caught here rather than by
+    /// somebody finding the save row twice its height with a white slab on it.
+    #[test]
+    fn the_panels_button_and_input_answer_what_the_sheets_override() {
+        let src = panel_source();
+        // The template's own text, and not the next one's: every `let
+        // Panel...` after it is a different widget.
+        let slice = |open: &str, next: &str| -> &'static str {
+            let rest = src.split(open).nth(1).unwrap_or_else(|| panic!("the panel declares `{open}`"));
+            let end = rest.find(next).unwrap_or_else(|| panic!("`{open}` is not followed by `{next}`"));
+            &rest[..end]
+        };
+        let button = slice("let PanelButton = Button {", "let PanelInput = TextInput {");
+        let input = slice("let PanelInput = TextInput {", "let PanelTreeNode = FileTreeNode {");
+        let themes = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("themes");
+        let mut seen = 0usize;
+        for entry in std::fs::read_dir(&themes).expect("the themes folder is in the tree") {
+            let sheet = entry.expect("a readable entry").path().join("widgets.splash");
+            let Ok(text) = std::fs::read_to_string(&sheet) else {
+                continue;
+            };
+            for line in text.lines() {
+                for (widget, kit) in [("Button", button), ("TextInput", input)] {
+                    let Some(prop) = line
+                        .trim()
+                        .strip_prefix(&format!("mod.widgets.{widget}."))
+                        .and_then(|rest| rest.split([' ', '=']).next())
+                    else {
+                        continue;
+                    };
+                    // `draw_bg.pixel` is answered by declaring `pixel:`
+                    // inside this template's own `draw_bg`, and so on down.
+                    let leaf = prop.rsplit('.').next().unwrap_or(prop);
+                    assert!(
+                        kit.contains(&format!("{leaf}:")),
+                        "{} overrides `{prop}` on a {widget} and PanelButton/PanelInput does not declare `{leaf}`",
+                        sheet.display()
+                    );
+                    seen += 1;
+                }
+            }
+        }
+        assert!(seen > 20, "only {seen} overrides were read -- the sheets did not load");
+        // The two that a sheet reaches through a THEME token rather than
+        // through `widgets.splash`: the stock templates take them from
+        // `theme.mspace_1` and `theme.mspace_v_1`, which every sheet moves.
+        for kit in [button, input] {
+            assert!(kit.contains("padding: Inset{"), "the padding is not written out");
+            assert!(kit.contains("margin: Inset{"), "the margin is not written out");
+            assert!(kit.contains("min_height: 0"), "the min height is not written out");
+        }
+    }
+
+    /// The panel's own skin is a PALETTE, and the switch that changes it is
+    /// the only thing that does.
+    ///
+    /// Three things are held together here, and the panel is wrong if any one
+    /// of them goes. A theme change on its own must not move the panel: that
+    /// immunity is the whole reason `mod.fab` exists, and it is what lets the
+    /// panel be the tool a theme is diagnosed WITH. The switch must move it,
+    /// or the button is a lie. And once the switch is on, a theme change must
+    /// move it again, or "wear the theme" would mean "wear the theme that
+    /// happened to be on when you pressed it".
+    ///
+    /// Measured through `fab_palette_stamp`, which is the same reading the
+    /// panel itself uses to decide whether to build its sidebar again -- so
+    /// this also tests that the rebuild fires when it should and, just as
+    /// importantly, never fires while the switch is off.
+    #[test]
+    fn only_the_wear_switch_puts_the_panel_in_the_apps_theme() {
+        use crate::desktop_style::{install, uninstall, DesktopStyle, StyleSheet};
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        assert!(
+            !crate::fab_controls::panel_wears_theme(&mut cx),
+            "the panel wears its own palette until it is asked not to"
+        );
+        let own = fab_palette_stamp(&mut cx);
+        // A theme change alone leaves the panel where it was.
+        for style in [DesktopStyle::Macos, DesktopStyle::Windows2000, DesktopStyle::Android] {
+            cx.with_vm(|vm| {
+                install(vm, StyleSheet::load(style));
+                vm.with_reload(crate::script_mod);
+            });
+            assert_eq!(
+                fab_palette_stamp(&mut cx),
+                own,
+                "the panel followed `{}` without being asked to",
+                style.id()
+            );
+        }
+        // The switch does move it...
+        crate::fab_controls::set_panel_wears_theme(&mut cx, true);
+        cx.with_vm(|vm| vm.with_reload(crate::script_mod));
+        let worn = fab_palette_stamp(&mut cx);
+        assert_ne!(worn, own, "the switch changed nothing");
+        // ...and now the picker moves it too.
+        cx.with_vm(|vm| {
+            install(vm, StyleSheet::load(DesktopStyle::Omarchy));
+            vm.with_reload(crate::script_mod);
+        });
+        assert_ne!(
+            fab_palette_stamp(&mut cx),
+            worn,
+            "worn, the panel did not follow the theme it was wearing"
+        );
+        // And off is off: back to the palette it started in, whatever sheet
+        // is still installed.
+        crate::fab_controls::set_panel_wears_theme(&mut cx, false);
+        cx.with_vm(|vm| vm.with_reload(crate::script_mod));
+        assert_eq!(fab_palette_stamp(&mut cx), own, "taking it off left something behind");
+        cx.with_vm(|vm| {
+            uninstall(vm);
+            vm.with_reload(crate::script_mod);
+        });
+        assert_eq!(fab_palette_stamp(&mut cx), own);
+    }
+
+    /// The panel's own splash chunk, evaluated the way the panel evaluates
+    /// it: by building a real Tweaker and asking it for its sidebar.
+    ///
+    /// That chunk is a macro body no compiler reads, it is a thousand lines
+    /// long, and it is evaluated ONCE -- when somebody first opens the panel.
+    /// A misspelling in it is a panel that comes up empty in front of
+    /// whoever opened it, and nothing before this caught one.
+    #[test]
+    fn the_panels_own_splash_chunk_builds_a_sidebar_with_the_theme_row_in_it() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            vm.bx.captured_errors = Some(Vec::new());
+        });
+        let tweaker = cx.with_vm(|vm| {
+            let widgets = vm.module(id!(widgets));
+            let value = vm
+                .bx
+                .heap
+                .value(widgets, LiveId::from_str("Tweaker").into(), NoTrap);
+            WidgetRef::script_from_value(vm, value)
+        });
+        assert!(!tweaker.is_empty(), "the Tweaker built no widget");
+        {
+            let mut panel = tweaker.borrow_mut::<Tweaker>().expect("a Tweaker");
+            panel.ensure_sidebar(&mut cx);
+            let sidebar = panel.sidebar.clone().expect("the chunk built a sidebar");
+            let errors = cx.with_vm(|vm| vm.take_errors());
+            assert!(errors.is_empty(), "{errors:?}");
+            // The Theme tab's head, down to the switch added beside the
+            // picker: a row that evaluates but resolves to nothing is the
+            // same broken panel as one that does not evaluate.
+            let head = sidebar.child(live_id!(theme_head));
+            assert!(!head.is_empty(), "the Theme tab has no head");
+            let row = head.child(live_id!(theme_pick_row));
+            assert!(!row.is_empty(), "the picker has no row");
+            for id in [live_id!(theme_pick), live_id!(theme_wear)] {
+                assert!(!row.child(id).is_empty(), "the picker row is missing a control");
+            }
+            // The filter field the panel is filtered with, while we are here.
+            let input = sidebar
+                .child(live_id!(filter_row))
+                .child(live_id!(search))
+                .child(live_id!(input));
+            assert!(!input.is_empty(), "the filter row has no field");
+        }
+    }
+
+    /// A theme switch asks for a style reload, `script_mod` runs again and
+    /// the window body is applied from ITS OWN splash -- which throws away
+    /// the runtime margin the panel had put on it, while the panel still
+    /// believes it is applied. With the guard reading `desired` alone, that
+    /// same `desired` early-returns, the margin is never put back and the
+    /// app draws full width under the panel: the right-hand side of the app
+    /// "disappears". Pressing the panel off and on was the only way back,
+    /// because that drives `desired` to 0 and back.
+    #[test]
+    fn a_style_reload_makes_the_body_margin_due_again() {
+        let band = 300.0;
+        // Settled: applied and wanted agree, so nothing runs -- the guard is
+        // there so this does not evaluate a chunk on every frame.
+        assert!(!body_margin_needs_apply(band, band, false));
+        // The reload has wiped the override. The SAME `desired` must run.
+        assert!(body_margin_needs_apply(band, band, true));
+        // ...and once it has run, it settles again.
+        assert!(!body_margin_needs_apply(band, band, false));
+        // The old escape hatch still works, and still costs two applies.
+        assert!(body_margin_needs_apply(band, 0.0, false));
+        assert!(body_margin_needs_apply(0.0, band, false));
+        // A splitter drag under half a pixel is not worth an eval; over it is.
+        assert!(!body_margin_needs_apply(band, band + 0.4, false));
+        assert!(body_margin_needs_apply(band, band + 0.6, false));
+        // A reload while the panel is OFF is answered by re-applying zero,
+        // not by leaving the app compressed.
+        assert!(body_margin_needs_apply(0.0, 0.0, true));
+    }
+
+    /// Releasing the panel hands the body back its OWN right margin, so what
+    /// is read off the body must never be the panel's own compression
+    /// misfiled as the body's. A re-apply can run either side of the wipe,
+    /// and getting this wrong leaves the app indented by a sidebar for the
+    /// rest of the session -- with the panel closed.
+    #[test]
+    fn the_bodys_own_margin_is_never_the_panels_own_compression() {
+        // Nothing applied yet, so whatever the body carries is its own.
+        assert_eq!(body_own_right(0.0, 0.0), Some(0.0));
+        assert_eq!(body_own_right(12.0, 0.0), Some(12.0));
+        // The override is still standing on the body: NOT the body's own,
+        // so the remembered value has to survive this read.
+        assert_eq!(body_own_right(300.0, 300.0), None);
+        assert_eq!(body_own_right(300.4, 300.0), None);
+        // A reload has put the body back to its own splash, so this is its
+        // own again -- and re-reading it here is how a body whose DSL margin
+        // changed across the reload is picked up.
+        assert_eq!(body_own_right(0.0, 300.0), Some(0.0));
+        assert_eq!(body_own_right(12.0, 300.0), Some(12.0));
+    }
+
+    /// Deleting a saved theme takes two presses, the same way saving over
+    /// one does -- and asking one of the two questions cancels the other, so
+    /// a standing "save again to replace it" can never answer a delete.
+    #[test]
+    fn a_delete_is_a_question_before_it_is_a_delete() {
+        let mut confirm: Option<ThemeConfirm> = None;
+        let pending_delete = |c: &Option<ThemeConfirm>| match c {
+            Some(ThemeConfirm::Delete(name)) => Some(name.clone()),
+            _ => None,
+        };
+        let pending_replace = |c: &Option<ThemeConfirm>| match c {
+            Some(ThemeConfirm::Replace(name)) => Some(name.clone()),
+            _ => None,
+        };
+        // Nothing is pending, so the first press only asks.
+        assert_eq!(pending_delete(&confirm), None);
+        confirm = Some(ThemeConfirm::Delete("sunset".to_string()));
+        assert_eq!(pending_delete(&confirm).as_deref(), Some("sunset"));
+        // A replace standing on the same name is NOT an answer to it.
+        confirm = Some(ThemeConfirm::Replace("sunset".to_string()));
+        assert_eq!(pending_delete(&confirm), None);
+        assert_eq!(pending_replace(&confirm).as_deref(), Some("sunset"));
+        // ...and a delete standing is not an answer to a replace either.
+        confirm = Some(ThemeConfirm::Delete("sunset".to_string()));
+        assert_eq!(pending_replace(&confirm), None);
+        // A question asked about another name is not an answer to this one.
+        confirm = Some(ThemeConfirm::Delete("dusk".to_string()));
+        assert_ne!(pending_delete(&confirm).as_deref(), Some("sunset"));
+    }
+
+    /// The panel's two destructive commands read the confirm the same way,
+    /// and both let it lapse. Read off the source, because the defect was
+    /// that one of them did not ask at all.
+    #[test]
+    fn the_theme_tab_asks_before_it_deletes_and_forgets_when_it_is_left() {
+        let src = panel_source();
+        let del = src
+            .split("fn delete_saved_theme(&mut self, cx: &mut Cx) {")
+            .nth(1)
+            .expect("the panel deletes saved themes");
+        let del = &del[..del.find("\n    /// What the store said").expect("the function ends")];
+        // The question is asked before the store is ever called.
+        let asks = del.find("pending_delete()").expect("delete asks first");
+        let does = del.find("theme_store::delete(").expect("delete deletes");
+        assert!(asks < does, "the delete happens before the question is asked");
+        // A refused delete re-reads the folder, or the row it could not
+        // remove stays in the picker with a live delete button on it.
+        let failed = del.find("Err(error)").expect("a delete can fail");
+        assert!(
+            del[failed..].contains("self.refresh_saved_themes();"),
+            "a failed delete leaves the list as it was"
+        );
+        // Entering the tab drops the last note and the standing question.
+        // One-line anchors on purpose: this file is CRLF and `include_str!`
+        // hands it over byte for byte, so an anchor spanning a line break
+        // would never match.
+        let enter = src
+            .split("// ...and the moment to drop what the tab last said.")
+            .nth(1)
+            .expect("entering the tab drops what it last said");
+        let enter = &enter[..600.min(enter.len())];
+        assert!(enter.contains("self.theme_msg.clear();"), "a stale note survives the tab");
+        assert!(enter.contains("self.theme_confirm = None;"), "a stale question survives the tab");
+    }
+
+    #[test]
+    fn a_size_row_reads_as_one_value_however_it_was_spelled() {
+        assert_eq!(
+            parse_size_text("Size.Fill{weight: 100 basis: FitBound.Abs(0) shrink: 0}"),
+            SizeText::Fill(FillText::plain())
+        );
+        assert_eq!(parse_size_text("Fill"), SizeText::Fill(FillText::plain()));
+        assert_eq!(
+            parse_size_text("Size.Fill{weight: 2 shrink: 1}"),
+            SizeText::Fill(FillText { weight: 2.0, shrink: 1.0, ..FillText::plain() })
+        );
+        assert_eq!(parse_size_text("Size.Fit{}"), SizeText::Fit);
+        assert_eq!(parse_size_text("Fit"), SizeText::Fit);
+        assert_eq!(parse_size_text("Size.Fixed(200)"), SizeText::Fixed(200.0));
+        assert_eq!(parse_size_text("200"), SizeText::Fixed(200.0));
+        assert_eq!(parse_size_text("24px"), SizeText::Fixed(24.0));
+        assert_eq!(parse_size_text("\"50%\""), SizeText::Rel("50%".into()));
+        assert_eq!(parse_size_text("25vw"), SizeText::Rel("25vw".into()));
+        assert_eq!(parse_size_text("25VW"), SizeText::Rel("25vw".into()));
+        assert_eq!(parse_size_text("calc(100% - 20px)"), SizeText::Expr("calc(100% - 20px)".into()));
+        assert_eq!(parse_size_text(""), SizeText::Fit);
+        // Half-typed: not a size yet, so never a size of nothing.
+        assert_eq!(parse_size_text("Fixed("), SizeText::Fit);
+        assert_eq!(parse_size_text("Fixed(abc)"), SizeText::Fit);
+        assert_eq!(parse_size_text("calc("), SizeText::Fit);
+        assert_eq!(parse_size_text("clamp(200px, 50%"), SizeText::Fit);
+    }
+
+    #[test]
+    fn a_fill_keeps_every_field_it_had_and_writes_back_whole() {
+        let fill = parse_fill_text("Size.Fill{weight: 2 basis: 25% shrink: 1 min: 48 max: 200}");
+        assert_eq!(fill.basis, "25%");
+        assert_eq!(fill.min, Some(48.0));
+        assert_eq!(
+            fill.chunk("width"),
+            "width: Size.Fill{weight: 2 basis: \"25%\" shrink: 1 min: 48 max: 200}"
+        );
+        let plain = parse_fill_text("Size.Fill{weight: 100 basis: FitBound.Abs(0) shrink: 0}");
+        assert_eq!(plain.chunk("height"), "height: Size.Fill{weight: 100 basis: 0 shrink: 0}");
+        let expr = parse_fill_text("Size.Fill{weight: 1 basis: \"calc(100% - 20px)\" shrink: 0}");
+        assert_eq!(expr.basis, "calc(100% - 20px)");
+        assert_eq!(expr.chunk("width"), "width: Size.Fill{weight: 1 basis: \"calc(100% - 20px)\" shrink: 0}");
+        assert_eq!(parse_fill_text("Fill").chunk("width"), "width: Size.Fill{weight: 100 basis: 0 shrink: 0}");
+    }
+
+    #[test]
+    fn a_bound_or_an_aspect_is_set_by_its_text_and_cleared_by_none() {
+        assert_eq!(bound_text("FitBound.Abs(120)"), "120");
+        assert_eq!(bound_text("50%"), "50%");
+        assert_eq!(bound_text("\"calc(100% - 20px)\""), "calc(100% - 20px)");
+        assert_eq!(bound_text("null"), "");
+        assert_eq!(bound_chunk("min_width", "calc("), None);
+        assert_eq!(bound_chunk("min_width", "120").as_deref(), Some("min_width: 120"));
+        assert_eq!(bound_chunk("max_width", "50%").as_deref(), Some("max_width: \"50%\""));
+        assert_eq!(bound_chunk("max_height", "clamp(200px, 50%, 600px)").as_deref(), Some("max_height: \"clamp(200px, 50%, 600px)\""));
+        assert_eq!(bound_chunk("min_height", "").as_deref(), Some("min_height: nil"));
+        assert_eq!(bound_chunk("min_height", "none").as_deref(), Some("min_height: nil"));
+        assert_eq!(bound_chunk("min_height", "Fill"), None);
+        assert_eq!(bound_chunk("min_height", "12p"), None);
+        assert_eq!(aspect_chunk("1.5").as_deref(), Some("aspect: 1.5"));
+        assert_eq!(aspect_chunk("16:9").as_deref(), Some("aspect: 1.7778"));
+        assert_eq!(aspect_chunk("3/2").as_deref(), Some("aspect: 1.5"));
+        assert_eq!(aspect_chunk("").as_deref(), Some("aspect: nil"));
+        assert_eq!(aspect_chunk("3:"), None);
+        assert_eq!(aspect_chunk("3:0"), None);
+        assert_eq!(aspect_chunk("wide"), None);
+    }
+
+    #[test]
+    fn a_container_name_is_an_id_and_a_position_is_a_pair() {
+        assert_eq!(container_chunk("side").as_deref(), Some("container_id: @side"));
+        assert_eq!(container_chunk("@side_2").as_deref(), Some("container_id: @side_2"));
+        assert_eq!(container_chunk("2side"), None);
+        assert_eq!(container_chunk("side bar"), None);
+        assert_eq!(container_chunk(""), None);
+        assert_eq!(parse_vec2_text("vec2f(10 20)"), Some((10.0, 20.0)));
+        assert_eq!(parse_vec2_text("vec2(10, 20.5)"), Some((10.0, 20.5)));
+        assert_eq!(parse_vec2_text("null"), None);
+    }
+
+    #[test]
+    fn grid_tracks_read_as_css_and_write_back_as_a_list() {
+        let printed = "[\"70px\" \"20%\" \"minmax(60px, 1fr)\" \"repeat(2, minmax(50px, 1fr))\"]";
+        assert_eq!(quoted_list_text(printed, " "), "70px 20% minmax(60px, 1fr) repeat(2, minmax(50px, 1fr))");
+        assert_eq!(quoted_list_text("[]", " "), "");
+        assert_eq!(quoted_list_text("[\"hero hero . . .\" \". . . . .\"]", " / "), "hero hero . . . / . . . . .");
+        assert_eq!(
+            split_tracks("70px 20% minmax(60px, 1fr) repeat(2, minmax(50px, 1fr))"),
+            vec!["70px", "20%", "minmax(60px, 1fr)", "repeat(2, minmax(50px, 1fr))"]
+        );
+        assert_eq!(
+            tracks_chunk("columns", "70px 20% minmax(60px, 1fr) repeat(auto-fill, minmax(50px, 1fr))").as_deref(),
+            Some("columns: [\"70px\" \"20%\" \"minmax(60px, 1fr)\" \"repeat(auto-fill, minmax(50px, 1fr))\"]")
+        );
+        assert_eq!(tracks_chunk("rows", "48 1fr").as_deref(), Some("rows: [\"48\" \"1fr\"]"));
+        assert_eq!(tracks_chunk("rows", "").as_deref(), Some("rows: []"));
+        assert_eq!(tracks_chunk("rows", "1f"), None);
+        assert_eq!(tracks_chunk("rows", "minmax(60px"), None);
+        assert_eq!(tracks_chunk("rows", "repeat(2, 50px)"), None);
+        assert_eq!(tracks_chunk("rows", "calc(100% - 20px)").as_deref(), Some("rows: [\"calc(100% - 20px)\"]"));
+        assert!(track_ok("minmax(min(10px, 5%), 1fr)"));
+        assert!(track_ok("repeat(2, minmax(clamp(1px, 5%, 10px), 1fr))"));
+        assert!(!track_ok("minmax(10px, 5%, 1fr)"));
+        assert_eq!(areas_chunk("hero hero . / . . .").as_deref(), Some("areas: [\"hero hero .\" \". . .\"]"));
+        assert_eq!(areas_chunk("").as_deref(), Some("areas: []"));
+        assert_eq!(areas_chunk("hero hero . / . ."), None);
+    }
+
+    #[test]
+    fn a_cell_that_says_nothing_is_no_cell() {
+        assert_eq!(CellText::default().chunk(), "cell: nil");
+        let placed = CellText { col: 4, row: 1, col_span: 0, row_span: 0, area: String::new() };
+        assert_eq!(placed.chunk(), "cell: CellPlacement{col: 4 row: 1 col_span: 0 row_span: 0 area: nil}");
+        let named = CellText { area: "hero".to_string(), ..CellText::default() };
+        assert_eq!(named.chunk(), "cell: CellPlacement{col: 0 row: 0 col_span: 0 row_span: 0 area: @hero}");
+    }
+
+    #[test]
+    fn a_flow_row_reads_as_one_value_and_writes_back_whole() {
+        let printed = parse_flow_text("Flow.Right{row_align: RowAlign.Top wrap: true}");
+        assert_eq!(printed, FlowText { dir: FlowDir::Right, wrap: true, row_align: RowAlignText::Top });
+        assert!(printed.wraps());
+        assert_eq!(printed.chunk(), "flow: Flow.Right{wrap: true row_align: RowAlign.Top}");
+        let centred = parse_flow_text("Flow.Right{wrap: true, row_align: RowAlign.Center}");
+        assert_eq!(centred.row_align, RowAlignText::Center);
+        assert_eq!(parse_flow_text("Flow.Down").dir, FlowDir::Down);
+        assert_eq!(parse_flow_text("Down").chunk(), "flow: Flow.Down");
+        assert_eq!(parse_flow_text("Overlay").chunk(), "flow: Flow.Overlay");
+        assert_eq!(parse_flow_text("Right").chunk(), "flow: Flow.Right{wrap: false row_align: RowAlign.Top}");
+        assert_eq!(parse_flow_text("RightWrap").wraps(), true);
+        assert_eq!(parse_flow_text("").dir, FlowDir::Down);
+        // Going Down keeps the wrap for the way back; wrap on a Down flow
+        // makes it a wrapping Right one; a row alignment implies Right.
+        let down = printed.with_dir(FlowDir::Down);
+        assert_eq!(down.chunk(), "flow: Flow.Down");
+        assert!(!down.wraps());
+        assert!(down.toggled_wrap().wraps());
+        assert_eq!(down.with_dir(FlowDir::Right).wraps(), true);
+        assert!(!printed.toggled_wrap().wraps());
+        assert_eq!(
+            parse_flow_text("Down").with_row_align(RowAlignText::Bottom).chunk(),
+            "flow: Flow.Right{wrap: false row_align: RowAlign.Bottom}"
+        );
+    }
+
+    #[test]
+    fn what_is_typed_into_a_size_field_becomes_the_chunk_the_engine_accepts() {
+        assert_eq!(size_chunk("width", "fill").as_deref(), Some("width: Fill"));
+        assert_eq!(size_chunk("width", "Fit").as_deref(), Some("width: Fit"));
+        assert_eq!(size_chunk("width", "200").as_deref(), Some("width: 200"));
+        assert_eq!(size_chunk("height", "24px").as_deref(), Some("height: 24"));
+        assert_eq!(size_chunk("width", "50%").as_deref(), Some("width: \"50%\""));
+        assert_eq!(size_chunk("width", "clamp(200px, 50%, 600px)").as_deref(), Some("width: \"clamp(200px, 50%, 600px)\""));
+        // A Fill with fields still sets Fill; the weight gets its own field.
+        assert_eq!(size_chunk("width", "Fill{weight: 2}").as_deref(), Some("width: Fill"));
+        // Half a word on its way to being one is not sent.
+        assert_eq!(size_chunk("width", "12p"), None);
+        assert_eq!(size_chunk("width", "fi"), None);
+        assert_eq!(size_chunk("width", "Fixed("), None);
+        assert_eq!(size_chunk("width", "calc(100%"), None);
+        assert_eq!(size_chunk("width", "25VW").as_deref(), Some("width: \"25vw\""));
+    }
+
+    #[test]
+    fn layout_enums_print_as_whole_values() {
+        use crate::makepad_draw::turtle::RowAlign;
+        use crate::makepad_draw::{Base, FitBound, Flow, Size};
+        use crate::makepad_script::{ScriptApply, ScriptNew};
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            // In dependency order, the way the draw crate's module does it:
+            // building a named variant's proto converts its DEFAULT fields
+            // to script values, and a bare default such as `Base::Full` or
+            // `RowAlign::Top` looks its own type up on the way.
+            <Base as ScriptNew>::script_api(vm);
+            <RowAlign as ScriptNew>::script_api(vm);
+            <FitBound as ScriptNew>::script_api(vm);
+            <Size as ScriptNew>::script_api(vm);
+            <Flow as ScriptNew>::script_api(vm);
+            let fill = Size::Fill {
+                weight: 100.0,
+                basis: FitBound::Abs(0.0),
+                shrink: 0.0,
+                min: None,
+                max: None,
+            }
+            .script_to_value(vm);
+            let fixed = Size::Fixed(200.0).script_to_value(vm);
+            let rel = Size::Rel { base: Base::Parent, factor: 0.5 }.script_to_value(vm);
+            let down = Flow::Down.script_to_value(vm);
+            let heap = &vm.bx.heap;
+            let fill_obj = fill.as_object().expect("a named variant is an object");
+            assert_eq!(
+                enum_info(heap, fill_obj).map(|(e, v)| (live_id_token(e), live_id_token(v))),
+                Some(("Size".to_string(), "Fill".to_string()))
+            );
+            assert_eq!(
+                fmt_value(heap, fill, 2).as_deref(),
+                Some("Size.Fill{weight: 100 basis: FitBound.Abs(0) shrink: 0}")
+            );
+            assert_eq!(fmt_value(heap, fixed, 2).as_deref(), Some("Size.Fixed(200)"));
+            assert_eq!(fmt_value(heap, down, 2).as_deref(), Some("Flow.Down"));
+            // A relative size prints quoted: the text is what a reset
+            // re-applies, and the panel reads it back the same.
+            assert_eq!(fmt_value(heap, rel, 2).as_deref(), Some("\"50%\""));
+            assert_eq!(parse_size_text("\"50%\""), SizeText::Rel("50%".into()));
+            // Display drops the enum and the fields equal to the defaults.
+            assert_eq!(fmt_enum(heap, fill_obj, EnumFmt::Display).as_deref(), Some("Fill"));
+        });
+    }
+
+    fn rect(x: f64, y: f64, w: f64, h: f64) -> Rect {
+        Rect { pos: dvec2(x, y), size: dvec2(w, h) }
+    }
+
+    #[test]
+    fn a_mention_lands_after_the_at_that_armed_it() {
+        assert_eq!(insert_mention("look at @", "/a/b/c"), "look at @/a/b/c");
+        // Typed on mid-sentence: the name goes where the @ is, not at the end.
+        assert_eq!(insert_mention("@ is too wide", "./b"), "@./b is too wide");
+        // The last @ wins — an earlier mention is left alone.
+        assert_eq!(insert_mention("@/x/y and @", "../w"), "@/x/y and @../w");
+        // The arming @ was deleted mid-pick: append rather than lose the click.
+        assert_eq!(insert_mention("align these", "/a/b"), "align these @/a/b");
+        assert_eq!(insert_mention("", "/a/b"), "@/a/b");
+    }
+
+    #[test]
+    fn a_path_segment_says_what_the_widget_is() {
+        // A real name wins.
+        assert_eq!(readable_segment("main_window", "Window"), "main_window");
+        // No name: the type is what a person would call it.
+        assert_eq!(readable_segment("-", "View"), "View");
+        // A list item's index is not a name either — the type reads better.
+        assert_eq!(readable_segment("3", "Label"), "Label");
+        // Neither: something has to be said.
+        assert_eq!(readable_segment("-", "-"), "Widget");
+    }
+
+    #[test]
+    fn an_anonymous_segment_is_a_position_not_a_name() {
+        // Legacy `-` / `-2` stand-ins can still arrive from a hand-written
+        // path or an older note store; the loose finder must drop them
+        // rather than hash them into ids.
+        assert!(is_anonymous_segment("-"));
+        assert!(is_anonymous_segment("-0"));
+        assert!(is_anonymous_segment("-12"));
+        assert!(!is_anonymous_segment("-a"));
+        assert!(!is_anonymous_segment("main_window"));
+        // `Label.2` is a NAME with an ordinal, not a position stand-in: the
+        // slash is the hierarchy, the dot is only which one of several.
+        assert!(!is_anonymous_segment("Label.2"));
+    }
+
+    #[test]
+    fn mentions_are_read_back_out_of_the_note_text() {
+        let base = "/root/a/b";
+        assert_eq!(
+            note_mentions(base, "match @/a/b/c to @/d/e, please"),
+            vec!["/a/b/c".to_string(), "/d/e".to_string()]
+        );
+        // A sentence-ending dot is punctuation, not part of the reference.
+        assert_eq!(note_mentions(base, "like @/a/b."), vec!["/a/b".to_string()]);
+        // The same widget twice is one reference.
+        assert_eq!(
+            note_mentions(base, "@/a/b and @/a/b"),
+            vec!["/a/b".to_string()]
+        );
+        // A bare @ (armed, never picked) names nothing.
+        assert!(note_mentions(base, "waiting on @").is_empty());
+        assert!(note_mentions(base, "no mentions here").is_empty());
+        // What the card SHOWS is relative; what comes back out is absolute,
+        // because a reference read elsewhere has no "here" to be relative to.
+        assert_eq!(
+            note_mentions(base, "inside @./x"),
+            vec!["/root/a/b/x".to_string()]
+        );
+        assert_eq!(
+            note_mentions(base, "next to @../c"),
+            vec!["/root/a/c".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_relative_mention_reads_like_a_url() {
+        // One notation for the whole scheme: `/` is the hierarchy, `./` the
+        // noted widget, `../` its parent.
+        let base = "/dock/tab/View.1/View.2/Label.1";
+        // Inside the noted widget.
+        assert_eq!(
+            relative_path(base, "/dock/tab/View.1/View.2/Label.1/child").as_deref(),
+            Some("./child")
+        );
+        // A sibling: up to the parent, then down.
+        assert_eq!(
+            relative_path(base, "/dock/tab/View.1/View.2/Label.3").as_deref(),
+            Some("../Label.3")
+        );
+        // One level further out.
+        assert_eq!(
+            relative_path(base, "/dock/tab/View.1/Button").as_deref(),
+            Some("../../Button")
+        );
+        // An ancestor gets no relative form: `../` alone names it but says
+        // nothing about WHAT it is.
+        assert!(relative_path(base, "/dock/tab/View.1/View.2").is_none());
+        // Nothing in common: there is no honest relative form.
+        assert!(relative_path("/a/b", "/x/y").is_none());
+    }
+
+    #[test]
+    fn a_relative_mention_round_trips_to_the_same_widget() {
+        let base = "/dock/tab/View.1/View.2/Label.1";
+        for target in [
+            "/dock/tab/View.1/View.2/Label.1/child",
+            "/dock/tab/View.1/View.2/Label.3",
+            "/dock/tab/View.1/Button",
+            "/dock/other/Label.1",
+        ] {
+            let rel = relative_path(base, target).expect("shares a root");
+            assert_eq!(absolute_mention(base, &rel), target, "{rel} did not round-trip");
+        }
+        // An absolute reference is left as it is, leading slash or not.
+        assert_eq!(absolute_mention("/a/b", "/x/y/z"), "/x/y/z");
+        assert_eq!(absolute_mention("/a/b", "x/y/z"), "/x/y/z");
+    }
+
+    #[test]
+    fn the_store_reads_both_its_own_shape_and_the_one_before_it() {
+        // The current shape: path, notes, rules.
+        let now = note_store_parse("# header
+Root/Button_1	too tight	keep it 44 high
+");
+        assert_eq!(now.len(), 1);
+        assert_eq!(now[0].path, "Root/Button_1");
+        assert_eq!(now[0].text, "too tight");
+        assert_eq!(now[0].rules, "keep it 44 high");
+
+        // A file written before rules existed: two columns, no third.
+        let two = note_store_parse("Root/Label_2	just a note
+");
+        assert_eq!(two.len(), 1);
+        assert_eq!(two[0].text, "just a note");
+        assert!(two[0].rules.is_empty());
+
+        // The shape the note CARD wrote: four columns of geometry it no
+        // longer has anything to describe, with the text in column five.
+        // The text has to survive; the geometry is dropped.
+        let old = note_store_parse("Root/View_3	8	-108	230	96	the old card said this
+");
+        assert_eq!(old.len(), 1);
+        assert_eq!(old[0].path, "Root/View_3");
+        assert_eq!(old[0].text, "the old card said this");
+        assert!(old[0].rules.is_empty());
+
+        // Newlines survive the round trip through a one-line-per-note file.
+        let round = note_store_parse(&format!(
+            "p	{}	{}
+",
+            note_store_escape("line one
+line two"),
+            note_store_escape("rule	with a tab")
+        ));
+        assert_eq!(round[0].text, "line one
+line two");
+        assert_eq!(round[0].rules, "rule	with a tab");
+    }
+
+    #[test]
+    fn note_store_escapes_survive_a_round_trip() {
+        // The store is one tab-separated line per note, so a note carrying
+        // newlines, tabs or backslashes has to come back exactly as typed.
+        for text in [
+            "tighten the line spacing",
+            "line one\nline two\n\nline four",
+            "a\tb\\c\\nnot-a-newline",
+            "",
+        ] {
+            let round = note_store_unescape(&note_store_escape(text));
+            assert_eq!(round, text, "{text:?} did not survive");
+        }
+        // Nothing escaped may carry the separators themselves.
+        let escaped = note_store_escape("a\tb\nc");
+        assert!(!escaped.contains('\t') && !escaped.contains('\n'), "{escaped:?}");
+    }
+
+    #[test]
+    fn a_malformed_note_line_is_skipped_not_fatal() {
+        // The file is meant to be hand-editable, so short or commented lines
+        // are dropped rather than taken as a note.
+        let body = "# header\n\nnot-enough-columns\tx\n";
+        let notes: Vec<&str> = body
+            .lines()
+            .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+            .filter(|line| line.split('\t').count() >= 6)
+            .collect();
+        assert!(notes.is_empty());
+    }
 
     fn entry(seq: u64, path: &str, prop: &str, old: &str, new: &str) -> TweakDiffEntry {
         TweakDiffEntry {
@@ -9932,5 +19127,485 @@ mod tests {
         assert_eq!(fmt_f64(12.0), "12");
         assert_eq!(fmt_f64(2.5), "2.5");
         assert_eq!(fmt_f64(0.33333333), "0.3333");
+    }
+
+    #[test]
+    fn center_and_zoom_follow_the_lock() {
+        let rest = ViewState { tree_isolate: false, isolate_uid: 0, center: false, zoom: 1.0 };
+        // Nothing locked: the head row is off, and neither the button, the
+        // field nor the wheel gets anywhere.
+        assert!(!rest.rule().controls_enabled);
+        assert_eq!(rest.center_toggled(), rest);
+        assert_eq!(rest.zoom_set(3.0), rest);
+        assert_eq!(rest.zoom_stepped(0.25), rest);
+        // The toggle lit with nothing locked is no lock either.
+        let unset = ViewState { tree_isolate: true, ..rest };
+        assert!(!unset.rule().controls_enabled);
+        assert_eq!(unset.center_toggled(), unset);
+        // Locked on 7: live, and each control moves its own thing, zoom held
+        // to 1..4 whichever way it arrives.
+        let locked = ViewState { tree_isolate: true, isolate_uid: 7, ..rest };
+        assert!(locked.rule().controls_enabled);
+        assert!(locked.center_toggled().center);
+        assert_eq!(locked.center_toggled().center_toggled(), locked);
+        assert_eq!(locked.zoom_set(2.5).zoom, 2.5);
+        assert_eq!(locked.zoom_set(9.0).zoom, 4.0);
+        assert_eq!(locked.zoom_set(0.2).zoom, 1.0);
+        assert_eq!(locked.zoom_stepped(0.25).zoom, 1.25);
+        assert_eq!(locked.zoom_set(4.0).zoom_stepped(0.25).zoom, 4.0);
+        assert_eq!(locked.zoom_stepped(-0.25).zoom, 1.0);
+        // Centred and zoomed in, the target leaves the screen: the lock lets
+        // go and the view rests — Center off, life size, head row off.
+        // While it is shown, nothing moves; the Isolate button off is the
+        // same rest; at rest already, nothing is asked.
+        let held = locked.center_toggled().zoom_set(3.0);
+        assert_eq!(held.settled(TargetPresence::Shown), held);
+        for off in [TargetPresence::Gone, TargetPresence::NotDrawn, TargetPresence::FoldedShut] {
+            assert_eq!(held.settled(off), rest);
+            assert_eq!(
+                held.settled(off).rule(),
+                ViewFocusRule { controls_enabled: false, center: false, zoom: 1.0 }
+            );
+            assert_eq!(rest.settled(off), rest);
+        }
+        assert_eq!(held.rested(), rest);
+
+        // Where the target stands. Drawn in its window's last frame and
+        // showing: held.
+        let shown = TargetSighting {
+            in_tree: true,
+            drawn_once: true,
+            current: true,
+            attached: true,
+            shows: true,
+            under_shut_fold: false,
+        };
+        assert_eq!(target_presence(shown), TargetPresence::Shown);
+        // Dropped from the tree.
+        let dropped = TargetSighting { in_tree: false, ..shown };
+        assert_eq!(target_presence(dropped), TargetPresence::Gone);
+        // Present but not drawn: its list was redrawn without it, or the
+        // list hangs off no pass. Either lets go of a held view.
+        let stale = TargetSighting { current: false, shows: false, ..shown };
+        assert_eq!(target_presence(stale), TargetPresence::NotDrawn);
+        assert_eq!(held.settled(target_presence(stale)), rest);
+        let detached = TargetSighting { attached: false, ..shown };
+        assert_eq!(target_presence(detached), TargetPresence::NotDrawn);
+        assert_eq!(held.settled(target_presence(detached)), rest);
+        // Present and drawn, but a closed fold has shut it away.
+        let folded = TargetSighting { shows: false, under_shut_fold: true, ..shown };
+        assert_eq!(target_presence(folded), TargetPresence::FoldedShut);
+        assert_eq!(held.settled(target_presence(folded)), rest);
+        // Drawn and clipped to nothing with no shut fold above: scrolled out
+        // of a scrolling view, or a fold still closing. Held.
+        let scrolled_out = TargetSighting { shows: false, ..shown };
+        assert_eq!(target_presence(scrolled_out), TargetPresence::Shown);
+        assert_eq!(held.settled(target_presence(scrolled_out)), held);
+        // Showing under a shut fold is the fold's header: held.
+        let header = TargetSighting { under_shut_fold: true, ..shown };
+        assert_eq!(target_presence(header), TargetPresence::Shown);
+        // Nothing drawn to judge by (read mid-draw, or no area of its own):
+        // there is only the tree to go on.
+        let unread = TargetSighting {
+            drawn_once: false,
+            current: false,
+            attached: false,
+            shows: false,
+            ..shown
+        };
+        assert_eq!(target_presence(unread), TargetPresence::Shown);
+        assert_eq!(target_presence(TargetSighting { in_tree: false, ..unread }), TargetPresence::Gone);
+    }
+
+    #[test]
+    fn the_tree_leaves_out_the_inspector_and_what_is_inside_it() {
+        fn row(uid: u64, depth: u32, has_children: bool) -> crate::widget_tree::FlatTreeRow {
+            crate::widget_tree::FlatTreeRow {
+                uid,
+                name: format!("w{uid}"),
+                ty: "View".to_string(),
+                depth,
+                has_children,
+                inspector: false,
+            }
+        }
+        fn inspector(uid: u64, depth: u32) -> crate::widget_tree::FlatTreeRow {
+            crate::widget_tree::FlatTreeRow {
+                name: "tweaker".to_string(),
+                ty: "Tweaker".to_string(),
+                inspector: true,
+                ..row(uid, depth, true)
+            }
+        }
+        let uids = |rows: &[crate::widget_tree::FlatTreeRow]| {
+            rows.iter().map(|row| row.uid).collect::<Vec<_>>()
+        };
+        let has_children = |rows: &[crate::widget_tree::FlatTreeRow]| {
+            rows.iter().map(|row| row.has_children).collect::<Vec<_>>()
+        };
+        // window(1) > body(2) > label(3); window > tweaker(4) > sidebar(5) >
+        // tab(6); window > after(7) > deep(8): the branch after the panel
+        // keeps its own depth-2 row.
+        let rows = vec![
+            row(1, 0, true),
+            row(2, 1, true),
+            row(3, 2, false),
+            row(4, 1, true),
+            row(5, 2, true),
+            row(6, 3, false),
+            row(7, 1, true),
+            row(8, 2, false),
+        ];
+        let out = rows_without_inspectors(rows.clone(), 4, 5);
+        assert_eq!(uids(&out), vec![1, 2, 3, 7, 8]);
+        assert_eq!(has_children(&out), vec![true, true, false, true, false]);
+        // The inspector borrowed while it reads: its own row says uid 0, and
+        // the panel under it (5) is what finds it.
+        let mut borrowed = rows.clone();
+        borrowed[3].uid = 0;
+        assert_eq!(uids(&rows_without_inspectors(borrowed, 4, 5)), vec![1, 2, 3, 7, 8]);
+        // The panel as its parent's only child: the parent is a leaf now.
+        let out = rows_without_inspectors(vec![row(1, 0, true), row(4, 1, true), row(5, 2, false)], 4, 5);
+        assert_eq!(uids(&out), vec![1]);
+        assert!(!out[0].has_children);
+        // Not in the tree yet (the panel is built on first open): untouched.
+        assert_eq!(uids(&rows_without_inspectors(rows.clone(), 99, 98)), uids(&rows));
+        // 0 is never a key: a borrowed root row and no panel take nothing out.
+        let mut unread = rows.clone();
+        unread[0].uid = 0;
+        assert_eq!(uids(&rows_without_inspectors(unread.clone(), 0, 0)), uids(&unread));
+
+        // Two windows, an inspector in each. out_window(10) > stage(11) >
+        // deck(12); out_window > tweaker(13) > sidebar(14) > tab(15);
+        // main_window(20) > body(21) > tweaker(22, an app View that only
+        // shares the name); main_window > tweaker(23) > sidebar(24) >
+        // filter(25); main_window > footer(26), after the inspector.
+        let windows = vec![
+            row(10, 0, true),
+            row(11, 1, true),
+            row(12, 2, false),
+            inspector(13, 1),
+            row(14, 2, true),
+            row(15, 3, false),
+            row(20, 0, true),
+            row(21, 1, true),
+            crate::widget_tree::FlatTreeRow { name: "tweaker".to_string(), ..row(22, 2, false) },
+            inspector(23, 1),
+            row(24, 2, true),
+            row(25, 3, false),
+            row(26, 1, false),
+        ];
+        let kept = vec![10, 11, 12, 20, 21, 22, 26];
+        let kept_children = vec![true, true, false, true, true, false, false];
+        // Opened on the main window: its own inspector is borrowed, so its
+        // row reads uid 0 and no type, and the one in the other window is
+        // known only by its type.
+        let mut from_main = windows.clone();
+        from_main[9].uid = 0;
+        from_main[9].inspector = false;
+        let out = rows_without_inspectors(from_main, 23, 24);
+        assert_eq!(uids(&out), kept);
+        assert_eq!(has_children(&out), kept_children);
+        // Opened on the output window: the same rows go, the other way round.
+        let mut from_output = windows.clone();
+        from_output[3].uid = 0;
+        from_output[3].inspector = false;
+        let out = rows_without_inspectors(from_output, 13, 14);
+        assert_eq!(uids(&out), kept);
+        assert_eq!(has_children(&out), kept_children);
+        // Read between events, nothing borrowed and no host named: the type
+        // alone takes both out.
+        let out = rows_without_inspectors(windows.clone(), 0, 0);
+        assert_eq!(uids(&out), kept);
+        assert_eq!(has_children(&out), kept_children);
+        // An inspector that is its window's only child leaves a leaf window,
+        // and the next window's rows are untouched.
+        let out = rows_without_inspectors(
+            vec![
+                row(30, 0, true),
+                inspector(31, 1),
+                row(32, 2, false),
+                row(40, 0, true),
+                row(41, 1, false),
+            ],
+            0,
+            0,
+        );
+        assert_eq!(uids(&out), vec![30, 40, 41]);
+        assert_eq!(has_children(&out), vec![false, true, false]);
+    }
+
+    fn layout_ask(reference: &str, from: &str, to: &str) -> TweakConvert {
+        TweakConvert {
+            reference: reference.to_string(),
+            from: from.to_string(),
+            to: to.to_string(),
+            size: None,
+        }
+    }
+
+    #[test]
+    fn a_dock_ask_is_offered_for_a_named_plain_container_with_something_in_it() {
+        let frame = DockFacts {
+            ty: "View",
+            parent_ty: "View",
+            has_children: true,
+            named: true,
+            in_list: false,
+            in_body: true,
+            in_panel: false,
+        };
+        assert_eq!(dock_gate_of(&frame), DockGate::Can);
+        assert_eq!(dock_gate_of(&DockFacts { ty: "Grid", ..frame }), DockGate::Can);
+        // Types whose sizing the wrap cannot speak for, the Dock included.
+        for ty in ["Button", "Dock", "Window", "KeyboardView", "Label", "", "-"] {
+            assert_eq!(dock_gate_of(&DockFacts { ty, ..frame }), DockGate::No, "{ty}");
+        }
+        // Only parents that lay children out by flow: the window's body and
+        // the plain containers. Parents that find a child by its name, one
+        // whose children come from Rust, and one that cannot be read, not.
+        for parent_ty in ["Grid", "KeyboardView"] {
+            assert_eq!(dock_gate_of(&DockFacts { parent_ty, ..frame }), DockGate::Can, "{parent_ty}");
+        }
+        for parent_ty in ["Window", "PageFlip", "Popover", "Splitter", "StoryCanvas", ""] {
+            assert_eq!(dock_gate_of(&DockFacts { parent_ty, ..frame }), DockGate::No, "{parent_ty}");
+        }
+        // The window's own chrome, a list item, an empty or anonymous one.
+        assert_eq!(dock_gate_of(&DockFacts { in_body: false, ..frame }), DockGate::No);
+        assert_eq!(dock_gate_of(&DockFacts { in_list: true, ..frame }), DockGate::No);
+        assert_eq!(dock_gate_of(&DockFacts { has_children: false, ..frame }), DockGate::No);
+        assert_eq!(dock_gate_of(&DockFacts { named: false, ..frame }), DockGate::No);
+        assert_eq!(dock_gate_of(&DockFacts { in_panel: true, ..frame }), DockGate::No);
+        // Already a tab's body: said, not offered -- whatever else is true.
+        let body = DockFacts { parent_ty: "Dock", named: false, has_children: false, ..frame };
+        assert_eq!(dock_gate_of(&body), DockGate::InDock);
+        assert_eq!(dock_gate_of(&DockFacts { ty: "Tab", ..body }), DockGate::No);
+        assert_eq!(dock_gate_of(&DockFacts { in_panel: true, ..body }), DockGate::No);
+        assert_eq!(dock_gate_of(&DockFacts { in_body: false, ..body }), DockGate::No);
+    }
+
+    #[test]
+    fn a_carried_out_dock_ask_is_found_again_from_the_tab_body() {
+        let converts = vec![
+            layout_ask("/w/frame", "View", "grid"),
+            layout_ask("/w/frame", "View", "dock"),
+            layout_ask("/w/View.2", "View", "dock"),
+            layout_ask("/w/side/panel", "View", "dock"),
+        ];
+        let renames = vec![TweakRename {
+            reference: "/w/View.2".to_string(),
+            from: String::new(),
+            to: "stage".to_string(),
+        }];
+        let found = |body: &str| dock_ask_done_by(&converts, &renames, body);
+        // The wrap as asked, under another dock name the edit had to pick,
+        // and a tab with a sibling index.
+        for body in ["/w/frame_dock/frame", "/w/frames/frame", "/w/frame_dock/frame.2"] {
+            assert_eq!(found(body), Some(&converts[1]), "{body}");
+        }
+        // A rename done in the same edit names the tab.
+        assert_eq!(found("/w/stage_dock/stage"), Some(&converts[2]));
+        assert_eq!(found("/w/side/panel_dock/panel"), Some(&converts[3]));
+        // Another parent, another tab name, or no dock level: no ask's body.
+        for body in [
+            "/w/side/frame_dock/frame",
+            "/w/frame_dock/other",
+            "/w/panel_dock/panel",
+            "/w/frame",
+            "/frame",
+            "frame",
+        ] {
+            assert_eq!(found(body), None, "{body}");
+        }
+    }
+
+    #[test]
+    fn a_dock_ask_toggles_on_and_off_and_leaves_a_grid_ask_standing() {
+        let mut converts = Vec::new();
+        // Ticked, then ticked again (a repeated change): one ask, the newer.
+        assert!(!converts_set(&mut converts, layout_ask("/w/frame", "View", "dock"), true));
+        let mut sized = layout_ask("/w/frame", "View", "dock");
+        sized.size = Some((820.0, 412.0));
+        assert!(converts_set(&mut converts, sized.clone(), true));
+        assert_eq!(converts, vec![sized.clone()]);
+        // A grid ask on the same widget stands beside it.
+        assert!(!converts_set(&mut converts, layout_ask("/w/frame", "View", "grid"), true));
+        assert_eq!(convert_for(&converts, "/w/frame", false).map(|c| c.to.as_str()), Some("grid"));
+        assert_eq!(convert_for(&converts, "/w/frame", true), Some(&sized));
+        // `make flex` replaces the grid ask in its own family only.
+        assert!(converts_set(&mut converts, layout_ask("/w/frame", "View", "flex"), true));
+        assert_eq!(converts.len(), 2);
+        assert_eq!(convert_for(&converts, "/w/frame", false).map(|c| c.to.as_str()), Some("flex"));
+        // Taking the layout ask back leaves the dock ask, and the other way.
+        assert!(converts_set(&mut converts, layout_ask("/w/frame", "View", "flex"), false));
+        assert_eq!(converts, vec![sized.clone()]);
+        assert!(!converts_set(&mut converts, layout_ask("/w/side", "View", "dock"), false));
+        assert!(!converts_set(&mut converts, layout_ask("/w/frame", "View", "grid"), true));
+        assert!(converts_set(&mut converts, layout_ask("/w/frame", "View", "dock"), false));
+        assert_eq!(converts, vec![layout_ask("/w/frame", "View", "grid")]);
+        assert!(convert_for(&converts, "/w/frame", true).is_none());
+    }
+
+    #[test]
+    fn stored_asks_fold_in_behind_the_sessions_own_one_per_family() {
+        let mut session = vec![layout_ask("/w/frame", "View", "flex")];
+        converts_merge(
+            &mut session,
+            vec![
+                layout_ask("/w/frame", "View", "grid"),
+                layout_ask("/w/frame", "View", "dock"),
+                layout_ask("/w/frame", "Grid", "dock"),
+                layout_ask("/w/side", "View", "grid"),
+            ],
+        );
+        assert_eq!(
+            session,
+            vec![
+                layout_ask("/w/frame", "View", "flex"),
+                layout_ask("/w/frame", "View", "dock"),
+                layout_ask("/w/side", "View", "grid"),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_layout_store_reads_old_and_new_lines_and_an_old_reader_keeps_its_asks() {
+        // A file from before dock asks: three columns, CRLF or not.
+        let old = layout_store_parse(
+            "# makepad layout conversions\n# reference\tcurrent type\twanted layout\n\
+             /w/frame\tView\tgrid\r\n\n/w/side\tGrid\tflex\n/w/short\tView\n",
+        );
+        assert_eq!(
+            old,
+            vec![layout_ask("/w/frame", "View", "grid"), layout_ask("/w/side", "Grid", "flex")]
+        );
+        // The new shape round-trips, layout lines first whatever the order
+        // the asks were made in, the size only on a dock line that has one.
+        let mut dock = layout_ask("/w/frame", "View", "dock");
+        dock.size = Some((820.0, 412.5));
+        let mut flex = layout_ask("/w/side", "Grid", "flex");
+        flex.size = Some((10.0, 10.0));
+        let asks = vec![
+            dock.clone(),
+            layout_ask("/w/frame", "View", "grid"),
+            layout_ask("/w/list", "View", "dock"),
+            flex.clone(),
+        ];
+        let text = layout_store_text(&asks);
+        let lines: Vec<&str> = text.lines().filter(|line| !line.starts_with('#')).collect();
+        assert_eq!(
+            lines,
+            vec![
+                "/w/frame\tView\tgrid",
+                "/w/side\tGrid\tflex",
+                "/w/frame\tView\tdock\t820x412.5",
+                "/w/list\tView\tdock",
+            ]
+        );
+        assert_eq!(
+            layout_store_parse(&text),
+            vec![
+                layout_ask("/w/frame", "View", "grid"),
+                layout_ask("/w/side", "Grid", "flex"),
+                dock.clone(),
+                layout_ask("/w/list", "View", "dock"),
+            ]
+        );
+        // The reader from before dock asks, as it was: columns 0-2 of every
+        // line with at least three, the first ask per widget kept.
+        let mut old_reader: Vec<(&str, &str, &str)> = Vec::new();
+        for line in text.lines() {
+            if line.starts_with('#') || line.trim().is_empty() {
+                continue;
+            }
+            let cols: Vec<&str> = line.split('\t').collect();
+            if cols.len() < 3 {
+                continue;
+            }
+            if !old_reader.iter().any(|(reference, _, _)| *reference == cols[0]) {
+                old_reader.push((cols[0], cols[1], cols[2]));
+            }
+        }
+        assert_eq!(
+            old_reader,
+            vec![("/w/frame", "View", "grid"), ("/w/side", "Grid", "flex"), ("/w/list", "View", "dock")]
+        );
+        // A size that does not read is no size, not no ask.
+        for cell in ["wide", "820x", "0x400", "820x400x2", ""] {
+            let read = layout_store_parse(&format!("/w/frame\tView\tdock\t{cell}\n"));
+            assert_eq!(read, vec![layout_ask("/w/frame", "View", "dock")], "{cell}");
+        }
+    }
+
+    #[test]
+    fn a_dock_wrap_takes_its_ids_from_the_container_name() {
+        let ids = |a: &str, b: &str, c: &str, d: &str| {
+            (a.to_string(), b.to_string(), c.to_string(), d.to_string())
+        };
+        assert_eq!(dock_ids("frame"), ids("frame_dock", "frame", "FrameBody", "Frame"));
+        assert_eq!(
+            dock_ids("side_panel"),
+            ids("side_panel_dock", "side_panel", "SidePanelBody", "Side panel")
+        );
+        assert_eq!(dock_ids("stage2"), ids("stage2_dock", "stage2", "Stage2Body", "Stage2"));
+        assert_eq!(dock_name("/window/body/frame", None), "frame");
+        assert_eq!(dock_name("/window/body/frame.2", None), "frame");
+        assert_eq!(dock_name("frame", None), "frame");
+        assert_eq!(dock_name("/window/body/frame", Some("stage")), "stage");
+        assert_eq!(dock_name("/window/body/frame", Some("")), "frame");
+        assert_eq!(dsl_points(412.0), "412.");
+        assert_eq!(dsl_points(412.46), "412.5");
+    }
+
+    #[test]
+    fn the_dock_instructions_carry_the_ids_the_measured_size_and_a_standing_grid_ask() {
+        let text = dock_transform_text("/window/body/frame", "View", Some((820.0, 412.0)), None, None);
+        for want in [
+            "frame_dock := Dock{",
+            "root := DockTabs{tabs: [@frame] selected: 0 closable: false}",
+            "frame := DockTab{name: \"Frame\" template: @PermanentTab kind: @FrameBody}",
+            "FrameBody := <its type as written>{width: Fill height: Fill",
+            "width: 820. and height: 412. + max(theme.tab_height, 25.)",
+            "`<value> + max(theme.tab_height, 25.)`",
+            "where the parent fits that axis",
+            "dock_border_size",
+            "`View` is only the Rust type",
+            "targets `frame_dock`",
+            "/window/body/frame_dock/frame",
+            "do not wrap it again",
+        ] {
+            assert!(text.contains(want), "missing `{want}` in: {text}");
+        }
+        assert!(!text.contains("  "), "a line break leaked spaces: {text}");
+        assert!(!text.contains("Grid") && !text.contains("rename"), "{text}");
+        let grid = dock_transform_text("/window/body/frame", "View", None, None, Some("grid"));
+        assert!(grid.contains("`FrameBody` is a Grid"), "{grid}");
+        assert!(
+            grid.contains("read that size off the running app and add max(theme.tab_height, 25.)"),
+            "{grid}"
+        );
+        let renamed =
+            dock_transform_text("/window/body/-", "Grid", None, Some("stage"), Some("flex"));
+        for want in ["stage_dock := Dock{", "@StageBody", "rename to `stage`", "`StageBody` is a View"] {
+            assert!(renamed.contains(want), "missing `{want}` in: {renamed}");
+        }
+    }
+
+    #[test]
+    fn state_reports_a_grid_ask_as_before_and_a_dock_ask_with_its_instructions() {
+        let mut dock = layout_ask("/w/frame", "View", "dock");
+        dock.size = Some((820.0, 412.5));
+        let converts = vec![layout_ask("/w/frame", "View", "grid"), dock];
+        let renames = vec![TweakRename {
+            reference: "/w/frame".to_string(),
+            from: "frame".to_string(),
+            to: "stage".to_string(),
+        }];
+        let json = converts_json(&converts, &renames);
+        assert!(json.starts_with("[{\"ref\":\"/w/frame\",\"from\":\"View\",\"to\":\"grid\"},{"), "{json}");
+        assert!(json.contains(",\"to\":\"dock\",\"name\":\"stage\",\"size\":[820,412.5],\"do\":\""), "{json}");
+        assert!(json.contains("`StageBody` is a Grid"), "{json}");
+        assert!(json.ends_with("\"}]"), "{json}");
+        assert_eq!(json.matches("\"do\"").count(), 1);
     }
 }

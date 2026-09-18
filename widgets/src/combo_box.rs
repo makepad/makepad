@@ -59,8 +59,10 @@
 use crate::{
     animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
     drop_down::PopupAnchorTransform,
+    event::TouchState,
     makepad_derive_widget::*,
     makepad_draw::*,
+    overlay_place::{place_overlay, span_inboard, PlaceRequest, Placement, Side},
     scroll_bar::{ScrollAxis, ScrollBar, ScrollBarAction},
     text_input::{TextInput, TextInputAction},
     widget::*,
@@ -551,31 +553,30 @@ pub fn layout_combo_popup(
     let content_h = rows as f64 * item_h;
     let capped_h = pad * 2.0 + content_h.min(visible_rows as f64 * item_h);
 
-    let width = content_w
-        .max(trigger.size.x)
-        .min((pass.x - margin * 2.0).max(40.0))
-        .max(40.0);
-    let x = trigger
-        .pos
-        .x
-        .clamp(margin, (pass.x - margin - width).max(margin));
-
-    let below_top = trigger.pos.y + trigger.size.y + gap;
-    let below_space = (pass.y - margin - below_top).max(0.0);
-    let above_bottom = trigger.pos.y - gap;
-    let above_space = (above_bottom - margin).max(0.0);
-
-    let (height, y, above) = if capped_h <= below_space {
-        (capped_h, below_top, false)
-    } else if capped_h <= above_space {
-        (capped_h, above_bottom - capped_h, true)
-    } else if below_space >= above_space {
-        (below_space.max(item_h + pad * 2.0), below_top, false)
-    } else {
-        let h = above_space.max(item_h + pad * 2.0);
-        (h, (above_bottom - h).max(margin), true)
+    // The shared placement rule: below the field with the left edges
+    // aligned, above when below is short and above is not, the roomier side
+    // when neither fits, pulled inboard of the margin, never narrower than
+    // the field and never wider than the pass. The helper shortens the popup
+    // to the room on the side it took; the list's own floor of one row and
+    // the final inboard pull are applied here because they are the list's
+    // rule, not the popup's.
+    let bounds = Rect {
+        pos: dvec2(margin, margin),
+        size: dvec2((pass.x - margin * 2.0).max(40.0), pass.y - margin * 2.0),
     };
-    let y = y.clamp(margin, (pass.y - margin - height).max(margin));
+    let placed = place_overlay(&PlaceRequest {
+        anchor: trigger,
+        size: dvec2(content_w.max(40.0), capped_h),
+        bounds,
+        gap,
+        placement: Placement::BOTTOM_START,
+        match_anchor_width: true,
+    });
+    let x = placed.rect.pos.x;
+    let width = placed.rect.size.x;
+    let above = placed.side == Side::Top;
+    let height = placed.rect.size.y.max(item_h + pad * 2.0);
+    let y = span_inboard(placed.rect.pos.y, height, margin, pass.y - margin * 2.0);
 
     let list_h = (height - pad * 2.0).max(item_h);
     ComboPopupGeom {
@@ -1267,6 +1268,13 @@ impl Widget for ComboBox {
             if matches!(popup_event, Event::MouseDown(_) | Event::TouchUpdate(_)) {
                 self.revert(cx);
                 dismissed = true;
+                // A press anywhere but on this box is the list's, as a press
+                // outside the list is for a plain drop-down: the lock is
+                // released by now, and whatever is walked after would
+                // otherwise take it. One on the box itself goes on to the
+                // field and the arrow below.
+                let field = self.aligned_rect.unwrap_or_else(|| self.draw_bg.area().rect(cx));
+                claim_press_outside(event, field, self.draw_bg.area());
             } else {
                 self.handle_popup_pointer(cx, popup_event);
             }
@@ -1500,6 +1508,27 @@ impl ComboBoxRef {
             inner.max_visible_items = rows.max(1);
             inner.draw_list.redraw(cx);
         }
+    }
+}
+
+/// Mark a press that starts outside `field` as handled by `owner`, unless
+/// something already claimed it, so no widget walked after takes it.
+fn claim_press_outside(event: &Event, field: Rect, owner: Area) {
+    match event {
+        Event::MouseDown(e) if !field.contains(e.abs) && e.handled.get().is_empty() => {
+            e.handled.set(owner);
+        }
+        Event::TouchUpdate(e) => {
+            for touch in &e.touches {
+                if touch.state == TouchState::Start
+                    && !field.contains(touch.abs)
+                    && touch.handled.get().is_empty()
+                {
+                    touch.handled.set(owner);
+                }
+            }
+        }
+        _ => {}
     }
 }
 

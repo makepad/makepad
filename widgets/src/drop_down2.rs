@@ -3,6 +3,7 @@ use {
         animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
         makepad_derive_widget::*,
         makepad_draw::*,
+        overlay_place::{place_overlay, span_inboard, PlaceRequest, Placement},
         widget::*,
     },
 };
@@ -247,10 +248,10 @@ script_mod! {
 
 const ARROW_SCROLL_PX_PER_SEC: f64 = 280.0;
 
-/// Apple-style popup: selected row stays under the trigger; overflow
+/// Covering popup: selected row stays under the trigger; overflow
 /// clamps to the pass and shows ▲/▼ scroll arrows.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ApplePopupGeom {
+pub struct CoveringPopupGeom {
     pub x: f64,
     pub y: f64,
     pub width: f64,
@@ -265,7 +266,7 @@ pub struct ApplePopupGeom {
     pub pad: f64,
 }
 
-impl ApplePopupGeom {
+impl CoveringPopupGeom {
     pub fn popup_rect(&self) -> Rect {
         Rect {
             pos: dvec2(self.x, self.y),
@@ -319,7 +320,7 @@ impl ApplePopupGeom {
     }
 }
 
-pub fn layout_apple_popup(
+pub fn layout_covering_popup(
     pass: Vec2d,
     trigger: Rect,
     item_count: usize,
@@ -330,7 +331,7 @@ pub fn layout_apple_popup(
     margin: f64,
     arrow_h: f64,
     scroll: Option<f64>,
-) -> ApplePopupGeom {
+) -> CoveringPopupGeom {
     let n = item_count.max(1);
     let selected = selected.min(n.saturating_sub(1));
     let item_h = item_h.max(1.0);
@@ -338,19 +339,32 @@ pub fn layout_apple_popup(
     let margin = margin.max(0.0);
     let arrow_h = arrow_h.max(0.0);
     let content_h = pad * 2.0 + n as f64 * item_h;
-    let width = content_w
-        .max(trigger.size.x)
-        .min((pass.x - margin * 2.0).max(40.0))
-        .max(40.0);
-    let x = trigger.pos.x.clamp(margin, (pass.x - margin - width).max(margin));
-
     let trigger_center = trigger.pos.y + trigger.size.y * 0.5;
     let selected_center = pad + (selected as f64 + 0.5) * item_h;
     let ideal_y = trigger_center - selected_center;
     let max_h = (pass.y - margin * 2.0).max(item_h + arrow_h * 2.0);
     let overflow = content_h > max_h + 0.5;
     let height = if overflow { max_h } else { content_h };
-    let y = ideal_y.clamp(margin, (pass.y - margin - height).max(margin));
+    // This popup does not hang off a side of the trigger: it COVERS it so
+    // the selected row sits under it, and its height is its own rule (the
+    // content, or the pass). Only the cross axis is shared with the other
+    // popups — never narrower than the trigger, never wider than the pass,
+    // pulled inboard with the left edge winning — so the request is bounded
+    // in x only and the vertical answer is not read.
+    let placed = place_overlay(&PlaceRequest {
+        anchor: trigger,
+        size: dvec2(content_w.max(40.0), height),
+        bounds: Rect {
+            pos: dvec2(margin, 0.0),
+            size: dvec2((pass.x - margin * 2.0).max(40.0), 0.0),
+        },
+        gap: 0.0,
+        placement: Placement::BOTTOM_START,
+        match_anchor_width: true,
+    });
+    let x = placed.rect.pos.x;
+    let width = placed.rect.size.x;
+    let y = span_inboard(ideal_y, height, margin, pass.y - margin * 2.0);
 
     let up_h = if overflow { arrow_h } else { 0.0 };
     let down_h = if overflow { arrow_h } else { 0.0 };
@@ -360,7 +374,7 @@ pub fn layout_apple_popup(
     let aligned = (list_y + selected_center - trigger_center).clamp(0.0, max_scroll);
     let scroll = scroll.unwrap_or(aligned).clamp(0.0, max_scroll);
 
-    ApplePopupGeom {
+    CoveringPopupGeom {
         x,
         y,
         width,
@@ -483,7 +497,7 @@ pub struct DropDown2 {
     #[rust]
     scroll: Option<f64>,
     #[rust]
-    geom: Option<ApplePopupGeom>,
+    geom: Option<CoveringPopupGeom>,
     /// The field's rect as last seen BETWEEN draws (final, aligned). During
     /// a draw the field's own area still sits at its pre-alignment position
     /// when it follows a Fill sibling, so the popup cannot be placed from it.
@@ -615,9 +629,13 @@ impl DropDown2 {
 
     fn draw_popup(&mut self, cx: &mut Cx2d, trigger: Rect) {
         let pass = cx.current_pass_size();
-        let font_px = 9.0;
+        // The size the items are ABOUT to be drawn at, not a number typed
+        // once. It was hardcoded to 9 while the theme drew them larger, so
+        // the popup came up too narrow for its own contents and sliced the
+        // tail off the longest option with nothing to say it had.
+        let font_px = self.draw_item_text.text_style.font_size as f64;
         let content_w = estimate_label_width(&self.labels, font_px);
-        let mut geom = layout_apple_popup(
+        let mut geom = layout_covering_popup(
             pass,
             trigger,
             self.labels.len(),
@@ -1015,7 +1033,7 @@ mod tests {
 
     #[test]
     fn short_list_stays_on_screen() {
-        let g = layout_apple_popup(
+        let g = layout_covering_popup(
             dvec2(800.0, 600.0),
             trigger(40.0, 40.0, 220.0, 28.0),
             5,
@@ -1035,7 +1053,7 @@ mod tests {
 
     #[test]
     fn long_list_near_top_clamps_and_scrolls() {
-        let g = layout_apple_popup(
+        let g = layout_covering_popup(
             dvec2(800.0, 600.0),
             trigger(40.0, 30.0, 220.0, 28.0),
             46,
@@ -1063,7 +1081,7 @@ mod tests {
 
     #[test]
     fn long_list_near_bottom_clamps_above() {
-        let g = layout_apple_popup(
+        let g = layout_covering_popup(
             dvec2(800.0, 600.0),
             trigger(40.0, 560.0, 220.0, 28.0),
             46,
@@ -1082,7 +1100,7 @@ mod tests {
 
     #[test]
     fn never_taller_than_pass() {
-        let g = layout_apple_popup(
+        let g = layout_covering_popup(
             dvec2(400.0, 300.0),
             trigger(10.0, 150.0, 180.0, 24.0),
             80,
