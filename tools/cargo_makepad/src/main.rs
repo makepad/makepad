@@ -295,6 +295,19 @@ fn show_help() {
 fn main() -> Result<(), Cow<'static, str>> {
     let args: Vec<String> = std::env::args().collect();
 
+    // `RUSTC_WRAPPER` mode for the Android super-app pack: cargo runs the
+    // `makepad-dyn-rustc` link to this binary as `makepad-dyn-rustc <rustc>
+    // <args…>`. Both the name and the env var must say so: a bare inherited
+    // env var never diverts an ordinary `cargo makepad` command.
+    let invoked_as_wrapper = args
+        .first()
+        .and_then(|a| std::path::Path::new(a).file_stem())
+        .map(|stem| stem == "makepad-dyn-rustc")
+        .unwrap_or(false);
+    if invoked_as_wrapper && std::env::var_os("MAKEPAD_DYN_RUSTC_WRAPPER").is_some() && args.len() > 1 {
+        android_rustc_wrapper(&args[1..]);
+    }
+
     // Skip the first argument if it's the binary path or 'cargo'
     let args = if args.len() > 1
         && (args[0].ends_with("cargo-makepad")

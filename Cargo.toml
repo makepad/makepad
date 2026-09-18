@@ -33,6 +33,7 @@ workspace.members = [
     "libs/search",
     "libs/tar",
     "libs/lz4",
+    "libs/rmeta",
     "apps/route",
     "apps/asset-ui",
     "apps/asset-server",

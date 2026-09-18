@@ -7,24 +7,43 @@
 # dylib. Desktop check: `MAKEPAD_WM_ROOT=<checkout> RUSTFLAGS="-C
 # prefer-dynamic" cargo run -p makepad-wm-dyn --release`.
 #
-# Android (from the packaged tree, local/wm-dyn/pack.sh): RUSTC_BOOTSTRAP=1
-#   RUSTFLAGS="-C prefer-dynamic" cargo makepad android --abi=aarch64
-#   --package-name=nl.makepad.wmdyn --app-label=wmdyn build -p makepad-wm-dyn
-#   --release --no-default-features
-# The packaged workspace unifies features across all of its members, so an
-# app built on the phone resolves the same engine units (apps/wm/src/
-# dylib_host.rs); `--no-default-features` there and here keeps every app's
-# `standalone` graph out of that union.
+# Android: the whole pack (stage the tree, cross-build, prove every tile,
+# pack the APK with the phone toolchain, rehearse from the packed APK) is
+#   cargo makepad android --abi=aarch64 --package-name=nl.makepad.wmdyn
+#     --app-label=wmdyn dyn-pack --dyn-toolchain=<musl rustc tree>
+#     -p makepad-wm-dyn --release --no-default-features
+# (tools/cargo_makepad/src/android/dyn_pack). The packaged workspace unifies
+# features across all of its members, so an app built on the phone resolves
+# the same engine units (apps/wm/src/dylib_host.rs); `--no-default-features`
+# there and here keeps every app's `standalone` graph out of that union.
 # The `[lib]` is the Android cdylib (cargo_makepad wraps bin-only packages
 # in a generated workspace under target/, which breaks the relocatable
-# fingerprints the on-device cargo needs). Packaging (rustc + tree) is
-# local/wm-dyn/ — not the main repo.
+# fingerprints the on-device cargo needs).
 
 [package]
 name = "makepad-wm-dyn"
 version = "0.1.0"
 edition = "2021"
 default-run = "wm-dyn"
+
+# What `cargo makepad android dyn-pack` stages, proves and packs: the engine
+# dylib every tile binds, and the tile packages the phone may compile.
+[package.metadata.makepad.dyn]
+engine = "makepad-wm-engine"
+apps = [
+    "makepad-calculator",
+    "makepad-calendar",
+    "makepad-clock",
+    "makepad-files",
+    "makepad-finance",
+    "makepad-mail",
+    "makepad-notes",
+    "makepad-photos",
+    "makepad-reminders",
+    "makepad-app-route",
+    "makepad-sheets",
+    "makepad-weather",
+]
 
 [lib]
 name = "makepad_wm_dyn"

@@ -11,7 +11,7 @@
 //! levels of the build it runs:
 //!  - cargo: the packaged workspace resolves features across ALL of its
 //!    members (`.cargo/config.toml` `feature-unification = "workspace"`,
-//!    written by local/wm-dyn/stage.py; `--no-default-features` on both the
+//!    written by `cargo makepad android dyn-pack`; `--no-default-features` on both the
 //!    engine cross-build and here), so `-p <app>` sees exactly the widgets
 //!    unit the engine was built from — Fresh, never compiled;
 //!  - rustc: the app's own invocation gets `--extern force:makepad_wm_engine=
@@ -26,8 +26,8 @@
 //! rustc toolchain, the checkout and the cross-built `target/` tree. The
 //! first tile open provisions those into the app's files dir
 //! ([`android::provision`]); every cargo/rustc child then runs under the
-//! environment that makes cargo's fingerprints match the shipped tree (see
-//! local/wm-dyn/STATUS.md, "Identity").
+//! environment that makes cargo's fingerprints match the shipped tree (the
+//! identity rules: tools/cargo_makepad/src/android/dyn_pack).
 
 use crate::clients::{self, AppDef, ClientLine};
 use crate::hub::ClientId;
@@ -396,7 +396,7 @@ unsafe extern "C" {
 
 /// The Android super-app's files-dir layout and first-run provisioning.
 ///
-/// Assets (`assets/wmdyn/…`, packed by local/wm-dyn/pack.py):
+/// Assets (`assets/wmdyn/…`, packed by `cargo makepad android dyn-pack`):
 /// `stamp` (pack id), `env.txt` (KEY=VALUE: the linker string and RUSTFLAGS
 /// of the Mac cross-build), `proc-macros.txt` (host crates to bootstrap),
 /// `proc-macro-svh.txt` (the SVH each rebuilt proc-macro must carry),
@@ -490,7 +490,7 @@ mod android {
     pub fn provision(d: &Dyn, lines: &Sender<ClientLine>, client: ClientId) -> Result<(), String> {
         let stamp = load_asset("wmdyn/stamp")
             .and_then(|b| String::from_utf8(b).ok())
-            .ok_or("asset wmdyn/stamp missing: APK packed without local/wm-dyn/pack.py")?;
+            .ok_or("asset wmdyn/stamp missing: APK not packed by `cargo makepad android dyn-pack`")?;
         if std::fs::read_to_string(d.data.join(STAMP)).ok().as_deref() == Some(stamp.as_str()) {
             std::env::set_var("MAKEPAD_WM_ROOT", d.data.join("src"));
             log!("wm: provision skipped: stamp hit ({})", stamp.trim());
@@ -664,39 +664,39 @@ mod android {
         Ok(())
     }
 
-    /// The SVH law (crate::rmeta): the engine's metadata names every
+    /// The SVH law (makepad_rmeta): the engine's metadata names every
     /// proc-macro by the SVH of the Mac's Mach-O build, and a proc-macro the
     /// musl rustc rebuilt carries another one (host triple, host std are in
     /// the hash) — rustc then fails the first app build with E0463 "can't
     /// find crate for makepad_micro_serde_derive which makepad_wm_engine
     /// depends on". So each rebuilt `.so` gets the recorded SVH written into
     /// its header (assets/wmdyn/proc-macro-svh.txt: `lib<crate>-<hash>.so
-    /// <svh>`, from pack.py), before the mtime bump. A listed file the
+    /// <svh>`, from dyn-pack), before the mtime bump. A listed file the
     /// bootstrap did not produce means the unit hashes differ from the
     /// Mac's: the engine would not be Fresh either — stop here, say which.
     fn patch_proc_macro_svh(d: &Dyn, lines: &Sender<ClientLine>, client: ClientId) -> Result<(), String> {
         let list = load_asset("wmdyn/proc-macro-svh.txt")
             .and_then(|b| String::from_utf8(b).ok())
-            .ok_or("asset wmdyn/proc-macro-svh.txt missing: APK packed by an older local/wm-dyn/pack.py")?;
+            .ok_or("asset wmdyn/proc-macro-svh.txt missing: APK packed by an older packer")?;
         let deps = d.data.join("target/release/deps");
         for line in list.lines() {
             let mut it = line.split_whitespace();
             let (Some(file), Some(hex)) = (it.next(), it.next()) else { continue };
-            let want = crate::rmeta::parse_svh(hex).ok_or_else(|| format!("proc-macro-svh.txt: bad svh {hex}"))?;
+            let want = makepad_rmeta::parse_svh(hex).ok_or_else(|| format!("proc-macro-svh.txt: bad svh {hex}"))?;
             let path = deps.join(file);
             let mut data = std::fs::read(&path)
                 .map_err(|e| format!("bootstrap produced no {file} (unit hash differs from the Mac's?): {e}"))?;
-            let h = crate::rmeta::read_header(&data).map_err(|e| format!("{file}: {e}"))?;
+            let h = makepad_rmeta::read_header(&data).map_err(|e| format!("{file}: {e}"))?;
             if h.svh == want {
                 say(lines, client, format!("{file}: svh already {hex}"));
                 continue;
             }
-            crate::rmeta::set_svh(&mut data, &h, want);
+            makepad_rmeta::set_svh(&mut data, &h, want);
             std::fs::write(&path, &data).map_err(|e| format!("write {file}: {e}"))?;
             say(
                 lines,
                 client,
-                format!("{file}: svh {} -> {hex} ({} {})", crate::rmeta::svh_hex(&h.svh), h.name, h.triple),
+                format!("{file}: svh {} -> {hex} ({} {})", makepad_rmeta::svh_hex(&h.svh), h.name, h.triple),
             );
         }
         Ok(())

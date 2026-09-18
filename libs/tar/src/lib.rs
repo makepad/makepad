@@ -13,6 +13,9 @@
 //! gzip archive is the exception: makepad-fast-inflate inflates it whole,
 //! so it costs its uncompressed size in memory — ship LZ4 for anything big.
 
+pub mod writer;
+pub use writer::TarWriter;
+
 use std::{
     fs,
     io::{self, Read, Write},

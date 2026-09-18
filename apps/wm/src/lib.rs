@@ -48,7 +48,6 @@ use linux_gpu::LinuxGpuController;
 pub mod module_host;
 pub mod module_view;
 mod dylib_host;
-mod rmeta;
 mod pane_links;
 mod preview;
 mod run_view;

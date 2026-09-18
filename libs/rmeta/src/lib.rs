@@ -9,8 +9,8 @@
 //! proc-macro rebuilt by the phone's musl-host rustc never carries the SVH the
 //! Mac-built engine recorded. The phone therefore rewrites the header SVH of
 //! each rebuilt proc-macro `.so` to the recorded one
-//! (`assets/wmdyn/proc-macro-svh.txt`, written by local/wm-dyn/pack.py with
-//! the same decoder, local/wm-dyn/rmeta.py). Nothing re-derives an SVH: rustc
+//! (`assets/wmdyn/proc-macro-svh.txt`, written by `cargo makepad android
+//! dyn-pack` with this same decoder). Nothing re-derives an SVH: rustc
 //! compares it for identity and copies it into dependents.
 //!
 //! Layout (rustc_metadata/src/rmeta/mod.rs): a dylib's `.rustc` section is
@@ -34,6 +34,9 @@ pub struct Header {
     /// Byte offset of the 16 SVH bytes in the file.
     pub svh_offset: usize,
     pub proc_macro: bool,
+    /// cargo's `-C extra-filename` (`-<metadata hash>`): the file is
+    /// `lib<name><extra_filename>.<ext>`.
+    pub extra_filename: String,
 }
 
 fn leb(b: &[u8], mut p: usize) -> Result<(u64, usize), String> {
@@ -102,7 +105,9 @@ fn header_at(data: &[u8], start: usize, len: usize) -> Result<Header, String> {
     let svh: [u8; 16] = b.get(p..p + 16).ok_or("svh past end")?.try_into().unwrap();
     let (name, q) = symbol(b, p + 16)?;
     let proc_macro = *b.get(q).ok_or("flags past end")? != 0;
-    Ok(Header { version, triple, name, svh, svh_offset: start + p, proc_macro })
+    // is_stub follows is_proc_macro_crate, then CrateRoot's extra_filename.
+    let (extra_filename, _) = string(b, q + 2)?;
+    Ok(Header { version, triple, name, svh, svh_offset: start + p, proc_macro, extra_filename })
 }
 
 /// The crate header of an rlib, dylib or proc-macro `.so`/`.dylib` image.
@@ -222,6 +227,7 @@ mod tests {
             assert_eq!(rlib.triple, "aarch64-unknown-linux-musl");
             assert_eq!(rlib.svh, svh);
             assert!(rlib.proc_macro);
+            assert_eq!(rlib.extra_filename, "-f2156a3299472f74");
             assert_eq!(&blob[rlib.svh_offset..rlib.svh_offset + 16], &svh);
             let image = dylib_image(&blob);
             let dylib = read_header(&image).unwrap();
@@ -250,11 +256,14 @@ mod tests {
         assert!(read_header(b"rust\0\0\0\x0a\xff\xff\xff\xff\xff\xff\xff\xff").is_err());
     }
 
-    /// The real thing when the pack lives next to the checkout (Mac only).
+    /// The real thing when a `cargo makepad android dyn-pack` stage exists in
+    /// the checkout's target tree (Mac only).
     #[test]
     fn reads_a_real_proc_macro_when_present() {
         let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") else { return };
-        let dir = format!("{manifest_dir}/../../local/wm-dyn/stage/target/release/deps");
+        let dir = format!(
+            "{manifest_dir}/../../target/android/makepad-android-dyn/makepad_wm_dyn/stage/target/release/deps"
+        );
         let Ok(rd) = std::fs::read_dir(dir) else { return };
         for e in rd.flatten() {
             let n = e.file_name().to_string_lossy().to_string();

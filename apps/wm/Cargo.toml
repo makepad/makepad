@@ -50,3 +50,5 @@ makepad-wm-theme = { path = "../../libs/wm_theme" }
 libloading = { path = "../../libs/vulkan/libloading" }
 # The super-app unpacks its shipped toolchain and checkout with our own reader.
 makepad-tar = { path = "../../libs/tar" }
+# The proc-macro SVH rewrite after the on-device bootstrap (the packer records them with the same crate).
+makepad-rmeta = { path = "../../libs/rmeta" }

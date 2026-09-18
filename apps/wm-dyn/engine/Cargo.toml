@@ -24,8 +24,8 @@ crate-type = ["dylib", "rlib"]
 
 [dependencies]
 # Superset of every feature an app or the WM asks of a shared crate. The
-# packaged workspace unifies features across all of its members (stage.py
-# writes `feature-unification = "workspace"`), so an on-device `-p <app>`
+# packaged workspace unifies features across all of its members (the dyn-pack
+# stage writes `feature-unification = "workspace"`), so an on-device `-p <app>`
 # build resolves the same engine units as the host's cross-build whatever an
 # app asks for; naming the union here keeps a plain desktop build of wm-dyn
 # (selected-package unification) on the same units too.
