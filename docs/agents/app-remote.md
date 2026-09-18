@@ -26,7 +26,9 @@ everything needed to address and clean up that instance:
 
 The port is ephemeral. `--remote=PORT` pins it; `MAKEPAD_REMOTE=1` or
 `MAKEPAD_REMOTE=PORT` also enables the service. Prefer the explicit launch
-flag for agent inspection.
+flag for agent inspection. On macOS `--focus` brings the app to the front as
+its window opens; a binary launched from a terminal otherwise stays behind
+the launcher.
 
 Do not discover a port by taking over another running instance. Retain your
 own launch's PID and endpoint. On code changes, close that instance, rebuild,
@@ -131,6 +133,40 @@ backend cannot grab; do not replace a failed grab with an OS screenshot.
   `SANDBOX_MUTE=1` and their own `SANDBOX_HOME` / `--state-dir`.
 
 ## Coordinate and lifecycle details
+
+### Sharing an instance with a person
+
+Read `/activity` before driving an app. `/s` includes the same `activity`
+object. It reports `user_active`, the monotonic `user_seq`, `idle_ms`, the
+two-second `quiet_ms`, whether input is `held`, and the last input's kind and
+window. It never exposes typed text, key values or pointer coordinates.
+Only native input advances the counter; HTTP and Studio injections are marked
+remote, including hardware-path mouse injection and file drops. Focus, layout
+and paint notifications do not count as interaction.
+
+Carry `if_user_seq=N` from the beginning of an automation sequence on every
+mutating request. A request without it is gated by the quiet period alone;
+with it, the request is also refused once the person has interacted since N.
+Input, window changes, closing/quitting, tweaker mutations, AI overlay
+mutations and shader patches return **HTTP 409** if the person is active or
+the counter differs. This check happens on the UI thread immediately
+before dispatch. Queued mutations that outlive their request deadline expire.
+Read-only status, snapshots, logs and grabs remain available.
+
+An interruption remains detectable after the quiet period: do not automatically
+read the new counter and retry. Stop the test, report the human intervention,
+and leave their instance running. After the person hands it back, read a fresh
+counter and start a new sequence once `user_active` is false. Do not bypass a
+409 with a process kill or a replacement launch. This also applies to `/gq`,
+which rechecks ownership after its grabs before quitting.
+
+Every HTTP response, including raw PNGs, carries `X-Makepad-User-Seq-Start`
+and `X-Makepad-User-Seq`. A changed counter means the person interacted during
+the request; compare the ending counter with the sequence's original counter
+before attributing a capture to your test. A `wait=1` command interrupted before
+its frame acknowledgment returns 409 with `applied:true`; its action already
+ran, so retrying it could duplicate an effect. A command refused before dispatch
+returns `applied:false`.
 
 - Rectangles are layout points, window-local, with Y increasing downward.
   Window `sz` is logical size; `px` is physical pixels. No DPI arithmetic

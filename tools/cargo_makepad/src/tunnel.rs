@@ -96,19 +96,20 @@ fn decode_file_data(payload: &[u8]) -> io::Result<(&str, &[u8])> {
 
 #[cfg(windows)]
 mod process_group {
+    use std::ffi::c_void;
     use std::io;
     use std::os::windows::io::AsRawHandle;
     use std::process::{Child, Command};
 
     #[link(name = "kernel32")]
     extern "system" {
-        fn CreateJobObjectW(lp_job_attributes: *mut u8, lp_name: *const u16) -> *mut u8;
-        fn AssignProcessToJobObject(h_job: *mut u8, h_process: *mut u8) -> i32;
-        fn TerminateJobObject(h_job: *mut u8, exit_code: u32) -> i32;
-        fn CloseHandle(h_object: *mut u8) -> i32;
+        fn CreateJobObjectW(lp_job_attributes: *mut c_void, lp_name: *const u16) -> *mut c_void;
+        fn AssignProcessToJobObject(h_job: *mut c_void, h_process: *mut c_void) -> i32;
+        fn TerminateJobObject(h_job: *mut c_void, exit_code: u32) -> i32;
+        fn CloseHandle(h_object: *mut c_void) -> i32;
     }
 
-    pub struct JobHandle(*mut u8);
+    pub struct JobHandle(*mut c_void);
     unsafe impl Send for JobHandle {}
 
     impl JobHandle {
@@ -122,9 +123,9 @@ mod process_group {
             }
         }
 
-        pub fn assign(&self, child: &Child) -> io::Result<()> {
+        pub fn assign(&mut self, child: &Child) -> io::Result<()> {
             unsafe {
-                let proc_handle = child.as_raw_handle() as *mut u8;
+                let proc_handle = child.as_raw_handle();
                 if AssignProcessToJobObject(self.0, proc_handle) == 0 {
                     return Err(io::Error::last_os_error());
                 }
@@ -147,8 +148,12 @@ mod process_group {
         }
     }
 
-    pub fn configure_command(_cmd: &mut Command) {
-        // On Windows, job object handles it
+    pub fn configure_command(cmd: &mut Command) {
+        use std::os::windows::process::CommandExt;
+        // Input/output are piped through the tunnel; there is no local
+        // console to show. Job objects still own the entire process tree.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
     }
 }
 
@@ -415,7 +420,6 @@ fn handle_connection(
     })?;
 
     // Create job handle and assign the child to it
-    #[allow(unused_mut)]
     let mut job = process_group::JobHandle::new()?;
     job.assign(&child)?;
 
