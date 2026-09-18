@@ -32,6 +32,9 @@ pub struct Splash {
     body: ArcStringMut,
     #[live]
     allow_net: bool,
+    /// Host-only, inherited restriction on external I/O. Never script-settable.
+    #[rust]
+    host_io_only: bool,
     /// The app's private storage directory — the root of its jailed `fs`
     /// module (see splash_storage.rs). None (the default) = every storage
     /// call errors, which is right for previews/validation-less contexts.
@@ -173,7 +176,8 @@ impl Splash {
         }
 
         if self.vm_id == MAIN_SPLASH_VM_ID {
-            self.vm_id = cx.alloc_splash_vm_with_network(self.allow_net);
+            self.host_io_only |= cx.script_data.std.host_io_only();
+            self.vm_id = cx.alloc_splash_vm_with_io(self.allow_net, self.host_io_only);
         }
         // (Re)bind this isolate's storage jail and host-bridge identity.
         // Keyed by heap so the script can neither read nor retarget them.
@@ -207,7 +211,7 @@ impl Splash {
         };
 
         let vm_id = self.vm_id;
-        let sheet=self.stylesheet.clone();
+        let sheet=if self.host_io_only {None} else {self.stylesheet.clone()};
         self.style_pending=false;
         // A style reapply runs the body's top-level statements again: only the
         // body defines the widget tree, and that tree has to be rebuilt on the
@@ -415,24 +419,25 @@ fn restore_modules(vm: &mut ScriptVm, saved: Vec<(LiveId, ScriptValue, Option<Sc
 /// its budget; and top-level side effects (e.g. `start_interval`) run and live
 /// until the marked-dead isolate is reclaimed by `gc_dead_splash_isolates`.
 pub fn validate_splash_body(cx: &mut Cx, body: &str, allow_net: bool) -> Vec<String> {
-    let vm_id = cx.alloc_splash_vm_with_network(allow_net);
-    // Give the dry run a throwaway storage jail so top-level `fs.read` boot
-    // loads validate instead of erroring "storage not available". The path is
-    // unpredictable and created with an EXCLUSIVE mkdir (fails EEXIST on any
-    // pre-existing entry incl. a planted symlink, so it never follows one out
-    // of temp); on failure the jail is simply left unset (fs calls error, same
-    // as a preview). Reclaimed below; per-vm so concurrent validations differ.
-    let scratch = std::env::temp_dir().join(format!(
-        "splash_validate_{}_{}",
-        std::process::id(),
-        vm_id.0,
-    ));
+    validate_splash_body_with_io(cx, body, allow_net, false)
+}
+
+/// Validate untrusted source with all external I/O confined to the host bridge.
+///
+/// The throwaway isolate has a fresh, empty filesystem jail and no host
+/// identity. Its files and queued bridge requests are discarded on completion.
+pub fn validate_splash_body_with_host_io(cx: &mut Cx, body: &str) -> Vec<String> {
+    validate_splash_body_with_io(cx, body, false, true)
+}
+
+fn validate_splash_body_with_io(cx: &mut Cx, body: &str, allow_net: bool, host_io_only: bool) -> Vec<String> {
+    let vm_id = cx.alloc_splash_vm_with_io(allow_net, host_io_only);
+    // Boot-time storage checks see a fresh jail; validation never opens the
+    // app's retained files. Only an exclusively created directory is owned.
+    let scratch = ValidationScratch::new(vm_id);
     let heap_key = cx.with_script_vm_id(vm_id, |vm| vm.bx.heap.heap_key());
-    // Clear a leftover from a crashed run (we own this exact name), then take
-    // it exclusively.
-    let _ = std::fs::remove_dir_all(&scratch);
-    if std::fs::create_dir(&scratch).is_ok() {
-        crate::splash_storage::set_root_for_heap(heap_key, Some(scratch.clone()));
+    if let Some(scratch) = &scratch {
+        crate::splash_storage::set_root_for_heap(heap_key, Some(scratch.0.clone()));
     }
     let prefix = if allow_net {
         SPLASH_NET_PREFIX
@@ -480,8 +485,40 @@ pub fn validate_splash_body(cx: &mut Cx, body: &str, allow_net: bool) -> Vec<Str
     // root binding) so nothing can re-create the scratch dir after we remove
     // it; then delete last, and it stays deleted.
     crate::widget_async::gc_dead_splash_isolates(cx);
-    let _ = std::fs::remove_dir_all(&scratch);
+    drop(scratch);
     errors_out
+}
+
+/// A validation-only jail; a collision never opens or deletes an existing path.
+struct ValidationScratch(std::path::PathBuf);
+
+impl ValidationScratch {
+    fn new(vm_id: SplashVmId) -> Option<Self> {
+        let epoch = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        for attempt in 0..16 {
+            let path = std::env::temp_dir().join(format!(
+                "splash_validate_{}_{}_{epoch}_{attempt}", std::process::id(), vm_id.0,
+            ));
+            match builder.create(&path) {
+                Ok(()) => return Some(Self(path)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(_) => return None,
+            }
+        }
+        None
+    }
+}
+
+impl Drop for ValidationScratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 impl WidgetNode for Splash {
@@ -527,16 +564,31 @@ impl Widget for Splash {
                 crate::widget_async::handle_splash_network_responses(cx, self.vm_id, responses);
             }
         }
-        self.view.handle_event(cx, event, scope);
+        if self.host_io_only && matches!(event, Event::TextCopy(_) | Event::TextCut(_)) {
+            return;
+        }
+        if self.host_io_only {
+            crate::widget_async::with_isolate(cx, self.vm_id, |cx| {
+                self.view.handle_event(cx, event, scope);
+            });
+        } else {
+            self.view.handle_event(cx, event, scope);
+        }
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        if self.style_pending && self.vm_id!=MAIN_SPLASH_VM_ID {self.eval_styled_body(cx,true);}
+        if self.style_pending && self.vm_id!=MAIN_SPLASH_VM_ID && !self.host_io_only {self.eval_styled_body(cx,true);}
         //let tree = self.view.widget_tree();
         //cx.with_vm(|vm| {
         //    log!("{}", tree.display(vm.heap()));
         //});
-        self.view.draw_walk(cx, scope, walk)
+        if self.host_io_only {
+            crate::widget_async::with_isolate(cx, self.vm_id, |cx| {
+                self.view.draw_walk(cx, scope, walk)
+            })
+        } else {
+            self.view.draw_walk(cx, scope, walk)
+        }
     }
 
     fn text(&self) -> String {
@@ -618,6 +670,17 @@ impl Splash {
         });
         });
         called
+    }
+
+    /// Require all external I/O to go through `host.request`.
+    ///
+    /// Call before `set_text`. This host-owned restriction cannot be disabled
+    /// after selection, including by nested Splash widgets or `allow_net: true`.
+    /// Raw sockets, HTTP, listeners, browser widgets, resource path/URL loading,
+    /// media sources, clipboard copying, and drag export are unavailable.
+    pub fn set_host_io_only(&mut self, enabled: bool) {
+        assert!(self.vm_id == MAIN_SPLASH_VM_ID, "set_host_io_only must precede set_text");
+        self.host_io_only |= enabled;
     }
 
     /// Sets whether this Splash's isolate gets the networking runtime. Must be
@@ -921,5 +984,40 @@ mod style_tests {
         assert!(splash.call_script_fn(&mut cx, id!(bump), &[]));
         assert_eq!(count(&mut cx, &mut splash), Some(2.0));
         splash.stop(&mut cx);
+    }
+}
+
+#[cfg(test)]
+mod host_io_validation_tests {
+    use super::*;
+
+    #[test]
+    fn host_io_validation_removes_its_temporary_storage() {
+        let scratch = ValidationScratch::new(MAIN_SPLASH_VM_ID).unwrap();
+        let path = scratch.0.clone();
+        std::fs::write(path.join("private.json"), "private").unwrap();
+        assert!(path.join("private.json").exists());
+        drop(scratch);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn host_io_validation_blocks_resources_and_has_only_empty_storage() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        assert!(validate_splash_body_with_host_io(&mut cx, "Label{text: \"safe\"}").is_empty());
+        assert!(!validate_splash_body_with_host_io(&mut cx, "let resource = http_resource(\"http://127.0.0.1:9/private\")").is_empty());
+        assert!(!validate_splash_body_with_host_io(&mut cx, "let resource = file_resource(\"/private\")").is_empty());
+        let source = r#"use mod.std.assert
+            assert(!fs.exists("/items.json"))
+            fs.write("/items.json", "validation only")
+            assert(fs.read("/items.json") == "validation only")
+            Label{text: "safe"}
+        "#;
+        let errors = validate_splash_body_with_host_io(&mut cx, source);
+        assert!(errors.is_empty(), "{errors:?}");
+        let errors = validate_splash_body_with_host_io(&mut cx, source);
+        assert!(errors.is_empty(), "a second validation must have fresh storage: {errors:?}");
+        assert!(crate::splash_host::take_splash_host_requests().is_empty());
     }
 }

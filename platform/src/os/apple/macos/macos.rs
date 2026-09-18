@@ -2548,6 +2548,7 @@ impl CxOsApi for Cx {
     }
 
     fn open_url(&mut self, url: &str, _in_place: OpenUrlInPlace) {
+        if self.script_data.std.host_io_only() { return; }
         // Use the macOS `open` command to open URLs
         let _ = std::process::Command::new("open").arg(url).spawn();
     }

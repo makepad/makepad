@@ -573,3 +573,53 @@ Every digit/operator handler is **inline** (no helper `fn`), so `ui.display` is 
 - For buttons use the **lensing** `glass.GlassButton` / `glass.GlassButtonProminent` (they refract the backdrop — the real gauss-glass look — and are fully clickable). For toggles use `glass.GlassRadio`. The flat `glass.Button`/`glass.Chip` don't refract; only use them when you explicitly want a flat chip.
 - Don't restyle glass surface colors — they're tuned. Just set layout (`width`/`height`/`spacing`/`padding`) and drop content in.
 - Hex colors with `e` next to a digit still need the `#x` prefix (e.g. `#x05070e`).
+
+## Embedding untrusted mini-apps with host-mediated I/O
+
+A host that enforces per-request permissions should call
+`Splash::set_host_io_only(true)` **before** the first `set_text`. The selection
+is host-owned, cannot be relaxed for that Splash, and is inherited by nested
+Splashes. `CxSplashVmExt::alloc_splash_vm_with_host_io()` provides the same mode
+for hosts allocating isolates directly. `allow_net: true` cannot override it.
+
+In this mode scripts use the existing `host.request` bridge for external I/O:
+
+```text
+host.request("network.http", {url: "https://example.com/data"}, fn(result) {
+    if result.is_ok { ui.output.set_text(result.data.body) }
+    else { ui.output.set_text(result.error) }
+})
+```
+
+`network.http` is an example host-defined service, not a built-in transport.
+The embedding host drains `take_splash_host_requests()`, authorizes the request
+using its trusted `app_tag`/`heap_key`, and responds through
+`splash_host_respond()`. An unanswered request performs no I/O. The host owns
+URL/method/header/body validation, redirect authorization before **each** hop,
+credential isolation, DNS/private-network checks, response limits, cancellation,
+and rechecking policy immediately before transmission and response delivery.
+Granting one request must never enable a native networking runtime for the guest.
+
+Direct HTTP, WebSockets, raw sockets, and listeners are rejected. Resource
+constructors are checked at the native entrypoint, including aliases retained in
+the widget prelude. Native browser launch, media playback, clipboard export,
+file pickers, and drag export are suppressed while the isolate is installed.
+Browser, MapView, ScreenCap, and Window constructors are not registered in the
+restricted isolate. Splash installs its own context while dispatching/drawing
+children, so native widget behavior cannot accidentally borrow host authority.
+Per-Splash stylesheet re-evaluation is disabled in this mode; restricted
+isolates retain the trusted boot theme chosen with `set_splash_theme`.
+
+The host may still explicitly supply a private jailed filesystem through
+`set_sandbox_dir`. For information-flow enforcement, either label all data in
+that persistent jail across instances and future runs, or leave it unset and
+provide labeled storage through the host bridge. Host-supplied native widgets,
+handles, services, and callbacks are capabilities too: register only audited
+ones and propagate source restrictions through their results. Network denial
+alone is not an information-flow policy; the host must track private sources
+and authorize every outgoing sink, including model inference and IPC.
+
+This is an API-level confinement boundary for script code, not process isolation:
+it does not address native memory-safety bugs, resource exhaustion, or covert
+channels such as rendering and timing. Default Splash behavior remains unchanged
+unless the host selects this mode.

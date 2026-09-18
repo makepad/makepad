@@ -1599,6 +1599,7 @@ impl CxOsApi for Cx {
     }
 
     fn open_url(&mut self, url: &str, in_place: OpenUrlInPlace) {
+        if self.script_data.std.host_io_only() { return; }
         self.os.from_wasm(FromWasmOpenUrl {
             url: url.to_string(),
             in_place: if let OpenUrlInPlace::Yes = in_place {
