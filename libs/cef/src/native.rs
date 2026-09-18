@@ -1,4 +1,7 @@
-use crate::{ffi, BootstrapResult, Error, Frame, Result, TEXT_INPUT_MODE_NONE};
+use crate::{
+    ffi, AudioCaptureConfig, AudioCaptureStats, AudioEvent, AudioFormat, AudioPacket,
+    BootstrapResult, Error, Frame, Result, TEXT_INPUT_MODE_NONE,
+};
 use libloading::Library;
 #[cfg(target_os = "macos")]
 use makepad_objc_sys::declare::ClassDecl;
@@ -18,7 +21,9 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::slice;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, OnceLock};
 
 #[cfg(target_os = "macos")]
@@ -381,6 +386,97 @@ struct SharedBrowserState {
     /// The latest decoded favicon bitmap (BGRA, premultiplied).
     favicon: Mutex<Option<Frame>>,
     favicon_url: Mutex<String>,
+    /// Audio capture, absent until the embedder asks for it: a browser that
+    /// never does hands CEF no audio handler at all.
+    audio: OnceLock<AudioTap>,
+}
+
+/// Packets the queue to the embedder holds before the capture thread drops
+/// one: about ten seconds at the default packet size, so a UI thread stalled
+/// behind a dialog loses nothing.
+const AUDIO_QUEUE_PACKETS: usize = 512;
+/// Packet buffers made up front. The embedder hands each one back as it
+/// drains, so in a steady state the capture thread never allocates.
+const AUDIO_POOL_PACKETS: usize = 64;
+
+/// The half of a browser's audio capture that CEF's threads touch.
+///
+/// Chromium's capture thread must never wait on the embedder, so nothing here
+/// is a lock the embedder can hold: packets and stream changes go out through
+/// a bounded `try_send`, buffers come back through a `try_recv`, and the rest
+/// is atomics. `capture` is a mutex only to make the type `Sync`; it is taken
+/// with `try_lock`, by capture callbacks alone.
+struct AudioTap {
+    enabled: AtomicBool,
+    want_sample_rate: AtomicU32,
+    want_channels: AtomicU32,
+    want_frames_per_buffer: AtomicU32,
+    events: SyncSender<AudioEvent>,
+    capture: Mutex<AudioCaptureSide>,
+    /// The stream now running, for an embedder that lost a `Started` or a
+    /// `Stopped` to a full queue.
+    streaming: AtomicBool,
+    epoch: AtomicU32,
+    sample_rate: AtomicU32,
+    channels: AtomicU32,
+    channel_layout: AtomicU32,
+    frames_per_buffer: AtomicU32,
+    packets: AtomicU64,
+    dropped_packets: AtomicU64,
+    dropped_frames: AtomicU64,
+    pool_misses: AtomicU64,
+}
+
+struct AudioCaptureSide {
+    spare: Receiver<Vec<f32>>,
+    /// The buffer of a packet the queue refused, kept for the next one.
+    held: Option<Vec<f32>>,
+}
+
+/// The embedder's half: owned by the [`Browser`], on the thread that pumps.
+struct AudioDrain {
+    events: Receiver<AudioEvent>,
+    recycle: SyncSender<Vec<f32>>,
+    /// The stream the embedder has been told about.
+    streaming: bool,
+    epoch: u32,
+    /// Events made up to cover a lost `Started`/`Stopped`, and the packet
+    /// that revealed the loss, in the order the embedder must see them.
+    pending: VecDeque<AudioEvent>,
+}
+
+impl AudioDrain {
+    /// A stream the embedder has not heard of: the one before it ends first,
+    /// if its `Stopped` never arrived.
+    fn begin(&mut self, format: AudioFormat) {
+        if self.streaming {
+            self.pending.push_back(AudioEvent::Stopped);
+        }
+        self.streaming = true;
+        self.epoch = format.epoch;
+        self.pending.push_back(AudioEvent::Started(format));
+    }
+}
+
+impl AudioTap {
+    fn format(&self) -> AudioFormat {
+        AudioFormat {
+            epoch: self.epoch.load(Ordering::Acquire),
+            sample_rate: self.sample_rate.load(Ordering::Acquire),
+            channels: self.channels.load(Ordering::Acquire),
+            channel_layout: self.channel_layout.load(Ordering::Acquire) as i32,
+            frames_per_buffer: self.frames_per_buffer.load(Ordering::Acquire),
+        }
+    }
+
+    fn set_config(&self, config: AudioCaptureConfig) {
+        self.want_sample_rate
+            .store(config.sample_rate.clamp(8_000, 192_000), Ordering::Release);
+        self.want_channels
+            .store(if config.channels == 1 { 1 } else { 2 }, Ordering::Release);
+        self.want_frames_per_buffer
+            .store(config.frames_per_buffer.clamp(128, 8_192), Ordering::Release);
+    }
 }
 
 #[derive(Default, Clone, Debug)]
@@ -424,6 +520,14 @@ struct ClientHandler {
     display_handler: *mut DisplayHandler,
     load_handler: *mut LoadHandler,
     life_span_handler: *mut LifeSpanHandler,
+    audio_handler: *mut AudioHandler,
+}
+
+#[repr(C)]
+struct AudioHandler {
+    cef_audio_handler: ffi::cef_audio_handler_t,
+    ref_count: AtomicUsize,
+    state: Arc<SharedBrowserState>,
 }
 
 #[repr(C)]
@@ -516,6 +620,14 @@ impl_ref_counted!(
     no_drop_hook
 );
 impl_ref_counted!(
+    AudioHandler,
+    audio_add_ref,
+    audio_release,
+    audio_has_one_ref,
+    audio_has_at_least_one_ref,
+    no_drop_hook
+);
+impl_ref_counted!(
     DownloadImageCallback,
     download_image_add_ref,
     download_image_release,
@@ -579,6 +691,7 @@ pub struct Browser {
     scale_factor: f32,
     accelerated: bool,
     hidden: bool,
+    audio: Option<AudioDrain>,
 }
 
 /// A snapshot of the accelerated-paint statistics for reporting.
@@ -2195,6 +2308,9 @@ unsafe extern "system" fn client_release(self_: *mut ffi::cef_base_ref_counted_t
                 &mut (*(*client).life_span_handler).cef_life_span_handler.base as *mut _,
             );
         }
+        if !(*client).audio_handler.is_null() {
+            release_ref_counted(&mut (*(*client).audio_handler).cef_audio_handler.base as *mut _);
+        }
         drop(Box::from_raw(client));
         1
     } else {
@@ -2453,6 +2569,185 @@ unsafe extern "system" fn client_get_life_span_handler(
 ) -> *mut c_void {
     let client = self_ as *mut ClientHandler;
     add_ref_and_return((*client).life_span_handler) as *mut c_void
+}
+
+/// Null unless the embedder enabled capture on this browser. CEF asks each
+/// time the page becomes audible, and a null answer leaves the page playing
+/// through the system device, exactly as it does with no handler bound.
+unsafe extern "system" fn client_get_audio_handler(self_: *mut ffi::cef_client_t) -> *mut c_void {
+    let client = self_ as *mut ClientHandler;
+    let audio = (*client).audio_handler;
+    if audio.is_null() {
+        return ptr::null_mut();
+    }
+    let enabled = audio_tap(&mut (*audio).cef_audio_handler)
+        .is_some_and(|tap| tap.enabled.load(Ordering::Acquire));
+    if !enabled {
+        return ptr::null_mut();
+    }
+    add_ref_and_return(audio) as *mut c_void
+}
+
+/// The capture state behind a handler CEF passed back, once capture has been
+/// enabled on its browser.
+unsafe fn audio_tap<'a>(self_: *mut ffi::cef_audio_handler_t) -> Option<&'a AudioTap> {
+    let handler = &*(self_ as *mut AudioHandler);
+    handler.state.audio.get()
+}
+
+/// UI thread. CEF pre-fills `params` with its defaults; returning 1 starts a
+/// loopback capture of the page in the embedder's format, and Chromium mutes
+/// the page's own output for as long as that capture runs.
+unsafe extern "system" fn audio_get_parameters(
+    self_: *mut ffi::cef_audio_handler_t,
+    browser: *mut ffi::cef_browser_t,
+    params: *mut ffi::cef_audio_parameters_t,
+) -> c_int {
+    release_param(browser);
+    let Some(tap) = audio_tap(self_) else {
+        return 0;
+    };
+    if params.is_null() || !tap.enabled.load(Ordering::Acquire) {
+        return 0;
+    }
+    (*params).channel_layout = if tap.want_channels.load(Ordering::Acquire) == 1 {
+        ffi::CEF_CHANNEL_LAYOUT_MONO
+    } else {
+        ffi::CEF_CHANNEL_LAYOUT_STEREO
+    };
+    (*params).sample_rate = tap.want_sample_rate.load(Ordering::Acquire) as c_int;
+    (*params).frames_per_buffer = tap.want_frames_per_buffer.load(Ordering::Acquire) as c_int;
+    1
+}
+
+/// Capture thread.
+unsafe extern "system" fn audio_on_stream_started(
+    self_: *mut ffi::cef_audio_handler_t,
+    browser: *mut ffi::cef_browser_t,
+    params: *const ffi::cef_audio_parameters_t,
+    channels: c_int,
+) {
+    release_param(browser);
+    let Some(tap) = audio_tap(self_) else {
+        return;
+    };
+    if !params.is_null() {
+        let params = &*params;
+        tap.sample_rate
+            .store(params.sample_rate.max(0) as u32, Ordering::Release);
+        tap.channel_layout
+            .store(params.channel_layout as u32, Ordering::Release);
+        tap.frames_per_buffer
+            .store(params.frames_per_buffer.max(0) as u32, Ordering::Release);
+    }
+    tap.channels.store(channels.max(0) as u32, Ordering::Release);
+    tap.epoch.fetch_add(1, Ordering::AcqRel);
+    tap.streaming.store(true, Ordering::Release);
+    // A full queue loses this; the packets carry the epoch, and the drain
+    // makes the event up again from the atomics above.
+    let _ = tap.events.try_send(AudioEvent::Started(tap.format()));
+}
+
+/// Capture thread, once per packet: `data` is one plane of `frames` f32 per
+/// channel. Interleaved into a recycled buffer and handed over without ever
+/// waiting; a packet the embedder has no room for is dropped and counted.
+unsafe extern "system" fn audio_on_stream_packet(
+    self_: *mut ffi::cef_audio_handler_t,
+    browser: *mut ffi::cef_browser_t,
+    data: *const *const f32,
+    frames: c_int,
+    pts: i64,
+) {
+    release_param(browser);
+    let Some(tap) = audio_tap(self_) else {
+        return;
+    };
+    if !tap.enabled.load(Ordering::Acquire) || data.is_null() || frames <= 0 {
+        return;
+    }
+    let frames = frames as usize;
+    let channels = tap.channels.load(Ordering::Acquire) as usize;
+    if channels == 0 {
+        return;
+    }
+    let dropped = |tap: &AudioTap| {
+        tap.dropped_packets.fetch_add(1, Ordering::Relaxed);
+        tap.dropped_frames.fetch_add(frames as u64, Ordering::Relaxed);
+    };
+    let Ok(mut side) = tap.capture.try_lock() else {
+        dropped(tap);
+        return;
+    };
+    let mut samples = match side.held.take() {
+        Some(samples) => samples,
+        None => match side.spare.try_recv() {
+            Ok(samples) => samples,
+            Err(_) => {
+                tap.pool_misses.fetch_add(1, Ordering::Relaxed);
+                Vec::new()
+            }
+        },
+    };
+    samples.clear();
+    samples.resize(frames * channels, 0.0);
+    for channel in 0..channels {
+        let plane = *data.add(channel);
+        if plane.is_null() {
+            continue;
+        }
+        let plane = slice::from_raw_parts(plane, frames);
+        for (frame, sample) in plane.iter().enumerate() {
+            samples[frame * channels + channel] = *sample;
+        }
+    }
+    let packet = AudioPacket {
+        epoch: tap.epoch.load(Ordering::Acquire),
+        channels: channels as u32,
+        frames,
+        pts_ms: pts,
+        samples,
+    };
+    match tap.events.try_send(AudioEvent::Packet(packet)) {
+        Ok(()) => {
+            tap.packets.fetch_add(1, Ordering::Relaxed);
+        }
+        Err(TrySendError::Full(event)) | Err(TrySendError::Disconnected(event)) => {
+            dropped(tap);
+            // Kept for the next packet, so an overflow frees nothing here.
+            if let AudioEvent::Packet(packet) = event {
+                side.held = Some(packet.samples);
+            }
+        }
+    }
+}
+
+/// UI thread.
+unsafe extern "system" fn audio_on_stream_stopped(
+    self_: *mut ffi::cef_audio_handler_t,
+    browser: *mut ffi::cef_browser_t,
+) {
+    release_param(browser);
+    let Some(tap) = audio_tap(self_) else {
+        return;
+    };
+    tap.streaming.store(false, Ordering::Release);
+    let _ = tap.events.try_send(AudioEvent::Stopped);
+}
+
+/// UI thread while the stream is being set up, capture thread after. CEF
+/// stops the stream itself.
+unsafe extern "system" fn audio_on_stream_error(
+    self_: *mut ffi::cef_audio_handler_t,
+    browser: *mut ffi::cef_browser_t,
+    message: *const ffi::cef_string_t,
+) {
+    release_param(browser);
+    let Some(tap) = audio_tap(self_) else {
+        return;
+    };
+    let _ = tap
+        .events
+        .try_send(AudioEvent::Error(cef_string_to_string(message)));
 }
 
 unsafe extern "system" fn render_get_root_screen_rect(
@@ -3118,12 +3413,36 @@ impl RenderHandler {
     }
 }
 
+impl AudioHandler {
+    fn allocate(state: Arc<SharedBrowserState>) -> *mut AudioHandler {
+        Box::into_raw(Box::new(Self {
+            cef_audio_handler: ffi::cef_audio_handler_t {
+                base: ffi::cef_base_ref_counted_t {
+                    size: std::mem::size_of::<ffi::cef_audio_handler_t>(),
+                    add_ref: Some(audio_add_ref),
+                    release: Some(audio_release),
+                    has_one_ref: Some(audio_has_one_ref),
+                    has_at_least_one_ref: Some(audio_has_at_least_one_ref),
+                },
+                get_audio_parameters: Some(audio_get_parameters),
+                on_audio_stream_started: Some(audio_on_stream_started),
+                on_audio_stream_packet: Some(audio_on_stream_packet),
+                on_audio_stream_stopped: Some(audio_on_stream_stopped),
+                on_audio_stream_error: Some(audio_on_stream_error),
+            },
+            ref_count: AtomicUsize::new(1),
+            state,
+        }))
+    }
+}
+
 impl ClientHandler {
     fn allocate(
         render_handler: *mut RenderHandler,
         display_handler: *mut DisplayHandler,
         load_handler: *mut LoadHandler,
         life_span_handler: *mut LifeSpanHandler,
+        audio_handler: *mut AudioHandler,
     ) -> *mut ClientHandler {
         Box::into_raw(Box::new(Self {
             cef_client: ffi::cef_client_t {
@@ -3134,7 +3453,7 @@ impl ClientHandler {
                     has_one_ref: Some(client_has_one_ref),
                     has_at_least_one_ref: Some(client_has_at_least_one_ref),
                 },
-                get_audio_handler: Some(client_null_handler),
+                get_audio_handler: Some(client_get_audio_handler),
                 get_command_handler: Some(client_null_handler),
                 get_context_menu_handler: Some(client_null_handler),
                 get_dialog_handler: Some(client_null_handler),
@@ -3159,6 +3478,7 @@ impl ClientHandler {
             display_handler,
             load_handler,
             life_span_handler,
+            audio_handler,
         }))
     }
 }
@@ -3296,11 +3616,13 @@ impl Browser {
         let display_handler = DisplayHandler::allocate(state.clone());
         let load_handler = LoadHandler::allocate(state.clone());
         let life_span_handler = LifeSpanHandler::allocate(state.clone());
+        let audio_handler = AudioHandler::allocate(state.clone());
         let client = ClientHandler::allocate(
             render_handler,
             display_handler,
             load_handler,
             life_span_handler,
+            audio_handler,
         );
         let accelerated = accelerated_paint_available();
 
@@ -3388,6 +3710,7 @@ impl Browser {
             scale_factor: 0.0,
             accelerated,
             hidden: false,
+            audio: None,
         };
         let _ = this.resize(width, height, scale_factor);
         schedule_pump_work(0);
@@ -3777,6 +4100,138 @@ impl Browser {
         })
     }
 
+    /// Capture what the page plays instead of letting it reach the system
+    /// device. Off until called, and a browser that never calls it behaves
+    /// as if this API did not exist.
+    ///
+    /// CEF asks for the capture when the page next becomes audible, so call
+    /// this before the page plays. While a capture runs Chromium mutes the
+    /// page's own output: the embedder's mix is the only place it is heard.
+    /// Call on the thread that pumps CEF, and drain with [`Self::poll_audio`]
+    /// from the same thread.
+    pub fn enable_audio_capture(&mut self, config: AudioCaptureConfig) {
+        if self.audio.is_none() {
+            let (events, drain_events) = sync_channel(AUDIO_QUEUE_PACKETS);
+            let (recycle, spare) = sync_channel(AUDIO_QUEUE_PACKETS);
+            let packet_len = config.frames_per_buffer.clamp(128, 8_192) as usize * 2;
+            for _ in 0..AUDIO_POOL_PACKETS {
+                let _ = recycle.try_send(Vec::with_capacity(packet_len));
+            }
+            let tap = AudioTap {
+                enabled: AtomicBool::new(false),
+                want_sample_rate: AtomicU32::new(0),
+                want_channels: AtomicU32::new(0),
+                want_frames_per_buffer: AtomicU32::new(0),
+                events,
+                capture: Mutex::new(AudioCaptureSide { spare, held: None }),
+                streaming: AtomicBool::new(false),
+                epoch: AtomicU32::new(0),
+                sample_rate: AtomicU32::new(0),
+                channels: AtomicU32::new(0),
+                channel_layout: AtomicU32::new(0),
+                frames_per_buffer: AtomicU32::new(0),
+                packets: AtomicU64::new(0),
+                dropped_packets: AtomicU64::new(0),
+                dropped_frames: AtomicU64::new(0),
+                pool_misses: AtomicU64::new(0),
+            };
+            if self.state.audio.set(tap).is_err() {
+                return;
+            }
+            self.audio = Some(AudioDrain {
+                events: drain_events,
+                recycle,
+                streaming: false,
+                epoch: 0,
+                pending: VecDeque::new(),
+            });
+        }
+        if let Some(tap) = self.state.audio.get() {
+            tap.set_config(config);
+            tap.enabled.store(true, Ordering::Release);
+        }
+    }
+
+    /// Stop capturing. The page's next stream plays through the system
+    /// device again; one already running stays muted until Chromium stops
+    /// it, and its packets are discarded.
+    pub fn disable_audio_capture(&mut self) {
+        if let Some(tap) = self.state.audio.get() {
+            tap.enabled.store(false, Ordering::Release);
+        }
+    }
+
+    /// The next capture event, or `None` when there is nothing waiting. Never
+    /// blocks. Hand every packet back with [`Self::recycle_audio_packet`]
+    /// once its samples have been copied out.
+    pub fn poll_audio(&mut self) -> Option<AudioEvent> {
+        let tap = self.state.audio.get()?;
+        let drain = self.audio.as_mut()?;
+        loop {
+            if let Some(event) = drain.pending.pop_front() {
+                return Some(event);
+            }
+            match drain.events.try_recv() {
+                Ok(AudioEvent::Started(format)) => {
+                    if !(drain.streaming && drain.epoch == format.epoch) {
+                        drain.begin(format);
+                    }
+                }
+                Ok(AudioEvent::Packet(packet)) => {
+                    if !(drain.streaming && drain.epoch == packet.epoch) {
+                        // Its `Started` found the queue full.
+                        drain.begin(AudioFormat {
+                            epoch: packet.epoch,
+                            channels: packet.channels,
+                            ..tap.format()
+                        });
+                    }
+                    drain.pending.push_back(AudioEvent::Packet(packet));
+                }
+                Ok(AudioEvent::Stopped) => {
+                    if drain.streaming {
+                        drain.streaming = false;
+                        return Some(AudioEvent::Stopped);
+                    }
+                }
+                Ok(event @ AudioEvent::Error(_)) => return Some(event),
+                Err(_) => {
+                    // A `Stopped` that found the queue full.
+                    if drain.streaming
+                        && !tap.streaming.load(Ordering::Acquire)
+                        && tap.epoch.load(Ordering::Acquire) == drain.epoch
+                    {
+                        drain.streaming = false;
+                        return Some(AudioEvent::Stopped);
+                    }
+                    return None;
+                }
+            }
+        }
+    }
+
+    /// Return a drained packet's buffer to the capture thread.
+    pub fn recycle_audio_packet(&mut self, packet: AudioPacket) {
+        if let Some(drain) = &self.audio {
+            let _ = drain.recycle.try_send(packet.samples);
+        }
+    }
+
+    pub fn audio_capture_stats(&self) -> AudioCaptureStats {
+        let Some(tap) = self.state.audio.get() else {
+            return AudioCaptureStats::default();
+        };
+        AudioCaptureStats {
+            enabled: tap.enabled.load(Ordering::Acquire),
+            streaming: tap.streaming.load(Ordering::Acquire),
+            streams: tap.epoch.load(Ordering::Acquire),
+            packets: tap.packets.load(Ordering::Relaxed),
+            dropped_packets: tap.dropped_packets.load(Ordering::Relaxed),
+            dropped_frames: tap.dropped_frames.load(Ordering::Relaxed),
+            pool_misses: tap.pool_misses.load(Ordering::Relaxed),
+        }
+    }
+
     pub fn take_frame(&mut self) -> Option<Frame> {
         self.state.take_frame()
     }
@@ -3785,6 +4240,9 @@ impl Browser {
 impl Drop for Browser {
     fn drop(&mut self) {
         self.state.closing.store(true, Ordering::Release);
+        if let Some(tap) = self.state.audio.get() {
+            tap.enabled.store(false, Ordering::Release);
+        }
         if let Ok(runtime) = runtime() {
             let state = runtime.state.lock().unwrap();
             if state.initialized && !state.shutting_down && !self.browser.is_null() {

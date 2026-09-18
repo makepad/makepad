@@ -43,6 +43,77 @@ pub struct Frame {
     pub pixels: Vec<u32>,
 }
 
+/// What a page's audio is captured as. Chromium mixes and resamples the
+/// page's output to this before the first packet, so the embedder names the
+/// format its own audio path wants and never converts a rate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AudioCaptureConfig {
+    pub sample_rate: u32,
+    /// One or two; anything else captures stereo.
+    pub channels: u32,
+    /// Frames per packet. Small is low latency and more packets.
+    pub frames_per_buffer: u32,
+}
+
+impl Default for AudioCaptureConfig {
+    fn default() -> Self {
+        Self {
+            sample_rate: 48_000,
+            channels: 2,
+            frames_per_buffer: 1024,
+        }
+    }
+}
+
+/// The format of one capture stream, as Chromium reported it when the stream
+/// started. `epoch` numbers the streams of one browser: a page that goes
+/// quiet and sounds again is a new stream with the next epoch.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AudioFormat {
+    pub epoch: u32,
+    pub sample_rate: u32,
+    pub channels: u32,
+    /// Chromium's channel layout number (`2` mono, `3` stereo).
+    pub channel_layout: i32,
+    pub frames_per_buffer: u32,
+}
+
+/// One packet of captured audio: interleaved f32, `frames * channels` long.
+#[derive(Debug)]
+pub struct AudioPacket {
+    pub epoch: u32,
+    pub channels: u32,
+    pub frames: usize,
+    /// Presentation time, milliseconds since the Unix epoch. A gap between
+    /// one packet's end and the next one's `pts_ms` is audio that was dropped.
+    pub pts_ms: i64,
+    pub samples: Vec<f32>,
+}
+
+#[derive(Debug)]
+pub enum AudioEvent {
+    Started(AudioFormat),
+    Packet(AudioPacket),
+    /// The page went quiet for a few seconds, navigated away or closed. The
+    /// same browser may start again.
+    Stopped,
+    Error(String),
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AudioCaptureStats {
+    pub enabled: bool,
+    pub streaming: bool,
+    pub streams: u32,
+    pub packets: u64,
+    /// Packets that found the queue to the embedder full and were dropped
+    /// rather than block Chromium's capture thread.
+    pub dropped_packets: u64,
+    pub dropped_frames: u64,
+    /// Packets that found no recycled buffer and allocated one.
+    pub pool_misses: u64,
+}
+
 pub const EVENTFLAG_NONE: u32 = 0;
 pub const EVENTFLAG_CAPS_LOCK_ON: u32 = 1 << 0;
 pub const EVENTFLAG_SHIFT_DOWN: u32 = 1 << 1;
@@ -281,6 +352,20 @@ impl Browser {
 
     pub fn take_favicon(&mut self) -> Option<Frame> {
         None
+    }
+
+    pub fn enable_audio_capture(&mut self, _config: AudioCaptureConfig) {}
+
+    pub fn disable_audio_capture(&mut self) {}
+
+    pub fn poll_audio(&mut self) -> Option<AudioEvent> {
+        None
+    }
+
+    pub fn recycle_audio_packet(&mut self, _packet: AudioPacket) {}
+
+    pub fn audio_capture_stats(&self) -> AudioCaptureStats {
+        AudioCaptureStats::default()
     }
 }
 
