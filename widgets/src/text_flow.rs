@@ -2672,3 +2672,40 @@ impl Widget for TextFlowLink {
         self.redraw(cx);
     }
 }
+
+#[cfg(test)]
+mod table_structure_tests {
+    use super::*;
+    use crate::makepad_platform::*;
+    use crate::script_eval;
+
+    /// `Markdown`, `Html` and `RichTextEditor` reach TextFlow through a Rust
+    /// `#[deref]`, not through the prototype chain, so a field their own DSL
+    /// block does not name is reset on every reload -- and a theme switch is
+    /// a reload -- to its FIELD TYPE's default rather than to what TextFlow's
+    /// block says. The `Layout` default flows Right, so a table's rows were
+    /// laid side by side: the header took the whole width and every body row
+    /// was left zero wide. Tables drew their box, their header, and none of
+    /// their content, on every theme switch, on a third of the documentation.
+    ///
+    /// Each of the three blocks now restates them. This holds them to it.
+    #[test]
+    fn a_table_still_runs_downward_after_a_reload() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let mut md = {
+                let value = script_eval!(vm, {use mod.widgets.* Markdown{}});
+                crate::markdown::Markdown::script_from_value(vm, value)
+            };
+            assert_eq!(md.text_flow.table_layout.flow, Flow::Down, "markdown at startup");
+            vm.with_reload(crate::script_mod);
+            let value = script_eval!(vm, {use mod.widgets.* Markdown{}});
+            md.script_apply(vm, &Apply::Reload, &mut Scope::empty(), value);
+            assert_eq!(md.text_flow.table_layout.flow, Flow::Down, "markdown after a reload");
+            assert!(matches!(md.text_flow.table_row_layout.flow, Flow::Right { .. }), "row flow after a reload");
+            assert_eq!(md.text_flow.table_walk.height, Size::fit(), "table height after a reload");
+            assert!(md.text_flow.heading_margin.top > 0.0, "heading margin after a reload");
+        });
+    }
+}
