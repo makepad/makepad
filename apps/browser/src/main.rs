@@ -747,7 +747,7 @@ pub fn app_main() {
         cx.borrow_mut().in_makepad_studio = true;
     }
     cx.borrow_mut().init_cx_os();
-    makepad_widgets::makepad_platform::remote::start_if_requested();
+    makepad_widgets::makepad_platform::remote::start_if_requested(&mut cx.borrow_mut());
     Cx::event_loop(cx.clone());
     drop(cx);
     makepad_cef::shutdown();

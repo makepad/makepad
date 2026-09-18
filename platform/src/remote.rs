@@ -27,24 +27,27 @@
 //!   not by the time their clients opened sockets. Each sequence deadline is
 //!   a new boundary; it does not freeze the app for the entire sequence.
 
-thread_local! {
-    static REMOTE_INPUT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
 /// Marks synchronous injected dispatch, including hardware-path mouse input and
 /// nested events. Native input delivered on a later event-loop turn stays native.
+/// The flag is the `Cx`'s (`RemoteActivity::remote_input`); the guard holds a
+/// handle to it so the dispatch it brackets is free to borrow the `Cx`.
 #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
-pub(crate) struct RemoteInputScope(bool);
+pub(crate) struct RemoteInputScope {
+    origin: std::rc::Rc<std::cell::Cell<bool>>,
+    previous: bool,
+}
 
 #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
-pub(crate) fn remote_input_scope() -> RemoteInputScope {
-    RemoteInputScope(REMOTE_INPUT.with(|origin| origin.replace(true)))
+pub(crate) fn remote_input_scope(cx: &crate::cx::Cx) -> RemoteInputScope {
+    let origin = cx.remote_activity.remote_input.clone();
+    let previous = origin.replace(true);
+    RemoteInputScope { origin, previous }
 }
 
 #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
 impl Drop for RemoteInputScope {
     fn drop(&mut self) {
-        REMOTE_INPUT.with(|origin| origin.set(self.0));
+        self.origin.set(self.previous);
     }
 }
 
@@ -56,6 +59,7 @@ mod activity;
 mod imp {
     use super::activity;
     pub(crate) use activity::note_user_event;
+    pub(crate) use activity::RemoteActivity;
     use crate::cx::Cx;
     use crate::cx_api::CxOsApi;
     use crate::makepad_math::dvec2;
@@ -144,6 +148,14 @@ mod imp {
         app: String,
         pid: u32,
         windows: Vec<WinInfo>,
+        /// The `Cx`'s user sequence, shared when the service starts so the
+        /// request threads can stamp headers without asking the UI thread.
+        user_seq: Arc<AtomicU64>,
+    }
+
+    /// The user sequence as the request threads see it.
+    fn user_seq_now() -> u64 {
+        status_cell().lock().unwrap().user_seq.load(Ordering::Acquire)
     }
 
     #[derive(Clone, PartialEq)]
@@ -201,7 +213,10 @@ mod imp {
         static FRAME_WAITERS: std::cell::RefCell<Vec<(u64, Sender<Reply>, Option<String>, u64)>> = Default::default();
         // Each connection owns its request context; it never crosses threads
         // implicitly. Queued commands carry the explicit expected user epoch.
-        static REQUEST_USER_SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        /// The `if_user_seq` a request carried, if any: a driver that names
+        /// the sequence it started from is refused once the person has
+        /// intervened; one that sends nothing only meets the quiet-period gate.
+        static REQUEST_USER_SEQ: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
         static REQUEST_START_USER_SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     }
 
@@ -294,7 +309,7 @@ mod imp {
 
     struct QueuedCmd {
         cmd: Cmd,
-        user_seq: u64,
+        user_seq: Option<u64>,
         deadline: Instant,
     }
 
@@ -557,7 +572,7 @@ mod imp {
     /// Bind the control port and start the accept loop. Prints
     /// `[makepad-remote] listening on HOST:PORT grabs=DIR` and flushes
     /// (HOST is `127.0.0.1` unless the bind named another interface).
-    pub fn start_if_requested() {
+    pub fn start_if_requested(cx: &mut Cx) {
         let Some((host, port)) = requested_bind() else {
             return;
         };
@@ -587,6 +602,7 @@ mod imp {
             let mut status = status_cell().lock().unwrap();
             status.app = app.clone();
             status.pid = pid;
+            status.user_seq = cx.remote_activity.seq_handle();
         }
         ACTIVE.store(true, Ordering::SeqCst);
         // One line, everything an agent needs to drive and clean up this
@@ -1144,8 +1160,8 @@ mod imp {
         let repaint_id = cx.repaint_id;
         FRAME_WAITERS.with_borrow_mut(|waiters| {
             waiters.retain(|(target, tx, payload, user_seq)| {
-                if *user_seq != activity::user_seq() {
-                    let _ = tx.send(Reply::Conflict(activity::interrupted()));
+                if *user_seq != cx.remote_activity.user_seq() {
+                    let _ = tx.send(Reply::Conflict(activity::interrupted(cx)));
                     return false;
                 }
                 if repaint_id >= *target {
@@ -1211,7 +1227,7 @@ mod imp {
 
     fn apply(cx: &mut Cx, request: QueuedCmd) {
         if let Some(tx) = request.cmd.mutation_reply() {
-            if let Some(conflict) = activity::conflict(request.user_seq) {
+            if let Some(conflict) = activity::conflict(cx, request.user_seq) {
                 let _ = tx.send(Reply::Conflict(conflict));
                 return;
             }
@@ -1220,11 +1236,11 @@ mod imp {
                 return;
             }
         }
-        let user_seq = activity::user_seq();
-        let _origin = super::remote_input_scope();
+        let user_seq = cx.remote_activity.user_seq();
+        let _origin = super::remote_input_scope(cx);
         match request.cmd {
             Cmd::Activity(tx) => {
-                let _ = tx.send(Reply::Text(activity::json()));
+                let _ = tx.send(Reply::Text(activity::json(cx)));
             }
             Cmd::Input {
                 window,
@@ -1844,7 +1860,7 @@ mod imp {
         out.extend_from_slice(
             format!(
                 "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Expose-Headers: X-Makepad-User-Seq, X-Makepad-User-Seq-Start\r\nX-Makepad-User-Seq: {}\r\nX-Makepad-User-Seq-Start: {}\r\nConnection: close\r\n\r\n",
-                body.len(), activity::user_seq(), REQUEST_START_USER_SEQ.get()
+                body.len(), user_seq_now(), REQUEST_START_USER_SEQ.get()
             )
             .as_bytes(),
         );
@@ -1864,15 +1880,16 @@ mod imp {
     }
 
     fn route(method: &str, path: &str, p: &Params) -> Out {
-        REQUEST_START_USER_SEQ.set(activity::user_seq());
+        REQUEST_START_USER_SEQ.set(user_seq_now());
         let expected = match p.get(&["if_user_seq"]) {
             Some(value) => match value.parse::<u64>() {
-                Ok(value) => value,
+                Ok(value) => Some(value),
                 Err(_) => return Out::Json(400, "{\"err\":\"if_user_seq must be an unsigned integer\"}".into()),
             },
-            // Legacy scripts may drive an untouched instance. Once the human
-            // intervenes, they must explicitly acknowledge the new epoch.
-            None => 0,
+            // A script that does not track the sequence is gated by the quiet
+            // period alone; one that does is refused once the person has
+            // intervened since the sequence it named.
+            None => None,
         };
         REQUEST_USER_SEQ.set(expected);
         if method != "GET" && method != "POST" && method != "HEAD" {
@@ -1881,7 +1898,7 @@ mod imp {
         match path {
             "/" | "/help" => Out::Text(200, cheat_sheet()),
             "/s" | "/status" => route_status(p),
-            "/activity" => reply_to_out(ask(Cmd::Activity, 4)),
+            "/activity" => reply_to_out(ask(Cmd::Activity, ACTIVITY_WAIT_SECS)),
             "/g" | "/grab" => route_grab(p),
             "/gseq" => route_grab_sequence(p),
             "/gq" => route_grab_quit(p),
@@ -2062,7 +2079,7 @@ mod imp {
              /s[?w=ID]         {{\"app\":..,\"pid\":..,\"w\":[{{\"i\":id,\"t\":title,\"sz\":[w,h],\"px\":[w,h],\"dpi\":f,\"pos\":[x,y]}}]}}\n\
              /activity         native user activity: user_active, user_seq, idle_ms, quiet_ms, held, last_input, window (also in /s)\n\
              \x20                 native input increments user_seq; injected input does not. No input contents are recorded\n\
-             \x20                 mutations require if_user_seq=N (default 0) and 2 seconds without native input; held input stays active\n\
+             \x20                 mutations need 2 seconds without native input; with if_user_seq=N they are also refused once the person intervened after N; held pointer/touch input stays active\n\
              \x20                 HTTP 409 user_interacting/user_intervened means STOP automation; reads remain available. Resume only after user handoff\n\
              \x20                 all replies include X-Makepad-User-Seq[-Start]; changed epochs invalidate test/capture attribution\n\
              \x20                 a window the HUMAN closed is reported as {{\"err\":\"window N closed by user\"}} — not a crash, do not relaunch\n\
@@ -2229,7 +2246,7 @@ mod imp {
             }
         }
         drop(status);
-        match ask(Cmd::Activity, 4) {
+        match ask(Cmd::Activity, ACTIVITY_WAIT_SECS) {
             Reply::Text(activity) => out.push_str(&format!(",\"activity\":{activity}}}")),
             other => return reply_to_out(other),
         }
@@ -2515,7 +2532,7 @@ mod imp {
                 .unwrap()
                 .push(QueuedCmd {
                     cmd: Cmd::CancelGrabs(self.ids.clone()),
-                    user_seq: 0,
+                    user_seq: None,
                     deadline: Instant::now(),
                 });
             wake_commands();
@@ -2861,6 +2878,11 @@ mod imp {
     }
 
     /// Queue a command and block this HTTP thread until the event loop answers.
+    /// A status or activity read waits for the UI thread through a stall
+    /// instead of answering 408 from a snapshot; the bound only keeps a
+    /// wedged app from pinning the request thread forever.
+    const ACTIVITY_WAIT_SECS: u64 = 600;
+
     fn ask<F>(make: F, timeout_secs: u64) -> Reply
     where
         F: FnOnce(Sender<Reply>) -> Cmd,
@@ -3364,7 +3386,7 @@ mod imp {
 mod imp {
     use crate::cx::Cx;
 
-    pub fn start_if_requested() {}
+    pub fn start_if_requested(_cx: &mut Cx) {}
     pub(crate) fn note_user_event(_cx: &mut Cx, _event: &crate::event::Event) {}
     /// There is no remote bridge on these targets, so nothing ever asked for one.
     pub fn requested() -> bool {

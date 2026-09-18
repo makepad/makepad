@@ -80,6 +80,7 @@ impl Cx {
                 os.user_uniforms_gen = None;
                 os.inst_capacity = 0;
                 os.retained_publication = None;
+                os.retained_failed = 0;
                 os.inst_charge.take()
             });
 
@@ -208,6 +209,18 @@ impl Cx {
                 let sh = &self.draw_shaders[draw_call.draw_shader_id.index];
                 if sh.os_shader_id.is_none() {
                     // shader didnt compile somehow
+                    continue;
+                }
+
+                // A publication the browser refused to upload is final for
+                // that content: skipped, never retried every frame. Changed
+                // content is a new publication and gets a fresh attempt.
+                if draw_item.os.retained_failed != 0
+                    && draw_item
+                        .retained_instances
+                        .as_ref()
+                        .is_some_and(|publication| publication.id() == draw_item.os.retained_failed)
+                {
                     continue;
                 }
 
@@ -1198,6 +1211,9 @@ pub struct CxOsDrawCall {
     pub inst_vb_generation: u64,
     pub inst_capacity: usize,
     pub retained_publication: Option<crate::retained_instances::RetainedInstances>,
+    /// The publication whose upload the browser refused (0 = none). That
+    /// content is not drawn and not retried; a new publication is tried.
+    pub retained_failed: u64,
     pub inst_charge: Option<crate::retained_instances::RetainedAllocation>,
     pub uniforms_recording_gen: Option<u64>,
     pub draw_call_uniforms_gen: Option<u64>,
