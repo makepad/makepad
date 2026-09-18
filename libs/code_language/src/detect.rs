@@ -12,7 +12,7 @@ pub fn inventory_extensions() -> &'static [&'static str] {
         "svg", "md", "markdown", "sql", "ddl", "pgsql", "psql", "mysql", "tsql", "plsql", "pks",
         "pkb", "json", "jsonl", "geojson", "jsonc", "json5", "sh", "ksh", "mksh", "bash", "bats",
         "zsh", "go", "php", "phtml", "kt", "kts", "dart", "swift", "rb", "rake", "gemspec", "ru",
-        "fs", "fsi", "fsx", "zig", "zon",
+        "fs", "fsi", "fsx", "zig", "zon", "hs", "lhs",
     ]
 }
 
@@ -536,6 +536,22 @@ pub fn detect_path(path: &str, bytes: Option<&[u8]>) -> Detection {
             note: "zig object notation",
         };
     }
+    if eq_ignore(ext, "hs") {
+        return Detection {
+            language: LanguageId::Haskell,
+            dialect: Dialect::default_for(LanguageId::Haskell),
+            source: DetectionSource::Extension,
+            note: "haskell source",
+        };
+    }
+    if eq_ignore(ext, "lhs") {
+        return Detection {
+            language: LanguageId::Haskell,
+            dialect: dialect(LanguageId::Haskell, "literate"),
+            source: DetectionSource::Extension,
+            note: "literate haskell (bird)",
+        };
+    }
     if let Some(bytes) = bytes {
         if let Some(detected) = detect_content(bytes) {
             return detected;
@@ -749,6 +765,7 @@ pub fn has_compiled_frontend(language: LanguageId) -> bool {
             | LanguageId::Ruby
             | LanguageId::FSharp
             | LanguageId::Zig
+            | LanguageId::Haskell
     )
 }
 

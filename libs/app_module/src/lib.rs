@@ -67,6 +67,19 @@ pub trait AppModule: Sync + 'static {
     fn capabilities(&self) -> &'static [&'static str];
 }
 
+/// The `dylib` entry a host `dlopen`s. App crates invoke this under
+/// `#[cfg(feature = "dynamic-module")]` so a static all-in-one that links
+/// many apps does not get a duplicate `makepad_app_module` symbol.
+#[macro_export]
+macro_rules! export_app_module {
+    ($static_name:ident) => {
+        #[no_mangle]
+        pub extern "C" fn makepad_app_module() -> &'static dyn $crate::AppModule {
+            &$static_name
+        }
+    };
+}
+
 /// The owner token of one instance. Every lease the host opens for the
 /// instance — a timer, a network request, an audio lane, a native layer —
 /// carries it, so teardown can find and end them and a late callback can be

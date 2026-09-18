@@ -460,7 +460,6 @@ struct TurnResult {
     prefix_ingested: Option<u64>,
     prefix_resumed: Option<bool>,
     prompt_tokens_estimate: u64,
-    text: String,
 }
 
 impl TurnResult {
@@ -652,7 +651,6 @@ fn run_turn(
         .ok_or_else(|| format!("no job id in {response}"))?;
 
     let mut first_visible = None;
-    let mut last = String::new();
     // THE METER, measured the way the client computes it: generated-token
     // deltas over the wall time between the polls that carried them. A
     // service-side round rate says what the GPU did; this says what the person
@@ -661,7 +659,7 @@ fn run_turn(
     let mut meter_first: Option<(Instant, u64)> = None;
     let mut meter_last: Option<(Instant, u64)> = None;
     let mut meter_gaps: Vec<(f64, u64)> = Vec::new();
-    loop {
+    let last = loop {
         if started.elapsed() > TURN_TIMEOUT {
             return Err(format!("turn {turn} did not finish in {TURN_TIMEOUT:?}"));
         }
@@ -696,16 +694,15 @@ fn run_turn(
             }
             meter_last = Some((now, gen));
         }
-        last = status.clone();
         match field_str(&status, "state").as_deref() {
-            Some("done") => break,
+            Some("done") => break status,
             Some("failed") | Some("error") => {
                 return Err(field_str(&status, "error").unwrap_or_else(|| "failed".into()))
             }
             Some("cancelled") => return Err("cancelled".into()),
             _ => {}
         }
-    }
+    };
     let total = started.elapsed();
     let text = field_str(&last, "partial_text").unwrap_or_default();
     // What the CLIENT stores, which is not always what the model wrote.
@@ -761,7 +758,6 @@ fn run_turn(
         prefix_ingested: field_u64(&last, "prefix_ingested"),
         prefix_resumed: field_bool(&last, "prefix_resumed"),
         prompt_tokens_estimate,
-        text,
     })
 }
 

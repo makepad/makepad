@@ -250,6 +250,7 @@ impl CliTurn {
     /// Kill the process and everything it spawned (the group we created),
     /// then remove its turn directory.
     pub fn kill_group(mut self) {
+        #[cfg(unix)]
         let pid = self.child.id();
         let _ = self.child.kill();
         // std has no group kill; /bin/kill does.

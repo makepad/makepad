@@ -55,10 +55,12 @@ pub enum LanguageId {
     FSharp = 27,
     /// Zig source; compiled frontend registered.
     Zig = 28,
+    /// Haskell source; compiled frontend registered.
+    Haskell = 29,
 }
 
 impl LanguageId {
-    pub const ALL: [LanguageId; 29] = [
+    pub const ALL: [LanguageId; 30] = [
         LanguageId::Unknown,
         LanguageId::Rust,
         LanguageId::Toml,
@@ -88,6 +90,7 @@ impl LanguageId {
         LanguageId::Ruby,
         LanguageId::FSharp,
         LanguageId::Zig,
+        LanguageId::Haskell,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -121,6 +124,7 @@ impl LanguageId {
             LanguageId::Ruby => "ruby",
             LanguageId::FSharp => "fsharp",
             LanguageId::Zig => "zig",
+            LanguageId::Haskell => "haskell",
         }
     }
 

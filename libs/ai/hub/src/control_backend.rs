@@ -706,6 +706,7 @@ mod tests {
             canny_high: None,
             peer_sources: Vec::new(),
             peer_tickets: Vec::new(),
+            pixal: None,
         };
         let mut sink = |_: &str, _: f64| {};
         let err = backend

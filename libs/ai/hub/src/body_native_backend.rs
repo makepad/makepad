@@ -390,12 +390,15 @@ impl ContentBackend for BodyNativeBackend {
 mod tests {
     use super::*;
     use crate::backend::{LiveConfig, RgbImage};
+    #[cfg(feature = "body-native")]
     use crate::protocol::GenerateRequestJson;
 
+    #[cfg(feature = "body-native")]
     fn params(request: GenerateRequestJson) -> GenerateParams {
         GenerateParams::from_request(&request).unwrap()
     }
 
+    #[cfg(feature = "body-native")]
     fn b64(bytes: &[u8]) -> String {
         String::from_utf8(makepad_base64::base64_encode(
             bytes,
@@ -404,6 +407,7 @@ mod tests {
         .unwrap()
     }
 
+    #[cfg(feature = "body-native")]
     fn input_png() -> Vec<u8> {
         crate::testpattern::encode_png_rgb8(&vec![128u8; 8 * 4 * 3], 8, 4).unwrap()
     }

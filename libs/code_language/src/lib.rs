@@ -12,6 +12,7 @@ pub mod dart_lex;
 pub mod detect;
 pub mod fsharp_lex;
 pub mod go_lex;
+pub mod haskell_lex;
 pub mod html_lex;
 pub mod id;
 pub mod java_lex;
@@ -44,6 +45,7 @@ pub use detect::{
 };
 pub use fsharp_lex::{FSharpState, FSHARP_LEXER_VERSION};
 pub use go_lex::{GoState, GO_LEXER_VERSION};
+pub use haskell_lex::{HaskellState, HASKELL_LEXER_VERSION};
 pub use html_lex::{HtmlState, MarkupDialect, HTML_LEXER_VERSION};
 pub use id::{Detection, DetectionSource, Dialect, LanguageId, LanguageVersion};
 pub use java_lex::{JavaState, JAVA_LEXER_VERSION};
@@ -52,7 +54,7 @@ pub use kotlin_lex::{KotlinState, KOTLIN_LEXER_VERSION};
 pub use lex::{
     lexical_provider, lexer_schema, provider_for_detection, provider_for_path,
     CSharpLexicalProvider, CppLexicalProvider, CssLexicalProvider, DartLexicalProvider,
-    FSharpLexicalProvider, GoLexicalProvider,
+    FSharpLexicalProvider, GoLexicalProvider, HaskellLexicalProvider,
     HtmlLexicalProvider, JavaLexicalProvider, JsonLexicalProvider, KotlinLexicalProvider,
     LexContinuation, LexicalProvider, MarkdownLexicalProvider, MarkupLexicalProvider,
     PhpLexicalProvider,
