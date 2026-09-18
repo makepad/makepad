@@ -8,6 +8,9 @@ use std::collections::HashMap;
 pub enum DesktopStyle {
     #[default]
     Omarchy,
+    /// A dark style in near-black and orange, the only one here not modelled
+    /// on somebody else's desktop.
+    BlackOrange,
     Macos,
     Windows,
     Windows2000,
@@ -17,10 +20,11 @@ pub enum DesktopStyle {
 }
 
 impl DesktopStyle {
-    pub const ALL: [Self; 7] = [Self::Omarchy, Self::Macos, Self::Windows, Self::Windows2000, Self::NextStep, Self::Ios, Self::Android];
+    pub const ALL: [Self; 8] = [Self::Omarchy, Self::BlackOrange, Self::Macos, Self::Windows, Self::Windows2000, Self::NextStep, Self::Ios, Self::Android];
     pub fn id(self) -> &'static str {
         match self {
             Self::Omarchy => "omarchy",
+            Self::BlackOrange => "black-orange",
             Self::Macos => "macos",
             Self::Windows => "windows",
             Self::Windows2000 => "windows-2000",
@@ -32,6 +36,7 @@ impl DesktopStyle {
     pub fn label(self) -> &'static str {
         match self {
             Self::Omarchy => "Omarchy",
+            Self::BlackOrange => "Black orange",
             Self::Macos => "macOS",
             Self::Windows => "Windows",
             Self::Windows2000 => "Windows 2000",
@@ -46,15 +51,31 @@ impl DesktopStyle {
     }
     pub fn supports_dark(self) -> bool { matches!(self, Self::Macos | Self::Windows | Self::Ios | Self::Android) }
     pub fn mobile(self) -> bool { matches!(self, Self::Ios | Self::Android) }
+    /// Which set of app artwork this style draws, as an index into the icon
+    /// table. A style is free to borrow another's drawings rather than have
+    /// every icon redrawn for it -- the table is one entry per SET, not one
+    /// per style, so the enum's own order must not be read as an index into
+    /// it.
+    pub fn icon_set(self) -> usize {
+        match self {
+            Self::Omarchy | Self::BlackOrange => 0,
+            Self::Macos => 1,
+            Self::Windows => 2,
+            Self::Windows2000 => 3,
+            Self::NextStep => 4,
+            Self::Ios => 5,
+            Self::Android => 6,
+        }
+    }
     pub fn next(self) -> Self {
         Self::ALL[(self as usize + 1) % Self::ALL.len()]
     }
     pub fn floating(self) -> bool {
-        self != Self::Omarchy && !self.mobile()
+        !matches!(self, Self::Omarchy | Self::BlackOrange) && !self.mobile()
     }
     pub fn shelf_height(self) -> f64 {
         match self {
-            Self::Omarchy => 0.0,
+            Self::Omarchy | Self::BlackOrange => 0.0,
             Self::Macos => 86.0,
             Self::Windows => 54.0,
             Self::Windows2000 => 34.0,
@@ -63,7 +84,7 @@ impl DesktopStyle {
     }
     pub fn title_height(self) -> f64 {
         match self {
-            Self::Omarchy => 0.0,
+            Self::Omarchy | Self::BlackOrange => 0.0,
             Self::Macos => 32.0,
             Self::Windows => 34.0,
             Self::Windows2000 => 20.0,
@@ -107,6 +128,10 @@ impl StyleSheet {
             DesktopStyle::Omarchy => (
                 include_str!("../themes/omarchy/theme.splash"),
                 include_str!("../themes/omarchy/widgets.splash"),
+            ),
+            DesktopStyle::BlackOrange => (
+                include_str!("../themes/black-orange/theme.splash"),
+                include_str!("../themes/black-orange/widgets.splash"),
             ),
             DesktopStyle::Macos if dark => (
                 include_str!("../themes/macos-dark/theme.splash"),
@@ -340,6 +365,7 @@ mod tests {
                         DesktopStyle::Windows => 4.0,
                         DesktopStyle::Ios => 14.0,
                         DesktopStyle::Android => 20.0,
+                        DesktopStyle::BlackOrange => 2.5,
                         _ => 0.0,
                     }
                 );

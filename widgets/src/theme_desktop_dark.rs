@@ -833,6 +833,7 @@ mod crate_tint_role_tests {
             assert_design_kind_roles(vm, "light-default");
             for (style, dark) in [
                 (DesktopStyle::Omarchy, false),
+                (DesktopStyle::BlackOrange, false),
                 (DesktopStyle::Macos, false),
                 (DesktopStyle::Macos, true),
                 (DesktopStyle::Windows, false),
@@ -872,6 +873,7 @@ mod crate_tint_role_tests {
     fn crate_tint_roles_resolve_in_every_shipped_theme() {
         let sheets = [
             (DesktopStyle::Omarchy, false, &DARK_TINTS),
+            (DesktopStyle::BlackOrange, false, &DARK_TINTS),
             (DesktopStyle::Macos, false, &LIGHT_TINTS),
             (DesktopStyle::Macos, true, &DARK_TINTS),
             (DesktopStyle::Windows, false, &LIGHT_TINTS),

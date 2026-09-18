@@ -1480,6 +1480,7 @@ mod sheet_contrast_tests {
     /// Every sheet the library ships, in both appearances it offers.
     const SHEETS: &[(DesktopStyle, bool)] = &[
         (DesktopStyle::Omarchy, false),
+        (DesktopStyle::BlackOrange, false),
         (DesktopStyle::Macos, false),
         (DesktopStyle::Macos, true),
         (DesktopStyle::Windows, false),
@@ -1629,21 +1630,27 @@ mod sheet_contrast_tests {
     fn contrast_audit() {
         let mut lines: Vec<String> = Vec::new();
         walk(&mut |vm, label| {
-            for (ground, ink) in MEANING.iter().chain(SURFACES).chain(VARIANTS) {
-                if let (Some(g), Some(i)) = (val(vm, ground), val(vm, ink)) {
-                    let c = reads(g | 0xFF, i);
-                    lines.push(format!(
-                        "{label:<14} {ground:<32} {ink:<24} #{:06X} on #{:06X} = {c:5.2}{}",
-                        i >> 8,
-                        g >> 8,
-                        if c < READABLE { "  FAIL" } else { "" }
-                    ));
+            let bar = |pairs: &[(&str, &str)]| {
+                if std::ptr::eq(pairs.as_ptr(), VARIANTS.as_ptr()) { LEGIBLE } else { READABLE }
+            };
+            for pairs in [MEANING, SURFACES, VARIANTS] {
+                let need = bar(pairs);
+                for (ground, ink) in pairs {
+                    if let (Some(g), Some(i)) = (val(vm, ground), val(vm, ink)) {
+                        let c = reads(g | 0xFF, i);
+                        lines.push(format!(
+                            "{label:<14} {ground:<32} {ink:<24} #{:06X} on #{:06X} = {c:5.2} (needs {need}){}",
+                            i >> 8,
+                            g >> 8,
+                            if c < need { "  FAIL" } else { "" }
+                        ));
+                    }
                 }
             }
         });
         let failed = lines.iter().filter(|l| l.ends_with("FAIL")).count();
         println!("{}", lines.join("
 "));
-        println!("{failed} of {} pairs below {READABLE}:1", lines.len());
+        println!("{failed} of {} pairs below the bar for their kind", lines.len());
     }
 }

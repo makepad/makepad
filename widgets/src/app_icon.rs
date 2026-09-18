@@ -91,7 +91,7 @@ pub fn load_assets(style: DesktopStyle) -> Vec<IconAsset> {
         .iter()
         .map(|icon| IconAsset {
             name: icon.name.into(),
-            svg: icon.variants[style as usize].into(),
+            svg: icon.variants[style.icon_set()].into(),
         })
         .collect();
     #[cfg(not(target_arch = "wasm32"))]
@@ -170,7 +170,7 @@ pub fn source(cx: &mut Cx, style: DesktopStyle, name: &str) -> Arc<str> {
         .get(&key)
         .or_else(|| catalog.sources.get(&(style as usize, "app".into())))
         .cloned()
-        .unwrap_or_else(|| Arc::from(ICONS.last().unwrap().variants[style as usize]))
+        .unwrap_or_else(|| Arc::from(ICONS.last().unwrap().variants[style.icon_set()]))
 }
 
 struct CachedIcon {
