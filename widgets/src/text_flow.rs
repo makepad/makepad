@@ -1737,7 +1737,20 @@ impl TextFlow {
         self.in_table_header = true;
         self.table_row_is_header = true;
         self.table_row_cell_rects.clear();
-        cx.begin_turtle(self.table_row_walk, self.table_row_layout);
+        // The header's ground goes down BEFORE its cells, not after them.
+        // Drawn after, it covered its own text wherever the theme's highlight
+        // is opaque -- which is every style sheet the library ships. Only the
+        // three base themes escaped it, by making that highlight translucent,
+        // which is why the header read fine in them and was blank under every
+        // style. `begin` puts the quad in the background draw group and `end`
+        // sizes it to the finished row, so it cannot cover what sits on it.
+        // Its border is suppressed: the per-cell pass below still draws the
+        // rules, on top, where they belong.
+        let border = self.draw_block.table_border_color;
+        self.draw_block.block_type = FlowBlockType::TableCell;
+        self.draw_block.table_border_color = Vec4f::default();
+        self.draw_block.begin(cx, self.table_row_walk, self.table_row_layout);
+        self.draw_block.table_border_color = border;
     }
 
     pub fn begin_table_row(&mut self, cx: &mut Cx2d) {
@@ -1747,7 +1760,12 @@ impl TextFlow {
     }
 
     pub fn end_table_row(&mut self, cx: &mut Cx2d) {
-        let row_rect = cx.end_turtle();
+        let row_rect = cx.turtle().rect();
+        if self.table_row_is_header {
+            self.draw_block.end(cx);
+        } else {
+            cx.end_turtle();
+        }
         self.draw_row_cell_borders(cx, row_rect);
         if self.selectable {
             self.selection_tracker.push_newline();
@@ -1767,11 +1785,10 @@ impl TextFlow {
         for i in 0..cell_count {
             let cell_rect = self.table_row_cell_rects[i];
 
-            self.draw_block.table_header_bg_color = if self.table_row_is_header {
-                saved_bg
-            } else {
-                transparent
-            };
+            // Always transparent here: a header's ground was already laid
+            // down underneath its text by `begin_table_header_row`, and a
+            // body row never had one. This pass is for the rules alone.
+            self.draw_block.table_header_bg_color = transparent;
             self.draw_block.draw_abs(
                 cx,
                 Rect {
