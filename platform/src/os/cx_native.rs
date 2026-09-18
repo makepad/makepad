@@ -67,7 +67,7 @@ impl Cx {
         request: crate::storage::StorageRequest,
     ) {
         let sender = self.storage_state.sender();
-        match self.task_pool().submit(crate::thread::Lane::Heavy, move || {
+        match self.task_pool().submit_internal(crate::thread::Lane::Heavy, move || {
             let response = crate::storage::native::execute(&crate::home::storage_dir(), request);
             let _ = sender.send(response);
         }) {

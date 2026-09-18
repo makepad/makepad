@@ -15,7 +15,7 @@ description = "Quite Ok Image (QOI) decoder and encoder part of the zune-image f
 [features]
 log = ["makepad-zune-core/log"]
 std = ["makepad-zune-core/std"]
-default = ["std", "log"]
+default = ["std"]
 [dependencies]
 makepad-zune-core = { path = "../zune-core", version = "^0.5.1" }
 

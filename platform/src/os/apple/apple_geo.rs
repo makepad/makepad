@@ -72,7 +72,7 @@ impl AppleLocationAccess {
             let callback: Box<dyn Fn(AppleLocationDelegateEvent) + Send + 'static> =
                 Box::new(move |event| {
                     let _ = event_tx.send(event);
-                    SignalToUI::set_ui_signal();
+                    SignalToUI::set_internal_signal();
                 });
             let double_box = Box::new(callback);
             let delegate = RcObjcId::from_owned(msg_send![
@@ -150,7 +150,7 @@ impl AppleLocationAccess {
             let _ = self
                 .tx
                 .send(AppleLocationDelegateEvent::Error(LocationErrorEvent::PermissionDenied));
-            SignalToUI::set_ui_signal();
+            SignalToUI::set_internal_signal();
         }
     }
 }
