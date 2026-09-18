@@ -90,6 +90,9 @@ pub struct Tessellator {
     points: Vec<VPoint>,
     paths: Vec<SubPath>,
     cum_dists: Vec<f32>,
+    /// Per point: where the inner stroke edge collapses to when the path
+    /// bends tighter than the stroke's half width (`collapse_inner_folds`).
+    inner_pivots: Vec<Option<(f32, f32)>>,
     /// Reusable sweep-line tessellator: keeps its event/edge/monotone
     /// buffers alive across fill() calls to avoid per-fill allocation churn.
     sweep: SweepTessellator,
@@ -402,6 +405,110 @@ impl Tessellator {
         }
     }
 
+    /// A path that bends tighter than the stroke's half width has no inner
+    /// offset curve: the per-point inner miter points run backwards along the
+    /// path and the strip folds over itself there (spikes on the inside of
+    /// the bend, doubly blended wedges across it). The true inner edge of
+    /// such a bend is the corner where the inner edges of the two segments
+    /// around it meet, so every point of the folded run takes that corner as
+    /// its inner vertex and the strip fans around it.
+    fn collapse_inner_folds(&mut self, hw: f32) {
+        self.inner_pivots.clear();
+        self.inner_pivots.resize(self.points.len(), None);
+        for pi in 0..self.paths.len() {
+            let (first, count, closed) = {
+                let sp = &self.paths[pi];
+                (sp.first, sp.count, sp.closed)
+            };
+            // Closed paths keep their miter points: a run could wrap the seam.
+            if closed || count < 4 {
+                continue;
+            }
+            let side = |point: &VPoint| if (point.flags & PT_LEFT) != 0 { hw } else { -hw };
+            let inner = |point: &VPoint| {
+                let s = side(point);
+                (point.x + point.dmx * s, point.y + point.dmy * s)
+            };
+            // Segment k runs from point k to k + 1; joints are 1..count - 1.
+            let folded = |points: &[VPoint], k: usize| {
+                if k == 0 || k + 1 >= count - 1 {
+                    return false;
+                }
+                let (a, b) = (&points[first + k], &points[first + k + 1]);
+                if (a.flags & PT_LEFT) != (b.flags & PT_LEFT) {
+                    return false;
+                }
+                let (ia, ib) = (inner(a), inner(b));
+                (ib.0 - ia.0) * a.dx + (ib.1 - ia.1) * a.dy <= 0.0
+            };
+            let mut k = 1;
+            while k + 1 < count - 1 {
+                if !folded(&self.points, k) {
+                    k += 1;
+                    continue;
+                }
+                let mut a = k;
+                let mut b = k + 1;
+                while b + 1 < count - 1 && folded(&self.points, b) {
+                    b += 1;
+                }
+                let s = side(&self.points[first + a]);
+                // Absorb neighbours whose own inner point the corner overtakes.
+                let mut pivot = None;
+                for _ in 0..count {
+                    let lead = self.points[first + a - 1];
+                    let trail = self.points[first + b];
+                    let from = (self.points[first + a].x + lead.dy * s, self.points[first + a].y - lead.dx * s);
+                    let to = (trail.x + trail.dy * s, trail.y - trail.dx * s);
+                    let denom = lead.dx * trail.dy - lead.dy * trail.dx;
+                    let corner = if denom.abs() > 1e-4 {
+                        let t = ((to.0 - from.0) * trail.dy - (to.1 - from.1) * trail.dx) / denom;
+                        (from.0 + lead.dx * t, from.1 + lead.dy * t)
+                    } else {
+                        ((from.0 + to.0) * 0.5, (from.1 + to.1) * 0.5)
+                    };
+                    pivot = Some(corner);
+                    let same_side = |point: &VPoint| side(point) == s;
+                    if a > 1 && same_side(&self.points[first + a - 1]) {
+                        let before = inner(&self.points[first + a - 1]);
+                        if (corner.0 - before.0) * lead.dx + (corner.1 - before.1) * lead.dy < 0.0 {
+                            a -= 1;
+                            continue;
+                        }
+                    }
+                    if b + 1 < count - 1 && same_side(&self.points[first + b + 1]) {
+                        let after = inner(&self.points[first + b + 1]);
+                        if (after.0 - corner.0) * trail.dx + (after.1 - corner.1) * trail.dy < 0.0 {
+                            b += 1;
+                            continue;
+                        }
+                    }
+                    break;
+                }
+                // A neighbour that cannot join the run (the path's end, or a
+                // joint bending the other way) bounds the corner: past its own
+                // offset point the adjoining quad would run backwards.
+                if let Some(corner) = pivot.as_mut() {
+                    let lead = self.points[first + a - 1];
+                    let trail = self.points[first + b];
+                    let next = self.points[first + b + 1];
+                    let after = (next.x + trail.dy * s, next.y - trail.dx * s);
+                    if (after.0 - corner.0) * trail.dx + (after.1 - corner.1) * trail.dy < 0.0 {
+                        *corner = after;
+                    }
+                    let before = (lead.x + lead.dy * s, lead.y - lead.dx * s);
+                    if (corner.0 - before.0) * lead.dx + (corner.1 - before.1) * lead.dy < 0.0 {
+                        *corner = before;
+                    }
+                }
+                for j in a..=b {
+                    self.inner_pivots[first + j] = pivot;
+                }
+                k = b + 1;
+            }
+        }
+    }
+
     /// Generate stroke geometry into the provided vecs (clears them first).
     pub fn stroke(
         &mut self,
@@ -490,6 +597,7 @@ impl Tessellator {
     ) {
         let hw = w * 0.5 + aa * 0.5;
         self.calculate_joins(hw, line_join, miter_limit);
+        self.collapse_inner_folds(hw);
         verts.clear();
         indices.clear();
         let has_round_cap = self.paths.iter().any(|path| !path.closed)
@@ -558,7 +666,7 @@ impl Tessellator {
                 let flags = p1.flags;
                 if (flags & (PT_BEVEL | PT_INNERBEVEL)) != 0 {
                     let vi_before = verts.len();
-                    self.emit_bevel_join(verts, indices, p0, p1, hw, hw, u0, u1);
+                    self.emit_bevel_join(verts, indices, p0, p1, hw, hw, u0, u1, line_join, self.inner_pivots[first + j]);
                     for v in &mut verts[vi_before..] {
                         v.stroke_dist = dist;
                     }
@@ -567,20 +675,17 @@ impl Tessellator {
                     }
                 } else {
                     let vi = verts.len() as u32;
-                    verts.push(VVertex::with_dist(
-                        p1.x + p1.dmx * hw,
-                        p1.y + p1.dmy * hw,
-                        u0,
-                        1.0,
-                        dist,
-                    ));
-                    verts.push(VVertex::with_dist(
-                        p1.x - p1.dmx * hw,
-                        p1.y - p1.dmy * hw,
-                        u1,
-                        1.0,
-                        dist,
-                    ));
+                    let mut left = (p1.x + p1.dmx * hw, p1.y + p1.dmy * hw);
+                    let mut right = (p1.x - p1.dmx * hw, p1.y - p1.dmy * hw);
+                    if let Some(pivot) = self.inner_pivots[first + j] {
+                        if (flags & PT_LEFT) != 0 {
+                            left = pivot;
+                        } else {
+                            right = pivot;
+                        }
+                    }
+                    verts.push(VVertex::with_dist(left.0, left.1, u0, 1.0, dist));
+                    verts.push(VVertex::with_dist(right.0, right.1, u1, 1.0, dist));
                     if let Some(anchors) = anchors.as_deref_mut() {
                         anchors.resize(verts.len(), [p1.x, p1.y]);
                     }
@@ -795,6 +900,12 @@ impl Tessellator {
         }
     }
 
+    /// A bevel or round join as strip pairs (left vertex, right vertex). The
+    /// inner side collapses to the miter point so the two segments' quads do
+    /// not overlap there; only a segment shorter than the stroke is wide
+    /// (`PT_INNERBEVEL`) keeps its two offset points. The outer side is the
+    /// miter point, the bevel chord, or an arc around the corner.
+    #[allow(clippy::too_many_arguments)]
     fn emit_bevel_join(
         &self,
         verts: &mut Vec<VVertex>,
@@ -805,46 +916,89 @@ impl Tessellator {
         rw: f32,
         u0: f32,
         u1: f32,
+        line_join: LineJoin,
+        inner_pivot: Option<(f32, f32)>,
     ) {
         let vi = verts.len() as u32;
         let dlx0 = p0.dy;
         let dly0 = -p0.dx;
         let dlx1 = p1.dy;
         let dly1 = -p1.dx;
-        if (p1.flags & PT_LEFT) != 0 {
-            let lx0 = p1.x + dlx0 * lw;
-            let ly0 = p1.y + dly0 * lw;
-            let lx1 = p1.x + dlx1 * lw;
-            let ly1 = p1.y + dly1 * lw;
-            verts.push(VVertex::new(lx0, ly0, u0, 1.0));
-            verts.push(VVertex::new(p1.x - dlx0 * rw, p1.y - dly0 * rw, u1, 1.0));
-            verts.push(VVertex::new(lx1, ly1, u0, 1.0));
-            verts.push(VVertex::new(p1.x - dlx1 * rw, p1.y - dly1 * rw, u1, 1.0));
+        let left_inner = (p1.flags & PT_LEFT) != 0;
+        // Signed offsets: the left side lies along +normal, the right along -normal.
+        let (inner_w, outer_w, inner_u, outer_u) = if left_inner {
+            (lw, -rw, u0, u1)
         } else {
-            let rx0 = p1.x - dlx0 * rw;
-            let ry0 = p1.y - dly0 * rw;
-            let rx1 = p1.x - dlx1 * rw;
-            let ry1 = p1.y - dly1 * rw;
-            verts.push(VVertex::new(p1.x + dlx0 * lw, p1.y + dly0 * lw, u0, 1.0));
-            verts.push(VVertex::new(rx0, ry0, u1, 1.0));
-            verts.push(VVertex::new(p1.x + dlx1 * lw, p1.y + dly1 * lw, u0, 1.0));
-            verts.push(VVertex::new(rx1, ry1, u1, 1.0));
+            (-rw, lw, u1, u0)
+        };
+        let (inner0, inner1) = if let Some(pivot) = inner_pivot {
+            (pivot, pivot)
+        } else if (p1.flags & PT_INNERBEVEL) != 0 {
+            (
+                (p1.x + dlx0 * inner_w, p1.y + dly0 * inner_w),
+                (p1.x + dlx1 * inner_w, p1.y + dly1 * inner_w),
+            )
+        } else {
+            let point = (p1.x + p1.dmx * inner_w, p1.y + p1.dmy * inner_w);
+            (point, point)
+        };
+        let mut push_pair = |inner: (f32, f32), outer: (f32, f32)| {
+            if left_inner {
+                verts.push(VVertex::new(inner.0, inner.1, inner_u, 1.0));
+                verts.push(VVertex::new(outer.0, outer.1, outer_u, 1.0));
+            } else {
+                verts.push(VVertex::new(outer.0, outer.1, outer_u, 1.0));
+                verts.push(VVertex::new(inner.0, inner.1, inner_u, 1.0));
+            }
+        };
+        if (p1.flags & PT_BEVEL) == 0 {
+            // Inner bevel under a miter join: the outer side stays mitered.
+            let outer = (p1.x + p1.dmx * outer_w, p1.y + p1.dmy * outer_w);
+            push_pair(inner0, outer);
+            push_pair(inner1, outer);
+        } else {
+            let outer0 = (p1.x + dlx0 * outer_w, p1.y + dly0 * outer_w);
+            let outer1 = (p1.x + dlx1 * outer_w, p1.y + dly1 * outer_w);
+            push_pair(inner0, outer0);
+            if matches!(line_join, LineJoin::Round) {
+                let radius = outer_w.abs();
+                let a0 = (dly0 * outer_w).atan2(dlx0 * outer_w);
+                let mut sweep = (dly1 * outer_w).atan2(dlx1 * outer_w) - a0;
+                if sweep > std::f32::consts::PI {
+                    sweep -= std::f32::consts::TAU;
+                } else if sweep < -std::f32::consts::PI {
+                    sweep += std::f32::consts::TAU;
+                }
+                // Chord error of 0.25 units, as the curve flattener uses.
+                let step = 2.0 * (radius / (radius + 0.25)).clamp(-1.0, 1.0).acos();
+                let segments = if step > 1e-4 {
+                    ((sweep.abs() / step).ceil() as usize).clamp(1, 64)
+                } else {
+                    1
+                };
+                let inner_mid = if inner0 == inner1 { inner0 } else { (p1.x, p1.y) };
+                for k in 1..segments {
+                    let angle = a0 + sweep * k as f32 / segments as f32;
+                    push_pair(
+                        inner_mid,
+                        (p1.x + angle.cos() * radius, p1.y + angle.sin() * radius),
+                    );
+                }
+            }
+            push_pair(inner1, outer1);
         }
-        // connect to previous pair and within bevel
-        if vi >= 2 {
-            indices.push(vi - 2);
-            indices.push(vi - 1);
-            indices.push(vi);
-            indices.push(vi - 1);
-            indices.push(vi + 1);
-            indices.push(vi);
+        let end = verts.len() as u32;
+        // Connect to the previous pair, then pair to pair through the join.
+        let mut pair = if vi >= 2 { vi - 2 } else { vi };
+        while pair + 2 < end {
+            indices.push(pair);
+            indices.push(pair + 1);
+            indices.push(pair + 2);
+            indices.push(pair + 1);
+            indices.push(pair + 3);
+            indices.push(pair + 2);
+            pair += 2;
         }
-        indices.push(vi);
-        indices.push(vi + 1);
-        indices.push(vi + 2);
-        indices.push(vi + 1);
-        indices.push(vi + 3);
-        indices.push(vi + 2);
     }
 
     /// Opt-in fast path for `fill()`: derive AA fill-side signs from contour
