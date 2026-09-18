@@ -85,6 +85,36 @@ mod imp {
     // ------------------------------------------------------------------
 
     static ACTIVE: AtomicBool = AtomicBool::new(false);
+    /// When the bridge last injected input, in milliseconds since it came
+    /// up; zero until it has. A window may wear a marker while this is
+    /// recent, so a person watching a scripted run can see that the pointer
+    /// and the keyboard are spoken for and keep their hands off.
+    static INJECTED_AT_MS: AtomicU64 = AtomicU64::new(0);
+    /// How long hands-off stays true after the last injected input.
+    const HANDS_OFF_LINGER_MS: u64 = 3000;
+
+    fn uptime_ms() -> u64 {
+        static T0: OnceLock<Instant> = OnceLock::new();
+        T0.get_or_init(Instant::now).elapsed().as_millis() as u64
+    }
+
+    /// Called when the bridge applies injected input.
+    fn note_injected_input() {
+        INJECTED_AT_MS.store(uptime_ms().max(1), Ordering::Relaxed);
+    }
+
+    /// Is the bridge driving right now, as far as a person watching the
+    /// window should be told?
+    ///
+    /// Read by app chrome on every frame: a scripted run injects a burst of
+    /// events and then thinks, so this stays true for a few seconds after
+    /// the last one rather than flickering off between them. Because it goes
+    /// quiet on its own, a caller that draws something from it must keep
+    /// asking for frames until it does.
+    pub fn hands_off_active() -> bool {
+        let at = INJECTED_AT_MS.load(Ordering::Relaxed);
+        at != 0 && uptime_ms().saturating_sub(at) < HANDS_OFF_LINGER_MS
+    }
 
     /// True when this process asked for the remote bridge, in any of the forms
     /// [`requested_bind`] accepts — including `MAKEPAD_REMOTE`, which a plain
@@ -1248,6 +1278,7 @@ mod imp {
                 wait,
                 tx,
             } => {
+                note_injected_input();
                 let window_id = match resolve_window(cx, window) {
                     Ok(window_id) => window_id,
                     Err(err) => {
@@ -3393,6 +3424,10 @@ mod imp {
         false
     }
     pub fn is_active() -> bool {
+        false
+    }
+    /// There is no bridge on these targets, so nothing is ever driving.
+    pub fn hands_off_active() -> bool {
         false
     }
     #[allow(dead_code)] // only the macos paint clock asks

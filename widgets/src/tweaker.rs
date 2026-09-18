@@ -16804,11 +16804,8 @@ impl Widget for Tweaker {
         if let Some(sidebar) = &self.sidebar {
             visit(id!(sidebar), sidebar.clone());
         }
-        if self.note_open {
-            if let Some(note) = &self.note_ui {
-                visit(id!(note), note.clone());
-            }
-        }
+        // Upstream's cancel walk also visited the floating note card. This
+        // fork removed that card, so there is nothing here to visit.
         true
     }
 

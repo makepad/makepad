@@ -1563,35 +1563,3 @@ mod style_reapply_tests {
     }
 }
 
-#[cfg(test)]
-mod style_reapply_tests {
-    use super::*;
-    use crate::desktop_style::{install, DesktopStyle, StyleSheet};
-
-    #[test]
-    fn style_reapply_preserves_dragged_split_and_axis() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        cx.with_vm(|vm| {
-            crate::script_mod(vm);
-            let original = crate::script_eval!(vm, {use mod.widgets.* Splitter{}});
-            let mut splitter = Splitter::script_from_value(vm, original);
-            assert!(matches!(splitter.align(), SplitterAlign::Weighted(w) if w == 0.5));
-            assert!(matches!(splitter.axis(), SplitterAxis::Horizontal));
-            // A drag and a host relayout (compact mode) happened at runtime.
-            splitter.set_align(SplitterAlign::FromA(120.0));
-            splitter.set_axis(SplitterAxis::Vertical);
-            for (style, dark) in [(DesktopStyle::Windows, false), (DesktopStyle::Macos, true), (DesktopStyle::Omarchy, false)] {
-                install(vm, StyleSheet::load_with_appearance(style, dark));
-                vm.with_reload(crate::script_mod);
-                splitter.script_apply(vm, &Apply::ScriptReapply, &mut Scope::empty(), original);
-                assert!(
-                    matches!(splitter.align(), SplitterAlign::FromA(p) if p == 120.0),
-                    "{}: a dragged split must survive a style change, got {:?}",
-                    style.id(),
-                    splitter.align()
-                );
-                assert!(matches!(splitter.axis(), SplitterAxis::Vertical), "{}", style.id());
-            }
-        });
-    }
-}

@@ -1831,15 +1831,6 @@ fn ended_value(actions: &Actions, uid: WidgetUid) -> Option<f64> {
     None
 }
 
-fn ended_value(actions: &Actions, uid: WidgetUid) -> Option<f64> {
-    for action in actions.filter_widget_actions_cast::<FabValueInputAction>(uid) {
-        if let FabValueInputAction::Ended(v) = action {
-            return Some(v);
-        }
-    }
-    None
-}
-
 // ===========================================================================
 // FabColorWheel
 // ===========================================================================
