@@ -632,7 +632,7 @@ mod tests {
         assert_eq!(two.tiles[0].rect, all.tiles[0].rect);
         assert_eq!(two.tiles[1].rect, all.tiles[2].rect);
         // The build's tile apps follow what it can launch.
-        let linked = crate::apps::Launchable { linked: vec!["photos"], processes: false };
+        let linked = crate::apps::Launchable { linked: vec!["photos"], processes: false, dylibs: false };
         assert_eq!(tile_apps(&linked), vec![("photos", TileKind::Wide)]);
     }
 

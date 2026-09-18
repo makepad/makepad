@@ -23,6 +23,7 @@ path = "src/main.rs"
 required-features = ["standalone"]
 
 [features]
+dynamic-module = []
 default = ["standalone"]
 demo = []
 # The standalone window (src/main.rs). A host that links the module leaves

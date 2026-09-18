@@ -21,6 +21,9 @@ pub struct WmBuild {
     /// Every app is a module: no client hub, no warm pool, no cargo
     /// launches — the all-in-one. A desktop build hosts processes too.
     pub modules_only: bool,
+    /// Android super-app: opening a tile is `cargo rustc --crate-type dylib`
+    /// of that crate against the packaged checkout, then `dlopen`.
+    pub dynamic_dylibs: bool,
     /// The style the desk comes up in.
     pub style: DesktopStyle,
     /// The assistant's widget families (`makepad_aichat::script_mod`), when
@@ -37,6 +40,7 @@ impl Default for WmBuild {
         WmBuild {
             modules: Vec::new(),
             modules_only: false,
+            dynamic_dylibs: false,
             style: DesktopStyle::Omarchy,
             assistant: None,
             title: "makepad-wm".to_string(),

@@ -47,6 +47,8 @@ use linux_controls::LinuxControls;
 use linux_gpu::LinuxGpuController;
 pub mod module_host;
 pub mod module_view;
+mod dylib_host;
+mod rmeta;
 mod pane_links;
 mod preview;
 mod run_view;
@@ -80,10 +82,11 @@ use shell::menu::{MenuSkin, ShellMenu, ShellMenuAction};
 use shell::panels::ShellPanelAction;
 use ai_bus::{AiBus, Route};
 use apps::{AppRegistry, Hosting, Launchable};
-use mobile::phone_size;
+use mobile::{phone_size, PhoneHit};
 use makepad_ai_services::wire::{ServiceCall, ServiceDown, ToolResult};
 use makepad_app_module::{AppModule, ExecOutcome, ModuleUpstream};
 use module_host::ModuleHost;
+use dylib_host::DylibHost;
 use pane_links::{PaneCall, PaneLinks};
 use makepad_widgets::ai_slot::AiSlotRequests;
 use shell::ai_pane::ShellAiPane;
@@ -569,6 +572,9 @@ pub struct App {
     /// Output lines from every child, for the tile's status line.
     #[rust]
     client_lines: Option<ClientLines>,
+    /// Android super-app: compiled `dylib`s kept mapped for the session.
+    #[rust]
+    dylib_host: Option<DylibHost>,
     /// The workspaces the bar cluster is currently showing, left to right —
     /// what a click on it maps to.
     #[rust]
@@ -834,6 +840,10 @@ impl App {
                 self.launch_module(cx, module);
                 return;
             }
+        }
+        if self.apps.hosting(app_id) == Hosting::Dylib {
+            self.launch_dylib(cx, app_id, false);
+            return;
         }
 
         // From here it is a PROCESS: nothing a build without a process
@@ -1806,8 +1816,15 @@ impl App {
 
     /// A freshly linked binary stalls on its first exec while macOS scans
     /// it (XprotectService/syspolicyd; the second exec is instant). Say so
-    /// instead of leaving the tile silent.
+    /// instead of leaving the tile silent. Never on Android / the dylib
+    /// super-app — that path is not Gatekeeper.
     fn explain_first_exec_scan(&mut self, cx: &mut Cx) {
+        if self.apps.launchable().dylibs {
+            return;
+        }
+        if !cfg!(target_os = "macos") {
+            return;
+        }
         const GRACE: f64 = 3.0;
         let waiting: Vec<ClientId> = self
             .state_mut()
@@ -2163,6 +2180,130 @@ impl App {
 
     // ---- in-process instances (module_host.rs) ----
 
+    fn dylib_host(&mut self) -> &mut DylibHost {
+        if self.dylib_host.is_none() {
+            let lines = self.line_sender();
+            self.dylib_host = Some(DylibHost::new(lines));
+        }
+        self.dylib_host.as_mut().unwrap()
+    }
+
+    /// Compile the app crate to a `dylib` (or reuse a mapped one) and seat
+    /// it with [`launch_module`].
+    fn launch_dylib(&mut self, cx: &mut Cx, app_id: &str, home_tile: bool) {
+        let Some(app) = crate::clients::find_app(app_id) else { return };
+        if let Some(module) = self.dylib_host().get(app_id) {
+            if home_tile {
+                self.launch_tile_module(cx, module);
+            } else {
+                self.launch_module(cx, module);
+            }
+            return;
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        let mut slot = crate::clients::ClientSlot::module(id, &app.id, &app.label);
+        slot.via_cargo = true;
+        slot.ready = false;
+        slot.status = "compiling…".into();
+        self.state_mut().clients.insert(id, slot);
+        if home_tile {
+            self.state_mut().phone.tiles.bind(app_id, id, true);
+        } else {
+            let area = self.desk_area(cx);
+            let gap = self.state_mut().gap;
+            self.state_mut().layout.insert(id, area, gap);
+            if self.state_mut().style.target.mobile() {
+                self.activate_client(cx, id);
+            }
+        }
+        let data_dir = cx.get_data_dir();
+        let pool = cx.thread_spawner();
+        let app_name = app.id.clone();
+        self.dylib_host().compile(&pool, app, id, home_tile, data_dir);
+        self.desk(cx).borrow_mut::<WmDesk>().map(|mut d| {
+            d.with_run_view(cx, id, |cx, v| {
+                v.set_startup_app(&app_name);
+                v.set_status_line(cx, "compiling …");
+            });
+        });
+        log!("wm: compiling {} as dylib for client {}", app_id, id);
+        self.update_bar(cx);
+    }
+
+    fn finish_dylib(&mut self, cx: &mut Cx, done: dylib_host::CompileDone) {
+        match done.result {
+            Ok(path) => match self.dylib_host().load_path(&done.app_id, &path) {
+                Ok(module) => {
+                    if let Some(slot) = self.state_mut().clients.get_mut(&done.client) {
+                        slot.status.clear();
+                        slot.ready = true;
+                        slot.via_cargo = false;
+                    }
+                    // Re-seat: create the isolate now that the module exists.
+                    // The placeholder client id is reused.
+                    let open = match module.open_schema().empty_open() {
+                        Ok(open) => open,
+                        Err(e) => {
+                            log!("wm: {} cannot open: {e}", module.id());
+                            return;
+                        }
+                    };
+                    let viewport = if done.home_tile {
+                        self.tile_viewport(module.id()).unwrap_or_else(|| {
+                            let a = self.desk_area(cx);
+                            dvec2(a.w, a.h)
+                        })
+                    } else {
+                        let a = self.desk_area(cx);
+                        dvec2(a.w, a.h)
+                    };
+                    if let Err(e) = self.module_host.create(cx, done.client, module, open, viewport) {
+                        log!("wm: dylib {} failed to start: {e}", done.app_id);
+                        return;
+                    }
+                    let Some((manifest, root, vm_id)) =
+                        self.module_host.get(done.client).map(|i| (i.manifest(), i.root.clone(), i.vm_id))
+                    else {
+                        return;
+                    };
+                    let _ = manifest;
+                    self.desk(cx).borrow_mut::<WmDesk>().map(|mut d| {
+                        d.mark_module(done.client);
+                        d.with_module_view(cx, done.client, |cx, v| v.set_root(cx, done.client, vm_id, root));
+                    });
+                    log!("wm: dylib {} seated as client {}", done.app_id, done.client);
+                    if done.home_tile {
+                        self.animate_phone(cx);
+                    }
+                    self.update_bar(cx);
+                }
+                Err(e) => {
+                    log!("wm: dlopen {}: {e}", done.app_id);
+                    if let Some(slot) = self.state_mut().clients.get_mut(&done.client) {
+                        slot.status = format!("load failed: {e}");
+                    }
+                }
+            },
+            Err(e) => {
+                log!("wm: compile {}: {e}", done.app_id);
+                if let Some(slot) = self.state_mut().clients.get_mut(&done.client) {
+                    slot.status = format!("build failed: {e}");
+                }
+            }
+        }
+    }
+
+    fn drain_dylibs(&mut self, cx: &mut Cx) {
+        let done = match self.dylib_host.as_mut() {
+            Some(h) => h.drain_done(),
+            None => return,
+        };
+        for ev in done {
+            self.finish_dylib(cx, ev);
+        }
+    }
+
     /// Open `module` as an instance of its own in this process: an isolate,
     /// a tile in the layout, a local endpoint on the bus. The ordinary
     /// launch path minus everything a process needs.
@@ -2392,7 +2533,9 @@ impl App {
                         id,
                         format!("no app `{app}`; known: {}", known_app_ids()),
                     ),
-                    Some(def) if !self.processes() && self.apps.hosting(&def.id) != Hosting::Module => {
+                    Some(def) if !self.processes()
+                        && self.apps.hosting(&def.id) != Hosting::Module
+                        && self.apps.hosting(&def.id) != Hosting::Dylib => {
                         ToolResult::unavailable(
                             id,
                             format!(
@@ -2603,6 +2746,7 @@ impl App {
                 }
                 if self.ai_bus.is_pane(client) {
                     self.with_pane_run_view(cx, |cx, v| v.set_presentable_draw(cx, pd));
+                    self.redraw_scene_content(cx);
                     self.note_first_frame(client);
                     return;
                 }
@@ -2614,6 +2758,9 @@ impl App {
                     d.note_client_frame(client, face);
                     d.with_run_view(cx, client, |cx, v| v.set_presentable_draw(cx, pd))
                 });
+                // The hosted frame is produced in a separate capture pass;
+                // invalidate the outer cached scene explicitly.
+                self.redraw_scene_content(cx);
                 self.note_first_frame(client);
                 // A focus that couldn't land at launch (tile not yet
                 // drawn) lands now that the client has a frame.
@@ -3239,6 +3386,15 @@ impl App {
 
     fn redraw_all(&mut self, cx: &mut Cx) {
         self.ui.redraw(cx);
+    }
+
+    /// Hosted clients render into capture passes below the desktop scene.
+    /// Their frame event therefore needs to invalidate the scene cache
+    /// explicitly, including for the assistant pane.
+    fn redraw_scene_content(&mut self, cx: &mut Cx) {
+        if let Some(mut scene) = self.ui.widget(cx, ids!(scene)).borrow_mut::<scene::WmScene>() {
+            scene.redraw_content(cx);
+        }
     }
 
     // --------------------------------------------------------------
@@ -4519,6 +4675,7 @@ impl MatchEvent for App {
         if self.state.is_some() {
             self.drain_hub(cx);
             self.drain_client_lines(cx);
+            self.drain_dylibs(cx);
             self.drain_module_upstream();
         }
     }
@@ -4781,6 +4938,13 @@ impl AppMain for App {
                 _ => {}
             }
         }
+        if let Event::BackPressed { handled } = event {
+            if self.state.is_some() && self.state_mut().style.target.mobile() {
+                self.phone_action(cx, PhoneHit::Back);
+                handled.set(true);
+                return;
+            }
+        }
         // WM keybinds intercept before anything reaches the tiles.
         if let Event::KeyDown(e) = event {
             if self.state.is_some() {
@@ -4849,6 +5013,7 @@ impl AppMain for App {
                 self.reap_exited(cx);
                 self.poll_backgrounds(cx);
                 self.drain_client_lines(cx);
+            self.drain_dylibs(cx);
                 self.explain_first_exec_scan(cx);
                 self.update_status(cx);
                 self.wifi_tick(cx);
@@ -4871,6 +5036,7 @@ impl AppMain for App {
                 self.poll_backgrounds(cx);
                 self.drain_hub(cx);
                 self.drain_client_lines(cx);
+            self.drain_dylibs(cx);
                 self.drain_wifi(cx);
                 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
                 self.poll_linux_controls(cx);

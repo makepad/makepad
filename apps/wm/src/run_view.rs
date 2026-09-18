@@ -1232,11 +1232,19 @@ impl Widget for MpRunView {
                 self.startup_initialized = true;
                 self.no_fb_view.set_text(cx, include_str!("../resources/startup.splash"));
             }
-            let headline = if self.status_line.starts_with("compiling ") {
+            let t = self.status_line.trim_start();
+            let lower = t.to_ascii_lowercase();
+            let headline = if lower.starts_with("compiling")
+                || lower.starts_with("provisioning")
+                || lower.starts_with("extracting")
+                || lower.starts_with("bootstrapping")
+                || lower.starts_with("aligning")
+                || lower.starts_with("provisioned")
+            {
                 "Compiling…"
-            } else if self.status_line.starts_with("waiting for another build") {
+            } else if lower.starts_with("waiting for another build") {
                 "Waiting to compile…"
-            } else if self.status_line.starts_with("build failed") {
+            } else if lower.starts_with("build failed") {
                 "Could not build application"
             } else { "Starting…" };
             self.no_fb_view.label(cx, ids!(placeholder)).set_text(cx, headline);

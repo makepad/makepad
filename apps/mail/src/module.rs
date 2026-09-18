@@ -9,6 +9,9 @@ pub struct MailModule;
 
 pub static MAIL_MODULE: MailModule = MailModule;
 
+#[cfg(feature = "dynamic-module")]
+makepad_app_module::export_app_module!(MAIL_MODULE);
+
 impl AppModule for MailModule {
     fn id(&self) -> &'static str {
         "mail"

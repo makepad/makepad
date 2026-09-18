@@ -1,0 +1,48 @@
+# makepad-wm-engine — the engine of the Android super-app as ONE Rust `dylib`.
+#
+# `apps/wm-dyn` hosts apps compiled on demand to `dylib`s. Those must bind
+# the host's widgets/platform/std, not a copy: rustc links an rlib that is
+# already inside an upstream dylib as `IncludedFromDylib` instead of
+# embedding it again. This crate is that upstream dylib: it re-exports the
+# union of everything the twelve tile apps and `makepad-wm` use, so the host
+# (`makepad-wm-dyn`) and every app dylib share one engine `.so`. Build the
+# whole super-app graph with `RUSTFLAGS="-C prefer-dynamic"`.
+#
+# Only the super-app graph depends on this crate; desktop/APK builds of the
+# apps keep their rlib/cdylib shape. `rlib` is here so a build without
+# prefer-dynamic still links (statically).
+
+[package]
+name = "makepad-wm-engine"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "makepad_wm_engine"
+path = "src/lib.rs"
+crate-type = ["dylib", "rlib"]
+
+[dependencies]
+# Superset of every feature an app or the WM asks of a shared crate: the
+# feature set of an engine unit must be the same in the host build and in
+# each on-device `-p <app>` build, and feature unification takes the union.
+makepad-widgets = { path = "../../../widgets", features = ["maps"] }
+makepad-app-module = { path = "../../../libs/app_module" }
+makepad-ai-services = { path = "../../../libs/ai/services" }
+makepad-wm-theme = { path = "../../../libs/wm_theme" }
+makepad-strict-json = { path = "../../../libs/strict_json" }
+makepad-wm-api = { path = "../../../libs/wm_api" }
+makepad-civil-time = { path = "../../../libs/civil_time" }
+makepad-base64 = { path = "../../../libs/base64" }
+makepad-converse = { path = "../../../libs/converse", default-features = false }
+makepad-diskmap = { path = "../../../libs/diskmap" }
+makepad-geodata = { path = "../../../libs/geodata" }
+makepad-html = { path = "../../../libs/html" }
+makepad-image-tiles = { path = "../../../libs/image_tiles" }
+makepad-map-nav = { path = "../../../libs/map_nav" }
+makepad-micro-serde = { path = "../../../libs/micro_serde" }
+makepad-network = { path = "../../../platform/network" }
+makepad-search = { path = "../../../libs/search" }
+makepad-sqlite = { path = "../../../libs/sqlite_query" }
+makepad-studio-protocol = { path = "../../../platform/studio" }
+libloading = { path = "../../../libs/vulkan/libloading" }

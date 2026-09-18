@@ -47,3 +47,6 @@ makepad-strict-json = { path = "../../libs/strict_json" }
 # binary's say (src/build.rs), never a feature of this crate.
 makepad-app-module = { path = "../../libs/app_module" }
 makepad-wm-theme = { path = "../../libs/wm_theme" }
+libloading = { path = "../../libs/vulkan/libloading" }
+# The super-app unpacks its shipped toolchain and checkout with our own reader.
+makepad-tar = { path = "../../libs/tar" }

@@ -20,6 +20,7 @@ name = "makepad_weather"
 path = "src/lib.rs"
 
 [features]
+dynamic-module = []
 default = ["standalone"]
 # The standalone window: the F10 overlay and the port toward it. A host
 # that links the MODULE (makepad-wm) leaves this off and gets the lib only.
