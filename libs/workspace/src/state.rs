@@ -68,10 +68,6 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Args {
             "--state-dir" => out.state_dir = args.next().map(PathBuf::from),
             "--cwd" => out.cwd = args.next().map(PathBuf::from),
             "--size" => out.window_size = args.next().and_then(|s| parse_size(&s)),
-            // Added by the renderer routing to the sibling build it starts
-            // (`Settings::renderer`); the routed process reads it as "do not
-            // route again" and there is nothing else to parse.
-            "--renderer-routed" => {}
             _ => {
                 if let Some(v) = arg.strip_prefix("--state-dir=") {
                     out.state_dir = Some(PathBuf::from(v));
@@ -96,9 +92,9 @@ fn parse_size(s: &str) -> Option<(u32, u32)> {
     }
 }
 
-/// The GPU API a desktop Linux build renders with. The API is chosen at
-/// build time, so an app honouring a saved choice starts the matching
-/// sibling binary instead of switching in place.
+/// The GPU API to render with on desktop Linux, where one binary carries both
+/// and picks when it starts. An app honouring a saved choice passes it to the
+/// platform as `MAKEPAD_GPU` and restarts itself to apply a change.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RendererChoice {
     Vulkan,
@@ -147,7 +143,7 @@ pub struct Settings {
     /// the map through the direct renderer, as the 2.5D/3D projections do.
     pub map_tiles: Option<bool>,
     /// The GPU API to render with on desktop Linux, `"vulkan"` or `"opengl"`
-    /// (`None` = whatever this build is). See [`Settings::renderer`].
+    /// (`None` = the platform's own startup pick). See [`Settings::renderer`].
     pub renderer: Option<String>,
     /// The print export's output width in pixels (`None` = 4096).
     pub export_width: Option<u32>,
@@ -364,10 +360,10 @@ mod tests {
         assert_eq!(b.cwd, Some(PathBuf::from("/y")));
         assert_eq!(parse_args(Vec::<String>::new()), Args::default());
         assert!(Args::default().state_dir().ends_with("studio"));
-        // the renderer routing's flag is accepted and changes nothing
-        let c = parse_args(["--renderer-routed", "--cwd", "/z"].map(String::from));
+        // an argument this parser does not know changes nothing
+        let c = parse_args(["--unknown-to-this-parser", "--cwd", "/z"].map(String::from));
         assert_eq!(c.cwd, Some(PathBuf::from("/z")));
-        assert_eq!(parse_args(["--renderer-routed"].map(String::from)), Args::default());
+        assert_eq!(parse_args(["--unknown-to-this-parser"].map(String::from)), Args::default());
     }
 
     #[test]

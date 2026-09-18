@@ -601,7 +601,6 @@ pub fn collect_linux_video_player_events(
 }
 
 /// Audio-only playback has no graphics context or video texture to update.
-#[cfg(use_vulkan)]
 pub fn collect_linux_audio_player_events(player: &mut LinuxVideoPlayer) -> Vec<Event> {
     collect_linux_player_events(player, |_| false)
 }

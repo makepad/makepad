@@ -357,9 +357,13 @@ pub enum OsType {
     Web(WebParams),
 }
 
-/// The GPU API this binary was built against. The choice is made at build
-/// time (`MAKEPAD=…`, or the `vulkan` cargo feature on desktop Linux), so an
-/// app that offers the user a different renderer starts another build.
+/// The GPU API this process renders with. On most targets that is the API the
+/// binary was built against (`MAKEPAD=…`). A desktop Linux build with the
+/// `vulkan` cargo feature carries OpenGL ES as well and chooses between them
+/// when its event loop starts (`MAKEPAD_GPU` overrides, see
+/// `os/linux/gpu_preference.rs`); `Cx::gpu_backend` reports the running API
+/// from then on, and the built default before that. An app offers the other
+/// renderer by restarting itself with `MAKEPAD_GPU` set.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GpuBackend {
     Metal,

@@ -12,9 +12,15 @@ use crate::{
 };
 
 pub(crate) struct WaylandApp {
-    connection: Connection,
-    pub event_queue: EventQueue<WaylandState>,
+    // Field order is drop order. `state` owns the windows, whose teardown
+    // still talks to the compositor: `eglDestroySurface` and
+    // `wl_egl_window_destroy` marshal requests on the display. It must go
+    // before `connection`, the last handle, whose drop disconnects the
+    // display. The other way round every OpenGL exit segfaulted inside
+    // NVIDIA's egl-wayland.
     pub state: WaylandState,
+    pub event_queue: EventQueue<WaylandState>,
+    connection: Connection,
     event_callback: Option<Box<dyn FnMut(&mut WaylandApp, XlibEvent) -> EventFlow>>,
 }
 impl WaylandApp {
@@ -89,10 +95,19 @@ impl WaylandApp {
         }
     }
     fn event_loop_poll(&mut self) {
+        // As in the Wait arm: a full socket buffer (WouldBlock) keeps the requests
+        // queued for the next flush; only a dead connection ends the loop.
         if let Err(err) = self.event_queue.flush() {
-            crate::warning!("Wayland flush failed: {}", err);
-            self.terminate_event_loop();
-            return;
+            let transient = matches!(
+                &err,
+                wayland_client::backend::WaylandError::Io(io)
+                    if io.kind() == std::io::ErrorKind::WouldBlock
+            );
+            if !transient {
+                crate::warning!("Wayland flush failed: {}", err);
+                self.terminate_event_loop();
+                return;
+            }
         }
         if let Some(guard) = self.event_queue.prepare_read() {
             if let Err(err) = guard.read() {

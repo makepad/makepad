@@ -153,8 +153,11 @@ impl HostPresentableImage {
     /// Return a texture retaining this specific completed frame. Vulkan reads
     /// hold a lease instead of exposing the writer's reusable allocation.
     pub fn texture_for_draw(&self, cx: &mut Cx, draw: &PresentableDraw, width: u32, height: u32) -> Option<Texture> {
+        // Desktop Linux decides this at runtime: a Vulkan-capable build renders
+        // with OpenGL when no usable device answered, and then shares the way an
+        // OpenGL build does.
         #[cfg(all(target_os = "linux", use_vulkan))]
-        {
+        if cx.os.vulkan_active() {
             let _ = (width, height);
             let mut vulkan = cx.os.vulkan.take().expect("Vulkan renderer initialized");
             let result = vulkan.acquire_shared_draw(cx, &self.texture, draw.sequence);
@@ -164,15 +167,17 @@ impl HostPresentableImage {
                 Err(error) => { crate::error!("Shared Vulkan frame rejected: {error}"); None }
             };
         }
-        #[cfg(not(all(target_os = "linux", use_vulkan)))]
+        #[cfg(not(all(target_os = "linux", use_vulkan, linux_direct)))]
         {
             let _ = (&cx, draw, width, height);
             #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
             if let Some(buffer) = self.software_buffer.as_ref() {
                 cx.upload_presentable_image_software_buffer(&self.texture, width, height, buffer.as_bytes());
             }
-            Some(self.texture.clone())
+            return Some(self.texture.clone());
         }
+        #[cfg(all(target_os = "linux", use_vulkan, linux_direct))]
+        None
     }
 }
 
@@ -445,7 +450,17 @@ pub fn export_host_swapchain(host: &mut HostSwapchain, _cx: &mut Cx)
         let shared = _cx.share_texture_for_presentable_image(&host.presentable_images[i].texture);
         #[cfg(all(linux_direct, not(use_vulkan)))]
         let shared: Option<LinuxOwnedImage> = None;
-        #[cfg(use_vulkan)]
+        // A Vulkan-capable build that fell back to OpenGL shares through the
+        // OpenGL path, as an OpenGL build does; without this it exported
+        // nothing and every hosted child stayed blank.
+        #[cfg(all(use_vulkan, not(linux_direct)))]
+        let shared = if _cx.os.vulkan_active() {
+            Some(_cx.export_vulkan_presentable_image(&host.presentable_images[i].texture)
+                .map_err(SharedSwapchainCreateError::Vulkan)?)
+        } else {
+            _cx.share_texture_for_presentable_image(&host.presentable_images[i].texture)
+        };
+        #[cfg(all(use_vulkan, linux_direct))]
         let shared = Some(_cx.export_vulkan_presentable_image(&host.presentable_images[i].texture)
             .map_err(SharedSwapchainCreateError::Vulkan)?);
         if let Some(image) = shared {
