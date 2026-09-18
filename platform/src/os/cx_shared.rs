@@ -477,7 +477,7 @@ impl Cx {
         }
         self.run_view_frame_encode_in_flight = true;
         let sender = self.run_view_frame_results.sender();
-        if let Ok(task) = self.task_pool().submit(crate::thread::Lane::Heavy, move || {
+        if let Ok(task) = self.task_pool().submit_internal(crate::thread::Lane::Heavy, move || {
             let result = Cx::prepare_studio_run_view_rgba(&request, width, height, rgba).and_then(
                 |(width, height, rgba)| {
                     Cx::encode_rgba_as_png(width, height, &rgba).map(|png| RunViewFrameData {
@@ -1227,8 +1227,14 @@ impl Cx {
             return;
         }
         #[cfg(any(target_arch = "wasm32", target_os = "linux", test))]
-        if let Some(event) = self.drag_drop.internal_drag_event(event) {
-            match event {
+        if let Some(drag) = self.drag_drop.internal_drag_event(event) {
+            // The pointer event goes out first and the drag one is appended, the
+            // way every other backend orders it: a widget that ends its gesture on
+            // FingerUp never sees one otherwise, and stays stuck mid-drag.
+            self.drag_drop.suspend_internal_drag();
+            self.call_event_handler(event);
+            self.drag_drop.resume_internal_drag();
+            match drag {
                 crate::event::InternalDragEvent::Drag(event) => {
                     self.call_event_handler(&Event::Drag(event));
                     self.drag_drop.cycle_drag();
