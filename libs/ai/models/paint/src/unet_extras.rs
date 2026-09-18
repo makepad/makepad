@@ -920,55 +920,6 @@ fn replace_block(src: &GpuTensor, start: usize, block: &GpuTensor) -> Result<Gpu
     concat_rows_n(&parts)
 }
 
-/// Official `reshape_qkv` + one `F.sdpa` over batch `B`.
-/// Packed tokens are `[B*S, H*D]`; concat-cols makes `[S, (B*H)*D]`, which is
-/// the same independent-head math as `[B,H,S,D]`.
-fn attn_sdpa_groups(
-    q: &GpuTensor,
-    k: &GpuTensor,
-    v: &GpuTensor,
-    batch: usize,
-    seq: usize,
-    heads: usize,
-    scale: f32,
-) -> Result<GpuTensor, String> {
-    if batch == 0 || q.rows() != batch * seq {
-        return Err(format!("attn_sdpa_groups rows {} vs {batch}*{seq}", q.rows()));
-    }
-    if k.rows() % batch != 0 || v.rows() != k.rows() {
-        return Err(format!(
-            "attn_sdpa_groups kv {} {} batch {batch}",
-            k.rows(),
-            v.rows()
-        ));
-    }
-    if batch == 1 {
-        return attn_packed(q, k, v, heads, scale);
-    }
-    let hidden = q.cols();
-    let k_seq = k.rows() / batch;
-    let mut qs = Vec::with_capacity(batch);
-    let mut ks = Vec::with_capacity(batch);
-    let mut vs = Vec::with_capacity(batch);
-    for i in 0..batch {
-        qs.push(gpu_slice_rows(q, i * seq, seq)?);
-        ks.push(gpu_slice_rows(k, i * k_seq, k_seq)?);
-        vs.push(gpu_slice_rows(v, i * k_seq, k_seq)?);
-    }
-    let q_refs: Vec<&GpuTensor> = qs.iter().collect();
-    let k_refs: Vec<&GpuTensor> = ks.iter().collect();
-    let v_refs: Vec<&GpuTensor> = vs.iter().collect();
-    let q_b = gpu_concat_cols(&q_refs)?;
-    let k_b = gpu_concat_cols(&k_refs)?;
-    let v_b = gpu_concat_cols(&v_refs)?;
-    let out = attn_packed(&q_b, &k_b, &v_b, batch * heads, scale)?;
-    let mut parts = Vec::with_capacity(batch);
-    for i in 0..batch {
-        parts.push(gpu_slice_cols(&out, i * hidden, hidden)?);
-    }
-    concat_rows_n(&parts)
-}
-
 #[allow(dead_code)]
 fn ref_attn_wide_v(
     q: &[f32],

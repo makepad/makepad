@@ -1,0 +1,9 @@
+[package]
+name = "makepad-loader-bundle"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+makepad-strict-json = { path = "../strict_json" }
+makepad-zip-file = { path = "../zip_file" }

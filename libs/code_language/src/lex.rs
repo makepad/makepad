@@ -11,6 +11,7 @@ use crate::dart_lex::{lex_line as dart_lex_line, DartState, DART_LEXER_VERSION};
 use crate::detect::{detect_path, is_cpp_family, is_script_family};
 use crate::fsharp_lex::{lex_line as fsharp_lex_line, FSharpState, FSHARP_LEXER_VERSION};
 use crate::go_lex::{lex_line as go_lex_line, GoState, GO_LEXER_VERSION};
+use crate::haskell_lex::{lex_line as haskell_lex_line, HaskellState, HASKELL_LEXER_VERSION};
 use crate::html_lex::{
     lex_line as html_lex_line, HtmlState, MarkupDialect, HTML_LEXER_VERSION,
 };
@@ -66,6 +67,7 @@ pub enum LexContinuation {
     Ruby(RubyState),
     FSharp(FSharpState),
     Zig(ZigState),
+    Haskell(HaskellState),
 }
 
 pub trait LexicalProvider: Send + Sync {
@@ -105,6 +107,7 @@ pub struct SwiftLexicalProvider;
 pub struct RubyLexicalProvider;
 pub struct FSharpLexicalProvider;
 pub struct ZigLexicalProvider;
+pub struct HaskellLexicalProvider;
 /// XML / SVG share the HTML tokeniser with a markup dialect in continuation state.
 pub struct MarkupLexicalProvider {
     pub language: LanguageId,
@@ -606,6 +609,37 @@ impl LexicalProvider for ZigLexicalProvider {
     }
 }
 
+impl LexicalProvider for HaskellLexicalProvider {
+    fn language(&self) -> LanguageId {
+        LanguageId::Haskell
+    }
+    fn lexer_version(&self) -> u32 {
+        HASKELL_LEXER_VERSION
+    }
+    fn initial(&self) -> LexContinuation {
+        self.initial_for_dialect(Dialect::default_for(LanguageId::Haskell))
+    }
+    fn initial_for_dialect(&self, dialect: Dialect) -> LexContinuation {
+        if dialect.name == "literate" {
+            LexContinuation::Haskell(HaskellState::literate())
+        } else {
+            LexContinuation::Haskell(HaskellState::default())
+        }
+    }
+    fn lex_line(&self, line: &str, state: &mut LexContinuation) -> Vec<TokenSpan> {
+        let incoming = match state {
+            LexContinuation::Haskell(s) => s.clone(),
+            _ => match self.initial() {
+                LexContinuation::Haskell(s) => s,
+                _ => HaskellState::default(),
+            },
+        };
+        let (next, roles) = haskell_lex_line(line, incoming);
+        *state = LexContinuation::Haskell(next);
+        roles_to_spans(roles)
+    }
+}
+
 impl LexicalProvider for MarkupLexicalProvider {
     fn language(&self) -> LanguageId {
         self.language
@@ -669,6 +703,7 @@ static SWIFT: SwiftLexicalProvider = SwiftLexicalProvider;
 static RUBY: RubyLexicalProvider = RubyLexicalProvider;
 static FSHARP: FSharpLexicalProvider = FSharpLexicalProvider;
 static ZIG: ZigLexicalProvider = ZigLexicalProvider;
+static HASKELL: HaskellLexicalProvider = HaskellLexicalProvider;
 static XML: MarkupLexicalProvider = MarkupLexicalProvider {
     language: LanguageId::Xml,
     dialect: MarkupDialect::Xml,
@@ -730,6 +765,8 @@ pub fn lexical_provider(language: LanguageId) -> &'static dyn LexicalProvider {
         &FSHARP
     } else if language == LanguageId::Zig {
         &ZIG
+    } else if language == LanguageId::Haskell {
+        &HASKELL
     } else {
         &PLAIN
     }
@@ -782,6 +819,8 @@ pub fn lexer_schema(language: LanguageId) -> u32 {
         FSHARP_LEXER_VERSION
     } else if language == LanguageId::Zig {
         ZIG_LEXER_VERSION
+    } else if language == LanguageId::Haskell {
+        HASKELL_LEXER_VERSION
     } else if language == LanguageId::Rust {
         0
     } else {

@@ -125,6 +125,18 @@ impl RendererChoice {
             RendererChoice::OpenGl => "OpenGL",
         }
     }
+
+    /// The `MAKEPAD_GPU` value that honours this choice when an app restarts
+    /// itself. A Vulkan preference is `auto`: the platform then picks Vulkan
+    /// when a hardware device answers and falls back to OpenGL otherwise,
+    /// where `vulkan` would insist and refuse to start without one (an X11
+    /// session, a broken driver). OpenGL is `gl`, which skips the probe.
+    pub fn gpu_env_value(self) -> &'static str {
+        match self {
+            RendererChoice::Vulkan => "auto",
+            RendererChoice::OpenGl => "gl",
+        }
+    }
 }
 
 /// Persisted user settings. Kept deliberately small for the shell slice.
@@ -154,6 +166,9 @@ pub struct Settings {
     /// The map colour theme identifier (`None` = `"default"`). The widget
     /// style and dark preference above are the OS chrome; this is the map.
     pub map_theme: Option<String>,
+    /// Experimental infinite zoom: a prepared map inside the glyph
+    /// (`None` = off). Older settings files without the field stay off.
+    pub infinite_zoom: Option<bool>,
 }
 
 const SETTINGS_FILE: &str = "settings.ron";
@@ -184,6 +199,9 @@ impl Settings {
     /// The saved map theme identifier, `"default"` when unset.
     pub fn map_theme(&self) -> &str {
         self.map_theme.as_deref().unwrap_or("default")
+    }
+    pub fn infinite_zoom(&self) -> bool {
+        self.infinite_zoom.unwrap_or(true)
     }
     pub fn load(dir: &Path) -> Self {
         std::fs::read_to_string(dir.join(SETTINGS_FILE))
@@ -378,6 +396,7 @@ mod tests {
         assert_eq!(old.style.as_deref(), Some("macos"));
         assert_eq!(old.code_indent_cells(), 3);
         assert!(!old.map_tiles());
+        assert!(old.infinite_zoom());
         // the choice round-trips through the file text
         let mut s = old.clone();
         s.set_renderer(Some(RendererChoice::OpenGl));
@@ -410,7 +429,9 @@ mod tests {
         assert_eq!(s.export_width, None);
         assert_eq!(s.export_width(), 4096);
         assert_eq!(s.code_indent_cells(), 3);
-        let s = Settings::deserialize_ron("(dark: false, export_width: Some(16384))").unwrap();
+        assert_eq!(s.infinite_zoom, None);
+        assert!(s.infinite_zoom());
+        let s = Settings::deserialize_ron("(dark: false, export_width: 16384)").unwrap();
         assert_eq!(s.export_width(), 16384);
     }
 
@@ -428,11 +449,14 @@ mod tests {
             export_width: Some(8192),
             history_keep_zoom: None,
             map_theme: None,
+            infinite_zoom: None,
         };
         s.save(&dir).unwrap();
         assert_eq!(Settings::load(&dir), s);
         assert!(!s.map_tiles());
         assert!(Settings::default().map_tiles());
+        assert!(s.infinite_zoom());
+        assert!(Settings::default().infinite_zoom());
         std::fs::write(dir.join(SETTINGS_FILE), "not ron").unwrap();
         assert_eq!(Settings::load(&dir), Settings::default());
         let _ = std::fs::remove_dir_all(&dir);

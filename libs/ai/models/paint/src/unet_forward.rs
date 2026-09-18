@@ -13,11 +13,11 @@
 //! keys.
 
 use crate::dual_stream::REF_TIMESTEP;
-use crate::unet_extras::{ExtraFlags, ExtraInputs, ExtraResident};
+use crate::unet_extras::ExtraResident;
 use crate::unet_first::{unpack_planar_host, BatchAct, UnetFirst};
 use makepad_ai_common::backend::cuda::{
     gpu_add, gpu_concat_cols, gpu_concat_rows, gpu_download, gpu_mul, gpu_paint_scale,
-    gpu_slice_cols, gpu_slice_rows, gpu_upload, gpu_upload_u32, GpuTensor,
+    gpu_slice_cols, gpu_upload, gpu_upload_u32, GpuTensor,
 };
 use std::collections::HashMap;
 

@@ -445,6 +445,7 @@ impl<T: FleetTransport> FleetQwenChatProvider<T> {
         self
     }
 
+    #[cfg(any(feature = "llm", test))]
     pub(crate) fn with_cancel_signal(mut self, signal: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
         self.cancel_signal = Some(signal);
         self

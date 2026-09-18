@@ -688,8 +688,8 @@ fn try_parse_create_table(name: &str, root_page: u32, sql: &str) -> Result<Table
         auto_specs.push(resolved);
     }
     let _ = pk_autoincrement;
-    if without_rowid {
-        return Err(Error::unsupported("WITHOUT ROWID tables"));
+    if without_rowid && pk_columns.is_empty() {
+        return Err(Error::sql("PRIMARY KEY missing on WITHOUT ROWID table"));
     }
 
     let any_real_affinity = columns.iter().any(|c| c.affinity == Affinity::Real);

@@ -48,9 +48,7 @@ mod sys {
     pub const MAP_SHARED: c_int = 1;
     pub const MADV_WILLNEED: c_int = 3;
     pub const MADV_SEQUENTIAL: c_int = 2;
-    pub const MADV_DONTNEED: c_int = 4;
     pub const MS_INVALIDATE: c_int = 0x0002;
-    pub const MS_KILLPAGES: c_int = 0x0004;
 
     #[repr(C)]
     pub struct Radvisory {

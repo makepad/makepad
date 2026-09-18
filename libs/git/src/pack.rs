@@ -525,3 +525,59 @@ mod tests {
         assert_eq!(obj.data, b"packed content\n");
     }
 }
+
+/// Save a verified, self-contained incoming pack and its standard v2 index.
+/// Offsets and object identities come from the importer's delta resolution.
+pub(crate) fn write_imported_pack(
+    git_dir: &Path, data: &[u8], entries: &[(ObjectId, u64, u64)],
+) -> Result<(), GitError> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SERIAL: AtomicU64 = AtomicU64::new(0);
+    let checksum = &data[data.len() - 20..];
+    let name = ObjectId::from_slice(checksum)?.to_hex();
+    let mut sorted = entries.to_vec();
+    sorted.sort_unstable_by_key(|e| *e.0.as_bytes());
+    let mut index = Vec::with_capacity(1072 + entries.len() * 28);
+    index.extend_from_slice(&[0xff, 0x74, 0x4f, 0x63]);
+    index.extend_from_slice(&2u32.to_be_bytes());
+    let mut fanout = [0u32; 256];
+    for entry in &sorted { fanout[entry.0.as_bytes()[0] as usize] += 1; }
+    let mut total = 0u32;
+    for count in fanout { total += count; index.extend_from_slice(&total.to_be_bytes()); }
+    for entry in &sorted { index.extend_from_slice(entry.0.as_bytes()); }
+    for (_, start, end) in &sorted {
+        let packed = data.get(*start as usize..*end as usize).ok_or_else(|| GitError::CorruptPack("invalid indexed object range".into()))?;
+        index.extend_from_slice(&makepad_fast_inflate::crc32(packed).to_be_bytes());
+    }
+    let mut large = Vec::new();
+    for (_, offset, _) in &sorted {
+        let offset = if *offset < 0x80000000 { *offset as u32 } else {
+            let entry = 0x80000000 | large.len() as u32;
+            large.push(*offset); entry
+        };
+        index.extend_from_slice(&offset.to_be_bytes());
+    }
+    for offset in large { index.extend_from_slice(&offset.to_be_bytes()); }
+    index.extend_from_slice(checksum);
+    let mut hash = crate::sha1::Sha1::new(); hash.update(&index);
+    index.extend_from_slice(&hash.finalize());
+    let dir = git_dir.join("objects/pack");
+    fs::create_dir_all(&dir)?;
+    let serial = SERIAL.fetch_add(1, Ordering::Relaxed);
+    // Publish the index last; readers discover packs through their index files.
+    for (extension, bytes) in [("pack", data), ("idx", index.as_slice())] {
+        let destination = dir.join(format!("pack-{name}.{extension}"));
+        let temporary = dir.join(format!("tmp-{}-{serial}.{extension}", std::process::id()));
+        let result = (|| -> Result<(), GitError> {
+            fs::write(&temporary, bytes)?;
+            match fs::rename(&temporary, &destination) {
+                Ok(()) => Ok(()),
+                Err(_) if destination.is_file() => { fs::remove_file(&temporary)?; Ok(()) }
+                Err(e) => Err(e.into()),
+            }
+        })();
+        if result.is_err() { let _ = fs::remove_file(&temporary); }
+        result?;
+    }
+    Ok(())
+}

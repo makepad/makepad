@@ -67,6 +67,9 @@ pub enum Base64DecodeError {
 }
 
 pub fn base64_decode(input: &[u8]) -> Result<Vec<u8>, Base64DecodeError> {
+    if input.is_empty() {
+        return Ok(Vec::new());
+    }
     let mut out = Vec::new();
     out.resize(input.len() * 3 / 4, 0u8);
     if input.len() & 3 != 0 {

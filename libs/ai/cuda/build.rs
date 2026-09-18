@@ -51,9 +51,7 @@ fn main() {
     // CUDA DLLs on every machine it ships to. NO_CUDA forces the kernel-less
     // stub the no-toolkit path already produces; it outranks REQUIRE.
     if env_flag("MAKEPAD_GGML_NO_CUDA") {
-        println!(
-            "cargo:warning=makepad-ai-cuda: MAKEPAD_GGML_NO_CUDA set — building without CUDA kernels"
-        );
+        // Explicitly opting out is a normal configuration, not a compiler warning.
         return;
     }
     if target_os == "linux" || target_os == "windows" {

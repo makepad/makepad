@@ -716,7 +716,7 @@ mod tests {
     fn pack_flux_fill_mask_matches_reference_reshape_permute() {
         let (width, height) = (32u32, 32u32);
         let mask: Vec<f32> = (0..(width * height))
-            .map(|i| ((i as f32 * 0.0173) % 1.0))
+            .map(|i| (i as f32 * 0.0173) % 1.0)
             .collect();
         let actual = pack_flux_fill_mask(&mask, width, height).unwrap();
         let expected = mask_pack_reference(&mask, width as usize, height as usize);
