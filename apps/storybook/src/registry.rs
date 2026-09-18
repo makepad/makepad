@@ -78,8 +78,13 @@ pub enum ControlKind {
 }
 
 /// Every story, in navigator order.
+///
+/// Read off the Rust tables, never off the script heap: the navigator, the
+/// search, the story count and the coverage page's "is this documented"
+/// column all come through here, and all of them work with no story template
+/// evaluated at all. That is what lets the templates be lazy.
 pub fn all() -> impl Iterator<Item = &'static Story> {
-    crate::stories::tables().iter().flat_map(|table| table.iter())
+    crate::stories::modules().iter().flat_map(|file| file.stories.iter())
 }
 
 /// The story under this key. A key that no longer names a page finds the
@@ -357,7 +362,7 @@ mod tests {
             "Text",
             &[
                 ("Label", &["Overview", "Text styles"]),
-                ("TextFlow", &["Overview", "Html", "Markdown"]),
+                ("TextFlow", &["Overview", "Marked spans", "Html", "Markdown"]),
                 ("RichTextEditor", &["Overview"]),
                 ("CodeBlock", &["Overview"]),
                 ("Marquee", &["Overview"]),
@@ -393,7 +398,7 @@ mod tests {
                 ("DatePicker", &["Overview", "Calendar"]),
                 ("TimePicker", &["Overview"]),
                 ("ColorPicker", &["Overview"]),
-                ("Dropzone", &["Overview"]),
+                ("Dropzone", &["Overview", "Well states"]),
                 ("Form", &["Overview"]),
                 ("PropertyInspector", &["Overview"]),
             ],
@@ -444,7 +449,7 @@ mod tests {
                 ("Alert", &["Overview"]),
                 ("Toast", &["Overview"]),
                 ("Progress", &["Overview", "Level meter"]),
-                ("Spinner", &["Overview"]),
+                ("Spinner", &["Overview", "Stopped, and the comet"]),
                 ("Placeholder", &["Overview"]),
                 ("EmptyState", &["Overview"]),
             ],

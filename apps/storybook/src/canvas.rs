@@ -8,6 +8,12 @@
 //! rebuilds every widget from its template, so the canvas drops its story on
 //! `LiveEdit` and instantiates it again on the next draw.
 //!
+//! The lookup is also where a story's file gets evaluated. The catalogue
+//! writes no template until the page that needs it is asked for, and a style
+//! reload takes every template written before it back off the heap, so
+//! `instantiate` asks `stories::evaluate_for` for the page it is about to
+//! build. That is the whole of the forcing: the canvas is the one reader.
+//!
 //! Two things ride along with the story. The controls panel's edits are
 //! script chunks applied to a widget inside the story; the canvas applies
 //! them at once and remembers them, so a story rebuilt after a reload comes
@@ -257,6 +263,13 @@ impl StoryCanvas {
     fn instantiate(&mut self, cx: &mut Cx, dsl: &str) -> Option<WidgetRef> {
         let id = LiveId::from_str(dsl);
         let value = cx.with_vm(|vm| {
+            // The only place a story template is read, so the only place one
+            // has to exist. The file that writes this page is evaluated here
+            // if this context has not evaluated it since the last style
+            // reload; the other hundred-odd files are left alone, which is
+            // what a theme switch no longer pays for. A name no page owns
+            // falls through to the missing-template line below.
+            crate::stories::evaluate_for(vm, dsl);
             let stories = vm.module(id!(stories));
             vm.bx.heap.value(stories, id.into(), NoTrap)
         });

@@ -488,6 +488,11 @@ impl AppMain for App {
         crate::controls::script_mod(vm);
         crate::actions::script_mod(vm);
         crate::theme_panel::script_mod(vm);
+        // Evaluates no story file. It throws away the record of which files
+        // this context has already evaluated -- `shell` above has just
+        // emptied `mod.stories`, and every page that was in it belonged to
+        // the theme being left. The canvas evaluates the one page it is
+        // showing on the rebuild that follows.
         crate::stories::script_mod(vm);
         self::script_mod(vm)
     }
