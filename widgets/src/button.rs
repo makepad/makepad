@@ -624,6 +624,43 @@ impl Widget for Button {
                 self.animator_play(cx, ids!(focus.off));
                 self.draw_bg.redraw(cx);
             }
+            // A focused button activates from the keyboard, with the keys the web and the
+            // desktop toolkits use. Holding the key repeats the press, so repeats are ignored.
+            Hit::KeyDown(ke) if self.enabled && is_activation_key(ke.key_code) && !ke.is_repeat => {
+                cx.widget_action_with_data(
+                    &self.action_data,
+                    uid,
+                    ButtonAction::Pressed(ke.modifiers),
+                );
+                cx.widget_to_script_call(uid, NIL, self.source.clone(), self.on_press.clone(), &[]);
+                if self.trigger_on_press {
+                    cx.widget_to_script_call(
+                        uid,
+                        NIL,
+                        self.source.clone(),
+                        self.on_click.clone(),
+                        &[],
+                    );
+                }
+                self.animator_play(cx, ids!(hover.down));
+            }
+            Hit::KeyUp(ke) if self.enabled && is_activation_key(ke.key_code) => {
+                cx.widget_action_with_data(
+                    &self.action_data,
+                    uid,
+                    ButtonAction::Clicked(ke.modifiers),
+                );
+                if !self.trigger_on_press {
+                    cx.widget_to_script_call(
+                        uid,
+                        NIL,
+                        self.source.clone(),
+                        self.on_click.clone(),
+                        &[],
+                    );
+                }
+                self.animator_play(cx, ids!(hover.off));
+            }
             Hit::FingerDown(fe) if self.enabled && fe.is_primary_hit() => {
                 if self.grab_key_focus {
                     cx.set_key_focus(self.draw_bg.area());
@@ -724,6 +761,12 @@ impl Widget for Button {
         self.text.as_mut_empty().push_str(v);
         self.redraw(cx);
     }
+}
+
+/// The keys that activate the focused button: `Space`, like a checkbox, and
+/// `Enter`, like following a link.
+fn is_activation_key(key_code: KeyCode) -> bool {
+    matches!(key_code, KeyCode::Space | KeyCode::ReturnKey | KeyCode::NumpadEnter)
 }
 
 impl Button {
