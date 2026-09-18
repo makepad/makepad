@@ -1,13 +1,13 @@
 use std::{
     fmt,
-    io::{self, Read},
+    io,
     path::Path,
     rc::Rc,
     sync::atomic::{AtomicU64, Ordering},
 };
 
 #[cfg(not(target_arch = "wasm32"))]
-use std::fs::File;
+use std::{fs::File, io::Read};
 
 #[derive(Clone)]
 pub enum SharedBytes {
@@ -343,11 +343,13 @@ mod os {
 
 #[cfg(not(any(all(unix, not(target_arch = "wasm32")), windows)))]
 mod os {
+    #[cfg(not(target_arch = "wasm32"))]
     use std::{fs::File, io};
 
     pub struct MappedBytesInner;
 
     impl MappedBytesInner {
+        #[cfg(not(target_arch = "wasm32"))]
         pub fn map_file(_file: &File, _len: usize) -> io::Result<Self> {
             Err(io::Error::new(
                 io::ErrorKind::Unsupported,

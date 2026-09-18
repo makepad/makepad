@@ -73,7 +73,15 @@ impl std::fmt::Debug for PreparedSnapshot {
 
 /// Tokenise and lay out a text (worker-side; the UI only attaches it).
 pub fn prepare_snapshot(text: &str) -> PreparedSnapshot {
-    let document = CodeDocument::prepare(text.into());
+    prepare_snapshot_for_path(None, text)
+}
+
+pub fn prepare_snapshot_for_path(path: Option<&std::path::Path>, text: &str) -> PreparedSnapshot {
+    let document = if let Some(path) = path {
+        CodeDocument::prepare_for_path(&path.to_string_lossy(), text.into())
+    } else {
+        CodeDocument::prepare(text.into())
+    };
     let view = CodeSession::prepare_view(&document, None);
     PreparedSnapshot { document, view, revision: 0 }
 }
@@ -536,7 +544,7 @@ fn run(
                         let reading = read_file(requested, watch);
                         if watch.last.as_ref() != Some(&reading) {
                             revision += 1;
-                            let prepared = reading.text.as_deref().map(|t| prepare_snapshot(t).with_revision(revision));
+                            let prepared = reading.text.as_deref().map(|t| prepare_snapshot_for_path(Some(requested), t).with_revision(revision));
                             pending.insert(requested.clone(), Delivery { snapshot: Arc::new(FileSnapshot {
                                 requested_path: requested.clone(),
                                 path: watch.canonical.clone().unwrap_or_else(|| requested.clone()),
@@ -560,7 +568,7 @@ fn run(
                 .and_then(|path| save_file(path, &request.expected_disk, &request.text, request.request_id, &stop));
             let (saved_text, saved_revision) = if outcome.is_ok() {
                 revision += 1;
-                let prepared = prepare_snapshot(&request.text).with_revision(revision);
+                let prepared = prepare_snapshot_for_path(canonical.as_deref(), &request.text).with_revision(revision);
                 for (requested, watch) in &mut watches {
                     if watch.canonical == canonical {
                         watch.last = Some(Reading { text: Some(request.text.clone()), error: None });
@@ -590,7 +598,7 @@ fn run(
                 let reading = read_file(requested, watch);
                 if watch.last.as_ref() != Some(&reading) {
                     revision += 1;
-                    let prepared = reading.text.as_deref().map(|t| prepare_snapshot(t).with_revision(revision));
+                    let prepared = reading.text.as_deref().map(|t| prepare_snapshot_for_path(Some(requested), t).with_revision(revision));
                     pending.insert(requested.clone(), Delivery { snapshot: Arc::new(FileSnapshot {
                         requested_path: requested.clone(),
                         path: watch.canonical.clone().unwrap_or_else(|| requested.clone()),

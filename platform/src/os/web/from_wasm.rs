@@ -301,6 +301,29 @@ pub struct FromWasmRetainedArrayBuffer {
 }
 
 #[derive(FromWasm)]
+pub struct WRetainedBufferCopy {
+    pub source_slot: usize,
+    pub destination_slot: usize,
+    pub slot_count: usize,
+}
+
+#[derive(FromWasm)]
+pub struct WRetainedBufferWrite {
+    pub destination_slot: usize,
+    pub data: WasmPtrF32,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmRetainedArrayUpdate {
+    pub buffer_id: usize,
+    pub slot_count: usize,
+    pub capacity_bytes: usize,
+    pub replace: bool,
+    pub copies: Vec<WRetainedBufferCopy>,
+    pub writes: Vec<WRetainedBufferWrite>,
+}
+
+#[derive(FromWasm)]
 pub struct WCustomUniformBuffer {
     pub block_name: String,
     pub data: WasmPtrU8,

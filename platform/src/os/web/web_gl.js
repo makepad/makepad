@@ -1664,6 +1664,89 @@ export class WasmWebGL extends WasmWebBrowser {
     }
   }
 
+  FromWasmRetainedArrayUpdate(args) {
+    const gl = this.gl;
+    const validInteger = (value) => Number.isSafeInteger(value) && value >= 0;
+    const reject = (reason) => {
+      this.report_vertex_submission_once(
+        `retained-delta:${args?.buffer_id}:${reason}`, reason, { buffer_id: args?.buffer_id });
+      if (validInteger(args?.buffer_id)) {
+        this.to_wasm.ToWasmRetainedUploadFailed({ buffer_id: args.buffer_id });
+      }
+    };
+    if (!validInteger(args?.buffer_id) || !validInteger(args.slot_count) ||
+        !validInteger(args.capacity_bytes) || args.capacity_bytes < args.slot_count * 4 ||
+        !Array.isArray(args.copies) || !Array.isArray(args.writes)) {
+      reject("invalid retained delta metadata"); return;
+    }
+    const previous = this.array_buffers[args.buffer_id];
+    const byteLength = makepad_safe_product(args.slot_count, 4);
+    if (byteLength === null) { reject("retained delta size overflow"); return; }
+    const writes = [];
+    for (const write of args.writes) {
+      const checked = this.make_validated_wasm_view(write.data, 4, false, "retained segment", Float32Array);
+      if (!checked.ok || !validInteger(write.destination_slot) ||
+          write.destination_slot + checked.element_count > args.slot_count) {
+        reject(checked.reason || "retained segment is outside destination"); return;
+      }
+      if (!args.replace && checked.element_count && write.destination_slot < (previous?.length || 0)) {
+        reject("retained patch requires a replacement backing"); return;
+      }
+      writes.push({ offset: write.destination_slot * 4, data: checked.array });
+    }
+    for (const copy of args.copies) {
+      if (!validInteger(copy.source_slot) || !validInteger(copy.destination_slot) ||
+          !validInteger(copy.slot_count) || !previous?.valid ||
+          copy.source_slot + copy.slot_count > previous.length ||
+          copy.destination_slot + copy.slot_count > args.slot_count ||
+          (!args.replace && copy.source_slot !== copy.destination_slot)) {
+        reject("invalid retained GPU copy range"); return;
+      }
+    }
+    if (!args.replace && (!previous?.valid || args.capacity_bytes > previous.retained_capacity)) {
+      reject("retained update has no compatible backing"); return;
+    }
+    let destination = previous?.gl_buf;
+    let installed = false;
+    try {
+      if (args.replace) {
+        destination = gl.createBuffer();
+        if (!destination) { reject("retained allocation returned null"); return; }
+        gl.bindBuffer(gl.COPY_WRITE_BUFFER, destination);
+        gl.bufferData(gl.COPY_WRITE_BUFFER, args.capacity_bytes, gl.STATIC_DRAW);
+        if (gl.getError() !== gl.NO_ERROR) { reject("retained allocation failed"); return; }
+        if (args.copies.length) {
+          gl.bindBuffer(gl.COPY_READ_BUFFER, previous.gl_buf);
+          for (const copy of args.copies) {
+            if (copy.slot_count) gl.copyBufferSubData(gl.COPY_READ_BUFFER, gl.COPY_WRITE_BUFFER,
+              copy.source_slot * 4, copy.destination_slot * 4, copy.slot_count * 4);
+          }
+        }
+      } else {
+        gl.bindBuffer(gl.COPY_WRITE_BUFFER, destination);
+      }
+      for (const write of writes) {
+        if (write.data.length) gl.bufferSubData(gl.COPY_WRITE_BUFFER, write.offset, write.data);
+      }
+      if (gl.getError() !== gl.NO_ERROR) { reject("retained delta upload failed"); return; }
+      destination._buffer_byte_length = args.capacity_bytes;
+      this.array_buffers[args.buffer_id] = {
+        gl_buf: destination, valid: true, byte_length: byteLength, length: args.slot_count,
+        retained_capacity: args.capacity_bytes, source_kind: "f32",
+        upload_version: (previous?.upload_version || 0) + 1,
+      };
+      installed = true;
+      // The command stream retains storage read by earlier draws and copies.
+      if (args.replace && previous?.gl_buf) gl.deleteBuffer(previous.gl_buf);
+    } catch (error) {
+      reject(`retained delta failed: ${error?.message || error}`);
+    } finally {
+      gl.bindBuffer(gl.COPY_READ_BUFFER, null);
+      gl.bindBuffer(gl.COPY_WRITE_BUFFER, null);
+      if (!installed && args.replace && destination) gl.deleteBuffer(destination);
+    }
+  }
+
   FromWasmAllocArrayBuffer(args) {
     const gl = this.gl;
     const buffer_id = args && args.buffer_id;

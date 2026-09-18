@@ -31,6 +31,7 @@ pub type WebSocket = u64;
 
 #[derive(Debug)]
 enum StudioWebSocketThreadMsg {
+    #[cfg(any(not(target_arch = "wasm32"), target_feature = "atomics"))]
     AppToStudio { message: AppToStudio },
     Terminate,
 }
@@ -468,11 +469,12 @@ impl Cx {
             return;
         }
 
+        #[cfg(any(not(target_arch = "wasm32"), target_feature = "atomics"))]
         if let Some(sender) = STUDIO_WEB_SOCKET_THREAD_SENDER.lock().unwrap().as_ref() {
             let _ = sender.send(StudioWebSocketThreadMsg::AppToStudio { message: msg });
-        } else {
-            let _ = studio_ws_send_binary(AppToStudioVec(vec![msg]).serialize_bin());
+            return;
         }
+        let _ = studio_ws_send_binary(AppToStudioVec(vec![msg]).serialize_bin());
     }
 }
 
