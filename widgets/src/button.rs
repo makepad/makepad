@@ -479,6 +479,11 @@ pub struct Button {
     icon_walk: Walk,
     #[live]
     label_walk: Walk,
+    /// Per-row horizontal alignment of the label, which only shows once the text
+    /// wraps onto more rows; give `label_walk` a `Fill` width so the rows have
+    /// room to move within.
+    #[live]
+    label_align: Align,
     #[walk]
     walk: Walk,
 
@@ -704,7 +709,7 @@ impl Widget for Button {
         self.draw_bg.begin(cx, walk, self.layout);
         self.draw_icon.draw_walk(cx, self.icon_walk);
         self.draw_text
-            .draw_walk(cx, self.label_walk, Align::default(), self.text.as_ref());
+            .draw_walk(cx, self.label_walk, self.label_align, self.text.as_ref());
         self.draw_bg.end(cx);
         cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
         DrawStep::done()
@@ -726,7 +731,7 @@ impl Button {
         self.draw_bg.begin(cx, self.walk, self.layout);
         self.draw_icon.draw_walk(cx, self.icon_walk);
         self.draw_text
-            .draw_walk(cx, self.label_walk, Align::default(), label);
+            .draw_walk(cx, self.label_walk, self.label_align, label);
         self.draw_bg.end(cx);
     }
 
