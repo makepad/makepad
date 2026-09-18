@@ -105,10 +105,10 @@
    "available": true,
    "gated": false,
    "license": {
-    "name": "MIT License",
+    "name": "Code MIT; checkpoint unlicensed, trained on an academic-use dataset",
     "url": "https://github.com/ZFTurbo/Music-Source-Separation-Training",
-    "summary": "BS-RoFormer four-stem separator checkpoint and implementation are MIT licensed.",
-    "restriction": "none"
+    "summary": "BS-RoFormer four-stem separator: the implementation is MIT, the checkpoint is a release asset with no licence of its own and was trained on MUSDB18-HQ (academic use only). Development and research use; not for a product.",
+    "restriction": "non-commercial"
    },
    "vram_gb": 6.0,
    "note": "Contract: input_b64 is a 44.1 kHz stereo PCM WAV. Output is application/vnd.makepad.stems-f32: drums, bass, other and vocals as planar stereo f32.",

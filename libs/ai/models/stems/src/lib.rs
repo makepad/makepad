@@ -1,8 +1,11 @@
 //! BS-RoFormer 4-stem music source separation on the makepad AI stack.
 //!
 //! Model: `model_bs_roformer_ep_17_sdr_9.6568.ckpt` from
-//! ZFTurbo/Music-Source-Separation-Training (MIT, checkpoint published as a
-//! release asset of that same MIT repo). 131.7 M parameters; MUSDB test SDR
+//! ZFTurbo/Music-Source-Separation-Training. The CODE is MIT; the checkpoint
+//! is published as a release asset of that repo without a licence of its
+//! own, and it was trained on MUSDB18-HQ, whose terms allow academic use
+//! only. So the weights are for development: nothing built for sale ships
+//! them (see [`MODEL_COMMERCIAL_USE`]). 131.7 M parameters; MUSDB test SDR
 //! 9.65 / multisong 9.38 — the best 4-stem entry in the repo's own table.
 //!
 //! **Placement-neutral by construction.** This crate is `demix(track) -> 4
@@ -57,7 +60,22 @@ pub use weights::StemsWeights;
 pub const MODEL_ID: &str = "bs-roformer-4stem";
 pub const MODEL_CHECKPOINT: &str = "model_bs_roformer_ep_17_sdr_9.6568.ckpt";
 pub const MODEL_SOURCE: &str = "https://github.com/ZFTurbo/Music-Source-Separation-Training";
-pub const MODEL_LICENSE: &str = "MIT (ZFTurbo/Music-Source-Separation-Training, (c) 2024 Roman Solovyev)";
+pub const MODEL_LICENSE: &str = "code MIT (ZFTurbo/Music-Source-Separation-Training, (c) 2024 Roman Solovyev); checkpoint released without a weights licence, trained on MUSDB18-HQ (academic use only): development use only";
+/// The licence line as the span cache's header carries it, frozen.
+///
+/// Builds from before the header learned to tell a separation from the words
+/// about it compare the whole header byte for byte and DELETE an entry that
+/// differs. They are still about, and they share cache roots with this one.
+/// So the header goes on carrying exactly the line it always has, and an
+/// entry written by either build reads as its own to the other; the
+/// statement of record about these weights is [`MODEL_LICENSE`], which a
+/// person reads, and not this, which only a comparison does.
+pub const CACHE_HEADER_LICENSE: &str =
+    "MIT (ZFTurbo/Music-Source-Separation-Training, (c) 2024 Roman Solovyev)";
+/// Whether these weights may go into something sold. They may not: the
+/// checkpoint carries no licence and its training set is academic-only. A
+/// host that ships to customers must refuse to bundle or install them.
+pub const MODEL_COMMERCIAL_USE: bool = false;
 /// SHA-256 of the published checkpoint.
 pub const MODEL_SHA256: &str =
     "3e9daecd70aaed5b5a0d1f861cc4d77eaa45afb3fc6301b1cf32c1be0f5868fb";

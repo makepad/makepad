@@ -96,12 +96,28 @@ pub struct CacheHeader {
 }
 
 impl CacheHeader {
+    /// Whether `other` describes the same separation of the same track: the
+    /// same model and checkpoint over the same samples on the same span
+    /// grid. The licence and source lines are provenance -- what somebody
+    /// reads, not what the bytes depend on -- so a model described in new
+    /// words is still the model that made these stems, and hours of
+    /// separation are not thrown away over a sentence.
+    pub fn same_separation(&self, other: &CacheHeader) -> bool {
+        self.model_id == other.model_id
+            && self.checkpoint == other.checkpoint
+            && self.checkpoint_sha256 == other.checkpoint_sha256
+            && self.sample_rate == other.sample_rate
+            && self.frames == other.frames
+            && self.span_samples == other.span_samples
+            && self.span_count == other.span_count
+    }
+
     pub fn for_track(frames: u64) -> Self {
         Self {
             model_id: crate::MODEL_ID.to_string(),
             checkpoint: crate::MODEL_CHECKPOINT.to_string(),
             checkpoint_sha256: crate::MODEL_SHA256.to_string(),
-            license: crate::MODEL_LICENSE.to_string(),
+            license: crate::CACHE_HEADER_LICENSE.to_string(),
             source: crate::MODEL_SOURCE.to_string(),
             sample_rate: SAMPLE_RATE,
             frames,
@@ -193,7 +209,7 @@ pub fn is_complete_on_disk(root: impl AsRef<Path>, digest: &str, header: &CacheH
     let Ok(text) = std::fs::read_to_string(dir.join("header")) else {
         return false;
     };
-    if CacheHeader::decode(&text).ok().as_ref() != Some(header) {
+    if !CacheHeader::decode(&text).is_ok_and(|existing| existing.same_separation(header)) {
         return false;
     }
     let Ok(spans) = std::fs::read(dir.join("spans")) else {
@@ -230,12 +246,24 @@ impl StemCache {
         if header_path.is_file() {
             let mut text = String::new();
             File::open(&header_path)?.read_to_string(&mut text)?;
-            let stale = match CacheHeader::decode(&text) {
-                Ok(existing) => existing != header,
-                Err(_) => true,
+            let (stale, reworded) = match CacheHeader::decode(&text) {
+                Ok(existing) => (!existing.same_separation(&header), existing != header),
+                Err(_) => (true, false),
             };
             if stale {
                 std::fs::remove_dir_all(&dir)?;
+            } else if reworded {
+                // Same stems, newer words about them: the record is brought
+                // up to date beside the audio, which stays exactly where it
+                // is. Written beside and renamed, so a crash here cannot
+                // leave a header that reads as no header at all -- which the
+                // next open would answer by deleting the track.
+                let fresh = dir.join("header.tmp");
+                let mut file = File::create(&fresh)?;
+                file.write_all(header.encode().as_bytes())?;
+                file.sync_all()?;
+                drop(file);
+                std::fs::rename(&fresh, &header_path)?;
             }
         }
         std::fs::create_dir_all(&dir)?;
@@ -724,6 +752,67 @@ mod tests {
         cache.write_span(2 * CHUNK_STEP, &ramp_stems(100, 0.2)).unwrap();
         assert!(cache.is_complete());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The licence and source lines are words ABOUT the model, not the model.
+    /// A build that words them differently must find the track it separated
+    /// yesterday, not delete it: separation costs a third of a track's length,
+    /// and a library of them costs hours.
+    #[test]
+    fn a_model_described_in_new_words_keeps_the_stems_it_made() {
+        let root = temp_root("reworded");
+        let frames = 2 * CHUNK_STEP;
+        let mut old = CacheHeader::for_track(frames as u64);
+        old.license = "an earlier wording".to_string();
+        old.source = "an earlier address".to_string();
+        let digest = "b".repeat(64);
+        {
+            let mut cache = StemCache::open(&root, &digest, old.clone()).unwrap();
+            for span in 0..cache.span_count() {
+                cache
+                    .write_span(span * CHUNK_STEP, &ramp_stems(CHUNK_STEP, 0.3))
+                    .unwrap();
+            }
+            assert!(cache.is_complete());
+        }
+        let new = CacheHeader::for_track(frames as u64);
+        assert_ne!(old, new);
+        assert!(is_complete_on_disk(&root, &digest, &new), "the probe still finds it");
+        let cache = StemCache::open(&root, &digest, new.clone()).unwrap();
+        assert!(cache.is_complete(), "and opening it keeps every span");
+        let text = std::fs::read_to_string(cache.dir().join("header")).unwrap();
+        assert_eq!(
+            CacheHeader::decode(&text).unwrap(),
+            new,
+            "with the record brought up to date"
+        );
+        assert!(!cache.dir().join("header.tmp").exists(), "and nothing left beside it");
+        drop(cache);
+
+        // Another checkpoint is still another separation.
+        let mut other = new.clone();
+        other.checkpoint_sha256 = "0".repeat(64);
+        assert!(!is_complete_on_disk(&root, &digest, &other));
+        let replaced = StemCache::open(&root, &digest, other).unwrap();
+        assert!(!replaced.is_complete(), "and its entry starts again from nothing");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The header's licence line is compared byte for byte by builds that
+    /// are still in use, and an entry that differs is one they delete. It
+    /// is pinned here so that rewording the statement of record can never
+    /// reword this by accident.
+    #[test]
+    fn the_header_carries_the_line_older_builds_compare_byte_for_byte() {
+        let header = CacheHeader::for_track(1_000_000);
+        assert_eq!(
+            header.license,
+            "MIT (ZFTurbo/Music-Source-Separation-Training, (c) 2024 Roman Solovyev)"
+        );
+        assert!(header.encode().contains(
+            "license=MIT (ZFTurbo/Music-Source-Separation-Training, (c) 2024 Roman Solovyev)\n"
+        ));
+        assert_ne!(header.license, crate::MODEL_LICENSE, "which is not the statement of record");
     }
 
     #[test]

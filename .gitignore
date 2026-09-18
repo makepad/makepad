@@ -14,6 +14,10 @@
 # Private Stage performance app. Clone into this path:
 #   git clone git@github.com:makepad/stage.git apps/stage
 /apps/stage/
+# The engine the stage app shares, and the app built on it beside the stage:
+# separate checkouts, cloned in the same way.
+/apps/engine/
+/apps/karaoke/
 
 # Remove Cargo.lock from gitignore if creating an executable, leave it for libraries
 # More information here https://doc.rust-lang.org/cargo/guide/cargo-toml-vs-cargo-lock.html
