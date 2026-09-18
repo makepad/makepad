@@ -24,6 +24,18 @@ script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
 
+    // The quad one continuation row is drawn with. It carries no colours of
+    // its own, so nothing anybody can see is drawn until a list says what its
+    // ruling is.
+    set_type_default() do #(DrawFillerQuad::script_shader(vm)){
+        ..mod.draw.DrawQuad
+        color_row: uniform(#0000)
+        color_row_alt: uniform(#0000)
+        pixel: fn() {
+            return self.color_row.mix(self.color_row_alt, self.alternate)
+        }
+    }
+
     mod.widgets.PortalListBase = #(PortalList::register_widget(vm))
 
     mod.widgets.PortalList = set_type_default() do mod.widgets.PortalListBase {
@@ -32,6 +44,15 @@ script_mod! {
         capture_overload: true
         scroll_bar: mod.widgets.ScrollBar {}
         flow: Down
+
+        // The ruling the continuation rows carry on with: the same theme pair
+        // every other ruled list in the library stripes by, so a list whose
+        // own rows use the house colours agrees with its own filler for free.
+        // Drawn only when `filler_rows` is on, which it is not by default.
+        filler +: {
+            color_row: theme.color_bg_even
+            color_row_alt: theme.color_bg_odd
+        }
 
         // The kinetic knobs, restated here so the design overlay can reach
         // them. A `#[live]` default alone gives the panel a value with no
@@ -71,6 +92,70 @@ const SMOOTH_SCROLL_MAXIMUM_WINDOW: usize = 20;
 /// How many frames a `smooth_scroll_to_end` animation takes, whatever the
 /// distance, so a long list doesn't crawl at a fixed pixels-per-frame rate.
 const SMOOTH_SCROLL_TO_END_FRAMES: f64 = 24.0;
+
+/// The quad one continuation row is drawn with.
+///
+/// `alternate` is `0.0` on an even row index and `1.0` on an odd one, which is
+/// the parity a host's own row background stripes by, so the ruling carries on
+/// in the colour the next real row would have had.
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+struct DrawFillerQuad {
+    #[deref]
+    draw_super: DrawQuad,
+    #[live]
+    alternate: f32,
+}
+
+/// The most continuation rows one draw will put in the gap. A pitch smaller
+/// than [`FILLER_MIN_PITCH`] is refused outright, so this only ever bites on a
+/// viewport tall enough to want hundreds of rows, where the ones past it are
+/// off screen anyway.
+const MAX_FILLER_ROWS: usize = 256;
+
+/// The smallest gap worth ruling, and the smallest row pitch worth ruling it
+/// with, in pixels. Below either, the filler draws nothing: sub-pixel rows are
+/// a hairline of the wrong colour, not a table.
+const FILLER_MIN_PITCH: f64 = 0.5;
+
+/// Where a short list's continuation rows go, relative to the viewport's own
+/// start along the scroll axis.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FillerBand {
+    /// The edge of the content the rows continue from.
+    origin: f64,
+    /// How much room there is to rule.
+    gap: f64,
+    /// `1` when the rows run on past the content, `-1` when they run back
+    /// before it.
+    step: isize,
+}
+
+/// How many continuation rows fit in a gap, and how tall the last one is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FillerRun {
+    /// The number of rows to draw, the last of them clamped.
+    rows: usize,
+    /// The size of the final row, which is what was left over.
+    last: f64,
+}
+
+/// Everything the continuation rows need, worked out while the drawn rows are
+/// still on hand and used once the borrow on them is released.
+#[derive(Clone, Copy)]
+struct FillerPlan {
+    /// The viewport the rows run inside.
+    viewport: Rect,
+    /// Which way they run, from where, and how far.
+    band: FillerBand,
+    /// One row's size along the scroll axis, taken from the row the filler
+    /// continues from: this list has no uniform row height, so the pitch can
+    /// only come from a row that was actually measured.
+    pitch: f64,
+    /// The index of that row, which is where the striping's parity continues
+    /// from.
+    from_index: usize,
+}
 
 enum ScrollState {
     Stopped,
@@ -586,6 +671,39 @@ pub struct PortalList {
     #[live(false)]
     reuse_items: bool,
 
+    /// Whether a list whose rows don't fill the viewport carries its ruling on
+    /// past the last row, so the leftover space reads as blank paper rather
+    /// than as the list stopping mid-air.
+    ///
+    /// Off by default, and worth turning on only for a list that is already
+    /// ruled: a table, a ledger, a directory listing. On a list drawn over a
+    /// plain ground it would sprout stripes out of nowhere.
+    ///
+    /// The rows are drawn with [`Self::filler`], at the pitch of the row the
+    /// filler continues from — this list has no uniform row height, so the
+    /// pitch can only come from a row that was measured — and the last one is
+    /// clamped to whatever room is left. A list resting at its end instead of
+    /// its start (`align_top_when_empty: false`) keeps its gap at the leading
+    /// edge, so the ruling runs the other way, back before the first row. An
+    /// empty list draws none of this: an empty state is what answers that.
+    #[live(false)]
+    filler_rows: bool,
+    /// The quad one continuation row is drawn with; see [`Self::filler_rows`].
+    #[live]
+    filler: DrawFillerQuad,
+
+    /// A row the host asked to keep on screen, honoured at the end of the next
+    /// draw and then forgotten. `None` — the default — leaves the list
+    /// positioned by scrolling alone.
+    #[rust]
+    keep_visible_in_draw: Option<usize>,
+    /// How many rows a recalled row lands short of the edge it came back over
+    /// (see [`Self::keep_index_visible`]). One row by default: a row pinned
+    /// flush against an edge reads as the end of the list, with nothing beyond
+    /// it to say the list goes on.
+    #[live(1)]
+    keep_visible_lead: usize,
+
     // Templates stored as rooted ScriptObjectRef - populated in on_after_apply
     #[rust]
     templates: HashMap<LiveId, ScriptObjectRef>,
@@ -719,6 +837,7 @@ impl PortalList {
 
         let vi = self.vec_index;
         let mut visible_items = 0;
+        let mut filler_plan = None;
 
         if let Some(ListDrawState::End { viewport }) = self.draw_state.get() {
             let list = &mut self.draw_align_list;
@@ -735,12 +854,16 @@ impl PortalList {
                 let mut last_pos = self.first_scroll;
                 let mut last_item_pos = None;
                 let mut last_drawn_index = None;
+                // The size of that same last row, which is the pitch the
+                // continuation rows take when there are any.
+                let mut last_drawn_size = 0.0;
                 for i in first_index..list.len() {
                     let item = &list[i];
                     last_pos += item.size.index(vi);
                     if item.index < self.range_end {
                         last_item_pos = Some(last_pos);
                         last_drawn_index = Some(item.index);
+                        last_drawn_size = item.size.index(vi);
                     } else {
                         break;
                     }
@@ -753,6 +876,12 @@ impl PortalList {
                 // a zero-size item appears in the middle of the visible range.
                 let drew_last_item = last_drawn_index == Some(self.range_end.saturating_sub(1));
 
+                // How far the two branches below move the whole run of rows
+                // from where `first_pos`/`last_item_pos` measured it. Adding it
+                // back is what puts the content's two edges in the viewport's
+                // own coordinates, which is all the filler needs. Both branches
+                // set it before anything reads it.
+                let content_shift;
                 let mut total_at_start = None;
                 if list[0].index == self.range_start {
                     let mut total = 0.0;
@@ -803,6 +932,7 @@ impl PortalList {
                     };
 
                     let mut pos = first_pos.min(min);
+                    content_shift = pos - first_pos;
                     for item in list.iter() {
                         let shift = Vec2d::from_index_pair(vi, pos, 0.0);
                         cx.shift_align_range(
@@ -847,6 +977,7 @@ impl PortalList {
                         0.0
                     };
 
+                    content_shift = shift;
                     let mut first_id_changed = false;
                     let start_pos = self.first_scroll + shift;
                     let mut pos = start_pos;
@@ -892,6 +1023,36 @@ impl PortalList {
                         self.first_scroll = start_pos;
                     }
                 }
+
+                // Where the continuation rows go, worked out here where the
+                // drawn rows and their settled positions are both on hand. The
+                // drawing itself waits for the borrow on the rows to be
+                // released, at the end of this block.
+                if self.filler_rows && self.not_filling_viewport {
+                    if let (Some(last_index), Some(last_pos)) =
+                        (last_drawn_index, last_item_pos)
+                    {
+                        let first = &list[0];
+                        let (from_index, pitch) = if self.align_top_when_empty {
+                            (last_index, last_drawn_size)
+                        } else {
+                            (first.index, first.size.index(vi))
+                        };
+                        filler_plan = filler_band(
+                            self.align_top_when_empty,
+                            first_pos + content_shift,
+                            last_pos + content_shift,
+                            viewport.size.index(vi),
+                        )
+                        .map(|band| FillerPlan {
+                            viewport,
+                            band,
+                            pitch,
+                            from_index,
+                        });
+                    }
+                }
+
                 // Capture measured heights into height_tree and height_cache
                 for item in list.iter() {
                     if item.index >= self.range_start && item.index < self.range_end {
@@ -974,6 +1135,12 @@ impl PortalList {
                     }
                 }
             }
+        }
+
+        // After the rows and before the scroll bar: the ruling is the ground
+        // the rows sit on, and the bar sits over both.
+        if let Some(plan) = filler_plan {
+            self.draw_filler_rows(cx, plan);
         }
 
         let rect = cx.turtle().rect();
@@ -1116,7 +1283,42 @@ impl PortalList {
                 cx.widget_action(self.widget_uid(), PortalListAction::Scroll);
             }
         }
+
+        // A row the host asked to hold, judged last of all: against the window
+        // this draw actually landed on, so a list whose rows moved under it is
+        // measured where it now is rather than where it was, and after the
+        // notifications above, which belong to the position just drawn.
+        self.apply_keep_visible(cx);
 }
+
+    /// Draws the continuation rows of a short list: one quad per row, at the
+    /// pitch of the row the ruling continues from, with the row nearest the
+    /// viewport edge clamped to what is left. Nothing is allocated here — the
+    /// run is two numbers and the quad is reused for every row.
+    fn draw_filler_rows(&mut self, cx: &mut Cx2d, plan: FillerPlan) {
+        let vi = self.vec_index;
+        let run = filler_run(plan.band.gap, plan.pitch, MAX_FILLER_ROWS);
+        let mut pos = plan.band.origin;
+        for n in 0..run.rows {
+            let size = if n + 1 == run.rows { run.last } else { plan.pitch };
+            // Running backwards, a row is laid out from its own far edge.
+            let start = if plan.band.step > 0 { pos } else { pos - size };
+            self.filler.alternate =
+                filler_alternate(plan.from_index, plan.band.step * (n as isize + 1));
+            let rect = match vi {
+                Vec2Index::Y => Rect {
+                    pos: dvec2(plan.viewport.pos.x, plan.viewport.pos.y + start),
+                    size: dvec2(plan.viewport.size.x, size),
+                },
+                Vec2Index::X => Rect {
+                    pos: dvec2(plan.viewport.pos.x + start, plan.viewport.pos.y),
+                    size: dvec2(size, plan.viewport.size.y),
+                },
+            };
+            self.filler.draw_abs(cx, rect);
+            pos += if plan.band.step > 0 { size } else { -size };
+        }
+    }
 
     /// Returns the index of the next visible item that will be drawn by this PortalList.
     pub fn next_visible_item(&mut self, cx: &mut Cx2d) -> Option<usize> {
@@ -1777,6 +1979,70 @@ impl PortalList {
     /// Enables or disables auto-tracking the last item in the list.
     pub fn set_tail_range(&mut self, tail_range: bool) {
         self.tail_range = tail_range;
+    }
+
+    /// Keeps the row at `index` on screen.
+    ///
+    /// A row that is already showing holds the list exactly where it is: this
+    /// is the whole point of asking for it rather than scrolling to the row,
+    /// which would move a list that had no need to move. A row that has gone
+    /// off either edge is brought back the shortest way, landing
+    /// `keep_visible_lead` rows short of the edge it came back over so it is
+    /// not pinned flush against it.
+    ///
+    /// Ask for this whenever the row the host cares about may have moved under
+    /// the list: after rows were inserted or removed above it (its index has
+    /// changed, so the list is showing a different stretch of the data than
+    /// the host thinks), or when the current item is chosen somewhere else
+    /// entirely and this list is one of the places that shows it. It is a
+    /// one-shot request, honoured at the end of the next draw and then
+    /// forgotten, so the user is free to scroll the row off afterwards — the
+    /// list never drags it back on its own.
+    ///
+    /// Two positions the list already holds win over the request, and it is
+    /// dropped rather than fought: a list that is tailing (`auto_tail` or
+    /// [`Self::set_tail_range`]) is already following its last row, and a
+    /// finger or a fling that owns the scroll is the user's, not the host's.
+    pub fn keep_index_visible(&mut self, cx: &mut Cx, index: usize) {
+        self.keep_visible_in_draw = Some(index);
+        self.area.redraw(cx);
+    }
+
+    /// Consumes a [`Self::keep_index_visible`] request at the end of a draw,
+    /// where the window that was actually drawn is known.
+    fn apply_keep_visible(&mut self, cx: &mut Cx2d) {
+        let Some(index) = self.keep_visible_in_draw.take() else {
+            return;
+        };
+        if index >= self.range_end {
+            return;
+        }
+        // The tail owns a tailing list, and a gesture owns a list being
+        // scrolled; either way the request has nothing to correct.
+        if self.tail_range
+            || matches!(
+                self.scroll_state,
+                ScrollState::Flick { .. }
+                    | ScrollState::Pulldown { .. }
+                    | ScrollState::Drag { .. }
+            )
+        {
+            return;
+        }
+        if let Some(first_id) = first_id_keeping_index_visible(
+            index,
+            self.first_id,
+            self.visible_items,
+            self.range_start,
+            self.keep_visible_lead,
+        ) {
+            self.first_id = first_id;
+            self.first_scroll = 0.0;
+            // The list was repositioned by code, so showing an end of it now
+            // is news again — the same rule `set_first_id_and_scroll` follows.
+            self.forget_reached_edges();
+            self.area.redraw(cx);
+        }
     }
 
     /// Sets the flow direction, e.g. to switch a list between a vertical
@@ -3401,6 +3667,13 @@ impl PortalListRef {
         }
     }
 
+    /// See [`PortalList::keep_index_visible()`].
+    pub fn keep_index_visible(&self, cx: &mut Cx, index: usize) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.keep_index_visible(cx, index);
+        }
+    }
+
     /// See [`PortalList::set_flow`].
     pub fn set_flow(&self, cx: &mut Cx, flow: Flow) {
         if let Some(mut inner) = self.borrow_mut() {
@@ -3730,6 +4003,114 @@ fn list_keeps_scroll_delta(delta: f64, at_start: bool, at_end: bool, band: bool)
     }
 }
 
+/// Where a list must sit so the row at `index` is on screen, or `None` when it
+/// already is and the list must not move at all.
+///
+/// The window is the `visible_items` rows from `first_id`, the stretch the last
+/// draw put on screen. A row that went off the start comes back `lead` rows
+/// down from the start of the window, and one that went off the end comes back
+/// `lead` rows up from the end of it, so the row the host cares about always
+/// has a neighbour beyond it saying the list goes on. Both are clamped so the
+/// row itself stays in the window, which is what a list too short for the lead,
+/// or a row too near the start of the range for it, comes down to.
+///
+/// A window of no rows means nothing was drawn, so the row is off screen by
+/// definition and comes back at the start of the window.
+fn first_id_keeping_index_visible(
+    index: usize,
+    first_id: usize,
+    visible_items: usize,
+    range_start: usize,
+    lead: usize,
+) -> Option<usize> {
+    if visible_items > 0 && index >= first_id && index < first_id + visible_items {
+        return None;
+    }
+    if index < first_id || visible_items == 0 {
+        return Some(index.saturating_sub(lead).max(range_start));
+    }
+    // Off the end: put the row `lead` rows up from the bottom of the window,
+    // never so far that the row itself goes off the top of it.
+    let first = index
+        .saturating_add(lead)
+        .saturating_add(1)
+        .saturating_sub(visible_items)
+        .max(range_start)
+        .min(index);
+    Some(first)
+}
+
+/// Where a short list's continuation rows go, and which way they run, from the
+/// content's two edges in the viewport's own coordinates.
+///
+/// A list resting at its start leaves its gap after the last row and the ruling
+/// runs on past it. A list resting at its end (`align_top_when_empty: false`)
+/// leaves the gap at the leading edge instead, so the ruling runs the other
+/// way, back before the first row. `None` when there is no gap worth ruling.
+fn filler_band(
+    align_top: bool,
+    content_start: f64,
+    content_end: f64,
+    viewport: f64,
+) -> Option<FillerBand> {
+    let band = if align_top {
+        FillerBand {
+            origin: content_end,
+            gap: viewport - content_end,
+            step: 1,
+        }
+    } else {
+        FillerBand {
+            origin: content_start,
+            gap: content_start,
+            step: -1,
+        }
+    };
+    (band.gap > FILLER_MIN_PITCH).then_some(band)
+}
+
+/// How many continuation rows of `pitch` fit in `gap`, and how tall the last of
+/// them is once it is clamped to what is left.
+///
+/// A gap shorter than one row is one clamped row, not none: that sliver is the
+/// top of the row the list would have drawn next, and leaving it blank is the
+/// ragged edge the ruling exists to remove. A gap or a pitch too small to rule,
+/// or one that isn't a number, draws nothing at all.
+fn filler_run(gap: f64, pitch: f64, max_rows: usize) -> FillerRun {
+    let none = FillerRun { rows: 0, last: 0.0 };
+    if !(gap > FILLER_MIN_PITCH) || !(pitch > FILLER_MIN_PITCH) || max_rows == 0 {
+        return none;
+    }
+    let whole = (gap / pitch).floor();
+    // A float too big for a usize saturates rather than wrapping, and the cap
+    // below catches it either way.
+    let mut rows = whole as usize;
+    let mut last = pitch;
+    let rest = gap - whole * pitch;
+    if rest > FILLER_MIN_PITCH {
+        rows += 1;
+        last = rest;
+    }
+    if rows > max_rows {
+        rows = max_rows;
+        last = pitch;
+    }
+    FillerRun { rows, last }
+}
+
+/// The striping of the continuation row `offset` rows past `from_index`
+/// (negative for the rows before it): `0.0` on an even row index and `1.0` on
+/// an odd one, the parity a ruled list's own rows stripe by, so the ruling
+/// carries on in the colour the next real row would have had.
+fn filler_alternate(from_index: usize, offset: isize) -> f32 {
+    let index = from_index as i64 + offset as i64;
+    if index.rem_euclid(2) == 0 {
+        0.0
+    } else {
+        1.0
+    }
+}
+
 impl PortalListSet {
     pub fn set_first_id(&self, id: usize) {
         for list in self.iter() {
@@ -3805,6 +4186,200 @@ mod tests {
         assert!(!list_keeps_scroll_delta(0.0, false, false, true));
     }
 
+    // A list showing five rows from row 10, i.e. rows 10 to 14.
+    const FIRST: usize = 10;
+    const WINDOW: usize = 5;
+    /// One row of daylight between a recalled row and the edge it came over.
+    const LEAD: usize = 1;
+
+    /// Asking for a row that is already showing is not a scroll request: the
+    /// list holds exactly where it is, wherever in the window the row sits.
+    #[test]
+    fn a_row_already_on_screen_holds_the_list_still() {
+        for index in FIRST..FIRST + WINDOW {
+            assert_eq!(
+                first_id_keeping_index_visible(index, FIRST, WINDOW, 0, LEAD),
+                None,
+                "the list moved for row {index}, which was already showing"
+            );
+        }
+    }
+
+    /// A row that went off the top comes back with the lead above it, so it
+    /// isn't pinned to the very edge.
+    #[test]
+    fn a_row_off_the_top_comes_back_short_of_the_top() {
+        assert_eq!(
+            first_id_keeping_index_visible(3, FIRST, WINDOW, 0, LEAD),
+            Some(2)
+        );
+        assert_eq!(
+            first_id_keeping_index_visible(9, FIRST, WINDOW, 0, 3),
+            Some(6)
+        );
+    }
+
+    /// The same off the bottom: the row lands one row up from the end of the
+    /// window rather than half off it.
+    #[test]
+    fn a_row_off_the_bottom_comes_back_short_of_the_bottom() {
+        let first = first_id_keeping_index_visible(20, FIRST, WINDOW, 0, LEAD).unwrap();
+        assert_eq!(first, 17);
+        // 17..22 shows the row with one row after it.
+        assert!(first <= 20 && 20 < first + WINDOW);
+        assert_eq!(20 - first + LEAD, WINDOW - 1);
+    }
+
+    /// The lead is daylight, not a promise: near the start of the range there
+    /// is none to be had, and the list stops at the first row it has.
+    #[test]
+    fn the_lead_never_runs_past_the_start_of_the_range() {
+        assert_eq!(
+            first_id_keeping_index_visible(0, FIRST, WINDOW, 0, LEAD),
+            Some(0)
+        );
+        assert_eq!(
+            first_id_keeping_index_visible(5, FIRST, WINDOW, 5, LEAD),
+            Some(5)
+        );
+    }
+
+    /// A window with no room for the lead still shows the row itself: the row
+    /// is the request, the lead is the manners.
+    #[test]
+    fn a_window_too_short_for_the_lead_still_shows_the_row() {
+        assert_eq!(
+            first_id_keeping_index_visible(20, FIRST, 1, 0, LEAD),
+            Some(20)
+        );
+        assert_eq!(
+            first_id_keeping_index_visible(20, FIRST, 2, 0, 4),
+            Some(20)
+        );
+    }
+
+    /// A list that drew nothing has no window to judge against, so the row is
+    /// off screen by definition and comes back at the start of one.
+    #[test]
+    fn a_list_that_drew_nothing_brings_the_row_to_its_start() {
+        assert_eq!(
+            first_id_keeping_index_visible(FIRST, FIRST, 0, 0, LEAD),
+            Some(FIRST - LEAD)
+        );
+    }
+
+    /// A short list resting at its start leaves its gap after the last row,
+    /// and the ruling runs on past it.
+    #[test]
+    fn a_list_resting_at_its_start_rules_the_gap_after_its_last_row() {
+        assert_eq!(
+            filler_band(true, 0.0, 80.0, 120.0),
+            Some(FillerBand {
+                origin: 80.0,
+                gap: 40.0,
+                step: 1
+            })
+        );
+    }
+
+    /// A short list resting at its end leaves the gap at the other edge, so
+    /// the ruling runs back before the first row instead.
+    #[test]
+    fn a_list_resting_at_its_end_rules_the_gap_before_its_first_row() {
+        assert_eq!(
+            filler_band(false, 40.0, 120.0, 120.0),
+            Some(FillerBand {
+                origin: 40.0,
+                gap: 40.0,
+                step: -1
+            })
+        );
+    }
+
+    /// Rows that reach the edge leave nothing to rule, whichever edge the list
+    /// rests on — and neither does a sliver too thin to be a row.
+    #[test]
+    fn rows_that_fill_the_viewport_leave_nothing_to_rule() {
+        assert_eq!(filler_band(true, 0.0, 120.0, 120.0), None);
+        assert_eq!(filler_band(false, 0.0, 120.0, 120.0), None);
+        assert_eq!(filler_band(true, 0.0, 119.7, 120.0), None);
+    }
+
+    /// The gap takes whole rows at the pitch of the row it continues, and the
+    /// last one takes what is left over.
+    #[test]
+    fn whole_rows_fill_the_gap_and_the_last_one_takes_what_is_left() {
+        assert_eq!(
+            filler_run(45.0, 20.0, MAX_FILLER_ROWS),
+            FillerRun {
+                rows: 3,
+                last: 5.0
+            }
+        );
+        assert_eq!(
+            filler_run(40.0, 20.0, MAX_FILLER_ROWS),
+            FillerRun {
+                rows: 2,
+                last: 20.0
+            }
+        );
+    }
+
+    /// A gap shorter than one row is one clamped row: that sliver is the top
+    /// of the row the list would have drawn next, and leaving it blank is the
+    /// ragged edge the ruling is there to remove.
+    #[test]
+    fn a_gap_shorter_than_a_row_is_one_clamped_row() {
+        assert_eq!(
+            filler_run(5.0, 20.0, MAX_FILLER_ROWS),
+            FillerRun {
+                rows: 1,
+                last: 5.0
+            }
+        );
+    }
+
+    /// Nothing is ruled without a gap and a row height to rule it by, and a
+    /// number that isn't one rules nothing either.
+    #[test]
+    fn a_row_with_no_height_rules_nothing() {
+        let none = FillerRun {
+            rows: 0,
+            last: 0.0,
+        };
+        assert_eq!(filler_run(40.0, 0.0, MAX_FILLER_ROWS), none);
+        assert_eq!(filler_run(0.0, 20.0, MAX_FILLER_ROWS), none);
+        assert_eq!(filler_run(0.2, 20.0, MAX_FILLER_ROWS), none);
+        assert_eq!(filler_run(f64::NAN, 20.0, MAX_FILLER_ROWS), none);
+        assert_eq!(filler_run(40.0, f64::NAN, MAX_FILLER_ROWS), none);
+        assert_eq!(filler_run(40.0, 20.0, 0), none);
+    }
+
+    /// However thin the rows, one draw only ever puts so many of them down;
+    /// the rest would be off the far edge anyway.
+    #[test]
+    fn the_run_of_rows_is_capped() {
+        assert_eq!(
+            filler_run(1000.0, 1.0, 8),
+            FillerRun {
+                rows: 8,
+                last: 1.0
+            }
+        );
+        assert_eq!(filler_run(f64::INFINITY, 1.0, 8).rows, 8);
+    }
+
+    /// The striping carries on from the row it continues, forwards past the
+    /// last row and backwards before the first.
+    #[test]
+    fn the_striping_carries_on_from_the_row_it_continues() {
+        assert_eq!(filler_alternate(4, 1), 1.0);
+        assert_eq!(filler_alternate(4, 2), 0.0);
+        assert_eq!(filler_alternate(5, 1), 0.0);
+        assert_eq!(filler_alternate(0, -1), 1.0);
+        assert_eq!(filler_alternate(0, -2), 0.0);
+    }
+
     const PANE: DVec2 = dvec2(300.0, 120.0);
 
     /// One draw of the pane, in the pass and draw list the test keeps.
@@ -3847,6 +4422,109 @@ mod tests {
         let list = log.portal_list(cx, ids!(list));
         let list = list.borrow().expect("the log holds no portal list");
         (list.first_id(), (list.first_scroll() * 100.0).round() / 100.0)
+    }
+
+    /// How many rows the list last drew.
+    fn window(cx: &Cx, log: &LogList) -> usize {
+        log.portal_list(cx, ids!(list)).visible_items()
+    }
+
+    /// Ask the list to keep `index` on screen.
+    fn keep(cx: &mut Cx, log: &LogList, index: usize) {
+        let list = log.portal_list(cx, ids!(list));
+        list.keep_index_visible(cx, index);
+    }
+
+    /// Keeping a row, through a real list: a row that is showing holds the
+    /// list exactly where it is, and one that has gone off either edge comes
+    /// back with a row to spare beyond it.
+    #[test]
+    fn the_list_holds_the_row_it_was_asked_to_keep() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let mut log = cx.with_vm(LogList::script_new_with_default);
+        log.lines = (0..200).map(|n| format!("log | line {n}")).collect();
+        let pass = DrawPass::new(&mut cx);
+        pass.set_size(&mut cx, PANE);
+        let mut draw_list = DrawList2d::new(&mut cx);
+        for _ in 0..3 {
+            frame(&mut cx, &mut log, &pass, &mut draw_list);
+        }
+        // Off the tail: a tailing list follows its last row and a request to
+        // keep another one is dropped rather than fought.
+        for _ in 0..2 {
+            wheel(&mut cx, &mut log, -600.0, false);
+            frame(&mut cx, &mut log, &pass, &mut draw_list);
+        }
+        let (first, _) = place(&cx, &log);
+        let rows = window(&cx, &log);
+        assert!(
+            first > 40 && first + rows + 20 < 200,
+            "the log did not settle in its middle: {first} + {rows}"
+        );
+
+        // A row that is showing is not a scroll request.
+        let before = place(&cx, &log);
+        keep(&mut cx, &log, first + 1);
+        frame(&mut cx, &mut log, &pass, &mut draw_list);
+        assert_eq!(place(&cx, &log), before, "a row already showing moved the list");
+
+        // A row off the top comes back one row short of it.
+        keep(&mut cx, &log, first - 20);
+        frame(&mut cx, &mut log, &pass, &mut draw_list);
+        frame(&mut cx, &mut log, &pass, &mut draw_list);
+        assert_eq!(
+            place(&cx, &log).0,
+            first - 21,
+            "the recalled row landed pinned to the top edge"
+        );
+
+        // And a row off the bottom comes back with a row to spare below it.
+        let far = first + 20;
+        keep(&mut cx, &log, far);
+        frame(&mut cx, &mut log, &pass, &mut draw_list);
+        frame(&mut cx, &mut log, &pass, &mut draw_list);
+        let (now, _) = place(&cx, &log);
+        let rows = window(&cx, &log);
+        assert!(
+            now <= far && far < now + rows,
+            "the row the list was asked to keep is off screen: {now} + {rows} for {far}"
+        );
+        assert!(
+            far + LEAD < now + rows,
+            "the recalled row landed pinned to the bottom edge: {now} + {rows} for {far}"
+        );
+    }
+
+    /// The continuation rows are ground, not layout: turning them on under a
+    /// list too short to fill its viewport leaves every real row exactly where
+    /// it was.
+    #[test]
+    fn the_continuation_rows_leave_the_real_rows_alone() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let mut log = cx.with_vm(LogList::script_new_with_default);
+        log.lines = (0..3).map(|n| format!("log | line {n}")).collect();
+        let pass = DrawPass::new(&mut cx);
+        pass.set_size(&mut cx, PANE);
+        let mut draw_list = DrawList2d::new(&mut cx);
+        for _ in 0..3 {
+            frame(&mut cx, &mut log, &pass, &mut draw_list);
+        }
+        let before = place(&cx, &log);
+        {
+            let list = log.portal_list(&cx, ids!(list));
+            let mut list = list.borrow_mut().expect("the log holds no portal list");
+            assert!(
+                !list.is_filling_viewport(),
+                "three lines filled the pane, so there is no gap to rule"
+            );
+            list.filler_rows = true;
+        }
+        for _ in 0..2 {
+            frame(&mut cx, &mut log, &pass, &mut draw_list);
+        }
+        assert_eq!(place(&cx, &log), before, "the ruling moved the rows it fills after");
     }
 
     /// The wheel over a list inside a scrolling page: the list keeps every
