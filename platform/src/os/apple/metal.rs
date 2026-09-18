@@ -1036,7 +1036,6 @@ impl Cx {
                     } else {
                         &draw_item.instance_ranges
                     };
-                    let mut did_draw = false;
                     for range in ranges {
                         let start = (range.start as u64).min(instances);
                         let end = (range.end as u64).min(instances);
@@ -1063,17 +1062,18 @@ impl Cx {
                                 baseInstance: start
                             ]
                         };
-                        did_draw = true;
                     }
-                    if did_draw {
-                        draw_item.consumed_instance_id = draw_item.retained_instance_id;
-                        draw_item.consumed_schema = draw_item.resident_schema;
-                        draw_item.consumed_serial = metal_cx.current_cb_seq;
-                        draw_item.consumed_uniforms_gen = draw_item
-                            .kind
-                            .draw_call()
-                            .map_or(0, |call| call.uniforms_gen);
-                    }
+                    // Consumed means "the encode that presents this content
+                    // happened", empty ranges included: an item whose ranges
+                    // clamp to nothing has nothing left to wait for, and its
+                    // completion receipt must still resolve.
+                    draw_item.consumed_instance_id = draw_item.retained_instance_id;
+                    draw_item.consumed_schema = draw_item.resident_schema;
+                    draw_item.consumed_serial = metal_cx.current_cb_seq;
+                    draw_item.consumed_uniforms_gen = draw_item
+                        .kind
+                        .draw_call()
+                        .map_or(0, |call| call.uniforms_gen);
                 } else {
                     crate::error!("Drawing error: index_buffer None")
                 }

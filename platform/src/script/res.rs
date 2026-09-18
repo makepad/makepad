@@ -245,7 +245,7 @@ fn load_packaged_resource(cx: &Cx, dep_path: &str) -> Option<Rc<Vec<u8>>> {
 fn load_packaged_resource(cx: &Cx, dep_path: &str) -> Option<Rc<Vec<u8>>> {
     let root = cx.package_root.as_deref()?;
     let full_path = format!("{}/{}", root, dep_path);
-    crate::os::cx_native::read_file_cwd_or_exe_relative(&full_path).map(Rc::new)
+    crate::os::cx_native::read_file_cwd_or_exe_relative(&cx.package_paths, &full_path).map(Rc::new)
 }
 
 /// Load a file directly from the filesystem (desktop/mobile only, not wasm).

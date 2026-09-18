@@ -50,11 +50,11 @@ pub fn exe_relative_path(rel: impl AsRef<Path>) -> Option<PathBuf> {
 /// A compile-on-device installation keeps resources in its downloaded sources.
 /// The adjacent map contains `crate_name<TAB>relative/source/directory` rows;
 /// neither resource lookup nor the map depends on the original install path.
-fn source_resource_path(path: &Path) -> Option<PathBuf> {
+/// Read once when the `Cx` is created and owned by it (`Cx::package_paths`).
+pub(crate) fn load_package_paths() -> std::collections::HashMap<String, PathBuf> {
     use std::collections::HashMap;
     use std::path::Component;
-    static PACKAGES: OnceLock<HashMap<String, PathBuf>> = OnceLock::new();
-    let packages = PACKAGES.get_or_init(|| {
+    {
         let mut packages = HashMap::new();
         let Some(root) = exe_dir() else { return packages };
         let own_map = std::env::current_exe().ok().and_then(|p| p.file_name().map(|n| root.join(format!("{}.makepad-package-paths", n.to_string_lossy()))));
@@ -71,7 +71,15 @@ fn source_resource_path(path: &Path) -> Option<PathBuf> {
             }
         }
         packages
-    });
+    }
+}
+
+/// `crate_name/rest` resolved through the package map, when the crate is in it.
+fn source_resource_path(
+    packages: &std::collections::HashMap<String, PathBuf>,
+    path: &Path,
+) -> Option<PathBuf> {
+    use std::path::Component;
     let mut components = path.components().filter(|c| !matches!(c, Component::CurDir));
     let Component::Normal(name) = components.next()? else { return None };
     let mut resolved = packages.get(name.to_str()?)?.clone();
@@ -84,14 +92,17 @@ fn source_resource_path(path: &Path) -> Option<PathBuf> {
 
 /// Reads a file at `path`, falling back to the same path resolved against the executable's
 /// directory. Returns `None` when neither location holds a readable file.
-pub fn read_file_cwd_or_exe_relative(path: impl AsRef<Path>) -> Option<Vec<u8>> {
+pub fn read_file_cwd_or_exe_relative(
+    packages: &std::collections::HashMap<String, PathBuf>,
+    path: impl AsRef<Path>,
+) -> Option<Vec<u8>> {
     fn read(path: &Path) -> Option<Vec<u8>> {
         let mut buffer = Vec::<u8>::new();
         File::open(path).ok()?.read_to_end(&mut buffer).ok()?;
         Some(buffer)
     }
     let path = path.as_ref();
-    source_resource_path(path).and_then(|p| read(&p))
+    source_resource_path(packages, path).and_then(|p| read(&p))
         .or_else(|| read(path)).or_else(|| read(&exe_relative_path(path)?))
 }
 
@@ -114,7 +125,7 @@ impl Cx {
 
     pub fn native_load_dependencies(&mut self) {
         for (path, dep) in &mut self.dependencies {
-            if let Some(buffer) = read_file_cwd_or_exe_relative(path) {
+            if let Some(buffer) = read_file_cwd_or_exe_relative(&self.package_paths, path) {
                 dep.data = Some(Ok(Rc::new(buffer)));
             } else {
                 println!("Could not load resource {}", path);

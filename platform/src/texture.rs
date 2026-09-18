@@ -19,15 +19,12 @@ pub fn image_cache_use_mipmaps() -> bool {
     if let Ok(v) = std::env::var("MAKEPAD_IMAGE_MIPMAPS") {
         return matches!(v.trim(), "1" | "true" | "on" | "yes");
     }
-    // Desktop Linux picks its GPU API at startup; the gate lives here because
-    // the draw crate cannot ask the backend. Both backends build the chain:
-    // OpenGL with `glGenerateMipmap`, Vulkan by blitting each level from the
-    // one above (`CxVulkan::record_mip_chain`).
+    // Every Linux backend builds the chain: OpenGL with `glGenerateMipmap`,
+    // Vulkan by blitting each level from the one above
+    // (`CxVulkan::record_mip_chain`), the simulated GPU in software. So the
+    // gate is the platform, not the API chosen at startup, and the decode
+    // worker can ask it without a `Cx`.
     cfg!(target_os = "linux")
-        && matches!(
-            crate::cx::Cx::gpu_backend(),
-            crate::cx::GpuBackend::OpenGl | crate::cx::GpuBackend::Gpusim | crate::cx::GpuBackend::Vulkan
-        )
 }
 
 /// A shared, reusable texture handle. GPU storage is allocated lazily by rendering.

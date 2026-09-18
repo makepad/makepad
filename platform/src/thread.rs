@@ -1253,6 +1253,7 @@ struct PoolInner {
     lanes: [LaneQueue; 2],
     workers: Vec<WorkerSlot>,
     light_reserve: usize,
+    heavy_priority: CxThreadPriority,
     closed: AtomicU8,
     started: AtomicUsize,
     exited: AtomicUsize,
@@ -1279,7 +1280,7 @@ impl PoolInner {
             while self.lanes[1].try_take().is_some() {}
             return None;
         }
-        // Reserved Light workers stay available; utility workers alternate
+        // Reserved Light workers stay available; heavy workers alternate
         // preference so a continuous short-job stream cannot starve Heavy.
         if heavy_capable && self.heavy_turn.fetch_add(1, Ordering::Relaxed) % 2 == 0 {
             if let Some(job) = self.lanes[Lane::Heavy.index()].try_take() { return Some(job); }
@@ -1287,8 +1288,8 @@ impl PoolInner {
         if let Some(job) = self.lanes[Lane::Light.index()].try_take() {
             return Some(job);
         }
-        // Utility workers may help with short jobs at utility priority. The
-        // user-initiated workers never run heavy work or promote its priority.
+        // Heavy workers may help with short jobs at their configured priority.
+        // Reserved light workers never take heavy work.
         if heavy_capable {
             self.lanes[Lane::Heavy.index()].try_take()
         } else {
@@ -1417,8 +1418,8 @@ impl PoolInner {
                 lane_stats.run_max_ms,
             ));
         }
-        out.push_str(&format!("; priority applied {}/{} (light UserInitiated / heavy Utility); light >2ms {} offenders=[",
-            stats.priority_applied, stats.workers, stats.light_over_budget));
+        out.push_str(&format!("; priority applied {}/{} (light UserInitiated / heavy {:?}); light >2ms {} offenders=[",
+            stats.priority_applied, stats.workers, self.heavy_priority, stats.light_over_budget));
         for (index, offender) in self.light_offenders().iter().enumerate() {
             if index > 0 {
                 out.push_str(", ");
@@ -1500,7 +1501,7 @@ fn pool_worker(inner: Arc<PoolInner>, index: usize) {
     let slot = &inner.workers[index];
     let _ = slot.thread.set(std::thread::current());
     let priority = if slot.heavy_capable {
-        CxThreadPriority::Utility
+        inner.heavy_priority
     } else {
         CxThreadPriority::UserInitiated
     };
@@ -1629,6 +1630,17 @@ impl fmt::Debug for TaskPool {
 impl TaskPool {
     /// Spawn the workers now; they park until the first job.
     pub fn new(spawner: ThreadSpawner, options: PoolOptions) -> Result<Self, SpawnError> {
+        Self::new_with_priority(spawner, options, CxThreadPriority::Utility)
+    }
+
+    /// A dedicated pool may serve a foreground operation the user is waiting
+    /// for (for example, indexing). Shared/background pools retain Utility.
+    /// Reserved light workers always retain their UserInitiated priority.
+    pub fn new_with_priority(
+        spawner: ThreadSpawner,
+        options: PoolOptions,
+        heavy_priority: CxThreadPriority,
+    ) -> Result<Self, SpawnError> {
         let worker_len = options.workers.get();
         let light_reserve = options.light_reserve.min(worker_len - 1);
         let workers = (0..worker_len)
@@ -1646,6 +1658,7 @@ impl TaskPool {
             ],
             workers,
             light_reserve,
+            heavy_priority,
             closed: AtomicU8::new(POOL_OPEN),
             started: AtomicUsize::new(0),
             exited: AtomicUsize::new(0),
@@ -1672,7 +1685,7 @@ impl TaskPool {
                     priority: if index < light_reserve {
                         CxThreadPriority::UserInitiated
                     } else {
-                        CxThreadPriority::Utility
+                        heavy_priority
                     },
                     ..Default::default()
                 },
@@ -1703,6 +1716,7 @@ impl TaskPool {
             lanes: [LaneQueue::new(1), LaneQueue::new(1)],
             workers: Vec::new(),
             light_reserve: 0,
+            heavy_priority: CxThreadPriority::Utility,
             closed: AtomicU8::new(POOL_CANCELLED),
             started: AtomicUsize::new(0),
             exited: AtomicUsize::new(0),

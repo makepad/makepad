@@ -33,7 +33,7 @@ fn render_gauss_frame(out_dir: &std::path::Path) -> usize {
         }
     }))));
     cx.borrow_mut().init_cx_os();
-    makepad_platform::remote::start_if_requested();
+    makepad_platform::remote::start_if_requested(&mut cx.borrow_mut());
     Cx::event_loop(cx.clone());
     let cx = cx.borrow();
     cx.passes
