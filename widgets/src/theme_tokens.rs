@@ -550,6 +550,12 @@ fn family_inputs(seed: &SeedColors) -> [FamilyInput; 7] {
 /// text, as a ratio of their luminances.
 pub const READABLE: f64 = 4.5;
 
+/// What a graphic or a second voice needs, where body text needs
+/// `READABLE`. The variant ink carries menu labels, list item detail and
+/// icons; held to the body rule it would have to be as strong as the body
+/// ink and would stop being a second voice at all.
+pub const LEGIBLE: f64 = 3.0;
+
 const BLACK: u32 = 0x000000FF;
 
 /// How far two colours stand apart, 1 to 21, by the luminance each has once
@@ -565,6 +571,34 @@ pub fn contrast(a: u32, b: u32) -> f64 {
     }
     let (la, lb) = (luminance(a), luminance(b));
     (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+}
+
+/// An ink laid over its ground. A role's ink often carries an alpha -- the
+/// dark theme's text was white at 65% -- and what a reader sees is the two
+/// combined, never the ink alone. Measuring the ink by itself flatters every
+/// pair it appears in.
+pub fn over(ground: u32, ink: u32) -> u32 {
+    let a = (ink & 0xFF) as f64 / 255.0;
+    let ch = |v: u32, sh: u32| ((v >> sh) & 0xFF) as f64;
+    let mixed = |sh: u32| (ch(ink, sh) * a + ch(ground, sh) * (1.0 - a)).round() as u32;
+    (mixed(24) << 24) | (mixed(16) << 16) | (mixed(8) << 8) | 0xFF
+}
+
+/// How an ink really reads on a ground, its alpha included.
+pub fn reads_on(ground: u32, ink: u32) -> f64 {
+    contrast(ground | 0xFF, over(ground | 0xFF, ink))
+}
+
+/// The ink to draw on a ground: the one asked for where it reaches `need`,
+/// and the plainer end where it does not.
+pub fn ink_for(ground: u32, ink: u32, need: f64) -> u32 {
+    if reads_on(ground, ink) >= need {
+        ink
+    } else if contrast(WHITE, ground | 0xFF) >= contrast(BLACK, ground | 0xFF) {
+        WHITE
+    } else {
+        BLACK
+    }
 }
 
 /// What to draw ON a ground, given the two ends the rule would reach for:
@@ -707,6 +741,12 @@ pub fn skeleton_ladder() -> Vec<(&'static str, u32)> {
 pub enum RoleSource {
     Token(&'static str),
     HalfMix(&'static str, &'static str),
+    /// A token mixed toward white or black by an amount: the surface ladder,
+    /// written against `color_fg_app` rather than against the opaque ladder
+    /// it used to alias. A sheet sets `color_fg_app` and does not set the
+    /// opaque ladder, so the alias left every rung above a sheet's own
+    /// surfaces holding the base theme's greys.
+    MixTo(&'static str, u32, f64),
 }
 
 impl RoleSource {
@@ -715,6 +755,9 @@ impl RoleSource {
         match self {
             RoleSource::Token(t) => format!("theme.{t}"),
             RoleSource::HalfMix(a, b) => format!("mix(theme.{a}, theme.{b}, 0.5)"),
+            RoleSource::MixTo(t, end, amount) => {
+                format!("mix(theme.{t}, {}, {amount})", if end == WHITE { "#F" } else { "#0" })
+            }
         }
     }
 }
@@ -728,17 +771,15 @@ impl RoleSource {
 /// `color_bg_app` leaves `color_surface` holding the colour it replaced.
 /// `the_derived_role_table_is_the_theme_files` holds the two copies together.
 pub const DERIVED_ROLES: &[(&str, RoleSource, RoleSource)] = {
-    use RoleSource::{HalfMix as M, Token as T};
+    use RoleSource::{HalfMix as M, MixTo as X, Token as T};
     &[
         ("color_surface", T("color_bg_app"), T("color_bg_app")),
         ("color_surface_container", T("color_fg_app"), T("color_fg_app")),
         ("color_surface_container_low", M("color_bg_app", "color_fg_app"), M("color_bg_app", "color_fg_app")),
-        ("color_surface_container_high", T("color_opaque_d_1"), T("color_opaque_u_1")),
-        ("color_surface_container_highest", T("color_opaque_d_2"), T("color_opaque_u_2")),
-        ("color_surface_dim", T("color_opaque_d_1"), T("color_opaque_d_2")),
-        ("color_surface_bright", T("color_opaque_u_3"), T("color_opaque_u_3")),
-        ("color_on_surface", T("color_text"), T("color_text")),
-        ("color_on_surface_variant", T("color_d_3"), T("color_u_4")),
+        ("color_surface_container_high", X("color_fg_app", BLACK, 0.15), X("color_fg_app", WHITE, 0.08)),
+        ("color_surface_container_highest", X("color_fg_app", BLACK, 0.25), X("color_fg_app", WHITE, 0.15)),
+        ("color_surface_dim", X("color_fg_app", BLACK, 0.15), X("color_fg_app", BLACK, 0.25)),
+        ("color_surface_bright", X("color_fg_app", WHITE, 0.35), X("color_fg_app", WHITE, 0.17)),
         ("color_outline", T("color_d_2"), T("color_u_3")),
         ("color_outline_variant", T("color_d_1"), T("color_u_15")),
         ("color_inverse_surface", T("color_opaque_d_5"), T("color_opaque_u_6")),
@@ -780,6 +821,7 @@ pub fn sheet_roles_script(sheet_theme: &str, read: &mut dyn FnMut(&str) -> Optio
         })
     };
     let mut out = String::new();
+    let mut ladder_top = None;
     for (role, light, dark_source) in DERIVED_ROLES {
         if named(role) {
             continue;
@@ -790,10 +832,35 @@ pub fn sheet_roles_script(sheet_theme: &str, read: &mut dyn FnMut(&str) -> Optio
                 (Some(a), Some(b)) => Some(mix_rgb(a, b, 0.5)),
                 _ => None,
             },
+            RoleSource::MixTo(t, end, amount) => read(t).map(|c| mix_rgb(c | 0xFF, end, amount)),
         };
         if let Some(rgba) = value {
+            if *role == "color_surface_container_high" {
+                ladder_top = Some(rgba);
+            }
             out.push_str(&format!("mod.theme.{role} = #x{rgba:08X}
 "));
+        }
+    }
+    // What is drawn ON those surfaces. A sheet chose its text colour against
+    // its own flat background and never saw the ladder derived above, so the
+    // choice is put to the brightest rung a widget lays text on: kept where
+    // it still reads there, replaced by the plain end where it does not. The
+    // second voice has no token of its own in a sheet, so what carries over
+    // is the base theme's own considered value, put to the same test.
+    if let Some(ground) = ladder_top.or_else(|| read("color_surface_container_high")) {
+        for (role, source, need) in [
+            ("color_on_surface", "color_text", READABLE),
+            ("color_on_surface_variant", "color_on_surface_variant", LEGIBLE),
+        ] {
+            if named(role) {
+                continue;
+            }
+            if let Some(ink) = read(source) {
+                let chosen = ink_for(ground, ink, need);
+                out.push_str(&format!("mod.theme.{role} = #x{chosen:08X}
+"));
+            }
         }
     }
     if let Some(accent) = read(SHEET_ACCENT) {
@@ -1112,6 +1179,16 @@ mod tests {
         }
     }
 
+    /// The value a generated script writes for a role.
+    fn written(script: &str, key: &str) -> u32 {
+        let line = script
+            .lines()
+            .find(|l| l.starts_with(&format!("mod.theme.{key} = ")))
+            .unwrap_or_else(|| panic!("{key} not written:
+{script}"));
+        u32::from_str_radix(line.rsplit("#x").next().unwrap(), 16).unwrap()
+    }
+
     fn a_sheet_in_beige_and_navy(key: &str) -> Option<u32> {
         match key {
             "color_bg_app" | "color_fg_app" => Some(0xD4D0C8FF),
@@ -1133,15 +1210,17 @@ mod.theme.color_bg_app = #d4d0c8
 "), "{script}");
         assert!(script.contains("mod.theme.color_on_surface = #x000000FF
 "), "{script}");
-        // A token the sheet left unanswerable is left alone rather than
-        // written as nothing.
-        assert!(!script.contains("color_surface_bright"), "{script}");
+        // The whole ladder follows the sheet, because it is written against
+        // `color_fg_app`, which a sheet sets: it used to alias the opaque
+        // ladder, which no sheet sets, so every rung above a sheet's own
+        // surfaces kept the base theme's greys.
+        assert!(script.contains("mod.theme.color_surface_bright = "), "{script}");
+        // A token the sheet left unanswerable is still left alone rather
+        // than written as nothing.
+        assert!(!script.contains("color_inverse_surface"), "{script}");
         // The accent is grown from the sheet's navy: blue, where the house
         // accent is an orange red.
-        let value = |key: &str| -> u32 {
-            let line = script.lines().find(|l| l.starts_with(&format!("mod.theme.{key} = "))).expect(key);
-            u32::from_str_radix(line.rsplit("#x").next().unwrap(), 16).unwrap()
-        };
+        let value = |key: &str| written(&script, key);
         let (hue, _, _) = rgb_to_hsl(value("color_primary"));
         assert!((220.0..=260.0).contains(&hue), "primary hue {hue} should be the sheet's blue");
         let (house_hue, _, _) = rgb_to_hsl(roles_for(Scheme::Light).entries()[0].1);
@@ -1193,13 +1272,19 @@ mod.theme.color_surface=#123456
     #[test]
     fn a_dark_sheet_reads_the_dark_themes_sources() {
         let mut read = |key: &str| match key {
-            "color_opaque_u_1" => Some(0x111111FF),
-            "color_opaque_d_1" => Some(0x999999FF),
+            "color_fg_app" => Some(0x202020FF),
             _ => None,
         };
-        let script = sheet_roles_script("mod.theme = mod.themes.dark
+        // The dark rule lifts the sheet's own foreground toward white and
+        // the light rule takes it down toward black. Reading the wrong one
+        // is how a dark sheet ended up wearing the light theme's greys.
+        let dark = sheet_roles_script("mod.theme = mod.themes.dark
 ", &mut read);
-        assert!(script.contains("mod.theme.color_surface_container_high = #x111111FF"), "{script}");
+        let light = sheet_roles_script("mod.theme = mod.themes.light
+", &mut read);
+        let rung = |script: &str| written(script, "color_surface_container_high");
+        assert!(rung(&dark) > 0x202020FF, "{dark}");
+        assert!(rung(&light) < 0x202020FF, "{light}");
     }
 
     /// The keys a theme file defines at its top level: lines at exactly eight
@@ -1417,7 +1502,7 @@ mod sheet_contrast_tests {
         ("color_primary", "color_on_primary"),
     ];
 
-    /// Every rung of the surface ladder, against the ink that goes on it.
+    /// Every rung of the surface ladder, against the body ink.
     const SURFACES: &[(&str, &str)] = &[
         ("color_surface", "color_on_surface"),
         ("color_surface_container", "color_on_surface"),
@@ -1426,8 +1511,14 @@ mod sheet_contrast_tests {
         ("color_surface_container_highest", "color_on_surface"),
         ("color_surface_dim", "color_on_surface"),
         ("color_surface_bright", "color_on_surface"),
+    ];
+
+    /// The same rungs against the second voice, which is held to `LEGIBLE`.
+    const VARIANTS: &[(&str, &str)] = &[
         ("color_surface", "color_on_surface_variant"),
+        ("color_surface_container", "color_on_surface_variant"),
         ("color_surface_container_high", "color_on_surface_variant"),
+        ("color_surface_container_highest", "color_on_surface_variant"),
     ];
 
     fn val(vm: &mut ScriptVm, key: &str) -> Option<u32> {
@@ -1439,21 +1530,17 @@ mod sheet_contrast_tests {
     /// which carries an alpha, so it is laid over its ground before being
     /// measured: white at 65% on a mid grey is not white.
     fn reads(ground: u32, ink: u32) -> f64 {
-        let a = (ink & 0xFF) as f64 / 255.0;
-        let ch = |v: u32, sh: u32| ((v >> sh) & 0xFF) as f64;
-        let over = |sh: u32| (ch(ink, sh) * a + ch(ground, sh) * (1.0 - a)).round() as u32;
-        let flat = (over(24) << 24) | (over(16) << 16) | (over(8) << 8) | 0xFF;
-        contrast(ground | 0xFF, flat)
+        reads_on(ground, ink)
     }
 
     /// The pairs that fail, as readable lines.
-    fn failures(vm: &mut ScriptVm, label: &str, pairs: &[(&str, &str)]) -> Vec<String> {
+    fn failures(vm: &mut ScriptVm, label: &str, pairs: &[(&str, &str)], need: f64) -> Vec<String> {
         let mut out = Vec::new();
         for (ground, ink) in pairs {
             if let (Some(g), Some(i)) = (val(vm, ground), val(vm, ink)) {
                 let c = reads(g | 0xFF, i);
-                if c < READABLE {
-                    out.push(format!("{label}: {ink} on {ground} = {c:.2}"));
+                if c < need {
+                    out.push(format!("{label}: {ink} on {ground} = {c:.2}, wanted {need}"));
                 }
             }
         }
@@ -1495,7 +1582,7 @@ mod sheet_contrast_tests {
     #[test]
     fn a_meaning_family_reads_on_its_own_ground_under_every_sheet() {
         let mut bad: Vec<String> = Vec::new();
-        walk(&mut |vm, label| bad.extend(failures(vm, label, MEANING)));
+        walk(&mut |vm, label| bad.extend(failures(vm, label, MEANING, READABLE)));
         assert!(bad.is_empty(), "text below {READABLE}:1 on its own ground:
 {}", bad.join("
 "));
@@ -1517,6 +1604,22 @@ mod sheet_contrast_tests {
         }
     }
 
+    /// A raised surface is still a surface somebody reads off. Every rung of
+    /// the ladder is a ground in the library -- the high one alone is the
+    /// ground of thirty-one widget files -- and the ink on it has to hold up
+    /// on all of them, in every theme and under every sheet.
+    #[test]
+    fn the_surface_ladder_carries_its_ink_on_every_rung() {
+        let mut bad: Vec<String> = Vec::new();
+        walk(&mut |vm, label| {
+            bad.extend(failures(vm, label, SURFACES, READABLE));
+            bad.extend(failures(vm, label, VARIANTS, LEGIBLE));
+        });
+        assert!(bad.is_empty(), "ink that does not hold on its rung:
+{}", bad.join("
+"));
+    }
+
     /// Every ground a widget draws text on, in every theme and every sheet,
     /// with the ink that goes on it. Not an assertion: the surface ladder
     /// does not pass yet, and the numbers are the input to fixing it.
@@ -1526,7 +1629,7 @@ mod sheet_contrast_tests {
     fn contrast_audit() {
         let mut lines: Vec<String> = Vec::new();
         walk(&mut |vm, label| {
-            for (ground, ink) in MEANING.iter().chain(SURFACES) {
+            for (ground, ink) in MEANING.iter().chain(SURFACES).chain(VARIANTS) {
                 if let (Some(g), Some(i)) = (val(vm, ground), val(vm, ink)) {
                     let c = reads(g | 0xFF, i);
                     lines.push(format!(

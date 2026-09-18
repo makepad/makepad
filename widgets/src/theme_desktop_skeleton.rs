@@ -429,7 +429,7 @@ script_mod! {
         color_surface_dim: #xCACACAFF
         color_surface_bright: #xF4F4F4FF
         color_on_surface: #x000000AA
-        color_on_surface_variant: #x00000066
+        color_on_surface_variant: #x00000099
         color_outline: #x00000040
         color_outline_variant: #x00000020
         color_inverse_surface: #x3C3C3CFF

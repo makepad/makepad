@@ -462,13 +462,13 @@ script_mod! {
         color_surface: theme.color_bg_app
         color_surface_container: theme.color_fg_app
         color_surface_container_low: mix(theme.color_bg_app, theme.color_fg_app, 0.5)
-        color_surface_container_high: theme.color_opaque_u_1
-        color_surface_container_highest: theme.color_opaque_u_2
+        color_surface_container_high: mix(theme.color_fg_app, #F, 0.08)
+        color_surface_container_highest: mix(theme.color_fg_app, #F, 0.15)
         color_surface_container_lowest: theme.color_opaque_d_1
-        color_surface_dim: theme.color_opaque_d_2
-        color_surface_bright: theme.color_opaque_u_3
-        color_on_surface: theme.color_text
-        color_on_surface_variant: theme.color_u_4
+        color_surface_dim: mix(theme.color_fg_app, #0, 0.25)
+        color_surface_bright: mix(theme.color_fg_app, #F, 0.17)
+        color_on_surface: #xFFFFFFFF
+        color_on_surface_variant: #xFFFFFFA8
         color_outline: theme.color_u_3
         color_outline_variant: theme.color_u_15
         color_inverse_surface: theme.color_opaque_u_6

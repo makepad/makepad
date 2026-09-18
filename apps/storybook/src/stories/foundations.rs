@@ -954,7 +954,7 @@ pub const STORIES: &[Story] = &[
         "Colour",
         "Surfaces",
         "FoundationsColorSurfaces",
-        "# Surfaces\n\nThe surface ladder sits on the opaque ladder the legacy tokens already define: `color_surface` is the app background, the containers step up or down from it. Outlines are translucent tints, surfaces never are. The scrim and the inverse pair are here too.",
+        "# Surfaces\n\n`color_surface` is the app background and the containers step up or down from it, each one mixed from `color_fg_app` rather than borrowed from the opaque ladder -- a style sheet sets the foreground and does not set that ladder, so a borrowed rung kept the colour of the theme underneath. How far they step is set by what has to stay readable on them: in the dark theme the first rung is pulled well down, because that is what leaves room above it. Outlines are translucent tints, surfaces never are. The scrim and the inverse pair are here too.",
         &[],
     ),
     story(
