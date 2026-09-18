@@ -634,10 +634,10 @@ impl FlowState {
                     row.nodes.entry(node.clone()).or_default().state = NodeState::Running;
                 }
             }
-            RunEvent::NodeProgress { node, permille, stage } => {
+            RunEvent::NodeProgress { node, permille, stage, .. } => {
                 if let Some(row) = self.runs.get_mut(&run_id) {
                     let entry = row.nodes.entry(node.clone()).or_default();
-                    entry.progress = Some(*permille);
+                    entry.progress = *permille;
                     entry.stage = Some(stage.clone());
                 }
             }

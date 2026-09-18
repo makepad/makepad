@@ -68,6 +68,7 @@ hub.set_run_items([
     RunStudioRelease{name: "makepad-example-map"}
     RunStudioRelease{name: "makepad-app-route"}
     RunStudioRelease{name: "makepad-app-asset-ui"}
+    RunStudioRelease{name: "makepad-app-flow-ui"}
     RunStudioRelease{name: "makepad-vj"}
     RunStudioRelease{name: "makepad-clock"}
     RunStudioRelease{name: "makepad-weather"}

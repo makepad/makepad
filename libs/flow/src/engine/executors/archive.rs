@@ -61,6 +61,7 @@ impl Executor for ArchiveExecutor {
         match job.poll() {
             Poll::Pending => Poll::Pending,
             Poll::Progress { permille, stage } => Poll::Progress { permille, stage },
+            Poll::Stage { stage, permille } => Poll::Stage { stage, permille },
             Poll::Done(_) => { self.index += 1; Poll::Pending }
             Poll::Failed(error) => Poll::Failed(format!("Gen output archive failed for {}: {error}", self.node)),
             Poll::Delta { port, text } => Poll::Delta { port, text },

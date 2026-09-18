@@ -125,10 +125,14 @@ pub enum RunEventPayload {
     NodeStarted {
         node: String,
     },
+    /// `permille`: progress of the whole node, absent while unknown (the
+    /// node is running an open-ended stage). `stage_permille`: the named
+    /// stage's own fraction, which restarts with every stage.
     NodeProgress {
         node: String,
-        permille: u16,
+        permille: Option<u16>,
         stage: String,
+        stage_permille: Option<u16>,
     },
     NodeDelta {
         node: String,
@@ -591,6 +595,7 @@ pub struct Event {
     pub text: Option<String>,
     pub permille: Option<u64>,
     pub stage: Option<String>,
+    pub stage_permille: Option<u64>,
     pub state: Option<JsonValue>,
     pub secs: Option<f64>,
     pub by: Option<String>,

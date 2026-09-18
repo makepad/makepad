@@ -58,6 +58,7 @@ impl Executor for OutputExecutor {
             return match publisher.poll() {
                 Poll::Pending => Poll::Pending,
                 Poll::Progress { permille, stage } => Poll::Progress { permille, stage },
+                Poll::Stage { stage, permille } => Poll::Stage { stage, permille },
                 Poll::Done(_) => {
                     self.publisher = None;
                     Poll::Done(vec![("value".to_string(), self.value.take().unwrap())])

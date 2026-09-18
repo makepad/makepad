@@ -27,7 +27,12 @@ pub trait ChatTurn {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChatEvent {
     Delta(String),
+    /// Progress of the whole turn, from a seam that can estimate it.
     Progress { permille: u16, stage: String },
+    /// A stage of the turn (admission, download, load, prefill, serving) and
+    /// that stage's own fraction when known. A turn's length is unknown until
+    /// it ends, so stages never add up to turn progress.
+    Stage { stage: String, permille: Option<u16> },
     Done { text: String },
     Failed(String),
 }
@@ -99,6 +104,9 @@ impl Executor for ChatExecutor {
             match event {
                 ChatEvent::Progress { permille, stage } => {
                     self.queue.push_back(Poll::Progress { permille, stage });
+                }
+                ChatEvent::Stage { stage, permille } => {
+                    self.queue.push_back(Poll::Stage { stage, permille });
                 }
                 ChatEvent::Delta(delta) => {
                     self.text.push_str(&delta);
@@ -217,11 +225,11 @@ impl ChatTurn for ProviderChatTurn {
             let terminal = matches!(event, makepad_ai_hub::providers::provider::ProviderEvent::Done { .. } | makepad_ai_hub::providers::provider::ProviderEvent::Error(_) | makepad_ai_hub::providers::provider::ProviderEvent::FunctionCall { .. });
             out.push(match event {
                 makepad_ai_hub::providers::provider::ProviderEvent::Delta(text) => ChatEvent::Delta(text),
-                makepad_ai_hub::providers::provider::ProviderEvent::Status { note, permille } => ChatEvent::Progress { permille, stage: note },
+                makepad_ai_hub::providers::provider::ProviderEvent::Status { note, permille } => ChatEvent::Stage { stage: note, permille: (permille > 0).then_some(permille.min(1000)) },
                 makepad_ai_hub::providers::provider::ProviderEvent::Done { text } => ChatEvent::Done { text },
                 makepad_ai_hub::providers::provider::ProviderEvent::Error(error) => ChatEvent::Failed(error),
                 makepad_ai_hub::providers::provider::ProviderEvent::FunctionCall { .. } => { self.provider.cancel(); ChatEvent::Failed("flow Llm nodes do not expose tools".into()) },
-                makepad_ai_hub::providers::provider::ProviderEvent::Serving(_) => ChatEvent::Progress { permille: 0, stage: "serving".into() },
+                makepad_ai_hub::providers::provider::ProviderEvent::Serving(_) => ChatEvent::Stage { stage: "serving".into(), permille: None },
             });
             if terminal { break; }
         }
@@ -334,8 +342,10 @@ impl ChatTurn for HubChatTurn {
 }
 
 #[cfg(feature = "hub-chat")]
+/// The hub's `Loading` fraction belongs to the named phase (fleet listen,
+/// download, load, prefill); each phase restarts it.
 fn loading_progress(stage: String, fraction: f64) -> ChatEvent {
-    ChatEvent::Progress { stage, permille: (fraction.clamp(0.0, 1.0) * 1000.0) as u16 }
+    ChatEvent::Stage { stage, permille: Some((fraction.clamp(0.0, 1.0) * 1000.0) as u16) }
 }
 
 #[cfg(feature = "hub-chat")]
@@ -460,8 +470,8 @@ mod progress_tests {
     #[test]
     fn hub_loading_maps_to_bounded_flow_progress() {
         for (fraction, expected) in [(0.0, 0), (0.25, 250), (2.0, 1000), (-1.0, 0), (f64::NAN, 0)] {
-            assert_eq!(loading_progress("queued".into(), fraction), ChatEvent::Progress {
-                permille: expected, stage: "queued".into(),
+            assert_eq!(loading_progress("queued".into(), fraction), ChatEvent::Stage {
+                permille: Some(expected), stage: "queued".into(),
             });
         }
     }

@@ -35,10 +35,13 @@ pub enum RunEvent {
     NodeStarted {
         node: String,
     },
+    /// `permille` is the whole node's progress and is absent while that is
+    /// unknown; `stage_permille` is the named stage's own fraction.
     NodeProgress {
         node: String,
-        permille: u16,
+        permille: Option<u16>,
         stage: String,
+        stage_permille: Option<u16>,
     },
     NodeDelta {
         node: String,
@@ -117,10 +120,12 @@ impl RunEvent {
                 node,
                 permille,
                 stage,
+                stage_permille,
             } => Wire::NodeProgress {
                 node: node.clone(),
                 permille: *permille,
                 stage: stage.clone(),
+                stage_permille: *stage_permille,
             },
             Self::NodeDelta { node, port, text } => Wire::NodeDelta {
                 node: node.clone(),
