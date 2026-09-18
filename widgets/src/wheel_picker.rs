@@ -25,15 +25,47 @@
 //! library's scroll rate would stop, that prediction is snapped to a row,
 //! and the column glides there starting at the speed the finger left it
 //! with. The motion is one movement and it always ends on a row.
+//!
+//! # A scale column, and the sliding ruler
+//!
+//! A column that names a `step` is a SCALE rather than a list. It carries
+//! no `items` at all: its rows are the numbers `min`, `min + step`, … up to
+//! `max`, drawn as graduations with a number on every `label_every`th one,
+//! so the column reads as a ruler sliding under the band rather than as
+//! words turning. `step: 0.0` — the default — is the column of words above,
+//! unchanged in every respect.
+//!
+//! There is deliberately NO tick-pitch property. `row_height` is the pitch
+//! between graduations AND the distance the gesture moves by, because they
+//! are the same number: a scale that drew its ticks at one pitch and slid at
+//! another would be a ruler whose marks disagreed with its own motion. A
+//! finer ruler is a smaller `row_height`, and the drag gets finer with it.
+//!
+//! Endless means CYCLIC. `loop_items` carries a scale round its declared
+//! `min..max` for as long as the finger keeps going; a scale with no ends at
+//! all is not expressible here, because the drum's whole travel is
+//! `count * row_height`, and pretending otherwise would be a different
+//! widget rather than a property on this one.
+//!
+//! # Standing it on its side
+//!
+//! `axis` says which way the drum travels; `DragAxis::Vertical`, the
+//! default, is the picker above to the pixel. Lying down, the rows run left
+//! to right and the band stands across them. The axis across the travel is
+//! what the columns are laid out along and what the hit test splits, so a
+//! picker lying down holds exactly ONE column: the cross axis has been spent
+//! on the ruler itself.
 use crate::{
     animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
     badge::measure,
     makepad_derive_widget::*,
     makepad_draw::*,
+    picker_parts::text_y,
     scroll_motion::{
         estimate_release_velocity, push_sample, FrameClock, ScrollSample,
         FLING_DECEL_RATE_PER_MS, FLING_MIN_TOTAL_DELTA,
     },
+    slider::{format_readout, DragAxis},
     widget::*,
     widget_async::ScriptAsyncResult,
 };
@@ -139,24 +171,44 @@ script_mod! {
                 sdf.stroke(stroke, self.border_size)
 
                 // The band runs across every column, because the row it
-                // holds in each one is that column's answer. Its height is
-                // the row height Rust laid the rows out at, handed over so
-                // the band and the row inside it cannot drift apart.
+                // holds in each one is that column's answer. Its thickness
+                // is the row height Rust laid the rows out at, handed over
+                // so the band and the row inside it cannot drift apart.
+                // Lying down it stands across the travel instead: the
+                // graduation it frames is the answer the same way.
                 let inset = self.border_size + 1.0
-                let band_y = (self.rect_size.y - self.row_px) * 0.5
-                sdf.box(
-                    inset
-                    band_y
-                    max(self.rect_size.x - inset * 2., 1.0)
-                    self.row_px
-                    self.border_radius
-                )
-                sdf.fill(band)
+                let mid_y = (self.rect_size.y - self.row_px) * 0.5
+                let mid_x = (self.rect_size.x - self.row_px) * 0.5
+                if self.vertical > 0.5 {
+                    sdf.box(
+                        inset
+                        mid_y
+                        max(self.rect_size.x - inset * 2., 1.0)
+                        self.row_px
+                        self.border_radius
+                    )
+                    sdf.fill(band)
 
-                // The column the keyboard is on, so a picker with several
-                // of them says which one the arrows will turn.
-                sdf.rect(self.band_x, band_y, self.band_w, self.row_px)
-                sdf.fill(band + vec4(0.06, 0.06, 0.06, 0.0) * self.focus)
+                    // The column the keyboard is on, so a picker with
+                    // several of them says which one the arrows will turn.
+                    sdf.rect(self.band_x, mid_y, self.band_w, self.row_px)
+                    sdf.fill(band + vec4(0.06, 0.06, 0.06, 0.0) * self.focus)
+                }
+                else {
+                    sdf.box(
+                        mid_x
+                        inset
+                        self.row_px
+                        max(self.rect_size.y - inset * 2., 1.0)
+                        self.border_radius
+                    )
+                    sdf.fill(band)
+
+                    // Lying down the lit slice runs across the travel too,
+                    // so `band_x` and `band_w` are read down the page.
+                    sdf.rect(mid_x, self.band_x, self.row_px, self.band_w)
+                    sdf.fill(band + vec4(0.06, 0.06, 0.06, 0.0) * self.focus)
+                }
 
                 return sdf.result
             }
@@ -220,6 +272,24 @@ script_mod! {
             border_color_disabled: theme.color_bevel_inset_1_disabled
         }
     }
+
+    /** A ruler that slides under the band. One scale column, lying down. */
+    mod.widgets.SlidingRuler = mod.widgets.WheelPicker{
+        /** which way the scale travels: Horizontal or Vertical */
+        axis: mod.widgets.DragAxis.Horizontal
+        /** graduations on screen; an even count gains one 9..81 step 2 */
+        visible_items: 41
+        /** the graduation pitch, and the rate the drag moves at 4..32 step 1 */
+        row_height: 10.0
+        /** how deep the ruler is, across its travel 24..160 step 4 */
+        column_width: 40.0
+    }
+
+    /** The same ruler stood on end. */
+    mod.widgets.SlidingRulerVertical = mod.widgets.SlidingRuler{
+        axis: mod.widgets.DragAxis.Vertical
+        column_width: 72.0
+    }
 }
 
 #[derive(Script, ScriptHook)]
@@ -238,6 +308,11 @@ pub struct DrawWheelPicker {
     band_x: f32,
     #[live]
     band_w: f32,
+    /// Which way the drum travels, as the shader can read it: 1.0 upright,
+    /// 0.0 lying down. The band has to stand ACROSS the travel, and only
+    /// Rust knows which way that is.
+    #[live(1.0)]
+    vertical: f32,
 }
 
 /// One column of the picker: the rows it holds, which of them is in the
@@ -261,6 +336,180 @@ pub struct WheelColumn {
     /// `column_width`.
     #[live]
     pub width: f64,
+
+    /// Where a scale starts and where it ends. A column that names a
+    /// `step` over a range is a SCALE: it holds no `items` at all, and its
+    /// rows are the numbers `min`, `min + step`, … up to `max`.
+    #[live]
+    pub min: f64,
+    #[live]
+    pub max: f64,
+    /// The value between one graduation and the next. Zero — the default —
+    /// is a column of words, unchanged in every respect.
+    ///
+    /// There is deliberately no separate tick-pitch property beside it: the
+    /// picker's `row_height` is the pitch, and it is the same number the
+    /// gesture moves by, which is what stops a scale from sliding at a rate
+    /// its own graduations disagree with.
+    #[live]
+    pub step: f64,
+    /// Decimals on a graduation's number, and the unit after it. Spelled
+    /// the way `Slider` spells them and formatted by the same function, so
+    /// a graduation and a readout beside it cannot disagree about either.
+    #[live]
+    pub precision: usize,
+    #[live]
+    pub unit: String,
+    /// One graduation in this many is a MAJOR one: a longer tick, and the
+    /// only kind that carries a number. Zero — the default — is every
+    /// tenth, which is the grouping a ruler is read in.
+    #[live]
+    pub label_every: usize,
+    /// How far a graduation reaches across the column, in pixels, and how
+    /// far a major one does. Zero — the default — takes both from the
+    /// column's own width, so a scale that says nothing still draws.
+    #[live]
+    pub tick_len: f64,
+    #[live]
+    pub tick_len_major: f64,
+}
+
+impl WheelColumn {
+    /// A column that names a step over a range is a scale rather than a
+    /// list of words. There is no mode to set and no discriminant to name:
+    /// the step IS the distinction, because a column of words has no
+    /// distance between one row and the next.
+    fn is_scale(&self) -> bool {
+        scale_count(self.min, self.max, self.step).is_some()
+    }
+
+    /// How many rows the column holds: a scale's graduations, or the items
+    /// it was handed.
+    ///
+    /// Everything else rests on this. `Drum` is built from a count, and a
+    /// scale column's `items` are empty forever — so a scale counted by its
+    /// items would be a drum of no rows, whose `bound` is 0.0 and whose
+    /// `rows_in_view` is empty. It would neither move nor draw.
+    fn count(&self) -> usize {
+        scale_count(self.min, self.max, self.step).unwrap_or(self.items.len())
+    }
+
+    /// The number graduation `index` stands for, or `None` on a column of
+    /// words, which has no number to stand for.
+    fn value_of(&self, index: usize) -> Option<f64> {
+        scale_count(self.min, self.max, self.step).map(|_| self.min + index as f64 * self.step)
+    }
+
+    /// How often a graduation is a major one.
+    fn labels_every(&self) -> usize {
+        if self.label_every == 0 {
+            10
+        } else {
+            self.label_every
+        }
+    }
+
+    fn is_major(&self, index: usize) -> bool {
+        index % self.labels_every() == 0
+    }
+
+    /// What a plain graduation and a major one reach across a column
+    /// `across` pixels deep.
+    ///
+    /// A third of the depth for a major one, not half: the rest of the
+    /// column is where the NUMBER goes, and a tick that took half of a
+    /// narrow ruler would leave every number too wide to fit and skipped.
+    fn tick_lengths(&self, across: f64) -> (f64, f64) {
+        let minor = if self.tick_len > 0.0 { self.tick_len } else { across * 0.18 };
+        let major = if self.tick_len_major > 0.0 { self.tick_len_major } else { across * 0.34 };
+        (minor, major)
+    }
+}
+
+/// The most graduations a scale may hold. A step small enough against a
+/// range wide enough asks for a drum nothing could draw and arithmetic that
+/// would lose the row it was on; the cap makes such a scale coarse rather
+/// than making it hang.
+const SCALE_MAX: usize = 100_000;
+
+/// How many graduations `min..=max` holds at `step`, or `None` when the
+/// column is a list of words rather than a scale.
+///
+/// Both ends are graduations, which is why there is a `+ 1`: a 0..10 scale
+/// stepping by one holds eleven marks, not ten. A range the step does not
+/// divide is rounded rather than refused, because the alternative is a
+/// scale that silently stops short of the `max` its own host declared.
+fn scale_count(min: f64, max: f64, step: f64) -> Option<usize> {
+    if !(step > 0.0) || !(max > min) {
+        return None;
+    }
+    let spans = ((max - min) / step).round();
+    if !spans.is_finite() {
+        return Some(SCALE_MAX);
+    }
+    Some(((spans.max(0.0) as i64) as usize).saturating_add(1).min(SCALE_MAX))
+}
+
+/// A graduation's own mark is one pixel thick along the travel, whatever
+/// the pitch is. The pitch is the space the mark stands in, not the mark.
+const TICK_PX: f64 = 1.0;
+
+/// The air a graduation's number keeps between itself and its tick, and
+/// between itself and the next number.
+const LABEL_GAP: f64 = 3.0;
+
+/// The travel axis and the one across it, in that order.
+///
+/// Everything the picker measures — a finger, the rect it landed in, a
+/// wheel notch, a row's place on screen — is read through this one word, so
+/// standing the control on its side turns all of them together or none of
+/// them. A cross-axis reading that did not flip would hit-test a ruler lying
+/// down against columns stacked the other way.
+fn split(vertical: bool, p: DVec2) -> (f64, f64) {
+    if vertical {
+        (p.y, p.x)
+    } else {
+        (p.x, p.y)
+    }
+}
+
+/// The quad one graduation draws, from the leading edge of its own cell
+/// along the travel and of its column across it.
+fn tick_rect(vertical: bool, lead: f64, cross: f64, pitch: f64, len: f64) -> Rect {
+    let thick = TICK_PX.min(pitch);
+    let at = lead + (pitch - thick) * 0.5;
+    if vertical {
+        Rect { pos: dvec2(cross, at), size: dvec2(len.max(1.0), thick) }
+    } else {
+        Rect { pos: dvec2(at, cross), size: dvec2(thick, len.max(1.0)) }
+    }
+}
+
+/// The box a graduation's number has to fit inside, as a width and a
+/// height.
+///
+/// Numbers run along x whichever way the ruler does, so the two crowd them
+/// differently. Standing up the numbers are stacked: what limits their WIDTH
+/// is the column's own depth beside the tick, and what limits their HEIGHT
+/// is the pitch to the next numbered graduation. Lying down the two swap.
+fn label_box(vertical: bool, pitch: f64, label_every: usize, across: f64, gap: f64) -> (f64, f64) {
+    let along = pitch * label_every.max(1) as f64 - gap * 2.0;
+    let depth = across - gap;
+    if vertical {
+        (depth, along)
+    } else {
+        (along, depth)
+    }
+}
+
+/// Whether a graduation's number is drawn at all.
+///
+/// It is SKIPPED, never clipped and never shrunk — the rule `waveform` uses
+/// for a marker's name. Half a number says less than no number and costs the
+/// reader a second working out that it is half a number; the graduation's
+/// tick is still there, and the number it wanted is the one two marks along.
+fn label_fits(width: f64, height: f64, room_x: f64, room_y: f64) -> bool {
+    width <= room_x && height <= room_y
 }
 
 /// The shortest and longest a glide may take, in seconds. The short bound
@@ -563,6 +812,14 @@ pub struct WheelPicker {
     draw_bg: DrawWheelPicker,
     #[live]
     draw_text: DrawText,
+    /// One graduation of a scale column. A Rust quad rather than a ladder
+    /// in `draw_bg`'s shader: a ladder would have to be told how far the
+    /// drum had slid, in an f32, and a looping drum's travel is unbounded
+    /// by design. Drawing a second material between `draw_bg`'s `begin` and
+    /// `end` is what `time_picker` and `kbd` already do — each writes only
+    /// its own area, so neither clobbers the other.
+    #[live]
+    draw_tick: DrawColor,
     #[walk]
     walk: Walk,
     #[layout]
@@ -570,14 +827,29 @@ pub struct WheelPicker {
     #[apply_default]
     animator: Animator,
 
-    /// The columns, left to right.
+    /// The columns, left to right — or top to bottom when the picker is
+    /// lying down. A picker lying down holds exactly ONE column: the axis
+    /// across the travel has been spent on the ruler itself.
     #[live]
     pub columns: Vec<WheelColumn>,
+
+    /// Which way the drum travels. `Vertical`, the default, is the picker
+    /// this widget has always been, to the pixel. `Horizontal` lays the
+    /// rows out left to right and stands the band across them.
+    #[live(DragAxis::Vertical)]
+    pub axis: DragAxis,
 
     /// Rows on screen. Odd, so there is a true centre; an even count is
     /// raised by one rather than refused.
     #[live(5)]
     pub visible_items: usize,
+    /// The distance from one row to the next, in pixels — and, on a scale
+    /// column, the pitch of the graduations as well.
+    ///
+    /// Those are ONE number on purpose. It is also the distance the drag
+    /// and the wheel move the drum by, so a ruler cannot slide at a rate
+    /// its own marks disagree with; a separate tick pitch is refused for
+    /// exactly that reason.
     #[live(28.0)]
     pub row_height: f64,
     /// The width of a column that declares none of its own.
@@ -599,11 +871,17 @@ pub struct WheelPicker {
     #[rust]
     spins: Vec<Spin>,
     /// Where each column was last drawn, as an offset from the widget's
-    /// left edge and a width. The hit test reads these rather than
-    /// recomputing the layout, so a press lands on the column the eye is
-    /// looking at.
+    /// leading edge ACROSS the travel, and a width. The hit test reads
+    /// these rather than recomputing the layout, so a press lands on the
+    /// column the eye is looking at.
     #[rust]
     spans: Vec<(f64, f64)>,
+    /// The shape each column's drum had at the last sync: how many rows and
+    /// whether it comes round. A scale column's length says nothing about
+    /// its count, so this is the only thing that can notice a live `min`,
+    /// `max` or `step` moving under a stored offset.
+    #[rust]
+    shapes: Vec<(usize, bool)>,
     /// The column the keyboard turns.
     #[rust]
     focus_col: usize,
@@ -619,6 +897,7 @@ impl ScriptHook for WheelPicker {
         // columns as they now stand, which is what a re-apply means.
         self.spins.clear();
         self.spans.clear();
+        self.shapes.clear();
         self.grab = None;
     }
 }
@@ -632,29 +911,59 @@ impl WheelPicker {
         self.row_height.max(1.0)
     }
 
+    /// Which way the drum travels. Everything the picker measures is read
+    /// through this one word.
+    fn is_vertical(&self) -> bool {
+        matches!(self.axis, DragAxis::Vertical)
+    }
+
     fn drum(&self, col: usize) -> Drum {
         let c = &self.columns[col];
-        Drum::new(c.items.len(), self.row(), c.loop_items)
+        Drum::new(c.count(), self.row(), c.loop_items)
     }
 
     /// Match the running state to the columns. Cheap when nothing changed,
     /// which is every frame but the first after an apply.
+    ///
+    /// The SHAPE of each column's drum is watched as well as the number of
+    /// columns. A scale column holds no `items`, so its count moves when
+    /// `min`, `max` or `step` do and nothing about the column's length would
+    /// ever say so; an offset left standing past the new end then puts
+    /// `rows_in_view` outside the column altogether and the picker draws
+    /// nothing at all. The pitch is deliberately NOT watched: a live
+    /// `row_height` drag must behave exactly as it always did.
     fn sync(&mut self) {
-        if self.spins.len() == self.columns.len() {
+        let row = self.row();
+        let shapes: Vec<(usize, bool)> =
+            self.columns.iter().map(|c| (c.count(), c.loop_items)).collect();
+        if self.spins.len() != self.columns.len() {
+            self.spins = self
+                .columns
+                .iter()
+                .zip(shapes.iter())
+                .map(|(c, &(count, looping))| {
+                    let drum = Drum::new(count, row, looping);
+                    Spin { offset: drum.bound(drum.offset_of(c.selected)), ..Default::default() }
+                })
+                .collect();
+            self.focus_col = self.focus_col.min(self.columns.len().saturating_sub(1));
+            self.grab = None;
+        } else if self.shapes != shapes {
+            // A column whose drum changed shape under a standing offset is
+            // re-bounded rather than reset: the place is still the one the
+            // hand left it in, it is only the end that has moved.
+            for (col, &shape) in shapes.iter().enumerate() {
+                if self.shapes.get(col) == Some(&shape) {
+                    continue;
+                }
+                let drum = Drum::new(shape.0, row, shape.1);
+                self.spins[col].glide = None;
+                self.spins[col].offset = drum.bound(self.spins[col].offset);
+            }
+        } else {
             return;
         }
-        let row = self.row();
-        let spins: Vec<Spin> = self
-            .columns
-            .iter()
-            .map(|c| {
-                let drum = Drum::new(c.items.len(), row, c.loop_items);
-                Spin { offset: drum.bound(drum.offset_of(c.selected)), ..Default::default() }
-            })
-            .collect();
-        self.spins = spins;
-        self.focus_col = self.focus_col.min(self.columns.len().saturating_sub(1));
-        self.grab = None;
+        self.shapes = shapes;
     }
 
     fn col_width(&self, col: usize) -> f64 {
@@ -679,7 +988,10 @@ impl WheelPicker {
         self.col_start(n - 1) + self.col_width(n - 1)
     }
 
-    /// The column an x offset from the widget's left edge belongs to.
+    /// The column an offset ACROSS the travel, from the widget's leading
+    /// edge on that axis, belongs to. Lying down that offset is a y, which
+    /// is why the hit test reads it through `split` rather than reaching
+    /// for `abs.x` — and why a picker lying down holds one column.
     fn column_at(&self, x: f64) -> usize {
         let last = self.columns.len().saturating_sub(1);
         for (i, &(start, w)) in self.spans.iter().enumerate() {
@@ -746,6 +1058,15 @@ impl WheelPicker {
         if alive {
             self.next_frame = cx.new_next_frame();
         }
+    }
+
+    /// The number `column` is holding: a scale's graduation, or, on a
+    /// column of words, the row's own index. A host reading a ruler should
+    /// not be made to re-derive `min + index * step` and get the rounding
+    /// subtly different from the number the ruler is drawing.
+    pub fn value(&self, column: usize) -> f64 {
+        let index = self.selected(column);
+        self.columns.get(column).and_then(|c| c.value_of(index)).unwrap_or(index as f64)
     }
 
     pub fn selected(&self, column: usize) -> usize {
@@ -836,6 +1157,7 @@ impl Widget for WheelPicker {
             return;
         }
         let row = self.row();
+        let vertical = self.is_vertical();
 
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
@@ -849,16 +1171,18 @@ impl Widget for WheelPicker {
             }
             Hit::FingerDown(fe) if fe.device.is_primary_hit() => {
                 cx.set_key_focus(self.draw_bg.area());
-                let col = self.column_at(fe.abs.x - fe.rect.pos.x);
+                let (along, across) = split(vertical, fe.abs);
+                let (_, rect_across) = split(vertical, fe.rect.pos);
+                let col = self.column_at(across - rect_across);
                 self.focus_col = col;
                 // A hand on a spinning wheel stops it where it stands.
                 let caught = self.spins[col].glide.take().is_some();
                 self.spins[col].samples.clear();
-                push_sample(&mut self.spins[col].samples, fe.abs.y, fe.time);
+                push_sample(&mut self.spins[col].samples, along, fe.time);
                 self.grab = Some(Grab {
                     col,
                     offset: self.spins[col].offset,
-                    abs: fe.abs.y,
+                    abs: along,
                     caught,
                 });
                 self.animator_play(cx, ids!(drag.on));
@@ -868,10 +1192,11 @@ impl Widget for WheelPicker {
                 let Some(grab) = self.grab else {
                     return;
                 };
-                push_sample(&mut self.spins[grab.col].samples, fe.abs.y, fe.time);
-                // The finger and the drum run opposite ways: dragging down
-                // brings earlier rows into the band.
-                self.place(cx, grab.col, grab.offset - (fe.abs.y - grab.abs));
+                let (along, _) = split(vertical, fe.abs);
+                push_sample(&mut self.spins[grab.col].samples, along, fe.time);
+                // The finger and the drum run opposite ways: dragging down —
+                // or, lying down, to the right — brings earlier rows in.
+                self.place(cx, grab.col, grab.offset - (along - grab.abs));
             }
             Hit::FingerUp(fe) => {
                 let Some(grab) = self.grab.take() else {
@@ -892,7 +1217,10 @@ impl Widget for WheelPicker {
                     // A press that did not move and did not stop anything
                     // is a tap on a row: the distance from the band to the
                     // finger is exactly the travel that brings that row in.
-                    fe.abs.y - (fe.rect.pos.y + fe.rect.size.y * 0.5)
+                    let (along, _) = split(vertical, fe.abs);
+                    let (pos, _) = split(vertical, fe.rect.pos);
+                    let (size, _) = split(vertical, fe.rect.size);
+                    along - (pos + size * 0.5)
                 } else {
                     0.0
                 };
@@ -914,23 +1242,33 @@ impl Widget for WheelPicker {
                 let col = self.focus_col.min(self.columns.len() - 1);
                 let drum = self.drum(col);
                 let index = drum.index_at(self.spins[col].offset);
+                // The pair of arrows that points ALONG the travel turns the
+                // drum and the pair across it chooses the column, so the
+                // keys keep pointing the way the rows actually move when the
+                // picker is stood on its side. Upright this is the mapping
+                // it has always had.
+                let (back, fwd, prev, next) = if vertical {
+                    (KeyCode::ArrowUp, KeyCode::ArrowDown, KeyCode::ArrowLeft, KeyCode::ArrowRight)
+                } else {
+                    (KeyCode::ArrowLeft, KeyCode::ArrowRight, KeyCode::ArrowUp, KeyCode::ArrowDown)
+                };
                 let landing = match ke.key_code {
-                    KeyCode::ArrowUp => Some(drum.step(index, -1)),
-                    KeyCode::ArrowDown => Some(drum.step(index, 1)),
+                    key if key == back => Some(drum.step(index, -1)),
+                    key if key == fwd => Some(drum.step(index, 1)),
                     // Home and End are the first and last row of the list,
                     // not of the drum: on a column that comes round, the
                     // last row may well be one step backwards.
                     KeyCode::Home => Some(0),
                     KeyCode::End => Some(drum.count.saturating_sub(1)),
-                    // Left and right choose the column, since Tab belongs
+                    // The cross arrows choose the column, since Tab belongs
                     // to focus traversal and a picker's columns are as much
                     // one control as a slider's two ends are.
-                    KeyCode::ArrowLeft => {
+                    key if key == prev => {
                         self.focus_col = col.saturating_sub(1);
                         self.draw_bg.redraw(cx);
                         None
                     }
-                    KeyCode::ArrowRight => {
+                    key if key == next => {
                         self.focus_col = (col + 1).min(self.columns.len() - 1);
                         self.draw_bg.redraw(cx);
                         None
@@ -943,8 +1281,13 @@ impl Widget for WheelPicker {
                 }
             }
             Hit::FingerScroll(e) => {
-                let col = self.column_at(e.abs.x - e.rect.pos.x);
-                let travel = wheel_travel(e.scroll.y, row);
+                let (_, across) = split(vertical, e.abs);
+                let (_, rect_across) = split(vertical, e.rect.pos);
+                let col = self.column_at(across - rect_across);
+                // Only the notch that runs ALONG the travel counts. A plain
+                // vertical wheel over a ruler lying down belongs to the page
+                // the ruler is sitting in, not to the ruler.
+                let travel = wheel_travel(split(vertical, e.scroll).0, row);
                 if travel != 0.0 {
                     self.focus_col = col;
                     self.spins[col].glide = None;
@@ -962,21 +1305,39 @@ impl Widget for WheelPicker {
         self.sync();
         let rows = self.rows();
         let row = self.row();
+        let vertical = self.is_vertical();
 
         // A drum's size is the rows it shows, not the room it is given: a
         // half row at the edge of the well would sit outside the band's
         // arithmetic and read as a list that had been cut off. `Fit` asks
         // for that natural size; any other walk is honoured as written, and
         // the columns keep their own widths and start at the left edge.
+        //
+        // The travel axis takes the rows and the axis across it takes the
+        // columns, so standing the picker on its side TRANSPOSES the walk.
+        // Nothing in the shader could do this: a `Fit` width that has to
+        // become `rows * row` is decided here or not at all.
         let mut walk = walk;
-        if matches!(walk.height, Size::Fit { .. }) {
-            walk.height = Size::Fixed(rows as f64 * row);
-        }
-        if matches!(walk.width, Size::Fit { .. }) {
-            walk.width = Size::Fixed(self.body_width());
+        let along = Size::Fixed(rows as f64 * row);
+        let across = Size::Fixed(self.body_width());
+        if vertical {
+            if matches!(walk.height, Size::Fit { .. }) {
+                walk.height = along;
+            }
+            if matches!(walk.width, Size::Fit { .. }) {
+                walk.width = across;
+            }
+        } else {
+            if matches!(walk.width, Size::Fit { .. }) {
+                walk.width = along;
+            }
+            if matches!(walk.height, Size::Fit { .. }) {
+                walk.height = across;
+            }
         }
 
         self.draw_bg.row_px = row as f32;
+        self.draw_bg.vertical = if vertical { 1.0 } else { 0.0 };
         // The instance values are fixed when the quad is emitted, which is
         // inside `begin`, so the lit slice is worked out from the column
         // widths rather than from the laid-out rect.
@@ -992,7 +1353,9 @@ impl Widget for WheelPicker {
 
         self.draw_bg.begin(cx, walk, self.layout);
         let rect = cx.turtle().rect();
-        let mid = rect.pos.y + rect.size.y * 0.5;
+        let (along_pos, cross_pos) = split(vertical, rect.pos);
+        let (along_size, _) = split(vertical, rect.size);
+        let mid = along_pos + along_size * 0.5;
         // Rows between the band and the edge of the well, and how far out a
         // row may be before none of it is inside.
         let half = rows as f64 * 0.5;
@@ -1006,27 +1369,69 @@ impl Widget for WheelPicker {
             self.spans.push((start, width));
             let drum = self.drum(col);
             let offset = self.spins[col].offset;
+            // A scale GENERATES its rows out of numbers where a column of
+            // words looks them up. What the generated ones need is lifted
+            // out of the row loop here, so the loop borrows nothing.
+            let scale = self.columns[col].is_scale();
+            let (min, step) = (self.columns[col].min, self.columns[col].step);
+            let precision = self.columns[col].precision;
+            let unit = if scale { self.columns[col].unit.clone() } else { String::new() };
+            let every = self.columns[col].labels_every();
+            let (tick_len, tick_len_major) = self.columns[col].tick_lengths(width);
+            // A number stands clear of the longest tick, and what is left of
+            // the column is the room it has to fit in.
+            let inset = if scale { tick_len_major + LABEL_GAP } else { 0.0 };
+            let (room_x, room_y) = label_box(vertical, row, every, width - inset, LABEL_GAP);
             for (index, d) in drum.rows_in_view(offset, reach) {
-                let Some(text) = self.columns[col].items.get(index).cloned() else {
-                    continue;
-                };
                 let ink_left = fade_at(d, half, self.dim_far);
                 let size = base_font * fade_at(d, half, self.shrink_far) as f32;
-                self.draw_text.text_style.font_size = size;
                 // The row in the band keeps the strong ink and its
                 // neighbours hand theirs over as they leave, mixed rather
                 // than switched so nothing pops as the drum turns.
                 let mut ink = self.color_selected.mix(self.color_item, (d.abs() as f32).min(1.0));
                 ink.w *= ink_left as f32;
+                // Where this row's own cell starts along the travel, and
+                // where its column starts across it.
+                let lead = mid + d * row - row * 0.5;
+                let cross = cross_pos + start;
+                // The tick is drawn BEFORE the label is looked for, because
+                // a scale has no label to look for on most of its rows and
+                // a lookup that runs first would skip the graduation too.
+                let text = if scale {
+                    let major = self.columns[col].is_major(index);
+                    self.draw_tick.color = ink;
+                    let len = if major { tick_len_major } else { tick_len };
+                    self.draw_tick.draw_abs(cx, tick_rect(vertical, lead, cross, row, len));
+                    if !major {
+                        continue;
+                    }
+                    Some(format_readout(min + index as f64 * step, precision, &unit))
+                } else {
+                    self.columns[col].items.get(index).cloned()
+                };
+                let Some(text) = text else {
+                    continue;
+                };
+                self.draw_text.text_style.font_size = size;
                 self.draw_text.color = ink;
                 let text_width = measure(&self.draw_text, cx, &text);
-                let top = mid + d * row - row * 0.5;
+                if scale && !label_fits(text_width, size as f64, room_x, room_y) {
+                    continue;
+                }
                 // `draw_abs` takes the top of the line box, not the top of
                 // the ink: a glyph's ink starts about 0.30 of the size
-                // below it. Centring the line box leaves every row riding
-                // high in its own band.
-                let y = top + (row - size as f64) * 0.5 - size as f64 * 0.30;
-                let x = rect.pos.x + start + (width - text_width) * 0.5;
+                // below it, and `text_y` is where the crate keeps that.
+                let (x, y) = if vertical {
+                    let x = if scale {
+                        cross + inset
+                    } else {
+                        cross + (width - text_width) * 0.5
+                    };
+                    (x, text_y(size as f64, lead, row))
+                } else {
+                    let y = text_y(size as f64, cross + inset, width - inset);
+                    (lead + (row - text_width) * 0.5, y)
+                };
                 self.draw_text.draw_abs(cx, dvec2(x, y), &text);
             }
         }
@@ -1043,7 +1448,16 @@ impl Widget for WheelPicker {
         self.columns
             .iter()
             .enumerate()
-            .map(|(col, c)| c.items.get(self.selected(col)).cloned().unwrap_or_default())
+            .map(|(col, c)| {
+                let index = self.selected(col);
+                // A scale holds no `items`, so indexing them would answer
+                // an empty string for every graduation. Its row is a number
+                // it makes, and so is its text.
+                match c.value_of(index) {
+                    Some(value) => format_readout(value, c.precision, &c.unit),
+                    None => c.items.get(index).cloned().unwrap_or_default(),
+                }
+            })
             .collect::<Vec<String>>()
             .join(" ")
     }
@@ -1053,6 +1467,12 @@ impl WheelPickerRef {
     /// The row `column` is holding in the band.
     pub fn selected(&self, column: usize) -> usize {
         self.borrow().map(|inner| inner.selected(column)).unwrap_or(0)
+    }
+
+    /// The number `column` is holding: a scale's graduation, or a row's own
+    /// index on a column of words.
+    pub fn value(&self, column: usize) -> f64 {
+        self.borrow().map(|inner| inner.value(column)).unwrap_or(0.0)
     }
 
     /// Put a row in the band, with no spin to watch.
@@ -1279,5 +1699,160 @@ mod tests {
     #[test]
     fn distance_from_the_band_does_not_care_which_side() {
         assert_eq!(fade_at(-1.5, 2.5, 0.5), fade_at(1.5, 2.5, 0.5));
+    }
+
+    // ---- the scale column ------------------------------------------------
+
+    fn scale(min: f64, max: f64, step: f64) -> WheelColumn {
+        WheelColumn { min, max, step, ..Default::default() }
+    }
+
+    #[test]
+    fn a_scale_counts_its_graduations_from_its_range() {
+        // Both ends are graduations, which is the whole reason for the + 1:
+        // 0..10 by ones is eleven marks, not ten.
+        assert_eq!(scale_count(0.0, 10.0, 1.0), Some(11));
+        assert_eq!(scale_count(-1.0, 1.0, 0.5), Some(5));
+        assert_eq!(scale_count(20.0, 20_000.0, 10.0), Some(1999));
+        // A range the step does not divide is rounded rather than refused:
+        // the alternative is a scale that quietly stops short of the max
+        // its own host declared.
+        assert_eq!(scale_count(0.0, 1.0, 0.3), Some(4));
+    }
+
+    #[test]
+    fn a_column_that_names_no_step_is_a_list_of_words() {
+        // This is the whole discriminant. `step: 0.0` has to leave the text
+        // column exactly as it was, so it must not even look like a scale.
+        assert_eq!(scale_count(0.0, 10.0, 0.0), None);
+        assert_eq!(scale_count(0.0, 10.0, -1.0), None, "nor does a step that runs backwards");
+        assert_eq!(scale_count(10.0, 0.0, 1.0), None, "nor a range that does");
+        assert_eq!(scale_count(5.0, 5.0, 1.0), None, "nor a range of nothing");
+        assert_eq!(scale_count(f64::NAN, 1.0, 1.0), None);
+        assert_eq!(scale_count(0.0, 1.0, f64::NAN), None);
+    }
+
+    #[test]
+    fn a_scale_that_would_never_end_is_capped_rather_than_left_to_hang() {
+        assert_eq!(scale_count(0.0, 1.0, f64::MIN_POSITIVE), Some(SCALE_MAX));
+        assert_eq!(scale_count(0.0, f64::INFINITY, 1.0), Some(SCALE_MAX));
+        assert_eq!(scale_count(0.0, 1e18, 1e-9), Some(SCALE_MAX));
+    }
+
+    #[test]
+    fn a_scale_column_carries_no_items_and_still_has_a_drum() {
+        // The edit the whole ruler rests on: a count of zero would give a
+        // drum that neither moves nor draws.
+        let c = scale(0.0, 100.0, 5.0);
+        assert!(c.items.is_empty());
+        assert!(c.is_scale());
+        assert_eq!(c.count(), 21);
+        let d = Drum::new(c.count(), 10.0, false);
+        assert_eq!(d.index_at(d.offset_of(7)), 7);
+        assert!(!d.rows_in_view(d.offset_of(7), 2.5).is_empty());
+    }
+
+    #[test]
+    fn the_graduation_in_the_band_is_the_number_the_scale_names() {
+        let c = scale(20.0, 20_000.0, 10.0);
+        assert_eq!(c.value_of(0), Some(20.0));
+        assert_eq!(c.value_of(80), Some(820.0));
+        // A column of words has no number to stand for, and says so rather
+        // than answering zero.
+        let mut words = WheelColumn::default();
+        words.items = vec!["Small".to_string(), "Large".to_string()];
+        assert_eq!(words.value_of(1), None);
+        assert_eq!(words.count(), 2, "and it still counts by its items");
+    }
+
+    #[test]
+    fn one_graduation_in_label_every_is_a_major_one() {
+        let c = scale(0.0, 100.0, 1.0);
+        assert_eq!(c.labels_every(), 10, "a scale that names none groups by ten");
+        assert!(c.is_major(0) && c.is_major(10) && c.is_major(100));
+        assert!(!c.is_major(9) && !c.is_major(11));
+        let mut c = scale(0.0, 100.0, 1.0);
+        c.label_every = 4;
+        assert!(c.is_major(8) && !c.is_major(7));
+    }
+
+    #[test]
+    fn a_scale_that_names_no_tick_lengths_takes_them_from_the_column() {
+        let c = scale(0.0, 10.0, 1.0);
+        let (minor, major) = c.tick_lengths(40.0);
+        assert!(minor > 0.0 && major > minor && major < 40.0);
+        let mut c = scale(0.0, 10.0, 1.0);
+        c.tick_len = 5.0;
+        c.tick_len_major = 9.0;
+        assert_eq!(c.tick_lengths(40.0), (5.0, 9.0));
+    }
+
+    // ---- standing it on its side ----------------------------------------
+
+    #[test]
+    fn the_axis_swaps_what_travel_means_and_what_across_means() {
+        // A finger, a rect, a wheel notch and a row's place on screen all
+        // read through this one word, so they turn together or not at all.
+        assert_eq!(split(true, dvec2(3.0, 7.0)), (7.0, 3.0), "upright the drum travels in y");
+        assert_eq!(split(false, dvec2(3.0, 7.0)), (3.0, 7.0), "lying down, in x");
+        // Which is what makes the hit test flip: the offset handed to
+        // `column_at` is the second of the pair either way round.
+        let (abs, origin) = (dvec2(120.0, 40.0), dvec2(100.0, 10.0));
+        assert_eq!(split(true, abs).1 - split(true, origin).1, 20.0);
+        assert_eq!(split(false, abs).1 - split(false, origin).1, 30.0);
+    }
+
+    #[test]
+    fn a_graduation_is_a_hairline_across_the_way_the_drum_moves() {
+        // The pitch is the room the mark stands in, not the mark.
+        let up = tick_rect(true, 100.0, 20.0, 12.0, 8.0);
+        assert_eq!((up.size.x, up.size.y), (8.0, 1.0));
+        assert_eq!((up.pos.x, up.pos.y), (20.0, 105.5), "centred in its own pitch");
+        let flat = tick_rect(false, 100.0, 20.0, 12.0, 8.0);
+        assert_eq!((flat.size.x, flat.size.y), (1.0, 8.0));
+        assert_eq!((flat.pos.x, flat.pos.y), (105.5, 20.0));
+        // A pitch finer than the mark gives the whole pitch to the mark
+        // rather than a rect wider than the space it has.
+        let fine = tick_rect(false, 0.0, 0.0, 0.5, 8.0);
+        assert_eq!(fine.size.x, 0.5);
+    }
+
+    // ---- which numbers are drawn ----------------------------------------
+
+    #[test]
+    fn a_number_is_skipped_when_it_does_not_fit_the_room_it_has() {
+        // Lying down, what crowds a number's WIDTH is the pitch to the next
+        // numbered graduation and what crowds its HEIGHT is the column's own
+        // depth beside the tick.
+        let (room_x, room_y) = label_box(false, 10.0, 10, 40.0, 3.0);
+        assert_eq!((room_x, room_y), (94.0, 37.0));
+        assert!(label_fits(28.0, 11.0, room_x, room_y));
+        assert!(!label_fits(120.0, 11.0, room_x, room_y), "wider than the next number's place");
+        assert!(!label_fits(28.0, 60.0, room_x, room_y), "taller than the ruler is deep");
+        // Standing up the two swap, because the numbers are stacked.
+        assert_eq!(label_box(true, 10.0, 10, 40.0, 3.0), (37.0, 94.0));
+    }
+
+    #[test]
+    fn a_ruler_too_fine_to_number_still_draws_its_graduations() {
+        // Four pixels between marks with every mark numbered leaves no room
+        // at all. The numbers go and the ticks stay, which is what a ruler
+        // does; nothing is clipped and nothing is shrunk to fit.
+        let (room_x, room_y) = label_box(false, 4.0, 1, 40.0, 3.0);
+        assert!(!label_fits(18.0, 11.0, room_x, room_y));
+        // Number one mark in ten at that pitch and they fit again.
+        let (room_x, room_y) = label_box(false, 4.0, 10, 40.0, 3.0);
+        assert!(label_fits(18.0, 11.0, room_x, room_y));
+    }
+
+    #[test]
+    fn a_scale_reads_the_same_number_as_a_readout_beside_it() {
+        // Both go through `format_readout`, so the decimals and the unit
+        // cannot drift apart.
+        let mut c = scale(0.0, 1.0, 0.25);
+        c.precision = 2;
+        c.unit = "s".to_string();
+        let value = c.value_of(3).unwrap();
+        assert_eq!(format_readout(value, c.precision, &c.unit), "0.75 s");
     }
 }

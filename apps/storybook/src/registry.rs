@@ -406,6 +406,7 @@ mod tests {
                 ("Select", &["Overview", "Combo box"]),
                 ("Chip", &["Overview"]),
                 ("WheelPicker", &["Overview"]),
+                ("SlidingRuler", &["Overview"]),
                 ("ColumnPicker", &["Overview"]),
                 ("SvgSelect", &["Overview"]),
             ],

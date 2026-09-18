@@ -68,6 +68,7 @@ pub mod select;
 pub mod combobox;
 pub mod chip;
 pub mod wheel_picker;
+pub mod sliding_ruler;
 pub mod column_picker;
 pub mod svg_select;
 pub mod toolbar;
@@ -192,6 +193,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     combobox::script_mod(vm);
     chip::script_mod(vm);
     wheel_picker::script_mod(vm);
+    sliding_ruler::script_mod(vm);
     column_picker::script_mod(vm);
     svg_select::script_mod(vm);
     // 9 Navigation
@@ -325,6 +327,7 @@ pub fn tables() -> &'static [&'static [Story]] {
         combobox::STORIES,
         chip::STORIES,
         wheel_picker::STORIES,
+        sliding_ruler::STORIES,
         column_picker::STORIES,
         svg_select::STORIES,
         // 9 Navigation
@@ -391,4 +394,54 @@ pub fn bump(key: LiveId) -> usize {
     let n = map.entry(key).or_insert(0);
     *n += 1;
     *n
+}
+
+#[cfg(test)]
+mod cost_of_a_switch {
+    //! A theme switch re-runs every module that read a theme token. This says
+    //! where that time goes.
+    //!
+    //! Each measurement gets a FRESH `Cx`. Measured one after another in one
+    //! context they are meaningless: every reload inherits what the last one
+    //! left behind, so whichever ran first looks cheap and the rest look
+    //! ruinous. The first attempt at this put the library at 0.9 s and the
+    //! stories at 59 s that way, against a switch that really takes about 0.8 s.
+    use crate::makepad_widgets::*;
+    use std::time::Instant;
+
+    fn one_reload(with_stories: bool) -> f64 {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut ms = 0.0;
+        cx.with_vm(|vm| {
+            crate::makepad_widgets::script_mod(vm);
+            if with_stories {
+                super::script_mod(vm);
+            }
+            let t = Instant::now();
+            vm.with_reload(|vm| {
+                crate::makepad_widgets::script_mod(vm);
+                if with_stories {
+                    super::script_mod(vm);
+                }
+            });
+            ms = t.elapsed().as_secs_f64() * 1000.0;
+        });
+        ms
+    }
+
+    /// Slow (minutes) and its ABSOLUTE numbers do not reconcile with a live
+    /// switch -- in the app the same reload reports about 0.8 s, here about
+    /// 50 s -- so read it for the RATIO only, which holds across every shape
+    /// this was measured in: the stories are ~99% of a reload, the whole
+    /// widget library is the other 1%. Settle the absolute figure by
+    /// instrumenting the running app, not here.
+    /// `cargo test -p makepad-storybook where_a_theme_switch -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn where_a_theme_switch_spends_its_time() {
+        let lib = one_reload(false);
+        let all = one_reload(true);
+        println!("COST library alone {lib:>8.1} ms | library + 113 stories {all:>8.1} ms | the stories' share {:>6.1} %",
+            if all > 0.0 { (all - lib) / all * 100.0 } else { 0.0 });
+    }
 }

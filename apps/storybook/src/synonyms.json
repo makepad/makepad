@@ -3360,6 +3360,29 @@
    ]
   },
   {
+   "component": "SlidingRuler",
+   "aka": [
+    "measuring stick",
+    "scale",
+    "tape measure",
+    "graduated scale",
+    "tick strip",
+    "sliding scale",
+    "gauge strip"
+   ],
+   "does": [
+    "slide a scale under the band",
+    "rest on a graduation",
+    "min max and step make the marks",
+    "number every nth graduation",
+    "numbers that do not fit are skipped",
+    "the pitch is the drag rate",
+    "wrap round the range endlessly",
+    "lay the ruler down or stand it on end",
+    "read the number rather than the index"
+   ]
+  },
+  {
    "component": "WindowChrome",
    "aka": [
     "title bar",
