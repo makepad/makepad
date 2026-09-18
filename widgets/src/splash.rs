@@ -419,7 +419,19 @@ fn restore_modules(vm: &mut ScriptVm, saved: Vec<(LiveId, ScriptValue, Option<Sc
 /// its budget; and top-level side effects (e.g. `start_interval`) run and live
 /// until the marked-dead isolate is reclaimed by `gc_dead_splash_isolates`.
 pub fn validate_splash_body(cx: &mut Cx, body: &str, allow_net: bool) -> Vec<String> {
-    let vm_id = cx.alloc_splash_vm_with_network(allow_net);
+    validate_splash_body_with_io(cx, body, allow_net, false)
+}
+
+/// Validate untrusted source with all external I/O confined to the host bridge.
+///
+/// The throwaway isolate has no filesystem jail or host identity, and its
+/// queued bridge requests are discarded when validation completes.
+pub fn validate_splash_body_with_host_io(cx: &mut Cx, body: &str) -> Vec<String> {
+    validate_splash_body_with_io(cx, body, false, true)
+}
+
+fn validate_splash_body_with_io(cx: &mut Cx, body: &str, allow_net: bool, host_io_only: bool) -> Vec<String> {
+    let vm_id = cx.alloc_splash_vm_with_io(allow_net, host_io_only);
     // Give the dry run a throwaway storage jail so top-level `fs.read` boot
     // loads validate instead of erroring "storage not available". The path is
     // unpredictable and created with an EXCLUSIVE mkdir (fails EEXIST on any
@@ -434,8 +446,8 @@ pub fn validate_splash_body(cx: &mut Cx, body: &str, allow_net: bool) -> Vec<Str
     let heap_key = cx.with_script_vm_id(vm_id, |vm| vm.bx.heap.heap_key());
     // Clear a leftover from a crashed run (we own this exact name), then take
     // it exclusively.
-    let _ = std::fs::remove_dir_all(&scratch);
-    if std::fs::create_dir(&scratch).is_ok() {
+    if !host_io_only { let _ = std::fs::remove_dir_all(&scratch); }
+    if !host_io_only && std::fs::create_dir(&scratch).is_ok() {
         crate::splash_storage::set_root_for_heap(heap_key, Some(scratch.clone()));
     }
     let prefix = if allow_net {
@@ -484,7 +496,7 @@ pub fn validate_splash_body(cx: &mut Cx, body: &str, allow_net: bool) -> Vec<Str
     // root binding) so nothing can re-create the scratch dir after we remove
     // it; then delete last, and it stays deleted.
     crate::widget_async::gc_dead_splash_isolates(cx);
-    let _ = std::fs::remove_dir_all(&scratch);
+    if !host_io_only { let _ = std::fs::remove_dir_all(&scratch); }
     errors_out
 }
 
@@ -951,5 +963,20 @@ mod style_tests {
         assert!(splash.call_script_fn(&mut cx, id!(bump), &[]));
         assert_eq!(count(&mut cx, &mut splash), Some(2.0));
         splash.stop(&mut cx);
+    }
+}
+
+#[cfg(test)]
+mod host_io_validation_tests {
+    use super::*;
+
+    #[test]
+    fn host_io_validation_blocks_resources_and_has_no_storage_jail() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        assert!(validate_splash_body_with_host_io(&mut cx, "Label{text: \"safe\"}").is_empty());
+        assert!(!validate_splash_body_with_host_io(&mut cx, "let resource = http_resource(\"http://127.0.0.1:9/private\")").is_empty());
+        assert!(!validate_splash_body_with_host_io(&mut cx, "let value = fs.read(\"/private\")").is_empty());
+        assert!(crate::splash_host::take_splash_host_requests().is_empty());
     }
 }
