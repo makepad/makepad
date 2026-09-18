@@ -5271,9 +5271,48 @@ fn sight_target(cx: &Cx, uid: u64, in_frame: bool) -> TargetSighting {
 /// flat (negative alpha) for the same reason — the theme gives the hover and
 /// focus states a second stop, and a two-tone face reads as a third state
 /// that does not exist.
+/// One colour off the fab palette, ready to apply. Opaque: these are FILLS,
+/// and a role that carries an alpha (the base theme's well is a translucent
+/// black) would let the panel's ground through a control that is meant to
+/// sit on it.
+fn fab_fill(cx: &mut Cx, key: LiveId) -> Vec4f {
+    let rgba = cx.with_vm(|vm| {
+        let fab = vm.module(id!(fab));
+        vm.bx.heap.value(fab, key.into(), NoTrap).as_color().unwrap_or(0)
+    });
+    vec4(
+        ((rgba >> 24) & 0xff) as f32 / 255.0,
+        ((rgba >> 16) & 0xff) as f32 / 255.0,
+        ((rgba >> 8) & 0xff) as f32 / 255.0,
+        1.0,
+    )
+}
+
 fn set_button_fill(cx: &mut Cx, btn: WidgetRef, selected: bool) {
     let mut btn = btn;
-    let (base, hover, down): (Vec4f, Vec4f, Vec4f) = if selected {
+    // Worn (the Theme tab's "wear" switch), the literals below would be a
+    // dark slab under a light theme with the panel's now-dark words on it --
+    // unreadable, and on every switch in the panel at once. So worn, the two
+    // states come off the palette instead: the accent's own CONTAINER for
+    // on, which is the tint that role exists to carry ink on, and the well
+    // tone for off. Both keep `fab.color_text` readable, which is what the
+    // button draws its word in; `worn_the_panel_takes_the_themes_colours_and_still_reads`
+    // holds that to a number under every sheet.
+    let (base, hover, down): (Vec4f, Vec4f, Vec4f) = if crate::fab_controls::panel_wears_theme(cx) {
+        if selected {
+            (
+                fab_fill(cx, live_id!(color_accent_dim)),
+                fab_fill(cx, live_id!(color_accent)),
+                fab_fill(cx, live_id!(color_accent_dim)),
+            )
+        } else {
+            (
+                fab_fill(cx, live_id!(color_input)),
+                fab_fill(cx, live_id!(color_input_hover)),
+                fab_fill(cx, live_id!(color_input_active)),
+            )
+        }
+    } else if selected {
         (
             vec4(0.23, 0.45, 0.83, 1.0),
             vec4(0.31, 0.54, 0.92, 1.0),
@@ -8159,6 +8198,9 @@ pub struct Tweaker {
     theme_save_uid: u64,
     #[rust]
     theme_delete_uid: u64,
+    /// The switch that puts the panel itself in the chosen theme.
+    #[rust]
+    theme_wear_uid: u64,
     /// Which built-in preset the picker shows as the one in force.
     #[rust]
     theme_preset: usize,
@@ -8404,14 +8446,114 @@ pub struct Tweaker {
     /// The body's own margin.right before the panel compressed it.
     #[rust]
     saved_body_right: Option<f64>,
+    /// Set when the body has been applied from its own DSL again, which
+    /// throws the panel's runtime margin away. See
+    /// [`body_margin_needs_apply`].
+    #[rust]
+    margin_stale: bool,
+    /// The palette the sidebar was built from. See [`fab_palette_stamp`].
+    #[rust]
+    sidebar_palette: u64,
     #[rust]
     splitter_drag: bool,
+}
+
+/// What the panel's chrome is painted from right now, as one number.
+///
+/// The sidebar is built ONCE, from a runtime splash chunk, and it reads
+/// `mod.fab` as it is built -- so nothing that changes the palette afterwards
+/// reaches it. That is the point: the panel is immune to whatever theme the
+/// app is wearing. But it also means the Theme tab's "wear" switch, which
+/// changes the palette and nothing else, would leave the panel in the
+/// colours it was built with until somebody closed and reopened it.
+///
+/// So the panel watches the PALETTE rather than the switch. That way it also
+/// follows a theme change made while the switch is on, and a switch thrown
+/// from anywhere else, without either having to remember to tell it. Three
+/// entries are enough to tell one palette from another, and this is three
+/// reads of a table already in memory. With the switch off the palette never
+/// moves, so the stamp never changes and the panel is built exactly once, as
+/// it always was.
+fn fab_palette_stamp(cx: &mut Cx) -> u64 {
+    cx.with_vm(|vm| {
+        let fab = vm.module(id!(fab));
+        let read = |key: LiveId| -> u64 {
+            vm.bx.heap.value(fab, key.into(), NoTrap).as_color().unwrap_or(0) as u64
+        };
+        // Folded rather than packed: five 32-bit colours do not fit in 64
+        // bits side by side, and two palettes that collided would be a
+        // repaint that never happened.
+        let mut stamp = 0xcbf2_9ce4_8422_2325u64;
+        for key in [
+            live_id!(color_area),
+            live_id!(color_text),
+            live_id!(color_accent),
+            live_id!(color_input),
+            live_id!(color_button),
+        ] {
+            stamp = (stamp ^ read(key)).wrapping_mul(0x100_0000_01b3);
+        }
+        stamp
+    })
+}
+
+/// Is the body's right margin due to be applied again?
+///
+/// `desired` alone is not enough to answer this. The margin is a RUNTIME
+/// override on a widget the APP declares in its own splash, so any script
+/// re-apply puts the body back to what its own DSL says and the override is
+/// gone -- while `applied_margin` here still says it is on. A theme switch
+/// is exactly that: it goes through `request_style_reload`, `script_mod`
+/// runs again and every widget is re-applied. The app then draws at full
+/// width UNDER the panel, which is the right-hand side of the app
+/// "disappearing"; toggling the panel off and on was the only way back,
+/// because that drives `desired` to 0 and back and so defeats the guard.
+///
+/// The guard itself has to stay: without it this runs an eval against the
+/// body on every frame the panel draws.
+///
+/// The apply generation the palette follows (`palette_gen`) is deliberately
+/// NOT what this hangs off: that moves on every property apply, so scrubbing
+/// a single value would re-evaluate the body's margin on every frame of the
+/// drag. `stale` is set by [`Tweaker::on_after_reload`] instead, which fires
+/// on precisely the applies that wipe the override -- the body is re-applied
+/// by the same pass that re-applies this widget, so the flag and the wipe
+/// cannot come apart.
+fn body_margin_needs_apply(applied: f64, desired: f64, stale: bool) -> bool {
+    stale || (applied - desired).abs() >= 0.5
+}
+
+/// The body's OWN right margin, as read back off the widget -- or `None`
+/// when what came back is the panel's own compression still standing on it,
+/// in which case the body's own is whatever was remembered before.
+///
+/// Releasing the panel gives the body back this value, so filing the panel's
+/// own width as "what the body had before" would indent the app by a sidebar
+/// for the rest of the session. A re-apply can run either side of the wipe
+/// -- after it, the body is back to its DSL and what is read back really is
+/// its own; before it (a splitter drag, a release), what is read back is
+/// what this panel wrote -- so the two cases are told apart by value rather
+/// than assumed.
+fn body_own_right(read_back: f64, applied: f64) -> Option<f64> {
+    if applied > 0.5 && (read_back - applied).abs() < 0.5 {
+        None
+    } else {
+        Some(read_back)
+    }
 }
 
 impl ScriptHook for Tweaker {
     fn on_after_new(&mut self, vm: &mut ScriptVm) {
         self.overlay_list = Some(DrawList2d::script_new(vm));
         self.sidebar_list = Some(DrawList2d::script_new(vm));
+    }
+    /// A reload -- a live edit, a `request_script_reapply`, or the style
+    /// reload a theme switch asks for -- has just re-applied this widget
+    /// from its DSL. The same pass re-applied the window body, so the
+    /// runtime margin the panel had put on it is gone and has to be put back
+    /// even though nothing about the panel's own geometry changed.
+    fn on_after_reload(&mut self, _vm: &mut ScriptVm) {
+        self.margin_stale = true;
     }
 }
 
@@ -8443,7 +8585,7 @@ impl Tweaker {
     /// size of the sidebar band, through the ordinary apply machinery so the
     /// relayout is the real one. Not a user edit — never enters the diff.
     fn ensure_body_margin(&mut self, cx: &mut Cx, desired: f64) {
-        if (self.applied_margin - desired).abs() < 0.5 {
+        if !body_margin_needs_apply(self.applied_margin, desired, self.margin_stale) {
             return;
         }
         let Some(body) = self.find_body(cx) else {
@@ -8464,8 +8606,14 @@ impl Tweaker {
         let left = leg("margin.left").or(scalar).unwrap_or(0.0);
         let top = leg("margin.top").or(scalar).unwrap_or(0.0);
         let bottom = leg("margin.bottom").or(scalar).unwrap_or(0.0);
-        if self.saved_body_right.is_none() {
-            self.saved_body_right = Some(leg("margin.right").or(scalar).unwrap_or(0.0));
+        // What the body itself carries -- unless the panel's own
+        // compression is still standing on it, which is not the body's own
+        // and must never replace what was remembered.
+        if let Some(own) = body_own_right(
+            leg("margin.right").or(scalar).unwrap_or(0.0),
+            self.applied_margin,
+        ) {
+            self.saved_body_right = Some(own);
         }
         let right = if desired > 0.5 {
             desired
@@ -8478,12 +8626,14 @@ impl Tweaker {
         match eval_chunk(cx, &body, &chunk) {
             Ok(()) => {
                 self.applied_margin = desired;
+                self.margin_stale = false;
                 cx.redraw_all();
             }
             Err(error) => {
                 log!("TWEAK body compress failed: {error}");
                 // Don't retry every frame.
                 self.applied_margin = desired;
+                self.margin_stale = false;
             }
         }
     }
@@ -8491,14 +8641,45 @@ impl Tweaker {
     /// Build the sidebar widget from a runtime splash chunk, once (every
     /// widget type — the fab controls included — is registered by then).
     fn ensure_sidebar(&mut self, cx: &mut Cx) {
+        let palette = fab_palette_stamp(cx);
         if self.sidebar.is_some() {
-            return;
+            if self.sidebar_palette == palette {
+                return;
+            }
+            // The chrome moved underneath it -- the Theme tab's "wear"
+            // switch, or a theme change while that switch is on. The chunk
+            // below is where every fab colour lands, and it is evaluated
+            // here and nowhere else, so the only way to repaint the panel is
+            // to build it again. Everything the panel REMEMBERS is on this
+            // struct rather than in those widgets, so what is lost is what
+            // was typed into the panel's own boxes, which is the price of
+            // changing its skin on purpose.
+            //
+            // Two of those boxes are MIRRORED on this struct, though, and a
+            // box that comes back empty beside a mirror that did not would
+            // leave the panel filtering by a word nobody can see and
+            // offering to save under a name nobody typed. The name is
+            // re-seeded through the channel that already exists for it; the
+            // filter is dropped, because its mirror is lower-cased and
+            // putting that back would change what the person wrote.
+            if !self.theme_name.is_empty() {
+                self.theme_name_seed = Some(self.theme_name.clone());
+            }
+            self.filter.clear();
+            // The property list is a NEW, empty list; the rows are refilled
+            // only when this says they are stale. The reload that changed
+            // the palette bumps the apply generation and would do it anyway,
+            // but a rebuild asked for any other way would leave the panel
+            // showing an empty tab.
+            self.rows_uid = 0;
+            self.sidebar = None;
         }
         if self.theme_colors.is_empty() {
             self.theme_colors = theme_palette(cx);
             self.palette_gen = session().lock().unwrap().apply_gen;
             log!("TWEAK theme palette: {} colours", self.theme_colors.len());
         }
+        self.sidebar_palette = palette;
         // What the app is already running under, before the picker offers
         // to change it: a sheet installed at startup is the selected row.
         self.theme_preset = current_theme_preset(cx);
@@ -9641,7 +9822,10 @@ impl Tweaker {
                     flow: Down
                     show_bg: true
                     draw_bg +: {
-                        color: #x303030
+                        // The panel's ground, off the palette rather than
+                        // written out: the same colour it has always been,
+                        // but one the Theme tab's "wear" switch can move.
+                        color: fab.color_area
                     }
                     padding: Inset{left: 4 right: 4 top: 6 bottom: 4}
                     spacing: 4
@@ -9731,9 +9915,41 @@ impl Tweaker {
                         flow: Down
                         spacing: 3
                         padding: Inset{left: 4 right: 4 top: 0 bottom: 3}
-                        theme_pick := PanelDropDown {
+                        // The picker, and beside it the switch that decides
+                        // whether the PANEL wears what the picker chose. One
+                        // row, because they are one question asked from two
+                        // sides: which theme, and who is wearing it.
+                        theme_pick_row := View {
                             width: Fill
-                            height: 20
+                            height: Fit
+                            flow: Right
+                            spacing: 3
+                            align: Align{x: 0.0 y: 0.5}
+                            theme_pick := PanelDropDown {
+                                width: Fill
+                                height: 20
+                            }
+                            // A TOGGLE and not a command: it lights while
+                            // the panel is wearing the theme and goes out
+                            // when the panel is back in its own palette --
+                            // the same on/off fill the filter row's search,
+                            // select and explode switches use
+                            // (`set_button_fill`), so the panel has one way
+                            // of showing a mode you are in.
+                            //
+                            // Off is the default and has to stay the
+                            // default: this panel is the tool a theme is
+                            // diagnosed WITH, so it has to be able to stand
+                            // outside the theme under test. The switch is
+                            // for the other question -- what a theme
+                            // actually looks like to work in.
+                            theme_wear := PanelButton {
+                                width: Fit
+                                height: 20
+                                padding: Inset{left: 7 right: 7 top: 2 bottom: 2}
+                                text: "wear"
+                                draw_text +: { text_style +: { font_size: 7.5 } }
+                            }
                         }
                         theme_save_row := View {
                             width: Fill
@@ -11057,7 +11273,8 @@ impl Tweaker {
             }
         }
 
-        let chrome: [(&[LiveId], &str); 26] = [
+        let chrome: [(&[LiveId], &str); 27] = [
+            (&[live_id!(theme_head), live_id!(theme_pick_row), live_id!(theme_wear)], "put this panel in the theme above too \u{00b7} off, the panel keeps its own colours whatever the app is wearing"),
             (&[live_id!(filter_row), live_id!(search)], "filter the properties by name \u{00b7} or search them, with the magnifier"),
             (&[live_id!(filter_row), live_id!(find)], "search instead of filter: every row stays, the hits are counted \u{00b7} F3 next, Shift+F3 previous"),
             (&[live_id!(filter_row), live_id!(nav), live_id!(prev)], "the previous hit (Shift+F3)"),
@@ -12507,8 +12724,17 @@ impl Tweaker {
                 // are cached here because a click arrives as a uid and
                 // nothing else.
                 let head = sidebar.child(live_id!(theme_head));
-                let pick = head.child(live_id!(theme_pick));
+                let pick_row = head.child(live_id!(theme_pick_row));
+                let pick = pick_row.child(live_id!(theme_pick));
                 self.theme_pick_uid = pick.widget_uid().0;
+                // The switch beside it, lit while the panel is wearing the
+                // theme. Read off the palette rather than off a flag of this
+                // widget's own, so what the switch SAYS and what the panel
+                // is actually painted in cannot drift apart.
+                let wear = pick_row.child(live_id!(theme_wear));
+                self.theme_wear_uid = wear.widget_uid().0;
+                let worn = crate::fab_controls::panel_wears_theme(cx);
+                set_button_fill(cx, wear, worn);
                 let entries = self.theme_entry_list();
                 // Only when they actually changed: `set_labels` redraws, and
                 // this runs on every frame the tab is up.
@@ -14955,6 +15181,12 @@ impl Tweaker {
                     self.apply_theme_choice(cx, index);
                 }
             }
+            if self.theme_wear_uid != 0 && widget_action.widget_uid.0 == self.theme_wear_uid {
+                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                    let on = !crate::fab_controls::panel_wears_theme(cx);
+                    self.set_panel_wears_theme(cx, on);
+                }
+            }
             if self.theme_name_uid != 0 && widget_action.widget_uid.0 == self.theme_name_uid {
                 match widget_action.cast::<TextInputAction>() {
                     TextInputAction::Changed(text) => {
@@ -15740,6 +15972,32 @@ impl Tweaker {
             }
         }
         log!("TWEAK theme preset: {}", preset.label());
+        self.theme_reload_frames = 6;
+        self.next_frame = cx.new_next_frame();
+        cx.request_style_reload();
+        self.redraw_sidebar(cx);
+    }
+
+    /// Put the panel itself in the theme the picker is showing, or back in
+    /// its own palette.
+    ///
+    /// Only the CHOICE is made here. The palette is built by
+    /// `fab_controls::script_mod`, so what this does is record the switch and
+    /// ask for the style reload that re-runs it; the panel then notices that
+    /// its chrome has moved and builds itself again ([`fab_palette_stamp`]).
+    ///
+    /// Deliberately not the other way round -- dropping the sidebar here and
+    /// letting the next draw rebuild it. `request_style_reload` lands a tick
+    /// or more later, so that rebuild would run against the palette that had
+    /// not changed yet and the panel would come back in the colours it was
+    /// already in. `theme_reload_frames` is the same answer the theme picker
+    /// already needed for the same reason.
+    fn set_panel_wears_theme(&mut self, cx: &mut Cx, on: bool) {
+        crate::fab_controls::set_panel_wears_theme(cx, on);
+        log!(
+            "TWEAK panel skin: {}",
+            if on { "the theme the app is wearing" } else { "its own palette" }
+        );
         self.theme_reload_frames = 6;
         self.next_frame = cx.new_next_frame();
         cx.request_style_reload();
@@ -17971,7 +18229,9 @@ mod tests {
         let src = panel_source();
         for (id, ty) in [
             ("theme_head", "View"),
+            ("theme_pick_row", "View"),
             ("theme_pick", "PanelDropDown"),
+            ("theme_wear", "PanelButton"),
             ("theme_save_row", "View"),
             ("theme_name", "PanelInput"),
             ("theme_save", "PanelButton"),
@@ -18107,6 +18367,169 @@ mod tests {
             assert!(kit.contains("margin: Inset{"), "the margin is not written out");
             assert!(kit.contains("min_height: 0"), "the min height is not written out");
         }
+    }
+
+    /// The panel's own skin is a PALETTE, and the switch that changes it is
+    /// the only thing that does.
+    ///
+    /// Three things are held together here, and the panel is wrong if any one
+    /// of them goes. A theme change on its own must not move the panel: that
+    /// immunity is the whole reason `mod.fab` exists, and it is what lets the
+    /// panel be the tool a theme is diagnosed WITH. The switch must move it,
+    /// or the button is a lie. And once the switch is on, a theme change must
+    /// move it again, or "wear the theme" would mean "wear the theme that
+    /// happened to be on when you pressed it".
+    ///
+    /// Measured through `fab_palette_stamp`, which is the same reading the
+    /// panel itself uses to decide whether to build its sidebar again -- so
+    /// this also tests that the rebuild fires when it should and, just as
+    /// importantly, never fires while the switch is off.
+    #[test]
+    fn only_the_wear_switch_puts_the_panel_in_the_apps_theme() {
+        use crate::desktop_style::{install, uninstall, DesktopStyle, StyleSheet};
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        assert!(
+            !crate::fab_controls::panel_wears_theme(&mut cx),
+            "the panel wears its own palette until it is asked not to"
+        );
+        let own = fab_palette_stamp(&mut cx);
+        // A theme change alone leaves the panel where it was.
+        for style in [DesktopStyle::Macos, DesktopStyle::Windows2000, DesktopStyle::Android] {
+            cx.with_vm(|vm| {
+                install(vm, StyleSheet::load(style));
+                vm.with_reload(crate::script_mod);
+            });
+            assert_eq!(
+                fab_palette_stamp(&mut cx),
+                own,
+                "the panel followed `{}` without being asked to",
+                style.id()
+            );
+        }
+        // The switch does move it...
+        crate::fab_controls::set_panel_wears_theme(&mut cx, true);
+        cx.with_vm(|vm| vm.with_reload(crate::script_mod));
+        let worn = fab_palette_stamp(&mut cx);
+        assert_ne!(worn, own, "the switch changed nothing");
+        // ...and now the picker moves it too.
+        cx.with_vm(|vm| {
+            install(vm, StyleSheet::load(DesktopStyle::Omarchy));
+            vm.with_reload(crate::script_mod);
+        });
+        assert_ne!(
+            fab_palette_stamp(&mut cx),
+            worn,
+            "worn, the panel did not follow the theme it was wearing"
+        );
+        // And off is off: back to the palette it started in, whatever sheet
+        // is still installed.
+        crate::fab_controls::set_panel_wears_theme(&mut cx, false);
+        cx.with_vm(|vm| vm.with_reload(crate::script_mod));
+        assert_eq!(fab_palette_stamp(&mut cx), own, "taking it off left something behind");
+        cx.with_vm(|vm| {
+            uninstall(vm);
+            vm.with_reload(crate::script_mod);
+        });
+        assert_eq!(fab_palette_stamp(&mut cx), own);
+    }
+
+    /// The panel's own splash chunk, evaluated the way the panel evaluates
+    /// it: by building a real Tweaker and asking it for its sidebar.
+    ///
+    /// That chunk is a macro body no compiler reads, it is a thousand lines
+    /// long, and it is evaluated ONCE -- when somebody first opens the panel.
+    /// A misspelling in it is a panel that comes up empty in front of
+    /// whoever opened it, and nothing before this caught one.
+    #[test]
+    fn the_panels_own_splash_chunk_builds_a_sidebar_with_the_theme_row_in_it() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            vm.bx.captured_errors = Some(Vec::new());
+        });
+        let tweaker = cx.with_vm(|vm| {
+            let widgets = vm.module(id!(widgets));
+            let value = vm
+                .bx
+                .heap
+                .value(widgets, LiveId::from_str("Tweaker").into(), NoTrap);
+            WidgetRef::script_from_value(vm, value)
+        });
+        assert!(!tweaker.is_empty(), "the Tweaker built no widget");
+        {
+            let mut panel = tweaker.borrow_mut::<Tweaker>().expect("a Tweaker");
+            panel.ensure_sidebar(&mut cx);
+            let sidebar = panel.sidebar.clone().expect("the chunk built a sidebar");
+            let errors = cx.with_vm(|vm| vm.take_errors());
+            assert!(errors.is_empty(), "{errors:?}");
+            // The Theme tab's head, down to the switch added beside the
+            // picker: a row that evaluates but resolves to nothing is the
+            // same broken panel as one that does not evaluate.
+            let head = sidebar.child(live_id!(theme_head));
+            assert!(!head.is_empty(), "the Theme tab has no head");
+            let row = head.child(live_id!(theme_pick_row));
+            assert!(!row.is_empty(), "the picker has no row");
+            for id in [live_id!(theme_pick), live_id!(theme_wear)] {
+                assert!(!row.child(id).is_empty(), "the picker row is missing a control");
+            }
+            // The filter field the panel is filtered with, while we are here.
+            let input = sidebar
+                .child(live_id!(filter_row))
+                .child(live_id!(search))
+                .child(live_id!(input));
+            assert!(!input.is_empty(), "the filter row has no field");
+        }
+    }
+
+    /// A theme switch asks for a style reload, `script_mod` runs again and
+    /// the window body is applied from ITS OWN splash -- which throws away
+    /// the runtime margin the panel had put on it, while the panel still
+    /// believes it is applied. With the guard reading `desired` alone, that
+    /// same `desired` early-returns, the margin is never put back and the
+    /// app draws full width under the panel: the right-hand side of the app
+    /// "disappears". Pressing the panel off and on was the only way back,
+    /// because that drives `desired` to 0 and back.
+    #[test]
+    fn a_style_reload_makes_the_body_margin_due_again() {
+        let band = 300.0;
+        // Settled: applied and wanted agree, so nothing runs -- the guard is
+        // there so this does not evaluate a chunk on every frame.
+        assert!(!body_margin_needs_apply(band, band, false));
+        // The reload has wiped the override. The SAME `desired` must run.
+        assert!(body_margin_needs_apply(band, band, true));
+        // ...and once it has run, it settles again.
+        assert!(!body_margin_needs_apply(band, band, false));
+        // The old escape hatch still works, and still costs two applies.
+        assert!(body_margin_needs_apply(band, 0.0, false));
+        assert!(body_margin_needs_apply(0.0, band, false));
+        // A splitter drag under half a pixel is not worth an eval; over it is.
+        assert!(!body_margin_needs_apply(band, band + 0.4, false));
+        assert!(body_margin_needs_apply(band, band + 0.6, false));
+        // A reload while the panel is OFF is answered by re-applying zero,
+        // not by leaving the app compressed.
+        assert!(body_margin_needs_apply(0.0, 0.0, true));
+    }
+
+    /// Releasing the panel hands the body back its OWN right margin, so what
+    /// is read off the body must never be the panel's own compression
+    /// misfiled as the body's. A re-apply can run either side of the wipe,
+    /// and getting this wrong leaves the app indented by a sidebar for the
+    /// rest of the session -- with the panel closed.
+    #[test]
+    fn the_bodys_own_margin_is_never_the_panels_own_compression() {
+        // Nothing applied yet, so whatever the body carries is its own.
+        assert_eq!(body_own_right(0.0, 0.0), Some(0.0));
+        assert_eq!(body_own_right(12.0, 0.0), Some(12.0));
+        // The override is still standing on the body: NOT the body's own,
+        // so the remembered value has to survive this read.
+        assert_eq!(body_own_right(300.0, 300.0), None);
+        assert_eq!(body_own_right(300.4, 300.0), None);
+        // A reload has put the body back to its own splash, so this is its
+        // own again -- and re-reading it here is how a body whose DSL margin
+        // changed across the reload is picked up.
+        assert_eq!(body_own_right(0.0, 300.0), Some(0.0));
+        assert_eq!(body_own_right(12.0, 300.0), Some(12.0));
     }
 
     /// Deleting a saved theme takes two presses, the same way saving over

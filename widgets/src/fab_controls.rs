@@ -32,6 +32,35 @@ use crate::{
 };
 use crate::makepad_script::script;
 
+/// Whether the dev panel wears the app's theme instead of its own palette.
+///
+/// Per `Cx` rather than a process global: a test builds its own `Cx`, and
+/// two tests that each install a sheet must not be able to see each other's
+/// answer to this.
+#[derive(Default)]
+struct PanelSkin {
+    wears_theme: bool,
+}
+
+/// Does the panel wear the app's theme?
+///
+/// `false` is the default and the answer this has always given. See
+/// [`set_panel_wears_theme`] for what `true` changes.
+pub fn panel_wears_theme(cx: &mut Cx) -> bool {
+    cx.global::<PanelSkin>().wears_theme
+}
+
+/// Put the panel in the app's theme, or back in its own palette.
+///
+/// This only records the choice. The palette is built by [`script_mod`], so
+/// the caller has to ask for a style reload before anything changes, and the
+/// panel has to notice that its chrome moved underneath it -- the tweaker's
+/// sidebar is evaluated once, when it first opens, and watches the palette
+/// for exactly this reason.
+pub fn set_panel_wears_theme(cx: &mut Cx, on: bool) {
+    cx.global::<PanelSkin>().wears_theme = on;
+}
+
 pub fn script_mod(vm: &mut ScriptVm) {
     // Phase 1: the token table and a prelude carrying the `fab` alias, so
     // the ported DSL below reads exactly like it does in the fab app.
@@ -106,6 +135,133 @@ pub fn script_mod(vm: &mut ScriptVm) {
             anim_fast: 0.10
             anim_normal: 0.15
         }
+        true
+    };
+    vm.eval(block);
+
+    // Phase 1b: the panel in the app's theme, when it has been asked for.
+    //
+    // OFF IS THE DEFAULT, and off is this block never running at all -- the
+    // table above is then exactly what it has always been, byte for byte.
+    //
+    // On, the COLOUR entries are re-pointed at the theme's own roles, and
+    // only the colour entries. The density, the type sizes and the motion
+    // stay where they are: a 24px inspector row being 24px is what makes the
+    // panel an inspector, and letting `android`'s 48px controls in through
+    // this door would be the sunken filter field all over again.
+    //
+    // The ROLES rather than the older tokens, for two reasons. A role is
+    // there under every sheet and every base theme -- no sheet names one, and
+    // `theme_tokens::sheet_roles_script` derives the whole set from what the
+    // sheet DID set -- so there is no palette entry that resolves to nothing
+    // under some style. And the roles come in ground/ink PAIRS that were
+    // picked to read against one another, which is what stops a light sheet
+    // painting pale words on a pale panel.
+    //
+    // What wearing a theme does NOT do is hand the panel that theme's
+    // SHADERS. `windows-2000` and `nextstep` replace `Button`, `TextInput`
+    // and `DropDown` `draw_bg.pixel` outright with a hard-coded Win95
+    // palette; every template the panel is built from declares a `pixel` of
+    // its own, so those never apply, worn or not. The panel can change
+    // colour here. It cannot turn into somebody else's control set, and it
+    // cannot become the white slab that immunity was written to avoid.
+    //
+    // `mod.tweak_panel` is re-pointed from here too. It is the tweaker's
+    // table, not this module's, but this module is registered LAST
+    // (`lib.rs` calls the tweaker's `script_mod` first), so both tables
+    // exist by now -- and what "wearing the theme" means should be one
+    // decision in one place rather than the same decision made twice.
+    if panel_wears_theme(vm.cx_mut()) {
+        let block = script! {
+            use mod.prelude.widgets_internal.*
+
+            mod.fab = {
+                ..mod.fab,
+
+                // ---- surfaces ----
+                // The panel is a container stack over the app's surface: the
+                // body one rung down, headers and rows one rung up, the
+                // popover at the top so it stands off whatever is under it.
+                color_area: theme.color_surface_container_low
+                color_editor: theme.color_surface
+                color_editor_alt: theme.color_surface_container_low
+                color_header: theme.color_surface_container_high
+                color_panel: theme.color_surface_container_high
+                color_panel_sub: theme.color_surface_container
+                color_popover: theme.color_surface_container_highest
+                color_popover_border: theme.color_outline
+                color_border: theme.color_outline
+                color_border_light: theme.color_outline_variant
+                color_row_hover: theme.color_surface_container_high
+                // The wells go to the theme's own inset family, which is the
+                // white field of a light style and the sunk well of a dark
+                // one -- the thing the fab palette calls `color_input`.
+                color_input: theme.color_inset
+                color_input_hover: theme.color_inset_hover
+                color_input_active: theme.color_inset_focus
+                color_button: theme.color_surface_container_high
+                color_button_hover: theme.color_surface_container_highest
+                color_button_down: theme.color_surface_container
+                color_button_active: theme.color_primary
+
+                // ---- text ----
+                // `color_on_surface` is the ink the role derivation already
+                // put to the brightest rung a widget lays text on, so it
+                // reads on every surface above.
+                color_text: theme.color_on_surface
+                color_text_dim: theme.color_on_surface_variant
+                // NOT `theme.color_placeholder`: that is a pale grey chosen
+                // against an app's page, and on the white field a light
+                // sheet gives this palette it stands only 2.1 apart. The
+                // muted grade is the body ink pulled part of the way to the
+                // panel's ground instead, which lands in the same place
+                // relative to the ink whatever the ground is.
+                color_text_muted: mix(theme.color_on_surface, theme.color_surface_container_low, 0.4)
+                color_text_active: theme.color_on_surface
+                color_text_header: theme.color_on_surface
+                color_text_on_accent: theme.color_on_primary
+
+                // ---- accents ----
+                // The four that MEAN something -- error, warning, success --
+                // keep meaning it: red is an error under every style, and the
+                // theme's own are already the readable version of that.
+                color_accent: theme.color_primary
+                color_accent_hover: theme.color_primary
+                color_accent_dim: theme.color_primary_container
+                color_selection_bg: theme.color_primary_container
+                color_focus_ring: theme.color_primary
+                color_warning: theme.color_warning
+                color_error: theme.color_error
+                color_ok: theme.color_success
+
+                // ---- the drag-numeric field's inset well ----
+                color_num: theme.color_inset
+                color_num_hover: theme.color_inset_hover
+                color_num_fill: theme.color_primary_container
+                color_num_arrow: theme.color_on_surface_variant
+            }
+
+            // The panel's own three ink grades, which sit on the panel's
+            // wells rather than on a fab row and so are graded apart from
+            // the fab ones. Worn, they come off the same pairs.
+            mod.tweak_panel = {
+                ..mod.tweak_panel,
+                text_dim: theme.color_on_surface_variant
+                text_muted: mix(theme.color_on_surface, theme.color_surface_container_low, 0.35)
+                face_off: theme.color_inset
+            }
+            true
+        };
+        vm.eval(block);
+    }
+
+    // Phase 1c: the prelude carrying the `fab` alias, built from whichever
+    // palette is in force. Separate from phase 1 so the block above can sit
+    // between the two: the alias holds the table it was built from, so
+    // re-pointing `mod.fab` after this would leave every control reading the
+    // palette that is no longer there.
+    let block = script! {
+        use mod.prelude.widgets_internal.*
 
         mod.prelude.fab_internal = {
             ..mod.prelude.widgets_internal,
@@ -206,6 +362,12 @@ pub fn script_mod(vm: &mut ScriptVm) {
             text_input: TextInput{
                 width: Fill
                 height: Fill
+                // The same trap FabSearch's `input` documents: `android`
+                // and `ios` set `mod.widgets.TextInput.min_height`, a walk
+                // applies it whatever height was asked for, and the value
+                // would be drawn below the 18px field it belongs to. Zero
+                // is what the default theme resolves to, so nothing moves.
+                min_height: 0
                 // Read-only display may carry a unit suffix. Editing
                 // switches this back to numeric-only in Rust.
                 is_numeric_only: false
@@ -386,6 +548,20 @@ pub fn script_mod(vm: &mut ScriptVm) {
             input := TextInput{
                 width: Fill
                 height: Fill
+                // The field fills a row of a FIXED height, so nothing here
+                // may impose a height of its own. `android` and `ios` set
+                // `mod.widgets.TextInput.min_height` to 48 and 44, and a
+                // walk applies a min height UNCONDITIONALLY -- the height
+                // asked for cannot escape it (draw/src/turtle.rs, where
+                // `walk.min_height` is resolved). The field's content box
+                // then stood 48 tall inside a 24 tall well, and a
+                // single-line input CENTRES its line box in that box
+                // (`TextInput::scroll_to_cursor`), so the word "Filter" was
+                // drawn 12px below where the well ends: sunk to the bottom
+                // of the box, straddling the lower border. Zero is what the
+                // default theme resolves to anyway, so this moves nothing
+                // that is on screen today.
+                min_height: 0
                 padding: Inset{left: 0 right: 0 top: 0 bottom: 0}
                 margin: Inset{top: 0 bottom: 0 left: 0 right: 0}
                 empty_text: "Filter"
@@ -397,6 +573,19 @@ pub fn script_mod(vm: &mut ScriptVm) {
                     color_empty: vec4(0.0, 0.0, 0.0, 0.0)
                     border_size: 0.0
                     border_radius: 0.0
+                    // The field has no ground of its own: the well around it
+                    // is this FabSearch View's `draw_bg`, drawn in the fab
+                    // palette. Written out because `windows-2000` and
+                    // `nextstep` REPLACE `mod.widgets.TextInput.draw_bg.pixel`
+                    // outright with a hard-coded opaque white Win95 field,
+                    // which ignores every colour declared above and would
+                    // paint a white slab over the well -- leaving the
+                    // panel's own light grey text on white. With the colours
+                    // above all transparent and no border, this is exactly
+                    // what the stock face already resolves to today.
+                    pixel: fn() {
+                        return vec4(0.0, 0.0, 0.0, 0.0)
+                    }
                 }
                 draw_text +: {
                     ink_centered: true
@@ -522,12 +711,18 @@ pub fn script_mod(vm: &mut ScriptVm) {
                     pick := mod.widgets.Button{
                         width: Fit
                         height: Fill
+                        // `android` and `ios` set `mod.widgets.Button.min_height`
+                        // to 48 and 44; a walk applies it whatever height the
+                        // instance asked for, so this row would stand twice
+                        // its height inside a popover sized for one.
+                        min_height: 0
                         padding: Inset{left: 6 right: 6 top: 2 bottom: 2}
                         text: "pick"
                     }
                     hex := TextInput{
                         width: Fill
                         height: Fill
+                        min_height: 0
                         empty_text: ""
                         draw_bg +: {
                             color: fab.color_input
@@ -2536,6 +2731,419 @@ mod tests {
         assert_eq!(field_zone(5.0, 200.0, 20.0), FieldZone::Decrement);
         assert_eq!(field_zone(100.0, 200.0, 20.0), FieldZone::Middle);
         assert_eq!(field_zone(195.0, 200.0, 20.0), FieldZone::Increment);
+    }
+
+    /// The box every stock widget nested in a fab template resolves to,
+    /// under whatever sheet is installed. One string per control, compared
+    /// against the same reading with no sheet at all.
+    fn fab_geometry(cx: &mut Cx) -> Vec<(&'static str, String)> {
+        fn built(cx: &mut Cx, name: &str) -> WidgetRef {
+            let widget = cx.with_vm(|vm| {
+                let widgets = vm.module(id!(widgets));
+                let value = vm
+                    .bx
+                    .heap
+                    .value(widgets, LiveId::from_str(name).into(), NoTrap);
+                WidgetRef::script_from_value(vm, value)
+            });
+            assert!(!widget.is_empty(), "{name} built no widget");
+            widget
+        }
+        // Everything a walk can impose a size with. `margin` is in here too:
+        // the stock field takes it from a theme token every sheet moves.
+        fn shape(w: Walk) -> String {
+            format!(
+                "w={:?} h={:?} min={:?}/{:?} max={:?}/{:?} aspect={:?} margin={:?}",
+                w.width,
+                w.height,
+                w.min_width,
+                w.min_height,
+                w.max_width,
+                w.max_height,
+                w.aspect,
+                w.margin,
+            )
+        }
+        let mut out = Vec::new();
+
+        // The panel's filter field: the well, and the field inside it.
+        let search = built(cx, "FabSearch");
+        let input = search.widget(&*cx, &[live_id!(input)]);
+        assert!(!input.is_empty(), "FabSearch no longer has an `input`");
+        out.push(("FabSearch", shape(search.walk(cx))));
+        out.push(("FabSearch/input", shape(input.walk(cx))));
+
+        // The drag-numeric field's editor -- every property row on the panel.
+        let value_input = built(cx, "FabValueInput");
+        out.push(("FabValueInput", shape(value_input.walk(cx))));
+        {
+            let mut field = value_input
+                .borrow_mut::<FabValueInput>()
+                .expect("FabValueInput is a FabValueInput");
+            out.push(("FabValueInput/text_input", shape(field.text_input.walk(cx))));
+        }
+
+        // The colour popover's hex row: a stock Button beside a stock field.
+        let color_pick = built(cx, "FabColorPick");
+        let (hex, pick) = {
+            let popover = color_pick
+                .borrow::<FabColorPick>()
+                .expect("FabColorPick is a FabColorPick");
+            (
+                popover.popover.widget(&*cx, &[live_id!(hex)]),
+                popover.popover.widget(&*cx, &[live_id!(pick)]),
+            )
+        };
+        assert!(!hex.is_empty(), "the colour popover no longer has a `hex`");
+        assert!(!pick.is_empty(), "the colour popover no longer has a `pick`");
+        out.push(("FabColorPick/hex", shape(hex.walk(cx))));
+        out.push(("FabColorPick/pick", shape(pick.walk(cx))));
+        out
+    }
+
+    /// Every control the dev panel is built from resolves to the SAME box
+    /// under every sheet the library ships as it does under none.
+    ///
+    /// The panel paints its own palette on purpose and is meant to be immune
+    /// to whatever the app is wearing -- but immunity is not automatic. A fab
+    /// template NESTS stock widgets, and a sheet reaches those through
+    /// `mod.widgets.TextInput` and `mod.widgets.Button`, taking everything
+    /// the template did not write out for itself.
+    ///
+    /// That is how the filter field came to sink. `android` and `ios` set
+    /// `mod.widgets.TextInput.min_height` to 48 and 44; a walk applies a min
+    /// height UNCONDITIONALLY (`draw/src/turtle.rs`, where `walk.min_height`
+    /// is resolved), so FabSearch's `height: Fill` field stood 48 tall inside
+    /// a 24 tall well -- and a single-line input CENTRES its line box in its
+    /// own content box (`TextInput::scroll_to_cursor`), which put the word
+    /// "Filter" a dozen pixels below the well's floor, straddling its border.
+    ///
+    /// Read off `DesktopStyle::ALL` rather than written out, so a sheet added
+    /// later -- or an existing one that starts overriding `max_height`, the
+    /// margin or the padding -- fails HERE and not on somebody's screen.
+    #[test]
+    fn the_fab_controls_resolve_the_same_box_under_every_sheet() {
+        use crate::desktop_style::{install, uninstall, DesktopStyle, StyleSheet};
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        cx.with_vm(crate::script_mod);
+        let plain = fab_geometry(&mut cx);
+        assert_eq!(plain.len(), 6, "a control was dropped from the reading");
+        for style in DesktopStyle::ALL {
+            for dark in [false, true] {
+                if dark && !style.supports_dark() {
+                    continue;
+                }
+                cx.with_vm(|vm| {
+                    install(vm, StyleSheet::load_with_appearance(style, dark));
+                    vm.with_reload(crate::script_mod);
+                });
+                let under = fab_geometry(&mut cx);
+                for ((name, want), (_, got)) in plain.iter().zip(under.iter()) {
+                    assert_eq!(
+                        want,
+                        got,
+                        "`{name}` resolves to a different box under `{}`{}",
+                        style.id(),
+                        if dark { " dark" } else { "" }
+                    );
+                }
+            }
+        }
+        // ...and taking the sheet off puts the panel back where it started.
+        cx.with_vm(|vm| {
+            uninstall(vm);
+            vm.with_reload(crate::script_mod);
+        });
+        assert_eq!(fab_geometry(&mut cx), plain);
+    }
+
+    /// The same question about the PAINT rather than the box, for the field
+    /// the panel's filter is.
+    ///
+    /// `windows-2000` and `nextstep` REPLACE
+    /// `mod.widgets.TextInput.draw_bg.pixel` outright with a hard-coded
+    /// opaque white Win95 field. That ignores every colour the filter field
+    /// declares, paints over the well FabSearch draws around it and leaves
+    /// the panel's own light grey placeholder on white. Answering an
+    /// override means declaring the same leaf in this template, so the
+    /// sheet's value lands on something the panel does not use.
+    ///
+    /// Read off the sheets in the tree, so a sheet that starts overriding
+    /// something else is caught here rather than by somebody finding the
+    /// filter unreadable.
+    #[test]
+    fn the_filter_field_answers_what_the_sheets_override_on_a_text_input() {
+        // Everything before `#[cfg(test)]`: the controls, without the tests
+        // that talk about them -- a test looking for a spelling in the whole
+        // file finds its own words and passes on them.
+        let src = include_str!("fab_controls.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the file has a first half");
+        let search = src
+            .split("mod.widgets.FabSearch = View{")
+            .nth(1)
+            .expect("the file declares `mod.widgets.FabSearch`");
+        // The FIELD's own text, not the well's: the View around it declares a
+        // `pixel` of its own, and that must not answer for the field.
+        let field = search
+            .split("input := TextInput{")
+            .nth(1)
+            .expect("FabSearch declares `input := TextInput`");
+        let kit = &field[..field
+            .find("mod.widgets.FabPropRow")
+            .expect("FabSearch is followed by FabPropRow")];
+        let themes = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("themes");
+        let mut seen = 0usize;
+        for entry in std::fs::read_dir(&themes).expect("the themes folder is in the tree") {
+            let sheet = entry.expect("a readable entry").path().join("widgets.splash");
+            let Ok(text) = std::fs::read_to_string(&sheet) else {
+                continue;
+            };
+            for line in text.lines() {
+                let Some(prop) = line
+                    .trim()
+                    .strip_prefix("mod.widgets.TextInput.")
+                    .and_then(|rest| rest.split([' ', '=']).next())
+                else {
+                    continue;
+                };
+                // `draw_bg.pixel` is answered by declaring `pixel:` inside
+                // this field's own `draw_bg`, and so on down.
+                let leaf = prop.rsplit('.').next().unwrap_or(prop);
+                assert!(
+                    kit.contains(&format!("{leaf}:")),
+                    "{} overrides `{prop}` on a TextInput and the filter field does not declare `{leaf}`",
+                    sheet.display()
+                );
+                seen += 1;
+            }
+        }
+        assert!(
+            seen > 8,
+            "only {seen} overrides were read -- the sheets did not load"
+        );
+        // The two a sheet reaches through a THEME token rather than through
+        // `widgets.splash`: the stock field takes its padding from
+        // `theme.mspace_1` and its margin from `theme.mspace_v_1`, and every
+        // sheet moves the space factor those are built from.
+        assert!(kit.contains("padding: Inset{"), "the padding is not written out");
+        assert!(kit.contains("margin: Inset{"), "the margin is not written out");
+        assert!(kit.contains("min_height: 0"), "the min height is not written out");
+    }
+
+    /// One entry of a runtime table, as the VM has it right now.
+    fn table_color(cx: &mut Cx, table: LiveId, key: &str) -> u32 {
+        cx.with_vm(|vm| {
+            let module = vm.module(table);
+            vm.bx
+                .heap
+                .value(module, LiveId::from_str(key).into(), NoTrap)
+                .as_color()
+                .unwrap_or_else(|| panic!("`{key}` is not a colour in this table"))
+        })
+    }
+
+    /// Every colour the fab palette declares, with the literal it is written
+    /// as. Read off the source, so an entry added to the table joins the
+    /// tests below without anybody remembering to come back for it.
+    fn declared_fab_colors() -> Vec<(String, u32)> {
+        let src = include_str!("fab_controls.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the file has a first half");
+        let table = src
+            .split("mod.fab = {")
+            .nth(1)
+            .expect("the file declares `mod.fab`");
+        // The colours only: the density, type and motion entries after them
+        // are numbers, and are deliberately NOT part of any palette swap.
+        let table = &table[..table
+            .find("// ---- density ----")
+            .expect("the table still has a density block after the colours")];
+        let mut out = Vec::new();
+        for line in table.lines() {
+            let line = line.trim();
+            let Some((name, value)) = line.split_once(':') else {
+                continue;
+            };
+            let Some(hex) = value.trim().strip_prefix("#x") else {
+                continue;
+            };
+            if !name.chars().all(|c| c.is_ascii_lowercase() || c == '_') {
+                continue;
+            }
+            let rgba = u32::from_str_radix(hex, 16).expect("a hex colour");
+            // The table writes six digits and means opaque.
+            out.push((name.to_string(), if hex.len() == 6 { rgba << 8 | 0xFF } else { rgba }));
+        }
+        assert!(out.len() > 30, "only {} colours were read off the table", out.len());
+        out
+    }
+
+    /// The panel's own palette, under every sheet the library ships.
+    ///
+    /// This is the immunity the panel exists for, stated as a value rather
+    /// than as an intention: with the Theme tab's "wear" toggle OFF -- which
+    /// is the default -- every colour the panel's chrome is drawn in is the
+    /// literal written in the table above, whatever the app is wearing.
+    #[test]
+    fn the_panels_palette_is_untouched_under_every_sheet_while_it_wears_its_own() {
+        use crate::desktop_style::{install, uninstall, DesktopStyle, StyleSheet};
+        let declared = declared_fab_colors();
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        cx.with_vm(crate::script_mod);
+        assert!(!panel_wears_theme(&mut cx), "the panel wears its own by default");
+        for style in [None].into_iter().chain(DesktopStyle::ALL.map(Some)) {
+            cx.with_vm(|vm| {
+                match style {
+                    Some(style) => install(vm, StyleSheet::load(style)),
+                    None => uninstall(vm),
+                }
+                vm.with_reload(crate::script_mod);
+            });
+            for (name, want) in &declared {
+                assert_eq!(
+                    table_color(&mut cx, id!(fab), name),
+                    *want,
+                    "`fab.{name}` moved under `{}`",
+                    style.map(|s| s.id()).unwrap_or("no sheet")
+                );
+            }
+        }
+    }
+
+    /// Worn, the panel takes the theme's colours -- and can still be read.
+    ///
+    /// Two halves, and the second is the one that matters. Re-pointing the
+    /// palette at theme tokens is easy; re-pointing it at tokens that still
+    /// stand apart from one another under a light sheet, a dark sheet and a
+    /// Win95 sheet is the whole difficulty. The pairs below are the panel's
+    /// load-bearing ones: the ground it draws its words on, the well, the
+    /// button face, the popover, and the ink on the accent.
+    ///
+    /// The unworn palette is put to the same test in the same loop, so the
+    /// bar is one the panel already clears rather than one invented here.
+    #[test]
+    fn worn_the_panel_takes_the_themes_colours_and_still_reads() {
+        use crate::desktop_style::{install, uninstall, DesktopStyle, StyleSheet};
+        use crate::theme_tokens::{reads_on, LEGIBLE, READABLE};
+        // (ground, ink, how far apart they have to stand)
+        const PAIRS: &[(&str, &str, f64)] = &[
+            ("color_area", "color_text", READABLE),
+            ("color_area", "color_text_dim", LEGIBLE),
+            ("color_panel", "color_text_header", READABLE),
+            ("color_header", "color_text", READABLE),
+            ("color_button", "color_text", READABLE),
+            ("color_button_hover", "color_text_active", READABLE),
+            // LEGIBLE, not READABLE: the panel's OWN accent (#x5680c2 under
+            // white) stands 3.99 apart and always has. The bar here is the
+            // one the panel already clears, so this measures whether wearing
+            // a theme makes it worse -- not whether the accent was ever a
+            // 4.5 in the first place.
+            ("color_button_active", "color_text_on_accent", LEGIBLE),
+            ("color_input", "color_text", READABLE),
+            ("color_popover", "color_text", READABLE),
+            ("color_row_hover", "color_text", READABLE),
+            // The two faces a panel SWITCH takes (`set_button_fill`): the
+            // accent's container while it is on, the well tone while it is
+            // off. Both carry the button's own word, which is `color_text`.
+            ("color_accent_dim", "color_text", READABLE),
+            ("color_input_hover", "color_text", READABLE),
+        ];
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        cx.with_vm(crate::script_mod);
+        let plain = declared_fab_colors();
+        for worn in [false, true] {
+            set_panel_wears_theme(&mut cx, worn);
+            for style in [None].into_iter().chain(DesktopStyle::ALL.map(Some)) {
+                cx.with_vm(|vm| {
+                    match style {
+                        Some(style) => install(vm, StyleSheet::load(style)),
+                        None => uninstall(vm),
+                    }
+                    vm.with_reload(crate::script_mod);
+                });
+                let where_ = format!(
+                    "{}, {}",
+                    style.map(|s| s.id()).unwrap_or("no sheet"),
+                    if worn { "worn" } else { "its own" }
+                );
+                for (ground, ink, need) in PAIRS {
+                    let g = table_color(&mut cx, id!(fab), ground);
+                    let i = table_color(&mut cx, id!(fab), ink);
+                    let apart = reads_on(g, i);
+                    assert!(
+                        apart >= *need,
+                        "{where_}: `{ink}` on `{ground}` stands {apart:.2} apart, under the {need} it needs"
+                    );
+                }
+                // The panel's own ink grades sit on the same ground.
+                for (ground, ink) in [("color_area", "text_dim"), ("color_input", "text_muted")] {
+                    let g = table_color(&mut cx, id!(fab), ground);
+                    let i = table_color(&mut cx, id!(tweak_panel), ink);
+                    let apart = reads_on(g, i);
+                    assert!(apart >= LEGIBLE, "{where_}: panel `{ink}` on `{ground}` is {apart:.2}");
+                }
+                // Worn really means worn: the palette is no longer the one
+                // written in the table. (A theme that happened to match it
+                // everywhere would be a coincidence no sheet is.)
+                if worn && style.is_some() {
+                    let moved = plain
+                        .iter()
+                        .filter(|(name, want)| table_color(&mut cx, id!(fab), name) != *want)
+                        .count();
+                    assert!(moved > 10, "{where_}: only {moved} colours followed the theme");
+                }
+            }
+        }
+        set_panel_wears_theme(&mut cx, false);
+    }
+
+    /// Wearing a theme is a COLOUR change and nothing else.
+    ///
+    /// The density and type entries are what make the panel an inspector: a
+    /// 24px row, a 20px small row, 8.5pt words. Letting a theme move those
+    /// would put `android`'s 48px controls back into the panel through the
+    /// front door -- the very thing the sunken filter field was.
+    #[test]
+    fn wearing_a_theme_never_moves_the_panels_density_or_type() {
+        use crate::desktop_style::{install, DesktopStyle, StyleSheet};
+        const NUMBERS: &[(&str, f64)] = &[
+            ("row_height", 24.0),
+            ("row_height_sm", 20.0),
+            ("header_height", 26.0),
+            ("prop_label_width", 92.0),
+            ("font_size_ui", 8.5),
+            ("font_size_small", 7.5),
+            ("font_size_header", 9.0),
+        ];
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        cx.with_vm(crate::script_mod);
+        for worn in [false, true] {
+            set_panel_wears_theme(&mut cx, worn);
+            for style in DesktopStyle::ALL {
+                cx.with_vm(|vm| {
+                    install(vm, StyleSheet::load(style));
+                    vm.with_reload(crate::script_mod);
+                });
+                for (name, want) in NUMBERS {
+                    let got = cx.with_vm(|vm| {
+                        let fab = vm.module(id!(fab));
+                        vm.bx
+                            .heap
+                            .value(fab, LiveId::from_str(name).into(), NoTrap)
+                            .as_f64()
+                    });
+                    assert_eq!(got, Some(*want), "`fab.{name}` moved under `{}`", style.id());
+                }
+            }
+        }
+        set_panel_wears_theme(&mut cx, false);
     }
 
     #[test]
