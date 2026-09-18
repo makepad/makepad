@@ -1256,6 +1256,14 @@ impl App {
             }
         }
         for (client, text, linked) in latest {
+            // Provisioning has no tile: its line goes on the desk itself
+            // until "provisioned" (or stays, as a failure to read).
+            if client == dylib_host::PROVISION_CLIENT {
+                let state = self.state_mut();
+                state.provision = if text.starts_with("provisioned") { None } else { Some(text) };
+                self.desk(cx).redraw(cx);
+                continue;
+            }
             let mut warm = false;
             let mut pane = false;
             if let Some(slot) = self.state_mut().clients.get_mut(&client) {
@@ -1282,6 +1290,9 @@ impl App {
             // The pane's child has its own run view, never a desk tile.
             if pane {
                 self.with_pane_run_view(cx, |cx, v| v.set_status_line(cx, &text));
+                continue;
+            }
+            if !self.state_mut().clients.contains_key(&client) {
                 continue;
             }
             self.desk(cx).borrow_mut::<WmDesk>().map(|mut d| {
@@ -4395,6 +4406,7 @@ impl MatchEvent for App {
             style: Default::default(),
             launchable: Launchable::default(),
             accessibility: desktop::Accessibility::load(&theme::makepad_home().join("wm/accessibility.splash")),
+            provision: None,
         });
         self.next_id = 1;
         // The hosting registry: the build's linked modules, the person's

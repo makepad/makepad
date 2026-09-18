@@ -1072,6 +1072,10 @@ impl Cx {
         if let Some(active) = self.os.gpu_backend {
             return active;
         }
+        #[cfg(all(target_os = "android", use_vulkan))]
+        if self.os.gl_fallback {
+            return GpuBackend::OpenGl;
+        }
         #[cfg(gpusim)]
         {
             GpuBackend::Gpusim

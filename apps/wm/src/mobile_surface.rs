@@ -243,6 +243,23 @@ impl PhoneSurface {
             }
         }
     }
+    /// The super-app's first run: the toolchain and checkout streaming out
+    /// of the APK (dylib_host `provision`). A pill above the dock with the
+    /// newest progress line, so the minutes before a tile can compile are
+    /// not a silent desk; a failure stays up in the same place.
+    pub fn draw_provision_band(&mut self, cx: &mut Cx2d, screen: Rect, chrome: PhoneChrome, style: DesktopStyle, dark: bool, opacity: f32, text: &str) {
+        if opacity<0.01 {return;}
+        self.use_fonts(style==DesktopStyle::Ios);
+        let (face, ink)=Self::card_colors(style, dark);
+        let dock=Self::home_dock(screen, chrome);
+        let h=58.0;
+        let r=rect(dock.pos.x, dock.pos.y-h-12.0, dock.size.x, h);
+        self.rounded(cx, r, 18.0, alpha(face, 0.9*opacity));
+        let ink=alpha(ink, opacity);
+        let headline=if text.starts_with("provision failed") {"Could not set up apps"} else {"Setting up apps for the first time"};
+        self.label(cx,rect(r.pos.x+14.0,r.pos.y+9.0,r.size.x-28.0,22.0),headline,13.0,true,ink);
+        self.label(cx,rect(r.pos.x+14.0,r.pos.y+31.0,r.size.x-28.0,20.0),text,11.0,false,alpha(ink,0.7*opacity));
+    }
     /// A window opened straight from its tile, before its first full-size
     /// frame: the launch card the zoom-in plays over.
     pub fn draw_launch_card(&mut self, cx: &mut Cx2d, r: Rect, app: &str, style: DesktopStyle, dark: bool, opacity: f32, radius: f32) {

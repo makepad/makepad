@@ -5,6 +5,9 @@
 // `compress_bound`, fast/default compression, and safe decompression.
 // It does not yet expose the frame, HC, or streaming APIs.
 
+pub mod frame;
+pub use frame::{frame_compress, frame_decompress, xxh32, FrameDecoder, FrameEncoder, Xxh32};
+
 use std::{fmt, ptr};
 
 #[cfg(all(target_arch = "aarch64", not(feature = "force-scalar")))]

@@ -3,9 +3,24 @@
 //! [`ModuleHost`] path as a statically linked module.
 //!
 //! The engine (`apps/wm-dyn/engine`, one Rust dylib that re-exports
-//! `makepad-widgets` and friends) must already be in the process
-//! (`-C prefer-dynamic`) so the app `.so` binds the host's `Cx`, not a second
-//! copy. `--stdin-loop` stays the desktop process model.
+//! `makepad-widgets` and friends) is already in the process
+//! (`-C prefer-dynamic`); the app `.so` must bind it and never carry a
+//! second widgets: Rust's ABI is per build, so a widgets compiled here could
+//! not bind the loaded engine (and on the phone its build script cannot even
+//! run: W^X). No app manifest says any of this — the host does, at the two
+//! levels of the build it runs:
+//!  - cargo: the packaged workspace resolves features across ALL of its
+//!    members (`.cargo/config.toml` `feature-unification = "workspace"`,
+//!    written by local/wm-dyn/stage.py; `--no-default-features` on both the
+//!    engine cross-build and here), so `-p <app>` sees exactly the widgets
+//!    unit the engine was built from — Fresh, never compiled;
+//!  - rustc: the app's own invocation gets `--extern force:makepad_wm_engine=
+//!    <engine .so>` (cargo's `--` passthrough), which loads the engine crate
+//!    without a source-level `extern crate`; rustc then links every rlib the
+//!    engine contains from it (`IncludedFromDylib`) instead of embedding it.
+//! Both are nightly-gated on this toolchain, so every cargo child runs with
+//! `RUSTC_BOOTSTRAP=1` — the Mac cross-build too: the flag is in every
+//! crate's SVH. `--stdin-loop` stays the desktop process model.
 //!
 //! Android: the APK carries the engine `.so`s, and its assets carry the
 //! rustc toolchain, the checkout and the cross-built `target/` tree. The
@@ -28,6 +43,10 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
 const ENTRY: &[u8] = b"makepad_app_module\0";
+
+/// The client id provisioning reports under: no tile, the desk shows its
+/// lines (lib.rs `drain_client_lines`, `WmState::provision`).
+pub const PROVISION_CLIENT: ClientId = 0;
 
 pub struct LoadedDylib {
     /// Kept so the module vtable stays valid.
@@ -163,8 +182,10 @@ fn compile_app(
     // `--crate-type dylib` is cargo's own flag, not a `--` passthrough: only
     // then does cargo hand rustc the deps as `.rlib`s (a passthrough leaves
     // the unit an rlib in cargo's eyes and it passes `.rmeta`s, which rustc
-    // refuses for a dylib). `--no-default-features` keeps the app's
-    // `standalone` graph out, so the engine's feature set is the host's.
+    // refuses for a dylib). `--no-default-features` applies to every member
+    // of the packaged workspace (feature unification is workspace-wide
+    // there) and keeps the apps' `standalone` graphs out — the engine was
+    // cross-built with the same flag, so the units match.
     cmd.arg("rustc").arg("--release").arg("--lib").arg("--crate-type").arg("dylib");
     if cfg!(target_os = "android") {
         cmd.arg("--offline").arg("--frozen");
@@ -179,6 +200,18 @@ fn compile_app(
         .arg("--no-default-features")
         .arg("--features")
         .arg("dynamic-module");
+    // The engine joins the app's crate graph here, not in its manifest:
+    // `--extern force:` loads it without an `extern crate` in the app, and
+    // rustc links widgets and friends from the dylib that is already in
+    // this process. Passthrough args reach only the app's own rustc.
+    let engine = engine_dylib(&target_dir);
+    if !engine.is_file() {
+        return Err(format!("engine dylib missing: {}", engine.display()));
+    }
+    cmd.arg("--")
+        .arg("-Zunstable-options")
+        .arg("--extern")
+        .arg(format!("force:makepad_wm_engine={}", engine.display()));
     // Android: everything lives under the app's files dir, with the exact
     // strings the Mac cross-build used (cargo hashes them). Desktop: the
     // process environment (CARGO_TARGET_DIR of the host build) is the
@@ -186,7 +219,12 @@ fn compile_app(
     #[cfg(target_os = "android")]
     dyn_env.env(&mut cmd);
     #[cfg(not(target_os = "android"))]
-    cmd.env("RUSTFLAGS", rustflags());
+    {
+        // `-Zunstable-options` and the workspace feature unification are
+        // nightly-gated; Android has this in the packed env (env.txt).
+        cmd.env("RUSTFLAGS", rustflags());
+        cmd.env("RUSTC_BOOTSTRAP", "1");
+    }
     #[cfg(target_os = "android")]
     let engine_before = dyn_env.engine_stamp();
 
@@ -264,26 +302,39 @@ fn lib_stem(package: &str) -> String {
     format!("lib{}", package.replace('-', "_"))
 }
 
-fn dylib_path(root: &Path, data_dir: Option<&str>, package: &str) -> Result<PathBuf, String> {
-    let stem = lib_stem(package);
-    let ext = if cfg!(target_os = "windows") {
+fn dylib_ext() -> &'static str {
+    if cfg!(target_os = "windows") {
         "dll"
     } else if cfg!(target_os = "macos") {
         "dylib"
     } else {
         "so"
-    };
-    let target_root = shared_target_dir(root, data_dir);
-    let triple = if cfg!(target_os = "android") {
-        "aarch64-linux-android/release"
+    }
+}
+
+/// The release output dir inside a target dir: the cross-compiled triple's
+/// on Android, the host's elsewhere.
+fn release_dir(target_dir: &Path) -> PathBuf {
+    if cfg!(target_os = "android") {
+        target_dir.join("aarch64-linux-android/release")
     } else {
-        "release"
-    };
-    let name = format!("{stem}.{ext}");
-    for dir in [
-        target_root.join(triple),
-        target_root.join(triple).join("deps"),
-    ] {
+        target_dir.join("release")
+    }
+}
+
+/// The engine dylib this process loaded, as the shared target dir holds
+/// it (a path package's dylib: no `-<hash>` in the name). Every app dylib
+/// is linked against exactly this file (`--extern force:`), and cargo must
+/// leave it alone (`Dyn::engine_stamp`).
+fn engine_dylib(target_dir: &Path) -> PathBuf {
+    release_dir(target_dir).join("deps").join(format!("libmakepad_wm_engine.{}", dylib_ext()))
+}
+
+fn dylib_path(root: &Path, data_dir: Option<&str>, package: &str) -> Result<PathBuf, String> {
+    let stem = lib_stem(package);
+    let release = release_dir(&shared_target_dir(root, data_dir));
+    let name = format!("{stem}.{}", dylib_ext());
+    for dir in [release.clone(), release.join("deps")] {
         let p = dir.join(&name);
         if p.exists() {
             return Ok(p);
@@ -349,8 +400,10 @@ unsafe extern "C" {
 /// `stamp` (pack id), `env.txt` (KEY=VALUE: the linker string and RUSTFLAGS
 /// of the Mac cross-build), `proc-macros.txt` (host crates to bootstrap),
 /// `proc-macro-svh.txt` (the SVH each rebuilt proc-macro must carry),
-/// `manifest.txt` (`name parts bytes` per tarball) and `<name>.NNN` parts
-/// of `src.tar.gz`, `target.tar.gz`, `tc.tar.gz`.
+/// `manifest.txt` (`name parts bytes` per archive) and `<name>.NNN` parts
+/// (32 MB, stored) of `src.tar.lz4`, `target.tar.lz4`, `tc.tar.lz4`: LZ4
+/// frames (libs/lz4) streamed straight out of the APK into files/ by
+/// makepad-tar, a few megabytes of memory whatever the archive's size.
 ///
 /// nativeLibraryDir (`apk_data_file`, executable) carries the musl loader
 /// `libld-musl.so`, `libbusybox.so`, and the `#!/system/bin/sh` drivers
@@ -359,8 +412,10 @@ unsafe extern "C" {
 #[cfg(target_os = "android")]
 mod android {
     use super::*;
-    use makepad_widgets::makepad_platform::os::linux::android::android_jni::load_asset;
-    use std::io::Write;
+    use makepad_widgets::makepad_platform::os::linux::android::android_jni::{load_asset, open_asset, AssetReader};
+    use std::cell::Cell;
+    use std::io::Read;
+    use std::rc::Rc;
 
     pub struct Dyn {
         pub data: PathBuf,
@@ -368,7 +423,18 @@ mod android {
         env: Vec<(String, String)>,
     }
 
+    /// The pack the files dir holds whole: written last, after the
+    /// bootstrap. A match means nothing to do.
     const STAMP: &str = ".wmdyn-stamp";
+    /// The pack whose archives are (being) unpacked. Another pack wipes the
+    /// tree first, so two packs never mix.
+    const PACK: &str = ".wmdyn-pack";
+    /// `.wmdyn-done-<dir>` holds the pack stamp once that archive is on
+    /// disk, so a launch killed mid-way (the OS, a crash, the person)
+    /// resumes at the next archive instead of redoing 600 MB.
+    const DONE_PREFIX: &str = ".wmdyn-done-";
+    /// A progress line every this many compressed bytes.
+    const PROGRESS_STEP: u64 = 4 << 20;
 
     pub fn detect(data_dir: Option<&str>) -> Result<Dyn, String> {
         let data = PathBuf::from(data_dir.ok_or("no data dir")?);
@@ -416,8 +482,7 @@ mod android {
         /// (size, mtime) of the shipped engine `.so` in target/: cargo must
         /// leave it alone.
         pub fn engine_stamp(&self) -> Option<(u64, std::time::SystemTime)> {
-            let p = self.data.join("target/aarch64-linux-android/release/deps/libmakepad_wm_engine.so");
-            let m = std::fs::metadata(p).ok()?;
+            let m = std::fs::metadata(engine_dylib(&self.data.join("target"))).ok()?;
             Some((m.len(), m.modified().ok()?))
         }
     }
@@ -428,13 +493,38 @@ mod android {
             .ok_or("asset wmdyn/stamp missing: APK packed without local/wm-dyn/pack.py")?;
         if std::fs::read_to_string(d.data.join(STAMP)).ok().as_deref() == Some(stamp.as_str()) {
             std::env::set_var("MAKEPAD_WM_ROOT", d.data.join("src"));
+            log!("wm: provision skipped: stamp hit ({})", stamp.trim());
             return Ok(());
         }
-        say(lines, client, format!("provisioning {} into {}", stamp.trim(), d.data.display()));
-        for dir in ["src", "target", "tc", "cargo", "home", "tmp"] {
-            let _ = std::fs::remove_dir_all(d.data.join(dir));
+        match provision_pack(d, &stamp, lines, client) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                // The desk shows this line; a tap on a tile retries.
+                say(lines, client, format!("provision failed: {e}"));
+                Err(e)
+            }
         }
-        let _ = std::fs::remove_file(d.data.join(STAMP));
+    }
+
+    fn provision_pack(d: &Dyn, stamp: &str, lines: &Sender<ClientLine>, client: ClientId) -> Result<(), String> {
+        let started = std::time::Instant::now();
+        if std::fs::read_to_string(d.data.join(PACK)).ok().as_deref() == Some(stamp) {
+            say(lines, client, format!("provisioning {}: resuming", stamp.trim()));
+        } else {
+            say(lines, client, format!("provisioning {} into {}", stamp.trim(), d.data.display()));
+            for dir in ["src", "target", "tc", "cargo", "home", "tmp"] {
+                let _ = std::fs::remove_dir_all(d.data.join(dir));
+            }
+            let _ = std::fs::remove_file(d.data.join(STAMP));
+            if let Ok(rd) = std::fs::read_dir(&d.data) {
+                for entry in rd.flatten() {
+                    if entry.file_name().to_string_lossy().starts_with(DONE_PREFIX) {
+                        let _ = std::fs::remove_file(entry.path());
+                    }
+                }
+            }
+            std::fs::write(d.data.join(PACK), stamp).map_err(|e| format!("pack stamp: {e}"))?;
+        }
         for dir in ["cargo", "home", "tmp"] {
             std::fs::create_dir_all(d.data.join(dir)).map_err(|e| format!("mkdir {dir}: {e}"))?;
         }
@@ -445,38 +535,97 @@ mod android {
             let mut it = line.split_whitespace();
             let (Some(name), Some(parts), Some(bytes)) = (it.next(), it.next(), it.next()) else { continue };
             let parts: usize = parts.parse().map_err(|_| format!("manifest: {line}"))?;
-            say(lines, client, format!("extracting {name} ({bytes} bytes, {parts} parts)"));
-            extract(d, name, parts, lines, client)?;
+            let bytes: u64 = bytes.parse().map_err(|_| format!("manifest: {line}"))?;
+            // `src.tar.lz4` unpacks to `src/`: the archive's one top directory.
+            let dir = name.split('.').next().unwrap_or(name);
+            let done = d.data.join(format!("{DONE_PREFIX}{dir}"));
+            if std::fs::read_to_string(&done).ok().as_deref() == Some(stamp) {
+                say(lines, client, format!("extracting {dir}: already on disk"));
+                continue;
+            }
+            // A half-written tree from a launch that died mid-archive.
+            let _ = std::fs::remove_dir_all(d.data.join(dir));
+            extract(d, name, dir, parts, bytes, lines, client)?;
+            std::fs::write(&done, stamp).map_err(|e| format!("{}: {e}", done.display()))?;
         }
         std::env::set_var("MAKEPAD_WM_ROOT", d.data.join("src"));
         bootstrap(d, lines, client)?;
         patch_proc_macro_svh(d, lines, client)?;
         say(lines, client, "aligning target/ mtimes");
         bump_mtimes(&d.data.join("target"))?;
-        std::fs::write(d.data.join(STAMP), &stamp).map_err(|e| format!("stamp: {e}"))?;
-        say(lines, client, "provisioned");
+        std::fs::write(d.data.join(STAMP), stamp).map_err(|e| format!("stamp: {e}"))?;
+        say(lines, client, format!("provisioned in {:.0} s", started.elapsed().as_secs_f64()));
         Ok(())
     }
 
-    /// Concatenate asset parts to a file, then `busybox tar -xzf` that file.
-    /// Piping stdin died immediately (Broken pipe) on this Pixel.
-    fn extract(d: &Dyn, name: &str, parts: usize, lines: &Sender<ClientLine>, client: ClientId) -> Result<(), String> {
-        let tar_path = d.data.join(name);
-        {
-            let mut out = std::fs::File::create(&tar_path).map_err(|e| format!("create {name}: {e}"))?;
-            for i in 0..parts {
-                let part = format!("wmdyn/{name}.{i:03}");
-                let bytes = load_asset(&part).ok_or_else(|| format!("asset {part} missing"))?;
-                out.write_all(&bytes).map_err(|e| format!("write {name}: {e}"))?;
-                let pct = ((i + 1) * 100) / parts;
-                say(lines, client, format!("extracting {name}: {}/{parts} ({pct}%)", i + 1));
+    /// The archive's asset parts, one stream.
+    struct PartsReader {
+        name: String,
+        parts: usize,
+        next: usize,
+        current: Option<AssetReader>,
+        /// Compressed bytes handed out so far (the progress line's numerator).
+        read: Rc<Cell<u64>>,
+    }
+
+    impl Read for PartsReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            loop {
+                if self.current.is_none() {
+                    if self.next == self.parts {
+                        return Ok(0);
+                    }
+                    let part = format!("wmdyn/{}.{:03}", self.name, self.next);
+                    let asset = open_asset(&part)
+                        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, format!("asset {part} missing")))?;
+                    self.current = Some(asset);
+                    self.next += 1;
+                }
+                let n = self.current.as_mut().unwrap().read(buf)?;
+                if n == 0 {
+                    self.current = None;
+                    continue;
+                }
+                self.read.set(self.read.get() + n as u64);
+                return Ok(n);
             }
-            out.flush().map_err(|e| format!("flush {name}: {e}"))?;
         }
-        say(lines, client, format!("unpacking {name}"));
-        let report = makepad_tar::unpack_file(&tar_path, &d.data).map_err(|e| format!("unpack {name}: {e}"))?;
-        say(lines, client, format!("unpacked {name}: {} files, {} links", report.files, report.symlinks + report.hardlinks));
-        let _ = std::fs::remove_file(&tar_path);
+    }
+
+    /// Stream the archive's asset parts through the LZ4 frame decoder and
+    /// the tar reader straight into files/. Nothing is concatenated on
+    /// flash and nothing is held whole: the gzip path read a 292 MB
+    /// archive into a Vec, inflated 800 MB more next to it, three archives
+    /// in a row beside a 400 MB GPU process — the OS killed it before a
+    /// stamp was written, and every launch started over.
+    fn extract(d: &Dyn, name: &str, dir: &str, parts: usize, total: u64, lines: &Sender<ClientLine>, client: ClientId) -> Result<(), String> {
+        let mb = |b: u64| b / 1_000_000;
+        let started = std::time::Instant::now();
+        say(lines, client, format!("inflating {dir} 0/{} MB", mb(total)));
+        let read = Rc::new(Cell::new(0u64));
+        let source = PartsReader { name: name.to_string(), parts, next: 0, current: None, read: read.clone() };
+        let mut last_said = 0u64;
+        let mut progress = |p: &makepad_tar::Progress| {
+            let got = read.get();
+            if got - last_said >= PROGRESS_STEP {
+                last_said = got;
+                say(lines, client, format!("inflating {dir} {}/{} MB · {} files", mb(got), mb(total), p.entries));
+            }
+        };
+        let report = makepad_tar::unpack_stream(source, &d.data, &mut progress).map_err(|e| format!("unpack {name}: {e}"))?;
+        if read.get() != total {
+            return Err(format!("{name}: {} bytes in the APK, manifest says {total}", read.get()));
+        }
+        say(
+            lines,
+            client,
+            format!(
+                "unpacked {dir}: {} files, {} links in {:.0} s",
+                report.files,
+                report.symlinks + report.hardlinks,
+                started.elapsed().as_secs_f64()
+            ),
+        );
         Ok(())
     }
 

@@ -396,6 +396,10 @@ pub struct WmState {
     pub launchable: crate::apps::Launchable,
     /// Reduce Transparency / Reduce Motion (desktop.rs `Accessibility`).
     pub accessibility: crate::desktop::Accessibility,
+    /// The super-app's first-run provisioning (dylib_host): its newest
+    /// progress line while the toolchain streams out of the APK, shown on
+    /// the desk; None once provisioned (or when nothing is provisioning).
+    pub provision: Option<String>,
 }
 
 impl WmState {

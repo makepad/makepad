@@ -4,16 +4,27 @@
 //! Regular files, directories, symbolic links and hard links are unpacked
 //! with their mode bits and modification time. Every entry path, and every
 //! link target, is checked to stay inside the destination, so a hostile
-//! archive cannot write outside it. Gzip archives are inflated whole by
-//! makepad-fast-inflate; the archive is parsed from memory.
+//! archive cannot write outside it.
+//!
+//! The archive is a STREAM: [`unpack_stream`] reads one 512-byte header at
+//! a time and copies each file's data through a 1 MB buffer, so an archive
+//! of any size unpacks in a few megabytes of memory. An LZ4 frame
+//! (makepad-lz4, by its magic) is decoded block by block on the way in. A
+//! gzip archive is the exception: makepad-fast-inflate inflates it whole,
+//! so it costs its uncompressed size in memory — ship LZ4 for anything big.
 
 use std::{
-    fs, io,
+    fs,
+    io::{self, Read, Write},
     path::{Component, Path, PathBuf},
     time::{Duration, SystemTime},
 };
 
 const BLOCK: usize = 512;
+/// File data moves through the stream in chunks this big.
+const COPY_CHUNK: usize = 1 << 20;
+/// A pax header or GNU long name larger than this is not a name.
+const MAX_META: u64 = 1 << 20;
 
 #[derive(Debug)]
 pub enum TarError {
@@ -22,10 +33,12 @@ pub enum TarError {
     /// A header field could not be read.
     BadHeader(&'static str),
     /// The header at this byte offset does not sum to its checksum.
-    Checksum { offset: usize },
+    Checksum { offset: u64 },
     /// An entry or link would leave the destination.
     UnsafePath(String),
     Gzip(String),
+    /// The archive source (a file, an asset, an LZ4 frame) failed to read.
+    Read(io::Error),
     Io(PathBuf, io::Error),
 }
 
@@ -37,6 +50,7 @@ impl std::fmt::Display for TarError {
             TarError::Checksum { offset } => write!(f, "tar header checksum mismatch at byte {offset}"),
             TarError::UnsafePath(path) => write!(f, "entry would leave the destination: {path}"),
             TarError::Gzip(error) => write!(f, "gzip: {error}"),
+            TarError::Read(error) => write!(f, "archive read: {error}"),
             TarError::Io(path, error) => write!(f, "{}: {error}", path.display()),
         }
     }
@@ -78,6 +92,16 @@ pub struct UnpackReport {
     pub skipped: usize,
 }
 
+/// Where a streaming unpack is: reported after every entry and after every
+/// chunk of a large file.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Progress {
+    /// Entries finished (of every kind, skipped ones included).
+    pub entries: usize,
+    /// File bytes written so far.
+    pub bytes: u64,
+}
+
 /// Overrides a pax extended header (`x`) or a GNU long-name entry carries
 /// for the entry that follows it.
 #[derive(Default)]
@@ -86,6 +110,86 @@ struct Pending {
     link: Option<String>,
     size: Option<u64>,
     mtime: Option<u64>,
+}
+
+/// The fields of one header block, before the pending overrides apply.
+struct RawHeader {
+    typeflag: u8,
+    size: u64,
+    name: String,
+    link: Option<String>,
+    mode: u32,
+    mtime: Option<u64>,
+}
+
+/// The entry a header (plus its pending overrides) describes.
+struct Resolved {
+    path: PathBuf,
+    kind: EntryKind,
+    mode: u32,
+    mtime: u64,
+    link: Option<PathBuf>,
+}
+
+fn raw_header(header: &[u8], offset: u64) -> Result<RawHeader, TarError> {
+    verify_checksum(header, offset)?;
+    let typeflag = header[156];
+    let size = numeric(&header[124..136]).ok_or(TarError::BadHeader("size"))?;
+    let ustar = &header[257..262] == b"ustar";
+    let name = {
+        let name = cstr(&header[0..100]);
+        let prefix = if ustar { cstr(&header[345..500]) } else { "" };
+        if prefix.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{prefix}/{name}")
+        }
+    };
+    let link = Some(cstr(&header[157..257]).to_owned()).filter(|s| !s.is_empty());
+    let mode = numeric(&header[100..108]).unwrap_or(0) as u32 & 0o7777;
+    let mtime = numeric(&header[136..148]);
+    Ok(RawHeader { typeflag, size, name, link, mode, mtime })
+}
+
+/// `L`, `K`, `x` and `g` entries carry data for the NEXT entry (or nothing
+/// this reader uses); everything else is an entry of its own.
+fn is_meta(typeflag: u8) -> bool {
+    matches!(typeflag, b'L' | b'K' | b'x' | b'g')
+}
+
+fn absorb_meta(typeflag: u8, data: &[u8], pending: &mut Pending) {
+    match typeflag {
+        b'L' => pending.path = Some(cstr(data).to_owned()),
+        b'K' => pending.link = Some(cstr(data).to_owned()),
+        b'x' => parse_pax(data, pending),
+        _ => {}
+    }
+}
+
+fn resolve(raw: RawHeader, pending: &mut Pending) -> Resolved {
+    let mut name = pending.path.take().unwrap_or(raw.name);
+    let link = pending.link.take().or(raw.link).map(PathBuf::from);
+    let mtime = pending.mtime.take().or(raw.mtime).unwrap_or(0);
+    *pending = Pending::default();
+    let mut kind = match raw.typeflag {
+        0 | b'0' | b'7' => EntryKind::File,
+        b'5' => EntryKind::Directory,
+        b'2' => EntryKind::Symlink,
+        b'1' => EntryKind::Hardlink,
+        other => EntryKind::Other(other),
+    };
+    // Pre-ustar archives mark directories with a trailing slash only.
+    if kind == EntryKind::File && name.ends_with('/') {
+        kind = EntryKind::Directory;
+    }
+    while name.ends_with('/') {
+        name.pop();
+    }
+    Resolved { path: PathBuf::from(name), kind, mode: raw.mode, mtime, link }
+}
+
+fn padded(size: u64) -> u64 {
+    size.div_ceil(BLOCK as u64) * BLOCK as u64
 }
 
 /// Parse every member of a plain (not compressed) tar archive.
@@ -99,14 +203,8 @@ pub fn entries(archive: &[u8]) -> Result<Vec<Entry<'_>>, TarError> {
             // End of archive (two zero blocks by convention; one is enough).
             break;
         }
-        verify_checksum(header, at)?;
-        let typeflag = header[156];
-        let size = numeric(&header[124..136]).ok_or(TarError::BadHeader("size"))?;
-        let size = match (typeflag, pending.size) {
-            (b'x' | b'g' | b'L' | b'K', _) => size,
-            (_, Some(size)) => size,
-            _ => size,
-        };
+        let raw = raw_header(header, at as u64)?;
+        let size = if is_meta(raw.typeflag) { raw.size } else { pending.size.unwrap_or(raw.size) };
         let data_start = at + BLOCK;
         let data_end = data_start
             .checked_add(usize::try_from(size).map_err(|_| TarError::BadHeader("size"))?)
@@ -114,92 +212,143 @@ pub fn entries(archive: &[u8]) -> Result<Vec<Entry<'_>>, TarError> {
         if data_end > archive.len() {
             return Err(TarError::Truncated);
         }
-        let padded_end = data_start + ((size as usize + BLOCK - 1) / BLOCK) * BLOCK;
+        let padded_end = data_start + padded(size) as usize;
         let data = &archive[data_start..data_end];
-        match typeflag {
-            b'L' => {
-                pending.path = Some(cstr(data).to_owned());
-                at = padded_end;
-                continue;
-            }
-            b'K' => {
-                pending.link = Some(cstr(data).to_owned());
-                at = padded_end;
-                continue;
-            }
-            b'x' => {
-                parse_pax(data, &mut pending);
-                at = padded_end;
-                continue;
-            }
-            b'g' => {
-                // Global pax records (vendor keys): nothing this reader uses.
-                at = padded_end;
-                continue;
-            }
-            _ => {}
+        if is_meta(raw.typeflag) {
+            absorb_meta(raw.typeflag, data, &mut pending);
+            at = padded_end;
+            continue;
         }
-        let ustar = &header[257..262] == b"ustar";
-        let mut name = match pending.path.take() {
-            Some(path) => path,
-            None => {
-                let name = cstr(&header[0..100]);
-                let prefix = if ustar { cstr(&header[345..500]) } else { "" };
-                if prefix.is_empty() {
-                    name.to_owned()
-                } else {
-                    format!("{prefix}/{name}")
-                }
-            }
-        };
-        let link = pending
-            .link
-            .take()
-            .or_else(|| Some(cstr(&header[157..257]).to_owned()).filter(|s| !s.is_empty()))
-            .map(PathBuf::from);
-        let mode = numeric(&header[100..108]).unwrap_or(0) as u32 & 0o7777;
-        let mtime = pending
-            .mtime
-            .take()
-            .or_else(|| numeric(&header[136..148]))
-            .unwrap_or(0);
-        pending = Pending::default();
-        let mut kind = match typeflag {
-            0 | b'0' | b'7' => EntryKind::File,
-            b'5' => EntryKind::Directory,
-            b'2' => EntryKind::Symlink,
-            b'1' => EntryKind::Hardlink,
-            other => EntryKind::Other(other),
-        };
-        // Pre-ustar archives mark directories with a trailing slash only.
-        if kind == EntryKind::File && name.ends_with('/') {
-            kind = EntryKind::Directory;
-        }
-        while name.ends_with('/') {
-            name.pop();
-        }
-        entries.push(Entry {
-            path: PathBuf::from(name),
-            kind,
-            mode,
-            mtime,
-            link,
-            data,
-        });
+        let r = resolve(raw, &mut pending);
+        entries.push(Entry { path: r.path, kind: r.kind, mode: r.mode, mtime: r.mtime, link: r.link, data });
         at = padded_end;
     }
     Ok(entries)
 }
 
-/// Unpack a plain tar archive below `dest`, creating it as needed.
+/// Unpack a plain tar archive held in memory below `dest`.
 pub fn unpack(archive: &[u8], dest: &Path) -> Result<UnpackReport, TarError> {
+    unpack_stream(archive, dest, &mut |_| {})
+}
+
+/// Unpack an archive file below `dest`: an LZ4 frame or a plain tar is
+/// streamed; a gzip file is inflated whole first.
+pub fn unpack_file(archive: &Path, dest: &Path) -> Result<UnpackReport, TarError> {
+    let file = fs::File::open(archive).map_err(|e| TarError::Io(archive.to_path_buf(), e))?;
+    unpack_stream(io::BufReader::with_capacity(COPY_CHUNK, file), dest, &mut |_| {})
+}
+
+/// Unpack archive bytes below `dest` (LZ4 frame, gzip, or plain tar by
+/// their magic).
+pub fn unpack_bytes(bytes: &[u8], dest: &Path) -> Result<UnpackReport, TarError> {
+    unpack_stream(bytes, dest, &mut |_| {})
+}
+
+/// Unpack an archive read from `source` below `dest`, creating it as
+/// needed. The first bytes decide the codec: an LZ4 frame is decoded as it
+/// streams, a gzip stream is read to the end and inflated in memory, and
+/// anything else is read as plain tar. `progress` hears about every entry
+/// and every chunk of a large file.
+pub fn unpack_stream<R: Read>(
+    mut source: R,
+    dest: &Path,
+    progress: &mut dyn FnMut(&Progress),
+) -> Result<UnpackReport, TarError> {
+    let mut head = [0u8; 4];
+    let mut got = 0;
+    while got < 4 {
+        let n = source.read(&mut head[got..]).map_err(TarError::Read)?;
+        if n == 0 {
+            break;
+        }
+        got += n;
+    }
+    let rest = io::Cursor::new(head[..got].to_vec()).chain(source);
+    if got == 4 && head == makepad_lz4::frame::MAGIC.to_le_bytes() {
+        let decoder = makepad_lz4::FrameDecoder::new(rest).map_err(TarError::Read)?;
+        unpack_tar(decoder, dest, progress)
+    } else if got >= 2 && head[..2] == [0x1f, 0x8b] {
+        let mut rest = rest;
+        let mut bytes = Vec::new();
+        rest.read_to_end(&mut bytes).map_err(TarError::Read)?;
+        let inflated = makepad_fast_inflate::gzip_decompress_vec(&bytes)
+            .map_err(|e| TarError::Gzip(format!("{e:?}")))?;
+        unpack_tar(&inflated[..], dest, progress)
+    } else {
+        unpack_tar(rest, dest, progress)
+    }
+}
+
+fn read_full<R: Read>(source: &mut R, buf: &mut [u8]) -> Result<usize, TarError> {
+    let mut got = 0;
+    while got < buf.len() {
+        let n = source.read(&mut buf[got..]).map_err(TarError::Read)?;
+        if n == 0 {
+            break;
+        }
+        got += n;
+    }
+    Ok(got)
+}
+
+fn skip<R: Read>(source: &mut R, mut n: u64, scratch: &mut [u8]) -> Result<(), TarError> {
+    while n > 0 {
+        let take = (n.min(scratch.len() as u64)) as usize;
+        if read_full(source, &mut scratch[..take])? != take {
+            return Err(TarError::Truncated);
+        }
+        n -= take as u64;
+    }
+    Ok(())
+}
+
+/// The streaming core: plain tar from `source`.
+fn unpack_tar<R: Read>(
+    mut source: R,
+    dest: &Path,
+    progress: &mut dyn FnMut(&Progress),
+) -> Result<UnpackReport, TarError> {
     fs::create_dir_all(dest).map_err(|e| TarError::Io(dest.to_path_buf(), e))?;
     let mut report = UnpackReport::default();
+    let mut done = Progress::default();
     // A directory's time is set once its contents are in place, since every
     // file written into it moves it again.
     let mut directory_times: Vec<(PathBuf, u64)> = Vec::new();
-    for entry in entries(archive)? {
+    let mut pending = Pending::default();
+    let mut header = [0u8; BLOCK];
+    let mut buf = vec![0u8; COPY_CHUNK];
+    let mut offset = 0u64;
+    loop {
+        let got = read_full(&mut source, &mut header)?;
+        if got == 0 {
+            // Some writers end without the zero blocks.
+            break;
+        }
+        if got < BLOCK {
+            return Err(TarError::Truncated);
+        }
+        if header.iter().all(|b| *b == 0) {
+            break;
+        }
+        let raw = raw_header(&header, offset)?;
+        offset += BLOCK as u64;
+        if is_meta(raw.typeflag) {
+            if raw.size > MAX_META {
+                return Err(TarError::BadHeader("oversized pax header"));
+            }
+            let mut data = vec![0u8; raw.size as usize];
+            if read_full(&mut source, &mut data)? != data.len() {
+                return Err(TarError::Truncated);
+            }
+            skip(&mut source, padded(raw.size) - raw.size, &mut buf)?;
+            offset += padded(raw.size);
+            absorb_meta(raw.typeflag, &data, &mut pending);
+            continue;
+        }
+        let size = pending.size.unwrap_or(raw.size);
+        let entry = resolve(raw, &mut pending);
         let target = safe_join(dest, &entry.path)?;
+        let mut consumed = 0u64;
         match entry.kind {
             EntryKind::Directory => {
                 fs::create_dir_all(&target).map_err(|e| TarError::Io(target.clone(), e))?;
@@ -213,7 +362,20 @@ pub fn unpack(archive: &[u8], dest: &Path) -> Result<UnpackReport, TarError> {
                 }
                 // A stale symlink or directory in the way is not written through.
                 remove_existing(&target)?;
-                fs::write(&target, entry.data).map_err(|e| TarError::Io(target.clone(), e))?;
+                let mut file = fs::File::create(&target).map_err(|e| TarError::Io(target.clone(), e))?;
+                while consumed < size {
+                    let take = ((size - consumed).min(buf.len() as u64)) as usize;
+                    if read_full(&mut source, &mut buf[..take])? != take {
+                        return Err(TarError::Truncated);
+                    }
+                    file.write_all(&buf[..take]).map_err(|e| TarError::Io(target.clone(), e))?;
+                    consumed += take as u64;
+                    done.bytes += take as u64;
+                    if consumed < size {
+                        progress(&done);
+                    }
+                }
+                drop(file);
                 set_mode(&target, entry.mode)?;
                 set_mtime(&target, entry.mtime)?;
                 report.files += 1;
@@ -236,17 +398,35 @@ pub fn unpack(archive: &[u8], dest: &Path) -> Result<UnpackReport, TarError> {
                     .link
                     .as_deref()
                     .ok_or_else(|| TarError::BadHeader("hard link without a target"))?;
-                let source = safe_join(dest, link)?;
+                let source_path = safe_join(dest, link)?;
                 if let Some(parent) = target.parent() {
                     fs::create_dir_all(parent).map_err(|e| TarError::Io(parent.to_path_buf(), e))?;
                 }
                 remove_existing(&target)?;
-                if fs::hard_link(&source, &target).is_err() {
-                    fs::copy(&source, &target).map_err(|e| TarError::Io(target.clone(), e))?;
+                if fs::hard_link(&source_path, &target).is_err() {
+                    fs::copy(&source_path, &target).map_err(|e| TarError::Io(target.clone(), e))?;
                 }
                 report.hardlinks += 1;
             }
             EntryKind::Other(_) => report.skipped += 1,
+        }
+        // Whatever the entry did not consume of its data, plus the padding.
+        skip(&mut source, padded(size) - consumed, &mut buf)?;
+        offset += padded(size);
+        done.entries += 1;
+        progress(&done);
+    }
+    // The stream is read to its end: the second zero block and the record
+    // padding a writer leaves after the archive, and the codec's trailer
+    // behind them. An LZ4 frame ends in an end mark and a content checksum
+    // that the decoder only reads, and verifies, when asked for more data;
+    // stopping at the first zero block left those 8 bytes unread, so the
+    // phone's count of APK bytes came up short of the manifest and the
+    // checksum was never checked.
+    loop {
+        let n = source.read(&mut buf).map_err(TarError::Read)?;
+        if n == 0 {
+            break;
         }
     }
     // Deepest first, so a parent's time is not moved by a child's.
@@ -255,24 +435,6 @@ pub fn unpack(archive: &[u8], dest: &Path) -> Result<UnpackReport, TarError> {
         set_mtime(&dir, mtime)?;
     }
     Ok(report)
-}
-
-/// Unpack an archive file below `dest`. A gzip file (by its magic) is
-/// inflated first; anything else is read as a plain tar archive.
-pub fn unpack_file(archive: &Path, dest: &Path) -> Result<UnpackReport, TarError> {
-    let bytes = fs::read(archive).map_err(|e| TarError::Io(archive.to_path_buf(), e))?;
-    unpack_bytes(&bytes, dest)
-}
-
-/// Unpack archive bytes below `dest`, inflating gzip first (by its magic).
-pub fn unpack_bytes(bytes: &[u8], dest: &Path) -> Result<UnpackReport, TarError> {
-    if bytes.starts_with(&[0x1f, 0x8b]) {
-        let inflated = makepad_fast_inflate::gzip_decompress_vec(bytes)
-            .map_err(|e| TarError::Gzip(format!("{e:?}")))?;
-        unpack(&inflated, dest)
-    } else {
-        unpack(bytes, dest)
-    }
 }
 
 /// `dest/relative`, refusing anything that is absolute, empty, or climbs.
@@ -365,7 +527,7 @@ fn set_mtime(path: &Path, mtime: u64) -> Result<(), TarError> {
 
 /// Header bytes sum to the checksum field with that field read as spaces.
 /// Old writers summed signed bytes; both sums are accepted.
-fn verify_checksum(header: &[u8], offset: usize) -> Result<(), TarError> {
+fn verify_checksum(header: &[u8], offset: u64) -> Result<(), TarError> {
     let recorded = numeric(&header[148..156]).ok_or(TarError::BadHeader("checksum"))?;
     let mut unsigned: u64 = 0;
     let mut signed: i64 = 0;
@@ -477,21 +639,42 @@ mod tests {
         dir
     }
 
-    #[test]
-    fn files_directories_links_and_long_names_round_trip() {
+    fn sample_archive(long: &str) -> Vec<u8> {
         let mut archive = Vec::new();
         push(&mut archive, header("d/", 0, b'5', 0o755, 1_700_000_000, ""), b"");
         push(&mut archive, header("d/a.txt", 5, b'0', 0o644, 1_700_000_001, ""), b"hello");
         push(&mut archive, header("d/run", 3, b'0', 0o755, 1_700_000_002, ""), b"#!x");
         push(&mut archive, header("d/link", 0, b'2', 0o777, 0, "a.txt"), b"");
         push(&mut archive, header("d/hard", 0, b'1', 0o644, 0, "d/a.txt"), b"");
-        let long = format!("d/{}.txt", "n".repeat(150));
         push(&mut archive, header("././@LongLink", long.len() as u64 + 1, b'L', 0o644, 0, ""), format!("{long}\0").as_bytes());
         push(&mut archive, header("d/short", 4, b'0', 0o644, 1_700_000_003, ""), b"long");
         let pax = "22 path=d/from-pax.txt\n";
         push(&mut archive, header("./PaxHeaders/x", pax.len() as u64, b'x', 0o644, 0, ""), pax.as_bytes());
         push(&mut archive, header("ignored", 3, b'0', 0o600, 1_700_000_004, ""), b"pax");
         archive.extend(std::iter::repeat(0).take(BLOCK * 2));
+        archive
+    }
+
+    fn check_sample(dest: &Path, long: &str) {
+        assert_eq!(fs::read_to_string(dest.join("d/a.txt")).unwrap(), "hello");
+        assert_eq!(fs::read_to_string(dest.join("d/link")).unwrap(), "hello");
+        assert_eq!(fs::read_to_string(dest.join("d/hard")).unwrap(), "hello");
+        assert_eq!(fs::read_to_string(dest.join(long)).unwrap(), "long");
+        assert_eq!(fs::read_to_string(dest.join("d/from-pax.txt")).unwrap(), "pax");
+        let modified = fs::metadata(dest.join("d/a.txt")).unwrap().modified().unwrap();
+        assert_eq!(modified.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(), 1_700_000_001);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(fs::metadata(dest.join("d/run")).unwrap().permissions().mode() & 0o777, 0o755);
+            assert!(fs::symlink_metadata(dest.join("d/link")).unwrap().file_type().is_symlink());
+        }
+    }
+
+    #[test]
+    fn files_directories_links_and_long_names_round_trip() {
+        let long = format!("d/{}.txt", "n".repeat(150));
+        let archive = sample_archive(&long);
 
         let parsed = entries(&archive).unwrap();
         let names: Vec<_> = parsed.iter().map(|e| e.path.to_string_lossy().into_owned()).collect();
@@ -502,19 +685,7 @@ mod tests {
         let dest = scratch("roundtrip");
         let report = unpack(&archive, &dest).unwrap();
         assert_eq!(report, UnpackReport { files: 4, directories: 1, symlinks: 1, hardlinks: 1, skipped: 0 });
-        assert_eq!(fs::read_to_string(dest.join("d/a.txt")).unwrap(), "hello");
-        assert_eq!(fs::read_to_string(dest.join("d/link")).unwrap(), "hello");
-        assert_eq!(fs::read_to_string(dest.join("d/hard")).unwrap(), "hello");
-        assert_eq!(fs::read_to_string(dest.join(&long)).unwrap(), "long");
-        assert_eq!(fs::read_to_string(dest.join("d/from-pax.txt")).unwrap(), "pax");
-        let modified = fs::metadata(dest.join("d/a.txt")).unwrap().modified().unwrap();
-        assert_eq!(modified.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(), 1_700_000_001);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(fs::metadata(dest.join("d/run")).unwrap().permissions().mode() & 0o777, 0o755);
-            assert!(fs::symlink_metadata(dest.join("d/link")).unwrap().file_type().is_symlink());
-        }
+        check_sample(&dest, &long);
         let _ = fs::remove_dir_all(&dest);
     }
 
@@ -528,6 +699,117 @@ mod tests {
         let report = unpack_bytes(&gz, &dest).unwrap();
         assert_eq!(report.files, 1);
         assert_eq!(fs::read_to_string(dest.join("x.txt")).unwrap(), "ok");
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    /// The phone's path: an LZ4 frame streamed through a small-read source
+    /// (an asset), files larger than the copy chunk, progress per chunk and
+    /// per entry, and the same contents as the in-memory unpack.
+    #[test]
+    fn lz4_frames_stream_with_progress() {
+        let long = format!("d/{}.txt", "n".repeat(150));
+        let mut archive = sample_archive(&long);
+        archive.truncate(archive.len() - BLOCK * 2);
+        let big: Vec<u8> = (0..(COPY_CHUNK * 3 + 12345)).map(|i| (i % 251) as u8).collect();
+        push(&mut archive, header("d/big.bin", big.len() as u64, b'0', 0o644, 1_700_000_005, ""), &big);
+        // No trailing zero blocks: the writer that stopped short is read too.
+        let frame = makepad_lz4::frame_compress(&archive);
+        assert!(frame.len() < archive.len());
+
+        struct Dribble<'a>(&'a [u8]);
+        impl Read for Dribble<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                let n = buf.len().min(self.0.len()).min(777);
+                buf[..n].copy_from_slice(&self.0[..n]);
+                self.0 = &self.0[n..];
+                Ok(n)
+            }
+        }
+        let dest = scratch("lz4");
+        let mut seen = Vec::new();
+        let report = unpack_stream(Dribble(&frame), &dest, &mut |p| seen.push(*p)).unwrap();
+        assert_eq!(report, UnpackReport { files: 5, directories: 1, symlinks: 1, hardlinks: 1, skipped: 0 });
+        check_sample(&dest, &long);
+        assert_eq!(fs::read(dest.join("d/big.bin")).unwrap(), big);
+        let last = seen.last().unwrap();
+        assert_eq!(last.entries, 8);
+        assert_eq!(last.bytes, 5 + 3 + 4 + 3 + big.len() as u64);
+        // The big file reported three chunks before its entry finished.
+        assert!(seen.windows(2).filter(|w| w[0].entries == w[1].entries && w[0].bytes < w[1].bytes).count() >= 3);
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    /// The APK's shape: Python's tarfile ends the archive with two zero
+    /// blocks and pads to the 10240-byte record, the frame is cut into
+    /// stored parts, and the phone chains the parts through one counting
+    /// reader whose total is checked against the manifest. Every byte of
+    /// the frame is read (the end mark and content checksum too), and a
+    /// damaged content checksum is now seen.
+    #[test]
+    fn lz4_parts_are_consumed_to_the_last_byte() {
+        const RECORD: usize = 10240;
+        let mut archive = Vec::new();
+        let big: Vec<u8> = (0..(COPY_CHUNK + 4321)).map(|i| (i % 253) as u8).collect();
+        push(&mut archive, header("p/", 0, b'5', 0o755, 1_700_000_000, ""), b"");
+        push(&mut archive, header("p/big.bin", big.len() as u64, b'0', 0o644, 1_700_000_001, ""), &big);
+        push(&mut archive, header("p/last.txt", 4, b'0', 0o644, 1_700_000_002, ""), b"last");
+        archive.extend(std::iter::repeat(0).take(BLOCK * 2));
+        let pad = (RECORD - archive.len() % RECORD) % RECORD;
+        archive.extend(std::iter::repeat(0).take(pad));
+        let frame = makepad_lz4::frame_compress(&archive);
+
+        struct Parts<'a> {
+            parts: Vec<&'a [u8]>,
+            next: usize,
+            read: std::rc::Rc<std::cell::Cell<u64>>,
+        }
+        impl Read for Parts<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                loop {
+                    let Some(part) = self.parts.get_mut(self.next) else { return Ok(0) };
+                    if part.is_empty() {
+                        self.next += 1;
+                        continue;
+                    }
+                    let n = buf.len().min(part.len()).min(1000);
+                    buf[..n].copy_from_slice(&part[..n]);
+                    *part = &part[n..];
+                    self.read.set(self.read.get() + n as u64);
+                    return Ok(n);
+                }
+            }
+        }
+        let read = std::rc::Rc::new(std::cell::Cell::new(0u64));
+        let source = Parts { parts: frame.chunks(70_000).collect(), next: 0, read: read.clone() };
+        let dest = scratch("lz4-parts");
+        let report = unpack_stream(source, &dest, &mut |_| {}).unwrap();
+        assert_eq!(report, UnpackReport { files: 2, directories: 1, symlinks: 0, hardlinks: 0, skipped: 0 });
+        assert_eq!(fs::read(dest.join("p/big.bin")).unwrap(), big);
+        assert_eq!(fs::read_to_string(dest.join("p/last.txt")).unwrap(), "last");
+        assert_eq!(read.get(), frame.len() as u64, "every byte of the frame is read");
+
+        // The last byte is the content checksum's: flipping it is an error
+        // the unpack reports, not a silently accepted archive.
+        let mut damaged = frame.clone();
+        *damaged.last_mut().unwrap() ^= 0xff;
+        assert!(matches!(unpack_stream(&damaged[..], &dest, &mut |_| {}), Err(TarError::Read(_))));
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn truncated_streams_are_reported() {
+        let mut archive = Vec::new();
+        push(&mut archive, header("x.txt", 2000, b'0', 0o644, 1_700_000_000, ""), &[7u8; 2000]);
+        let dest = scratch("truncated");
+        // Cut inside the file's data.
+        assert!(matches!(unpack_stream(&archive[..BLOCK + 100], &dest, &mut |_| {}), Err(TarError::Truncated)));
+        // Cut inside a header.
+        assert!(matches!(unpack_stream(&archive[..100], &dest, &mut |_| {}), Err(TarError::Truncated)));
+        // A damaged LZ4 frame surfaces as a read error, not a panic.
+        let mut frame = makepad_lz4::frame_compress(&archive);
+        let n = frame.len();
+        frame.truncate(n - 6);
+        assert!(matches!(unpack_stream(&frame[..], &dest, &mut |_| {}), Err(TarError::Read(_))));
         let _ = fs::remove_dir_all(&dest);
     }
 

@@ -107,6 +107,25 @@ fn android_debug_log(prio: i32, msg: &str) {
     unsafe { __android_log_write(prio as c_int, "Makepad\0".as_ptr(), msg.as_ptr()) };
 }
 
+/// An Android system property's value, empty when unset. Bionic's
+/// `__system_property_get` is in libc on every API level this runs on.
+fn android_system_property(name: &str) -> String {
+    use std::ffi::{c_char, c_int, CString};
+    extern "C" {
+        fn __system_property_get(name: *const c_char, value: *mut c_char) -> c_int;
+    }
+    const PROP_VALUE_MAX: usize = 92;
+    let Ok(name) = CString::new(name) else {
+        return String::new();
+    };
+    let mut value = [0u8; PROP_VALUE_MAX];
+    let len = unsafe { __system_property_get(name.as_ptr(), value.as_mut_ptr() as *mut c_char) };
+    if len <= 0 {
+        return String::new();
+    }
+    String::from_utf8_lossy(&value[..(len as usize).min(PROP_VALUE_MAX)]).into_owned()
+}
+
 fn android_panic_summary(info: &std::panic::PanicHookInfo<'_>) -> String {
     let payload = if let Some(payload) = info.payload().downcast_ref::<&str>() {
         (*payload).to_string()
@@ -688,8 +707,10 @@ impl Cx {
                             match CxVulkan::new(window, width_u32, height_u32) {
                                 Ok(vulkan) => {
                                     self.os.vulkan = Some(vulkan);
+                                    self.os.gl_fallback = false;
                                 }
                                 Err(err) => {
+                                    self.os.gl_fallback = true;
                                     crate::error!(
                                         "Android Vulkan backend init failed, falling back to OpenGL: {err}"
                                     );
@@ -1969,6 +1990,14 @@ impl Cx {
             let mut cx = startup();
             let mut libegl = LibEgl::try_load().expect("Cant load LibEGL");
 
+            // A phone has no `MAKEPAD_TRACE` environment: the trace topics
+            // come from a system property instead
+            // (`adb shell setprop debug.makepad.trace gpu.present`).
+            let trace_topics = android_system_property("debug.makepad.trace");
+            if !trace_topics.is_empty() {
+                crate::makepad_error_log::set_trace_topics(&trace_topics);
+            }
+
             cx.os.activity_thread_id = Some(activity_thread_id);
             cx.os.render_thread_id =
                 Some(unsafe { libc_sys::syscall(libc_sys::SYS_GETTID) as u64 });
@@ -2133,6 +2162,7 @@ impl Cx {
                         cx.os.vulkan = Some(vulkan);
                     }
                     Err(err) => {
+                        cx.os.gl_fallback = true;
                         crate::error!(
                             "Android Vulkan backend init failed on startup, continuing with OpenGL: {err}"
                         );
@@ -2389,6 +2419,15 @@ impl Cx {
                     self.draw_pass_to_texture_for_active_backend(*draw_pass_id);
                 }
             }
+        }
+        // A repaint that ended without a window pass (captures only, or the
+        // window pass skipped its turn) still has to reach the GPU.
+        #[cfg(use_vulkan)]
+        if let Some(mut vulkan) = self.os.vulkan.take() {
+            if let Err(err) = vulkan.end_repaint() {
+                crate::error!("Android Vulkan repaint submit failed: {err}");
+            }
+            self.os.vulkan = Some(vulkan);
         }
 
         let timestamp_ns = (self.os.timers.time_now().max(0.0) * 1_000_000_000.0) as u64;
@@ -3382,6 +3421,8 @@ impl Default for CxOs {
             surface_alive: false,
             #[cfg(use_vulkan)]
             vulkan: None,
+            #[cfg(use_vulkan)]
+            gl_fallback: false,
             quit: false,
             fullscreen: false,
             timers: Default::default(),
@@ -3539,6 +3580,10 @@ pub struct CxOs {
     pub(crate) surface_alive: bool,
     #[cfg(use_vulkan)]
     pub(crate) vulkan: Option<CxVulkan>,
+    /// Vulkan found no usable device and OpenGL ES draws instead; what
+    /// `Cx::gpu_backend` reports in a Vulkan build.
+    #[cfg(use_vulkan)]
+    pub(crate) gl_fallback: bool,
     pub(crate) media: CxAndroidMedia,
     pub(crate) video_surfaces: HashMap<LiveId, jobject>,
     pub(crate) video_configs: HashMap<LiveId, AndroidVideoConfig>,

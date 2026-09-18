@@ -19,9 +19,10 @@ name = "makepad_clock"
 path = "src/lib.rs"
 
 [features]
-# On-demand dylib for the Android super-app: links the engine dylib so
-# widgets/std bind the host's copy (apps/wm-dyn/engine).
-dynamic-module = ["dep:makepad-wm-engine"]
+# On-demand dylib for the Android super-app (apps/wm-dyn). No engine dep
+# here: the host that builds the lib binds it to its engine dylib itself
+# (apps/wm/src/dylib_host.rs), so this crate's manifest is the desktop's.
+dynamic-module = []
 default = ["standalone"]
 # The standalone window: the F10 overlay and the port toward it. A host
 # that links the MODULE (makepad-wm) leaves this off and gets the lib only.
@@ -38,4 +39,3 @@ makepad-wm-api = { path = "../../libs/wm_api", optional = true }
 makepad-ai-services = { path = "../../libs/ai/services" }
 # The module contract: what the window manager seats in-process (src/module.rs).
 makepad-app-module = { path = "../../libs/app_module" }
-makepad-wm-engine = { path = "../wm-dyn/engine", optional = true }
