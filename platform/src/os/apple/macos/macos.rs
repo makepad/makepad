@@ -141,6 +141,18 @@ impl DrawableWorker {
         if !self.pending && self.request.try_send(()).is_ok() { self.pending = true; self.started = Some(Instant::now()); }
         result
     }
+
+    /// Acquire on the UI thread, for a beat whose prefetched drawable can't be
+    /// used. The pool was just rebuilt for the new size, so this doesn't block.
+    fn acquire_now(&mut self, layer: ObjcId) -> Option<RcObjcId> {
+        let pool: ObjcId = unsafe { msg_send![class!(NSAutoreleasePool), new] };
+        let start = Instant::now();
+        let drawable: ObjcId = unsafe { msg_send![layer, nextDrawable] };
+        self.wait_ns.store(start.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Release);
+        let drawable = NonNull::new(drawable).map(RcObjcId::from_unowned);
+        unsafe { let _: () = msg_send![pool, release]; }
+        drawable
+    }
 }
 
 /// A remote grab whose window has no drawable yet stays pending across
@@ -322,6 +334,16 @@ impl MetalWindow {
         } else {
             false
         }
+    }
+
+    /// The worker vends a drawable it acquired a beat ago, so one that predates
+    /// a resize still has the old texture size. Painting into it lands the frame
+    /// in a corner of the texture and leaves the rest of the layer unpainted.
+    fn drawable_matches_layer(&self, drawable: ObjcId) -> bool {
+        let texture: ObjcId = unsafe { msg_send![drawable, texture] };
+        let width: u64 = unsafe { msg_send![texture, width] };
+        let height: u64 = unsafe { msg_send![texture, height] };
+        (width as f64 - self.cal_size.x).abs() < 1.0 && (height as f64 - self.cal_size.y).abs() < 1.0
     }
 }
 
@@ -801,7 +823,14 @@ impl Cx {
                             // a remote grab on a beat without a drawable
                             // leaves the pass dirty and is polled again on
                             // the next beat: never a wait on the UI thread
-                            let drawable = worker.take();
+                            let drawable = match worker.take() {
+                                Some(stale) if !metal_window.drawable_matches_layer(stale.as_id()) => {
+                                    crate::trace!("present", "drawable predates the layer's resize, reacquiring");
+                                    drop(stale);
+                                    worker.acquire_now(metal_window.ca_layer)
+                                }
+                                drawable => drawable,
+                            };
                             if let Some(trace) = &metal_cx.present_trace {
                                 trace.drawable_wait(worker.started.map_or(0, |t| t.elapsed().as_nanos() as u64).max(worker.wait_ns.load(Ordering::Acquire)));
                                 if drawable.is_none() && worker.pending { trace.cause(PresentCause::DrawableWait); }
