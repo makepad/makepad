@@ -75,6 +75,12 @@ script_mod! {
     set_type_default() do #(DrawClearMark::script_shader(vm)){
         ..mod.draw.DrawQuad
     }
+    set_type_default() do #(DrawAddMark::script_shader(vm)){
+        ..mod.draw.DrawQuad
+    }
+    set_type_default() do #(DrawWellOverlay::script_shader(vm)){
+        ..mod.draw.DrawQuad
+    }
 
     /** A target that takes a file dropped on it, and says beforehand
      * whether it will. */
@@ -295,6 +301,22 @@ script_mod! {
         text: "Drop a picture"
         /** what it will take */
         accept: "image/*"
+        /** it would take a picture, said without a drag being over it 0..1 step 1 */
+        accepting: false
+        /** it would not take one, and says so 0..1 step 1 */
+        refusing: false
+        /** an engraved plus over the prompt while the well is empty 0..1 step 1 */
+        add_mark: false
+        /** the plus's box in pixels 8..80 step 1 */
+        add_mark_size: 28.0
+        /** clear space between the plus and the prompt under it 0..24 step 1 */
+        add_mark_gap: 6.0
+        /** drawn as chosen; the host decides which well that is 0..1 step 1 */
+        selected: false
+        /** how far a load into this well has got, 0..1; below zero draws no bar -1..1 step 0.01 */
+        progress: -1.0
+        /** seconds a `reject` flash lasts before the well goes quiet again 0..3 step 0.05 */
+        reject_secs: 0.7
         /** a mark in the corner that empties the well 0..1 step 1 */
         clearable: true
         /** the corner mark's box in pixels 12..40 step 1 */
@@ -317,24 +339,27 @@ script_mod! {
         draw_bg +: {
             accepting: 0.0
             refusing: 0.0
+            selected: 0.0
             hover: 0.0
             focus: 0.0
             disabled: 0.0
 
             /** border thickness in pixels 0..6 step 0.25 */
             border_size: 1.0
-            /** how much thicker the border goes while a drag is over it 0..6 step 0.25 */
+            /** how much thicker the border goes for a loud state 0..6 step 0.25 */
             border_lift: 1.5
             /** corner rounding radius 0..24 step 0.5 */
             border_radius: theme.corner_radius
 
             color: theme.color_inset
             color_hover: theme.color_inset_hover
+            color_selected: theme.color_secondary_container
             color_accepting: theme.color_success_container
             color_refusing: theme.color_error_container
             color_disabled: theme.color_inset_disabled
 
             border_color: theme.color_bevel_inset_1
+            border_color_selected: theme.color_primary
             border_color_focus: theme.color_bevel_focus
             border_color_accepting: theme.color_success
             border_color_refusing: theme.color_error
@@ -342,7 +367,11 @@ script_mod! {
 
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                let edge = self.border_size + (self.accepting + self.refusing) * self.border_lift
+                // Chosen thickens the ring too. Over a picture the ring is
+                // the only thing left to say it with, and a colour swap on
+                // a hairline is easy to miss.
+                let loud = self.accepting + self.refusing + self.selected
+                let edge = self.border_size + loud * self.border_lift
                 sdf.box(
                     edge
                     edge
@@ -352,16 +381,133 @@ script_mod! {
                 )
                 let fill = self.color
                     .mix(self.color_hover, self.hover)
+                    .mix(self.color_selected, self.selected)
                     .mix(self.color_accepting, self.accepting)
                     .mix(self.color_refusing, self.refusing)
                     .mix(self.color_disabled, self.disabled)
+                // Focus sits after chosen: where the keyboard is must stay
+                // visible on a well that is also part of a selection.
                 let stroke = self.border_color
+                    .mix(self.border_color_selected, self.selected)
                     .mix(self.border_color_focus, self.focus)
                     .mix(self.border_color_accepting, self.accepting)
                     .mix(self.border_color_refusing, self.refusing)
                     .mix(self.border_color_disabled, self.disabled)
                 sdf.fill_keep(fill)
                 sdf.stroke(stroke, edge)
+                return sdf.result
+            }
+        }
+
+        // The plus. Its own layer rather than part of the ground, because
+        // the ground quad is pushed before its rect is resolved and the
+        // mark has to be placed against that rect.
+        draw_add +: {
+            hover: 0.0
+            disabled: 0.0
+            /** the plus's stroke in pixels 1..8 step 0.5 */
+            stroke: 2.0
+            /** how far the lit copy sits below the ink; 0 draws it flat 0..4 step 0.5 */
+            engrave: 1.0
+
+            color: theme.color_text_meta
+            color_hover: theme.color_text
+            color_disabled: theme.color_text_disabled
+            color_engrave: theme.color_bevel_inset_2
+
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                // Boxes, not paths, the way the library's other empty-state
+                // figures are drawn: two mirrored path segments in one
+                // shader here once painted only the second, and a mark that
+                // sometimes fails to appear is worse than a plainer one
+                // that always does. Consecutive boxes union into the same
+                // field, so one fill paints both arms and neither can go
+                // missing without the other.
+                let e = self.engrave
+                let m = min(self.rect_size.x, self.rect_size.y) - e
+                let mx = self.rect_size.x * 0.5
+                let my = self.rect_size.y * 0.5 - e * 0.5
+                let w = max(1.0, self.stroke)
+                let ink = self.color
+                    .mix(self.color_hover, self.hover)
+                    .mix(self.color_disabled, self.disabled)
+                // Drawn twice: a lit copy a touch lower, then the ink over
+                // it. That is the whole of the engraving, and it is what
+                // keeps the plus reading as cut INTO the face rather than
+                // laid on top of it like a button.
+                sdf.box(mx - m * 0.5, my - w * 0.5 + e, m, w, w * 0.5)
+                sdf.box(mx - w * 0.5, my - m * 0.5 + e, w, m, w * 0.5)
+                sdf.fill(self.color_engrave)
+                sdf.box(mx - m * 0.5, my - w * 0.5, m, w, w * 0.5)
+                sdf.box(mx - w * 0.5, my - m * 0.5, w, m, w * 0.5)
+                sdf.fill(ink)
+                return sdf.result
+            }
+        }
+
+        // The chosen-or-armed ring and the progress bar, OVER the picture.
+        // The ground is drawn before the picture and a picture cropped to
+        // fill covers it whole, border and all, so a well that is chosen,
+        // armed or loading could not say so once it had something in it.
+        draw_over +: {
+            selected: 0.0
+            accepting: 0.0
+            refusing: 0.0
+            disabled: 0.0
+            progress: -1.0
+
+            /** ring thickness in pixels 0..6 step 0.25 */
+            border_size: 1.0
+            /** how much thicker the ring goes for a loud state 0..6 step 0.25 */
+            border_lift: 1.5
+            /** corner rounding radius 0..24 step 0.5 */
+            border_radius: theme.corner_radius
+            /** thickness of the progress bar in pixels 2..12 step 1 */
+            bar_height: 4.0
+            /** clear space around the progress bar in pixels 0..32 step 1 */
+            bar_inset: 8.0
+
+            ring_color_selected: theme.color_primary
+            ring_color_accepting: theme.color_success
+            ring_color_refusing: theme.color_error
+            track_color: theme.color_surface_container_highest
+            track_color_disabled: theme.color_inset_disabled
+            mark_color: theme.color_primary
+            mark_color_disabled: theme.color_text_disabled
+
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                let loud = self.selected + self.accepting + self.refusing
+                if loud > 0.001 {
+                    // The same ring the ground draws, at the same width, so
+                    // the two cannot disagree about where the edge is.
+                    let edge = self.border_size + loud * self.border_lift
+                    let ink = self.ring_color_selected
+                        .mix(self.ring_color_accepting, self.accepting)
+                        .mix(self.ring_color_refusing, self.refusing)
+                    sdf.box(
+                        edge
+                        edge
+                        self.rect_size.x - edge * 2.
+                        self.rect_size.y - edge * 2.
+                        self.border_radius
+                    )
+                    sdf.stroke(vec4(ink.xyz, ink.w * min(loud, 1.0)), edge)
+                }
+                if self.progress >= 0.0 {
+                    let h = self.bar_height
+                    let x = self.bar_inset
+                    let w = self.rect_size.x - self.bar_inset * 2.
+                    let y = self.rect_size.y - self.bar_inset - h
+                    sdf.box(x, y, w, h, h * 0.5)
+                    sdf.fill(self.track_color.mix(self.track_color_disabled, self.disabled))
+                    // Never thinner than it is tall: a one percent load is a
+                    // dot, not a smear.
+                    let f = min(max(w * self.progress, h), w)
+                    sdf.box(x, y, f, h, h * 0.5)
+                    sdf.fill(self.mark_color.mix(self.mark_color_disabled, self.disabled))
+                }
                 return sdf.result
             }
         }
@@ -693,6 +839,63 @@ enum Look {
     Idle,
     Accepting,
     Refusing,
+}
+
+/// What a well shows: the drag while one is over it, and whatever the host
+/// asked for the rest of the time.
+///
+/// Two looks rather than one because they answer to different people. A drag
+/// is the platform talking and lasts exactly as long as the pointer is over
+/// the target. A host-set look outlives it — a well armed because a browse
+/// button was pressed, or refusing because the server turned the picture
+/// away — and one field would lose it, since a drag anywhere else in the
+/// window reports `NoHit` here and would wipe it back to idle.
+fn resolve_look(drag: Look, host: Look) -> Look {
+    if drag == Look::Idle {
+        host
+    } else {
+        drag
+    }
+}
+
+/// The look a host asked for, from its two flags. Refusing wins over
+/// accepting: it is the louder answer and the safer one to be wrong with.
+fn host_look(accepting: bool, refusing: bool) -> Look {
+    if refusing {
+        Look::Refusing
+    } else if accepting {
+        Look::Accepting
+    } else {
+        Look::Idle
+    }
+}
+
+/// Where the plus and the prompt go in an empty well: the plus's box, and
+/// the band the one line of prompt is centred in.
+///
+/// With no plus the band is the whole well, which is exactly where the
+/// prompt has always been drawn — turning the mark on is the only thing that
+/// moves anything. With one, the pair is treated as a single stack and
+/// centred together, so the plus lifts the words rather than landing on top
+/// of them.
+fn empty_face(rect: Rect, mark: Option<f64>, line: f64, gap: f64) -> (Option<Rect>, Rect) {
+    let Some(size) = mark else {
+        return (None, rect);
+    };
+    let line = line.max(0.0);
+    // No words, no gap, or the plus sits off centre with nothing under it.
+    let gap = if line > 0.0 { gap.max(0.0) } else { 0.0 };
+    let top = rect.pos.y + (rect.size.y - (size + gap + line)) * 0.5;
+    (
+        Some(Rect {
+            pos: dvec2(rect.pos.x + (rect.size.x - size) * 0.5, top),
+            size: dvec2(size, size),
+        }),
+        Rect {
+            pos: dvec2(rect.pos.x, top + size + gap),
+            size: dvec2(rect.size.x, line),
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1755,6 +1958,8 @@ pub struct DrawImageWell {
     #[live]
     refusing: f32,
     #[live]
+    selected: f32,
+    #[live]
     hover: f32,
     #[live]
     focus: f32,
@@ -1771,6 +1976,8 @@ pub struct DrawImageWell {
     #[live]
     color_hover: Vec4f,
     #[live]
+    color_selected: Vec4f,
+    #[live]
     color_accepting: Vec4f,
     #[live]
     color_refusing: Vec4f,
@@ -1779,6 +1986,8 @@ pub struct DrawImageWell {
     #[live]
     border_color: Vec4f,
     #[live]
+    border_color_selected: Vec4f,
+    #[live]
     border_color_focus: Vec4f,
     #[live]
     border_color_accepting: Vec4f,
@@ -1786,6 +1995,75 @@ pub struct DrawImageWell {
     border_color_refusing: Vec4f,
     #[live]
     border_color_disabled: Vec4f,
+}
+
+/// The engraved plus over an empty well's prompt. Its own layer because the
+/// ground quad is pushed before its rect is resolved, and the mark has to be
+/// placed against that rect.
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawAddMark {
+    #[deref]
+    draw_super: DrawQuad,
+    #[live]
+    hover: f32,
+    #[live]
+    disabled: f32,
+    #[live]
+    stroke: f32,
+    #[live]
+    engrave: f32,
+    #[live]
+    color: Vec4f,
+    #[live]
+    color_hover: Vec4f,
+    #[live]
+    color_disabled: Vec4f,
+    #[live]
+    color_engrave: Vec4f,
+}
+
+/// The chosen-or-armed ring and the progress bar, drawn over the picture.
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawWellOverlay {
+    #[deref]
+    draw_super: DrawQuad,
+    #[live]
+    selected: f32,
+    #[live]
+    accepting: f32,
+    #[live]
+    refusing: f32,
+    #[live]
+    disabled: f32,
+    /// Below zero draws no bar at all.
+    #[live]
+    progress: f32,
+    #[live]
+    border_size: f32,
+    #[live]
+    border_lift: f32,
+    #[live]
+    border_radius: f32,
+    #[live]
+    bar_height: f32,
+    #[live]
+    bar_inset: f32,
+    #[live]
+    ring_color_selected: Vec4f,
+    #[live]
+    ring_color_accepting: Vec4f,
+    #[live]
+    ring_color_refusing: Vec4f,
+    #[live]
+    track_color: Vec4f,
+    #[live]
+    track_color_disabled: Vec4f,
+    #[live]
+    mark_color: Vec4f,
+    #[live]
+    mark_color_disabled: Vec4f,
 }
 
 /// The disc behind the corner mark. Its own layer because it is drawn over
@@ -1830,6 +2108,10 @@ pub struct ImageWell {
     #[live]
     pub draw_bg: DrawImageWell,
     #[live]
+    draw_add: DrawAddMark,
+    #[live]
+    draw_over: DrawWellOverlay,
+    #[live]
     draw_clear: DrawClearMark,
     #[live]
     draw_text: DrawText,
@@ -1853,6 +2135,52 @@ pub struct ImageWell {
     /// What it will take. See [`FileFilter`].
     #[live]
     pub accept: String,
+    /// It would take a picture, said without a drag being over it.
+    ///
+    /// Wanted wherever the picture is coming from somewhere else — a browse
+    /// button, a paste, a pick in a list beside the well — which the
+    /// drag-only version of this state cannot serve at all, because it can
+    /// only be reached from inside a drag.
+    #[live]
+    pub accepting: bool,
+    /// It would not take one, and says so. For a refusal with an end to it,
+    /// see [`ImageWell::reject`].
+    #[live]
+    pub refusing: bool,
+    /// An engraved plus over the prompt while the well is empty.
+    ///
+    /// Wanted wherever the well is one of several, or is small enough that
+    /// the prompt has to be short: a plus in a square is the most
+    /// recognisable "put something here" mark there is, and a face carrying
+    /// nothing but a line of grey text does not read as a target at a
+    /// glance. Off by default, because a well that has always been words
+    /// alone must keep looking like one.
+    #[live]
+    pub add_mark: bool,
+    #[live(28.0)]
+    add_mark_size: f64,
+    #[live(6.0)]
+    add_mark_gap: f64,
+    /// Drawn as chosen: a ring, and a tinted face while it is empty.
+    ///
+    /// Wanted where several wells stand together and one of them is the one
+    /// being worked on — a gallery, a set of slots, a form with a picture
+    /// per row. The well never sets this itself, exactly as a list row does
+    /// not choose itself: which one is chosen is the host's to know.
+    #[live]
+    pub selected: bool,
+    /// How far a load into this well has got, 0..1. Below zero draws no bar,
+    /// which is where a well with nothing going on sits.
+    ///
+    /// The bar belongs on the well and not on a row beside it: the well is
+    /// where the picture went, and a bar somewhere else leaves the reader
+    /// matching the two up by eye.
+    #[live(-1.0)]
+    pub progress: f64,
+    /// Seconds a [`ImageWell::reject`] flash lasts before the well goes
+    /// quiet again.
+    #[live(0.7)]
+    pub reject_secs: f64,
     /// A mark in the corner that empties the well.
     #[live(true)]
     pub clearable: bool,
@@ -1866,8 +2194,13 @@ pub struct ImageWell {
     #[live]
     color_text_disabled: Vec4f,
 
+    /// What a drag over the well is saying, if there is one. The host's
+    /// half lives in `accepting`/`refusing`; see [`resolve_look`] for why
+    /// the two are kept apart.
     #[rust]
-    look: Look,
+    drag_look: Look,
+    #[rust]
+    reject_timer: Timer,
     #[rust]
     hovered: bool,
     #[rust]
@@ -1944,9 +2277,89 @@ impl ImageWell {
         }
     }
 
+    /// What the well is wearing: the drag while one is over it, else the
+    /// look the host asked for.
+    fn look(&self) -> Look {
+        resolve_look(self.drag_look, host_look(self.accepting, self.refusing))
+    }
+
+    /// Say it would take a picture; see [`ImageWell::accepting`].
+    pub fn set_accepting(&mut self, cx: &mut Cx, on: bool) {
+        if self.accepting != on {
+            self.accepting = on;
+            self.draw_bg.redraw(cx);
+        }
+    }
+
+    /// Hold the refusing look until something says otherwise, cancelling any
+    /// flash in flight.
+    pub fn set_refusing(&mut self, cx: &mut Cx, on: bool) {
+        self.stop_reject(cx);
+        if self.refusing != on {
+            self.refusing = on;
+            self.draw_bg.redraw(cx);
+        }
+    }
+
+    /// Flash the refusing look for `reject_secs`, then go quiet by itself.
+    ///
+    /// This is the answer to a picture the host turned away for a reason the
+    /// well cannot know — too large, the wrong shape, the server said no —
+    /// and it has to come from outside, because the well's own filter only
+    /// ever reads a name.
+    pub fn reject(&mut self, cx: &mut Cx) {
+        cx.stop_timer(self.reject_timer);
+        self.refusing = true;
+        self.reject_timer = if self.reject_secs > 0.0 {
+            cx.start_timeout(self.reject_secs)
+        } else {
+            Timer::empty()
+        };
+        self.draw_bg.redraw(cx);
+    }
+
+    pub fn selected(&self) -> bool {
+        self.selected
+    }
+
+    /// Draw the well as chosen.
+    pub fn set_selected(&mut self, cx: &mut Cx, selected: bool) {
+        if self.selected != selected {
+            self.selected = selected;
+            self.redraw(cx);
+        }
+    }
+
+    /// How far a load into this well has got, if one is running.
+    pub fn progress(&self) -> Option<f64> {
+        (self.progress >= 0.0).then(|| self.progress.clamp(0.0, 1.0))
+    }
+
+    /// Show a bar across the foot of the well, or `None` to take it away.
+    pub fn set_progress(&mut self, cx: &mut Cx, progress: Option<f64>) {
+        let v = progress.map(|p| p.clamp(0.0, 1.0)).unwrap_or(-1.0);
+        if self.progress != v {
+            self.progress = v;
+            self.redraw(cx);
+        }
+    }
+
+    /// Draw the engraved plus over the prompt while the well is empty.
+    pub fn set_add_mark(&mut self, cx: &mut Cx, on: bool) {
+        if self.add_mark != on {
+            self.add_mark = on;
+            self.redraw(cx);
+        }
+    }
+
+    fn stop_reject(&mut self, cx: &mut Cx) {
+        cx.stop_timer(self.reject_timer);
+        self.reject_timer = Timer::empty();
+    }
+
     fn set_look(&mut self, cx: &mut Cx, look: Look) {
-        if self.look != look {
-            self.look = look;
+        if self.drag_look != look {
+            self.drag_look = look;
             self.draw_bg.redraw(cx);
         }
     }
@@ -2002,7 +2415,11 @@ impl Widget for ImageWell {
     fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
         if self.disabled != disabled {
             self.disabled = disabled;
-            self.look = Look::Idle;
+            // Every look goes, the host's as well as the drag's: a well
+            // that is deaf must not go on saying it would take something.
+            self.drag_look = Look::Idle;
+            self.accepting = false;
+            self.refusing = false;
             self.picture.set_disabled(cx, disabled);
             self.redraw(cx);
         }
@@ -2014,6 +2431,14 @@ impl Widget for ImageWell {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.picture.handle_event(cx, event, scope);
+        // Before the disabled gate: a flash that was running when the well
+        // was switched off still has to end, or the well comes back refusing
+        // for no reason anyone can see.
+        if self.reject_timer.is_event(event).is_some() {
+            self.reject_timer = Timer::empty();
+            self.refusing = false;
+            self.draw_bg.redraw(cx);
+        }
         if self.disabled {
             return;
         }
@@ -2074,8 +2499,10 @@ impl Widget for ImageWell {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let showing = self.has_picture();
         let focused = cx.cx.cx.has_key_focus(self.draw_bg.area());
-        self.draw_bg.accepting = if self.look == Look::Accepting { 1.0 } else { 0.0 };
-        self.draw_bg.refusing = if self.look == Look::Refusing { 1.0 } else { 0.0 };
+        let look = self.look();
+        self.draw_bg.accepting = if look == Look::Accepting { 1.0 } else { 0.0 };
+        self.draw_bg.refusing = if look == Look::Refusing { 1.0 } else { 0.0 };
+        self.draw_bg.selected = if self.selected { 1.0 } else { 0.0 };
         self.draw_bg.hover = if self.hovered { 1.0 } else { 0.0 };
         self.draw_bg.focus = if focused { 1.0 } else { 0.0 };
         self.draw_bg.disabled = if self.disabled { 1.0 } else { 0.0 };
@@ -2104,23 +2531,51 @@ impl Widget for ImageWell {
             },
         );
 
-        if !showing && !self.text.is_empty() {
-            let text = self.text.clone();
+        if !showing {
+            // The plus and the prompt share the empty face, so where each
+            // one goes is worked out once, for both.
             let size = self.draw_text.text_style.font_size as f64;
-            let width = measure(&self.draw_text, cx, &text);
-            self.draw_text.color = if self.disabled {
-                self.color_text_disabled
-            } else {
-                self.color_text
-            };
-            self.draw_text.draw_abs(
-                cx,
-                dvec2(
-                    rect.pos.x + (rect.size.x - width) * 0.5,
-                    line_y(rect.pos.y, rect.size.y, size),
-                ),
-                &text,
+            let (mark_rect, band) = empty_face(
+                rect,
+                self.add_mark.then_some(self.add_mark_size),
+                if self.text.is_empty() { 0.0 } else { size },
+                self.add_mark_gap,
             );
+            if let Some(mark_rect) = mark_rect {
+                self.draw_add.hover = if self.hovered { 1.0 } else { 0.0 };
+                self.draw_add.disabled = if self.disabled { 1.0 } else { 0.0 };
+                self.draw_add.draw_abs(cx, mark_rect);
+            }
+            if !self.text.is_empty() {
+                let text = self.text.clone();
+                let width = measure(&self.draw_text, cx, &text);
+                self.draw_text.color = if self.disabled {
+                    self.color_text_disabled
+                } else {
+                    self.color_text
+                };
+                self.draw_text.draw_abs(
+                    cx,
+                    dvec2(
+                        rect.pos.x + (rect.size.x - width) * 0.5,
+                        line_y(band.pos.y, band.size.y, size),
+                    ),
+                    &text,
+                );
+            }
+        }
+
+        // Over the picture: the ring only when there is a picture hiding the
+        // ground's own, and the bar whenever there is one to draw.
+        let ring = showing && (self.selected || look != Look::Idle);
+        let bar = self.progress >= 0.0;
+        if ring || bar {
+            self.draw_over.selected = if ring && self.selected { 1.0 } else { 0.0 };
+            self.draw_over.accepting = if ring && look == Look::Accepting { 1.0 } else { 0.0 };
+            self.draw_over.refusing = if ring && look == Look::Refusing { 1.0 } else { 0.0 };
+            self.draw_over.disabled = if self.disabled { 1.0 } else { 0.0 };
+            self.draw_over.progress = if bar { self.progress as f32 } else { -1.0 };
+            self.draw_over.draw_abs(cx, rect);
         }
 
         if showing && self.clearable && !self.disabled {
@@ -2156,6 +2611,54 @@ impl Widget for ImageWell {
 impl ImageWellRef {
     pub fn has_picture(&self) -> bool {
         self.borrow().map(|inner| inner.has_picture()).unwrap_or(false)
+    }
+
+    /// Say it would take a picture; see [`ImageWell::set_accepting`].
+    pub fn set_accepting(&self, cx: &mut Cx, on: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_accepting(cx, on);
+        }
+    }
+
+    /// Hold the refusing look; see [`ImageWell::set_refusing`].
+    pub fn set_refusing(&self, cx: &mut Cx, on: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_refusing(cx, on);
+        }
+    }
+
+    /// Flash a refusal and go quiet again; see [`ImageWell::reject`].
+    pub fn reject(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.reject(cx);
+        }
+    }
+
+    pub fn selected(&self) -> bool {
+        self.borrow().map(|inner| inner.selected()).unwrap_or(false)
+    }
+
+    pub fn set_selected(&self, cx: &mut Cx, selected: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_selected(cx, selected);
+        }
+    }
+
+    pub fn progress(&self) -> Option<f64> {
+        self.borrow().and_then(|inner| inner.progress())
+    }
+
+    /// A bar across the foot of the well, or `None` for none.
+    pub fn set_progress(&self, cx: &mut Cx, progress: Option<f64>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_progress(cx, progress);
+        }
+    }
+
+    pub fn set_add_mark(&self, cx: &mut Cx, on: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_add_mark(cx, on);
+        }
     }
 
     pub fn show_file(&self, cx: &mut Cx, path: &str) -> bool {
@@ -2218,6 +2721,106 @@ impl ImageWellRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `script_mod!` block is invisible to the Rust compiler and a
+    /// shader that fails to compile is not an error anywhere — the draw is
+    /// simply skipped and the widget paints nothing. Building the well out
+    /// of its type default and reading the shader-error slot back turns
+    /// either into a failed build; the plus and the overlay ring are two
+    /// new shaders, so this is what covers them.
+    ///
+    /// It also pins the promise that matters most about the four new
+    /// states: every one of them defaults to exactly what the well did
+    /// before it had them.
+    #[test]
+    fn the_well_comes_out_of_the_dsl_with_every_new_state_off() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let well = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            // Registering type defaults compiles nothing; making an instance
+            // out of one does. Clearing here keeps any other module's
+            // complaint out of this test's answer.
+            let _ = crate::makepad_draw::makepad_platform::shader_error::take();
+            ImageWell::script_new_with_default(vm)
+        });
+        assert_eq!(
+            crate::makepad_draw::makepad_platform::shader_error::take(),
+            None,
+            "a draw shader failed to compile"
+        );
+        // Values only the DSL sets, so the block was really evaluated.
+        assert_eq!(well.accept, "image/*");
+        assert!(well.clearable);
+        // And the four new states, every one of them off.
+        assert!(!well.add_mark, "the empty face is words alone until asked");
+        assert!(!well.selected);
+        assert!(!well.accepting);
+        assert!(!well.refusing);
+        assert!(well.progress < 0.0, "no bar until a host asks for one");
+        assert!(well.progress().is_none());
+        // The numbers the new states draw with came through too.
+        assert_eq!(well.add_mark_size, 28.0);
+        assert_eq!(well.add_mark_gap, 6.0);
+        assert_eq!(well.reject_secs, 0.7);
+    }
+
+    /// Turning the plus on is the only thing that may move the prompt, so
+    /// with no plus the band it is centred in is still the whole well.
+    #[test]
+    fn a_well_with_no_plus_leaves_the_prompt_where_it_was() {
+        let rect = Rect { pos: dvec2(10.0, 20.0), size: dvec2(120.0, 140.0) };
+        let (mark, band) = empty_face(rect, None, 12.0, 6.0);
+        assert!(mark.is_none());
+        assert_eq!(band, rect);
+    }
+
+    #[test]
+    fn the_plus_and_the_prompt_are_centred_together() {
+        let rect = Rect { pos: dvec2(0.0, 0.0), size: dvec2(120.0, 120.0) };
+        let (mark, band) = empty_face(rect, Some(28.0), 12.0, 6.0);
+        let mark = mark.expect("a plus was asked for");
+        assert_eq!(mark.size, dvec2(28.0, 28.0));
+        // 28 + 6 + 12 = 46 tall, so the stack starts at (120 - 46) / 2 = 37.
+        assert_eq!(mark.pos.y, 37.0);
+        assert_eq!(mark.pos.x, 46.0, "and centred across");
+        assert_eq!(band.pos.y, 71.0);
+        assert_eq!(band.size.y, 12.0);
+        // As much room above the plus as below the words.
+        let above = mark.pos.y - rect.pos.y;
+        let below = rect.size.y - (band.pos.y + band.size.y);
+        assert!((above - below).abs() < 1e-9, "{above} vs {below}");
+    }
+
+    /// No words means no gap either, or the plus sits low with nothing
+    /// under it to balance against.
+    #[test]
+    fn a_plus_with_no_prompt_takes_the_middle() {
+        let rect = Rect { pos: dvec2(0.0, 0.0), size: dvec2(100.0, 100.0) };
+        let (mark, _) = empty_face(rect, Some(40.0), 0.0, 6.0);
+        assert_eq!(mark.unwrap().pos.y, 30.0);
+    }
+
+    /// Refusing is the louder answer, so it wins the moment both are set —
+    /// a well that is both armed and refusing must read as refusing.
+    #[test]
+    fn refusing_beats_accepting() {
+        assert_eq!(host_look(false, false), Look::Idle);
+        assert_eq!(host_look(true, false), Look::Accepting);
+        assert_eq!(host_look(false, true), Look::Refusing);
+        assert_eq!(host_look(true, true), Look::Refusing);
+    }
+
+    #[test]
+    fn a_drag_beats_the_look_the_host_asked_for() {
+        assert_eq!(resolve_look(Look::Idle, Look::Idle), Look::Idle);
+        // Nothing is being dragged: what the host armed is what shows.
+        assert_eq!(resolve_look(Look::Idle, Look::Accepting), Look::Accepting);
+        assert_eq!(resolve_look(Look::Idle, Look::Refusing), Look::Refusing);
+        // A drag is over it, so the platform's answer is the live one — and
+        // when it ends, the host's look is still underneath it.
+        assert_eq!(resolve_look(Look::Refusing, Look::Accepting), Look::Refusing);
+        assert_eq!(resolve_look(Look::Accepting, Look::Refusing), Look::Accepting);
+    }
 
     /// One unit per character, so the elision tests read as counts.
     fn per_char(s: &str) -> f64 {

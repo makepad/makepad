@@ -9,7 +9,7 @@
 //! ASKED things (is it showing, what does it say) and TOLD things (start,
 //! finish, fail) instead of being toggled through `visible`.
 //!
-//! The three faces are one shader with a `face` selector rather than three
+//! The four faces are one shader with a `face` selector rather than four
 //! widgets, so the status spinner and the overlay get all of them for free
 //! and a host can swap faces with a prop. The shader runs on the pass clock
 //! (`draw_pass.time`), the same idiom as the loading spinner, so nothing
@@ -39,6 +39,13 @@
 //! Optionally it puts a blurred glass pane over the content instead of a
 //! plain scrim; the pane's own spinner is a child of the pane because the
 //! glass composites above anything its parent draws after it.
+//!
+//! FAILED: the overlay can also say the load STOPPED. Without that a host
+//! whose load fails has one move — tear the overlay down and put something
+//! else in the hole — and in the meantime a scrim that stays up with an arc
+//! turning on it is a lie about what the machine is doing. `fail` morphs
+//! the arc into a cross through the status spinner that is already in this
+//! file, because a stopped mark must never be mistaken for a slow one.
 
 use crate::{
     button::*,
@@ -60,6 +67,10 @@ pub enum SpinnerFace {
     Dots,
     /// Five bars rising in a wave.
     Bars,
+    /// A bright head leading a tail that fades away round the ring. Wanted
+    /// where the mark is the only thing moving on the screen — a splash, a
+    /// full-window overlay — and the arc's breathing gap reads as a stutter.
+    Comet,
 }
 
 impl SpinnerFace {
@@ -68,6 +79,7 @@ impl SpinnerFace {
             SpinnerFace::Arc => 0.0,
             SpinnerFace::Dots => 1.0,
             SpinnerFace::Bars => 2.0,
+            SpinnerFace::Comet => 3.0,
         }
     }
 }
@@ -223,7 +235,7 @@ script_mod! {
                     sdf.fill(vec4(ink.xyz, ink.w * p3 * spin))
                 }
             }
-            if self.face > 1.5 {
+            if self.face > 1.5 && self.face < 2.5 {
                 // Five bars, equal to their gaps, rising in a wave.
                 let bw = (self.rect_size.x - inset * 2.0) / 9.0
                 let x0 = inset
@@ -245,6 +257,32 @@ script_mod! {
                 let h4 = h * self.bar_height(4.0, w)
                 sdf.box(x0 + bw * 8.0, center.y - h4 * 0.5, bw, h4, bw * 0.5)
                 sdf.fill(bar)
+            }
+            if self.face > 2.5 {
+                // A comet: one bright head dragging a tail that fades out
+                // behind it. The tail is worked out per pixel rather than
+                // stamped as a row of dots, so it stays smooth at any size.
+                let d = self.pos * self.rect_size - center
+                // PHASE MINUS ANGLE, and not the other way round. The bright
+                // end has to be the LEADING one; swap the two and the tail
+                // sits in FRONT of the head, and the whole mark reads as a
+                // spinner turning backwards.
+                let sweep = fract(t - atan2(d.y, d.x) / TAU)
+                let tail = pow(1.0 - sweep, 2.2)
+                if self.track_alpha > 0.0 {
+                    sdf.circle(center.x, center.y, radius)
+                    sdf.stroke(vec4(ink.xyz, ink.w * self.track_alpha * spin), stroke * 0.5)
+                }
+                // Half the width, like the track above: `stroke` is the ink
+                // the arc face lays down, and `sdf.stroke` spreads its
+                // argument either side of the line.
+                sdf.circle(center.x, center.y, radius)
+                sdf.stroke(vec4(ink.xyz, ink.w * tail * spin), stroke * 0.5)
+                // The head itself, so the leading end is a round cap rather
+                // than the flat cut the falloff alone would leave there.
+                let head = t * TAU
+                sdf.circle(center.x + cos(head) * radius, center.y + sin(head) * radius, stroke * 0.5)
+                sdf.fill(vec4(ink.xyz, ink.w * spin))
             }
             if self.morph > 0.001 {
                 // The closed ring the mark sits in, then the mark itself.
@@ -306,6 +344,8 @@ script_mod! {
         contained: false
         /** a word beside the mark */
         text: ""
+        /** drawn at all; false takes no room either 0..1 step 1 */
+        visible: true
         /** dimmed 0..1 step 1 */
         disabled: false
         draw_text +: {
@@ -322,6 +362,11 @@ script_mod! {
     /** Five bars rising in a wave. */
     mod.widgets.SpinnerBars = mod.widgets.SpinnerFlat{
         face: mod.widgets.SpinnerFace.Bars
+    }
+
+    /** A bright head leading a tail that fades away round the ring. */
+    mod.widgets.SpinnerComet = mod.widgets.SpinnerFlat{
+        face: mod.widgets.SpinnerFace.Comet
     }
 
     /** The arc on a rounded container, for sitting over content. */
@@ -353,6 +398,8 @@ script_mod! {
         text_finished: ""
         /** the word once failed; empty keeps `text` */
         text_error: ""
+        /** drawn at all; false takes no room either 0..1 step 1 */
+        visible: true
         /** dimmed 0..1 step 1 */
         disabled: false
         draw_text +: {
@@ -401,7 +448,8 @@ script_mod! {
     mod.widgets.LoadingOverlayBase = #(LoadingOverlay::register_widget(vm))
     /** Wraps content; while `active` it dims the content, blocks the
      * pointer over it and centres a spinner on it, optionally through a
-     * blurred glass pane. */
+     * blurred glass pane. `failed` swaps the spinner for a cross so the
+     * same overlay can report that the load stopped. */
     mod.widgets.LoadingOverlay = set_type_default() do mod.widgets.LoadingOverlayBase{
         width: Fill
         height: Fill
@@ -415,8 +463,19 @@ script_mod! {
         blur: false
         /** the word under the spinner */
         text: ""
+        /** the load stopped: the arc becomes a cross and stays 0..1 step 1 */
+        failed: false
+        /** the word once it has failed; empty keeps `text` */
+        text_failed: ""
         spinner: mod.widgets.SpinnerFlat{
             size: 28.0
+        }
+        // The failure face is a whole StatusSpinner rather than a second
+        // shader: the arc-to-cross morph, its easing and its ink all already
+        // live on that widget, and this is what it was written for.
+        mark: mod.widgets.StatusSpinner{
+            size: 28.0
+            auto_reset_secs: 0.0
         }
         glass: GaussRoundedView{
             width: Fill
@@ -430,6 +489,14 @@ script_mod! {
             }
             spinner := mod.widgets.SpinnerFlat{
                 size: 28.0
+            }
+            // A child of the pane for the same reason the spinner is: the
+            // glass composites above anything its parent draws after it, so
+            // a cross drawn by the overlay would be painted straight out.
+            mark := mod.widgets.StatusSpinner{
+                visible: false
+                size: 28.0
+                auto_reset_secs: 0.0
             }
         }
     }
@@ -476,6 +543,32 @@ fn delayed_alpha(now: f64, shown_since: f64, delay_secs: f64, fade_secs: f64) ->
     } else {
         (t / fade_secs).clamp(0.0, 1.0)
     }
+}
+
+/// How bright the comet face is at `angle_turns` when its head is at
+/// `phase_turns`, both counted in whole turns: 1 at the head, falling away
+/// round the ring behind it.
+///
+/// PHASE MINUS ANGLE, and never the other way round. The bright end has to
+/// be the LEADING one; swap the two and the tail sits in front of the head
+/// and the mark reads as a spinner turning backwards. That is the one
+/// hard-won detail about drawing a comet, so it is written down here as
+/// well as in the shader, in a form that can be checked without a window.
+pub fn comet_tail(phase_turns: f64, angle_turns: f64) -> f64 {
+    let sweep = (phase_turns - angle_turns).rem_euclid(1.0);
+    (1.0 - sweep).powf(2.2)
+}
+
+/// Whether `set_active(active)` is a real flip and should restart the fade.
+///
+/// It has to say no while the overlay is already where it is being put, or a
+/// host calling `set_active(cx, true)` on every draw would restart the delay
+/// every frame and the overlay would never appear at all. The price is that
+/// a RECYCLED row is told "no change" too: its previous occupant left the
+/// overlay up, the new one is loading as well, and nothing in the flip says
+/// the row changed hands. That is what [`LoadingOverlay::restart`] is for.
+fn flip_restarts(applied: bool, alpha: f64, active: bool) -> bool {
+    applied != active || (alpha > 0.0) != active
 }
 
 /// The loading overlay's alpha at `now`, and whether it is still moving.
@@ -556,6 +649,11 @@ pub struct Spinner {
     pub fade_secs: f64,
     #[live]
     pub contained: bool,
+    /// Drawn at all. A hidden spinner takes no room either, so a host can
+    /// swap it for another mark in the same slot without the layout moving.
+    #[live(true)]
+    #[visible]
+    pub visible: bool,
     #[live]
     pub disabled: bool,
     /// When it first drew, for the delay. `None` until then and again
@@ -616,6 +714,9 @@ impl Spinner {
 
 impl Widget for Spinner {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        if !self.visible {
+            return DrawStep::done();
+        }
         let now = cx.seconds_since_app_start();
         let (alpha, settled) = self.alpha_now(now);
         self.alpha = alpha;
@@ -752,8 +853,15 @@ pub struct StatusSpinner {
     pub auto_reset_secs: f64,
     #[live]
     pub morph_secs: f64,
+    /// Drawn at all. A hidden mark takes no room either.
+    #[live(true)]
+    #[visible]
+    pub visible: bool,
     #[live]
     pub disabled: bool,
+    /// An extra multiplier a host (the loading overlay) fades with.
+    #[rust(1.0)]
+    opacity: f64,
     /// The status the transitions were last run for; a script apply that
     /// changes `status` behind the setter's back is caught at draw time.
     #[rust]
@@ -793,6 +901,10 @@ impl StatusSpinner {
 
     pub fn status(&self) -> SpinnerStatus {
         self.status
+    }
+
+    fn set_opacity(&mut self, opacity: f64) {
+        self.opacity = opacity.clamp(0.0, 1.0);
     }
 
     /// Move to `status`. Finished and Error morph the arc into their mark
@@ -844,6 +956,9 @@ impl StatusSpinner {
 
 impl Widget for StatusSpinner {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        if !self.visible {
+            return DrawStep::done();
+        }
         if self.status != self.applied {
             let status = self.status;
             self.set_status(cx, status);
@@ -856,6 +971,7 @@ impl Widget for StatusSpinner {
             SpinnerStatus::Finished => (FACE_STATUS_FINISHED, 1.0),
             SpinnerStatus::Error => (FACE_STATUS_ERROR, 1.0),
         };
+        let alpha = alpha * self.opacity as f32;
         self.draw_bg.face = SpinnerFace::Arc.index();
         self.draw_bg.alpha = if self.disabled { alpha * 0.5 } else { alpha };
         self.draw_bg.status = face_status;
@@ -863,7 +979,7 @@ impl Widget for StatusSpinner {
         self.draw_bg.contained = 0.0;
         self.draw_bg.draw_walk(cx, Walk::fixed(s, s));
         let label = self.label_text();
-        if !label.is_empty() {
+        if !label.is_empty() && alpha > 0.0 {
             self.draw_text
                 .draw_walk(cx, Walk::fit(), Align { x: 0.0, y: 0.5 }, &label);
         }
@@ -1146,12 +1262,20 @@ pub struct LoadingOverlay {
     draw_scrim: DrawLoadingScrim,
     #[live]
     spinner: Spinner,
+    /// The face it wears once the load has failed: a status spinner, whose
+    /// arc-to-cross morph is the thing being borrowed.
+    #[live]
+    mark: StatusSpinner,
     #[live]
     glass: GaussRoundedView,
     #[live]
     pub text: String,
     #[live]
+    pub text_failed: String,
+    #[live]
     pub active: bool,
+    #[live]
+    pub failed: bool,
     #[live]
     pub delay_secs: f64,
     #[live]
@@ -1161,6 +1285,10 @@ pub struct LoadingOverlay {
     /// The `active` the fade was last started for.
     #[rust]
     applied_active: bool,
+    /// The `failed` the faces were last swapped for; a script apply that
+    /// writes the field behind the setter's back is caught at draw time.
+    #[rust]
+    applied_failed: bool,
     /// The scrim's alpha on screen.
     #[rust]
     alpha: f64,
@@ -1178,11 +1306,20 @@ impl LoadingOverlay {
         self.active
     }
 
+    pub fn has_failed(&self) -> bool {
+        self.failed
+    }
+
     /// Turn the overlay on or off. On: the scrim waits out `delay_secs`
-    /// and fades in. Off: it fades out from wherever it was.
+    /// and fades in. Off: it fades out from wherever it was, and a failure
+    /// it was reporting goes with it — a failure belongs to the load that
+    /// failed, and the next one starts clean.
     pub fn set_active(&mut self, cx: &mut Cx, active: bool) {
         self.active = active;
-        if self.applied_active == active && (self.alpha > 0.0) == active {
+        if !active && self.failed {
+            self.set_failed(cx, false);
+        }
+        if !flip_restarts(self.applied_active, self.alpha, active) {
             return;
         }
         self.applied_active = active;
@@ -1207,10 +1344,83 @@ impl LoadingOverlay {
         )
     }
 
+    /// Say the load STOPPED: the arc closes into a ring and a cross fades
+    /// into it, and there it stays.
+    ///
+    /// This is the state a busy overlay is usually missing, and the reason
+    /// to want it is that without one a host has to tear the overlay down
+    /// and put something else in the hole, while a scrim that stays up with
+    /// an arc still turning on it says the machine is working when it has
+    /// stopped. A stopped mark must never be mistaken for a slow one.
+    pub fn fail(&mut self, cx: &mut Cx) {
+        self.set_failed(cx, true);
+    }
+
+    /// Whether the overlay is reporting a failure. Turning it on also turns
+    /// the overlay on, because there is nothing to report it against
+    /// otherwise.
+    pub fn set_failed(&mut self, cx: &mut Cx, failed: bool) {
+        if self.applied_failed == failed {
+            self.failed = failed;
+            return;
+        }
+        self.applied_failed = failed;
+        self.failed = failed;
+        if failed {
+            self.set_active(cx, true);
+        }
+        let status = if failed {
+            SpinnerStatus::Error
+        } else {
+            SpinnerStatus::Inactive
+        };
+        self.mark.set_status(cx, status);
+        // The blurred pane keeps its own pair, because anything the overlay
+        // draws after the glass is composited out by it.
+        self.glass.widget(cx, ids!(spinner)).set_visible(cx, !failed);
+        let glass_mark = self.glass.widget(cx, ids!(mark));
+        glass_mark.set_visible(cx, failed);
+        glass_mark.as_status_spinner().set_status(cx, status);
+        self.push_text(cx);
+        self.redraw(cx);
+    }
+
+    /// Arm the overlay again as if it had never been up: the fade starts
+    /// from nothing, the delay runs in full and a failure is cleared.
+    ///
+    /// A recycled list row is what this is for. Such a row keeps its widgets
+    /// and only swaps what they show, so the overlay the PREVIOUS row left
+    /// up is the overlay the new row starts with — and `set_active(cx,
+    /// true)` on a row that is already active is not a flip, so the new row
+    /// silently inherits the old one's finished fade and its own delay never
+    /// runs. Call this when a row is re-seated.
+    pub fn restart(&mut self, cx: &mut Cx) {
+        self.alpha = 0.0;
+        self.alpha_at_flip = 0.0;
+        self.applied_active = !self.active;
+        self.set_failed(cx, false);
+        self.spinner.restart(cx);
+        let active = self.active;
+        self.set_active(cx, active);
+    }
+
+    /// The word under the mark: the failure word once it has failed, and
+    /// `text` whenever that is empty, so a host that only wants one word
+    /// writes one.
+    fn word(&self) -> String {
+        if self.failed && !self.text_failed.is_empty() {
+            self.text_failed.clone()
+        } else {
+            self.text.clone()
+        }
+    }
+
     fn push_text(&mut self, cx: &mut Cx) {
-        let text = self.text.clone();
+        let text = self.word();
         self.spinner.set_text(cx, &text);
+        self.mark.set_text(cx, &text);
         self.glass.widget(cx, ids!(spinner)).set_text(cx, &text);
+        self.glass.widget(cx, ids!(mark)).set_text(cx, &text);
     }
 }
 
@@ -1220,6 +1430,10 @@ impl Widget for LoadingOverlay {
             // A script apply flipped `active` behind the setter's back.
             let active = self.active;
             self.set_active(cx, active);
+        }
+        if self.failed != self.applied_failed {
+            let failed = self.failed;
+            self.set_failed(cx, failed);
         }
         let step = self.view.draw_walk(cx, scope, walk);
         if step.is_step() {
@@ -1240,6 +1454,7 @@ impl Widget for LoadingOverlay {
             );
         } else {
             self.spinner.set_opacity(self.alpha);
+            self.mark.set_opacity(self.alpha);
             cx.begin_turtle(
                 Walk::fixed(rect.size.x, rect.size.y).with_abs_pos(rect.pos),
                 Layout {
@@ -1247,7 +1462,11 @@ impl Widget for LoadingOverlay {
                     ..Layout::flow_down()
                 },
             );
-            let _ = self.spinner.draw_walk(cx, scope, Walk::fit());
+            if self.failed {
+                let _ = self.mark.draw_walk(cx, scope, Walk::fit());
+            } else {
+                let _ = self.spinner.draw_walk(cx, scope, Walk::fit());
+            }
             cx.end_turtle();
         }
         DrawStep::done()
@@ -1287,8 +1506,10 @@ impl Widget for LoadingOverlay {
                 self.glass.handle_event(cx, event, scope);
             }
         }
-        // The spinner pumps its own fade frames; it needs its events.
+        // The spinner pumps its own fade frames and the mark its own morph
+        // frames; both need their events.
         self.spinner.handle_event(cx, event, scope);
+        self.mark.handle_event(cx, event, scope);
         self.view.handle_event(cx, event, scope);
     }
 
@@ -1304,14 +1525,18 @@ impl Widget for LoadingOverlay {
         }
     }
 
-    /// "active" or "idle" plus the scrim's alpha, so a test can wait for
-    /// the overlay to be up (or gone) rather than for a frame count.
+    /// "active", "failed" or "idle" plus the scrim's alpha, so a test can
+    /// wait for the overlay to be up, to have given up, or to be gone,
+    /// rather than for a frame count.
     fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(format!(
-            "{} {:.2}",
-            if self.active { "active" } else { "idle" },
-            self.alpha
-        ))
+        let state = if self.failed {
+            "failed"
+        } else if self.active {
+            "active"
+        } else {
+            "idle"
+        };
+        Some(format!("{} {:.2}", state, self.alpha))
     }
 }
 
@@ -1323,6 +1548,31 @@ impl LoadingOverlayRef {
     pub fn set_active(&self, cx: &mut Cx, active: bool) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_active(cx, active);
+        }
+    }
+
+    pub fn has_failed(&self) -> bool {
+        self.borrow().map(|inner| inner.has_failed()).unwrap_or(false)
+    }
+
+    /// The load stopped; say so without taking the overlay down.
+    pub fn fail(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.fail(cx);
+        }
+    }
+
+    pub fn set_failed(&self, cx: &mut Cx, failed: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_failed(cx, failed);
+        }
+    }
+
+    /// Call when a recycled row is re-seated; see
+    /// [`LoadingOverlay::restart`].
+    pub fn restart(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.restart(cx);
         }
     }
 }
@@ -1373,6 +1623,82 @@ mod tests {
             announced[0]
         );
         assert!(!glass_arrives(false, 0.0, 1.0), "a plain scrim has no glass to announce");
+    }
+
+    /// The `script_mod!` block is invisible to the Rust compiler: a mistake
+    /// in it shows up only in a running app's log, and a shader that fails
+    /// to compile is not an error anywhere — the draw is simply skipped and
+    /// the widget paints nothing. Building one of each out of its type
+    /// default and reading the shader-error slot back is what turns either
+    /// into a failed build. The comet is a new arm of the spinner shader
+    /// and the failure face a new slot on the overlay, so both are here.
+    #[test]
+    fn the_spinners_and_the_overlay_come_out_of_the_dsl_and_compile() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (spinner, overlay) = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            // Registering type defaults compiles nothing; making an instance
+            // out of one does. Clearing here keeps any other module's
+            // complaint out of this test's answer.
+            let _ = crate::makepad_draw::makepad_platform::shader_error::take();
+            (
+                Spinner::script_new_with_default(vm),
+                LoadingOverlay::script_new_with_default(vm),
+            )
+        });
+        assert_eq!(
+            crate::makepad_draw::makepad_platform::shader_error::take(),
+            None,
+            "a draw shader failed to compile"
+        );
+        // Values only the DSL sets, so the block was really evaluated.
+        assert_eq!(spinner.size, 24.0);
+        assert_eq!(spinner.face, SpinnerFace::Arc);
+        // Everything new defaults to what these did before they had it.
+        assert!(spinner.visible, "a spinner still draws unless it is told not to");
+        assert!(!overlay.active);
+        assert!(!overlay.failed, "an overlay does not start out having given up");
+        assert!(overlay.text_failed.is_empty(), "and falls back to `text`");
+        // The failure face came through its slot, and is quiet.
+        assert_eq!(overlay.mark.size, 28.0);
+        assert_eq!(overlay.mark.auto_reset_secs, 0.0, "a failure does not time out");
+        assert_eq!(overlay.mark.status, SpinnerStatus::Inactive);
+    }
+
+    /// The head is the BRIGHT end and it leads. A point just behind it is
+    /// nearly as bright; the same distance in front of it is nearly dark.
+    /// Get these two the wrong way round and the mark turns backwards.
+    #[test]
+    fn the_comets_head_leads_its_tail() {
+        let head = 0.25;
+        assert!((comet_tail(head, head) - 1.0).abs() < 1e-9, "brightest at the head");
+        let behind = comet_tail(head, head - 0.05);
+        let ahead = comet_tail(head, head + 0.05);
+        assert!(behind > ahead, "behind {behind}, ahead {ahead}");
+        assert!(behind > 0.8, "just behind the head is still bright: {behind}");
+        assert!(ahead < 0.05, "just in front of it is dark: {ahead}");
+        // All the way round is the head again, with no seam.
+        assert!((comet_tail(head, head - 1.0) - 1.0).abs() < 1e-9);
+        // And it never leaves 0..1, whatever turn the phase is on.
+        for step in 0..64 {
+            let a = step as f64 / 64.0;
+            let v = comet_tail(7.5, a);
+            assert!((0.0..=1.0).contains(&v), "{a} -> {v}");
+        }
+    }
+
+    /// The trap `LoadingOverlay::restart` exists for: a recycled row whose
+    /// previous occupant left the overlay up is told, correctly by this
+    /// rule and wrongly for the row, that nothing changed.
+    #[test]
+    fn a_repeated_set_active_does_not_restart_the_fade() {
+        assert!(flip_restarts(false, 0.0, true), "off to on is a flip");
+        assert!(flip_restarts(true, 1.0, false), "on to off is a flip");
+        assert!(!flip_restarts(true, 1.0, true), "on while already on is not");
+        assert!(!flip_restarts(false, 0.0, false), "off while already off is not");
+        // Mid fade-out, and asked for on again: the alpha has not reached
+        // zero, so the flip is taken and the fade runs on from where it is.
+        assert!(flip_restarts(false, 0.4, true));
     }
 
     #[test]
