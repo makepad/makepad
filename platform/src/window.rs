@@ -236,7 +236,7 @@ impl CxWindowPool {
         test,
         target_os = "macos",
         target_os = "windows",
-        all(target_os = "linux", not(linux_direct)),
+        target_os = "linux",
         gpusim,
     ))]
     pub(crate) fn stdin_apply_native_geom(

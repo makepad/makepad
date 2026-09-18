@@ -11,8 +11,8 @@ use {
         //    Rect
         //},
         event::{
-            KeyCode, KeyEvent, KeyModifiers, ScrollPhase, TextClipboardEvent, TextInputEvent,
-            TimerEvent,
+            KeyCode, KeyEvent, KeyModifiers, PinchPhase, ScrollPhase, TextClipboardEvent,
+            TextInputEvent, TimerEvent,
         },
         macos_menu::MacosMenu,
         makepad_live_id::*,
@@ -853,26 +853,9 @@ impl MacosApp {
             NSEventType::NSMouseEntered => {}
             NSEventType::NSMouseExited => {}
             NSEventType::NSScrollWheel => {
-                let window: ObjcId = msg_send![ns_event, window];
-                if window == nil {
+                let Some(cocoa_window) = Self::window_of_ns_event(ns_event) else {
                     return;
-                }
-                let window_delegate: ObjcId = msg_send![window, delegate];
-                if window_delegate == nil {
-                    return;
-                }
-                // Foreign windows land in this event loop too (the macOS
-                // screen-capture overlay's TUINSWindow among them) and their
-                // delegates don't carry our ivar — skip them, don't panic.
-                if (*window_delegate)
-                    .class()
-                    .instance_variable("macos_window_ptr")
-                    .is_none()
-                {
-                    return;
-                }
-                let ptr: *mut c_void = *(*window_delegate).get_ivar("macos_window_ptr");
-                let cocoa_window = &mut *(ptr as *mut MacosWindow);
+                };
                 let dx: f64 = msg_send![ns_event, scrollingDeltaX];
                 let dy: f64 = msg_send![ns_event, scrollingDeltaY];
                 let has_prec: BOOL = msg_send![ns_event, hasPreciseScrollingDeltas];
@@ -921,9 +904,55 @@ impl MacosApp {
                     );
                 };
             }
+            NSEventType::NSEventTypeMagnify => {
+                let Some(cocoa_window) = Self::window_of_ns_event(ns_event) else {
+                    return;
+                };
+                // `magnification` is the change since the previous magnify
+                // event (0 on the first); the phase bits are the NSEventPhase
+                // mask the scroll wheel decodes above. A cancelled gesture
+                // ends like a lifted one: the zoom stays where it got.
+                let magnification: f64 = msg_send![ns_event, magnification];
+                let phase_bits: u64 = msg_send![ns_event, phase];
+                let phase = if phase_bits & ((1 << 0) | (1 << 5)) != 0 {
+                    PinchPhase::Begin
+                } else if phase_bits & ((1 << 3) | (1 << 4)) != 0 {
+                    PinchPhase::End
+                } else {
+                    PinchPhase::Update
+                };
+                cocoa_window.send_pinch(
+                    1.0 + magnification,
+                    phase,
+                    get_event_key_modifier(ns_event),
+                );
+            }
             NSEventType::NSEventTypePressure => {}
             _ => (),
         }
+    }
+
+    /// The `MacosWindow` behind an NSEvent's window. Foreign windows land in
+    /// this event loop too (the macOS screen-capture overlay's TUINSWindow
+    /// among them) and their delegates don't carry our ivar: None, no panic.
+    unsafe fn window_of_ns_event(ns_event: ObjcId) -> Option<&'static mut MacosWindow> {
+        let window: ObjcId = msg_send![ns_event, window];
+        if window == nil {
+            return None;
+        }
+        let window_delegate: ObjcId = msg_send![window, delegate];
+        if window_delegate == nil {
+            return None;
+        }
+        if (*window_delegate)
+            .class()
+            .instance_variable("macos_window_ptr")
+            .is_none()
+        {
+            return None;
+        }
+        let ptr: *mut c_void = *(*window_delegate).get_ivar("macos_window_ptr");
+        Some(&mut *(ptr as *mut MacosWindow))
     }
 
     pub fn event_loop() {

@@ -749,3 +749,11 @@ pub struct ToWasmVideoPlaybackResourcesReleased {
     pub video_id_lo: u32,
     pub video_id_hi: u32,
 }
+
+/// A retained instance buffer's segment update could not be applied on the
+/// GPU side (the buffer was lost or too small); the app re-uploads it whole
+/// from its CPU segments.
+#[derive(ToWasm)]
+pub struct ToWasmRetainedUploadFailed {
+    pub buffer_id: usize,
+}
