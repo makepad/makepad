@@ -160,7 +160,8 @@ impl Cx {
         }
     }
 
-    #[cfg(not(use_vulkan))]
+    /// Also reachable in a Vulkan-capable build that fell back to OpenGL.
+    #[cfg(any(not(use_vulkan), all(target_os = "linux", not(linux_direct))))]
     pub fn upload_presentable_image_software_buffer(
         &mut self,
         texture: &Texture,

@@ -36,6 +36,10 @@ pub struct OpenglCx {
     pub make_current_error_logged: Cell<bool>,
     /// Once-per-outage latch for `eglSwapBuffers` failures.
     pub swap_error_logged: Cell<bool>,
+    /// Time spent inside `eglSwapBuffers` since the Wayland paint cycle last
+    /// cleared it. A driver may throttle there even at swap interval 0 (NVIDIA
+    /// does); the frame pacer subtracts that wait from a cycle's CPU cost.
+    pub swap_wait: Cell<std::time::Duration>,
 }
 
 /// `EGL_CONTEXT_LOST`. EGL reports this when the context and every GL object made from it
@@ -255,6 +259,7 @@ impl OpenglCx {
             swap_interval,
             make_current_error_logged: Cell::new(false),
             swap_error_logged: Cell::new(false),
+            swap_wait: Cell::new(std::time::Duration::ZERO),
         }
     }
 
@@ -351,7 +356,7 @@ impl Cx {
         pix_height: f64,
     ) -> bool {
         let draw_list_id = self.passes[draw_pass_id].main_draw_list_id.unwrap();
-
+        let frame_started = std::time::Instant::now();
         unsafe {
             let gl = self.os.gl();
             let opengl_cx = self.os.opengl_cx.as_ref().unwrap();
@@ -366,8 +371,10 @@ impl Cx {
             }
             (gl.glViewport)(0, 0, pix_width.floor() as i32, pix_height.floor() as i32);
         }
+        let bound = std::time::Instant::now();
 
         self.setup_render_pass(draw_pass_id, false);
+        let setup_done = std::time::Instant::now();
 
         self.passes[draw_pass_id].paint_dirty = false;
 
@@ -465,7 +472,11 @@ impl Cx {
 
         // Studio screenshot readback: read framebuffer pixels before swap.
         let capture_window_id = self.get_pass_window_id(draw_pass_id).map(|w| w.id());
-        let request_ids = self.take_studio_screenshot_request_ids(0);
+        // Targeted at this pass's window: a `--remote` `/g?w=N` grab records the
+        // window it asked for, and an untargeted take (`None`) never matches one,
+        // so every remote grab on the OpenGL backend used to time out. Studio and
+        // file-sink requests carry no window and still match any pass.
+        let request_ids = self.take_studio_screenshot_request_ids_for_window(0, capture_window_id);
         // A continuous capture sink (the ScreenCap recorder) is standing
         // permission rather than a queued request, so it is asked separately.
         let wants_capture = crate::screen_capture::capture_wants_window(capture_window_id);
@@ -533,10 +544,14 @@ impl Cx {
 
         unsafe {
             let opengl_cx = self.os.opengl_cx.as_ref().unwrap();
+            let render_done = std::time::Instant::now();
             let swap_ok = {
                 let _phase = crate::thread::ui_phase(crate::thread::UiPhase::GpuWait);
                 (opengl_cx.libegl.eglSwapBuffers.unwrap())(opengl_cx.egl_display, egl_surface)
             };
+            opengl_cx
+                .swap_wait
+                .set(opengl_cx.swap_wait.get() + render_done.elapsed());
             if swap_ok == 0 {
                 // `eglGetError` is called outside the latch: it clears EGL's per-thread
                 // error, and skipping it would leak a stale code into the next report.
@@ -556,6 +571,16 @@ impl Cx {
                 }
             } else {
                 opengl_cx.swap_error_logged.set(false);
+                crate::trace!(
+                    "gpu.present",
+                    "present time={:.6} backend=gl render_ms={:.3} swap_ms={:.3} bind_ms={:.3} setup_ms={:.3} draw_ms={:.3}",
+                    crate::cx_api::CxOsApi::seconds_since_app_start(self),
+                    render_done.duration_since(frame_started).as_secs_f64() * 1000.0,
+                    render_done.elapsed().as_secs_f64() * 1000.0,
+                    bound.duration_since(frame_started).as_secs_f64() * 1000.0,
+                    setup_done.duration_since(bound).as_secs_f64() * 1000.0,
+                    render_done.duration_since(setup_done).as_secs_f64() * 1000.0
+                );
             }
             swap_ok != 0
         }

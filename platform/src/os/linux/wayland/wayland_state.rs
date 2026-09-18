@@ -426,7 +426,18 @@ pub(crate) struct WaylandState {
     /// yet. While a window is listed here the compositor is not ready for a new frame
     /// on that surface, so presenting it is skipped (its pass stays dirty). See the
     /// frame-callback pacing in `linux_wayland.rs`.
-    frame_callbacks_pending: Vec<WindowId>,
+    frame_callbacks_pending: Vec<(WindowId, usize)>,
+    /// Decides how many presents may await their `wl_surface::frame` callback
+    /// before a window's next present is held back; see `frame_pacer.rs`.
+    pub(crate) frame_pacer: super::frame_pacer::FramePacer,
+    /// The compositor advertises `wp_fifo_manager_v1`, so a FIFO swapchain
+    /// queues a present behind the previous one instead of blocking on it.
+    pub(crate) has_fifo_v1: bool,
+    /// Windows presented since the Paint arm last cleared this.
+    pub(crate) presents_this_cycle: usize,
+    /// When every surface became held back by the compositor (see the Paint
+    /// arm in `linux_wayland.rs`); `None` while at least one can present.
+    pub(crate) frame_gate_since: Option<std::time::Instant>,
     pub(crate) event_flow: EventFlow,
     pub(crate) event_loop_running: bool,
 
@@ -500,6 +511,10 @@ impl WaylandState {
             scroll_gesture_active: false,
             scroll_stopped: false,
             frame_callbacks_pending: Vec::new(),
+            frame_pacer: super::frame_pacer::FramePacer::new(),
+            has_fifo_v1: false,
+            presents_this_cycle: 0,
+            frame_gate_since: None,
             event_flow: EventFlow::Wait,
             event_loop_running: true,
             key_repeat_rate: 25,
@@ -741,6 +756,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for WaylandState {
                     let shm = wl_registry.bind::<wl_shm::WlShm, _, _>(name, 1, qhandle, ());
                     state.shm = Some(shm);
                 }
+                // Not bound: the Vulkan swapchain uses it, the pacer only needs
+                // to know it is there.
+                "wp_fifo_manager_v1" => state.has_fifo_v1 = true,
                 "xdg_toplevel_icon_manager_v1" => {
                     let icon_manager = wl_registry
                         .bind::<xdg_toplevel_icon_manager_v1::XdgToplevelIconManagerV1, _, _>(
@@ -2051,8 +2069,8 @@ impl Dispatch<wl_callback::WlCallback, WindowId> for WaylandState {
         // pending flag; the Paint that follows event dispatch in the event loop presents
         // the window's pass if it is still dirty. The window may have been closed while
         // the callback was in flight, in which case there is nothing left to clear.
-        if let wl_callback::Event::Done { .. } = event {
-            state.clear_frame_callback_pending(*window_id);
+        if let wl_callback::Event::Done { callback_data } = event {
+            state.frame_callback_done(*window_id, callback_data);
         }
     }
 }
@@ -2397,27 +2415,83 @@ impl WaylandState {
         }));
     }
 
-    /// True while the given window's last presented frame awaits its `wl_surface::frame`
-    /// callback, meaning the compositor is not ready for another frame on that surface.
+    /// Presents of this window whose `wl_surface::frame` callback has not fired yet.
+    pub(crate) fn frame_callbacks_in_flight(&self, window_id: WindowId) -> usize {
+        self.frame_callbacks_pending
+            .iter()
+            .find(|(id, _)| *id == window_id)
+            .map_or(0, |(_, count)| *count)
+    }
+
+    /// Presents a window may have awaiting their callbacks right now.
+    fn frames_in_flight_allowed(&self) -> usize {
+        self.frame_pacer
+            .frames_in_flight(self.has_fifo_v1, std::time::Instant::now())
+            .max(1)
+    }
+
+    /// True while the window has as many presents awaiting their callbacks as the
+    /// pacer allows: the compositor has not consumed enough of them for another
+    /// present, so the window's pass stays dirty until a callback fires.
     pub(crate) fn is_frame_callback_pending(&self, window_id: WindowId) -> bool {
-        self.frame_callbacks_pending.contains(&window_id)
+        self.frame_callbacks_in_flight(window_id) >= self.frames_in_flight_allowed()
     }
 
     pub(crate) fn set_frame_callback_pending(&mut self, window_id: WindowId) {
-        if !self.frame_callbacks_pending.contains(&window_id) {
-            self.frame_callbacks_pending.push(window_id);
+        self.presents_this_cycle += 1;
+        match self.frame_callbacks_pending.iter_mut().find(|(id, _)| *id == window_id) {
+            Some((_, count)) => *count += 1,
+            None => self.frame_callbacks_pending.push((window_id, 1)),
         }
     }
 
-    /// Clear a window's pending frame callback. Called when the callback fires and when
-    /// a window is closed, since the compositor never fires callbacks for a destroyed
-    /// surface and a stale entry would keep the window's presents gated forever.
-    pub(crate) fn clear_frame_callback_pending(&mut self, window_id: WindowId) {
-        self.frame_callbacks_pending.retain(|id| *id != window_id);
+    /// One frame callback fired: the compositor consumed one present of the window.
+    pub(crate) fn frame_callback_done(&mut self, window_id: WindowId, compositor_ms: u32) {
+        self.frame_pacer
+            .callback_arrived(std::time::Instant::now(), compositor_ms);
+        if let Some((_, count)) = self.frame_callbacks_pending.iter_mut().find(|(id, _)| *id == window_id) {
+            *count = count.saturating_sub(1);
+        }
+        self.frame_callbacks_pending.retain(|(_, count)| *count > 0);
     }
 
+    /// Forget a window's pending frame callbacks. Called when a window is closed,
+    /// since the compositor never fires callbacks for a destroyed surface and a
+    /// stale entry would keep the window's presents gated forever.
+    pub(crate) fn clear_frame_callback_pending(&mut self, window_id: WindowId) {
+        self.frame_callbacks_pending.retain(|(id, _)| *id != window_id);
+    }
+
+    /// Some window is held back waiting for the compositor.
     pub(crate) fn any_frame_callback_pending(&self) -> bool {
-        !self.frame_callbacks_pending.is_empty()
+        let allowed = self.frames_in_flight_allowed();
+        self.frame_callbacks_pending
+            .iter()
+            .any(|(_, count)| *count >= allowed)
+    }
+
+    /// Every configured surface is held back waiting for the compositor: nothing
+    /// drawn now could be presented, so the app's next-frame and draw events can
+    /// wait for the next callback instead of producing a frame that is thrown away.
+    pub(crate) fn all_windows_frame_callback_pending(&self) -> bool {
+        let mut any = false;
+        for window in &self.windows {
+            if window.configured {
+                any = true;
+                if !self.is_frame_callback_pending(window.window_id) {
+                    return false;
+                }
+            }
+        }
+        for popup in &self.popups {
+            if popup.configured {
+                any = true;
+                if !self.is_frame_callback_pending(popup.window_id) {
+                    return false;
+                }
+            }
+        }
+        any
     }
 
     /// Called from the event loop when the key repeat timer fires.

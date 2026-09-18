@@ -753,4 +753,11 @@ impl CxOs {
         #[cfg(use_vulkan)]
         { panic!("OpenGL is unavailable in the direct Vulkan renderer") }
     }
+
+    /// The direct renderer has no runtime fallback: a Vulkan build renders
+    /// with Vulkan.
+    #[cfg(use_vulkan)]
+    pub(crate) fn vulkan_active(&self) -> bool {
+        true
+    }
 }

@@ -1,3 +1,4 @@
+pub(crate) mod frame_pacer;
 pub mod linux_wayland;
 pub mod opengl_wayland;
 pub mod wayland_app;

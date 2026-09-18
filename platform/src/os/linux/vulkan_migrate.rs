@@ -274,6 +274,7 @@ impl ResourceMigration {
                     resource.layers,
                     resource.is_cube,
                     resource.format,
+                    resource.mip_levels,
                 )?
             } else if matches!(
                 allocation.category,

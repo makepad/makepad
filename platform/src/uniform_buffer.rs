@@ -22,9 +22,23 @@ impl UniformBuffer {
         if self.readers() != 1
             || cfg!(all(
                 not(gpusim),
-                any(use_vulkan, linux_direct, target_env = "ohos")
+                any(
+                    linux_direct,
+                    target_env = "ohos",
+                    all(use_vulkan, not(target_os = "linux"))
+                )
             ))
         {
+            return None;
+        }
+        // A Vulkan-capable desktop Linux build chooses its API at startup; the
+        // serial-based release below is only valid while OpenGL is rendering.
+        #[cfg(all(
+            use_vulkan,
+            target_os = "linux",
+            not(any(gpusim, linux_direct, target_env = "ohos"))
+        ))]
+        if cx.os.vulkan_active() {
             return None;
         }
         let submitted = cx.frame_submission_serial();
@@ -45,10 +59,12 @@ impl UniformBuffer {
         let id = self.uniform_buffer_id();
         #[cfg(all(
             not(gpusim),
-            not(use_vulkan),
             not(linux_direct),
             not(target_env = "ohos"),
-            any(target_os = "linux", target_os = "android")
+            any(
+                target_os = "linux",
+                all(target_os = "android", not(use_vulkan))
+            )
         ))]
         cx.uniform_buffers[id].os.buffer.free_resources(cx.os.gl());
         let buffer = &mut cx.uniform_buffers[id];

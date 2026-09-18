@@ -35,6 +35,8 @@ pub mod openxr_sys;
 #[cfg(target_env = "ohos")]
 pub mod open_harmony;
 
+#[cfg(all(use_vulkan, target_os = "linux"))]
+pub(crate) mod gpu_preference;
 pub mod egl_sys;
 #[macro_use]
 pub mod gl_sys;

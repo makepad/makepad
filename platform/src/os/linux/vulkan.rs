@@ -66,6 +66,14 @@ extern "C" {
     fn ANativeWindow_acquire(window: *mut ndk_sys::ANativeWindow);
 }
 
+/// Bound on waiting for the previous window frame's submission on Linux.
+#[cfg(target_os = "linux")]
+const FRAME_FENCE_WAIT_NS: u64 = 1_000_000_000;
+/// Bound on waiting for a FIFO swapchain image on Linux. The frame-callback
+/// pacing in `linux_wayland.rs` normally keeps one image free; this only
+/// limits how long a present can block when the compositor holds them all.
+#[cfg(target_os = "linux")]
+const SWAPCHAIN_ACQUIRE_WAIT_NS: u64 = 100_000_000;
 #[cfg(target_os = "android")]
 const XR_FRAGMENT_DENSITY_MAP_FORMAT: vk::Format = vk::Format::R8G8_UNORM;
 #[cfg(target_os = "android")]
@@ -195,6 +203,11 @@ struct FrameResources {
     render_passes: Vec<vk::RenderPass>,
     packet_buffer: Option<VulkanBuffer>,
     packet_buffer_used: vk::DeviceSize,
+    /// Host address of `packet_buffer`'s whole mapping (0 when unmapped). The
+    /// arena stays mapped for its lifetime so packets memcpy straight into it
+    /// instead of paying a vkMapMemory/vkUnmapMemory pair each. Kept as an
+    /// address rather than a pointer so the struct stays `Default` and `Send`.
+    packet_buffer_mapped: usize,
 }
 
 #[cfg(target_os = "android")]
@@ -288,6 +301,9 @@ struct VulkanTextureResource {
     face_views: [vk::ImageView; 6],
     width: u32,
     height: u32,
+    /// 1 for an ordinary texture; the full chain for a mipmapped image, which
+    /// `upload_vec_texture` fills by blitting each level from the one above.
+    mip_levels: u32,
     layers: u32,
     is_cube: bool,
     format: vk::Format,
@@ -1413,10 +1429,12 @@ impl CxVulkan {
                 device.free_memory(buffer.memory, None);
             }
             if let Some(buffer) = frame_resources.packet_buffer.take() {
+                // Freeing the memory unmaps the arena's persistent mapping.
                 device.destroy_buffer(buffer.buffer, None);
                 device.free_memory(buffer.memory, None);
             }
         }
+        frame_resources.packet_buffer_mapped = 0;
         frame_resources.retained.clear();
         frame_resources.retained_transfers = None;
         frame_resources.retained_updates.clear();
@@ -1468,11 +1486,22 @@ impl CxVulkan {
             if let Some(old_buffer) = self.frame_resources.packet_buffer.take() {
                 // Earlier draws in this command buffer still reference this
                 // allocation. Retire it with the frame, after its fence, not
-                // while recording the draw that grows the arena.
+                // while recording the draw that grows the arena. Freeing its
+                // memory later unmaps it implicitly.
                 self.frame_resources.buffers.push(old_buffer);
+                self.frame_resources.packet_buffer_mapped = 0;
             }
             let new_size = required_size.next_power_of_two().max(64 * 1024);
             let buffer = self.create_host_buffer(usage, new_size)?;
+            // Map the whole arena once; packets write through this mapping.
+            // Host-coherent memory needs no flush. If mapping fails, packets
+            // fall back to mapping their own span.
+            self.frame_resources.packet_buffer_mapped = unsafe {
+                self.device
+                    .map_memory(buffer.memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
+                    .map(|ptr| ptr as usize)
+                    .unwrap_or(0)
+            };
             self.frame_resources.packet_buffer = Some(buffer);
             self.frame_resources.packet_buffer_used = 0;
             offset = 0;
@@ -2918,6 +2947,7 @@ impl CxVulkan {
         if self.in_flight_fence == vk::Fence::null() {
             return Err("Vulkan frame synchronization is unavailable".into());
         }
+        let frame_started = Instant::now();
         // Direct display: the main target is a sampled composition image that
         // every acquired connector presents independently.
         #[cfg(all(target_os = "linux", linux_direct))]
@@ -2967,16 +2997,24 @@ impl CxVulkan {
         };
 
         unsafe {
+            // The single command buffer is re-recorded once the previous frame's
+            // GPU work is done. Wait for it, bounded: polling here and returning
+            // `Ok(false)` made the event loop spin (re-running the app's
+            // next-frame and draw events) for the whole GPU time of every frame.
+            // A frame that is still running after the bound is left dirty as
+            // before, so a wedged device cannot hang the UI thread.
             #[cfg(target_os = "linux")]
-            if !self.device.get_fence_status(self.in_flight_fence)
-                .map_err(|e| format!("get_fence_status failed: {e:?}"))? {
-                return Ok(false);
+            match self.device.wait_for_fences(&[self.in_flight_fence], true, FRAME_FENCE_WAIT_NS) {
+                Ok(()) => {}
+                Err(vk::Result::TIMEOUT) => return Ok(false),
+                Err(e) => return Err(format!("wait_for_fences failed: {e:?}")),
             }
             #[cfg(target_os = "android")]
             self.device
                 .wait_for_fences(&[self.in_flight_fence], true, u64::MAX)
                 .map_err(|e| format!("wait_for_fences failed: {e:?}"))?;
         }
+        let fence_waited = Instant::now();
         // The fence proved the previous submission complete: every receipt
         // and delivery proof marked with that repaint may now read
         // `completed` (the frontier this backend never advanced before).
@@ -2986,12 +3024,27 @@ impl CxVulkan {
         #[cfg(target_os = "linux")]
         self.profile.collect_pending(&self.device);
 
+        // The fence proved the previous frame complete, so its packet arena and
+        // descriptor pools can be reused in place (the offscreen and direct
+        // paths already do this) instead of being freed and re-allocated with
+        // several vkAllocateMemory/vkCreateDescriptorPool calls every frame.
+        #[cfg(target_os = "linux")]
+        self.recycle_completed_frame_resources()?;
+        #[cfg(not(target_os = "linux"))]
         self.destroy_frame_resources();
 
+        // FIFO presentation hands an image back as soon as the compositor releases
+        // one; on Linux wait for that (bounded) instead of returning `NOT_READY`,
+        // which left the pass dirty and the event loop spinning through draw
+        // events until an image freed up.
+        #[cfg(target_os = "linux")]
+        let acquire_timeout_ns = SWAPCHAIN_ACQUIRE_WAIT_NS;
+        #[cfg(not(target_os = "linux"))]
+        let acquire_timeout_ns = u64::MAX;
         let (image_index, acquire_suboptimal) = match unsafe {
             self.swapchain_loader.acquire_next_image(
                 self.swapchain,
-                if cfg!(target_os = "linux") { 0 } else { u64::MAX },
+                acquire_timeout_ns,
                 self.image_available_semaphore,
                 vk::Fence::null(),
             )
@@ -3011,6 +3064,7 @@ impl CxVulkan {
             }
         };
         self.acquired_image_pending = true;
+        let image_acquired = Instant::now();
         if self.swapchain_images.get(image_index as usize).is_none() {
             return Err(format!("invalid swapchain image index {image_index}"));
         }
@@ -3247,6 +3301,7 @@ impl CxVulkan {
             .swapchains(&swapchains)
             .image_indices(&image_indices);
 
+        let recorded = Instant::now();
         before_present();
         let present_suboptimal = match unsafe {
             self.swapchain_loader
@@ -3300,7 +3355,17 @@ impl CxVulkan {
             self.recreate_swapchain()?;
         }
 
-        crate::trace!("gpu.present", "present time={:.6}", crate::cx_api::CxOsApi::seconds_since_app_start(cx));
+        crate::trace!(
+            "gpu.present",
+            "present time={:.6} fence_wait_ms={:.3} acquire_wait_ms={:.3} record_ms={:.3} present_ms={:.3} packets={} instances={}",
+            crate::cx_api::CxOsApi::seconds_since_app_start(cx),
+            fence_waited.duration_since(frame_started).as_secs_f64() * 1000.0,
+            image_acquired.duration_since(fence_waited).as_secs_f64() * 1000.0,
+            recorded.duration_since(image_acquired).as_secs_f64() * 1000.0,
+            recorded.elapsed().as_secs_f64() * 1000.0,
+            draw_stats.packets_recorded,
+            draw_stats.instances,
+        );
         cx.passes[draw_pass_id].paint_dirty = false;
         // The bake transaction's paint receipt, after all selected ranges.
         cx.passes[draw_pass_id].painted_serial = cx.repaint_id;
@@ -4114,6 +4179,41 @@ impl CxVulkan {
         Ok(())
     }
 
+    /// The mip chain a format asks for, given its dimensions. Only the `Mip`
+    /// formats get one, and only where the device can linearly blit that
+    /// format; everything else stays single-level.
+    fn vec_texture_mip_levels(
+        &self,
+        format: &TextureFormat,
+        vk_format: vk::Format,
+        width: u32,
+        height: u32,
+    ) -> u32 {
+        if !matches!(format, TextureFormat::VecMipBGRAu8_32 { .. }) {
+            return 1;
+        }
+        // Desktop Linux only, matching `image_cache_use_mipmaps`, which is what
+        // asks for this format. Android and Quest share this file but neither
+        // requests a chain, and neither was measured with one.
+        if !cfg!(target_os = "linux") {
+            return 1;
+        }
+        let properties = unsafe {
+            self.instance
+                .get_physical_device_format_properties(self.physical_device, vk_format)
+        };
+        // `record_mip_chain` reads each level and writes the next with a linear
+        // blit, so the format needs all three: a device without them keeps a
+        // single level rather than recording an invalid command.
+        let required = vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR
+            | vk::FormatFeatureFlags::BLIT_SRC
+            | vk::FormatFeatureFlags::BLIT_DST;
+        if !properties.optimal_tiling_features.contains(required) {
+            return 1;
+        }
+        32 - width.max(height).max(1).leading_zeros()
+    }
+
     fn vec_texture_meta(format: &TextureFormat) -> Option<(u32, u32, u32, bool, vk::Format)> {
         match format {
             TextureFormat::VecBGRAu8_32 { width, height, .. } => Some((
@@ -4235,8 +4335,8 @@ impl CxVulkan {
                 data,
                 ..
             }
-            // VecMipBGRAu8_32: level 0 only for now (safe, no mip chain). Real mips
-            // (mip_levels>1 + vkCmdBlitImage) are a TODO for Vulkan.
+            // VecMipBGRAu8_32 uploads level 0 like any other image; the rest of
+            // the chain is blitted from it in `upload_vec_texture`.
             | TextureFormat::VecMipBGRAu8_32 {
                 width,
                 height,
@@ -4399,7 +4499,9 @@ impl CxVulkan {
         layers: u32,
         is_cube: bool,
         format: vk::Format,
+        mip_levels: u32,
     ) -> Result<VulkanTextureResource, String> {
+        let mip_levels = mip_levels.max(1);
         let image_flags = if is_cube {
             vk::ImageCreateFlags::CUBE_COMPATIBLE
         } else {
@@ -4414,11 +4516,22 @@ impl CxVulkan {
                 height: height.max(1),
                 depth: 1,
             })
-            .mip_levels(1)
+            .mip_levels(mip_levels)
             .array_layers(layers.max(1))
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
-            .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST | migration_image_usage())
+            // TRANSFER_SRC: each level below the first is blitted from the one
+            // above it, so the image reads from itself.
+            .usage(
+                vk::ImageUsageFlags::SAMPLED
+                    | vk::ImageUsageFlags::TRANSFER_DST
+                    | if mip_levels > 1 {
+                        vk::ImageUsageFlags::TRANSFER_SRC
+                    } else {
+                        vk::ImageUsageFlags::empty()
+                    }
+                    | migration_image_usage(),
+            )
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
         let image = unsafe { self.device.create_image(&image_info, None) }
@@ -4467,7 +4580,7 @@ impl CxVulkan {
                 vk::ImageSubresourceRange::default()
                     .aspect_mask(vk::ImageAspectFlags::COLOR)
                     .base_mip_level(0)
-                    .level_count(1)
+                    .level_count(mip_levels)
                     .base_array_layer(0)
                     .layer_count(layers.max(1)),
             );
@@ -4507,6 +4620,7 @@ impl CxVulkan {
             image,
             memory,
             view,
+            mip_levels,
             face_views,
             width: width.max(1),
             height: height.max(1),
@@ -4651,6 +4765,7 @@ impl CxVulkan {
             image,
             memory,
             view,
+            mip_levels: 1,
             face_views,
             width: width.max(1),
             height: height.max(1),
@@ -4841,6 +4956,7 @@ impl CxVulkan {
             image,
             memory,
             view,
+            mip_levels: 1,
             face_views: [vk::ImageView::null(); 6],
             width: width.max(1),
             height: height.max(1),
@@ -4953,6 +5069,7 @@ impl CxVulkan {
             image,
             memory,
             view,
+            mip_levels: 1,
             face_views: [vk::ImageView::null(); 6],
             width: width.max(1),
             height: height.max(1),
@@ -5269,6 +5386,7 @@ impl CxVulkan {
             image,
             memory,
             view,
+            mip_levels: 1,
             face_views: [vk::ImageView::null(); 6],
             width: width.max(1),
             height: height.max(1),
@@ -5490,6 +5608,7 @@ impl CxVulkan {
             image,
             memory,
             view,
+            mip_levels: 1,
             face_views: [vk::ImageView::null(); 6],
             width: width.max(1),
             height: height.max(1),
@@ -5769,6 +5888,7 @@ impl CxVulkan {
             image,
             memory,
             view: y_view,
+            mip_levels: 1,
             face_views: [vk::ImageView::null(); 6],
             width: width.max(1),
             height: height.max(1),
@@ -5785,6 +5905,7 @@ impl CxVulkan {
             image: vk::Image::null(),
             memory: vk::DeviceMemory::null(),
             view: u_view,
+            mip_levels: 1,
             face_views: [vk::ImageView::null(); 6],
             width: chroma_width,
             height: chroma_height,
@@ -5802,6 +5923,7 @@ impl CxVulkan {
             image: vk::Image::null(),
             memory: vk::DeviceMemory::null(),
             view: v_view,
+            mip_levels: 1,
             face_views: [vk::ImageView::null(); 6],
             width: chroma_width,
             height: chroma_height,
@@ -5943,7 +6065,7 @@ impl CxVulkan {
         texture_id: TextureId,
     ) -> Result<(), String> {
         let texture_key = Self::texture_key(texture_id);
-        let (alloc_changed, updated, width, height, layers, is_cube, format) = {
+        let (alloc_changed, updated, width, height, layers, is_cube, format, mip_levels) = {
             let cxtexture = &mut cx.textures[texture_id];
             if !cxtexture.format.is_vec() {
                 return Ok(());
@@ -5954,6 +6076,7 @@ impl CxVulkan {
                 Self::vec_texture_meta(&cxtexture.format).ok_or_else(|| {
                     format!("unsupported Vulkan texture format: {:?}", cxtexture.format)
                 })?;
+            let mip_levels = self.vec_texture_mip_levels(&cxtexture.format, format, width, height);
             (
                 alloc_changed,
                 updated,
@@ -5962,6 +6085,7 @@ impl CxVulkan {
                 layers,
                 is_cube,
                 format,
+                mip_levels,
             )
         };
 
@@ -5973,6 +6097,7 @@ impl CxVulkan {
                     || resource.layers != layers.max(1)
                     || resource.is_cube != is_cube
                     || resource.format != format
+                    || resource.mip_levels != mip_levels
             }
             None => true,
         };
@@ -5981,7 +6106,8 @@ impl CxVulkan {
             if let Some(old_resource) = self.textures.remove(&texture_key) {
                 self.destroy_texture_resource(old_resource);
             }
-            let resource = self.create_texture_resource(width, height, layers, is_cube, format)?;
+            let resource =
+                self.create_texture_resource(width, height, layers, is_cube, format, mip_levels)?;
             self.textures.insert(texture_key, resource);
         }
 
@@ -6027,7 +6153,9 @@ impl CxVulkan {
                 vk::ImageSubresourceRange::default()
                     .aspect_mask(vk::ImageAspectFlags::COLOR)
                     .base_mip_level(0)
-                    .level_count(1)
+                    // All of them: the levels below the first are written by
+                    // the blits, so they must leave UNDEFINED here too.
+                    .level_count(mip_levels)
                     .base_array_layer(0)
                     .layer_count(layer_count),
             );
@@ -6052,6 +6180,8 @@ impl CxVulkan {
                 height: upload.height,
                 depth: 1,
             });
+        // Every level at once: level 0 has just been written, and the rest are
+        // about to be, so one barrier covers the whole image.
         let to_shader = vk::ImageMemoryBarrier::default()
                 .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                 .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
@@ -6064,7 +6194,7 @@ impl CxVulkan {
                 vk::ImageSubresourceRange::default()
                     .aspect_mask(vk::ImageAspectFlags::COLOR)
                     .base_mip_level(0)
-                    .level_count(1)
+                    .level_count(mip_levels)
                     .base_array_layer(0)
                     .layer_count(layer_count),
             );
@@ -6085,6 +6215,9 @@ impl CxVulkan {
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                 &[copy_region],
             );
+            if mip_levels > 1 {
+                self.record_mip_chain(image, width, height, layer_count, mip_levels);
+            }
             self.device.cmd_pipeline_barrier(
                 self.command_buffer,
                 vk::PipelineStageFlags::TRANSFER,
@@ -6100,6 +6233,127 @@ impl CxVulkan {
         }
 
         Ok(())
+    }
+
+    /// Fill levels 1.. by halving the level above, the way `glGenerateMipmap`
+    /// does, so a minified image samples a chain instead of aliasing. The
+    /// caller has written level 0 and put the whole image in
+    /// `TRANSFER_DST_OPTIMAL`; every level is left in that layout, so the
+    /// caller's single barrier still covers them.
+    ///
+    /// # Safety
+    /// Records into `self.command_buffer`, which the caller has begun.
+    unsafe fn record_mip_chain(
+        &self,
+        image: vk::Image,
+        width: u32,
+        height: u32,
+        layer_count: u32,
+        mip_levels: u32,
+    ) {
+        let mut src_width = width.max(1) as i32;
+        let mut src_height = height.max(1) as i32;
+        for level in 1..mip_levels {
+            // The source level must finish being written before it is read.
+            let to_read = vk::ImageMemoryBarrier::default()
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::TRANSFER_READ)
+                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                .image(image)
+                .subresource_range(
+                    vk::ImageSubresourceRange::default()
+                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                        .base_mip_level(level - 1)
+                        .level_count(1)
+                        .base_array_layer(0)
+                        .layer_count(layer_count),
+                );
+            let dst_width = (src_width / 2).max(1);
+            let dst_height = (src_height / 2).max(1);
+            let blit = vk::ImageBlit::default()
+                .src_subresource(
+                    vk::ImageSubresourceLayers::default()
+                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                        .mip_level(level - 1)
+                        .base_array_layer(0)
+                        .layer_count(layer_count),
+                )
+                .src_offsets([
+                    vk::Offset3D { x: 0, y: 0, z: 0 },
+                    vk::Offset3D {
+                        x: src_width,
+                        y: src_height,
+                        z: 1,
+                    },
+                ])
+                .dst_subresource(
+                    vk::ImageSubresourceLayers::default()
+                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                        .mip_level(level)
+                        .base_array_layer(0)
+                        .layer_count(layer_count),
+                )
+                .dst_offsets([
+                    vk::Offset3D { x: 0, y: 0, z: 0 },
+                    vk::Offset3D {
+                        x: dst_width,
+                        y: dst_height,
+                        z: 1,
+                    },
+                ]);
+            // Back to TRANSFER_DST_OPTIMAL so the caller's one barrier can move
+            // every level to SHADER_READ_ONLY_OPTIMAL together.
+            let to_write = vk::ImageMemoryBarrier::default()
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .src_access_mask(vk::AccessFlags::TRANSFER_READ)
+                .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .image(image)
+                .subresource_range(
+                    vk::ImageSubresourceRange::default()
+                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                        .base_mip_level(level - 1)
+                        .level_count(1)
+                        .base_array_layer(0)
+                        .layer_count(layer_count),
+                );
+            unsafe {
+                self.device.cmd_pipeline_barrier(
+                    self.command_buffer,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[to_read],
+                );
+                self.device.cmd_blit_image(
+                    self.command_buffer,
+                    image,
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &[blit],
+                    vk::Filter::LINEAR,
+                );
+                self.device.cmd_pipeline_barrier(
+                    self.command_buffer,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[to_write],
+                );
+            }
+            src_width = dst_width;
+            src_height = dst_height;
+        }
     }
 
     fn record_draw_list(
@@ -6587,16 +6841,20 @@ impl CxVulkan {
             packet_base_alignment,
         )?;
         unsafe {
-            let mapped = self
-                .device
-                .map_memory(
-                    packet_buffer.memory,
-                    packet_base_offset,
-                    packet_span_size,
-                    vk::MemoryMapFlags::empty(),
-                )
-                .map_err(|e| format!("map_memory(packet_buffer) failed: {e:?}"))?;
-            let mapped_ptr = mapped as *mut u8;
+            let persistent = self.frame_resources.packet_buffer_mapped;
+            let mapped_ptr = if persistent != 0 {
+                (persistent as *mut u8).add(packet_base_offset as usize)
+            } else {
+                self.device
+                    .map_memory(
+                        packet_buffer.memory,
+                        packet_base_offset,
+                        packet_span_size,
+                        vk::MemoryMapFlags::empty(),
+                    )
+                    .map_err(|e| format!("map_memory(packet_buffer) failed: {e:?}"))?
+                    as *mut u8
+            };
             if instances_bytes != 0 {
                 std::ptr::copy_nonoverlapping(
                     packet.instances.as_ptr() as *const u8,
@@ -6611,7 +6869,9 @@ impl CxVulkan {
                     uniform.size as usize,
                 );
             }
-            self.device.unmap_memory(packet_buffer.memory);
+            if persistent == 0 {
+                self.device.unmap_memory(packet_buffer.memory);
+            }
         }
         self.xr_packet_buffer_count_this_frame += 1;
         self.xr_packet_buffer_bytes_this_frame += packet_span_size as u64;
@@ -7944,7 +8204,14 @@ impl CxVulkan {
             return Ok(());
         }
 
-        let mut image_count = capabilities.min_image_count.saturating_add(1);
+        // Desktop Linux: one image on screen, up to two queued behind the
+        // frame-callback pacing (`linux_wayland.rs`, two presents in flight)
+        // and one free to record into while the compositor is still releasing
+        // the oldest; with only one spare, acquiring blocked ~2 ms per frame
+        // waiting for that release. Android paces differently and keeps one
+        // spare, so it does not pay for an extra colour and depth target.
+        let spare_images = if cfg!(target_os = "linux") { 2 } else { 1 };
+        let mut image_count = capabilities.min_image_count.saturating_add(spare_images);
         if capabilities.max_image_count > 0 {
             image_count = image_count.min(capabilities.max_image_count);
         }
