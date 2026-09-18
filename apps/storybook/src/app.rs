@@ -465,9 +465,18 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
-        if let Some(name) = settings::get(settings::THEME) {
-            if let Some(index) = theme::index_of(&name) {
-                theme::set_choice(index);
+        // Restore the saved theme ONCE, at startup. Done on every run, as it
+        // was, this made the catalogue's own list the last writer on every
+        // reload: the developer panel's theme picker was undone a tick after
+        // it was used, and so would anything else that set a theme.
+        static RESTORED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !RESTORED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            if let Some(name) = settings::get(settings::THEME) {
+                if let Some(index) = theme::index_of(&name) {
+                    theme::set_choice(index);
+                    let picked = theme::choices()[index];
+                    theme::apply_choice(vm, picked);
+                }
             }
         }
         theme::widgets_script_mod(vm);

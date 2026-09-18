@@ -436,6 +436,63 @@ pub use crate::screen_cap::*;
 
 pub use crate::video::*;
 
+/// Which of the three themes the library is written in `theme_mod` leaves in
+/// `mod.theme`. A `desktop_style` sheet is laid OVER one of these rather than
+/// replacing it, so the two are separate choices.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BaseTheme {
+    #[default]
+    Dark,
+    Light,
+    Skeleton,
+}
+
+impl BaseTheme {
+    pub const ALL: [Self; 3] = [Self::Dark, Self::Light, Self::Skeleton];
+    /// What a settings file or a remote surface calls it.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Dark => "dark",
+            Self::Light => "light",
+            Self::Skeleton => "skeleton",
+        }
+    }
+    /// What a picker shows.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Dark => "Dark",
+            Self::Light => "Light",
+            Self::Skeleton => "Skeleton",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| v.id() == s)
+    }
+}
+
+/// One value, not one per heap: every heap's `theme_mod` has to end on the
+/// same base or two windows of one app disagree about what light means.
+/// `desktop_style::Styles` is per-heap because a sheet is installed into the
+/// heap that evaluates it; this is a preference, and nothing about it is
+/// heap-shaped.
+#[derive(Default)]
+struct BaseThemeChoice(BaseTheme);
+
+/// The base theme `theme_mod` will emit. `Dark` until somebody says otherwise,
+/// which is exactly what the module hard-coded before there was a choice.
+pub fn base_theme(cx: &mut Cx) -> BaseTheme {
+    cx.global::<BaseThemeChoice>().0
+}
+
+/// Choose the base theme. It is read by `theme_mod`, so it takes effect on the
+/// next `script_mod` run and no sooner: a caller switching a running app
+/// follows this with `cx.request_style_reload()`, which re-runs `script_mod`
+/// and then re-applies the tree with `Apply::ScriptReapply` (typed text and
+/// running animations survive, which `Apply::Reload` would not).
+pub fn set_base_theme(cx: &mut Cx, theme: BaseTheme) {
+    cx.global::<BaseThemeChoice>().0 = theme;
+}
+
 pub fn theme_mod(vm: &mut ScriptVm) {
     makepad_draw::script_mod(vm);
     if !vm.is_reload() {
@@ -487,9 +544,27 @@ pub fn theme_mod(vm: &mut ScriptVm) {
             draw:mod.draw,
             MouseCursor:mod.draw.MouseCursor
         }
-        mod.theme = mod.themes.dark
-
     });
+    // The base theme, last, so everything after it reads the one that was
+    // chosen. `Dark` is the default, so an app that never calls
+    // `set_base_theme` gets precisely what this used to say outright.
+    match base_theme(vm.cx_mut()) {
+        BaseTheme::Dark => {
+            script_eval!(vm, {
+                mod.theme = mod.themes.dark
+            });
+        }
+        BaseTheme::Light => {
+            script_eval!(vm, {
+                mod.theme = mod.themes.light
+            });
+        }
+        BaseTheme::Skeleton => {
+            script_eval!(vm, {
+                mod.theme = mod.themes.skeleton
+            });
+        }
+    }
 }
 
 pub fn widgets_mod(vm: &mut ScriptVm) {
@@ -748,6 +823,59 @@ pub fn script_mod(vm: &mut ScriptVm) {
     widgets_mod(vm);
     crate::desktop_style::apply_widgets(vm);
     makepad_platform::startup_trace("widgets: widgets_mod done");
+}
+
+#[cfg(test)]
+mod base_theme_tests {
+    use super::*;
+
+    /// The base theme is a choice now, and `dark` is still what an app that
+    /// never makes one gets.
+    #[test]
+    fn theme_mod_emits_the_chosen_base_and_still_defaults_to_dark() {
+        fn bg(vm: &mut ScriptVm) -> Option<u32> {
+            let theme = vm.module(id!(theme));
+            vm.bx
+                .heap
+                .value(theme, id!(color_bg_app).into(), NoTrap)
+                .as_color()
+        }
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let dark = bg(vm);
+            assert!(dark.is_some());
+            assert_eq!(base_theme(vm.cx_mut()), BaseTheme::Dark);
+
+            set_base_theme(vm.cx_mut(), BaseTheme::Light);
+            vm.with_reload(crate::script_mod);
+            let light = bg(vm);
+            assert!(light.is_some() && light != dark, "{light:?} vs {dark:?}");
+            assert!(vm.take_errors().is_empty());
+
+            set_base_theme(vm.cx_mut(), BaseTheme::Skeleton);
+            vm.with_reload(crate::script_mod);
+            let skeleton = bg(vm);
+            assert!(skeleton.is_some());
+            assert!(vm.take_errors().is_empty());
+
+            // And back: the choice is a setting, not a one-way door.
+            set_base_theme(vm.cx_mut(), BaseTheme::Dark);
+            vm.with_reload(crate::script_mod);
+            assert_eq!(bg(vm), dark);
+            assert!(vm.take_errors().is_empty());
+        });
+    }
+
+    #[test]
+    fn every_base_theme_has_a_name_and_parses_back() {
+        for base in BaseTheme::ALL {
+            assert_eq!(BaseTheme::parse(base.id()), Some(base));
+            assert!(!base.label().is_empty());
+        }
+        assert_eq!(BaseTheme::parse("omarchy"), None);
+        assert_eq!(BaseTheme::default(), BaseTheme::Dark);
+    }
 }
 
 #[cfg(test)]

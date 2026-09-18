@@ -7641,6 +7641,102 @@ enum PanelTab {
     Spec,
 }
 
+/// How many preset buttons the Theme tab's strip declares. The panel's UI is
+/// one runtime splash chunk evaluated once, and a View has no way to grow a
+/// child afterwards, so the slots are fixed and the spares are hidden. The
+/// list is fifteen long today -- three base themes, eight sheets, four of
+/// them with a dark appearance -- and a test asserts it still fits, so a
+/// sheet added to `DesktopStyle::ALL` cannot quietly fall off the end.
+const THEME_PRESET_SLOTS: usize = 20;
+
+/// One thing the Theme tab's preset strip offers: a theme the library is
+/// written in, or a style sheet laid over one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ThemePreset {
+    Base(crate::BaseTheme),
+    Sheet(crate::desktop_style::DesktopStyle, bool),
+}
+
+impl ThemePreset {
+    /// What the button says.
+    fn label(self) -> String {
+        match self {
+            Self::Base(base) => base.label().to_string(),
+            Self::Sheet(style, false) => style.label().to_string(),
+            Self::Sheet(style, true) => format!("{} dark", style.label()),
+        }
+    }
+}
+
+/// Everything the strip offers, in the order it offers it: the base themes,
+/// then every sheet the library ships, each followed by its dark appearance
+/// where it has one.
+///
+/// Read off the library's own lists rather than written out here, so a theme
+/// or a sheet added there turns up in the panel without anybody remembering
+/// to add it, and so the panel names none of them itself.
+fn theme_presets() -> Vec<ThemePreset> {
+    let mut out: Vec<ThemePreset> = crate::BaseTheme::ALL
+        .into_iter()
+        .map(ThemePreset::Base)
+        .collect();
+    for style in crate::desktop_style::DesktopStyle::ALL {
+        out.push(ThemePreset::Sheet(style, false));
+        if style.supports_dark() {
+            out.push(ThemePreset::Sheet(style, true));
+        }
+    }
+    out
+}
+
+/// The strip's button ids, in slot order.
+fn theme_preset_ids() -> [LiveId; THEME_PRESET_SLOTS] {
+    [
+        live_id!(p0),
+        live_id!(p1),
+        live_id!(p2),
+        live_id!(p3),
+        live_id!(p4),
+        live_id!(p5),
+        live_id!(p6),
+        live_id!(p7),
+        live_id!(p8),
+        live_id!(p9),
+        live_id!(p10),
+        live_id!(p11),
+        live_id!(p12),
+        live_id!(p13),
+        live_id!(p14),
+        live_id!(p15),
+        live_id!(p16),
+        live_id!(p17),
+        live_id!(p18),
+        live_id!(p19)
+    ]
+}
+
+/// Which preset the library is running under right now: the sheet
+/// `desktop_style` has installed, or the base theme when there is none.
+/// Read once, when the panel is built -- an app may well have put a sheet on
+/// before the panel existed, and the strip must not claim otherwise.
+fn current_theme_preset(cx: &mut Cx) -> usize {
+    let sheet = cx.with_vm(|vm| crate::desktop_style::current_name(vm));
+    let base = crate::base_theme(cx);
+    let wanted = match sheet
+        .as_deref()
+        .and_then(|name| {
+            crate::desktop_style::DesktopStyle::parse(name)
+                .map(|style| (style, name.ends_with("-dark")))
+        }) {
+        Some((style, dark)) => ThemePreset::Sheet(style, dark),
+        None => ThemePreset::Base(base),
+    };
+    theme_presets()
+        .iter()
+        .position(|preset| *preset == wanted)
+        .unwrap_or(0)
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum BoxKind {
     Margin,
@@ -8027,6 +8123,20 @@ pub struct Tweaker {
     /// Tab-bar button uids, captured at draw.
     #[rust]
     tab_uids: [u64; 5],
+    /// Theme preset strip button uids, captured at draw. A slot with no
+    /// preset in it holds 0, which no widget has, so an empty strip routes
+    /// nothing.
+    #[rust]
+    preset_uids: [u64; THEME_PRESET_SLOTS],
+    /// Which preset the strip shows as the one in force.
+    #[rust]
+    theme_preset: usize,
+    /// Frames left to re-read the theme after a preset switch. The switch
+    /// lands on a later tick (`request_style_reload` re-runs `script_mod`
+    /// from the event loop), so the rows and the palette are read from the
+    /// theme the panel just left for a frame or two unless it keeps looking.
+    #[rust]
+    theme_reload_frames: u8,
     /// The two PortalLists' uids (props, tree), captured at ensure.
     #[rust]
     props_list_uid: u64,
@@ -8320,6 +8430,9 @@ impl Tweaker {
             self.palette_gen = session().lock().unwrap().apply_gen;
             log!("TWEAK theme palette: {} colours", self.theme_colors.len());
         }
+        // What the app is already running under, before the strip offers to
+        // change it: a sheet installed at startup is the selected preset.
+        self.theme_preset = current_theme_preset(cx);
         // The shader source view is a plain multiline TextInput, on purpose:
         // the real code editor as a sidebar child would put a CodeView in
         // the main window's widget tree for every app the tweaker rides in.
@@ -9212,6 +9325,43 @@ impl Tweaker {
                         tab_tree := PanelButton { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Tree" draw_text +: { text_style +: { font_size: 8.0 } } }
                         tab_theme := PanelButton { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Theme" draw_text +: { text_style +: { font_size: 8.0 } } }
                         tab_spec := PanelButton { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Spec" draw_text +: { text_style +: { font_size: 8.0 } } }
+                    }
+                    // The Theme tab's preset strip: which theme, or which
+                    // style sheet, the whole library is running under. It
+                    // sits above the rows because it decides what they are
+                    // rows OF -- pick a sheet and every value under it is a
+                    // different value.
+                    //
+                    // Fixed slots, filled at draw from `theme_presets()`:
+                    // this chunk is evaluated once and a View cannot grow a
+                    // child afterwards, so the spares stay hidden.
+                    preset_row := View {
+                        visible: false
+                        width: Fill
+                        height: Fit
+                        flow: Right{wrap: true}
+                        spacing: 2
+                        padding: Inset{left: 4 right: 4 top: 0 bottom: 2}
+                        p0 := PanelButton { visible: false width: Fit height: 18 padding: Inset{left: 5 right: 5 top: 1 bottom: 3} margin: Inset{left:0 right:0 top:1 bottom:1} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                        p1 := PanelButton { visible: false width: Fit height: 18 padding: Inset{left: 5 right: 5 top: 1 bottom: 3} margin: Inset{left:0 right:0 top:1 bottom:1} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                        p2 := PanelButton { visible: false width: Fit height: 18 padding: Inset{left: 5 right: 5 top: 1 bottom: 3} margin: Inset{left:0 right:0 top:1 bottom:1} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                        p3 := PanelButton { visible: false width: Fit height: 18 padding: Inset{left: 5 right: 5 top: 1 bottom: 3} margin: Inset{left:0 right:0 top:1 bottom:1} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                        p4 := PanelButton { visible: false width: Fit height: 18 padding: Inset{left: 5 right: 5 top: 1 bottom: 3} margin: Inset{left:0 right:0 top:1 bottom:1} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                        p5 := PanelButton { visible: false width: Fit height: 18 padding: Inset{left: 5 right: 5 top: 1 bottom: 3} margin: Inset{left:0 right:0 top:1 bottom:1} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                        p6 := PanelButton { visible: false width: Fit height: 18 padding: Inset{left: 5 right: 5 top: 1 bottom: 3} margin: Inset{left:0 right:0 top:1 bottom:1} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                        p7 := PanelButton { visible: false width: Fit height: 18 padding: Inset{left: 5 right: 5 top: 1 bottom: 3} margin: Inset{left:0 right:0 top:1 bottom:1} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                        p8 := PanelButton { visible: false width: Fit height: 18 padding: Inset{left: 5 right: 5 top: 1 bottom: 3} margin: Inset{left:0 right:0 top:1 bottom:1} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                        p9 := PanelButton { visible: false width: Fit height: 18 padding: Inset{left: 5 right: 5 top: 1 bottom: 3} margin: Inset{left:0 right:0 top:1 bottom:1} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                        p10 := PanelButton { visible: false width: Fit height: 18 padding: Inset{left: 5 right: 5 top: 1 bottom: 3} margin: Inset{left:0 right:0 top:1 bottom:1} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                        p11 := PanelButton { visible: false width: Fit height: 18 padding: Inset{left: 5 right: 5 top: 1 bottom: 3} margin: Inset{left:0 right:0 top:1 bottom:1} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                        p12 := PanelButton { visible: false width: Fit height: 18 padding: Inset{left: 5 right: 5 top: 1 bottom: 3} margin: Inset{left:0 right:0 top:1 bottom:1} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                        p13 := PanelButton { visible: false width: Fit height: 18 padding: Inset{left: 5 right: 5 top: 1 bottom: 3} margin: Inset{left:0 right:0 top:1 bottom:1} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                        p14 := PanelButton { visible: false width: Fit height: 18 padding: Inset{left: 5 right: 5 top: 1 bottom: 3} margin: Inset{left:0 right:0 top:1 bottom:1} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                        p15 := PanelButton { visible: false width: Fit height: 18 padding: Inset{left: 5 right: 5 top: 1 bottom: 3} margin: Inset{left:0 right:0 top:1 bottom:1} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                        p16 := PanelButton { visible: false width: Fit height: 18 padding: Inset{left: 5 right: 5 top: 1 bottom: 3} margin: Inset{left:0 right:0 top:1 bottom:1} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                        p17 := PanelButton { visible: false width: Fit height: 18 padding: Inset{left: 5 right: 5 top: 1 bottom: 3} margin: Inset{left:0 right:0 top:1 bottom:1} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                        p18 := PanelButton { visible: false width: Fit height: 18 padding: Inset{left: 5 right: 5 top: 1 bottom: 3} margin: Inset{left:0 right:0 top:1 bottom:1} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                        p19 := PanelButton { visible: false width: Fit height: 18 padding: Inset{left: 5 right: 5 top: 1 bottom: 3} margin: Inset{left:0 right:0 top:1 bottom:1} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
                     }
                     shader_col := ScrollYView {
                         width: Fill
@@ -11907,6 +12057,9 @@ impl Tweaker {
             sidebar
                 .child(live_id!(spec_col))
                 .set_visible(cx, tab == PanelTab::Spec);
+            sidebar
+                .child(live_id!(preset_row))
+                .set_visible(cx, tab == PanelTab::Theme);
             if tab == PanelTab::Tree {
                 // The toggle shows its state by fill, like the scope buttons,
                 // and says what it is isolating — a tree cut down to one
@@ -11933,6 +12086,28 @@ impl Tweaker {
                     (false, _) => String::new(),
                 };
                 head.child(live_id!(isolate_hint)).set_text(cx, &hint);
+            }
+            if tab == PanelTab::Theme {
+                // The strip, like the tab row: selected by fill, never by
+                // brackets in the label, and its uids cached here because a
+                // click arrives as a uid and nothing else.
+                let row = sidebar.child(live_id!(preset_row));
+                let presets = theme_presets();
+                for (slot, id) in theme_preset_ids().into_iter().enumerate() {
+                    let btn = row.child(id);
+                    match presets.get(slot) {
+                        Some(preset) => {
+                            btn.set_visible(cx, true);
+                            btn.set_text(cx, &preset.label());
+                            set_button_fill(cx, btn.clone(), slot == self.theme_preset);
+                            self.preset_uids[slot] = btn.widget_uid().0;
+                        }
+                        None => {
+                            btn.set_visible(cx, false);
+                            self.preset_uids[slot] = 0;
+                        }
+                    }
+                }
             }
             {
                 // The filter works on the row list, which the Shader and
@@ -14326,6 +14501,18 @@ impl Tweaker {
                     self.redraw_sidebar(cx);
                 }
             }
+            if self.preset_uids.contains(&widget_action.widget_uid.0)
+                && widget_action.widget_uid.0 != 0
+            {
+                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                    let index = self
+                        .preset_uids
+                        .iter()
+                        .position(|uid| *uid == widget_action.widget_uid.0)
+                        .unwrap_or(0);
+                    self.apply_theme_preset(cx, index);
+                }
+            }
             if self.tree_list_uid != 0 && widget_action.widget_uid.0 == self.tree_list_uid {
                 match widget_action.cast::<FileTreeAction>() {
                     FileTreeAction::FileClicked(id) | FileTreeAction::FolderClicked(id) => {
@@ -15044,6 +15231,42 @@ impl Tweaker {
             drop(list_ref);
         }
         let _ = cx;
+    }
+
+    /// Put the whole library under another preset.
+    ///
+    /// A sheet goes on with `desktop_style::install`; a base theme takes the
+    /// last one off again, or a sheet tried once would stay under every
+    /// theme picked after it. Neither is visible until `script_mod` runs
+    /// again -- `theme_mod` is where the base is emitted and where a sheet's
+    /// tokens are read -- so the switch lands on `request_style_reload`,
+    /// which re-runs it and then re-applies the tree with
+    /// `Apply::ScriptReapply`: typed text and running animations survive,
+    /// which the `Apply::Reload` of a plain live edit would not.
+    fn apply_theme_preset(&mut self, cx: &mut Cx, index: usize) {
+        let Some(preset) = theme_presets().get(index).copied() else {
+            return;
+        };
+        self.theme_preset = index;
+        match preset {
+            ThemePreset::Base(base) => {
+                crate::set_base_theme(cx, base);
+                cx.with_vm(|vm| crate::desktop_style::uninstall(vm));
+            }
+            ThemePreset::Sheet(style, dark) => {
+                // A sheet is laid over the dark base, exactly as it is when
+                // one arrives from the window manager.
+                crate::set_base_theme(cx, crate::BaseTheme::Dark);
+                let sheet =
+                    crate::desktop_style::StyleSheet::load_with_appearance(style, dark);
+                cx.with_vm(|vm| crate::desktop_style::install(vm, sheet));
+            }
+        }
+        log!("TWEAK theme preset: {}", preset.label());
+        self.theme_reload_frames = 6;
+        self.next_frame = cx.new_next_frame();
+        cx.request_style_reload();
+        self.redraw_sidebar(cx);
     }
 
     fn redraw_sidebar(&mut self, cx: &mut Cx) {
@@ -16301,6 +16524,16 @@ impl Widget for Tweaker {
             self.view_zoom = 1.0;
         }
         self.was_on = on;
+        // A preset switch re-runs `script_mod` from the event loop, a tick
+        // or more after the click, so for a frame or two the rows and the
+        // palette would still be the ones read under the theme just left.
+        // Both hang off the apply generation, so keep bumping it until the
+        // switch has landed.
+        if self.theme_reload_frames > 0 {
+            self.theme_reload_frames -= 1;
+            session().lock().unwrap().apply_gen += 1;
+            self.next_frame = cx.new_next_frame();
+        }
         // A theme edit made outside this overlay (a tool going through
         // `reflect::theme_set_value`) bumps the session's apply generation;
         // the palette strip and the swatch names follow it here instead of
@@ -16688,6 +16921,76 @@ impl Widget for Tweaker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_theme_strip_offers_every_base_theme_and_every_sheet_the_library_ships() {
+        let presets = theme_presets();
+        // The base themes first, in the library's own order.
+        for (slot, base) in crate::BaseTheme::ALL.into_iter().enumerate() {
+            assert_eq!(presets[slot], ThemePreset::Base(base));
+        }
+        // Then every sheet, each followed by its dark appearance where it
+        // has one -- read off `DesktopStyle::ALL`, never written out here.
+        let mut expect = Vec::new();
+        for style in crate::desktop_style::DesktopStyle::ALL {
+            expect.push(ThemePreset::Sheet(style, false));
+            if style.supports_dark() {
+                expect.push(ThemePreset::Sheet(style, true));
+            }
+        }
+        assert_eq!(&presets[crate::BaseTheme::ALL.len()..], &expect[..]);
+        // Every preset needs a button: the strip's slots are declared in the
+        // splash and cannot grow at runtime.
+        assert!(
+            presets.len() <= THEME_PRESET_SLOTS,
+            "{} presets, {THEME_PRESET_SLOTS} buttons declared in `preset_row`",
+            presets.len()
+        );
+        // And every label says something.
+        for preset in presets {
+            assert!(!preset.label().trim().is_empty(), "{preset:?}");
+        }
+    }
+
+    /// The two spellings the preset strip brings into the panel's own splash
+    /// chunk -- a wrapping row, and a button that starts hidden -- against
+    /// the real widget module. That chunk is evaluated once, when somebody
+    /// first opens the panel, so nothing else here would catch a spelling
+    /// the VM turns down.
+    #[test]
+    fn a_wrapping_row_of_hidden_buttons_evaluates() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            vm.bx.captured_errors = Some(Vec::new());
+            let value = script_eval!(vm, {
+                use mod.prelude.widgets.*
+                View {
+                    visible: false
+                    width: Fill
+                    height: Fit
+                    flow: Right{wrap: true}
+                    spacing: 2
+                    padding: Inset{left: 4 right: 4 top: 0 bottom: 2}
+                    p0 := Button { visible: false width: Fit height: 18 padding: Inset{left: 5 right: 5 top: 1 bottom: 3} margin: Inset{left:0 right:0 top:1 bottom:1} text: "" draw_text +: { text_style +: { font_size: 7.0 } } }
+                }
+            });
+            assert!(value.as_object().is_some());
+            assert!(vm.take_errors().is_empty());
+        });
+    }
+
+    #[test]
+    fn every_preset_slot_the_panel_addresses_is_declared_in_the_splash() {
+        let src = include_str!("tweaker.rs");
+        for slot in 0..THEME_PRESET_SLOTS {
+            assert!(
+                src.contains(&format!("p{slot} := PanelButton")),
+                "preset slot p{slot} is addressed but never declared"
+            );
+        }
+        assert_eq!(theme_preset_ids().len(), THEME_PRESET_SLOTS);
+    }
 
     #[test]
     fn a_size_row_reads_as_one_value_however_it_was_spelled() {

@@ -88,22 +88,20 @@ pub fn set_choice(index: usize) {
 }
 
 /// The library's `script_mod` split around the theme choice.
-pub fn widgets_script_mod(vm: &mut ScriptVm) {
-    crate::makepad_widgets::theme_mod(vm);
-    let picked = choices().get(choice()).copied().unwrap_or(Choice::Base(0));
-    match picked {
-        Choice::Base(1) => {
-            script_eval!(vm, {
-                mod.theme = mod.themes.light
-            });
-        }
-        Choice::Base(2) => {
-            script_eval!(vm, {
-                mod.theme = mod.themes.skeleton
-            });
-        }
-        _ => {}
-    }
+/// Write a pick into the library, which is where it is read back from.
+///
+/// The base theme and the installed sheet both live in the library now, so
+/// this list and the developer panel's own picker write to one place and
+/// cannot disagree. This used to be done on every `script_mod` run, which
+/// made whichever list ran last the winner: the panel's pick was undone a
+/// tick after it was made.
+pub fn apply_choice(vm: &mut ScriptVm, picked: Choice) {
+    let base = match picked {
+        Choice::Base(1) => BaseTheme::Light,
+        Choice::Base(2) => BaseTheme::Skeleton,
+        _ => BaseTheme::Dark,
+    };
+    set_base_theme(vm.cx_mut(), base);
     // A sheet goes on BEFORE `widgets_mod`, which reads it for its token
     // half as its first act; and comes off again for a base theme, or the
     // last sheet tried would stay under every theme picked after it.
@@ -113,6 +111,10 @@ pub fn widgets_script_mod(vm: &mut ScriptVm) {
         }
         Choice::Base(_) => desktop_style::uninstall(vm),
     }
+}
+
+pub fn widgets_script_mod(vm: &mut ScriptVm) {
+    crate::makepad_widgets::theme_mod(vm);
     crate::makepad_widgets::widgets_mod(vm);
     // The widget half of a sheet. The library's own `script_mod` does this
     // and this function stands in for it, so without the call a sheet's
@@ -130,5 +132,12 @@ pub fn select(cx: &mut Cx, index: usize) {
     set_choice(index);
     crate::settings::set(crate::settings::THEME, &names[index]);
     log!("storybook: theme {}", names[index]);
-    cx.request_live_edit();
+    let picked = choices()[index];
+    cx.with_vm(|vm| apply_choice(vm, picked));
+    // A style reload re-runs `script_mod` and then applies with
+    // `ScriptReapply` rather than `Reload`, so typed text and running
+    // animations survive the switch. `request_script_reapply` alone would
+    // not do: it does not re-run `script_mod`, and both halves of a switch
+    // are emitted there.
+    cx.request_style_reload();
 }
