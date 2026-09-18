@@ -169,7 +169,7 @@ impl WaylandCx {
                 )
             });
         }
-        crate::cx_api::set_active_gpu_backend(if vulkan_active {
+        cx.borrow_mut().os.gpu_backend = Some(if vulkan_active {
             crate::cx::GpuBackend::Vulkan
         } else {
             crate::cx::GpuBackend::OpenGl

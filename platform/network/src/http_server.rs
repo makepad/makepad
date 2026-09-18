@@ -210,6 +210,13 @@ impl HttpServerResponse {
             }))),
         }
     }
+
+    /// Stream an existing file region and a small in-memory trailer on the connection thread.
+    pub fn from_file_with_suffix(header: String, file: File, offset: u64, len: u64, suffix: Vec<u8>) -> Self {
+        let mut response = Self::from_file(header, file, offset, len);
+        response.body = suffix;
+        response
+    }
 }
 
 pub type HttpServerResponseSender = mpsc::Sender<HttpServerResponse>;
@@ -796,7 +803,7 @@ fn write_response(
         HttpServerResponsePayload::File(file_response) => file_response
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .len,
+            .len.saturating_add(response.body.len() as u64),
         HttpServerResponsePayload::Bytes => response.body.len() as u64,
     });
     let write_deadline = response_write_deadline(Instant::now(), deadline, response_len);
@@ -822,6 +829,9 @@ fn write_response(
                     break;
                 }
                 left -= read as u64;
+            }
+            if left == 0 {
+                let _ = write_bytes_until(tcp_stream, &response.body, write_deadline);
             }
         }
     } else {

@@ -349,6 +349,13 @@ impl MacosWindow {
                     let () = msg_send![self.window, orderFront: nil];
                 } else {
                     let () = msg_send![self.window, makeKeyAndOrderFront: nil];
+                    // `--focus`: bring the app to the front as its window
+                    // opens. A binary launched from a terminal or by an agent
+                    // otherwise stays behind the launcher.
+                    if std::env::args().any(|arg| arg == "--focus") {
+                        let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
+                        let () = msg_send![ns_app, activateIgnoringOtherApps: YES];
+                    }
                 }
             }
             crate::startup_trace("NSWindow ordered front");

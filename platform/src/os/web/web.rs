@@ -555,20 +555,29 @@ impl Cx {
                         for index in 0..self.draw_lists[list].draw_items.len() {
                             let item = &mut self.draw_lists[list].draw_items[index];
                             if item.os.inst_vb_id == Some(failed.buffer_id) {
-                                // The browser keeps the last complete GPU buffer.
-                                // Retry from CPU segments, never from a failed delta.
+                                // A failed upload is final for this publication:
+                                // the browser could not allocate or fill the
+                                // buffer, and asking again every frame only
+                                // spins. The item stays off screen until its
+                                // content changes (a new publication).
+                                let publication = item
+                                    .retained_instances
+                                    .as_ref()
+                                    .map_or(item.retained_instance_id, |p| p.id());
+                                item.os.retained_failed = publication;
                                 item.os.retained_publication = None;
                                 item.os.inst_capacity = 0;
-                                item.retained_instance_id = 0;
-                                item.consumed_instance_id = 0;
-                                item.instance_upload_pending = true;
+                                item.instance_upload_pending = false;
                                 if let Some(call) = item.kind.draw_call_mut() {
-                                    call.instance_dirty = true;
+                                    call.instance_dirty = false;
                                 }
+                                crate::error!(
+                                    "WebGL retained upload failed for draw list {:?} item {}; that content stays off screen until it changes",
+                                    list, index
+                                );
                             }
                         }
                     }
-                    self.redraw_all();
                 }
 
                 live_id!(ToWasmWebGLShadersDone) => {

@@ -194,7 +194,13 @@ struct VulkanGeometryResource {
 #[derive(Default)]
 struct FrameResources {
     retained: Vec<Arc<VulkanRetainedAllocation>>,
+    /// The transfer command buffer the current pass records into; `None`
+    /// until a relocation needs one, and again after each submission.
     retained_transfers: Option<VulkanRetainedTransfers>,
+    /// Transfer command buffers already submitted in this frame. A later
+    /// pass of the same repaint records into a fresh one; these stay alive
+    /// until the frame's fence completes.
+    submitted_transfers: Vec<VulkanRetainedTransfers>,
     retained_updates: Vec<((DrawListId, usize), u64)>,
     buffers: Vec<VulkanBuffer>,
     descriptor_pools: Vec<vk::DescriptorPool>,
@@ -1437,6 +1443,7 @@ impl CxVulkan {
         frame_resources.packet_buffer_mapped = 0;
         frame_resources.retained.clear();
         frame_resources.retained_transfers = None;
+        frame_resources.submitted_transfers.clear();
         frame_resources.retained_updates.clear();
         frame_resources.packet_buffer_used = 0;
         frame_resources.descriptor_pool_cursor = 0;
@@ -1460,6 +1467,7 @@ impl CxVulkan {
         }
         frame_resources.retained.clear();
         frame_resources.retained_transfers = None;
+        frame_resources.submitted_transfers.clear();
         frame_resources.retained_updates.clear();
         frame_resources.packet_buffer_used = 0;
         frame_resources.descriptor_pool_cursor = 0;
@@ -6503,7 +6511,11 @@ impl CxVulkan {
                     draw_stats.skipped_no_instances_buffer += 1;
                     continue;
                 };
-                if data.len() < slots {
+                // Retained publications are already resident in the GPU
+                // buffer selected below. Their CPU-side `data` slice is
+                // intentionally empty; only immediate/shared instances need
+                // this short-buffer validation.
+                if retained_instances.is_none() && data.len() < slots {
                     draw_stats.skipped_instances_too_short += 1;
                     continue;
                 }
@@ -7605,6 +7617,18 @@ impl CxVulkan {
                 }
             }
         }
+        // The submitted command buffer is kept until the frame's fence
+        // completes; the next relocation in this repaint (a window pass after
+        // an offscreen pass) records into a fresh one instead of failing.
+        if self
+            .frame_resources
+            .retained_transfers
+            .as_ref()
+            .is_some_and(|commands| commands.ended)
+        {
+            let submitted = self.frame_resources.retained_transfers.take().unwrap();
+            self.frame_resources.submitted_transfers.push(submitted);
+        }
     }
 
     fn ensure_retained_instances(
@@ -8469,6 +8493,7 @@ impl CxVulkan {
         }
         frame_resources.retained.clear();
         frame_resources.retained_transfers = None;
+        frame_resources.submitted_transfers.clear();
         frame_resources.retained_updates.clear();
         frame_resources.packet_buffer_used = 0;
         frame_resources.descriptor_pool_cursor = 0;
