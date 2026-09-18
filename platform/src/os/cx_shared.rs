@@ -1390,6 +1390,15 @@ impl Cx {
             }
         }
 
+        // The frame's recording boundary: every draw list has finished
+        // recording. The geometries dropped since the last redraw are freed
+        // now, except those a live draw call still names (see
+        // `CxGeometryPool`); the scan runs only when something was dropped.
+        if self.geometries.has_unreleased() {
+            let referenced = self.draw_lists.referenced_geometries();
+            self.geometries.release_unreferenced(&referenced);
+        }
+
         if Cx::has_studio_web_socket() {
             self.try_send_studio_widget_tree_dump_responses();
             self.try_send_studio_widget_snapshot_responses();

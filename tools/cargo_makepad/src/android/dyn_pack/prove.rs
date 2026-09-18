@@ -4,7 +4,7 @@
 //! rustc level (`--extern force:`, nightly-gated -> RUSTC_BOOTSTRAP=1 in the
 //! env, with RUSTFLAGS, the linker string and the remapping rustc wrapper:
 //! the device's env.txt). The verdict passes only on the device's success
-//! criteria: cargo succeeded, nothing Dirty, no build script run, exactly one
+//! criteria: cargo succeeded, nothing but the app itself Dirty, no build script run, exactly one
 //! Compiling (the app), the engine .so untouched, the app .so produced and
 //! NEEDING the engine.
 
@@ -53,7 +53,14 @@ pub fn prove(
     let text = fs::read_to_string(log).map_err(|e| format!("{}: {e}", log.display()))?;
 
     let widgets_fresh = text.lines().filter(|l| second_word_after(l, "Fresh") == Some("makepad-widgets")).count();
-    let dirty = text.lines().filter(|l| l.trim_start().starts_with("Dirty")).count();
+    // A Dirty line for any package but the app is a unit mismatch. The app
+    // itself may be Dirty here: a previous proof left its dylib in target/
+    // and the engine was rebuilt since. The pack ships no app lib units, so
+    // on the phone the app is always compiled fresh, never Dirty.
+    let dirty = text
+        .lines()
+        .filter(|l| l.trim_start().starts_with("Dirty ") && second_word_after(l, "Dirty") != Some(app))
+        .count();
     let own_marker = format!("/build/{app}-");
     let mut scripts = 0;
     for l in text.lines().filter(|l| l.contains("Running `") && l.contains("build-script-build`")) {

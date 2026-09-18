@@ -157,6 +157,9 @@ impl CxVulkan {
         slot.frame_resources
             .buffers
             .append(&mut self.frame_resources.buffers);
+        slot.frame_resources
+            .framebuffers
+            .append(&mut self.frame_resources.framebuffers);
         self.swap_repaint_slot(slot_index);
         unsafe {
             self.device

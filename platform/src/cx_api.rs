@@ -1044,6 +1044,22 @@ impl Cx {
             .map(SharedBytes::from_owned)
     }
 
+    /// The script resource at `path` can never be read in this process: no
+    /// resource is registered under it, or its load already failed (a font
+    /// left out of the build's font set, an asset missing from the package).
+    /// A resource still loading, or not yet loaded, is not unavailable.
+    pub fn script_resource_generation(&self) -> u64 {
+        self.script_data.resources.generation.get()
+    }
+
+    pub fn script_resource_unavailable(&self, path: &str) -> bool {
+        let resources = self.script_data.resources.resources.borrow();
+        match resources.iter().find(|res| res.abs_path == path) {
+            None => true,
+            Some(res) => matches!(res.data, crate::script::res::CxScriptResourceData::Error(_)),
+        }
+    }
+
     pub fn null_texture(&self) -> Texture {
         self.null_texture.clone()
     }

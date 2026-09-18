@@ -11,10 +11,10 @@ script_mod! {
     mod.widgets.PhoneSurface = set_type_default() do mod.widgets.PhoneSurfaceBase {
         width: Fill height: Fill
         d +: {text.text_style: theme.font_regular text_bold.text_style: theme.font_bold}
-        ios_font: theme.font_regular{font_family: FontFamily{latin := FontMember{res: crate_resource("self:../../widgets/resources/Inter.ttf") weight: 400.0 asc: 0.0 desc: 0.0}}}
-        ios_bold: theme.font_bold{font_family: FontFamily{latin := FontMember{res: crate_resource("self:../../widgets/resources/Inter.ttf") weight: 600.0 asc: 0.0 desc: 0.0}}}
-        android_font: theme.font_regular{font_family: FontFamily{latin := FontMember{res: crate_resource("self:../../widgets/resources/RobotoFlex.ttf") weight: 400.0 asc: 0.0 desc: 0.0}}}
-        android_bold: theme.font_bold{font_family: FontFamily{latin := FontMember{res: crate_resource("self:../../widgets/resources/RobotoFlex.ttf") weight: 600.0 asc: 0.0 desc: 0.0}}}
+        ios_font: theme.font_regular{font_family: FontFamily{latin := FontMember{res: crate_resource("makepad_widgets:resources/Inter.ttf") weight: 400.0 asc: 0.0 desc: 0.0}}}
+        ios_bold: theme.font_bold{font_family: FontFamily{latin := FontMember{res: crate_resource("makepad_widgets:resources/Inter.ttf") weight: 600.0 asc: 0.0 desc: 0.0}}}
+        android_font: theme.font_regular{font_family: FontFamily{latin := FontMember{res: crate_resource("makepad_widgets:resources/RobotoFlex.ttf") weight: 400.0 asc: 0.0 desc: 0.0}}}
+        android_bold: theme.font_bold{font_family: FontFamily{latin := FontMember{res: crate_resource("makepad_widgets:resources/RobotoFlex.ttf") weight: 600.0 asc: 0.0 desc: 0.0}}}
         chrome +: {}
         key_shift +: {svg: crate_resource("self:resources/icons/key-shift.svg")}
         key_backspace +: {svg: crate_resource("self:resources/icons/key-backspace.svg")}

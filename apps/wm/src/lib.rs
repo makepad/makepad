@@ -3366,12 +3366,14 @@ impl App {
             self.bar_sample.muted = s.muted;
             self.bar_sample.battery = s.battery;
         }
-        // No sampler (no processes to fork `date` in: the web): the clock
-        // is formatted from the platform's own epoch seconds instead.
-        self.bar_sample.clock = match (self.clock_alt, s.clock.is_empty()) {
-            (alt, true) => host::fallback_clock(alt),
-            (true, false) => s.clock_alt,
-            (false, false) => s.clock,
+        // The clock is formatted here, on the UI thread: `localtime_r` reads
+        // the process environment, which this thread also writes (child env,
+        // MAKEPAD_WM_ROOT), so no worker may read it concurrently. Where
+        // there is no local clock (the web) the platform's own epoch seconds
+        // are formatted instead.
+        self.bar_sample.clock = {
+            let clock = shell::bar::sample_clock(self.clock_alt);
+            if clock.is_empty() { host::fallback_clock(self.clock_alt) } else { clock }
         };
         self.status_tick = self.status_tick.wrapping_add(1);
         self.bar_sample.network = s.network;

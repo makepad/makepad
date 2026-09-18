@@ -338,6 +338,7 @@ impl Cx {
             // This ensures we're in sync with the Android Choreographer when we receive a RenderLoop message.
             match from_java_rx.recv() {
                 Ok(FromJavaMessage::RenderLoop) => {
+                    let render_loop_started = std::time::Instant::now();
                     // Drain all pending messages, coalescing consecutive touch-move
                     // events to avoid redundant event dispatch before painting.
                     // Start/Stop events are never dropped — only pure-Move events
@@ -399,6 +400,22 @@ impl Cx {
                         if self.os.needs_first_draw {
                             self.os.needs_first_draw = false;
                             self.redraw_all();
+                        }
+                        // The event side of a frame: the drained Java messages
+                        // (touches coalesced), the timers/signals and the live
+                        // edit gate, before any drawing. Only for a vsync that
+                        // draws (the same test `handle_drawing` makes): at rest
+                        // the loop wakes 120 times a second and paints nothing.
+                        if self.any_passes_dirty()
+                            || self.need_redrawing()
+                            || !self.new_next_frames.is_empty()
+                            || self.demo_time_repaint
+                        {
+                            crate::trace!(
+                                "frame.cpu",
+                                "events_ms={:.3}",
+                                render_loop_started.elapsed().as_secs_f64() * 1000.0
+                            );
                         }
                         self.handle_drawing();
                     } else {
@@ -1463,13 +1480,16 @@ impl Cx {
             || self.demo_time_repaint
         {
             let time_now = self.os.timers.time_now();
+            let phase_started = std::time::Instant::now();
             if !self.new_next_frames.is_empty() {
                 self.call_next_frame_event(time_now);
             }
+            let next_frame_done = std::time::Instant::now();
             if self.need_redrawing() {
                 self.call_draw_event(time_now);
                 self.compile_shaders_for_active_backend();
             }
+            let draw_done = std::time::Instant::now();
 
             if self.os.first_after_resize {
                 self.os.first_after_resize = false;
@@ -1477,6 +1497,17 @@ impl Cx {
             }
 
             self.handle_repaint();
+            // Where a frame's CPU goes on the main thread, per phase: the
+            // NextFrame step, the widget draw (`call_draw_event`) and the
+            // repaint of every dirty pass (`handle_repaint`, record + submit).
+            // `adb shell setprop debug.makepad.trace frame.cpu`.
+            crate::trace!(
+                "frame.cpu",
+                "next_frame_ms={:.3} draw_ms={:.3} repaint_ms={:.3}",
+                next_frame_done.duration_since(phase_started).as_secs_f64() * 1000.0,
+                draw_done.duration_since(next_frame_done).as_secs_f64() * 1000.0,
+                draw_done.elapsed().as_secs_f64() * 1000.0,
+            );
 
             // Run script-VM garbage collection at a safe point after paint, matching
             // the macOS backend, so the script object heap doesn't grow without bound:

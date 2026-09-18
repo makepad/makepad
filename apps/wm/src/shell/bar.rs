@@ -225,12 +225,103 @@ fn run(cmd: &str, args: &[&str]) -> Option<String> {
     }
 }
 
-/// `date +"%A %H:%M"` — omarchy's `dddd HH:mm`.
+/// The wall clock in local time, read in-process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LocalTime {
+    pub year: i64,
+    /// 1–12.
+    pub month: u32,
+    /// 1–31.
+    pub day: u32,
+    pub hour: u32,
+    pub minute: u32,
+    /// 0 = Monday.
+    pub weekday: u32,
+}
+
+/// Now, in the process's local time zone, through the C library's
+/// `localtime_r` — the call `date` itself makes. The sampler used to run
+/// `date` twice a second; on the phone each fork+exec of a process with
+/// the WM's address space cost about 5% of a core and showed up in
+/// every swipe profile as `execve`.
+#[cfg(all(unix, not(target_arch = "wasm32")))]
+pub fn local_now() -> Option<LocalTime> {
+    use std::ffi::{c_char, c_int, c_long};
+    /// POSIX `struct tm` as bionic, glibc and macOS lay it out: nine ints,
+    /// then the zone offset and name.
+    #[repr(C)]
+    struct Tm {
+        sec: c_int,
+        min: c_int,
+        hour: c_int,
+        mday: c_int,
+        mon: c_int,
+        year: c_int,
+        wday: c_int,
+        yday: c_int,
+        isdst: c_int,
+        gmtoff: c_long,
+        zone: *const c_char,
+    }
+    extern "C" {
+        fn localtime_r(time: *const i64, out: *mut Tm) -> *mut Tm;
+    }
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs() as i64;
+    let mut tm = Tm {
+        sec: 0,
+        min: 0,
+        hour: 0,
+        mday: 0,
+        mon: 0,
+        year: 0,
+        wday: 0,
+        yday: 0,
+        isdst: 0,
+        gmtoff: 0,
+        zone: std::ptr::null(),
+    };
+    // SAFETY: `localtime_r` writes only into `tm`, whose layout matches the
+    // platform's `struct tm`; a null return means it could not convert.
+    if unsafe { localtime_r(&secs, &mut tm) }.is_null() {
+        return None;
+    }
+    Some(LocalTime {
+        year: tm.year as i64 + 1900,
+        month: (tm.mon + 1).clamp(1, 12) as u32,
+        day: tm.mday.clamp(1, 31) as u32,
+        hour: tm.hour.clamp(0, 23) as u32,
+        minute: tm.min.clamp(0, 59) as u32,
+        // `tm_wday` counts from Sunday.
+        weekday: ((tm.wday + 6) % 7) as u32,
+    })
+}
+
+#[cfg(not(all(unix, not(target_arch = "wasm32"))))]
+pub fn local_now() -> Option<LocalTime> {
+    None
+}
+
+/// English full weekday names, Monday first — `date`'s `%A`.
+const WEEKDAY_FULL: [&str; 7] =
+    ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+
+/// `%A %H:%M` — omarchy's `dddd HH:mm`; `alt` is `%-d %B W%V %Y`.
 pub fn sample_clock(alt: bool) -> String {
-    let fmt = if alt { "+%-d %B W%V %Y" } else { "+%A %H:%M" };
-    run("date", &[fmt])
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default()
+    let Some(now) = local_now() else { return String::new() };
+    if alt {
+        format!(
+            "{} {} W{:02} {}",
+            now.day,
+            super::panels::MONTH_NAMES[(now.month - 1) as usize],
+            super::panels::iso_week(now.year, now.month, now.day),
+            now.year
+        )
+    } else {
+        format!("{} {:02}:{:02}", WEEKDAY_FULL[now.weekday as usize], now.hour, now.minute)
+    }
 }
 
 /// Everything the bar reads from the OS, gathered OFF the main thread.
@@ -280,8 +371,9 @@ pub fn start_status_sampler(
                 let (volume, muted) = sample_volume();
                 status.volume = volume;
                 status.muted = muted;
-                status.clock = sample_clock(false);
-                status.clock_alt = sample_clock(true);
+                // The clock is not sampled here: `localtime_r` reads the
+                // process environment, which the UI thread writes (child
+                // env, MAKEPAD_WM_ROOT); the UI thread formats it itself.
                 if round % 5 == 0 {
                     status.battery = sample_battery();
                     status.network = sample_network();
