@@ -16,6 +16,9 @@ pub struct FilesModule;
 /// The one linked instance of the module description: immutable, no state.
 pub static FILES_MODULE: FilesModule = FilesModule;
 
+#[cfg(feature = "dynamic-module")]
+makepad_app_module::export_app_module!(FILES_MODULE);
+
 impl AppModule for FilesModule {
     fn id(&self) -> &'static str {
         "files"

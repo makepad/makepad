@@ -35,6 +35,17 @@ pub struct WmScene {
     last: f64,
 }
 impl WmScene {
+    /// A hosted application paints into a pass owned by its window capture,
+    /// rather than into this view's draw-list tree.  Its redraw therefore
+    /// cannot always invalidate the scene texture cache through the normal
+    /// ancestor walk.  Force that cache to be rebuilt when a new frame is
+    /// available so transparent captures and backdrop passes never reveal a
+    /// previous scene underneath the current application.
+    pub fn redraw_content(&mut self, cx: &mut Cx) {
+        self.view.redraw_texture_cache();
+        self.view.redraw(cx);
+    }
+
     pub fn cut(&mut self, cx: &mut Cx) {
         self.frozen.clear();
         self.progress = 1.0;

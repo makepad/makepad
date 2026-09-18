@@ -9,6 +9,9 @@ pub struct RemindersModule;
 
 pub static REMINDERS_MODULE: RemindersModule = RemindersModule;
 
+#[cfg(feature = "dynamic-module")]
+makepad_app_module::export_app_module!(REMINDERS_MODULE);
+
 impl AppModule for RemindersModule {
     fn id(&self) -> &'static str {
         "reminders"

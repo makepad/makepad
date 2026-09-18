@@ -548,7 +548,12 @@ impl PhoneSurface {
         let nav_ink=if phone.screen==PhoneScreen::App || phone.keyboard>0.5 {
             if state.style.dark {rgb(238,238,242)}else{rgb(30,30,34)}
         }else if phone.screen==PhoneScreen::Drawer && !state.style.dark {rgb(30,30,34)}else{rgb(255,255,255)};
-        if chrome.fake_indicator() {self.rounded(cx,rect(bottom.pos.x+bottom.size.x*0.5-60.0,bottom.pos.y+12.0,120.0,4.0),2.0,nav_ink);}
+        // iOS skin on a real Android phone: still draw the home pill so
+        // there is a way out of an in-process app (the OS Home button
+        // leaves wmdyn entirely; Back is gesture-nav and never arrives).
+        if chrome.fake_indicator() || ios {
+            self.rounded(cx,rect(bottom.pos.x+bottom.size.x*0.5-60.0,bottom.pos.y+(bottom_h-4.0)*0.5,120.0,4.0),2.0,nav_ink);
+        }
         if bottom_h>0.0 {self.hits.push((bottom,PhoneHit::Home));}
         if !ios && phone.keyboard>0.5 {
             let back=rect(bottom.pos.x+12.0,bottom.pos.y-10.0,40.0,34.0);
