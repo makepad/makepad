@@ -29,6 +29,71 @@ script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
 
+    let TextMarkKind = set_type_default() do #(TextMarkKind::script_api(vm))
+    mod.widgets.TextMarkKind = TextMarkKind
+
+    /** The marked-span decoration: a wave, or a dotted rule, drawn under the
+     * words of a marked range rather than round the whole control.
+     *
+     * Every knob is in pixels - amplitude, wavelength, thickness, and the gap
+     * below the baseline - so the same word marked in a heading and in a
+     * caption gets the same wave, and a long run does not blur. */
+    mod.widgets.DrawTextMark = set_type_default() do #(DrawTextMark::script_shader(vm)) {
+        ..mod.draw.DrawQuad
+
+        mark_kind: instance(TextMarkKind.Error)
+        color_error: theme.color_error
+        color_warning: theme.color_warning
+        color_note: theme.color_info
+
+        /** wave height above and below its centre line, in pixels 0..4 step 0.1 */
+        amplitude: 1.3
+        /** one full period of the wave, in pixels 2..20 step 0.5 */
+        wavelength: 5.0
+        /** stroke width, in pixels 0.5..4 step 0.1 */
+        thickness: 1.1
+        /** distance from the text baseline down to the top of the wave, in pixels 0..8 step 0.5 */
+        gap: 1.0
+
+        pixel: fn() {
+            var color = self.color_error
+            var dotted = 0.0
+            match self.mark_kind {
+                TextMarkKind.Error => {
+                    color = self.color_error
+                }
+                TextMarkKind.Warning => {
+                    color = self.color_warning
+                }
+                TextMarkKind.Note => {
+                    color = self.color_note
+                    dotted = 1.0
+                }
+            }
+            let p = self.pos * self.rect_size
+            // The quad hangs from the baseline, so the centre line sits a gap
+            // plus one amplitude below the top of it.
+            let center_y = self.gap + self.amplitude + self.thickness * 0.5
+            var offset = sin(p.x * 6.2831853 / self.wavelength) * self.amplitude
+            if dotted > 0.5 {
+                offset = 0.0
+            }
+            // Shear the sample point instead of stroking a curve: one straight
+            // line through a displaced viewport is one SDF, and the wave keeps
+            // the stroke's antialiasing.
+            let sdf = Sdf2d.viewport(vec2(p.x, p.y - offset))
+            sdf.move_to(0.0, center_y)
+            sdf.line_to(self.rect_size.x, center_y)
+            let stroked = sdf.stroke(color, self.thickness)
+            if dotted > 0.5 {
+                if modf(p.x, self.wavelength) > self.wavelength * 0.5 {
+                    return vec4(0.0, 0.0, 0.0, 0.0)
+                }
+            }
+            return stroked
+        }
+    }
+
     mod.widgets.TextInputBase = #(TextInput::register_widget(vm))
 
     /** The flat text field: an inset well with text, selection band and caret layers. */
@@ -353,6 +418,13 @@ script_mod! {
             }
         }
 
+        /** The marked-span squiggle: drawn under the words, not round the well. */
+        draw_mark +: {
+            color_error: theme.color_error
+            color_warning: theme.color_warning
+            color_note: theme.color_info
+        }
+
         animator: Animator{
             empty: {
                 default: @off
@@ -525,6 +597,236 @@ script_mod! {
     }
 }
 
+
+/// What a marked span means.
+///
+/// The flavour picks the colour and the shape; nothing else about a mark
+/// changes. Error and warning are the two a form needs - this value will not
+/// do, and this value is doubtful - and note is the third thing a marked span
+/// is ever for: a term with something behind it, a tracked change, a hint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Script, ScriptHook)]
+#[repr(u32)]
+pub enum TextMarkKind {
+    /// Wrong: a misspelling, a value the form will not accept.
+    #[pick]
+    Error = 1,
+    /// Doubtful: a lint, a weak password, a date in the past.
+    Warning = 2,
+    /// Noteworthy: a defined term, a tracked change, a hint.
+    Note = 3,
+}
+
+/// A stretch of text marked as wrong, doubtful or noteworthy.
+///
+/// `start` and `end` are byte offsets into the marked widget's own text, half
+/// open, so a mark is `text[start..end]`. They are plain offsets into one
+/// string on purpose: every text widget in this library lays out one string,
+/// and a line-and-column position would have to be converted at every call.
+///
+/// Marks may overlap, and overlapping marks all draw. A misspelt word inside a
+/// sentence flagged as too long is two facts, not one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TextMark {
+    /// First byte of the marked text.
+    pub start: usize,
+    /// One past the last byte of the marked text.
+    pub end: usize,
+    /// What the mark means.
+    pub kind: TextMarkKind,
+}
+
+impl TextMark {
+    /// A mark over `start..end`. The two ends may arrive either way round.
+    pub fn new(start: usize, end: usize, kind: TextMarkKind) -> Self {
+        Self {
+            start: start.min(end),
+            end: start.max(end),
+            kind,
+        }
+    }
+
+    /// A mark saying this text is wrong.
+    pub fn error(start: usize, end: usize) -> Self {
+        Self::new(start, end, TextMarkKind::Error)
+    }
+
+    /// A mark saying this text is doubtful.
+    pub fn warning(start: usize, end: usize) -> Self {
+        Self::new(start, end, TextMarkKind::Warning)
+    }
+
+    /// A mark saying this text is worth noticing.
+    pub fn note(start: usize, end: usize) -> Self {
+        Self::new(start, end, TextMarkKind::Note)
+    }
+
+    /// Whether the mark covers no text at all. An empty mark draws nothing.
+    pub fn is_empty(&self) -> bool {
+        self.start >= self.end
+    }
+
+    /// The part of this mark that falls inside a `window_len`-byte window
+    /// starting at `window_start`, as a range local to that window, or `None`
+    /// when the mark misses the window entirely.
+    ///
+    /// This is the first half of turning a mark into rects: a text flow lays
+    /// out one run at a time, each run holding a slice of the flow's text, and
+    /// a mark given against the whole flow has to be cut down to the piece of
+    /// it that each run actually contains before that run's layout can be
+    /// asked where the glyphs are.
+    pub fn clip_to(&self, window_start: usize, window_len: usize) -> Option<std::ops::Range<usize>> {
+        let start = self.start.max(window_start);
+        let end = self.end.min(window_start + window_len);
+        if start >= end {
+            return None;
+        }
+        Some(start - window_start..end - window_start)
+    }
+}
+
+/// The marks a text widget is currently showing.
+///
+/// A plain list in the order the host gave it, with no merging and no overlap
+/// rule: a set that silently drops a mark because another one touches it
+/// cannot report two things about one word, which is the case marks exist for.
+#[derive(Clone, Debug, Default)]
+pub struct TextMarkSet {
+    marks: Vec<TextMark>,
+}
+
+impl TextMarkSet {
+    /// Whether there is nothing to draw.
+    pub fn is_empty(&self) -> bool {
+        self.marks.is_empty()
+    }
+
+    /// How many marks are set.
+    pub fn len(&self) -> usize {
+        self.marks.len()
+    }
+
+    /// The marks, in the order they were given.
+    pub fn as_slice(&self) -> &[TextMark] {
+        &self.marks
+    }
+
+    /// Walk the marks in the order they were given.
+    pub fn iter(&self) -> std::slice::Iter<'_, TextMark> {
+        self.marks.iter()
+    }
+
+    /// Replace every mark. Empty marks are dropped on the way in, since they
+    /// would draw nothing and only cost a rect walk per frame.
+    pub fn set(&mut self, marks: impl IntoIterator<Item = TextMark>) {
+        self.marks.clear();
+        self.marks.extend(marks.into_iter().filter(|m| !m.is_empty()));
+    }
+
+    /// Add one mark, keeping the ones already there.
+    pub fn push(&mut self, mark: TextMark) {
+        if !mark.is_empty() {
+            self.marks.push(mark);
+        }
+    }
+
+    /// Drop every mark.
+    pub fn clear(&mut self) {
+        self.marks.clear();
+    }
+
+    /// Drop every mark because the text changed underneath them, returning
+    /// whether anything was actually dropped.
+    ///
+    /// The library deliberately does no edit algebra. An offset that was right
+    /// before an edit is a guess after it, and a squiggle under the wrong word
+    /// is worse than no squiggle at all; the host has just changed the text, so
+    /// it is about to re-validate it anyway and can mark it again. One line,
+    /// correct, and no edit arithmetic enters the library.
+    pub fn clear_on_edit(&mut self) -> bool {
+        if self.marks.is_empty() {
+            return false;
+        }
+        self.marks.clear();
+        true
+    }
+}
+
+/// Place a mark's band under one row of laid-out text.
+///
+/// `row_origin` and `row_width` are one row's piece of the mark in layout
+/// pixels relative to `text_origin`, and `row_ascender` is that row's ascender,
+/// so `row_origin.y + row_ascender` is that row's baseline. The band hangs from
+/// the baseline down and is `band_height` tall whatever the row is: the wave is
+/// measured in pixels, not in fractions of a row.
+///
+/// A mark crossing a wrap arrives here once per row it touches, each piece
+/// carrying its own row's ascender, so every piece hangs from the baseline of
+/// the row it is actually on rather than from the first row's.
+pub fn mark_band_rect(
+    text_origin: DVec2,
+    row_origin: DVec2,
+    row_width: f64,
+    row_ascender: f64,
+    font_scale: f64,
+    band_height: f64,
+) -> Rect {
+    Rect {
+        pos: dvec2(
+            text_origin.x + row_origin.x * font_scale,
+            text_origin.y + (row_origin.y + row_ascender) * font_scale,
+        ),
+        size: dvec2((row_width * font_scale).max(0.0), band_height),
+    }
+}
+
+/// The squiggle drawn under a marked span.
+///
+/// The shape comes from the terminal's underline shader rather than the code
+/// editor's decoration: the editor takes its amplitude as a fraction of the
+/// row height, so the same word gets a different wave in a heading than in the
+/// prose under it, and a wide run blurs. Here every uniform is in pixels.
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawTextMark {
+    #[deref]
+    draw_super: DrawQuad,
+    /// Colour of an [`TextMarkKind::Error`] mark.
+    #[live]
+    pub color_error: Vec4f,
+    /// Colour of a [`TextMarkKind::Warning`] mark.
+    #[live]
+    pub color_warning: Vec4f,
+    /// Colour of a [`TextMarkKind::Note`] mark.
+    #[live]
+    pub color_note: Vec4f,
+    /// Which flavour this instance draws.
+    #[live]
+    pub mark_kind: TextMarkKind,
+    /// Wave height above and below its centre line, in pixels.
+    #[live]
+    pub amplitude: f32,
+    /// One full period of the wave, in pixels.
+    #[live]
+    pub wavelength: f32,
+    /// Stroke width, in pixels.
+    #[live]
+    pub thickness: f32,
+    /// Distance from the text baseline down to the top of the wave, in pixels.
+    #[live]
+    pub gap: f32,
+}
+
+impl DrawTextMark {
+    /// How tall a band this shader needs under the baseline, in pixels.
+    ///
+    /// The widget hands `draw_abs` a rect this tall, so the wave is never
+    /// clipped and never scaled to fit a row. The last pixel is headroom for
+    /// the stroke's antialiasing.
+    pub fn band_height(&self) -> f64 {
+        (self.gap + 2.0 * self.amplitude + self.thickness + 1.0) as f64
+    }
+}
+
 #[derive(Script, Widget, Animator)]
 pub struct TextInput {
     #[uid]
@@ -545,6 +847,13 @@ pub struct TextInput {
     draw_cursor: DrawQuad,
     #[live]
     draw_composition_underline: DrawQuad,
+    #[live]
+    draw_mark: DrawTextMark,
+
+    /// The marked spans this field is showing. Dropped on every edit; the host
+    /// re-validates and marks again.
+    #[rust]
+    marks: TextMarkSet,
 
     #[layout]
     layout: Layout,
@@ -1725,6 +2034,39 @@ impl TextInput {
         }
     }
 
+    /// Mark a stretch of this field's text as wrong, doubtful or noteworthy,
+    /// keeping the marks already set.
+    ///
+    /// `start` and `end` are byte offsets into [`TextInput::text`] and may
+    /// arrive either way round. The mark draws under the words themselves, so
+    /// a form can say *which* word it objects to instead of colouring the whole
+    /// control - which is all a field could say before.
+    ///
+    /// Marks are dropped the moment the text changes; validate again and mark
+    /// again. See [`TextMarkSet::clear_on_edit`].
+    pub fn add_mark(&mut self, cx: &mut Cx, start: usize, end: usize, kind: TextMarkKind) {
+        self.marks.push(TextMark::new(start, end, kind));
+        self.draw_bg.redraw(cx);
+    }
+
+    /// Replace every mark on this field.
+    pub fn set_marks(&mut self, cx: &mut Cx, marks: impl IntoIterator<Item = TextMark>) {
+        self.marks.set(marks);
+        self.draw_bg.redraw(cx);
+    }
+
+    /// Drop every mark on this field.
+    pub fn clear_marks(&mut self, cx: &mut Cx) {
+        if self.marks.clear_on_edit() {
+            self.draw_bg.redraw(cx);
+        }
+    }
+
+    /// The marks this field is showing, in the order they were given.
+    pub fn marks(&self) -> &[TextMark] {
+        self.marks.as_slice()
+    }
+
     pub fn force_new_edit_group(&mut self) {
         self.history.force_new_edit_group();
     }
@@ -1892,6 +2234,67 @@ impl TextInput {
         self.draw_composition_underline.end_many_instances(cx);
     }
 
+    /// Draw a mark under the words of every marked range.
+    ///
+    /// One quad per row a mark touches. The layout's `selection_rects` has
+    /// already split the range at the wraps and hands back one rect per row,
+    /// each carrying that row's ascender - the same call that draws the IME
+    /// composition underline, used for the same reason.
+    ///
+    /// A password field draws no marks: the glyphs on screen are not the text,
+    /// so a byte range over the text does not name anything visible.
+    fn draw_marks(&mut self, cx: &mut Cx2d, text_rect: Rect) {
+        if self.marks.is_empty() || self.is_password {
+            return;
+        }
+        let Some(laidout_text) = self.laidout_text.clone() else {
+            return;
+        };
+        let font_scale = self.draw_text.font_scale as f64;
+        let band_height = self.draw_mark.band_height();
+        let text_len = self.text.len();
+
+        self.draw_mark.begin_many_instances(cx);
+        for mark in self.marks.as_slice() {
+            let Some(range) = mark.clip_to(0, text_len) else {
+                continue;
+            };
+            let selection = Selection {
+                anchor: Cursor {
+                    index: floor_grapheme_boundary(&self.text, range.start),
+                    prefer_next_row: false,
+                },
+                cursor: Cursor {
+                    index: floor_grapheme_boundary(&self.text, range.end),
+                    prefer_next_row: false,
+                },
+            };
+            self.draw_mark.mark_kind = mark.kind;
+            for SelectionRect {
+                rect_in_lpxs,
+                ascender_in_lpxs,
+            } in laidout_text.selection_rects(selection)
+            {
+                let band = mark_band_rect(
+                    text_rect.pos,
+                    dvec2(
+                        rect_in_lpxs.origin.x as f64,
+                        rect_in_lpxs.origin.y as f64,
+                    ),
+                    rect_in_lpxs.size.width as f64,
+                    ascender_in_lpxs as f64,
+                    font_scale,
+                    band_height,
+                );
+                if band.size.x <= 0.0 {
+                    continue;
+                }
+                self.draw_mark.draw_abs(cx, band);
+            }
+        }
+        self.draw_mark.end_many_instances(cx);
+    }
+
     fn ceil_word_boundary(&self, index: usize) -> usize {
         let mut prev_word_boundary_index = 0;
         for (word_boundary_index, _) in self.text.split_word_bound_indices() {
@@ -1973,6 +2376,7 @@ impl TextInput {
         self.needs_scroll_to_cursor = true;
         self.history.apply_edit(edit, &mut self.text);
         self.laidout_text = None;
+        self.marks.clear_on_edit();
         self.check_text_is_empty(cx);
     }
 
@@ -2084,12 +2488,14 @@ impl TextInput {
         };
         self.needs_scroll_to_cursor = true;
         self.laidout_text = None;
+        self.marks.clear_on_edit();
         self.check_text_is_empty(cx);
     }
 
     fn undo(&mut self, cx: &mut Cx) -> bool {
         if let Some(new_selection) = self.history.undo(self.selection, &mut self.text) {
             self.laidout_text = None;
+            self.marks.clear_on_edit();
             self.selection = new_selection;
             self.needs_scroll_to_cursor = true;
             self.check_text_is_empty(cx);
@@ -2102,6 +2508,7 @@ impl TextInput {
     fn redo(&mut self, cx: &mut Cx) -> bool {
         if let Some(new_selection) = self.history.redo(self.selection, &mut self.text) {
             self.laidout_text = None;
+            self.marks.clear_on_edit();
             self.selection = new_selection;
             self.needs_scroll_to_cursor = true;
             self.check_text_is_empty(cx);
@@ -2246,6 +2653,7 @@ impl Widget for TextInput {
 
     fn set_text(&mut self, cx: &mut Cx, text: &str) {
         self.text = self.filter_input(text, true);
+        self.marks.clear_on_edit();
         self.set_selection(
             cx,
             Selection {
@@ -2269,6 +2677,7 @@ impl Widget for TextInput {
         self.draw_bg.begin(cx, walk, self.layout);
         self.draw_selection.append_to_draw_call(cx);
         self.draw_composition_underline.append_to_draw_call(cx);
+        self.draw_mark.append_to_draw_call(cx);
         // Push an inner clip rect to prevent scrolled text from bleeding into
         // the padding area. For multiline, this clips vertically-scrolled content.
         // For single-line, this clips horizontally-scrolled content that overflows.
@@ -2283,6 +2692,7 @@ impl Widget for TextInput {
         let cursor_rect = self.draw_cursor(cx, text_rect);
         self.draw_selection(cx, text_rect);
         self.draw_composition_underline(cx, text_rect);
+        self.draw_marks(cx, text_rect);
         self.scroll_to_cursor(cx, content_clip_index);
         cx.pop_clip_rect();
         self.draw_scroll_bar(cx);
@@ -3167,6 +3577,34 @@ impl Widget for TextInput {
 }
 
 impl TextInputRef {
+    /// See [`TextInput::add_mark`].
+    pub fn add_mark(&self, cx: &mut Cx, start: usize, end: usize, kind: TextMarkKind) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.add_mark(cx, start, end, kind);
+        }
+    }
+
+    /// See [`TextInput::set_marks`].
+    pub fn set_marks(&self, cx: &mut Cx, marks: impl IntoIterator<Item = TextMark>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_marks(cx, marks);
+        }
+    }
+
+    /// See [`TextInput::clear_marks`].
+    pub fn clear_marks(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.clear_marks(cx);
+        }
+    }
+
+    /// See [`TextInput::marks`].
+    pub fn marks(&self) -> Vec<TextMark> {
+        self.borrow()
+            .map(|inner| inner.marks().to_vec())
+            .unwrap_or_default()
+    }
+
     /// See [`TextInput::set_max_lines`].
     pub fn set_max_lines(&self, cx: &mut Cx, max_lines: usize) {
         if let Some(mut inner) = self.borrow_mut() {
@@ -3773,4 +4211,149 @@ fn uses_apple_text_boundary_modifier(modifiers: KeyModifiers) -> bool {
 
 fn is_apple_text_platform() -> bool {
     cfg!(target_vendor = "apple")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{mark_band_rect, TextMark, TextMarkKind, TextMarkSet};
+    use crate::makepad_draw::*;
+
+    // --- a range onto the runs that have to draw it -----------------------
+
+    #[test]
+    fn a_mark_clips_into_the_run_that_holds_it() {
+        // "hello world", laid out as two runs: "hello " at 0 and "world" at 6.
+        let mark = TextMark::error(6, 11);
+        assert_eq!(mark.clip_to(0, 6), None);
+        assert_eq!(mark.clip_to(6, 5), Some(0..5));
+    }
+
+    #[test]
+    fn a_mark_spanning_two_runs_clips_into_both() {
+        let mark = TextMark::warning(3, 9);
+        assert_eq!(mark.clip_to(0, 6), Some(3..6));
+        assert_eq!(mark.clip_to(6, 5), Some(0..3));
+    }
+
+    #[test]
+    fn a_mark_past_the_end_is_clamped_to_the_text() {
+        let mark = TextMark::error(2, 900);
+        assert_eq!(mark.clip_to(0, 11), Some(2..11));
+    }
+
+    #[test]
+    fn a_mark_that_misses_a_run_yields_nothing() {
+        assert_eq!(TextMark::error(0, 4).clip_to(6, 5), None);
+        assert_eq!(TextMark::error(20, 24).clip_to(6, 5), None);
+    }
+
+    #[test]
+    fn an_empty_mark_yields_nothing() {
+        let mark = TextMark::note(4, 4);
+        assert!(mark.is_empty());
+        assert_eq!(mark.clip_to(0, 11), None);
+    }
+
+    #[test]
+    fn a_mark_given_back_to_front_is_normalised() {
+        let mark = TextMark::new(9, 3, TextMarkKind::Error);
+        assert_eq!((mark.start, mark.end), (3, 9));
+        assert_eq!(mark.clip_to(0, 11), Some(3..9));
+    }
+
+    // --- one mark, one band per row it touches ---------------------------
+
+    #[test]
+    fn a_band_hangs_from_the_rows_baseline() {
+        // A row 16 lpxs tall with a 12 lpx ascender, drawn at 2x.
+        let band = mark_band_rect(dvec2(100.0, 50.0), dvec2(4.0, 0.0), 30.0, 12.0, 2.0, 5.0);
+        assert_eq!(band.pos.x, 100.0 + 8.0);
+        assert_eq!(band.pos.y, 50.0 + 24.0);
+        assert_eq!(band.size.x, 60.0);
+        assert_eq!(band.size.y, 5.0);
+    }
+
+    #[test]
+    fn a_mark_split_across_a_wrap_gets_a_band_per_row() {
+        // What the layout hands back for a mark that wraps: the tail of row 0
+        // from x=40, then the head of row 1 from x=0. Row 1 sits 20 lpxs lower.
+        let rows = [
+            (dvec2(40.0, 0.0), 60.0, 12.0),
+            (dvec2(0.0, 20.0), 25.0, 12.0),
+        ];
+        let bands: Vec<Rect> = rows
+            .iter()
+            .map(|(origin, width, ascender)| {
+                mark_band_rect(dvec2(10.0, 10.0), *origin, *width, *ascender, 1.0, 4.0)
+            })
+            .collect();
+
+        assert_eq!(bands.len(), 2);
+        // Each piece hangs from its own row's baseline, not from the first's.
+        assert_eq!(bands[0].pos.y, 10.0 + 12.0);
+        assert_eq!(bands[1].pos.y, 10.0 + 32.0);
+        // The second piece starts at the left edge of the text, not where the
+        // first one ended.
+        assert_eq!(bands[0].pos.x, 50.0);
+        assert_eq!(bands[1].pos.x, 10.0);
+        // And both bands are the same height: the wave is in pixels.
+        assert_eq!(bands[0].size.y, bands[1].size.y);
+    }
+
+    #[test]
+    fn a_band_is_the_same_height_under_a_heading_as_under_a_caption() {
+        let caption = mark_band_rect(DVec2::default(), dvec2(0.0, 0.0), 40.0, 9.0, 1.0, 4.0);
+        let heading = mark_band_rect(DVec2::default(), dvec2(0.0, 0.0), 40.0, 30.0, 1.0, 4.0);
+        assert_eq!(caption.size.y, heading.size.y);
+        // ...and each still sits on its own baseline.
+        assert_eq!(caption.pos.y, 9.0);
+        assert_eq!(heading.pos.y, 30.0);
+    }
+
+    #[test]
+    fn a_zero_width_piece_makes_a_zero_width_band() {
+        let band = mark_band_rect(DVec2::default(), dvec2(5.0, 0.0), -3.0, 10.0, 1.0, 4.0);
+        assert_eq!(band.size.x, 0.0);
+    }
+
+    // --- the set ----------------------------------------------------------
+
+    #[test]
+    fn marks_are_dropped_on_edit() {
+        let mut marks = TextMarkSet::default();
+        marks.set([TextMark::error(0, 4), TextMark::warning(6, 9)]);
+        assert_eq!(marks.len(), 2);
+
+        assert!(marks.clear_on_edit());
+        assert!(marks.is_empty());
+        // Nothing to drop the second time, so nothing to redraw for either.
+        assert!(!marks.clear_on_edit());
+    }
+
+    #[test]
+    fn overlapping_marks_both_survive() {
+        let mut marks = TextMarkSet::default();
+        marks.set([TextMark::warning(0, 20), TextMark::error(4, 9)]);
+        assert_eq!(marks.len(), 2);
+        assert_eq!(marks.as_slice()[0].kind, TextMarkKind::Warning);
+        assert_eq!(marks.as_slice()[1].kind, TextMarkKind::Error);
+    }
+
+    #[test]
+    fn empty_marks_never_reach_the_draw_walk() {
+        let mut marks = TextMarkSet::default();
+        marks.set([TextMark::error(3, 3), TextMark::error(3, 5)]);
+        assert_eq!(marks.len(), 1);
+        marks.push(TextMark::note(7, 7));
+        assert_eq!(marks.len(), 1);
+    }
+
+    #[test]
+    fn setting_marks_replaces_rather_than_appends() {
+        let mut marks = TextMarkSet::default();
+        marks.set([TextMark::error(0, 4)]);
+        marks.set([TextMark::note(6, 9)]);
+        assert_eq!(marks.len(), 1);
+        assert_eq!(marks.as_slice()[0].kind, TextMarkKind::Note);
+    }
 }
