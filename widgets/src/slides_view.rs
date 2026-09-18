@@ -1,3 +1,14 @@
+//! SlidesView — a deck: one slide at a time, filling what it is given.
+//!
+//! The slides are the children written under it, in the order they are
+//! written; the arrow keys move between them and the deck slides sideways
+//! from one to the next rather than cutting.
+//!
+//! It deliberately does NOT paginate, scroll, or show two slides at once
+//! except while it is moving between them: anything on screen beside the
+//! slide is the thing a slide exists to keep off it. Nor does it size
+//! itself to its content — a slide is handed the deck's rect and is
+//! expected to fit in it, so the deck needs a real height of its own.
 use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*, widget_tree::CxWidgetExt};
 
 script_mod! {
@@ -71,6 +82,33 @@ pub enum SlidesViewAction {
     None,
 }
 
+/// Where an entry written under the deck is filed.
+///
+/// `named` is the id it was written with (`intro := Slide{}`); `nil_key`
+/// says it carried no key at all, which is how a slide is normally
+/// written. The unnamed ones are numbered in the order they appear, and
+/// that numbering is the deck's order — dropping them, as this once did,
+/// is what left a deck of plain `Slide{}` children with no slides in it.
+/// An entry that is neither is not a child and is passed over.
+fn entry_id(named: Option<LiveId>, nil_key: bool, anonymous: &mut usize) -> Option<LiveId> {
+    if named.is_some() {
+        return named;
+    }
+    if nil_key {
+        let id = LiveId(*anonymous as u64);
+        *anonymous += 1;
+        return Some(id);
+    }
+    None
+}
+
+/// The slide a goal lands on. There is nothing past either end of a deck,
+/// and an empty deck rests on the first slide rather than on the one
+/// before it.
+fn clamp_goal(goal: f64, count: usize) -> f64 {
+    goal.clamp(0.0, (count.max(1) - 1) as f64)
+}
+
 #[derive(Script, WidgetRef, WidgetSet, WidgetRegister)]
 pub struct SlidesView {
     #[uid]
@@ -128,26 +166,35 @@ impl ScriptHook for SlidesView {
         scope: &mut Scope,
         value: ScriptValue,
     ) {
-        // Handle vec_key children from the object's vec (these are our slide templates)
-        // Only collect during template applies (not eval) to avoid storing temporary objects
+        // The children written under the deck are its slides. Only collect
+        // during template applies (not eval) to avoid storing temporary objects
         if !apply.is_eval() {
             if let Some(obj) = value.as_object() {
+                let mut anonymous = 0usize;
                 vm.vec_with(obj, |vm, vec| {
                     for kv in vec {
-                        if kv.key.as_id().is_some() {
-                            // vec_key children are our slides
-                            if let Some(id) = kv.key.as_id() {
-                                if let Some(template_obj) = kv.value.as_object() {
-                                    self.templates
-                                        .insert(id, vm.bx.heap.new_object_ref(template_obj));
-                                    self.draw_order.push(id);
-                                }
-
-                                // If we already have this slide instantiated, apply updates to it
-                                if let Some(slide) = self.slides.get_mut(&id) {
-                                    slide.script_apply(vm, apply, scope, kv.value);
-                                }
+                        let Some(id) = entry_id(kv.key.as_id(), kv.key.is_nil(), &mut anonymous)
+                        else {
+                            continue;
+                        };
+                        // A deck may hold anything a script can write; only
+                        // the things that can become widgets are slides.
+                        if !WidgetRef::value_is_newable_widget(vm, kv.value) {
+                            continue;
+                        }
+                        if let Some(template_obj) = kv.value.as_object() {
+                            self.templates.insert(id, vm.bx.heap.new_object_ref(template_obj));
+                            // The written order is the deck's order. An id
+                            // already in it is this slide being applied
+                            // again, not another slide behind it.
+                            if !self.draw_order.contains(&id) {
+                                self.draw_order.push(id);
                             }
+                        }
+
+                        // If we already have this slide instantiated, apply updates to it
+                        if let Some(slide) = self.slides.get_mut(&id) {
+                            slide.script_apply(vm, apply, scope, kv.value);
                         }
                     }
                 });
@@ -327,19 +374,12 @@ impl SlidesView {
     }
 
     pub fn next_slide(&mut self, cx: &mut Cx) {
-        self.goal_slide += 1.0;
-        let max_goal_slide = (self.draw_order.len().max(1) - 1) as f64;
-        if self.goal_slide > max_goal_slide {
-            self.goal_slide = max_goal_slide
-        }
+        self.goal_slide = clamp_goal(self.goal_slide + 1.0, self.draw_order.len());
         self.next_frame(cx);
     }
 
     pub fn prev_slide(&mut self, cx: &mut Cx) {
-        self.goal_slide -= 1.0;
-        if self.goal_slide < 0.0 {
-            self.goal_slide = 0.0;
-        }
+        self.goal_slide = clamp_goal(self.goal_slide - 1.0, self.draw_order.len());
         self.next_frame(cx);
     }
 
@@ -403,5 +443,58 @@ impl SlidesViewSet {
         for item in self.iter() {
             item.prev_slide(cx);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The ids a run of children are filed under, in written order; `None`
+    /// is a child written without a name, which is how slides are written.
+    fn order(entries: &[Option<LiveId>]) -> Vec<LiveId> {
+        let mut anonymous = 0usize;
+        entries
+            .iter()
+            .filter_map(|named| entry_id(*named, named.is_none(), &mut anonymous))
+            .collect()
+    }
+
+    #[test]
+    fn a_deck_written_without_names_still_has_slides() {
+        // The bug: a slide is written `Slide{...}` and carries no key, and
+        // only entries with a key were collected — so none of them were,
+        // and the deck drew nothing at all.
+        assert_eq!(order(&[None, None, None]), vec![LiveId(0), LiveId(1), LiveId(2)]);
+    }
+
+    #[test]
+    fn the_written_order_is_the_deck_order() {
+        assert_eq!(
+            order(&[None, Some(live_id!(outro)), None]),
+            vec![LiveId(0), live_id!(outro), LiveId(1)],
+            "a named slide keeps its name and does not spend a number"
+        );
+    }
+
+    #[test]
+    fn an_entry_that_is_neither_named_nor_bare_is_not_a_slide() {
+        let mut anonymous = 0usize;
+        assert_eq!(entry_id(None, false, &mut anonymous), None);
+        assert_eq!(anonymous, 0, "and it does not spend a slide's number");
+    }
+
+    #[test]
+    fn the_goal_stops_at_either_end_of_the_deck() {
+        assert_eq!(clamp_goal(-1.0, 3), 0.0, "there is nothing before the first");
+        assert_eq!(clamp_goal(3.0, 3), 2.0, "nor anything after the last");
+        assert_eq!(clamp_goal(2.0, 3), 2.0);
+    }
+
+    #[test]
+    fn an_empty_deck_rests_on_the_first_slide() {
+        // A deck with no children still answers `next`, and 0 - 1 slides is
+        // not a slide to sit on.
+        assert_eq!(clamp_goal(1.0, 0), 0.0);
     }
 }

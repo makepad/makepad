@@ -1,8 +1,9 @@
 use crate::makepad_draw::text::{
     geom::Point as TextPoint,
-    layouter::LaidoutText,
+    layouter::{LaidoutText, SelectionRect},
     selection::{Cursor, Selection},
 };
+use crate::text_input::{mark_band_rect, DrawTextMark, TextMark, TextMarkKind, TextMarkSet};
 use crate::{
     animator::*, makepad_derive_widget::*, makepad_draw::shader::draw_text::TextOverflow,
     makepad_draw::*, widget::*, widget_tree::CxWidgetExt,
@@ -110,6 +111,12 @@ script_mod! {
         draw_selection +: {
             draw_call_group: @selection
             color: theme.color_u_3
+        }
+        /** The marked-span squiggle: drawn under the words, not round the flow. */
+        draw_mark +: {
+            color_error: theme.color_error
+            color_warning: theme.color_warning
+            color_note: theme.color_info
         }
     }
 
@@ -300,6 +307,19 @@ impl StackCounter {
     pub fn value(&self) -> usize {
         self.0
     }
+}
+
+/// The largest index at or below `index` that starts a character.
+///
+/// Byte offsets that come from outside - a spell checker, a validator, a diff -
+/// are not guaranteed to fall between characters, and a position asked for at a
+/// byte inside one is meaningless rather than merely wrong.
+fn floor_char_boundary(text: &str, index: usize) -> usize {
+    let mut index = index.min(text.len());
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
 }
 
 /// A segment in the TextFlow selection stream
@@ -548,6 +568,72 @@ impl SelectionTracker {
         (dx * dx + dy * dy).sqrt()
     }
 
+    /// Screen-space bands for one mark: one per row the mark touches, each
+    /// hanging from that row's own baseline.
+    ///
+    /// Not the same shape as [`SelectionTracker::selection_rects`]. A selection
+    /// is a box around the words; a mark goes *under* them, so each band starts
+    /// at the baseline and is `band_height` tall whatever the row's height is.
+    ///
+    /// The mark's range is cut down to each text segment in turn - a flow lays
+    /// out one run at a time and a mark is given against the whole flow - and
+    /// the run's layout then splits its piece again at every wrap, which is why
+    /// a mark that crosses a line break comes back as two bands rather than one
+    /// box spanning both rows.
+    ///
+    /// Gaps and child-widget segments are skipped: an inline image has no
+    /// baseline to hang a mark from, and a child that draws its own text draws
+    /// its own decorations with it.
+    pub fn mark_rects(&self, mark: TextMark, band_height: f64) -> Vec<Rect> {
+        let mut rects = Vec::new();
+        for segment in &self.segments {
+            let SelectionSegment::Text {
+                laidout_text,
+                origin,
+                font_scale,
+                text_start,
+            } = segment
+            else {
+                continue;
+            };
+            let Some(range) = mark.clip_to(*text_start, laidout_text.text.len()) else {
+                continue;
+            };
+            // A mark arrives as byte offsets a host computed against its own
+            // copy of the text; a spell checker or a diff can land one inside a
+            // multi-byte character, and the layout is asked for a position, not
+            // a slice, so it would answer nonsense rather than panic.
+            let selection = Selection {
+                anchor: Cursor {
+                    index: floor_char_boundary(&laidout_text.text, range.start),
+                    prefer_next_row: false,
+                },
+                cursor: Cursor {
+                    index: floor_char_boundary(&laidout_text.text, range.end),
+                    prefer_next_row: false,
+                },
+            };
+            for SelectionRect {
+                rect_in_lpxs,
+                ascender_in_lpxs,
+            } in laidout_text.selection_rects(selection)
+            {
+                let band = mark_band_rect(
+                    *origin,
+                    dvec2(rect_in_lpxs.origin.x as f64, rect_in_lpxs.origin.y as f64),
+                    rect_in_lpxs.size.width as f64,
+                    ascender_in_lpxs as f64,
+                    *font_scale as f64,
+                    band_height,
+                );
+                if band.size.x > 0.0 {
+                    rects.push(band);
+                }
+            }
+        }
+        rects
+    }
+
     /// Get all selection rects for the given character range
     pub fn selection_rects(&self, start: usize, end: usize) -> Vec<Rect> {
         let mut rects = Vec::new();
@@ -777,6 +863,14 @@ pub struct TextFlow {
 
     #[live]
     pub draw_selection: DrawColor,
+
+    #[live]
+    pub draw_mark: DrawTextMark,
+
+    /// The marked spans this flow is showing, over the text it accumulates as
+    /// it draws (the same offsets [`TextFlow::get_full_text`] returns).
+    #[rust]
+    marks: TextMarkSet,
 
     /// Enable text selection
     #[live(false)]
@@ -1333,7 +1427,7 @@ impl TextFlow {
         self.lines_drawn = 0;
         self.content_truncated = false;
         self.last_row_y = f64::NAN;
-        if self.selectable {
+        if self.tracks_text() {
             self.selection_tracker.clear();
             self.widget_text_entries.clear();
         }
@@ -1425,8 +1519,10 @@ impl TextFlow {
     pub fn end(&mut self, cx: &mut Cx2d) {
         self.draw_text.end_deferred_slug_flush(cx);
 
-        // Draw selection highlight before finishing the turtle
+        // Draw selection highlight before finishing the turtle, then the
+        // marks over it: a mark under a selected word must stay visible.
         self.draw_selection_rects(cx);
+        self.draw_mark_rects(cx);
 
         cx.end_turtle_with_area(&mut self.area);
         self.items.as_mut().unwrap().retain_visible();
@@ -1468,6 +1564,65 @@ impl TextFlow {
     /// Reset all streaming animations (text fade).
     pub fn reset_all_streaming_animations(&mut self) {
         self.reset_streaming_animation();
+    }
+
+    /// Whether this draw pass has to record its laid-out text.
+    ///
+    /// Selection needs it and so do marks: both turn a byte range into rects
+    /// after the glyphs are placed, and neither can do that from the drawn
+    /// glyphs alone. A flow with neither pays for none of it.
+    fn tracks_text(&self) -> bool {
+        self.selectable || !self.marks.is_empty()
+    }
+
+    /// Mark a stretch of this flow's text as wrong, doubtful or noteworthy,
+    /// keeping the marks already set.
+    ///
+    /// `start` and `end` are byte offsets into the text the flow accumulates as
+    /// it draws - what [`TextFlow::get_full_text`] returns - and may arrive
+    /// either way round. The mark draws under the words themselves, so a host
+    /// can say *which* word it means rather than colouring the whole block.
+    ///
+    /// Setting a mark makes the flow record its layout as it draws, the same
+    /// work `selectable` asks for; a flow with no marks pays nothing.
+    pub fn add_mark(&mut self, cx: &mut Cx, start: usize, end: usize, kind: TextMarkKind) {
+        self.marks.push(TextMark::new(start, end, kind));
+        self.redraw(cx);
+    }
+
+    /// Replace every mark on this flow.
+    pub fn set_marks(&mut self, cx: &mut Cx, marks: impl IntoIterator<Item = TextMark>) {
+        self.marks.set(marks);
+        self.redraw(cx);
+    }
+
+    /// Drop every mark on this flow.
+    pub fn clear_marks(&mut self, cx: &mut Cx) {
+        if self.marks.clear_on_edit() {
+            self.redraw(cx);
+        }
+    }
+
+    /// The marks this flow is showing, in the order they were given.
+    pub fn marks(&self) -> &[TextMark] {
+        self.marks.as_slice()
+    }
+
+    /// Draw a mark under the words of every marked range.
+    ///
+    /// Overlapping marks all draw, in the order they were given, so a word
+    /// flagged twice carries both squiggles rather than silently losing one.
+    fn draw_mark_rects(&mut self, cx: &mut Cx2d) {
+        if self.marks.is_empty() {
+            return;
+        }
+        let band_height = self.draw_mark.band_height();
+        for mark in self.marks.as_slice() {
+            self.draw_mark.mark_kind = mark.kind;
+            for rect in self.selection_tracker.mark_rects(*mark, band_height) {
+                self.draw_mark.draw_abs(cx, rect);
+            }
+        }
     }
 
     /// Draw selection highlight rectangles
@@ -1621,7 +1776,7 @@ impl TextFlow {
     /// The widget's Area is stored in the tracker for hit testing;
     /// the WidgetRef is stored separately for selection propagation.
     pub fn push_widget_text_for_selection(&mut self, widget: WidgetRef, text: &str) {
-        if self.selectable {
+        if self.tracks_text() {
             let text_start = self.selection_tracker.text.len();
             let text_len = text.len();
             self.selection_tracker.push_widget_text(widget.area(), text);
@@ -1646,7 +1801,7 @@ impl TextFlow {
         };
         self.draw_block.draw_vars.area = area;
         self.draw_block.end(cx);
-        if self.selectable {
+        if self.tracks_text() {
             self.selection_tracker.push_newline();
         }
     }
@@ -1696,7 +1851,7 @@ impl TextFlow {
     pub fn end_list_item(&mut self, cx: &mut Cx2d) {
         cx.end_turtle();
         self.first_thing_on_a_line = true;
-        if self.selectable {
+        if self.tracks_text() {
             self.selection_tracker.push_newline();
         }
     }
@@ -1704,7 +1859,7 @@ impl TextFlow {
     pub fn new_line_collapsed(&mut self, cx: &mut Cx2d) {
         cx.turtle_new_line();
         self.first_thing_on_a_line = true;
-        if self.selectable {
+        if self.tracks_text() {
             self.selection_tracker.push_newline();
         }
     }
@@ -1716,7 +1871,7 @@ impl TextFlow {
         let spacing = cx.turtle().wrap_spacing();
         cx.turtle_new_line_with_spacing(spacing);
         self.first_thing_on_a_line = true;
-        if self.selectable {
+        if self.tracks_text() {
             self.selection_tracker.push_newline();
         }
     }
@@ -1724,7 +1879,7 @@ impl TextFlow {
     pub fn new_line_collapsed_with_spacing(&mut self, cx: &mut Cx2d, spacing: f64) {
         cx.turtle_new_line_with_spacing(spacing);
         self.first_thing_on_a_line = true;
-        if self.selectable {
+        if self.tracks_text() {
             self.selection_tracker.push_newline();
         }
     }
@@ -1748,7 +1903,7 @@ impl TextFlow {
         };
         self.draw_block.draw_vars.area = area;
         self.draw_block.end(cx);
-        if self.selectable {
+        if self.tracks_text() {
             self.selection_tracker.push_newline();
         }
     }
@@ -1763,7 +1918,7 @@ impl TextFlow {
         cx.end_turtle();
         self.table_num_columns = 0;
         self.in_table_header = false;
-        if self.selectable {
+        if self.tracks_text() {
             self.selection_tracker.push_newline();
         }
     }
@@ -1772,7 +1927,20 @@ impl TextFlow {
         self.in_table_header = true;
         self.table_row_is_header = true;
         self.table_row_cell_rects.clear();
-        cx.begin_turtle(self.table_row_walk, self.table_row_layout);
+        // The header's ground goes down BEFORE its cells, not after them.
+        // Drawn after, it covered its own text wherever the theme's highlight
+        // is opaque -- which is every style sheet the library ships. Only the
+        // three base themes escaped it, by making that highlight translucent,
+        // which is why the header read fine in them and was blank under every
+        // style. `begin` puts the quad in the background draw group and `end`
+        // sizes it to the finished row, so it cannot cover what sits on it.
+        // Its border is suppressed: the per-cell pass below still draws the
+        // rules, on top, where they belong.
+        let border = self.draw_block.table_border_color;
+        self.draw_block.block_type = FlowBlockType::TableCell;
+        self.draw_block.table_border_color = Vec4f::default();
+        self.draw_block.begin(cx, self.table_row_walk, self.table_row_layout);
+        self.draw_block.table_border_color = border;
     }
 
     pub fn begin_table_row(&mut self, cx: &mut Cx2d) {
@@ -1782,9 +1950,14 @@ impl TextFlow {
     }
 
     pub fn end_table_row(&mut self, cx: &mut Cx2d) {
-        let row_rect = cx.end_turtle();
+        let row_rect = cx.turtle().rect();
+        if self.table_row_is_header {
+            self.draw_block.end(cx);
+        } else {
+            cx.end_turtle();
+        }
         self.draw_row_cell_borders(cx, row_rect);
-        if self.selectable {
+        if self.tracks_text() {
             self.selection_tracker.push_newline();
         }
     }
@@ -1802,11 +1975,10 @@ impl TextFlow {
         for i in 0..cell_count {
             let cell_rect = self.table_row_cell_rects[i];
 
-            self.draw_block.table_header_bg_color = if self.table_row_is_header {
-                saved_bg
-            } else {
-                transparent
-            };
+            // Always transparent here: a header's ground was already laid
+            // down underneath its text by `begin_table_header_row`, and a
+            // body row never had one. This pass is for the rules alone.
+            self.draw_block.table_header_bg_color = transparent;
             self.draw_block.draw_abs(
                 cx,
                 Rect {
@@ -1875,7 +2047,7 @@ impl TextFlow {
 
     pub fn draw_item_counted(&mut self, cx: &mut Cx2d, template: LiveId) -> LiveId {
         let entry_id = self.new_counted_id();
-        let start_pos = if self.selectable {
+        let start_pos = if self.tracks_text() {
             Some(cx.turtle().pos())
         } else {
             None
@@ -1912,7 +2084,7 @@ impl TextFlow {
 
     pub fn draw_item_counted_ref(&mut self, cx: &mut Cx2d, template: LiveId) -> WidgetRef {
         let entry_id = self.new_counted_id();
-        let start_pos = if self.selectable {
+        let start_pos = if self.tracks_text() {
             Some(cx.turtle().pos())
         } else {
             None
@@ -2193,10 +2365,13 @@ impl TextFlow {
                 self.draw_text.text_overflow = TextOverflow::Clip;
             };
 
+            // Asked before `draw_text` is borrowed out of `self` below.
+            let tracks_text = self.tracks_text();
             let dt = &mut self.draw_text;
 
-            // Capture LaidoutText for selection when selectable
-            if self.selectable {
+            // Capture LaidoutText when something needs to turn a byte range
+            // back into rects: a selection, or a marked span.
+            if tracks_text {
                 let turtle_pos = cx.turtle().pos();
                 let turtle_rect = cx.turtle().inner_rect();
                 let origin = dvec2(turtle_rect.pos.x, turtle_pos.y);
@@ -2706,5 +2881,63 @@ impl Widget for TextFlowLink {
         if self.text.as_ref() == v { return }
         self.text.as_mut_empty().push_str(v);
         self.redraw(cx);
+    }
+}
+
+#[cfg(test)]
+mod table_structure_tests {
+    use super::*;
+    use crate::makepad_platform::*;
+    use crate::script_eval;
+
+    /// `Markdown`, `Html` and `RichTextEditor` reach TextFlow through a Rust
+    /// `#[deref]`, not through the prototype chain, so a field their own DSL
+    /// block does not name is reset on every reload -- and a theme switch is
+    /// a reload -- to its FIELD TYPE's default rather than to what TextFlow's
+    /// block says. The `Layout` default flows Right, so a table's rows were
+    /// laid side by side: the header took the whole width and every body row
+    /// was left zero wide. Tables drew their box, their header, and none of
+    /// their content, on every theme switch, on a third of the documentation.
+    ///
+    /// Each of the three blocks now restates them. This holds them to it.
+    #[test]
+    fn a_table_still_runs_downward_after_a_reload() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let mut md = {
+                let value = script_eval!(vm, {use mod.widgets.* Markdown{}});
+                crate::markdown::Markdown::script_from_value(vm, value)
+            };
+            assert_eq!(md.text_flow.table_layout.flow, Flow::Down, "markdown at startup");
+            vm.with_reload(crate::script_mod);
+            let value = script_eval!(vm, {use mod.widgets.* Markdown{}});
+            md.script_apply(vm, &Apply::Reload, &mut Scope::empty(), value);
+            assert_eq!(md.text_flow.table_layout.flow, Flow::Down, "markdown after a reload");
+            assert!(matches!(md.text_flow.table_row_layout.flow, Flow::Right { .. }), "row flow after a reload");
+            assert_eq!(md.text_flow.table_walk.height, Size::fit(), "table height after a reload");
+            assert!(md.text_flow.heading_margin.top > 0.0, "heading margin after a reload");
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::floor_char_boundary;
+
+    #[test]
+    fn a_mark_landing_inside_a_character_is_floored_to_its_start() {
+        // "cafe" with an acute on the e: that character is two bytes, at 3..5.
+        let text = "caf\u{e9}";
+        assert_eq!(floor_char_boundary(text, 3), 3);
+        assert_eq!(floor_char_boundary(text, 4), 3);
+        assert_eq!(floor_char_boundary(text, 5), 5);
+    }
+
+    #[test]
+    fn a_mark_past_the_end_is_floored_to_the_end() {
+        let text = "caf\u{e9}";
+        assert_eq!(floor_char_boundary(text, 900), 5);
+        assert_eq!(floor_char_boundary("", 4), 0);
     }
 }

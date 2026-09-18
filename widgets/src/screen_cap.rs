@@ -527,6 +527,12 @@ impl Session {
                 queue.dropped += excess as u64;
             }
         });
+        // Upstream's tap allocator hands back an id unconditionally. The fork
+        // carried a version that answered `None` when every slot was taken, so
+        // a recording could say it was going out silent; that is a platform
+        // change and does not belong in a widget PR, so the id is wrapped here
+        // instead and the widget keeps its shape.
+        let tap_id = Some(tap_id);
 
                     let attachments = CaptureAttachments { capture_id, tap_id };
                     let mut info = RecordingInfo::default();
@@ -600,12 +606,18 @@ impl Session {
     }
 }
 
-struct CaptureAttachments { capture_id: u64, tap_id: u64 }
+/// `tap_id` is `None` when every output tap was taken at start: the
+/// recording then has picture and no sound, and said so in the log.
+struct CaptureAttachments { capture_id: u64, tap_id: Option<u64> }
 impl Drop for CaptureAttachments {
     fn drop(&mut self) {
         // Registry locks belong to the encoder worker, never the window/UI.
         remove_screen_capture(self.capture_id);
-        remove_audio_output_tap(self.tap_id);
+        // Asking to remove a tap that was never added is not a no-op it can
+        // be trusted with.
+        if let Some(tap_id) = self.tap_id {
+            remove_audio_output_tap(tap_id);
+        }
     }
 }
 

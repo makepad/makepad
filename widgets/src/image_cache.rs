@@ -24,6 +24,10 @@ pub enum ImageFit {
     CropToFill,
     /// Ignores the requested widget bounds and uses the image's natural size.
     Size,
+    /// Keeps the requested bounds and cuts the texture into nine parts along
+    /// `slice`: corners keep their size, edges fill one way, the middle both.
+    /// A `Fit` axis takes the picture's natural size. Crop and aspect are not read.
+    Slice,
 }
 
 pub use makepad_draw::{

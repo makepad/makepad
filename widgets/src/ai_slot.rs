@@ -254,6 +254,11 @@ pub struct AiChatSlot {
     region_rect: Option<Rect>,
     #[rust]
     region_started_open: bool,
+    /// Whose press the pointer is carrying: true while the press that is
+    /// currently down landed OUTSIDE the overlay, so the control that took it
+    /// keeps the moves this pane would otherwise swallow.
+    #[rust]
+    press_outside: bool,
 }
 
 impl AiChatSlot {
@@ -287,7 +292,13 @@ impl AiChatSlot {
         );
         match event {
             Event::MouseDown(e) if e.window_id == window_id => {
-                if body.contains(e.abs) && e.button == MouseButton::PRIMARY {
+                // The band is a drag started from a raw press, so it stands
+                // down while another control holds the mouse: that press is
+                // the control's, not the corner of a region.
+                if body.contains(e.abs)
+                    && e.button == MouseButton::PRIMARY
+                    && !cx.fingers.is_mouse_held_outside(&[])
+                {
                     self.region_start = Some(clamp(e.abs));
                     self.region_rect = None;
                 }
@@ -597,7 +608,29 @@ pub fn window_intercept(
             }
             None => false,
         };
-        (s.showing(), inside)
+        // Pointer capture: a control that took a press owns the mouse until
+        // the release, and an intercepted event never reaches it — so a fader
+        // dragged past the open pane would lose the rest of its drag. Which
+        // press this is decides it: the pane's own widgets capture too (the
+        // composer selecting text, a button held down), and theirs it keeps.
+        // Drag and drop is the exception the rule names — a drag's source does
+        // not lock the pointer, and the pane must go on seeing Drag/Drop to
+        // light up and accept the drop, so only the mouse gestures ask.
+        let is_mouse_gesture = matches!(
+            event,
+            Event::MouseDown(_) | Event::MouseMove(_) | Event::MouseUp(_)
+        );
+        let stands_down = pane_stands_down(
+            s.press_outside,
+            is_mouse_gesture,
+            cx.fingers.is_mouse_held_outside(&[]),
+        );
+        match event {
+            Event::MouseDown(e) if e.window_id == window_id => s.press_outside = !inside,
+            Event::MouseUp(e) if e.window_id == window_id => s.press_outside = false,
+            _ => {}
+        }
+        (s.showing(), inside && !stands_down)
     };
     if showing && inside {
         cx.global::<AiSlotRequests>().current_window = Some(window_id.0);
@@ -606,6 +639,60 @@ pub fn window_intercept(
         return true;
     }
     false
+}
+
+/// Whether the open pane must let a pointer event through to the app beneath.
+///
+/// The pane is an overlay that claims every pointer event over itself, which
+/// is right for a press of its own but wrong while another control holds the
+/// mouse: a control that is dragged continuously owns the pointer from the
+/// press to the release, and an event the pane swallows never reaches it — the
+/// drag would simply stop at the pane's edge.
+///
+/// * `press_outside` — the press currently down landed outside the pane, so
+///   whatever captured it is not the pane's. A press that started inside keeps
+///   the pane's own drags (selecting text in the composer, a button held down)
+///   working exactly as before.
+/// * `is_mouse_gesture` — down/move/up only. Drag and drop is the exception to
+///   the rule: its source does not lock the pointer, and the pane must go on
+///   seeing `Drag`/`Drop` so it can light up and accept a drop.
+/// * `mouse_held_outside` — `CxFingers::is_mouse_held_outside`: a control owns
+///   the mouse right now. Touch captures are ignored there by design.
+fn pane_stands_down(press_outside: bool, is_mouse_gesture: bool, mouse_held_outside: bool) -> bool {
+    press_outside && is_mouse_gesture && mouse_held_outside
+}
+
+#[cfg(test)]
+mod pointer_capture_tests {
+    use super::*;
+
+    /// The bug: a control outside the pane that holds the mouse keeps every
+    /// move of its drag, even the ones that wander over the open overlay.
+    #[test]
+    fn a_control_holding_the_mouse_keeps_its_moves() {
+        assert!(pane_stands_down(true, true, true));
+    }
+
+    /// The pane's own drags are untouched — a press that started inside it is
+    /// the pane's, whoever captured it.
+    #[test]
+    fn a_press_that_started_inside_stays_the_panes() {
+        assert!(!pane_stands_down(false, true, true));
+    }
+
+    /// With nothing holding the mouse the pane claims its pointer events as
+    /// before: an overlay that stopped taking presses would be no overlay.
+    #[test]
+    fn an_unheld_pointer_is_still_the_panes() {
+        assert!(!pane_stands_down(true, true, false));
+    }
+
+    /// The drag-and-drop exception: a drop still reaches the pane, because a
+    /// drag's source deliberately does not lock the pointer.
+    #[test]
+    fn a_drop_still_reaches_the_pane() {
+        assert!(!pane_stands_down(true, false, true));
+    }
 }
 
 /// One toggle per key event, however many windows saw it.

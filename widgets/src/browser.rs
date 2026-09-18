@@ -953,6 +953,15 @@ impl Widget for Browser {
 
         #[cfg(feature = "cef")]
         if desired_backend == ActiveBrowserBackend::CEF {
+            // `capture_overload` below hands the page the FingerDown for a
+            // press another widget already took: a splitter between the panes,
+            // a control floating over the page. A control that is dragged
+            // continuously owns the pointer from the press to the release, and
+            // nothing else may take a press, a hover or the keyboard from that
+            // pointer on the way — so a press it holds never reaches the page.
+            // Mouse only, deliberately: `is_mouse_held_outside` ignores touch
+            // captures, so a finger still reaches the page.
+            let pointer_held_elsewhere = cx.fingers.is_mouse_held_outside(&[self.browser_area()]);
             match event.hits_with_capture_overload(cx, self.browser_area(), true) {
                 Hit::KeyFocus(_) => {
                     if let Some(browser) = &mut self.cef_browser {
@@ -973,7 +982,7 @@ impl Widget for Browser {
                     cx.hide_text_ime();
                     self.suppress_next_paste_shortcut = false;
                 }
-                Hit::FingerDown(fe) => {
+                Hit::FingerDown(fe) if !pointer_held_elsewhere => {
                     let button = fe.mouse_button().unwrap_or(MouseButton::PRIMARY);
                     self.pressed_buttons.insert(button);
                     cx.set_key_focus(self.browser_area());
@@ -993,20 +1002,25 @@ impl Widget for Browser {
                         fe.tap_count as i32,
                     );
                 }
-                Hit::FingerMove(fe) => {
+                Hit::FingerMove(fe) if !pointer_held_elsewhere => {
                     self.send_mouse_move_internal(cx, fe.abs, fe.modifiers, false);
                 }
                 Hit::FingerUp(fe) => {
                     let button = fe.mouse_button().unwrap_or(MouseButton::PRIMARY);
-                    self.send_mouse_move_internal(cx, fe.abs, fe.modifiers, false);
-                    self.send_mouse_click_internal(
-                        cx,
-                        fe.abs,
-                        fe.modifiers,
-                        Some(button),
-                        true,
-                        fe.tap_count as i32,
-                    );
+                    // Only release a button the page was actually told about: a
+                    // press that stood down above never reached it, and a lone
+                    // mouse-up leaves the page believing a drag is still live.
+                    if self.pressed_buttons.contains(button) {
+                        self.send_mouse_move_internal(cx, fe.abs, fe.modifiers, false);
+                        self.send_mouse_click_internal(
+                            cx,
+                            fe.abs,
+                            fe.modifiers,
+                            Some(button),
+                            true,
+                            fe.tap_count as i32,
+                        );
+                    }
                     self.pressed_buttons.remove(button);
                 }
                 Hit::FingerHoverIn(fe) | Hit::FingerHoverOver(fe) => {

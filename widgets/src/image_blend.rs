@@ -1,3 +1,8 @@
+//! Two pictures in one place that crossfade from one to the other.
+//!
+//! Both pictures are ordinary `Image`s, so every fit applies to them, slicing
+//! included.
+
 use crate::{
     animator::{Animator, AnimatorAction, AnimatorImpl, Play},
     image::Image,
@@ -172,6 +177,40 @@ impl ImageBlendRef {
             inner.load_png_from_data(cx, data, 0)
         } else {
             Ok(()) // preserving existing behavior of silent failures.
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::image_cache::ImageFit;
+
+    /// The blend has no drawing of its own: its pictures are drawn by
+    /// `Image`, so a sliced skin on each side is set on each picture and the
+    /// crossfade fades one sliced skin into the other. A property that did
+    /// not reach the picture would be taken by the markup anyway, which is
+    /// why the settings are read back.
+    #[test]
+    fn both_pictures_of_a_blend_can_be_sliced() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let blend = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let _ = makepad_platform::shader_error::take();
+            let source = script! {
+                use mod.prelude.widgets.*
+                ImageBlend{
+                    image_a +: {fit: ImageFit.Slice slice: 12}
+                    image_b +: {fit: ImageFit.Slice slice: 12}
+                }
+            };
+            let value = vm.eval(source);
+            ImageBlend::script_from_value(vm, value)
+        });
+        assert_eq!(makepad_platform::shader_error::take(), None, "a picture shader failed to compile");
+        for (side, image) in [("image_a", &blend.image_a), ("image_b", &blend.image_b)] {
+            assert!(matches!(image.fit(), ImageFit::Slice), "{side} is not sliced");
+            assert_eq!(image.slice().left, 12.0, "{side} lost its inset");
         }
     }
 }

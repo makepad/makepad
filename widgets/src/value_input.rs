@@ -1,4 +1,4 @@
-//! ValueInput — a Blender-style scrubbable number field.
+//! ValueInput — a scrubbable number field.
 //!
 //! One compact widget, three ways in, exactly the Blender number-field
 //! contract:
@@ -19,7 +19,9 @@
 //! back with [`ValueInput::set_value`], which yields while the operator's
 //! finger or keyboard owns the field.
 
-use crate::{makepad_derive_widget::*, makepad_draw::*, text_input::*, widget::*};
+use crate::{
+    badge::measure, makepad_derive_widget::*, makepad_draw::*, text_input::*, widget::*,
+};
 
 #[derive(Clone, Debug, PartialEq, Default)]
 pub enum ValueInputAction {
@@ -38,6 +40,8 @@ script_mod! {
     mod.widgets.ValueInput = set_type_default() do mod.widgets.ValueInputBase{
         width: 76
         height: 22
+        /** the colour of the step marks at either end */
+        arrow_color: #xa9b4bf
 
         draw_bg +: {
             hover: uniform(0.0)
@@ -45,7 +49,6 @@ script_mod! {
             focus: uniform(0.0)
             color: theme.color_inset
             border_color: theme.color_bevel
-            arrow_color: #xa9b4bf
 
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
@@ -55,28 +58,22 @@ script_mod! {
                 let lift = 0.06 * max(self.hover, self.drag) + 0.05 * self.focus
                 sdf.fill(self.color + vec4(lift, lift, lift, 0.0))
                 sdf.stroke(self.border_color, 1.0)
-                // Hover reveals the step chevrons at the edges (Blender's
-                // affordance); a drag keeps them lit.
-                let a = max(self.hover, self.drag) * (1.0 - self.focus)
-                if a > 0.01 {
-                    let cy = h * 0.5
-                    sdf.move_to(9.0, cy - 3.5)
-                    sdf.line_to(5.5, cy)
-                    sdf.line_to(9.0, cy + 3.5)
-                    sdf.close_path()
-                    sdf.fill(vec4(self.arrow_color.xyz * a, a))
-                    sdf.move_to(w - 9.0, cy - 3.5)
-                    sdf.line_to(w - 5.5, cy)
-                    sdf.line_to(w - 9.0, cy + 3.5)
-                    sdf.close_path()
-                    sdf.fill(vec4(self.arrow_color.xyz * a, a))
-                }
+                // The step marks are drawn as glyphs by the Rust side.
+                // They were two mirrored SDF paths here and only ever
+                // the second one painted: swapping them changed nothing,
+                // moving the failing one to mid-field changed nothing,
+                // and the same geometry as a filled box painted fine.
                 return sdf.result
             }
         }
         draw_text +: {
             color: #xf4f7fa
-            text_style: theme.font_bold{font_size: 11}
+            // Line spacing of one, so the line box IS the ink box. With
+            // the theme's leading the line is taller than the digits,
+            // and centring the LINE leaves the digits riding high in a
+            // field this short: a run of digits has no descender to
+            // fill the bottom of the box.
+            text_style: theme.font_bold{font_size: 11, line_spacing: 1.0}
         }
         text_input: TextInput{
             width: Fill
@@ -91,6 +88,18 @@ script_mod! {
 const CLICK_SLOP: f64 = 3.0;
 /// The edge band (layout points) where a plain click means STEP, not edit.
 const ARROW_BAND: f64 = 14.0;
+/// The step marks, shown while the pointer is over the field.
+const LEFT_MARK: &str = "\u{2039}";
+const RIGHT_MARK: &str = "\u{203a}";
+/// How far each mark sits in from its edge.
+const MARK_INSET: f64 = 5.0;
+/// Where a glyph's ink begins below the y handed to `draw_abs`, as a
+/// share of the font size. The call takes the top of the LINE box, and
+/// the ink of a digit starts about a third of the way down it. Measured
+/// on this face rather than assumed: without it a number centred by
+/// arithmetic sits low, and one centred by `Align` sits high, because
+/// digits have no descender to fill the bottom of the line.
+const INK_TOP: f64 = 0.30;
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct ValueInput {
@@ -125,8 +134,16 @@ pub struct ValueInput {
 
     #[rust]
     value: f64,
+    /// The colour of the step marks. On the widget, not on `draw_bg`,
+    /// because the marks are glyphs now and Rust draws them.
+    #[live]
+    pub arrow_color: Vec4f,
+
     #[rust]
     editing: bool,
+    /// The pointer is over the field, so the marks show.
+    #[rust]
+    hovered: bool,
     /// A press in flight: (start x, value at press, wandered-past-slop).
     #[rust]
     drag: Option<(f64, f64, bool)>,
@@ -186,12 +203,25 @@ impl Widget for ValueInput {
         if self.editing {
             let _ = self.text_input.draw_walk(cx, scope, Walk::fill());
         } else {
-            self.draw_text.draw_walk(
-                cx,
-                Walk::fill(),
-                Align { x: 0.5, y: 0.5 },
-                &self.format(),
-            );
+            let rect = cx.turtle().rect();
+            let size = self.draw_text.text_style.font_size as f64;
+            let y = rect.pos.y + (rect.size.y - size) * 0.5 - size * INK_TOP;
+            let text = self.format();
+            let tw = measure(&self.draw_text, cx, &text);
+            self.draw_text
+                .draw_abs(cx, dvec2(rect.pos.x + (rect.size.x - tw) * 0.5, y), &text);
+            if self.hovered || self.drag.is_some() {
+                let rest = self.draw_text.color;
+                self.draw_text.color = self.arrow_color;
+                let mw = measure(&self.draw_text, cx, RIGHT_MARK);
+                self.draw_text.draw_abs(cx, dvec2(rect.pos.x + MARK_INSET, y), LEFT_MARK);
+                self.draw_text.draw_abs(
+                    cx,
+                    dvec2(rect.pos.x + rect.size.x - MARK_INSET - mw, y),
+                    RIGHT_MARK,
+                );
+                self.draw_text.color = rest;
+            }
         }
         self.draw_bg.end(cx);
         DrawStep::done()
@@ -223,13 +253,27 @@ impl Widget for ValueInput {
 
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
+                self.hovered = true;
                 self.draw_bg.set_uniform(cx, id!(hover), &[1.0]);
                 self.draw_bg.redraw(cx);
             }
             Hit::FingerHoverOver(_) => {
                 cx.set_cursor(MouseCursor::EwResize);
             }
+            // The wheel over a number is the cheapest way to nudge one,
+            // and every other numeric control in the library answers to
+            // it. Shift takes ten steps, the way a coarse drag would.
+            Hit::FingerScroll(e) => {
+                if !self.editing {
+                    let notches = -e.scroll.y.signum();
+                    if notches != 0.0 {
+                        let bite = if e.modifiers.shift { 10.0 } else { 1.0 };
+                        self.commit(cx, uid, self.value + notches * self.step * bite);
+                    }
+                }
+            }
             Hit::FingerHoverOut(_) => {
+                self.hovered = false;
                 self.draw_bg.set_uniform(cx, id!(hover), &[0.0]);
                 self.draw_bg.redraw(cx);
             }
