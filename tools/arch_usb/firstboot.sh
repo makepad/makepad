@@ -18,10 +18,6 @@ done
 getent group arch >/dev/null || groupadd arch
 id arch >/dev/null 2>&1 || useradd -m -u 1000 -g arch -s /bin/bash arch
 usermod -aG wheel,audio,video,input,render,storage,uucp,games -s /bin/bash arch
-printf 'arch:12345\n' | chpasswd
-chage -E -1 -I -1 -M 99999 arch
-install -d -m 0700 -o arch -g arch /home/arch/.ssh
-install -o arch -g arch -m 0600 "$seed/authorized_keys" /home/arch/.ssh/authorized_keys
 chmod go-w /home/arch
 install -d -m 0750 /etc/sudoers.d
 printf 'arch ALL=(ALL:ALL) ALL\n' > /etc/sudoers.d/10-arch
@@ -30,18 +26,9 @@ grep -Eq '^([@#]includedir)[[:space:]]+/etc/sudoers.d([[:space:]]|$)' /etc/sudoe
 visudo -c
 sudo -l -U arch /usr/bin/id
 
-mkdir -p /etc/ssh/sshd_config.d
-install -m 0644 "$seed/sshd.conf" /etc/ssh/sshd_config.d/00-makepad.conf
-if ! head -1 /etc/ssh/sshd_config | grep -Fxq 'Include /etc/ssh/sshd_config.d/00-makepad.conf'; then
-    { printf 'Include /etc/ssh/sshd_config.d/00-makepad.conf\n'; cat /etc/ssh/sshd_config; } > "$state/sshd_config.new"
-    install -m 0600 "$state/sshd_config.new" /etc/ssh/sshd_config
-fi
-ssh-keygen -A
-sshd -t
-sshd -T -C user=arch,host=makepad-arch,addr=127.0.0.1 > "$state/sshd-effective.txt"
-for policy in 'pubkeyauthentication yes' 'passwordauthentication no' 'kbdinteractiveauthentication no' 'permitrootlogin no' 'authenticationmethods publickey' 'allowusers arch'; do
-    grep -Fxiq "$policy" "$state/sshd-effective.txt"
-done
+# Install without starting SSH yet: cloud-init orders it after this stage.
+# The helper writes the password only to root-readable local console files.
+bash "$seed/ssh.sh" install
 
 # Firmware is available before re-probing the Realtek Ethernet adapter.
 mkdir -p /usr/lib/firmware /etc/systemd/network /etc/modprobe.d /etc/iwd
@@ -87,9 +74,6 @@ if test "${MAKEPAD_KEEP_NETWORK:-0}" != 1; then
         networkctl reconfigure "${path##*/}" || echo "Networkd will configure ${path##*/} when the interface appears."
     done
 fi
-
-printf 'Makepad Arch USB - login: arch\nIPv4: \\4\nSSH uses the Mac key. Run makepad-status for package setup progress.\n\n' > /etc/issue
-printf 'Makepad Arch USB\nInitial console/sudo password: 12345. SSH uses your Mac key.\npacman is available; initial package installation runs in the background.\nRun makepad-status for progress.\nWi-Fi connections are configured with iwctl after package setup completes.\n' > /etc/motd
 
 # SSH is ordered after this cloud-init stage. Queue it without waiting for
 # that dependency; returning from this script lets it start normally.

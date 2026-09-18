@@ -85,7 +85,7 @@ mod win {
     const PROCESS_TERMINATE: u32 = 0x0001;
     const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
     const STILL_ACTIVE: u32 = 259;
-    const INVALID_HANDLE_VALUE: *mut u8 = !0usize as *mut u8;
+    const INVALID_HANDLE_VALUE: *mut std::ffi::c_void = !0usize as *mut std::ffi::c_void;
 
     #[repr(C)]
     struct ProcessEntry32W {
@@ -103,13 +103,13 @@ mod win {
 
     #[link(name = "kernel32")]
     extern "system" {
-        fn CreateToolhelp32Snapshot(flags: u32, process_id: u32) -> *mut u8;
-        fn Process32FirstW(snapshot: *mut u8, entry: *mut ProcessEntry32W) -> i32;
-        fn Process32NextW(snapshot: *mut u8, entry: *mut ProcessEntry32W) -> i32;
-        fn OpenProcess(access: u32, inherit: i32, process_id: u32) -> *mut u8;
-        fn TerminateProcess(process: *mut u8, exit_code: u32) -> i32;
-        fn GetExitCodeProcess(process: *mut u8, exit_code: *mut u32) -> i32;
-        fn CloseHandle(object: *mut u8) -> i32;
+        fn CreateToolhelp32Snapshot(flags: u32, process_id: u32) -> *mut std::ffi::c_void;
+        fn Process32FirstW(snapshot: *mut std::ffi::c_void, entry: *mut ProcessEntry32W) -> i32;
+        fn Process32NextW(snapshot: *mut std::ffi::c_void, entry: *mut ProcessEntry32W) -> i32;
+        fn OpenProcess(access: u32, inherit: i32, process_id: u32) -> *mut std::ffi::c_void;
+        fn TerminateProcess(process: *mut std::ffi::c_void, exit_code: u32) -> i32;
+        fn GetExitCodeProcess(process: *mut std::ffi::c_void, exit_code: *mut u32) -> i32;
+        fn CloseHandle(object: *mut std::ffi::c_void) -> i32;
     }
 
     fn wide_to_string(buf: &[u16]) -> String {

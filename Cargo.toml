@@ -4,6 +4,8 @@ workspace.members = [
     "apps/terminal",
     "apps/wm",
     "apps/wm-all",
+    "apps/wm-dyn",
+    "apps/wm-dyn/engine",
     "apps/aichat",
     "apps/finance",
     "apps/sheets",
@@ -28,6 +30,8 @@ workspace.members = [
     "libs/workspace",
     "libs/code_arch",
     "libs/code_language",
+    "libs/search",
+    "libs/tar",
     "apps/route",
     "apps/asset-ui",
     "apps/asset-server",
@@ -61,6 +65,7 @@ workspace.members = [
     "libs/bounded_http",
     "libs/flow",
     "libs/strict_json",
+    "libs/loader_bundle",
     # === remesh (FaithC port) / xatlas (jpcy port) ===
     "libs/remesh",
     "libs/xatlas",
@@ -164,7 +169,7 @@ workspace.members = [
     # === necessary tools ===
     "platform/video",
     "tools/cargo_makepad",
-    "tools/makepad_loader",
+    "tools/makepad_builder",
     # === OSM PBF -> tile archive + nav artifact bake passes (CLI + in-app) ===
     "libs/map_build",
     "tools/map_tiles",
@@ -287,7 +292,6 @@ workspace.exclude = [
     "libs/linux/wayland-protocols",
     "libs/linux/wayland-sys",
     "tools/windows_strip",
-    "tools/web_server",
     "tools/file_router",
     "tools/wasm_strip",
 ]
