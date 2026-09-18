@@ -177,7 +177,7 @@ fn push_event(ev: MfEvent) {
         q.retain(|e| !matches!(e, MfEvent::Frame { session, .. } if *session == sid));
     }
     q.push(ev);
-    SignalToUI::set_ui_signal();
+    SignalToUI::set_internal_signal();
 }
 
 fn drain_events_for(session: u64) -> Vec<MfEvent> {

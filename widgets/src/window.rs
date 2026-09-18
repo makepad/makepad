@@ -158,7 +158,9 @@ script_mod! {
             caption_label := View {
                 width: Fill height: Fill flow: Right
                 align: Center
-                caption_icon := AppIcon{width: 16 height: 16 margin: Inset{right: 6}}
+                // Off by default: an app id makepad ships no artwork for falls back
+                // to a generic tile, so apps opt in with `caption_icon +: {visible: true}`.
+                caption_icon := AppIcon{visible: false width: 16 height: 16 margin: Inset{right: 6}}
                 label := Label {text: "Makepad"}
             }
             voice_wave := VoiceWave {}

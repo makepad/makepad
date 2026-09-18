@@ -378,10 +378,14 @@ impl Cx {
                 self.call_event_handler(&Event::Timer(e))
             }
             Win32Event::Signal => {
-                if SignalToUI::check_and_clear_ui_signal() {
+                let internal_signal = SignalToUI::check_and_clear_internal_signal();
+                let ui_signal = SignalToUI::check_and_clear_ui_signal();
+                if internal_signal || ui_signal {
                     self.handle_termination_signal();
                     self.handle_media_signals();
                     self.handle_script_signals();
+                }
+                if ui_signal {
                     self.call_event_handler(&Event::Signal);
                 }
                 if SignalToUI::check_and_clear_action_signal() {

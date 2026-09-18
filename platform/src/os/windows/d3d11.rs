@@ -1051,7 +1051,7 @@ impl Cx {
             let mapping = D3dShaderInputs::from(&self.draw_shaders.shaders[id].mapping);
             let device = d3d11_cx.device.clone();
             let compile_device = device.clone();
-            let task = slot.submit_named("renderer.hlsl-pipeline", move || {
+            let task = slot.submit_internal_named("renderer.hlsl-pipeline", move || {
                 let CxDrawShaderCode::Combined { code } = &mapping.code else {
                     crate::error!("D3D11 does not support separate vertex/fragment sources");
                     return Err(D3dShaderError::Compile);

@@ -209,6 +209,10 @@ pub enum Event {
 
     Timer(TimerEvent),
 
+    /// An app-facing channel has something for the UI thread: a `ToUISender`
+    /// sent, a task-pool job finished, a texture readback completed. This is a
+    /// broadcast to every widget with no payload, so each handler polls its
+    /// own queue. Makepad's own machinery never raises it.
     Signal,
     Trigger(TriggerEvent),
     MacosMenuCommand(LiveId),

@@ -846,7 +846,7 @@ impl<P: Send + 'static> RetirementBatches<P> {
         if !self.initialized {
             if self.preparing.is_none() {
                 if let Ok(slot) = pool.reserve(crate::thread::Lane::Heavy) {
-                    self.preparing = Some(slot.submit_named("retirement batch storage", || {
+                    self.preparing = Some(slot.submit_internal_named("retirement batch storage", || {
                         (0..16)
                             .map(|_| {
                                 PreparedDrawBox::new().initialize(RetirementBatch {
@@ -1049,7 +1049,7 @@ impl CxDrawListPool {
             let returned = batches.returned_tx.clone();
             let counter = self.1.retirements.clone();
             counter.fetch_add(1, Ordering::AcqRel);
-            slot.submit_named("retained draw storage retirement", move || {
+            slot.submit_internal_named("retained draw storage retirement", move || {
                 for item in &mut batch.items {
                     drop(item.take());
                 }
@@ -1057,7 +1057,7 @@ impl CxDrawListPool {
                 // that empty envelope still occurs here on the worker.
                 let _ = returned.try_send(batch);
                 counter.fetch_sub(1, Ordering::AcqRel);
-                crate::thread::SignalToUI::set_ui_signal();
+                crate::thread::SignalToUI::set_internal_signal();
             })
             .detach();
         }
@@ -1475,9 +1475,6 @@ pub struct CxDrawItem {
     /// Immutable worker payload; old callers continue using `instances`.
     pub retained_instances: Option<crate::retained_instances::RetainedInstances>,
     pub retained_instance_id: u64,
-    /// Content hash of the last immediate payload a backend fully uploaded;
-    /// an identical re-record is then a no-op upload. Zero = none.
-    pub immediate_hash: u64,
     /// Immutable layout/font interpretation of the wanted and resident bytes.
     /// Zero preserves the ordinary immediate/retained API contract.
     pub retained_schema: u64,
@@ -2021,7 +2018,6 @@ impl CxDrawItems {
             instances.bind_budget(&self.recording_budget);
             self.buffer.push(allocation.initialize(CxDrawItem {
                 instance_upload_pending: false,
-                immediate_hash: 0,
                 shared: None,
                 redraw_id: 0,
                 kind: CxDrawKind::Empty,
@@ -2229,7 +2225,6 @@ impl CxDrawItems {
                 retained_upload_range: 0..0,
                 instance_ranges: Vec::new(),
                 instance_upload_pending: false,
-                immediate_hash: 0,
                 shared: None,
                 os: CxOsDrawCall::default(),
                 kind: CxDrawKind::Empty,
@@ -3618,25 +3613,4 @@ mod uniform_generation_tests {
         assert_eq!(draw_list.recording_gen, 5);
         assert_eq!(draw_list.uniforms_gen, 6);
     }
-}
-
-/// Content hash of an immediate instance payload, for skipping the upload of
-/// a re-record whose bytes did not change (a camera move re-emitting the same
-/// world-space geometry). Bounded: payloads above 256 KiB are never hashed
-/// (returns 0, which matches nothing), so the hash cost stays under the
-/// budget of a small copy. Never returns 0 for a hashed payload.
-pub fn immediate_payload_hash(data: &[f32]) -> u64 {
-    if data.is_empty() || data.len() * 4 > 256 * 1024 {
-        return 0;
-    }
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for chunk in data.chunks(64) {
-        for v in chunk {
-            for b in v.to_bits().to_le_bytes() {
-                h ^= b as u64;
-                h = h.wrapping_mul(0x0000_0100_0000_01b3);
-            }
-        }
-    }
-    h.max(1)
 }

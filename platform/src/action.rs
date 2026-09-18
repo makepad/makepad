@@ -139,7 +139,7 @@ impl Cx {
                 if !pending.want_bytes {
                     return false;
                 }
-                match self.task_pool().submit(crate::thread::Lane::Heavy, move || {
+                match self.task_pool().submit_internal(crate::thread::Lane::Heavy, move || {
                     Cx::post_action(FileDialogLoadAction(load_virtual_files_action(
                         id,
                         paths,

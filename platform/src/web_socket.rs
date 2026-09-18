@@ -244,7 +244,7 @@ impl Cx {
                 samples.drain(0..remove);
             }
         }
-        SignalToUI::set_ui_signal();
+        SignalToUI::set_internal_signal();
     }
 
     #[cfg(any(not(target_arch = "wasm32"), target_feature = "atomics"))]
@@ -318,7 +318,6 @@ impl Cx {
 
     fn start_studio_websocket(&mut self, studio_http: &str) {
         if studio_http.is_empty() {
-            crate::log!("studio websocket disabled: empty studio_http");
             return;
         }
         self.studio_http = studio_http.into();

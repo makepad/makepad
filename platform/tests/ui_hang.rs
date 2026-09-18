@@ -16,6 +16,8 @@ fn main() {
     }
     let output = Command::new(std::env::current_exe().unwrap())
         .arg("--watchdog-child")
+        // The sampler is opt-in, and this test is the opt-in.
+        .env("MAKEPAD_UI_HANG_MS", "250")
         .output()
         .expect("run isolated main-thread watchdog test");
     let log = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));

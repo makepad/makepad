@@ -17,7 +17,7 @@ pub(crate) fn install() {
 
 fn request() {
     REQUESTED.store(true, Ordering::Release);
-    SignalToUI::set_ui_signal();
+    SignalToUI::set_internal_signal();
 }
 
 pub(crate) fn take_requested() -> bool {
