@@ -16,6 +16,18 @@ use current source for API signatures and working examples.
   `widgets/src/`, `code_editor/`, and `apps/director/` before changing Splash syntax.
   The archived `old/` tree is not the reference for current widget APIs.
 
+## Current agent workflow
+
+- Codex manages the work and reviews Fable's designs and results.
+- Fable designs and executes the difficult implementation work.
+- Grok handles bounded mechanical work and validation under precise briefs.
+- Keep one persistent Fable session for related tasks; send follow-ups to that
+  session or resume it with its existing context. Do not repeatedly start fresh
+  Fable sessions and repay the same input context. Idle without polling/model
+  turns while waiting for related work.
+- This is the user's current workflow (2026-09-16) and supersedes older role
+  assignments in local skills or memories. Preserve the manager/implementer split.
+
 ## Software installation requires explicit approval
 
 - NEVER install, upgrade, bootstrap, or download and run external software
@@ -49,6 +61,14 @@ use current source for API signatures and working examples.
   instruction files such as `AGENTS.md` are the Markdown exception. Preserve
   existing tracked documentation and incoming human/external changes; do not
   blanket-delete files or ignore every Markdown path.
+- NEVER commit third-party source snapshots (`cargo vendor` output, copied
+  crates, SDK trees), model weights, datasets, media dumps, or any other bulk
+  import. GitHub keeps every pushed blob, so one such commit bloats every
+  clone of the repository forever. Dependencies come from crates.io or from
+  in-repo `libs/` ports; offline mirrors live outside the tree. Read
+  `git diff --stat` before every commit and stop on paths you did not write;
+  a chain that carries such content is rewritten before it is pushed, never
+  fixed with a follow-up delete.
 - Run the existing repository tests for validation. Do not add generated test
   files, inline test code, or test scaffolding unless the user explicitly requests
   that change. Preserve existing tests; do not remove or weaken them to pass.
@@ -65,9 +85,11 @@ use current source for API signatures and working examples.
   commit the exact eligible source to `local`, release binary build, existing
   native tests, then launch. Record the checkpoint hash with the binary and
   its evidence. Reuse bounded worktrees; never create one per build.
-- Agents may code the next revision while its previous app is running. The
-  next compilation/check waits until the person closes that flow's app and
-  Studio observes its exit. Standalone evaluations obey the same gate.
+- Agents may code, check, and build the next revision while its previous app
+  is running. When the replacement is ready, gracefully close and restart
+  that workflow's app without asking the user to close it. Verify the old
+  process exits and launch the replacement with the same workspace and state.
+  This applies to Studio flows and standalone evaluations.
 - A validated revision requires `cargo check` for its supported platforms with
   zero warnings/errors, the existing native tests on the current host, and a
   release build/runtime check when applicable. Use the repository's actual
@@ -120,10 +142,18 @@ use current source for API signatures and working examples.
 ## App ownership, focus, and screenshots
 
 - Launch any app you intend to inspect or drive with `--remote`.
-- Never stop, drive, or replace an instance the user is running. Before a
-  fresh launch, gracefully close only older instances you launched.
+- Do not drive or stop unrelated user instances. For an app in the active
+  development workflow, close and restart it when the replacement is ready;
+  no separate user-close confirmation is required. Before a fresh launch,
+  gracefully close the previous workflow instance and verify its exit.
 - Remote windows stay visible but unfocused. Do not activate them or use
   `MAKEPAD_FOCUS=1` unless the user explicitly asks to bring one forward.
+- Before remote automation, read `/activity` and preserve its `user_seq` as
+  `if_user_seq` on mutating requests. HTTP 409 or a changed response
+  `X-Makepad-User-Seq` means the human intervened: stop the test and leave
+  that instance running. Do not refresh the counter and retry, force-quit,
+  or restart it automatically. Resume with a fresh counter only after the
+  user hands control back. See [App remote control](docs/agents/app-remote.md).
 - Subagent verification runs use `MAKEPAD_HIDE_WINDOWS=1 <bin> --remote`.
   Only the main session opens a visible inspection window; avoid duplicates.
 - Capture only the app's own drawable through `/g`, `/gq`, `/tweak/grab`,
