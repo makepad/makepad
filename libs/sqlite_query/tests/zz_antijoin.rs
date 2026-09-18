@@ -29,7 +29,9 @@ fn setup(n_items: usize, n_indexed: usize) -> String {
 fn the_unindexed_rows_are_found_at_real_size() {
     if !have_sqlite3() { eprintln!("no sqlite3 CLI; skipping"); return }
     let s = Scratch::new("antijoin-big");
-    let db = build_db(s.path("").parent().unwrap(), "big2.sqlite", &setup(61_000, 2_000));
+    // Inside the scratch directory, so a second run never meets the first
+    // run's file.
+    let db = build_db(&s.path(""), "big2.sqlite", &setup(61_000, 2_000));
 
     let sql = "SELECT COUNT(*) FROM items i LEFT JOIN terms t ON t.item = i.id WHERE t.item IS NULL";
     let theirs = sqlite3_column(&db, sql);

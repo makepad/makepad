@@ -14,7 +14,7 @@
 //! Usage: `llama-slot-probe <model.gguf> [--tokens N] [--slots N]`
 
 use makepad_ai_llm::{
-    LaneEvent, LaneExecutor, LaneOutcome, LaneRequest, LaneScheduler, LlamaModel,
+    LaneEvent, LaneExecutor, LaneRequest, LaneScheduler, LlamaModel,
     LlamaSamplingParams, LlamaSession, LlamaSessionConfig, LlamaVocab, SlotTable,
 };
 use std::collections::HashMap;
@@ -402,7 +402,7 @@ fn run_shipping(
     });
 
     let mut streams: HashMap<u64, Vec<i32>> = HashMap::new();
-    let mut record = |events: Vec<LaneEvent>, streams: &mut HashMap<u64, Vec<i32>>| {
+    let record = |events: Vec<LaneEvent>, streams: &mut HashMap<u64, Vec<i32>>| {
         for event in events {
             if let LaneEvent::Token { job, token, .. } = event {
                 streams.entry(job).or_default().push(token);
@@ -423,7 +423,7 @@ fn run_shipping(
             .map_err(|r| format!("submit refused job {}", r.job))
     };
     // A prefill consumes a step, so each lane needs one extra to get going.
-    let mut pump = |exec: &mut LaneExecutor,
+    let pump = |exec: &mut LaneExecutor,
                     streams: &mut HashMap<u64, Vec<i32>>,
                     decode_steps: usize,
                     prefills: usize|
@@ -537,7 +537,7 @@ fn run_timeline(
     let mut next_token = vec![0i32; slots as usize];
     let mut streams: Vec<Vec<i32>> = vec![Vec::new(); slots as usize];
 
-    let mut join = |session: &mut LlamaSession,
+    let join = |session: &mut LlamaSession,
                     table: &mut SlotTable,
                     next_token: &mut Vec<i32>,
                     text: &str|
@@ -555,7 +555,7 @@ fn run_timeline(
         Ok(lane)
     };
 
-    let mut decode_steps = |session: &mut LlamaSession,
+    let decode_steps = |session: &mut LlamaSession,
                             table: &mut SlotTable,
                             next_token: &mut Vec<i32>,
                             streams: &mut Vec<Vec<i32>>,

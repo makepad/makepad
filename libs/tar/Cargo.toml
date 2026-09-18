@@ -1,0 +1,8 @@
+[package]
+name = "makepad-tar"
+version = "0.1.0"
+edition = "2021"
+description = "A tar reader for the archives Makepad ships: ustar, GNU long names, pax headers, gzip through makepad-fast-inflate"
+
+[dependencies]
+makepad-fast-inflate = { path = "../fast_inflate" }

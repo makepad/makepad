@@ -16,6 +16,7 @@ use std::cell::RefCell;
 
 pub fn prof_dump() {}
 
+#[cfg(target_os = "macos")]
 pub(crate) fn prof_add(_slot: usize, _started: std::time::Instant) {}
 
 fn tensor(rows: usize, cols: usize, data: Vec<f32>) -> GpuTensor {
@@ -23,7 +24,9 @@ fn tensor(rows: usize, cols: usize, data: Vec<f32>) -> GpuTensor {
         rows,
         cols,
         data: RefCell::new(data),
+        #[cfg(target_os = "macos")]
         u32s: RefCell::new(Vec::new()),
+        #[cfg(target_os = "macos")]
         id: std::cell::Cell::new(crate::gpu_types::fresh_tensor_id()),
     }
 }

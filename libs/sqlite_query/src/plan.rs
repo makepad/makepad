@@ -2047,6 +2047,12 @@ fn choose_access(
     earlier_slots: &[usize],
     slot_base: usize,
 ) -> Access {
+    // A WITHOUT ROWID table has no rowid to seek, and its indexes carry the
+    // primary key instead of a rowid, so it is read by a full scan only.
+    if table.without_rowid {
+        return Access::Scan;
+    }
+
     let cons = constraints_for(slot, level, conjuncts, used, earlier_slots, slot_base);
 
     // 1. rowid equality: one row, no index needed.

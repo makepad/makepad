@@ -434,7 +434,7 @@ mod tests {
         // torch's own docstring: SobolEngine(dimension=5).draw(3) starts
         // 0,0,0 / .5,.5,.5 / .75,.25,.25 — the first three columns are what
         // the 3-dimensional engine produces.
-        let mut state = sobol_initialize_state(3);
+        let state = sobol_initialize_state(3);
         let shift = vec![0i64; 3];
         let recip = 1.0f32 / (1i64 << SOBOL_MAXBIT) as f32;
         let mut quasi = shift;

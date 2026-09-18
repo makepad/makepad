@@ -24,8 +24,11 @@
 //! `msync(MS_INVALIDATE)`, never a system-wide purge) and prints the
 //! verified before/after residency.
 
+#[cfg(target_os = "macos")]
 use makepad_ai_loader::mmap::MappedRegion;
+#[cfg(target_os = "macos")]
 use std::path::Path;
+#[cfg(target_os = "macos")]
 use std::time::Instant;
 
 #[cfg(target_os = "macos")]
