@@ -467,13 +467,20 @@ impl Setup {
         let mut selected = apps.iter().position(|a| a.0 == self.app).unwrap_or(0);
         let mut options: Vec<_> = apps.iter().enumerate().map(|(i, a)| ((i + 1).to_string(), a.1.clone(), a.2.clone())).collect();
         options.push(("q".into(), "Back".into(), String::new()));
+        let info = ["Choosing an app sets up any missing compiler, downloads its sources, then compiles and opens it".into()];
         loop {
-            match Screen::enter().choose_from("Other Apps", &["Shared compiler, source and build cache".into()], &options, selected)?.as_str() {
+            match Screen::enter().choose_from("Makepad Apps", &info, &options, selected)?.as_str() {
                 "q" => return Ok(()),
                 choice => {
                     selected = choice.parse::<usize>().ok().and_then(|i| i.checked_sub(1)).ok_or("Invalid app choice")?;
                     let app = apps.get(selected).ok_or("Invalid app choice")?;
-                    self.app_menu(&app.0)?;
+                    // The app returns here when it has been launched (or could
+                    // not be), with the row still selected.
+                    if let Err(error) = self.run_app(&app.0) {
+                        let text = clean(&if self.email.is_empty() { error } else { error.replace(&self.email, "[email]") });
+                        activity(&text);
+                        Screen::enter().message("Step could not complete", &text)?;
+                    }
                 }
             }
         }
@@ -494,12 +501,6 @@ impl Setup {
             release.save(&cached)?;
         }
         Ok(selected)
-    }
-    fn app_menu(&mut self, app: &str) -> Result<(), String> {
-        let mut selected = self.app_setup(app)?;
-        let result = show_menu(&mut selected, false);
-        fs::write(self.root.join("selected-app"), &self.app).map_err(|e| e.to_string())?;
-        result
     }
     fn run_app(&mut self, app: &str) -> Result<(), String> {
         let mut selected = self.app_setup(app)?;
@@ -790,7 +791,7 @@ impl Setup {
         if release.id == "scope" {
             // This explicit Builder launch should open in front. Ordinary
             // Makepad windows retain their default non-activating startup.
-            app.env("MAKEPAD_FOCUS", "1");
+            app.arg("--focus");
         }
         // The app is a GUI child of Builder. Give it its own process group (or
         // detached Windows process) so closing the terminal that hosts Builder
@@ -914,7 +915,7 @@ pub fn run() -> Result<(), String> {
         println!("Setup cancelled. Nothing was downloaded or installed.");
         return Ok(());
     }
-    show_menu(&mut setup, true)?;
+    show_menu(&mut setup)?;
     if io::stdout().is_terminal() { print!("\x1b[0m"); }
     println!("Makepad Builder closed.");
     Ok(())
@@ -940,12 +941,12 @@ fn gpu_warning_acknowledged() -> Result<bool, String> {
     Screen::enter().acknowledge("GPU driver notice", &info)
 }
 
-fn show_menu(setup: &mut Setup, primary: bool) -> Result<(), String> {
+fn show_menu(setup: &mut Setup) -> Result<(), String> {
     fs::write(setup.root.join("selected-app"), &setup.app).map_err(|e| e.to_string())?;
     let _screen = Screen::enter();
     // Start setup once when Builder opens. Success, cancellation and failure
     // all return to the normal menu; never restart the sequence on redraw.
-    let mut startup = primary;
+    let mut startup = true;
     loop {
         let ready = setup.ready();
         let registered_title = catalog::apps()?.iter().find(|app| app.get("id").and_then(makepad_strict_json::Value::as_str) == Some(&setup.app))
@@ -956,13 +957,12 @@ fn show_menu(setup: &mut Setup, primary: bool) -> Result<(), String> {
         });
         let mut options: Vec<_> = MENU
             .lines()
-            .filter(|entry| primary || !(entry.starts_with("3|") || entry.starts_with("4|")))
             .filter_map(|entry| {
                 let fields: Vec<_> = entry.split('|').collect();
                 (fields.len() == 3).then(|| {
                     let retry_compiler = setup.compiler_retry && fields[0] == "1";
                     (
-                        if !primary && fields[0] == "5" { "3".into() } else { fields[0].into() },
+                        fields[0].into(),
                         if retry_compiler { "Retry compiler check".into() } else { fields[1].replace("{app}", &title) },
                         if retry_compiler {
                             "Recheck the staged Rust compiler after Windows security scanning".into()
@@ -983,15 +983,14 @@ fn show_menu(setup: &mut Setup, primary: bool) -> Result<(), String> {
             })
             .collect();
         if crate::cuda::supported() {
-            options.push(((if primary { "6" } else { "4" }).into(), if setup.cuda { "Disable CUDA".into() } else { "Enable CUDA (required for AI app features)".into() }, "NVIDIA compiler and libraries for AI app features".into()));
+            options.push(("6".into(), if setup.cuda { "Disable CUDA".into() } else { "Enable CUDA (required for AI app features)".into() }, "NVIDIA compiler and libraries for AI app features".into()));
         }
         let command_key = if crate::cuda::supported() { "7" } else { "6" };
-        if primary && setup.root.join(if cfg!(windows) { "scope.exe" } else { "scope.bin" }).is_file() {
+        if setup.root.join(if cfg!(windows) { "scope.exe" } else { "scope.bin" }).is_file() {
             options.push((command_key.into(), "Set up scope command".into(), "Open any project from your terminal".into()));
         }
-        if !primary { options.push(("q".into(), if setup.app == "wm" { "Back to Builder".into() } else { "Back to Other Apps".into() }, String::new())); }
         let info = [ABOUT.trim().replace("{app}", &title)];
-        let heading = if primary { "Makepad Builder".to_owned() } else { format!("Makepad Builder · {title}") };
+        let heading = "Makepad Builder".to_owned();
         let compiler_ready = ready[0] && ready[1];
         let built = setup.release.as_ref().is_some_and(|release| {
             load_release(&setup.root.join("installed").join(format!("{}.json", setup.app)))
@@ -1000,7 +999,7 @@ fn show_menu(setup: &mut Setup, primary: bool) -> Result<(), String> {
         });
         let mut disabled = Vec::new();
         if !compiler_ready { disabled.push("2"); }
-        if !ready.into_iter().all(|v| v) { disabled.push(if primary { "5" } else { "3" }); }
+        if !ready.into_iter().all(|v| v) { disabled.push("5"); }
         let choice = if std::mem::take(&mut startup) {
             "1".to_owned()
         } else {
@@ -1018,10 +1017,10 @@ fn show_menu(setup: &mut Setup, primary: bool) -> Result<(), String> {
         let result = match choice.as_str() {
             "1" => setup.install_and_run(),
             "2" => setup.build(),
-            "3" if primary => setup.apps(),
-            "4" if primary => setup.run_app("wm"),
-            key if key == (if primary { "5" } else { "3" }) => setup.ai_terminal(),
-            key if primary && key == command_key => (|| {
+            "3" => setup.run_app("wm"),
+            "4" => setup.apps(),
+            "5" => setup.ai_terminal(),
+            key if key == command_key => (|| {
                 let info = [
                     "Add the Scope command to your user PATH?".into(),
                     if cfg!(windows) { "Use the user environment settings.".into() } else { "Create ~/.local/bin/scope; add ~/.local/bin to your shell profile if needed.".into() },
@@ -1035,7 +1034,7 @@ fn show_menu(setup: &mut Setup, primary: bool) -> Result<(), String> {
                 }
                 Ok(())
             })(),
-            key if key == (if primary { "6" } else { "4" }) => setup.release().and_then(|r| {
+            "6" => setup.release().and_then(|r| {
                 if !crate::cuda::supported() {
                     return Err("The optional CUDA toolkit is available on x64 Windows".into());
                 }
