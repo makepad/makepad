@@ -10,6 +10,9 @@ pub struct NotesModule;
 /// The one linked instance of the module description: immutable, no state.
 pub static NOTES_MODULE: NotesModule = NotesModule;
 
+#[cfg(feature = "dynamic-module")]
+makepad_app_module::export_app_module!(NOTES_MODULE);
+
 impl AppModule for NotesModule {
     fn id(&self) -> &'static str {
         "notes"

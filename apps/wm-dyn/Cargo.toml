@@ -1,0 +1,34 @@
+# wm-dyn — Android super-app: the same desk as wm-all (iOS skin), but apps
+# are not linked in. Opening a tile runs `cargo rustc --crate-type dylib`
+# against the packaged checkout and `dlopen`s the result into ModuleHost.
+#
+# The whole graph is built with `RUSTFLAGS="-C prefer-dynamic"` so that the
+# engine (`engine/`, one Rust dylib) is shared by the host and every app
+# dylib. Desktop check: `MAKEPAD_WM_ROOT=<checkout> RUSTFLAGS="-C
+# prefer-dynamic" cargo run -p makepad-wm-dyn --release`.
+#
+# Android: RUSTFLAGS="-C prefer-dynamic" cargo makepad android --abi=aarch64
+#   --package-name=nl.makepad.wmdyn --app-label=wmdyn build -p makepad-wm-dyn --release
+# The `[lib]` is the Android cdylib (cargo_makepad wraps bin-only packages
+# in a generated workspace under target/, which breaks the relocatable
+# fingerprints the on-device cargo needs). Packaging (rustc + tree) is
+# local/wm-dyn/ — not the main repo.
+
+[package]
+name = "makepad-wm-dyn"
+version = "0.1.0"
+edition = "2021"
+default-run = "wm-dyn"
+
+[lib]
+name = "makepad_wm_dyn"
+path = "src/lib.rs"
+
+[[bin]]
+name = "wm-dyn"
+path = "src/main.rs"
+
+[dependencies]
+makepad-wm = { path = "../wm" }
+makepad-widgets = { path = "../../widgets" }
+makepad-wm-engine = { path = "engine" }

@@ -22,6 +22,7 @@ name = "makepad_sheets"
 path = "src/lib.rs"
 
 [features]
+dynamic-module = []
 default = ["standalone"]
 demo = []
 # The standalone window: the F10 overlay and the port toward it. A host

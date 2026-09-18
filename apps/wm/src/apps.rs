@@ -24,6 +24,8 @@ use std::path::Path;
 pub enum Hosting {
     Process,
     Module,
+    /// `cargo rustc --crate-type dylib` then `dlopen` in the host process.
+    Dylib,
 }
 
 /// What a menu may offer to launch: the linked modules, and — where this
@@ -34,19 +36,29 @@ pub enum Hosting {
 pub struct Launchable {
     pub linked: Vec<&'static str>,
     pub processes: bool,
+    pub dylibs: bool,
 }
 
 impl Default for Launchable {
     /// The desktop before its build is read: processes where the platform
     /// has them, nothing linked.
     fn default() -> Self {
-        Launchable { linked: Vec::new(), processes: crate::host::processes_available() }
+        Launchable {
+            linked: Vec::new(),
+            processes: crate::host::processes_available(),
+            dylibs: false,
+        }
     }
 }
 
 impl Launchable {
     pub fn allows(&self, app: &AppDef) -> bool {
-        self.linked.contains(&app.id.as_str()) || (self.processes && app.is_available())
+        self.linked.contains(&app.id.as_str())
+            || (self.processes && app.is_available())
+            // Super-app: show every packaged crate even before the checkout
+            // is extracted (first tap provisions). `is_available` needs a
+            // repo on disk, which the APK does not have at first launch.
+            || (self.dylibs && !app.package.is_empty())
     }
 }
 
@@ -55,6 +67,8 @@ pub struct AppRegistry {
     overrides: HashMap<String, Hosting>,
     /// This build hosts processes (the platform can, and the build wants to).
     processes: bool,
+    /// Opening an app compiles it to a `dylib` and `dlopen`s it (Android super-app).
+    dylibs: bool,
     /// This build links the assistant's widget families (`WmBuild::assistant`).
     assistant: bool,
 }
@@ -65,6 +79,7 @@ impl Default for AppRegistry {
             modules: Vec::new(),
             overrides: HashMap::new(),
             processes: crate::host::processes_available(),
+            dylibs: false,
             assistant: false,
         }
     }
@@ -80,6 +95,7 @@ impl AppRegistry {
             modules: build.modules.clone(),
             overrides: HashMap::new(),
             processes,
+            dylibs: build.dynamic_dylibs,
             assistant: build.assistant.is_some(),
         };
         if let Ok(text) = std::fs::read_to_string(settings) {
@@ -112,6 +128,9 @@ impl AppRegistry {
     /// build): every linked module is a module, and everything else is
     /// simply not there.
     pub fn hosting(&self, id: &str) -> Hosting {
+        if self.dylibs && self.module(id).is_none() {
+            return Hosting::Dylib;
+        }
         if !self.processes {
             return if self.module(id).is_some() { Hosting::Module } else { Hosting::Process };
         }
@@ -135,7 +154,7 @@ impl AppRegistry {
 
     /// What the menus may offer (see [`Launchable`]).
     pub fn launchable(&self) -> Launchable {
-        Launchable { linked: self.linked_ids(), processes: self.processes }
+        Launchable { linked: self.linked_ids(), processes: self.processes, dylibs: self.dylibs }
     }
 
     /// `~/.makepad/wm/apps.splash`: one `id: Module` or `id: Process` per
@@ -220,7 +239,7 @@ mod tests {
         let plain = AppRegistry::load(Path::new("/nonexistent/apps.splash"), &[], &build(false, true), true);
         assert_eq!(plain.hosting("sheets"), Hosting::Process, "desktop default is a process");
         assert!(!plain.pane_in_process(), "the desktop's assistant is the child process unless switched");
-        assert_eq!(plain.launchable(), Launchable { linked: vec!["sheets"], processes: true });
+        assert_eq!(plain.launchable(), Launchable { linked: vec!["sheets"], processes: true, dylibs: false });
     }
 
     #[test]
@@ -237,5 +256,19 @@ mod tests {
         assert!(!launchable.allows(&terminal));
         // The desktop's default launchable follows the platform alone.
         assert_eq!(Launchable::default().processes, crate::host::processes_available());
+    }
+
+    #[test]
+    fn dynamic_dylibs_host_unlinked_apps_as_dylib() {
+        let mut b = build(true, false);
+        b.dynamic_dylibs = true;
+        let registry = AppRegistry::load(Path::new("/nonexistent/apps.splash"), &[], &b, false);
+        assert_eq!(registry.hosting("sheets"), Hosting::Module, "linked module stays a module");
+        assert_eq!(registry.hosting("calculator"), Hosting::Dylib);
+        let launchable = registry.launchable();
+        assert!(launchable.dylibs);
+        assert!(!launchable.processes);
+        let calc = crate::clients::find_app("calculator").unwrap();
+        assert!(launchable.allows(&calc), "dylib builds list crates before the tree is extracted");
     }
 }

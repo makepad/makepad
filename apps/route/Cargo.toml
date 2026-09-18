@@ -22,6 +22,7 @@ path = "src/main.rs"
 required-features = ["standalone"]
 
 [features]
+dynamic-module = []
 default = ["standalone", "native"]
 # The standalone window (src/main.rs). A host that links the module
 # leaves it off and gets the lib only.
