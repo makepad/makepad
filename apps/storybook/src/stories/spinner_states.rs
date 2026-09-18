@@ -1,5 +1,4 @@
 //! An overlay that can say the load STOPPED, with the comet face beside it.
-use crate::makepad_widgets::dropzone::*;
 use crate::makepad_widgets::*;
 use crate::registry::{Control, ControlKind, Story};
 

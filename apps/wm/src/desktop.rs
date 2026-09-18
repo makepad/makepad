@@ -14,8 +14,8 @@ impl Default for StyleTween {
         Self {
             target: DesktopStyle::Omarchy,
             dark: false,
-            weights: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-            from: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            weights: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            from: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             elapsed: 1.0,
         }
     }

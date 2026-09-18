@@ -8,15 +8,18 @@ use std::collections::HashMap;
 pub enum DesktopStyle {
     #[default]
     Omarchy,
-    /// A dark style in near-black and orange, the only one here not modelled
-    /// on somebody else's desktop.
-    BlackOrange,
     Macos,
     Windows,
     Windows2000,
     NextStep,
     Ios,
     Android,
+    /// A dark style in near-black and orange, the only one here not modelled
+    /// on somebody else's desktop. Declared last: the window manager's style
+    /// tween reads its weights by discriminant (1 is macOS, 3 Windows 2000,
+    /// 4 NeXTSTEP), so a new style takes the next number and `ALL` below
+    /// keeps the order they are shown in.
+    BlackOrange,
 }
 
 impl DesktopStyle {
@@ -68,7 +71,9 @@ impl DesktopStyle {
         }
     }
     pub fn next(self) -> Self {
-        Self::ALL[(self as usize + 1) % Self::ALL.len()]
+        // By place in `ALL`, not by discriminant: the two orders differ.
+        let at = Self::ALL.iter().position(|style| *style == self).unwrap_or(0);
+        Self::ALL[(at + 1) % Self::ALL.len()]
     }
     pub fn floating(self) -> bool {
         !matches!(self, Self::Omarchy | Self::BlackOrange) && !self.mobile()
