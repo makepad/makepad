@@ -595,6 +595,11 @@ impl Cx {
                 };
                 let trace_draw = crate::makepad_error_log::trace_enabled("gl.draw");
 
+                // A refused retained allocation leaves this item without
+                // instance storage (or with the previous, smaller backing).
+                // It must not be drawn this frame: the VAO would bind a
+                // missing buffer, or read past the old one.
+                let mut upload_refused = false;
                 'instance_upload: {
                     if (draw_call.instance_dirty
                         || draw_item.os.inst_vb.gl_buffer.is_none()
@@ -658,6 +663,7 @@ impl Cx {
                                 crate::trace!("gl.repaint", "retained upload pending");
                                 draw_item.instance_upload_pending = true;
                                 self.demo_time_repaint = true;
+                                upload_refused = true;
                                 break 'instance_upload;
                             };
                             uploaded
@@ -695,6 +701,9 @@ impl Cx {
                     draw_call.uniforms_dirty = true;
                 }
                 *zbias += zbias_step;
+                if upload_refused {
+                    continue;
+                }
 
                 let instances = if draw_item.retained_instances.is_some() {
                     draw_item.retained_instance_count as u64

@@ -2208,7 +2208,11 @@ impl CxDrawItems {
         if call.draw_shader_id != draw_shader_id {
             return false;
         }
-        let dest = &call.dyn_uniforms[offset..offset + value.len()];
+        // A stale mapping (shader re-bound since the caller looked it up) must
+        // not panic the UI thread; it is simply not applied.
+        let Some(dest) = call.dyn_uniforms.get(offset..offset + value.len()) else {
+            return false;
+        };
         let unchanged = dest
             .iter()
             .zip(value.iter())

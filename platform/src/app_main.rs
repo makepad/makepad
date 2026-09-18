@@ -483,7 +483,7 @@ macro_rules! app_main {
             $crate::startup_trace("init_cx_os (deps loaded)");
             // `--remote`: a localhost HTTP control surface for agents / tests.
             // No-op unless the flag (or MAKEPAD_REMOTE) is present.
-            $crate::remote::start_if_requested();
+            $crate::remote::start_if_requested(&mut cx.borrow_mut());
             Cx::event_loop(cx);
         }
 

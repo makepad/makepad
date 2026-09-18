@@ -598,34 +598,6 @@ pub(crate) fn defer_platform_op(platform_ops: &mut VecDeque<CxOsOp>, op: CxOsOp)
     platform_ops.len() > 1
 }
 
-/// The GPU API the desktop Linux event loop settled on (0 = not chosen yet).
-static ACTIVE_GPU_BACKEND: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
-
-pub(crate) fn active_gpu_backend() -> Option<GpuBackend> {
-    match ACTIVE_GPU_BACKEND.load(std::sync::atomic::Ordering::Relaxed) {
-        1 => Some(GpuBackend::Vulkan),
-        2 => Some(GpuBackend::OpenGl),
-        _ => None,
-    }
-}
-
-/// Records the API the desktop Linux event loop chose at startup, so
-/// `Cx::gpu_backend` answers with the running backend rather than the
-/// compiled default. Only that event loop chooses at runtime; every other
-/// target keeps its compiled backend and never calls this.
-#[cfg(all(
-    target_os = "linux",
-    not(any(gpusim, linux_direct, target_env = "ohos", target_os = "android"))
-))]
-pub(crate) fn set_active_gpu_backend(backend: GpuBackend) {
-    let code = match backend {
-        GpuBackend::Vulkan => 1,
-        GpuBackend::OpenGl => 2,
-        _ => 0,
-    };
-    ACTIVE_GPU_BACKEND.store(code, std::sync::atomic::Ordering::Relaxed);
-}
-
 impl Cx {
     /// Update a named dynamic uniform on one retained draw item without
     /// invalidating its immutable instance publication.
@@ -636,8 +608,12 @@ impl Cx {
         name: LiveId,
         value: &[f32],
     ) -> bool {
-        let Some(shader) = self.draw_lists[list].draw_items[item]
-            .draw_call()
+        // A stale (list, item) after eviction or re-recording is a no-op,
+        // never a UI-thread panic.
+        let draw_items = &self.draw_lists[list].draw_items;
+        let Some(shader) = (item < draw_items.len())
+            .then(|| draw_items[item].draw_call())
+            .flatten()
             .map(|call| call.draw_shader_id)
         else {
             return false;
@@ -1085,10 +1061,15 @@ impl Cx {
     /// The GPU API this binary renders with (see [`GpuBackend`]). Desktop Linux
     /// picks between Vulkan and OpenGL ES at startup (a Vulkan-capable build
     /// falls back to OpenGL when no usable hardware device answers); once the
-    /// event loop has chosen, this reports that choice. Before that, and on
-    /// every other platform, it is the API compiled into the binary.
-    pub fn gpu_backend() -> GpuBackend {
-        if let Some(active) = active_gpu_backend() {
+    /// event loop has chosen, this reports that choice (recorded on the
+    /// Linux platform state, `CxOs::gpu_backend`). Before that, and on every
+    /// other platform, it is the API compiled into the binary.
+    pub fn gpu_backend(&self) -> GpuBackend {
+        #[cfg(all(
+            target_os = "linux",
+            not(any(gpusim, linux_direct, target_env = "ohos"))
+        ))]
+        if let Some(active) = self.os.gpu_backend {
             return active;
         }
         #[cfg(gpusim)]
@@ -1162,7 +1143,7 @@ impl Cx {
         } else if cfg!(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")) {
             cfg!(not(use_vulkan))
         } else if cfg!(target_os = "linux") {
-            matches!(Self::gpu_backend(), GpuBackend::OpenGl)
+            matches!(self.gpu_backend(), GpuBackend::OpenGl)
         } else {
             false
         };

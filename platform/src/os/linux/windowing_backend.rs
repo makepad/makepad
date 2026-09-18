@@ -82,7 +82,7 @@ impl Cx {
                         custom_window_chrome: false,
                     });
                     cx.os.vulkan = Some(vulkan);
-                    crate::cx_api::set_active_gpu_backend(crate::cx::GpuBackend::Vulkan);
+                    cx.os.gpu_backend = Some(crate::cx::GpuBackend::Vulkan);
                     cx.stdin_event_loop();
                     drop(cx.os.vulkan.take());
                     return;
@@ -160,7 +160,7 @@ impl Cx {
         match protocol {
             WindowingProtocol::Wayland => Self::wayland_event_loop(cx),
             WindowingProtocol::X11 => {
-                crate::cx_api::set_active_gpu_backend(crate::cx::GpuBackend::OpenGl);
+                cx.borrow_mut().os.gpu_backend = Some(crate::cx::GpuBackend::OpenGl);
                 Self::x11_event_loop(cx)
             }
         }
@@ -208,6 +208,10 @@ pub struct CxOs {
     pub opengl_cx: Option<OpenglCx>,
     #[cfg(use_vulkan)]
     pub(crate) vulkan: Option<super::vulkan::CxVulkan>,
+    /// The GPU API the event loop settled on at startup (`None` until then):
+    /// a Vulkan-capable build renders with OpenGL ES when no usable device
+    /// answers. `Cx::gpu_backend` reports it from here.
+    pub(crate) gpu_backend: Option<crate::cx::GpuBackend>,
     pub(crate) video_players: HashMap<LiveId, LinuxVideoPlayer>,
     pub(crate) gstreamer: Option<LibGStreamer>,
 }
@@ -224,8 +228,7 @@ impl CxOs {
         {
             // The renderer is taken out of `CxOs` for the duration of a
             // present; the recorded choice keeps the answer stable then.
-            self.vulkan.is_some()
-                || matches!(crate::cx_api::active_gpu_backend(), Some(crate::cx::GpuBackend::Vulkan))
+            self.vulkan.is_some() || matches!(self.gpu_backend, Some(crate::cx::GpuBackend::Vulkan))
         }
         #[cfg(not(use_vulkan))]
         {

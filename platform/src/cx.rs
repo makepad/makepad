@@ -65,6 +65,13 @@ pub struct Cx {
     pub script_vm: Option<Box<ScriptVmBase>>,
     pub script_data: CxScriptData,
     pub package_root: Option<String>,
+    /// `crate_name` → source directory for a compile-on-device installation,
+    /// from the map beside the executable (`os::cx_native::load_package_paths`).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) package_paths: std::collections::HashMap<String, std::path::PathBuf>,
+    /// Native user-input bookkeeping for the `--remote` interface.
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+    pub(crate) remote_activity: crate::remote::RemoteActivity,
     pub(crate) font_set: crate::font_policy::FontSet,
     pub(crate) font_set_frozen: bool,
 
@@ -904,6 +911,10 @@ impl Cx {
         let publications = crate::shared_instances::Publications::new(textures.1.serials.clone());
         let mut cx = Self {
             package_root: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            package_paths: crate::os::cx_native::load_package_paths(),
+            #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+            remote_activity: Default::default(),
             font_set: crate::font_policy::FontSet::target_default(),
             font_set_frozen: false,
             demo_time_repaint: false,
