@@ -96,7 +96,7 @@ fn callback(cx: &mut Cx, op: &str, args: &[(String, String)]) -> Result<String, 
         }
         "story_theme" => {
             let Some(name) = arg(args, "name") else {
-                return Err("need name=dark|light|skeleton".to_string());
+                return Err(format!("need name={}", theme::names().join("|")));
             };
             let Some(index) = theme::index_of(name) else {
                 return Err(format!("no theme {name}"));
@@ -109,7 +109,7 @@ fn callback(cx: &mut Cx, op: &str, args: &[(String, String)]) -> Result<String, 
             Ok(format!(
                 "{{\"story\":{},\"theme\":{},\"baseline\":{},\"stories\":{}}}",
                 json_str(&current),
-                json_str(theme::NAMES[theme::choice()]),
+                json_str(&theme::names()[theme::choice()]),
                 json_str(&settings::baseline()),
                 registry::all().count()
             ))

@@ -441,7 +441,7 @@ script_mod! {
         color_on_tertiary: #x172645FF
         color_tertiary_container: #x324367FF
         color_on_tertiary_container: #xD8E1F3FF
-        color_on_error: #x4F0D0DFF
+        color_on_error: #xFFFFFFFF
         color_error_container: #x732626FF
         color_on_error_container: #xFAD1D1FF
         color_on_warning: #x553E07FF

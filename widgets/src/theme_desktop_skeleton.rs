@@ -405,11 +405,11 @@ script_mod! {
         color_on_error: #xFFFFFFFF
         color_error_container: #xF2D9D9FF
         color_on_error_container: #x2C1111FF
-        color_on_warning: #xFFFFFFFF
+        color_on_warning: #x000000FF
         color_warning_container: #xF2EBD9FF
         color_on_warning_container: #x2C2411FF
         color_success: #x389457FF
-        color_on_success: #xFFFFFFFF
+        color_on_success: #x000000FF
         color_success_container: #xD9F2E1FF
         color_on_success_container: #x112C1AFF
         color_info: #x386394FF

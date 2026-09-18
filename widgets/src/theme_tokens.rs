@@ -529,10 +529,16 @@ struct FamilyInput {
 fn family_inputs(seed: &SeedColors) -> [FamilyInput; 7] {
     let hue_of = |rgba: u32| rgb_to_hsl(rgba).0;
     let primary = hue_of(seed.primary);
+    // A seed with no colour in it has no hue either, and the number it
+    // reports for one is nought, which is red: a style whose accent is black
+    // got a family of reds. The rule takes only the hue from a seed and
+    // brings its own saturation, so it has to be told when there is no hue
+    // to take, and then the three brand families are greys.
+    let brand = if rgb_to_hsl(seed.primary).1 < 0.08 { 0.0 } else { 0.62 };
     [
-        FamilyInput { hue: primary, sat: 0.62, intent: false },
-        FamilyInput { hue: seed.secondary.map(hue_of).unwrap_or(primary + 30.0), sat: 0.62 * 0.55, intent: false },
-        FamilyInput { hue: seed.tertiary.map(hue_of).unwrap_or(primary - 150.0), sat: 0.62 * 0.8, intent: false },
+        FamilyInput { hue: primary, sat: brand, intent: false },
+        FamilyInput { hue: seed.secondary.map(hue_of).unwrap_or(primary + 30.0), sat: brand * 0.55, intent: false },
+        FamilyInput { hue: seed.tertiary.map(hue_of).unwrap_or(primary - 150.0), sat: brand * 0.8, intent: false },
         FamilyInput { hue: seed.error.map(hue_of).unwrap_or(0.0), sat: 0.72, intent: true },
         FamilyInput { hue: 42.0, sat: 0.85, intent: true },
         FamilyInput { hue: 140.0, sat: 0.55, intent: true },
@@ -540,21 +546,71 @@ fn family_inputs(seed: &SeedColors) -> [FamilyInput; 7] {
     ]
 }
 
+/// The least a colour drawn on another has to stand off it to be read as
+/// text, as a ratio of their luminances.
+pub const READABLE: f64 = 4.5;
+
+const BLACK: u32 = 0x000000FF;
+
+/// How far two colours stand apart, 1 to 21, by the luminance each has once
+/// its channels are taken out of their display curve. Alpha is ignored: a
+/// role is drawn solid.
+pub fn contrast(a: u32, b: u32) -> f64 {
+    fn luminance(rgba: u32) -> f64 {
+        let channel = |shift: u32| {
+            let v = ((rgba >> shift) & 0xFF) as f64 / 255.0;
+            if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+        };
+        0.2126 * channel(24) + 0.7152 * channel(16) + 0.0722 * channel(8)
+    }
+    let (la, lb) = (luminance(a), luminance(b));
+    (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+}
+
+/// What to draw ON a ground, given the two ends the rule would reach for:
+/// the first if it reads, the other if only that does, and failing both the
+/// plainer of black and white.
+///
+/// The rule used to name one end and stop. That is right for a red or a
+/// blue and wrong for an amber or a green, which are far brighter than a red
+/// of the same lightness in the space the rule counts in: white on the
+/// warning colour stood at 1.9:1. Asking the ground is the only version of
+/// the rule that holds for a hue nobody has tried yet, which is what a style
+/// sheet's accent is.
+pub fn readable_on(ground: u32, first: u32, other: u32) -> u32 {
+    if contrast(first, ground) >= READABLE {
+        first
+    } else if contrast(other, ground) >= READABLE {
+        other
+    } else if contrast(BLACK, ground) > contrast(WHITE, ground) {
+        BLACK
+    } else {
+        WHITE
+    }
+}
+
 fn light_family(hue: f64, sat: f64) -> RoleFamily {
+    let base = hsl_to_rgb(hue, sat, 0.40);
+    let container = hsl_to_rgb(hue, (sat * 1.1).min(1.0), 0.90);
+    let ink = hsl_to_rgb(hue, sat, 0.12);
     RoleFamily {
-        base: hsl_to_rgb(hue, sat, 0.40),
-        on_base: WHITE,
-        container: hsl_to_rgb(hue, (sat * 1.1).min(1.0), 0.90),
-        on_container: hsl_to_rgb(hue, sat, 0.12),
+        base,
+        on_base: readable_on(base, WHITE, ink),
+        container,
+        on_container: readable_on(container, ink, WHITE),
     }
 }
 
 fn dark_family(hue: f64, sat: f64) -> RoleFamily {
+    let base = hsl_to_rgb(hue, sat, 0.74);
+    let container = hsl_to_rgb(hue, sat * 0.7, 0.30);
+    let ink = hsl_to_rgb(hue, sat, 0.18);
+    let pale = hsl_to_rgb(hue, (sat * 1.1).min(1.0), 0.90);
     RoleFamily {
-        base: hsl_to_rgb(hue, sat, 0.74),
-        on_base: hsl_to_rgb(hue, sat, 0.18),
-        container: hsl_to_rgb(hue, sat * 0.7, 0.30),
-        on_container: hsl_to_rgb(hue, (sat * 1.1).min(1.0), 0.90),
+        base,
+        on_base: readable_on(base, ink, pale),
+        container,
+        on_container: readable_on(container, pale, ink),
     }
 }
 
@@ -589,17 +645,32 @@ pub fn roles_from_seed(seed: &SeedColors, scheme: Scheme) -> ColorRoles {
         Scheme::Dark => light_family(inputs[0].hue, inputs[0].sat).base,
         Scheme::Skeleton => 0xBBBBBBFF,
     };
+    // Error and warning are not drawn on the colours this rule makes for
+    // them. Every theme keeps `color_error` and `color_warning` as the older
+    // `color_high` and `color_mid`, so what is drawn on them has to be chosen
+    // against THOSE: the dark theme's ink stood at 2.6:1 on the red that is
+    // actually there, having been picked for a pink that is not.
+    let on_kept = |family: RoleFamily, ground: u32| RoleFamily {
+        on_base: readable_on(ground, family.on_base, if family.on_base == WHITE { BLACK } else { WHITE }),
+        ..family
+    };
     ColorRoles {
         primary: f(0),
         secondary: f(1),
         tertiary: f(2),
-        error: f(3),
-        warning: f(4),
+        error: on_kept(f(3), KEPT_ERROR),
+        warning: on_kept(f(4), KEPT_WARNING),
         success: f(5),
         info: f(6),
         inverse_primary,
     }
 }
+
+/// `color_high` and `color_mid` as every theme file declares them, which is
+/// what `color_error` and `color_warning` are in all three.
+/// `error_and_warning_are_the_older_colours` holds these to the files.
+pub const KEPT_ERROR: u32 = 0xCC0000FF;
+pub const KEPT_WARNING: u32 = 0xFFAA00FF;
 
 /// The accent roles the theme files carry for a scheme: the house seed
 /// through the built-in rule.
@@ -628,6 +699,140 @@ pub fn skeleton_ladder() -> Vec<(&'static str, u32)> {
         ("color_opaque_d_4", mix_rgb(FG, BLACK, 0.6)),
         ("color_opaque_d_5", mix_rgb(FG, BLACK, 0.75)),
     ]
+}
+
+/// Where one of the library's own roles comes from in a base theme: another
+/// token, or two of them mixed half and half.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum RoleSource {
+    Token(&'static str),
+    HalfMix(&'static str, &'static str),
+}
+
+impl RoleSource {
+    /// The expression as the theme file writes it.
+    pub fn expression(self) -> String {
+        match self {
+            RoleSource::Token(t) => format!("theme.{t}"),
+            RoleSource::HalfMix(a, b) => format!("mix(theme.{a}, theme.{b}, 0.5)"),
+        }
+    }
+}
+
+/// The roles a base theme derives from older tokens, as `(role, where the
+/// light theme gets it, where the dark theme gets it)`.
+///
+/// Written down a second time, beside the theme files that are the first,
+/// because a style sheet needs it and cannot get it from them: a theme
+/// derives these ONCE, when it is built, so a sheet that then changes
+/// `color_bg_app` leaves `color_surface` holding the colour it replaced.
+/// `the_derived_role_table_is_the_theme_files` holds the two copies together.
+pub const DERIVED_ROLES: &[(&str, RoleSource, RoleSource)] = {
+    use RoleSource::{HalfMix as M, Token as T};
+    &[
+        ("color_surface", T("color_bg_app"), T("color_bg_app")),
+        ("color_surface_container", T("color_fg_app"), T("color_fg_app")),
+        ("color_surface_container_low", M("color_bg_app", "color_fg_app"), M("color_bg_app", "color_fg_app")),
+        ("color_surface_container_high", T("color_opaque_d_1"), T("color_opaque_u_1")),
+        ("color_surface_container_highest", T("color_opaque_d_2"), T("color_opaque_u_2")),
+        ("color_surface_dim", T("color_opaque_d_1"), T("color_opaque_d_2")),
+        ("color_surface_bright", T("color_opaque_u_3"), T("color_opaque_u_3")),
+        ("color_on_surface", T("color_text"), T("color_text")),
+        ("color_on_surface_variant", T("color_d_3"), T("color_u_4")),
+        ("color_outline", T("color_d_2"), T("color_u_3")),
+        ("color_outline_variant", T("color_d_1"), T("color_u_15")),
+        ("color_inverse_surface", T("color_opaque_d_5"), T("color_opaque_u_6")),
+        ("color_inverse_on_surface", T("color_opaque_u_6"), T("color_opaque_d_5")),
+        ("color_placeholder", T("color_opaque_d_1"), T("color_opaque_u_1")),
+        ("color_placeholder_hl", T("color_opaque_d_2"), T("color_opaque_u_2")),
+    ]
+};
+
+/// The token a style sheet's accent is read from. Every sheet the library
+/// ships sets it, and it is the saturated one: the highlight behind a
+/// selection is a pale tint in some of them, which is no seed for an accent.
+pub const SHEET_ACCENT: &str = "color_ctrl_selected";
+
+/// The script that brings the library's own roles into line with a style
+/// sheet, to be run straight after the sheet's tokens.
+///
+/// A sheet sets a few hundred of the older tokens and none of the roles,
+/// because the roles are younger than the sheets. Left alone, a widget built
+/// on roles keeps the base theme's surfaces under a sheet that has changed
+/// them, and lights its selection in the house accent beside buttons lit in
+/// the sheet's own. So the surfaces are read again from the tokens the sheet
+/// DID set, and the accent families are grown from the sheet's own accent by
+/// the rule that grew the house ones — which also settles what is drawn ON
+/// the accent, a colour no sheet names and one that cannot be guessed: white
+/// on one sheet's navy and near black on another's lavender.
+///
+/// The families that mean something — error, warning, success, info — stay
+/// as they are: red is an error under every style. A role the sheet names
+/// for itself is the sheet's to decide and is left alone.
+pub fn sheet_roles_script(sheet_theme: &str, read: &mut dyn FnMut(&str) -> Option<u32>) -> String {
+    let dark = sheet_theme.contains("mod.themes.dark");
+    let named = |key: &str| {
+        sheet_theme.lines().any(|line| {
+            line.trim_start()
+                .strip_prefix("mod.theme.")
+                .and_then(|rest| rest.strip_prefix(key))
+                .is_some_and(|rest| rest.trim_start().starts_with('='))
+        })
+    };
+    let mut out = String::new();
+    for (role, light, dark_source) in DERIVED_ROLES {
+        if named(role) {
+            continue;
+        }
+        let value = match if dark { *dark_source } else { *light } {
+            RoleSource::Token(t) => read(t),
+            RoleSource::HalfMix(a, b) => match (read(a), read(b)) {
+                (Some(a), Some(b)) => Some(mix_rgb(a, b, 0.5)),
+                _ => None,
+            },
+        };
+        if let Some(rgba) = value {
+            out.push_str(&format!("mod.theme.{role} = #x{rgba:08X}
+"));
+        }
+    }
+    if let Some(accent) = read(SHEET_ACCENT) {
+        let seed = SeedColors { primary: accent | 0xFF, ..SeedColors::HOUSE };
+        let scheme = if dark { Scheme::Dark } else { Scheme::Light };
+        for (key, rgba) in roles_from_seed(&seed, scheme).entries() {
+            let follows = ["primary", "secondary", "tertiary"].iter().any(|family| key.contains(family));
+            if follows && !named(key) {
+                out.push_str(&format!("mod.theme.{key} = #x{rgba:08X}
+"));
+            }
+        }
+    }
+    // The four families that mean something keep their colours, but a sheet
+    // may have set those colours itself, and what is drawn on them was chosen
+    // for the base theme's: black picked for the light theme's green stood at
+    // 4.2:1 on the darker green six sheets use. So the ink is asked of the
+    // ground that is there now, and left alone wherever it already reads.
+    for family in ["error", "warning", "success", "info"] {
+        let on_key = format!("color_on_{family}");
+        if named(&on_key) {
+            continue;
+        }
+        if let (Some(ground), Some(ink)) = (read(&format!("color_{family}")), read(&on_key)) {
+            let (ground, ink) = (ground | 0xFF, ink | 0xFF);
+            let reads = readable_on(ground, ink, if contrast(WHITE, ground) > contrast(BLACK, ground) { WHITE } else { BLACK });
+            if reads != ink {
+                out.push_str(&format!("mod.theme.{on_key} = #x{reads:08X}
+"));
+            }
+        }
+    }
+    // The last statement of an evaluated script is swallowed, so a script
+    // that ends on an assignment loses it. Every sheet the library ships
+    // ends with this same bare `true` for the same reason. Without it the
+    // final role derived here was silently the one before the sheet.
+    out.push_str("true
+");
+    out
 }
 
 /// Grows a scheme's accent roles from seed colours. The built-in generator is
@@ -790,6 +995,212 @@ pub fn export_theme_source(name: &str, values: &[(String, TokenValue)]) -> Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The table is a second copy of what the theme files say, and a second
+    /// copy is only safe while something fails when the first one moves.
+    /// The ground error and warning text is drawn on is not the rule's; it
+    /// is whatever the theme files keep those two names pointing at.
+    #[test]
+    fn error_and_warning_are_the_older_colours() {
+        for scheme in [Scheme::Dark, Scheme::Light, Scheme::Skeleton] {
+            let src = scheme.source();
+            let has = |line: &str| src.lines().any(|l| l.trim() == line);
+            assert!(has("color_high: #C00") || has("color_high: #xCC0000FF"), "{}", scheme.theme_name());
+            assert!(has("color_mid: #FA0") || has("color_mid: #xFFAA00FF"), "{}", scheme.theme_name());
+            assert!(has("color_error: theme.color_high") || has("color_error: #xCC0000FF"), "{}", scheme.theme_name());
+            assert!(has("color_warning: theme.color_mid") || has("color_warning: #xFFAA00FF"), "{}", scheme.theme_name());
+        }
+        assert_eq!((KEPT_ERROR, KEPT_WARNING), (0xCC0000FF, 0xFFAA00FF));
+    }
+
+    /// The ground a family's text really sits on, which for two of them is
+    /// not the family's own base.
+    fn ground_of(key: &str, base: u32) -> u32 {
+        match key {
+            "color_on_error" => KEPT_ERROR,
+            "color_on_warning" => KEPT_WARNING,
+            _ => base,
+        }
+    }
+
+    fn unreadable(roles: &ColorRoles) -> Vec<String> {
+        let entries = roles.entries();
+        let mut out = Vec::new();
+        for quad in entries.chunks(4).take(7) {
+            let [(_, base), (on_key, on_base), (_, container), (on_c_key, on_container)] = [quad[0], quad[1], quad[2], quad[3]];
+            for (key, ink, ground) in [(on_key, on_base, ground_of(on_key, base)), (on_c_key, on_container, container)] {
+                let ratio = contrast(ink, ground);
+                if ratio < READABLE {
+                    out.push(format!("{key} {ink:08X} on {ground:08X} is {ratio:.2}:1"));
+                }
+            }
+        }
+        out
+    }
+
+    /// White on the warning colour stood at 1.9:1 in every light theme and
+    /// the dark theme's error ink at 2.6:1, and the test that pinned those
+    /// values compared them only to the rule that made them.
+    #[test]
+    fn everything_drawn_on_an_accent_reads() {
+        for scheme in [Scheme::Dark, Scheme::Light, Scheme::Skeleton] {
+            let bad = unreadable(&roles_for(scheme));
+            assert!(bad.is_empty(), "{}: {bad:#?}", scheme.theme_name());
+        }
+    }
+
+    /// A style sheet's accent is a hue nobody chose with this rule in mind,
+    /// so the rule has to hold all the way round, not at the house seed.
+    #[test]
+    fn it_reads_whatever_hue_the_accent_is() {
+        for scheme in [Scheme::Dark, Scheme::Light] {
+            for step in 0..36 {
+                let seed = SeedColors { primary: hsl_to_rgb(step as f64 * 10.0, 0.85, 0.5), ..SeedColors::HOUSE };
+                let bad = unreadable(&roles_from_seed(&seed, scheme));
+                assert!(bad.is_empty(), "{} at hue {}: {bad:#?}", scheme.theme_name(), step * 10);
+            }
+            // And a sheet whose accent is no hue at all.
+            for grey in [0x000000FFu32, 0x808080FF, 0xFFFFFFFF] {
+                let bad = unreadable(&roles_from_seed(&SeedColors { primary: grey, ..SeedColors::HOUSE }, scheme));
+                assert!(bad.is_empty(), "{} at grey {grey:08X}: {bad:#?}", scheme.theme_name());
+            }
+        }
+    }
+
+    #[test]
+    fn an_accent_with_no_colour_grows_a_family_with_none() {
+        let grey = |rgba: u32| { let (r, g, b) = ((rgba >> 24) & 0xFF, (rgba >> 16) & 0xFF, (rgba >> 8) & 0xFF); r == g && g == b };
+        for seed in [0x000000FFu32, 0x808080FF, 0xFFFFFFFF] {
+            for scheme in [Scheme::Dark, Scheme::Light] {
+                let roles = roles_from_seed(&SeedColors { primary: seed, ..SeedColors::HOUSE }, scheme);
+                for (key, rgba) in roles.entries() {
+                    if ["primary", "secondary", "tertiary"].iter().any(|f| key.contains(f)) {
+                        assert!(grey(rgba), "{key} grown from {seed:08X} came out {rgba:08X}, which has a colour in it");
+                    }
+                }
+                // Red still means an error, whatever the accent is.
+                assert!(!grey(roles.entries()[14].1), "the error container keeps its red");
+            }
+        }
+        // The house seed is unchanged by any of this.
+        assert_eq!(roles_for(Scheme::Light).entries()[0].1, 0xA53D27FF);
+    }
+
+    #[test]
+    fn the_rule_keeps_its_own_choice_where_that_reads() {
+        // A red: white reads on it, so white stays.
+        assert_eq!(readable_on(0xA53D27FF, WHITE, 0x32120CFF), WHITE);
+        // An amber: white does not, and the ink does.
+        assert_eq!(readable_on(0xFFAA00FF, WHITE, 0x392905FF), 0x392905FF);
+        // A mid grey that neither end reads on falls to black or white.
+        assert_eq!(readable_on(0x777777FF, 0x888888FF, 0x666666FF), BLACK);
+    }
+
+    #[test]
+    fn the_derived_role_table_is_the_theme_files() {
+        for (scheme, pick) in [(Scheme::Light, 0usize), (Scheme::Dark, 1usize)] {
+            let source = scheme.source();
+            for (role, light, dark) in DERIVED_ROLES {
+                let want = if pick == 0 { light.expression() } else { dark.expression() };
+                let line = format!("{role}: {want}");
+                assert!(
+                    source.lines().any(|l| l.trim() == line),
+                    "{} theme: expected the line `{line}`",
+                    scheme.theme_name()
+                );
+            }
+        }
+    }
+
+    fn a_sheet_in_beige_and_navy(key: &str) -> Option<u32> {
+        match key {
+            "color_bg_app" | "color_fg_app" => Some(0xD4D0C8FF),
+            "color_text" => Some(0x000000FF),
+            "color_ctrl_selected" => Some(0x000080FF),
+            "color_opaque_d_1" => Some(0xB4B1AAFF),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_sheet_moves_the_surfaces_and_grows_its_own_accent() {
+        let sheet = "mod.theme = mod.themes.light
+mod.theme.color_bg_app = #d4d0c8
+";
+        let script = sheet_roles_script(sheet, &mut a_sheet_in_beige_and_navy);
+        // The surface is the ground the sheet set, not the one it replaced.
+        assert!(script.contains("mod.theme.color_surface = #xD4D0C8FF
+"), "{script}");
+        assert!(script.contains("mod.theme.color_on_surface = #x000000FF
+"), "{script}");
+        // A token the sheet left unanswerable is left alone rather than
+        // written as nothing.
+        assert!(!script.contains("color_surface_bright"), "{script}");
+        // The accent is grown from the sheet's navy: blue, where the house
+        // accent is an orange red.
+        let value = |key: &str| -> u32 {
+            let line = script.lines().find(|l| l.starts_with(&format!("mod.theme.{key} = "))).expect(key);
+            u32::from_str_radix(line.rsplit("#x").next().unwrap(), 16).unwrap()
+        };
+        let (hue, _, _) = rgb_to_hsl(value("color_primary"));
+        assert!((220.0..=260.0).contains(&hue), "primary hue {hue} should be the sheet's blue");
+        let (house_hue, _, _) = rgb_to_hsl(roles_for(Scheme::Light).entries()[0].1);
+        assert!((house_hue - hue).abs() > 100.0, "and nowhere near the house accent at {house_hue}");
+        // What is drawn on it is settled by the same rule, and reads.
+        let (_, _, on) = rgb_to_hsl(value("color_on_primary"));
+        let (_, _, base) = rgb_to_hsl(value("color_primary"));
+        assert!((on - base).abs() > 0.4, "text on the accent has to stand off it: {on} on {base}");
+        // Red is an error under every style.
+        assert!(!script.contains("color_error"), "{script}");
+        assert!(!script.contains("color_success"), "{script}");
+    }
+
+    #[test]
+    fn what_is_drawn_on_a_status_colour_is_asked_of_the_sheets_own() {
+        // The light theme's black, on the darker green a sheet brought.
+        let mut read = |key: &str| match key {
+            "color_success" => Some(0x2F7D4BFF),
+            "color_on_success" => Some(0x000000FF),
+            // One that already reads is not rewritten.
+            "color_error" => Some(0xCC0000FF),
+            "color_on_error" => Some(0xFFFFFFFF),
+            _ => None,
+        };
+        let script = sheet_roles_script("mod.theme = mod.themes.light
+", &mut read);
+        assert!(script.contains("mod.theme.color_on_success = #xFFFFFFFF
+"), "{script}");
+        assert!(!script.contains("color_on_error"), "{script}");
+        assert!(contrast(0xFFFFFFFF, 0x2F7D4BFF) >= READABLE && contrast(0x000000FF, 0x2F7D4BFF) < READABLE);
+    }
+
+    #[test]
+    fn a_role_the_sheet_names_is_the_sheets_to_decide() {
+        let sheet = "mod.theme = mod.themes.light
+mod.theme.color_primary = #ff0000
+mod.theme.color_surface=#123456
+";
+        let script = sheet_roles_script(sheet, &mut a_sheet_in_beige_and_navy);
+        assert!(!script.contains("mod.theme.color_primary ="), "{script}");
+        assert!(!script.contains("mod.theme.color_surface ="), "{script}");
+        // Its neighbours are still grown, and a longer name that merely
+        // starts the same way is not mistaken for the one the sheet set.
+        assert!(script.contains("mod.theme.color_on_primary ="), "{script}");
+        assert!(script.contains("mod.theme.color_primary_container ="), "{script}");
+        assert!(script.contains("mod.theme.color_surface_container ="), "{script}");
+    }
+
+    #[test]
+    fn a_dark_sheet_reads_the_dark_themes_sources() {
+        let mut read = |key: &str| match key {
+            "color_opaque_u_1" => Some(0x111111FF),
+            "color_opaque_d_1" => Some(0x999999FF),
+            _ => None,
+        };
+        let script = sheet_roles_script("mod.theme = mod.themes.dark
+", &mut read);
+        assert!(script.contains("mod.theme.color_surface_container_high = #x111111FF"), "{script}");
+    }
 
     /// The keys a theme file defines at its top level: lines at exactly eight
     /// spaces of indent that open with `name:`.
@@ -971,5 +1382,165 @@ mod tests {
         assert!(colors < primary && primary < fonts);
         assert!(fonts < body);
         assert!(out.ends_with("    }\n}\n"));
+    }
+}
+
+#[cfg(test)]
+mod sheet_contrast_tests {
+    use super::*;
+    use crate::desktop_style::{install, uninstall, DesktopStyle, StyleSheet};
+    use crate::makepad_platform::*;
+    use crate::script_eval;
+
+    /// Every sheet the library ships, in both appearances it offers.
+    const SHEETS: &[(DesktopStyle, bool)] = &[
+        (DesktopStyle::Omarchy, false),
+        (DesktopStyle::Macos, false),
+        (DesktopStyle::Macos, true),
+        (DesktopStyle::Windows, false),
+        (DesktopStyle::Windows, true),
+        (DesktopStyle::Windows2000, false),
+        (DesktopStyle::NextStep, false),
+        (DesktopStyle::Ios, false),
+        (DesktopStyle::Ios, true),
+        (DesktopStyle::Android, false),
+        (DesktopStyle::Android, true),
+    ];
+
+    /// The four families that mean something, and the accent, each with the
+    /// ink meant to be drawn on it.
+    const MEANING: &[(&str, &str)] = &[
+        ("color_success", "color_on_success"),
+        ("color_warning", "color_on_warning"),
+        ("color_error", "color_on_error"),
+        ("color_info", "color_on_info"),
+        ("color_primary", "color_on_primary"),
+    ];
+
+    /// Every rung of the surface ladder, against the ink that goes on it.
+    const SURFACES: &[(&str, &str)] = &[
+        ("color_surface", "color_on_surface"),
+        ("color_surface_container", "color_on_surface"),
+        ("color_surface_container_low", "color_on_surface"),
+        ("color_surface_container_high", "color_on_surface"),
+        ("color_surface_container_highest", "color_on_surface"),
+        ("color_surface_dim", "color_on_surface"),
+        ("color_surface_bright", "color_on_surface"),
+        ("color_surface", "color_on_surface_variant"),
+        ("color_surface_container_high", "color_on_surface_variant"),
+    ];
+
+    fn val(vm: &mut ScriptVm, key: &str) -> Option<u32> {
+        let theme = vm.module(id!(theme));
+        vm.bx.heap.value(theme, LiveId::from_str(key).into(), NoTrap).as_color()
+    }
+
+    /// How the pair really reads. An ink is often the theme's text colour,
+    /// which carries an alpha, so it is laid over its ground before being
+    /// measured: white at 65% on a mid grey is not white.
+    fn reads(ground: u32, ink: u32) -> f64 {
+        let a = (ink & 0xFF) as f64 / 255.0;
+        let ch = |v: u32, sh: u32| ((v >> sh) & 0xFF) as f64;
+        let over = |sh: u32| (ch(ink, sh) * a + ch(ground, sh) * (1.0 - a)).round() as u32;
+        let flat = (over(24) << 24) | (over(16) << 16) | (over(8) << 8) | 0xFF;
+        contrast(ground | 0xFF, flat)
+    }
+
+    /// The pairs that fail, as readable lines.
+    fn failures(vm: &mut ScriptVm, label: &str, pairs: &[(&str, &str)]) -> Vec<String> {
+        let mut out = Vec::new();
+        for (ground, ink) in pairs {
+            if let (Some(g), Some(i)) = (val(vm, ground), val(vm, ink)) {
+                let c = reads(g | 0xFF, i);
+                if c < READABLE {
+                    out.push(format!("{label}: {ink} on {ground} = {c:.2}"));
+                }
+            }
+        }
+        out
+    }
+
+    /// Walks the base themes and then every sheet, handing each to `check`.
+    fn walk(check: &mut dyn FnMut(&mut ScriptVm, &str)) {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            check(vm, "dark");
+            script_eval!(vm, {
+                mod.theme = mod.themes.light
+            });
+            check(vm, "light");
+            script_eval!(vm, {
+                mod.theme = mod.themes.skeleton
+            });
+            check(vm, "skeleton");
+            for (style, dark) in SHEETS {
+                install(vm, StyleSheet::load_with_appearance(*style, *dark));
+                vm.bx.captured_errors = Some(Vec::new());
+                vm.with_reload(crate::script_mod);
+                let errors = vm.take_errors();
+                let label = StyleSheet::load_with_appearance(*style, *dark).name;
+                assert!(errors.is_empty(), "{label}: {errors:?}");
+                check(vm, &label);
+            }
+            uninstall(vm);
+        });
+    }
+
+    /// Red is an error under every style, but the ground a sheet gives that
+    /// name is its own, and what reads on ours may not read on theirs: black
+    /// chosen for our green stood at 4.2:1 on the darker green six sheets
+    /// use. The derivation asks the ground that is actually there, and this
+    /// holds it to the answer.
+    #[test]
+    fn a_meaning_family_reads_on_its_own_ground_under_every_sheet() {
+        let mut bad: Vec<String> = Vec::new();
+        walk(&mut |vm, label| bad.extend(failures(vm, label, MEANING)));
+        assert!(bad.is_empty(), "text below {READABLE}:1 on its own ground:
+{}", bad.join("
+"));
+    }
+
+    /// The last statement of an evaluated script is swallowed, so a derived
+    /// script that ends on an assignment loses it, silently and without an
+    /// error: the role stayed at whatever it was before the sheet. Every
+    /// sheet the library ships ends with the same bare `true` for the same
+    /// reason. Read the sheets rather than trusting the memory of it.
+    #[test]
+    fn a_derived_script_ends_in_a_statement_it_can_afford_to_lose() {
+        let script = sheet_roles_script("mod.theme = mod.themes.light
+", &mut |_| Some(0x808080FF));
+        assert_eq!(script.lines().last(), Some("true"), "{script}");
+        for (style, dark) in SHEETS {
+            let sheet = StyleSheet::load_with_appearance(*style, *dark);
+            assert_eq!(sheet.theme.lines().last().map(str::trim), Some("true"), "{}", sheet.name);
+        }
+    }
+
+    /// Every ground a widget draws text on, in every theme and every sheet,
+    /// with the ink that goes on it. Not an assertion: the surface ladder
+    /// does not pass yet, and the numbers are the input to fixing it.
+    /// `cargo test -p makepad-widgets contrast_audit -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn contrast_audit() {
+        let mut lines: Vec<String> = Vec::new();
+        walk(&mut |vm, label| {
+            for (ground, ink) in MEANING.iter().chain(SURFACES) {
+                if let (Some(g), Some(i)) = (val(vm, ground), val(vm, ink)) {
+                    let c = reads(g | 0xFF, i);
+                    lines.push(format!(
+                        "{label:<14} {ground:<32} {ink:<24} #{:06X} on #{:06X} = {c:5.2}{}",
+                        i >> 8,
+                        g >> 8,
+                        if c < READABLE { "  FAIL" } else { "" }
+                    ));
+                }
+            }
+        });
+        let failed = lines.iter().filter(|l| l.ends_with("FAIL")).count();
+        println!("{}", lines.join("
+"));
+        println!("{failed} of {} pairs below {READABLE}:1", lines.len());
     }
 }

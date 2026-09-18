@@ -198,6 +198,15 @@ pub fn install(vm: &mut ScriptVm, sheet: StyleSheet) {
     let key = vm.bx.heap.heap_key();
     vm.cx_mut().global::<Styles>().heaps.insert(key, sheet);
 }
+/// Take the sheet off again, so the next evaluation runs under the plain
+/// theme. `install` had no way back: an app that lets somebody try a sheet
+/// could put one on and never return to what it started with. A sheet named
+/// by `MAKEPAD_WIDGET_STYLE` comes back on the next read, as it would have
+/// arrived in the first place.
+pub fn uninstall(vm: &mut ScriptVm) {
+    let key = vm.bx.heap.heap_key();
+    vm.cx_mut().global::<Styles>().heaps.remove(&key);
+}
 pub fn current(vm: &mut ScriptVm) -> Option<StyleSheet> {
     let key = vm.bx.heap.heap_key();
     if let Some(sheet) = vm.cx_mut().global::<Styles>().heaps.get(&key).cloned() {
@@ -243,6 +252,14 @@ fn evaluate(vm: &mut ScriptVm, sheet: &StyleSheet, phase: &str, code: String) {
 pub fn apply_theme(vm: &mut ScriptVm) {
     if let Some(sheet) = current(vm) {
         evaluate(vm, &sheet, "theme", sheet.theme.clone());
+        // The library's own roles are younger than the sheets and no sheet
+        // names them, so they are brought into line with what this one set.
+        let roles = {
+            let theme = vm.module(id!(theme));
+            let mut read = |key: &str| vm.bx.heap.value(theme, LiveId::from_str(key).into(), NoTrap).as_color();
+            crate::theme_tokens::sheet_roles_script(&sheet.theme, &mut read)
+        };
+        evaluate(vm, &sheet, "roles", roles);
         if DesktopStyle::parse(&sheet.name).is_some_and(|style| style.mobile()) {
             crate::font_policy::append_style_fallbacks(vm);
         }

@@ -361,9 +361,12 @@ impl MatchEvent for App {
                 .check_box(cx, ids!(new_only))
                 .set_active(cx, true, Animate::No);
         }
-        self.ui
-            .drop_down(cx, ids!(theme_select))
-            .set_selected_item(cx, theme::choice());
+        // The list is the library's, read at startup: the base themes and
+        // every sheet it ships. The markup above names only the three it
+        // could not do without if this never ran.
+        let theme_select = self.ui.drop_down(cx, ids!(theme_select));
+        theme_select.set_labels(cx, theme::labels());
+        theme_select.set_selected_item(cx, theme::choice());
         self.refresh_new_count(cx);
         let key = match settings::get(settings::LAST_STORY) {
             Some(k) if registry::find(&k).is_some() => k,
@@ -483,7 +486,12 @@ impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         if let Event::LiveEdit = event {
             let choice = theme::choice();
-            self.ui.drop_down(cx, ids!(theme_select)).set_selected_item(cx, choice);
+            // A switch re-applies the whole tree from its markup, and the
+            // markup knows three names: the list has to go back on before
+            // the fourteenth of them can be the one that is selected.
+            let theme_select = self.ui.drop_down(cx, ids!(theme_select));
+            theme_select.set_labels(cx, theme::labels());
+            theme_select.set_selected_item(cx, choice);
             remote::install(cx);
         }
         self.drain_requests(cx);
