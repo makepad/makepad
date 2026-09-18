@@ -44,7 +44,11 @@ pub fn install_ui_waker(waker: Option<UiWaker>) {
     }
 }
 
-fn wake_ui() {
+/// Wake the event loop without raising the UI signal, for a worker whose result
+/// the next beat picks up by itself. `Event::Signal` means "a worker has
+/// something for you" and is dispatched to the whole widget tree, so a
+/// render-internal thread must not raise it every frame.
+pub fn wake_ui_loop() {
     let waker = UI_WAKER.lock().ok().and_then(|slot| slot.clone());
     if let Some(waker) = waker {
         waker.wake();
@@ -60,13 +64,13 @@ static ACTION_SIGNAL: AtomicBool = AtomicBool::new(false);
 impl SignalToUI {
     pub fn set_ui_signal() {
         if !UI_SIGNAL.swap(true, Ordering::AcqRel) {
-            wake_ui();
+            wake_ui_loop();
         }
     }
 
     pub fn set_action_signal() {
         if !ACTION_SIGNAL.swap(true, Ordering::AcqRel) {
-            wake_ui();
+            wake_ui_loop();
         }
     }
 

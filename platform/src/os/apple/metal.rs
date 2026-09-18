@@ -2419,7 +2419,7 @@ fn spawn_submitter(
                 if let Some(trace) = &trace { trace.mark(PresentStage::CommitReturned); }
                 drop(submission);
                 let _: () = unsafe { msg_send![pool, release] };
-                crate::thread::SignalToUI::set_ui_signal();
+                crate::thread::wake_ui_loop();
             }
         })
         .expect("Metal submission worker");
@@ -4193,7 +4193,7 @@ fn spawn_allocator() -> (std::sync::mpsc::SyncSender<MetalAllocationRequest>, st
                     }
                 }
                 let _: () = unsafe { msg_send![pool, release] };
-                crate::thread::SignalToUI::set_ui_signal();
+                crate::thread::wake_ui_loop();
             }
         }).expect("Metal instance allocation worker");
         (tx, thread)

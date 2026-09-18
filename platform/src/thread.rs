@@ -45,8 +45,9 @@ use {
 };
 
 pub use makepad_network::{
-    to_ui_bounded, to_ui_oneshot, FromUIReceiver, FromUISender, ReceiverAlreadyTaken, SignalFromUI,
-    SignalToUI, ToUIOneshotReceiver, ToUIOneshotSender, ToUIReceiver, ToUISender, UiWaker,
+    to_ui_bounded, to_ui_oneshot, wake_ui_loop, FromUIReceiver, FromUISender, ReceiverAlreadyTaken,
+    SignalFromUI, SignalToUI, ToUIOneshotReceiver, ToUIOneshotSender, ToUIReceiver, ToUISender,
+    UiWaker,
 };
 
 fn lock_without_wasm_wait<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {

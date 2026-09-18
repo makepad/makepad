@@ -125,7 +125,7 @@ impl DrawableWorker {
                 let drawable = NonNull::new(drawable).map(RcObjcId::from_unowned);
                 unsafe { let _: () = msg_send![pool, release]; }
                 if ready.try_send(drawable).is_err() { break; }
-                SignalToUI::set_ui_signal();
+                crate::thread::wake_ui_loop();
             }
         }).expect("drawable acquisition worker");
         Self { request, ready: replies, pending: false, wait_ns, started: None }

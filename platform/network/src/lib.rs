@@ -32,7 +32,7 @@ pub use crate::types::{
     SplitUrl, WebSocketMessage, WebSocketTransport, WsMessage, WsSend,
 };
 pub use crate::ui_signal::{
-    install_ui_waker, to_ui_bounded, to_ui_oneshot, FromUIReceiver, FromUISender,
+    install_ui_waker, to_ui_bounded, to_ui_oneshot, wake_ui_loop, FromUIReceiver, FromUISender,
     ReceiverAlreadyTaken, SignalFromUI, SignalToUI, ToUIOneshotReceiver, ToUIOneshotSender,
     ToUIReceiver, ToUISender, UiWaker,
 };
