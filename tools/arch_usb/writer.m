@@ -57,6 +57,7 @@ static int RunPython(BOOL write, int diskFD) {
     pid_t child = fork();
     if (child < 0) {
         perror("fork");
+        if (diskFD >= 0) close(diskFD);
         return 1;
     }
     if (child == 0) {
@@ -68,6 +69,9 @@ static int RunPython(BOOL write, int diskFD) {
         perror("Starting the reviewed writer");
         _exit(1);
     }
+    // The child owns raw access from here. Keeping the parent's duplicate
+    // open would prevent diskutil from ejecting after read-back verification.
+    if (diskFD >= 0) close(diskFD);
     int status = 0;
     while (waitpid(child, &status, 0) < 0) {
         if (errno == EINTR) continue;
@@ -99,9 +103,7 @@ static int AuthorizedWrite(void) {
         close(diskFD);
         return 1;
     }
-    int status = RunPython(YES, diskFD);
-    close(diskFD);
-    return status;
+    return RunPython(YES, diskFD);
 }
 
 static NSString *ShellQuote(NSString *value) {
@@ -162,7 +164,7 @@ static NSString *AppleScriptQuote(NSString *value) {
     NSAlert *alert = [[NSAlert alloc] init];
     if (result && !error) {
         alert.messageText = @"Arch USB verified and ejected";
-        alert.informativeText = @"Move the USB to the target PC, disable Secure Boot, and choose its UEFI USB boot entry. Connect Ethernet. Login: arch / 12345. SSH uses the public key supplied to the builder. Initial setup continues automatically; run makepad-status to check progress.";
+        alert.informativeText = @"Move the USB to the target PC, disable Secure Boot, and choose its UEFI USB boot entry. Connect Ethernet. Login: arch. A memorable SSH and sudo password is generated on first boot and displayed on the local console. Run sudo makepad-ssh show for connection details. Initial setup continues automatically; run makepad-status to check progress.";
     } else {
         alert.alertStyle = NSAlertStyleWarning;
         alert.messageText = @"Arch USB write did not complete";
