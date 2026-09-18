@@ -35,7 +35,7 @@ use crate::{
     overlay_place::{claim_escape, orphan_sweep_locks, release_orphaned_sweep_locks, span_inboard},
     pill_nav::{smootherstep, DrawMorphSurface, UnitTween},
     scroll_bars::ScrollExtent,
-    scroll_more::ScrollShadowView,
+    scroll_fade::ScrollShadowView,
     tour::{askable_area, id_path},
     view::View,
     widget::*,

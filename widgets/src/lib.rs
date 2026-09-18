@@ -49,7 +49,6 @@ pub mod menu;
 pub mod select;
 pub mod accordion;
 pub mod dialog;
-pub mod drawer;
 pub mod toast;
 pub mod breadcrumb;
 pub mod browser;
@@ -100,7 +99,6 @@ pub mod drop_toggles;
 pub mod overlay_place;
 pub mod tip;
 pub mod popover;
-pub mod overlay_layers;
 pub mod value_input;
 pub mod fab_controls;
 pub mod menu_bar;
@@ -147,22 +145,25 @@ pub mod dropzone;
 pub mod form;
 pub mod color;
 pub mod column_picker;
+pub mod picker_parts;
+pub mod tree_select;
+pub mod transfer;
 pub mod command_palette;
-pub mod pie_menu;
 pub mod radial_menu;
 pub mod floating_action;
 pub mod hamburger_menu;
 pub mod property_inspector;
-pub mod chart_more;
+pub mod chart_shapes;
 pub mod toolbar;
+mod column_fit;
 pub mod masonry;
 pub mod tile_list;
 pub mod item_grid;
 pub mod kanban;
-pub mod splitter_more;
 pub mod svg_select;
 pub mod rich_text;
-pub mod scroll_more;
+pub mod scroll_marks;
+pub mod scroll_fade;
 pub mod line_menu;
 pub mod tour;
 pub mod wheel_picker;
@@ -249,7 +250,6 @@ pub use crate::{
     select::*,
     accordion::*,
     dialog::*,
-    drawer::*,
     toast::*,
     placeholder::*,
     animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
@@ -269,7 +269,6 @@ pub use crate::{
     drop_toggles::*,
     overlay_place::*,
     popover::*,
-    overlay_layers::*,
     expandable_panel::*,
     file_tree::*,
     flat_list::*,
@@ -325,22 +324,24 @@ pub use crate::{
     form::*,
     color::*,
     column_picker::*,
+    picker_parts::*,
+    tree_select::*,
+    transfer::*,
     command_palette::*,
-    pie_menu::*,
     radial_menu::*,
     floating_action::*,
     hamburger_menu::*,
     property_inspector::*,
-    chart_more::*,
+    chart_shapes::*,
     toolbar::*,
     masonry::*,
     tile_list::*,
     item_grid::*,
     kanban::*,
-    splitter_more::*,
     svg_select::*,
     rich_text::*,
-    scroll_more::*,
+    scroll_marks::*,
+    scroll_fade::*,
     line_menu::*,
     tour::*,
     wheel_picker::*,
@@ -624,21 +625,24 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::dropzone::script_mod(vm);
     crate::form::script_mod(vm);
     crate::color::script_mod(vm);
+    // Before the three that draw with its panel and row surfaces.
+    crate::picker_parts::script_mod(vm);
     crate::column_picker::script_mod(vm);
+    crate::tree_select::script_mod(vm);
+    crate::transfer::script_mod(vm);
     crate::command_palette::script_mod(vm);
-    crate::pie_menu::script_mod(vm);
     crate::radial_menu::script_mod(vm);
     crate::property_inspector::script_mod(vm);
     crate::tour::script_mod(vm);
-    crate::chart_more::script_mod(vm);
+    crate::chart_shapes::script_mod(vm);
     crate::toolbar::script_mod(vm);
     crate::floating_action::script_mod(vm);
     crate::masonry::script_mod(vm);
     crate::tile_list::script_mod(vm);
     crate::item_grid::script_mod(vm);
     crate::kanban::script_mod(vm);
-    crate::splitter_more::script_mod(vm);
-    crate::scroll_more::script_mod(vm);
+    crate::scroll_marks::script_mod(vm);
+    crate::scroll_fade::script_mod(vm);
     // After the pill nav, whose surface shader draws its card, and the nav
     // list, whose ground is its hit rect.
     crate::line_menu::script_mod(vm);
@@ -663,9 +667,9 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::expandable_panel::script_mod(vm);
     crate::modal::script_mod(vm);
     crate::dialog::script_mod(vm);
-    crate::drawer::script_mod(vm);
-    // After the drawer: the menu is built from a drawer, a popover, a nav
-    // list and a burger button, and this is the last of the four to land.
+    // After the dialog: the menu is built from a drawer, which is a dialog
+    // on an edge, a popover, a nav list and a burger button, and this is
+    // the last of the four to land.
     crate::hamburger_menu::script_mod(vm);
     crate::tooltip::script_mod(vm);
     crate::callout_tooltip::script_mod(vm);
@@ -694,13 +698,6 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     #[cfg(feature = "maps")]
     crate::map::view::script_mod(vm);
     crate::math_view::script_mod(vm);
-
-    // The overlay layer host registers LAST, after every layer it owns
-    // (tip today; menu layer, toaster and dialog host as they land): a
-    // widget deriving from another must register after it, and Window,
-    // which registers far above tip and modal, cannot own these for the
-    // same reason. Keep it the final registration in this function.
-    crate::overlay_layers::script_mod(vm);
 
     // Safe area inset values (in Makepad layout points). Populated from the platform's
     // display_context which is set before Startup on iOS/Android. On desktop
@@ -824,37 +821,6 @@ mod button_group_registration_tests {
 }
 
 #[cfg(test)]
-mod drawer_registration_tests {
-    /// The drawer registers after the modal it is built on and the dialog
-    /// it sits beside, with one type default and its two sheet presets.
-    #[test]
-    fn test_drawer_is_registered_after_its_bases() {
-        let lib = include_str!("lib.rs");
-        let drawer = include_str!("drawer.rs");
-        assert!(lib.contains("pub mod drawer;"));
-        assert!(lib.contains("drawer::*"));
-        let at = lib.find("crate::drawer::script_mod(vm);").expect("drawer registered");
-        for base in [
-            "crate::modal::script_mod(vm);",
-            "crate::button::script_mod(vm);",
-            "crate::label::script_mod(vm);",
-        ] {
-            assert!(lib.find(base).expect(base) < at, "{base} must register before the drawer");
-        }
-        assert!(drawer.contains("mod.widgets.DrawerBase = #(Drawer::register_widget(vm))"));
-        assert!(drawer.contains("mod.widgets.Drawer = set_type_default()"));
-        assert!(drawer.contains("mod.widgets.BottomSheet = mod.widgets.Drawer{"));
-        assert!(drawer.contains("mod.widgets.SideSheet = mod.widgets.Drawer{"));
-        assert_eq!(drawer.matches("set_type_default() do mod.widgets.DrawerBase").count(), 1);
-        // The widget derive takes any field type beginning with "Draw" for
-        // a shader layer, which is why these two are not called DrawerSide
-        // and DrawerSize.
-        assert!(!drawer.contains("pub enum DrawerSide"));
-        assert!(!drawer.contains("pub enum DrawerSize"));
-    }
-}
-
-#[cfg(test)]
 mod dialog_registration_tests {
     /// The dialog registers after the modal it is built on and the button
     /// and label its chrome uses, with one type default and the presets
@@ -878,6 +844,14 @@ mod dialog_registration_tests {
         assert!(dialog.contains("mod.widgets.AlertDialog = mod.widgets.Dialog{"));
         assert!(dialog.contains("mod.widgets.ConfirmDialog = mod.widgets.Dialog{"));
         assert_eq!(dialog.matches("set_type_default() do mod.widgets.DialogBase").count(), 1);
+        // The drawer and the two sheets are the dialog on an edge: presets
+        // of it, with no type and so no type default of their own.
+        assert!(dialog.contains("mod.widgets.Drawer = mod.widgets.Dialog{"));
+        assert!(dialog.contains("mod.widgets.SideSheet = mod.widgets.Drawer{"));
+        assert!(dialog.contains("mod.widgets.BottomSheet = mod.widgets.Drawer{"));
+        // The widget derive takes any field type beginning with "Draw" for
+        // a shader layer, which is why the side is not called DrawerSide.
+        assert!(!dialog.contains("pub enum DrawerSide"));
     }
 }
 
@@ -1048,9 +1022,8 @@ mod popover_registration_tests {
         assert_eq!(popover.matches("set_type_default() do mod.widgets.PopoverBase").count(), 1);
     }
 
-    /// The presets build on the bevelled popover, the confirm popover has
-    /// its own base and one default, and the hover card is what the info
-    /// label is made of.
+    /// The presets build on the bevelled popover, and the confirm popover
+    /// has its own base and one default.
     #[test]
     fn test_popover_presets_and_confirm_are_registered() {
         let popover = include_str!("popover.rs");
@@ -1060,34 +1033,7 @@ mod popover_registration_tests {
         assert!(popover.contains("mod.widgets.ConfirmPopoverBase = #(ConfirmPopover::register_widget(vm))"));
         assert!(popover.contains("mod.widgets.ConfirmPopover = set_type_default() do mod.widgets.ConfirmPopoverBase{"));
         assert_eq!(popover.matches("set_type_default() do mod.widgets.ConfirmPopoverBase").count(), 1);
-        assert!(popover.contains("mod.widgets.InfoLabel = mod.widgets.PopoverHover{"));
         assert!(popover.contains("pub struct FocusTrap"));
-    }
-}
-
-#[cfg(test)]
-mod overlay_layers_registration_tests {
-    /// The layer host registers after the tip layer it owns, and after
-    /// every other widget: no registration follows it in `widgets_mod`.
-    #[test]
-    fn test_overlay_layers_is_registered_last() {
-        let lib = include_str!("lib.rs");
-        let layers = include_str!("overlay_layers.rs");
-        assert!(lib.contains("pub mod overlay_layers;"));
-        assert!(lib.contains("overlay_layers::*"));
-        let call = "crate::overlay_layers::script_mod(vm);";
-        let at = lib.find(call).unwrap();
-        assert!(lib.find("crate::tip::script_mod(vm);").unwrap() < at);
-        assert!(lib.find("crate::modal::script_mod(vm);").unwrap() < at);
-        assert!(lib.find("crate::window::script_mod(vm);").unwrap() < at);
-        // Nothing else registers between the host and the end of widgets_mod.
-        let rest = &lib[at + call.len()..];
-        let end = rest.find("pub fn script_mod(vm: &mut ScriptVm)").unwrap();
-        assert!(!rest[..end].contains("::script_mod(vm);"));
-        assert!(layers.contains("mod.widgets.OverlayLayersBase = #(OverlayLayers::register_widget(vm))"));
-        assert!(layers.contains("mod.widgets.OverlayLayers = set_type_default() do mod.widgets.OverlayLayersBase{"));
-        assert_eq!(layers.matches("set_type_default() do mod.widgets.OverlayLayersBase").count(), 1);
-        assert!(layers.contains("tip_layer := TipLayer{}"));
     }
 }
 
@@ -1126,21 +1072,27 @@ fn assert_registered_after(call: &str, bases: &[&str]) {
 
 #[cfg(test)]
 mod radial_menu_registration_tests {
-    /// The ring menu registers directly after the pie menu whose angle
-    /// measure and keys it shares, after the glass it samples, with one type
-    /// default.
+    /// The ring menu registers after the glass it samples and the badge
+    /// whose text measure it uses, with one type default: `PieMenu` and the
+    /// other presets derive from it and must not take the default with them.
+    /// Neither base is its neighbour, so the order is read here rather than
+    /// through `assert_registered_after`, which also pins the slot.
     #[test]
     fn test_radial_menu_is_registered_after_its_bases() {
         let lib = include_str!("lib.rs");
         let radial = include_str!("radial_menu.rs");
         assert!(lib.contains("\npub mod radial_menu;"));
         assert!(lib.contains("\n    radial_menu::*,"));
-        crate::assert_registered_after(
-            "crate::radial_menu::script_mod(vm);",
-            &["crate::pie_menu::script_mod(vm);", "crate::gauss_view::script_mod(vm);", "crate::badge::script_mod(vm);"],
-        );
+        let calls = crate::widgets_mod_source();
+        let call = "crate::radial_menu::script_mod(vm);";
+        let at = calls.find(call).unwrap_or_else(|| panic!("{call} is not registered"));
+        for base in ["crate::gauss_view::script_mod(vm);", "crate::badge::script_mod(vm);"] {
+            let base_at = calls.find(base).unwrap_or_else(|| panic!("{base} is not registered"));
+            assert!(base_at < at, "{base} must register before {call}");
+        }
         assert!(radial.contains("mod.widgets.RadialMenuBase = #(RadialMenu::register_widget(vm))"));
         assert_eq!(radial.matches("set_type_default() do mod.widgets.RadialMenuBase").count(), 1);
+        assert!(radial.contains("mod.widgets.PieMenu = mod.widgets.RadialMenu{"), "the ring in its field is a preset, not a type");
     }
 }
 
@@ -1169,8 +1121,8 @@ mod floating_action_registration_tests {
 #[cfg(test)]
 mod hamburger_menu_registration_tests {
     /// The menu is composed of a drawer, a popover, a nav list and a burger
-    /// button, so it registers after all four, directly after the drawer,
-    /// which lands last.
+    /// button, so it registers after all four, directly after the dialog a
+    /// drawer is a preset of, which lands last.
     #[test]
     fn test_hamburger_menu_is_registered_after_its_bases() {
         let lib = include_str!("lib.rs");
@@ -1180,7 +1132,7 @@ mod hamburger_menu_registration_tests {
         crate::assert_registered_after(
             "crate::hamburger_menu::script_mod(vm);",
             &[
-                "crate::drawer::script_mod(vm);",
+                "crate::dialog::script_mod(vm);",
                 "crate::popover::script_mod(vm);",
                 "crate::nav_list::script_mod(vm);",
                 "crate::button::script_mod(vm);",
@@ -1225,7 +1177,7 @@ mod line_menu_registration_tests {
         crate::assert_registered_after(
             "crate::line_menu::script_mod(vm);",
             &[
-                "crate::scroll_more::script_mod(vm);",
+                "crate::scroll_fade::script_mod(vm);",
                 "crate::nav_list::script_mod(vm);",
                 "crate::pill_nav::script_mod(vm);",
             ],

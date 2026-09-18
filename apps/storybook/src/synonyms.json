@@ -62,6 +62,8 @@
     "callout",
     "notice",
     "inline message",
+    "inline tip",
+    "guide banner",
     "message bar",
     "info box",
     "warning box"
@@ -79,6 +81,7 @@
     "full width strip",
     "text reflow",
     "remember dismissal",
+    "folded guidance",
     "accent bar",
     "intent icon",
     "full width banner",
@@ -779,7 +782,12 @@
     "confirm box",
     "alert window",
     "message box",
-    "are you sure"
+    "are you sure",
+    "side panel",
+    "slide out panel",
+    "side sheet",
+    "bottom sheet",
+    "off canvas panel"
    ],
    "does": [
     "blocks the page",
@@ -795,7 +803,17 @@
     "width sizes",
     "full screen",
     "confirmed or cancelled",
-    "confirmed or canceled"
+    "confirmed or canceled",
+    "slides in from an edge",
+    "edge selection",
+    "grab handle",
+    "snap points",
+    "drag to dismiss",
+    "peek height",
+    "half height",
+    "panel width",
+    "panel height",
+    "slide animation"
    ]
   },
   {
@@ -847,32 +865,6 @@
     "collapse an empty panel",
     "close a tab",
     "drag and drop"
-   ]
-  },
-  {
-   "component": "Drawer",
-   "aka": [
-    "side panel",
-    "slide out panel",
-    "side sheet",
-    "bottom sheet",
-    "off canvas panel"
-   ],
-   "does": [
-    "slides in from an edge",
-    "edge selection",
-    "dim the background",
-    "scrim",
-    "escape to close",
-    "blocks the page",
-    "grab handle",
-    "snap points",
-    "drag to dismiss",
-    "peek height",
-    "half height",
-    "panel width",
-    "panel height",
-    "slide animation"
    ]
   },
   {
@@ -2610,8 +2602,14 @@
    ]
   },
   {
-   "component": "SplitPane",
+   "component": "Splitter",
    "aka": [
+    "drag bar",
+    "gutter",
+    "resize handle",
+    "two panes",
+    "split view",
+    "split pane",
     "resizable panes",
     "sidebar divider",
     "draggable gutter",
@@ -2620,6 +2618,17 @@
     "adjustable sidebar"
    ],
    "does": [
+    "drag to resize",
+    "side by side",
+    "stacked panes",
+    "keep a fraction",
+    "fixed from one edge",
+    "minimum pane size",
+    "fold a pane",
+    "collapse a pane",
+    "reopen a pane",
+    "reports its position",
+    "horizontal or vertical",
     "two children and a bar between them",
     "side by side or stacked",
     "the least each side may be is a law",
@@ -2633,33 +2642,8 @@
     "the arrows move it by a step",
     "home and end are the clamps themselves",
     "an arrow brings a folded side back",
-    "settled says the number to write down",
-    "moved reports every frame of a drag"
-   ]
-  },
-  {
-   "component": "Splitter",
-   "aka": [
-    "drag bar",
-    "gutter",
-    "resize handle",
-    "two panes",
-    "split view",
-    "split pane",
-    "resizable panes"
-   ],
-   "does": [
-    "drag to resize",
-    "side by side",
-    "stacked panes",
-    "keep a fraction",
-    "fixed from one edge",
-    "minimum pane size",
-    "fold a pane",
-    "collapse a pane",
-    "reopen a pane",
-    "reports its position",
-    "horizontal or vertical"
+    "settled says the align to write down",
+    "changed reports every frame of a drag"
    ]
   },
   {
@@ -3054,8 +3038,10 @@
     "pauses on hover",
     "countdown hairline",
     "stack limit",
+    "one at a time",
     "queue overflow",
     "six corners",
+    "top of the window",
     "undo action",
     "closable",
     "never blocks input",

@@ -1,4 +1,4 @@
-//! Alerts, banners, inline tips and callouts: a message that sits IN the
+//! Alerts, banners, guides and callouts: a message that sits IN the
 //! page instead of over it.
 //!
 //! A toast interrupts and leaves; a dialog blocks. Neither is right for
@@ -9,7 +9,7 @@
 //! description, an optional action and an optional close cross, on a face
 //! whose colour says how urgent it is. The dressings are presets of the
 //! same widget: `Alert` for a message inside content, `Banner` for the full
-//! width strip under a toolbar, `InlineTip` for guidance that can be sent
+//! width strip under a toolbar, `AlertGuide` for guidance that can be sent
 //! away for good, `Callout` for the card-shaped nudge with an accent bar.
 //!
 //! The intent is a PROPERTY, not a preset. The shaders carry the four intent
@@ -41,7 +41,7 @@
 //! `LinkLabel` as a rule. The alert watches for their `Clicked` and raises
 //! [`AlertAction::Action`] so a host that only wants to know "the action was
 //! taken" can listen in one place; a host that fills both slots reads the
-//! buttons directly to tell them apart. A tip with a `dismiss_key` raises
+//! buttons directly to tell them apart. A guide with a `dismiss_key` raises
 //! [`AlertAction::Dismissed`] with that key when closed; persisting it is
 //! the host's job, this widget only promises never to close silently.
 
@@ -61,7 +61,7 @@ pub enum AlertAction {
     /// The widget in an action slot was clicked.
     Action,
     /// Closed while carrying a `dismiss_key`; the host stores the key so
-    /// the tip stays away. Raised after `Closed`.
+    /// the guide stays away. Raised after `Closed`.
     Dismissed(String),
     #[default]
     None,
@@ -661,9 +661,11 @@ script_mod! {
         }
     }
 
-    /** The inline tip: a guide banner with folded guidance and a media slot,
-     * closable, on a low surface with the intent's stroke. */
-    mod.widgets.InlineTip = mod.widgets.AlertFlat{
+    /** The guide: an alert that teaches rather than reports, with folded
+     * guidance and a media slot, closable, on a low surface with the
+     * intent's stroke. Named for the family it belongs to: it sits in the
+     * page like every alert, and is no relation of the hover `Tip`. */
+    mod.widgets.AlertGuide = mod.widgets.AlertFlat{
         appearance: mod.widgets.AlertAppearance.Outline
         closable: true
         single_line: false
@@ -753,7 +755,7 @@ pub struct DrawAlertText {
     dim: f32,
 }
 
-/// The message-in-the-page widget behind Alert, Banner, InlineTip and Callout.
+/// The message-in-the-page widget behind Alert, Banner, AlertGuide and Callout.
 #[derive(Script, ScriptHook, WidgetRef, WidgetSet, WidgetRegister, Animator)]
 pub struct Alert {
     #[uid]
@@ -791,7 +793,7 @@ pub struct Alert {
     /// A second action, for a banner that offers two.
     #[live]
     secondary: WidgetRef,
-    /// A picture beside the text, for a tip.
+    /// A picture beside the text, for a guide.
     #[live]
     media: WidgetRef,
 
@@ -1431,7 +1433,7 @@ impl AlertRef {
             .any(|a| matches!(a.cast(), AlertAction::Action))
     }
 
-    /// The dismiss key, when this pass closed a tip that carries one.
+    /// The dismiss key, when this pass closed a guide that carries one.
     pub fn dismissed(&self, actions: &Actions) -> Option<String> {
         for action in actions.filter_widget_actions(self.widget_uid()) {
             if let AlertAction::Dismissed(key) = action.cast() {

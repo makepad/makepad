@@ -309,53 +309,6 @@ script_mod! {
             }
         }
     }
-
-    /** A label with an (i) mark beside it that opens a hover card of
-     * explanation. Set `label.text` for the word and `content.info.text`
-     * for the explanation. */
-    mod.widgets.InfoLabel = mod.widgets.PopoverHover{
-        flow: Right
-        spacing: theme.space_1
-        align: Align{x: 0.0, y: 0.5}
-        /** the word */
-        label := Label{
-            text: "Label"
-        }
-        /** the (i) mark */
-        glyph := View{
-            width: 14
-            height: 14
-            show_bg: true
-            align: Center
-            draw_bg +: {
-                color: theme.color_outline
-                pixel: fn() {
-                    let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                    sdf.circle(self.rect_size.x * 0.5, self.rect_size.y * 0.5, self.rect_size.x * 0.5 - 1.0)
-                    sdf.stroke(self.color, 1.0)
-                    return sdf.result
-                }
-            }
-            mark := Label{
-                padding: 0
-                text: "i"
-                draw_text +: {
-                    color: theme.color_outline
-                    text_style: theme.font_bold{
-                        font_size: 8
-                    }
-                }
-            }
-        }
-        content := View{
-            width: Fit
-            height: Fit
-            /** the explanation */
-            info := Label{
-                text: "Information"
-            }
-        }
-    }
 }
 
 /// What opens a popover.

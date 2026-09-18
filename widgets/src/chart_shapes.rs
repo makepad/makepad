@@ -17,7 +17,8 @@
 //! swallow one. A list of strings is what markup can carry here — a list of
 //! numbers is not a live type — and writing the data as lines keeps it
 //! readable in the file that declares it. `set_rows` takes the same thing
-//! from Rust.
+//! from Rust. The reader is [`crate::chart::parse_row`], the one every chart
+//! in the library reads its lines through.
 //!
 //! # How the shapes are drawn
 //!
@@ -53,7 +54,13 @@
 //! And it does not animate. A wedge that grows on first draw is a wedge
 //! that is the wrong size for a moment, and a chart is read in that moment
 //! as often as any other.
-use crate::{badge::measure, makepad_derive_widget::*, makepad_draw::*, widget::*};
+use crate::{
+    badge::measure,
+    chart::{fmt_value, parse_rows, Row},
+    makepad_derive_widget::*,
+    makepad_draw::*,
+    widget::*,
+};
 use std::f64::consts::TAU;
 
 script_mod! {
@@ -401,62 +408,6 @@ pub struct DrawDot {
     hot: f32,
 }
 
-// ---- The data ----
-
-/// One part of a chart as it was written down: a name, and the numbers
-/// after it.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Row {
-    pub label: String,
-    pub values: Vec<f64>,
-}
-
-impl Row {
-    pub fn new(label: &str, values: &[f64]) -> Self {
-        Self { label: label.to_string(), values: values.to_vec() }
-    }
-
-    /// The row's first number, a row without one counting as nothing. A
-    /// line that carried no number is a part worth nothing, which is a
-    /// thing a chart can draw; it is not a part that is missing.
-    pub fn value(&self) -> f64 {
-        self.values.first().copied().unwrap_or(0.0)
-    }
-
-    pub fn value_at(&self, i: usize) -> f64 {
-        self.values.get(i).copied().unwrap_or(0.0)
-    }
-}
-
-/// Read one line of markup as a label and the numbers after it.
-///
-/// `"Rent 420"`, `"Public transport 120"`, `"Speed: 4 3 5 2"`. A colon, if
-/// there is one, splits the two. Without one the numbers are the longest
-/// run of them at the END of the line, so a label may be several words and
-/// may hold a number of its own as long as a word comes after it — `"Q1
-/// 2024 480"` is one quarter worth 480 and not three numbers.
-pub fn parse_row(line: &str) -> Row {
-    if let Some((name, rest)) = line.split_once(':') {
-        return Row {
-            label: name.trim().to_string(),
-            values: rest.split_whitespace().filter_map(|t| t.parse::<f64>().ok()).collect(),
-        };
-    }
-    let words: Vec<&str> = line.split_whitespace().collect();
-    let mut first = words.len();
-    while first > 0 && words[first - 1].parse::<f64>().is_ok() {
-        first -= 1;
-    }
-    Row {
-        label: words[..first].join(" "),
-        values: words[first..].iter().filter_map(|t| t.parse::<f64>().ok()).collect(),
-    }
-}
-
-pub fn parse_rows(lines: &[String]) -> Vec<Row> {
-    lines.iter().map(|line| parse_row(line)).collect()
-}
-
 // ---- The angles ----
 
 /// The wedges a list of values cuts a circle into.
@@ -645,17 +596,6 @@ pub fn ink_on(on: Vec4f) -> Vec4f {
     }
 }
 
-/// A number as a chart writes it: whole when it is whole, one decimal when
-/// it is not. Charts are read at a glance, and a trailing `.00` on every
-/// part of every one of them is noise.
-pub fn fmt_value(v: f64) -> String {
-    if (v - v.round()).abs() < 1e-9 && v.abs() < 1e15 {
-        format!("{}", v.round() as i64)
-    } else {
-        format!("{:.1}", v)
-    }
-}
-
 /// What a figure reports about its parts. Parts are numbered in the order
 /// their lines were written, so part three is the third line.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -729,7 +669,7 @@ pub struct ChartFigure {
     #[live]
     pub draw_value: DrawText,
 
-    /// One line per part, as markup writes it. See [`parse_row`].
+    /// One line per part, as markup writes it. See [`crate::chart::parse_row`].
     #[live]
     pub series: Vec<String>,
 
@@ -2148,43 +2088,6 @@ mod tests {
     }
 
     #[test]
-    fn a_line_is_read_as_a_name_and_the_numbers_after_it() {
-        assert_eq!(parse_row("Rent 420"), Row::new("Rent", &[420.0]));
-        assert_eq!(
-            parse_row("Public transport 120"),
-            Row::new("Public transport", &[120.0]),
-            "a name may be several words"
-        );
-        assert_eq!(
-            parse_row("Q1 2024 480"),
-            Row::new("Q1", &[2024.0, 480.0]),
-            "the numbers are the whole trailing run"
-        );
-        assert_eq!(
-            parse_row("Speed: 4 3 5 2"),
-            Row::new("Speed", &[4.0, 3.0, 5.0, 2.0]),
-            "a colon says where the name stops"
-        );
-        assert_eq!(
-            parse_row("Q1 2024: 480"),
-            Row::new("Q1 2024", &[480.0]),
-            "which is how a name keeps a number of its own"
-        );
-    }
-
-    #[test]
-    fn a_line_with_no_number_is_a_part_worth_nothing_and_not_a_broken_one() {
-        let row = parse_row("Nothing here");
-        assert_eq!(row.label, "Nothing here");
-        assert!(row.values.is_empty());
-        assert_eq!(row.value(), 0.0, "which a chart can draw");
-        assert_eq!(row.value_at(3), 0.0);
-        assert_eq!(parse_row(""), Row::default());
-        // A run of numbers with no name is a nameless part, not a name.
-        assert_eq!(parse_row("12 40 8"), Row::new("", &[12.0, 40.0, 8.0]));
-    }
-
-    #[test]
     fn ink_reverses_over_a_light_part() {
         let dark = Vec4f { x: 0.1, y: 0.12, z: 0.3, w: 1.0 };
         let light = Vec4f { x: 0.95, y: 0.92, z: 0.7, w: 1.0 };
@@ -2196,13 +2099,5 @@ mod tests {
         let yellow = Vec4f { x: 1.0, y: 1.0, z: 0.0, w: 1.0 };
         assert!(ink_on(blue).x > 0.5);
         assert!(ink_on(yellow).x < 0.5);
-    }
-
-    #[test]
-    fn a_whole_number_is_written_without_a_decimal_point() {
-        assert_eq!(fmt_value(420.0), "420");
-        assert_eq!(fmt_value(0.0), "0");
-        assert_eq!(fmt_value(-7.0), "-7");
-        assert_eq!(fmt_value(3.14), "3.1");
     }
 }

@@ -162,7 +162,7 @@ The row, the drawer's list and the drop panel's list are all built up front and 
 | `measure` | `HamburgerMeasure.Window` compares the window's width; `Parent` the room the parent leaves |
 | `breakpoint`, `hysteresis` | a folded menu unfolds only at `breakpoint + hysteresis` |
 | `close_on_pick` | a press or Return in the panel puts it away |
-| `drawer_side`, `drawer_size`, `drawer_title` | written to the drawer |
+| `drawer_side`, `drawer_size`, `drawer_title` | written to the drawer, which is a `Dialog` on an edge: a `PanelEdge`, one of the dialog's size rungs, and its title |
 | `drop_width` | the drop panel's width |
 | `enter_secs`, `enter_ease` | how long the panel takes to come out and the curve it comes out on; `theme.motion_medium_2` and `theme.motion_ease_emphasized_decelerate` |
 | `exit_secs`, `exit_ease` | how long it takes to go away and the curve it goes on; `theme.motion_short_4` and `theme.motion_ease_standard_accelerate` |

@@ -9,8 +9,8 @@
 //! one thing worse than a message nobody reads is a message nobody can get
 //! rid of.
 //!
-//! **One layer, many callers.** An app declares one `Toaster` — in its
-//! `OverlayLayers` host, or as the last child of the window body — and any
+//! **One layer, many callers.** An app declares one `Toaster` — as the
+//! last child of the window body, so it draws over every panel — and any
 //! code that has a `Cx` can raise a toast with [`ToastAction::Show`]. The
 //! layer owns the queue, the lifetimes, the stacking and the chrome, so a
 //! module that wants to say "saved" does not have to own a widget.
@@ -33,6 +33,11 @@
 //! **The stack has a limit.** Only `max_visible` cards are on screen; the
 //! rest wait, and the layer says how many are waiting rather than covering
 //! the window in cards nobody asked for.
+//!
+//! **One widget, not one per shape.** The bar that says one thing at a time
+//! is `Toaster{max_visible: 1}`, and the strip for a message about the whole
+//! app is `Toaster{place: TopCenter}`. Each is a property away, so neither
+//! has a name of its own to learn.
 
 use crate::{
     badge::{measure, BadgeIntent, BadgePalette},
@@ -304,18 +309,6 @@ script_mod! {
             text_style: theme.font_body_s
             color: theme.color_on_surface_variant
         }
-    }
-
-    /** Toasts at the top, where a message about the whole app belongs. */
-    mod.widgets.MessageToaster = mod.widgets.Toaster{
-        place: TopCenter
-    }
-
-    /** One at a time, at the bottom: the shape for a message about what the
-     * person just did. */
-    mod.widgets.Snackbar = mod.widgets.Toaster{
-        place: BottomCenter
-        max_visible: 1
     }
 }
 

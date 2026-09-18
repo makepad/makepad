@@ -2756,9 +2756,6 @@ mod waveform_registration_tests {
         ] {
             assert!(lib.find(base).expect(base) < at, "{base} must register before waveform");
         }
-        // Nothing may come between the overlay layer host and the end of
-        // the function, and that host has a test of its own saying so.
-        assert!(lib.find("crate::overlay_layers::script_mod(vm);").unwrap() > at);
     }
 
     #[test]

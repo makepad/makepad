@@ -12,10 +12,10 @@ pub mod foundations;
 pub mod layout;
 pub mod grid;
 pub mod masonry;
-pub mod splitter_more;
+pub mod splitter;
 pub mod dock;
 pub mod align_scroll;
-pub mod scroll_more;
+pub mod scroll_marks_and_fades;
 pub mod divider;
 pub mod view;
 pub mod corner_cap_view;
@@ -113,7 +113,7 @@ pub mod badge;
 pub mod avatar;
 pub mod kbd;
 pub mod chart;
-pub mod chart_more;
+pub mod chart_shapes;
 pub mod timeline;
 pub mod chat;
 
@@ -130,10 +130,10 @@ pub fn script_mod(vm: &mut ScriptVm) {
     layout::script_mod(vm);
     grid::script_mod(vm);
     masonry::script_mod(vm);
-    splitter_more::script_mod(vm);
+    splitter::script_mod(vm);
     dock::script_mod(vm);
     align_scroll::script_mod(vm);
-    scroll_more::script_mod(vm);
+    scroll_marks_and_fades::script_mod(vm);
     divider::script_mod(vm);
     // 3 Containers
     view::script_mod(vm);
@@ -242,7 +242,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     avatar::script_mod(vm);
     kbd::script_mod(vm);
     chart::script_mod(vm);
-    chart_more::script_mod(vm);
+    chart_shapes::script_mod(vm);
     timeline::script_mod(vm);
     chat::script_mod(vm);
 }
@@ -263,10 +263,10 @@ pub fn tables() -> &'static [&'static [Story]] {
         layout::STORIES,
         grid::STORIES,
         masonry::STORIES,
-        splitter_more::STORIES,
+        splitter::STORIES,
         dock::STORIES,
         align_scroll::STORIES,
-        scroll_more::STORIES,
+        scroll_marks_and_fades::STORIES,
         divider::STORIES,
         // 3 Containers
         view::STORIES,
@@ -375,7 +375,7 @@ pub fn tables() -> &'static [&'static [Story]] {
         avatar::STORIES,
         kbd::STORIES,
         chart::STORIES,
-        chart_more::STORIES,
+        chart_shapes::STORIES,
         timeline::STORIES,
         chat::STORIES,
     ]

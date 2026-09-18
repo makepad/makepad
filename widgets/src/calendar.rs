@@ -7,8 +7,10 @@
 //!
 //! The second is the grid: rows of seven, weekday headings, the days either
 //! side of the month drawn dim, and one, several or a span of days chosen
-//! from it. [`MonthPicker`] and [`YearPicker`] are the same contract on a
-//! twelve-cell grid, for the two steps above a day.
+//! from it. [`CalendarGrain`] is what a cell of it stands for: a day, or —
+//! for the two steps above a day — a month or a year, on a twelve-cell page
+//! under the same contract. `MonthPicker` and `YearPicker` are that one
+//! widget with its grain set, declared in the script block and nowhere else.
 //!
 //! # What this deliberately does not do
 //!
@@ -513,6 +515,86 @@ pub fn year_page(year: i32) -> i32 {
     year - year.rem_euclid(12)
 }
 
+/// What one cell of the grid stands for.
+///
+/// A month and a year are each named by the day they start on, so
+/// everything downstream — bounds, selection, actions — works on the one
+/// date type whatever the grain.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Script, ScriptHook)]
+pub enum CalendarGrain {
+    /// A day: seven columns under weekday headings, a month to the page.
+    #[pick]
+    #[default]
+    Day,
+    /// A month: twelve cells, a year to the page.
+    Month,
+    /// A year: twelve cells, the pages aligned the way [`year_page`] says.
+    Year,
+}
+
+/// How many cells a page of months or of years holds.
+pub const PAGE_CELLS: usize = 12;
+
+impl CalendarGrain {
+    /// Where a date's cell sits in the unbroken run of this grain's cells:
+    /// days from the epoch, months from the January of year zero, years
+    /// from year zero. Only differences and pages are read off it, so the
+    /// three not sharing an origin costs nothing.
+    ///
+    /// This is what lets a page of months and a page of years be one
+    /// machine: both are twelve consecutive ordinals, and a move of the
+    /// keyboard is an addition in either.
+    pub fn ordinal(self, date: CivilDate) -> i64 {
+        match self {
+            Self::Day => date.to_days(),
+            Self::Month => date.year as i64 * 12 + (date.month as i64 - 1),
+            Self::Year => date.year as i64,
+        }
+    }
+
+    /// The date that names the cell at `ordinal`. The inverse of
+    /// [`CalendarGrain::ordinal`] for any date that names a cell.
+    pub fn date_at(self, ordinal: i64) -> CivilDate {
+        match self {
+            Self::Day => CivilDate::from_days(ordinal),
+            Self::Month => CivilDate {
+                year: ordinal.div_euclid(12) as i32,
+                month: ordinal.rem_euclid(12) as u32 + 1,
+                day: 1,
+            },
+            Self::Year => CivilDate { year: ordinal as i32, month: 1, day: 1 },
+        }
+    }
+
+    /// The date that names the cell `date` falls in: the day itself, the
+    /// first of its month, the first of its year.
+    pub fn floor(self, date: CivilDate) -> CivilDate {
+        match self {
+            Self::Day => date,
+            grain => grain.date_at(grain.ordinal(date)),
+        }
+    }
+}
+
+/// The ordinal of the first cell on the twelve-cell page that holds
+/// `ordinal`. It is [`year_page`] in either unit: a page of months aligned
+/// on twelve is a calendar year, and a page of years is the same page
+/// `year_page` names.
+pub fn page_of(ordinal: i64) -> i64 {
+    ordinal - ordinal.rem_euclid(PAGE_CELLS as i64)
+}
+
+/// A month's name as a cell shows it.
+fn month_label(name: &str, long: bool) -> String {
+    if long {
+        name.to_string()
+    } else {
+        // Three letters is the shortest form that stays unambiguous in
+        // English; two collides on Ja/Ju and Ma.
+        name.chars().take(3).collect()
+    }
+}
+
 /// A host's own rule for which days may be chosen, on top of the bounds. It
 /// answers true for a day that is open.
 pub type DayAllowed = Box<dyn Fn(CivilDate) -> bool>;
@@ -529,6 +611,11 @@ pub enum CalendarPickAction {
     RangeSelected(CivilDate, CivilDate),
     /// The grid moved to another month, by an arrow, by the keyboard, or by
     /// a press on a day belonging to a neighbour.
+    ///
+    /// A twelve-cell page reports itself turning the same way. A page of
+    /// months has no month of its own, so it gives its year and the month
+    /// the keyboard is on; a page of years gives its first year and month
+    /// 1.
     MonthChanged(i32, u32),
     #[default]
     None,
@@ -540,11 +627,12 @@ script_mod! {
     /** How many days may be chosen at once. */
     mod.widgets.CalendarPickMode = #(CalendarPickMode::script_api(vm))
 
+    /** What one cell of the grid stands for. */
+    mod.widgets.CalendarGrain = #(CalendarGrain::script_api(vm))
+
     use mod.widgets.*
 
     mod.widgets.CalendarBase = #(Calendar::register_widget(vm))
-    mod.widgets.MonthPickerBase = #(MonthPicker::register_widget(vm))
-    mod.widgets.YearPickerBase = #(YearPicker::register_widget(vm))
 
     set_type_default() do #(DrawCalendarFrame::script_shader(vm)){
         ..mod.draw.DrawQuad
@@ -660,19 +748,22 @@ script_mod! {
     }
 
     /** A month grid: rows of seven, the neighbouring months dimmed, and one
-     * day, several days or a span chosen from it. */
+     * day, several days or a span chosen from it. With a coarser grain the
+     * same widget is a twelve-cell page of months or of years. */
     mod.widgets.Calendar = set_type_default() do mod.widgets.CalendarBase{
         width: Fit
         height: Fit
         margin: theme.mspace_1
 
+        /** what a cell stands for: Day is the month grid, Month and Year a twelve-cell page */
+        grain: CalendarGrain.Day
         /** how many days may be chosen at once */
         mode: CalendarPickMode.Single
         /** the weekday a row starts on; 0 is Monday 0..6 step 1 */
         first_day: 0
         /** the year on show; 0 takes it from the selection, then from today 0..3000 step 1 */
         year: 0
-        /** the month on show; 0 takes it from the selection, then from today 0..12 step 1 */
+        /** the month on show, on a day grid; 0 takes it from the selection, then from today 0..12 step 1 */
         month: 0
         /** the day marked as today, as an ISO date; empty marks none */
         today: ""
@@ -688,9 +779,13 @@ script_mod! {
         show_week_numbers: false
         /** the twelve month names, comma separated; empty uses the built-in ones */
         month_names: ""
+        /** on a page of months, write the names in full rather than shortened to three letters */
+        long_names: false
         /** the seven weekday headings from Monday, comma separated */
         weekday_names: ""
 
+        /** how many cells to a row on a twelve-cell page; a day grid is always seven 2..6 step 1 */
+        columns: 3
         /** width of one day cell in pixels 20..64 step 1 */
         cell_width: 34.
         /** height of one day cell in pixels 20..64 step 1 */
@@ -747,145 +842,28 @@ script_mod! {
     }
 
     /** Twelve months on one page, chosen the way a calendar chooses days.
-     * The step marks move a year at a time. */
-    mod.widgets.MonthPicker = set_type_default() do mod.widgets.MonthPickerBase{
-        width: Fit
-        height: Fit
-        margin: theme.mspace_1
-
-        /** how many months may be chosen at once */
-        mode: CalendarPickMode.Single
-        /** the year on show; 0 takes it from the selection 0..3000 step 1 */
-        year: 0
-        /** the months chosen at the start, ISO dates separated by commas */
-        selected: ""
-        /** earliest month that may be chosen, as an ISO date; empty for none */
-        min: ""
-        /** latest month that may be chosen, as an ISO date; empty for none */
-        max: ""
-        /** the twelve month names, comma separated; empty uses the built-in ones */
-        month_names: ""
-        /** write the month names in full rather than shortened to three letters */
-        long_names: false
-
-        /** how many cells to a row 2..6 step 1 */
-        columns: 3
+     * The step marks move a year at a time. It is a calendar with its
+     * grain set, and a cell wide enough for a name. */
+    mod.widgets.MonthPicker = mod.widgets.Calendar{
+        grain: CalendarGrain.Month
         /** width of one cell in pixels 40..140 step 2 */
         cell_width: 72.
         /** height of one cell in pixels 24..64 step 1 */
         cell_height: 34.
-        /** height of the year band in pixels 0..60 step 1 */
-        header_height: 32.
-        /** width of each step mark in the header in pixels 16..48 step 1 */
-        arrow_width: 28.
-        /** room between the frame and everything in it in pixels 0..24 step 1 */
-        inset: 8.
-
-        color_title: theme.color_text
-        color_arrow: theme.color_text_meta
-        color_day: theme.color_text
-        color_off: theme.color_text_disabled
-        color_on_selected: theme.color_on_primary
-
-        draw_title +: {text_style: theme.font_bold{font_size: theme.font_size_p}}
-        draw_arrow +: {text_style: theme.font_regular{font_size: theme.font_size_4}}
-        draw_day +: {text_style: theme.font_regular{font_size: theme.font_size_p}}
-
-        animator: Animator{
-            focus: {
-                default: @off
-                off: AnimatorState{
-                    from: {all: Forward {duration: 0.1}}
-                    apply: {draw_bg: {focus: 0.0}}
-                }
-                on: AnimatorState{
-                    from: {all: Snap}
-                    apply: {draw_bg: {focus: 1.0}}
-                }
-            }
-            disabled: {
-                default: @off
-                off: AnimatorState{
-                    from: {all: Forward {duration: 0.1}}
-                    apply: {draw_bg: {disabled: 0.0}}
-                }
-                on: AnimatorState{
-                    from: {all: Snap}
-                    apply: {draw_bg: {disabled: 1.0}}
-                }
-            }
-        }
     }
 
     /** Twelve years on one page, chosen the way a calendar chooses days.
      * The step marks move a whole page, so the pages line up. */
-    mod.widgets.YearPicker = set_type_default() do mod.widgets.YearPickerBase{
-        width: Fit
-        height: Fit
-        margin: theme.mspace_1
-
-        /** how many years may be chosen at once */
-        mode: CalendarPickMode.Single
-        /** the year the page opens on; 0 takes it from the selection 0..3000 step 1 */
-        year: 0
-        /** the years chosen at the start, ISO dates separated by commas */
-        selected: ""
-        /** earliest year that may be chosen, as an ISO date; empty for none */
-        min: ""
-        /** latest year that may be chosen, as an ISO date; empty for none */
-        max: ""
-
-        /** how many cells to a row 2..6 step 1 */
-        columns: 3
+    mod.widgets.YearPicker = mod.widgets.Calendar{
+        grain: CalendarGrain.Year
         /** width of one cell in pixels 40..140 step 2 */
         cell_width: 72.
         /** height of one cell in pixels 24..64 step 1 */
         cell_height: 34.
-        /** height of the page band in pixels 0..60 step 1 */
-        header_height: 32.
-        /** width of each step mark in the header in pixels 16..48 step 1 */
-        arrow_width: 28.
-        /** room between the frame and everything in it in pixels 0..24 step 1 */
-        inset: 8.
-
-        color_title: theme.color_text
-        color_arrow: theme.color_text_meta
-        color_day: theme.color_text
-        color_off: theme.color_text_disabled
-        color_on_selected: theme.color_on_primary
-
-        draw_title +: {text_style: theme.font_bold{font_size: theme.font_size_p}}
-        draw_arrow +: {text_style: theme.font_regular{font_size: theme.font_size_4}}
-        draw_day +: {text_style: theme.font_regular{font_size: theme.font_size_p}}
-
-        animator: Animator{
-            focus: {
-                default: @off
-                off: AnimatorState{
-                    from: {all: Forward {duration: 0.1}}
-                    apply: {draw_bg: {focus: 0.0}}
-                }
-                on: AnimatorState{
-                    from: {all: Snap}
-                    apply: {draw_bg: {focus: 1.0}}
-                }
-            }
-            disabled: {
-                default: @off
-                off: AnimatorState{
-                    from: {all: Forward {duration: 0.1}}
-                    apply: {draw_bg: {disabled: 0.0}}
-                }
-                on: AnimatorState{
-                    from: {all: Snap}
-                    apply: {draw_bg: {disabled: 1.0}}
-                }
-            }
-        }
     }
 }
 
-/// The frame all three draw themselves inside. It is also the widget's hit
+/// The frame every grain draws itself inside. It is also the widget's hit
 /// area and its redraw area: every cell is placed absolutely and leaves
 /// neither.
 #[derive(Script, ScriptHook)]
@@ -978,15 +956,6 @@ fn draw_header(
     (prev, next)
 }
 
-/// Where cell `column` of a `cols`-wide row sits inside `row_area`.
-fn grid_cell(row_area: Rect, cols: usize, column: usize) -> Rect {
-    let cell_w = row_area.size.x / cols.max(1) as f64;
-    Rect {
-        pos: dvec2(row_area.pos.x + column as f64 * cell_w, row_area.pos.y),
-        size: dvec2(cell_w, row_area.size.y),
-    }
-}
-
 #[derive(Script, Widget, Animator)]
 pub struct Calendar {
     #[uid]
@@ -1014,6 +983,8 @@ pub struct Calendar {
     animator: Animator,
 
     #[live]
+    pub grain: CalendarGrain,
+    #[live]
     pub mode: CalendarPickMode,
     #[live]
     pub first_day: u32,
@@ -1036,8 +1007,12 @@ pub struct Calendar {
     #[live]
     pub month_names: String,
     #[live]
+    pub long_names: bool,
+    #[live]
     pub weekday_names: String,
 
+    #[live(3)]
+    pub columns: usize,
     #[live(34.0)]
     pub cell_width: f64,
     #[live(30.0)]
@@ -1070,13 +1045,15 @@ pub struct Calendar {
     #[live]
     pub color_week: Vec4f,
 
-    /// The month on show. Kept apart from the `year` and `month`
-    /// properties, which say where to start: an arrow press moves this, and
-    /// the next live re-apply must not undo it.
+    /// The page on show: a month of a day grid, and the first cell of a
+    /// twelve-cell page. Kept apart from the `year` and `month` properties,
+    /// which say where to start: an arrow press moves this, and the next
+    /// live re-apply must not undo it.
     #[rust]
     view_year: i32,
     #[rust]
     view_month: u32,
+    /// The cell the keyboard is on, as the date that names it.
     #[rust]
     focus: CivilDate,
     #[rust]
@@ -1101,6 +1078,8 @@ pub struct Calendar {
     #[rust]
     adopted_month: (u32, u32),
     #[rust]
+    adopted_grain: CalendarGrain,
+    #[rust]
     allowed: Option<DayAllowed>,
 }
 
@@ -1112,28 +1091,66 @@ impl ScriptHook for Calendar {
 
 impl Calendar {
     fn adopt(&mut self) {
+        self.adopted_grain = self.grain;
         self.selection = DaySelection::new(self.mode);
         self.adopted = self.selected.clone();
         self.selection.set_days(&parse_iso_list(&self.selected));
-        self.adopted_month = (self.year, self.month);
+        self.adopted_month = match self.grain {
+            CalendarGrain::Day => (self.year, self.month),
+            CalendarGrain::Month | CalendarGrain::Year => (self.year, 0),
+        };
         self.today_date = parse_iso(&self.today);
-        // No clock. The month on show is whatever the host named, then the
+        self.hover = None;
+        let first = self.selection.days().first().copied();
+        // No clock. The page on show is whatever the host named, then the
         // first day it chose, then the day it called today, and only then
         // the epoch — a visible, honest wrong answer rather than a guess
         // dressed as a right one.
-        let anchor = CivilDate::new(self.year as i32, self.month, 1)
-            .or_else(|| self.selection.days().first().copied())
-            .or(self.today_date)
-            .unwrap_or_default();
-        self.view_year = anchor.year;
-        self.view_month = anchor.month;
-        self.focus = self.selection.days().first().copied().unwrap_or(anchor);
+        let anchor = self.named().or(first).or(self.today_date).unwrap_or_default();
+        let view = match self.grain {
+            CalendarGrain::Day => anchor,
+            grain => grain.date_at(page_of(grain.ordinal(anchor))),
+        };
+        self.view_year = view.year;
+        self.view_month = view.month;
+        self.focus = match self.grain {
+            CalendarGrain::Day => first.unwrap_or(anchor),
+            // A page of months puts the keyboard on the chosen month when
+            // that month is on the page, and on January when it is not.
+            CalendarGrain::Month => first
+                .filter(|date| date.year == view.year)
+                .map(|date| CalendarGrain::Month.floor(date))
+                .unwrap_or(view),
+            // A page of years puts it on the year the page was opened for,
+            // which is always on it.
+            CalendarGrain::Year => CalendarGrain::Year.floor(anchor),
+        };
+    }
+
+    /// The page the `year` and `month` properties name, if they name one.
+    fn named(&self) -> Option<CivilDate> {
+        match self.grain {
+            CalendarGrain::Day => CivilDate::new(self.year as i32, self.month, 1),
+            // Only a day grid has a month to name, and month 0 being no
+            // month is what tells a day grid that nothing was named. A
+            // twelve-cell page has to ask the year itself: year 0 is a real
+            // year, and a page opened on it would never look at the
+            // selection.
+            _ if self.year == 0 => None,
+            _ => CivilDate::new(self.year as i32, 1, 1),
+        }
     }
 
     /// Take up whatever the properties say now. Called every draw because
     /// every one of them is live, and the tweaker may have moved any of
     /// them since the last one.
     fn sync(&mut self) {
+        if self.adopted_grain != self.grain {
+            // A chosen day is not a chosen month, and a focus on the 14th
+            // names no cell of a page of years. Start again rather than
+            // reinterpret.
+            self.adopt();
+        }
         if self.selection.mode() != self.mode {
             // A range half made cannot be read as a day, and a set of five
             // days cannot be read as a range. Start again rather than
@@ -1145,26 +1162,91 @@ impl Calendar {
             self.adopted = self.selected.clone();
             self.selection.set_days(&parse_iso_list(&self.selected));
         }
-        if self.adopted_month != (self.year, self.month) {
-            self.adopted_month = (self.year, self.month);
-            if let Some(date) = CivilDate::new(self.year as i32, self.month, 1) {
-                self.view_year = date.year;
-                self.view_month = date.month;
+        // A page of months or of years has no use for `month`, so only a
+        // page of days answers to it. Watching it on the coarse pages
+        // snapped a page somebody had turned back to the named year the
+        // moment a host or the tweaker touched a property the page does
+        // not even draw.
+        let watched = match self.grain {
+            CalendarGrain::Day => (self.year, self.month),
+            CalendarGrain::Month | CalendarGrain::Year => (self.year, 0),
+        };
+        if self.adopted_month != watched {
+            self.adopted_month = watched;
+            if let Some(date) = self.named() {
+                match self.grain {
+                    CalendarGrain::Day => {
+                        self.view_year = date.year;
+                        self.view_month = date.month;
+                    }
+                    grain => {
+                        let shift = page_of(grain.ordinal(date)) - self.page();
+                        // A page of years goes to the year that was named.
+                        // A page of months was named no month, so the
+                        // keyboard stays on the one it was on.
+                        self.focus = if grain == CalendarGrain::Year {
+                            date
+                        } else {
+                            grain.date_at(grain.ordinal(self.focus) + shift)
+                        };
+                        self.turn_by(shift);
+                    }
+                }
             }
         }
         self.bounds = DayBounds {
             min: parse_iso(&self.min),
             max: parse_iso(&self.max),
-            weekdays_off: self.weekdays_off,
+            // A month is named by its first day, and closing every month
+            // that happens to start on a Saturday is nobody's rule.
+            weekdays_off: if self.grain == CalendarGrain::Day { self.weekdays_off } else { 0 },
         };
         self.today_date = parse_iso(&self.today);
         if self.view_month == 0 {
             self.view_month = 1;
         }
+        self.columns = self.columns.clamp(1, PAGE_CELLS);
     }
 
     fn grid(&self) -> MonthGrid {
         MonthGrid { year: self.view_year, month: self.view_month, first_day: self.first_day }
+    }
+
+    fn view(&self) -> CivilDate {
+        CivilDate { year: self.view_year, month: self.view_month.clamp(1, 12), day: 1 }
+    }
+
+    /// The ordinal of the first cell of the twelve-cell page on show.
+    fn page(&self) -> i64 {
+        page_of(self.grain.ordinal(self.view()))
+    }
+
+    /// Turn the twelve-cell page by `shift` cells. The pointer has not
+    /// moved, so the cell it was over it is over still, and that cell now
+    /// stands for another date.
+    fn turn_by(&mut self, shift: i64) {
+        let grain = self.grain;
+        self.hover = self.hover.map(|at| grain.date_at(grain.ordinal(at) + shift));
+        let view = grain.date_at(self.page() + shift);
+        self.view_year = view.year;
+        self.view_month = view.month;
+    }
+
+    /// How many cells to a row, and how many cells in all.
+    fn shape(&self) -> (usize, usize) {
+        match self.grain {
+            CalendarGrain::Day => (GRID_COLS, GRID_CELLS),
+            _ => (self.columns.clamp(1, PAGE_CELLS), PAGE_CELLS),
+        }
+    }
+
+    /// The date cell `index` stands for, counting left to right and top to
+    /// bottom.
+    fn cell_date(&self, index: usize) -> CivilDate {
+        match self.grain {
+            CalendarGrain::Day => self.grid().cell(index),
+            grain => grain.date_at(self.page() + index as i64),
+        }
     }
 
     /// Whether a day may be chosen: the bounds first, then the host's own
@@ -1174,28 +1256,63 @@ impl Calendar {
     }
 
     fn title(&self) -> String {
-        let names = names_or(&self.month_names, &MONTH_NAMES);
-        let index = (self.view_month.clamp(1, 12) - 1) as usize;
-        format!("{} {}", names[index], self.view_year)
-    }
-
-    fn show(&mut self, cx: &mut Cx, date: CivilDate) {
-        if date.year != self.view_year || date.month != self.view_month {
-            self.view_year = date.year;
-            self.view_month = date.month;
-            cx.widget_action(
-                self.uid,
-                CalendarPickAction::MonthChanged(self.view_year, self.view_month),
-            );
+        match self.grain {
+            CalendarGrain::Day => {
+                let names = names_or(&self.month_names, &MONTH_NAMES);
+                let index = (self.view_month.clamp(1, 12) - 1) as usize;
+                format!("{} {}", names[index], self.view_year)
+            }
+            CalendarGrain::Month => self.view_year.to_string(),
+            CalendarGrain::Year => {
+                let first = self.page();
+                format!("{} \u{2013} {}", first, first + PAGE_CELLS as i64 - 1)
+            }
         }
     }
 
-    fn step_month(&mut self, cx: &mut Cx, delta: i32) {
-        let shown =
-            CivilDate { year: self.view_year, month: self.view_month, day: 1 }.add_months(delta);
+    /// Put the page that holds `date` on show, and say so if that moved it.
+    fn show(&mut self, cx: &mut Cx, date: CivilDate) {
+        let moved = match self.grain {
+            CalendarGrain::Day => {
+                let moved = date.year != self.view_year || date.month != self.view_month;
+                self.view_year = date.year;
+                self.view_month = date.month;
+                moved
+            }
+            grain => {
+                let shift = page_of(grain.ordinal(date)) - self.page();
+                self.turn_by(shift);
+                shift != 0
+            }
+        };
+        if moved {
+            // A page of months has no month of its own to report, so it
+            // names the one the keyboard is on.
+            let month = if self.grain == CalendarGrain::Month {
+                self.focus.month
+            } else {
+                self.view_month
+            };
+            cx.widget_action(self.uid, CalendarPickAction::MonthChanged(self.view_year, month));
+        }
+    }
+
+    /// One press of a header step mark: a month of a day grid, a whole page
+    /// of a twelve-cell one.
+    fn step(&mut self, cx: &mut Cx, delta: i32) {
+        let (shown, focus) = match self.grain {
+            CalendarGrain::Day => (self.view().add_months(delta), self.focus.add_months(delta)),
+            grain => {
+                let shift = delta as i64 * PAGE_CELLS as i64;
+                (
+                    grain.date_at(self.page() + shift),
+                    grain.date_at(grain.ordinal(self.focus) + shift),
+                )
+            }
+        };
         // The focus travels with the grid, or the next arrow key would jump
         // the view back to wherever the focus was left.
-        self.focus = self.focus.add_months(delta);
+        self.focus = focus;
         self.show(cx, shown);
         self.redraw(cx);
     }
@@ -1222,7 +1339,77 @@ impl Calendar {
         self.redraw(cx);
     }
 
-    /// The days chosen now. In `Range` this is the two ends.
+    /// Put the keyboard on `landed` and the grid on the page that holds it.
+    fn land(&mut self, cx: &mut Cx, landed: CivilDate) {
+        self.focus = landed;
+        self.show(cx, landed);
+        self.redraw(cx);
+    }
+
+    /// A key on a day grid.
+    fn day_key(&mut self, cx: &mut Cx, key: KeyCode) {
+        let motion = match key {
+            KeyCode::ArrowLeft => Some(Motion::PrevDay),
+            KeyCode::ArrowRight => Some(Motion::NextDay),
+            KeyCode::ArrowUp => Some(Motion::PrevWeek),
+            KeyCode::ArrowDown => Some(Motion::NextWeek),
+            KeyCode::PageUp => Some(Motion::PrevMonth),
+            KeyCode::PageDown => Some(Motion::NextMonth),
+            KeyCode::Home => Some(Motion::WeekStart),
+            KeyCode::End => Some(Motion::WeekEnd),
+            _ => None,
+        };
+        if let Some(motion) = motion {
+            let want = move_focus(self.focus, self.first_day, motion);
+            // Step over the days the host has closed rather than parking on
+            // one: the focus would otherwise sit somewhere Return does
+            // nothing and say nothing about why.
+            let step = if want < self.focus { -1 } else { 1 };
+            let landed = seek(want, step, SEEK_LIMIT, |date| self.allows(date)).unwrap_or(want);
+            self.land(cx, landed);
+        }
+        if matches!(key, KeyCode::ReturnKey | KeyCode::Space) {
+            let focus = self.focus;
+            self.choose(cx, focus);
+        }
+        // Half a range is not an answer, and once one end is picked up
+        // there is otherwise no way to put it down.
+        if key == KeyCode::Escape && self.selection.anchor().is_some() {
+            self.selection.clear();
+            cx.widget_action(self.uid, CalendarPickAction::Selected(self.focus));
+            self.redraw(cx);
+        }
+    }
+
+    /// A key on a twelve-cell page. Every move is a count of cells, rolling
+    /// into the page either side rather than stopping: a page that stops at
+    /// its last cell leaves the next one reachable only through the header.
+    fn page_key(&mut self, cx: &mut Cx, key: KeyCode) {
+        let (cols, cells) = self.shape();
+        let (cols, cells) = (cols as i64, cells as i64);
+        let at = self.grain.ordinal(self.focus);
+        let to = match key {
+            KeyCode::ArrowLeft => at - 1,
+            KeyCode::ArrowRight => at + 1,
+            KeyCode::ArrowUp => at - cols,
+            KeyCode::ArrowDown => at + cols,
+            KeyCode::PageUp => at - cells,
+            KeyCode::PageDown => at + cells,
+            KeyCode::Home => self.page(),
+            KeyCode::End => self.page() + cells - 1,
+            KeyCode::ReturnKey | KeyCode::Space => {
+                let focus = self.focus;
+                self.choose(cx, focus);
+                return;
+            }
+            _ => return,
+        };
+        let landed = self.grain.date_at(to);
+        self.land(cx, landed);
+    }
+
+    /// The days chosen now. In `Range` this is the two ends. On a page of
+    /// months or of years each is the first day of what was chosen.
     pub fn selected_days(&self) -> Vec<CivilDate> {
         self.selection.days().to_vec()
     }
@@ -1232,7 +1419,11 @@ impl Calendar {
     }
 
     pub fn set_selected_days(&mut self, cx: &mut Cx, days: &[CivilDate]) {
-        self.selection.set_days(days);
+        // On a page of months a chosen day IS its month. Stored as given,
+        // the keyboard went to September and no cell was drawn chosen,
+        // because the cells compare against the first of the month.
+        let days: Vec<CivilDate> = days.iter().map(|d| self.grain.floor(*d)).collect();
+        self.selection.set_days(&days);
         if let Some(first) = days.first() {
             self.focus = *first;
             self.view_year = first.year;
@@ -1264,15 +1455,19 @@ impl Widget for Calendar {
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.sync();
-        let week_col = if self.show_week_numbers { self.week_width } else { 0.0 };
+        // Only a day grid has weekday headings over it and week numbers
+        // down its side. A twelve-cell page is the header and the cells.
+        let day_grid = self.grain == CalendarGrain::Day;
+        let week_col = if day_grid && self.show_week_numbers { self.week_width } else { 0.0 };
+        let heads_h = if day_grid { self.weekday_height } else { 0.0 };
+        let (cols, count) = self.shape();
+        let rows = count.div_ceil(cols);
         // A Fit calendar asks for exactly what it is about to draw. Fill
         // inside a Fit parent resolves to nothing and is never painted, so
         // there is no useful default here but a real number.
-        let natural_w = self.inset * 2.0 + week_col + GRID_COLS as f64 * self.cell_width;
-        let natural_h = self.inset * 2.0
-            + self.header_height
-            + self.weekday_height
-            + GRID_ROWS as f64 * self.cell_height;
+        let natural_w = self.inset * 2.0 + week_col + cols as f64 * self.cell_width;
+        let natural_h =
+            self.inset * 2.0 + self.header_height + heads_h + rows as f64 * self.cell_height;
         let walk = Walk {
             width: match walk.width {
                 Size::Fit { .. } => Size::Fixed(natural_w),
@@ -1312,36 +1507,39 @@ impl Widget for Calendar {
 
         let grid_x = inner.pos.x + week_col;
         let grid_w = (inner.size.x - week_col).max(1.0);
-        let cell_w = grid_w / GRID_COLS as f64;
-        let cell_h =
-            ((inner.size.y - self.header_height - self.weekday_height) / GRID_ROWS as f64).max(1.0);
+        let cell_w = grid_w / cols as f64;
+        let cell_h = ((inner.size.y - self.header_height - heads_h) / rows as f64).max(1.0);
         let heads_y = inner.pos.y + self.header_height;
-        let grid_y = heads_y + self.weekday_height;
+        let grid_y = heads_y + heads_h;
 
-        let weekdays = names_or(&self.weekday_names, &WEEKDAY_NAMES);
-        self.draw_meta.color = self.color_weekday;
-        for col in 0..GRID_COLS {
-            let name = weekdays[((self.first_day as usize % 7) + col) % 7].clone();
-            let rect = Rect {
-                pos: dvec2(grid_x + col as f64 * cell_w, heads_y),
-                size: dvec2(cell_w, self.weekday_height),
-            };
-            draw_centered(&mut self.draw_meta, cx, rect, &name);
+        if day_grid {
+            let weekdays = names_or(&self.weekday_names, &WEEKDAY_NAMES);
+            self.draw_meta.color = self.color_weekday;
+            for col in 0..GRID_COLS {
+                let name = weekdays[((self.first_day as usize % 7) + col) % 7].clone();
+                let rect = Rect {
+                    pos: dvec2(grid_x + col as f64 * cell_w, heads_y),
+                    size: dvec2(cell_w, self.weekday_height),
+                };
+                draw_centered(&mut self.draw_meta, cx, rect, &name);
+            }
         }
 
         let grid = self.grid();
         let focused = self.animator_in_state(cx, ids!(focus.on));
         let off = self.animator_in_state(cx, ids!(disabled.on));
         let preview = self.selection.preview(self.hover);
+        // On a twelve-cell page today is the cell that holds it.
+        let today = self.today_date.map(|date| self.grain.floor(date));
 
         self.cells.clear();
-        let mut looks: Vec<(Rect, CivilDate, CellLook)> = Vec::with_capacity(GRID_CELLS);
-        for index in 0..GRID_CELLS {
-            let date = grid.cell(index);
+        let mut looks: Vec<(Rect, CivilDate, CellLook)> = Vec::with_capacity(count);
+        for index in 0..count {
+            let date = self.cell_date(index);
             let rect = Rect {
                 pos: dvec2(
-                    grid_x + (index % GRID_COLS) as f64 * cell_w,
-                    grid_y + (index / GRID_COLS) as f64 * cell_h,
+                    grid_x + (index % cols) as f64 * cell_w,
+                    grid_y + (index / cols) as f64 * cell_h,
                 ),
                 size: dvec2(cell_w, cell_h),
             };
@@ -1349,10 +1547,12 @@ impl Widget for Calendar {
             let selected = self.selection.contains(date);
             let mut look = CellLook {
                 selected,
-                today: self.today_date == Some(date),
+                today: today == Some(date),
                 focus: focused && self.focus == date,
                 hover: allowed && self.hover == Some(date) && !selected,
-                outside: !grid.owns(date),
+                // A twelve-cell page has no neighbours to dim: every cell
+                // on it is its own.
+                outside: day_grid && !grid.owns(date),
                 off: !allowed,
                 ..CellLook::default()
             };
@@ -1386,6 +1586,10 @@ impl Widget for Calendar {
             self.draw_cell.hover = if look.hover { 1.0 } else { 0.0 };
             self.draw_cell.draw_abs(cx, *rect);
         }
+        let months = match self.grain {
+            CalendarGrain::Month => names_or(&self.month_names, &MONTH_NAMES),
+            _ => Vec::new(),
+        };
         for (rect, date, look) in &looks {
             self.draw_day.color = if look.off {
                 self.color_off
@@ -1396,11 +1600,17 @@ impl Widget for Calendar {
             } else {
                 self.color_day
             };
-            let label = date.day.to_string();
+            let label = match self.grain {
+                CalendarGrain::Day => date.day.to_string(),
+                CalendarGrain::Month => {
+                    month_label(&months[(date.month.clamp(1, 12) - 1) as usize], self.long_names)
+                }
+                CalendarGrain::Year => date.year.to_string(),
+            };
             draw_centered(&mut self.draw_day, cx, *rect, &label);
         }
 
-        if self.show_week_numbers {
+        if day_grid && self.show_week_numbers {
             self.draw_meta.color = self.color_week;
             for row in 0..GRID_ROWS {
                 let (_, week) = grid.cell(row * GRID_COLS).iso_week();
@@ -1424,7 +1634,6 @@ impl Widget for Calendar {
         if self.animator_in_state(cx, ids!(disabled.on)) {
             return;
         }
-        let uid = self.uid;
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(fe) | Hit::FingerHoverOver(fe) => {
                 let at = self
@@ -1452,11 +1661,11 @@ impl Widget for Calendar {
             Hit::FingerDown(fe) if fe.device.is_primary_hit() => {
                 cx.set_key_focus(self.draw_bg.area());
                 if self.prev_rect.contains(fe.abs) {
-                    self.step_month(cx, -1);
+                    self.step(cx, -1);
                     return;
                 }
                 if self.next_rect.contains(fe.abs) {
-                    self.step_month(cx, 1);
+                    self.step(cx, 1);
                     return;
                 }
                 let hit = self
@@ -1476,48 +1685,15 @@ impl Widget for Calendar {
                 self.animator_play(cx, ids!(focus.off));
                 self.redraw(cx);
             }
-            Hit::KeyDown(ke) => {
-                let motion = match ke.key_code {
-                    KeyCode::ArrowLeft => Some(Motion::PrevDay),
-                    KeyCode::ArrowRight => Some(Motion::NextDay),
-                    KeyCode::ArrowUp => Some(Motion::PrevWeek),
-                    KeyCode::ArrowDown => Some(Motion::NextWeek),
-                    KeyCode::PageUp => Some(Motion::PrevMonth),
-                    KeyCode::PageDown => Some(Motion::NextMonth),
-                    KeyCode::Home => Some(Motion::WeekStart),
-                    KeyCode::End => Some(Motion::WeekEnd),
-                    _ => None,
-                };
-                if let Some(motion) = motion {
-                    let want = move_focus(self.focus, self.first_day, motion);
-                    // Step over the days the host has closed rather than
-                    // parking on one: the focus would otherwise sit
-                    // somewhere Return does nothing and say nothing about
-                    // why.
-                    let step = if want < self.focus { -1 } else { 1 };
-                    let landed =
-                        seek(want, step, SEEK_LIMIT, |date| self.allows(date)).unwrap_or(want);
-                    self.focus = landed;
-                    self.show(cx, landed);
-                    self.redraw(cx);
-                }
-                if matches!(ke.key_code, KeyCode::ReturnKey | KeyCode::Space) {
-                    let focus = self.focus;
-                    self.choose(cx, focus);
-                }
-                // Half a range is not an answer, and once one end is picked
-                // up there is otherwise no way to put it down.
-                if ke.key_code == KeyCode::Escape && self.selection.anchor().is_some() {
-                    self.selection.clear();
-                    cx.widget_action(uid, CalendarPickAction::Selected(self.focus));
-                    self.redraw(cx);
-                }
-            }
+            Hit::KeyDown(ke) => match self.grain {
+                CalendarGrain::Day => self.day_key(cx, ke.key_code),
+                _ => self.page_key(cx, ke.key_code),
+            },
             _ => {}
         }
     }
 
-    /// The month on show and how many days are chosen, so a test can read
+    /// The page on show and how many days are chosen, so a test can read
     /// the whole widget in one line.
     fn text(&self) -> String {
         format!("{} ({} chosen)", self.title(), self.selection.days().len())
@@ -1586,859 +1762,6 @@ impl CalendarRef {
         let item = actions.find_widget_action(self.widget_uid())?;
         match item.cast() {
             CalendarPickAction::MonthChanged(year, month) => Some((year, month)),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Script, Widget, Animator)]
-pub struct MonthPicker {
-    #[uid]
-    uid: WidgetUid,
-    #[source]
-    source: ScriptObjectRef,
-    #[redraw]
-    #[live]
-    draw_bg: DrawCalendarFrame,
-    #[live]
-    draw_cell: DrawCalendarCell,
-    #[live]
-    draw_title: DrawText,
-    #[live]
-    draw_arrow: DrawText,
-    #[live]
-    draw_day: DrawText,
-    #[walk]
-    walk: Walk,
-    #[layout]
-    layout: Layout,
-    #[apply_default]
-    animator: Animator,
-
-    #[live]
-    pub mode: CalendarPickMode,
-    #[live]
-    pub year: u32,
-    #[live]
-    pub selected: String,
-    #[live]
-    pub min: String,
-    #[live]
-    pub max: String,
-    #[live]
-    pub month_names: String,
-    #[live]
-    pub long_names: bool,
-
-    #[live(3)]
-    pub columns: usize,
-    #[live(72.0)]
-    pub cell_width: f64,
-    #[live(34.0)]
-    pub cell_height: f64,
-    #[live(32.0)]
-    pub header_height: f64,
-    #[live(28.0)]
-    pub arrow_width: f64,
-    #[live(8.0)]
-    pub inset: f64,
-
-    #[live]
-    pub color_title: Vec4f,
-    #[live]
-    pub color_arrow: Vec4f,
-    #[live]
-    pub color_day: Vec4f,
-    #[live]
-    pub color_off: Vec4f,
-    #[live]
-    pub color_on_selected: Vec4f,
-
-    #[rust]
-    view_year: i32,
-    /// Which of the twelve cells the keyboard is on.
-    #[rust]
-    focus: usize,
-    #[rust]
-    selection: DaySelection,
-    #[rust]
-    bounds: DayBounds,
-    #[rust]
-    hover: Option<usize>,
-    #[rust]
-    cells: Vec<(Rect, CivilDate)>,
-    #[rust]
-    prev_rect: Rect,
-    #[rust]
-    next_rect: Rect,
-    #[rust]
-    adopted: String,
-    #[rust]
-    adopted_year: u32,
-    #[rust]
-    allowed: Option<DayAllowed>,
-}
-
-impl ScriptHook for MonthPicker {
-    fn on_after_new(&mut self, _vm: &mut ScriptVm) {
-        self.selection = DaySelection::new(self.mode);
-        self.adopted = self.selected.clone();
-        self.selection.set_days(&parse_iso_list(&self.selected));
-        self.adopted_year = self.year;
-        let anchor = CivilDate::new(self.year as i32, 1, 1)
-            .or_else(|| self.selection.days().first().copied())
-            .unwrap_or_default();
-        self.view_year = anchor.year;
-        self.focus = self
-            .selection
-            .days()
-            .first()
-            .filter(|date| date.year == self.view_year)
-            .map(|date| (date.month.clamp(1, 12) - 1) as usize)
-            .unwrap_or(0);
-    }
-}
-
-impl MonthPicker {
-    fn sync(&mut self) {
-        if self.selection.mode() != self.mode {
-            self.selection = DaySelection::new(self.mode);
-            self.adopted.clear();
-        }
-        if self.adopted != self.selected {
-            self.adopted = self.selected.clone();
-            self.selection.set_days(&parse_iso_list(&self.selected));
-        }
-        if self.adopted_year != self.year {
-            self.adopted_year = self.year;
-            if let Some(date) = CivilDate::new(self.year as i32, 1, 1) {
-                self.view_year = date.year;
-            }
-        }
-        self.bounds =
-            DayBounds { min: parse_iso(&self.min), max: parse_iso(&self.max), weekdays_off: 0 };
-        self.columns = self.columns.clamp(1, 12);
-    }
-
-    /// The date a cell stands for: the first of that month. A month is
-    /// named by the day it starts on, so everything downstream — bounds,
-    /// selection, actions — works on the same type a calendar does.
-    fn cell_date(&self, index: usize) -> CivilDate {
-        CivilDate { year: self.view_year, month: index as u32 % 12 + 1, day: 1 }
-    }
-
-    pub fn allows(&self, date: CivilDate) -> bool {
-        self.bounds.allows(date) && self.allowed.as_ref().map(|rule| rule(date)).unwrap_or(true)
-    }
-
-    fn label(&self, index: usize) -> String {
-        let names = names_or(&self.month_names, &MONTH_NAMES);
-        let name = &names[index % 12];
-        if self.long_names {
-            name.clone()
-        } else {
-            // Three letters is the shortest form that stays unambiguous in
-            // English; two collides on Ja/Ju and Ma.
-            name.chars().take(3).collect()
-        }
-    }
-
-    fn step_year(&mut self, cx: &mut Cx, delta: i32) {
-        self.view_year += delta;
-        cx.widget_action(
-            self.uid,
-            CalendarPickAction::MonthChanged(self.view_year, self.focus as u32 % 12 + 1),
-        );
-        self.redraw(cx);
-    }
-
-    fn choose(&mut self, cx: &mut Cx, index: usize) {
-        let date = self.cell_date(index);
-        if !self.allows(date) {
-            return;
-        }
-        self.focus = index % 12;
-        let uid = self.uid;
-        match self.selection.pick(date) {
-            Picked::Day(day) | Picked::Cleared(day) => {
-                cx.widget_action(uid, CalendarPickAction::Selected(day));
-            }
-            Picked::Span(start, end) => {
-                cx.widget_action(uid, CalendarPickAction::RangeSelected(start, end));
-            }
-            Picked::Waiting(_) => {}
-        }
-        self.redraw(cx);
-    }
-
-    /// Move the focus by `delta` cells, rolling into the year either side
-    /// rather than stopping. A grid that stops at December leaves the next
-    /// year reachable only through the header.
-    fn move_focus_by(&mut self, cx: &mut Cx, delta: i64) {
-        let flat = self.view_year as i64 * 12 + self.focus as i64 + delta;
-        let year = flat.div_euclid(12) as i32;
-        let index = flat.rem_euclid(12) as usize;
-        if year != self.view_year {
-            self.view_year = year;
-            cx.widget_action(self.uid, CalendarPickAction::MonthChanged(self.view_year, index as u32 + 1));
-        }
-        self.focus = index;
-        self.redraw(cx);
-    }
-
-    pub fn selected_months(&self) -> Vec<CivilDate> {
-        self.selection.days().to_vec()
-    }
-}
-
-impl Widget for MonthPicker {
-    fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
-        self.animator_toggle(cx, disabled, Animate::Yes, ids!(disabled.on), ids!(disabled.off));
-    }
-
-    fn disabled(&self, cx: &Cx) -> bool {
-        self.animator_in_state(cx, ids!(disabled.on))
-    }
-
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
-        self.sync();
-        let cols = self.columns;
-        let rows = 12_usize.div_ceil(cols);
-        let natural_w = self.inset * 2.0 + cols as f64 * self.cell_width;
-        let natural_h = self.inset * 2.0 + self.header_height + rows as f64 * self.cell_height;
-        let walk = Walk {
-            width: match walk.width {
-                Size::Fit { .. } => Size::Fixed(natural_w),
-                other => other,
-            },
-            height: match walk.height {
-                Size::Fit { .. } => Size::Fixed(natural_h),
-                other => other,
-            },
-            ..walk
-        };
-
-        self.draw_bg.begin(cx, walk, self.layout);
-        let frame = cx.turtle().rect();
-        let inner = Rect {
-            pos: dvec2(frame.pos.x + self.inset, frame.pos.y + self.inset),
-            size: dvec2(
-                (frame.size.x - self.inset * 2.0).max(1.0),
-                (frame.size.y - self.inset * 2.0).max(1.0),
-            ),
-        };
-
-        self.draw_title.color = self.color_title;
-        self.draw_arrow.color = self.color_arrow;
-        let title = self.view_year.to_string();
-        let band = Rect { pos: inner.pos, size: dvec2(inner.size.x, self.header_height) };
-        let (prev, next) = draw_header(
-            &mut self.draw_title,
-            &mut self.draw_arrow,
-            cx,
-            band,
-            self.arrow_width,
-            &title,
-        );
-        self.prev_rect = prev;
-        self.next_rect = next;
-
-        let cell_h = ((inner.size.y - self.header_height) / rows as f64).max(1.0);
-        let focused = self.animator_in_state(cx, ids!(focus.on));
-        let off = self.animator_in_state(cx, ids!(disabled.on));
-        let preview = self.selection.preview(self.hover.map(|index| self.cell_date(index)));
-
-        self.cells.clear();
-        let mut looks: Vec<(Rect, usize, CellLook)> = Vec::with_capacity(12);
-        for index in 0..12 {
-            let row_area = Rect {
-                pos: dvec2(
-                    inner.pos.x,
-                    inner.pos.y + self.header_height + (index / cols) as f64 * cell_h,
-                ),
-                size: dvec2(inner.size.x, cell_h),
-            };
-            let rect = grid_cell(row_area, cols, index % cols);
-            let date = self.cell_date(index);
-            let allowed = !off && self.allows(date);
-            let selected = self.selection.contains(date);
-            let mut look = CellLook {
-                selected,
-                focus: focused && self.focus == index,
-                hover: allowed && self.hover == Some(index) && !selected,
-                off: !allowed,
-                ..CellLook::default()
-            };
-            if let Some((start, end)) = preview {
-                if start < end && date >= start && date <= end {
-                    look.span = true;
-                    look.span_end = if date == start {
-                        -1.0
-                    } else if date == end {
-                        1.0
-                    } else {
-                        0.0
-                    };
-                    look.selected = date == start || date == end;
-                }
-            }
-            self.cells.push((rect, date));
-            looks.push((rect, index, look));
-        }
-
-        for (rect, _, look) in &looks {
-            self.draw_cell.selected = if look.selected { 1.0 } else { 0.0 };
-            self.draw_cell.span = if look.span { 1.0 } else { 0.0 };
-            self.draw_cell.span_end = look.span_end;
-            self.draw_cell.today = 0.0;
-            self.draw_cell.focus = if look.focus { 1.0 } else { 0.0 };
-            self.draw_cell.hover = if look.hover { 1.0 } else { 0.0 };
-            self.draw_cell.draw_abs(cx, *rect);
-        }
-        for (rect, index, look) in &looks {
-            self.draw_day.color = if look.off {
-                self.color_off
-            } else if look.selected {
-                self.color_on_selected
-            } else {
-                self.color_day
-            };
-            let label = self.label(*index);
-            draw_centered(&mut self.draw_day, cx, *rect, &label);
-        }
-
-        self.draw_bg.end(cx);
-        if !off {
-            cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
-        }
-        DrawStep::done()
-    }
-
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
-        self.animator_handle_event(cx, event);
-        if self.animator_in_state(cx, ids!(disabled.on)) {
-            return;
-        }
-        match event.hits(cx, self.draw_bg.area()) {
-            Hit::FingerHoverIn(fe) | Hit::FingerHoverOver(fe) => {
-                let at = self
-                    .cells
-                    .iter()
-                    .position(|(rect, date)| rect.contains(fe.abs) && self.allows(*date));
-                let on_step = self.prev_rect.contains(fe.abs) || self.next_rect.contains(fe.abs);
-                cx.set_cursor(if at.is_some() || on_step {
-                    MouseCursor::Hand
-                } else {
-                    MouseCursor::Default
-                });
-                if at != self.hover {
-                    self.hover = at;
-                    self.redraw(cx);
-                }
-            }
-            Hit::FingerHoverOut(_) => {
-                if self.hover.take().is_some() {
-                    self.redraw(cx);
-                }
-            }
-            Hit::FingerDown(fe) if fe.device.is_primary_hit() => {
-                cx.set_key_focus(self.draw_bg.area());
-                if self.prev_rect.contains(fe.abs) {
-                    self.step_year(cx, -1);
-                    return;
-                }
-                if self.next_rect.contains(fe.abs) {
-                    self.step_year(cx, 1);
-                    return;
-                }
-                let hit = self.cells.iter().position(|(rect, _)| rect.contains(fe.abs));
-                if let Some(index) = hit {
-                    self.choose(cx, index);
-                }
-            }
-            Hit::KeyFocus(_) => {
-                self.animator_play(cx, ids!(focus.on));
-                self.redraw(cx);
-            }
-            Hit::KeyFocusLost(_) => {
-                self.animator_play(cx, ids!(focus.off));
-                self.redraw(cx);
-            }
-            Hit::KeyDown(ke) => {
-                let cols = self.columns.clamp(1, 12) as i64;
-                match ke.key_code {
-                    KeyCode::ArrowLeft => self.move_focus_by(cx, -1),
-                    KeyCode::ArrowRight => self.move_focus_by(cx, 1),
-                    KeyCode::ArrowUp => self.move_focus_by(cx, -cols),
-                    KeyCode::ArrowDown => self.move_focus_by(cx, cols),
-                    KeyCode::PageUp => self.move_focus_by(cx, -12),
-                    KeyCode::PageDown => self.move_focus_by(cx, 12),
-                    KeyCode::Home => {
-                        self.focus = 0;
-                        self.redraw(cx);
-                    }
-                    KeyCode::End => {
-                        self.focus = 11;
-                        self.redraw(cx);
-                    }
-                    KeyCode::ReturnKey | KeyCode::Space => {
-                        let focus = self.focus;
-                        self.choose(cx, focus);
-                    }
-                    _ => {}
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn text(&self) -> String {
-        format!("{} ({} chosen)", self.view_year, self.selection.days().len())
-    }
-}
-
-impl MonthPickerRef {
-    pub fn selected_months(&self) -> Vec<CivilDate> {
-        self.borrow().map(|inner| inner.selected_months()).unwrap_or_default()
-    }
-
-    pub fn selected_month(&self) -> Option<CivilDate> {
-        self.borrow().and_then(|inner| inner.selected_months().first().copied())
-    }
-
-    pub fn set_day_allowed(&self, rule: DayAllowed) {
-        if let Some(mut inner) = self.borrow_mut() {
-            inner.allowed = Some(rule);
-        }
-    }
-
-    pub fn selected(&self, actions: &Actions) -> Option<CivilDate> {
-        let item = actions.find_widget_action(self.widget_uid())?;
-        match item.cast() {
-            CalendarPickAction::Selected(date) => Some(date),
-            _ => None,
-        }
-    }
-
-    pub fn range_selected(&self, actions: &Actions) -> Option<(CivilDate, CivilDate)> {
-        let item = actions.find_widget_action(self.widget_uid())?;
-        match item.cast() {
-            CalendarPickAction::RangeSelected(start, end) => Some((start, end)),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Script, Widget, Animator)]
-pub struct YearPicker {
-    #[uid]
-    uid: WidgetUid,
-    #[source]
-    source: ScriptObjectRef,
-    #[redraw]
-    #[live]
-    draw_bg: DrawCalendarFrame,
-    #[live]
-    draw_cell: DrawCalendarCell,
-    #[live]
-    draw_title: DrawText,
-    #[live]
-    draw_arrow: DrawText,
-    #[live]
-    draw_day: DrawText,
-    #[walk]
-    walk: Walk,
-    #[layout]
-    layout: Layout,
-    #[apply_default]
-    animator: Animator,
-
-    #[live]
-    pub mode: CalendarPickMode,
-    #[live]
-    pub year: u32,
-    #[live]
-    pub selected: String,
-    #[live]
-    pub min: String,
-    #[live]
-    pub max: String,
-
-    #[live(3)]
-    pub columns: usize,
-    #[live(72.0)]
-    pub cell_width: f64,
-    #[live(34.0)]
-    pub cell_height: f64,
-    #[live(32.0)]
-    pub header_height: f64,
-    #[live(28.0)]
-    pub arrow_width: f64,
-    #[live(8.0)]
-    pub inset: f64,
-
-    #[live]
-    pub color_title: Vec4f,
-    #[live]
-    pub color_arrow: Vec4f,
-    #[live]
-    pub color_day: Vec4f,
-    #[live]
-    pub color_off: Vec4f,
-    #[live]
-    pub color_on_selected: Vec4f,
-
-    /// The first year of the page on show.
-    #[rust]
-    page: i32,
-    #[rust]
-    focus: usize,
-    #[rust]
-    selection: DaySelection,
-    #[rust]
-    bounds: DayBounds,
-    #[rust]
-    hover: Option<usize>,
-    #[rust]
-    cells: Vec<(Rect, CivilDate)>,
-    #[rust]
-    prev_rect: Rect,
-    #[rust]
-    next_rect: Rect,
-    #[rust]
-    adopted: String,
-    #[rust]
-    adopted_year: u32,
-    #[rust]
-    allowed: Option<DayAllowed>,
-}
-
-impl ScriptHook for YearPicker {
-    fn on_after_new(&mut self, _vm: &mut ScriptVm) {
-        self.selection = DaySelection::new(self.mode);
-        self.adopted = self.selected.clone();
-        self.selection.set_days(&parse_iso_list(&self.selected));
-        self.adopted_year = self.year;
-        let anchor = CivilDate::new(self.year as i32, 1, 1)
-            .or_else(|| self.selection.days().first().copied())
-            .unwrap_or_default();
-        self.page = year_page(anchor.year);
-        self.focus = (anchor.year - self.page).clamp(0, 11) as usize;
-    }
-}
-
-impl YearPicker {
-    fn sync(&mut self) {
-        if self.selection.mode() != self.mode {
-            self.selection = DaySelection::new(self.mode);
-            self.adopted.clear();
-        }
-        if self.adopted != self.selected {
-            self.adopted = self.selected.clone();
-            self.selection.set_days(&parse_iso_list(&self.selected));
-        }
-        if self.adopted_year != self.year {
-            self.adopted_year = self.year;
-            if let Some(date) = CivilDate::new(self.year as i32, 1, 1) {
-                self.page = year_page(date.year);
-                self.focus = (date.year - self.page).clamp(0, 11) as usize;
-            }
-        }
-        self.bounds =
-            DayBounds { min: parse_iso(&self.min), max: parse_iso(&self.max), weekdays_off: 0 };
-        self.columns = self.columns.clamp(1, 12);
-    }
-
-    /// A year is named by the day it starts on, for the same reason a month
-    /// is: one date type through the whole family.
-    fn cell_date(&self, index: usize) -> CivilDate {
-        CivilDate { year: self.page + index as i32, month: 1, day: 1 }
-    }
-
-    pub fn allows(&self, date: CivilDate) -> bool {
-        self.bounds.allows(date) && self.allowed.as_ref().map(|rule| rule(date)).unwrap_or(true)
-    }
-
-    fn step_page(&mut self, cx: &mut Cx, delta: i32) {
-        self.page += delta * 12;
-        cx.widget_action(self.uid, CalendarPickAction::MonthChanged(self.page, 1));
-        self.redraw(cx);
-    }
-
-    fn choose(&mut self, cx: &mut Cx, index: usize) {
-        let date = self.cell_date(index);
-        if !self.allows(date) {
-            return;
-        }
-        self.focus = index.min(11);
-        let uid = self.uid;
-        match self.selection.pick(date) {
-            Picked::Day(day) | Picked::Cleared(day) => {
-                cx.widget_action(uid, CalendarPickAction::Selected(day));
-            }
-            Picked::Span(start, end) => {
-                cx.widget_action(uid, CalendarPickAction::RangeSelected(start, end));
-            }
-            Picked::Waiting(_) => {}
-        }
-        self.redraw(cx);
-    }
-
-    fn move_focus_by(&mut self, cx: &mut Cx, delta: i64) {
-        let flat = self.page as i64 + self.focus as i64 + delta;
-        let page = year_page(flat as i32);
-        if page != self.page {
-            self.page = page;
-            cx.widget_action(self.uid, CalendarPickAction::MonthChanged(self.page, 1));
-        }
-        self.focus = (flat as i32 - self.page).clamp(0, 11) as usize;
-        self.redraw(cx);
-    }
-
-    pub fn selected_years(&self) -> Vec<CivilDate> {
-        self.selection.days().to_vec()
-    }
-}
-
-impl Widget for YearPicker {
-    fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
-        self.animator_toggle(cx, disabled, Animate::Yes, ids!(disabled.on), ids!(disabled.off));
-    }
-
-    fn disabled(&self, cx: &Cx) -> bool {
-        self.animator_in_state(cx, ids!(disabled.on))
-    }
-
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
-        self.sync();
-        let cols = self.columns;
-        let rows = 12_usize.div_ceil(cols);
-        let natural_w = self.inset * 2.0 + cols as f64 * self.cell_width;
-        let natural_h = self.inset * 2.0 + self.header_height + rows as f64 * self.cell_height;
-        let walk = Walk {
-            width: match walk.width {
-                Size::Fit { .. } => Size::Fixed(natural_w),
-                other => other,
-            },
-            height: match walk.height {
-                Size::Fit { .. } => Size::Fixed(natural_h),
-                other => other,
-            },
-            ..walk
-        };
-
-        self.draw_bg.begin(cx, walk, self.layout);
-        let frame = cx.turtle().rect();
-        let inner = Rect {
-            pos: dvec2(frame.pos.x + self.inset, frame.pos.y + self.inset),
-            size: dvec2(
-                (frame.size.x - self.inset * 2.0).max(1.0),
-                (frame.size.y - self.inset * 2.0).max(1.0),
-            ),
-        };
-
-        self.draw_title.color = self.color_title;
-        self.draw_arrow.color = self.color_arrow;
-        let title = format!("{} \u{2013} {}", self.page, self.page + 11);
-        let band = Rect { pos: inner.pos, size: dvec2(inner.size.x, self.header_height) };
-        let (prev, next) = draw_header(
-            &mut self.draw_title,
-            &mut self.draw_arrow,
-            cx,
-            band,
-            self.arrow_width,
-            &title,
-        );
-        self.prev_rect = prev;
-        self.next_rect = next;
-
-        let cell_h = ((inner.size.y - self.header_height) / rows as f64).max(1.0);
-        let focused = self.animator_in_state(cx, ids!(focus.on));
-        let off = self.animator_in_state(cx, ids!(disabled.on));
-        let preview = self.selection.preview(self.hover.map(|index| self.cell_date(index)));
-
-        self.cells.clear();
-        let mut looks: Vec<(Rect, usize, CellLook)> = Vec::with_capacity(12);
-        for index in 0..12 {
-            let row_area = Rect {
-                pos: dvec2(
-                    inner.pos.x,
-                    inner.pos.y + self.header_height + (index / cols) as f64 * cell_h,
-                ),
-                size: dvec2(inner.size.x, cell_h),
-            };
-            let rect = grid_cell(row_area, cols, index % cols);
-            let date = self.cell_date(index);
-            let allowed = !off && self.allows(date);
-            let selected = self.selection.contains(date);
-            let mut look = CellLook {
-                selected,
-                focus: focused && self.focus == index,
-                hover: allowed && self.hover == Some(index) && !selected,
-                off: !allowed,
-                ..CellLook::default()
-            };
-            if let Some((start, end)) = preview {
-                if start < end && date >= start && date <= end {
-                    look.span = true;
-                    look.span_end = if date == start {
-                        -1.0
-                    } else if date == end {
-                        1.0
-                    } else {
-                        0.0
-                    };
-                    look.selected = date == start || date == end;
-                }
-            }
-            self.cells.push((rect, date));
-            looks.push((rect, index, look));
-        }
-
-        for (rect, _, look) in &looks {
-            self.draw_cell.selected = if look.selected { 1.0 } else { 0.0 };
-            self.draw_cell.span = if look.span { 1.0 } else { 0.0 };
-            self.draw_cell.span_end = look.span_end;
-            self.draw_cell.today = 0.0;
-            self.draw_cell.focus = if look.focus { 1.0 } else { 0.0 };
-            self.draw_cell.hover = if look.hover { 1.0 } else { 0.0 };
-            self.draw_cell.draw_abs(cx, *rect);
-        }
-        for (rect, index, look) in &looks {
-            self.draw_day.color = if look.off {
-                self.color_off
-            } else if look.selected {
-                self.color_on_selected
-            } else {
-                self.color_day
-            };
-            let label = (self.page + *index as i32).to_string();
-            draw_centered(&mut self.draw_day, cx, *rect, &label);
-        }
-
-        self.draw_bg.end(cx);
-        if !off {
-            cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
-        }
-        DrawStep::done()
-    }
-
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
-        self.animator_handle_event(cx, event);
-        if self.animator_in_state(cx, ids!(disabled.on)) {
-            return;
-        }
-        match event.hits(cx, self.draw_bg.area()) {
-            Hit::FingerHoverIn(fe) | Hit::FingerHoverOver(fe) => {
-                let at = self
-                    .cells
-                    .iter()
-                    .position(|(rect, date)| rect.contains(fe.abs) && self.allows(*date));
-                let on_step = self.prev_rect.contains(fe.abs) || self.next_rect.contains(fe.abs);
-                cx.set_cursor(if at.is_some() || on_step {
-                    MouseCursor::Hand
-                } else {
-                    MouseCursor::Default
-                });
-                if at != self.hover {
-                    self.hover = at;
-                    self.redraw(cx);
-                }
-            }
-            Hit::FingerHoverOut(_) => {
-                if self.hover.take().is_some() {
-                    self.redraw(cx);
-                }
-            }
-            Hit::FingerDown(fe) if fe.device.is_primary_hit() => {
-                cx.set_key_focus(self.draw_bg.area());
-                if self.prev_rect.contains(fe.abs) {
-                    self.step_page(cx, -1);
-                    return;
-                }
-                if self.next_rect.contains(fe.abs) {
-                    self.step_page(cx, 1);
-                    return;
-                }
-                let hit = self.cells.iter().position(|(rect, _)| rect.contains(fe.abs));
-                if let Some(index) = hit {
-                    self.choose(cx, index);
-                }
-            }
-            Hit::KeyFocus(_) => {
-                self.animator_play(cx, ids!(focus.on));
-                self.redraw(cx);
-            }
-            Hit::KeyFocusLost(_) => {
-                self.animator_play(cx, ids!(focus.off));
-                self.redraw(cx);
-            }
-            Hit::KeyDown(ke) => {
-                let cols = self.columns.clamp(1, 12) as i64;
-                match ke.key_code {
-                    KeyCode::ArrowLeft => self.move_focus_by(cx, -1),
-                    KeyCode::ArrowRight => self.move_focus_by(cx, 1),
-                    KeyCode::ArrowUp => self.move_focus_by(cx, -cols),
-                    KeyCode::ArrowDown => self.move_focus_by(cx, cols),
-                    KeyCode::PageUp => self.move_focus_by(cx, -12),
-                    KeyCode::PageDown => self.move_focus_by(cx, 12),
-                    KeyCode::Home => {
-                        self.focus = 0;
-                        self.redraw(cx);
-                    }
-                    KeyCode::End => {
-                        self.focus = 11;
-                        self.redraw(cx);
-                    }
-                    KeyCode::ReturnKey | KeyCode::Space => {
-                        let focus = self.focus;
-                        self.choose(cx, focus);
-                    }
-                    _ => {}
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn text(&self) -> String {
-        format!(
-            "{} \u{2013} {} ({} chosen)",
-            self.page,
-            self.page + 11,
-            self.selection.days().len()
-        )
-    }
-}
-
-impl YearPickerRef {
-    pub fn selected_years(&self) -> Vec<CivilDate> {
-        self.borrow().map(|inner| inner.selected_years()).unwrap_or_default()
-    }
-
-    pub fn selected_year(&self) -> Option<i32> {
-        self.borrow()
-            .and_then(|inner| inner.selected_years().first().map(|date| date.year))
-    }
-
-    pub fn set_day_allowed(&self, rule: DayAllowed) {
-        if let Some(mut inner) = self.borrow_mut() {
-            inner.allowed = Some(rule);
-        }
-    }
-
-    pub fn selected(&self, actions: &Actions) -> Option<CivilDate> {
-        let item = actions.find_widget_action(self.widget_uid())?;
-        match item.cast() {
-            CalendarPickAction::Selected(date) => Some(date),
-            _ => None,
-        }
-    }
-
-    pub fn range_selected(&self, actions: &Actions) -> Option<(CivilDate, CivilDate)> {
-        let item = actions.find_widget_action(self.widget_uid())?;
-        match item.cast() {
-            CalendarPickAction::RangeSelected(start, end) => Some((start, end)),
             _ => None,
         }
     }
@@ -2756,6 +2079,74 @@ mod tests {
             assert_eq!(year_page(2016 + offset), 2016);
         }
         assert_eq!(year_page(-1), -12);
+    }
+
+    /// A page of years is the page `year_page` names, and a page of months
+    /// is a calendar year. One rule in two units is what lets the two
+    /// twelve-cell pages share their keyboard and their header.
+    #[test]
+    fn a_twelve_cell_page_is_the_year_page_in_either_unit() {
+        for year in -30..=3000 {
+            assert_eq!(page_of(year as i64), year_page(year) as i64);
+            for month in 1..=12 {
+                let at = CalendarGrain::Month.ordinal(date(year, month, 1));
+                assert_eq!(
+                    CalendarGrain::Month.date_at(page_of(at)),
+                    date(year, 1, 1),
+                    "{year}-{month} is on the page that starts its own year"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_cell_and_its_ordinal_round_trip_in_every_grain() {
+        for grain in [CalendarGrain::Day, CalendarGrain::Month, CalendarGrain::Year] {
+            for year in [-1, 0, 1, 1969, 1970, 2026] {
+                for month in 1..=12 {
+                    let cell = grain.floor(date(year, month, 17));
+                    assert_eq!(grain.date_at(grain.ordinal(cell)), cell, "{grain:?} {cell:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_coarser_grain_names_a_cell_by_the_day_it_starts_on() {
+        let day = date(2026, 9, 17);
+        assert_eq!(CalendarGrain::Day.floor(day), day);
+        assert_eq!(CalendarGrain::Month.floor(day), date(2026, 9, 1));
+        assert_eq!(CalendarGrain::Year.floor(day), date(2026, 1, 1));
+    }
+
+    /// The keyboard on a twelve-cell page is an addition, and it rolls into
+    /// the page either side rather than stopping at the last cell.
+    #[test]
+    fn a_move_on_a_twelve_cell_page_rolls_into_the_next_one() {
+        let months = CalendarGrain::Month;
+        let december = months.ordinal(date(2026, 12, 1));
+        assert_eq!(months.date_at(december + 1), date(2027, 1, 1));
+        assert_eq!(months.date_at(december + 3), date(2027, 3, 1), "a row down, three to a row");
+        assert_eq!(months.date_at(december - 12), date(2025, 12, 1), "a page back keeps the month");
+        assert_ne!(page_of(december + 1), page_of(december));
+        assert_eq!(months.date_at(months.ordinal(date(0, 1, 1)) - 1), date(-1, 12, 1));
+
+        let years = CalendarGrain::Year;
+        let last = years.ordinal(date(2027, 1, 1));
+        assert_eq!(page_of(last), 2016);
+        assert_eq!(years.date_at(last + 1), date(2028, 1, 1));
+        assert_eq!(page_of(last + 1), 2028);
+        assert_eq!(page_of(last + 12), 2028, "a page on lands on the next page, same cell");
+    }
+
+    #[test]
+    fn a_month_cell_is_three_letters_unless_asked_for_the_whole_name() {
+        assert_eq!(month_label("September", false), "Sep");
+        assert_eq!(month_label("September", true), "September");
+        assert_eq!(month_label("May", false), "May");
+        // Counted in characters, not bytes: a name that is not ASCII must
+        // not be cut through the middle of a letter.
+        assert_eq!(month_label("März", false), "Mär");
     }
 
     #[test]

@@ -7,9 +7,32 @@
 //! two or three rings deep. Only the direction within the open rings decides
 //! the pick; how far past a ring's inner edge the pointer went never does.
 //!
+//! A ring asks the hand for a DIRECTION and nothing else. A list menu asks
+//! for a direction and a distance, since every row is a different way away
+//! and each one is a thin target to stop on. Past the dead zone in the middle
+//! every wedge is unbounded, so a flick that leaves the hub and stops anywhere
+//! out along a wedge picks it, and the same flick means the same thing
+//! wherever the ring was opened.
+//!
+//! Both the drawing and the picking measure angles CLOCKWISE FROM STRAIGHT
+//! UP, and both get that measure from [`ArcRing`]. One measure in one place
+//! is what stops the wedge that is seen and the wedge that is got from
+//! drifting apart by a half step nobody notices until a flick picks the
+//! neighbour. The wedges are two comparisons per pixel in the shader, a
+//! radius test and an angle test, rather than outlines walked as paths, which
+//! do not paint reliably here.
+//!
 //! It floats over everything on an overlay of its own. That lets the rings
 //! reach past the widget that opened them, and it is what makes the frosted
 //! look possible, because glass can only sample the window from an overlay.
+//!
+//! `overlay: false` draws the rings in the field instead, in the parent's own
+//! draw list: the field is then the room the rings may open in, a Fit field
+//! is the ring's own box, and the menu holds neither the pointer nor the
+//! keyboard of the rest of the window. `pinned` keeps such a ring up, centred
+//! in its field, and leaves it up after a pick: a radial control sitting on
+//! the surface rather than a menu that is summoned. `PieMenu` is the preset
+//! for the ring in its field, and `labels` fills a flat ring from bare words.
 //!
 //! The rings grow open on the theme's motion tokens: `enter_ease` is one of
 //! the theme's easings and both enter times are theme durations, so the menu
@@ -18,18 +41,16 @@
 //! digits and the outside test go on reading the edge the ring comes to rest
 //! at, so what a pointer reaches never depends on the frame it lands in.
 //!
-//! `PieMenu` stays what it is: the pinned, in-field ring of flat labels that
-//! reports an index. This is the summoned menu with depth. It shares the pie
-//! menu's angle measure and its number keys, not its drawing.
-//!
 //! What it deliberately does NOT do. No more than three rings: a fourth
 //! would need a disc wider than most windows are tall, and by then its arcs
-//! have been split three times. No arrow keys, for the pie menu's reason: in
-//! a ring an arrow would have to be a compass direction and a list step at
-//! once. No memory of the last pick, and no pinned mode, which is the pie
-//! menu's job. Nothing animates away: a pick, a cancel or a move inward takes
-//! its rings down at once, because a ring still shrinking under the pointer
-//! reads as a ring that is still open.
+//! have been split three times. No arrow keys: in a ring an arrow would have
+//! to be a compass direction and a list step at once, so the first nine
+//! choices of the outermost ring are picked by their own number. No memory of
+//! the last pick, pinned or not: it reports a choice, and a control that has
+//! to show its current setting is a radio group and not a menu. Nothing
+//! animates away: a pick, a cancel or a move inward takes its rings down at
+//! once, because a ring still shrinking under the pointer reads as a ring
+//! that is still open.
 
 use crate::{
     animator::Ease,
@@ -40,7 +61,6 @@ use crate::{
     makepad_draw::*,
     modal::area_after_redraws,
     overlay_place::{claim_escape, orphan_sweep_locks},
-    pie_menu::{fit_centre, key_number},
     widget::*,
 };
 use std::f64::consts::{PI, TAU};
@@ -50,9 +70,15 @@ use std::f64::consts::{PI, TAU};
 /// ring would not, and its arcs would be too thin to aim at anyway.
 const MAX_DEPTH: usize = 3;
 
-/// The least ring 0 can reach past its hub and still be aimed at: the pie
-/// menu's floor, so the two menus answer a hub wider than the radius alike.
+/// The least ring 0 can reach past its hub and still be aimed at: a caller
+/// that sets a hub wider than the radius still gets something aimable rather
+/// than an empty box.
 const RING_MIN: f64 = 8.0;
+
+/// The room left around the rings inside what they are fitted to: the rim is
+/// feathered over about a pixel and a half, and a ring drawn hard against
+/// the edge of its field loses that feather to the clip.
+const RING_PAD: f64 = 4.0;
 
 /// Room around each wedge's own box for the feather along its edges.
 const WEDGE_PAD: f64 = 2.0;
@@ -144,6 +170,18 @@ impl RadialNode {
     }
 }
 
+/// A flat ring from bare words, the first at twelve o'clock and the rest
+/// clockwise. A word has no key of its own, so its position is its key: the
+/// pick of the third word is "2", the number `RadialPick::index` answers, and
+/// two choices that read alike still cannot be mistaken for each other.
+pub fn flat_ring<S: AsRef<str>>(labels: &[S]) -> Vec<RadialNode> {
+    labels
+        .iter()
+        .enumerate()
+        .map(|(i, label)| RadialNode::new(&i.to_string(), label.as_ref()))
+        .collect()
+}
+
 /// How many levels a tree has: 0 for no choices, 1 for a single ring.
 fn levels(nodes: &[RadialNode]) -> usize {
     nodes
@@ -231,9 +269,12 @@ pub fn build_tree(flat: &[(&str, &str, &str, bool)]) -> (Vec<RadialNode>, Vec<St
 /// One ring's worth of wedges: `count` of them sharing `span` radians from
 /// `start`, between `inner` and `outer` points from the centre.
 ///
-/// Angles are the pie menu's measure — radians CLOCKWISE FROM STRAIGHT UP —
-/// so a full ring here and a `PieRing` agree on every wedge. An outer ring
-/// is the same thing with less than the whole circle.
+/// Angles here are radians measured CLOCKWISE FROM STRAIGHT UP, which is
+/// neither convention this file would otherwise be pulled between: the pixel
+/// grid grows downward and `atan2` counts anticlockwise from the +x axis.
+/// Converting once, here, is what keeps the drawing and the picking talking
+/// about the same wedge. An outer ring is a full ring with less than the
+/// whole circle.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ArcRing {
     pub count: usize,
@@ -244,8 +285,9 @@ pub struct ArcRing {
 }
 
 impl ArcRing {
-    /// The whole circle, wedge 0 centred on twelve o'clock as the pie menu
-    /// draws it.
+    /// The whole circle, wedge 0 centred on twelve o'clock, so the numbers
+    /// read the way a clock face does and the seam between the last wedge and
+    /// the first lands ON twelve rather than beside it.
     pub fn full(count: usize, inner: f64, outer: f64) -> Self {
         let start = if count == 0 { 0.0 } else { -PI / count as f64 };
         Self { count, start, span: TAU, inner, outer }
@@ -314,7 +356,7 @@ impl ArcRing {
     }
 
     /// How far right of and BELOW the centre the middle of wedge `i` sits,
-    /// `radius` out, as `PieRing::offset` measures it.
+    /// `radius` out.
     pub fn offset(&self, i: usize, radius: f64) -> (f64, f64) {
         let c = self.centre(i);
         (c.sin() * radius, -c.cos() * radius)
@@ -506,6 +548,23 @@ fn ring_change(
     settle
 }
 
+/// The choice a key names, counting from one, or nothing. The digits pick by
+/// POSITION, which is the only keyboard a ring can honestly have.
+fn key_number(code: KeyCode) -> Option<usize> {
+    match code {
+        KeyCode::Key1 | KeyCode::Numpad1 => Some(1),
+        KeyCode::Key2 | KeyCode::Numpad2 => Some(2),
+        KeyCode::Key3 | KeyCode::Numpad3 => Some(3),
+        KeyCode::Key4 | KeyCode::Numpad4 => Some(4),
+        KeyCode::Key5 | KeyCode::Numpad5 => Some(5),
+        KeyCode::Key6 | KeyCode::Numpad6 => Some(6),
+        KeyCode::Key7 | KeyCode::Numpad7 => Some(7),
+        KeyCode::Key8 | KeyCode::Numpad8 => Some(8),
+        KeyCode::Key9 | KeyCode::Numpad9 => Some(9),
+        _ => None,
+    }
+}
+
 /// The choice a digit names on the focus ring, which is the deepest open
 /// one: the digits count from one on that ring, so the numbers drawn and the
 /// keys that answer move outward together.
@@ -539,6 +598,30 @@ fn fit_bounds(pass: DVec2, left: f64, top: f64, right: f64, bottom: f64) -> Rect
             (pass.y - top - bottom - EDGE * 2.0).max(0.0),
         ),
     }
+}
+
+/// The centre rings reaching `radius` open at when they were asked for at
+/// `at`: nudged until the whole of them is inside `field`, because a wedge
+/// that is half outside is a choice that cannot be aimed at.
+///
+/// A field too small to hold the rings gets them centred and overflowing.
+/// Refusing to draw would leave a press with no menu at all, which is worse
+/// than a ring that reaches past its room.
+pub fn fit_centre(field: Rect, at: DVec2, radius: f64) -> DVec2 {
+    let reach = radius + RING_PAD;
+    let axis = |lo: f64, size: f64, want: f64| -> f64 {
+        let near = lo + reach;
+        let far = lo + size - reach;
+        if near > far {
+            lo + size * 0.5
+        } else {
+            want.clamp(near, far)
+        }
+    };
+    dvec2(
+        axis(field.pos.x, field.size.x, at.x),
+        axis(field.pos.y, field.size.y, at.y),
+    )
 }
 
 /// The share of its enter time a ring has had, from 0 to 1. Reduced motion
@@ -759,6 +842,15 @@ pub struct RadialPick {
     pub path: Vec<usize>,
 }
 
+impl RadialPick {
+    /// The choice on the first ring, counting from zero the way the choices
+    /// are declared. For a flat ring that is the whole pick, so a host that
+    /// only has `labels` reads this and nothing else.
+    pub fn index(&self) -> usize {
+        self.path.first().copied().unwrap_or(0)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Default)]
 pub enum RadialAction {
     Opened,
@@ -967,7 +1059,7 @@ script_mod! {
             if self.hub > 0.5 {
                 // The hub keeps its size while ring 0 grows and only fades
                 // in, so the dead zone is the right size from the first
-                // frame, as the pie menu's is.
+                // frame.
                 if r > self.outer + 1.5 {
                     return vec4(0.0, 0.0, 0.0, 0.0)
                 }
@@ -1065,9 +1157,10 @@ script_mod! {
         ..mod.draw.DrawQuad
         pixel: fn() {
             // Nothing: the field is where a press may open the menu, not a
-            // surface. The rings are on the overlay and leave no rect here,
-            // so without this quad the widget has nothing to be pressed on,
-            // to redraw, or to hold the keyboard with.
+            // surface. The rings are placed absolutely, on the overlay or in
+            // the field, and leave no rect here either way, so without this
+            // quad the widget has nothing to be pressed on, to redraw, or to
+            // hold the keyboard with.
             return vec4(0.0, 0.0, 0.0, 0.0)
         }
     }
@@ -1078,12 +1171,19 @@ script_mod! {
      * outer ring in its own direction, so one flick outward picks a choice
      * two or three rings deep. */
     mod.widgets.RadialMenu = set_type_default() do mod.widgets.RadialMenuBase{
-        // The field: where a press can open the menu. A Fit field is 0 by 0,
-        // which suits a menu opened only from Rust.
+        // The field: where a press can open the menu. A Fit field is 0 by 0
+        // under a floating menu, which suits one opened only from Rust, and
+        // the rings' own box under rings drawn in the field.
         width: Fill
         height: Fill
         /** the choices, flat: RadialItem{key: "share/mail" label: "Mail"} */
         items: []
+        /** the choices as bare words, one flat ring, read when `items` is empty */
+        labels: []
+        /** float over the window on an overlay; off draws the rings in the field itself 0..1 step 1 */
+        overlay: true
+        /** keep the ring up, centred in its field, and leave it up after a pick 0..1 step 1 */
+        pinned: false
         /** what opens it: RadialTrigger.Press Secondary Manual */
         trigger: RadialTrigger.Press
         /** theme fills, or the window blurred behind: RadialLook.Solid Frosted */
@@ -1168,6 +1268,21 @@ script_mod! {
      * through to what is underneath. */
     mod.widgets.RadialMenuContext = mod.widgets.RadialMenu{
         trigger: RadialTrigger.Secondary
+    }
+
+    /** The ring in its own field rather than over the window: a Fit field is
+     * the ring's own box, and a press in the field raises the ring where the
+     * press landed. With `pinned` it is up from the first draw, centred, and
+     * stays up after a pick, which is a radial control on the surface. */
+    mod.widgets.PieMenu = mod.widgets.RadialMenu{
+        width: Fit
+        height: Fit
+        overlay: false
+        // Grown at an even rate over a fixed moment. The theme's entrance,
+        // which the floating menu takes, is a curve for something summoned
+        // over the window, and a pinned ring is never summoned at all.
+        enter_secs: 0.12
+        enter_ease: theme.motion_ease_linear
     }
 }
 
@@ -1263,6 +1378,18 @@ pub struct RadialMenu {
 
     #[live]
     pub items: Vec<RadialItem>,
+    /// The choices as bare words: one flat ring, read when `items` is empty.
+    #[live]
+    pub labels: Vec<String>,
+    /// Float over the window on an overlay. Off, the rings are drawn in the
+    /// field, in the parent's own draw list, and the menu holds neither the
+    /// pointer nor the keyboard of the rest of the window.
+    #[live(true)]
+    pub overlay: bool,
+    /// Keep the ring up, centred in its field, and leave it up after a pick.
+    /// A pinned ring is always drawn in its field: see `in_field`.
+    #[live(false)]
+    pub pinned: bool,
     #[live]
     pub trigger: RadialTrigger,
     #[live]
@@ -1300,6 +1427,10 @@ pub struct RadialMenu {
 
     #[rust]
     draw_list: Option<DrawList2d>,
+    /// The overlay list has been begun at least once, so it shows whatever
+    /// it was last given until it is begun again.
+    #[rust]
+    overlay_drawn: bool,
     #[rust]
     tree: Vec<RadialNode>,
     /// `set_items` was called: the DSL list does not re-seed the tree until
@@ -1355,7 +1486,13 @@ impl ScriptHook for RadialMenu {
                 .iter()
                 .map(|item| (item.key.as_str(), item.label.as_str(), item.icon.as_str(), item.enabled))
                 .collect();
-            let (tree, dropped) = build_tree(&flat);
+            // Bare words are the short way to say a flat ring. Items say
+            // everything words can and more, so they win when both are given.
+            let (tree, dropped) = if flat.is_empty() {
+                (flat_ring(&self.labels), Vec::new())
+            } else {
+                build_tree(&flat)
+            };
             if apply.is_template_apply() {
                 for key in dropped {
                     log!("RadialMenu: item \"{key}\" dropped: an empty segment, more than {MAX_DEPTH} rings deep, a parent declared after it or not at all, or a key used twice");
@@ -1370,7 +1507,13 @@ impl ScriptHook for RadialMenu {
             if reset {
                 self.reset_rings(cx);
             }
-            if self.look == RadialLook::Frosted && self.open.is_some() {
+            // Moved into its field while it was up as an overlay: rings in a
+            // field never hold the pointer, and a pinned ring would never
+            // let go of it.
+            if self.in_field() {
+                self.unlock(cx);
+            }
+            if self.look == RadialLook::Frosted && self.open.is_some() && !self.in_field() {
                 arm_gauss_capture(cx);
             }
             self.redraw_menu(cx);
@@ -1416,10 +1559,22 @@ impl RadialMenu {
         node.enabled && !node.children.is_empty() && depth + 1 < MAX_DEPTH
     }
 
+    /// Whether the rings are drawn in the field rather than on the overlay.
+    /// A pinned ring always is, whatever `overlay` says: a floating menu
+    /// holds the pointer for as long as it is up, and one that is never
+    /// taken down would hold it for good.
+    fn in_field(&self) -> bool {
+        self.pinned || !self.overlay
+    }
+
     fn redraw_menu(&mut self, cx: &mut Cx) {
         self.draw_field.redraw(cx);
-        if let Some(list) = &self.draw_list {
-            list.redraw(cx);
+        // Rings in the field are part of the field's own list. The overlay
+        // list is only asked again when it still has something to let go of.
+        if !self.in_field() || self.overlay_drawn {
+            if let Some(list) = &self.draw_list {
+                list.redraw(cx);
+            }
         }
     }
 
@@ -1473,16 +1628,24 @@ impl RadialMenu {
         if self.tree.is_empty() {
             return;
         }
-        if self.open.is_none() {
+        let in_field = self.in_field();
+        // Rings in the field leave the keyboard where a press or a Tab put
+        // it, so there is no place to remember and give back.
+        if self.open.is_none() && !in_field {
             self.restore_focus = cx.key_focus();
         }
         self.stop_dwell(cx);
         // Fitted once, against the deepest ring the tree can open, so that
         // opening an outer ring never moves the rings already under the
         // pointer; and against the swing, so a spring near an edge stays in
-        // the window.
+        // the window. Rings in the field are fitted to the field instead,
+        // and again on every draw, since a field can be resized under them.
         let full = self.fit_reach();
-        let bounds = self.bounds(cx);
+        let bounds = if in_field {
+            (!self.field_area.is_empty()).then(|| self.field_area.rect(cx))
+        } else {
+            self.bounds(cx)
+        };
         let centre = bounds.map_or(at, |bounds| fit_centre(bounds, at, full));
         let now = cx.seconds_since_app_start();
         self.open = Some(OpenState {
@@ -1498,13 +1661,16 @@ impl RadialMenu {
             dwell: None,
             pointer: None,
         });
-        self.lock(cx);
-        self.focus_owed = true;
-        self.take_focus(cx);
-        if self.look == RadialLook::Frosted {
-            // Before the next frame begins, or that frame paints the rings
-            // without a capture and they show the fallback face for a frame.
-            arm_gauss_capture(cx);
+        if !in_field {
+            self.lock(cx);
+            self.focus_owed = true;
+            self.take_focus(cx);
+            if self.look == RadialLook::Frosted {
+                // Before the next frame begins, or that frame paints the
+                // rings without a capture and they show the fallback face
+                // for a frame.
+                arm_gauss_capture(cx);
+            }
         }
         self.keep_growing(cx);
         self.redraw_menu(cx);
@@ -1534,9 +1700,12 @@ impl RadialMenu {
         Some(fit_bounds(self.pass_size, insets.left, insets.top, insets.right, insets.bottom))
     }
 
-    /// Take the menu down without reporting anything.
+    /// Take the menu down without reporting anything. A pinned ring stays:
+    /// it is a control on the surface and there is nothing to dismiss.
     pub fn close(&mut self, cx: &mut Cx) {
-        self.take_down(cx, false);
+        if !self.pinned {
+            self.take_down(cx, false);
+        }
     }
 
     /// Every close funnels through here. `keep_lock` holds the pointer until
@@ -1575,6 +1744,12 @@ impl RadialMenu {
     /// no widget at all.
     fn give_back_focus(&mut self, cx: &mut Cx) {
         self.focus_owed = false;
+        // Rings in the field never took the keyboard from anywhere: it is on
+        // the field because a press or a Tab put it there, and it stays.
+        if self.in_field() {
+            self.restore_focus = Area::Empty;
+            return;
+        }
         let restore = area_after_redraws(cx, std::mem::take(&mut self.restore_focus));
         let focus = cx.key_focus();
         let ours = !self.field_area.is_empty() && focus == self.field_area;
@@ -1584,6 +1759,11 @@ impl RadialMenu {
     }
 
     fn cancel(&mut self, cx: &mut Cx) {
+        // Escape, a press elsewhere and a release in the hub all mean "none
+        // of these", and a pinned ring answers that by staying as it is.
+        if self.pinned {
+            return;
+        }
         if self.take_down(cx, false) {
             let uid = self.uid;
             cx.widget_action(uid, RadialAction::Cancelled);
@@ -1591,7 +1771,11 @@ impl RadialMenu {
     }
 
     fn choose(&mut self, cx: &mut Cx, pick: RadialPick) {
-        self.take_down(cx, false);
+        if self.pinned {
+            self.redraw_menu(cx);
+        } else {
+            self.take_down(cx, false);
+        }
         let uid = self.uid;
         cx.widget_action(uid, RadialAction::Picked(pick));
     }
@@ -1614,6 +1798,12 @@ impl RadialMenu {
             self.reset_rings(cx);
         }
         self.redraw_menu(cx);
+    }
+
+    /// Replace the choices with a flat ring of bare words, as `labels` does
+    /// from the DSL.
+    pub fn set_labels(&mut self, cx: &mut Cx, labels: Vec<String>) {
+        self.set_items(cx, flat_ring(&labels));
     }
 
     /// The key of the choice being aimed at, when it can be picked.
@@ -1752,6 +1942,21 @@ impl RadialMenu {
         }
     }
 
+    /// The pointer left the field with no press held: nothing is aimed at any
+    /// more. Only rings in the field hear this. A floating menu follows the
+    /// pointer over the whole window, which it holds.
+    fn pointer_left(&mut self, cx: &mut Cx) {
+        self.stop_dwell(cx);
+        let Some(open) = self.open.as_mut() else { return };
+        let changed = open.hot.is_some() || open.aim.is_some();
+        open.hot = None;
+        open.aim = None;
+        open.pointer = None;
+        if changed {
+            self.redraw_menu(cx);
+        }
+    }
+
     /// The dwell ran out while the pointer was still on its target.
     fn dwell_fired(&mut self, cx: &mut Cx) {
         let Some(open) = self.open.as_mut() else { return };
@@ -1839,6 +2044,9 @@ impl RadialMenu {
 
     fn key_down(&mut self, cx: &mut Cx, ke: &KeyEvent) {
         match ke.key_code {
+            // A pinned ring has nothing to take down, and claiming the key
+            // would keep it from an overlay that has.
+            KeyCode::Escape if self.pinned => {}
             KeyCode::Escape => {
                 // Nothing locked above the menu, or an overlay opened over it
                 // loses its Escape to the menu whenever the menu hears the
@@ -1848,6 +2056,9 @@ impl RadialMenu {
                     self.cancel(cx);
                 }
             }
+            // Rings in the field are a tab stop like any other control: Tab
+            // moves on, and losing the keyboard takes a summoned ring down.
+            KeyCode::Tab if self.in_field() => {}
             KeyCode::Tab => {
                 // While the menu is up its field is no tab stop (see
                 // `draw_walk`), so the window finds no stop to move to and
@@ -1963,6 +2174,92 @@ impl RadialMenu {
         }
     }
 
+    /// A secondary press or a long touch in the field, for a menu those open.
+    /// Answers whether the event opened it.
+    ///
+    /// Raw events, so a primary press in the field reaches what is
+    /// underneath untouched: `hits` would capture it. A press another overlay
+    /// holds the pointer for is that overlay's to answer. Raw events do not
+    /// pass through the lock as hits do, so the check is made here, or a
+    /// right press outside an open overlay would open this menu over the
+    /// press that closes it.
+    fn opens_from_secondary(&mut self, cx: &mut Cx, event: &Event) -> bool {
+        if self.trigger != RadialTrigger::Secondary {
+            return false;
+        }
+        let free = cx.sweep_lock_area().map_or(true, |top| top == self.field_area);
+        match event {
+            Event::MouseDown(me) if free && me.button.is_secondary() && self.field_area.clipped_rect(cx).contains(me.abs) => {
+                me.handled.set(self.field_area);
+                self.touch = None;
+                self.open_with(cx, me.abs, true);
+                true
+            }
+            Event::LongPress(lp) if free && self.field_area.clipped_rect(cx).contains(lp.abs) => {
+                self.touch = Some(lp.uid);
+                self.open_with(cx, lp.abs, true);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Input for rings drawn in the field. Hits on the field and not raw
+    /// events: the rings are a control among others on the surface, so they
+    /// answer what lands on their field, light up only under a pointer that
+    /// is over it, and leave every other press, key and wheel to the rest of
+    /// the window. A press held from the field goes on reporting after it has
+    /// left the field, which is exactly what "the distance does not matter"
+    /// needs.
+    fn handle_field_input(&mut self, cx: &mut Cx, event: &Event) {
+        if self.open.is_none() {
+            if self.opens_from_secondary(cx, event) {
+                return;
+            }
+        } else {
+            match event {
+                // A press that lands outside the field dismisses. `hits`
+                // only reports what lands on the field, so the raw press is
+                // the only place a press that missed can be seen.
+                Event::MouseDown(me) if !self.field_area.rect(cx).contains(me.abs) => self.cancel(cx),
+                // The other button is never captured by `hits`, and the
+                // release of a secondary press that opened the rings is the
+                // end of a stroke all the same.
+                Event::MouseUp(me) if !me.button.is_primary() && self.open.as_ref().map_or(false, |open| open.opening_press) => {
+                    self.release_at(cx, me.abs);
+                    return;
+                }
+                _ => {}
+            }
+        }
+        match event.hits(cx, self.field_area) {
+            Hit::FingerDown(fe) if fe.is_primary_hit() => {
+                cx.set_key_focus(self.field_area);
+                if self.open.is_some() {
+                    self.aim_at(cx, fe.abs);
+                } else if self.trigger == RadialTrigger::Press {
+                    self.touch = None;
+                    self.open_with(cx, fe.abs, true);
+                }
+            }
+            Hit::FingerMove(fe) => self.pointer_at(cx, fe.abs),
+            Hit::FingerHoverIn(fe) | Hit::FingerHoverOver(fe) => self.pointer_at(cx, fe.abs),
+            Hit::FingerHoverOut(_) => self.pointer_left(cx),
+            Hit::FingerUp(fe) if fe.is_primary_hit() => self.release_at(cx, fe.abs),
+            Hit::KeyDown(ke) => {
+                if self.open.is_some() {
+                    self.key_down(cx, &ke);
+                } else if self.opens_from_key(cx, &ke) {
+                    let at = self.field_area.rect(cx).center();
+                    self.touch = None;
+                    self.open_with(cx, at, false);
+                }
+            }
+            Hit::KeyFocusLost(_) => self.cancel(cx),
+            _ => {}
+        }
+    }
+
     /// The keyboard's way in: Enter or Space on the field's tab stop opens
     /// the rings around the middle of the field, as a press there would, and
     /// the digits take it from there.
@@ -1973,6 +2270,87 @@ impl RadialMenu {
             && !(m.control || m.alt || m.logo)
             && !self.field_area.is_empty()
             && cx.has_key_focus(self.field_area)
+    }
+
+    /// The rings drawn in the field, in the parent's own draw list.
+    ///
+    /// The field is the room the rings may open in. A Fit field becomes the
+    /// rings' own box: Fit has nothing to measure here — every wedge is
+    /// placed absolutely and leaves no rect — so a Fit field left alone is
+    /// nothing wide, and rings in it are laid out and never painted.
+    fn draw_in_field(&mut self, cx: &mut Cx2d, walk: Walk) -> DrawStep {
+        let reach = self.fit_reach();
+        let natural = (reach + RING_PAD) * 2.0;
+        let walk = Walk {
+            width: match walk.width {
+                Size::Fit { .. } => Size::Fixed(natural),
+                other => other,
+            },
+            height: match walk.height {
+                Size::Fit { .. } => Size::Fixed(natural),
+                other => other,
+            },
+            ..walk
+        };
+        // Begun and ended around the rings rather than walked before them,
+        // so the wedges and the words are this field's own draw calls and
+        // never join those of a ring drawn earlier on the same surface.
+        self.draw_field.begin(cx, walk, Layout::default());
+        let field = cx.turtle().rect();
+        let now = cx.seconds_since_app_start();
+
+        if self.pinned && self.open.is_none() && !self.tree.is_empty() {
+            // Up from the first draw, and with no press behind it: nothing
+            // is reported, and neither the pointer nor the keyboard is taken.
+            self.open = Some(OpenState {
+                centre: field.center(),
+                fitted: true,
+                opened_at: now,
+                press_at: field.center(),
+                opening_press: false,
+                open_path: Vec::new(),
+                ring_opened_at: [now; MAX_DEPTH],
+                hot: None,
+                aim: None,
+                dwell: None,
+                pointer: None,
+            });
+        }
+        if let Some(open) = self.open.as_mut() {
+            // Re-fitted every draw, not just at the open: the field may have
+            // been resized under the rings, and a ring half outside its field
+            // has choices that cannot be aimed at.
+            open.centre = fit_centre(field, open.centre, reach);
+            open.fitted = true;
+        }
+        if self.open.is_some() && !self.tree.is_empty() {
+            // No picture of the window: glass can only sample it from an
+            // overlay, so a frosted ring in its field shows its flat face.
+            self.draw_menu(cx, None);
+        }
+
+        self.draw_field.end(cx);
+        let drawn = self.draw_field.area();
+        self.field_area = cx.update_area_refs(self.field_area, drawn);
+        // One stop for the rings, open or not, so Tab reaches them and the
+        // digits work without the pointer being anywhere near.
+        cx.add_nav_stop(self.field_area, NavRole::TextInput, Inset::default());
+        self.pass_size = cx.current_pass_size();
+
+        // Drawn as an overlay before it was moved into its field: that list
+        // is begun once more, with nothing in it, or it keeps showing the
+        // rings it showed last.
+        if self.overlay_drawn {
+            if let Some(mut list) = self.draw_list.take() {
+                list.begin_overlay_reuse(cx);
+                cx.begin_root_turtle_for_pass(Layout::default());
+                cx.end_pass_sized_turtle();
+                list.end(cx);
+                self.draw_list = Some(list);
+            }
+            self.overlay_drawn = false;
+        }
+        DrawStep::done()
     }
 
     fn draw_menu(&mut self, cx: &mut Cx2d, snapshot: Option<GaussBlurSnapshot>) {
@@ -2158,6 +2536,9 @@ impl Drop for RadialMenu {
 
 impl Widget for RadialMenu {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        if self.in_field() {
+            return self.draw_in_field(cx, walk);
+        }
         // Fit has nothing to measure — the rings are on the overlay — so a
         // Fit field is exactly nothing wide, for a menu opened from Rust.
         let walk = Walk {
@@ -2219,6 +2600,7 @@ impl Widget for RadialMenu {
             return DrawStep::done();
         };
         list.begin_overlay_reuse(cx);
+        self.overlay_drawn = true;
         let snapshot = if self.open.is_some() && self.look == RadialLook::Frosted {
             request_window_gauss(cx)
         } else {
@@ -2241,6 +2623,11 @@ impl Widget for RadialMenu {
         if self.dwell_timer.is_event(event).is_some() {
             self.dwell_timer = Timer::empty();
             self.dwell_fired(cx);
+        }
+
+        if self.in_field() {
+            self.handle_field_input(cx, event);
+            return;
         }
 
         // The release that belongs to a dismissing press: eat it, then let
@@ -2273,7 +2660,6 @@ impl Widget for RadialMenu {
             }
         }
 
-        let mut taken = false;
         if self.open.is_none() {
             if let Event::KeyDown(ke) = event {
                 if self.opens_from_key(cx, ke) {
@@ -2284,31 +2670,11 @@ impl Widget for RadialMenu {
                 }
             }
         }
-        if self.open.is_some() {
-            taken = self.handle_open_input(cx, event);
-        } else if self.trigger == RadialTrigger::Secondary {
-            // Raw events, so a primary press in the field reaches what is
-            // underneath untouched: `hits` would capture it.
-            // A press another overlay holds the pointer for is that overlay's
-            // to answer. Raw events do not pass through the lock as hits do,
-            // so the check is made here, or a right press outside an open
-            // overlay would open this menu over the press that closes it.
-            let free = cx.sweep_lock_area().map_or(true, |top| top == self.field_area);
-            match event {
-                Event::MouseDown(me) if free && me.button.is_secondary() && self.field_area.clipped_rect(cx).contains(me.abs) => {
-                    me.handled.set(self.field_area);
-                    self.touch = None;
-                    self.open_with(cx, me.abs, true);
-                    taken = true;
-                }
-                Event::LongPress(lp) if free && self.field_area.clipped_rect(cx).contains(lp.abs) => {
-                    self.touch = Some(lp.uid);
-                    self.open_with(cx, lp.abs, true);
-                    taken = true;
-                }
-                _ => {}
-            }
-        }
+        let taken = if self.open.is_some() {
+            self.handle_open_input(cx, event)
+        } else {
+            self.opens_from_secondary(cx, event)
+        };
         if self.trigger == RadialTrigger::Press && !taken && self.open.is_none() {
             if let Hit::FingerDown(fe) = event.hits(cx, self.field_area) {
                 if fe.is_primary_hit() {
@@ -2403,6 +2769,21 @@ impl RadialMenuRef {
         }
     }
 
+    /// Replace the choices with a flat ring of bare words.
+    pub fn set_labels(&self, cx: &mut Cx, labels: Vec<String>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_labels(cx, labels);
+        }
+    }
+
+    /// The word at a position on the first ring, for a caller that wants the
+    /// word back rather than the number `picked_index` reported.
+    pub fn label_at(&self, index: usize) -> String {
+        self.borrow()
+            .and_then(|inner| inner.tree.get(index).map(|node| node.label.clone()))
+            .unwrap_or_default()
+    }
+
     /// Every report this menu made in `actions`. One event can carry more
     /// than one — a ring opening and then a pick — so the first alone is not
     /// enough.
@@ -2422,6 +2803,12 @@ impl RadialMenuRef {
             RadialAction::Picked(pick) => Some(pick),
             _ => None,
         })
+    }
+
+    /// The position picked on the first ring this pass, if a choice was: all
+    /// a host of a flat ring needs, in one line.
+    pub fn picked_index(&self, actions: &Actions) -> Option<usize> {
+        self.picked(actions).map(|pick| pick.index())
     }
 
     /// Whether the menu was taken down this pass without a choice.
@@ -2451,7 +2838,6 @@ mod tests {
     use super::*;
     use crate::makepad_platform::event::{ScrollEvent, ScrollPhase};
     use crate::makepad_script::trap::NoTrap;
-    use crate::pie_menu::PieRing;
 
     const DEG: f64 = PI / 180.0;
 
@@ -2516,24 +2902,135 @@ mod tests {
         assert_eq!(levels(&deep), MAX_DEPTH);
     }
 
-    /// A full ring is the pie menu's ring: the same wedge for every
-    /// direction. The directions sit a quarter degree off the half-degree
-    /// grid, clear of every seam, since which side a direction exactly on a
-    /// seam falls to is promised by neither.
+    /// A flat ring of `count` choices around a hub of `hub` points, which is
+    /// all a ring of bare labels ever opens.
+    fn flat(count: usize, hub: f64) -> [ArcRing; 1] {
+        [ArcRing::full(count, hub, 96.0)]
+    }
+
+    /// The wedge a flat ring picks for a direction, well clear of any dead
+    /// zone.
+    fn flat_at(count: usize, hub: f64, deg: f64) -> Option<usize> {
+        let (dx, dy) = aim(deg, 100.0);
+        pick(&flat(count, hub), hub, dx, dy).map(|(_, index)| index)
+    }
+
+    /// Inside the hub there is no direction worth reading — the hand has
+    /// not said anything yet. Outside it, only the direction is read: the
+    /// same aim one point out and a thousand points out is the same wedge,
+    /// which is the whole reason a ring beats a list.
     #[test]
-    fn a_full_arc_ring_agrees_with_pie_ring() {
-        for count in 1..=8 {
-            let arc = ArcRing::full(count, 20.0, 96.0);
-            let pie = PieRing::new(count, 20.0);
-            for step in 0..720 {
-                let (dx, dy) = aim((step as f64 + 0.25) * 0.5, 100.0);
-                let a = dx.atan2(-dy).rem_euclid(TAU);
-                assert_eq!(arc.angle_index(a), pie.pick(dx, dy), "{count} wedges at step {step}");
-            }
+    fn the_dead_zone_answers_nothing_and_distance_past_it_says_nothing_more() {
+        let ring = flat(4, 30.0);
+        assert_eq!(pick(&ring, 30.0, 0.0, 0.0), None, "the centre itself");
+        let (dx, dy) = aim(45.0, 29.0);
+        assert_eq!(pick(&ring, 30.0, dx, dy), None, "still inside the hub");
+        let (dx, dy) = aim(45.0, 31.0);
+        assert_eq!(pick(&ring, 30.0, dx, dy), Some((0, 1)), "one point out and it answers");
+        let (dx, dy) = aim(45.0, 4000.0);
+        assert_eq!(pick(&ring, 30.0, dx, dy), Some((0, 1)), "a mile out is the same wedge");
+    }
+
+    /// Wedge 0 is CENTRED on twelve o'clock, so the seam between the last
+    /// wedge and the first is on twelve too. A hair either side of straight
+    /// up must be the same wedge; the bug this catches is the wrap being
+    /// dropped, which sends the left hair to the last wedge and puts a
+    /// fault line down the middle of the most-aimed-at target on the ring.
+    #[test]
+    fn the_seam_between_the_last_wedge_and_the_first_is_at_twelve_oclock() {
+        assert_eq!(flat_at(4, 10.0, 0.0), Some(0), "straight up");
+        assert_eq!(flat_at(4, 10.0, 0.5), Some(0), "a hair clockwise of up");
+        assert_eq!(flat_at(4, 10.0, -0.5), Some(0), "a hair anticlockwise of up");
+        assert_eq!(flat_at(4, 10.0, 44.9), Some(0), "just short of the first seam");
+        assert_eq!(flat_at(4, 10.0, 45.1), Some(1), "just over it");
+        assert_eq!(flat_at(4, 10.0, 314.9), Some(3), "just short of the last seam");
+        assert_eq!(flat_at(4, 10.0, 315.1), Some(0), "and over that one, back to the first");
+    }
+
+    /// An odd ring has no wedge opposite another and no seam on any axis,
+    /// which is where an even-count assumption shows up. Every wedge's own
+    /// direction picks itself, and both of its seams belong to the right
+    /// side.
+    #[test]
+    fn an_odd_ring_still_lands_every_wedge_on_its_own_direction() {
+        for i in 0..5 {
+            let centre = i as f64 * 72.0;
+            assert_eq!(flat_at(5, 20.0, centre), Some(i), "the middle of wedge {i}");
+            assert_eq!(flat_at(5, 20.0, centre + 35.9), Some(i), "its clockwise edge");
+            assert_eq!(flat_at(5, 20.0, centre - 35.9), Some(i), "its other edge");
+            assert_eq!(flat_at(5, 20.0, centre + 36.1), Some((i + 1) % 5), "over the seam");
+        }
+        // Three, for the one direction most likely to be assumed: right.
+        assert_eq!(flat_at(3, 20.0, 0.0), Some(0), "up");
+        assert_eq!(flat_at(3, 20.0, 90.0), Some(1), "right");
+        assert_eq!(flat_at(3, 20.0, 270.0), Some(2), "left");
+    }
+
+    /// The wedge that is drawn and the wedge that is picked are the same
+    /// wedge: every span's own middle picks the span it came from, and each
+    /// span ends exactly where the next begins, so the ring has no gap for
+    /// a flick to fall into.
+    #[test]
+    fn the_drawn_spans_tile_the_circle_and_agree_with_the_picking() {
+        for count in [1usize, 2, 3, 5, 8] {
+            let ring = ArcRing::full(count, 20.0, 96.0);
             for i in 0..count {
-                assert!((arc.centre(i) - pie.centre(i)).abs() < 1e-9, "centre {i} of {count}");
+                let (a0, a1) = ring.span_of(i);
+                let mid = (a0 + (a1 - a0).rem_euclid(TAU) * 0.5).rem_euclid(TAU);
+                let (dx, dy) = aim(mid.to_degrees(), 100.0);
+                assert_eq!(pick(&[ring], 20.0, dx, dy), Some((0, i)), "the middle of span {i} of {count}");
+                let next = ring.span_of((i + 1) % count).0;
+                assert!(
+                    (a1 - next).abs() < 1e-9,
+                    "span {i} of {count} ends at {a1}, the next begins at {next}"
+                );
             }
         }
+    }
+
+    /// One choice is a whole circle, and an empty ring answers nothing at
+    /// all rather than a wedge that is not there.
+    #[test]
+    fn a_ring_of_one_takes_every_direction_and_a_ring_of_none_takes_none() {
+        for deg in [0.0, 90.0, 180.0, 270.0, 359.0] {
+            assert_eq!(flat_at(1, 15.0, deg), Some(0), "{deg} degrees");
+        }
+        assert_eq!(pick(&flat(1, 15.0), 15.0, 0.0, 0.0), None, "even so, not from the hub");
+        assert_eq!(flat_at(0, 15.0, 90.0), None, "nothing to pick");
+    }
+
+    /// Wedge 0's label goes straight above the centre, and the offsets run
+    /// clockwise from it. A sign error here draws the ring mirrored, which
+    /// reads as correct until the picking disagrees with it.
+    #[test]
+    fn the_first_wedge_sits_above_the_centre_and_the_rest_run_clockwise() {
+        let ring = ArcRing::full(4, 20.0, 96.0);
+        let (dx, dy) = ring.offset(0, 50.0);
+        assert!(dx.abs() < 1e-9 && (dy + 50.0).abs() < 1e-9, "up is ({dx}, {dy})");
+        let (dx, dy) = ring.offset(1, 50.0);
+        assert!((dx - 50.0).abs() < 1e-9 && dy.abs() < 1e-9, "right is ({dx}, {dy})");
+        let (dx, dy) = ring.offset(2, 50.0);
+        assert!(dx.abs() < 1e-9 && (dy - 50.0).abs() < 1e-9, "down is ({dx}, {dy})");
+    }
+
+    /// Rings opened near an edge are nudged until all of them is in the
+    /// field, because a wedge that is half outside cannot be aimed at. A
+    /// field too small for the rings centres them rather than refusing.
+    #[test]
+    fn a_ring_opened_at_the_edge_is_nudged_until_all_of_it_is_reachable() {
+        let field = Rect { pos: dvec2(0.0, 0.0), size: dvec2(400.0, 300.0) };
+        let middle = fit_centre(field, dvec2(200.0, 150.0), 50.0);
+        assert_eq!(middle, dvec2(200.0, 150.0), "room to spare: left where it was asked for");
+        let corner = fit_centre(field, dvec2(2.0, 2.0), 50.0);
+        assert_eq!(corner, dvec2(54.0, 54.0), "pushed in by the reach and the pad");
+        let far = fit_centre(field, dvec2(399.0, 299.0), 50.0);
+        assert_eq!(far, dvec2(346.0, 246.0), "and in from the other two edges");
+        let cramped = Rect { pos: dvec2(10.0, 10.0), size: dvec2(40.0, 40.0) };
+        assert_eq!(
+            fit_centre(cramped, dvec2(12.0, 12.0), 50.0),
+            dvec2(30.0, 30.0),
+            "no room at all: centred, and let to overflow"
+        );
     }
 
     /// The middle of a child arc is its parent's direction, however much the
@@ -2668,7 +3165,7 @@ mod tests {
     }
 
     /// The centre is fitted against the full depth, inside the safe area
-    /// and the edge margin, with the pie menu's own arithmetic.
+    /// and the edge margin.
     #[test]
     fn the_centre_is_fitted_for_the_deepest_ring() {
         let bounds = fit_bounds(dvec2(800.0, 600.0), 0.0, 0.0, 0.0, 0.0);
@@ -3778,5 +4275,180 @@ mod tests {
             assert_eq!(selected, vec!["Edit"]);
             assert!(parts.iter().any(|part| part.text == "Paste" && !part.enabled));
         });
+    }
+
+    /// The ring in its field is a preset that changes only what it says it
+    /// changes, and the bare menu still floats. Bare words become a flat
+    /// ring whose keys are their positions, and items win over words.
+    #[test]
+    fn the_ring_in_its_field_is_a_preset_and_words_are_a_flat_ring() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let bare = crate::script_eval!(vm, {use mod.widgets.* RadialMenu{}});
+            let bare = RadialMenu::script_from_value(vm, bare);
+            assert!(bare.overlay && !bare.pinned && bare.labels.is_empty(), "the bare menu floats, unpinned");
+            assert!(!bare.in_field());
+            assert!(matches!(bare.walk.width, Size::Fill { .. }));
+
+            let pie = crate::script_eval!(vm, {
+                use mod.widgets.*
+                PieMenu{labels: ["Cut" "Copy" "Paste"]}
+            });
+            let pie = RadialMenu::script_from_value(vm, pie);
+            assert!(!pie.overlay && !pie.pinned, "in its field, and summoned until it is pinned");
+            assert!(pie.in_field());
+            assert!(matches!(pie.walk.width, Size::Fit { .. }) && matches!(pie.walk.height, Size::Fit { .. }));
+            assert_eq!((pie.enter_secs, pie.enter_ease), (0.12, Ease::Linear), "grown evenly over a fixed moment");
+            assert_eq!((pie.trigger, pie.look), (RadialTrigger::Press, RadialLook::Solid));
+            assert_eq!(
+                (pie.radius, pie.hub_radius, pie.gap, pie.show_numbers),
+                (bare.radius, bare.hub_radius, bare.gap, bare.show_numbers)
+            );
+            assert_eq!(keys(&pie.tree), vec!["0".to_string(), "1".to_string(), "2".to_string()]);
+            let words: Vec<&str> = pie.tree.iter().map(|node| node.label.as_str()).collect();
+            assert_eq!(words, vec!["Cut", "Copy", "Paste"]);
+
+            let both = crate::script_eval!(vm, {
+                use mod.widgets.*
+                RadialMenu{
+                    labels: ["Cut" "Copy"]
+                    items: [RadialItem{key: "open" label: "Open"}]
+                }
+            });
+            let both = RadialMenu::script_from_value(vm, both);
+            assert_eq!(keys(&both.tree), vec!["open".to_string()], "items say more, so they win");
+
+            let pinned = crate::script_eval!(vm, {use mod.widgets.* RadialMenu{pinned: true}});
+            let pinned = RadialMenu::script_from_value(vm, pinned);
+            assert!(pinned.overlay && pinned.in_field(), "a pinned ring is in its field whatever overlay says");
+        });
+        let pick = RadialPick { id: LiveId::from_str("2"), key: "2".to_string(), path: vec![2] };
+        assert_eq!(pick.index(), 2, "the position a host of bare words reads");
+        assert_eq!(flat_ring(&["a", "a"])[1].key, "1", "two words alike are still two choices");
+    }
+
+    /// A pinned ring above a field a press raises a ring in, drawn once into
+    /// an 800 by 600 window.
+    fn rings_in_fields(cx: &mut Cx) -> (WidgetRef, Target) {
+        let root = cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: 800
+                    height: 600
+                    flow: Down
+                    pinned := PieMenu{pinned: true labels: ["Move" "Rotate" "Scale" "Mirror"]}
+                    summoned := PieMenu{width: 400 height: 300 labels: ["Cut" "Copy" "Paste"]}
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        let mut target = Target::new(cx);
+        target.draw(cx, &root, dvec2(800.0, 600.0));
+        (root, target)
+    }
+
+    fn reports_of(cx: &mut Cx, act: impl FnOnce(&mut Cx)) -> Vec<RadialAction> {
+        let actions = cx.capture_actions(act);
+        reports_in(&actions)
+    }
+
+    /// A pinned ring is up from its first draw, centred in a Fit field that
+    /// is exactly the ring's own box, and takes neither the pointer nor the
+    /// keyboard to be there. A pick reports and leaves it up; Escape and
+    /// `close` pass it by, and Escape is left for an overlay that wants it.
+    #[test]
+    fn a_pinned_ring_is_up_from_its_first_draw_and_nothing_takes_it_down() {
+        let mut cx = drawn_cx();
+        let (root, mut target) = rings_in_fields(&mut cx);
+        let ring = root.widget(&cx, ids!(pinned)).as_radial_menu();
+        let field = field_of(&root, &cx, ids!(pinned));
+        assert_eq!(
+            field.rect(&cx),
+            Rect { pos: dvec2(0.0, 0.0), size: dvec2(200.0, 200.0) },
+            "the reach and the pad, twice"
+        );
+        assert!(ring.is_open(), "up from the first draw");
+        assert_eq!(root.widget(&cx, ids!(pinned)).borrow::<RadialMenu>().unwrap().centre(), Some(dvec2(100.0, 100.0)));
+        assert_eq!(cx.sweep_lock_area(), None, "a control on the surface holds no pointer");
+        settle_focus(&mut cx);
+        assert!(!cx.has_key_focus(field), "and did not take the keyboard to be drawn");
+        assert!(nav_stops(&mut cx, &target).contains(&field), "but it is a stop while it is up");
+
+        let reports = reports_of(&mut cx, |cx| {
+            let widget = root.widget(cx, ids!(pinned));
+            let mut menu = widget.borrow_mut::<RadialMenu>().unwrap();
+            let c = menu.centre().unwrap();
+            menu.pointer_at(cx, toward(c, 90.0, 60.0));
+            assert_eq!(menu.text(), "Rotate", "aimed at under a pointer over the field");
+            menu.pointer_left(cx);
+            assert_eq!(menu.text(), "", "and at nothing once the pointer has left it");
+            menu.key_down(cx, &key(KeyCode::Key3));
+            assert!(menu.is_open(), "a pick leaves it up");
+            menu.key_down(cx, &key(KeyCode::Escape));
+            menu.close(cx);
+            menu.release_at(cx, c);
+            assert!(menu.is_open(), "nothing dismisses it");
+        });
+        assert_eq!(reports, vec![picked("2", &[2])], "one pick, no open and no cancel");
+        assert!(claim_escape(&mut cx), "the Escape it ignored is still there to be claimed");
+
+        target.draw(&mut cx, &root, dvec2(800.0, 600.0));
+        assert!(ring.is_open());
+        assert_eq!(cx.sweep_lock_area(), None);
+    }
+
+    /// A press in the field raises the ring where the press landed, nudged
+    /// into the field and not into the window. The ring holds no pointer, the
+    /// keyboard goes to the field because the press put it there, a release
+    /// on a wedge picks by position, and a press outside the field dismisses
+    /// with nothing left to eat.
+    #[test]
+    fn a_ring_in_its_field_opens_where_the_press_lands_and_holds_nothing() {
+        let mut cx = drawn_cx();
+        let (root, _target) = rings_in_fields(&mut cx);
+        let ring = root.widget(&cx, ids!(summoned)).as_radial_menu();
+        let field = field_of(&root, &cx, ids!(summoned));
+        assert_eq!(field.rect(&cx), Rect { pos: dvec2(0.0, 200.0), size: dvec2(400.0, 300.0) });
+        assert!(!ring.is_open(), "summoned, so closed until it is asked for");
+
+        let press = dvec2(50.0, 220.0);
+        let reports = reports_of(&mut cx, |cx| {
+            root.handle_event(cx, &mouse_down(press, MouseButton::PRIMARY), &mut Scope::empty());
+            root.handle_event(cx, &mouse_up(press, MouseButton::PRIMARY), &mut Scope::empty());
+        });
+        assert_eq!(reports, vec![RadialAction::Opened]);
+        assert!(ring.is_open(), "the press that opened it, let go where it opened, leaves it up");
+        let centre = root.widget(&cx, ids!(summoned)).borrow::<RadialMenu>().unwrap().centre();
+        assert_eq!(centre, Some(dvec2(100.0, 300.0)), "nudged into the field");
+        assert_eq!(cx.sweep_lock_area(), None, "rings in a field hold no pointer");
+        settle_focus(&mut cx);
+        assert!(cx.has_key_focus(field), "the press put the keyboard on the field");
+
+        let copy = toward(dvec2(100.0, 300.0), 120.0, 60.0);
+        let reports = reports_of(&mut cx, |cx| {
+            root.handle_event(cx, &mouse_down(copy, MouseButton::PRIMARY), &mut Scope::empty());
+            root.handle_event(cx, &mouse_up(copy, MouseButton::PRIMARY), &mut Scope::empty());
+        });
+        assert_eq!(reports, vec![picked("1", &[1])]);
+        assert!(!ring.is_open(), "a pick takes a summoned ring down");
+        settle_focus(&mut cx);
+        assert!(cx.has_key_focus(field), "and the keyboard stays where the press put it");
+
+        // A fresh page: the platform lets go of a press when its button
+        // comes up, which nothing here does, and a field still holding one
+        // is told of every press wherever it lands.
+        let mut cx = drawn_cx();
+        let (root, _target) = rings_in_fields(&mut cx);
+        root.widget(&cx, ids!(summoned)).as_radial_menu().open_at(&mut cx, dvec2(200.0, 350.0));
+        let reports = reports_of(&mut cx, |cx| {
+            root.handle_event(cx, &mouse_down(dvec2(700.0, 550.0), MouseButton::PRIMARY), &mut Scope::empty());
+        });
+        assert_eq!(reports, vec![RadialAction::Cancelled], "a press outside the field dismisses");
+        let widget = root.widget(&cx, ids!(summoned));
+        let menu = widget.borrow::<RadialMenu>().unwrap();
+        assert!(!menu.is_open() && !menu.swallow_up && !menu.locked, "with no release owed and nothing held");
     }
 }

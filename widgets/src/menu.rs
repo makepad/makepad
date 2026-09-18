@@ -2,8 +2,8 @@
 //! context menu in an app, with real hover tracking, real keyboard
 //! navigation and real submenus.
 //!
-//! An app declares ONE `MenuLayer` — inside its `OverlayLayers` host, or as
-//! the last child of a window body — and then nobody else has to own a
+//! An app declares ONE `MenuLayer` — as the last child of a window body,
+//! so it draws over every panel — and then nobody else has to own a
 //! menu. A control raises one by emitting [`MenuAction::Open`] with the rows
 //! it wants and the anchor rect it measured from its own drawn area, and
 //! reads [`MenuAction::Picked`] back out of the next actions pass. That is

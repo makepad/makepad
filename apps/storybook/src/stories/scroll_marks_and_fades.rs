@@ -13,7 +13,7 @@ script_mod! {
         draw_text +: {color: theme.color_text_meta}
     }
 
-    mod.stories.ScrollMoreOverview = StoryPage{
+    mod.stories.ScrollMarksAndFadesOverview = StoryPage{
         StoryNote{text: "A scroll view says almost nothing about the part it is not showing. These two say something: a track carrying a mark for every place worth going to, and an edge that goes soft when there is more content past it."}
 
         StoryHeading{text: "A track that doubles as a map"}
@@ -141,6 +141,31 @@ script_mod! {
             }
         }
 
+        StoryHeading{text: "A box that grows until it is told to stop"}
+        StoryNote{text: "`height: Fit` with a `max` is as tall as its content up to the ceiling, and a scrolling box from there on. This one reached its ceiling at 140, so it scrolls and its bottom is soft like any other; with three lines in it, it would be three lines tall and flat."}
+        StoryRow{
+            width: Fill
+            grown := mod.widgets.ScrollShadowView{
+                width: Fill
+                height: Fit{max: FitBound.Abs(140)}
+                flow: Down
+                spacing: theme.space_1
+                padding: theme.mspace_2
+                show_bg: true
+                draw_bg +: {color: uniform(theme.color_surface_container_high) pixel: fn() {return Pal.premul(self.color)}}
+                Line{text: "First"}
+                Line{text: "Second"}
+                Line{text: "Third"}
+                Line{text: "Fourth"}
+                Line{text: "Fifth"}
+                Line{text: "Sixth"}
+                Line{text: "Seventh"}
+                Line{text: "Eighth"}
+                Line{text: "Ninth"}
+                Line{text: "Tenth — the last line, so the bottom is flat here."}
+            }
+        }
+
         StoryHeading{text: "Both ways at once"}
         StoryNote{text: "`ScrollShadowXYView` lets the content overflow across as well as down and fades all four edges on the same rule. The right edge is soft here because the rows are wider than the box."}
         StoryRow{
@@ -165,7 +190,7 @@ script_mod! {
     }
 }
 
-fn scroll_more_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
+fn scroll_marks_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
     let bar = root.annotated_scroll_bar(cx, ids!(subject));
     if let Some(pos) = bar.scrolled(actions) {
         root.label(cx, ids!(reading))
@@ -179,7 +204,7 @@ pub const STORIES: &[Story] = &[Story {
     component: "Scrolling",
     also: &["AnnotatedScrollBar", "AnnotatedScrollBarX", "ScrollShadowView", "ScrollShadowXYView"],
     name: "Marks and shadows",
-    dsl: "ScrollMoreOverview",
+    dsl: "ScrollMarksAndFadesOverview",
     added: "2026-09-10",
     tags: &[
         "new",
@@ -193,7 +218,9 @@ pub const STORIES: &[Story] = &[Story {
         "scrollbar",
         "container",
     ],
-    doc: "# AnnotatedScrollBar and ScrollShadowView\n\nTwo widgets for the same problem: a scrolling box is very quiet about the part of the content it is not showing. The bar says roughly how far down the handle is and nothing about what is down there; the edge of the box says nothing at all, so a list cut off mid-row looks exactly like a list that happened to end.\n\n## AnnotatedScrollBar\n\nA scrollbar whose track carries marks — a coloured tick at every place worth knowing about. The track stops being a position readout and becomes a map of the whole document: a search that matched forty times is forty ticks you can aim at, rather than a count and a \"next\" button pressed forty times.\n\nA mark is a position between 0 and 1 and a colour. Positions are a share of the whole rather than a line number or a pixel offset, because the bar has no idea what the content is counted in and telling it twice is how the two get out of step.\n\n| Written as | Means |\n|---|---|\n| `marks: [\"0.42\"]` | a plain mark, in `mark_color` |\n| `marks: [\"0.42 warn\"]` | `mark_color_warn` |\n| `marks: [\"0.42 error\"]` | `mark_color_error` |\n| `marks: [\"0.42 change\"]` | `mark_color_change` |\n\nThe declared list is a convenience for a fixed set. Anything a program works out goes through `set_marks`, which takes positions and colours of its own and then owns the track.\n\n### Two marks in the same place\n\nThey collapse into one tick. A long document has far more interesting places than the track has rows of pixels — five thousand search hits down a four hundred pixel lane would paint it solid, which is the one result that carries no information at all. The first mark to claim a row keeps it, so a caller that lists errors before hits gets errors drawn.\n\n### What it does not do\n\nIt does not scroll anything. It is told how much content there is with `view_total`, and reports where the handle went as `Scrolled`; wiring that to a view is the host's job, because the thing being mapped is usually not a plain scroll view but a virtualized list, a document model or a timeline. Its own drawn length is the visible extent, since a bar beside a viewport is exactly as long as the viewport.\n\nA press on a mark does not jump to it either. The track already means \"go to here\", and a second meaning on the same press is one too many.\n\n## ScrollShadowView\n\nA scrolling box that fades an edge whenever there is content past it, and only then. Each edge decides for itself, so the top of a list is flat until it has been scrolled and the bottom is soft until the last row is reached. `fade_top`, `fade_bottom`, `fade_left` and `fade_right` turn any of the four off, for the case where something else already draws that line.\n\nThe fade comes up over the first `fade_ramp` pixels of overflow rather than switching on. Scrolling is continuous, and a box moved by one pixel has barely hidden anything; a hard edge appearing at that point reads as a glitch rather than as information.\n\nAn axis that cannot scroll never fades. A permanent gradient down the side of a box whose content fits is a decoration nobody chose, and it makes the fade mean nothing on the boxes where it is doing real work.",
+    doc: "# AnnotatedScrollBar and ScrollShadowView\n\nTwo widgets for the same problem: a scrolling box is very quiet about the part of the content it is not showing. The bar says roughly how far down the handle is and nothing about what is down there; the edge of the box says nothing at all, so a list cut off mid-row looks exactly like a list that happened to end.\n\n## AnnotatedScrollBar\n\nA scrollbar whose track carries marks — a coloured tick at every place worth knowing about. The track stops being a position readout and becomes a map of the whole document: a search that matched forty times is forty ticks you can aim at, rather than a count and a \"next\" button pressed forty times.\n\nA mark is a position between 0 and 1 and a colour. Positions are a share of the whole rather than a line number or a pixel offset, because the bar has no idea what the content is counted in and telling it twice is how the two get out of step.\n\n| Written as | Means |\n|---|---|\n| `marks: [\"0.42\"]` | a plain mark, in `mark_color` |\n| `marks: [\"0.42 warn\"]` | `mark_color_warn` |\n| `marks: [\"0.42 error\"]` | `mark_color_error` |\n| `marks: [\"0.42 change\"]` | `mark_color_change` |\n\nThe declared list is a convenience for a fixed set. Anything a program works out goes through `set_marks`, which takes positions and colours of its own and then owns the track.\n\n### Two marks in the same place\n\nThey collapse into one tick. A long document has far more interesting places than the track has rows of pixels — five thousand search hits down a four hundred pixel lane would paint it solid, which is the one result that carries no information at all. The first mark to claim a row keeps it, so a caller that lists errors before hits gets errors drawn.\n\n### What it does not do\n\nIt does not scroll anything. It is told how much content there is with `view_total`, and reports where the handle went as `Scrolled`; wiring that to a view is the host's job, because the thing being mapped is usually not a plain scroll view but a virtualized list, a document model or a timeline. Its own drawn length is the visible extent, since a bar beside a viewport is exactly as long as the viewport.\n\nA press on a mark does not jump to it either. The track already means \"go to here\", and a second meaning on the same press is one too many.\n\n## ScrollShadowView\n\nA scrolling box that fades an edge whenever there is content past it, and only then. Each edge decides for itself, so the top of a list is flat until it has been scrolled and the bottom is soft until the last row is reached. `fade_top`, `fade_bottom`, `fade_left` and `fade_right` turn any of the four off, for the case where something else already draws that line.\n\nThe fade comes up over the first `fade_ramp` pixels of overflow rather than switching on. Scrolling is continuous, and a box moved by one pixel has barely hidden anything; a hard edge appearing at that point reads as a glitch rather than as information.\n\nAn axis that cannot scroll never fades. A permanent gradient down the side of a box whose content fits is a decoration nobody chose, and it makes the fade mean nothing on the boxes where it is doing real work.
+
+The box is as long as its bars say it is. A `Fit` height with a `max` is as tall as its content until it reaches the ceiling and a scrolling box from there on, and its far edge fades like any other's.",
     subject: "subject",
     feature: None,
     controls: &[
@@ -233,5 +260,5 @@ pub const STORIES: &[Story] = &[Story {
             kind: ControlKind::Bool { prop: "fade_bottom", default: true },
         },
     ],
-    on_actions: Some(scroll_more_actions),
+    on_actions: Some(scroll_marks_actions),
 }];

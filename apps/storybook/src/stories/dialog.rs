@@ -122,7 +122,9 @@ fn dialog_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
                 DialogAction::Confirmed => "confirmed",
                 DialogAction::Cancelled => "cancelled",
                 DialogAction::Dismissed => "dismissed",
-                DialogAction::None => continue,
+                // Coming up and a sheet settling on a rung are reports, and
+                // `answered` hands back only answers.
+                _ => continue,
             };
             root.label(cx, ids!(answer)).set_text(cx, &format!("{name}: {said}"));
         }
@@ -138,7 +140,7 @@ pub const STORIES: &[Story] = &[Story {
     dsl: "DialogOverview",
     added: "2026-09-05",
     tags: &["new"],
-    doc: "# Dialog\n\nA dialog stops the work and asks for an answer. That is the opposite of a toast, and it is why a dialog takes the pointer, takes the keyboard, dims what is behind it and does not go away by itself.\n\nIt is a title, a body that scrolls, and a row of answers that does not: a long body that pushes its buttons off the screen leaves the reader unable to answer the question they were stopped for. `size` picks the width from `Xs` for a yes-or-no up to `Full` for a task that has taken over.\n\nReturn takes the default answer and Escape leaves without one, so a dialog can always be answered or left by keyboard alone; when it closes, the focus goes back where it came from. `destructive` puts the error role on the confirming answer, because \"delete everything\" drawn like \"cancel\" eventually deletes everything.\n\nA dialog nests like every other overlay: a menu or a popover opened inside it takes Escape first, one press closing one thing.\n\nThe layer under it, which dims the window and holds whatever is put on it, is `Modal`, on the next page. Reach for that directly only when what floats over the window is not a question.",
+    doc: "# Dialog\n\nA dialog stops the work and asks for an answer. That is the opposite of a toast, and it is why a dialog takes the pointer, takes the keyboard, dims what is behind it and does not go away by itself.\n\nIt is a title, a body that scrolls, and a row of answers that does not: a long body that pushes its buttons off the screen leaves the reader unable to answer the question they were stopped for. `size` picks the width from `Xs` for a yes-or-no up to `Full` for a task that has taken over.\n\n`side` says where it stands. `PanelEdge.Center`, the default, is the card in the middle of the window that every dialog on this page is. An edge makes the same widget a panel that comes in from it, and `Drawer`, `SideSheet` and `BottomSheet` are that with no answers: they have the Drawer page in this folder.\n\nReturn takes the default answer and Escape leaves without one, so a dialog can always be answered or left by keyboard alone. An answer with an empty label is left out, and a dialog with no `confirm_text` leaves Return to whatever is inside it. When it closes, the focus goes back where it came from. `destructive` puts the error role on the confirming answer, because \"delete everything\" drawn like \"cancel\" eventually deletes everything.\n\nA dialog nests like every other overlay: a menu or a popover opened inside it takes Escape first, one press closing one thing.\n\nThe layer under it, which dims the window and holds whatever is put on it, is `Modal`, on the next page. Reach for that directly only when what floats over the window is not a question.",
     subject: "",
     feature: None,
     controls: &[],
