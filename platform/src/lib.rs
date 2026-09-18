@@ -283,7 +283,7 @@ pub use {
             unregister_media_playback_session, MediaPlaybackSessionId,
         },
         script::vm::*,
-        screen::{fit_window_rect_to_screens, ScreenGeom, MIN_WINDOW_SIZE},
+        screen::{fit_window_rect_to_screens, screens, ScreenGeom, MIN_WINDOW_SIZE},
         shared_bytes::{MappedBytes, SharedBytes, SharedBytesStats},
         storage::{
             StorageError, StorageHandle, StorageList, StorageOp, StorageRequestId,

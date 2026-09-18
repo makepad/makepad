@@ -23,6 +23,30 @@ pub struct ScreenGeom {
     pub is_primary: bool,
 }
 
+/// Every display attached right now, in the platform's window-position space:
+/// what an app that puts a picture on a second screen chooses from.
+#[cfg(all(not(gpusim), target_os = "windows"))]
+pub fn screens() -> Vec<ScreenGeom> {
+    crate::os::windows::win32_screen::win32_screens()
+}
+
+/// Every display attached right now, in the platform's window-position space:
+/// what an app that puts a picture on a second screen chooses from.
+#[cfg(all(not(gpusim), target_os = "macos"))]
+pub fn screens() -> Vec<ScreenGeom> {
+    crate::os::apple::macos::macos_window::macos_screens()
+}
+
+/// A backend with no display list to offer answers with none; a caller
+/// then keeps its window where the system put it.
+#[cfg(not(any(
+    all(not(gpusim), target_os = "windows"),
+    all(not(gpusim), target_os = "macos")
+)))]
+pub fn screens() -> Vec<ScreenGeom> {
+    Vec::new()
+}
+
 /// Area shared by two rectangles; zero when they do not overlap.
 fn overlap_area(a: Rect, b: Rect) -> f64 {
     let w = (a.pos.x + a.size.x).min(b.pos.x + b.size.x) - a.pos.x.max(b.pos.x);
