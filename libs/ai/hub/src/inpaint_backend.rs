@@ -788,6 +788,7 @@ mod tests {
             motion_mode: None,
             peer_sources: Vec::new(),
             peer_tickets: Vec::new(),
+            pixal: None,
         };
         let err = match named_input(&params, INPUT_IMAGE) {
             Err(err) => err,

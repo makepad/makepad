@@ -2318,6 +2318,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn mul_mat_selector_uses_mul_mm_when_feature_allows() {
         let mut ctx = ctx();
         let a = tensor(&mut ctx, TensorType::F16, &[128, 64, 1, 1]);

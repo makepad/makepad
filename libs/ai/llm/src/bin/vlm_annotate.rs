@@ -21,7 +21,7 @@
 use makepad_ai_llm::{
     preprocess_rgb8, LlamaSession, LlamaSessionConfig, VisionConfig, VisionTower,
 };
-use std::io::{BufRead, Write};
+use std::io::Write;
 use std::time::Instant;
 
 fn read_ppm(path: &str) -> Result<(Vec<u8>, usize, usize), String> {

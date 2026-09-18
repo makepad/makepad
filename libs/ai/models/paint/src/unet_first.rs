@@ -5,7 +5,7 @@
 use crate::cuda_unet::f16_bytes;
 use crate::torch_bin::{self, TorchDtype};
 use makepad_ai_common::backend::cuda::{
-    gpu_add, gpu_add_rows_broadcast, gpu_concat_cols, gpu_concat_rows, gpu_conv2d_nchw_cached,
+    gpu_add, gpu_add_rows_broadcast, gpu_concat_cols,
     gpu_conv2d_nchw_packed, gpu_conv2d_planar_cached, gpu_conv2d_planar_strided, gpu_device_available,
     gpu_download, gpu_group_norm_planar, gpu_linear_nt_cached,
     gpu_linear_nt_cached_f16, gpu_to_f16, gpu_to_f32,
@@ -807,18 +807,6 @@ impl UnetFirst {
 
     pub(crate) fn silu_temb(&self, temb: &[f32]) -> Result<GpuTensor, String> {
         gpu_silu(&gpu_upload(temb, 1, temb.len())?)
-    }
-
-    /// Official ResNet on one stacked `[C, n*H*W]` tensor: GN, conv, time
-    /// linear, residual.
-    pub(crate) fn resnet_batch(
-        &self,
-        x: &BatchAct,
-        temb: &[f32],
-        prefix: &str,
-        channels: usize,
-    ) -> Result<BatchAct, String> {
-        self.resnet_batch_act(x, &self.silu_temb(temb)?, prefix, channels)
     }
 
     pub(crate) fn resnet_batch_act(
