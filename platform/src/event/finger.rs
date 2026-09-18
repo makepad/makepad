@@ -20,7 +20,7 @@ use {
 
 // Mouse events
 
-pub use makepad_studio_protocol::{KeyModifiers, MouseButton};
+pub use makepad_studio_protocol::{KeyModifiers, MouseButton, PinchPhase};
 
 #[derive(Clone, Debug)]
 pub struct MouseDownEvent {
@@ -125,6 +125,23 @@ pub struct ScrollEvent {
     pub is_mouse: bool,
     pub time: f64,
     pub phase: ScrollPhase,
+}
+
+/// A trackpad pinch: macOS `magnifyWithEvent:` and Wayland's
+/// `zwp_pointer_gesture_pinch_v1` (X11 and Windows report none).
+///
+/// `scale` is multiplicative and relative to the previous event of the same
+/// gesture (1 on `Begin` and `End`), so a widget zooming about `abs` applies
+/// it directly: `zoom *= scale`. Handle it through the `hit` functions as
+/// [`Hit::FingerPinch`], delivered to the widget under `abs`.
+#[derive(Clone, Debug)]
+pub struct PinchEvent {
+    pub window_id: WindowId,
+    pub abs: Vec2d,
+    pub scale: f64,
+    pub phase: PinchPhase,
+    pub modifiers: KeyModifiers,
+    pub time: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -884,6 +901,18 @@ pub struct FingerScrollEvent {
     pub phase: ScrollPhase,
 }
 
+#[derive(Clone, Debug)]
+pub struct FingerPinchEvent {
+    pub window_id: WindowId,
+    pub abs: Vec2d,
+    /// The change since the previous event of the gesture (see [`PinchEvent`]).
+    pub scale: f64,
+    pub phase: PinchPhase,
+    pub modifiers: KeyModifiers,
+    pub time: f64,
+    pub rect: Rect,
+}
+
 /*
 pub enum HitTouch {
     Single,
@@ -1105,6 +1134,23 @@ impl Event {
                         time: e.time,
                         scroll: e.scroll,
                         phase: e.phase,
+                    });
+                }
+            }
+            Event::Pinch(e) => {
+                if cx.fingers.test_sweep_lock(options.sweep_area) {
+                    return Hit::Nothing;
+                }
+                let rect = area.clipped_rect(&cx);
+                if hit_test(e.abs, &rect, &options.margin) {
+                    return Hit::FingerPinch(FingerPinchEvent {
+                        window_id: e.window_id,
+                        abs: e.abs,
+                        scale: e.scale,
+                        phase: e.phase,
+                        modifiers: e.modifiers,
+                        time: e.time,
+                        rect,
                     });
                 }
             }

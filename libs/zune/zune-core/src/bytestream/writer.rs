@@ -121,6 +121,11 @@ impl<T: ZByteWriterTrait> ZWriter<T> {
     ///
     /// # Returns
     ///  Number of bytes written
+    /// The sink, once every byte is written (a file the caller flushes).
+    pub fn into_inner(self) -> T {
+        self.buffer
+    }
+
     pub fn bytes_written(&self) -> usize {
         self.bytes_written
     }

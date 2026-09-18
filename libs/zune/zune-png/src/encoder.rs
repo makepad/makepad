@@ -183,6 +183,110 @@ impl<'a> PngEncoder<'a> {
     }
 }
 
+/// The IDAT chunk size the row-band encoder writes: one deflate output
+/// step per chunk (the whole-image encoder's 8 KiB chunks suit icons; a
+/// print band produces megabytes).
+#[cfg(feature = "std")]
+const STREAM_IDAT_BYTES: usize = 1 << 16;
+
+/// A PNG written band by band: `write_rows` filters and deflates the rows
+/// it is given and streams the IDAT chunks to the sink, `finish` ends the
+/// stream. The signature, headers, filters and compressor are
+/// `PngEncoder`'s; the rows are never held whole (a print export is
+/// gigapixel-class, so the caller hands over one tile row at a time).
+#[cfg(feature = "std")]
+pub struct PngStreamEncoder<T: ZByteWriterTrait> {
+    writer:     ZWriter<T>,
+    options:    EncoderOptions,
+    scanline:   usize,
+    components: usize,
+    rows:       usize,
+    previous:   Vec<u8>,
+    filtered:   Vec<u8>,
+    compressor: makepad_fast_inflate::ZlibCompressor,
+    pending:    Vec<u8>
+}
+
+#[cfg(feature = "std")]
+impl<T: ZByteWriterTrait> PngStreamEncoder<T> {
+    /// Writes the signature and headers for `options` (8-bit depths only:
+    /// the rows arrive as bytes in scanline order).
+    pub fn new(sink: T, options: EncoderOptions) -> Result<Self, ZByteIoError> {
+        if options.depth() != makepad_zune_core::bit_depth::BitDepth::Eight {
+            return Err(ZByteIoError::Generic("the row-band encoder writes 8-bit samples"));
+        }
+        let mut writer = ZWriter::new(sink);
+        PngEncoder::new(&[], options).encode_headers(&mut writer)?;
+        let components = options.colorspace().num_components() * options.depth().size_of();
+        let scanline = options.width() * components;
+        if scanline == 0 || options.height() == 0 {
+            return Err(ZByteIoError::Generic("an empty image"));
+        }
+        Ok(PngStreamEncoder {
+            writer,
+            options,
+            scanline,
+            components,
+            rows: 0,
+            previous: Vec::new(),
+            filtered: vec![0; scanline + 1],
+            compressor: makepad_fast_inflate::ZlibCompressor::new(6),
+            pending: Vec::new()
+        })
+    }
+
+    /// Whole rows, top to bottom (`rows.len()` a multiple of the scanline).
+    pub fn write_rows(&mut self, rows: &[u8]) -> Result<(), ZByteIoError> {
+        if rows.len() % self.scanline != 0 {
+            return Err(ZByteIoError::Generic("rows are not whole scanlines"));
+        }
+        for row in rows.chunks_exact(self.scanline) {
+            if self.rows >= self.options.height() {
+                return Err(ZByteIoError::Generic("more rows than the image height"));
+            }
+            let filter = choose_compression_filter(&self.previous, row);
+            filter_scanline(row, &self.previous, &mut self.filtered, filter, self.components);
+            self.compressor.write(&self.filtered, &mut self.pending);
+            self.previous.clear();
+            self.previous.extend_from_slice(row);
+            self.rows += 1;
+            self.write_idat(false)?;
+        }
+        Ok(())
+    }
+
+    /// Ends the stream (the last IDAT chunks and IEND) once every row of
+    /// the image was written: the bytes written in all, and the sink (a
+    /// buffered file the caller still flushes).
+    pub fn finish(mut self) -> Result<(usize, T), ZByteIoError> {
+        if self.rows != self.options.height() {
+            return Err(ZByteIoError::NotEnoughBytes(self.options.height(), self.rows));
+        }
+        self.compressor.finish(&mut self.pending);
+        self.write_idat(true)?;
+        write_header_fn(&PngEncoder::new(&[], self.options), &mut self.writer, b"IEND", write_iend)?;
+        Ok((self.writer.bytes_written(), self.writer.into_inner()))
+    }
+
+    /// The pending compressed bytes as whole chunks (every byte with `all`).
+    fn write_idat(&mut self, all: bool) -> Result<(), ZByteIoError> {
+        let mut done = 0;
+        while self.pending.len() - done >= STREAM_IDAT_BYTES || (all && done < self.pending.len()) {
+            let end = (done + STREAM_IDAT_BYTES).min(self.pending.len());
+            let chunk = PngChunk {
+                length:     end - done,
+                chunk_type: PngChunkType::IDAT,
+                chunk:      *b"IDAT",
+                crc:        0
+            };
+            write_chunk(chunk, &self.pending[done..end], &mut self.writer)?;
+            done = end;
+        }
+        self.pending.drain(..done);
+        Ok(())
+    }
+}
+
 #[test]
 fn test_simple_write() {
     use makepad_zune_core::bit_depth::BitDepth;

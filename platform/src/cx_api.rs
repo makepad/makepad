@@ -4,7 +4,7 @@ use {
     crate::{
         area::Area,
         cursor::MouseCursor,
-        cx::{Cx, CxRef, OsType, XrCapabilities},
+        cx::{Cx, CxRef, GpuBackend, OsType, XrCapabilities},
         display_context::SystemBarAppearance,
         draw_list::DrawListId,
         draw_pass::{CxDrawPassParent, CxDrawPassRect, DrawPassId},
@@ -599,6 +599,50 @@ pub(crate) fn defer_platform_op(platform_ops: &mut VecDeque<CxOsOp>, op: CxOsOp)
 }
 
 impl Cx {
+    /// Update a named dynamic uniform on one retained draw item without
+    /// invalidating its immutable instance publication.
+    pub fn set_draw_item_uniform(
+        &mut self,
+        list: DrawListId,
+        item: usize,
+        name: LiveId,
+        value: &[f32],
+    ) -> bool {
+        let Some(shader) = self.draw_lists[list].draw_items[item]
+            .draw_call()
+            .map(|call| call.draw_shader_id)
+        else {
+            return false;
+        };
+        let Some(input) = self.draw_shaders[shader.index]
+            .mapping
+            .dyn_uniforms
+            .inputs
+            .iter()
+            .find(|input| input.id == name)
+        else {
+            return false;
+        };
+        let offset = input.offset;
+        let len = input.slots.min(value.len());
+        let draw_list = &mut self.draw_lists[list];
+        let changed = draw_list.draw_items.set_dyn_uniform(
+            item,
+            shader,
+            offset,
+            &value[..len],
+            &mut self.uniform_gen,
+        );
+        if changed {
+            if let Some(pass) = draw_list.draw_pass_id {
+                self.passes[pass].paint_dirty = true;
+            }
+        }
+        changed
+    }
+}
+
+impl Cx {
     pub fn in_draw_event(&self) -> bool {
         self.in_draw_event
     }
@@ -1008,6 +1052,45 @@ impl Cx {
 
     pub fn os_type(&self) -> &OsType {
         &self.os_type
+    }
+
+    /// The GPU API compiled into this binary (see [`GpuBackend`]).
+    pub fn gpu_backend() -> GpuBackend {
+        #[cfg(gpusim)]
+        {
+            GpuBackend::Gpusim
+        }
+        #[cfg(not(gpusim))]
+        {
+            #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+            {
+                GpuBackend::Metal
+            }
+            #[cfg(target_os = "windows")]
+            {
+                GpuBackend::Direct3d11
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                GpuBackend::WebGl
+            }
+            #[cfg(all(
+                not(any(target_os = "macos", target_os = "ios", target_os = "tvos", target_os = "windows")),
+                not(target_arch = "wasm32"),
+                use_vulkan
+            ))]
+            {
+                GpuBackend::Vulkan
+            }
+            #[cfg(all(
+                not(any(target_os = "macos", target_os = "ios", target_os = "tvos", target_os = "windows")),
+                not(target_arch = "wasm32"),
+                not(use_vulkan)
+            ))]
+            {
+                GpuBackend::OpenGl
+            }
+        }
     }
 
     /// Returns the app's writable data directory path.
@@ -2368,7 +2451,7 @@ mod stale_window_tests {
     }
 }
 
-#[cfg(all(target_os = "linux", not(target_os = "android")))]
+#[cfg(all(target_os = "linux", not(target_os = "android"), not(gpusim)))]
 fn can_play_type_impl(mime: &str) -> &'static str {
     crate::os::linux::linux_video_playback::can_play_type(mime)
 }
@@ -2387,7 +2470,7 @@ fn can_play_type_impl(mime: &str) -> &'static str {
 }
 
 #[cfg(all(
-    any(target_os = "macos", target_os = "ios", target_os = "tvos"),
+    any(target_os = "macos", target_os = "ios", target_os = "tvos", target_os = "linux"),
     gpusim
 ))]
 fn can_play_type_impl(_mime: &str) -> &'static str {

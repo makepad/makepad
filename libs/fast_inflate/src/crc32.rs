@@ -159,8 +159,8 @@ unsafe fn crc32_pclmulqdq(crc: u32, data: &[u8]) -> u32 {
     let mut x1 = get(&mut p);
     let mut x0 = get(&mut p);
 
-    // Fold in initial CRC value
-    x3 = arch::_mm_xor_si128(x3, arch::_mm_cvtsi32_si128(!crc as i32));
+    // The dispatcher already complemented the rolling CRC into internal state.
+    x3 = arch::_mm_xor_si128(x3, arch::_mm_cvtsi32_si128(crc as i32));
 
     let k1k2 = arch::_mm_set_epi64x(K2, K1);
     while p.len() >= 64 {
@@ -210,7 +210,7 @@ unsafe fn crc32_pclmulqdq(crc: u32, data: &[u8]) -> u32 {
 
     // Handle remaining bytes
     if !p.is_empty() {
-        !crc32_slice8(!c, p)
+        !crc32_slice8(c, p)
     } else {
         !c
     }

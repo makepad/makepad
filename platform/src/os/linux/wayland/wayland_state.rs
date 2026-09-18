@@ -32,6 +32,7 @@ use wayland_protocols::{
             wp_cursor_shape_manager_v1::{self, WpCursorShapeManagerV1},
         },
         fractional_scale::v1::client::{wp_fractional_scale_manager_v1, wp_fractional_scale_v1},
+        pointer_gestures::zv1::client::{zwp_pointer_gesture_pinch_v1, zwp_pointer_gestures_v1},
         primary_selection::zv1::client::{
             zwp_primary_selection_device_manager_v1, zwp_primary_selection_device_v1,
             zwp_primary_selection_offer_v1, zwp_primary_selection_source_v1,
@@ -50,8 +51,8 @@ use wayland_protocols::{
 use crate::{
     cx_native::EventFlow,
     event::{
-        PopupDismissReason, PopupDismissedEvent, ScrollEvent, ScrollPhase, WindowGeom,
-        TAP_COUNT_DISTANCE, TAP_COUNT_TIME,
+        PinchEvent, PinchPhase, PopupDismissReason, PopupDismissedEvent, ScrollEvent, ScrollPhase,
+        WindowGeom, TAP_COUNT_DISTANCE, TAP_COUNT_TIME,
     },
     select_timer::SelectTimers,
     wayland::wayland_app::WaylandApp,
@@ -340,6 +341,13 @@ pub(crate) struct WaylandState {
     pub(crate) cursor_manager: Option<wp_cursor_shape_manager_v1::WpCursorShapeManagerV1>,
     pub(crate) cursor_shape: Option<wp_cursor_shape_device_v1::WpCursorShapeDeviceV1>,
     pub(crate) pointer: Option<wl_pointer::WlPointer>,
+    /// The touchpad gestures global (`zwp_pointer_gestures_v1`) when the compositor
+    /// offers one, and the pinch object it hands out for our pointer.
+    pub(crate) pointer_gestures: Option<zwp_pointer_gestures_v1::ZwpPointerGesturesV1>,
+    pub(crate) pinch_gesture: Option<zwp_pointer_gesture_pinch_v1::ZwpPointerGesturePinchV1>,
+    /// The pinch's scale at its previous update: the protocol reports the scale since
+    /// `begin`, `PinchEvent::scale` is the change since the previous event.
+    pub(crate) pinch_scale: f64,
     pub(crate) last_mouse_pos: Vec2d,
     pub(crate) pointer_serial: Option<u32>,
     pub(crate) pointer_enter_serial: Option<u32>,
@@ -450,6 +458,9 @@ impl WaylandState {
             cursor_manager: None,
             cursor_shape: None,
             pointer: None,
+            pointer_gestures: None,
+            pinch_gesture: None,
+            pinch_scale: 1.0,
             decoration_manager: None,
             icon_manager: None,
             scale_manager: None,
@@ -760,6 +771,20 @@ impl Dispatch<wl_registry::WlRegistry, ()> for WaylandState {
                     );
                     state.primary_selection_manager = Some(manager);
                     state.ensure_primary_selection_device(qhandle);
+                }
+                "zwp_pointer_gestures_v1" => {
+                    let manager = wl_registry.bind::<zwp_pointer_gestures_v1::ZwpPointerGesturesV1, _, _>(
+                        name,
+                        1,
+                        qhandle,
+                        (),
+                    );
+                    // The seat may have handed out the pointer before this global
+                    // arrived (the order is the compositor's); either side finishes.
+                    if let Some(pointer) = state.pointer.as_ref() {
+                        state.pinch_gesture = Some(manager.get_pinch_gesture(pointer, qhandle, ()));
+                    }
+                    state.pointer_gestures = Some(manager);
                 }
                 _ => {}
             }
@@ -1130,6 +1155,9 @@ impl Dispatch<wl_seat::WlSeat, ()> for WaylandState {
                 let pointer = seat.get_pointer(qhandle, ());
                 if let Some(manager) = state.cursor_manager.as_ref() {
                     state.cursor_shape = Some(manager.get_pointer(&pointer, qhandle, ()));
+                }
+                if let Some(manager) = state.pointer_gestures.as_ref() {
+                    state.pinch_gesture = Some(manager.get_pinch_gesture(&pointer, qhandle, ()));
                 }
                 state.pointer = Some(pointer);
             }
@@ -2048,6 +2076,52 @@ delegate_noop!(WaylandState: ignore wp_viewport::WpViewport);
 delegate_noop!(WaylandState: ignore wp_viewporter::WpViewporter);
 delegate_noop!(WaylandState: ignore wl_surface::WlSurface);
 delegate_noop!(WaylandState: ignore wp_cursor_shape_device_v1::WpCursorShapeDeviceV1);
+delegate_noop!(WaylandState: ignore zwp_pointer_gestures_v1::ZwpPointerGesturesV1);
+
+impl Dispatch<zwp_pointer_gesture_pinch_v1::ZwpPointerGesturePinchV1, ()> for WaylandState {
+    fn event(
+        state: &mut Self,
+        _: &zwp_pointer_gesture_pinch_v1::ZwpPointerGesturePinchV1,
+        event: zwp_pointer_gesture_pinch_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        // The protocol's `scale` is cumulative since `begin`; the platform's
+        // `PinchEvent::scale` is the change since the previous event. A cancelled
+        // gesture ends like a lifted one: the zoom stays where it got.
+        let (scale, phase) = match event {
+            zwp_pointer_gesture_pinch_v1::Event::Begin { .. } => {
+                state.pinch_scale = 1.0;
+                (1.0, PinchPhase::Begin)
+            }
+            zwp_pointer_gesture_pinch_v1::Event::Update { scale, .. } => {
+                let step = if state.pinch_scale > 0.0 { scale / state.pinch_scale } else { 1.0 };
+                state.pinch_scale = scale;
+                (step, PinchPhase::Update)
+            }
+            zwp_pointer_gesture_pinch_v1::Event::End { .. } => {
+                state.pinch_scale = 1.0;
+                (1.0, PinchPhase::End)
+            }
+            _ => return,
+        };
+        let Some(window_id) = state.pointer_window else {
+            return;
+        };
+        // Deliver any buffered motion first so the pinch lands at the current pointer.
+        state.flush_pending_motion();
+        let time = state.time_now();
+        state.do_callback(XlibEvent::Pinch(PinchEvent {
+            window_id,
+            abs: state.last_mouse_pos,
+            scale,
+            phase,
+            modifiers: state.modifiers,
+            time,
+        }));
+    }
+}
 delegate_noop!(WaylandState: ignore wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1);
 delegate_noop!(WaylandState: ignore wl_compositor::WlCompositor);
 delegate_noop!(WaylandState: ignore wl_region::WlRegion);

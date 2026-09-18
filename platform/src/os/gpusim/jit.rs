@@ -1,3 +1,4 @@
+#[cfg(target_os = "macos")]
 use std::ffi::{c_void, CStr, CString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -236,5 +237,9 @@ impl GpusimLoadedModule {
 
     pub fn shader_version(&self) -> Result<u32, String> {
         Err("gpusim shader version lookup is only implemented on macOS for now".to_string())
+    }
+
+    pub fn symbol<F: Sized>(&self, _symbol: &str) -> Result<F, String> {
+        Err("gpusim shader symbol lookup is only implemented on macOS for now".to_string())
     }
 }

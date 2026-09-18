@@ -357,6 +357,32 @@ pub enum OsType {
     Web(WebParams),
 }
 
+/// The GPU API this binary was built against. The choice is made at build
+/// time (`MAKEPAD=…`, or the `vulkan` cargo feature on desktop Linux), so an
+/// app that offers the user a different renderer starts another build.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuBackend {
+    Metal,
+    Direct3d11,
+    Vulkan,
+    OpenGl,
+    WebGl,
+    Gpusim,
+}
+
+impl GpuBackend {
+    pub fn name(self) -> &'static str {
+        match self {
+            GpuBackend::Metal => "Metal",
+            GpuBackend::Direct3d11 => "Direct3D 11",
+            GpuBackend::Vulkan => "Vulkan",
+            GpuBackend::OpenGl => "OpenGL",
+            GpuBackend::WebGl => "WebGL",
+            GpuBackend::Gpusim => "simulated GPU",
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct XrCapabilities {
     pub ar_supported: bool,

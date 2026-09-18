@@ -3,7 +3,8 @@ use {
         area::Area,
         event::{
             finger::MouseButton, DragItem, KeyModifiers, MouseDownEvent, MouseMoveEvent,
-            MouseUpEvent, ScrollEvent, ScrollPhase, TextInputEvent, WindowCloseRequestedEvent,
+            MouseUpEvent, PinchEvent, PinchPhase, ScrollEvent, ScrollPhase, TextInputEvent,
+            WindowCloseRequestedEvent,
             WindowDragQueryEvent, WindowDragQueryResponse, WindowGeom, WindowGeomChangeEvent,
         },
         makepad_math::{dvec2, Rect, Vec2d},
@@ -1094,6 +1095,23 @@ impl MacosWindow {
             handled_x: Cell::new(false),
             handled_y: Cell::new(false),
             phase,
+        }));
+    }
+
+    /// A magnify step from the trackpad, at the pointer like a scroll.
+    pub fn send_pinch(&mut self, scale: f64, phase: PinchPhase, modifiers: KeyModifiers) {
+        if self.retired {
+            return;
+        }
+        // A pinch means the current touch isn't a tap.
+        self.touch_disqualified = true;
+        self.do_callback(MacosEvent::Pinch(PinchEvent {
+            window_id: self.window_id,
+            abs: self.last_mouse_pos,
+            scale,
+            phase,
+            modifiers,
+            time: self.time_now(),
         }));
     }
 

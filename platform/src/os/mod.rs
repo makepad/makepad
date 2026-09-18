@@ -66,6 +66,27 @@ pub mod linux;
 #[cfg(all(not(gpusim), any(target_os = "android", target_os = "linux")))]
 pub use crate::os::linux::*;
 
+#[cfg(all(gpusim, any(target_os = "android", target_os = "linux")))]
+/// The simulated GPU keeps the process-boundary pieces of the Linux backend:
+/// shared memory, the studio IPC, DMA-BUF descriptors and the hosted swapchain
+/// sender, without any GPU driver behind them.
+#[allow(clippy::disallowed_types, clippy::disallowed_methods, dead_code)]
+pub mod linux {
+    #[path = "libc_sys.rs"]
+    pub mod libc_sys;
+    #[path = "v4l2_sys.rs"]
+    pub mod v4l2_sys;
+    #[path = "ipc.rs"]
+    pub mod ipc;
+    #[path = "dma_buf.rs"]
+    pub mod dma_buf;
+    #[path = "hosted_gpu_sender.rs"]
+    pub mod hosted_gpu_sender;
+    // The software-buffer upload is renderer independent (a BGRA texture).
+    #[path = "presentable.rs"]
+    mod presentable;
+}
+
 #[cfg(all(test, not(gpusim), target_os = "macos"))]
 // Native Linux compatibility tests reuse OS-only timing code on macOS.
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]

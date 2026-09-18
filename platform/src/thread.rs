@@ -659,6 +659,7 @@ impl MachineTopology {
         (self.performance.saturating_sub(2).max(1), light)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn limited_to(mut self, logical: usize) -> Self {
         self.logical = self.logical.min(logical.max(1));
         self.physical = self.physical.min(self.logical).max(1);

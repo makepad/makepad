@@ -27,8 +27,35 @@
 //!   not by the time their clients opened sockets. Each sequence deadline is
 //!   a new boundary; it does not freeze the app for the entire sequence.
 
+thread_local! {
+    static REMOTE_INPUT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Marks synchronous injected dispatch, including hardware-path mouse input and
+/// nested events. Native input delivered on a later event-loop turn stays native.
+#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+pub(crate) struct RemoteInputScope(bool);
+
+#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+pub(crate) fn remote_input_scope() -> RemoteInputScope {
+    RemoteInputScope(REMOTE_INPUT.with(|origin| origin.replace(true)))
+}
+
+#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+impl Drop for RemoteInputScope {
+    fn drop(&mut self) {
+        REMOTE_INPUT.with(|origin| origin.set(self.0));
+    }
+}
+
+#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+#[path = "remote_activity.rs"]
+mod activity;
+
 #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
 mod imp {
+    use super::activity;
+    pub(crate) use activity::note_user_event;
     use crate::cx::Cx;
     use crate::cx_api::CxOsApi;
     use crate::makepad_math::dvec2;
@@ -37,8 +64,8 @@ mod imp {
     };
     use crate::window::WindowId;
     use makepad_studio_protocol::{
-        KeyCode, KeyEvent, RemoteKeyModifiers, RemoteMouseDown, RemoteMouseMove, RemoteMouseUp,
-        RemoteScroll, ScreenshotRequest, StudioToApp, TextInputEvent,
+        KeyCode, KeyEvent, PinchPhase, RemoteKeyModifiers, RemoteMouseDown, RemoteMouseMove,
+        RemoteMouseUp, RemotePinch, RemoteScroll, ScreenshotRequest, StudioToApp, TextInputEvent,
     };
     use std::collections::HashMap;
     use std::io::{Read, Write};
@@ -79,8 +106,8 @@ mod imp {
     static PENDING_GRABS: AtomicUsize = AtomicUsize::new(0);
     static GRAB_BYTES: AtomicUsize = AtomicUsize::new(0);
 
-    fn queue() -> &'static Mutex<Vec<Cmd>> {
-        static Q: OnceLock<Mutex<Vec<Cmd>>> = OnceLock::new();
+    fn queue() -> &'static Mutex<Vec<QueuedCmd>> {
+        static Q: OnceLock<Mutex<Vec<QueuedCmd>>> = OnceLock::new();
         Q.get_or_init(|| Mutex::new(Vec::new()))
     }
 
@@ -171,7 +198,11 @@ mod imp {
     thread_local! {
         // This state belongs only to the UI, unlike the HTTP reply sinks.
         static CAPTURES: std::cell::RefCell<Captures> = Default::default();
-        static FRAME_WAITERS: std::cell::RefCell<Vec<(u64, Sender<Reply>, Option<String>)>> = Default::default();
+        static FRAME_WAITERS: std::cell::RefCell<Vec<(u64, Sender<Reply>, Option<String>, u64)>> = Default::default();
+        // Each connection owns its request context; it never crosses threads
+        // implicitly. Queued commands carry the explicit expected user epoch.
+        static REQUEST_USER_SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        static REQUEST_START_USER_SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     }
 
     struct EncodeJob {
@@ -261,7 +292,14 @@ mod imp {
     // command queue
     // ------------------------------------------------------------------
 
+    struct QueuedCmd {
+        cmd: Cmd,
+        user_seq: u64,
+        deadline: Instant,
+    }
+
     enum Cmd {
+        Activity(Sender<Reply>),
         Input {
             window: Option<usize>,
             inputs: Vec<Input>,
@@ -326,6 +364,19 @@ mod imp {
         },
     }
 
+    impl Cmd {
+        fn mutation_reply(&self) -> Option<&Sender<Reply>> {
+            match self {
+                Self::Input { tx, .. } | Self::Close { tx, .. }
+                | Self::Quit(tx) | Self::ShaderConstPatch { tx, .. } => Some(tx),
+                Self::Tweak { op, tx, .. }
+                    if !matches!(op.as_str(), "state" | "diff" | "final") => Some(tx),
+                Self::Ai { op, tx, .. } if op != "transcript" => Some(tx),
+                _ => None,
+            }
+        }
+    }
+
     enum Input {
         Mouse {
             kind: MouseKind,
@@ -338,6 +389,19 @@ mod imp {
             /// Hardware-faithful: route through the same pointer-lock/pin
             /// transform physical mouse events take (`/m?hw=1`).
             hw: bool,
+            /// The event's timestamp on the app clock (`/m?time=`), or now:
+            /// drag samples with their own times drive velocity-dependent
+            /// gestures (a flick's momentum) the same way every run.
+            time: Option<f64>,
+        },
+        /// One step of a trackpad pinch (`/m?k=pinch&scale=&phase=`).
+        Pinch {
+            x: f64,
+            y: f64,
+            scale: f64,
+            phase: PinchPhase,
+            mods: RemoteKeyModifiers,
+            time: Option<f64>,
         },
         Key {
             down: bool,
@@ -370,6 +434,7 @@ mod imp {
         /// `poll` in a later tick.
         Text(String),
         Err(String),
+        Conflict(String),
     }
 
     /// `(target repaint_id, responder, payload)` — resolved once the app has
@@ -986,7 +1051,7 @@ mod imp {
         publish_windows(cx);
         let mut pending = false;
 
-        let cmds: Vec<Cmd> = {
+        let cmds: Vec<QueuedCmd> = {
             match queue().try_lock() {
                 Ok(mut q) => std::mem::take(&mut *q),
                 Err(_) => Vec::new(),
@@ -998,7 +1063,7 @@ mod imp {
         for cmd in cmds {
             poll_captures(cx);
             pending |= present_captures(cx, &mut present);
-            let wait_window = match &cmd {
+            let wait_window = match &cmd.cmd {
                 Cmd::Input {
                     window, wait: true, ..
                 } => Some(*window),
@@ -1014,7 +1079,7 @@ mod imp {
                 match present(cx, window) {
                     Some(false) => {
                         FRAME_WAITERS.with_borrow_mut(|waiters| {
-                            for (_, tx, _) in waiters.drain(..) {
+                            for (_, tx, _, _) in waiters.drain(..) {
                                 let _ = tx.send(Reply::Err(
                                     "requested input frame could not be submitted; retry".into(),
                                 ));
@@ -1078,7 +1143,11 @@ mod imp {
         // Resolve anyone who asked to be answered after the next frame.
         let repaint_id = cx.repaint_id;
         FRAME_WAITERS.with_borrow_mut(|waiters| {
-            waiters.retain(|(target, tx, payload)| {
+            waiters.retain(|(target, tx, payload, user_seq)| {
+                if *user_seq != activity::user_seq() {
+                    let _ = tx.send(Reply::Conflict(activity::interrupted()));
+                    return false;
+                }
                 if repaint_id >= *target {
                     let text = match payload {
                         Some(payload) => payload.clone(),
@@ -1140,8 +1209,23 @@ mod imp {
         }
     }
 
-    fn apply(cx: &mut Cx, cmd: Cmd) {
-        match cmd {
+    fn apply(cx: &mut Cx, request: QueuedCmd) {
+        if let Some(tx) = request.cmd.mutation_reply() {
+            if let Some(conflict) = activity::conflict(request.user_seq) {
+                let _ = tx.send(Reply::Conflict(conflict));
+                return;
+            }
+            if Instant::now() >= request.deadline {
+                let _ = tx.send(Reply::Err("expired command was not applied".into()));
+                return;
+            }
+        }
+        let user_seq = activity::user_seq();
+        let _origin = super::remote_input_scope();
+        match request.cmd {
+            Cmd::Activity(tx) => {
+                let _ = tx.send(Reply::Text(activity::json()));
+            }
             Cmd::Input {
                 window,
                 inputs,
@@ -1176,8 +1260,10 @@ mod imp {
                         dy,
                         mods,
                         hw: true,
+                        time: at,
                     } = input
                     {
+                        let time = at.unwrap_or(time);
                         let raw = dvec2(x, y);
                         match kind {
                             MouseKind::Move => {
@@ -1253,7 +1339,9 @@ mod imp {
                             dy,
                             mods,
                             hw: _,
+                            time: at,
                         } => {
+                            let time = at.unwrap_or(time);
                             // Remote /click and /m are window-local layout points.
                             // dispatch_studio_msg calls stdin_pointer_abs ->
                             // dpi_override_scale and remaps native OS points into
@@ -1293,6 +1381,25 @@ mod imp {
                                     modifiers: mods,
                                 }),
                             }
+                        }
+                        Input::Pinch {
+                            x,
+                            y,
+                            scale,
+                            phase,
+                            mods,
+                            time: at,
+                        } => {
+                            let native = cx.windows[window_id]
+                                .layout_vec2d_to_native_points(dvec2(x, y));
+                            StudioToApp::Pinch(RemotePinch {
+                                time: at.unwrap_or(time),
+                                x: native.x,
+                                y: native.y,
+                                scale,
+                                phase,
+                                modifiers: mods,
+                            })
                         }
                         Input::Key { down, code, mods } => {
                             let event = KeyEvent {
@@ -1345,7 +1452,7 @@ mod imp {
                 }
                 if wait {
                     FRAME_WAITERS.with_borrow_mut(|waiters| {
-                        waiters.push((cx.repaint_id + 1, tx, input_result))
+                        waiters.push((cx.repaint_id + 1, tx, input_result, user_seq))
                     });
                 } else {
                     let _ = tx.send(input_result.map_or(Reply::Ok, Reply::Text));
@@ -1545,7 +1652,7 @@ mod imp {
                     Ok(json) => {
                         if wait {
                             FRAME_WAITERS.with_borrow_mut(|waiters| {
-                                waiters.push((cx.repaint_id + 1, tx, Some(json)))
+                            waiters.push((cx.repaint_id + 1, tx, Some(json), user_seq))
                             });
                         } else {
                             let _ = tx.send(Reply::Text(json));
@@ -1567,7 +1674,7 @@ mod imp {
                     Ok(json) => {
                         if wait {
                             FRAME_WAITERS.with_borrow_mut(|waiters| {
-                                waiters.push((cx.repaint_id + 1, tx, Some(json)))
+                            waiters.push((cx.repaint_id + 1, tx, Some(json), user_seq))
                             });
                         } else {
                             let _ = tx.send(Reply::Text(json));
@@ -1728,6 +1835,7 @@ mod imp {
             400 => "Bad Request",
             404 => "Not Found",
             408 => "Request Timeout",
+            409 => "Conflict",
             431 => "Request Header Fields Too Large",
             503 => "Service Unavailable",
             _ => "Error",
@@ -1735,8 +1843,8 @@ mod imp {
         let mut out = Vec::with_capacity(body.len() + 256);
         out.extend_from_slice(
             format!(
-                "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
-                body.len()
+                "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Expose-Headers: X-Makepad-User-Seq, X-Makepad-User-Seq-Start\r\nX-Makepad-User-Seq: {}\r\nX-Makepad-User-Seq-Start: {}\r\nConnection: close\r\n\r\n",
+                body.len(), activity::user_seq(), REQUEST_START_USER_SEQ.get()
             )
             .as_bytes(),
         );
@@ -1756,12 +1864,24 @@ mod imp {
     }
 
     fn route(method: &str, path: &str, p: &Params) -> Out {
+        REQUEST_START_USER_SEQ.set(activity::user_seq());
+        let expected = match p.get(&["if_user_seq"]) {
+            Some(value) => match value.parse::<u64>() {
+                Ok(value) => value,
+                Err(_) => return Out::Json(400, "{\"err\":\"if_user_seq must be an unsigned integer\"}".into()),
+            },
+            // Legacy scripts may drive an untouched instance. Once the human
+            // intervenes, they must explicitly acknowledge the new epoch.
+            None => 0,
+        };
+        REQUEST_USER_SEQ.set(expected);
         if method != "GET" && method != "POST" && method != "HEAD" {
             return Out::Json(400, "{\"err\":\"method\"}".to_string());
         }
         match path {
             "/" | "/help" => Out::Text(200, cheat_sheet()),
             "/s" | "/status" => route_status(p),
+            "/activity" => reply_to_out(ask(Cmd::Activity, 4)),
             "/g" | "/grab" => route_grab(p),
             "/gseq" => route_grab_sequence(p),
             "/gq" => route_grab_quit(p),
@@ -1940,13 +2060,19 @@ mod imp {
              all routes are GET; every answer is one line of JSON; x/y are layout points, window-local, y down\n\
              /                 this sheet\n\
              /s[?w=ID]         {{\"app\":..,\"pid\":..,\"w\":[{{\"i\":id,\"t\":title,\"sz\":[w,h],\"px\":[w,h],\"dpi\":f,\"pos\":[x,y]}}]}}\n\
+             /activity         native user activity: user_active, user_seq, idle_ms, quiet_ms, held, last_input, window (also in /s)\n\
+             \x20                 native input increments user_seq; injected input does not. No input contents are recorded\n\
+             \x20                 mutations require if_user_seq=N (default 0) and 2 seconds without native input; held input stays active\n\
+             \x20                 HTTP 409 user_interacting/user_intervened means STOP automation; reads remain available. Resume only after user handoff\n\
+             \x20                 all replies include X-Makepad-User-Seq[-Start]; changed epochs invalidate test/capture attribution\n\
              \x20                 a window the HUMAN closed is reported as {{\"err\":\"window N closed by user\"}} — not a crash, do not relaunch\n\
              /g?w=&scale=&raw= grab window w (default: first). returns {{\"png\":path,\"w\":id,\"sz\":[w,h],\"capture_ms\":ms,\"encode_ms\":ms}}; raw=1 sends image/png bytes\n\
              \x20                 standalone macOS: pending Draw + immediate present at UI arming, before later input; no animation tick. Other backends: next render\n\
              /gseq?n=8&every_ms=50&scale=1  a separate present per deadline; n=1..64, every_ms>=8, span<=60s; {{\"png\":[paths],\"frames\":[per-frame timings]}}\n\
              \x20                 scheduled_ms and pixels_ms share the request origin; capture_ms = pixels_ms - scheduled_ms; cadence never waits for PNG encoding\n\
              \x20                 commands follow UI queue order (concurrent sockets have no client-time order); macOS wait=1 input replies after submitting its applied frame\n\
-             /m?k=&x=&y=&w=    mouse. k=move|down|up|click|scroll  b=0 left,1 right,2 middle  scroll: dx=,dy=\n\
+             /m?k=&x=&y=&w=    mouse. k=move|down|up|click|scroll|pinch  b=0 left,1 right,2 middle  scroll: dx=,dy=  pinch: scale= (relative to the previous step), phase=begin|update|end\n\
+                               time= stamps the event in app-clock seconds (default: now) so drag samples carry their own timing\n\
                                add hw=1 to take the hardware pointer path (pointer-lock/pin transform included)\n\
              /click?x=&y=      alias for /m?k=click\n\
              /k?t=TEXT         type text. or /k?k=down|up&c=KeyA (Escape ReturnKey Tab Backspace ArrowLeft F1 Key1 ..)\n\
@@ -1968,9 +2094,9 @@ mod imp {
              /close?w=ID       close one window the normal way\n\
              /gq[?scale=&w=]   FINISH HERE: grab every window, then quit. {{\"png\":[paths],\"quit\":1}}\n\
              /quit             shut the app down gracefully (no final grab)\n\
-             if you launched this app, you MUST end with /gq (or /quit) — never leave test windows on the user's screen, never pkill\n\
+             finish owned tests with /gq (or /quit); if the user intervened, leave their app running — never force-close on 409\n\
              add &wait=1 to any input route to answer only after the next frame is drawn (so a following /g sees it)\n\
-             add &w=ID to target a window; omit for the first one. errors are {{\"err\":\"...\"}} with status 404\n\
+             add &w=ID to target a window; omit for the first one. ordinary errors are {{\"err\":\"...\"}} with status 404; interaction conflicts use 409\n\
              POST the same routes with a flat JSON body ({{\"x\":10,\"y\":20}}) when quoting query strings is painful\n",
             status.app,
             status.pid,
@@ -2102,7 +2228,11 @@ mod imp {
                 out.push(']');
             }
         }
-        out.push('}');
+        drop(status);
+        match ask(Cmd::Activity, 4) {
+            Reply::Text(activity) => out.push_str(&format!(",\"activity\":{activity}}}")),
+            other => return reply_to_out(other),
+        }
         Out::Json(200, out)
     }
 
@@ -2119,6 +2249,7 @@ mod imp {
         let dy = p.f64(&["dy", "sy"], 0.0);
         let mods = p.mods();
         let hw = p.flag(&["hw"]);
+        let time = p.get(&["time"]).and_then(|v| v.parse::<f64>().ok());
         let mouse = |kind| Input::Mouse {
             kind,
             x,
@@ -2128,6 +2259,7 @@ mod imp {
             dy,
             mods,
             hw,
+            time,
         };
         let inputs = match kind.as_str() {
             "move" => vec![mouse(MouseKind::Move)],
@@ -2139,6 +2271,22 @@ mod imp {
                 mouse(MouseKind::Up),
             ],
             "scroll" | "wheel" => vec![mouse(MouseKind::Scroll)],
+            "pinch" => {
+                let phase = match p.get(&["phase"]).unwrap_or("update") {
+                    "begin" => PinchPhase::Begin,
+                    "update" => PinchPhase::Update,
+                    "end" => PinchPhase::End,
+                    other => return err(&format!("bad pinch phase {other}")),
+                };
+                vec![Input::Pinch {
+                    x,
+                    y,
+                    scale: p.f64(&["scale", "s"], 1.0),
+                    phase,
+                    mods,
+                    time,
+                }]
+            }
             other => return err(&format!("bad kind {other}")),
         };
         send_input(window, inputs, p.flag(&["wait"]))
@@ -2219,7 +2367,7 @@ mod imp {
         let mut seen = Vec::new();
         for (key, _) in &p.0 {
             let key = match key.as_str() {
-                "path" | "x" | "y" | "wait" => key.as_str(),
+                "path" | "x" | "y" | "wait" | "if_user_seq" => key.as_str(),
                 "w" | "window" => "w",
                 _ => return Err("unknown drop parameter"),
             };
@@ -2365,7 +2513,11 @@ mod imp {
             queue()
                 .lock()
                 .unwrap()
-                .push(Cmd::CancelGrabs(self.ids.clone()));
+                .push(QueuedCmd {
+                    cmd: Cmd::CancelGrabs(self.ids.clone()),
+                    user_seq: 0,
+                    deadline: Instant::now(),
+                });
             wake_commands();
         }
     }
@@ -2434,7 +2586,7 @@ mod imp {
         ) {
             Reply::Ok => Ok(pending),
             Reply::Err(msg) => Err(msg),
-            Reply::Text(_) => Err("unexpected grab reply".into()),
+            Reply::Text(_) | Reply::Conflict(_) => Err("unexpected grab reply".into()),
         }
     }
 
@@ -2553,8 +2705,13 @@ mod imp {
                 Err(msg) => problems.push(format!("w{window_id}: {msg}")),
             }
         }
-        // Quit regardless: a failed grab must never leave the app on screen.
-        let quit = matches!(ask(|tx| Cmd::Quit(tx), 4), Reply::Ok);
+        // Capture failure still permits cleanup, but human intervention does
+        // not. Check on the UI thread after all the potentially slow grabs.
+        let quit = match ask(Cmd::Quit, 4) {
+            Reply::Ok => true,
+            Reply::Conflict(json) => return Out::Json(409, json),
+            other => return reply_to_out(other),
+        };
         let mut out = String::from("{\"png\":[");
         for (index, path) in paths.iter().enumerate() {
             if index > 0 {
@@ -2709,7 +2866,11 @@ mod imp {
         F: FnOnce(Sender<Reply>) -> Cmd,
     {
         let (tx, rx) = channel();
-        queue().lock().unwrap().push(make(tx));
+        queue().lock().unwrap().push(QueuedCmd {
+            cmd: make(tx),
+            user_seq: REQUEST_USER_SEQ.get(),
+            deadline: Instant::now() + Duration::from_secs(timeout_secs),
+        });
         wake_commands();
         match rx.recv_timeout(Duration::from_secs(timeout_secs)) {
             Ok(reply) => reply,
@@ -2722,6 +2883,7 @@ mod imp {
             Reply::Ok => Out::Json(200, "{\"ok\":1}".to_string()),
             Reply::Text(text) => Out::Json(200, text),
             Reply::Err(msg) => err(&msg),
+            Reply::Conflict(json) => Out::Json(409, json),
         }
     }
 
@@ -3203,6 +3365,7 @@ mod imp {
     use crate::cx::Cx;
 
     pub fn start_if_requested() {}
+    pub(crate) fn note_user_event(_cx: &mut Cx, _event: &crate::event::Event) {}
     /// There is no remote bridge on these targets, so nothing ever asked for one.
     pub fn requested() -> bool {
         false
