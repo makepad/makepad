@@ -43,6 +43,11 @@
 //! `mod.theme.x` directly: `mod.theme` is the shared base object, and such a
 //! write mutates it for every widget that was built from it.
 
+use crate::desktop_style::DesktopStyle;
+use crate::makepad_platform::{LiveId, NoTrap, ScriptMod, ScriptVm};
+use crate::script_eval;
+use std::collections::{BTreeMap, BTreeSet};
+
 /// One of the three themes shipped with the library.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Scheme {
@@ -794,6 +799,115 @@ pub const DERIVED_ROLES: &[(&str, RoleSource, RoleSource)] = {
 /// selection is a pale tint in some of them, which is no seed for an accent.
 pub const SHEET_ACCENT: &str = "color_ctrl_selected";
 
+/// What the role derivation is allowed to regrow.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoleGrowth {
+    /// Surfaces, the inks that go on them, and the three brand families grown
+    /// from `SHEET_ACCENT`. What a style sheet needs: it sets a few hundred of
+    /// the older tokens and none of the roles at all.
+    FromAccent,
+    /// Surfaces and inks only, leaving the brand families as they stand, and
+    /// putting the mix's OWN body ink to the ground rather than `color_text`.
+    /// What a mix needs: every theme in it already carries a considered brand
+    /// family and a considered body ink, where a sheet carries neither. The
+    /// base themes' `color_ctrl_selected` is a focus BLUE that has never been
+    /// their `color_primary`, so growing from it would turn a mix of two
+    /// orange themes blue; and their `color_on_surface` is a decided white or
+    /// black that their `color_text` is a translucent version of, so reading
+    /// the ink off `color_text` would rewrite a lone theme into something
+    /// that is not it.
+    KeepAccent,
+}
+
+/// The roles a theme derives from its older tokens, as `(key, rgba)` in the
+/// order a theme file lists them.
+///
+/// `sheet_roles_script` writes these out as a script of assignments, which is
+/// what a sheet needs; the equalizer folds the same answers into the overrides
+/// of a derived theme object instead. One rule, two ways of spending it.
+pub fn derived_roles(
+    dark: bool,
+    growth: RoleGrowth,
+    named: &mut dyn FnMut(&str) -> bool,
+    read: &mut dyn FnMut(&str) -> Option<u32>,
+) -> Vec<(String, u32)> {
+    let mut out: Vec<(String, u32)> = Vec::new();
+    let mut ladder_top = None;
+    for (role, light, dark_source) in DERIVED_ROLES {
+        if named(role) {
+            continue;
+        }
+        let value = match if dark { *dark_source } else { *light } {
+            RoleSource::Token(t) => read(t),
+            RoleSource::HalfMix(a, b) => match (read(a), read(b)) {
+                (Some(a), Some(b)) => Some(mix_rgb(a, b, 0.5)),
+                _ => None,
+            },
+            RoleSource::MixTo(t, end, amount) => read(t).map(|c| mix_rgb(c | 0xFF, end, amount)),
+        };
+        if let Some(rgba) = value {
+            if *role == "color_surface_container_high" {
+                ladder_top = Some(rgba);
+            }
+            out.push((role.to_string(), rgba));
+        }
+    }
+    // What is drawn ON those surfaces. A sheet chose its text colour against
+    // its own flat background and never saw the ladder derived above, so the
+    // choice is put to the brightest rung a widget lays text on: kept where
+    // it still reads there, replaced by the plain end where it does not. The
+    // second voice has no token of its own in a sheet, so what carries over
+    // is the base theme's own considered value, put to the same test.
+    if let Some(ground) = ladder_top.or_else(|| read("color_surface_container_high")) {
+        let body = match growth {
+            RoleGrowth::FromAccent => "color_text",
+            RoleGrowth::KeepAccent => "color_on_surface",
+        };
+        for (role, source, need) in [
+            ("color_on_surface", body, READABLE),
+            ("color_on_surface_variant", "color_on_surface_variant", LEGIBLE),
+        ] {
+            if named(role) {
+                continue;
+            }
+            if let Some(ink) = read(source) {
+                out.push((role.to_string(), ink_for(ground, ink, need)));
+            }
+        }
+    }
+    if growth == RoleGrowth::FromAccent {
+        if let Some(accent) = read(SHEET_ACCENT) {
+            let seed = SeedColors { primary: accent | 0xFF, ..SeedColors::HOUSE };
+            let scheme = if dark { Scheme::Dark } else { Scheme::Light };
+            for (key, rgba) in roles_from_seed(&seed, scheme).entries() {
+                let follows = ["primary", "secondary", "tertiary"].iter().any(|family| key.contains(family));
+                if follows && !named(key) {
+                    out.push((key.to_string(), rgba));
+                }
+            }
+        }
+    }
+    // The four families that mean something keep their colours, but a sheet
+    // may have set those colours itself, and what is drawn on them was chosen
+    // for the base theme's: black picked for the light theme's green stood at
+    // 4.2:1 on the darker green six sheets use. So the ink is asked of the
+    // ground that is there now, and left alone wherever it already reads.
+    for family in ["error", "warning", "success", "info"] {
+        let on_key = format!("color_on_{family}");
+        if named(&on_key) {
+            continue;
+        }
+        if let (Some(ground), Some(ink)) = (read(&format!("color_{family}")), read(&on_key)) {
+            let (ground, ink) = (ground | 0xFF, ink | 0xFF);
+            let reads = readable_on(ground, ink, if contrast(WHITE, ground) > contrast(BLACK, ground) { WHITE } else { BLACK });
+            if reads != ink {
+                out.push((on_key, reads));
+            }
+        }
+    }
+    out
+}
+
 /// The script that brings the library's own roles into line with a style
 /// sheet, to be run straight after the sheet's tokens.
 ///
@@ -812,7 +926,7 @@ pub const SHEET_ACCENT: &str = "color_ctrl_selected";
 /// for itself is the sheet's to decide and is left alone.
 pub fn sheet_roles_script(sheet_theme: &str, read: &mut dyn FnMut(&str) -> Option<u32>) -> String {
     let dark = sheet_theme.contains("mod.themes.dark");
-    let named = |key: &str| {
+    let mut named = |key: &str| {
         sheet_theme.lines().any(|line| {
             line.trim_start()
                 .strip_prefix("mod.theme.")
@@ -821,84 +935,14 @@ pub fn sheet_roles_script(sheet_theme: &str, read: &mut dyn FnMut(&str) -> Optio
         })
     };
     let mut out = String::new();
-    let mut ladder_top = None;
-    for (role, light, dark_source) in DERIVED_ROLES {
-        if named(role) {
-            continue;
-        }
-        let value = match if dark { *dark_source } else { *light } {
-            RoleSource::Token(t) => read(t),
-            RoleSource::HalfMix(a, b) => match (read(a), read(b)) {
-                (Some(a), Some(b)) => Some(mix_rgb(a, b, 0.5)),
-                _ => None,
-            },
-            RoleSource::MixTo(t, end, amount) => read(t).map(|c| mix_rgb(c | 0xFF, end, amount)),
-        };
-        if let Some(rgba) = value {
-            if *role == "color_surface_container_high" {
-                ladder_top = Some(rgba);
-            }
-            out.push_str(&format!("mod.theme.{role} = #x{rgba:08X}
-"));
-        }
-    }
-    // What is drawn ON those surfaces. A sheet chose its text colour against
-    // its own flat background and never saw the ladder derived above, so the
-    // choice is put to the brightest rung a widget lays text on: kept where
-    // it still reads there, replaced by the plain end where it does not. The
-    // second voice has no token of its own in a sheet, so what carries over
-    // is the base theme's own considered value, put to the same test.
-    if let Some(ground) = ladder_top.or_else(|| read("color_surface_container_high")) {
-        for (role, source, need) in [
-            ("color_on_surface", "color_text", READABLE),
-            ("color_on_surface_variant", "color_on_surface_variant", LEGIBLE),
-        ] {
-            if named(role) {
-                continue;
-            }
-            if let Some(ink) = read(source) {
-                let chosen = ink_for(ground, ink, need);
-                out.push_str(&format!("mod.theme.{role} = #x{chosen:08X}
-"));
-            }
-        }
-    }
-    if let Some(accent) = read(SHEET_ACCENT) {
-        let seed = SeedColors { primary: accent | 0xFF, ..SeedColors::HOUSE };
-        let scheme = if dark { Scheme::Dark } else { Scheme::Light };
-        for (key, rgba) in roles_from_seed(&seed, scheme).entries() {
-            let follows = ["primary", "secondary", "tertiary"].iter().any(|family| key.contains(family));
-            if follows && !named(key) {
-                out.push_str(&format!("mod.theme.{key} = #x{rgba:08X}
-"));
-            }
-        }
-    }
-    // The four families that mean something keep their colours, but a sheet
-    // may have set those colours itself, and what is drawn on them was chosen
-    // for the base theme's: black picked for the light theme's green stood at
-    // 4.2:1 on the darker green six sheets use. So the ink is asked of the
-    // ground that is there now, and left alone wherever it already reads.
-    for family in ["error", "warning", "success", "info"] {
-        let on_key = format!("color_on_{family}");
-        if named(&on_key) {
-            continue;
-        }
-        if let (Some(ground), Some(ink)) = (read(&format!("color_{family}")), read(&on_key)) {
-            let (ground, ink) = (ground | 0xFF, ink | 0xFF);
-            let reads = readable_on(ground, ink, if contrast(WHITE, ground) > contrast(BLACK, ground) { WHITE } else { BLACK });
-            if reads != ink {
-                out.push_str(&format!("mod.theme.{on_key} = #x{reads:08X}
-"));
-            }
-        }
+    for (key, rgba) in derived_roles(dark, RoleGrowth::FromAccent, &mut named, read) {
+        out.push_str(&format!("mod.theme.{key} = #x{rgba:08X}\n"));
     }
     // The last statement of an evaluated script is swallowed, so a script
     // that ends on an assignment loses it. Every sheet the library ships
     // ends with this same bare `true` for the same reason. Without it the
     // final role derived here was silently the one before the sheet.
-    out.push_str("true
-");
+    out.push_str("true\n");
     out
 }
 
@@ -1057,6 +1101,826 @@ pub fn export_theme_source(name: &str, values: &[(String, TokenValue)]) -> Strin
     }
     out.push_str("    }\n}\n");
     out
+}
+
+// ---------------------------------------------------------------------------
+// The theme equalizer: several themes mixed together by weight.
+// ---------------------------------------------------------------------------
+
+/// Which appearance group a theme sits in.
+///
+/// A mix never crosses the two. Half way between a dark theme and a light one
+/// is a mid grey page with mid grey text on it: both grounds meet in the
+/// middle, and so does the ink each theme chose to stand off its own ground,
+/// so the pair arrives at the middle together and nothing reads. There is no
+/// weighting of a dark theme and a light one that comes out legible, which is
+/// why the equalizer offers one group at a time and `BlendCache::blend`
+/// refuses a mix that spans both rather than quietly handing back that grey.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Appearance {
+    Dark,
+    Light,
+}
+
+impl Appearance {
+    pub const ALL: [Appearance; 2] = [Appearance::Dark, Appearance::Light];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Appearance::Dark => "Dark",
+            Appearance::Light => "Light",
+        }
+    }
+}
+
+/// Which base theme each style sheet is written against. A sheet says so in
+/// its own first line -- `mod.theme = mod.themes.dark` -- and that line is
+/// also the only honest source for its appearance: two of the sheets are dark
+/// and carry no `-dark` in their name. `the_sheet_table_is_what_the_sheets_say`
+/// holds this copy to the sheets themselves.
+const SHEET_BASE: &[(DesktopStyle, bool, Scheme)] = &[
+    (DesktopStyle::Omarchy, false, Scheme::Dark),
+    (DesktopStyle::BlackOrange, false, Scheme::Dark),
+    (DesktopStyle::Macos, false, Scheme::Light),
+    (DesktopStyle::Macos, true, Scheme::Dark),
+    (DesktopStyle::Windows, false, Scheme::Light),
+    (DesktopStyle::Windows, true, Scheme::Dark),
+    (DesktopStyle::Windows2000, false, Scheme::Light),
+    (DesktopStyle::NextStep, false, Scheme::Light),
+    (DesktopStyle::Ios, false, Scheme::Light),
+    (DesktopStyle::Ios, true, Scheme::Dark),
+    (DesktopStyle::Android, false, Scheme::Light),
+    (DesktopStyle::Android, true, Scheme::Dark),
+];
+
+/// One ingredient of a mix: a base theme, or a style sheet in one of the
+/// appearances it offers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlendTheme {
+    Base(Scheme),
+    Sheet(DesktopStyle, bool),
+}
+
+impl BlendTheme {
+    /// Every theme the equalizer can mix, the three base themes first.
+    pub fn all() -> Vec<BlendTheme> {
+        let mut out: Vec<BlendTheme> = Scheme::ALL.iter().map(|s| BlendTheme::Base(*s)).collect();
+        out.extend(SHEET_BASE.iter().map(|(style, dark, _)| BlendTheme::Sheet(*style, *dark)));
+        out
+    }
+
+    /// The themes of one appearance group, which is the list a mix is drawn
+    /// from: a slider per entry, and nothing from the other group.
+    pub fn group(appearance: Appearance) -> Vec<BlendTheme> {
+        BlendTheme::all().into_iter().filter(|t| t.appearance() == appearance).collect()
+    }
+
+    /// The `mod.themes` object this theme's tokens live in: itself for a base
+    /// theme, and for a sheet the theme the sheet assigns into.
+    pub fn base(self) -> Scheme {
+        match self {
+            BlendTheme::Base(scheme) => scheme,
+            BlendTheme::Sheet(style, dark) => SHEET_BASE
+                .iter()
+                .find(|(s, d, _)| *s == style && *d == dark)
+                .map(|(_, _, base)| *base)
+                .unwrap_or(Scheme::Light),
+        }
+    }
+
+    /// The group this theme mixes in.
+    pub fn appearance(self) -> Appearance {
+        match self {
+            BlendTheme::Base(Scheme::Dark) => Appearance::Dark,
+            // The skeleton is a pale placeholder page, so it belongs with the
+            // light group; `the_groups_match_the_grounds` measures that off
+            // the resolved themes rather than taking it on trust.
+            BlendTheme::Base(_) => Appearance::Light,
+            BlendTheme::Sheet(..) => {
+                if self.base() == Scheme::Dark {
+                    Appearance::Dark
+                } else {
+                    Appearance::Light
+                }
+            }
+        }
+    }
+
+    /// The key under `mod.themes` for a base theme, and the name a sheet is
+    /// loaded and installed under.
+    pub fn name(self) -> String {
+        match self {
+            BlendTheme::Base(scheme) => scheme.theme_name().to_string(),
+            BlendTheme::Sheet(style, dark) => {
+                if dark && style.supports_dark() {
+                    format!("{}-dark", style.id())
+                } else {
+                    style.id().to_string()
+                }
+            }
+        }
+    }
+
+    /// A name for the control that drives this theme's weight.
+    pub fn label(self) -> String {
+        match self {
+            BlendTheme::Base(Scheme::Dark) => "Dark".to_string(),
+            BlendTheme::Base(Scheme::Light) => "Light".to_string(),
+            BlendTheme::Base(Scheme::Skeleton) => "Skeleton".to_string(),
+            BlendTheme::Sheet(style, dark) => {
+                if dark && style.supports_dark() {
+                    format!("{} dark", style.label())
+                } else {
+                    style.label().to_string()
+                }
+            }
+        }
+    }
+}
+
+/// Whether averaging this token with another theme's would mean anything.
+///
+/// The fifteen `color_map_N` series with their eight shades each, and the
+/// fourteen `color_syntax_*` keys, are categorical palettes: their members are
+/// told apart BY hue, and which hue is which carries the meaning -- the third
+/// series of a chart, a string literal, a comment. A palette half way between
+/// two palettes is not a palette: every member has drifted toward every other
+/// member and toward the mean of the lot, which is the one property a
+/// categorical palette exists to avoid. So these are not blended at all. They
+/// are taken whole from the argmax theme and read as that theme's, which is
+/// 133 of the 557 tokens a theme carries.
+pub fn is_categorical(key: &str) -> bool {
+    key.starts_with("color_map_") || key.starts_with("color_syntax_")
+}
+
+/// How the weights behave when one of them moves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WeightMode {
+    /// Every weight is its own, and the mix is `sum(w_i * T_i) / sum(w_i)`.
+    /// Raising one theme leaves the others exactly where they were; what
+    /// changes is their share of the total. This is adding an ingredient:
+    /// turn a theme up and more of it goes in.
+    Absolute,
+    /// The weights always add up to `RELATIVE_TOTAL`. Raising one takes from
+    /// the anchor -- the theme the mix started from -- and once the anchor is
+    /// spent, from all the others in proportion to what each still holds.
+    /// Lowering one hands it back to the anchor. This is a budget of a hundred
+    /// parts shared out, where a theme's number IS its share of the result.
+    Relative,
+}
+
+/// What a relative mix always adds up to.
+pub const RELATIVE_TOTAL: f64 = 100.0;
+
+/// Move one weight and settle the rest by the rule of the mode.
+///
+/// `anchor` is the theme the mix started from, which relative mode takes from
+/// first; absolute mode ignores it. An index past the end is ignored.
+pub fn set_weight(mode: WeightMode, weights: &mut [f64], anchor: usize, index: usize, value: f64) {
+    if index >= weights.len() {
+        return;
+    }
+    match mode {
+        WeightMode::Absolute => weights[index] = value.max(0.0),
+        WeightMode::Relative => relative_set(weights, anchor, index, value),
+    }
+}
+
+/// Set one weight of a relative mix, keeping the total at `RELATIVE_TOTAL`.
+/// The weights handed in are expected to add up to it already; `to_relative`
+/// is how a mix gets there in the first place.
+pub fn relative_set(weights: &mut [f64], anchor: usize, index: usize, value: f64) {
+    if index >= weights.len() {
+        return;
+    }
+    let value = value.clamp(0.0, RELATIVE_TOTAL);
+    let mut owed = value - weights[index];
+    weights[index] = value;
+    let anchor = if anchor < weights.len() && anchor != index { Some(anchor) } else { None };
+    let others: Vec<usize> = (0..weights.len()).filter(|i| *i != index && Some(*i) != anchor).collect();
+    if owed > 0.0 {
+        // Taking: the anchor first, and only then everything else, each in
+        // proportion to what it holds.
+        let anchor_first = anchor.map(|a| vec![a]).unwrap_or_default();
+        owed -= take_proportionally(weights, &anchor_first, owed);
+        owed -= take_proportionally(weights, &others, owed);
+        // Nothing left anywhere to take: the slider cannot go that high.
+        weights[index] -= owed.max(0.0);
+    } else if owed < 0.0 {
+        // Giving back: to the anchor, which is what a raise took from, and to
+        // everything else when this slider IS the anchor.
+        let group = match anchor {
+            Some(a) => vec![a],
+            None => others,
+        };
+        give_proportionally(weights, &group, -owed);
+    }
+    // Floating point is the enemy of a conserved total, so the sum gets the
+    // last word: whatever it is out by lands on the largest weight, which is
+    // always big enough to absorb it.
+    let drift = RELATIVE_TOTAL - weights.iter().sum::<f64>();
+    if drift != 0.0 && drift.abs() < 1e-6 {
+        if let Some(at) = (0..weights.len()).max_by(|a, b| weights[*a].total_cmp(&weights[*b])) {
+            weights[at] += drift;
+        }
+    }
+}
+
+/// A set of weights scaled to `RELATIVE_TOTAL`, which is how a relative mix
+/// starts: an absolute mix carried over, or everything on the anchor when
+/// nothing carries weight at all.
+pub fn to_relative(weights: &[f64], anchor: usize) -> Vec<f64> {
+    let total: f64 = weights.iter().map(|w| w.max(0.0)).sum();
+    if total <= 0.0 {
+        let mut out = vec![0.0; weights.len()];
+        if let Some(w) = out.get_mut(anchor) {
+            *w = RELATIVE_TOTAL;
+        }
+        return out;
+    }
+    weights.iter().map(|w| w.max(0.0) / total * RELATIVE_TOTAL).collect()
+}
+
+/// Take up to `amount` from `group` in proportion to what each member holds,
+/// and report what was actually taken.
+fn take_proportionally(weights: &mut [f64], group: &[usize], amount: f64) -> f64 {
+    let held: f64 = group.iter().map(|i| weights[*i]).sum();
+    if amount <= 0.0 || held <= 0.0 {
+        return 0.0;
+    }
+    let take = amount.min(held);
+    for i in group {
+        weights[*i] -= weights[*i] / held * take;
+    }
+    take
+}
+
+/// Hand `amount` to `group` in proportion to what each member holds, or
+/// evenly when the group holds nothing at all.
+fn give_proportionally(weights: &mut [f64], group: &[usize], amount: f64) {
+    if group.is_empty() || amount <= 0.0 {
+        return;
+    }
+    let held: f64 = group.iter().map(|i| weights[*i]).sum();
+    for i in group {
+        weights[*i] += if held > 0.0 {
+            weights[*i] / held * amount
+        } else {
+            amount / group.len() as f64
+        };
+    }
+}
+
+/// The weights as fractions of their total, which is what both modes actually
+/// blend by: `sum(w_i * T_i) / sum(w_i)`. All zero when nothing carries
+/// weight, which `BlendCache::blend` reports rather than divides by.
+pub fn normalized(weights: &[f64]) -> Vec<f64> {
+    let total: f64 = weights.iter().map(|w| w.max(0.0)).sum();
+    if total <= 0.0 {
+        return vec![0.0; weights.len()];
+    }
+    weights.iter().map(|w| w.max(0.0) / total).collect()
+}
+
+/// The narrowest and the widest the random curve may be.
+pub const SIGMA_MIN: f64 = 0.6;
+pub const SIGMA_MAX: f64 = 4.0;
+
+/// A random mix of `n` themes: pure, seeded, and summing to one.
+///
+/// The weights fall off a bell from whichever theme the shuffle put first:
+/// `w_k = exp(-(k / sigma)^2)`, with `k` a theme's place in a random order.
+/// Sigma is itself random, log-uniform between `SIGMA_MIN` and `SIGMA_MAX`, so
+/// that the CURVE is what is being randomised: a sharp sigma gives one
+/// dominant theme with an influence or two behind it, a wide one gives a
+/// spread of five or six. Drawing each weight independently instead gives the
+/// same flat mush every time -- the mean of n independent weights concentrates
+/// as n grows, so nothing ever dominates and nothing is ever nearly absent.
+///
+/// Pure and seeded so the same seed is the same mix, here and in a test.
+pub fn random_weights(seed: u64, n: usize) -> Vec<f64> {
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut state = seed;
+    let sigma = SIGMA_MIN * (SIGMA_MAX / SIGMA_MIN).powf(next_unit(&mut state));
+    let mut order: Vec<usize> = (0..n).collect();
+    for i in (1..n).rev() {
+        let j = (next_u64(&mut state) % (i as u64 + 1)) as usize;
+        order.swap(i, j);
+    }
+    let mut out = vec![0.0; n];
+    for (rank, theme) in order.iter().enumerate() {
+        let k = rank as f64 / sigma;
+        out[*theme] = (-(k * k)).exp();
+    }
+    let total: f64 = out.iter().sum();
+    for w in out.iter_mut() {
+        *w /= total;
+    }
+    out
+}
+
+/// SplitMix64, so the randomiser owes nothing to a crate and nothing to the
+/// clock: the same seed is the same sequence on every machine and every run.
+fn next_u64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// The next draw as a number in 0..1.
+fn next_unit(state: &mut u64) -> f64 {
+    (next_u64(state) >> 11) as f64 / (1u64 << 53) as f64
+}
+
+/// `mix_rgb` with the alpha channel carried along.
+///
+/// Theme tokens are not all opaque -- the dark theme's text is white at 65
+/// percent, and the whole hidden ladder is a tint -- and `mix_rgb` returns an
+/// opaque colour, because the script's own `mix()` on two opaque colours is
+/// what it was written for. Blending with it alone turned every translucent
+/// token solid, which reads as a different theme rather than a mix of two.
+pub fn mix_rgba(a: u32, b: u32, t: f64) -> u32 {
+    let alpha = |v: u32| (v & 0xFF) as f64;
+    let out = (alpha(a) + (alpha(b) - alpha(a)) * t).round().clamp(0.0, 255.0) as u32;
+    (mix_rgb(a, b, t) & 0xFFFF_FF00) | out
+}
+
+/// A resolved token value, in the only two kinds a mix can carry.
+///
+/// Everything else a theme holds -- a `TextStyle`, an `Ease`, the `Inset` of
+/// `mspace_1` -- has no midpoint, so it is not cached and not written: it
+/// comes from the object the blend script derives from, which is the argmax
+/// theme's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BlendValue {
+    Color(u32),
+    Num(f64),
+}
+
+/// One theme's resolved tokens, by name.
+///
+/// A theme's values are not in its file: a token is an expression over other
+/// tokens, a style sheet then assigns over the lot, and the answer only exists
+/// once the module has been evaluated. `resolve_theme` does that, at the cost
+/// of a full module reload, which is why a `BlendCache` keeps the answers.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ThemeValues {
+    pub theme: BlendTheme,
+    values: BTreeMap<String, BlendValue>,
+}
+
+impl ThemeValues {
+    pub fn new(theme: BlendTheme, values: BTreeMap<String, BlendValue>) -> Self {
+        Self { theme, values }
+    }
+
+    pub fn get(&self, key: &str) -> Option<BlendValue> {
+        self.values.get(key).copied()
+    }
+
+    pub fn color(&self, key: &str) -> Option<u32> {
+        match self.get(key) {
+            Some(BlendValue::Color(c)) => Some(c),
+            _ => None,
+        }
+    }
+
+    pub fn num(&self, key: &str) -> Option<f64> {
+        match self.get(key) {
+            Some(BlendValue::Num(n)) => Some(n),
+            _ => None,
+        }
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &str> {
+        self.values.keys().map(|k| k.as_str())
+    }
+
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+}
+
+/// Why a mix could not be made.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BlendError {
+    /// Every slider is at nought; there is nothing to divide by.
+    NoWeight,
+    /// A dark theme and a light one in the same mix. The two never blend.
+    MixedAppearance(BlendTheme, BlendTheme),
+    /// A theme in the mix has not been resolved into the cache yet.
+    NotResolved(BlendTheme),
+}
+
+impl std::fmt::Display for BlendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BlendError::NoWeight => write!(f, "no theme in the mix carries any weight"),
+            BlendError::MixedAppearance(a, b) => write!(
+                f,
+                "{} is {:?} and {} is {:?}; a mix never crosses the two",
+                a.name(),
+                a.appearance(),
+                b.name(),
+                b.appearance()
+            ),
+            BlendError::NotResolved(t) => write!(f, "{} has not been resolved into the cache", t.name()),
+        }
+    }
+}
+
+/// A mix, ready to apply.
+///
+/// One script, derived from the argmax theme's base object, pinning every
+/// token the blend moved. Never a run of `mod.theme.k = v` assignments: those
+/// mutate the shared base object for every widget already built from it.
+///
+/// The values a blend cannot carry -- the fonts, the eases, `mspace_1` -- come
+/// from that base object, and only the argmax theme's sheet puts ITS versions
+/// of them there, so `argmax_sheet` names the sheet to have in force when the
+/// script runs. The caller's three steps:
+///
+/// ```ignore
+/// let blend = cache.blend(&mix)?;                  // one per slider move
+/// match blend.argmax_sheet() {                     // whose fonts the mix wears
+///     Some((style, dark)) => install(vm, StyleSheet::load_with_appearance(style, dark)),
+///     None => uninstall(vm),
+/// }
+/// vm.eval(/* a ScriptMod carrying */ blend.script("equalized"));
+/// cx.request_script_reapply();
+/// ```
+#[derive(Clone, Debug, PartialEq)]
+pub struct ThemeBlend {
+    /// The theme with the largest weight, which lends the mix everything a
+    /// blend means nothing for.
+    pub argmax: BlendTheme,
+    /// The `mod.themes` object the script derives from: the argmax theme's.
+    pub base: Scheme,
+    /// The group the whole mix came from.
+    pub appearance: Appearance,
+    /// Every token the script pins, in key order.
+    pub overrides: Vec<(String, TokenValue)>,
+}
+
+impl ThemeBlend {
+    /// The one script to evaluate. `name` is the key the derived theme is
+    /// filed under in `mod.themes`; re-running with the same name replaces it.
+    pub fn script(&self, name: &str) -> String {
+        theme_module_script(name, self.base.theme_name(), &self.overrides)
+    }
+
+    /// The sheet to have installed when the script runs, if the argmax theme
+    /// is a sheet at all.
+    pub fn argmax_sheet(&self) -> Option<(DesktopStyle, bool)> {
+        match self.argmax {
+            BlendTheme::Sheet(style, dark) => Some((style, dark)),
+            BlendTheme::Base(_) => None,
+        }
+    }
+
+    fn value(&self, key: &str) -> Option<&TokenValue> {
+        self.overrides
+            .binary_search_by(|(k, _)| k.as_str().cmp(key))
+            .ok()
+            .map(|at| &self.overrides[at].1)
+    }
+
+    /// A blended colour, for a preview or a contrast check.
+    pub fn color(&self, key: &str) -> Option<u32> {
+        match self.value(key) {
+            Some(TokenValue::Color(c)) => Some(*c),
+            _ => None,
+        }
+    }
+
+    /// A blended number.
+    pub fn num(&self, key: &str) -> Option<f64> {
+        match self.value(key) {
+            Some(TokenValue::Num(n)) => Some(*n),
+            _ => None,
+        }
+    }
+}
+
+/// The resolved themes a mix is made from.
+///
+/// Resolving costs a module reload per theme, so it happens once per theme and
+/// the answers are kept here; a slider move then blends from the cache and
+/// touches no VM at all.
+#[derive(Clone, Debug, Default)]
+pub struct BlendCache {
+    resolved: Vec<ThemeValues>,
+}
+
+impl BlendCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn get(&self, theme: BlendTheme) -> Option<&ThemeValues> {
+        self.resolved.iter().find(|v| v.theme == theme)
+    }
+
+    pub fn insert(&mut self, values: ThemeValues) {
+        self.resolved.retain(|v| v.theme != values.theme);
+        self.resolved.push(values);
+    }
+
+    pub fn themes(&self) -> impl Iterator<Item = BlendTheme> + '_ {
+        self.resolved.iter().map(|v| v.theme)
+    }
+
+    pub fn len(&self) -> usize {
+        self.resolved.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.resolved.is_empty()
+    }
+
+    /// Resolve every theme of `themes` that is not in the cache yet, and put
+    /// the VM back the way it was found: whatever sheet was installed goes
+    /// back on, and the module is reloaded, so the caller can apply a blend on
+    /// top of a VM that is none the wiser.
+    pub fn fill(&mut self, vm: &mut ScriptVm, themes: &[BlendTheme]) {
+        let restore = crate::desktop_style::current(vm);
+        let mut resolved_any = false;
+        for theme in themes {
+            if self.get(*theme).is_some() {
+                continue;
+            }
+            let values = resolve_theme(vm, *theme);
+            self.insert(values);
+            resolved_any = true;
+        }
+        if resolved_any {
+            match restore {
+                Some(sheet) => crate::desktop_style::install(vm, sheet),
+                None => crate::desktop_style::uninstall(vm),
+            }
+            vm.with_reload(crate::script_mod);
+        }
+    }
+
+    /// Mix the themes of `mix` by their weights.
+    ///
+    /// The weights need not be normalised and need not be in any mode: what is
+    /// blended is `sum(w_i * T_i) / sum(w_i)` either way, and the two modes
+    /// differ only in what happens to the OTHER sliders when one of them
+    /// moves (see `WeightMode`). A weight of nought drops its theme out
+    /// entirely, so a mix of one theme at any weight is that theme exactly,
+    /// byte for byte, with no rounding anywhere.
+    ///
+    /// Colours mix through `mix_rgba`, numbers linearly. The categorical
+    /// palettes (`is_categorical`) are not mixed at all but taken from the
+    /// argmax theme. Then the library's own roles are derived again from the
+    /// blended tokens, because the choices in them -- which ink goes on which
+    /// ground -- are thresholds, and a threshold does not survive an average:
+    /// two themes whose text reads on their own page can average into one
+    /// whose does not.
+    pub fn blend(&self, mix: &[(BlendTheme, f64)]) -> Result<ThemeBlend, BlendError> {
+        let mut parts: Vec<(&ThemeValues, f64)> = Vec::new();
+        for (theme, weight) in mix {
+            if !(*weight > 0.0) {
+                continue;
+            }
+            let values = self.get(*theme).ok_or(BlendError::NotResolved(*theme))?;
+            parts.push((values, *weight));
+        }
+        let Some((first, _)) = parts.first().copied() else {
+            return Err(BlendError::NoWeight);
+        };
+        let appearance = first.theme.appearance();
+        for (values, _) in &parts {
+            if values.theme.appearance() != appearance {
+                return Err(BlendError::MixedAppearance(first.theme, values.theme));
+            }
+        }
+        // The heaviest theme, and the FIRST of them on a tie, so that an even
+        // mix does not change its mind about whose fonts it wears when the
+        // list is rebuilt.
+        let mut argmax = first;
+        let mut best = parts[0].1;
+        for (values, weight) in &parts[1..] {
+            if *weight > best {
+                best = *weight;
+                argmax = values;
+            }
+        }
+        let mut keys: BTreeSet<&str> = BTreeSet::new();
+        for (values, _) in &parts {
+            keys.extend(values.keys());
+        }
+        let mut blended: BTreeMap<String, BlendValue> = BTreeMap::new();
+        for key in keys {
+            if is_categorical(key) {
+                if let Some(value) = argmax.get(key) {
+                    blended.insert(key.to_string(), value);
+                }
+                continue;
+            }
+            // A running weighted mean: each theme in turn, mixed in at its
+            // share of the weight so far. The first one lands whole, so one
+            // ingredient is itself and nothing is rounded on the way.
+            let mut acc: Option<BlendValue> = None;
+            let mut total = 0.0;
+            for (values, weight) in &parts {
+                let Some(value) = values.get(key) else {
+                    continue;
+                };
+                total += weight;
+                let t = weight / total;
+                acc = Some(match acc {
+                    None => value,
+                    Some(sofar) => blend_value(sofar, value, t),
+                });
+            }
+            if let Some(value) = acc {
+                blended.insert(key.to_string(), value);
+            }
+        }
+        // The roles, off the blended tokens. The brand families are left as
+        // they were blended: every ingredient already carries a considered
+        // one, and the base themes' accent token is a focus blue that has
+        // never been their `color_primary`. A surface rung the mix already
+        // carries is left alone too: the rule that derives it is linear, so
+        // blending the rung and deriving it from the blended ground are the
+        // same answer -- all but the rounding, and the script's own `mix()`
+        // does not round a half the way `mix_rgb` does, which put a lone dark
+        // theme one step off itself on three rungs. What is always asked
+        // again is the ink: which colour goes on which ground is a threshold,
+        // and a threshold is exactly what does not survive an average.
+        let roles = {
+            let mut named = |key: &str| {
+                DERIVED_ROLES.iter().any(|(role, _, _)| *role == key) && blended.contains_key(key)
+            };
+            let mut read = |key: &str| match blended.get(key) {
+                Some(BlendValue::Color(c)) => Some(*c),
+                _ => None,
+            };
+            derived_roles(
+                appearance == Appearance::Dark,
+                RoleGrowth::KeepAccent,
+                &mut named,
+                &mut read,
+            )
+        };
+        for (key, rgba) in roles {
+            blended.insert(key, BlendValue::Color(rgba));
+        }
+        let overrides = blended
+            .into_iter()
+            .map(|(key, value)| {
+                let value = match value {
+                    BlendValue::Color(c) => TokenValue::Color(c),
+                    BlendValue::Num(n) => TokenValue::Num(n),
+                };
+                (key, value)
+            })
+            .collect();
+        Ok(ThemeBlend {
+            argmax: argmax.theme,
+            base: argmax.theme.base(),
+            appearance,
+            overrides,
+        })
+    }
+}
+
+/// Two values of one token, mixed by `t`.
+fn blend_value(a: BlendValue, b: BlendValue, t: f64) -> BlendValue {
+    match (a, b) {
+        (BlendValue::Color(a), BlendValue::Color(b)) => BlendValue::Color(mix_rgba(a, b, t)),
+        (BlendValue::Num(a), BlendValue::Num(b)) => BlendValue::Num(a + (b - a) * t),
+        // A key that is a colour in one theme and a number in another is not a
+        // token the two share; the heavier side keeps it rather than the two
+        // being forced into one kind.
+        (a, b) => {
+            if t >= 0.5 {
+                b
+            } else {
+                a
+            }
+        }
+    }
+}
+
+/// Every top-level key of a theme file: the lines at exactly eight spaces of
+/// indent that open with `name:`.
+pub fn theme_keys(source: &str) -> Vec<&str> {
+    source
+        .lines()
+        .filter_map(|line| {
+            let rest = line.strip_prefix("        ")?;
+            let first = rest.chars().next()?;
+            if !first.is_ascii_lowercase() {
+                return None;
+            }
+            let key = &rest[..rest.find(':')?];
+            if key.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
+                Some(key)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Every key the three theme files define between them, in file order and
+/// without repeats: the tokens a mix can carry.
+pub fn base_theme_keys() -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = Vec::new();
+    for scheme in Scheme::ALL {
+        for key in theme_keys(scheme.source()) {
+            if !out.contains(&key) {
+                out.push(key);
+            }
+        }
+    }
+    out
+}
+
+/// The keys a style sheet assigns, as `mod.theme.<key> = ...`. A sheet may
+/// introduce a token no base theme file defines -- seventeen of them do --
+/// and a mix that read only the base files would drop those on the floor.
+pub fn assigned_keys(sheet_theme: &str) -> Vec<&str> {
+    let mut out: Vec<&str> = Vec::new();
+    for line in sheet_theme.lines() {
+        let Some(rest) = line.trim_start().strip_prefix("mod.theme.") else {
+            continue;
+        };
+        let end = rest
+            .find(|c: char| !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'))
+            .unwrap_or(rest.len());
+        let (key, tail) = rest.split_at(end);
+        if !key.is_empty() && tail.trim_start().starts_with('=') && !out.contains(&key) {
+            out.push(key);
+        }
+    }
+    out
+}
+
+/// Resolve one theme's tokens in a script VM.
+///
+/// Installs the sheet (or takes one off), reloads the widget module, and reads
+/// every key back off `mod.theme`. The reload is not optional: a sheet assigns
+/// into the base theme OBJECT, so a theme read after another one had its sheet
+/// on would be wearing half of it.
+pub fn resolve_theme(vm: &mut ScriptVm, theme: BlendTheme) -> ThemeValues {
+    let sheet = match theme {
+        BlendTheme::Base(_) => {
+            crate::desktop_style::uninstall(vm);
+            None
+        }
+        BlendTheme::Sheet(style, dark) => {
+            let sheet = crate::desktop_style::StyleSheet::load_with_appearance(style, dark);
+            crate::desktop_style::install(vm, sheet.clone());
+            Some(sheet)
+        }
+    };
+    vm.with_reload(crate::script_mod);
+    // A reload leaves `mod.theme` on the dark theme; a sheet has already moved
+    // it to its own base.
+    match theme {
+        BlendTheme::Base(Scheme::Light) => {
+            script_eval!(vm, {
+                mod.theme = mod.themes.light
+            });
+        }
+        BlendTheme::Base(Scheme::Skeleton) => {
+            script_eval!(vm, {
+                mod.theme = mod.themes.skeleton
+            });
+        }
+        _ => {}
+    }
+    let mut keys: Vec<String> = base_theme_keys().iter().map(|k| k.to_string()).collect();
+    if let Some(sheet) = &sheet {
+        for key in assigned_keys(&sheet.theme) {
+            if !keys.iter().any(|k| k == key) {
+                keys.push(key.to_string());
+            }
+        }
+    }
+    let object = vm.module(LiveId::from_str("theme"));
+    let mut values = BTreeMap::new();
+    for key in keys {
+        let value = vm.bx.heap.value(object, LiveId::from_str(&key).into(), NoTrap);
+        if let Some(rgba) = value.as_color() {
+            values.insert(key, BlendValue::Color(rgba));
+        } else if let Some(number) = value.as_number() {
+            values.insert(key, BlendValue::Num(number));
+        }
+    }
+    ThemeValues { theme, values }
 }
 
 #[cfg(test)]
@@ -1287,25 +2151,10 @@ mod.theme.color_surface=#123456
         assert!(rung(&light) < 0x202020FF, "{light}");
     }
 
-    /// The keys a theme file defines at its top level: lines at exactly eight
-    /// spaces of indent that open with `name:`.
+    /// The keys a theme file defines at its top level, which the equalizer
+    /// needs too and so keeps.
     fn own_keys(source: &str) -> Vec<&str> {
-        source
-            .lines()
-            .filter_map(|line| {
-                let rest = line.strip_prefix("        ")?;
-                let first = rest.chars().next()?;
-                if !first.is_ascii_lowercase() {
-                    return None;
-                }
-                let key = &rest[..rest.find(':')?];
-                if key.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
-                    Some(key)
-                } else {
-                    None
-                }
-            })
-            .collect()
+        theme_keys(source)
     }
 
     /// Whether a key falls under one of the prefixes the token programme
@@ -1478,7 +2327,7 @@ mod sheet_contrast_tests {
     use crate::script_eval;
 
     /// Every sheet the library ships, in both appearances it offers.
-    const SHEETS: &[(DesktopStyle, bool)] = &[
+    pub(super) const SHEETS: &[(DesktopStyle, bool)] = &[
         (DesktopStyle::Omarchy, false),
         (DesktopStyle::BlackOrange, false),
         (DesktopStyle::Macos, false),
@@ -1495,7 +2344,7 @@ mod sheet_contrast_tests {
 
     /// The four families that mean something, and the accent, each with the
     /// ink meant to be drawn on it.
-    const MEANING: &[(&str, &str)] = &[
+    pub(super) const MEANING: &[(&str, &str)] = &[
         ("color_success", "color_on_success"),
         ("color_warning", "color_on_warning"),
         ("color_error", "color_on_error"),
@@ -1504,7 +2353,7 @@ mod sheet_contrast_tests {
     ];
 
     /// Every rung of the surface ladder, against the body ink.
-    const SURFACES: &[(&str, &str)] = &[
+    pub(super) const SURFACES: &[(&str, &str)] = &[
         ("color_surface", "color_on_surface"),
         ("color_surface_container", "color_on_surface"),
         ("color_surface_container_low", "color_on_surface"),
@@ -1515,7 +2364,7 @@ mod sheet_contrast_tests {
     ];
 
     /// The same rungs against the second voice, which is held to `LEGIBLE`.
-    const VARIANTS: &[(&str, &str)] = &[
+    pub(super) const VARIANTS: &[(&str, &str)] = &[
         ("color_surface", "color_on_surface_variant"),
         ("color_surface_container", "color_on_surface_variant"),
         ("color_surface_container_high", "color_on_surface_variant"),
@@ -1652,5 +2501,504 @@ mod sheet_contrast_tests {
         println!("{}", lines.join("
 "));
         println!("{failed} of {} pairs below the bar for their kind", lines.len());
+    }
+}
+
+#[cfg(test)]
+mod equalizer_tests {
+    use super::sheet_contrast_tests::{MEANING, SURFACES, VARIANTS};
+    use super::*;
+    use crate::desktop_style::StyleSheet;
+    use crate::makepad_platform::Cx;
+    use std::collections::BTreeMap;
+    use std::sync::OnceLock;
+
+    /// A theme invented for the maths: the tokens the role derivation reads,
+    /// two numbers, and one member of each categorical palette. No VM, so the
+    /// blending itself can be checked at speed and by hand.
+    fn made_up(theme: BlendTheme, colors: &[(&str, u32)], numbers: &[(&str, f64)]) -> ThemeValues {
+        let mut values = BTreeMap::new();
+        for (key, rgba) in colors {
+            values.insert(key.to_string(), BlendValue::Color(*rgba));
+        }
+        for (key, number) in numbers {
+            values.insert(key.to_string(), BlendValue::Num(*number));
+        }
+        ThemeValues::new(theme, values)
+    }
+
+    const NEAR_BLACK: BlendTheme = BlendTheme::Base(Scheme::Dark);
+    const CHARCOAL: BlendTheme = BlendTheme::Sheet(DesktopStyle::Omarchy, false);
+
+    /// Two dark themes far enough apart that a midpoint is obvious, and one
+    /// light theme to be refused.
+    fn bench() -> BlendCache {
+        let mut cache = BlendCache::new();
+        cache.insert(made_up(
+            NEAR_BLACK,
+            &[
+                ("color_bg_app", 0x101010FF),
+                ("color_fg_app", 0x202020FF),
+                ("color_text", 0xEEEEEEFF),
+                ("color_on_surface", 0xEEEEEEFF),
+                ("color_on_surface_variant", 0xAAAAAAFF),
+                ("color_u_3", 0x404040FF),
+                ("color_u_15", 0x303030FF),
+                ("color_opaque_u_6", 0xF0F0F0FF),
+                ("color_opaque_d_5", 0x0A0A0AFF),
+                ("color_opaque_u_1", 0x181818FF),
+                ("color_opaque_u_2", 0x282828FF),
+                ("color_primary", 0xFF5C39FF),
+                ("color_map_1", 0x286CABFF),
+                ("color_syntax_string", 0x00FF00FF),
+            ],
+            &[("space_factor", 8.0), ("radius_m", 6.0)],
+        ));
+        cache.insert(made_up(
+            CHARCOAL,
+            &[
+                ("color_bg_app", 0x303030FF),
+                ("color_fg_app", 0x404040FF),
+                ("color_text", 0xCCCCCCFF),
+                ("color_on_surface", 0xCCCCCCFF),
+                ("color_on_surface_variant", 0xB0B0B0FF),
+                ("color_u_3", 0x606060FF),
+                ("color_u_15", 0x505050FF),
+                ("color_opaque_u_6", 0xE0E0E0FF),
+                ("color_opaque_d_5", 0x1A1A1AFF),
+                ("color_opaque_u_1", 0x383838FF),
+                ("color_opaque_u_2", 0x484848FF),
+                ("color_primary", 0x39A5FFFF),
+                ("color_map_1", 0x900000FF),
+                ("color_syntax_string", 0x0000FFFF),
+            ],
+            &[("space_factor", 10.0), ("radius_m", 4.0)],
+        ));
+        cache.insert(made_up(
+            BlendTheme::Base(Scheme::Light),
+            &[("color_bg_app", 0xFFFFFFFF), ("color_fg_app", 0xF0F0F0FF)],
+            &[("space_factor", 9.0)],
+        ));
+        cache
+    }
+
+    /// A slider at the top with every other at nought is not a blend of
+    /// anything, and has to come back as the theme itself -- not the theme
+    /// plus a rounding error, and not the theme with its inks second-guessed.
+    #[test]
+    fn a_mix_at_full_weight_is_exactly_that_theme() {
+        let cache = bench();
+        let theme = cache.get(NEAR_BLACK).unwrap();
+        for weight in [1.0, 100.0, 0.001] {
+            let blend = cache.blend(&[(NEAR_BLACK, weight), (CHARCOAL, 0.0)]).unwrap();
+            assert_eq!(blend.argmax, NEAR_BLACK);
+            for key in theme.keys() {
+                let want = theme.get(key).unwrap();
+                let got = match (blend.color(key), blend.num(key)) {
+                    (Some(c), _) => BlendValue::Color(c),
+                    (_, Some(n)) => BlendValue::Num(n),
+                    _ => panic!("{key} is missing from the blend"),
+                };
+                assert_eq!(got, want, "{key} at weight {weight}");
+            }
+        }
+    }
+
+    /// Half of one and half of the other is the midpoint of every channel and
+    /// of every number, with nothing else moved.
+    #[test]
+    fn half_and_half_is_the_midpoint_of_every_channel() {
+        let cache = bench();
+        let blend = cache.blend(&[(NEAR_BLACK, 50.0), (CHARCOAL, 50.0)]).unwrap();
+        assert_eq!(blend.color("color_bg_app"), Some(0x202020FF));
+        assert_eq!(blend.color("color_fg_app"), Some(0x303030FF));
+        // (0xEE + 0xCC) / 2 and (0xFF5C39 + 0x39A5FF) / 2, per channel.
+        assert_eq!(blend.color("color_text"), Some(0xDDDDDDFF));
+        assert_eq!(blend.color("color_primary"), Some(0x9C819CFF));
+        assert_eq!(blend.num("space_factor"), Some(9.0));
+        assert_eq!(blend.num("radius_m"), Some(5.0));
+        // And it is the same answer as the library's own two-colour mix.
+        assert_eq!(blend.color("color_bg_app"), Some(mix_rgb(0x101010FF, 0x303030FF, 0.5)));
+        // A weighting works out the same way: three parts to one.
+        let quarter = cache.blend(&[(NEAR_BLACK, 75.0), (CHARCOAL, 25.0)]).unwrap();
+        assert_eq!(quarter.color("color_bg_app"), Some(mix_rgb(0x101010FF, 0x303030FF, 0.25)));
+    }
+
+    /// An ink that is not opaque is most of the theme's text, and a mix that
+    /// forgets its alpha comes back as a solid version of itself.
+    #[test]
+    fn a_mix_keeps_the_alpha_a_token_carries() {
+        assert_eq!(mix_rgba(0xFFFFFF00, 0xFFFFFFFF, 0.5), 0xFFFFFF80);
+        assert_eq!(mix_rgba(0x000000AA, 0x000000AA, 0.5), 0x000000AA);
+        assert_eq!(mix_rgba(0x101010FF, 0x303030FF, 0.5), 0x202020FF);
+    }
+
+    /// The heaviest theme lends the mix everything an average means nothing
+    /// for: the chart and syntax palettes, and -- through the object the
+    /// script derives from -- the fonts, the eases and `mspace_1`.
+    #[test]
+    fn the_heaviest_theme_lends_its_palettes_and_its_fonts() {
+        let cache = bench();
+        let mine = cache.blend(&[(NEAR_BLACK, 70.0), (CHARCOAL, 30.0)]).unwrap();
+        assert_eq!(mine.argmax, NEAR_BLACK);
+        assert_eq!(mine.color("color_map_1"), Some(0x286CABFF));
+        assert_eq!(mine.color("color_syntax_string"), Some(0x00FF00FF));
+        assert_eq!(mine.base, Scheme::Dark);
+        assert_eq!(mine.argmax_sheet(), None);
+        // The palettes never meet in the middle, however close the weights.
+        let theirs = cache.blend(&[(NEAR_BLACK, 49.0), (CHARCOAL, 51.0)]).unwrap();
+        assert_eq!(theirs.argmax, CHARCOAL);
+        assert_eq!(theirs.color("color_map_1"), Some(0x900000FF));
+        assert_eq!(theirs.color("color_syntax_string"), Some(0x0000FFFF));
+        assert_eq!(theirs.argmax_sheet(), Some((DesktopStyle::Omarchy, false)));
+        // The rest of the mix is still a mix, and barely moved by the swap.
+        assert_eq!(mine.color("color_bg_app"), Some(mix_rgb(0x101010FF, 0x303030FF, 0.3)));
+        assert_eq!(theirs.color("color_bg_app"), Some(mix_rgb(0x101010FF, 0x303030FF, 0.51)));
+        // A tie keeps the first, so an even mix does not change its mind
+        // about whose fonts it wears when the list is rebuilt.
+        let even = cache.blend(&[(NEAR_BLACK, 50.0), (CHARCOAL, 50.0)]).unwrap();
+        assert_eq!(even.argmax, NEAR_BLACK);
+    }
+
+    /// One script, deriving a new theme object. Never a run of assignments
+    /// into `mod.theme`, which is shared with every widget already built.
+    #[test]
+    fn a_mix_is_one_script_that_derives_a_theme() {
+        let cache = bench();
+        let blend = cache.blend(&[(NEAR_BLACK, 50.0), (CHARCOAL, 50.0)]).unwrap();
+        let script = blend.script("equalized");
+        assert!(script.starts_with("mod.themes.equalized = mod.themes.dark{ "), "{script}");
+        assert!(script.ends_with(" }\nmod.theme = mod.themes.equalized\n"), "{script}");
+        assert!(!script.contains("mod.theme."), "a mix must not assign into the shared theme: {script}");
+        assert!(script.contains("color_bg_app: #x202020FF"), "{script}");
+        assert!(script.contains("space_factor: 9.0"), "{script}");
+        assert_eq!(script.lines().count(), 2, "{script}");
+    }
+
+    /// Nothing to divide by, and a theme nobody resolved, are both said out
+    /// loud rather than guessed at.
+    #[test]
+    fn a_mix_of_nothing_is_an_error_not_a_guess() {
+        let cache = bench();
+        assert_eq!(cache.blend(&[]), Err(BlendError::NoWeight));
+        assert_eq!(cache.blend(&[(NEAR_BLACK, 0.0)]), Err(BlendError::NoWeight));
+        let absent = BlendTheme::Sheet(DesktopStyle::NextStep, false);
+        assert_eq!(cache.blend(&[(absent, 1.0)]), Err(BlendError::NotResolved(absent)));
+    }
+
+    /// A dark theme and a light one meet in a mid grey with mid grey text on
+    /// it. The engine refuses rather than producing that.
+    #[test]
+    fn a_mix_never_crosses_the_appearance() {
+        let cache = bench();
+        let light = BlendTheme::Base(Scheme::Light);
+        assert_eq!(
+            cache.blend(&[(NEAR_BLACK, 50.0), (light, 50.0)]),
+            Err(BlendError::MixedAppearance(NEAR_BLACK, light))
+        );
+        // A weight of nought is not in the mix at all, so it cannot spoil one.
+        assert!(cache.blend(&[(NEAR_BLACK, 50.0), (light, 0.0)]).is_ok());
+        // And the two groups are the two lists a panel offers.
+        let dark = BlendTheme::group(Appearance::Dark);
+        let pale = BlendTheme::group(Appearance::Light);
+        assert_eq!(dark.len() + pale.len(), BlendTheme::all().len());
+        assert!(dark.iter().all(|t| !pale.contains(t)));
+        assert_eq!(dark.len(), 7, "{dark:?}");
+        assert_eq!(pale.len(), 8, "{pale:?}");
+    }
+
+    /// The weights of a relative mix are a hundred parts shared out, so
+    /// however they are dragged about they still add up to a hundred and none
+    /// of them goes negative.
+    #[test]
+    fn a_relative_mix_always_adds_up_to_a_hundred() {
+        let mut weights = to_relative(&[1.0, 0.0, 0.0, 0.0], 0);
+        assert_eq!(weights, vec![100.0, 0.0, 0.0, 0.0]);
+        // Raising the second takes from the theme the mix started from.
+        relative_set(&mut weights, 0, 1, 30.0);
+        assert_eq!(weights, vec![70.0, 30.0, 0.0, 0.0]);
+        // Raising the third takes the anchor's last seventy and then ten more
+        // from the second, which is all there is left to scale down.
+        relative_set(&mut weights, 0, 2, 80.0);
+        assert_eq!(weights, vec![0.0, 20.0, 80.0, 0.0]);
+        // Lowering hands it back to the anchor.
+        relative_set(&mut weights, 0, 2, 40.0);
+        assert_eq!(weights, vec![40.0, 20.0, 40.0, 0.0]);
+        // A slider cannot go past the whole budget.
+        relative_set(&mut weights, 0, 3, 150.0);
+        assert_eq!(weights, vec![0.0, 0.0, 0.0, 100.0]);
+        // And it holds through any sequence of drags, including on the anchor
+        // itself and in absolute mode, which conserves nothing on purpose.
+        let mut weights = to_relative(&[3.0, 1.0, 1.0, 5.0, 0.0], 3);
+        let mut state = 99u64;
+        for step in 0..500 {
+            let index = (next_u64(&mut state) % 5) as usize;
+            let value = next_unit(&mut state) * RELATIVE_TOTAL;
+            set_weight(WeightMode::Relative, &mut weights, 3, index, value);
+            let total: f64 = weights.iter().sum();
+            assert!((total - RELATIVE_TOTAL).abs() < 1e-9, "step {step}: {weights:?} adds up to {total}");
+            assert!(weights.iter().all(|w| *w >= -1e-9), "step {step}: {weights:?}");
+        }
+        let mut absolute = vec![1.0, 1.0];
+        set_weight(WeightMode::Absolute, &mut absolute, 0, 1, 7.0);
+        assert_eq!(absolute, vec![1.0, 7.0]);
+        assert_eq!(normalized(&absolute), vec![0.125, 0.875]);
+        assert_eq!(normalized(&[0.0, 0.0]), vec![0.0, 0.0]);
+    }
+
+    /// The randomiser randomises the CURVE, not just the numbers: a sharp
+    /// sigma is one theme with an influence behind it, a wide one is a spread.
+    /// Same seed, same mix, so a mix somebody liked can be got back.
+    #[test]
+    fn random_weights_is_seeded_sums_to_one_and_reaches_both_ends() {
+        assert_eq!(random_weights(7, 6), random_weights(7, 6));
+        assert_ne!(random_weights(7, 6), random_weights(8, 6));
+        assert!(random_weights(1, 0).is_empty());
+        assert_eq!(random_weights(1, 1), vec![1.0]);
+        for seed in 0..200u64 {
+            for n in 1..10usize {
+                let weights = random_weights(seed, n);
+                assert_eq!(weights.len(), n);
+                let total: f64 = weights.iter().sum();
+                assert!((total - 1.0).abs() < 1e-12, "seed {seed} of {n}: {total}");
+                assert!(weights.iter().all(|w| *w > 0.0 && w.is_finite()), "seed {seed}: {weights:?}");
+            }
+        }
+        // Both ends of the sharpness range are actually reached.
+        let mut sharpest: f64 = 0.0;
+        let mut widest: f64 = 1.0;
+        let mut firsts = std::collections::BTreeSet::new();
+        for seed in 0..500u64 {
+            let weights = random_weights(seed, 7);
+            let top = weights.iter().copied().fold(0.0f64, f64::max);
+            sharpest = sharpest.max(top);
+            widest = widest.min(top);
+            firsts.insert(weights.iter().position(|w| *w == top).unwrap());
+        }
+        assert!(sharpest > 0.85, "no seed gave one dominant theme: the best was {sharpest}");
+        assert!(widest < 0.30, "no seed gave a spread: the flattest was {widest}");
+        // The order is random too, so it is not always the first theme that
+        // wins.
+        assert_eq!(firsts.len(), 7, "the shuffle never reached {:?}", firsts);
+    }
+
+    /// The table of which base theme each sheet is written against is a second
+    /// copy of the sheets' own first line, and a second copy is only safe
+    /// while something fails when the first one moves.
+    #[test]
+    fn the_sheet_table_is_what_the_sheets_say() {
+        let mut expected: Vec<(DesktopStyle, bool)> = Vec::new();
+        for style in DesktopStyle::ALL {
+            expected.push((style, false));
+            if style.supports_dark() {
+                expected.push((style, true));
+            }
+        }
+        let listed: Vec<(DesktopStyle, bool)> = SHEET_BASE.iter().map(|(s, d, _)| (*s, *d)).collect();
+        assert_eq!(listed.len(), expected.len(), "{listed:?}");
+        for entry in &expected {
+            assert!(listed.contains(entry), "{entry:?} is not in the table");
+        }
+        for (style, dark, base) in SHEET_BASE {
+            let theme = BlendTheme::Sheet(*style, *dark);
+            let sheet = StyleSheet::load_with_appearance(*style, *dark);
+            assert_eq!(sheet.name, theme.name(), "the name a sheet loads under");
+            let line = format!("mod.theme = mod.themes.{}", base.theme_name());
+            assert!(
+                sheet.theme.lines().any(|l| l.trim() == line),
+                "{}: expected the line `{line}`",
+                sheet.name
+            );
+            assert_eq!(theme.base(), *base);
+            let wanted = if *base == Scheme::Dark { Appearance::Dark } else { Appearance::Light };
+            assert_eq!(theme.appearance(), wanted, "{}", sheet.name);
+        }
+    }
+
+    /// The map and syntax palettes, and nothing else. Half the colours in a
+    /// theme file are `color_map_*`, which is why the exclusion is worth
+    /// stating: the other four hundred tokens do blend.
+    #[test]
+    fn only_the_categorical_palettes_are_left_out() {
+        assert!(is_categorical("color_map_1"));
+        assert!(is_categorical("color_map_12_h"));
+        assert!(is_categorical("color_syntax_string"));
+        assert!(!is_categorical("color_mark_active"));
+        assert!(!is_categorical("color_primary"));
+        assert!(!is_categorical("color_surface"));
+        let keys = base_theme_keys();
+        let out = keys.iter().filter(|k| is_categorical(k)).count();
+        assert_eq!(keys.len(), 557, "the theme files have grown or shrunk");
+        assert_eq!(out, 133, "the categorical palettes are {out} of {} tokens", keys.len());
+    }
+
+    /// The keys a sheet introduces that no base theme file has, which a mix
+    /// that read only the files would drop.
+    #[test]
+    fn a_sheets_own_keys_are_read_as_well() {
+        let sheet = "mod.theme = mod.themes.light\nmod.theme.color_label = #f00\n  mod.theme.color_terminal_bg=#0f0\nmod.theme.color_x.y = #00f\nlet color_no = 1\n";
+        assert_eq!(assigned_keys(sheet), vec!["color_label", "color_terminal_bg"]);
+        let real = StyleSheet::load_with_appearance(DesktopStyle::Windows2000, false);
+        let keys = assigned_keys(&real.theme);
+        assert!(keys.contains(&"color_bg_app"), "{keys:?}");
+        assert!(keys.iter().any(|k| !base_theme_keys().contains(k)), "windows-2000 sets a key of its own");
+    }
+
+    /// Every theme the equalizer offers, resolved once. The reload per theme
+    /// is the expensive part, so the two tests that need real values share
+    /// one cache.
+    fn resolved() -> &'static BlendCache {
+        static CACHE: OnceLock<BlendCache> = OnceLock::new();
+        CACHE.get_or_init(|| {
+            let mut cache = BlendCache::new();
+            let mut cx = Cx::new(Box::new(|_, _| {}));
+            cx.with_vm(|vm| cache.fill(vm, &BlendTheme::all()));
+            cache
+        })
+    }
+
+    /// The same promise as `a_mix_at_full_weight_is_exactly_that_theme`, but
+    /// against the values a real theme actually resolves to, where the role
+    /// derivation gets a chance to second-guess a theme's own inks.
+    #[test]
+    fn a_lone_resolved_theme_blends_into_itself() {
+        let cache = resolved();
+        assert_eq!(cache.len(), BlendTheme::all().len());
+        for theme in BlendTheme::all() {
+            let values = cache.get(theme).unwrap();
+            // The skeleton is a shorter file than the other two and carries
+            // 350 of the 557 tokens; the rest carry over 500.
+            let least = if theme == BlendTheme::Base(Scheme::Skeleton) { 340 } else { 500 };
+            assert!(values.len() > least, "{} resolved only {} tokens", theme.name(), values.len());
+            let blend = cache.blend(&[(theme, 100.0)]).unwrap();
+            let mut moved: Vec<String> = Vec::new();
+            for key in values.keys() {
+                let want = values.get(key).unwrap();
+                let got = match (blend.color(key), blend.num(key)) {
+                    (Some(c), _) => BlendValue::Color(c),
+                    (_, Some(n)) => BlendValue::Num(n),
+                    _ => {
+                        moved.push(format!("{key} is missing"));
+                        continue;
+                    }
+                };
+                if got != want {
+                    moved.push(format!("{key}: {want:?} became {got:?}"));
+                }
+            }
+            assert!(moved.is_empty(), "{} did not survive its own blend:\n{}", theme.name(), moved.join("\n"));
+        }
+    }
+
+    /// Whether the skeleton really belongs with the light group, and the dark
+    /// group with the dark: measured off the resolved page rather than taken
+    /// on trust from a name.
+    #[test]
+    fn the_groups_match_the_grounds() {
+        let cache = resolved();
+        for theme in BlendTheme::all() {
+            let ground = cache.get(theme).unwrap().color("color_surface").unwrap();
+            let dark = contrast(ground | 0xFF, 0xFFFFFFFF) > contrast(ground | 0xFF, 0x000000FF);
+            let wanted = if dark { Appearance::Dark } else { Appearance::Light };
+            assert_eq!(theme.appearance(), wanted, "{} has a {ground:08X} page", theme.name());
+        }
+    }
+
+    /// The case the whole re-derivation is there for. The light theme draws
+    /// BLACK on its green and macOS draws WHITE on its own, so half of one
+    /// and half of the other meets at a mid grey, and a mid grey stands at
+    /// 1.04:1 on the green underneath it: two themes whose success message
+    /// reads perfectly well, blending into one whose does not. Thirty-six of
+    /// the mixes tried in `every_blended_pair_still_reaches_its_bar` have that
+    /// shape. Nothing is clamped to hide it -- the ink is simply asked again
+    /// of the ground it will actually sit on, and comes back black at 5.10:1.
+    /// The surface ladder, by contrast, blends safely on its own: not one of
+    /// the 5184 pairs measured there needed its ink changed.
+    #[test]
+    fn two_readable_themes_can_blend_into_an_unreadable_one() {
+        let cache = resolved();
+        let light = BlendTheme::Base(Scheme::Light);
+        let macos = BlendTheme::Sheet(DesktopStyle::Macos, false);
+        for theme in [light, macos] {
+            let values = cache.get(theme).unwrap();
+            let (ground, ink) = (values.color("color_success").unwrap(), values.color("color_on_success").unwrap());
+            assert!(reads_on(ground | 0xFF, ink) >= READABLE, "{} starts out readable", theme.name());
+        }
+        let blend = cache.blend(&[(light, 50.0), (macos, 50.0)]).unwrap();
+        let ground = blend.color("color_success").unwrap() | 0xFF;
+        let naive = mix_rgba(
+            cache.get(light).unwrap().color("color_on_success").unwrap(),
+            cache.get(macos).unwrap().color("color_on_success").unwrap(),
+            0.5,
+        );
+        assert_eq!(naive, 0x808080FF, "black and white average to a mid grey");
+        let flat = reads_on(ground, naive);
+        assert!(flat < 1.1, "the averaged ink stands at {flat:.2} on the blended green");
+        let chosen = blend.color("color_on_success").unwrap();
+        assert_eq!(chosen, 0x000000FF);
+        assert!(reads_on(ground, chosen) >= READABLE, "and what the blend ships does read");
+    }
+
+    /// Two readable themes CAN blend into an unreadable one: the ink each of
+    /// them chose was chosen against its own ground, and both the ink and the
+    /// ground move when they are averaged, with no promise that they move
+    /// apart. So every mix is put to the same bars the library holds itself
+    /// to -- `READABLE` for body text, `LEGIBLE` for the second voice -- over
+    /// every pair in a group at several weightings, and over a few dozen
+    /// random mixes of the whole group.
+    #[test]
+    fn every_blended_pair_still_reaches_its_bar() {
+        let cache = resolved();
+        let mut bad: Vec<String> = Vec::new();
+        let mut checked = 0usize;
+        let mut measured = 0usize;
+        let mut tightest = (f64::MAX, String::new());
+        let mut check = |blend: &ThemeBlend, label: &str, bad: &mut Vec<String>| {
+            for (pairs, need) in [(SURFACES, READABLE), (VARIANTS, LEGIBLE), (MEANING, READABLE)] {
+                for (ground, ink) in pairs {
+                    if let (Some(g), Some(i)) = (blend.color(ground), blend.color(ink)) {
+                        let c = reads_on(g | 0xFF, i);
+                        measured += 1;
+                        if c - need < tightest.0 {
+                            tightest = (c - need, format!("{label}: {ink} on {ground} = {c:.2}, needs {need}"));
+                        }
+                        if c < need {
+                            bad.push(format!("{label}: {ink} on {ground} = {c:.2}, wanted {need}"));
+                        }
+                    }
+                }
+            }
+        };
+        for appearance in Appearance::ALL {
+            let group = BlendTheme::group(appearance);
+            for (a, first) in group.iter().enumerate() {
+                for second in &group[a + 1..] {
+                    for (wa, wb) in [(50.0, 50.0), (25.0, 75.0), (75.0, 25.0), (90.0, 10.0)] {
+                        let mix = [(*first, wa), (*second, wb)];
+                        let blend = cache.blend(&mix).unwrap();
+                        let label = format!("{} {wa} / {} {wb}", first.name(), second.name());
+                        check(&blend, &label, &mut bad);
+                        checked += 1;
+                    }
+                }
+            }
+            for seed in 0..64u64 {
+                let weights = random_weights(seed, group.len());
+                let mix: Vec<(BlendTheme, f64)> = group.iter().copied().zip(weights.iter().copied()).collect();
+                let blend = cache.blend(&mix).unwrap();
+                let label = format!(
+                    "{} seed {seed}: {}",
+                    appearance.label(),
+                    mix.iter().map(|(t, w)| format!("{} {:.2}", t.name(), w)).collect::<Vec<_>>().join(" ")
+                );
+                check(&blend, &label, &mut bad);
+                checked += 1;
+            }
+        }
+        assert!(checked > 200, "only {checked} mixes were tried");
+        // A pair that is never found is a pair that is never checked, and a
+        // test that checks nothing passes beautifully.
+        assert!(measured > 3000, "only {measured} pairs were actually measured");
+        assert!(bad.is_empty(), "{} of {checked} mixes carry ink that does not hold (the tightest pair overall was {}):\n{}", bad.len(), tightest.1, bad.join("\n"));
     }
 }
