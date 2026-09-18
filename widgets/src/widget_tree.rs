@@ -3271,13 +3271,19 @@ mod tests {
 
     #[test]
     fn test_observe_and_find_single_node() {
+        // A search never matches its own root (`collect_within_graph_with_skip`
+        // skips the `is_root` frame), so the node is found from its parent.
         let tree = WidgetTree::default();
+        let root_uid = WidgetUid::new();
         let uid = WidgetUid::new();
         let w = make_widget(uid, vec![]);
-        tree.observe_node(uid, name("root"), w.clone(), None);
-        let found = tree.find_within(uid, &[name("root")]);
+        let root = make_widget(root_uid, vec![(name("node"), w.clone())]);
+        tree.observe_node(root_uid, name("root"), root.clone(), None);
+        tree.observe_node(uid, name("node"), w.clone(), Some(root_uid));
+        let found = tree.find_within(root_uid, &[name("node")]);
         assert!(!found.is_empty());
         assert_eq!(found.widget_uid(), uid);
+        assert!(tree.find_within(root_uid, &[name("root")]).is_empty());
     }
 
     #[test]
@@ -3395,13 +3401,23 @@ mod tests {
     #[test]
     fn test_property_patch_no_structural_rebuild() {
         let tree = WidgetTree::default();
+        let root_uid = WidgetUid::new();
         let uid = WidgetUid::new();
         let w = make_widget(uid, vec![]);
-        tree.observe_node(uid, name("node"), w.clone(), None);
+        // The parent's own child list is what a refresh reads names from, so
+        // it is shared with the test and renamed alongside the observation.
+        let children = std::rc::Rc::new(std::cell::RefCell::new(vec![(name("node"), w.clone())]));
+        let root = make_dynamic_widget(root_uid, children.clone());
+        tree.observe_node(root_uid, name("root"), root.clone(), None);
+        tree.observe_node(uid, name("node"), w.clone(), Some(root_uid));
+        // A first lookup settles the root's children into the graph; the
+        // helper then clears every derived cache but keeps that graph.
+        assert!(!tree.find_within(root_uid, &[name("node")]).is_empty());
         stabilize_graph_cache(&tree);
 
         // Re-observe same node with different name (property change)
-        tree.observe_node(uid, name("renamed"), w.clone(), None);
+        children.borrow_mut()[0].0 = name("renamed");
+        tree.observe_node(uid, name("renamed"), w.clone(), Some(root_uid));
 
         {
             let inner = tree.inner.borrow();
@@ -3409,12 +3425,13 @@ mod tests {
             assert!(!inner.structure_dirty);
         }
 
-        let found = tree.find_within(uid, &[name("renamed")]);
+        // Searched from the parent: a search never matches its own root.
+        let found = tree.find_within(root_uid, &[name("renamed")]);
         assert!(!found.is_empty());
         assert_eq!(found.widget_uid(), uid);
 
         // Old name should not find it
-        let old = tree.find_within(uid, &[name("node")]);
+        let old = tree.find_within(root_uid, &[name("node")]);
         assert!(old.is_empty());
     }
 

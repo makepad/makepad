@@ -289,7 +289,9 @@ mod tests {
                     let text=TextStyle::script_from_value(vm,value);
                     let members=text.font_family.member_ids().collect::<Vec<_>>();
                     assert_eq!(members.first(),Some(&"latin"));
-                    assert!(members.contains(&"jetbrains_ui_symbols"),"{members:?}");
+                    // The mobile policy's fallback chain (font_policy.rs) ends
+                    // in the emoji face; it must survive every appearance.
+                    assert!(members.contains(&"noto_color_emoji"),"{members:?}");
                     assert!(vm.take_errors().is_empty());
                 }
             }

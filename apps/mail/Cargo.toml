@@ -18,6 +18,7 @@ path = "src/main.rs"
 required-features = ["standalone"]
 
 [features]
+dynamic-module = []
 default = ["standalone"]
 # The standalone window (src/main.rs); a host that links the module leaves it off.
 standalone = []
@@ -29,3 +30,13 @@ makepad-ai-services = { path = "../../libs/ai/services" }
 makepad-app-module = { path = "../../libs/app_module" }
 makepad-strict-json = { path = "../../libs/strict_json" }
 makepad-civil-time = { path = "../../libs/civil_time" }
+
+makepad-search = { path = "../../libs/search" }
+makepad-sqlite = { path = "../../libs/sqlite_query" }
+makepad-base64 = { path = "../../libs/base64" }
+makepad-html = { path = "../../libs/html" }
+
+[[bin]]
+name = "mail-index"
+path = "src/index_main.rs"
+required-features = ["standalone"]

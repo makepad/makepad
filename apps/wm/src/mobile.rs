@@ -51,7 +51,10 @@ impl PhoneChrome {
     pub fn bottom_reserve(&self, _screen: Rect) -> f64 {
         match self {
             PhoneChrome::Simulated => 24.0,
-            PhoneChrome::Device { insets } => insets.bottom,
+            // Real phones with gesture nav often report 0 here (the OS
+            // already reserved the nav strip). Keep a tappable home bar
+            // inside the app so we are not stuck in an in-process tile.
+            PhoneChrome::Device { insets } => insets.bottom.max(28.0),
         }
     }
     /// The shell's home gesture zone: the bottom reserve plus a few points

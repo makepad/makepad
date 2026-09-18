@@ -1304,6 +1304,9 @@ impl Widget for HtmlLink {
                     cx.set_cursor(MouseCursor::Hand);
                     self.animator_play(cx, ids!(hover.on));
                 }
+                Hit::FingerHoverOver(_) => {
+                    cx.set_cursor(MouseCursor::Hand);
+                }
                 Hit::FingerHoverOut(_) => {
                     self.animator_play(cx, ids!(hover.off));
                 }

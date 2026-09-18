@@ -9,6 +9,9 @@ pub struct CalendarModule;
 
 pub static CALENDAR_MODULE: CalendarModule = CalendarModule;
 
+#[cfg(feature = "dynamic-module")]
+makepad_app_module::export_app_module!(CALENDAR_MODULE);
+
 impl AppModule for CalendarModule {
     fn id(&self) -> &'static str {
         "calendar"

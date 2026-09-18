@@ -8,6 +8,7 @@ use crate::{
     makepad_draw::*, widget::*, widget_tree::CxWidgetExt,
 };
 use std::rc::Rc;
+use unicode_segmentation::UnicodeSegmentation;
 
 const LPXS_PER_PT: f32 = 96.0 / 72.0;
 
@@ -393,6 +394,19 @@ impl SelectionTracker {
 
     pub fn total_len(&self) -> usize {
         self.text.len()
+    }
+
+    /// UTF-8 byte range of the Unicode word (or punctuation/space segment)
+    /// under the cursor. Use the complete selection stream so styling changes
+    /// in the middle of a word do not split the selection.
+    fn word_range(&self, index: usize) -> (usize, usize) {
+        let index = index.min(self.text.len().saturating_sub(1));
+        self.text.split_word_bound_indices()
+            .find_map(|(start, word)| {
+                let end = start + word.len();
+                (index < end).then_some((start, end))
+            })
+            .unwrap_or((0, 0))
     }
 
     /// Find character index from screen point.
@@ -784,6 +798,10 @@ pub struct TextFlow {
     /// Kept separate from the tracker so it only holds Areas, not WidgetRefs.
     #[rust]
     widget_text_entries: Vec<(WidgetRef, usize, usize)>,
+
+    /// Original word range while extending a double-click selection.
+    #[rust]
+    selection_word_anchor: Option<(usize, usize)>,
 
     /// Whether currently dragging to select
     #[rust]
@@ -1218,7 +1236,11 @@ impl Widget for TextFlow {
                 cx.set_cursor(MouseCursor::Text);
             }
             Hit::FingerHoverOut(_) => {
-                cx.set_cursor(MouseCursor::Default);
+                // A link or other child may just have claimed hover and set
+                // its own cursor. Leaving the selectable text must not erase it.
+                if event.pointer_claimed_area().is_empty() {
+                    cx.set_cursor(MouseCursor::Default);
+                }
             }
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 cx.set_key_focus(self.area);
@@ -1226,24 +1248,41 @@ impl Widget for TextFlow {
                     cx.hide_clipboard_actions();
                 }
                 if let Some(idx) = self.selection_tracker.point_to_index(cx, fe.abs) {
-                    self.selection_anchor = idx;
-                    self.selection_cursor = idx;
+                    self.selection_word_anchor = if fe.tap_count == 2 {
+                        let (start, end) = self.selection_tracker.word_range(idx);
+                        self.set_selection(start, end);
+                        Some((start, end))
+                    } else {
+                        self.set_selection(idx, idx);
+                        None
+                    };
                     self.is_selecting = true;
                     self.redraw(cx);
                 }
             }
             Hit::FingerMove(fe) if self.is_selecting => {
                 if let Some(idx) = self.selection_tracker.point_to_index(cx, fe.abs) {
-                    if self.selection_cursor != idx {
-                        self.selection_cursor = idx;
-                        // Propagate selection to child widgets (e.g., CodeView)
-                        self.propagate_selection_to_children();
+                    let (anchor, cursor) = if let Some((start, end)) = self.selection_word_anchor {
+                        let (word_start, word_end) = self.selection_tracker.word_range(idx);
+                        if idx < start {
+                            (end, word_start)
+                        } else if idx >= end {
+                            (start, word_end)
+                        } else {
+                            (start, end)
+                        }
+                    } else {
+                        (self.selection_anchor, idx)
+                    };
+                    if self.selection_anchor != anchor || self.selection_cursor != cursor {
+                        self.set_selection(anchor, cursor);
                         self.redraw(cx);
                     }
                 }
             }
             Hit::FingerUp(fe) => {
                 self.is_selecting = false;
+                self.selection_word_anchor = None;
                 if fe.device.is_touch() {
                     let has_selection = self.has_selection();
                     if has_selection {
@@ -1472,6 +1511,7 @@ impl TextFlow {
     /// Select all text in this TextFlow
     pub fn select_all(&mut self) {
         if self.selectable {
+            self.selection_word_anchor = None;
             self.selection_anchor = 0;
             self.selection_cursor = self.selection_tracker.total_len();
             for (widget, _, _) in &self.widget_text_entries {
@@ -1482,6 +1522,7 @@ impl TextFlow {
 
     /// Clear selection
     pub fn clear_selection(&mut self) {
+        self.selection_word_anchor = None;
         self.selection_anchor = 0;
         self.selection_cursor = 0;
         self.is_selecting = false;

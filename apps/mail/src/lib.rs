@@ -5,6 +5,13 @@ pub use makepad_widgets;
 use makepad_widgets::*;
 
 pub mod ai;
+pub mod source;
+pub mod apple_mail;
+pub mod mime;
+pub mod presentation;
+pub mod mail_index;
+pub mod mail_worker;
+pub mod local_view;
 pub mod engine;
 pub mod model;
 pub mod module;
@@ -19,4 +26,5 @@ pub use view::MailView;
 /// `makepad_widgets` again.
 pub fn script_mod(vm: &mut ScriptVm) {
     view::script_mod(vm);
+    local_view::script_mod(vm);
 }

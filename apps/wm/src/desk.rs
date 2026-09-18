@@ -999,8 +999,10 @@ impl WmDesk {
     }
 
     /// The next tile asked for `client` is a module tile.
+    /// Drop a compile-time RunView splash so the isolate actually draws.
     pub fn mark_module(&mut self, client: ClientId) {
         self.module_clients.insert(client);
+        self.items.remove(&client);
     }
 
     /// The tile as its host trait, whichever kind it is (tile.rs).

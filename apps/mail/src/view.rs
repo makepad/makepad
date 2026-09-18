@@ -14,7 +14,7 @@ use makepad_widgets::makepad_platform::storage::{
 };
 use makepad_widgets::*;
 
-fn secondary_text_color(vm: &mut ScriptVm) -> ScriptValue {
+pub(crate) fn secondary_text_color(vm: &mut ScriptVm) -> ScriptValue {
     let theme = vm.module(id!(theme));
     let muted = vm.bx.heap.value(theme, id!(color_text_muted).into(), NoTrap);
     if !muted.is_nil() && !muted.is_err() {
@@ -153,6 +153,7 @@ script_mod! {
             draw_bg +: { color: theme.color_focus border_radius: 3 }
         }
     }
+    mod.widgets.MailMessageRow = MessageRow
     let ReaderBlock = View{
         width: Fill height: Fit flow: Down spacing: 16
         padding: Inset{left: 16 right: 16 top: 24 bottom: 24}

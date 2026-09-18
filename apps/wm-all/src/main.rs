@@ -34,6 +34,7 @@ app_main!(
                 &makepad_calculator::CALCULATOR_MODULE,
             ],
             modules_only: true,
+            dynamic_dylibs: false,
             style: DesktopStyle::Ios,
             assistant: Some(makepad_aichat::script_mod),
             title: "wm all-in-one".to_string(),

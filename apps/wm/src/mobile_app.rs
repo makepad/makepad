@@ -25,7 +25,7 @@ impl App {
     // --------------------------------------------------------------
 
     /// The compact viewport of `app`'s tile on the current phone screen.
-    fn tile_viewport(&mut self, app: &str) -> Option<Vec2d> {
+    pub(crate) fn tile_viewport(&mut self, app: &str) -> Option<Vec2d> {
         let state = self.state_mut();
         let screen = state.phone.viewport;
         if screen.size.x < 1.0 || screen.size.y < 1.0 { return None; }
@@ -59,7 +59,12 @@ impl App {
             if let Some(client) = existing {
                 self.state_mut().phone.tiles.bind(app, client, false);
             } else if home_visible && self.state_mut().phone.tiles.may_launch(app, now) {
-                self.launch_tile_client(cx, app);
+                // Super-app dylibs compile on tap. Auto-starting clock /
+                // weather / photos would race provision and hide the
+                // compile card behind three silent jobs.
+                if self.apps.hosting(app) != Hosting::Dylib {
+                    self.launch_tile_client(cx, app);
+                }
             }
         }
         let (foreground, settled) = {
@@ -230,6 +235,10 @@ impl App {
             if let Some(module) = self.apps.module(app_id) { self.launch_tile_module(cx, module); }
             return;
         }
+        if self.apps.hosting(app_id) == Hosting::Dylib {
+            self.launch_dylib(cx, app_id, true);
+            return;
+        }
         if !self.processes() { return; }
         let hub_port = self.state_mut().hub_port;
         if hub_port == 0 { return; }
@@ -250,7 +259,7 @@ impl App {
             Err(err) => log!("wm: home tile launch of {} failed: {}", app.id, err),
         }
     }
-    fn launch_tile_module(&mut self, cx: &mut Cx, module: &'static dyn AppModule) {
+    pub(crate) fn launch_tile_module(&mut self, cx: &mut Cx, module: &'static dyn AppModule) {
         let open = match module.open_schema().empty_open() {
             Ok(open) => open,
             Err(e) => { log!("wm: {} cannot open without arguments: {}", module.id(), e); return; }
@@ -485,7 +494,7 @@ impl App {
         self.state_mut().phone.keyboard_target=0.0;
         self.animate_phone(cx);
     }
-    fn phone_action(&mut self,cx:&mut Cx,hit:PhoneHit) {
+    pub(crate) fn phone_action(&mut self,cx:&mut Cx,hit:PhoneHit) {
         // In edit mode an icon is for arranging, not launching.
         if self.state_mut().phone.edit.active && matches!(hit,PhoneHit::App(_)) {return;}
         match hit {
@@ -588,7 +597,10 @@ impl App {
     }
     pub(super) fn phone_key(&mut self,cx:&mut Cx,e:&KeyEvent)->bool {
         if !self.state_mut().style.target.mobile() {return false;}
-        if e.key_code==KeyCode::Escape {self.phone_action(cx,PhoneHit::Back);return true;}
+        if e.key_code==KeyCode::Escape || e.key_code==KeyCode::Back {
+            self.phone_action(cx,PhoneHit::Back);
+            return true;
+        }
         if e.key_code==KeyCode::Tab && e.modifiers.alt {self.phone_action(cx,PhoneHit::Recents);return true;}
         !self.state_mut().phone.accepts_app_input()
     }

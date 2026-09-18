@@ -17,6 +17,7 @@ name = "makepad_files"
 path = "src/lib.rs"
 
 [features]
+dynamic-module = []
 default = ["standalone"]
 demo = []
 # The standalone window and the local model. A host that links the MODULE
