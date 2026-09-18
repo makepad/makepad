@@ -701,6 +701,27 @@ impl Publications {
         retiring.retain(|(_, receipt)| !receipt.retire_complete());
         before - retiring.len()
     }
+    /// True while released blocks still wait on the completion serial. A
+    /// backend that arms its completion fence on demand keeps arming it while
+    /// this holds, or those blocks would never retire. (Today that backend is
+    /// OpenGL on Linux and Android.)
+    #[cfg(all(
+        not(gpusim),
+        any(target_os = "linux", target_os = "android"),
+        not(any(
+            linux_direct,
+            target_env = "ohos",
+            all(use_vulkan, not(target_os = "linux"))
+        ))
+    ))]
+    pub(crate) fn has_retiring(&self) -> bool {
+        !self
+            .counters
+            .retiring
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty()
+    }
     /// Publish an immutable block. Validates the stride, charges the bytes
     /// against the envelope (refusing with the accounting when they do not
     /// fit), and returns the block whose receipt starts `Pending`. The
