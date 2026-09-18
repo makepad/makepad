@@ -14,9 +14,13 @@
 //! It is not a list. There is no scrollbar, no page motion, no selection of
 //! more than one row, and the number of rows on screen is a property of the
 //! control rather than of the room it is given — a fixed count is what lets
-//! the middle row mean something. Nor does it fetch rows as it goes: every
-//! column holds its whole list. Long lists belong in a list; a picker is
-//! for a set of values small enough that seeing the neighbours helps.
+//! the middle row mean something. That last clause holds for every picker
+//! that leaves `fill_travel` alone, which is every picker that does not say
+//! otherwise; the single exception is a ruler that asks for the room to
+//! decide, and it is spelled out under "A ruler that fills the room" below.
+//! Nor does it fetch rows as it goes: every column holds its whole list.
+//! Long lists belong in a list; a picker is for a set of values small enough
+//! that seeing the neighbours helps.
 //!
 //! # Landing on a row
 //!
@@ -46,6 +50,31 @@
 //! all is not expressible here, because the drum's whole travel is
 //! `count * row_height`, and pretending otherwise would be a different
 //! widget rather than a property on this one.
+//!
+//! # A ruler that fills the room
+//!
+//! `fill_travel` is the one property that suspends the fixed-count rule
+//! above, and it suspends it only along the travel. With it set, the walk
+//! along the travel is honoured exactly as the host wrote it — `width: Fill`
+//! on a ruler lying down — and the number of graduations is however many the
+//! laid-out extent holds at `row_height`, rounded down to a whole odd count
+//! so there is still a middle for the band. A graduated scale usually wants
+//! to span the panel it measures, and a row count picked to approximate one
+//! container is a number that is wrong at every other window size.
+//!
+//! Off — the default — nothing moves: `visible_items` rules exactly as it
+//! always has. On, `visible_items` is the FALLBACK, for a walk with no room
+//! to read out of: `Fit` is the question "what is your natural size", and a
+//! drum's natural size is still its declared rows.
+//!
+//! Everything measured in ROWS reads the derived count rather than the
+//! declared one, and the fade at the ends is measured in rows. The ink and
+//! the size a row gives up is its distance from the band over HALF THE ROWS
+//! ON SCREEN, so a fade left on a declared 41 while the extent grew to 121
+//! rows would be fully spent a third of the way out and leave the remaining
+//! two thirds of the ruler flat. `rows_in` is the one answer the fade, the
+//! reach and the draw all take, which is what stops them being counted
+//! differently.
 //!
 //! # Standing it on its side
 //!
@@ -90,6 +119,8 @@ script_mod! {
 
         /** rows on screen; an even count gains one 3..11 step 2 */
         visible_items: 5
+        /** the travel takes its length from the room, not from visible_items */
+        fill_travel: false
         /** row height in pixels 16..64 step 1 */
         row_height: 28.0
         /** width of a column that sets none of its own, in pixels 24..320 step 4 */
@@ -708,6 +739,49 @@ fn odd_rows(n: usize) -> usize {
     }
 }
 
+/// The most graduations a ruler will draw however much room it is handed.
+/// A turtle can report an extent no finite number of rows would fill, and a
+/// count taken straight from one is a draw loop that does not come back —
+/// and, before the cap, a cast that saturates at `usize::MAX` and an
+/// `odd_rows` that overflows adding one to it.
+const FILL_MAX_ROWS: usize = 10_001;
+
+/// How many rows an extent holds at pitch `row`, for a travel axis that
+/// takes its length from the room rather than from a declared count.
+///
+/// Rounded DOWN and then made odd, for the two reasons the declared count is
+/// whole and odd: a part row at the end of a ruler is a graduation the band
+/// could never centre on, and a drum with no middle row has nothing to put
+/// in the band. `None` is an extent that says nothing usable — a walk that
+/// asked for no room, a turtle not yet measured, or less room than a single
+/// row — and the declared count is the only answer there is then.
+fn rows_for_extent(extent: f64, row: f64) -> Option<usize> {
+    let row = row.max(1.0);
+    if !(extent >= row) || !extent.is_finite() {
+        return None;
+    }
+    Some(odd_rows(((extent / row).floor() as usize).min(FILL_MAX_ROWS)))
+}
+
+/// How many rows are on screen, all told: the room's answer when the control
+/// asked for the room to decide and the room had one, and the declared count
+/// otherwise.
+///
+/// It is a free function rather than a method so the widget and its tests
+/// read the SAME arithmetic, and so there is exactly one place where the two
+/// counts can be told apart. Everything measured in rows — the fade, the
+/// reach, the rows drawn — comes through here, because a fade counted
+/// against one of them while the rows were counted against the other is a
+/// gradient that stops before the ruler does.
+fn rows_on_screen(fill_travel: bool, visible_items: usize, extent: f64, row: f64) -> usize {
+    if fill_travel {
+        if let Some(rows) = rows_for_extent(extent, row) {
+            return rows;
+        }
+    }
+    odd_rows(visible_items)
+}
+
 /// Where a spin released at `velocity` px/s stops if its speed decays by
 /// `decay_per_ms` every millisecond: the whole remaining travel of
 /// `v(t) = v0 * decay^t` is `v0 / lambda`, with `lambda = -ln(decay) * 1000`.
@@ -841,8 +915,26 @@ pub struct WheelPicker {
 
     /// Rows on screen. Odd, so there is a true centre; an even count is
     /// raised by one rather than refused.
+    ///
+    /// It settles the length of the control UNLESS `fill_travel` is set, in
+    /// which case the room settles it and this is only what a walk with no
+    /// room to read falls back to.
     #[live(5)]
     pub visible_items: usize,
+    /// The travel axis takes its length from the room it is given rather
+    /// than from `visible_items`.
+    ///
+    /// Off — the default — is the picker's standing contract: a drum is as
+    /// long as the rows it declares, whatever it has been laid out in. On,
+    /// the walk along the travel is honoured as the host wrote it and the
+    /// count is read back out of the laid-out extent afterwards, which is
+    /// what lets a ruler be `width: Fill` and span the panel it measures.
+    ///
+    /// It does not make a `Fit` walk grow. `Fit` asks what the natural size
+    /// is, and a drum's natural size is its declared rows; there has to be
+    /// room before a count can be read out of it.
+    #[live]
+    pub fill_travel: bool,
     /// The distance from one row to the next, in pixels — and, on a scale
     /// column, the pitch of the graduations as well.
     ///
@@ -903,8 +995,17 @@ impl ScriptHook for WheelPicker {
 }
 
 impl WheelPicker {
+    /// The rows a `Fit` walk asks for: the declared count, always, because
+    /// `Fit` is the question this is the natural answer to.
     fn rows(&self) -> usize {
         odd_rows(self.visible_items)
+    }
+
+    /// The rows actually on screen, given the extent the travel axis was
+    /// laid out at. The same as `rows` unless `fill_travel` asked for the
+    /// room to decide.
+    fn rows_in(&self, extent: f64) -> usize {
+        rows_on_screen(self.fill_travel, self.visible_items, extent, self.row())
     }
 
     fn row(&self) -> f64 {
@@ -1303,7 +1404,9 @@ impl Widget for WheelPicker {
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.sync();
-        let rows = self.rows();
+        // The rows a `Fit` walk asks for. What is actually DRAWN is counted
+        // again below, once the layout has settled how long the travel is.
+        let fit_rows = self.rows();
         let row = self.row();
         let vertical = self.is_vertical();
 
@@ -1313,12 +1416,18 @@ impl Widget for WheelPicker {
         // for that natural size; any other walk is honoured as written, and
         // the columns keep their own widths and start at the left edge.
         //
+        // `fill_travel` turns that round along the travel, and only there:
+        // the walk is left as the host wrote it, and the count is read back
+        // out of the extent once the layout has settled it. A `Fit` walk is
+        // still the natural size either way, because there is no room to
+        // read out of a walk that is asking what the natural size is.
+        //
         // The travel axis takes the rows and the axis across it takes the
         // columns, so standing the picker on its side TRANSPOSES the walk.
         // Nothing in the shader could do this: a `Fit` width that has to
         // become `rows * row` is decided here or not at all.
         let mut walk = walk;
-        let along = Size::Fixed(rows as f64 * row);
+        let along = Size::Fixed(fit_rows as f64 * row);
         let across = Size::Fixed(self.body_width());
         if vertical {
             if matches!(walk.height, Size::Fit { .. }) {
@@ -1358,6 +1467,14 @@ impl Widget for WheelPicker {
         let mid = along_pos + along_size * 0.5;
         // Rows between the band and the edge of the well, and how far out a
         // row may be before none of it is inside.
+        //
+        // The count is read back from the extent the travel was LAID OUT at
+        // rather than from the one the walk asked for, because a ruler that
+        // fills its room only finds out how long it is here. Everything
+        // below is measured in these rows — the fade included, which on the
+        // declared count would be spent a third of the way along a ruler
+        // three times its declared length and leave the rest of it flat.
+        let rows = self.rows_in(along_size);
         let half = rows as f64 * 0.5;
         let reach = half + 0.5;
         let base_font = self.draw_text.text_style.font_size;
@@ -1854,5 +1971,123 @@ mod tests {
         c.unit = "s".to_string();
         let value = c.value_of(3).unwrap();
         assert_eq!(format_readout(value, c.precision, &c.unit), "0.75 s");
+    }
+
+    // ---- a ruler that fills the room -------------------------------------
+
+    #[test]
+    fn a_count_read_out_of_the_room_is_whole_odd_and_fits_it() {
+        assert_eq!(rows_for_extent(410.0, 10.0), Some(41));
+        assert_eq!(rows_for_extent(405.0, 10.0), Some(41), "the part row is dropped");
+        assert_eq!(rows_for_extent(396.0, 10.0), Some(39));
+        // Odd for the band's sake, rounded down for the ruler's: a part
+        // graduation at the end is one the band could never centre on.
+        for extent in [10.0, 100.0, 101.0, 199.9, 200.0, 4096.0] {
+            let rows = rows_for_extent(extent, 10.0).unwrap();
+            assert_eq!(rows % 2, 1, "{extent} left no middle row for the band");
+            assert!(
+                (rows - 1) as f64 * 10.0 <= extent,
+                "{extent} asked for more rows than it has room for"
+            );
+        }
+        // The pitch is what it is counted in, so a finer ruler in the same
+        // room holds proportionally more.
+        assert_eq!(rows_for_extent(400.0, 5.0), Some(81));
+    }
+
+    #[test]
+    fn a_room_that_says_nothing_hands_back_no_count() {
+        // A walk that asked for nothing, a turtle not yet measured, a ruler
+        // with less room than one graduation: the declared count is the
+        // only answer any of these has.
+        assert_eq!(rows_for_extent(0.0, 10.0), None);
+        assert_eq!(rows_for_extent(-40.0, 10.0), None);
+        assert_eq!(rows_for_extent(9.0, 10.0), None, "less room than a single row");
+        assert_eq!(rows_for_extent(f64::INFINITY, 10.0), None);
+        assert_eq!(rows_for_extent(f64::NAN, 10.0), None);
+        // And a room no finite drum could fill is capped rather than turned
+        // into a cast that saturates and an odd_rows that overflows past it.
+        assert_eq!(rows_for_extent(1e12, 1.0), Some(FILL_MAX_ROWS));
+        assert_eq!(rows_for_extent(f64::MAX, 1.0), Some(FILL_MAX_ROWS));
+    }
+
+    #[test]
+    fn a_picker_that_did_not_ask_for_the_room_never_reads_it() {
+        // The contract the rest of the widget rests on, unchanged: the
+        // count is a property of the control, not of what it was laid out
+        // in. Whatever the extent, the answer is the declared one.
+        for extent in [0.0, 27.9, 140.0, 4000.0, f64::INFINITY, f64::NAN] {
+            assert_eq!(rows_on_screen(false, 5, extent, 28.0), 5, "extent {extent}");
+            assert_eq!(rows_on_screen(false, 41, extent, 10.0), 41, "extent {extent}");
+        }
+        // Including the even count that gains one, exactly as before.
+        assert_eq!(rows_on_screen(false, 4, 4000.0, 28.0), odd_rows(4));
+        assert_eq!(rows_on_screen(false, 0, 4000.0, 28.0), 1);
+    }
+
+    #[test]
+    fn a_ruler_that_asked_for_the_room_takes_its_count_from_it() {
+        assert_eq!(rows_on_screen(true, 41, 800.0, 10.0), 81, "eighty rows fit, so eighty-one");
+        assert_eq!(rows_on_screen(true, 41, 140.0, 10.0), 15, "and a narrow panel gets fewer");
+        // A walk with no room to read out of — `Fit`, or a turtle not yet
+        // measured — falls back to the declared count rather than to a
+        // ruler of one graduation.
+        assert_eq!(rows_on_screen(true, 41, 0.0, 10.0), 41);
+        assert_eq!(rows_on_screen(true, 41, f64::INFINITY, 10.0), 41);
+    }
+
+    #[test]
+    fn the_fade_still_reaches_both_ends_of_a_long_ruler() {
+        // The failure this exists to rule out: the fade's half-width is a
+        // number of ROWS, so a ruler whose extent grew while its fade kept
+        // the declared count would run out of gradient partway along and
+        // leave the rest of itself flat.
+        let (row, declared, take) = (10.0, 41usize, 0.45);
+        let extent = 1210.0; // three times the declared forty-one rows
+        let rows = rows_on_screen(true, declared, extent, row);
+        assert_eq!(rows, 121);
+        let half = rows as f64 * 0.5;
+        // The outermost row on screen is half the ruler away from the band.
+        let edge = extent / row * 0.5;
+        assert!((half - edge).abs() <= 1.0, "the fade reaches as far as the ruler does");
+        // At the very end the outermost row has given up exactly its share,
+        // and no more — more would be a fade that had gone out early.
+        assert!((fade_at(edge, half, take) - (1.0 - take)).abs() < 1e-9);
+        // And it is still fading on the way there, at every station.
+        let mut last = 1.0;
+        for tenth in 1..=10 {
+            let ink = fade_at(edge * tenth as f64 / 10.0, half, take);
+            assert!(ink < last, "the gradient had already stopped {tenth} tenths out");
+            last = ink;
+        }
+        // What `visible_items` alone would have given: a half-width spent a
+        // third of the way out, with everything past it flat.
+        let stale = odd_rows(declared) as f64 * 0.5;
+        assert!(stale / edge < 0.4, "the stale fade is over a third of the way along");
+        assert_eq!(
+            fade_at(edge * 0.5, stale, take),
+            fade_at(edge, stale, take),
+            "the outer half of the ruler would all be one flat tone"
+        );
+        assert!(
+            fade_at(edge * 0.5, half, take) > fade_at(edge, half, take),
+            "where the derived count still has gradient left there"
+        );
+    }
+
+    #[test]
+    fn a_filled_ruler_is_graduated_all_the_way_to_its_ends() {
+        // The count decides `reach` as well as the fade, so the drum is
+        // asked for every row the extent has room for rather than for the
+        // declared forty-one with bare well either side of them.
+        let (row, declared, extent) = (10.0, 41usize, 1210.0);
+        let rows = rows_on_screen(true, declared, extent, row);
+        let d = Drum::new(4000, row, false);
+        let drawn = d.rows_in_view(d.offset_of(2000), rows as f64 * 0.5 + 0.5);
+        assert_eq!(drawn.len(), rows, "the whole extent is graduated");
+        let stale = odd_rows(declared);
+        let short = d.rows_in_view(d.offset_of(2000), stale as f64 * 0.5 + 0.5);
+        assert_eq!(short.len(), stale, "where the declared count leaves most of it bare");
+        assert!(drawn.len() > short.len() * 2);
     }
 }
