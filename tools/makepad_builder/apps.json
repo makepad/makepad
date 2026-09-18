@@ -284,7 +284,7 @@
   },
   {
     "id": "wm",
-    "title": "Window Manager",
+    "title": "Makepad WM",
     "package": "makepad-wm",
     "binary": "wm",
     "workspace": "makepad/apps/wm",
