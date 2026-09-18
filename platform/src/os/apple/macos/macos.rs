@@ -125,7 +125,7 @@ impl DrawableWorker {
                 let drawable = NonNull::new(drawable).map(RcObjcId::from_unowned);
                 unsafe { let _: () = msg_send![pool, release]; }
                 if ready.try_send(drawable).is_err() { break; }
-                SignalToUI::set_ui_signal();
+                crate::thread::wake_ui_loop();
             }
         }).expect("drawable acquisition worker");
         Self { request, ready: replies, pending: false, wait_ns, started: None }
@@ -140,6 +140,18 @@ impl DrawableWorker {
         } else { None };
         if !self.pending && self.request.try_send(()).is_ok() { self.pending = true; self.started = Some(Instant::now()); }
         result
+    }
+
+    /// Acquire on the UI thread, for a beat whose prefetched drawable can't be
+    /// used. The pool was just rebuilt for the new size, so this doesn't block.
+    fn acquire_now(&mut self, layer: ObjcId) -> Option<RcObjcId> {
+        let pool: ObjcId = unsafe { msg_send![class!(NSAutoreleasePool), new] };
+        let start = Instant::now();
+        let drawable: ObjcId = unsafe { msg_send![layer, nextDrawable] };
+        self.wait_ns.store(start.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Release);
+        let drawable = NonNull::new(drawable).map(RcObjcId::from_unowned);
+        unsafe { let _: () = msg_send![pool, release]; }
+        drawable
     }
 }
 
@@ -322,6 +334,16 @@ impl MetalWindow {
         } else {
             false
         }
+    }
+
+    /// The worker vends a drawable it acquired a beat ago, so one that predates
+    /// a resize still has the old texture size. Painting into it lands the frame
+    /// in a corner of the texture and leaves the rest of the layer unpainted.
+    fn drawable_matches_layer(&self, drawable: ObjcId) -> bool {
+        let texture: ObjcId = unsafe { msg_send![drawable, texture] };
+        let width: u64 = unsafe { msg_send![texture, width] };
+        let height: u64 = unsafe { msg_send![texture, height] };
+        (width as f64 - self.cal_size.x).abs() < 1.0 && (height as f64 - self.cal_size.y).abs() < 1.0
     }
 }
 
@@ -801,7 +823,19 @@ impl Cx {
                             // a remote grab on a beat without a drawable
                             // leaves the pass dirty and is polled again on
                             // the next beat: never a wait on the UI thread
-                            let drawable = worker.take();
+                            let drawable = match worker.take() {
+                                Some(stale) if !metal_window.drawable_matches_layer(stale.as_id()) => {
+                                    crate::trace!("present", "drawable predates the layer's resize, reacquiring");
+                                    drop(stale);
+                                    // Only while the pool has a free drawable. Exhausted, the
+                                    // acquire would block the UI thread on the compositor, which
+                                    // is what the worker exists to avoid; skip and stay dirty.
+                                    (in_flight < PRESENT_GATE_IN_FLIGHT)
+                                        .then(|| worker.acquire_now(metal_window.ca_layer))
+                                        .flatten()
+                                }
+                                drawable => drawable,
+                            };
                             if let Some(trace) = &metal_cx.present_trace {
                                 trace.drawable_wait(worker.started.map_or(0, |t| t.elapsed().as_nanos() as u64).max(worker.wait_ns.load(Ordering::Acquire)));
                                 if drawable.is_none() && worker.pending { trace.cause(PresentCause::DrawableWait); }
@@ -1121,12 +1155,16 @@ impl Cx {
                     }
 
                     // check signals
-                    if SignalToUI::check_and_clear_ui_signal() {
+                    let internal_signal = SignalToUI::check_and_clear_internal_signal();
+                    let ui_signal = SignalToUI::check_and_clear_ui_signal();
+                    if internal_signal || ui_signal {
                         self.handle_termination_signal();
                         self.handle_media_signals();
                         self.handle_script_signals();
-                        self.call_event_handler(&Event::Signal);
                         needs_timer = true;
+                    }
+                    if ui_signal {
+                        self.call_event_handler(&Event::Signal);
                     }
 
                     if SignalToUI::check_and_clear_action_signal() {
@@ -2466,7 +2504,7 @@ impl CxOsApi for Cx {
         let sender = self.os.game_input_events.sender.clone();
         self.os.apple_game_input = Some(AppleGameInput::init(move |event| {
             let _ = sender.send(event);
-            SignalToUI::set_ui_signal();
+            SignalToUI::set_internal_signal();
         }));
     }
 

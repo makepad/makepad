@@ -281,13 +281,10 @@ impl Cx {
                 });
             // A re-recorded immediate payload with unchanged bytes (a camera move
             // re-emitting world-space geometry) keeps its resident copy: no upload.
-            let immediate_hash = if publication.is_none() && call.instance_dirty {
-                crate::draw_list::immediate_payload_hash(data)
-            } else { 0 };
-            if immediate_hash != 0
-                && immediate_hash == item.immediate_hash
-                && item.os.instance_buffer.pending.is_none()
-                && item.os.instance_buffer.inner.as_ref().is_some_and(|inner| inner.len == data.len() * 4)
+            if publication.is_none()
+                && call.instance_dirty
+                && !item.retained_gpu_evicted
+                && item.os.instance_buffer.resident_matches(data)
             {
                 call.instance_dirty = false;
                 item.instance_upload_pending = false;
@@ -315,9 +312,6 @@ impl Cx {
                 self.os.instance_bytes_uploaded.saturating_add(bytes as u64);
             item.instance_upload_pending = remaining != 0;
             call.instance_dirty = false;
-            if remaining == 0 && immediate_hash != 0 {
-                item.immediate_hash = immediate_hash;
-            }
             if remaining == 0 || (item.retained_progressive && item.os.instance_buffer.pending.as_ref().is_some_and(|p|
                 p.publication == target && item.os.instance_buffer.inner.as_ref().is_some_and(|i| i.len > 0 && i.buffer.as_id() == p.inner.buffer.as_id()))) {
                 item.retained_gpu_evicted = false;
@@ -2419,7 +2413,7 @@ fn spawn_submitter(
                 if let Some(trace) = &trace { trace.mark(PresentStage::CommitReturned); }
                 drop(submission);
                 let _: () = unsafe { msg_send![pool, release] };
-                crate::thread::SignalToUI::set_ui_signal();
+                crate::thread::wake_ui_loop();
             }
         })
         .expect("Metal submission worker");
@@ -3094,7 +3088,7 @@ impl MetalCx {
         };
         let envelope =
             crate::retained_instances::retained_device_envelope(recommended, physical, unified);
-        crate::log!("retained-upload budgets: recommended_working_set_bytes={} physical_memory_bytes={} unified={} allocation_limit={} fraction=1/4 pool_fraction=1/16 residency_high_fraction=3/4 residency_low_fraction=5/8 source={}", recommended, physical, unified, envelope,
+        crate::trace!("gpu.upload", "retained-upload budgets: recommended_working_set_bytes={} physical_memory_bytes={} unified={} allocation_limit={} fraction=1/4 pool_fraction=1/16 residency_high_fraction=3/4 residency_low_fraction=5/8 source={}", recommended, physical, unified, envelope,
             if !unified && recommended != 0 { "recommendedMaxWorkingSetSize" } else { "physicalMemory/2" });
         let in_flight: InFlightQueue = Arc::new(Mutex::new(VecDeque::new()));
         let (submitter, submitter_thread) = spawn_submitter(in_flight.clone());
@@ -3507,7 +3501,7 @@ impl MetalPipelines {
         crate::error!("Metal shader: {}", error);
         let _ = self.blend.set(Err(error.clone()));
         let _ = self.solid.set(Err(error));
-        crate::thread::SignalToUI::set_ui_signal();
+        crate::thread::wake_ui_loop();
     }
 
     fn compile(
@@ -3660,7 +3654,7 @@ impl MetalPipelines {
                         } else {
                             ready.solid.set(result)
                         };
-                        crate::thread::SignalToUI::set_ui_signal();
+                        crate::thread::wake_ui_loop();
                     });
                     unsafe {
                         let _: () = msg_send![callback_device.as_id(),
@@ -4193,7 +4187,7 @@ fn spawn_allocator() -> (std::sync::mpsc::SyncSender<MetalAllocationRequest>, st
                     }
                 }
                 let _: () = unsafe { msg_send![pool, release] };
-                crate::thread::SignalToUI::set_ui_signal();
+                crate::thread::wake_ui_loop();
             }
         }).expect("Metal instance allocation worker");
         (tx, thread)
@@ -4208,6 +4202,27 @@ struct MetalPendingInstances {
 }
 
 impl MetalBuffer {
+    /// True when the resident copy already holds exactly these bytes. Instance
+    /// buffers are StorageModeShared, so this reads the memory a copy writes.
+    fn resident_matches(&self, data: &[f32]) -> bool {
+        let len = data.len() * 4;
+        if len == 0 || self.pending.is_some() {
+            return false;
+        }
+        let Some(inner) = self.inner.as_ref().filter(|inner| inner.len == len) else {
+            return false;
+        };
+        let resident: *const std::ffi::c_void =
+            unsafe { msg_send![inner.buffer.as_id(), contents] };
+        if resident.is_null() {
+            return false;
+        }
+        unsafe {
+            std::slice::from_raw_parts(resident as *const u8, len)
+                == std::slice::from_raw_parts(data.as_ptr() as *const u8, len)
+        }
+    }
+
     fn last_submission(&self) -> u64 {
         self.inner
             .iter()

@@ -19,20 +19,22 @@ mod backend;
 #[path = "demangle.rs"]
 mod demangle;
 
-const THRESHOLD: Duration = Duration::from_millis(250);
 const INTERVAL: Duration = Duration::from_millis(100);
 
 fn sample_interval(threshold: Duration) -> Duration {
     INTERVAL.min(threshold / 4).max(Duration::from_millis(1))
 }
 
-fn configured_threshold() -> Duration {
+/// Opt-in: `MAKEPAD_UI_HANG_MS` is both the switch and the threshold, since the
+/// sampler costs a permanently woken thread and suspends the UI thread to walk
+/// its stack. 250 is a good value to turn it on with.
+fn configured_threshold() -> Option<Duration> {
     std::env::var("MAKEPAD_UI_HANG_MS")
+        .ok()?
+        .parse::<u64>()
         .ok()
-        .and_then(|v| v.parse::<u64>().ok())
         .filter(|ms| *ms > 0)
         .map(Duration::from_millis)
-        .unwrap_or(THRESHOLD)
 }
 
 pub(super) struct State {
@@ -71,6 +73,7 @@ impl Drop for Registration {
 thread_local! { static REGISTRATION: RefCell<Option<Registration>> = const { RefCell::new(None) }; }
 
 pub(super) fn initialize() {
+    let Some(threshold) = configured_threshold() else { return };
     REGISTRATION.with(|registration| {
         if registration.borrow().is_some() { return; }
         let Some(target) = backend::Target::current() else {
@@ -79,7 +82,7 @@ pub(super) fn initialize() {
         };
         let (tx, rx) = sync_channel(16);
         let state = Arc::new(State {
-            threshold: configured_threshold(),
+            threshold,
             origin: Instant::now(), start: AtomicU64::new(0), phase: AtomicU64::new(0),
             stop: AtomicBool::new(false), completions: tx, lost: AtomicU64::new(0),
         });
@@ -171,7 +174,7 @@ mod tests {
         let target = backend::Target::current().expect("native stack target");
         let (tx, rx) = sync_channel(16);
         let state = Arc::new(State {
-            threshold: THRESHOLD,
+            threshold: Duration::from_millis(250),
             origin: Instant::now(), start: AtomicU64::new(0),
             phase: AtomicU64::new(super::super::UiPhase::CodePageInstall as u64),
             stop: AtomicBool::new(false), completions: tx, lost: AtomicU64::new(0),

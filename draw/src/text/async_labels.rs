@@ -277,7 +277,7 @@ impl LabelCache {
                     pool.retry_at=None;
                     let mut free = std::mem::take(&mut pool.free);
                     let recording_budget=cx.draw_lists.1.recordings.clone();
-                    pool.job = Some(slot.submit_named("text.label-instance-storage", move || {
+                    pool.job = Some(slot.submit_internal_named("text.label-instance-storage", move || {
                         let count = (65536 / floats).clamp(1, 32);
                         free.reserve(count);
                         for _ in 0..count {
