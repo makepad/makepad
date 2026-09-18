@@ -96,10 +96,11 @@ pub struct CxDragDrop {
     next_drag_area: Area,
     #[cfg(any(target_arch = "wasm32", target_os = "linux", test))]
     internal_drag_items: Option<Arc<Vec<DragItem>>>,
-    /// Set while the pointer event that produced a drag event is itself being
-    /// dispatched, so that dispatch doesn't produce the same drag event again.
+    /// Held while the pointer event that produced a drag event is itself being
+    /// dispatched, so that dispatch neither produces the same drag event again
+    /// nor trips `start_dragging`'s "start drag twice".
     #[cfg(any(target_arch = "wasm32", target_os = "linux", test))]
-    internal_drag_dispatching: bool,
+    suspended_drag_items: Option<Arc<Vec<DragItem>>>,
 }
 
 #[cfg(any(target_arch = "wasm32", target_os = "linux", test))]
@@ -117,9 +118,6 @@ impl CxDragDrop {
 
     #[cfg(any(target_arch = "wasm32", target_os = "linux", test))]
     pub(crate) fn internal_drag_event(&mut self, event: &Event) -> Option<InternalDragEvent> {
-        if self.internal_drag_dispatching {
-            return None;
-        }
         match event {
             Event::MouseMove(event) => {
                 let items = self.internal_drag_items.as_ref()?.clone();
@@ -144,10 +142,21 @@ impl CxDragDrop {
         }
     }
 
-    /// Brackets the dispatch of the pointer event a drag event came from.
+    /// Brackets the dispatch of the pointer event a drag event came from: the
+    /// items are out of the way for it, and come back unless it started a new
+    /// drag of its own. Losing them to an unwound dispatch ends the drag,
+    /// which beats a flag that stays stuck for the life of the process.
     #[cfg(any(target_arch = "wasm32", target_os = "linux", test))]
-    pub(crate) fn set_internal_drag_dispatching(&mut self, dispatching: bool) {
-        self.internal_drag_dispatching = dispatching;
+    pub(crate) fn suspend_internal_drag(&mut self) {
+        self.suspended_drag_items = self.internal_drag_items.take();
+    }
+
+    #[cfg(any(target_arch = "wasm32", target_os = "linux", test))]
+    pub(crate) fn resume_internal_drag(&mut self) {
+        let suspended = self.suspended_drag_items.take();
+        if self.internal_drag_items.is_none() {
+            self.internal_drag_items = suspended;
+        }
     }
 
     #[allow(dead_code)]

@@ -1231,9 +1231,9 @@ impl Cx {
             // The pointer event goes out first and the drag one is appended, the
             // way every other backend orders it: a widget that ends its gesture on
             // FingerUp never sees one otherwise, and stays stuck mid-drag.
-            self.drag_drop.set_internal_drag_dispatching(true);
+            self.drag_drop.suspend_internal_drag();
             self.call_event_handler(event);
-            self.drag_drop.set_internal_drag_dispatching(false);
+            self.drag_drop.resume_internal_drag();
             match drag {
                 crate::event::InternalDragEvent::Drag(event) => {
                     self.call_event_handler(&Event::Drag(event));

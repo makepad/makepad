@@ -827,7 +827,12 @@ impl Cx {
                                 Some(stale) if !metal_window.drawable_matches_layer(stale.as_id()) => {
                                     crate::trace!("present", "drawable predates the layer's resize, reacquiring");
                                     drop(stale);
-                                    worker.acquire_now(metal_window.ca_layer)
+                                    // Only while the pool has a free drawable. Exhausted, the
+                                    // acquire would block the UI thread on the compositor, which
+                                    // is what the worker exists to avoid; skip and stay dirty.
+                                    (in_flight < PRESENT_GATE_IN_FLIGHT)
+                                        .then(|| worker.acquire_now(metal_window.ca_layer))
+                                        .flatten()
                                 }
                                 drawable => drawable,
                             };

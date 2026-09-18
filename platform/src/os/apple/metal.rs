@@ -283,6 +283,7 @@ impl Cx {
             // re-emitting world-space geometry) keeps its resident copy: no upload.
             if publication.is_none()
                 && call.instance_dirty
+                && !item.retained_gpu_evicted
                 && item.os.instance_buffer.resident_matches(data)
             {
                 call.instance_dirty = false;
