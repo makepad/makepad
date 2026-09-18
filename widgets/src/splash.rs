@@ -32,6 +32,9 @@ pub struct Splash {
     body: ArcStringMut,
     #[live]
     allow_net: bool,
+    /// Host-only, inherited restriction on external I/O. Never script-settable.
+    #[rust]
+    host_io_only: bool,
     /// The app's private storage directory — the root of its jailed `fs`
     /// module (see splash_storage.rs). None (the default) = every storage
     /// call errors, which is right for previews/validation-less contexts.
@@ -173,7 +176,8 @@ impl Splash {
         }
 
         if self.vm_id == MAIN_SPLASH_VM_ID {
-            self.vm_id = cx.alloc_splash_vm_with_network(self.allow_net);
+            self.host_io_only |= cx.script_data.std.host_io_only();
+            self.vm_id = cx.alloc_splash_vm_with_io(self.allow_net, self.host_io_only);
         }
         // (Re)bind this isolate's storage jail and host-bridge identity.
         // Keyed by heap so the script can neither read nor retarget them.
@@ -207,7 +211,7 @@ impl Splash {
         };
 
         let vm_id = self.vm_id;
-        let sheet=self.stylesheet.clone();
+        let sheet=if self.host_io_only {None} else {self.stylesheet.clone()};
         self.style_pending=false;
         // A style reapply runs the body's top-level statements again: only the
         // body defines the widget tree, and that tree has to be rebuilt on the
@@ -527,16 +531,31 @@ impl Widget for Splash {
                 crate::widget_async::handle_splash_network_responses(cx, self.vm_id, responses);
             }
         }
-        self.view.handle_event(cx, event, scope);
+        if self.host_io_only && matches!(event, Event::TextCopy(_) | Event::TextCut(_)) {
+            return;
+        }
+        if self.host_io_only {
+            crate::widget_async::with_isolate(cx, self.vm_id, |cx| {
+                self.view.handle_event(cx, event, scope);
+            });
+        } else {
+            self.view.handle_event(cx, event, scope);
+        }
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        if self.style_pending && self.vm_id!=MAIN_SPLASH_VM_ID {self.eval_styled_body(cx,true);}
+        if self.style_pending && self.vm_id!=MAIN_SPLASH_VM_ID && !self.host_io_only {self.eval_styled_body(cx,true);}
         //let tree = self.view.widget_tree();
         //cx.with_vm(|vm| {
         //    log!("{}", tree.display(vm.heap()));
         //});
-        self.view.draw_walk(cx, scope, walk)
+        if self.host_io_only {
+            crate::widget_async::with_isolate(cx, self.vm_id, |cx| {
+                self.view.draw_walk(cx, scope, walk)
+            })
+        } else {
+            self.view.draw_walk(cx, scope, walk)
+        }
     }
 
     fn text(&self) -> String {
@@ -618,6 +637,17 @@ impl Splash {
         });
         });
         called
+    }
+
+    /// Require all external I/O to go through `host.request`.
+    ///
+    /// Call before `set_text`. This host-owned restriction cannot be disabled
+    /// after selection, including by nested Splash widgets or `allow_net: true`.
+    /// Raw sockets, HTTP, listeners, browser widgets, resource path/URL loading,
+    /// media sources, clipboard copying, and drag export are unavailable.
+    pub fn set_host_io_only(&mut self, enabled: bool) {
+        assert!(self.vm_id == MAIN_SPLASH_VM_ID, "set_host_io_only must precede set_text");
+        self.host_io_only |= enabled;
     }
 
     /// Sets whether this Splash's isolate gets the networking runtime. Must be

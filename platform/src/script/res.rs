@@ -997,6 +997,9 @@ pub fn script_mod(vm: &mut ScriptVm) {
         id_lut!(load_all_resources),
         script_args_def!(value = NIL),
         move |vm, args| {
+            if vm.host.cx_mut().script_data.std.host_io_only() {
+                return script_err_io!(vm.trap(), "external resources require a host request");
+            }
             let value = script_value!(vm, args.value);
             let cx = vm.host.cx_mut();
             cx.load_all_script_resources();
@@ -1011,6 +1014,9 @@ pub fn script_mod(vm: &mut ScriptVm) {
         id_lut!(file_resource),
         script_args_def!(path = NIL),
         move |vm, args| {
+            if vm.host.cx_mut().script_data.std.host_io_only() {
+                return script_err_io!(vm.trap(), "external resources require a host request");
+            }
             let path = script_value!(vm, args.path);
             if !path.is_string_like() {
                 return script_err_type_mismatch!(vm.trap(), "invalid res arg type");
@@ -1070,6 +1076,9 @@ pub fn script_mod(vm: &mut ScriptVm) {
         id_lut!(crate_resource),
         script_args_def!(path = NIL),
         move |vm, args| {
+            if vm.host.cx_mut().script_data.std.host_io_only() {
+                return script_err_io!(vm.trap(), "external resources require a host request");
+            }
             let path = script_value!(vm, args.path);
             if !path.is_string_like() {
                 return script_err_type_mismatch!(vm.trap(), "invalid res arg type");
@@ -1094,6 +1103,9 @@ pub fn script_mod(vm: &mut ScriptVm) {
         id_lut!(http_resource),
         script_args_def!(url = NIL),
         move |vm, args| {
+            if vm.host.cx_mut().script_data.std.host_io_only() {
+                return script_err_io!(vm.trap(), "external resources require a host request");
+            }
             let url = script_value!(vm, args.url);
             if !url.is_string_like() {
                 return script_err_type_mismatch!(vm.trap(), "invalid res arg type");
