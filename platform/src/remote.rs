@@ -2700,7 +2700,7 @@ mod imp {
         #[cfg(all(target_os = "macos", not(gpusim)))]
         crate::os::apple::macos::macos_app::wake_event_loop();
         #[cfg(not(all(target_os = "macos", not(gpusim))))]
-        crate::thread::SignalToUI::set_ui_signal();
+        crate::thread::SignalToUI::set_internal_signal();
     }
 
     /// Queue a command and block this HTTP thread until the event loop answers.

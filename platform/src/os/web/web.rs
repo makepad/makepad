@@ -485,10 +485,14 @@ impl Cx {
 
                 live_id!(ToWasmSignal) => {
                     let tw = ToWasmSignal::read_to_wasm(&mut to_wasm);
-                    if tw.flags & 1 != 0 {
+                    if tw.flags & (1 | 4) != 0 {
                         self.handle_media_signals();
                         self.handle_script_signals();
+                    }
+                    if tw.flags & 1 != 0 {
                         self.call_event_handler(&Event::Signal);
+                    }
+                    if tw.flags & (1 | 4) != 0 {
                         self.dispatch_network_runtime_events();
                     }
                     if tw.flags & 2 != 0 {
@@ -1735,6 +1739,9 @@ pub unsafe extern "C" fn wasm_check_signal() -> u32 {
     }
     if SignalToUI::check_and_clear_action_signal() {
         x |= 2
+    }
+    if SignalToUI::check_and_clear_internal_signal() {
+        x |= 4
     }
     x
 }

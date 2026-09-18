@@ -147,7 +147,7 @@ impl Cx {
                     content: change.content,
                 })
                 .map_err(|_| "channel closed".to_string())?;
-                SignalToUI::set_ui_signal();
+                SignalToUI::set_internal_signal();
                 Ok(())
             },
             logger,

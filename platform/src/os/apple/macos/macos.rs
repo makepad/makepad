@@ -1150,12 +1150,16 @@ impl Cx {
                     }
 
                     // check signals
-                    if SignalToUI::check_and_clear_ui_signal() {
+                    let internal_signal = SignalToUI::check_and_clear_internal_signal();
+                    let ui_signal = SignalToUI::check_and_clear_ui_signal();
+                    if internal_signal || ui_signal {
                         self.handle_termination_signal();
                         self.handle_media_signals();
                         self.handle_script_signals();
-                        self.call_event_handler(&Event::Signal);
                         needs_timer = true;
+                    }
+                    if ui_signal {
+                        self.call_event_handler(&Event::Signal);
                     }
 
                     if SignalToUI::check_and_clear_action_signal() {
@@ -2495,7 +2499,7 @@ impl CxOsApi for Cx {
         let sender = self.os.game_input_events.sender.clone();
         self.os.apple_game_input = Some(AppleGameInput::init(move |event| {
             let _ = sender.send(event);
-            SignalToUI::set_ui_signal();
+            SignalToUI::set_internal_signal();
         }));
     }
 

@@ -44,10 +44,8 @@ pub fn install_ui_waker(waker: Option<UiWaker>) {
     }
 }
 
-/// Wake the event loop without raising the UI signal, for a worker whose result
-/// the next beat picks up by itself. `Event::Signal` means "a worker has
-/// something for you" and is dispatched to the whole widget tree, so a
-/// render-internal thread must not raise it every frame.
+/// Wake the event loop and nothing else, for a worker whose result the next
+/// beat picks up by itself (a render worker whose pass is already dirty).
 pub fn wake_ui_loop() {
     let waker = UI_WAKER.lock().ok().and_then(|slot| slot.clone());
     if let Some(waker) = waker {
@@ -59,11 +57,25 @@ pub fn wake_ui_loop() {
 pub struct SignalToUI(Arc<AtomicBool>);
 
 static UI_SIGNAL: AtomicBool = AtomicBool::new(false);
+static INTERNAL_SIGNAL: AtomicBool = AtomicBool::new(false);
 static ACTION_SIGNAL: AtomicBool = AtomicBool::new(false);
 
 impl SignalToUI {
+    /// An app-facing channel has something for the UI thread. The next beat
+    /// dispatches `Event::Signal` to the whole widget tree, so raise this only
+    /// for data an app polls on that event: a `ToUISender`, a task result, a
+    /// texture readback. Makepad's own queues raise `set_internal_signal`.
     pub fn set_ui_signal() {
         if !UI_SIGNAL.swap(true, Ordering::AcqRel) {
+            wake_ui_loop();
+        }
+    }
+
+    /// One of makepad's own queues has something for the UI thread: media
+    /// device changes, the script pump, a termination request. The next beat
+    /// services those without waking every widget with an `Event::Signal`.
+    pub fn set_internal_signal() {
+        if !INTERNAL_SIGNAL.swap(true, Ordering::AcqRel) {
             wake_ui_loop();
         }
     }
@@ -76,6 +88,10 @@ impl SignalToUI {
 
     pub fn check_and_clear_ui_signal() -> bool {
         UI_SIGNAL.swap(false, Ordering::AcqRel)
+    }
+
+    pub fn check_and_clear_internal_signal() -> bool {
+        INTERNAL_SIGNAL.swap(false, Ordering::AcqRel)
     }
 
     pub fn check_and_clear_action_signal() -> bool {
@@ -333,6 +349,19 @@ impl<T> std::ops::Deref for FromUIReceiver<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn internal_and_ui_signals_are_independent() {
+        SignalToUI::check_and_clear_ui_signal();
+        SignalToUI::check_and_clear_internal_signal();
+        SignalToUI::set_internal_signal();
+        assert!(!SignalToUI::check_and_clear_ui_signal());
+        assert!(SignalToUI::check_and_clear_internal_signal());
+        assert!(!SignalToUI::check_and_clear_internal_signal());
+        SignalToUI::set_ui_signal();
+        assert!(!SignalToUI::check_and_clear_internal_signal());
+        assert!(SignalToUI::check_and_clear_ui_signal());
+    }
 
     #[test]
     fn oneshot_delivers_once() {

@@ -863,7 +863,7 @@ impl Cx {
 
         let net = Arc::new(NetworkRuntime::new(Default::default()));
         net.set_wake_fn(Some(Arc::new(|| {
-            SignalToUI::set_ui_signal();
+            SignalToUI::set_internal_signal();
         })));
 
         let script_std = makepad_script_std::ScriptStd::with_network_runtime(net.clone());

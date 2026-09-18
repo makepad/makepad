@@ -846,7 +846,7 @@ impl<P: Send + 'static> RetirementBatches<P> {
         if !self.initialized {
             if self.preparing.is_none() {
                 if let Ok(slot) = pool.reserve(crate::thread::Lane::Heavy) {
-                    self.preparing = Some(slot.submit_named("retirement batch storage", || {
+                    self.preparing = Some(slot.submit_internal_named("retirement batch storage", || {
                         (0..16)
                             .map(|_| {
                                 PreparedDrawBox::new().initialize(RetirementBatch {
@@ -1049,7 +1049,7 @@ impl CxDrawListPool {
             let returned = batches.returned_tx.clone();
             let counter = self.1.retirements.clone();
             counter.fetch_add(1, Ordering::AcqRel);
-            slot.submit_named("retained draw storage retirement", move || {
+            slot.submit_internal_named("retained draw storage retirement", move || {
                 for item in &mut batch.items {
                     drop(item.take());
                 }
@@ -1057,7 +1057,7 @@ impl CxDrawListPool {
                 // that empty envelope still occurs here on the worker.
                 let _ = returned.try_send(batch);
                 counter.fetch_sub(1, Ordering::AcqRel);
-                crate::thread::SignalToUI::set_ui_signal();
+                crate::thread::SignalToUI::set_internal_signal();
             })
             .detach();
         }

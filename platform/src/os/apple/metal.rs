@@ -3500,7 +3500,7 @@ impl MetalPipelines {
         crate::error!("Metal shader: {}", error);
         let _ = self.blend.set(Err(error.clone()));
         let _ = self.solid.set(Err(error));
-        crate::thread::SignalToUI::set_ui_signal();
+        crate::thread::wake_ui_loop();
     }
 
     fn compile(
@@ -3653,7 +3653,7 @@ impl MetalPipelines {
                         } else {
                             ready.solid.set(result)
                         };
-                        crate::thread::SignalToUI::set_ui_signal();
+                        crate::thread::wake_ui_loop();
                     });
                     unsafe {
                         let _: () = msg_send![callback_device.as_id(),

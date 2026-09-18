@@ -244,7 +244,7 @@ impl Cx {
                 samples.drain(0..remove);
             }
         }
-        SignalToUI::set_ui_signal();
+        SignalToUI::set_internal_signal();
     }
 
     #[cfg(any(not(target_arch = "wasm32"), target_feature = "atomics"))]
