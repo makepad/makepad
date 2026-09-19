@@ -275,17 +275,96 @@ impl ScriptHeap {
         }
     }
 
+    /// A type registered again -- every module run registers every
+    /// scriptable type, so a reload does this for all of them -- takes the
+    /// slot it had. A slot's proto is a collector root, and so is the
+    /// default filed under the slot's index; a fresh slot per run kept every
+    /// previous run's template tree alive for the life of the process, some
+    /// thousands of objects a reload, and nothing ever let them go.
+    ///
+    /// A type with an id takes its slot back by the id. One without --
+    /// the derive registers an enum's named variants that way -- takes the
+    /// slot of any earlier registration with the same props: those carry no
+    /// object, so nothing about them differs between runs but the slot.
     pub fn register_type(
         &mut self,
         type_id: Option<ScriptTypeId>,
         ty_check: ScriptTypeCheck,
     ) -> ScriptTypeIndex {
+        if let Some(type_id) = type_id {
+            if let Some(index) = self.type_index.get(&type_id).copied() {
+                self.type_check[index.0 as usize] = ty_check;
+                return index;
+            }
+        } else if ty_check.object.is_none() {
+            let same = self.type_check.iter().position(|have| {
+                have.object.is_none()
+                    && have.is_repr_u32_enum == ty_check.is_repr_u32_enum
+                    && have.props.rust_instance_start == ty_check.props.rust_instance_start
+                    && have.props.props.len() == ty_check.props.props.len()
+                    && have.props.iter_ordered().eq(ty_check.props.iter_ordered())
+            });
+            if let Some(index) = same {
+                return ScriptTypeIndex(index as _);
+            }
+        }
         let index = ScriptTypeIndex(self.type_check.len() as _);
         if let Some(type_id) = type_id {
             self.type_index.insert(type_id, index);
         }
         self.type_check.push(ty_check);
         index
+    }
+
+    /// How many type slots exist. A test counts these across module runs.
+    pub fn registered_type_count(&self) -> usize {
+        self.type_check.len()
+    }
+
+    /// The objects every type slot roots: each slot's proto, and the
+    /// default filed under it. A leak hunt walks what hangs off them.
+    pub fn type_root_ids(&self) -> (Vec<ScriptObject>, Vec<ScriptObject>) {
+        let protos = self
+            .type_check
+            .iter()
+            .filter_map(|check| check.object.as_ref().and_then(|object| object.proto.as_object()))
+            .collect();
+        let defaults = self.type_defaults.values().copied().collect();
+        (protos, defaults)
+    }
+
+    /// Every allocated object slot, as a handle a reader can use. A leak
+    /// hunt walks these after a collection to see what survived, by kind.
+    pub fn alloced_object_ids(&self) -> Vec<ScriptObject> {
+        let mut out = Vec::new();
+        for i in 1..self.objects.len() {
+            let obj = self.objects.get_at(i);
+            if obj.tag.is_alloced() {
+                out.push(ScriptObject::new(i as u32, self.objects.generation(i)));
+            }
+        }
+        out
+    }
+
+    /// Every object a Rust-held reference is keeping alive. A leak hunt
+    /// diffs two readings to see what was newly pinned.
+    pub fn root_object_ids(&self) -> Vec<ScriptObject> {
+        self.root_objects.borrow().keys().copied().collect()
+    }
+
+    /// The size of every root the collector marks from, in the order it
+    /// marks them: type slots, type defaults, pod types, Rust-held object
+    /// refs, Rust-held array refs, Rust-held handles. Two readings apart in
+    /// time say which root a leak hangs off.
+    pub fn root_counts(&self) -> [usize; 6] {
+        [
+            self.type_check.len(),
+            self.type_defaults.len(),
+            self.pod_types.len(),
+            self.root_objects.borrow().len(),
+            self.root_arrays.borrow().len(),
+            self.root_handles.borrow().len(),
+        ]
     }
 
     pub fn type_matches_id(&self, ptr: ScriptObject, type_id: ScriptTypeId) -> bool {
