@@ -388,6 +388,44 @@ impl ScriptHeap {
         mark_value_fields!(objects, arrays, strings, pods, handles, regexes, mark_vec, val);
     }
 
+    /// How many objects the given seeds reach, following what the marker
+    /// follows: the proto, every map key and value, every vec key and value,
+    /// and every element of every array met on the way. `visited` is
+    /// shared in and out, so a caller can mark a tree once and then ask
+    /// what each further root reaches beyond it. A leak hunt's reading.
+    pub fn reach_count(&self, seeds: &[ScriptObject], visited: &mut std::collections::HashSet<ScriptObject>) -> usize {
+        let mut arrays_seen: std::collections::HashSet<ScriptArray> = Default::default();
+        let mut count = 0usize;
+        let mut stack: Vec<ScriptValue> = seeds.iter().map(|o| ScriptValue::from(*o)).collect();
+        while let Some(val) = stack.pop() {
+            if let Some(obj) = val.as_object() {
+                if !self.objects.is_valid(obj) || !visited.insert(obj) {
+                    continue;
+                }
+                count += 1;
+                let object = &self.objects[obj];
+                stack.push(object.proto);
+                for (key, entry) in object.map.iter() {
+                    stack.push(*key);
+                    stack.push(entry.value);
+                }
+                for kv in object.vec.iter() {
+                    stack.push(kv.key);
+                    stack.push(kv.value);
+                }
+            } else if let Some(arr) = val.as_array() {
+                if !arrays_seen.insert(arr) {
+                    continue;
+                }
+                let len = self.array_len(arr);
+                for i in 0..len {
+                    stack.push(self.array_index_unchecked(arr, i));
+                }
+            }
+        }
+        count
+    }
+
     pub fn mark(&mut self, threads: &ScriptThreads, code: &ScriptCode) {
         self.mark_vec.clear();
 
@@ -558,8 +596,13 @@ impl ScriptHeap {
                 continue;
             }
             if !obj.tag.is_marked() && obj.tag.is_alloced() {
+                // Only the object the slot names frees the slot: an older
+                // definition of the same layout shares it (`new_pod_type`),
+                // and its death must not pull the slot from under the newer.
                 if let Some(pod_ty) = obj.tag.as_pod_type() {
-                    self.pod_types_free.push(pod_ty);
+                    if self.pod_types[pod_ty.index as usize].object.index == i as u32 {
+                        self.pod_types_free.push(pod_ty);
+                    }
                 }
                 obj.clear();
                 // Increment generation so stale references will be detected
@@ -837,7 +880,9 @@ impl ScriptHeap {
         // Must check is_alloced to avoid double-freeing
         if obj.tag.is_alloced() && !obj.tag.is_reffed() {
             if let Some(pod_ty) = obj.tag.as_pod_type() {
-                self.pod_types_free.push(pod_ty);
+                if self.pod_types[pod_ty.index as usize].object == ptr {
+                    self.pod_types_free.push(pod_ty);
+                }
             }
             obj.clear();
             // Increment generation so stale references will be detected

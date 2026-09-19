@@ -829,6 +829,49 @@ pub fn script_mod(vm: &mut ScriptVm) {
 }
 
 #[cfg(test)]
+mod module_rebuild_tests {
+    use super::*;
+
+    /// A module rebuild -- a theme switch, a live edit, every settle of a
+    /// drag on the theme lab -- must leave the live heap where it found it.
+    /// It did not: every run registered every type into a fresh slot, and
+    /// each slot rooted its template tree, so a rebuild kept some thousands
+    /// of objects alive for good. Measured through the collector's own
+    /// count, after a collection, so garbage the collector would take
+    /// anyway is not mistaken for a leak.
+    #[test]
+    fn a_module_rebuild_leaves_the_live_heap_where_it_was() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        set_base_theme(&mut cx, BaseTheme::Dark);
+        cx.with_vm(|vm| script_mod(vm));
+        let live_after = |cx: &mut Cx| {
+            cx.with_vm(|vm| {
+                vm.with_reload(script_mod);
+                vm.gc();
+                (vm.bx.heap.gc_live_len(), vm.bx.heap.root_counts())
+            })
+        };
+        // Two runs to settle: the first reload pays for what the first run
+        // only lazily made.
+        live_after(&mut cx);
+        let (live, roots) = live_after(&mut cx);
+        for _ in 0..5 {
+            let (now, roots_now) = live_after(&mut cx);
+            assert_eq!(
+                roots_now, roots,
+                "a rebuild grew a collector root (type slots, defaults, pod types, refs, array refs, handles)"
+            );
+            assert!(
+                now <= live + 64,
+                "a rebuild left {} more live objects than the one before it",
+                now as i64 - live as i64
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod base_theme_tests {
     use super::*;
 

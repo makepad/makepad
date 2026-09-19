@@ -23,6 +23,30 @@ impl ScriptHeap {
         ty: ScriptPodTy,
         default: ScriptValue,
     ) -> ScriptPodType {
+        // A pod type spelled out in a script -- a vertex struct, an array,
+        // an inline struct -- is spelled out again by every module run, and
+        // a slot's object is a collector root, so a fresh slot per run kept
+        // every previous run's definition alive for good. One that reads the
+        // same as a slot already filled, name and layout alike, takes that
+        // slot: the layout is the layout, and any pod or shader still
+        // holding the index goes on meaning what it meant. A changed layout
+        // under the same name is a new type and gets a new slot. The default
+        // is not part of the identity -- each run makes its own default
+        // value, equal in content and never in pointer -- so the slot takes
+        // the newest default along with the newest object, and the older
+        // ones are garbage. The sweep knows not to free a slot on the death
+        // of an older object.
+        let same = self
+            .pod_types
+            .iter()
+            .position(|have| have.name == name && have.ty == ty);
+        if let Some(index) = same {
+            let ptr = ScriptPodType { index: index as u32 };
+            let slot = &mut self.pod_types[index];
+            slot.object = object;
+            slot.default = default;
+            return ptr;
+        }
         if let Some(ptr) = self.pod_types_free.pop() {
             let pod_type = &mut self.pod_types[ptr.index as usize];
             pod_type.object = object;
@@ -81,15 +105,58 @@ impl ScriptHeap {
     }
 
     pub fn pod_type_name_set(&mut self, ty: ScriptPodType, name: LiveId) {
-        let ty = &mut self.pod_types[ty.index as usize];
-        ty.name = Some(name);
+        if self.pod_type_take_older_slot(ty, name) {
+            return;
+        }
+        self.pod_types[ty.index as usize].name = Some(name);
     }
 
     pub fn pod_type_name_if_not_set(&mut self, ty: ScriptPodType, name: LiveId) {
-        let ty = &mut self.pod_types[ty.index as usize];
-        if ty.name.is_none() {
-            ty.name = Some(name);
+        if self.pod_types[ty.index as usize].name.is_some() {
+            return;
         }
+        if self.pod_type_take_older_slot(ty, name) {
+            return;
+        }
+        self.pod_types[ty.index as usize].name = Some(name);
+    }
+
+    /// A struct spelled out in a script gets its slot before its name: the
+    /// slot when the struct is built, the name when it is assigned to a
+    /// module key. Every module run spells out the same structs again, and
+    /// a slot's object is a collector root, so a fresh slot per run kept
+    /// every previous run's definition alive for good. So the moment a
+    /// slot is named, an older slot with that name and the same layout
+    /// takes the new definition over -- object and default -- the object is
+    /// re-tagged with the older slot, and the slot just made is given back.
+    /// Anything still holding the older index goes on meaning what it
+    /// meant: the layout is the layout. A changed layout under the same
+    /// name is a new type, and keeps its new slot.
+    ///
+    /// Returns whether an older slot took over. Nothing but the definition
+    /// object refers to the new slot yet -- a struct is named in the same
+    /// statement that builds it -- which is what makes giving it back safe.
+    fn pod_type_take_older_slot(&mut self, ty: ScriptPodType, name: LiveId) -> bool {
+        let i = ty.index as usize;
+        let older = self.pod_types.iter().position(|have| {
+            have.name == Some(name) && have.ty == self.pod_types[i].ty
+        });
+        let Some(j) = older else { return false };
+        if j == i {
+            return false;
+        }
+        let object = self.pod_types[i].object;
+        let default = self.pod_types[i].default;
+        let slot = &mut self.pod_types[j];
+        slot.object = object;
+        slot.default = default;
+        let older = ScriptPodType { index: j as u32 };
+        if object != ScriptObject::ZERO {
+            self.set_object_pod_type(object, older);
+        }
+        self.pod_types[i] = ScriptPodTypeData::default();
+        self.pod_types_free.push(ty);
+        true
     }
 
     /// Maps a Rust TypeId to its corresponding ScriptPodType.
