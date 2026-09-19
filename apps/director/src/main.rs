@@ -57,7 +57,8 @@ app_main!(
         "makepad_widgets/resources/jetbrains_mono_variable.ttf",
         "makepad_widgets/resources/fa-solid-900.ttf",
         "makepad_widgets/resources/NotoColorEmoji.ttf",
-        "makepad_widgets/resources/Inter.ttf",
+        INTER_FONT_ASSET,
+        ROBOTO_FLEX_FONT_ASSET,
     ]
 );
 
