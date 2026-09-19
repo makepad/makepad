@@ -19,6 +19,16 @@
 //! here, and without the word the lab goes on believing the mix it last
 //! installed is still on the screen. That word is [`ThemeLab::invalidate`].
 //!
+//! The other thing it owes is the part of the theme in force that a base
+//! theme and a style sheet do not add up to. A theme somebody saved is those
+//! two with a set of tokens pinned over them, and the pins are the one part
+//! the lab cannot see for itself: `mod.theme` holds what the tokens came to
+//! rather than which of them were pinned, and the module rebuild that puts
+//! the base and the sheet back is the very thing that throws them away. So a
+//! panel opening the lab over a saved theme says so on the way in --
+//! [`ThemeLab::enter_pinned`] rather than [`ThemeLab::enter`] -- and gets the
+//! whole theme back on the way out rather than two thirds of it.
+//!
 //! # What the lab will not let a panel do
 //!
 //! Mix a dark theme with a light one. Half way between the two is a mid grey
@@ -39,7 +49,7 @@
 use crate::desktop_style::{self, DesktopStyle, StyleSheet};
 use crate::makepad_platform::{ScriptMod, ScriptVm, ScriptVmCx};
 use crate::theme_tokens::{
-    random_weights, reads_on, set_weight, to_relative, Scheme, ThemeBlend, LEGIBLE, READABLE,
+    held_pairs, random_weights, reads_on, set_weight, to_relative, Scheme, ThemeBlend,
 };
 use crate::BaseTheme;
 
@@ -62,32 +72,6 @@ const MIX_NAME: &str = "equalized";
 /// untouched slider row can come back a few ulps from where it was, and a
 /// dirty check on exact equality would reinstall the same theme every frame.
 const SAME_WEIGHT: f64 = 1e-9;
-
-/// The ground and ink pairs a mix is measured on, with the bar each is held
-/// to. The surface ladder against the body ink and the four meanings against
-/// their own ink are the pairs that carry running text, so they answer to
-/// `READABLE`; the second voice carries menu labels, list detail and icons,
-/// so it answers to `LEGIBLE`. These are the same pairs the library holds its
-/// own themes and sheets to, which is what makes the number comparable: a mix
-/// that passes here is as readable as a shipped theme, and no more.
-const PAIRS: &[(&str, &str, f64)] = &[
-    ("color_surface", "color_on_surface", READABLE),
-    ("color_surface_container", "color_on_surface", READABLE),
-    ("color_surface_container_low", "color_on_surface", READABLE),
-    ("color_surface_container_high", "color_on_surface", READABLE),
-    ("color_surface_container_highest", "color_on_surface", READABLE),
-    ("color_surface_dim", "color_on_surface", READABLE),
-    ("color_surface_bright", "color_on_surface", READABLE),
-    ("color_surface", "color_on_surface_variant", LEGIBLE),
-    ("color_surface_container", "color_on_surface_variant", LEGIBLE),
-    ("color_surface_container_high", "color_on_surface_variant", LEGIBLE),
-    ("color_surface_container_highest", "color_on_surface_variant", LEGIBLE),
-    ("color_success", "color_on_success", READABLE),
-    ("color_warning", "color_on_warning", READABLE),
-    ("color_error", "color_on_error", READABLE),
-    ("color_info", "color_on_info", READABLE),
-    ("color_primary", "color_on_primary", READABLE),
-];
 
 /// One theme's control: what to call it, and where its weight is.
 ///
@@ -168,16 +152,79 @@ impl Applied {
     }
 }
 
+/// The part of a theme that a base theme and a style sheet do not add up to.
+///
+/// A theme somebody saved is a base, a sheet, and a set of tokens pinned over
+/// the pair of them. [`ThemeLab::enter`] can read the first two off the vm
+/// and cannot read the third: what it would find there is `mod.theme`, which
+/// holds what the tokens came to rather than which of them were pinned, and
+/// the module rebuild that puts the base and the sheet back is exactly what
+/// throws the pins away. Only the panel knows them, because it is the panel
+/// that loaded them and put them on.
+///
+/// So it hands them over as the script it installed them with, which is the
+/// same shape the lab installs a mix with and the same shape
+/// `crate::theme_store` writes a saved theme in. A panel holding a
+/// `SavedTheme` has both halves of one already:
+/// `PinnedTheme::new(&saved.name, &saved.script())`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PinnedTheme {
+    name: String,
+    script: String,
+}
+
+impl PinnedTheme {
+    /// `name` labels the script in a log and a diagnostic and does nothing
+    /// else; what the script files itself under in `mod.themes` is the
+    /// script's own business.
+    ///
+    /// The trailing `true` the language wants is added here rather than asked
+    /// of the caller. The last statement of an evaluated script is swallowed,
+    /// and the last statement of an override script is the assignment that
+    /// makes the theme current, so a script handed over as it was written
+    /// would pin every token and then leave the theme it pinned them into
+    /// sitting in `mod.themes` unworn -- silently, and with nothing in the
+    /// log. A script that already ends in one is none the worse for a second.
+    pub fn new(name: &str, script: &str) -> Self {
+        let mut script = script.to_string();
+        if !script.ends_with('\n') {
+            script.push('\n');
+        }
+        script.push_str("true\n");
+        Self { name: name.to_string(), script }
+    }
+
+    /// The name this was made under.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The script as it will be evaluated, trailing `true` and all.
+    pub fn script(&self) -> &str {
+        &self.script
+    }
+}
+
 /// What was in force when the lab was entered, so that leaving can put it
 /// back. The base theme and the sheet are two separate choices -- a sheet is
 /// laid over a base rather than replacing it -- so both are taken, and the
 /// theme the pair amounts to is worked out once here rather than at every
 /// call that needs it.
-#[derive(Clone, Copy, Debug, PartialEq)]
+///
+/// A saved theme is those two with tokens pinned over them, and the pins ride
+/// here too: see [`PinnedTheme`]. Without them, leaving restored a theme by
+/// its name only -- the right base, the right sheet, and none of what the
+/// person had actually chosen -- and the picker went on naming a theme the
+/// screen was not.
+#[derive(Clone, Debug, PartialEq)]
 struct Entry {
     base: BaseTheme,
     sheet: Option<(DesktopStyle, bool)>,
     theme: BlendTheme,
+    /// The tokens the entry theme pins over its base and its sheet, and
+    /// `None` for a theme that is just those two: every built-in, and every
+    /// style sheet.
+    pinned: Option<PinnedTheme>,
 }
 
 /// A mix of the themes the library ships, and the panel's side of it.
@@ -260,14 +307,29 @@ impl ThemeLab {
     /// Whether the lab is open: [`ThemeLab::enter`] has been called and
     /// [`ThemeLab::leave`] has not.
     ///
-    /// A closed lab has no rows, and every call that moves a weight is a no-op
-    /// over no rows: `set_weight` and `clear_weight` find no index, `reset` and
-    /// `randomize` have nothing to write, `index_of` has no row to point at,
-    /// `apply` answers [`Applied::Nothing`] and `readability` measures nothing.
-    /// That silence is deliberate -- a panel draws the folded section before it
-    /// ever opens it, and should not have to guard each call -- but it also
-    /// means a test that forgets to enter asserts nothing whatever it calls, so
-    /// a test asks this first.
+    /// A closed lab is inert. It has no rows, so `set_weight` and
+    /// `clear_weight` find no index, `reset` and `randomize` have nothing to
+    /// write, `index_of` has no row to point at, and `readability` has no mix
+    /// to measure; `set_appearance` draws no group, and `apply` answers
+    /// [`Applied::Nothing`].
+    ///
+    /// The rows are part of that rather than an exception to it, which is
+    /// worth saying because they look cheap enough to draw early. Entering
+    /// starts the mix from the theme in force, and the theme in force is the
+    /// one thing only [`ThemeLab::enter`] knows -- so entering resets every
+    /// weight, and a weight moved before then is a weight entering throws
+    /// away. A panel offering rows over a closed lab would be offering a
+    /// control whose every move is lost.
+    ///
+    /// What a closed lab does still do is remember. [`ThemeLab::set_mode`]
+    /// keeps the mode for the next entry, [`ThemeLab::rebuilds`] counts for
+    /// the whole life of the lab, and the resolved themes are kept across a
+    /// leave so that opening again is instant -- see [`ThemeLab::cache`].
+    ///
+    /// The silence is deliberate: a panel draws the folded section before it
+    /// ever opens it, and should not have to guard each call. But it also
+    /// means a test that forgets to enter asserts nothing whatever it calls,
+    /// so a test asks this first.
     pub fn is_open(&self) -> bool {
         self.entry.is_some()
     }
@@ -297,8 +359,31 @@ impl ThemeLab {
     /// otherwise capture the mix as the theme to go back to, and leaving
     /// would never return anywhere.
     ///
+    /// This is the door for a theme that IS a base theme and a style sheet:
+    /// every built-in the library ships, and every desktop sheet. A theme
+    /// with tokens pinned over those -- one somebody saved -- comes in
+    /// through [`ThemeLab::enter_pinned`] instead, because the pins are the
+    /// one part of it the lab cannot see from here.
+    ///
     /// The panel calls this inside `cx.with_vm`.
     pub fn enter(&mut self, vm: &mut ScriptVm) {
+        self.enter_on(vm, None);
+    }
+
+    /// Remember a theme that pins tokens over its base and its sheet, and
+    /// make a mix of it.
+    ///
+    /// [`ThemeLab::enter`] in every other respect, and the same cost. What it
+    /// adds is the only part of a saved theme the lab cannot read off the vm
+    /// for itself, so that leaving is the inverse of entering rather than two
+    /// thirds of it. See [`PinnedTheme`].
+    ///
+    /// The panel calls this inside `cx.with_vm`.
+    pub fn enter_pinned(&mut self, vm: &mut ScriptVm, pinned: &PinnedTheme) {
+        self.enter_on(vm, Some(pinned.clone()));
+    }
+
+    fn enter_on(&mut self, vm: &mut ScriptVm, pinned: Option<PinnedTheme>) {
         if self.entry.is_some() {
             return;
         }
@@ -321,7 +406,7 @@ impl ThemeLab {
             // one behind, so the tree has to be walked over it again.
             vm.cx_mut().request_script_reapply();
         }
-        self.entry = Some(Entry { base, sheet, theme });
+        self.entry = Some(Entry { base, sheet, theme, pinned });
         self.installed = false;
         self.show(theme.appearance());
         self.applied = Some((self.appearance, self.weights()));
@@ -335,8 +420,12 @@ impl ThemeLab {
     /// Show the other group. The weights of the group being left are not kept:
     /// they weigh themes that cannot be in this mix, and a number a panel
     /// cannot see is a number nobody chose.
+    ///
+    /// A closed lab takes no group: it has no theme for the mix to start
+    /// from, so every weight this would draw is one that entering would throw
+    /// away again. See [`ThemeLab::is_open`].
     pub fn set_appearance(&mut self, appearance: Appearance) {
-        if appearance == self.appearance {
+        if !self.is_open() || appearance == self.appearance {
             return;
         }
         self.show(appearance);
@@ -520,10 +609,7 @@ impl ThemeLab {
     /// The panel calls this inside `cx.with_vm`, and shows the error: a mix
     /// that refused itself in the log is a mix that failed silently.
     pub fn apply(&mut self, vm: &mut ScriptVm) -> Result<Applied, BlendError> {
-        let Some(entry) = self.entry else {
-            return Ok(Applied::Nothing);
-        };
-        if !self.is_dirty() {
+        if !self.is_open() || !self.is_dirty() {
             return Ok(Applied::Nothing);
         }
         let mut did = Applied::Nothing;
@@ -536,7 +622,13 @@ impl ThemeLab {
             // weights having wandered and returned costs a tree walk of
             // nothing.
             if self.installed {
-                self.install_entry(vm, entry);
+                // Cloned rather than borrowed, because putting it back is a
+                // call on `self`; and only here, because a saved theme's
+                // pins are a script of some size and every other path
+                // through this call has no use for them.
+                if let Some(entry) = self.entry.clone() {
+                    self.install_entry(vm, &entry);
+                }
                 self.installed = false;
                 vm.cx_mut().request_script_reapply();
                 did = Applied::Entry;
@@ -567,7 +659,7 @@ impl ThemeLab {
             return;
         };
         if self.installed {
-            self.install_entry(vm, entry);
+            self.install_entry(vm, &entry);
             vm.cx_mut().request_script_reapply();
         }
         self.installed = false;
@@ -601,7 +693,7 @@ impl ThemeLab {
         };
         let mut margin: Option<f64> = None;
         let mut failures: Vec<(f64, String)> = Vec::new();
-        for (ground, ink, need) in PAIRS {
+        for (ground, ink, need) in held_pairs() {
             let (Some(g), Some(i)) = (blend.color(ground), blend.color(ink)) else {
                 continue;
             };
@@ -634,6 +726,7 @@ impl ThemeLab {
         let group = BlendTheme::group(appearance);
         self.anchor = self
             .entry
+            .as_ref()
             .and_then(|entry| group.iter().position(|theme| *theme == entry.theme))
             .unwrap_or(0);
         self.appearance = appearance;
@@ -664,7 +757,7 @@ impl ThemeLab {
 
     /// Whether the mix on show is just the theme the lab was entered on.
     fn is_entry_mix(&self) -> bool {
-        let Some(entry) = self.entry else {
+        let Some(entry) = self.entry.as_ref() else {
             return false;
         };
         if entry.theme.appearance() != self.appearance {
@@ -684,7 +777,9 @@ impl ThemeLab {
     fn install_blend(&mut self, vm: &mut ScriptVm, blend: &ThemeBlend) {
         self.rebuilds = self.rebuilds.saturating_add(1);
         desktop_style::uninstall(vm);
-        let code = format!("{}true\n", blend.script(MIX_NAME));
+        // `theme_module_script` ends itself, so the seam does not: a second
+        // terminator here would be a third place that knows about the first.
+        let code = blend.script(MIX_NAME);
         vm.with_reload(|vm| {
             crate::theme_mod(vm);
             vm.eval(ScriptMod {
@@ -701,9 +796,19 @@ impl ThemeLab {
         });
     }
 
-    /// The base theme and the sheet the lab was entered on, back on, and the
-    /// module rebuilt off the pair of them.
-    fn install_entry(&mut self, vm: &mut ScriptVm, entry: Entry) {
+    /// The base theme and the sheet the lab was entered on, back on, the
+    /// module rebuilt off the pair of them, and the entry theme's own pinned
+    /// tokens over the top of that.
+    ///
+    /// The pins go on AFTER the whole module rather than into the seam a mix
+    /// is spliced into. A sheet's own script runs from the first line of the
+    /// widget module and re-points `mod.theme` at its base as it goes, so
+    /// anything pinned before that is pinned over; and after is where the
+    /// panel put them when it installed the theme in the first place, which
+    /// is what makes this the way back to where the lab was opened rather
+    /// than a fourth arrangement nothing else produces. The caller's
+    /// `request_script_reapply` is what carries them to the tree.
+    fn install_entry(&mut self, vm: &mut ScriptVm, entry: &Entry) {
         self.rebuilds = self.rebuilds.saturating_add(1);
         crate::set_base_theme(vm.cx_mut(), entry.base);
         match entry.sheet {
@@ -712,7 +817,21 @@ impl ThemeLab {
             }
             None => desktop_style::uninstall(vm),
         }
-        vm.with_reload(crate::script_mod);
+        let pinned = entry.pinned.as_ref();
+        vm.with_reload(|vm| {
+            crate::script_mod(vm);
+            if let Some(pinned) = pinned {
+                vm.eval(ScriptMod {
+                    cargo_manifest_path: env!("CARGO_MANIFEST_DIR").into(),
+                    module_path: format!("theme_lab_{}", pinned.name),
+                    file: format!("{}.splash", pinned.name),
+                    line: 0,
+                    column: 0,
+                    code: pinned.script.clone(),
+                    values: vec![],
+                });
+            }
+        });
     }
 }
 
@@ -720,7 +839,9 @@ impl ThemeLab {
 mod theme_lab_tests {
     use super::*;
     use crate::makepad_platform::{Cx, LiveId, NoTrap};
-    use crate::theme_tokens::{mix_rgb, BlendValue, ThemeValues};
+    use crate::theme_tokens::{
+        mix_rgb, theme_module_script, BlendValue, ThemeValues, TokenValue, READABLE,
+    };
     use std::collections::BTreeMap;
 
     /// A theme invented for the maths: enough tokens to blend and to measure,
@@ -776,9 +897,11 @@ mod theme_lab_tests {
     const OMARCHY: BlendTheme = BlendTheme::Sheet(DesktopStyle::Omarchy, false);
 
     /// A theme whose inks do not stand off its grounds, with the misses in a
-    /// deliberate order: the pair `PAIRS` names first is a near miss at 4.37
-    /// against a bar of 4.5, and the worst of the four is the eleventh pair in
-    /// the table, at 1.40 against a bar of 3. Neither ground is derived again
+    /// deliberate order: the first pair the table finds anything for here is a
+    /// near miss at 4.37 against a bar of 4.5, and the worst of the four is
+    /// the second voice on the highest container, at 1.40 against a bar of 3.
+    /// It carries four of the seventeen pairs and nothing else, so the other
+    /// thirteen are skipped and `measured` is 4. Neither ground is derived again
     /// by a blend -- both are roles a blend leaves alone where the theme
     /// already carries them, and the ink derivation wants a `color_fg_app`
     /// this theme does not have -- so these numbers reach `readability`
@@ -1012,7 +1135,7 @@ mod theme_lab_tests {
             desktop_style::install(vm, StyleSheet::load_with_appearance(DesktopStyle::Omarchy, false));
             crate::set_base_theme(vm.cx_mut(), BaseTheme::Dark);
             lab.enter(vm);
-            assert_eq!(lab.entry.unwrap().theme, OMARCHY);
+            assert_eq!(lab.entry.as_ref().unwrap().theme, OMARCHY);
             assert_eq!(lab.appearance(), Appearance::Dark, "a dark sheet opens the dark group");
             // A lab that was only looked at restores nothing.
             let mut untouched = lab.clone();
@@ -1035,6 +1158,91 @@ mod theme_lab_tests {
             assert!(lab.entry.is_none() && lab.rows().is_empty(), "the lab is closed");
             // The cache survives, so opening it again is free.
             assert_eq!(lab.cache.len(), BlendTheme::all().len());
+        });
+    }
+
+    /// A saved theme is a base, a sheet, and a set of tokens pinned over the
+    /// pair of them, and the pins are the part only the panel knows. Four
+    /// clicks used to lose them: pick the theme, open the mix, move a weight,
+    /// press `- mix`. Leaving put the base and the sheet back and dropped the
+    /// pins on the floor, so the picker went on naming a theme the screen was
+    /// not.
+    ///
+    /// Driven the way the panel drives it and read off the app: the pinned
+    /// ground goes on for real, a real mix goes over it, and BOTH ways back
+    /// out -- the rows returning to the theme the lab opened on, and the fold
+    /// -- have to hand back the pinned value rather than the base theme's.
+    /// The first assertion is also the guard for the swallowed last
+    /// statement: without the `true` [`PinnedTheme::new`] appends, the line
+    /// that makes the theme current never runs and the theme never goes on.
+    #[test]
+    fn leaving_puts_back_a_saved_themes_own_tokens_and_not_only_its_base_and_sheet() {
+        const PINNED: u32 = 0x3B1F5CFF;
+        let mut lab = ThemeLab::new();
+        lab.cache = bench();
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            desktop_style::install(vm, StyleSheet::load_with_appearance(DesktopStyle::Omarchy, false));
+            crate::set_base_theme(vm.cx_mut(), BaseTheme::Dark);
+            vm.with_reload(crate::script_mod);
+            // The theme somebody saved, put on the way the panel puts one on:
+            // the base and the sheet, and then its own tokens over the top.
+            let pinned = PinnedTheme::new(
+                "sunset",
+                &theme_module_script(
+                    "sunset",
+                    "dark",
+                    &[("color_bg_app".to_string(), TokenValue::Color(PINNED))],
+                ),
+            );
+            vm.eval(ScriptMod {
+                cargo_manifest_path: env!("CARGO_MANIFEST_DIR").into(),
+                module_path: "theme_lab_test_sunset".to_string(),
+                file: "sunset.splash".to_string(),
+                line: 0,
+                column: 0,
+                code: pinned.script().to_string(),
+                values: vec![],
+            });
+            assert_eq!(
+                read_theme(vm, "color_bg_app"),
+                Some(PINNED),
+                "the saved theme never went on, so nothing below is about one"
+            );
+
+            lab.enter_pinned(vm, &pinned);
+            assert_eq!(lab.entry.as_ref().unwrap().theme, OMARCHY, "the sheet under the pins");
+            let dark = lab.index_of(DARK).unwrap();
+            lab.set_weight(dark, RELATIVE_TOTAL);
+            assert_eq!(lab.apply(vm).unwrap(), Applied::Mix);
+            assert_ne!(read_theme(vm, "color_bg_app"), Some(PINNED), "the mix never reached the app");
+
+            // The rows back where they started, which is one of the two ways
+            // the entry theme goes back on.
+            lab.reset();
+            assert_eq!(lab.apply(vm).unwrap(), Applied::Entry);
+            assert_eq!(
+                read_theme(vm, "color_bg_app"),
+                Some(PINNED),
+                "the entry theme came back as its base and its sheet and none of its own tokens"
+            );
+
+            // ...and the fold, which is the press it was found on.
+            lab.set_weight(dark, RELATIVE_TOTAL);
+            assert_eq!(lab.apply(vm).unwrap(), Applied::Mix);
+            lab.leave(vm);
+            assert_eq!(
+                read_theme(vm, "color_bg_app"),
+                Some(PINNED),
+                "leaving left the picker naming a theme the screen is not"
+            );
+            assert_eq!(
+                desktop_style::current_name(vm).as_deref(),
+                Some("omarchy"),
+                "and lost the sheet under it as well"
+            );
+            assert_eq!(crate::base_theme(vm.cx_mut()), BaseTheme::Dark);
         });
     }
 
@@ -1163,9 +1371,9 @@ mod theme_lab_tests {
     }
 
     /// A panel has room for one line, so the line has to name the worst pair
-    /// and not the first pair. The near miss at the top of the table is the
-    /// one nobody would notice; the second voice eleven rows down, at 1.40
-    /// against a bar of 3, is the one that has gone.
+    /// and not the first pair. The near miss the table reaches first is the
+    /// one nobody would notice; the second voice on the highest container, at
+    /// 1.40 against a bar of 3, is the one that has gone.
     #[test]
     fn the_worst_failure_is_the_one_a_panel_shows_first() {
         let mut lab = entered();
@@ -1189,6 +1397,50 @@ mod theme_lab_tests {
         assert!(!reading.holds());
     }
 
+    /// The panel measures whatever `held_pairs` hands it, so its table and the
+    /// library's cannot drift: there is one table. What can still go missing
+    /// is a pair the blend carries no value for -- `readability` skips one of
+    /// those rather than failing, and a skipped pair is a pair nobody has a
+    /// number for, which is how the inverse page went unmeasured the first
+    /// time. So this enters on the real fifteen and counts what the reading
+    /// measured against what the library holds.
+    ///
+    /// It pays for the full resolve, which no other test here does. That is
+    /// the point of it: made-up themes carry the tokens the test wrote into
+    /// them, and would agree with a table naming any token at all.
+    #[test]
+    fn a_reading_measures_every_pair_the_library_holds() {
+        let held = held_pairs();
+        // A table that came back short would leave everything below agreeing
+        // with nothing.
+        assert!(held.len() >= 17, "only {} pairs came out of the library's table", held.len());
+        assert!(
+            held.contains(&("color_inverse_surface", "color_inverse_on_surface", READABLE)),
+            "the inverse page is the pair this check exists for"
+        );
+        // A group the library only MEASURES must not reach the bar a mix is
+        // failed against: the loading block is one, and every shipped theme
+        // fails it.
+        assert!(
+            !held.iter().any(|(_, ink, _)| *ink == "color_placeholder"),
+            "a group the library does not hold itself to is being held against a mix"
+        );
+
+        let mut lab = ThemeLab::new();
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            desktop_style::uninstall(vm);
+            lab.enter(vm);
+            let reading = lab.readability();
+            assert_eq!(
+                reading.measured,
+                held.len(),
+                "a pair the library holds carried no value into the blend and was skipped: {reading:?}"
+            );
+        });
+    }
+
     /// Every call that moves a weight is a no-op on a lab nobody has entered,
     /// which is deliberate -- a panel draws the folded section before it opens
     /// it -- and is also the trap that makes a test of an un-entered lab
@@ -1203,11 +1455,33 @@ mod theme_lab_tests {
         lab.clear_weight(0);
         lab.randomize(0x5EED);
         lab.reset();
+        lab.set_appearance(Appearance::Light);
         assert!(lab.rows().is_empty(), "a closed lab grew a row");
+        assert_eq!(lab.appearance(), Appearance::Dark, "and moved the group it says is on show");
         assert_eq!(lab.readability().measured, 0, "and measured a mix of nothing");
         let mut cx = Cx::new(Box::new(|_, _| {}));
         assert_eq!(cx.with_vm(|vm| lab.apply(vm)), Ok(Applied::Nothing));
         assert_eq!(lab.rebuilds(), 0, "a closed lab rebuilt the module");
+
+        // An empty cache is not what makes any of that true, which matters
+        // because the cache a panel has is the warm one: the resolved themes
+        // are kept across a leave, so a closed lab that HAS been entered can
+        // blend, and a group drawn over it would measure a mix nothing is
+        // wearing and read as if it were on the screen.
+        let mut warm = entered();
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| warm.leave(vm));
+        assert!(!warm.is_open());
+        assert_eq!(warm.cache().len(), BlendTheme::all().len(), "the themes were not kept");
+        warm.set_appearance(Appearance::Light);
+        warm.randomize(0x5EED);
+        assert!(warm.rows().is_empty(), "a closed lab with the themes in hand drew a group");
+        assert_eq!(warm.readability().measured, 0, "and measured a mix that is not in force");
+        // What it does still do is remember: the mode is the one it will open
+        // on next, and a panel may set it while the section is folded.
+        warm.set_mode(WeightMode::Relative);
+        assert_eq!(warm.mode(), WeightMode::Relative, "a closed lab forgot the mode");
+
         let lab = entered();
         assert!(lab.is_open());
         assert_eq!(lab.index_of(DARK), Some(0), "the dark theme is the first of its group");
