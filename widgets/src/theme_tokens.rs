@@ -1887,20 +1887,36 @@ pub fn resolve_theme(vm: &mut ScriptVm, theme: BlendTheme) -> ThemeValues {
         }
     };
     vm.with_reload(crate::script_mod);
-    // A reload leaves `mod.theme` on the dark theme; a sheet has already moved
-    // it to its own base.
+    // `theme_mod` ends a reload by pointing `mod.theme` at whichever base the
+    // Cx is set to, which is the app's choice and has nothing to do with the
+    // theme being asked for here. So every base says which one it is outright
+    // rather than reading back what the reload happened to leave: the answer
+    // is filed in a cache under the name that was asked for, and an entry
+    // taken from the wrong theme stays wrong for the rest of the run. The
+    // match is over `Scheme` and not over `BlendTheme` so that a fourth base
+    // theme is a compile error here instead of a silent ambient answer.
     match theme {
-        BlendTheme::Base(Scheme::Light) => {
-            script_eval!(vm, {
-                mod.theme = mod.themes.light
-            });
-        }
-        BlendTheme::Base(Scheme::Skeleton) => {
-            script_eval!(vm, {
-                mod.theme = mod.themes.skeleton
-            });
-        }
-        _ => {}
+        BlendTheme::Base(scheme) => match scheme {
+            Scheme::Dark => {
+                script_eval!(vm, {
+                    mod.theme = mod.themes.dark
+                });
+            }
+            Scheme::Light => {
+                script_eval!(vm, {
+                    mod.theme = mod.themes.light
+                });
+            }
+            Scheme::Skeleton => {
+                script_eval!(vm, {
+                    mod.theme = mod.themes.skeleton
+                });
+            }
+        },
+        // A sheet's own first line moves `mod.theme` to the base it is
+        // written against, and the rest of it assigns into that object, so
+        // moving it again here would throw the sheet away.
+        BlendTheme::Sheet(..) => {}
     }
     let mut keys: Vec<String> = base_theme_keys().iter().map(|k| k.to_string()).collect();
     if let Some(sheet) = &sheet {
@@ -2371,6 +2387,59 @@ mod sheet_contrast_tests {
         ("color_surface_container_highest", "color_on_surface_variant"),
     ];
 
+    /// The page of the opposite scheme, with the only ink there is for it.
+    /// A tooltip and a snackbar are the whole of it, and both carry words,
+    /// so it answers to the body rule like any other page. It is also the
+    /// one pair neither the ladder nor the derivation looks at: the ink is
+    /// not re-derived on a blend, so nothing but this has ever asked whether
+    /// the two still stand apart.
+    pub(super) const INVERSE: &[(&str, &str)] =
+        &[("color_inverse_surface", "color_inverse_on_surface")];
+
+    /// The loading block, on the rungs it is laid on. Nobody reads a
+    /// placeholder -- it is the shape of text that has not arrived -- so the
+    /// bar is `LEGIBLE`, the same one the library holds a graphic to, and
+    /// not `READABLE`.
+    pub(super) const PLACEHOLDERS: &[(&str, &str)] = &[
+        ("color_surface", "color_placeholder"),
+        ("color_surface_container", "color_placeholder"),
+        ("color_surface_container_low", "color_placeholder"),
+        ("color_surface_container_high", "color_placeholder"),
+        ("color_surface_container_highest", "color_placeholder"),
+    ];
+
+    /// Whether the themes the library ships reach a group's bar today, or
+    /// whether the audit only prints how far off they are.
+    #[derive(Clone, Copy, PartialEq)]
+    pub(super) enum Held {
+        Yes,
+        NotYet,
+    }
+
+    /// Every table above with the bar its pairs answer to. The audit and the
+    /// blend sweep both read this, so a pair added once is measured in both
+    /// and a pair only one of them knew about cannot happen again.
+    ///
+    /// The loading block is measured and not held. Its bar is `LEGIBLE`,
+    /// because nobody READS a placeholder -- it is the shape of text that has
+    /// not arrived, a graphic standing where words will be -- and not the body
+    /// rule. It does not reach that bar: 53 of the 75 pairs are under it, one
+    /// theme of the fifteen clears every rung, and all three base themes fail
+    /// all five. `color_placeholder` is `color_opaque_u_1` / `d_1`, the same
+    /// source the ladder rungs are mixed from and never put to the ladder the
+    /// way the surface inks now are, so it lands on a rung of exactly its own
+    /// colour three times over: the dark theme draws a #737373 skeleton on a
+    /// #737373 ground, at 1.00, and there is nothing there to see. That is
+    /// the token's to fix, in the theme files, and the bar stays where a
+    /// graphic's bar belongs until it is.
+    pub(super) const GROUPS: &[(&[(&str, &str)], f64, Held)] = &[
+        (MEANING, READABLE, Held::Yes),
+        (SURFACES, READABLE, Held::Yes),
+        (VARIANTS, LEGIBLE, Held::Yes),
+        (INVERSE, READABLE, Held::Yes),
+        (PLACEHOLDERS, LEGIBLE, Held::NotYet),
+    ];
+
     fn val(vm: &mut ScriptVm, key: &str) -> Option<u32> {
         let theme = vm.module(id!(theme));
         vm.bx.heap.value(theme, LiveId::from_str(key).into(), NoTrap).as_color()
@@ -2470,43 +2539,67 @@ mod sheet_contrast_tests {
 "));
     }
 
-    /// Every ground a widget draws text on, in every theme and every sheet,
-    /// with the ink that goes on it. Not an assertion: the surface ladder
-    /// does not pass yet, and the numbers are the input to fixing it.
+    /// A tooltip and a snackbar are a page of the opposite scheme, and the
+    /// only ink there is for that page is `color_inverse_on_surface`. Neither
+    /// the ladder derivation nor the blend re-derives the pair, and a sheet
+    /// that sets one of the two and not the other gets the base theme's other
+    /// half, so nothing else in the library has ever asked whether the two
+    /// still stand apart.
+    #[test]
+    fn the_inverse_page_carries_its_own_ink_under_every_sheet() {
+        let mut bad: Vec<String> = Vec::new();
+        walk(&mut |vm, label| bad.extend(failures(vm, label, INVERSE, READABLE)));
+        assert!(bad.is_empty(), "ink that does not hold on the inverse page:
+{}", bad.join("
+"));
+    }
+
+    /// Every ground a widget lays something on, in every theme and every
+    /// sheet, with what goes on it. Not an assertion: it prints the whole of
+    /// `GROUPS`, including the pairs no test holds the library to yet, and
+    /// those numbers are the input to fixing them.
     /// `cargo test -p makepad-widgets contrast_audit -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn contrast_audit() {
-        let mut lines: Vec<String> = Vec::new();
+        let mut lines: Vec<(Held, String)> = Vec::new();
         walk(&mut |vm, label| {
-            let bar = |pairs: &[(&str, &str)]| {
-                if std::ptr::eq(pairs.as_ptr(), VARIANTS.as_ptr()) { LEGIBLE } else { READABLE }
-            };
-            for pairs in [MEANING, SURFACES, VARIANTS] {
-                let need = bar(pairs);
-                for (ground, ink) in pairs {
+            for (pairs, need, held) in GROUPS {
+                let need = *need;
+                for (ground, ink) in *pairs {
                     if let (Some(g), Some(i)) = (val(vm, ground), val(vm, ink)) {
                         let c = reads(g | 0xFF, i);
-                        lines.push(format!(
+                        lines.push((*held, format!(
                             "{label:<14} {ground:<32} {ink:<24} #{:06X} on #{:06X} = {c:5.2} (needs {need}){}",
                             i >> 8,
                             g >> 8,
                             if c < need { "  FAIL" } else { "" }
-                        ));
+                        )));
                     }
                 }
             }
         });
-        let failed = lines.iter().filter(|l| l.ends_with("FAIL")).count();
-        println!("{}", lines.join("
+        let failed = |held: Held| lines.iter().filter(|(h, l)| *h == held && l.ends_with("FAIL")).count();
+        let loose = lines.iter().filter(|(h, _)| *h == Held::NotYet).count();
+        println!("{}", lines.iter().map(|(_, l)| l.as_str()).collect::<Vec<_>>().join("
 "));
-        println!("{failed} of {} pairs below the bar for their kind", lines.len());
+        println!(
+            "{} of {} pairs below the bar for their kind",
+            failed(Held::Yes) + failed(Held::NotYet),
+            lines.len()
+        );
+        println!(
+            "{} of those are held by a test and {} of them fail; {loose} are measured only and {} of them fail",
+            lines.len() - loose,
+            failed(Held::Yes),
+            failed(Held::NotYet)
+        );
     }
 }
 
 #[cfg(test)]
 mod equalizer_tests {
-    use super::sheet_contrast_tests::{MEANING, SURFACES, VARIANTS};
+    use super::sheet_contrast_tests::{Held, GROUPS};
     use super::*;
     use crate::desktop_style::StyleSheet;
     use crate::makepad_platform::Cx;
@@ -2904,6 +2997,53 @@ mod equalizer_tests {
         }
     }
 
+    /// A base theme has to resolve to ITSELF, whatever base the app is set
+    /// to. `theme_mod` ends a reload by pointing `mod.theme` at the Cx's own
+    /// base, so a resolve that trusts what the reload leaves behind reads the
+    /// APP's theme and files it under the name it was asked for. One cache
+    /// entry is then wrong for the rest of the run, and `blend` cannot catch
+    /// it: appearance is read off the enum and not off the values, so a dark
+    /// entry holding light tokens mixes happily with a real dark theme and
+    /// lands on the mid-grey page the appearance split exists to prevent.
+    /// `resolved()` above cannot see any of this: a fresh `Cx` is Dark, which
+    /// is the one base the ambient answer agreed with.
+    #[test]
+    fn a_base_theme_resolves_to_itself_under_another_app_base() {
+        fn resolve_all(vm: &mut ScriptVm, base: crate::BaseTheme) -> Vec<ThemeValues> {
+            use crate::makepad_draw::ScriptVmCx;
+            crate::set_base_theme(vm.cx_mut(), base);
+            vm.with_reload(crate::script_mod);
+            Scheme::ALL.iter().map(|s| resolve_theme(vm, BlendTheme::Base(*s))).collect()
+        }
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let under_light = resolve_all(vm, crate::BaseTheme::Light);
+            // A named token, so a failure reads as the thing it is rather
+            // than as a map that differs somewhere. The dark theme's page is
+            // near black and the light theme's near white; there is nothing
+            // in between for this to be wrong about.
+            let page = |scheme: Scheme| {
+                under_light
+                    .iter()
+                    .find(|v| v.theme == BlendTheme::Base(scheme))
+                    .and_then(|v| v.color("color_bg_app"))
+                    .unwrap_or_else(|| panic!("{} resolved no page at all", scheme.theme_name()))
+                    | 0xFF
+            };
+            let (dark, light) = (page(Scheme::Dark), page(Scheme::Light));
+            assert!(
+                contrast(dark, WHITE) > contrast(dark, BLACK),
+                "the dark theme resolved a {dark:08X} page under a light app"
+            );
+            assert!(contrast(light, BLACK) > contrast(light, WHITE), "the light theme gave {light:08X}");
+            assert!(contrast(dark, light) > READABLE, "{dark:08X} and {light:08X} are the same page");
+            // And not that one token alone: all three themes, all five
+            // hundred values, resolved again under the other base.
+            assert_eq!(under_light, resolve_all(vm, crate::BaseTheme::Dark));
+        });
+    }
+
     /// The case the whole re-derivation is there for. The light theme draws
     /// BLACK on its green and macOS draws WHITE on its own, so half of one
     /// and half of the other meets at a mid grey, and a mid grey stands at
@@ -2952,13 +3092,19 @@ mod equalizer_tests {
         let mut bad: Vec<String> = Vec::new();
         let mut checked = 0usize;
         let mut measured = 0usize;
+        let mut seen: BTreeSet<(&str, &str)> = BTreeSet::new();
         let mut tightest = (f64::MAX, String::new());
         let mut check = |blend: &ThemeBlend, label: &str, bad: &mut Vec<String>| {
-            for (pairs, need) in [(SURFACES, READABLE), (VARIANTS, LEGIBLE), (MEANING, READABLE)] {
-                for (ground, ink) in pairs {
+            for (pairs, need, held) in GROUPS {
+                if *held == Held::NotYet {
+                    continue;
+                }
+                let need = *need;
+                for (ground, ink) in *pairs {
                     if let (Some(g), Some(i)) = (blend.color(ground), blend.color(ink)) {
                         let c = reads_on(g | 0xFF, i);
                         measured += 1;
+                        seen.insert((*ground, *ink));
                         if c - need < tightest.0 {
                             tightest = (c - need, format!("{label}: {ink} on {ground} = {c:.2}, needs {need}"));
                         }
@@ -2997,8 +3143,17 @@ mod equalizer_tests {
         }
         assert!(checked > 200, "only {checked} mixes were tried");
         // A pair that is never found is a pair that is never checked, and a
-        // test that checks nothing passes beautifully.
+        // test that checks nothing passes beautifully. Counting the total is
+        // not enough for that: a pair a blend simply does not carry drops out
+        // silently and the other sixteen make the number up. So every named
+        // pair has to have been reached at least once.
         assert!(measured > 3000, "only {measured} pairs were actually measured");
+        let want: BTreeSet<(&str, &str)> = GROUPS
+            .iter()
+            .filter(|(_, _, held)| *held == Held::Yes)
+            .flat_map(|(pairs, _, _)| pairs.iter().copied())
+            .collect();
+        assert_eq!(seen, want, "a pair the table names was never found in a blend");
         assert!(bad.is_empty(), "{} of {checked} mixes carry ink that does not hold (the tightest pair overall was {}):\n{}", bad.len(), tightest.1, bad.join("\n"));
     }
 }
