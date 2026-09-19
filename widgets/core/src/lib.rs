@@ -1015,6 +1015,70 @@ mod base_theme_tests {
 }
 
 #[cfg(test)]
+mod module_rebuild_tests {
+    use super::*;
+
+    /// A module rebuild -- a theme switch, a live edit, every settle of a
+    /// drag on the theme lab -- must leave the live heap where it found it.
+    /// It did not: every run registered every type into a fresh slot, and
+    /// each slot rooted its template tree, so a rebuild kept some thousands
+    /// of objects alive for good. Measured through the collector's own
+    /// count, after a collection, so garbage the collector would take
+    /// anyway is not mistaken for a leak.
+    #[test]
+    fn a_module_rebuild_leaves_the_live_heap_where_it_was() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        set_base_theme(&mut cx, BaseTheme::Dark);
+        cx.with_vm(|vm| script_mod(vm));
+        let live_after = |cx: &mut Cx| {
+            cx.with_vm(|vm| {
+                vm.with_reload(script_mod);
+                vm.gc();
+                (vm.bx.heap.gc_live_len(), vm.bx.heap.root_counts())
+            })
+        };
+        // Two runs to settle: the first reload pays for what the first run
+        // only lazily made.
+        live_after(&mut cx);
+        let (mut live, roots) = live_after(&mut cx);
+        let named = ["type slots", "type defaults", "pod types", "object refs", "array refs", "handles"];
+        let mut steps = Vec::new();
+        for _ in 0..5 {
+            let (now, roots_now) = live_after(&mut cx);
+            // Every root but the pod types holds still. Those still grow, by
+            // the vertex structs a run spells out, and the obvious fix -- an
+            // equal slot taking the new definition over -- is not open: a
+            // compiled shader holds a pod type INDEX, so handing a slot back
+            // to the free list hands a later struct an index some shader is
+            // still reading its geometry through, and a quad stops finding
+            // its own `pos`. It waits for a way to retire a slot that knows
+            // who is still holding it.
+            for (i, name) in named.iter().enumerate() {
+                if i == 2 {
+                    continue;
+                }
+                assert_eq!(roots_now[i], roots[i], "a rebuild grew a collector root: {name}");
+            }
+            steps.push(now as i64 - live as i64);
+            live = now;
+        }
+        // Not zero, for the reason above: a run's pod definitions stay rooted
+        // by the slots they were filed under. What matters is that the cost
+        // is the SAME every rebuild and small -- a leak accelerates, and this
+        // is what a leak of some 2,970 objects a rebuild was brought down to.
+        let worst = *steps.iter().max().unwrap();
+        assert!(
+            worst <= 192,
+            "a rebuild left {worst} more live objects than the one before it; per-rebuild steps were {steps:?}"
+        );
+        assert!(
+            steps.iter().all(|s| (s - steps[0]).abs() <= 32),
+            "the cost of a rebuild is not settling: {steps:?}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod animated_image_gif_registration_tests {
     #[test]
     fn test_animated_image_gif_is_registered_separately_from_image() {
