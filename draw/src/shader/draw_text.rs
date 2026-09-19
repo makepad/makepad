@@ -3568,6 +3568,13 @@ impl FontFamily {
                             variations: Vec::new(),
                         },
                     );
+                } else if fonts.note_missing_font(&member.resource_path) {
+                    error!(
+                        "font {:?} (member {}) is not packaged with this app, so its text will show as boxes. \
+                        Declare it in `app_main!`, e.g. `font_assets: [MATH_VIEW_FONT_ASSET]`, \
+                        `INTER_FONT_ASSET` or `ROBOTO_FLEX_FONT_ASSET`, or a literal resource path.",
+                        member.resource_path, member.id
+                    );
                 }
             }
 

@@ -5,7 +5,7 @@ use makepad_terminal::widget::{MpTerm, MpTermAction};
 pub use makepad_widgets;
 use makepad_widgets::*;
 
-app_main!(App, font_assets: ["makepad_widgets/resources/jetbrains_mono_variable.ttf"]);
+app_main!(App, font_assets: ["makepad_widgets/resources/jetbrains_mono_variable.ttf", INTER_FONT_ASSET]);
 
 script_mod! {
     use mod.prelude.widgets.*
