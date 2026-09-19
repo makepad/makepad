@@ -44,7 +44,7 @@
 //! write mutates it for every widget that was built from it.
 
 use crate::desktop_style::DesktopStyle;
-use crate::makepad_platform::{LiveId, NoTrap, ScriptMod, ScriptVm};
+use crate::makepad_platform::{LiveId, NoTrap, ScriptMod, ScriptVm, ScriptVmCx};
 use crate::script_eval;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -1051,6 +1051,45 @@ pub fn theme_source_with_globals(name: &str, base_file_body: &str, globals: &[(S
     out
 }
 
+/// Whether a key is one of the globals the rest of a theme derives from.
+pub fn is_global_key(name: &str) -> bool {
+    GLOBAL_KEYS.contains(&name)
+}
+
+/// The script inside a theme file's `script_mod! { ... }`, as text the VM
+/// can be handed back: the `use` lines and the theme itself, nothing of the
+/// Rust around them.
+pub fn theme_script_body(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut inside = false;
+    for line in source.lines() {
+        if !inside {
+            inside = line.starts_with("script_mod! {");
+            continue;
+        }
+        if line == "}" {
+            break;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// A base theme built again from its own source with a person's globals in
+/// place of the file's, under the base's own name -- so the module's
+/// `mod.theme` and a sheet's first line both land on the re-derived one.
+/// Every rung is an expression of the globals, so a step in `space_factor`
+/// or `font_size_base` moves the whole ladder; a pin on the one token,
+/// which is all an override script can do, left every rung where it was.
+pub fn theme_rederived_script(scheme: Scheme, globals: &[(String, TokenValue)]) -> String {
+    let source = theme_source_with_globals(scheme.theme_name(), scheme.source(), globals);
+    let mut code = theme_script_body(&source);
+    // The last statement of a script is swallowed; `true` takes the fall.
+    code.push_str("true\n");
+    code
+}
+
 /// The eight keys everything else derives from.
 const GLOBAL_KEYS: [&str; 8] = [
     "color_contrast",
@@ -1667,6 +1706,9 @@ impl BlendCache {
                 None => crate::desktop_style::uninstall(vm),
             }
             vm.with_reload(crate::script_mod);
+            // Fifteen resolves are fifteen module rebuilds, each leaving the
+            // last behind; collect once here rather than carry them all.
+            vm.gc();
         }
     }
 
@@ -1875,6 +1917,14 @@ pub fn assigned_keys(sheet_theme: &str) -> Vec<&str> {
 /// into the base theme OBJECT, so a theme read after another one had its sheet
 /// on would be wearing half of it.
 pub fn resolve_theme(vm: &mut ScriptVm, theme: BlendTheme) -> ThemeValues {
+    // A standing mix comes off for the duration. `theme_mod` re-emits one on
+    // every run now, and a theme resolved with the mix over the top of it
+    // would be filed in the cache as that theme -- wrong for the rest of the
+    // run, and wrong in a way that blends a mix back into itself.
+    let mix = crate::theme_mix(vm.cx_mut());
+    if mix.is_some() {
+        crate::set_theme_mix(vm.cx_mut(), None);
+    }
     let sheet = match theme {
         BlendTheme::Base(_) => {
             crate::desktop_style::uninstall(vm);
@@ -1935,6 +1985,12 @@ pub fn resolve_theme(vm: &mut ScriptVm, theme: BlendTheme) -> ThemeValues {
         } else if let Some(number) = value.as_number() {
             values.insert(key, BlendValue::Num(number));
         }
+    }
+    // The mix goes back on the Cx. Not evaluated again here: the caller
+    // that filled a cache reloads once at the end, and that reload re-emits
+    // it. See `BlendCache::fill`.
+    if mix.is_some() {
+        crate::set_theme_mix(vm.cx_mut(), mix);
     }
     ThemeValues { theme, values }
 }
@@ -2303,6 +2359,17 @@ mod.theme.color_surface=#123456
         assert!(out.contains("\n        space_2: 1.0 * theme.space_factor\n"));
         assert!(out.contains("\n        font_label: TextStyle{\n"));
         assert_eq!(out.lines().count(), Scheme::Dark.source().lines().count() - 3);
+    }
+
+    #[test]
+    fn a_rederived_script_is_the_theme_under_its_own_name_and_ends_in_true() {
+        let globals = [("space_factor".to_string(), TokenValue::Raw("12.0".to_string()))];
+        let code = theme_rederived_script(Scheme::Dark, &globals);
+        assert!(code.starts_with("    use mod.math.*\n"), "the use lines were lost");
+        assert!(code.contains("\n    mod.themes.dark = {\n"), "the base was renamed");
+        assert!(code.contains("\n        space_factor: 12.0\n"));
+        assert!(!code.contains("script_mod!") && !code.contains("#[cfg(test)]"), "Rust leaked into the script");
+        assert!(code.ends_with("    }\ntrue\n"), "the script does not end in the statement it can afford to lose");
     }
 
     #[test]

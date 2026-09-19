@@ -487,13 +487,91 @@ pub fn base_theme(cx: &mut Cx) -> BaseTheme {
     cx.global::<BaseThemeChoice>().0
 }
 
+/// The blend `theme_mod` emits over the base theme, whole, as the script that
+/// makes it current. `None` is the ordinary case: no mix, and `theme_mod` ends
+/// on the base theme exactly as it did before there was a mix.
+///
+/// On the Cx and not in the module, for the same reason the base theme is: a
+/// module run is what would otherwise lose it. Evaluating a blend once into
+/// `mod.theme` moves the library's own theme and nothing an APP built off it,
+/// because an app's templates bake `theme.color_x` into a literal when the
+/// app's own module block runs, and only re-running THAT rebuilds them -- which
+/// is `cx.request_style_reload()`, which is a module run, which would throw the
+/// blend away again. Held here it survives, and the reload that makes an app
+/// wear the mix is the same reload that re-emits it.
+#[derive(Default)]
+struct ThemeMixChoice(Option<String>);
+
+/// The blend in force, if any: the script `theme_mod` re-emits on every run.
+pub fn theme_mix(cx: &mut Cx) -> Option<String> {
+    cx.global::<ThemeMixChoice>().0.clone()
+}
+
+/// Put a blend in force, or take the standing one off with `None`.
+///
+/// Read by `theme_mod`, so like `set_base_theme` it takes effect on the next
+/// module run and no sooner: a caller follows it with
+/// `cx.request_style_reload()`. That is not a detail of this call -- it is the
+/// whole point of it. See [`crate::theme_lab::ThemeLab::apply`].
+pub fn set_theme_mix(cx: &mut Cx, code: Option<String>) {
+    cx.global::<ThemeMixChoice>().0 = code;
+}
+
+/// A person's own edits to the theme in force, token by token, as the text
+/// each was set to. Re-emitted on every module run, after the base theme,
+/// the sheet and the mix, so an edit outlives the rebuild that used to
+/// forget it: the heap held the value, and the next reload put the theme
+/// file's own back.
+#[derive(Default)]
+struct ThemeEdits(std::collections::BTreeMap<String, String>);
+
+/// The edits standing over the theme, in token order.
+pub fn theme_edits(cx: &mut Cx) -> Vec<(String, String)> {
+    cx.global::<ThemeEdits>().0.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+}
+
+/// Put one edit in force, or take it off with `None`. Like the mix it is
+/// read on the next module run: a caller follows it with
+/// `cx.request_style_reload()`, behind whatever settle its gesture wants.
+pub fn set_theme_edit(cx: &mut Cx, name: &str, text: Option<String>) {
+    let edits = &mut cx.global::<ThemeEdits>().0;
+    match text {
+        Some(text) => {
+            edits.insert(name.to_string(), text);
+        }
+        None => {
+            edits.remove(name);
+        }
+    }
+}
+
+/// Every edit off. Picking a theme does this: the edits were made to the
+/// theme that was up, and would otherwise pin its values over the next.
+pub fn clear_theme_edits(cx: &mut Cx) {
+    cx.global::<ThemeEdits>().0.clear();
+}
+
 /// Choose the base theme. It is read by `theme_mod`, so it takes effect on the
 /// next `script_mod` run and no sooner: a caller switching a running app
 /// follows this with `cx.request_style_reload()`, which re-runs `script_mod`
 /// and then re-applies the tree with `Apply::ScriptReapply` (typed text and
 /// running animations survive, which `Apply::Reload` would not).
+///
+/// A standing mix comes off. Picking a theme is somebody saying which theme
+/// the app should be wearing, and a mix stands over the whole app rather than
+/// over the panel that made it -- so the pick wins. Without this the blend
+/// `theme_mod` re-emits on every run would go straight back over the top of
+/// the theme just chosen, and a picker that had worked for years would sit
+/// there doing nothing for as long as a mix was up.
+///
+/// The lab notices it has been stood down and opens again on the theme now in
+/// force; see [`crate::theme_lab::ThemeLab::apply`]. The one caller that must
+/// not be caught by this is the lab's own install, which sets no base theme --
+/// it writes the blend and asks for the reload, and nothing else.
 pub fn set_base_theme(cx: &mut Cx, theme: BaseTheme) {
     cx.global::<BaseThemeChoice>().0 = theme;
+    set_theme_mix(cx, None);
+    clear_theme_edits(cx);
 }
 
 pub fn theme_mod(vm: &mut ScriptVm) {
@@ -508,6 +586,34 @@ pub fn theme_mod(vm: &mut ScriptVm) {
     crate::theme_desktop_dark::script_mod(vm);
     crate::theme_desktop_light::script_mod(vm);
     crate::theme_desktop_skeleton::script_mod(vm);
+    // A person's edit to a GLOBAL -- `space_factor`, `font_size_base` --
+    // builds the base theme again from its own source with that literal in
+    // place, so every rung derived from it moves. Under the base's own name:
+    // the `mod.theme` below and a sheet's first line both point at it by
+    // name. The edits go on again later as pins, in `widgets_mod`; for a
+    // global that is nothing, and for one a base's file does not spell out
+    // it is the only way the value lands at all.
+    let globals: Vec<(String, crate::theme_tokens::TokenValue)> = theme_edits(vm.cx_mut())
+        .into_iter()
+        .filter(|(name, _)| crate::theme_tokens::is_global_key(name))
+        .map(|(name, text)| (name, crate::theme_tokens::TokenValue::Raw(text)))
+        .collect();
+    if !globals.is_empty() {
+        let scheme = match base_theme(vm.cx_mut()) {
+            BaseTheme::Dark => crate::theme_tokens::Scheme::Dark,
+            BaseTheme::Light => crate::theme_tokens::Scheme::Light,
+            BaseTheme::Skeleton => crate::theme_tokens::Scheme::Skeleton,
+        };
+        vm.eval(makepad_platform::ScriptMod {
+            cargo_manifest_path: env!("CARGO_MANIFEST_DIR").into(),
+            module_path: "theme_globals".to_string(),
+            file: format!("theme_{}_rederived.splash", scheme.theme_name()),
+            line: 0,
+            column: 0,
+            code: crate::theme_tokens::theme_rederived_script(scheme, &globals),
+            values: vec![],
+        });
+    }
     #[cfg(not(target_arch = "wasm32"))]
     script_eval!(vm, {
         mod.helper = {
@@ -568,10 +674,56 @@ pub fn theme_mod(vm: &mut ScriptVm) {
             });
         }
     }
+    // ...and the blend over it, if one is in force. Here, and not in
+    // `widgets_mod`, because this is the seam a mix is seen from: after the
+    // themes exist, and before a widget template bakes `theme.color_x` into a
+    // literal it will not evaluate again.
+    if let Some(code) = theme_mix(vm.cx_mut()) {
+        vm.eval(makepad_platform::ScriptMod {
+            cargo_manifest_path: env!("CARGO_MANIFEST_DIR").into(),
+            module_path: "theme_lab".to_string(),
+            file: format!("{}.splash", crate::theme_lab::MIX_NAME),
+            line: 0,
+            column: 0,
+            code,
+            values: vec![],
+        });
+    }
 }
 
 pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::desktop_style::apply_theme(vm);
+    // ...and the person's own edits over everything -- base, sheet or mix.
+    // (A global has already rebuilt the base in `theme_mod`; its pin here
+    // is the same value again, and the belt for a base that never named it.)
+    // Here and not beside the mix: a sheet's first line points `mod.theme`
+    // at its own base, so an edit written before `apply_theme` is gone by
+    // now; and before the prelude captures `theme: mod.theme` for every
+    // template, which is the last moment a token is still a token.
+    let edits = theme_edits(vm.cx_mut());
+    if !edits.is_empty() {
+        let mut code = String::from("mod.themes.edited = mod.theme{");
+        for (name, text) in &edits {
+            code.push(' ');
+            code.push_str(name);
+            code.push_str(": ");
+            code.push_str(text);
+        }
+        // The last statement of a script is swallowed; `true` takes the fall.
+        code.push_str(" }
+mod.theme = mod.themes.edited
+true
+");
+        vm.eval(makepad_platform::ScriptMod {
+            cargo_manifest_path: env!("CARGO_MANIFEST_DIR").into(),
+            module_path: "theme_edits".to_string(),
+            file: "theme_edits.splash".to_string(),
+            line: 0,
+            column: 0,
+            code,
+            values: vec![],
+        });
+    }
     // make the prelude for our own widgets
     script_eval!(vm, {
         mod.prelude.widgets_internal = {

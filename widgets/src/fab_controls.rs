@@ -727,6 +727,14 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 draw_text +: {
                     ink_centered: true
                     color: fab.color_text
+                    // Every state, not just the resting one: the stock field takes the
+                    // app theme's ink for hover, focus and down, and under a light theme
+                    // that ink is dark -- so the word being typed went black on this
+                    // panel's dark well the moment the box took focus.
+                    color_hover: fab.color_text_active
+                    color_focus: fab.color_text_active
+                    color_down: fab.color_text_active
+                    color_disabled: fab.color_text_muted
                     color_empty: fab.color_text_muted
                     color_empty_hover: fab.color_text_dim
                     color_empty_focus: fab.color_text_dim
@@ -3947,6 +3955,46 @@ mod tests {
     /// however it is spelled; and each entry is checked against the size its
     /// own template declares, which is what proves the path found a real fab
     /// text style rather than an empty object wearing the 10pt default.
+    /// The filter box, focused with a word in it, under either base theme:
+    /// the ink it types with has to be the panel's, never the theme's. Only
+    /// the resting ink was; hover, focus and down fell through to the stock
+    /// field's `theme.color_text_focus` and friends, which under a light
+    /// theme are dark, on a well that is not.
+    #[test]
+    fn the_filter_box_keeps_its_own_ink_in_every_state() {
+        for base in [crate::BaseTheme::Light, crate::BaseTheme::Dark] {
+            let mut cx = Cx::new(Box::new(|_, _| {}));
+            crate::set_base_theme(&mut cx, base);
+            let (inks, own) = cx.with_vm(|vm| {
+                crate::script_mod(vm);
+                let widgets = vm.module(id!(widgets));
+                let search = vm.bx.heap.value(widgets, LiveId::from_str("FabSearch").into(), NoTrap);
+                let input = vm.bx.heap.value(search.as_object().expect("FabSearch"), LiveId::from_str("input").into(), NoTrap);
+                let draw_text = vm.bx.heap.value(input.as_object().expect("input"), LiveId::from_str("draw_text").into(), NoTrap);
+                let dt = draw_text.as_object().expect("draw_text");
+                let keys = ["color", "color_hover", "color_focus", "color_down", "color_disabled", "color_empty", "color_empty_hover", "color_empty_focus"];
+                let inks: Vec<(&str, Option<u32>)> = keys
+                    .into_iter()
+                    .map(|k| (k, vm.bx.heap.value(dt, LiveId::from_str(k).into(), NoTrap).as_color()))
+                    .collect();
+                let fab = vm.module(id!(fab));
+                let own: Vec<u32> = ["color_text", "color_text_active", "color_text_dim", "color_text_muted"]
+                    .into_iter()
+                    .filter_map(|k| vm.bx.heap.value(fab, LiveId::from_str(k).into(), NoTrap).as_color())
+                    .collect();
+                (inks, own)
+            });
+            assert_eq!(own.len(), 4, "the panel's palette is missing an ink this test relies on");
+            for (key, ink) in inks {
+                let ink = ink.unwrap_or_else(|| panic!("{key} is not a colour on the filter box"));
+                assert!(
+                    own.contains(&ink),
+                    "under {base:?}, {key} is #{ink:08X}, not one of the panel's own inks: it fell through to the app theme"
+                );
+            }
+        }
+    }
+
     #[test]
     fn the_kits_words_keep_one_face_under_every_sheet() {
         use crate::desktop_style::{install, uninstall, DesktopStyle, StyleSheet};
