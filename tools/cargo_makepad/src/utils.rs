@@ -230,6 +230,43 @@ pub fn extract_dependency_paths(line: &str) -> Option<(String, Option<PathBuf>)>
     None
 }
 
+/// Where every package in the dependency graph lives on disk, keyed by package name.
+///
+/// `cargo tree` only prints a directory for path dependencies, and the `<crate>.path` file a
+/// build script leaves in the target dir is gone as soon as something prunes that dir, so a
+/// git dependency's resources can only be found reliably by asking cargo itself.
+fn crate_dirs_from_metadata(cwd: &Path) -> HashMap<String, PathBuf> {
+    let dirs = HashMap::new();
+    let output = match Command::new("cargo")
+        .args(["metadata", "--format-version", "1"])
+        .current_dir(cwd)
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return dirs,
+    };
+    let Ok(json) = std::str::from_utf8(&output.stdout) else {
+        return dirs;
+    };
+    crate_dirs_from_metadata_json(json)
+}
+
+fn crate_dirs_from_metadata_json(metadata_json: &str) -> HashMap<String, PathBuf> {
+    let mut dirs = HashMap::new();
+    let Ok(metadata) = CargoMetadata::deserialize_json_lenient(metadata_json) else {
+        return dirs;
+    };
+    for package in metadata.packages {
+        let Some(manifest_path) = package.manifest_path else {
+            continue;
+        };
+        if let Some(dir) = Path::new(&manifest_path).parent() {
+            dirs.insert(package.name, dir.to_path_buf());
+        }
+    }
+    dirs
+}
+
 pub fn get_crate_dir(build_crate: &str) -> Result<PathBuf, String> {
     let cwd = std::env::current_dir().unwrap();
     if let Ok(output) = shell_env_cap(&[], &cwd, "cargo", &["pkgid", "-p", build_crate]) {
@@ -257,6 +294,7 @@ pub fn get_crate_dep_dirs(
 ) -> HashMap<String, PathBuf> {
     let mut dependencies = HashMap::new();
     let cwd = std::env::current_dir().unwrap();
+    let metadata_dirs = crate_dirs_from_metadata(&cwd);
     let target = format!("--target={target}");
     if let Ok(cargo_tree_output) = shell_env_cap(
         &[],
@@ -268,6 +306,8 @@ pub fn get_crate_dep_dirs(
             if let Some((name, path)) = extract_dependency_paths(line) {
                 if let Some(path) = path {
                     dependencies.insert(name, path);
+                } else if let Some(dir) = metadata_dirs.get(&name) {
+                    dependencies.insert(name, dir.clone());
                 } else {
                     // check in the build dir for .path files, used to find the crate dir of a crates.io crate
                     let dir_file = build_dir.join(format!("{}.path", name));
@@ -386,6 +426,7 @@ struct CargoMetadata {
 #[derive(DeJson)]
 struct CargoMetadataPackage {
     name: String,
+    manifest_path: Option<String>,
     default_run: Option<String>,
     targets: Vec<CargoMetadataTarget>,
 }
@@ -496,6 +537,61 @@ pub fn get_wasm_binary_name(build_crate: &str, args: &[String]) -> Result<String
     let metadata_json = std::str::from_utf8(&output.stdout)
         .map_err(|err| format!("cargo metadata returned invalid UTF-8: {err}"))?;
     resolve_wasm_binary_name_from_metadata(metadata_json, build_crate, args)
+}
+
+#[cfg(test)]
+mod crate_dir_tests {
+    use super::*;
+
+    #[test]
+    fn crate_dirs_come_from_manifest_paths() {
+        // Trimmed `cargo metadata --format-version 1`: a workspace member and a git dependency,
+        // with the keys we don't read left in so the lenient parse is exercised.
+        let json = r#"{
+            "packages": [
+                {
+                    "name": "robrix",
+                    "version": "1.0.0",
+                    "id": "path+file:///work/robrix#1.0.0",
+                    "source": null,
+                    "manifest_path": "/work/robrix/Cargo.toml",
+                    "default_run": null,
+                    "dependencies": [],
+                    "targets": [{"name": "robrix", "kind": ["bin"], "src_path": "/work/robrix/src/main.rs"}]
+                },
+                {
+                    "name": "makepad-widgets",
+                    "version": "2.0.0",
+                    "source": "git+https://github.com/kevinaboos/makepad?branch=linux_drm_optional#9a1d1ccd",
+                    "manifest_path": "/home/u/.cargo/git/checkouts/makepad-69d78fae/9a1d1cc/widgets/Cargo.toml",
+                    "default_run": null,
+                    "dependencies": [],
+                    "targets": [{"name": "makepad-widgets", "kind": ["lib"], "src_path": "/x/lib.rs"}]
+                }
+            ],
+            "workspace_members": [],
+            "resolve": null,
+            "target_directory": "/work/robrix/target",
+            "version": 1
+        }"#;
+        let dirs = crate_dirs_from_metadata_json(json);
+        assert_eq!(
+            dirs.get("makepad-widgets").map(|p| p.as_path()),
+            Some(Path::new(
+                "/home/u/.cargo/git/checkouts/makepad-69d78fae/9a1d1cc/widgets"
+            )),
+            "a git dependency must resolve to its checkout dir, not be dropped"
+        );
+        assert_eq!(
+            dirs.get("robrix").map(|p| p.as_path()),
+            Some(Path::new("/work/robrix"))
+        );
+    }
+
+    #[test]
+    fn unparseable_metadata_yields_no_dirs() {
+        assert!(crate_dirs_from_metadata_json("not json").is_empty());
+    }
 }
 
 #[cfg(test)]
