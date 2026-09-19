@@ -1086,6 +1086,16 @@ impl MacosApp {
         }
     }
 
+    /// No `NSView.displayLink` fires while every window sits in the Dock, so
+    /// the paint clock has to fall back to the NSTimer.
+    pub fn all_windows_miniaturized(&self) -> bool {
+        !self.cocoa_windows.is_empty()
+            && self.cocoa_windows.iter().all(|(window, _)| unsafe {
+                let miniaturized: bool = msg_send![*window, isMiniaturized];
+                miniaturized
+            })
+    }
+
     /// True when link pacing SHOULD be re-armed: a window exists without
     /// its own link (fresh window, or the self-heal after a close).
     pub fn display_link_needs_rearm(&self) -> bool {

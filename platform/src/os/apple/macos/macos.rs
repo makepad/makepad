@@ -1025,7 +1025,8 @@ impl Cx {
         // as the idle heartbeat. NSView.displayLink never fires for a window
         // that is not on screen — hidden eval/test runs (MAKEPAD_HIDE_WINDOWS)
         // pace on the timer or they freeze.
-        let want_link = std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_none();
+        let want_link = std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_none()
+            && !with_macos_app(|app| app.all_windows_miniaturized());
         // Self-heal: a window close invalidated the link while the beat
         // thought itself armed — re-anchor on a surviving window.
         if self.os.timer0_armed && want_link && with_macos_app(|app| app.display_link_needs_rearm())
@@ -1340,6 +1341,15 @@ impl Cx {
                 }
                 // ok lets not redraw all, just this window
                 self.call_event_handler(&Event::WindowGeomChange(re));
+            }
+            MacosEvent::WindowMiniaturizeChange => {
+                // This is the last beat we get once the Dock takes the window,
+                // so swap the paint clock over now.
+                if with_macos_app(|app| app.all_windows_miniaturized()) {
+                    self.ensure_timer0_stopped();
+                } else {
+                    self.ensure_timer0_started();
+                }
             }
             MacosEvent::WindowClosed(wc) => {
                 // lets remove the window from the set

@@ -320,6 +320,10 @@ pub fn define_macos_window_delegate() -> *const Class {
         cw.send_lost_focus_event();
     }
 
+    extern "C" fn window_did_miniaturize_change(_this: &Object, _: Sel, _: ObjcId) {
+        MacosApp::do_callback(MacosEvent::WindowMiniaturizeChange);
+    }
+
     // Invoked when the dragged image enters destination bounds or frame
     extern "C" fn dragging_entered(_this: &Object, _: Sel, _sender: ObjcId) -> BOOL {
         YES
@@ -422,6 +426,14 @@ pub fn define_macos_window_delegate() -> *const Class {
         decl.add_method(
             sel!(windowDidResignKey:),
             window_did_resign_key as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
+            sel!(windowDidMiniaturize:),
+            window_did_miniaturize_change as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
+            sel!(windowDidDeminiaturize:),
+            window_did_miniaturize_change as extern "C" fn(&Object, Sel, ObjcId),
         );
 
         // callbacks for drag and drop events
