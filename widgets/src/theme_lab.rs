@@ -13,11 +13,22 @@
 //! [`ThemeLab::enter`], move a weight, [`ThemeLab::apply`],
 //! [`ThemeLab::leave`]. It never names a cache, a blend, or a script.
 //!
+//! An install is a choice written onto the `Cx` and a module run asked for:
+//! `cx.request_style_reload()`. It has to be. A widget does not read
+//! `mod.theme` when it draws -- its colour was baked into the template it was
+//! built from, as a literal, when that template's module block ran -- and an
+//! app's templates are built in the app's OWN module tail. So nothing short
+//! of re-running that tail moves an app, and the tail is `script_mod`, and
+//! re-running `script_mod` is a module run. A mix evaluated once into a
+//! module would be thrown away by the very run that was meant to carry it;
+//! held on the Cx and re-emitted by `theme_mod`, it survives, and the run
+//! that makes an app wear it is the same run that puts it back up.
+//!
 //! What a panel owes the lab in return is a word whenever something else
 //! rebuilds the module underneath it -- a style reload, a live edit, a base
-//! theme switched from elsewhere in the app. None of that is visible from
-//! here, and without the word the lab goes on believing the mix it last
-//! installed is still on the screen. That word is [`ThemeLab::invalidate`].
+//! theme switched from elsewhere in the app. That word is
+//! [`ThemeLab::invalidate`], and it is cheap: the mix stands through a
+//! rebuild, so what the word buys is a fresh reading, not a reinstall.
 //!
 //! The other thing it owes is the part of the theme in force that a base
 //! theme and a style sheet do not add up to. A theme somebody saved is those
@@ -26,8 +37,20 @@
 //! rather than which of them were pinned, and the module rebuild that puts
 //! the base and the sheet back is the very thing that throws them away. So a
 //! panel opening the lab over a saved theme says so on the way in --
-//! [`ThemeLab::enter_pinned`] rather than [`ThemeLab::enter`] -- and gets the
-//! whole theme back on the way out rather than two thirds of it.
+//! [`ThemeLab::enter_pinned`] rather than [`ThemeLab::enter`] -- and gets its
+//! own tokens back on the way out and not only the base underneath them.
+//!
+//! The pins go back the way the mix goes on: held on the Cx and emitted at
+//! the seam. There is one theme they do not reach that way, and it is worth
+//! naming rather than discovering -- a saved theme with a style SHEET under
+//! it. A sheet's own script runs AFTER that seam and points `mod.theme` back
+//! at its own base as its first line, so it goes over a set of pins as
+//! readily as it goes over a mix; a mix answers that by taking the sheet off,
+//! and a theme being handed back cannot, because the sheet is half of what is
+//! being handed back. Over a sheet the lab returns the base and the sheet,
+//! and the tokens pinned over the pair of them are the panel's to land, on
+//! the tick after the reload, exactly as the panel landed them when the theme
+//! was picked. See `ThemeLab::install_entry`.
 //!
 //! # What the lab will not let a panel do
 //!
@@ -47,7 +70,7 @@
 //! slot after every draw for as long as the app runs.
 
 use crate::desktop_style::{self, DesktopStyle, StyleSheet};
-use crate::makepad_platform::{ScriptMod, ScriptVm, ScriptVmCx};
+use crate::makepad_platform::{ScriptVm, ScriptVmCx};
 use crate::theme_tokens::{
     held_pairs, random_weights, reads_on, set_weight, to_relative, Scheme, ThemeBlend,
 };
@@ -65,7 +88,7 @@ pub use crate::theme_tokens::{
 /// The key the mix is filed under in `mod.themes`. One name, re-used on every
 /// apply, so a session leaves one derived object behind rather than one per
 /// slider move.
-const MIX_NAME: &str = "equalized";
+pub(crate) const MIX_NAME: &str = "equalized";
 
 /// How near two weights have to be to count as the same one. The relative
 /// mode settles its total by moving the drift onto the largest weight, so an
@@ -128,7 +151,7 @@ impl Readability {
 
 /// What an [`ThemeLab::apply`] did, so that a caller can see its own cost.
 ///
-/// An install is a module rebuild -- about 37 ms, two frames and a half -- and
+/// An install is a module rebuild -- about 52 ms, three frames and a half -- and
 /// the whole expense of the lab is in the calls that answer something other
 /// than `Nothing`. A panel that applies on every drawn frame of a drag can
 /// read that here, or in [`ThemeLab::rebuilds`], rather than in a profile.
@@ -376,7 +399,8 @@ impl ThemeLab {
     /// [`ThemeLab::enter`] in every other respect, and the same cost. What it
     /// adds is the only part of a saved theme the lab cannot read off the vm
     /// for itself, so that leaving is the inverse of entering rather than two
-    /// thirds of it. See [`PinnedTheme`].
+    /// thirds of it. See [`PinnedTheme`], and `ThemeLab::install_entry` for
+    /// the one theme the pins do not reach on the way back out.
     ///
     /// The panel calls this inside `cx.with_vm`.
     pub fn enter_pinned(&mut self, vm: &mut ScriptVm, pinned: &PinnedTheme) {
@@ -524,8 +548,11 @@ impl ThemeLab {
     ///
     /// The weights against the weights that went in, and nothing else: the lab
     /// holds no handle on the module it installed them into. Something else
-    /// rebuilding that module leaves this answering `false` over a mix that is
-    /// no longer on the screen, which is what [`ThemeLab::invalidate`] is for.
+    /// rebuilding that module leaves this answering `false` over a reading
+    /// taken off a module that has gone -- the mix itself stands, because it
+    /// is held on the Cx and emitted again by the very run that rebuilt
+    /// everything else -- and that stale reading is what
+    /// [`ThemeLab::invalidate`] is for.
     pub fn is_dirty(&self) -> bool {
         let Some((appearance, weights)) = &self.applied else {
             return true;
@@ -539,31 +566,26 @@ impl ThemeLab {
     }
 
     /// Say that the module was rebuilt underneath the lab, so that the next
-    /// [`ThemeLab::apply`] puts the mix back.
+    /// [`ThemeLab::apply`] reads it afresh.
     ///
     /// Every caller of `cx.request_style_reload()` or `cx.request_live_edit()`
     /// owes the lab this call, and so does anything else that re-runs
     /// `script_mod`: switching the base theme, putting a style sheet on or
     /// taking one off, a live edit landing from a file watcher. None of it is
     /// visible from here -- the lab holds the weights it installed, not the
-    /// module it installed them into -- so a rebuild it was not told about
-    /// leaves [`ThemeLab::is_dirty`] answering `false` over an app that has
-    /// snapped back to its bare base theme, with the panel still showing the
-    /// mix at its weights and no draw that will ever put it back. The button
-    /// that reloads the style sits thirty pixels above the mix; this is not a
-    /// corner.
+    /// module it installed them into.
     ///
     /// What is dropped is the memory of what was installed, which makes the
-    /// lab dirty again. What is NOT dropped is that the lab still owes the
-    /// entry theme back: a rebuild puts up the base theme and whatever sheet
-    /// is installed, and installing a mix took the entry sheet off, so after
-    /// one the app wears neither the mix nor what the lab found -- and
-    /// [`ThemeLab::leave`] is the only thing that can put the second one on.
-    /// Clearing that debt here would leave somebody in a theme nobody chose
-    /// with no way back but to find their sheet by hand.
+    /// lab dirty again, so the next [`ThemeLab::apply`] takes a fresh reading
+    /// over a module that has just been rebuilt. What that apply will NOT do
+    /// is install again: the mix is held on the Cx and `theme_mod` re-emits
+    /// it, so it came back up with the module. A word about a rebuild costs a
+    /// blend, not a rebuild.
     ///
-    /// Cheap, and safe where nothing happened: the worst it costs is one
-    /// rebuild that was not strictly needed, on the next apply.
+    /// What is NOT dropped is that the lab still owes the entry theme back.
+    /// Installing a mix took the entry sheet off, and only [`ThemeLab::leave`]
+    /// can put it back; clearing that debt here would leave somebody in a
+    /// theme nobody chose with no way back but to find their sheet by hand.
     pub fn invalidate(&mut self) {
         self.applied = None;
         self.blended = None;
@@ -572,32 +594,48 @@ impl ThemeLab {
     /// Put the mix in force, and say what that took.
     ///
     /// Safe to call on any frame in the sense that an untouched mix is a
-    /// return and nothing else. When the mix HAS moved this costs a module
-    /// rebuild -- about 37 ms, two frames and a half -- so a panel owes it a
-    /// settle: apply on the control's own end-of-drag action, or on a timeout
-    /// re-armed by every edit. Applying once per drawn frame of a 500 ms drag
-    /// is not a slower drag, it is 480 ms of blocked main thread. The lab has
-    /// no frame clock and cannot make the settle happen; what it can do is
-    /// hand back what it did, so that a caller can count its own rebuilds --
-    /// see [`Applied`] and [`ThemeLab::rebuilds`]. What a panel must not do is
-    /// reach for a style reload per slider move; this call is the whole
-    /// install, and a style reload throws it away (see
-    /// [`ThemeLab::invalidate`]).
+    /// return and nothing else. The call itself is half a millisecond -- it
+    /// blends, writes the blend onto the Cx and asks for a style reload --
+    /// but the reload it asks for is a module rebuild, about 52 ms on the
+    /// tick that follows. So a panel still owes it a settle: apply on the
+    /// control's own end-of-drag action, or on a timeout re-armed by every
+    /// edit. Forty applies across a 500 ms drag is not a slower drag, it is
+    /// forty module rebuilds queued behind it. The lab has no frame clock and
+    /// cannot make the settle happen; what it can do is hand back what it did,
+    /// so that a caller can count its own rebuilds -- see [`Applied`] and
+    /// [`ThemeLab::rebuilds`].
     ///
-    /// One blend, one script, one evaluation, one re-apply. The script is
-    /// evaluated BETWEEN the theme module and the widget module, because a
-    /// widget template bakes `theme.color_x` into a literal when its own
-    /// module block runs and a re-apply does not evaluate expressions again:
-    /// a mix installed after the widgets have been built moves `mod.theme`
-    /// and not one thing drawn from it. The trailing `true` is there because
-    /// the last statement of an evaluated script is swallowed, and the last
-    /// statement of this one is what makes the mix current.
+    /// The style reload is not an alternative to an install, it IS the
+    /// install. `request_script_reapply` would re-apply the widget tree from
+    /// the value captured at startup, over templates that were baked off the
+    /// theme this mix replaced, and write the old colours faithfully back
+    /// across the whole screen; it does not re-run `script_mod`, and
+    /// `script_mod` is where an app's templates are made. So the blend is put
+    /// where `theme_mod` will find it on every run -- see
+    /// [`crate::set_theme_mix`] -- at the one seam it is seen from, after the
+    /// themes exist and before a widget template bakes `theme.color_x` into a
+    /// literal it will not evaluate again.
     ///
-    /// The sheet comes off. A sheet's own script re-points `mod.theme` back
-    /// at its base and mutates it, from the first line of the widget module,
-    /// which is after the mix has been evaluated and therefore over the top of
-    /// it. The mix already carries every token the sheet set, by weight; what
-    /// is given up is the sheet's widget re-skins and its font fallbacks.
+    /// The mix that is already in force does not go in twice. A panel is told
+    /// about every rebuild, including the one this call asked for, so an
+    /// apply that installed unconditionally would ask for the reload that
+    /// told it.
+    ///
+    /// A theme chosen from outside the lab wins, and this is the call that
+    /// notices. A mix that has gone from the Cx under a lab that believes it
+    /// installed one is somebody else's pick -- the app's own picker sets the
+    /// base theme, and setting the base theme stands a mix down -- so the lab
+    /// does not put it back: it opens again on the theme now in force and
+    /// answers [`Applied::Nothing`]. The section stays open and the weights
+    /// start from what was picked, so the only thing a panel has to do about
+    /// it is draw its rows again.
+    ///
+    /// The sheet comes off, and stays off, because that choice is a Cx global
+    /// too. A sheet's own script re-points `mod.theme` back at its base and
+    /// mutates it, from the first line of the widget module, which is after
+    /// the mix has been emitted and therefore over the top of it. The mix
+    /// already carries every token the sheet set, by weight; what is given up
+    /// is the sheet's widget re-skins and its font fallbacks.
     ///
     /// The roles are not derived again here. [`BlendCache::blend`] has already
     /// done it over the blended tokens, growing the brand families from what
@@ -609,7 +647,38 @@ impl ThemeLab {
     /// The panel calls this inside `cx.with_vm`, and shows the error: a mix
     /// that refused itself in the log is a mix that failed silently.
     pub fn apply(&mut self, vm: &mut ScriptVm) -> Result<Applied, BlendError> {
-        if !self.is_open() || !self.is_dirty() {
+        // A closed lab refuses first. Everything below this asks something
+        // about the theme the lab was opened on, and a closed lab has none.
+        if !self.is_open() {
+            return Ok(Applied::Nothing);
+        }
+        // Then a lab that has been stood down from outside. `set_base_theme`
+        // takes a standing mix off, so a lab that believes it installed one
+        // and finds none on the Cx has had the theme chosen out from under it
+        // -- the app's own picker, an appearance that followed the desktop.
+        // The pick WINS: putting the mix back would make that picker do
+        // nothing for as long as the section was open, which is the same
+        // complaint in other clothes.
+        //
+        // Asked BEFORE the dirty check, because a pick moves no weight: the
+        // rows are exactly where the lab left them, so a call that asked what
+        // had moved first would answer `Nothing` and never look.
+        //
+        // What the lab does instead is open again on the theme now in force,
+        // so the weights start from what was picked and `leave` hands THAT
+        // back rather than a theme last asked for three clicks ago. No
+        // install, no rebuild: the pick is already on its way up on the
+        // reload that told us. The entry's pins go with the entry, because
+        // they are the tokens of the theme that has just been replaced; a
+        // panel that knows the pick was a saved theme enters the lab on it
+        // again itself, pins and all.
+        if self.installed && crate::theme_mix(vm.cx_mut()).is_none() {
+            self.installed = false;
+            self.entry = None;
+            self.enter(vm);
+            return Ok(Applied::Nothing);
+        }
+        if !self.is_dirty() {
             return Ok(Applied::Nothing);
         }
         let mut did = Applied::Nothing;
@@ -630,16 +699,26 @@ impl ThemeLab {
                     self.install_entry(vm, &entry);
                 }
                 self.installed = false;
-                vm.cx_mut().request_script_reapply();
                 did = Applied::Entry;
             }
         } else {
             let blend = self.cache.blend(&self.mix())?;
-            self.install_blend(vm, &blend);
-            self.installed = true;
-            vm.cx_mut().request_script_reapply();
+            let code = Self::mix_script(&blend);
+            // A mix that is already the one in force does not go in again.
+            // The module can be rebuilt under the lab -- a style reload, a
+            // live edit, a base theme switched elsewhere -- and the rebuild
+            // re-emits this very script, so a lab told about that rebuild
+            // ([`ThemeLab::invalidate`]) is owed a fresh blend to measure and
+            // nothing else. Installing would ask for the reload that told us,
+            // and that is a loop with a module rebuild in it.
+            if crate::theme_mix(vm.cx_mut()).as_deref() == Some(code.as_str()) {
+                did = Applied::Nothing;
+            } else {
+                self.install_blend(vm, code);
+                self.installed = true;
+                did = Applied::Mix;
+            }
             blended = Some(blend);
-            did = Applied::Mix;
         }
         self.applied = Some((self.appearance, self.weights()));
         // Only the install path leaves a blend to measure; the entry theme
@@ -651,7 +730,7 @@ impl ThemeLab {
     /// Put back the theme [`ThemeLab::enter`] found, and close the lab.
     ///
     /// A lab that never installed anything restores nothing: there is nothing
-    /// to undo, and a rebuild for the sake of it is 37 ms of nothing.
+    /// to undo, and a rebuild for the sake of it is 52 ms of nothing.
     ///
     /// The panel calls this inside `cx.with_vm`.
     pub fn leave(&mut self, vm: &mut ScriptVm) {
@@ -659,8 +738,14 @@ impl ThemeLab {
             return;
         };
         if self.installed {
+            // Borrowed rather than taken: the entry carries the script its
+            // pins are written in, and is no longer the two words a `Copy`
+            // was made of. Nothing follows it, either -- `install_entry` asks
+            // for the style reload, and that reload IS the install. A script
+            // reapply on top of it would walk the tree from the value
+            // captured at startup, over templates the reload is about to
+            // rebuild, and write the mix's colours faithfully back.
             self.install_entry(vm, &entry);
-            vm.cx_mut().request_script_reapply();
         }
         self.installed = false;
         self.rows.clear();
@@ -770,44 +855,80 @@ impl ThemeLab {
         })
     }
 
-    /// The module, rebuilt with the mix evaluated at the one point it is seen
-    /// from: after the themes exist and before the widgets are baked off them.
-    /// This is the library's own module run with a single line spliced into
-    /// the seam.
-    fn install_blend(&mut self, vm: &mut ScriptVm, blend: &ThemeBlend) {
+    /// The mix put where the run that carries it will find it, and that run
+    /// asked for.
+    ///
+    /// Nothing is evaluated here. A blend evaluated into the module moves
+    /// `mod.theme` and not one thing an app drew from it -- a widget's colour
+    /// was baked into its template as a literal when the app's own module
+    /// block ran -- and the rebuild that remakes those templates is the very
+    /// thing that would throw an evaluated blend away. So the blend goes onto
+    /// the Cx, where `theme_mod` emits it at the one seam it is seen from, on
+    /// every run it makes; and the run is asked for. See
+    /// [`crate::set_theme_mix`].
+    ///
+    /// The sheet comes off first and stays off, for the reason
+    /// [`ThemeLab::apply`] gives: a sheet's own script runs after that seam
+    /// and would point `mod.theme` back at its own base over the top of the
+    /// mix.
+    fn install_blend(&mut self, vm: &mut ScriptVm, code: String) {
         self.rebuilds = self.rebuilds.saturating_add(1);
         desktop_style::uninstall(vm);
-        // `theme_module_script` ends itself, so the seam does not: a second
-        // terminator here would be a third place that knows about the first.
-        let code = blend.script(MIX_NAME);
-        vm.with_reload(|vm| {
-            crate::theme_mod(vm);
-            vm.eval(ScriptMod {
-                cargo_manifest_path: env!("CARGO_MANIFEST_DIR").into(),
-                module_path: "theme_lab".to_string(),
-                file: format!("{MIX_NAME}.splash"),
-                line: 0,
-                column: 0,
-                code,
-                values: vec![],
-            });
-            crate::widgets_mod(vm);
-            desktop_style::apply_widgets(vm);
-        });
+        crate::set_theme_mix(vm.cx_mut(), Some(code));
+        vm.cx_mut().request_style_reload();
     }
 
-    /// The base theme and the sheet the lab was entered on, back on, the
-    /// module rebuilt off the pair of them, and the entry theme's own pinned
-    /// tokens over the top of that.
+    /// The script that makes a blend the theme: the blend's own module
+    /// script, and nothing added to it.
     ///
-    /// The pins go on AFTER the whole module rather than into the seam a mix
-    /// is spliced into. A sheet's own script runs from the first line of the
-    /// widget module and re-points `mod.theme` at its base as it goes, so
-    /// anything pinned before that is pinned over; and after is where the
-    /// panel put them when it installed the theme in the first place, which
-    /// is what makes this the way back to where the lab was opened rather
-    /// than a fourth arrangement nothing else produces. The caller's
-    /// `request_script_reapply` is what carries them to the tree.
+    /// The last statement of an evaluated script is swallowed, and the last
+    /// statement of this one is the assignment that makes the mix current --
+    /// but the `true` that takes that fall is
+    /// [`crate::theme_tokens::theme_module_script`]'s own now, and every
+    /// caller gets it. A second terminator here would be a third place that
+    /// knows about the first.
+    ///
+    /// A function rather than a line inside [`ThemeLab::install_blend`],
+    /// because [`ThemeLab::apply`] asks for the script BEFORE it installs
+    /// anything, to compare it with the one already on the Cx. One generator,
+    /// so a mix already in force is recognised by the very text it would have
+    /// gone in as.
+    fn mix_script(blend: &ThemeBlend) -> String {
+        blend.script(MIX_NAME)
+    }
+
+    /// The theme the lab was entered on back onto the Cx -- its base, its
+    /// sheet, and, where no sheet is in the way of them, its own pinned
+    /// tokens -- and the module run that makes an app wear what went back
+    /// asked for.
+    ///
+    /// The pins ride where the mix rides, and for the same reason. They are a
+    /// script that makes a theme current, and a script evaluated here would
+    /// be thrown away by the very rebuild that puts the base and the sheet
+    /// back; held on the Cx, `theme_mod` emits them on every run it makes, so
+    /// the run that hands the theme back is the run that hands back the part
+    /// of it only the panel knew. See [`PinnedTheme`].
+    ///
+    /// Written AFTER the base theme and not before: `set_base_theme` takes a
+    /// standing mix off -- it is the call a picker makes, and a picker's
+    /// whole point is that the mix stands down in front of it -- so pins
+    /// written first are pins that call throws away.
+    ///
+    /// An entry with no pins writes `None` there, which is the same line
+    /// taking the mix off, so every way out of a mix leaves by one door.
+    ///
+    /// What this does NOT put back is a saved theme's pins where a style
+    /// sheet sits under them. The seam is the last word on `mod.theme` in a
+    /// run that has no sheet in it, and the first of several in a run that
+    /// has: `desktop_style::apply_theme` evaluates the sheet's own script
+    /// after it, and that script's first line points `mod.theme` back at the
+    /// base theme it was written against -- over the pins, as it would go
+    /// over a mix. The lab has no seam of its own after the sheet, and the
+    /// place that has one is the panel: `Event::LiveEdit` reaches a widget
+    /// after the rebuild the reload asked for, which is where a saved
+    /// theme's tokens go on when it is PICKED, and is the only place they can
+    /// go on when it is handed back. A panel that lands them there on an
+    /// [`Applied::Entry`] and on the fold closes this; the lab cannot.
     fn install_entry(&mut self, vm: &mut ScriptVm, entry: &Entry) {
         self.rebuilds = self.rebuilds.saturating_add(1);
         crate::set_base_theme(vm.cx_mut(), entry.base);
@@ -817,28 +938,16 @@ impl ThemeLab {
             }
             None => desktop_style::uninstall(vm),
         }
-        let pinned = entry.pinned.as_ref();
-        vm.with_reload(|vm| {
-            crate::script_mod(vm);
-            if let Some(pinned) = pinned {
-                vm.eval(ScriptMod {
-                    cargo_manifest_path: env!("CARGO_MANIFEST_DIR").into(),
-                    module_path: format!("theme_lab_{}", pinned.name),
-                    file: format!("{}.splash", pinned.name),
-                    line: 0,
-                    column: 0,
-                    code: pinned.script.clone(),
-                    values: vec![],
-                });
-            }
-        });
+        let pinned = entry.pinned.as_ref().map(|pinned| pinned.script.clone());
+        crate::set_theme_mix(vm.cx_mut(), pinned);
+        vm.cx_mut().request_style_reload();
     }
 }
 
 #[cfg(test)]
 mod theme_lab_tests {
     use super::*;
-    use crate::makepad_platform::{Cx, LiveId, NoTrap};
+    use crate::makepad_platform::{Cx, LiveId, NoTrap, ScriptMod};
     use crate::theme_tokens::{
         mix_rgb, theme_module_script, BlendValue, ThemeValues, TokenValue, READABLE,
     };
@@ -876,6 +985,25 @@ mod theme_lab_tests {
             cache.insert(made_up(theme, bg, ink, 2.0 + step as f64));
         }
         cache
+    }
+
+    /// The tick a `cx.request_style_reload()` lands on, driven by hand.
+    ///
+    /// An install writes a choice onto the Cx and asks for a reload; the
+    /// reload is what re-runs `script_mod` and rebuilds every template the
+    /// widgets are made from, so until it has run nothing an install did is
+    /// anywhere. In an app that run is `app_main!`'s `Event::LiveEdit` arm,
+    /// over the APP's own `script_mod` -- which is the whole reason the choice
+    /// lives on the Cx: an app's templates bake `theme.color_x` into a literal
+    /// when the app's module block runs, and re-running that is the only thing
+    /// that moves them. Here the app is the library.
+    fn the_reload_lands(vm: &mut ScriptVm) {
+        assert!(
+            std::mem::take(&mut vm.cx_mut().pending_style_reload),
+            "nothing asked for the style reload that carries an install to the app"
+        );
+        vm.cx_mut().pending_live_edit_request = false;
+        vm.with_reload(crate::script_mod);
     }
 
     /// A lab whose themes are already resolved, entered on a bare dark theme.
@@ -1101,6 +1229,7 @@ mod theme_lab_tests {
             assert!(lab.is_dirty());
             assert_eq!(lab.apply(vm).unwrap(), Applied::Mix);
             assert!(!lab.is_dirty(), "an applied mix is not owed another apply");
+            the_reload_lands(vm);
             // Raising one weight in absolute mode leaves the theme the lab
             // opened on exactly where it was, so what went on is half of
             // each: a colour neither ingredient carries, which is the only
@@ -1146,6 +1275,7 @@ mod theme_lab_tests {
             let dark = lab.index_of(DARK).unwrap();
             lab.set_weight(dark, RELATIVE_TOTAL);
             assert_eq!(lab.apply(vm).unwrap(), Applied::Mix);
+            the_reload_lands(vm);
             assert!(lab.installed);
             assert_eq!(desktop_style::current_name(vm), None, "a mix stands on its base, not on a sheet");
             lab.leave(vm);
@@ -1164,30 +1294,41 @@ mod theme_lab_tests {
     /// A saved theme is a base, a sheet, and a set of tokens pinned over the
     /// pair of them, and the pins are the part only the panel knows. Four
     /// clicks used to lose them: pick the theme, open the mix, move a weight,
-    /// press `- mix`. Leaving put the base and the sheet back and dropped the
-    /// pins on the floor, so the picker went on naming a theme the screen was
-    /// not.
+    /// press `- mix`. Leaving put the base back and dropped the pins on the
+    /// floor, so the picker went on naming a theme the screen was not.
     ///
     /// Driven the way the panel drives it and read off the app: the pinned
     /// ground goes on for real, a real mix goes over it, and BOTH ways back
     /// out -- the rows returning to the theme the lab opened on, and the fold
     /// -- have to hand back the pinned value rather than the base theme's.
+    /// Each way back out is read after the reload it asked for, because that
+    /// reload IS the install: the pins are held on the Cx and it is the run
+    /// they are emitted in.
+    ///
     /// The first assertion is also the guard for the swallowed last
     /// statement: without the `true` [`PinnedTheme::new`] appends, the line
     /// that makes the theme current never runs and the theme never goes on.
+    ///
+    /// Over a bare base theme, because that is the theme whose pins are the
+    /// lab's to hand back. A saved theme with a style SHEET under it is not:
+    /// the sheet's script runs after the seam the pins are emitted at and
+    /// points `mod.theme` at its own base, so what comes back over a sheet is
+    /// the base and the sheet -- see `ThemeLab::install_entry`, which says
+    /// where the rest of that theme has to come from. That the sheet itself
+    /// comes back is `leaving_puts_back_what_entering_found`.
     #[test]
-    fn leaving_puts_back_a_saved_themes_own_tokens_and_not_only_its_base_and_sheet() {
+    fn leaving_puts_back_a_saved_themes_own_tokens_and_not_only_its_base() {
         const PINNED: u32 = 0x3B1F5CFF;
         let mut lab = ThemeLab::new();
         lab.cache = bench();
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(|vm| {
             crate::script_mod(vm);
-            desktop_style::install(vm, StyleSheet::load_with_appearance(DesktopStyle::Omarchy, false));
+            desktop_style::uninstall(vm);
             crate::set_base_theme(vm.cx_mut(), BaseTheme::Dark);
             vm.with_reload(crate::script_mod);
             // The theme somebody saved, put on the way the panel puts one on:
-            // the base and the sheet, and then its own tokens over the top.
+            // the base theme, and then its own tokens over the top.
             let pinned = PinnedTheme::new(
                 "sunset",
                 &theme_module_script(
@@ -1212,50 +1353,54 @@ mod theme_lab_tests {
             );
 
             lab.enter_pinned(vm, &pinned);
-            assert_eq!(lab.entry.as_ref().unwrap().theme, OMARCHY, "the sheet under the pins");
-            let dark = lab.index_of(DARK).unwrap();
-            lab.set_weight(dark, RELATIVE_TOTAL);
+            assert_eq!(
+                lab.entry.as_ref().unwrap().theme,
+                DARK,
+                "the base theme under the pins"
+            );
+            let omarchy = lab.index_of(OMARCHY).unwrap();
+            lab.set_mode(WeightMode::Absolute);
+            lab.set_weight(omarchy, RELATIVE_TOTAL);
             assert_eq!(lab.apply(vm).unwrap(), Applied::Mix);
+            the_reload_lands(vm);
             assert_ne!(read_theme(vm, "color_bg_app"), Some(PINNED), "the mix never reached the app");
 
             // The rows back where they started, which is one of the two ways
             // the entry theme goes back on.
             lab.reset();
             assert_eq!(lab.apply(vm).unwrap(), Applied::Entry);
+            the_reload_lands(vm);
             assert_eq!(
                 read_theme(vm, "color_bg_app"),
                 Some(PINNED),
-                "the entry theme came back as its base and its sheet and none of its own tokens"
+                "the entry theme came back as its bare base and none of its own tokens"
             );
 
             // ...and the fold, which is the press it was found on.
-            lab.set_weight(dark, RELATIVE_TOTAL);
+            lab.set_weight(omarchy, RELATIVE_TOTAL);
             assert_eq!(lab.apply(vm).unwrap(), Applied::Mix);
+            the_reload_lands(vm);
             lab.leave(vm);
+            the_reload_lands(vm);
             assert_eq!(
                 read_theme(vm, "color_bg_app"),
                 Some(PINNED),
                 "leaving left the picker naming a theme the screen is not"
-            );
-            assert_eq!(
-                desktop_style::current_name(vm).as_deref(),
-                Some("omarchy"),
-                "and lost the sheet under it as well"
             );
             assert_eq!(crate::base_theme(vm.cx_mut()), BaseTheme::Dark);
         });
     }
 
     /// The app can be rebuilt out from under the lab -- a style reload, a live
-    /// edit, a base theme switched elsewhere -- and the lab cannot see it
-    /// happen. What it holds is the weights it installed, which still match
-    /// the rows, so nothing is dirty and no draw will ever put the mix back:
-    /// the app sits on its bare base theme with the panel showing a mix at its
-    /// weights. Being told is the only way out, and this is the sequence that
-    /// needs it -- the button that reloads the style is thirty pixels above
-    /// the section.
+    /// edit, a base theme switched elsewhere -- and the mix stands through it.
+    /// It has to: the reload that makes an app wear the mix at all IS a
+    /// rebuild, so a mix a rebuild could lose could never be worn.
+    ///
+    /// The lab still cannot SEE a rebuild, and being told about one is still
+    /// free to do -- what it must not cost is a second install. A lab that
+    /// reinstalled on every word would ask for the reload that told it.
     #[test]
-    fn a_rebuild_under_the_lab_comes_back_only_once_the_lab_is_told() {
+    fn a_rebuild_under_the_lab_leaves_the_mix_standing() {
         let mut lab = ThemeLab::new();
         lab.cache = bench();
         let mut cx = Cx::new(Box::new(|_, _| {}));
@@ -1267,32 +1412,117 @@ mod theme_lab_tests {
             lab.set_mode(WeightMode::Absolute);
             lab.set_weight(omarchy, RELATIVE_TOTAL);
             assert_eq!(lab.apply(vm).unwrap(), Applied::Mix);
+            the_reload_lands(vm);
             let mix = [(DARK, RELATIVE_TOTAL), (OMARCHY, RELATIVE_TOTAL)];
             let want = lab.cache.blend(&mix).unwrap().color("color_bg_app");
             assert_eq!(read_theme(vm, "color_bg_app"), want, "the mix did not go on");
 
-            // What a `request_style_reload` lands on the next tick: the
-            // library's own module, built from the base theme, over the top of
-            // the mix.
+            // Somebody else's rebuild, with the mix standing: a live edit off
+            // the file watcher, the panel's own wear switch, a theme reload.
+            // `theme_mod` re-emits the mix, so it comes back up with the
+            // module rather than being buried by it.
             vm.with_reload(crate::script_mod);
-            assert_ne!(read_theme(vm, "color_bg_app"), want, "the reload left the mix standing");
-            assert!(!lab.is_dirty(), "the lab cannot see a reload, which is the whole trap");
-            assert_eq!(
-                lab.apply(vm).unwrap(),
-                Applied::Nothing,
-                "and will not put the mix back of its own accord"
-            );
-            assert_ne!(read_theme(vm, "color_bg_app"), want);
-
-            lab.invalidate();
-            assert!(lab.is_dirty(), "a lab that has been told is owed an apply");
-            assert_eq!(lab.apply(vm).unwrap(), Applied::Mix);
-            assert_eq!(read_theme(vm, "color_bg_app"), want, "the mix did not come back");
+            assert_eq!(read_theme(vm, "color_bg_app"), want, "the rebuild took the mix off");
             assert_eq!(
                 read_widget_theme(vm, "color_bg_app"),
                 want,
-                "the widgets were not built off the mix that came back"
+                "the widgets of the rebuilt module were not built off the mix"
             );
+            assert!(!lab.is_dirty(), "a mix that never came off is owed an apply");
+
+            // And being told about it is free. This is the loop: the panel is
+            // told about EVERY rebuild, including the one its own install
+            // asked for, so an apply that reinstalled here would ask for the
+            // reload that told it, with a module rebuild inside the turn.
+            lab.invalidate();
+            assert!(lab.is_dirty(), "a lab that has been told is owed an apply");
+            let rebuilds = lab.rebuilds();
+            assert_eq!(
+                lab.apply(vm).unwrap(),
+                Applied::Nothing,
+                "a mix already in force went in a second time"
+            );
+            assert_eq!(lab.rebuilds(), rebuilds, "and cost a rebuild doing it");
+            assert!(
+                !vm.cx_mut().pending_style_reload,
+                "the apply asked for the reload that would tell it again"
+            );
+            assert!(!lab.is_dirty(), "and is still owed one");
+            assert_eq!(read_theme(vm, "color_bg_app"), want);
+        });
+    }
+
+    /// A theme chosen from OUTSIDE the lab wins, and the lab opens again on
+    /// it.
+    ///
+    /// This is the other half of holding the mix on the Cx. A blend that
+    /// `theme_mod` re-emits on every run survives every rebuild -- which is
+    /// the point -- and would therefore survive the rebuild an app's own
+    /// theme picker asks for too, going straight back over the top of the
+    /// theme just chosen. A picker that had worked for years would sit there
+    /// doing nothing for as long as the section was open.
+    ///
+    /// So `set_base_theme` takes a standing mix off, and the lab reads a mix
+    /// that has gone as having been stood down: it does not put the blend
+    /// back, it re-enters on what is now in force. What `leave` then hands
+    /// back is the theme the picker names, and the weights start from it.
+    ///
+    /// Driven here through the bare calls an app's picker makes --
+    /// `set_base_theme` and a style reload -- because that is all the library
+    /// can see of it. `apps/storybook/src/theme.rs::select` is the one that
+    /// was measured doing nothing.
+    #[test]
+    fn a_theme_chosen_from_outside_the_lab_is_the_theme_that_stays() {
+        let mut lab = ThemeLab::new();
+        lab.cache = bench();
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            desktop_style::uninstall(vm);
+            crate::set_base_theme(vm.cx_mut(), BaseTheme::Dark);
+            vm.with_reload(crate::script_mod);
+            lab.enter(vm);
+            let omarchy = lab.index_of(OMARCHY).unwrap();
+            lab.set_mode(WeightMode::Absolute);
+            lab.set_weight(omarchy, RELATIVE_TOTAL);
+            assert_eq!(lab.apply(vm).unwrap(), Applied::Mix);
+            the_reload_lands(vm);
+            let mix = [(DARK, RELATIVE_TOTAL), (OMARCHY, RELATIVE_TOTAL)];
+            let blend = lab.cache.blend(&mix).unwrap().color("color_bg_app");
+            assert_eq!(read_theme(vm, "color_bg_app"), blend, "the mix never went on");
+
+            // The app's own picker: a base theme set, and the reload that
+            // carries it. Nothing here knows the lab exists.
+            crate::set_base_theme(vm.cx_mut(), BaseTheme::Light);
+            vm.cx_mut().request_style_reload();
+            the_reload_lands(vm);
+            let light = read_theme(vm, "color_bg_app");
+            assert_ne!(light, blend, "the blend went back over the theme just picked");
+
+            // ...and the word the panel owes the lab when a rebuild lands,
+            // which is where the lab finds out. It must not reinstall.
+            lab.invalidate();
+            let rebuilds = lab.rebuilds();
+            assert_eq!(
+                lab.apply(vm).unwrap(),
+                Applied::Nothing,
+                "the lab put its mix back over somebody else's pick"
+            );
+            assert_eq!(lab.rebuilds(), rebuilds, "and spent a rebuild doing it");
+            assert!(
+                !vm.cx_mut().pending_style_reload,
+                "the stand-down asked for a reload of its own"
+            );
+            assert_eq!(read_theme(vm, "color_bg_app"), light, "the pick did not stay");
+            assert!(!lab.installed, "the lab still believes its mix is on the app");
+
+            // The section is open on the theme that was picked, so that is
+            // what the weights start from and what leaving hands back.
+            assert!(lab.is_open(), "the stand-down folded the section away");
+            assert_eq!(lab.entry.as_ref().unwrap().theme, BlendTheme::Base(Scheme::Light));
+            lab.leave(vm);
+            assert!(!vm.cx_mut().pending_style_reload, "leaving an uninstalled lab rebuilt anyway");
+            assert_eq!(read_theme(vm, "color_bg_app"), light, "leaving took the pick away");
         });
     }
 
@@ -1317,7 +1547,7 @@ mod theme_lab_tests {
             lab.set_weight(dark, RELATIVE_TOTAL);
             assert_eq!(lab.apply(vm).unwrap(), Applied::Mix);
             assert_eq!(desktop_style::current_name(vm), None, "a mix stands on its base");
-            vm.with_reload(crate::script_mod);
+            the_reload_lands(vm);
             lab.invalidate();
             assert!(lab.installed, "the sheet is still off, so the lab still owes it back");
             lab.leave(vm);

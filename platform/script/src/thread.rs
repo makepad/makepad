@@ -165,6 +165,13 @@ impl ScriptThread {
         self.is_paused
     }
 
+    /// What this thread is rooting for the collector, as sizes: the value
+    /// stack, the frame slots, the scope chain, the method contexts, the
+    /// loop frames. A leak hunt reads these across events.
+    pub fn root_footprint(&self) -> [usize; 5] {
+        [self.stack.len(), self.slots.len(), self.scopes.len(), self.mes.len(), self.loops.len()]
+    }
+
     pub fn thread_id(&self) -> ScriptThreadId {
         self.thread_id
     }
