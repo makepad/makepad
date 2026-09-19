@@ -56,6 +56,7 @@ pub mod cas;
 #[cfg(all(feature = "native", not(any(target_arch = "wasm32", feature = "embedded"))))]
 mod cas_file;
 pub mod catalog;
+pub mod effect_doc;
 pub mod core;
 #[cfg(any(target_arch = "wasm32", feature = "embedded"))]
 pub mod embedded;

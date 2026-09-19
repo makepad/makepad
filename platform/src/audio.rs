@@ -111,6 +111,16 @@ impl AudioDevicesEvent {
         Vec::new()
     }
 
+    pub fn loopback_capture_order(&self) -> Vec<AudioDeviceId> {
+        let mut devices: Vec<&AudioDeviceDesc> = self
+            .descs
+            .iter()
+            .filter(|d| d.device_type.is_loopback() && !d.has_failed)
+            .collect();
+        devices.sort_by_key(|d| !d.is_default);
+        devices.iter().map(|d| d.device_id).collect()
+    }
+
     pub fn match_outputs(&self, outputs: &[&str]) -> Vec<AudioDeviceId> {
         let mut results = Vec::new();
         for d in &self.descs {
