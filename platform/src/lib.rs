@@ -166,7 +166,8 @@ pub use {
             extend_font_asset_manifest, font_asset_manifest_len, FontAsset, FontChain, FontPolicy,
             FontRole, FontSet, LazyFontAsset, LazyFontFamily, FONT_ASSET_MANIFEST_SECTION,
             INTERNATIONAL_FONT_ASSET_MANIFEST, LATIN_FONT_ASSET_MANIFEST,
-            LATIN_FONT_ASSET_PACKAGE_MANIFEST, MATH_VIEW_FONT_ASSET, UI_SYMBOL_FALLBACK,
+            LATIN_FONT_ASSET_PACKAGE_MANIFEST, MATH_VIEW_FONT_ASSET, INTER_FONT_ASSET,
+            ROBOTO_FLEX_FONT_ASSET, UI_SYMBOL_FALLBACK,
         },
         draw_list::{CxDrawCall, CxDrawItem, CxDrawListPool, CxRectArea, DrawList, DrawListId, DrawListRecordingStorage},
         shared_instances::{

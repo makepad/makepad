@@ -46,9 +46,14 @@ impl FontSet {
     }
 }
 
-/// Font resources registered by the standard widgets module outside the
-/// semantic theme roles. `app_main!` includes these in every emitted manifest.
+/// Fonts the standard widgets ship but no theme role needs, so no manifest includes them
+/// by default. An app declares the ones it uses in `app_main!`'s `font_assets`.
+/// Only `MathView` draws with this one.
 pub const MATH_VIEW_FONT_ASSET: &str = "makepad_widgets/resources/NewCMMath-Regular.otf";
+/// Primary typeface of the `ios` platform style, and a symbol face some apps pick directly.
+pub const INTER_FONT_ASSET: &str = "makepad_widgets/resources/Inter.ttf";
+/// Primary typeface of the `android` platform style.
+pub const ROBOTO_FLEX_FONT_ASSET: &str = "makepad_widgets/resources/RobotoFlex.ttf";
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum FontRole {

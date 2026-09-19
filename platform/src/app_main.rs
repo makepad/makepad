@@ -390,10 +390,10 @@ macro_rules! app_main {
         #[cfg(not(target_arch = "wasm32"))]
         $crate::app_main!(@impl $app, $crate::FontSet::International, $crate::INTERNATIONAL_FONT_ASSET_MANIFEST, [], $configure);
     };
-    ( $app:ident, font_assets: [$($asset:literal),* $(,)?] ) => {
+    ( $app:ident, font_assets: [$($asset:expr),* $(,)?] ) => {
         $crate::app_main!($app, font_assets: [$($asset),*], configure: |_cx: &mut Cx| {});
     };
-    ( $app:ident, font_assets: [$($asset:literal),* $(,)?], configure: $configure:expr ) => {
+    ( $app:ident, font_assets: [$($asset:expr),* $(,)?], configure: $configure:expr ) => {
         #[cfg(target_arch = "wasm32")]
         $crate::app_main!(@impl $app, $crate::FontSet::Latin, $crate::LATIN_FONT_ASSET_PACKAGE_MANIFEST, [$($asset),*], $configure);
         #[cfg(not(target_arch = "wasm32"))]
@@ -411,27 +411,22 @@ macro_rules! app_main {
     ( $app:ident, font_set: International, configure: $configure:expr ) => {
         $crate::app_main!(@impl $app, $crate::FontSet::International, $crate::INTERNATIONAL_FONT_ASSET_MANIFEST, [], $configure);
     };
-    ( $app:ident, font_set: Latin, font_assets: [$($asset:literal),* $(,)?] ) => {
+    ( $app:ident, font_set: Latin, font_assets: [$($asset:expr),* $(,)?] ) => {
         $crate::app_main!($app, font_set: Latin, font_assets: [$($asset),*], configure: |_cx: &mut Cx| {});
     };
-    ( $app:ident, font_set: Latin, font_assets: [$($asset:literal),* $(,)?], configure: $configure:expr ) => {
+    ( $app:ident, font_set: Latin, font_assets: [$($asset:expr),* $(,)?], configure: $configure:expr ) => {
         $crate::app_main!(@impl $app, $crate::FontSet::Latin, $crate::LATIN_FONT_ASSET_PACKAGE_MANIFEST, [$($asset),*], $configure);
     };
-    ( $app:ident, font_set: International, font_assets: [$($asset:literal),* $(,)?] ) => {
+    ( $app:ident, font_set: International, font_assets: [$($asset:expr),* $(,)?] ) => {
         $crate::app_main!($app, font_set: International, font_assets: [$($asset),*], configure: |_cx: &mut Cx| {});
     };
-    ( $app:ident, font_set: International, font_assets: [$($asset:literal),* $(,)?], configure: $configure:expr ) => {
+    ( $app:ident, font_set: International, font_assets: [$($asset:expr),* $(,)?], configure: $configure:expr ) => {
         $crate::app_main!(@impl $app, $crate::FontSet::International, $crate::INTERNATIONAL_FONT_ASSET_MANIFEST, [$($asset),*], $configure);
     };
-    (@impl $app:ident, $font_set:expr, $manifest:expr, [$($asset:literal),*], $configure:expr) => {
+    (@impl $app:ident, $font_set:expr, $manifest:expr, [$($asset:expr),*], $configure:expr) => {
         // The payload is line-oriented UTF-8. Lane B reads this section from
         // freshly linked wasm before any optional custom-section stripping.
-        const MAKEPAD_EXTRA_FONT_ASSETS: &[&str] = &[
-            $crate::MATH_VIEW_FONT_ASSET,
-            "makepad_widgets/resources/Inter.ttf",
-            "makepad_widgets/resources/RobotoFlex.ttf",
-            $($asset),*
-        ];
+        const MAKEPAD_EXTRA_FONT_ASSETS: &[&str] = &[$($asset),*];
         #[used]
         #[cfg_attr(target_arch = "wasm32", link_section = "makepad.font-assets.v1")]
         #[cfg_attr(
@@ -610,9 +605,6 @@ mod font_set_macro_compile_test {
     #[test]
     fn explicit_font_set_macro_form_compiles_with_international_manifest() {
         const EXTRAS: &[&str] = &[
-            MATH_VIEW_FONT_ASSET,
-            "makepad_widgets/resources/Inter.ttf",
-            "makepad_widgets/resources/RobotoFlex.ttf",
             "example/resources/Custom.ttf",
             "makepad_widgets/resources/NotoColorEmoji.ttf",
         ];
@@ -622,8 +614,11 @@ mod font_set_macro_compile_test {
         assert_eq!(MAKEPAD_FONT_ASSETS_V1, EXPECTED);
         let manifest = std::str::from_utf8(&MAKEPAD_FONT_ASSETS_V1).unwrap();
         assert_eq!(manifest.matches("NotoColorEmoji.ttf").count(), 1);
-        assert!(manifest.contains("NewCMMath-Regular.otf"));
         assert!(manifest.contains("example/resources/Custom.ttf"));
+        // Optional widget fonts only ship when declared.
+        assert!(!manifest.contains("NewCMMath-Regular.otf"));
+        assert!(!manifest.contains("Inter.ttf"));
+        assert!(!manifest.contains("RobotoFlex.ttf"));
     }
 
     #[test]

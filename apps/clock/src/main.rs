@@ -20,7 +20,7 @@ use makepad_clock::{ai, view::ClockView};
 use makepad_widgets::desktop_style::{self, DesktopStyle, StyleSheet};
 use makepad_widgets::*;
 
-app_main!(App);
+app_main!(App, font_assets: [INTER_FONT_ASSET, ROBOTO_FLEX_FONT_ASSET]);
 
 script_mod! {
     use mod.prelude.widgets.*
