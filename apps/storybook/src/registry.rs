@@ -391,7 +391,7 @@ mod tests {
             &[
                 ("TextInput", &["Overview", "Field well"]),
                 ("NumberField", &["Overview"]),
-                ("Slider", &["Overview", "Range slider"]),
+                ("Slider", &["Overview", "Fader", "Range slider"]),
                 ("Rotary", &["Overview", "Knob"]),
                 ("Rating", &["Overview"]),
                 ("TagField", &["Overview"]),

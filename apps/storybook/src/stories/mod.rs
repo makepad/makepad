@@ -59,6 +59,7 @@ pub mod textinput;
 pub mod field_well;
 pub mod number_field;
 pub mod slider;
+pub mod slider_fader;
 pub mod range_slider;
 pub mod rotary;
 pub mod rating;
@@ -216,6 +217,7 @@ static FILES: &[StoryModule] = &[
     file(field_well::script_mod, field_well::STORIES),
     file(number_field::script_mod, number_field::STORIES),
     file(slider::script_mod, slider::STORIES),
+    file(slider_fader::script_mod, slider_fader::STORIES),
     file(range_slider::script_mod, range_slider::STORIES),
     file(rotary::script_mod, rotary::STORIES),
     file(rating::script_mod, rating::STORIES),
@@ -397,6 +399,42 @@ pub fn bump(key: LiveId) -> usize {
     let n = map.entry(key).or_insert(0);
     *n += 1;
     *n
+}
+
+#[cfg(test)]
+mod wiring {
+    //! A story file that nothing lists is dead code wearing live code's
+    //! clothes: it compiles, it reads well, and the app never sees a line of
+    //! it, because [`FILES`] is the one road from a file to the navigator. A
+    //! file sat here written and unreachable for a day, and what gave it away
+    //! was the story count not moving.
+
+    /// The one entry in [`super::FILES`] that is not a file in this
+    /// directory: the coverage page is written beside the count it draws.
+    const LISTED_FROM_ELSEWHERE: usize = 1;
+
+    #[test]
+    fn every_file_in_this_directory_is_listed() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/stories");
+        let written = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
+            .flatten()
+            .filter(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                name.ends_with(".rs") && name != "mod.rs"
+            })
+            .count();
+        assert_eq!(
+            super::modules().len() - LISTED_FROM_ELSEWHERE,
+            written,
+            concat!(
+                "the table lists one number of story files and the directory holds ",
+                "another; a file nothing lists is evaluated by nothing, and its pages ",
+                "are in no tree, no search and no count"
+            )
+        );
+    }
 }
 
 #[cfg(test)]
