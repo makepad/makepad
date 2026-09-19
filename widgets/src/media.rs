@@ -31,7 +31,12 @@
 //! reach; FILL stretches it to the box, shape and all. Cover is done by the
 //! image's own shader rather than by drawing something oversized and
 //! clipping it: the arithmetic here works out the rect either way, and
-//! hands the box's own size to a picture that would overflow it.
+//! hands the box's own size to a picture that would overflow it. The
+//! ground's `border_radius` is handed over with that size, so a picture
+//! that reaches the box's corners is cut by the curve the ground is cut
+//! by. A picture that does not reach them — anything `Contain` left short
+//! on an axis — keeps its own square corners, because the curve belongs
+//! to the box and there is ground showing around it either way.
 //!
 //! The source goes on the `Media`, not on the image sitting in its slot.
 //! The box only knows about the sources it fetched itself: an image asked
@@ -43,11 +48,9 @@
 //! this widget only decides WHICH source they are pointed at and what is
 //! drawn while they work. It cannot be told WHERE in the box a cropped
 //! picture is taken from: a fitted picture is centred, or wherever the
-//! box's own `align` puts it, and nothing finer than that. It
-//! does not clip the picture to its own rounded corners — the ground behind
-//! has a radius, the picture does not, so a covering picture in a rounded
-//! box has square corners. It does not retry, back off, or wait for
-//! scrolling: a source that failed is done until the source itself changes.
+//! box's own `align` puts it, and nothing finer than that. It does not
+//! retry, back off, or wait for scrolling: a source that failed is done
+//! until the source itself changes.
 //! And an SVG source is not a picture as far as this widget is concerned,
 //! for the same reason it is not one to the image widget's own `src`: that
 //! path decodes rasters on a worker. Put the drawing in the slot instead.
@@ -165,7 +168,7 @@ script_mod! {
         draw_bg +: {
             /** the ground, seen wherever the picture does not reach */
             color: theme.color_placeholder
-            /** corner rounding of the ground; the picture is not clipped to it 0..24 step 0.5 */
+            /** corner rounding of the ground; a picture that reaches the corners is cut to it 0..24 step 0.5 */
             border_radius: 0.0
         }
     }
@@ -289,6 +292,23 @@ pub(crate) fn fit_size(fit: MediaFit, natural: Option<(f64, f64)>, bounds: (f64,
             let scale = (bw / sw).max(bh / sh);
             (sw * scale, sh * scale)
         }
+    }
+}
+
+/// The corner radius the picture itself is drawn with, given the ground's.
+///
+/// The curve belongs to the BOX. A picture that reaches the box's corners
+/// is cut by it, because the ground it would otherwise cover is the thing
+/// that is rounded; one with room around it keeps its own square corners,
+/// since cutting them would round a shape with ground showing on every
+/// side of it. Half a point short is not room: the arithmetic that fits a
+/// picture does not land on the box to the last bit.
+pub(crate) fn picture_radius(radius: f32, picture: (f64, f64), inner: (f64, f64)) -> f32 {
+    const REACH: f64 = 0.5;
+    if picture.0 + REACH >= inner.0 && picture.1 + REACH >= inner.1 {
+        radius
+    } else {
+        0.0
     }
 }
 
@@ -551,6 +571,15 @@ impl Widget for Media {
             height: Size::Fixed(ph.min(inner.1)),
             ..Walk::default()
         };
+        // The curve goes to the picture with the rect: what the ground is
+        // cut by, a picture covering the ground is cut by too. Written
+        // straight onto the draw struct rather than through a setter,
+        // because a setter redraws and a redraw on every draw is a loop.
+        let image = self.picture.as_image();
+        if let Some(mut image) = image.borrow_mut() {
+            image.draw_bg.border_radius =
+                picture_radius(self.draw_bg.border_radius, (pw, ph), inner);
+        }
         if self.applied_fit != Some(self.fit) {
             self.applied_fit = Some(self.fit);
             // Pushed only when it changes: this redraws, and a redraw on
@@ -807,6 +836,73 @@ mod tests {
         assert_eq!(box_size((300.0, f64::NAN), 0.0, WIDE), (300.0, 75.0));
         // With neither axis stated, the picture is the box.
         assert_eq!(box_size((f64::NAN, f64::NAN), 0.0, WIDE), (400.0, 100.0));
+    }
+
+    #[test]
+    fn the_ground_keeps_its_curve_when_there_is_ground_showing() {
+        // A covering picture and a stretched one both reach the corners,
+        // and the corner they reach is the ground's.
+        assert_eq!(picture_radius(8.0, (800.0, 200.0), (100.0, 200.0)), 8.0);
+        assert_eq!(picture_radius(8.0, (100.0, 200.0), (100.0, 200.0)), 8.0);
+        // Contain stops short on an axis, and what it stops short of is
+        // ground the curve is already cut into.
+        assert_eq!(picture_radius(8.0, (100.0, 25.0), (100.0, 200.0)), 0.0);
+        assert_eq!(picture_radius(8.0, (25.0, 200.0), (100.0, 200.0)), 0.0);
+        // Half a point short of the box is a rounding error, not a gap.
+        assert_eq!(picture_radius(8.0, (99.7, 200.0), (100.0, 200.0)), 8.0);
+        // A square box has no curve to hand on.
+        assert_eq!(picture_radius(0.0, (800.0, 200.0), (100.0, 200.0)), 0.0);
+    }
+
+    /// One radius, written once. A caller rounds the ground and the
+    /// picture follows, so the two cannot end up disagreeing about where
+    /// the corner is.
+    #[test]
+    fn the_box_hands_its_curve_to_the_picture_it_draws() {
+        use crate::makepad_draw::cx_draw::CxDraw;
+
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut media = cx.with_vm(|vm| {
+            vm.bx.captured_errors = Some(Vec::new());
+            crate::script_mod(vm);
+            let errors = vm.take_errors();
+            assert!(errors.is_empty(), "{errors:#?}");
+            let value = crate::script_eval!(vm, {
+                use mod.widgets.*
+                Media{
+                    width: 200.
+                    height: 120.
+                    draw_bg +: {border_radius: 9.0}
+                }
+            });
+            Media::script_from_value(vm, value)
+        });
+
+        let size = dvec2(200.0, 120.0);
+        let pass = DrawPass::new(&mut cx);
+        pass.set_size(&mut cx, size);
+        let mut draw_list = DrawList2d::new(&mut cx);
+        {
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(&mut cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&pass, None);
+            draw_list.begin_always(&mut cx2d);
+            cx2d.begin_root_turtle(size, Layout::flow_overlay());
+            let walk = media.walk;
+            media.draw_walk_all(&mut cx2d, &mut Scope::empty(), walk);
+            cx2d.end_pass_sized_turtle();
+            draw_list.end(&mut cx2d);
+            cx2d.end_pass(&pass);
+        }
+
+        assert_eq!(media.draw_bg.border_radius, 9.0, "the DSL reached the ground");
+        let image = media.picture.as_image();
+        let picture = image.borrow().expect("the slot holds a picture");
+        assert_eq!(
+            picture.draw_bg.border_radius, 9.0,
+            "the picture was left square in a rounded box"
+        );
     }
 
     #[test]
