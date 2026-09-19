@@ -25,6 +25,7 @@ pub mod theme_desktop_light;
 pub mod theme_desktop_skeleton;
 pub mod theme_tokens;
 pub mod theme_store;
+pub mod theme_lab;
 pub mod widget;
 pub mod widget_async;
 pub mod splash_host;
