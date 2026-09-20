@@ -97,7 +97,6 @@ fn games(
         newest: false,
         page_size: 50,
         facets: 0,
-        newest: false,
     };
     let page = client.catalog_search(&query, None).expect("search games");
     page.hits

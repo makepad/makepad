@@ -187,6 +187,17 @@ workspace.members = [
 ]
 
 workspace.exclude = [
+    # The web server this line kept developing after upstream moved its own to
+    # makepad/webserver: 15 commits since the fork diverged (KNMI's anonymous
+    # radar key, a directory path redirecting rather than 404ing, the in-memory
+    # poller cache). Excluded rather than a member so it stays buildable on its
+    # own without joining the workspace build.
+    "tools/web_server",
+    # The loader upstream replaced with the Builder. It cannot be a MEMBER --
+    # tools/makepad_builder declares the same package name, makepad-loader, and
+    # two members cannot share one. Excluded keeps the source and lets it build
+    # in place.
+    "tools/makepad_loader",
     # Private Scope (the Architecture map) and its code-intelligence crates.
     # Clone into apps/scope; path deps stay ../../ like a subdirectory. Not a
     # required member so a clean makepad tree still loads.
