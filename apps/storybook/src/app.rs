@@ -992,4 +992,155 @@ mod tests {
             assert!(app.reset_pressed(&mut cx, &actions), "a press went unanswered");
         }
     }
+
+    /// What a named override block can actually change, and under which apply.
+    ///
+    /// A block is authored `tight: {...}` at the use site and declared
+    /// `tight := {}` on the base. The colon form is only legal because the
+    /// checked path falls back to the vec before erroring: a widget proto is
+    /// frozen VALIDATED, so without the declaration this is a hard error at
+    /// construction, not a warning and not a value quietly ignored.
+    ///
+    /// The variant matters more than anything else here. Under
+    /// `Apply::ScriptReapply` -- what `request_style_reload` produces --
+    /// `String`, `ArcStringMut` and every `#[visible]` field return early, so a
+    /// block driven that way changes nothing on screen while passing any test
+    /// written against `Apply::New`. That is how a feature ships as a no-op.
+    #[test]
+    fn a_compact_block_is_readable_and_only_some_applies_wear_it() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        cx.with_vm(|vm| {
+            <App as AppMain>::script_mod(vm);
+            let value = script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    probe := ButtonFlat{
+                        text: "Inspect"
+                        give_up := 1
+                        tight: { text: "<>"  visible: false }
+                    }
+                }
+            });
+            assert!(
+                vm.take_errors().is_empty(),
+                "`tight:` must be legal on an instance once the base declares it"
+            );
+            let root = WidgetRef::script_from_value(vm, value);
+            let probe = root.widget(vm.cx_mut(), ids!(probe));
+            let src = probe.script_source();
+
+            // The block is readable back by name off the instance.
+            let block = vm.bx.heap.value(src, id!(tight).into(), NoTrap);
+            assert!(block.is_object(), "tight must read back as an object");
+
+            // The rank is an integer. `as_f64` answers None for an integer
+            // literal, so a row reading ranks that way finds none of them and
+            // builds no ladder, with no error anywhere.
+            // A small integer literal is stored as U40, not I32 and not F64.
+            // `as_i32`, `as_u32` and `as_f64` all answer None for it, so a row
+            // reading ranks with any single-type accessor finds none of them and
+            // builds no ladder, with no error anywhere. `as_number` is the only
+            // accessor that covers every numeric representation.
+            let rank = vm.bx.heap.value(src, id!(give_up).into(), NoTrap);
+            assert_eq!(rank.as_number(), Some(1.0), "give_up reads through as_number");
+            assert_eq!(rank.as_i32(), None, "and is NOT an i32");
+            assert_eq!(rank.as_f64(), None, "and is NOT an f64");
+            assert_eq!(rank.as_u40(), Some(1), "it is a u40");
+
+            // The block sits in the vec, which the derived apply never reads,
+            // so the button still says what it was authored to say.
+            assert_eq!(probe.text(), "Inspect", "the block must not apply itself");
+
+            // The table. Each variant against a button in its authored state.
+            for (apply, want_text, want_visible) in [
+                (Apply::New, "<>", false),
+                (Apply::Animate, "<>", false),
+                (Apply::Eval, "<>", false),
+                (Apply::ScriptReapply, "Inspect", true),
+                (Apply::Rebake, "Inspect", true),
+            ] {
+                let fresh = script_eval!(vm, {
+                    use mod.prelude.widgets.*
+                    use mod.widgets.*
+                    ButtonFlat{ text: "Inspect" }
+                });
+                let mut fresh = WidgetRef::script_from_value(vm, fresh);
+                fresh.script_apply(vm, &apply, &mut Scope::empty(), block);
+                assert_eq!(fresh.text(), want_text, "text under {apply:?}");
+                assert_eq!(
+                    fresh.visible(),
+                    want_visible,
+                    "visible under {apply:?}"
+                );
+            }
+        });
+    }
+
+    /// And that the row actually draws narrower for it.
+    ///
+    /// A field changing is not a pixel changing. Two features this month passed
+    /// every test they had and did nothing on screen, so the block is measured
+    /// here off the drawn rect rather than off the button it was applied to.
+    #[test]
+    fn a_compact_block_draws_narrower_than_the_face_it_replaces() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        let (root, probe, block) = cx.with_vm(|vm| {
+            <App as AppMain>::script_mod(vm);
+            let value = script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    probe := ButtonFlat{
+                        text: "Inspect the widget"
+                        tight: { text: "<>" }
+                    }
+                }
+            });
+            assert!(vm.take_errors().is_empty());
+            let root = WidgetRef::script_from_value(vm, value);
+            let probe = root.widget(vm.cx_mut(), ids!(probe));
+            let block = vm.bx.heap.value(probe.script_source(), id!(tight).into(), NoTrap);
+            (root, probe, block)
+        });
+
+        let pass = DrawPass::new(&mut cx);
+        let mut list = DrawList2d::new(&mut cx);
+        let draw_once = |cx: &mut Cx, list: &mut DrawList2d| {
+            let size = dvec2(600.0, 120.0);
+            pass.set_size(cx, size);
+            cx.redraw_all();
+            let event = std::mem::take(&mut cx.new_draw_event);
+            let mut draw = CxDraw::new(cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&pass, Some(1.0));
+            list.begin_always(&mut cx2d);
+            cx2d.begin_root_turtle(size, Layout::flow_down());
+            root.draw_all(&mut cx2d, &mut Scope::empty());
+            cx2d.end_pass_sized_turtle();
+            list.end(&mut cx2d);
+            cx2d.end_pass(&pass);
+        };
+
+        draw_once(&mut cx, &mut list);
+        let long = probe.area().rect(&cx).size.x;
+        assert!(long > 0.0, "the long face must draw with a width of its own");
+
+        cx.with_vm(|vm| {
+            let mut probe = probe.clone();
+            probe.script_apply(vm, &Apply::Animate, &mut Scope::empty(), block);
+        });
+        draw_once(&mut cx, &mut list);
+        let short = probe.area().rect(&cx).size.x;
+
+        assert!(
+            short < long,
+            "the compact face must DRAW narrower, not merely say it is: {long} -> {short}"
+        );
+    }
+
 }

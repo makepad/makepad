@@ -20,6 +20,16 @@ script_mod! {
     mod.widgets.ButtonFlat = set_type_default() do mod.widgets.ButtonBase{
         /** the label text */
         text: "Button"
+
+        // The compact face, worn when the row this sits on runs out of width.
+        // Declared with `:=` rather than `:` so it lands in the instance's vec:
+        // a widget proto is frozen VALIDATED, so a key its props do not list is
+        // a hard error at construction -- but the checked path falls back to the
+        // vec first, which is what makes `tight: {...}` legal at the use site.
+        // The vec is also invisible to the derived apply, so the block never
+        // clobbers the button's own text.
+        /** the face this button wears when its row runs out of width */
+        tight := {}
         width: Fit
         height: Fit
         /** gap between icon and label 0..24 step 1 */
