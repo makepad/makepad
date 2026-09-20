@@ -3541,17 +3541,6 @@ impl MapUniformSlots {
     }
 }
 
-/// Orientation of the shadow-mask pass texture when the ground shader samples
-/// it by screen position. The pass is a child pass at the window's dpi over
-/// the map rect; on Metal it comes back bottom-up (grab-verified: unflipped,
-/// every shadow lands on the far side of its building and hides behind it).
-fn shadow_mask_y_flip_for_os(os_type: &OsType) -> f32 {
-    match os_type {
-        OsType::Macos | OsType::Ios(_) => 1.0,
-        _ => 0.0,
-    }
-}
-
 /// Writes one draw's uniforms and textures into `draw_vars`: the staging
 /// copy a new draw call is created from, and the source
 /// `DrawVars::update_uniforms_on_area` pushes onto a retained call.
@@ -5504,7 +5493,9 @@ impl Widget for MapView {
             (
                 self.shadow_mask_texture.clone(),
                 1.0,
-                shadow_mask_y_flip_for_os(cx.os_type()),
+                // The mask is an ordinary render texture: top-left rows on
+                // every backend, sampled by screen position as stored.
+                0.0,
             )
         } else {
             (None, 0.0, 0.0)

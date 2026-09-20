@@ -767,8 +767,10 @@ impl SsaaStack {
     /// Draw the single fullscreen resolve quad into the (now-active) window pass, sampling the
     /// supersized scene texture with LINEAR (== a 2x2 box for supersample==2).
     fn draw_resolve(&mut self, cx: &mut Cx2d, resolve: &mut DrawSsaaResolve, root_size: Vec2d) {
-        // Scene texture is bottom-up — flip opposite to the gauss compositor or the UI shows upside-down.
-        let source_y_flip = 1.0;
+        // The supersized scene is an ordinary render texture: top-left rows
+        // like every other (the platform's Y law), sampled as stored. With
+        // the flip this resolve mirrored the whole window on Metal.
+        let source_y_flip = 0.0;
         resolve
             .draw_vars
             .set_uniform(cx, live_id!(source_y_flip), &[source_y_flip]);
