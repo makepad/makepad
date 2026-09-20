@@ -62,6 +62,7 @@ pub struct FontsMemoryBytes {
 pub struct Fonts {
     layouter: Layouter,
     lazy_font_requests: LazyFontRequests,
+    missing_font_paths: FxHashSet<String>,
     needs_prepare_atlases: bool,
     atlas_texture: Texture,
     slug_atlas: SlugAtlas,
@@ -124,6 +125,7 @@ impl Fonts {
         Self {
             layouter,
             lazy_font_requests: Default::default(),
+            missing_font_paths: FxHashSet::default(),
             needs_prepare_atlases: false,
             atlas_texture: Texture::new_with_format(
                 cx,
@@ -313,6 +315,11 @@ impl Fonts {
 
     pub fn is_font_known(&self, id: FontId) -> bool {
         self.layouter.is_font_known(id)
+    }
+
+    /// True the first time a resource path fails to load, so the error logs once.
+    pub fn note_missing_font(&mut self, resource_path: &str) -> bool {
+        self.missing_font_paths.insert(resource_path.to_string())
     }
 
     pub fn define_font_family(&mut self, id: FontFamilyId, definition: FontFamilyDefinition) {

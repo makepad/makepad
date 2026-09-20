@@ -2105,6 +2105,17 @@ pub struct FloatingAction {
     /// the actions have areas to take it with.
     #[rust]
     focus_first: bool,
+    /// This pass opened the set from a key, so the button's own keyboard
+    /// activation must not be read as a second press.
+    ///
+    /// A Button activates from Return and Space on its own account, and this
+    /// widget answers the same keys itself to put focus on the first action.
+    /// Without this the two agree: the key opens the set here, the button's
+    /// `Pressed` arrives a moment later, `handle_actions` finds the set open
+    /// and closes it again -- one keypress, open and shut, with the focus the
+    /// open was for thrown away.
+    #[rust]
+    opened_by_key: bool,
     /// The trap was begun before the set was drawn and must be pointed at
     /// the draw that has the stops in it.
     #[rust]
@@ -2496,6 +2507,7 @@ impl FloatingAction {
             }
         }
         self.focus_first = false;
+        self.opened_by_key = false;
         self.trap_pending = false;
         if keep_lock && self.locked {
             self.swallow_up = true;
@@ -2774,6 +2786,10 @@ impl FloatingAction {
             if main.clicked(actions) {
                 cx.widget_action(self.uid, FloatingActionAction::Pressed);
             }
+        } else if main.pressed(actions) && self.opened_by_key {
+            // The key that opened it reaching us a second time, through the
+            // button. Swallow it once; the set stays open.
+            self.opened_by_key = false;
         } else if main.pressed(actions) && !self.pinned {
             // On the press, not the click: the set is out while the hand is
             // still down, so dragging to an action and letting go picks it.
@@ -2804,6 +2820,7 @@ impl FloatingAction {
                 } else if !self.pinned {
                     self.open_with(cx, false);
                     self.focus_first = true;
+                    self.opened_by_key = true;
                 }
             }
             return;

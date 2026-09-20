@@ -20,6 +20,7 @@ pub enum MacosEvent {
     WindowResizeLoopStop(WindowId),
     WindowGeomChange(WindowGeomChangeEvent),
     WindowClosed(WindowClosedEvent),
+    WindowMiniaturizeChange,
     Paint,
     /// One window's display link fired: paint THAT window at its own flip,
     /// with the flip's target timestamp (app-time domain). CAMetalDisplayLink

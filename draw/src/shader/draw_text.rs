@@ -3576,6 +3576,11 @@ impl FontFamily {
                             variations: Vec::new(),
                         },
                     );
+                // Two different absences, and only one is a mistake. A build that
+                // leaves a font out on purpose says so through the resource table:
+                // the family renders without it, and that is a log. A font nobody
+                // declared at all shows as boxes on screen, so it is an error that
+                // says how to fix it.
                 } else if cx.script_resource_unavailable(&member.resource_path) {
                     if fonts.note_font_unavailable(font_id) {
                         log!(
@@ -3585,6 +3590,13 @@ impl FontFamily {
                         );
                     }
                     continue;
+                } else if fonts.note_missing_font(&member.resource_path) {
+                    error!(
+                        "font {:?} (member {}) is not packaged with this app, so its text will show as boxes. \
+                        Declare it in `app_main!`, e.g. `font_assets: [MATH_VIEW_FONT_ASSET]`, \
+                        `INTER_FONT_ASSET` or `ROBOTO_FLEX_FONT_ASSET`, or a literal resource path.",
+                        member.resource_path, member.id
+                    );
                 }
             }
             expected_member_count += 1;
