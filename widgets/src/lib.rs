@@ -308,7 +308,6 @@ pub use crate::{
     tag_field::*,
     radio_group::*,
     kbd::*,
-    typography::*,
     tree::*,
     list_item::*,
     avatar::*,

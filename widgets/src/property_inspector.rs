@@ -254,7 +254,7 @@ pub fn label_of(prop: &Prop) -> &str {
 
 /// One line of the panel.
 #[derive(Clone, Debug, PartialEq)]
-pub enum Row {
+pub enum InspectorRow {
     /// A group's heading. `count` is how many properties belong to it,
     /// whether or not they are currently shown.
     Heading {
@@ -277,7 +277,7 @@ pub enum Row {
 ///
 /// `closed` names the groups whose properties are folded away. A closed
 /// group still shows its heading and still counts everything it has.
-pub fn build_rows(props: &[Prop], closed: &[String]) -> Vec<Row> {
+pub fn build_rows(props: &[Prop], closed: &[String]) -> Vec<InspectorRow> {
     let mut order: Vec<&str> = Vec::new();
     for prop in props {
         let group = group_of(prop);
@@ -301,7 +301,7 @@ pub fn build_rows(props: &[Prop], closed: &[String]) -> Vec<Row> {
             true
         } else {
             let open = !closed.iter().any(|shut| shut == group);
-            rows.push(Row::Heading {
+            rows.push(InspectorRow::Heading {
                 group: group.to_string(),
                 count: members.len(),
                 open,
@@ -310,7 +310,7 @@ pub fn build_rows(props: &[Prop], closed: &[String]) -> Vec<Row> {
         };
         if open {
             for index in members {
-                rows.push(Row::Field {
+                rows.push(InspectorRow::Field {
                     index,
                     kind: editor_of(&props[index]),
                 });
@@ -598,7 +598,7 @@ pub struct PropertyInspector {
     #[rust]
     props: Vec<Prop>,
     #[rust]
-    rows: Vec<Row>,
+    rows: Vec<InspectorRow>,
     #[rust]
     closed: Vec<String>,
     #[rust]
@@ -655,7 +655,7 @@ fn heading_key(group: &str) -> LiveId {
 }
 
 /// The key a property's row is kept under: the property's place in the list,
-/// which survives a fold. Row POSITIONS do not — folding a group above moves
+/// which survives a fold. InspectorRow POSITIONS do not — folding a group above moves
 /// every row below it, and the rows would swap widgets under the pointer.
 ///
 /// A group name whose 64-bit hash landed on a small integer is the only way
@@ -887,7 +887,7 @@ impl Widget for PropertyInspector {
         let rows = self.rows.clone();
         for row in &rows {
             match row {
-                Row::Heading { group, count, open } => {
+                InspectorRow::Heading { group, count, open } => {
                     let Some((widget, _)) =
                         self.item(cx.cx.cx, heading_key(group), live_id!(row_heading))
                     else {
@@ -897,7 +897,7 @@ impl Widget for PropertyInspector {
                     let row_walk = widget.walk(cx.cx.cx);
                     let _ = widget.draw_walk(cx, scope, row_walk);
                 }
-                Row::Field { index, kind } => {
+                InspectorRow::Field { index, kind } => {
                     let template = self.template_for(*kind);
                     let Some((widget, fresh)) = self.item(cx.cx.cx, field_key(*index), template)
                     else {
@@ -920,8 +920,8 @@ impl Widget for PropertyInspector {
         let mut widgets: Vec<WidgetRef> = Vec::with_capacity(self.rows.len());
         for row in &self.rows {
             let key = match row {
-                Row::Heading { group, .. } => heading_key(group),
-                Row::Field { index, .. } => field_key(*index),
+                InspectorRow::Heading { group, .. } => heading_key(group),
+                InspectorRow::Field { index, .. } => field_key(*index),
             };
             if let Some(item) = self.items.get(&key) {
                 widgets.push(item.widget.clone());
@@ -936,7 +936,7 @@ impl Widget for PropertyInspector {
         let rows = self.rows.clone();
         for row in &rows {
             match row {
-                Row::Heading { group, .. } => {
+                InspectorRow::Heading { group, .. } => {
                     if !self.folding {
                         continue;
                     }
@@ -952,7 +952,7 @@ impl Widget for PropertyInspector {
                         self.set_group_open(cx, group, !open);
                     }
                 }
-                Row::Field { index, kind } => {
+                InspectorRow::Field { index, kind } => {
                     let field = match self.items.get(&field_key(*index)) {
                         Some(item) => item.widget.child(live_id!(value)),
                         None => continue,
@@ -1147,19 +1147,19 @@ mod tests {
         let rows = build_rows(&props(), &[]);
         assert_eq!(
             rows[0],
-            Row::Field {
+            InspectorRow::Field {
                 index: 0,
                 kind: PropKind::Bool
             }
         );
         assert_eq!(
             rows[1],
-            Row::Field {
+            InspectorRow::Field {
                 index: 2,
                 kind: PropKind::Text
             }
         );
-        assert!(matches!(rows[2], Row::Heading { .. }));
+        assert!(matches!(rows[2], InspectorRow::Heading { .. }));
     }
 
     /// A group gathers everything that names it, however far apart the
@@ -1170,7 +1170,7 @@ mod tests {
         let rows = build_rows(&props(), &[]);
         assert_eq!(
             rows[2],
-            Row::Heading {
+            InspectorRow::Heading {
                 group: "draw_bg".to_string(),
                 count: 2,
                 open: true,
@@ -1178,14 +1178,14 @@ mod tests {
         );
         assert_eq!(
             rows[3],
-            Row::Field {
+            InspectorRow::Field {
                 index: 1,
                 kind: PropKind::Color
             }
         );
         assert_eq!(
             rows[4],
-            Row::Field {
+            InspectorRow::Field {
                 index: 3,
                 kind: PropKind::Number
             }
@@ -1205,7 +1205,7 @@ mod tests {
         let headings: Vec<String> = build_rows(&props, &[])
             .into_iter()
             .filter_map(|row| match row {
-                Row::Heading { group, .. } => Some(group),
+                InspectorRow::Heading { group, .. } => Some(group),
                 _ => None,
             })
             .collect();
@@ -1219,7 +1219,7 @@ mod tests {
         let rows = build_rows(&props(), &["draw_bg".to_string()]);
         assert_eq!(
             rows.last().unwrap(),
-            &Row::Heading {
+            &InspectorRow::Heading {
                 group: "draw_bg".to_string(),
                 count: 2,
                 open: false,
