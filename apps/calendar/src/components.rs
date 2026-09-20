@@ -1,6 +1,9 @@
 //! Quiet controls and row-owned hit regions shared by Calendar presentations.
 use crate::model::*;
 use crate::presentation::*;
+// The calendar's own colour contrast, not the theme store's: both come in
+// through globs and rustc will not pick one for us.
+use crate::presentation::contrast;
 use crate::presentation::rect;
 use makepad_civil_time::Day;
 use makepad_widgets::animator::Ease;
