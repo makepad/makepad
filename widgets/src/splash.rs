@@ -63,6 +63,16 @@ pub struct Splash {
     /// None leaves the storage default.
     #[rust]
     storage_quota: Option<u64>,
+    /// When Some, this isolate is ENFORCED — `host.request` is
+    /// refused outside `host_caps`, every network path is refused outside
+    /// these hosts, and the instruction budget below is charged. None keeps
+    /// the informational behaviour every existing host relied on.
+    #[rust]
+    policy_hosts: Option<Vec<String>>,
+    /// Script instructions this isolate may run over its life (cumulative,
+    /// unlike the per-evaluation cap). None = unbounded.
+    #[rust]
+    instruction_budget: Option<u64>,
     /// What to call this script in error messages. Set by the host to the
     /// mini-app's id; empty for previews and one-off evals.
     ///
@@ -167,8 +177,7 @@ impl Splash {
     fn eval_body(&mut self, cx: &mut Cx) {self.eval_styled_body(cx,false);}
 
     fn eval_styled_body(&mut self,cx:&mut Cx,preserve:bool) {
-        let body = self.body.as_ref();
-        if body.is_empty() {
+        if self.body.as_ref().is_empty() {
             return;
         }
 
@@ -183,8 +192,14 @@ impl Splash {
         crate::splash_host::set_caps_for_heap(heap_key, self.host_caps.clone());
         crate::splash_host::set_prompts_for_heap(heap_key, self.host_prompts);
         crate::splash_storage::set_quota_for_heap(heap_key, self.storage_quota);
+        self.apply_policy(heap_key);
+        if !crate::splash_policy::may_run(heap_key) {
+            log!("splash: {} is stopped: its instruction budget is spent", self.source_label());
+            return;
+        }
 
         let body_key = self.body_key();
+        let body = self.body.as_ref();
         // Full code string: prefix + body (no closing - parser auto-closes)
         let prefix = if self.allow_net {
             SPLASH_NET_PREFIX
@@ -250,6 +265,9 @@ impl Splash {
                 });
                 if preserve {
                     restore_modules(vm, saved);
+                }
+                if !crate::splash_policy::charge(heap_key, vm.last_limit_consumed() as u64) {
+                    log!("splash: an app spent its instruction budget evaluating its body and is stopped");
                 }
                 let body_modules: Vec<LiveId> = module_keys(vm)
                     .into_iter()
@@ -574,6 +592,10 @@ impl Splash {
         let mut called = false;
         crate::widget_async::contain_isolate_panic("script hook call", || {
         called = cx.with_script_vm_id(self.vm_id, |vm| {
+            let heap_key = vm.bx.heap.heap_key();
+            if !crate::splash_policy::may_run(heap_key) {
+                return false;
+            }
             // NoTrap: this is an existence probe for an OPTIONAL hook. A
             // trapping lookup queues a NotFound into the error log even though
             // the miss is handled right here — every host broadcast (e.g.
@@ -586,6 +608,7 @@ impl Splash {
             vm.with_instruction_limit(WIDGET_SCRIPT_INSTRUCTION_LIMIT, |vm| {
                 vm.call(fnval, args);
             });
+            crate::splash_policy::charge(heap_key, vm.last_limit_consumed() as u64);
             true
         });
         });
@@ -603,6 +626,10 @@ impl Splash {
         let mut called = false;
         crate::widget_async::contain_isolate_panic("script hook call", || {
         called = cx.with_script_vm_id(self.vm_id, |vm| {
+            let heap_key = vm.bx.heap.heap_key();
+            if !crate::splash_policy::may_run(heap_key) {
+                return false;
+            }
             let fnval = vm.bx.heap.scope_value(scope, name, NoTrap);
             if fnval.is_nil() || fnval.is_err() {
                 return false;
@@ -614,6 +641,7 @@ impl Splash {
             vm.with_instruction_limit(WIDGET_SCRIPT_INSTRUCTION_LIMIT, |vm| {
                 vm.call(fnval, &vals);
             });
+            crate::splash_policy::charge(heap_key, vm.last_limit_consumed() as u64);
             true
         });
         });
@@ -683,6 +711,38 @@ impl Splash {
         }
     }
 
+    /// Puts this isolate under an ENFORCED policy: `host.request` is
+    /// refused outside `host_caps`, every network path (`net` and artwork)
+    /// is refused outside `hosts`, and `instruction_budget` is charged
+    /// cumulatively until spent. Call before set_text. Pass `None` hosts to
+    /// return to the unenforced behaviour.
+    pub fn set_policy(&mut self, cx: &mut Cx, hosts: Option<Vec<String>>, instruction_budget: Option<u64>) {
+        self.policy_hosts = hosts;
+        self.instruction_budget = instruction_budget;
+        if self.vm_id != MAIN_SPLASH_VM_ID {
+            let heap_key = cx.with_script_vm_id(self.vm_id, |vm| vm.bx.heap.heap_key());
+            self.apply_policy(heap_key);
+        }
+    }
+
+    /// Instructions this isolate has run under its budget so far.
+    pub fn instructions_used(&mut self, cx: &mut Cx) -> u64 {
+        if self.vm_id == MAIN_SPLASH_VM_ID {
+            return 0;
+        }
+        let heap_key = cx.with_script_vm_id(self.vm_id, |vm| vm.bx.heap.heap_key());
+        crate::splash_policy::instructions_used(heap_key)
+    }
+
+    /// Push the policy fields onto the live isolate. The URL gate is
+    /// installed on first use, so an isolate with no policy is unaffected.
+    fn apply_policy(&mut self, heap_key: usize) {
+        crate::splash_policy::install_url_gate();
+        if let Some(hosts) = &self.policy_hosts {
+            crate::splash_policy::set_policy_for_heap(heap_key, self.host_caps.clone(), hosts.clone(), self.instruction_budget);
+        }
+    }
+
     /// This Splash's live isolate heap identity (None while stopped) — the
     /// same key `SplashHostRequest::heap_key` carries, so hosts can relate a
     /// request to a specific widget (e.g. to skip an IPC sender's own isolate
@@ -735,6 +795,18 @@ impl Splash {
 }
 
 impl SplashRef {
+    /// See [`Splash::set_policy`].
+    pub fn set_policy(&self, cx: &mut Cx, hosts: Option<Vec<String>>, instruction_budget: Option<u64>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_policy(cx, hosts, instruction_budget);
+        }
+    }
+
+    /// See [`Splash::instructions_used`].
+    pub fn instructions_used(&self, cx: &mut Cx) -> u64 {
+        self.borrow_mut().map(|mut inner| inner.instructions_used(cx)).unwrap_or(0)
+    }
+
     pub fn set_text(&self, cx: &mut Cx, v: &str) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_text(cx, v);

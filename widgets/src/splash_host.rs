@@ -179,9 +179,16 @@ pub fn splash_host_respond(
         vm.bx.heap.set_value(obj, id!(is_ok).into(), ok.into(), trap);
         vm.bx.heap.set_value(obj, id!(data).into(), data, trap);
         vm.bx.heap.set_value(obj, id!(error).into(), error, trap);
+        if !crate::splash_policy::may_run(heap_key) {
+            delivered = false;
+            return;
+        }
         vm.with_instruction_limit(WIDGET_SCRIPT_INSTRUCTION_LIMIT, |vm| {
             vm.call(callback.as_object().into(), &[obj.into()]);
         });
+        if !crate::splash_policy::charge(heap_key, vm.last_limit_consumed() as u64) {
+            crate::makepad_draw::log!("splash host: an app spent its instruction budget in a callback and is stopped");
+        }
         // A callback that errors (or pauses and errors later on its own
         // thread) leaves its errors queued on the trap; nothing else drains
         // this entry path, so they used to vanish and a broken callback
@@ -246,6 +253,26 @@ pub fn script_mod(vm: &mut ScriptVm) {
             };
 
             let heap_key = vm.bx.heap.heap_key();
+            // The capability list is checked HERE, not
+            // merely reported. A refused request never reaches the host's
+            // queue; the app hears `{is_ok: false, error}` like any other
+            // failure, so a well-written app degrades instead of hanging.
+            if let Err(reason) = crate::splash_policy::service_allowed(heap_key, &service) {
+                crate::makepad_draw::log!("splash host: refused {service:?}: {reason}");
+                return match callback {
+                    Some(callback) => {
+                        let obj = vm.bx.heap.new_object();
+                        let error = vm.new_string_with(|_vm, s| s.push_str(&reason));
+                        let trap = vm.bx.threads.cur().trap.pass();
+                        vm.bx.heap.set_value(obj, id!(is_ok).into(), false.into(), trap);
+                        vm.bx.heap.set_value(obj, id!(data).into(), NIL, trap);
+                        vm.bx.heap.set_value(obj, id!(error).into(), error, trap);
+                        vm.call(callback.as_object().into(), &[obj.into()]);
+                        (0.0f64).into()
+                    }
+                    None => script_err_invalid_args!(vm.trap(), "{}", reason),
+                };
+            }
             let req_id = BRIDGE.with(|b| {
                 let mut b = b.borrow_mut();
                 b.next_req_id += 1;
