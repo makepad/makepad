@@ -1470,6 +1470,67 @@ fn now_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    /// A wide file is folded to its FRONT PAIR, not to its first channel with
+    /// its last.
+    ///
+    /// On 5.1 the last channel is the low-frequency send and on 7.1 it is a
+    /// rear, so `frame[channels - 1]` puts one of those in the right ear -- in
+    /// the phones as well as the room. Stereo and mono are bit-identical either
+    /// way, which is why this went unnoticed through a merge: nothing reveals
+    /// it until somebody packs a wide file. It also moves `track_digest`, so a
+    /// wide track repacked loses the wave, loop and lyrics caches it already
+    /// had.
+    #[test]
+    fn a_wide_file_is_folded_to_its_front_pair_not_its_first_and_last() {
+        let front_l = 0.5f32;
+        let front_r = 0.25f32;
+        let centre = 0.75f32;
+        let lfe = -1.0f32;
+        let rear_l = 0.125f32;
+        let rear_r = -0.5f32;
+
+        // 5.1, one frame, in the usual L R C LFE Ls Rs order.
+        let six = DecodedAudio {
+            rate: 48_000,
+            channels: 6,
+            pcm_interleaved_f32: vec![front_l, front_r, centre, lfe, rear_l, rear_r],
+        };
+        let got = deck_frames(&six).expect("six channels decode");
+        let want = |v: f32| (v.clamp(-1.0, 1.0) * 32767.0) as i16;
+        assert_eq!(
+            got,
+            vec![[want(front_l), want(front_r)]],
+            "a 5.1 frame must fold to its front pair; the last channel is the LFE"
+        );
+        assert_ne!(
+            got[0][1],
+            want(rear_r),
+            "the right ear must not be the surround"
+        );
+
+        // Stereo is untouched, and mono goes to both ears.
+        let stereo = DecodedAudio {
+            rate: 48_000,
+            channels: 2,
+            pcm_interleaved_f32: vec![front_l, front_r],
+        };
+        assert_eq!(
+            deck_frames(&stereo).expect("stereo decodes"),
+            vec![[want(front_l), want(front_r)]]
+        );
+
+        let mono = DecodedAudio {
+            rate: 48_000,
+            channels: 1,
+            pcm_interleaved_f32: vec![front_l],
+        };
+        assert_eq!(
+            deck_frames(&mono).expect("mono decodes"),
+            vec![[want(front_l), want(front_l)]],
+            "one channel is heard in both ears"
+        );
+    }
+
     use super::*;
     use makepad_audio_encode::{encode_vorbis, EncodeOptions};
     use std::sync::atomic::{AtomicU64, Ordering};
