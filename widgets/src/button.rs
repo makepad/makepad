@@ -1310,15 +1310,14 @@ impl Widget for Button {
         cx: &mut Cx2d,
         over: Option<&crate::width_override::WidthOverride>,
     ) -> Option<f64> {
-        if let Some(o) = over {
-            if o.opaque {
-                return None;
-            }
-            if o.hides() {
-                return Some(0.0);
-            }
+        if over.is_some_and(|o| o.opaque) {
+            return None;
         }
-        if !self.visible {
+        // A block that states `visible` states it: the child may be wearing the
+        // opposite right now, and a price taken off what it is wearing is a
+        // price of the concession rather than of the face being priced.
+        let visible = over.and_then(|o| o.visible).unwrap_or(self.visible);
+        if !visible {
             return Some(0.0);
         }
 

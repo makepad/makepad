@@ -26,6 +26,7 @@ pub mod theme_desktop_skeleton;
 pub mod theme_tokens;
 pub mod theme_store;
 pub mod theme_lab;
+pub mod conceding_row;
 pub mod widget;
 pub mod width_override;
 pub mod widget_async;
@@ -826,6 +827,8 @@ true
     crate::select::script_mod(vm);
     crate::toast::script_mod(vm);
     crate::placeholder::script_mod(vm);
+    // Only needs a View to derive from; the ladder it uses is Rust.
+    crate::conceding_row::script_mod(vm);
 
     crate::bare_step::script_mod(vm);
     crate::turtle_step::script_mod(vm);

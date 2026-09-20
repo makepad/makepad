@@ -1218,4 +1218,183 @@ mod tests {
             );
         }
     }
+
+    /// A row of its own, giving way as it is narrowed.
+    ///
+    /// The row prices every rung before it draws, so narrowing it past three
+    /// rungs at once settles in ONE draw rather than one draw per rung. That is
+    /// the whole point of measuring rather than taking a rung and looking.
+    #[test]
+    fn a_conceding_row_settles_in_one_draw_however_far_it_has_to_fall() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        let root = cx.with_vm(|vm| {
+            <App as AppMain>::script_mod(vm);
+            let value = script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    row := ConcedingRow{
+                        a := ButtonFlat{ text: "Inspect the widget"  give_up := 1  tight: { text: "<>" } }
+                        b := ButtonFlat{ text: "Reset everything"    give_up := 2  tight: { visible: false } }
+                        c := ButtonFlat{ text: "New only"            give_up := 3  tight: { text: "New" } }
+                        d := ButtonFlat{ text: "Always here" }
+                    }
+                }
+            });
+            assert!(vm.take_errors().is_empty());
+            WidgetRef::script_from_value(vm, value)
+        });
+
+        let pass = DrawPass::new(&mut cx);
+        let mut list = DrawList2d::new(&mut cx);
+        let one = |cx: &mut Cx, list: &mut DrawList2d, w: f64| {
+            let size = dvec2(w, 120.0);
+            pass.set_size(cx, size);
+            cx.redraw_all();
+            let event = std::mem::take(&mut cx.new_draw_event);
+            let mut draw = CxDraw::new(cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&pass, Some(1.0));
+            list.begin_always(&mut cx2d);
+            cx2d.begin_root_turtle(size, Layout::flow_down());
+            root.draw_all(&mut cx2d, &mut Scope::empty());
+            cx2d.end_pass_sized_turtle();
+            list.end(&mut cx2d);
+            cx2d.end_pass(&pass);
+        };
+        let face = |cx: &Cx| {
+            (
+                root.widget(cx, ids!(a)).text(),
+                root.widget(cx, ids!(b)).visible(),
+                root.widget(cx, ids!(c)).text(),
+            )
+        };
+
+        // Wide: everything as authored.
+        one(&mut cx, &mut list, 900.0);
+        assert_eq!(
+            face(&cx),
+            ("Inspect the widget".to_string(), true, "New only".to_string()),
+            "a row with room to spare must give up nothing"
+        );
+
+        // Narrow enough to need all three rungs, in ONE step.
+        one(&mut cx, &mut list, 120.0);
+        assert_eq!(
+            face(&cx),
+            ("<>".to_string(), false, "New".to_string()),
+            "three rungs, one draw"
+        );
+
+        // A second draw at the same width must change nothing.
+        let settled = face(&cx);
+        one(&mut cx, &mut list, 120.0);
+        assert_eq!(face(&cx), settled, "a settled row must stay settled");
+
+        // And back up, to the same faces at the same widths.
+        one(&mut cx, &mut list, 900.0);
+        assert_eq!(
+            face(&cx),
+            ("Inspect the widget".to_string(), true, "New only".to_string()),
+            "the row must give its faces back when the room returns"
+        );
+    }
+
+
+    /// The same widths on the way down and on the way back up.
+    ///
+    /// Two things this catches that a single narrowing does not: a row that
+    /// settles somewhere else depending on which way the window was dragged,
+    /// which on a slow drag reads as the row lagging behind the mouse; and a row
+    /// that flaps, where the face it puts on changes the width it measures and
+    /// it changes its mind forever.
+    #[test]
+    fn a_conceding_row_reaches_the_same_face_going_down_and_coming_back() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        let root = cx.with_vm(|vm| {
+            <App as AppMain>::script_mod(vm);
+            let value = script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    row := ConcedingRow{
+                        a := ButtonFlat{ text: "Inspect the widget"  give_up := 1  tight: { text: "<>" } }
+                        b := ButtonFlat{ text: "Reset everything"    give_up := 2  tight: { visible: false } }
+                        c := ButtonFlat{ text: "New only"            give_up := 3  tight: { text: "New" } }
+                        d := ButtonFlat{ text: "Always here" }
+                    }
+                }
+            });
+            assert!(vm.take_errors().is_empty());
+            WidgetRef::script_from_value(vm, value)
+        });
+
+        let pass = DrawPass::new(&mut cx);
+        let mut list = DrawList2d::new(&mut cx);
+        let mut one = |cx: &mut Cx, w: f64| {
+            let size = dvec2(w, 120.0);
+            pass.set_size(cx, size);
+            cx.redraw_all();
+            let event = std::mem::take(&mut cx.new_draw_event);
+            let mut draw = CxDraw::new(cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&pass, Some(1.0));
+            list.begin_always(&mut cx2d);
+            cx2d.begin_root_turtle(size, Layout::flow_down());
+            root.draw_all(&mut cx2d, &mut Scope::empty());
+            cx2d.end_pass_sized_turtle();
+            list.end(&mut cx2d);
+            cx2d.end_pass(&pass);
+        };
+        let face = |cx: &Cx| {
+            (
+                root.widget(cx, ids!(a)).text(),
+                root.widget(cx, ids!(b)).visible(),
+                root.widget(cx, ids!(c)).text(),
+            )
+        };
+
+        let widths: Vec<f64> = (0..80).map(|s| 700.0 - 8.0 * s as f64).collect();
+
+        let mut down = Vec::new();
+        for &w in &widths {
+            one(&mut cx, w);
+            down.push(face(&cx));
+        }
+
+        let mut up = Vec::new();
+        for &w in widths.iter().rev() {
+            one(&mut cx, w);
+            up.push(face(&cx));
+        }
+        up.reverse();
+
+        for (i, &w) in widths.iter().enumerate() {
+            assert_eq!(
+                down[i], up[i],
+                "at {w} the row settled differently going down and coming back"
+            );
+        }
+
+        // A drawn row must never change its mind on a draw that changed nothing.
+        for &w in &widths {
+            one(&mut cx, w);
+            let settled = face(&cx);
+            one(&mut cx, w);
+            assert_eq!(face(&cx), settled, "the row flapped at {w}");
+        }
+
+        // And it must actually have given way somewhere across that range.
+        assert!(
+            down.first() != down.last(),
+            "the row never gave anything up across 700 points of narrowing"
+        );
+    }
+
 }

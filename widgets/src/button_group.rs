@@ -316,6 +316,23 @@ impl ConcessionLadder {
     }
 
     /// How many concessions are in force.
+    /// Forget every learned cost, leaving the level where it is.
+    ///
+    /// A cost is only true for the strings and the theme it was measured under.
+    /// A row that re-prices from scratch each frame clears them first rather
+    /// than carrying a number it can no longer stand behind; zero reads as NOT
+    /// KNOWN, which is the honest state for a cost nobody has measured.
+    pub fn clear_costs(&mut self) {
+        for c in self.costs.iter_mut() {
+            *c = 0.0;
+        }
+    }
+
+    /// What each rung is currently believed to save. Zero means NOT KNOWN.
+    pub fn costs(&self) -> &[f64] {
+        &self.costs
+    }
+
     pub fn level(&self) -> usize {
         self.level
     }

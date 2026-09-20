@@ -277,13 +277,13 @@ pub trait Widget: WidgetNode {
         cx: &mut Cx2d,
         over: Option<&crate::width_override::WidthOverride>,
     ) -> Option<f64> {
-        if let Some(o) = over {
-            if o.opaque {
-                return None;
-            }
-            if o.hides() {
-                return Some(0.0);
-            }
+        if over.is_some_and(|o| o.opaque) {
+            return None;
+        }
+        // A block that states `visible` states it, whatever the widget is
+        // wearing at the moment it is asked.
+        if !over.and_then(|o| o.visible).unwrap_or_else(|| self.visible()) {
+            return Some(0.0);
         }
         let walk = self.walk(cx.cx);
         let width = over.and_then(|o| o.width).unwrap_or(walk.width);

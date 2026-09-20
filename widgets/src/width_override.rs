@@ -80,4 +80,54 @@ impl WidthOverride {
     pub fn hides(&self) -> bool {
         self.visible == Some(false)
     }
+
+    /// Lay `other` over this one: every field it states wins, every field it
+    /// leaves alone keeps what was here.
+    ///
+    /// A row prices a level by laying the rungs in force over the authored
+    /// face, in order, and asking the child what it would be under the result.
+    /// Doing it this way rather than reading the child is what keeps a price
+    /// independent of the face the child happens to be wearing -- otherwise the
+    /// first concession makes every later measurement a measurement of the
+    /// concession, and the row can never price its way back up.
+    pub fn overlay(&mut self, other: &Self) {
+        if other.visible.is_some() {
+            self.visible = other.visible;
+        }
+        if other.text.is_some() {
+            self.text = other.text.clone();
+        }
+        if other.width.is_some() {
+            self.width = other.width;
+        }
+        if other.margin.is_some() {
+            self.margin = other.margin;
+        }
+        if other.padding.is_some() {
+            self.padding = other.padding;
+        }
+        if other.spacing.is_some() {
+            self.spacing = other.spacing;
+        }
+        self.opaque |= other.opaque;
+    }
+
+    /// Every key this block names, width-relevant or not.
+    ///
+    /// A row snapshots exactly these off the child before it puts any face on,
+    /// so that taking a face off again is applying a block like any other.
+    pub fn keys(vm: &mut ScriptVm, block: ScriptObject) -> Vec<LiveId> {
+        let mut keys = Vec::new();
+        let mut read = |_vm: &mut ScriptVm, map: &mut ScriptObjectMap| {
+            for (key, _) in map.iter() {
+                if let Some(k) = key.as_id() {
+                    if !keys.contains(&k) {
+                        keys.push(k);
+                    }
+                }
+            }
+        };
+        vm.proto_map_iter_mut_with(block, &mut read);
+        keys
+    }
 }
