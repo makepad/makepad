@@ -8,7 +8,7 @@ script_mod! {
     set_type_default() do #(DrawPhoneApp::script_shader(vm)) {
         ..mod.draw.DrawQuad
         image: texture_2d(float)
-        opacity: 1.0 radius: 0.0 y_flip: 0.0
+        opacity: 1.0 radius: 0.0
         // The part of the texture this rect shows: all of it, or a window
         // onto it (a crossfade tile app opening: its full frame clipped
         // to the tile's growing rect, never scaled).
@@ -17,7 +17,6 @@ script_mod! {
             let sdf=Sdf2d.viewport(self.pos*self.rect_size)
             sdf.box(0.0,0.0,self.rect_size.x,self.rect_size.y,self.radius)
             let uv=self.uv_pos+self.pos*self.uv_size
-            let uv=vec2(uv.x,mix(uv.y,1.0-uv.y,self.y_flip))
             sdf.fill(self.image.sample(uv)*self.opacity)
             return sdf.result
         }
@@ -29,7 +28,6 @@ pub struct DrawPhoneApp {
     #[deref] draw_super: DrawQuad,
     #[live] pub opacity: f32,
     #[live] pub radius: f32,
-    #[live] pub y_flip: f32,
     #[live] pub uv_pos: Vec2f,
     #[live] pub uv_size: Vec2f,
 }
@@ -77,7 +75,6 @@ impl WmDesk {
         self.draw_phone.opacity = 1.0;
         // Sdf2d.box uses half the visible corner radius.
         self.draw_phone.radius = radius * 0.5;
-        self.draw_phone.y_flip = if matches!(cx.os_type(), OsType::Android(_)) {1.0} else {0.0};
         self.draw_phone.draw_abs(cx, rect);
     }
     fn client_arriving(&self, client: ClientId) -> bool {
@@ -153,7 +150,6 @@ impl WmDesk {
         self.draw_phone.draw_vars.set_texture(0,capture.frame.texture());
         self.draw_phone.opacity=opacity;
         self.draw_phone.radius=0.0;
-        self.draw_phone.y_flip=if matches!(cx.os_type(),OsType::Android(_)){1.0}else{0.0};
         self.draw_phone.uv_pos=vec2(0.0,0.0);
         self.draw_phone.uv_size=vec2(1.0,(2.0/full.size.y.max(1.0)) as f32);
         self.draw_phone.draw_abs(cx,band);
@@ -166,7 +162,6 @@ impl WmDesk {
         self.draw_phone.draw_vars.set_texture(0,capture.frame.texture());
         self.draw_phone.opacity=opacity;
         self.draw_phone.radius=radius;
-        self.draw_phone.y_flip=if matches!(cx.os_type(),OsType::Android(_)){1.0}else{0.0};
         let size=dvec2(full.size.x.max(1.0),full.size.y.max(1.0));
         self.draw_phone.uv_pos=vec2(((window.pos.x-full.pos.x)/size.x) as f32,((window.pos.y-full.pos.y)/size.y) as f32);
         self.draw_phone.uv_size=vec2((window.size.x/size.x) as f32,(window.size.y/size.y) as f32);

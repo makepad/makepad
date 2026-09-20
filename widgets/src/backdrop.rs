@@ -2,7 +2,7 @@
 //! a Gaussian pyramid; only intervening content in a sampling footprint creates
 //! another one. Blur work is deferred until all requested levels are known.
 use crate::{
-    gauss_stack::{gauss_render_texture_y_flip_for_os, GaussStack},
+    gauss_stack::GaussStack,
     gauss_view::{GaussBlurSnapshot, GAUSS_VIEW_LEVELS},
     makepad_draw::*,
     window::{DrawGaussDownsample, DrawGaussScene, DrawGaussUpsample},
@@ -98,7 +98,7 @@ impl BackdropCompositor {
         self.levels[source] = self.levels[source].max(count);
         self.stacks[source].snapshot(
             self.size,
-            gauss_render_texture_y_flip_for_os(cx.os_type()),
+            0.0,
             cx.current_dpi_factor(),
         )
     }

@@ -1,4 +1,4 @@
-use crate::gauss_stack::{GaussStack, gauss_render_texture_y_flip_for_os};
+use crate::gauss_stack::GaussStack;
 #[cfg(feature = "voice")]
 use crate::voice_wave::VoiceWaveWidgetExt;
 use crate::{
@@ -682,8 +682,8 @@ impl SplodedStack {
     fn draw_resolve(&mut self, cx: &mut Cx2d, resolve: &mut DrawSsaaResolve, root_size: Vec2d) {
         // Same orientation as the gauss compositor, NOT the SSAA one: this
         // pass renders at the window's own dpi, so its texture comes back
-        // top-down (grab-verified — the inverted flag renders the UI mirrored).
-        let source_y_flip = gauss_render_texture_y_flip_for_os(cx.os_type());
+        // top-down like every render texture (the platform's Y law).
+        let source_y_flip = 0.0;
         resolve
             .draw_vars
             .set_uniform(cx, live_id!(source_y_flip), &[source_y_flip]);
@@ -768,7 +768,7 @@ impl SsaaStack {
     /// supersized scene texture with LINEAR (== a 2x2 box for supersample==2).
     fn draw_resolve(&mut self, cx: &mut Cx2d, resolve: &mut DrawSsaaResolve, root_size: Vec2d) {
         // Scene texture is bottom-up — flip opposite to the gauss compositor or the UI shows upside-down.
-        let source_y_flip = 1.0 - gauss_render_texture_y_flip_for_os(cx.os_type());
+        let source_y_flip = 1.0;
         resolve
             .draw_vars
             .set_uniform(cx, live_id!(source_y_flip), &[source_y_flip]);
@@ -1065,7 +1065,7 @@ impl Window {
         cx.begin_root_turtle(size, Layout::flow_overlay());
         let window_id = self.window.handle.window_id();
         self.use_gauss_capture = window_wants_gauss_capture(cx, window_id);
-        let source_y_flip = gauss_render_texture_y_flip_for_os(cx.os_type());
+        let source_y_flip = 0.0;
         let gauss_snapshot = if self.use_gauss_capture {
             Some(
                 self.gauss_stack
@@ -1320,15 +1320,6 @@ fn caption_press_is_clients(over_content: bool, mouse_held_outside: bool) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn gauss_render_texture_y_flip_is_platform_specific() {
-        assert_eq!(gauss_render_texture_y_flip_for_os(&OsType::Macos), 0.0);
-        assert_eq!(
-            gauss_render_texture_y_flip_for_os(&OsType::Android(Default::default())),
-            1.0
-        );
-    }
 
     /// The bare caption is the window manager's to drag — that is the whole
     /// point of a caption bar, and the fix must not take it away.

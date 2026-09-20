@@ -3269,15 +3269,23 @@ impl CxVulkan {
             self.device.cmd_set_viewport(
                 self.command_buffer,
                 0,
+                // THE Y LAW: the 2D camera is GL-style -- the top of the
+                // pass rect lands at clip y = +1 -- and Vulkan's clip space
+                // points down, so every pass drawn with that camera, window
+                // and capture alike, renders through a negative-height
+                // viewport. The window comes out upright and a capture's
+                // rows are stored top-left like Metal's, on Android as on
+                // the desktop, so nobody downstream flips V. (The direct
+                // display's letterbox blit is not such a pass: its own
+                // vertex shader maps uv.y = 0 to clip -1 and keeps a
+                // positive viewport.) Make this positive and a whole
+                // Wayland or X11 window stands on its head; make one pass
+                // differ and every consumer starts flipping V again.
                 &[vk::Viewport {
                     x: 0.0,
-                    // Window/swapchain: Android is already Y-down. A
-                    // negative-height viewport here inverts the desk while
-                    // WindowFrame captures (offscreen, still negative-Y)
-                    // stay upright.
-                    y: 0.0,
+                    y: self.swapchain_extent.height as f32,
                     width: self.swapchain_extent.width as f32,
-                    height: self.swapchain_extent.height as f32,
+                    height: -(self.swapchain_extent.height as f32),
                     min_depth: 0.0,
                     max_depth: 1.0,
                 }],
@@ -4209,15 +4217,14 @@ impl CxVulkan {
             self.device.cmd_set_viewport(
                 self.command_buffer,
                 0,
+                // Same law as the window pass above: a negative-height
+                // viewport, so this texture's row 0 is the top of the pass
+                // and whoever samples it plain-samples.
                 &[vk::Viewport {
                     x: 0.0,
-                    // Same origin as the swapchain (y=0, +height): Android
-                    // is Y-down. Do not invert captures independently —
-                    // that is what made the compiling card flip whenever
-                    // the desk was corrected.
-                    y: 0.0,
+                    y: target_height as f32,
                     width: target_width as f32,
-                    height: target_height as f32,
+                    height: -(target_height as f32),
                     min_depth: 0.0,
                     max_depth: 1.0,
                 }],

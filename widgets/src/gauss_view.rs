@@ -34,7 +34,7 @@
 //! here reads `draw_pass.time`, which would pin the window at display rate for as
 //! long as the glass is on screen — see the note on `ripple_age`.
 use crate::{
-    gauss_stack::{gauss_render_texture_y_flip_for_os, GaussStack},
+    gauss_stack::GaussStack,
     makepad_derive_widget::*,
     makepad_draw::*,
     view::View,
@@ -330,7 +330,7 @@ impl CaptureGauss {
     /// begun: `shift` and `size` are the capture pass's, `root_size` the
     /// root turtle's (the enclosing window's).
     pub fn begin(&mut self, cx: &mut Cx2d, pass: DrawPassId, shift: Vec2d, size: Vec2d, root_size: Vec2d) {
-        let source_y_flip = gauss_render_texture_y_flip_for_os(cx.os_type());
+        let source_y_flip = 0.0;
         let dpi_factor = cx.current_dpi_factor();
         let wants = std::env::var_os("MAKEPAD_NO_GAUSS").is_none() && {
             let global = cx.global::<GaussWindowGlobal>();
