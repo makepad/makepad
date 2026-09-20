@@ -12,6 +12,10 @@
 //!   engages a drag (one step per pixel, Shift fine, Ctrl snaps, clamping
 //!   shifts the anchor), a plain click opens text entry, the end zones step.
 //!   `enabled: false` dims it and makes it inert.
+//! * `mod.widgets.FabSlider` — a horizontal track with the name on its
+//!   left and the number on its right. The press lands the thumb where the
+//!   pointer is and the drag keeps it there; a click on the name takes the
+//!   row back to zero.
 //! * `mod.widgets.FabColorWheel` — hue ring around a saturation/value
 //!   square, pointer-captured drags, arrow-key nudges.
 //! * `mod.widgets.FabColorPick` — a swatch that opens a self-managed
@@ -31,35 +35,6 @@ use crate::{
     text_input::*, view::View, widget::*,
 };
 use crate::makepad_script::script;
-
-/// Whether the dev panel wears the app's theme instead of its own palette.
-///
-/// Per `Cx` rather than a process global: a test builds its own `Cx`, and
-/// two tests that each install a sheet must not be able to see each other's
-/// answer to this.
-#[derive(Default)]
-struct PanelSkin {
-    wears_theme: bool,
-}
-
-/// Does the panel wear the app's theme?
-///
-/// `false` is the default and the answer this has always given. See
-/// [`set_panel_wears_theme`] for what `true` changes.
-pub fn panel_wears_theme(cx: &mut Cx) -> bool {
-    cx.global::<PanelSkin>().wears_theme
-}
-
-/// Put the panel in the app's theme, or back in its own palette.
-///
-/// This only records the choice. The palette is built by [`script_mod`], so
-/// the caller has to ask for a style reload before anything changes, and the
-/// panel has to notice that its chrome moved underneath it -- the tweaker's
-/// sidebar is evaluated once, when it first opens, and watches the palette
-/// for exactly this reason.
-pub fn set_panel_wears_theme(cx: &mut Cx, on: bool) {
-    cx.global::<PanelSkin>().wears_theme = on;
-}
 
 pub fn script_mod(vm: &mut ScriptVm) {
     // Phase 1: the token table and a prelude carrying the `fab` alias, so
@@ -126,7 +101,37 @@ pub fn script_mod(vm: &mut ScriptVm) {
             border: 1.0
             swatch_width: 46.0
 
-            // ---- type (points) ----
+            // ---- type ----
+            // The kit's own face, here for the reason the palette above is
+            // here. A sheet MOVES `theme.font_regular` -- `android` takes
+            // Roboto, `ios` Inter -- and installing a blend takes the sheet
+            // off and puts it back on, so a kit whose words came from the
+            // theme changed typeface on the applied frame and changed back
+            // on leave. The row heights are fab and held; the text metrics
+            // did not, and every label and field on the panel reflowed under
+            // the hand of whoever was dragging a weight. The Theme tab's
+            // picker already carries a face of its own against exactly this
+            // (`PanelFont`, tweaker.rs); the kit carries the same one, so
+            // the panel and the controls in it read as one surface.
+            //
+            // The LATIN member only. What follows it in the family -- the
+            // symbol face, and the CJK and emoji members the policy keeps
+            // lazy -- is whatever was resolved for the app, because the
+            // search well and the hex field take TYPED text: a panel that
+            // reflows is a nuisance, a panel that cannot spell what was
+            // typed into it is a dead end.
+            font: theme.font_regular{
+                font_family: theme.font_regular.font_family{
+                    latin := FontMember{
+                        res: crate_resource("self:resources/IBMPlexSans-Text.ttf")
+                        asc: -0.1
+                        desc: 0.0
+                    }
+                }
+                line_spacing: 1.2
+            }
+
+            // ---- type sizes (points) ----
             font_size_ui: 8.5
             font_size_small: 7.5
             font_size_header: 9.0
@@ -139,125 +144,8 @@ pub fn script_mod(vm: &mut ScriptVm) {
     };
     vm.eval(block);
 
-    // Phase 1b: the panel in the app's theme, when it has been asked for.
-    //
-    // OFF IS THE DEFAULT, and off is this block never running at all -- the
-    // table above is then exactly what it has always been, byte for byte.
-    //
-    // On, the COLOUR entries are re-pointed at the theme's own roles, and
-    // only the colour entries. The density, the type sizes and the motion
-    // stay where they are: a 24px inspector row being 24px is what makes the
-    // panel an inspector, and letting `android`'s 48px controls in through
-    // this door would be the sunken filter field all over again.
-    //
-    // The ROLES rather than the older tokens, for two reasons. A role is
-    // there under every sheet and every base theme -- no sheet names one, and
-    // `theme_tokens::sheet_roles_script` derives the whole set from what the
-    // sheet DID set -- so there is no palette entry that resolves to nothing
-    // under some style. And the roles come in ground/ink PAIRS that were
-    // picked to read against one another, which is what stops a light sheet
-    // painting pale words on a pale panel.
-    //
-    // What wearing a theme does NOT do is hand the panel that theme's
-    // SHADERS. `windows-2000` and `nextstep` replace `Button`, `TextInput`
-    // and `DropDown` `draw_bg.pixel` outright with a hard-coded Win95
-    // palette; every template the panel is built from declares a `pixel` of
-    // its own, so those never apply, worn or not. The panel can change
-    // colour here. It cannot turn into somebody else's control set, and it
-    // cannot become the white slab that immunity was written to avoid.
-    //
-    // `mod.tweak_panel` is re-pointed from here too. It is the tweaker's
-    // table, not this module's, but this module is registered LAST
-    // (`lib.rs` calls the tweaker's `script_mod` first), so both tables
-    // exist by now -- and what "wearing the theme" means should be one
-    // decision in one place rather than the same decision made twice.
-    if panel_wears_theme(vm.cx_mut()) {
-        let block = script! {
-            use mod.prelude.widgets_internal.*
-
-            mod.fab = {
-                ..mod.fab,
-
-                // ---- surfaces ----
-                // The panel is a container stack over the app's surface: the
-                // body one rung down, headers and rows one rung up, the
-                // popover at the top so it stands off whatever is under it.
-                color_area: theme.color_surface_container_low
-                color_editor: theme.color_surface
-                color_editor_alt: theme.color_surface_container_low
-                color_header: theme.color_surface_container_high
-                color_panel: theme.color_surface_container_high
-                color_panel_sub: theme.color_surface_container
-                color_popover: theme.color_surface_container_highest
-                color_popover_border: theme.color_outline
-                color_border: theme.color_outline
-                color_border_light: theme.color_outline_variant
-                color_row_hover: theme.color_surface_container_high
-                // The wells go to the theme's own inset family, which is the
-                // white field of a light style and the sunk well of a dark
-                // one -- the thing the fab palette calls `color_input`.
-                color_input: theme.color_inset
-                color_input_hover: theme.color_inset_hover
-                color_input_active: theme.color_inset_focus
-                color_button: theme.color_surface_container_high
-                color_button_hover: theme.color_surface_container_highest
-                color_button_down: theme.color_surface_container
-                color_button_active: theme.color_primary
-
-                // ---- text ----
-                // `color_on_surface` is the ink the role derivation already
-                // put to the brightest rung a widget lays text on, so it
-                // reads on every surface above.
-                color_text: theme.color_on_surface
-                color_text_dim: theme.color_on_surface_variant
-                // NOT `theme.color_placeholder`: that is a pale grey chosen
-                // against an app's page, and on the white field a light
-                // sheet gives this palette it stands only 2.1 apart. The
-                // muted grade is the body ink pulled part of the way to the
-                // panel's ground instead, which lands in the same place
-                // relative to the ink whatever the ground is.
-                color_text_muted: mix(theme.color_on_surface, theme.color_surface_container_low, 0.4)
-                color_text_active: theme.color_on_surface
-                color_text_header: theme.color_on_surface
-                color_text_on_accent: theme.color_on_primary
-
-                // ---- accents ----
-                // The four that MEAN something -- error, warning, success --
-                // keep meaning it: red is an error under every style, and the
-                // theme's own are already the readable version of that.
-                color_accent: theme.color_primary
-                color_accent_hover: theme.color_primary
-                color_accent_dim: theme.color_primary_container
-                color_selection_bg: theme.color_primary_container
-                color_focus_ring: theme.color_primary
-                color_warning: theme.color_warning
-                color_error: theme.color_error
-                color_ok: theme.color_success
-
-                // ---- the drag-numeric field's inset well ----
-                color_num: theme.color_inset
-                color_num_hover: theme.color_inset_hover
-                color_num_fill: theme.color_primary_container
-                color_num_arrow: theme.color_on_surface_variant
-            }
-
-            // The panel's own three ink grades, which sit on the panel's
-            // wells rather than on a fab row and so are graded apart from
-            // the fab ones. Worn, they come off the same pairs.
-            mod.tweak_panel = {
-                ..mod.tweak_panel,
-                text_dim: theme.color_on_surface_variant
-                text_muted: mix(theme.color_on_surface, theme.color_surface_container_low, 0.35)
-                face_off: theme.color_inset
-            }
-            true
-        };
-        vm.eval(block);
-    }
-
-    // Phase 1c: the prelude carrying the `fab` alias, built from whichever
-    // palette is in force. Separate from phase 1 so the block above can sit
-    // between the two: the alias holds the table it was built from, so
+    // Phase 1b: the prelude carrying the `fab` alias, built from the table
+    // above once it is final. The alias holds the table it was built from, so
     // re-pointing `mod.fab` after this would leave every control reading the
     // palette that is no longer there.
     let block = script! {
@@ -355,7 +243,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 ink_centered: true
                 color: fab.color_text_dim
                 text_overflow: TextOverflow.Ellipsis
-                text_style: theme.font_regular{
+                text_style: fab.font{
                     font_size: fab.font_size_ui
                 }
             }
@@ -381,7 +269,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 draw_text +: {
                     ink_centered: true
                     color: fab.color_text
-                    text_style: theme.font_regular{
+                    text_style: fab.font{
                         font_size: fab.font_size_ui
                     }
                 }
@@ -412,6 +300,109 @@ pub fn script_mod(vm: &mut ScriptVm) {
                         from: {all: Snap}
                         apply: { draw_bg: {focus: 1.0} }
                     }
+                }
+            }
+        }
+
+        set_type_default() do #(DrawFabSlider::script_shader(vm)){
+            ..mod.draw.DrawQuad
+
+            // `#[live]` fields on DrawFabSlider, so they are already
+            // instances — see DrawDragNum above.
+            hover: 0.0
+            down: 0.0
+            focus: 0.0
+            disabled: 0.0
+            travel: 0.0
+            label_px: 0.0
+            readout_px: 0.0
+            thumb_px: 12.0
+            inset_px: 2.0
+
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                let h = self.rect_size.y
+                // The track is whatever the name and the number leave of the
+                // row. Rust hands over the same two column widths its hit
+                // test measures from, so the thumb is drawn where it can be
+                // taken hold of.
+                let x0 = self.label_px
+                let x1 = max(x0 + 2.0, self.rect_size.x - self.readout_px)
+                let w = x1 - x0
+                let dim = 1.0 - 0.6 * self.disabled
+                let cy = h * 0.5
+                let well = max(4.0, h - 10.0)
+
+                sdf.box(x0 + 0.5, cy - well * 0.5, w - 1.0, well, fab.radius)
+                let mut base = fab.color_num.mix(fab.color_num_hover, self.hover)
+                base = vec4(base.xyz, base.w * dim)
+                sdf.fill_keep(base)
+                let mut border = fab.color_border.mix(fab.color_focus_ring, self.focus)
+                border = vec4(border.xyz, border.w * dim)
+                sdf.stroke(border, 1.0)
+
+                // The thumb's centre never leaves the well, so what it runs
+                // over is the well less the inset at both ends and its own
+                // width — the three numbers `SliderTravel` measures with.
+                let span = max(1.0, w - self.inset_px * 2.0 - self.thumb_px)
+                let tc = x0 + self.inset_px + self.thumb_px * 0.5 + self.travel * span
+                sdf.box(x0 + 1.0, cy - well * 0.5 + 1.0, max(1.0, tc - x0 - 1.0), well - 2.0, fab.radius)
+                sdf.fill(vec4(fab.color_num_fill.xyz, 0.85 * dim))
+
+                sdf.box(tc - self.thumb_px * 0.5, 2.0, self.thumb_px, h - 4.0, fab.radius)
+                let mut face = fab.color_button.mix(fab.color_button_hover, self.hover).mix(fab.color_button_down, self.down)
+                face = vec4(face.xyz, face.w * dim)
+                sdf.fill_keep(face)
+                sdf.stroke(vec4(fab.color_border.xyz, fab.color_border.w * dim), 1.0)
+                return sdf.result
+            }
+        }
+
+        mod.widgets.FabSliderBase = #(FabSlider::register_widget(vm))
+        /** The track: a press anywhere on it lands the thumb under the
+         * pointer and the drag keeps it there, a click on the name takes the
+         * row back to zero. */
+        mod.widgets.FabSlider = set_type_default() do mod.widgets.FabSliderBase{
+            width: Fill
+            height: fab.row_height
+            flow: Right
+            align: Align{x: 0.0 y: 0.5}
+            padding: Inset{left: 8 right: 6 top: 0 bottom: 0}
+            margin: Inset{top: 0 bottom: 0 left: 0 right: 0}
+            // No spacing: the three columns are measured rather than spaced.
+            // The hit test derives the track from the two column widths, and
+            // a gap the turtle put in is a gap it cannot see.
+            spacing: 0
+
+            label: ""
+            label_width: fab.prop_label_width
+            readout_width: 34.0
+            min: 0.0
+            max: 100.0
+            /** the arrow-key increment, and the detent a drag lands on 0..25 step 0.5 */
+            step: 1.0
+            /** the shift+arrow increment 0..50 step 0.5 */
+            big_step: 10.0
+            precision: 0
+            unit: "%"
+            value: 0.0
+            thumb_size: 12.0
+            track_inset: 2.0
+            enabled: true
+
+            draw_label +: {
+                ink_centered: true
+                color: fab.color_text_dim
+                text_overflow: TextOverflow.Ellipsis
+                text_style: fab.font{
+                    font_size: fab.font_size_ui
+                }
+            }
+            draw_value +: {
+                ink_centered: true
+                color: fab.color_text
+                text_style: fab.font{
+                    font_size: fab.font_size_ui
                 }
             }
         }
@@ -501,7 +492,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
             draw_text +: {
                 ink_centered: true
                 color: fab.color_text
-                text_style: theme.font_regular{
+                text_style: fab.font{
                     font_size: fab.font_size_ui
                 }
             }
@@ -514,7 +505,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
         mod.widgets.FabLabelSmall = mod.widgets.FabLabel{
             draw_text +: {
                 color: fab.color_text_dim
-                text_style: theme.font_regular{
+                text_style: fab.font{
                     font_size: fab.font_size_small
                 }
             }
@@ -522,7 +513,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
         mod.widgets.FabHeaderLabel = mod.widgets.FabLabel{
             draw_text +: {
                 color: fab.color_text_header
-                text_style: theme.font_regular{
+                text_style: fab.font{
                     font_size: fab.font_size_header
                 }
             }
@@ -590,10 +581,18 @@ pub fn script_mod(vm: &mut ScriptVm) {
                 draw_text +: {
                     ink_centered: true
                     color: fab.color_text
+                    // Every state, not just the resting one: the stock field takes the
+                    // app theme's ink for hover, focus and down, and under a light theme
+                    // that ink is dark -- so the word being typed went black on this
+                    // panel's dark well the moment the box took focus.
+                    color_hover: fab.color_text_active
+                    color_focus: fab.color_text_active
+                    color_down: fab.color_text_active
+                    color_disabled: fab.color_text_muted
                     color_empty: fab.color_text_muted
                     color_empty_hover: fab.color_text_dim
                     color_empty_focus: fab.color_text_dim
-                    text_style: theme.font_regular{
+                    text_style: fab.font{
                         font_size: fab.font_size_ui
                     }
                 }
@@ -731,7 +730,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
                         draw_text +: {
                             color: fab.color_text
                             ink_centered: true
-                            text_style: theme.font_regular{ font_size: fab.font_size_ui }
+                            text_style: fab.font{ font_size: fab.font_size_ui }
                         }
                     }
                 }
@@ -1825,6 +1824,793 @@ impl FabValueInputRef {
 fn ended_value(actions: &Actions, uid: WidgetUid) -> Option<f64> {
     for action in actions.filter_widget_actions_cast::<FabValueInputAction>(uid) {
         if let FabValueInputAction::Ended(v) = action {
+            return Some(v);
+        }
+    }
+    None
+}
+
+// ===========================================================================
+// FabSlider — a horizontal track whose thumb goes where the pointer is. The
+// travel law is pure and the shader is handed the same numbers the hit test
+// measures with, so what is drawn is what is grabbable.
+// ===========================================================================
+
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawFabSlider {
+    #[deref]
+    draw_super: DrawQuad,
+    #[live]
+    hover: f32,
+    #[live]
+    down: f32,
+    #[live]
+    focus: f32,
+    #[live]
+    disabled: f32,
+    /// Where the value sits along the travel, 0..1.
+    #[live]
+    travel: f32,
+    /// The name's column and the number's column, in pixels. Rust measures
+    /// the track between them and the shader draws it between the same two.
+    #[live]
+    label_px: f32,
+    #[live]
+    readout_px: f32,
+    #[live]
+    thumb_px: f32,
+    #[live]
+    inset_px: f32,
+}
+
+#[derive(Clone, Debug, Default)]
+pub enum FabSliderAction {
+    /// The value moved. Live under a drag, and under every arrow key
+    /// including the repeats the keyboard sends while one is held down.
+    Changed(f64),
+    /// The gesture that was moving the value is over, and this is the value
+    /// it came to rest on. A commit: a host that rate-limits `Changed` is
+    /// meant to spend this one at once.
+    ///
+    /// At most ONE per gesture, and never none. A mouse release ends a drag
+    /// or a tap on the name; a deliberate key press ends itself, so a single
+    /// arrow and a jump to a stop both land without waiting; and the release
+    /// of a HELD key ends the run of repeats it sent, which is what keeps a
+    /// second of held arrow down to two of these instead of thirty. See
+    /// `key_step`.
+    ///
+    /// Where a run ends without its release -- the keyboard moving on, the
+    /// row being switched off, the window losing the focus mid-key -- what
+    /// the run owes is paid there instead. A host that rate-limits `Changed`
+    /// and spends this one can hold it to that.
+    Ended(f64),
+    /// A click on the name: the row is back at zero and the host should take
+    /// it out of whatever it feeds.
+    Reset,
+    #[default]
+    None,
+}
+
+/// The travel one slider carries into a press: the range it spans, the
+/// detent it lands on, and the two pixel sizes the shader is handed.
+///
+/// The mapping is ABSOLUTE — the value is where the pointer is, not how far
+/// it has come — which is the whole difference between this and the number
+/// field's scrub above. Kept here, entire and with no `Cx` anywhere, so the
+/// law the hit test uses is the law the tests read.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SliderTravel {
+    pub min: f64,
+    pub max: f64,
+    /// The detent a value lands on; `0` is continuous.
+    pub step: f64,
+    /// Thumb width and the track's inset, in pixels.
+    pub thumb: f64,
+    pub inset: f64,
+}
+
+impl SliderTravel {
+    /// The two stops in order, whichever way round they were written.
+    pub fn stops(&self) -> (f64, f64) {
+        (self.min.min(self.max), self.min.max(self.max))
+    }
+
+    /// A value onto the detent and inside the stops. Quantising walks a
+    /// value off the end of a range that is not a whole number of steps, so
+    /// the clamp comes second and not first.
+    pub fn settle(&self, v: f64) -> f64 {
+        let (lo, hi) = self.stops();
+        let v = if self.step > 0.0 {
+            lo + ((v - lo) / self.step).round() * self.step
+        } else {
+            v
+        };
+        v.clamp(lo, hi)
+    }
+
+    /// Inside the stops, and nowhere near the detent.
+    ///
+    /// The detent belongs to the hand: it is where a drag lands and how far
+    /// an arrow key carries. A number that arrives from a caller is somebody
+    /// else's arithmetic and is none of its business -- a row of weights
+    /// sharing a hundred parts stops adding up the moment three of them are
+    /// rounded on the way in.
+    pub fn contain(&self, v: f64) -> f64 {
+        let (lo, hi) = self.stops();
+        v.clamp(lo, hi)
+    }
+
+    /// Where a value sits along the travel, 0..1.
+    pub fn travel(&self, v: f64) -> f64 {
+        let (lo, hi) = self.stops();
+        let span = hi - lo;
+        if span.abs() < f64::EPSILON {
+            0.0
+        } else {
+            ((v - lo) / span).clamp(0.0, 1.0)
+        }
+    }
+
+    /// What the thumb's CENTRE runs over: the track less its inset at both
+    /// ends and the thumb's own width, so neither stop hangs off the end.
+    pub fn travel_px(&self, width: f64) -> f64 {
+        (width - self.inset * 2.0 - self.thumb).max(1.0)
+    }
+
+    /// The value at an x offset from the left edge of the TRACK.
+    pub fn value_at(&self, x: f64, width: f64) -> f64 {
+        let t = ((x - self.inset - self.thumb * 0.5) / self.travel_px(width)).clamp(0.0, 1.0);
+        let (lo, hi) = self.stops();
+        self.settle(lo + t * (hi - lo))
+    }
+
+    /// The x of the thumb's centre, in the same frame as `value_at`.
+    pub fn thumb_x(&self, v: f64, width: f64) -> f64 {
+        self.inset + self.thumb * 0.5 + self.travel(v) * self.travel_px(width)
+    }
+}
+
+/// The three columns of the row. Only the track answers a press with a
+/// value: the number is there to be read, and the name is the reset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SliderZone {
+    Label,
+    Track,
+    Readout,
+}
+
+/// Which column a pointer at `x` (from the row's left edge) is over, for a
+/// row of `width` whose outer columns are `label_px` and `readout_px` wide.
+pub fn slider_zone(x: f64, width: f64, label_px: f64, readout_px: f64) -> SliderZone {
+    if x < label_px {
+        SliderZone::Label
+    } else if x > width - readout_px {
+        SliderZone::Readout
+    } else {
+        SliderZone::Track
+    }
+}
+
+#[derive(Script, ScriptHook, Widget)]
+pub struct FabSlider {
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
+    #[redraw]
+    #[live]
+    draw_bg: DrawFabSlider,
+    #[live]
+    draw_label: DrawText,
+    #[live]
+    draw_value: DrawText,
+    #[walk]
+    walk: Walk,
+    #[layout]
+    layout: Layout,
+
+    #[live]
+    label: String,
+    /// The name's column and the number's, in points. Fixed rather than
+    /// fitted: an equalizer is a stack of these, and the tracks have to
+    /// begin in the same place all the way down the column.
+    #[live(92.0)]
+    label_width: f64,
+    #[live(34.0)]
+    readout_width: f64,
+    #[live]
+    min: f64,
+    #[live(100.0)]
+    max: f64,
+    /// The arrow-key increment, and the detent a drag lands on.
+    #[live(1.0)]
+    step: f64,
+    /// Shift+arrow. Coarse, where Shift on the number field above is fine:
+    /// one arrow on a 0..100 track is already the small gesture, so Shift
+    /// has nowhere to go but up.
+    #[live(10.0)]
+    big_step: f64,
+    #[live(0)]
+    precision: usize,
+    #[live]
+    unit: String,
+    #[live]
+    value: f64,
+    #[live(12.0)]
+    thumb_size: f64,
+    #[live(2.0)]
+    track_inset: f64,
+    /// Off: the row shows dimmed and nothing answers.
+    #[live(true)]
+    enabled: bool,
+
+    /// Held for the length of a gesture, so Escape and a modal's dismissal
+    /// reach this control rather than whatever it is sitting in.
+    #[rust]
+    cancel_scope: Option<CancelScope>,
+    #[rust]
+    dragging: bool,
+    /// What the value was when the press landed, for a cancel to put back.
+    #[rust]
+    press_value: f64,
+    /// The number this row PRINTS, where that is not the number it holds.
+    ///
+    /// A column that is read as a whole -- shares of a total, rounded over
+    /// the column rather than a row at a time -- has a number for the
+    /// readout that is nobody's own value, and can be a part or two from it.
+    /// Kept apart so that it stops at the text: the thumb stands on `value`,
+    /// an arrow steps from `value`, and what a gesture reports is `value`.
+    /// Cleared by anything that moves the row, because the number a hand has
+    /// just set is the row's own, and a share worked out for the value
+    /// before it would print as a lie under a moving thumb.
+    #[rust]
+    readout: Option<f64>,
+    #[rust]
+    hovered: bool,
+    /// A keyboard run owes a commit: an arrow has moved the row since the
+    /// last one went out, and the release that will end the run has not
+    /// arrived yet.
+    #[rust]
+    key_commit_due: bool,
+    /// The name's own box. The face is one area and it takes the press; this
+    /// is only ever asked whether a tap FINISHED on the word, and never
+    /// asked for a hit of its own — a second area over the same press is
+    /// what once left the stock Slider unable to be dragged from its legend.
+    #[rust]
+    label_area: Area,
+}
+
+impl FabSlider {
+    fn travel(&self) -> SliderTravel {
+        SliderTravel {
+            min: self.min,
+            max: self.max,
+            step: self.step,
+            thumb: self.thumb_size,
+            inset: self.track_inset,
+        }
+    }
+
+    /// The row's outer two columns, padding included, in the face's frame.
+    fn columns(&self) -> (f64, f64) {
+        (
+            self.layout.padding.left + self.label_width,
+            self.layout.padding.right + self.readout_width,
+        )
+    }
+
+    /// The value the pointer is naming right now.
+    fn value_at_pointer(&self, cx: &Cx, abs_x: f64) -> f64 {
+        let face = self.draw_bg.area().rect(cx);
+        let (label_px, readout_px) = self.columns();
+        let width = (face.size.x - label_px - readout_px).max(1.0);
+        self.travel().value_at(abs_x - face.pos.x - label_px, width)
+    }
+
+    /// Which column a press at `abs_x` landed in.
+    fn zone_at(&self, cx: &Cx, abs_x: f64) -> SliderZone {
+        let face = self.draw_bg.area().rect(cx);
+        let (label_px, readout_px) = self.columns();
+        slider_zone(abs_x - face.pos.x, face.size.x, label_px, readout_px)
+    }
+
+    pub fn value(&self) -> f64 {
+        self.value
+    }
+
+    /// A value pushed in from outside, held EXACTLY as it was handed over.
+    ///
+    /// What is guaranteed: the number a host sets is the number `value()`
+    /// reads back, the number the next arrow key steps from, and the number
+    /// the thumb stands on -- clamped to the stops and to nothing else. The
+    /// detent is the HAND's grid, the thing a drag lands on and the thing an
+    /// arrow steps by; it is never a filter on the host's own arithmetic. A
+    /// `step` of 1 is what a weight row wants under a finger, and it used to
+    /// round what the host had worked out as well: four rows splitting a
+    /// hundred parts come down to 0 / 37.5 / 37.5 / 25, and rows that stored
+    /// 38 read back 101% under a legend promising a hundred -- and then
+    /// handed the next arrow key an origin nobody had set.
+    ///
+    /// What is NOT guaranteed: that the number on screen is the number held.
+    /// The readout is `precision` places wide and rounds to fit, so a row
+    /// holding 37.5 at `precision: 0` prints 38. A host that needs the column
+    /// to READ as a hundred as well as sum to one is not to round before it
+    /// sets -- that stores the rounded number, with every consequence in the
+    /// paragraph above -- but to say both numbers at once. See
+    /// [`FabSlider::set_value_and_readout`].
+    ///
+    /// Refused mid-drag: a host answering late must not argue with the hand
+    /// that is on the thumb.
+    pub fn set_value(&mut self, cx: &mut Cx, v: f64) {
+        if self.dragging {
+            return;
+        }
+        self.hold(cx, v, None);
+    }
+
+    /// The number the row HOLDS and the number it PRINTS, handed over
+    /// together.
+    ///
+    /// For the host whose readout is not its own arithmetic. A column of
+    /// shares of a total is rounded over the whole column, so what one row
+    /// shows is a part or two off what it carries; a host with nowhere to
+    /// put that but the value ended up storing it, and then the row stepped
+    /// from it -- an arrow on the largest share of a mix walked the weight
+    /// DOWN, because the largest share is the one the column takes its
+    /// rounding out of.
+    ///
+    /// So they arrive together and part company here: `v` is the whole of
+    /// what the row holds, steps from and reports, and `readout` reaches
+    /// nothing but the text. They are one call because they are one fact --
+    /// a row left printing the share of a mix it no longer holds is the same
+    /// fault the other way round.
+    ///
+    /// Refused mid-drag, for the reason above it.
+    pub fn set_value_and_readout(&mut self, cx: &mut Cx, v: f64, readout: f64) {
+        if self.dragging {
+            return;
+        }
+        self.hold(cx, v, Some(readout));
+    }
+
+    /// What the row prints: what a host said to print, or what the row holds.
+    pub fn readout(&self) -> f64 {
+        self.readout.unwrap_or(self.value)
+    }
+
+    /// The one door a host's number comes in by. The redraw hangs off the
+    /// PAIR, because a column can be re-rounded by a move on another row
+    /// without this one's value changing by anything at all.
+    fn hold(&mut self, cx: &mut Cx, v: f64, readout: Option<f64>) {
+        let v = self.travel().contain(v);
+        if (v - self.value).abs() > f64::EPSILON || readout != self.readout {
+            self.value = v;
+            self.readout = readout;
+            self.draw_bg.redraw(cx);
+        }
+    }
+
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// The row's name, for a host filling a list of them.
+    pub fn set_label(&mut self, cx: &mut Cx, text: &str) {
+        if self.label != text {
+            self.label = text.to_string();
+            self.draw_bg.redraw(cx);
+        }
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Switching off mid-gesture ends the gesture first: the pointer is let
+    /// go, the value the press found is put back, and a keyboard run that has
+    /// not committed yet pays up. A row nothing can reach will never see the
+    /// release that would otherwise have ended it.
+    pub fn set_enabled(&mut self, cx: &mut Cx, enabled: bool) {
+        if self.enabled == enabled {
+            return;
+        }
+        self.enabled = enabled;
+        if !enabled {
+            let uid = self.widget_uid();
+            self.cancel_drag(cx, uid);
+            self.end_key_run(cx, uid);
+            self.hovered = false;
+        }
+        self.draw_bg.redraw(cx);
+    }
+
+    /// Answers whether the value actually moved, which is what tells a key
+    /// press whether it has anything left to commit.
+    fn publish(&mut self, cx: &mut Cx, uid: WidgetUid, v: f64, ended: bool) -> bool {
+        let moved = (v - self.value).abs() > f64::EPSILON;
+        if moved {
+            self.value = v;
+            // The hand's number is the row's own, so whatever a host had it
+            // printing instead goes here: a share worked out for the weight
+            // before this one would sit under a thumb that has left it.
+            self.readout = None;
+            self.draw_bg.redraw(cx);
+            cx.widget_action(uid, FabSliderAction::Changed(self.value));
+        }
+        if ended {
+            cx.widget_action(uid, FabSliderAction::Ended(self.value));
+        }
+        moved
+    }
+
+    /// One key's worth of movement, and whether it ends anything.
+    ///
+    /// A fresh press is a deliberate act and commits where it lands, so one
+    /// arrow and a jump to a stop both land at once. What the keyboard sends
+    /// AFTER it is not a second gesture, it is the first one still running:
+    /// a repeat says only that the value moved, and the single commit the run
+    /// owes is paid at the release. An arrow held for a second is therefore
+    /// two commits rather than thirty -- which is the difference that matters
+    /// on the other side, where a commit is a host dropping everything to
+    /// install what it was handed. A drag is bounded there already, by the
+    /// interval behind its moves; a held key had been going round it.
+    fn key_step(&mut self, cx: &mut Cx, uid: WidgetUid, v: f64, repeat: bool) {
+        let moved = self.publish(cx, uid, v, !repeat);
+        if repeat {
+            // A repeat that landed nowhere new -- an arrow held against a
+            // stop -- owes nothing of its own, and cancels nothing already
+            // owed by the repeats before it.
+            self.key_commit_due |= moved;
+        } else {
+            self.key_commit_due = false;
+        }
+    }
+
+    /// The commit a keyboard run still owes, paid at the release -- or at
+    /// whatever ends the run before one arrives. Unpaid, the last value a
+    /// hand nudged sits on the row and reaches nobody.
+    fn end_key_run(&mut self, cx: &mut Cx, uid: WidgetUid) {
+        if self.key_commit_due {
+            self.key_commit_due = false;
+            cx.widget_action(uid, FabSliderAction::Ended(self.value));
+        }
+    }
+
+    fn nudge(&mut self, cx: &mut Cx, uid: WidgetUid, direction: f64, big: bool, repeat: bool) {
+        let step = if big { self.big_step } else { self.step };
+        // A continuous track still has to move by something; a hundredth of
+        // the range is the arrow-key equivalent of one percent.
+        let step = if step > 0.0 {
+            step
+        } else {
+            (self.max - self.min).abs() * 0.01
+        };
+        // One step from where the row actually stands. Settling the sum onto
+        // the detent's grid reads the origin off the grid first, so an arrow
+        // pressed on a row set to 37.5 published 39 -- a step and a half the
+        // hand never asked for.
+        let v = self.travel().contain(self.value + direction * step);
+        self.key_step(cx, uid, v, repeat);
+    }
+
+    /// ZERO, and not the range's floor nor a `default:` the way the stock
+    /// Slider's title click goes. "This one counts for nothing" is the
+    /// gesture a row of these needs most, and it is the same number whichever
+    /// row it is asked of; a range that never reaches zero takes its nearest
+    /// stop instead.
+    fn reset(&mut self, cx: &mut Cx, uid: WidgetUid) {
+        let v = self.travel().settle(0.0);
+        self.publish(cx, uid, v, false);
+        cx.widget_action(uid, FabSliderAction::Reset);
+    }
+
+    fn cancel_drag(&mut self, cx: &mut Cx, uid: WidgetUid) {
+        self.cancel_scope = None;
+        if self.dragging {
+            self.dragging = false;
+            let back = self.press_value;
+            self.publish(cx, uid, back, false);
+            self.draw_bg.redraw(cx);
+        }
+    }
+}
+
+impl Widget for FabSlider {
+    // The generic switch and the bridge's `enabled` column both come through
+    // here, so what they say is what the row does.
+    fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
+        self.set_enabled(cx, !disabled);
+    }
+
+    fn disabled(&self, _cx: &Cx) -> bool {
+        !self.enabled
+    }
+
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        let (label_px, readout_px) = self.columns();
+        self.draw_bg.label_px = label_px as f32;
+        self.draw_bg.readout_px = readout_px as f32;
+        self.draw_bg.thumb_px = self.thumb_size as f32;
+        self.draw_bg.inset_px = self.track_inset as f32;
+        self.draw_bg.travel = self.travel().travel(self.value) as f32;
+        self.draw_bg.hover = if self.hovered && self.enabled { 1.0 } else { 0.0 };
+        self.draw_bg.down = if self.dragging { 1.0 } else { 0.0 };
+        self.draw_bg.focus = if cx.cx.cx.has_key_focus(self.draw_bg.area()) {
+            1.0
+        } else {
+            0.0
+        };
+        self.draw_bg.disabled = if self.enabled { 0.0 } else { 1.0 };
+        self.draw_bg.begin(cx, walk, self.layout);
+
+        // The name gets a turtle of its own, because the reset gesture needs
+        // a box to ask about at the release. It is a measurement and not a
+        // hit target: the face above is the only thing that takes a press.
+        let label_walk = Walk::new(Size::Fixed(self.label_width), Size::fill());
+        cx.begin_turtle(label_walk, Layout::default());
+        if !self.label.is_empty() {
+            self.draw_label
+                .draw_walk(cx, label_walk, Align { x: 0.0, y: 0.5 }, &self.label);
+        }
+        cx.end_turtle_with_area(&mut self.label_area);
+
+        // The track itself is painted by the face underneath; this only
+        // claims the width, and claims exactly the width the hit test and
+        // the shader both measure, so the number lands where it belongs.
+        let row = cx.turtle().rect().size.x;
+        let track_w = (row - label_px - readout_px).max(1.0);
+        let _ = cx.walk_turtle(Walk::new(Size::Fixed(track_w), Size::fill()));
+
+        let text = crate::slider::format_readout(self.readout(), self.precision, &self.unit);
+        let value_walk = Walk::new(Size::Fixed(self.readout_width), Size::fill());
+        self.draw_value
+            .draw_walk(cx, value_walk, Align { x: 1.0, y: 0.5 }, &text);
+
+        self.draw_bg.end(cx);
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        let uid = self.widget_uid();
+        // Off: nothing below answers.
+        if !self.enabled {
+            return;
+        }
+        if self.dragging && crate::modal::ModalAction::is_dismissal(event) {
+            self.cancel_drag(cx, uid);
+            return;
+        }
+        // The window going away ends whatever this row was in the middle of,
+        // by either hand: the press is let go and the value it found put
+        // back, and a keyboard run pays the commit it owes. Whatever would
+        // have ended either one -- the release, the key coming up -- is
+        // going to the app that took the focus. `Hit::KeyFocusLost` does not
+        // stand in for it: the focus INSIDE this app has not moved, so a held
+        // arrow and an alt-tab left the last value a hand nudged sitting on
+        // the row with nothing having been told about it. Ordered as
+        // `set_enabled` orders the same pair, so that what is committed is
+        // the value the row is left standing on.
+        if let Event::WindowLostFocus(_) = event {
+            self.cancel_drag(cx, uid);
+            self.end_key_run(cx, uid);
+            return;
+        }
+        // Escape, Back or the right button puts back the value the press
+        // found.
+        if self.dragging {
+            match event {
+                Event::KeyDown(ke)
+                    if ke.key_code == KeyCode::Escape
+                        && self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s)) =>
+                {
+                    self.cancel_drag(cx, uid);
+                    return;
+                }
+                Event::BackPressed { .. }
+                    if self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s))
+                        && event.back_pressed() =>
+                {
+                    self.cancel_drag(cx, uid);
+                    return;
+                }
+                Event::MouseDown(me) if me.button.is_secondary() => {
+                    self.cancel_drag(cx, uid);
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        // One area, asked plainly: no sweep area and no capture overload,
+        // so the press this takes is the press nothing else is holding. And
+        // no wheel arm below, deliberately — the panel these sit in scrolls,
+        // and a row that ate the wheel would be a row you could not get past.
+        match event.hits(cx, self.draw_bg.area()) {
+            Hit::FingerHoverIn(fe) | Hit::FingerHoverOver(fe) => {
+                cx.set_cursor(match self.zone_at(cx, fe.abs.x) {
+                    SliderZone::Track => MouseCursor::Grab,
+                    SliderZone::Label => MouseCursor::Hand,
+                    SliderZone::Readout => MouseCursor::Default,
+                });
+                if !self.hovered {
+                    self.hovered = true;
+                    self.draw_bg.redraw(cx);
+                }
+            }
+            Hit::FingerHoverOut(_) => {
+                self.hovered = false;
+                self.draw_bg.redraw(cx);
+            }
+            Hit::FingerDown(fe) if fe.device.is_primary_hit() => {
+                cx.set_key_focus(self.draw_bg.area());
+                self.press_value = self.value;
+                // `hits` took the mouse on the way in and holds it until the
+                // release, which is what a scroller around this control asks
+                // the capture list about before it drags its own content.
+                self.cancel_scope = Some(self.begin_cancel_scope(cx));
+                if self.zone_at(cx, fe.abs.x) == SliderZone::Track {
+                    // A track is not a scrub: the thumb goes where the
+                    // finger is, on the press itself, and stays under it.
+                    self.dragging = true;
+                    let v = self.value_at_pointer(cx, fe.abs.x);
+                    self.publish(cx, uid, v, false);
+                }
+                self.draw_bg.redraw(cx);
+            }
+            Hit::FingerMove(fe) => {
+                if self.dragging {
+                    let v = self.value_at_pointer(cx, fe.abs.x);
+                    self.publish(cx, uid, v, false);
+                }
+            }
+            Hit::FingerUp(fe) => {
+                self.cancel_scope = None;
+                // A tap that began AND stayed on the name. `was_tap` rather
+                // than `is_over`, so a drag that merely started there ends as
+                // the drag it was; and it is the press that is asked about,
+                // so the box is tested against `abs_start`.
+                let tapped_label = fe.was_tap()
+                    && !self.label.is_empty()
+                    && self.label_area.rect(cx).contains(fe.abs_start);
+                if tapped_label {
+                    self.reset(cx, uid);
+                }
+                if self.dragging || tapped_label {
+                    // After the reset and never before it: the commit is what
+                    // a host writes down, and it has to carry the zero.
+                    cx.widget_action(uid, FabSliderAction::Ended(self.value));
+                }
+                self.dragging = false;
+                self.draw_bg.redraw(cx);
+            }
+            // Ctrl and Cmd are the accelerator space, and that space belongs
+            // to whatever this row is sitting in: Ctrl+Home is the panel going
+            // to its top, Cmd+Arrow is the window manager's. A focused row
+            // that nudged on either would break those shortcuts silently, and
+            // only while the keyboard happened to be resting on it. Shift is
+            // this control's own -- the coarse step -- and Alt is left
+            // unclaimed, which is where a fine step would go.
+            Hit::KeyDown(ke) if !ke.modifiers.control && !ke.modifiers.logo => {
+                match ke.key_code {
+                    KeyCode::ArrowLeft | KeyCode::ArrowDown => {
+                        self.nudge(cx, uid, -1.0, ke.modifiers.shift, ke.is_repeat)
+                    }
+                    KeyCode::ArrowRight | KeyCode::ArrowUp => {
+                        self.nudge(cx, uid, 1.0, ke.modifiers.shift, ke.is_repeat)
+                    }
+                    // Absolute, both of them: the first press names the stop
+                    // and every repeat after it names the same stop, so a key
+                    // held against the end of its own travel goes quiet.
+                    KeyCode::Home => {
+                        let v = self.travel().stops().0;
+                        self.key_step(cx, uid, v, ke.is_repeat);
+                    }
+                    KeyCode::End => {
+                        let v = self.travel().stops().1;
+                        self.key_step(cx, uid, v, ke.is_repeat);
+                    }
+                    _ => {}
+                }
+            }
+            // Letting go of the key that was driving the value ends the
+            // gesture, the way letting go of the mouse button does.
+            Hit::KeyUp(ke)
+                if matches!(
+                    ke.key_code,
+                    KeyCode::ArrowLeft
+                        | KeyCode::ArrowRight
+                        | KeyCode::ArrowUp
+                        | KeyCode::ArrowDown
+                        | KeyCode::Home
+                        | KeyCode::End
+                ) =>
+            {
+                self.end_key_run(cx, uid);
+            }
+            Hit::KeyFocus(_) => {
+                self.draw_bg.redraw(cx);
+            }
+            Hit::KeyFocusLost(_) => {
+                // The keyboard has gone elsewhere and the release will go with
+                // it, so what the run owes is paid here or never.
+                self.end_key_run(cx, uid);
+                self.draw_bg.redraw(cx);
+            }
+            _ => {}
+        }
+    }
+}
+
+impl FabSliderRef {
+    pub fn changed(&self, actions: &Actions) -> Option<f64> {
+        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
+            if let FabSliderAction::Changed(v) = item.cast() {
+                return Some(v);
+            }
+        }
+        None
+    }
+
+    pub fn ended(&self, actions: &Actions) -> Option<f64> {
+        slider_ended_value(actions, self.widget_uid())
+    }
+
+    /// Was the name clicked? The value is already back at zero; this is the
+    /// host's cue to drop the row from whatever ledger it keeps.
+    pub fn was_reset(&self, actions: &Actions) -> bool {
+        actions
+            .filter_widget_actions_cast::<FabSliderAction>(self.widget_uid())
+            .any(|action| matches!(action, FabSliderAction::Reset))
+    }
+
+    pub fn set_value(&self, cx: &mut Cx, v: f64) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_value(cx, v);
+        }
+    }
+
+    /// See [`FabSlider::set_value_and_readout`]: what the row holds and what
+    /// it prints, for a host whose column is rounded over the column.
+    pub fn set_value_and_readout(&self, cx: &mut Cx, v: f64, readout: f64) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_value_and_readout(cx, v, readout);
+        }
+    }
+
+    pub fn value(&self) -> f64 {
+        self.borrow().map_or(0.0, |i| i.value())
+    }
+
+    /// What the row prints, which is what it holds unless a host said
+    /// otherwise.
+    pub fn readout(&self) -> f64 {
+        self.borrow().map_or(0.0, |i| i.readout())
+    }
+
+    pub fn set_label(&self, cx: &mut Cx, text: &str) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_label(cx, text);
+        }
+    }
+
+    pub fn set_enabled(&self, cx: &mut Cx, enabled: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_enabled(cx, enabled);
+        }
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.borrow().map_or(true, |i| i.enabled())
+    }
+}
+
+/// `Changed` comes before `Ended` in the same buffer and
+/// `find_widget_action` answers with the first of them, so the commit has to
+/// be looked for rather than found.
+fn slider_ended_value(actions: &Actions, uid: WidgetUid) -> Option<f64> {
+    for action in actions.filter_widget_actions_cast::<FabSliderAction>(uid) {
+        if let FabSliderAction::Ended(v) = action {
             return Some(v);
         }
     }
@@ -3053,17 +3839,17 @@ mod tests {
     /// The panel's own palette, under every sheet the library ships.
     ///
     /// This is the immunity the panel exists for, stated as a value rather
-    /// than as an intention: with the Theme tab's "wear" toggle OFF -- which
-    /// is the default -- every colour the panel's chrome is drawn in is the
-    /// literal written in the table above, whatever the app is wearing.
+    /// than as an intention: every colour the panel's chrome is drawn in is
+    /// the literal written in the table above, whatever the app is wearing.
+    /// Not a default with something on the other side of it -- there is no
+    /// other side, and this is the reading that keeps it that way.
     #[test]
-    fn the_panels_palette_is_untouched_under_every_sheet_while_it_wears_its_own() {
+    fn the_panels_palette_is_untouched_under_every_sheet() {
         use crate::desktop_style::{install, uninstall, DesktopStyle, StyleSheet};
         let declared = declared_fab_colors();
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.init_cx_os();
         cx.with_vm(crate::script_mod);
-        assert!(!panel_wears_theme(&mut cx), "the panel wears its own by default");
         for style in [None].into_iter().chain(DesktopStyle::ALL.map(Some)) {
             cx.with_vm(|vm| {
                 match style {
@@ -3083,19 +3869,18 @@ mod tests {
         }
     }
 
-    /// Worn, the panel takes the theme's colours -- and can still be read.
+    /// The panel's palette can be READ, under every sheet the library ships.
     ///
-    /// Two halves, and the second is the one that matters. Re-pointing the
-    /// palette at theme tokens is easy; re-pointing it at tokens that still
-    /// stand apart from one another under a light sheet, a dark sheet and a
-    /// Win95 sheet is the whole difficulty. The pairs below are the panel's
-    /// load-bearing ones: the ground it draws its words on, the well, the
-    /// button face, the popover, and the ink on the accent.
+    /// Immunity says the colours do not move. It does not say they were ever
+    /// legible, and the two are worth holding apart: the pairs below are the
+    /// panel's load-bearing ones -- the ground it draws its words on, the
+    /// well, the button face, the popover, and the ink on the accent.
     ///
-    /// The unworn palette is put to the same test in the same loop, so the
-    /// bar is one the panel already clears rather than one invented here.
+    /// Under every sheet rather than under none, because `mod.tweak_panel`'s
+    /// three ink grades belong to the tweaker's table and so are not in the
+    /// reading the test above takes.
     #[test]
-    fn worn_the_panel_takes_the_themes_colours_and_still_reads() {
+    fn the_panels_palette_reads_against_itself_under_every_sheet() {
         use crate::desktop_style::{install, uninstall, DesktopStyle, StyleSheet};
         use crate::theme_tokens::{reads_on, LEGIBLE, READABLE};
         // (ground, ink, how far apart they have to stand)
@@ -3106,11 +3891,9 @@ mod tests {
             ("color_header", "color_text", READABLE),
             ("color_button", "color_text", READABLE),
             ("color_button_hover", "color_text_active", READABLE),
-            // LEGIBLE, not READABLE: the panel's OWN accent (#x5680c2 under
-            // white) stands 3.99 apart and always has. The bar here is the
-            // one the panel already clears, so this measures whether wearing
-            // a theme makes it worse -- not whether the accent was ever a
-            // 4.5 in the first place.
+            // LEGIBLE, not READABLE: the panel's accent (#x5680c2 under
+            // white) stands 3.99 apart and always has. This records where it
+            // is rather than claiming it was ever a 4.5.
             ("color_button_active", "color_text_on_accent", LEGIBLE),
             ("color_input", "color_text", READABLE),
             ("color_popover", "color_text", READABLE),
@@ -3124,61 +3907,179 @@ mod tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.init_cx_os();
         cx.with_vm(crate::script_mod);
-        let plain = declared_fab_colors();
-        for worn in [false, true] {
-            set_panel_wears_theme(&mut cx, worn);
-            for style in [None].into_iter().chain(DesktopStyle::ALL.map(Some)) {
-                cx.with_vm(|vm| {
-                    match style {
-                        Some(style) => install(vm, StyleSheet::load(style)),
-                        None => uninstall(vm),
-                    }
-                    vm.with_reload(crate::script_mod);
-                });
-                let where_ = format!(
-                    "{}, {}",
-                    style.map(|s| s.id()).unwrap_or("no sheet"),
-                    if worn { "worn" } else { "its own" }
+        for style in [None].into_iter().chain(DesktopStyle::ALL.map(Some)) {
+            cx.with_vm(|vm| {
+                match style {
+                    Some(style) => install(vm, StyleSheet::load(style)),
+                    None => uninstall(vm),
+                }
+                vm.with_reload(crate::script_mod);
+            });
+            let where_ = style.map(|s| s.id()).unwrap_or("no sheet");
+            for (ground, ink, need) in PAIRS {
+                let g = table_color(&mut cx, id!(fab), ground);
+                let i = table_color(&mut cx, id!(fab), ink);
+                let apart = reads_on(g, i);
+                assert!(
+                    apart >= *need,
+                    "{where_}: `{ink}` on `{ground}` stands {apart:.2} apart, under the {need} it needs"
                 );
-                for (ground, ink, need) in PAIRS {
-                    let g = table_color(&mut cx, id!(fab), ground);
-                    let i = table_color(&mut cx, id!(fab), ink);
-                    let apart = reads_on(g, i);
-                    assert!(
-                        apart >= *need,
-                        "{where_}: `{ink}` on `{ground}` stands {apart:.2} apart, under the {need} it needs"
-                    );
-                }
-                // The panel's own ink grades sit on the same ground.
-                for (ground, ink) in [("color_area", "text_dim"), ("color_input", "text_muted")] {
-                    let g = table_color(&mut cx, id!(fab), ground);
-                    let i = table_color(&mut cx, id!(tweak_panel), ink);
-                    let apart = reads_on(g, i);
-                    assert!(apart >= LEGIBLE, "{where_}: panel `{ink}` on `{ground}` is {apart:.2}");
-                }
-                // Worn really means worn: the palette is no longer the one
-                // written in the table. (A theme that happened to match it
-                // everywhere would be a coincidence no sheet is.)
-                if worn && style.is_some() {
-                    let moved = plain
-                        .iter()
-                        .filter(|(name, want)| table_color(&mut cx, id!(fab), name) != *want)
-                        .count();
-                    assert!(moved > 10, "{where_}: only {moved} colours followed the theme");
-                }
+            }
+            // The panel's own ink grades sit on the same ground.
+            for (ground, ink) in [("color_area", "text_dim"), ("color_input", "text_muted")] {
+                let g = table_color(&mut cx, id!(fab), ground);
+                let i = table_color(&mut cx, id!(tweak_panel), ink);
+                let apart = reads_on(g, i);
+                assert!(apart >= LEGIBLE, "{where_}: panel `{ink}` on `{ground}` is {apart:.2}");
             }
         }
-        set_panel_wears_theme(&mut cx, false);
     }
 
-    /// Wearing a theme is a COLOUR change and nothing else.
+    /// Every text style the kit declares, in template order, read back as
+    /// what it RESOLVES to rather than as what the source says it is.
+    fn kit_text_styles(cx: &mut Cx) -> Vec<TextStyle> {
+        cx.with_vm(|vm| {
+            let values = vec![
+                crate::script_eval!(vm, {mod.widgets.FabValueInput.draw_text.text_style}),
+                crate::script_eval!(vm, {mod.widgets.FabValueInput.text_input.draw_text.text_style}),
+                crate::script_eval!(vm, {mod.widgets.FabSlider.draw_label.text_style}),
+                crate::script_eval!(vm, {mod.widgets.FabSlider.draw_value.text_style}),
+                crate::script_eval!(vm, {mod.widgets.FabLabel.draw_text.text_style}),
+                crate::script_eval!(vm, {mod.widgets.FabLabelSmall.draw_text.text_style}),
+                crate::script_eval!(vm, {mod.widgets.FabHeaderLabel.draw_text.text_style}),
+                crate::script_eval!(vm, {mod.widgets.FabSearch.input.draw_text.text_style}),
+                crate::script_eval!(vm, {mod.widgets.FabColorPick.popover.hex_row.hex.draw_text.text_style}),
+            ];
+            values
+                .into_iter()
+                .map(|value| TextStyle::script_from_value(vm, value))
+                .collect()
+        })
+    }
+
+    /// The kit's words keep ONE face, under every sheet the library ships.
+    ///
+    /// `mod.fab` is there so the panel does not restyle itself while the
+    /// theme underneath it is being changed, and the text was the half of
+    /// that which leaked: each `text_style` below named `theme.font_regular`
+    /// and took only its SIZE from the table. Installing a blend takes the
+    /// sheet off on every apply, so on the applied frame `android`'s Roboto
+    /// came through every label and field on the panel at once and went back
+    /// on leave -- the row heights are fab and held, the text metrics moved,
+    /// and the labels reflowed under the hand that was dragging a weight.
+    ///
+    /// Two things make this hard to fake. The face is the one the family
+    /// RESOLVES to, so a site re-pointed at the theme by hand fails here
+    /// however it is spelled; and each entry is checked against the size its
+    /// own template declares, which is what proves the path found a real fab
+    /// text style rather than an empty object wearing the 10pt default.
+    /// The filter box, focused with a word in it, under either base theme:
+    /// the ink it types with has to be the panel's, never the theme's. Only
+    /// the resting ink was; hover, focus and down fell through to the stock
+    /// field's `theme.color_text_focus` and friends, which under a light
+    /// theme are dark, on a well that is not.
+    #[test]
+    fn the_filter_box_keeps_its_own_ink_in_every_state() {
+        for base in [crate::BaseTheme::Light, crate::BaseTheme::Dark] {
+            let mut cx = Cx::new(Box::new(|_, _| {}));
+            crate::set_base_theme(&mut cx, base);
+            let (inks, own) = cx.with_vm(|vm| {
+                crate::script_mod(vm);
+                let widgets = vm.module(id!(widgets));
+                let search = vm.bx.heap.value(widgets, LiveId::from_str("FabSearch").into(), NoTrap);
+                let input = vm.bx.heap.value(search.as_object().expect("FabSearch"), LiveId::from_str("input").into(), NoTrap);
+                let draw_text = vm.bx.heap.value(input.as_object().expect("input"), LiveId::from_str("draw_text").into(), NoTrap);
+                let dt = draw_text.as_object().expect("draw_text");
+                let keys = ["color", "color_hover", "color_focus", "color_down", "color_disabled", "color_empty", "color_empty_hover", "color_empty_focus"];
+                let inks: Vec<(&str, Option<u32>)> = keys
+                    .into_iter()
+                    .map(|k| (k, vm.bx.heap.value(dt, LiveId::from_str(k).into(), NoTrap).as_color()))
+                    .collect();
+                let fab = vm.module(id!(fab));
+                let own: Vec<u32> = ["color_text", "color_text_active", "color_text_dim", "color_text_muted"]
+                    .into_iter()
+                    .filter_map(|k| vm.bx.heap.value(fab, LiveId::from_str(k).into(), NoTrap).as_color())
+                    .collect();
+                (inks, own)
+            });
+            assert_eq!(own.len(), 4, "the panel's palette is missing an ink this test relies on");
+            for (key, ink) in inks {
+                let ink = ink.unwrap_or_else(|| panic!("{key} is not a colour on the filter box"));
+                assert!(
+                    own.contains(&ink),
+                    "under {base:?}, {key} is #{ink:08X}, not one of the panel's own inks: it fell through to the app theme"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_kits_words_keep_one_face_under_every_sheet() {
+        use crate::desktop_style::{install, uninstall, DesktopStyle, StyleSheet};
+        // (where it is written, the size that template asks for)
+        const SITES: &[(&str, f32)] = &[
+            ("FabValueInput.draw_text", 8.5),
+            ("FabValueInput.text_input.draw_text", 8.5),
+            ("FabSlider.draw_label", 8.5),
+            ("FabSlider.draw_value", 8.5),
+            ("FabLabel.draw_text", 8.5),
+            ("FabLabelSmall.draw_text", 7.5),
+            ("FabHeaderLabel.draw_text", 9.0),
+            ("FabSearch.input.draw_text", 8.5),
+            ("FabColorPick.popover.hex_row.hex.draw_text", 8.5),
+        ];
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        cx.with_vm(crate::script_mod);
+        for style in [None].into_iter().chain(DesktopStyle::ALL.map(Some)) {
+            cx.with_vm(|vm| {
+                match style {
+                    Some(style) => install(vm, StyleSheet::load(style)),
+                    None => uninstall(vm),
+                }
+                vm.with_reload(crate::script_mod);
+            });
+            let where_ = style.map(|s| s.id()).unwrap_or("no sheet");
+            let read = kit_text_styles(&mut cx);
+            assert_eq!(read.len(), SITES.len());
+            for (style, (site, size)) in read.into_iter().zip(SITES) {
+                assert_eq!(
+                    style.font_size, *size,
+                    "{where_}: `{site}` did not resolve to a fab text style"
+                );
+                let family = format!("{:?}", style.font_family);
+                // The FIRST member is the one the latin metrics come from.
+                let first = family
+                    .split("resource_path: \"")
+                    .nth(1)
+                    .and_then(|rest| rest.split('"').next())
+                    .unwrap_or("nothing at all");
+                assert!(
+                    first.ends_with("IBMPlexSans-Text.ttf"),
+                    "{where_}: `{site}` leads with `{first}`"
+                );
+                assert!(
+                    !family.contains("RobotoFlex.ttf") && !family.contains("Inter.ttf"),
+                    "{where_}: `{site}` took the sheet's typeface: {family}"
+                );
+                // ...and what follows it is still the app's fallback chain,
+                // so a filter field can spell what was typed into it.
+                assert!(
+                    family.contains("NotoColorEmoji.ttf"),
+                    "{where_}: `{site}` lost the fallbacks: {family}"
+                );
+            }
+        }
+    }
+
+    /// The panel's density and type are not a sheet's to move.
     ///
     /// The density and type entries are what make the panel an inspector: a
-    /// 24px row, a 20px small row, 8.5pt words. Letting a theme move those
-    /// would put `android`'s 48px controls back into the panel through the
-    /// front door -- the very thing the sunken filter field was.
+    /// 24px row, a 20px small row, 8.5pt words. A sheet reaching these would
+    /// put `android`'s 48px controls back into the panel through the front
+    /// door -- the very thing the sunken filter field was.
     #[test]
-    fn wearing_a_theme_never_moves_the_panels_density_or_type() {
+    fn the_panels_density_and_type_never_move_under_a_sheet() {
         use crate::desktop_style::{install, DesktopStyle, StyleSheet};
         const NUMBERS: &[(&str, f64)] = &[
             ("row_height", 24.0),
@@ -3192,26 +4093,22 @@ mod tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.init_cx_os();
         cx.with_vm(crate::script_mod);
-        for worn in [false, true] {
-            set_panel_wears_theme(&mut cx, worn);
-            for style in DesktopStyle::ALL {
-                cx.with_vm(|vm| {
-                    install(vm, StyleSheet::load(style));
-                    vm.with_reload(crate::script_mod);
+        for style in DesktopStyle::ALL {
+            cx.with_vm(|vm| {
+                install(vm, StyleSheet::load(style));
+                vm.with_reload(crate::script_mod);
+            });
+            for (name, want) in NUMBERS {
+                let got = cx.with_vm(|vm| {
+                    let fab = vm.module(id!(fab));
+                    vm.bx
+                        .heap
+                        .value(fab, LiveId::from_str(name).into(), NoTrap)
+                        .as_f64()
                 });
-                for (name, want) in NUMBERS {
-                    let got = cx.with_vm(|vm| {
-                        let fab = vm.module(id!(fab));
-                        vm.bx
-                            .heap
-                            .value(fab, LiveId::from_str(name).into(), NoTrap)
-                            .as_f64()
-                    });
-                    assert_eq!(got, Some(*want), "`fab.{name}` moved under `{}`", style.id());
-                }
+                assert_eq!(got, Some(*want), "`fab.{name}` moved under `{}`", style.id());
             }
         }
-        set_panel_wears_theme(&mut cx, false);
     }
 
     #[test]
@@ -3232,5 +4129,760 @@ mod tests {
             }),
         ];
         assert_eq!(ended_value(&actions, uid), Some(73.0));
+    }
+
+    fn equalizer_row() -> SliderTravel {
+        SliderTravel {
+            min: 0.0,
+            max: 100.0,
+            step: 0.0,
+            thumb: 12.0,
+            inset: 2.0,
+        }
+    }
+
+    /// The whole point of a track: the value is where the pointer IS, not
+    /// how far it has travelled since the press. Both stops and the middle,
+    /// measured from the track's left edge — 160 of track, 12 of thumb and 2
+    /// of inset at each end leave 144 of travel, starting 8 in.
+    #[test]
+    fn the_track_reads_the_value_under_the_pointer() {
+        let t = equalizer_row();
+        let v = t.value_at(8.0, 160.0);
+        assert!(v.abs() < 1e-9, "{v}");
+        let v = t.value_at(80.0, 160.0);
+        assert!((v - 50.0).abs() < 1e-9, "{v}");
+        let v = t.value_at(152.0, 160.0);
+        assert!((v - 100.0).abs() < 1e-9, "{v}");
+    }
+
+    /// ...and the thumb is drawn where a press will read it back. The shader
+    /// is handed these same three numbers every draw, so this is also what
+    /// keeps the pixels and the hit test from disagreeing.
+    #[test]
+    fn the_thumb_stands_where_a_press_reads_it_back() {
+        let t = equalizer_row();
+        for want in [0.0, 12.5, 33.0, 50.0, 99.0, 100.0] {
+            let x = t.thumb_x(want, 160.0);
+            let got = t.value_at(x, 160.0);
+            assert!((got - want).abs() < 1e-9, "{want} came back as {got}");
+        }
+    }
+
+    /// Past either stop is the stop. A track has nowhere else to go, and a
+    /// detent that does not divide the range must not walk off the end of
+    /// it either.
+    #[test]
+    fn the_value_can_never_leave_the_track() {
+        let t = equalizer_row();
+        assert!(t.value_at(-400.0, 160.0).abs() < 1e-9);
+        assert!((t.value_at(4000.0, 160.0) - 100.0).abs() < 1e-9);
+        assert!(t.settle(-1.0).abs() < 1e-9);
+        assert!((t.settle(1e9) - 100.0).abs() < 1e-9);
+        let detented = SliderTravel {
+            step: 7.0,
+            ..equalizer_row()
+        };
+        let v = detented.value_at(4000.0, 160.0);
+        assert!((v - 98.0).abs() < 1e-9, "{v}");
+        assert!(detented.settle(1e9) <= 100.0);
+        assert!(detented.settle(-1e9) >= 0.0);
+    }
+
+    #[test]
+    fn the_columns_split_the_name_and_the_number_off_the_track() {
+        assert_eq!(slider_zone(4.0, 300.0, 100.0, 40.0), SliderZone::Label);
+        assert_eq!(slider_zone(150.0, 300.0, 100.0, 40.0), SliderZone::Track);
+        assert_eq!(slider_zone(280.0, 300.0, 100.0, 40.0), SliderZone::Readout);
+    }
+
+    #[test]
+    fn a_sliders_commit_is_found_after_the_change_it_follows() {
+        let uid = WidgetUid(19);
+        let actions: ActionsBuf = vec![
+            Box::new(WidgetAction {
+                data: None,
+                action: Box::new(FabSliderAction::Changed(41.0)),
+                widget_uid: uid,
+                group: None,
+            }),
+            Box::new(WidgetAction {
+                data: None,
+                action: Box::new(FabSliderAction::Ended(42.0)),
+                widget_uid: uid,
+                group: None,
+            }),
+        ];
+        assert_eq!(slider_ended_value(&actions, uid), Some(42.0));
+    }
+
+    /// The new control is painted out of the panel's own table and nothing
+    /// else. A face that writes a colour of its own is a face that stays
+    /// dark under a light theme; a face that reads the app's theme is the
+    /// white slab the whole palette was written to avoid.
+    #[test]
+    fn the_sliders_face_names_only_the_panels_own_palette() {
+        let src = include_str!("fab_controls.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the file has a first half");
+        let face = src
+            .split("do #(DrawFabSlider::script_shader(vm)){")
+            .nth(1)
+            .expect("the file declares the slider's shader");
+        let face = &face[..face
+            .find("mod.widgets.FabSliderBase")
+            .expect("the shader is followed by the registration")];
+        assert!(
+            !face.contains("#x"),
+            "the slider's face writes a colour of its own"
+        );
+        assert!(
+            !face.contains("theme."),
+            "the slider's face reads the app's theme"
+        );
+        assert!(
+            face.contains("fab.color_num"),
+            "the slider's face is drawn from the fab table"
+        );
+    }
+}
+
+/// THE POINTER-CAPTURE RULE, as it applies to the track.
+///
+/// One press, one owner: the face takes the mouse on the way in through
+/// `hits` and holds it until the release, which is what lets a scroller
+/// around this control stand its own drag down while a thumb is being
+/// moved. The name is a box the release is MEASURED against, never a second
+/// area asking for a hit of its own — that second ask is what once left the
+/// stock Slider unable to be dragged from its own legend.
+#[cfg(test)]
+mod fab_slider_gestures {
+    #![allow(dead_code)]
+    use super::*;
+    use crate::makepad_draw::cx_draw::CxDraw;
+    use std::cell::Cell;
+
+    const SIZE: Vec2d = Vec2d { x: 800.0, y: 600.0 };
+    const WINDOW: WindowId = WindowId(1, 1);
+
+    struct Target {
+        pass: DrawPass,
+        draw_list: DrawList2d,
+    }
+
+    impl Target {
+        fn new(cx: &mut Cx) -> Self {
+            Target {
+                pass: DrawPass::new(cx),
+                draw_list: DrawList2d::new(cx),
+            }
+        }
+
+        fn draw(&mut self, cx: &mut Cx, root: &WidgetRef) {
+            self.pass.set_size(cx, SIZE);
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&self.pass, None);
+            self.draw_list.begin_always(&mut cx2d);
+            cx2d.begin_root_turtle(SIZE, Layout::flow_down());
+            root.draw_all(&mut cx2d, &mut Scope::empty());
+            cx2d.end_pass_sized_turtle();
+            self.draw_list.end(&mut cx2d);
+            cx2d.end_pass(&self.pass);
+        }
+    }
+
+    fn press(abs: Vec2d, time: f64) -> Event {
+        Event::MouseDown(MouseDownEvent {
+            abs,
+            button: MouseButton::PRIMARY,
+            window_id: WINDOW,
+            modifiers: KeyModifiers::default(),
+            handled: Cell::new(Area::Empty),
+            time,
+        })
+    }
+
+    fn moved(abs: Vec2d, time: f64) -> Event {
+        Event::MouseMove(MouseMoveEvent {
+            abs,
+            lock_delta: Vec2d::default(),
+            window_id: WINDOW,
+            modifiers: KeyModifiers::default(),
+            handled: Cell::new(Area::Empty),
+            time,
+        })
+    }
+
+    fn release(abs: Vec2d, time: f64) -> Event {
+        Event::MouseUp(MouseUpEvent {
+            abs,
+            button: MouseButton::PRIMARY,
+            window_id: WINDOW,
+            modifiers: KeyModifiers::default(),
+            time,
+        })
+    }
+
+    fn send(cx: &mut Cx, root: &WidgetRef, event: &Event) -> ActionsBuf {
+        cx.capture_actions(|cx| root.handle_event(cx, event, &mut Scope::empty()))
+    }
+
+    fn scene(cx: &mut Cx) -> WidgetRef {
+        cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    weight := FabSlider{
+                        width: 300.
+                        label: "one"
+                        value: 50.0
+                    }
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        })
+    }
+
+    fn start(cx: &mut Cx) -> (WidgetRef, WidgetRef) {
+        cx.init_cx_os();
+        cx.with_vm(crate::script_mod);
+        let root = scene(cx);
+        let mut target = Target::new(cx);
+        target.draw(cx, &root);
+        let weight = root.widget(cx, ids!(weight));
+        assert!(!weight.is_empty(), "the scene has a slider in it");
+        (root, weight)
+    }
+
+    /// The window x of a point `travel` (0..1) along the track, taken the
+    /// way the control takes it.
+    fn on_the_track(cx: &Cx, weight: &WidgetRef, travel: f64) -> Vec2d {
+        let inner = weight.borrow::<FabSlider>().unwrap();
+        let face = inner.draw_bg.area().rect(cx);
+        assert!(face.size.x > 0.0, "the slider was drawn");
+        let (label_px, readout_px) = inner.columns();
+        let width = face.size.x - label_px - readout_px;
+        let t = inner.travel();
+        let (lo, hi) = t.stops();
+        dvec2(
+            face.pos.x + label_px + t.thumb_x(lo + travel * (hi - lo), width),
+            face.pos.y + face.size.y * 0.5,
+        )
+    }
+
+    fn on_the_word(cx: &Cx, weight: &WidgetRef) -> Vec2d {
+        let rect = weight.borrow::<FabSlider>().unwrap().label_area.rect(cx);
+        assert!(
+            rect.size.x > 0.0 && rect.size.y > 0.0,
+            "the name was drawn, or this test is pressing nothing"
+        );
+        rect.pos + rect.size * 0.5
+    }
+
+    fn changed(actions: &ActionsBuf, weight: &WidgetRef) -> Option<f64> {
+        weight.as_fab_slider().changed(actions)
+    }
+
+    fn ended(actions: &ActionsBuf, weight: &WidgetRef) -> Option<f64> {
+        weight.as_fab_slider().ended(actions)
+    }
+
+    fn was_reset(actions: &ActionsBuf, weight: &WidgetRef) -> bool {
+        weight.as_fab_slider().was_reset(actions)
+    }
+
+    /// A press on the track lands the value under the pointer at once — no
+    /// threshold, no anchor, nothing to travel through first — and the move
+    /// keeps it there.
+    #[test]
+    fn a_press_on_the_track_jumps_the_thumb_and_then_tracks_it() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, weight) = start(&mut cx);
+        let at = on_the_track(&cx, &weight, 0.25);
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        let actions = send(&mut cx, &root, &press(at, 0.0));
+        assert_eq!(
+            changed(&actions, &weight),
+            Some(25.0),
+            "the press landed the thumb"
+        );
+        let to = on_the_track(&cx, &weight, 0.75);
+        let actions = send(&mut cx, &root, &moved(to, 0.1));
+        assert_eq!(
+            changed(&actions, &weight),
+            Some(75.0),
+            "the drag followed the pointer"
+        );
+        let actions = send(&mut cx, &root, &release(to, 0.2));
+        assert_eq!(ended(&actions, &weight), Some(75.0));
+        cx.fingers.first_mouse_button = None;
+    }
+
+    /// The name is the reset, and the commit that follows it carries the
+    /// zero rather than the value the press found.
+    #[test]
+    fn a_tap_on_the_name_resets_the_row_before_it_commits() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, weight) = start(&mut cx);
+        let at = on_the_word(&cx, &weight);
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        let actions = send(&mut cx, &root, &press(at, 0.0));
+        assert_eq!(
+            changed(&actions, &weight),
+            None,
+            "a press on the name moves nothing"
+        );
+        let actions = send(&mut cx, &root, &release(at, 0.0));
+        assert!(was_reset(&actions, &weight), "the tap read as a reset");
+        assert_eq!(
+            ended(&actions, &weight),
+            Some(0.0),
+            "and the commit carries the zero"
+        );
+        cx.fingers.first_mouse_button = None;
+    }
+
+    fn key(key_code: KeyCode, shift: bool) -> Event {
+        Event::KeyDown(KeyEvent {
+            key_code,
+            is_repeat: false,
+            modifiers: KeyModifiers {
+                shift,
+                ..KeyModifiers::default()
+            },
+            time: 0.0,
+        })
+    }
+
+    /// What a caller SETS is what the row holds.
+    ///
+    /// `step: 1.0` and `precision: 0` are what a weight row wants under a
+    /// finger. Neither is a licence to round the host's own arithmetic on the
+    /// way in: four rows splitting a hundred parts come down to 0 / 37.5 /
+    /// 37.5 / 25, and rows that stored 38 put 101% on screen under a legend
+    /// promising a hundred.
+    #[test]
+    fn a_value_set_from_outside_is_held_exactly() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (_root, weight) = start(&mut cx);
+        let row = weight.as_fab_slider();
+        row.set_value(&mut cx, 37.5);
+        assert_eq!(
+            row.value(),
+            37.5,
+            "the detent rounded a number nobody dragged"
+        );
+        // The stops are not the detent, and they still hold.
+        row.set_value(&mut cx, 120.0);
+        assert_eq!(row.value(), 100.0);
+        row.set_value(&mut cx, -3.0);
+        assert_eq!(row.value(), 0.0);
+    }
+
+    /// An arrow moves one step from where the row STANDS.
+    ///
+    /// Focused the way a hand focuses it -- a press on the track and a
+    /// release -- and only then is the off-detent value pushed in, which is
+    /// the panel's own order: the host writes the weights, the hand nudges
+    /// one of them. Settling the sum onto the grid read the origin off the
+    /// grid first and published 39 from a row standing at 37.5, a jump of a
+    /// step and a half that the ledger behind the panel then had to absorb.
+    #[test]
+    fn an_arrow_moves_one_step_from_where_the_row_stands() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, weight) = start(&mut cx);
+        let at = on_the_track(&cx, &weight, 0.5);
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        // Dispatched rather than captured: `set_key_focus` only records the
+        // request, and the focus moves on the cycle that runs once the
+        // press's actions have gone out.
+        root.handle_event(&mut cx, &press(at, 0.0), &mut Scope::empty());
+        cx.handle_actions();
+        root.handle_event(&mut cx, &release(at, 0.1), &mut Scope::empty());
+        cx.handle_actions();
+        cx.fingers.first_mouse_button = None;
+        let face = weight.borrow::<FabSlider>().unwrap().draw_bg.area();
+        assert!(
+            cx.has_key_focus(face),
+            "the press left the keyboard elsewhere, so the arrows below reach nothing"
+        );
+        weight.as_fab_slider().set_value(&mut cx, 37.5);
+
+        let actions = send(&mut cx, &root, &key(KeyCode::ArrowRight, false));
+        assert_eq!(
+            changed(&actions, &weight),
+            Some(38.5),
+            "the arrow started from the rounded number"
+        );
+        let actions = send(&mut cx, &root, &key(KeyCode::ArrowLeft, false));
+        assert_eq!(changed(&actions, &weight), Some(37.5), "and back again");
+        // Shift is the coarse step, taken from the same true origin.
+        let actions = send(&mut cx, &root, &key(KeyCode::ArrowRight, true));
+        assert_eq!(changed(&actions, &weight), Some(47.5));
+    }
+
+    /// The detent is still the detent for the hand that is on the thumb: a
+    /// drag lands on whole parts however the row was set.
+    #[test]
+    fn a_drag_still_lands_on_the_detent() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, weight) = start(&mut cx);
+        weight.as_fab_slider().set_value(&mut cx, 37.5);
+        let at = on_the_track(&cx, &weight, 0.617);
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        let actions = send(&mut cx, &root, &press(at, 0.0));
+        let landed = changed(&actions, &weight).expect("the press moved the thumb");
+        assert_eq!(landed, landed.round(), "the drag came to rest off the detent");
+        send(&mut cx, &root, &release(at, 0.1));
+        cx.fingers.first_mouse_button = None;
+    }
+
+    fn key_repeat(key_code: KeyCode) -> Event {
+        Event::KeyDown(KeyEvent {
+            key_code,
+            is_repeat: true,
+            modifiers: KeyModifiers::default(),
+            time: 0.0,
+        })
+    }
+
+    fn key_up(key_code: KeyCode) -> Event {
+        Event::KeyUp(KeyEvent {
+            key_code,
+            is_repeat: false,
+            modifiers: KeyModifiers::default(),
+            time: 0.0,
+        })
+    }
+
+    fn key_with(key_code: KeyCode, modifiers: KeyModifiers) -> Event {
+        Event::KeyDown(KeyEvent {
+            key_code,
+            is_repeat: false,
+            modifiers,
+            time: 0.0,
+        })
+    }
+
+    /// How many commits one event produced. A commit is the expensive word in
+    /// this control's vocabulary -- the panel rebuilds a module on each one --
+    /// so the COUNT is the thing under test, not whether one arrived.
+    fn commits(actions: &ActionsBuf, weight: &WidgetRef) -> usize {
+        actions
+            .filter_widget_actions_cast::<FabSliderAction>(weight.widget_uid())
+            .filter(|action| matches!(action, FabSliderAction::Ended(_)))
+            .count()
+    }
+
+    /// The keyboard, taken the way a hand has to take it: there is no tab
+    /// order into this row, so a press on the track and a release is the only
+    /// door in. Dispatched rather than captured -- `set_key_focus` only
+    /// records the request, and the focus moves on the cycle that runs once
+    /// the press's actions have gone out.
+    fn give_it_the_keyboard(cx: &mut Cx, root: &WidgetRef, weight: &WidgetRef) {
+        let at = on_the_track(cx, weight, 0.5);
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        root.handle_event(cx, &press(at, 0.0), &mut Scope::empty());
+        cx.handle_actions();
+        root.handle_event(cx, &release(at, 0.1), &mut Scope::empty());
+        cx.handle_actions();
+        cx.fingers.first_mouse_button = None;
+        let face = weight.borrow::<FabSlider>().unwrap().draw_bg.area();
+        assert!(
+            cx.has_key_focus(face),
+            "the press left the keyboard elsewhere, so the keys below reach nothing"
+        );
+    }
+
+    /// A HELD arrow is ONE gesture, not thirty.
+    ///
+    /// The keyboard sends a repeat every thirty-odd milliseconds. A host that
+    /// reads each of them as the end of a gesture does its end-of-gesture work
+    /// thirty times for one second of a held key, and the panel these rows sit
+    /// in spends a module rebuild on every one of them -- a second of held
+    /// arrow for a second of main thread nobody can draw on. The same second
+    /// spent dragging costs a handful, because a drag reports moves and the
+    /// settle behind them bounds it. This is the test that says the arrows are
+    /// bounded the same way.
+    #[test]
+    fn a_held_arrow_commits_for_the_run_and_not_once_per_repeat() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, weight) = start(&mut cx);
+        give_it_the_keyboard(&mut cx, &root, &weight);
+        weight.as_fab_slider().set_value(&mut cx, 10.0);
+
+        // The deliberate press commits where it lands: one tap of an arrow is
+        // a whole gesture, and it must not wait for a release to be seen.
+        let actions = send(&mut cx, &root, &key(KeyCode::ArrowRight, false));
+        assert_eq!(changed(&actions, &weight), Some(11.0));
+        assert_eq!(
+            commits(&actions, &weight),
+            1,
+            "a single deliberate press has to land at once"
+        );
+
+        // ...and then the key is HELD. Every repeat moves the row; not one of
+        // them ends a gesture the hand has not let go of.
+        let mut moved = 0;
+        for beat in 0..29 {
+            let actions = send(&mut cx, &root, &key_repeat(KeyCode::ArrowRight));
+            moved += changed(&actions, &weight).is_some() as usize;
+            assert_eq!(
+                commits(&actions, &weight),
+                0,
+                "repeat {beat} ended a gesture the hand has not let go of"
+            );
+        }
+        assert_eq!(moved, 29, "the repeats stopped moving the row");
+
+        // The release is the end, and it carries what the run stopped on.
+        let actions = send(&mut cx, &root, &key_up(KeyCode::ArrowRight));
+        assert_eq!(
+            commits(&actions, &weight),
+            1,
+            "the run ended without a commit, so its last value never left the row"
+        );
+        assert_eq!(ended(&actions, &weight), Some(40.0));
+        assert_eq!(weight.as_fab_slider().value(), 40.0);
+    }
+
+    /// The value a run stops on is the value the host has to end up holding.
+    ///
+    /// The repeats say only "moved", so the commit rides on the release -- and
+    /// a release that never arrives, because the keyboard went somewhere else
+    /// mid-run, must still pay what the run owes. Otherwise the last thing the
+    /// hand did sits on the row and reaches nothing.
+    #[test]
+    fn a_run_the_keyboard_walks_out_on_still_commits() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, weight) = start(&mut cx);
+        give_it_the_keyboard(&mut cx, &root, &weight);
+        weight.as_fab_slider().set_value(&mut cx, 10.0);
+        send(&mut cx, &root, &key(KeyCode::ArrowRight, false));
+        let actions = send(&mut cx, &root, &key_repeat(KeyCode::ArrowRight));
+        assert_eq!(changed(&actions, &weight), Some(12.0));
+        assert_eq!(commits(&actions, &weight), 0, "the repeat is mid-run");
+
+        let face = weight.borrow::<FabSlider>().unwrap().draw_bg.area();
+        let actions = send(
+            &mut cx,
+            &root,
+            &Event::KeyFocus(KeyFocusEvent {
+                prev: face,
+                focus: Area::Empty,
+            }),
+        );
+        assert_eq!(
+            ended(&actions, &weight),
+            Some(12.0),
+            "the run was abandoned with a value the host had never been told to keep"
+        );
+        // ...and once only. What is owed is owed once.
+        let actions = send(
+            &mut cx,
+            &root,
+            &Event::KeyFocus(KeyFocusEvent {
+                prev: face,
+                focus: Area::Empty,
+            }),
+        );
+        assert_eq!(commits(&actions, &weight), 0);
+    }
+
+    /// An arrow steps from what the row HOLDS, not from what it PRINTS.
+    ///
+    /// A host whose column is read as a whole rounds over the whole column,
+    /// and the leftover parts come off the largest share -- so the biggest
+    /// row of a mix prints several parts below the weight it carries.
+    /// Written into the value, which was once the only way to say it, that
+    /// printed number became the one the next arrow started from: the key
+    /// that means MORE asked for less than the row already had, and walked
+    /// the biggest theme in the mix down four parts a press. Where the gap
+    /// was narrower than one step the row could not move at all, and every
+    /// press still cost the host its end-of-gesture work.
+    #[test]
+    fn an_arrow_steps_from_what_the_row_holds_and_not_what_it_prints() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, weight) = start(&mut cx);
+        give_it_the_keyboard(&mut cx, &root, &weight);
+        let row = weight.as_fab_slider();
+        // The shape a mix with a tail leaves: a dominant row, and four parts
+        // of the column's rounding taken off it.
+        row.set_value_and_readout(&mut cx, 85.5, 81.0);
+        assert_eq!(row.value(), 85.5, "the weight the row stands for");
+        assert_eq!(row.readout(), 81.0, "the share the column prints");
+
+        let actions = send(&mut cx, &root, &key(KeyCode::ArrowRight, false));
+        assert_eq!(
+            changed(&actions, &weight),
+            Some(86.5),
+            "the arrow stepped from the printed share, so the key that means more asked for \
+             less than the row already held"
+        );
+        assert_eq!(commits(&actions, &weight), 1, "a deliberate press lands at once");
+        assert_eq!(ended(&actions, &weight), Some(86.5));
+        // ...and the row prints its own number again. A share worked out for
+        // the weight before this one is a share this row no longer has.
+        assert_eq!(
+            row.readout(),
+            86.5,
+            "the row went on printing a share the hand has moved it off"
+        );
+
+        // A plain value takes the readout back with it, so a host cannot
+        // leave one standing over a number it was never worked out for.
+        row.set_value(&mut cx, 40.0);
+        assert_eq!(row.readout(), 40.0);
+    }
+
+    /// A run the WINDOW walks out on still commits.
+    ///
+    /// `Hit::KeyFocusLost` does not fire when the whole app is deactivated --
+    /// the focus INSIDE it has not moved -- so an arrow held while the hand
+    /// alt-tabs away ended the run with nothing told about where it stopped.
+    /// The repeats say only that the value moved, so a host that rate-limits
+    /// those and acts on the commit was left holding the value from before
+    /// the run.
+    #[test]
+    fn a_run_the_window_walks_out_on_still_commits() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, weight) = start(&mut cx);
+        give_it_the_keyboard(&mut cx, &root, &weight);
+        weight.as_fab_slider().set_value(&mut cx, 10.0);
+        send(&mut cx, &root, &key(KeyCode::ArrowRight, false));
+        let actions = send(&mut cx, &root, &key_repeat(KeyCode::ArrowRight));
+        assert_eq!(changed(&actions, &weight), Some(12.0));
+        assert_eq!(commits(&actions, &weight), 0, "the repeat is mid-run");
+
+        let actions = send(&mut cx, &root, &Event::WindowLostFocus(WINDOW));
+        assert_eq!(
+            ended(&actions, &weight),
+            Some(12.0),
+            "the window took the keyboard away and the run went uncommitted"
+        );
+        // ...and once only. What is owed is owed once.
+        let actions = send(&mut cx, &root, &Event::WindowLostFocus(WINDOW));
+        assert_eq!(commits(&actions, &weight), 0);
+        assert_eq!(
+            weight.as_fab_slider().value(),
+            12.0,
+            "the deactivation moved the row the hand had stopped on"
+        );
+    }
+
+    /// End is ABSOLUTE: the first press names the stop, and every repeat after
+    /// it names the same stop. A key held against the end of its own travel is
+    /// a key this row has already answered, and answering it again is an
+    /// end-of-gesture for a value that did not move.
+    #[test]
+    fn a_held_stop_key_commits_once_and_then_has_nothing_to_say() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, weight) = start(&mut cx);
+        give_it_the_keyboard(&mut cx, &root, &weight);
+        weight.as_fab_slider().set_value(&mut cx, 10.0);
+
+        let actions = send(&mut cx, &root, &key(KeyCode::End, false));
+        assert_eq!(
+            changed(&actions, &weight),
+            Some(100.0),
+            "End is the far stop, and it goes there on the press"
+        );
+        assert_eq!(
+            commits(&actions, &weight),
+            1,
+            "a stop key has to feel immediate"
+        );
+        for beat in 0..10 {
+            let actions = send(&mut cx, &root, &key_repeat(KeyCode::End));
+            assert_eq!(changed(&actions, &weight), None);
+            assert_eq!(
+                commits(&actions, &weight),
+                0,
+                "repeat {beat} commits the stop the row is already standing on"
+            );
+        }
+        let actions = send(&mut cx, &root, &key_up(KeyCode::End));
+        assert_eq!(
+            commits(&actions, &weight),
+            0,
+            "the press paid for itself; the release owes nothing"
+        );
+    }
+
+    /// Ctrl and Cmd belong to whatever the row is sitting IN.
+    ///
+    /// Ctrl+Home is the panel going to its top and Cmd+Arrow is the window
+    /// manager's; a focused row that nudges on either is a row that broke a
+    /// shortcut the rest of the app still honours -- silently, and only while
+    /// the keyboard happens to be on it. Shift is this control's own.
+    #[test]
+    fn the_accelerator_modifiers_are_not_this_rows_to_take() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, weight) = start(&mut cx);
+        give_it_the_keyboard(&mut cx, &root, &weight);
+        let row = weight.as_fab_slider();
+        row.set_value(&mut cx, 10.0);
+
+        let held = [
+            (
+                "ctrl",
+                KeyModifiers {
+                    control: true,
+                    ..KeyModifiers::default()
+                },
+            ),
+            (
+                "cmd",
+                KeyModifiers {
+                    logo: true,
+                    ..KeyModifiers::default()
+                },
+            ),
+        ];
+        for (name, modifiers) in held {
+            for key_code in [KeyCode::ArrowRight, KeyCode::ArrowDown, KeyCode::End] {
+                let actions = send(&mut cx, &root, &key_with(key_code, modifiers));
+                assert_eq!(
+                    changed(&actions, &weight),
+                    None,
+                    "{name}+{key_code:?} moved the row"
+                );
+                assert_eq!(commits(&actions, &weight), 0);
+            }
+        }
+        assert_eq!(row.value(), 10.0, "the row answered an accelerator");
+
+        // ...and Shift, which IS the row's own, still takes the coarse step.
+        let actions = send(&mut cx, &root, &key(KeyCode::ArrowRight, true));
+        assert_eq!(changed(&actions, &weight), Some(20.0));
+    }
+
+    /// One press, one owner. This is the reading a scroller takes before it
+    /// starts dragging its content, so a second hold anywhere on the row
+    /// would be the panel scrolling out from under a thumb.
+    #[test]
+    fn the_face_is_the_only_thing_holding_that_press() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, weight) = start(&mut cx);
+        let at = on_the_track(&cx, &weight, 0.5);
+        let face = weight.borrow::<FabSlider>().unwrap().draw_bg.area();
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        send(&mut cx, &root, &press(at, 0.0));
+        assert!(
+            cx.fingers.is_area_captured(face),
+            "the track took the pointer"
+        );
+        assert!(
+            !cx.fingers.is_mouse_held_outside(&[face]),
+            "and nothing else on the row took a second hold of it"
+        );
+        cx.fingers.first_mouse_button = None;
     }
 }

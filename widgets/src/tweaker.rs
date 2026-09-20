@@ -90,7 +90,7 @@
 
 use crate::{
     check_box::{CheckBox, CheckBoxAction},
-    fab_controls::{format_hex, parse_hex, rgb_to_hsv, FabColorPick, FabColorPickAction, FabValueInput, FabValueInputAction, FabValueInputWidgetRefExt},
+    fab_controls::{format_hex, parse_hex, rgb_to_hsv, FabColorPick, FabColorPickAction, FabSliderAction, FabSliderWidgetRefExt, FabValueInput, FabValueInputAction, FabValueInputWidgetRefExt},
     makepad_draw::makepad_platform::devtools,
     makepad_draw::makepad_platform::sploded::{SPLODED_SPREAD_DEFAULT, SPLODED_SPREAD_MAX, SPLODED_SPREAD_MIN},
     dock::DockWidgetRefExt,
@@ -108,6 +108,8 @@ use crate::{
     widget_tree::{live_id_token, widget_type_names, CxWidgetExt},
 };
 use crate::makepad_script::script_eval;
+use crate::theme_lab::{Applied, PinnedTheme, ThemeLab};
+use crate::theme_tokens::{Appearance, WeightMode, RELATIVE_TOTAL};
 use crate::Animate;
 use crate::ButtonAction;
 use crate::button::ButtonWidgetRefExt;
@@ -1427,6 +1429,42 @@ fn draw_hands_off_frame(cx: &mut Cx2d, outline: &mut DrawTweakOutline) -> bool {
         outline.draw_abs(cx, rect);
     }
     true
+}
+
+/// The process's private (pagefile-backed) bytes, in KB, for the state
+/// route. Windows only; elsewhere it reads zero.
+#[cfg(windows)]
+fn private_kb() -> u64 {
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct Counters {
+        cb: u32,
+        PageFaultCount: u32,
+        PeakWorkingSetSize: usize,
+        WorkingSetSize: usize,
+        QuotaPeakPagedPoolUsage: usize,
+        QuotaPagedPoolUsage: usize,
+        QuotaPeakNonPagedPoolUsage: usize,
+        QuotaNonPagedPoolUsage: usize,
+        PagefileUsage: usize,
+        PeakPagefileUsage: usize,
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentProcess() -> *mut core::ffi::c_void;
+        fn K32GetProcessMemoryInfo(process: *mut core::ffi::c_void, counters: *mut Counters, cb: u32) -> i32;
+    }
+    unsafe {
+        let mut c: Counters = std::mem::zeroed();
+        c.cb = std::mem::size_of::<Counters>() as u32;
+        K32GetProcessMemoryInfo(GetCurrentProcess(), &mut c, c.cb);
+        (c.PagefileUsage / 1024) as u64
+    }
+}
+
+#[cfg(not(windows))]
+fn private_kb() -> u64 {
+    0
 }
 
 fn sidebar_width() -> f64 {
@@ -4881,6 +4919,28 @@ fn theme_palette(cx: &mut Cx) -> Vec<(String, u32, String)> {
 
 /// Overwrite one theme value in the script heap, wherever in the theme's
 /// prototype chain it is defined (the module is immutable to scripts).
+///
+/// KNOWN LIMITATION, while a mix stands. This writes into `mod.theme`, and
+/// every `install_blend` replaces that map wholesale; what keeps an override
+/// on the screen across a mix is not this write but `pulse_sync`, which
+/// repaints the draw-buffer slots it recorded after each draw. So for as long
+/// as a blend is in force with an override open, the screen and `mod.theme`
+/// disagree BY CONSTRUCTION -- the screen wears the override, the heap wears
+/// the blend -- and the two readers of the heap say so:
+///
+/// - [`crate::theme_store::snapshot`] reads `mod.theme`, so "save as" over a
+///   mix records the BLEND's value for an overridden token rather than the
+///   one on screen. Pick the saved row back afterwards and the page changes
+///   colour. Its own doc says it takes "a value the person changed in the
+///   Theme tab a moment ago", and over a mix that is not true.
+/// - `Tweaker::mix_reading` measures `blend.color(...)`, so the readability
+///   line under the weights reports pairs the screen is not wearing whenever
+///   an override is open.
+///
+/// Neither is a wrong answer about the blend; both are the wrong answer about
+/// the screen. Closing this means the override surviving an `install_blend`
+/// rather than being repainted after it, which is a change to the blend
+/// install and not to this line.
 fn theme_heap_set(cx: &mut Cx, key: LiveId, value: ScriptValue) -> bool {
     let mut hit = false;
     cx.with_vm(|vm| {
@@ -4963,10 +5023,13 @@ pub(crate) fn theme_apply(
     if old_text == text && !overridden {
         return Ok(None);
     }
+    // The literal the module run will read back: what the theme files write.
+    let mut literal = text.clone();
     match value {
         ThemeVal::Color(current) => {
             let (rgba, _) = parse_hex(&text).ok_or_else(|| format!("{text:?} is not a colour"))?;
             let new = packed_of(rgba);
+            literal = format!("#x{new:08X}");
             // The theme module is immutable to scripts; a design tool
             // edits the value in place, at the level that defines it.
             theme_heap_set(cx, key, ScriptValue::from_color(new));
@@ -5000,6 +5063,7 @@ pub(crate) fn theme_apply(
         }
         ThemeVal::Num(_) => {
             let f: f64 = text.parse().map_err(|_| format!("{text:?} is not a number"))?;
+            literal = format!("{f:?}");
             // Numbers are baked into layouts at apply time: the heap
             // holds the new value for everything applied from now on
             // and the ledger carries it to the source; existing layout
@@ -5010,6 +5074,14 @@ pub(crate) fn theme_apply(
     }
     let now = cx.seconds_since_app_start();
     let mut s = session().lock().unwrap();
+    // What the value was before anyone touched it this session: the
+    // oldest step on the ledger. An edit that lands back there is not
+    // an edit any more, and must not go on pinning the theme file's own.
+    let original = s
+        .diff
+        .iter()
+        .find(|e| e.scope == "theme" && e.prop == name)
+        .map(|e| e.old.clone());
     s.suppress_until = now + SUPPRESS_LINGER;
     s.apply_gen += 1;
     s.next_seq += 1;
@@ -5029,6 +5101,10 @@ pub(crate) fn theme_apply(
     }
     s.diff.push(entry);
     drop(s);
+    // The heap holds the value only until the next module run forgets it;
+    // this is what that run reads it back from. The caller asks for the run.
+    let back_at_original = original.as_deref() == Some(text.as_str());
+    crate::set_theme_edit(cx, name, if back_at_original { None } else { Some(literal) });
     cx.redraw_all();
     Ok(Some((value, text)))
 }
@@ -5289,48 +5365,14 @@ fn sight_target(cx: &Cx, uid: u64, in_frame: bool) -> TargetSighting {
 /// flat (negative alpha) for the same reason — the theme gives the hover and
 /// focus states a second stop, and a two-tone face reads as a third state
 /// that does not exist.
-/// One colour off the fab palette, ready to apply. Opaque: these are FILLS,
-/// and a role that carries an alpha (the base theme's well is a translucent
-/// black) would let the panel's ground through a control that is meant to
-/// sit on it.
-fn fab_fill(cx: &mut Cx, key: LiveId) -> Vec4f {
-    let rgba = cx.with_vm(|vm| {
-        let fab = vm.module(id!(fab));
-        vm.bx.heap.value(fab, key.into(), NoTrap).as_color().unwrap_or(0)
-    });
-    vec4(
-        ((rgba >> 24) & 0xff) as f32 / 255.0,
-        ((rgba >> 16) & 0xff) as f32 / 255.0,
-        ((rgba >> 8) & 0xff) as f32 / 255.0,
-        1.0,
-    )
-}
-
 fn set_button_fill(cx: &mut Cx, btn: WidgetRef, selected: bool) {
     let mut btn = btn;
-    // Worn (the Theme tab's "wear" switch), the literals below would be a
-    // dark slab under a light theme with the panel's now-dark words on it --
-    // unreadable, and on every switch in the panel at once. So worn, the two
-    // states come off the palette instead: the accent's own CONTAINER for
-    // on, which is the tint that role exists to carry ink on, and the well
-    // tone for off. Both keep `fab.color_text` readable, which is what the
-    // button draws its word in; `worn_the_panel_takes_the_themes_colours_and_still_reads`
-    // holds that to a number under every sheet.
-    let (base, hover, down): (Vec4f, Vec4f, Vec4f) = if crate::fab_controls::panel_wears_theme(cx) {
-        if selected {
-            (
-                fab_fill(cx, live_id!(color_accent_dim)),
-                fab_fill(cx, live_id!(color_accent)),
-                fab_fill(cx, live_id!(color_accent_dim)),
-            )
-        } else {
-            (
-                fab_fill(cx, live_id!(color_input)),
-                fab_fill(cx, live_id!(color_input_hover)),
-                fab_fill(cx, live_id!(color_input_active)),
-            )
-        }
-    } else if selected {
+    // Literals, and deliberately: the panel's chrome stands still under
+    // whatever theme the app is wearing, so the colour that says "you are in
+    // this mode" must not be read from a table that can move underneath it.
+    // Both pairs are chosen against `fab.color_text`, which is what the
+    // button draws its word in.
+    let (base, hover, down): (Vec4f, Vec4f, Vec4f) = if selected {
         (
             vec4(0.23, 0.45, 0.83, 1.0),
             vec4(0.31, 0.54, 0.92, 1.0),
@@ -6919,6 +6961,49 @@ pub fn tweak_callback(
             // repainting — the platform's time repaint, the spinner's too).
             out.push_str(&format!(",\"f\":{}", cx.repaint_id()));
             out.push_str(&format!(",\"shaders\":{}", cx.draw_shaders.shaders.len()));
+            // Memory, by owner. Two reads apart in time say which of these
+            // grows with the process: the script heap and what roots it, the
+            // draw lists, the text caches, the process itself. The `census`
+            // and `reach` ops go further when one of them does.
+            {
+                let (heap, live, bodies, roots) = cx.with_vm(|vm| {
+                    (vm.bx.heap.objects_len(), vm.bx.heap.gc_live_len(), vm.bx.code.bodies.borrow().len(), vm.bx.heap.root_counts())
+                });
+                let (threads, paused, foot) = cx.with_vm(|vm| {
+                    let n = vm.bx.threads.len();
+                    let mut foot = [0usize; 5];
+                    let mut paused = 0usize;
+                    for i in 0..n {
+                        if let Some(t) = vm.bx.threads.get(i) {
+                            let f = t.root_footprint();
+                            for k in 0..5 {
+                                foot[k] += f[k];
+                            }
+                            if t.is_paused() {
+                                paused += 1;
+                            }
+                        }
+                    }
+                    (n, paused, foot)
+                });
+                out.push_str(&format!(
+                    ",\"threads\":{threads},\"paused\":{paused},\"stack\":{},\"slots\":{},\"scopes\":{},\"mes\":{},\"loops\":{}",
+                    foot[0], foot[1], foot[2], foot[3], foot[4]
+                ));
+                let lists = cx.draw_lists.id_iter().count();
+                let items: usize = cx.draw_lists.id_iter().map(|id| cx.draw_lists[id].draw_items.len()).sum();
+                let fonts = cx
+                    .get_global::<std::rc::Rc<std::cell::RefCell<crate::makepad_draw::text::fonts::Fonts>>>()
+                    .clone();
+                let fm = fonts.borrow().memory_bytes();
+                out.push_str(&format!(
+                    ",\"heap\":{heap},\"live\":{live},\"bodies\":{bodies},\"lists\":{lists},\"items\":{items},\"atlas_kb\":{},\"layout_kb\":{},\"private_kb\":{},\"types\":{},\"defaults\":{},\"pods\":{},\"refs\":{},\"arefs\":{},\"handles\":{}",
+                    fm.atlas_bytes / 1024,
+                    fm.layout_cache_bytes / 1024,
+                    private_kb(),
+                    roots[0], roots[1], roots[2], roots[3], roots[4], roots[5]
+                ));
+            }
             {
                 let s = session().lock().unwrap();
                 out.push_str(",\"states\":[");
@@ -6956,6 +7041,148 @@ pub fn tweak_callback(
             session().lock().unwrap().theme_req = Some((name.clone(), value.clone()));
             cx.redraw_all();
             Ok(format!("{{\"ok\":1,\"theme\":{},\"value\":{}}}", json_str(&name), json_str(&value)))
+        }
+        "census" => {
+            // A leak hunt's reading: collect, then count every surviving
+            // object by the site of the template it was built from. Two
+            // readings apart in time say which kind of object is piling up.
+            let rows = cx.with_vm(|vm| {
+                vm.gc();
+                let ids = vm.bx.heap.alloced_object_ids();
+                let mut by_site: std::collections::HashMap<String, usize> = Default::default();
+                for obj in ids {
+                    let chain = vm.construction_chain(obj.into());
+                    let site = chain
+                        .iter()
+                        .find_map(|lvl| lvl.loc.as_ref().map(|l| format!("{}:{}", l.file.rsplit('/').next().unwrap_or(&l.file), l.line)))
+                        .unwrap_or_else(|| {
+                            // No site anywhere up the chain: say what the
+                            // object is by its own keys and by what its proto
+                            // is -- a keyless object is told apart by the
+                            // proto alone.
+                            let keys = chain
+                                .first()
+                                .map(|lvl| format!("?{} [{}]", lvl.own_keys.len(), lvl.own_keys.iter().take(3).map(|k| crate::widget_tree::live_id_token(*k)).collect::<Vec<_>>().join(",")))
+                                .unwrap_or_else(|| "?".to_string());
+                            let proto = vm.bx.heap.proto(obj);
+                            let proto = if let Some(id) = proto.as_id() {
+                                format!("proto=id:{}", crate::widget_tree::live_id_token(id))
+                            } else if let Some(pobj) = proto.as_object() {
+                                let pchain = vm.construction_chain(pobj.into());
+                                let psite = pchain
+                                    .iter()
+                                    .find_map(|lvl| lvl.loc.as_ref().map(|l| format!("{}:{}", l.file.rsplit('/').next().unwrap_or(&l.file), l.line)));
+                                let pkeys = pchain.first().map(|lvl| lvl.own_keys.len()).unwrap_or(0);
+                                format!("proto=obj:{}:{pkeys}", psite.unwrap_or_else(|| "?".to_string()))
+                            } else if proto.is_nil() {
+                                "proto=nil".to_string()
+                            } else {
+                                let text = format!("{proto:?}");
+                                format!("proto=other:{}", text.chars().take(40).collect::<String>())
+                            };
+                            format!("{keys} {proto}")
+                        });
+                    *by_site.entry(site).or_insert(0) += 1;
+                }
+                let mut rows: Vec<(String, usize)> = by_site.into_iter().collect();
+                rows.sort_by(|a, b| b.1.cmp(&a.1));
+                rows
+            });
+            let total: usize = rows.iter().map(|(_, n)| n).sum();
+            let body = rows
+                .iter()
+                .take(400)
+                .map(|(site, n)| format!("[{},{}]", json_str(site), n))
+                .collect::<Vec<_>>()
+                .join(",");
+            Ok(format!("{{\"ok\":1,\"total\":{total},\"sites\":[{body}]}}"))
+        }
+        "reach" => {
+            // A leak hunt's reading: how many objects each collector root
+            // reaches, walked by hand over own keys, the vec part and the
+            // proto. The module tree is walked once per module; every other
+            // root is walked with the module tree already marked, so what it
+            // reports is what it alone keeps alive.
+            fn reach(vm: &mut ScriptVm, seeds: &[ScriptObject], visited: &mut std::collections::HashSet<ScriptObject>) -> usize {
+                vm.bx.heap.reach_count(seeds, visited)
+            }
+            let report = cx.with_vm(|vm| {
+                vm.gc();
+                let modules = vm.bx.heap.modules;
+                let module_ids: Vec<(String, ScriptObject)> = vm
+                    .construction_chain(modules.into())
+                    .first()
+                    .map(|lvl| {
+                        lvl.own_keys
+                            .iter()
+                            .filter_map(|k| vm.bx.heap.value(modules, (*k).into(), NoTrap).as_object().map(|o| (crate::widget_tree::live_id_token(*k), o)))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mut out = String::new();
+                let mut all_modules: std::collections::HashSet<ScriptObject> = Default::default();
+                all_modules.insert(modules);
+                out.push_str("\"modules\":{");
+                let mut first = true;
+                for (name, obj) in &module_ids {
+                    let mut visited: std::collections::HashSet<ScriptObject> = Default::default();
+                    visited.insert(modules);
+                    let n = reach(vm, &[*obj], &mut visited);
+                    all_modules.extend(visited.iter().copied());
+                    if !first {
+                        out.push(',');
+                    }
+                    first = false;
+                    out.push_str(&format!("{}:{n}", json_str(name)));
+                }
+                out.push('}');
+                let (protos, defaults) = vm.bx.heap.type_root_ids();
+                let refs = vm.bx.heap.root_object_ids();
+                let bodies: Vec<ScriptObject> = {
+                    let bodies = vm.bx.code.bodies.borrow();
+                    bodies
+                        .iter()
+                        .flat_map(|b| {
+                            let mut v = vec![b.scope.as_object(), b.me.as_object()];
+                            if let Some(end) = &b.end_scope {
+                                v.push(end.as_object());
+                            }
+                            v
+                        })
+                        .collect()
+                };
+                for (name, seeds) in [("typeprotos", protos), ("typedefaults", defaults), ("bodies", bodies), ("refs", refs.clone())] {
+                    let mut visited = all_modules.clone();
+                    let n = reach(vm, &seeds, &mut visited);
+                    out.push_str(&format!(",\"{name}\":{n}"));
+                }
+                // The refs one by one: what each Rust-held reference keeps
+                // alive beyond the module tree, the biggest first, each named
+                // by its template's site and first keys.
+                let mut per_ref: Vec<(usize, String)> = refs
+                    .iter()
+                    .map(|obj| {
+                        let mut visited = all_modules.clone();
+                        let n = reach(vm, &[*obj], &mut visited);
+                        let chain = vm.construction_chain((*obj).into());
+                        let site = chain
+                            .iter()
+                            .find_map(|lvl| lvl.loc.as_ref().map(|l| format!("{}:{}", l.file.rsplit('/').next().unwrap_or(&l.file), l.line)))
+                            .unwrap_or_else(|| "?".to_string());
+                        let keys: Vec<String> = chain
+                            .first()
+                            .map(|lvl| lvl.own_keys.iter().take(5).map(|k| crate::widget_tree::live_id_token(*k)).collect())
+                            .unwrap_or_default();
+                        (n, format!("{site} keys={} [{}] obj={}", chain.first().map(|l| l.own_keys.len()).unwrap_or(0), keys.join(","), obj.index()))
+                    })
+                    .collect();
+                per_ref.sort_by(|a, b| b.0.cmp(&a.0));
+                out.push_str(",\"top_refs\":[");
+                out.push_str(&per_ref.iter().take(1200).map(|(n, s)| format!("[{n},{}]", json_str(s))).collect::<Vec<_>>().join(","));
+                out.push(']');
+                out
+            });
+            Ok(format!("{{\"ok\":1,{report}}}"))
         }
         "pulse" => {
             // Pin the theme pulse on a colour (name=color_x or a #hex);
@@ -7768,9 +7995,9 @@ impl ThemeChoice {
 /// A question the Theme tab has asked and is waiting on a second press to
 /// answer, and the name it was asked about.
 ///
-/// One field holds both, rather than a flag per command, so there is one
+/// One field holds them all, rather than a flag per command, so there is one
 /// place a question is asked, one place it is answered and one place it
-/// lapses -- and so asking one question CANCELS the other. Two flags would
+/// lapses -- and so asking one question CANCELS the others. A flag each would
 /// have let a "save again to replace it" still standing answer a delete, or
 /// the other way round, which is the class of bug a confirmation exists to
 /// prevent.
@@ -7780,6 +8007,47 @@ enum ThemeConfirm {
     Replace(String),
     /// "delete" has offered to remove this saved theme from disk.
     Delete(String),
+    /// The picker has offered to drop a standing mix for this theme. The
+    /// other two are asked about a file; this one is asked about the only
+    /// thing the panel destroys that was never written down.
+    Mix(String),
+}
+
+/// The saved theme the panel is wearing: the name the picker shows, and the
+/// tokens that belong to that name.
+///
+/// ONE field and not two, because they were two and they drifted. The name
+/// and the pins were written side by side at three sites, and at a fourth --
+/// "save as" -- the name moved on its own; from there the picker named one
+/// theme while the pins of the theme before it sat waiting, and the next
+/// `- mix` put a theme nobody was wearing back over the screen, taking every
+/// hand edit made since with it. A doc comment asking the next writer to
+/// remember the second line is not a rule, it is a hope. They are not two
+/// facts that have to agree, they are one fact -- which saved theme is on --
+/// and nothing can move half of one.
+///
+/// `None` in [`Tweaker::theme_worn`] is a built-in in force. That is kept
+/// beside `theme_preset` rather than folded into it, because deleting a saved
+/// theme has to fall back to something and the built-in last picked is it.
+#[derive(Clone)]
+struct WornTheme {
+    /// What the picker shows, what the delete button acts on, and what the
+    /// store knows the file by.
+    name: String,
+    /// Its own tokens, pinned over its base theme and its sheet.
+    ///
+    /// The one part of a saved theme nothing on the vm remembers: `mod.theme`
+    /// holds what the tokens came TO rather than which of them were pinned,
+    /// and the module rebuild that puts the base and the sheet back is
+    /// exactly what throws them away. So the panel keeps them, because it is
+    /// the panel that loaded them and put them on, and the mix is entered on
+    /// them whenever somebody unfolds it. See `enter_the_lab` and
+    /// [`crate::theme_lab::PinnedTheme`].
+    ///
+    /// Deliberately not `pending_theme_script`, which cannot serve: that is
+    /// taken by the next `Event::LiveEdit`, a tick after the pick and long
+    /// before anybody unfolds anything.
+    pinned: PinnedTheme,
 }
 
 /// Everything the picker offers, in the order it offers it: every built-in
@@ -7817,6 +8085,174 @@ fn current_theme_preset(cx: &mut Cx) -> usize {
         .iter()
         .position(|preset| *preset == wanted)
         .unwrap_or(0)
+}
+
+/// The mix's weight rows, in the order the lab lists them.
+///
+/// Eight, because the longest appearance group the library ships is eight
+/// themes and the sidebar is one chunk evaluated once -- there is no making
+/// a row at the moment a group turns out to want it. A shorter group hides
+/// the tail and zeroes its uids, which shuts the route as well as the row.
+const EQ_ROW_IDS: [LiveId; 8] = [
+    live_id!(eq_row_0),
+    live_id!(eq_row_1),
+    live_id!(eq_row_2),
+    live_id!(eq_row_3),
+    live_id!(eq_row_4),
+    live_id!(eq_row_5),
+    live_id!(eq_row_6),
+    live_id!(eq_row_7),
+];
+
+/// How long the mix waits between installs while a weight is being dragged.
+///
+/// An install is a module rebuild -- the blend itself, the sheet off, the
+/// theme module, the mix evaluated into it, the widget module, and a walk of
+/// the whole tree after that -- and it measures about 52 ms. A slider reports
+/// a change per pointer move, so installing on each of them spends the whole
+/// of a 500 ms drag with the main thread blocked and the thumb trailing the
+/// pointer by frames. Held to one install per interval, the same drag pays
+/// about a third of its own length and the blend still restates itself six
+/// or seven times a second, which is enough to read a colour moving.
+///
+/// The number is the install cost with room around it. Much shorter and the
+/// duty cycle climbs until the drag itself stutters -- at 75 ms it is two
+/// thirds; much longer and the app visibly lags the rows. What the hand
+/// actually stopped on never waits for any of this: the end of the gesture
+/// installs on the next draw, whatever the interval says.
+///
+/// The 52 ms is measured and not guessed: `script_mod` re-run under
+/// `vm.with_reload` in a release build, median of twelve, with the VM's
+/// errors captured rather than logged -- logging the one pre-existing `ime`
+/// warning per reload adds 30 ms of stdout on its own and is what makes this
+/// look like 80. The APP's own module tail is inside that number and costs
+/// about a millisecond of it: the library's `script_mod` measured 51 ms in
+/// the same process and storybook's whole one 52 ms. That is why carrying an
+/// install on a style reload, which re-runs the app's tail, is not a heavier
+/// road than the module splice it replaced -- it is the same road, plus a
+/// millisecond, and it is the only one that reaches a widget.
+const EQ_SETTLE: f64 = 0.15;
+
+/// The panel lies over the app rather than pushing it inward. Compressing
+/// the body cost a jump the width of the panel on every module rebuild --
+/// the rebuild forgot the compression and the next draw put it back -- and
+/// a mix or a theme edit rebuilds on every settle. Kept as a switch, not
+/// deleted: the compression code is still the right shape if the panel
+/// ever moves to its own window and stops needing either.
+const PANEL_FLOATS: bool = false;
+
+/// How far the app body is pushed in while the panel is up.
+fn desired_body_margin(on: bool) -> f64 {
+    if on && !PANEL_FLOATS { sidebar_width() } else { 0.0 }
+}
+
+/// The seed the next surprise mix is drawn from.
+///
+/// A counter walked on, and not a number off the clock: the same seed has to
+/// be the same mix, or the one somebody liked cannot be got back to and no
+/// test can pin one. The step is the constant the draw mixes with itself, so
+/// two presses land in unrelated parts of its sequence rather than in
+/// neighbouring draws of the same one.
+fn next_mix_seed(seed: u64) -> u64 {
+    seed.wrapping_add(0x9E37_79B9_7F4A_7C15)
+}
+
+/// The weights as the rows will PRINT them, where what they add up to is part
+/// of what they say.
+///
+/// A weight row shows whole numbers -- a share is felt against the seven
+/// beside it, where a column of decimals asks to be read one at a time -- and
+/// a relative mix is a hundred parts of a total. Rounded a row at a time
+/// those two cannot both hold: four rows splitting a hundred come down to
+/// 0 / 37.5 / 37.5 / 25 and print 0 / 38 / 38 / 25, which is a hundred and
+/// one. Nor does a decimal place settle it -- three rows splitting a hundred
+/// evenly print 33.3 three times, and 33.33, and 33.333, for ever.
+///
+/// So the rounding is shared out rather than done in each row's ignorance of
+/// the others: every row takes its floor, and the parts left over go to the
+/// rows with the largest fraction, largest first and in row order where two
+/// are equal, so the same mix prints the same column on every draw.
+///
+/// Under one rule that outranks the arithmetic: a row that is in the mix
+/// never prints 0, because 0 is this panel's word for out of it. See
+/// `rows_that_would_print_as_out`.
+///
+/// What the LAB holds is not this and must not be. The blend is made from the
+/// halves, and a row that stored what it printed would hand the next arrow
+/// key an origin nobody set.
+///
+/// Weights that do not add to `total` in the first place are none of this
+/// function's business: there is no rounding to distribute there, only
+/// numbers to show, so they come back rounded each on its own -- and then the
+/// one rule is applied to those too, because it is about what a row MEANS and
+/// not about what a column adds to.
+fn shares_that_add_up(weights: &[f64], total: f64) -> Vec<f64> {
+    let mut shares: Vec<f64> = weights.iter().map(|weight| weight.max(0.0).floor()).collect();
+    let floors: f64 = shares.iter().sum();
+    let left = (total - floors).round();
+    if left < 0.0 || left > shares.len() as f64 {
+        shares = weights.iter().map(|weight| weight.max(0.0).round()).collect();
+    } else {
+        let mut order: Vec<usize> = (0..shares.len()).collect();
+        order.sort_by(|a, b| {
+            let fraction = |index: usize| weights[index].max(0.0) - shares[index];
+            fraction(*b)
+                .partial_cmp(&fraction(*a))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.cmp(b))
+        });
+        for index in order.into_iter().take(left as usize) {
+            shares[index] += 1.0;
+        }
+    }
+    // ...and then no row that is in the mix printing as out of it. The part
+    // comes off the largest share there is, which is the one that can least
+    // notice it: the column still adds to the total, and a part off the
+    // biggest row is a smaller lie than a row claiming not to be there at
+    // all. Where nothing can spare one -- a column already down to ones --
+    // nothing is moved, because eight rows cannot each print 1 out of four.
+    for silent in rows_that_would_print_as_out(weights, &shares) {
+        let Some(largest) = largest_share_that_can_spare_a_part(&shares) else {
+            break;
+        };
+        shares[largest] -= 1.0;
+        shares[silent] = 1.0;
+    }
+    shares
+}
+
+/// The rows that are IN the mix and would print as out of it: some weight,
+/// and a share rounded down to nothing.
+///
+/// A row reading 0 is this panel's own word for "not in the mix" -- clicking
+/// a theme's name sets exactly that, and it is the documented gesture for
+/// taking one out -- so a row carrying four tenths of a part and printing 0
+/// contradicts itself in the panel's own vocabulary, while going on moving
+/// the blend. It is not a corner, either: the surprise draws a bell curve
+/// over eight rows, and a bell curve over eight rows has a tail under a half
+/// most times it is pressed.
+fn rows_that_would_print_as_out(weights: &[f64], shares: &[f64]) -> Vec<usize> {
+    (0..shares.len())
+        .filter(|index| weights[*index] > 0.0 && shares[*index] <= 0.0)
+        .collect()
+}
+
+/// The biggest share that can give a part up without falling to nothing
+/// itself -- which would only move the fault along a row. Lowest row first
+/// where two are equal, so that the same mix prints the same column on every
+/// draw.
+fn largest_share_that_can_spare_a_part(shares: &[f64]) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    for index in 0..shares.len() {
+        if shares[index] < 2.0 {
+            continue;
+        }
+        match best {
+            Some(had) if shares[had] >= shares[index] => {}
+            _ => best = Some(index),
+        }
+    }
+    best
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -8216,9 +8652,6 @@ pub struct Tweaker {
     theme_save_uid: u64,
     #[rust]
     theme_delete_uid: u64,
-    /// The switch that puts the panel itself in the chosen theme.
-    #[rust]
-    theme_wear_uid: u64,
     /// Which built-in preset the picker shows as the one in force.
     #[rust]
     theme_preset: usize,
@@ -8232,11 +8665,10 @@ pub struct Tweaker {
     /// only pushed at the widget when they actually change.
     #[rust]
     theme_entries: Vec<ThemeChoice>,
-    /// The saved theme in force, or `None` when a built-in is. Kept beside
-    /// `theme_preset` rather than folded into it: deleting a saved theme has
-    /// to fall back to something, and the built-in last picked is it.
+    /// The saved theme in force -- its name and its pins in one move -- or
+    /// `None` when a built-in is. See [`WornTheme`] for why it is one field.
     #[rust]
-    theme_saved: Option<String>,
+    theme_worn: Option<WornTheme>,
     /// The name box's text, mirrored here so a click on "save as" can read it
     /// without going back through the widget.
     #[rust]
@@ -8266,6 +8698,84 @@ pub struct Tweaker {
     /// theme the panel just left for a frame or two unless it keeps looking.
     #[rust]
     theme_reload_frames: u8,
+    /// The mix: several themes in force at once, each with a weight, and
+    /// the part of that a panel would otherwise have to remember. Held
+    /// here rather than in the rows that show it, because the sidebar is
+    /// dropped and rebuilt whenever the panel's own palette moves, and a
+    /// weight kept in a widget would go with it.
+    #[rust]
+    eq_lab: ThemeLab,
+    /// Whether the mix section is unfolded. Folded is the default and has
+    /// to be: opening it resolves every theme the library ships, and
+    /// nobody asked for that by coming to the tab to pick one.
+    #[rust]
+    eq_open: bool,
+    /// A weight moved, so the mix has to go in and be read again. A drag
+    /// reports a change per pointer move and each install is a module
+    /// rebuild, so the moves collect here and one install serves every one
+    /// of them that arrives inside [`EQ_SETTLE`].
+    #[rust]
+    eq_apply_due: bool,
+    /// The mix goes in on the next draw whatever the settle says.
+    ///
+    /// Set by everything that is a press rather than a drag: the end of a
+    /// gesture, either switch row, the surprise, the reset, opening the
+    /// section. Those are one install each, and a press that had to wait out
+    /// an interval reads as the panel having missed it.
+    #[rust]
+    eq_apply_at_once: bool,
+    /// When the mix last actually went in, on the app clock.
+    ///
+    /// Only an install moves it. An apply that found nothing to do cost
+    /// nothing, and the move after it must not wait out an interval that
+    /// nobody paid for.
+    #[rust]
+    eq_installed_at: f64,
+    /// A theme edit is waiting to be worn; see `edit_settle`.
+    #[rust]
+    edit_reload_due: bool,
+    #[rust]
+    edit_reloaded_at: f64,
+    /// How many reloads the edits have cost; what a test counts.
+    #[rust]
+    edit_reloads: u32,
+    /// How the mix in force reads, as the last install measured it. Kept
+    /// rather than measured per draw: it is a blend of every theme in the
+    /// mix, and nothing about it changes between two moves of a weight.
+    #[rust]
+    eq_reading: String,
+    /// Whether a blend is standing over the app, as the last install
+    /// answered. An apply that found nothing to do says nothing here: it left
+    /// the screen exactly as it was.
+    ///
+    /// The weights cannot answer this -- a lab holds them whether or not they
+    /// ever went in -- and it is what the picker asks before it throws a mix
+    /// away, because the question is about what the app is WEARING.
+    #[rust]
+    eq_mix_stands: bool,
+    /// Where the next surprise is drawn from. Started off the session's
+    /// apply generation, which is a number the panel already has, so that
+    /// the button is reproducible and a test can pin one press of it.
+    #[rust]
+    eq_seed: u64,
+    /// The mix section's own controls, captured at draw like the picker's.
+    /// A folded section zeroes all of them: a uid left over from the last
+    /// time it was open would route a press meant for something else.
+    #[rust]
+    eq_fold_uid: u64,
+    #[rust]
+    eq_dark_uid: u64,
+    #[rust]
+    eq_light_uid: u64,
+    #[rust]
+    eq_absolute_uid: u64,
+    #[rust]
+    eq_relative_uid: u64,
+    #[rust]
+    eq_random_uid: u64,
+    /// One per weight row on show, in the group's own order; the rest 0.
+    #[rust]
+    eq_row_uids: [u64; 8],
     /// The two PortalLists' uids (props, tree), captured at ensure.
     #[rust]
     props_list_uid: u64,
@@ -8432,9 +8942,22 @@ pub struct Tweaker {
     /// text over another's. Nothing is written unless these agree.
     #[rust]
     note_key_shown: String,
-    /// Previous tweak-mode state, to detect the on edge.
+    /// Previous tweak-mode state, to detect the on edge -- and cleared by
+    /// [`Tweaker::cancel_interactions`], which is the panel already stood
+    /// down and so the edge already answered.
     #[rust]
     was_on: bool,
+    /// Where this panel reads and writes saved themes. `None` is the store's
+    /// own answer, which is what a person's install uses; a host that keeps
+    /// its themes somewhere else says so here rather than through the
+    /// process environment, which is shared with every other thread in it.
+    #[rust]
+    themes_dir: Option<std::path::PathBuf>,
+    /// The draw saw the mode go off and left the standing down to the next
+    /// event, because standing down rebuilds two modules and a draw pass must
+    /// not do that to itself. See `draw_walk` and `cancel_interactions`.
+    #[rust]
+    stand_down_pending: bool,
     /// The open color-picker popover's rect: input inside it belongs to
     /// the popup — row gestures skip it and the scroll list ignores wheel
     /// there (the input-side mirror of app < outlines < panel < popups).
@@ -8484,17 +9007,18 @@ pub struct Tweaker {
 /// The sidebar is built ONCE, from a runtime splash chunk, and it reads
 /// `mod.fab` as it is built -- so nothing that changes the palette afterwards
 /// reaches it. That is the point: the panel is immune to whatever theme the
-/// app is wearing. But it also means the Theme tab's "wear" switch, which
-/// changes the palette and nothing else, would leave the panel in the
-/// colours it was built with until somebody closed and reopened it.
+/// app is wearing, which is what lets it be the tool a theme is diagnosed
+/// WITH.
 ///
-/// So the panel watches the PALETTE rather than the switch. That way it also
-/// follows a theme change made while the switch is on, and a switch thrown
-/// from anywhere else, without either having to remember to tell it. Three
-/// entries are enough to tell one palette from another, and this is three
-/// reads of a table already in memory. With the switch off the palette never
-/// moves, so the stamp never changes and the panel is built exactly once, as
-/// it always was.
+/// Watched rather than assumed. `mod.fab` is a table like any other, and a
+/// token in it re-pointed at `theme.` -- by an edit, by a sheet reaching
+/// further than it was meant to -- would move the panel's skin silently and
+/// leave it in the colours it was built with until somebody closed and
+/// reopened it. So the panel reads what it was painted from and builds again
+/// if that ever differs, without anything having to remember to tell it.
+/// Three entries are enough to tell one palette from another, and this is
+/// three reads of a table already in memory. While the palette holds still
+/// the stamp never changes and the panel is built exactly once.
 fn fab_palette_stamp(cx: &mut Cx) -> u64 {
     cx.with_vm(|vm| {
         let fab = vm.module(id!(fab));
@@ -8606,6 +9130,15 @@ impl Tweaker {
     /// size of the sidebar band, through the ordinary apply machinery so the
     /// relayout is the real one. Not a user edit — never enters the diff.
     fn ensure_body_margin(&mut self, cx: &mut Cx, desired: f64) {
+        // A floating panel never touches the body. Not merely "asks for a
+        // margin of zero": the ask itself is a script chunk applied to the
+        // app's own body, and applying one is a rebuild of what it lands on.
+        // Every reload marked the margin stale and re-applied a zero, and
+        // each of those rebuilt the body once more while the panel was up.
+        if PANEL_FLOATS {
+            self.margin_stale = false;
+            return;
+        }
         if !body_margin_needs_apply(self.applied_margin, desired, self.margin_stale) {
             return;
         }
@@ -8667,9 +9200,9 @@ impl Tweaker {
             if self.sidebar_palette == palette {
                 return;
             }
-            // The chrome moved underneath it -- the Theme tab's "wear"
-            // switch, or a theme change while that switch is on. The chunk
-            // below is where every fab colour lands, and it is evaluated
+            // The chrome moved underneath it: something re-pointed one of
+            // the panel's own palette entries. The chunk below is where
+            // every fab colour lands, and it is evaluated
             // here and nowhere else, so the only way to repaint the panel is
             // to build it again. Everything the panel REMEMBERS is on this
             // struct rather than in those widgets, so what is lost is what
@@ -9837,6 +10370,24 @@ impl Tweaker {
                     name := PanelLabelDim { width: Fill text: "" max_lines: 1 text_overflow: TextOverflow.Ellipsis }
                     ne := PanelLabelSmall { width: Fit text: "no editor yet" }
                 }
+                // One theme's weight in the mix. A slider and not the panel's
+                // number field: a weight is a share, felt against the seven
+                // beside it, where a column of type-in boxes asks to be read
+                // one at a time. Its name column is the way back out -- a
+                // click there is the slider's own reset -- and its face is
+                // drawn from `mod.fab` throughout, so it needs no hardening
+                // against the sheets the way a stock control would.
+                //
+                // The wrapper is what carries `visible`: a group of seven
+                // hides the eighth row, and a widget that is not a View
+                // answers `set_visible` with nothing at all.
+                let EqRowT = View {
+                    width: Fill
+                    height: Fit
+                    eq_weight := FabSlider {
+                        height: fab.row_height_sm
+                    }
+                }
                 View {
                     width: Fill
                     height: Fill
@@ -9844,8 +10395,8 @@ impl Tweaker {
                     show_bg: true
                     draw_bg +: {
                         // The panel's ground, off the palette rather than
-                        // written out: the same colour it has always been,
-                        // but one the Theme tab's "wear" switch can move.
+                        // written out: one entry to move if the panel's own
+                        // skin is ever changed, and one no sheet can reach.
                         color: fab.color_area
                     }
                     padding: Inset{left: 4 right: 4 top: 6 bottom: 4}
@@ -9936,10 +10487,16 @@ impl Tweaker {
                         flow: Down
                         spacing: 3
                         padding: Inset{left: 4 right: 4 top: 0 bottom: 3}
-                        // The picker, and beside it the switch that decides
-                        // whether the PANEL wears what the picker chose. One
-                        // row, because they are one question asked from two
-                        // sides: which theme, and who is wearing it.
+                        // The picker, and beside it the way into a mix. One
+                        // row, because they are one question asked twice:
+                        // which theme -- and, where no one theme is the
+                        // answer, what mixture of them.
+                        //
+                        // The picker Fills and the toggle Fits its word, so
+                        // the list keeps every point the toggle does not
+                        // need; both stand 20 high in a row that centres
+                        // what is in it, so the name in the field and the
+                        // word on the toggle sit on one line.
                         theme_pick_row := View {
                             width: Fill
                             height: Fit
@@ -9950,26 +10507,122 @@ impl Tweaker {
                                 width: Fill
                                 height: 20
                             }
-                            // A TOGGLE and not a command: it lights while
-                            // the panel is wearing the theme and goes out
-                            // when the panel is back in its own palette --
-                            // the same on/off fill the filter row's search,
-                            // select and explode switches use
-                            // (`set_button_fill`), so the panel has one way
-                            // of showing a mode you are in.
+                            // Folded until it is asked for, and twice over.
+                            // Opening it resolves every theme the library
+                            // ships, which is the better part of a second;
+                            // and `theme_head` is Fit and outside every
+                            // scroller, so eight open rows would push the
+                            // value list off the bottom of the panel for
+                            // somebody who only came here to pick a theme.
                             //
-                            // Off is the default and has to stay the
-                            // default: this panel is the tool a theme is
-                            // diagnosed WITH, so it has to be able to stand
-                            // outside the theme under test. The switch is
-                            // for the other question -- what a theme
-                            // actually looks like to work in.
-                            theme_wear := PanelButton {
+                            // Here rather than over the section it opens,
+                            // because the mix is the picker's other answer:
+                            // it is reached from where the theme is chosen.
+                            eq_fold := PanelButton {
                                 width: Fit
                                 height: 20
                                 padding: Inset{left: 7 right: 7 top: 2 bottom: 2}
-                                text: "wear"
+                                text: "+ mix"
                                 draw_text +: { text_style +: { font_size: 7.5 } }
+                            }
+                        }
+                        // THE EQUALIZER. The theme in force does not have to
+                        // be one of the ones that shipped: every theme of one
+                        // appearance can be in it at once, each with a weight,
+                        // and what the app wears is what they average to.
+                        //
+                        // A section and not a field, so it opens BELOW the
+                        // picker row and never inside it. The toggle that
+                        // opens it is up in that row, beside the picker; what
+                        // it unfolds is all of this.
+                        eq_body := View {
+                            visible: false
+                            width: Fill
+                            height: Fit
+                            flow: Down
+                            spacing: 3
+                            padding: Inset{left: 0 right: 0 top: 2 bottom: 0}
+                            // Which half of the library is being mixed. Two
+                            // rungs, so a pair of switches and not a list to
+                            // open -- and two switches rather than one, because
+                            // "not dark" is a fact about the mix and not a
+                            // thing anybody presses.
+                            //
+                            // It is a choice and not a preference: no mix
+                            // crosses the two. Half way between a dark theme
+                            // and a light one is a mid grey page with mid grey
+                            // text on it, and the engine refuses it outright.
+                            eq_appearance_row := View {
+                                width: Fill
+                                height: Fit
+                                flow: Right
+                                spacing: 3
+                                align: Align{x: 0.0 y: 0.5}
+                                eq_dark := PanelButton {
+                                    width: Fit
+                                    height: 20
+                                    padding: Inset{left: 7 right: 7 top: 2 bottom: 2}
+                                    text: "dark"
+                                    draw_text +: { text_style +: { font_size: 7.5 } }
+                                }
+                                eq_light := PanelButton {
+                                    width: Fit
+                                    height: 20
+                                    padding: Inset{left: 7 right: 7 top: 2 bottom: 2}
+                                    text: "light"
+                                    draw_text +: { text_style +: { font_size: 7.5 } }
+                                }
+                                eq_absolute := PanelButton {
+                                    width: Fit
+                                    height: 20
+                                    padding: Inset{left: 7 right: 7 top: 2 bottom: 2}
+                                    margin: Inset{left: 10}
+                                    text: "absolute"
+                                    draw_text +: { text_style +: { font_size: 7.5 } }
+                                }
+                                eq_relative := PanelButton {
+                                    width: Fit
+                                    height: 20
+                                    padding: Inset{left: 7 right: 7 top: 2 bottom: 2}
+                                    text: "relative"
+                                    draw_text +: { text_style +: { font_size: 7.5 } }
+                                }
+                                eq_random := PanelButton {
+                                    width: Fit
+                                    height: 20
+                                    padding: Inset{left: 7 right: 7 top: 2 bottom: 2}
+                                    margin: Inset{left: 10}
+                                    text: "surprise"
+                                    draw_text +: { text_style +: { font_size: 7.5 } }
+                                }
+                            }
+                            // A row per theme of the group on show, and the
+                            // tail hidden when the group is the shorter one.
+                            eq_rows := View {
+                                width: Fill
+                                height: Fit
+                                flow: Down
+                                spacing: 1
+                                eq_row_0 := EqRowT {}
+                                eq_row_1 := EqRowT {}
+                                eq_row_2 := EqRowT {}
+                                eq_row_3 := EqRowT {}
+                                eq_row_4 := EqRowT {}
+                                eq_row_5 := EqRowT {}
+                                eq_row_6 := EqRowT {}
+                                eq_row_7 := EqRowT {}
+                            }
+                            // How the mix reads. Two themes that were each
+                            // readable can average into one that is not: both
+                            // chose their ink against their own ground, and
+                            // the average moves the pair together. Said in
+                            // numbers and left there -- it is a measurement,
+                            // and whoever is looking at the mix can see the
+                            // page it describes.
+                            eq_read := PanelLabelSmall {
+                                width: Fill
+                                text: ""
+                                max_lines: 2
                             }
                         }
                         theme_save_row := View {
@@ -11294,8 +11947,13 @@ impl Tweaker {
             }
         }
 
-        let chrome: [(&[LiveId], &str); 27] = [
-            (&[live_id!(theme_head), live_id!(theme_pick_row), live_id!(theme_wear)], "put this panel in the theme above too \u{00b7} off, the panel keeps its own colours whatever the app is wearing"),
+        let chrome: [(&[LiveId], &str); 32] = [
+            (&[live_id!(theme_head), live_id!(theme_pick_row), live_id!(eq_fold)], "mix several themes into one \u{00b7} a weight each, and the app wears what they average to"),
+            (&[live_id!(theme_head), live_id!(eq_body), live_id!(eq_appearance_row), live_id!(eq_dark)], "mix the dark themes \u{00b7} a mix never crosses dark and light"),
+            (&[live_id!(theme_head), live_id!(eq_body), live_id!(eq_appearance_row), live_id!(eq_light)], "mix the light themes \u{00b7} a mix never crosses dark and light"),
+            (&[live_id!(theme_head), live_id!(eq_body), live_id!(eq_appearance_row), live_id!(eq_absolute)], "every weight is its own \u{00b7} turning one up puts more of that theme in"),
+            (&[live_id!(theme_head), live_id!(eq_body), live_id!(eq_appearance_row), live_id!(eq_relative)], "the weights share a hundred parts \u{00b7} turning one up takes from the rest"),
+            (&[live_id!(theme_head), live_id!(eq_body), live_id!(eq_appearance_row), live_id!(eq_random)], "a mix nobody planned \u{00b7} the same press from the same place is the same mix"),
             (&[live_id!(filter_row), live_id!(search)], "filter the properties by name \u{00b7} or search them, with the magnifier"),
             (&[live_id!(filter_row), live_id!(find)], "search instead of filter: every row stays, the hits are counted \u{00b7} F3 next, Shift+F3 previous"),
             (&[live_id!(filter_row), live_id!(nav), live_id!(prev)], "the previous hit (Shift+F3)"),
@@ -11879,6 +12537,8 @@ impl Tweaker {
         let Some((was, applied)) = theme_apply(cx, name, text, origin, undo)? else {
             return Ok(());
         };
+        self.edit_reload_due = true;
+        self.next_frame = cx.new_next_frame();
         if matches!(was, ThemeVal::Color(_)) {
             self.theme_colors = theme_palette(cx);
             self.palette_gen = session().lock().unwrap().apply_gen;
@@ -12748,14 +13408,6 @@ impl Tweaker {
                 let pick_row = head.child(live_id!(theme_pick_row));
                 let pick = pick_row.child(live_id!(theme_pick));
                 self.theme_pick_uid = pick.widget_uid().0;
-                // The switch beside it, lit while the panel is wearing the
-                // theme. Read off the palette rather than off a flag of this
-                // widget's own, so what the switch SAYS and what the panel
-                // is actually painted in cannot drift apart.
-                let wear = pick_row.child(live_id!(theme_wear));
-                self.theme_wear_uid = wear.widget_uid().0;
-                let worn = crate::fab_controls::panel_wears_theme(cx);
-                set_button_fill(cx, wear, worn);
                 let entries = self.theme_entry_list();
                 // Only when they actually changed: `set_labels` redraws, and
                 // this runs on every frame the tab is up.
@@ -12786,6 +13438,13 @@ impl Tweaker {
                 let del = row.child(live_id!(theme_delete));
                 del.set_visible(cx, deletable);
                 self.theme_delete_uid = if deletable { del.widget_uid().0 } else { 0 };
+                // The mix, under everything above it: a blend is made OUT of
+                // the themes the picker lists, and "save as" then snapshots
+                // whatever is in force, mix included. Drawn BEFORE the note
+                // line is pushed at the widget, because a mix that refuses
+                // itself answers in that same line and a refusal shown a
+                // frame late is a refusal shown against the next press.
+                self.draw_equalizer(cx, &head);
                 let msg = head.child(live_id!(theme_msg));
                 msg.set_visible(cx, !self.theme_msg.is_empty());
                 msg.set_text(cx, &self.theme_msg);
@@ -15172,40 +15831,12 @@ impl Tweaker {
                         .iter()
                         .position(|uid| *uid == widget_action.widget_uid.0)
                         .unwrap_or(0);
-                    self.panel_tab = match index {
-                        1 => PanelTab::Shader,
-                        2 => PanelTab::Tree,
-                        3 => PanelTab::Theme,
-                        4 => PanelTab::Spec,
-                        _ => PanelTab::Props,
-                    };
-                    // Entering the Theme tab is the moment to look at the
-                    // theme folder again: another window, another app or the
-                    // person's own editor may have changed what is in it.
-                    if self.panel_tab == PanelTab::Theme {
-                        self.refresh_saved_themes();
-                        // ...and the moment to drop what the tab last said.
-                        // A note is the answer to a press, so a "deleted
-                        // sunset" still sitting there on the way back in
-                        // reports something that happened a tab ago as if it
-                        // had just happened. The question that goes with it
-                        // lapses for the same reason: coming back to the tab
-                        // is not an answer to anything.
-                        self.theme_msg.clear();
-                        self.theme_confirm = None;
-                    }
-                    self.redraw_sidebar(cx);
+                    self.set_panel_tab(cx, index);
                 }
             }
             if self.theme_pick_uid != 0 && widget_action.widget_uid.0 == self.theme_pick_uid {
                 if let DropDownAction::Select(index) = widget_action.cast::<DropDownAction>() {
                     self.apply_theme_choice(cx, index);
-                }
-            }
-            if self.theme_wear_uid != 0 && widget_action.widget_uid.0 == self.theme_wear_uid {
-                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
-                    let on = !crate::fab_controls::panel_wears_theme(cx);
-                    self.set_panel_wears_theme(cx, on);
                 }
             }
             if self.theme_name_uid != 0 && widget_action.widget_uid.0 == self.theme_name_uid {
@@ -15237,6 +15868,74 @@ impl Tweaker {
             if self.theme_delete_uid != 0 && widget_action.widget_uid.0 == self.theme_delete_uid {
                 if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
                     self.delete_saved_theme(cx);
+                }
+            }
+            if self.eq_fold_uid != 0 && widget_action.widget_uid.0 == self.eq_fold_uid {
+                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                    self.toggle_equalizer(cx);
+                }
+            }
+            // The two switch rows. Written as a pair each rather than a
+            // branch each, because a rung that answers differently from its
+            // neighbour is how a radio row stops being one.
+            for (uid, appearance) in
+                [(self.eq_dark_uid, Appearance::Dark), (self.eq_light_uid, Appearance::Light)]
+            {
+                if uid != 0 && widget_action.widget_uid.0 == uid {
+                    if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                        self.eq_set_appearance(appearance);
+                        self.redraw_sidebar(cx);
+                    }
+                }
+            }
+            for (uid, mode) in [
+                (self.eq_absolute_uid, WeightMode::Absolute),
+                (self.eq_relative_uid, WeightMode::Relative),
+            ] {
+                if uid != 0 && widget_action.widget_uid.0 == uid {
+                    if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                        self.eq_set_mode(mode);
+                        self.redraw_sidebar(cx);
+                    }
+                }
+            }
+            if self.eq_random_uid != 0 && widget_action.widget_uid.0 == self.eq_random_uid {
+                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                    self.eq_surprise();
+                    self.redraw_sidebar(cx);
+                }
+            }
+            if let Some(index) = self
+                .eq_row_uids
+                .iter()
+                .position(|uid| *uid != 0 && *uid == widget_action.widget_uid.0)
+            {
+                match widget_action.cast::<FabSliderAction>() {
+                    // Every move of the thumb lands here and NOT in an
+                    // install: see `eq_weight_moved`. The rows are redrawn
+                    // and nothing else is -- until a mix goes in, the app is
+                    // still wearing the theme it was already wearing, and a
+                    // redraw of the whole tree per pointer move is the panel
+                    // making its own drag expensive.
+                    FabSliderAction::Changed(weight) => {
+                        self.eq_weight_moved(index, weight);
+                        self.redraw_panel(cx);
+                    }
+                    // The thumb was let go: this is the value somebody chose,
+                    // so it does not wait for the settle to come round again.
+                    // A drag that stopped twenty milliseconds short of the
+                    // interval must not leave the app a blend behind what the
+                    // rows read.
+                    FabSliderAction::Ended(weight) => {
+                        self.eq_gesture_ended(index, weight);
+                        self.redraw_panel(cx);
+                    }
+                    // The name was clicked: that theme comes out of the mix.
+                    FabSliderAction::Reset => {
+                        self.eq_row_cleared(index);
+                        self.redraw_panel(cx);
+                    }
+                    _ => {}
                 }
             }
             if self.tree_list_uid != 0 && widget_action.widget_uid.0 == self.tree_list_uid {
@@ -15973,10 +16672,14 @@ impl Tweaker {
         let Some(preset) = theme_presets().get(index).copied() else {
             return;
         };
+        // Before anything goes on, because the mix has to come off the theme
+        // it is standing over rather than off the one about to replace it.
+        let mixing = self.theme_choice_takes_the_mix_off(cx);
         self.theme_preset = index;
-        // A built-in is now in force, so nothing saved is, and a saved
-        // theme's tokens that had not landed yet must not land on top of it.
-        self.theme_saved = None;
+        // A built-in is now in force, so nothing saved is -- name and pins
+        // together, because they are one thing -- and a saved theme's tokens
+        // that had not landed yet must not land on top of it.
+        self.theme_worn = None;
         self.pending_theme_script = None;
         match preset {
             ThemePreset::Base(base) => {
@@ -15996,33 +16699,54 @@ impl Tweaker {
         self.theme_reload_frames = 6;
         self.next_frame = cx.new_next_frame();
         cx.request_style_reload();
+        if mixing {
+            self.mix_starts_from_the_theme_just_picked(cx);
+        }
         self.redraw_sidebar(cx);
     }
 
-    /// Put the panel itself in the theme the picker is showing, or back in
-    /// its own palette.
+    /// Move the panel to the tab at `index`.
     ///
-    /// Only the CHOICE is made here. The palette is built by
-    /// `fab_controls::script_mod`, so what this does is record the switch and
-    /// ask for the style reload that re-runs it; the panel then notices that
-    /// its chrome has moved and builds itself again ([`fab_palette_stamp`]).
-    ///
-    /// Deliberately not the other way round -- dropping the sidebar here and
-    /// letting the next draw rebuild it. `request_style_reload` lands a tick
-    /// or more later, so that rebuild would run against the palette that had
-    /// not changed yet and the panel would come back in the colours it was
-    /// already in. `theme_reload_frames` is the same answer the theme picker
-    /// already needed for the same reason.
-    fn set_panel_wears_theme(&mut self, cx: &mut Cx, on: bool) {
-        crate::fab_controls::set_panel_wears_theme(cx, on);
-        log!(
-            "TWEAK panel skin: {}",
-            if on { "the theme the app is wearing" } else { "its own palette" }
-        );
-        self.theme_reload_frames = 6;
-        self.next_frame = cx.new_next_frame();
-        cx.request_style_reload();
+    /// A mix stands over the whole app, not over the tab it was made on, so
+    /// walking off the tab has to hand the theme back. Left standing, the
+    /// only way out of it is a control on a tab nobody is looking at any
+    /// more. That happens BEFORE the tab moves -- after it, the panel no
+    /// longer knows it was on Theme.
+    fn set_panel_tab(&mut self, cx: &mut Cx, index: usize) {
+        if self.panel_tab == PanelTab::Theme && index != 3 {
+            self.leave_equalizer(cx);
+        }
+        self.panel_tab = match index {
+            1 => PanelTab::Shader,
+            2 => PanelTab::Tree,
+            3 => PanelTab::Theme,
+            4 => PanelTab::Spec,
+            _ => PanelTab::Props,
+        };
+        // Entering the Theme tab is the moment to look at the theme folder
+        // again: another window, another app or the person's own editor may
+        // have changed what is in it.
+        if self.panel_tab == PanelTab::Theme {
+            self.refresh_saved_themes();
+            // ...and the moment to drop what the tab last said. A note is the
+            // answer to a press, so a "deleted sunset" still sitting there on
+            // the way back in reports something that happened a tab ago as if
+            // it had just happened. The question that goes with it lapses for
+            // the same reason: coming back to the tab is not an answer to
+            // anything.
+            self.theme_msg.clear();
+            self.theme_confirm = None;
+        }
         self.redraw_sidebar(cx);
+    }
+
+    /// The folder this panel's themes live in: what a host set, or the
+    /// store's own. Asked per call rather than kept, so that the store's
+    /// answer stays as live as it was when every call read it directly.
+    fn themes_dir(&self) -> std::path::PathBuf {
+        self.themes_dir
+            .clone()
+            .unwrap_or_else(crate::theme_store::themes_dir)
     }
 
     /// Re-read the store's list of saved themes.
@@ -16031,19 +16755,35 @@ impl Tweaker {
     /// save or a delete -- deliberately not per frame: the picker is refilled
     /// on every frame the tab is up, and this is a directory read.
     fn refresh_saved_themes(&mut self) {
-        self.theme_saved_names = crate::theme_store::list();
+        // A store that could not TELL is not a store saying they are gone --
+        // a sync client renaming the folder, a scanner holding a handle -- so
+        // the list stands as it was and so does the name the picker is on.
+        // The alternative is below: an unreadable folder reads as an empty
+        // one, and the theme somebody is wearing is stripped off the screen,
+        // pins and all, with nothing to undo it.
+        let Ok(names) = crate::theme_store::list_in(&self.themes_dir()) else {
+            return;
+        };
+        self.theme_saved_names = names;
         // A theme that is no longer there is no longer the one in force, as
         // far as the picker is concerned: another window or the person's own
         // editor may have removed the file. Letting the name stand would
         // leave the picker highlighting nothing and the delete button
         // offering to remove something twice.
-        if self
-            .theme_saved
-            .as_deref()
-            .is_some_and(|name| !self.theme_saved_names.iter().any(|n| n == name))
-        {
-            self.theme_saved = None;
+        let gone = self
+            .theme_saved()
+            .is_some_and(|name| !self.theme_saved_names.iter().any(|n| n == name));
+        if gone {
+            // Pins and all: they are the pins of the theme the picker names,
+            // and it names a built-in now.
+            self.theme_worn = None;
         }
+    }
+
+    /// The name of the saved theme in force, for the picker, the delete
+    /// button and the bridge's readout. `None` is a built-in.
+    fn theme_saved(&self) -> Option<&str> {
+        self.theme_worn.as_ref().map(|worn| worn.name.as_str())
     }
 
     /// Everything the picker offers right now.
@@ -16055,7 +16795,7 @@ impl Tweaker {
     /// by name rather than by a remembered index, because the list it sits in
     /// changes under it -- a save inserts a row, a delete removes one.
     fn theme_choice_index(&self, entries: &[ThemeChoice]) -> usize {
-        match &self.theme_saved {
+        match self.theme_saved() {
             Some(name) => entries
                 .iter()
                 .position(|entry| matches!(entry, ThemeChoice::Saved(saved) if saved == name))
@@ -16068,18 +16808,65 @@ impl Tweaker {
     /// `theme_presets()` order, so a built-in row's index is its preset's.
     fn apply_theme_choice(&mut self, cx: &mut Cx, index: usize) {
         let entries = self.theme_entry_list();
-        match entries.get(index) {
-            Some(ThemeChoice::Builtin(_)) => {
+        let Some(entry) = entries.get(index) else {
+            return;
+        };
+        if !self.mix_stands_down_for(cx, &entry.label()) {
+            return;
+        }
+        match entry {
+            ThemeChoice::Builtin(_) => {
                 self.theme_msg.clear();
                 self.theme_confirm = None;
                 self.apply_theme_preset(cx, index);
             }
-            Some(ThemeChoice::Saved(name)) => {
+            ThemeChoice::Saved(name) => {
                 let name = name.clone();
                 self.apply_saved_theme(cx, &name);
             }
-            None => {}
         }
+    }
+
+    /// Whether the mix may be thrown away for the theme named, asking if it
+    /// may not.
+    ///
+    /// Picking a theme with a mix standing takes the mix off and starts a new
+    /// one from the theme picked, which puts every weight back to nought --
+    /// see `theme_choice_takes_the_mix_off`. That is the right answer to the
+    /// press and the wrong way to arrive at it: a mix is a minute's work, it
+    /// was never written down, and a hand reaching for the picker to compare
+    /// a theme is not a hand saying the mix can go. It is the one input this
+    /// panel destroys, and both of the commands that destroy a FILE ask
+    /// first, where a deleted file can at least be made again.
+    ///
+    /// So it asks the same way they do, with the same field and the same
+    /// rule: the press puts the question up and the same press again answers
+    /// it. Anything else -- another row picked, another name typed, the tab
+    /// left -- lets it lapse, and a press that was never repeated costs
+    /// nothing. The picker itself is redrawn from what is in force on every
+    /// frame, so a refused pick snaps back to the theme the app is wearing.
+    ///
+    /// The note says where a mix CAN be kept, because there is somewhere:
+    /// "save as" is two rows up and writes the blend out as a theme of its
+    /// own.
+    ///
+    /// Only a mix that is actually on the app is worth a question. A section
+    /// standing open at the weights it was entered with has nothing to lose,
+    /// and asking there would charge a second press for nothing.
+    fn mix_stands_down_for(&mut self, cx: &mut Cx, name: &str) -> bool {
+        if !self.eq_open || !self.eq_mix_stands {
+            return true;
+        }
+        if self.pending_mix_drop() == Some(name) {
+            self.theme_confirm = None;
+            return true;
+        }
+        self.theme_confirm = Some(ThemeConfirm::Mix(name.to_string()));
+        self.theme_note(
+            cx,
+            &format!("{name} drops the mix \u{2014} pick it again, or save the mix first"),
+        );
+        false
     }
 
     /// Put a saved theme on. Its base theme and its sheet go on the way a
@@ -16088,7 +16875,7 @@ impl Tweaker {
     /// base and would rebuild them away. See the `Event::LiveEdit` arm in
     /// `handle_event` for where they land.
     fn apply_saved_theme(&mut self, cx: &mut Cx, name: &str) {
-        let theme = match crate::theme_store::load(name) {
+        let theme = match crate::theme_store::load_in(&self.themes_dir(), name) {
             Ok(theme) => theme,
             Err(error) => {
                 self.theme_note(cx, &error.to_string());
@@ -16100,6 +16887,10 @@ impl Tweaker {
             crate::theme_tokens::Scheme::Light => crate::BaseTheme::Light,
             crate::theme_tokens::Scheme::Skeleton => crate::BaseTheme::Skeleton,
         };
+        // Same as a preset: the pick is the statement of intent, and the mix
+        // stands down in front of it. Taken after the store has answered, so
+        // that a theme that could not be loaded does not take a mix with it.
+        let mixing = self.theme_choice_takes_the_mix_off(cx);
         crate::set_base_theme(cx, base);
         match theme.sheet {
             Some((style, dark)) => {
@@ -16111,15 +16902,89 @@ impl Tweaker {
             None => cx.with_vm(|vm| crate::desktop_style::uninstall(vm)),
         }
         log!("TWEAK theme: {}", theme.name);
-        self.theme_saved = Some(theme.name.clone());
+        let script = theme.script();
         self.theme_name_seed = Some(theme.name.clone());
-        self.pending_theme_script = Some((theme.name.clone(), theme.script()));
+        // Spent once, by the next `Event::LiveEdit`...
+        self.pending_theme_script = Some((theme.name.clone(), script.clone()));
+        // ...and kept, because the mix is entered on the same tokens whenever
+        // somebody unfolds it, which is long after that event. Name and pins
+        // in the one move: see [`WornTheme`] and `enter_the_lab`.
+        self.theme_worn = Some(WornTheme {
+            pinned: PinnedTheme::new(&theme.name, &script),
+            name: theme.name.clone(),
+        });
         self.theme_msg.clear();
         self.theme_confirm = None;
         self.theme_reload_frames = 6;
         self.next_frame = cx.new_next_frame();
         cx.request_style_reload();
+        if mixing {
+            self.mix_starts_from_the_theme_just_picked(cx);
+        }
         self.redraw_sidebar(cx);
+    }
+
+    /// Stand a standing mix down, because a theme has just been picked.
+    ///
+    /// The picker sits in the same header six rows above the fold, and a mix
+    /// stands over the whole app rather than over the section that made it.
+    /// So picking a theme with one standing is somebody saying, in so many
+    /// words, which theme the app should be wearing -- and it wins: the mix
+    /// comes off through the one door out of it, and the theme the caller is
+    /// about to install goes on over the top. Left alone, the lab went on
+    /// believing the app was wearing the theme the section had been opened
+    /// on, and `- mix` put THAT back: a theme last asked for three clicks
+    /// earlier, with the picker still naming the one it had just replaced.
+    ///
+    /// Answers whether the section was open, so the caller can put it back on
+    /// the new theme once that theme is on.
+    fn theme_choice_takes_the_mix_off(&mut self, cx: &mut Cx) -> bool {
+        if !self.eq_open {
+            return false;
+        }
+        self.leave_equalizer(cx);
+        true
+    }
+
+    /// Open the mix section again, on the theme that has just been picked.
+    ///
+    /// A press on the picker is not a press on the fold, so the section stays
+    /// open; what changes is the theme it is a mix OF, which is now the one
+    /// in force. That is what `- mix` then hands back, and it is what the
+    /// weights start from.
+    ///
+    /// It does not have to wait for the style reload. Entering reads the base
+    /// theme and the sheet, and the caller has already set both -- the reload
+    /// only makes them visible. And every theme is already resolved from the
+    /// first entry, so this costs microseconds rather than the second the
+    /// first one did.
+    fn mix_starts_from_the_theme_just_picked(&mut self, cx: &mut Cx) {
+        self.eq_open = true;
+        self.enter_the_lab(cx);
+        self.eq_mix_changed();
+    }
+
+    /// Open the lab on the theme in force, pins and all.
+    ///
+    /// A built-in is a base theme and a style sheet, and the lab reads both
+    /// off the vm for itself. A theme somebody SAVED is those two with tokens
+    /// pinned over them, and the pins are the one part of it nothing on the
+    /// vm remembers: `mod.theme` holds what the tokens came to rather than
+    /// which of them were pinned, and the module rebuild that puts the base
+    /// and the sheet back is exactly what throws the pins away. Only the
+    /// panel knows them, because it is the panel that loaded them and put
+    /// them on -- so it hands them over, and leaving the mix becomes the
+    /// inverse of entering it instead of two thirds of one.
+    ///
+    /// Without this, `- mix` over a saved theme put back the right base and
+    /// the right sheet and none of what the person had actually chosen.
+    fn enter_the_lab(&mut self, cx: &mut Cx) {
+        let pinned = self.theme_worn.as_ref().map(|worn| worn.pinned.clone());
+        let lab = &mut self.eq_lab;
+        cx.with_vm(|vm| match &pinned {
+            Some(pinned) => lab.enter_pinned(vm, pinned),
+            None => lab.enter(vm),
+        });
     }
 
     /// "Save as": the theme in force, under the name in the box.
@@ -16129,6 +16994,13 @@ impl Tweaker {
     /// already saved is a QUESTION -- press save again and it is answered --
     /// while a built-in name is refused by the store outright and no second
     /// press changes that.
+    ///
+    /// What is written is what `theme_store::snapshot` reads off `mod.theme`.
+    /// That is the screen, except in one case: a colour override open over a
+    /// standing mix is painted into the draw buffers and not into the heap,
+    /// so saving there records the blend's value for that one token and the
+    /// saved theme comes back a different colour from the page it was taken
+    /// from. See `theme_heap_set` for the whole of it.
     fn save_theme_as(&mut self, cx: &mut Cx) {
         let typed = self.theme_name.clone();
         let Some(name) = crate::theme_store::normalize_name(&typed) else {
@@ -16144,10 +17016,11 @@ impl Tweaker {
             }
         };
         let answered = self.pending_replace() == Some(name.as_str());
+        let dir = self.themes_dir();
         let written = if answered {
-            crate::theme_store::save_replacing(&theme)
+            crate::theme_store::save_replacing_in(&dir, &theme)
         } else {
-            crate::theme_store::save(&theme)
+            crate::theme_store::save_in(&dir, &theme)
         };
         match written {
             Ok(path) => {
@@ -16155,13 +17028,54 @@ impl Tweaker {
                 self.theme_confirm = None;
                 self.refresh_saved_themes();
                 // What was saved is a snapshot of what is in force, so it is
-                // already on: the picker only has to say so.
-                self.theme_saved = Some(name.clone());
+                // already on: the picker only has to say so. Its pins are
+                // that snapshot's own tokens and go on in the same move --
+                // the name used to move here alone, and the pins of whatever
+                // was picked BEFORE the save stayed behind it. See
+                // [`WornTheme`] for what that cost.
+                self.theme_worn = Some(WornTheme {
+                    pinned: PinnedTheme::new(&name, &theme.script()),
+                    name: name.clone(),
+                });
                 if name != typed {
                     self.theme_name_seed = Some(name.clone());
                 }
                 let count = theme.overrides.len();
-                self.theme_note(cx, &format!("saved {name} ({count} values)"));
+                let mut note = format!("saved {name} ({count} values)");
+                // ...unless what is in force is a MIX, and then saying so is
+                // not enough. Saving a mix is somebody stating that this mix
+                // is a theme now, and the panel has to mean it all the way
+                // down: the theme the lab would hand back at `- mix` is still
+                // the one the section was opened on, so the picker would name
+                // what was just written while the next press quietly put the
+                // old theme back underneath it -- the same disagreement
+                // between the panel and the screen that the picker itself was
+                // cured of.
+                //
+                // So it goes on through the door a pick goes through, which
+                // stands the mix down and re-anchors the section on the theme
+                // that was written.
+                //
+                // It is not seamless, and this used to say it was. Leaving
+                // the mix puts the theme the section was OPENED on back
+                // first, and the saved theme only becomes visible when the
+                // style reload lands a tick later, so a frame or two of the
+                // old theme shows through on the way. Where it SETTLES is the
+                // blend that was standing, to the value -- the file is a
+                // snapshot of it -- and the flicker is what it costs to have
+                // one door out of a mix rather than two. The second door,
+                // the one that put no theme back at all, is the fault this
+                // panel already had.
+                if self.eq_open {
+                    self.apply_saved_theme(cx, &name);
+                    if !self.theme_msg.is_empty() {
+                        // A store that cannot read back what it has just
+                        // written has said so already, and its word stands.
+                        return;
+                    }
+                    note = format!("saved {name} ({count} values) \u{2014} the mix is now {name}");
+                }
+                self.theme_note(cx, &note);
             }
             Err(crate::theme_store::StoreError::Exists(_)) => {
                 self.theme_confirm = Some(ThemeConfirm::Replace(name.clone()));
@@ -16179,6 +17093,15 @@ impl Tweaker {
     fn pending_replace(&self) -> Option<&str> {
         match &self.theme_confirm {
             Some(ThemeConfirm::Replace(name)) => Some(name.as_str()),
+            _ => None,
+        }
+    }
+
+    /// The name a question has been asked about, when it is the question
+    /// "pick it again and the mix goes".
+    fn pending_mix_drop(&self) -> Option<&str> {
+        match &self.theme_confirm {
+            Some(ThemeConfirm::Mix(name)) => Some(name.as_str()),
             _ => None,
         }
     }
@@ -16205,16 +17128,31 @@ impl Tweaker {
     /// only a second press about the same name answers it, so picking another
     /// theme, typing another name, saving or leaving the tab all let it lapse.
     fn delete_saved_theme(&mut self, cx: &mut Cx) {
-        let Some(name) = self.theme_saved.clone() else {
+        let Some(name) = self.theme_saved().map(str::to_string) else {
             return;
         };
         if self.pending_delete() != Some(name.as_str()) {
             self.theme_confirm = Some(ThemeConfirm::Delete(name.clone()));
-            self.theme_note(cx, &format!("delete {name}? \u{2014} press delete again to remove it"));
+            // A standing mix goes with it, and this is the only press that
+            // can say so. The picker asks its own question before it throws a
+            // mix away (`mix_stands_down_for`); delete cannot ask that one,
+            // because by the time the file is gone the fall back to a
+            // built-in is forced and a question asked THEN would be asking
+            // about something already spent. So the question delete does ask
+            // carries both, and what the second press costs is on it.
+            let and_the_mix = if self.eq_open && self.eq_mix_stands {
+                " \u{2014} the mix goes with it"
+            } else {
+                ""
+            };
+            self.theme_note(
+                cx,
+                &format!("delete {name}?{and_the_mix} \u{2014} press delete again to remove it"),
+            );
             return;
         }
         self.theme_confirm = None;
-        if let Err(error) = crate::theme_store::delete(&name) {
+        if let Err(error) = crate::theme_store::delete_in(&self.themes_dir(), &name) {
             // A delete that did not go through still changed what the picker
             // knows: the file may have gone out from under it, or its folder
             // may have. Re-read before saying so, or the row that could not
@@ -16227,6 +17165,12 @@ impl Tweaker {
         self.refresh_saved_themes();
         // Nothing may go on pointing at a theme that is gone: back to the
         // built-in the picker was last on, which is one that cannot go away.
+        //
+        // Straight at the preset and not through `apply_theme_choice`, which
+        // is the door that asks about a standing mix. There is nothing left
+        // to ask here: the file has gone, the fall back is forced, and the
+        // press that forced it was answered twice -- with the mix named in
+        // the question, above.
         let preset = self.theme_preset;
         self.apply_theme_preset(cx, preset);
         self.theme_note(cx, &format!("deleted {name}"));
@@ -16239,13 +17183,530 @@ impl Tweaker {
         self.redraw_sidebar(cx);
     }
 
-    fn redraw_sidebar(&mut self, cx: &mut Cx) {
+    /// The mix section, drawn from the lab and from nothing else.
+    ///
+    /// The install lives HERE and not in the press that asked for it. A drag
+    /// reports a change per pointer move, every install asks for a module
+    /// rebuild, and one rebuild per move is a panel still catching up long
+    /// after the thumb stopped -- the complaint about theme switching being
+    /// slow is exactly the thing an equalizer would multiply. So the moves
+    /// collect on a flag, and `eq_settle` spends it at most once per
+    /// [`EQ_SETTLE`]. The rebuild itself is not spent on this frame: the
+    /// apply writes the blend onto the Cx and asks for the style reload that
+    /// carries it, which lands on a later tick. Half a millisecond here,
+    /// fifty-two there, and never both on the frame a thumb is moving.
+    ///
+    /// A frame is enough to draw the rows; it is not enough to earn an
+    /// install.
+    fn draw_equalizer(&mut self, cx: &mut Cx, head: &WidgetRef) {
+        // Up in the picker row: the section opens below, the toggle does not
+        // live in it.
+        let fold = head.child(live_id!(theme_pick_row)).child(live_id!(eq_fold));
+        self.eq_fold_uid = fold.widget_uid().0;
+        fold.set_text(cx, if self.eq_open { "- mix" } else { "+ mix" });
+        let body = head.child(live_id!(eq_body));
+        body.set_visible(cx, self.eq_open);
+        if !self.eq_open {
+            // Folded, and every route into it shut with it.
+            self.eq_dark_uid = 0;
+            self.eq_light_uid = 0;
+            self.eq_absolute_uid = 0;
+            self.eq_relative_uid = 0;
+            self.eq_random_uid = 0;
+            self.eq_row_uids = [0; 8];
+            return;
+        }
+        // Only where something is waiting on it. The settle is an interval
+        // between installs and a draw that owes the mix nothing has no
+        // business asking the platform what time it is -- which is also what
+        // lets the readout below be drawn and read back on its own.
+        if self.eq_apply_due {
+            let now = cx.seconds_since_app_start();
+            if self.eq_settle(cx, now) {
+                // A move that arrived inside the settle is still owed its
+                // install, and a drag that has stopped sends nothing more to
+                // ask for one. This is the frame that carries it.
+                self.next_frame = cx.new_next_frame();
+            }
+        }
+        let appearance = self.eq_lab.appearance();
+        let row = body.child(live_id!(eq_appearance_row));
+        let dark = row.child(live_id!(eq_dark));
+        let light = row.child(live_id!(eq_light));
+        self.eq_dark_uid = dark.widget_uid().0;
+        self.eq_light_uid = light.widget_uid().0;
+        set_button_fill(cx, dark, appearance == Appearance::Dark);
+        set_button_fill(cx, light, appearance == Appearance::Light);
+        // Taken off the lab in one go, because the loop below writes at
+        // `self` as it walks and a group is eight labels.
+        let mode = self.eq_lab.mode();
+        let weights: Vec<(String, f64)> = self
+            .eq_lab
+            .rows()
+            .iter()
+            .map(|row| (row.label.clone(), row.weight))
+            .collect();
+        // Whole numbers on the rows in BOTH modes, because a row prints whole
+        // numbers whatever mode it is in. At `precision: 0` a held 37.5 reads
+        // 38, and the arrow that takes it to 38.5 reads 38 again: a key press
+        // that moves the mix and moves nothing on the screen.
+        //
+        // Absolute mode was once left out of this and so had the same fault
+        // one button away from where it was reported: `set_mode` leaves the
+        // weights exactly as it finds them, and a row does not quantise what
+        // it is handed.
+        //
+        // The two modes round differently because they are read differently.
+        // A relative column is a hundred parts of a total and is read as a
+        // whole, so its rounding is shared out over the column rather than
+        // done a row at a time -- which is how 0 / 37.5 / 37.5 / 25 came to
+        // read as a hundred and one parts of a hundred. See
+        // `shares_that_add_up`. An absolute row answers to nothing but
+        // itself, so it rounds by itself and nobody pays for it.
+        //
+        // The share is the row's READOUT and not its value. Written into the
+        // value it was, once, and it cost the key the hand reaches for first:
+        // the column takes its rounding out of the largest share, so the
+        // dominant row of a mix with a tail prints BELOW what it holds, and
+        // an arrow stepping from the printed number asked for less than the
+        // row already had. Right walked the biggest theme in the mix down by
+        // four parts a press, and where the gap was under a step it stuck for
+        // ever -- each press paying for a module rebuild to arrive back where
+        // it started. See [`FabSlider::set_value_and_readout`], which is where
+        // the two part company.
+        //
+        // What the LAB holds is untouched by any of it: the blend is made
+        // from the halves, and this is the column's arithmetic and not the
+        // mix's.
+        let held: Vec<f64> = weights.iter().map(|(_, weight)| *weight).collect();
+        let shown = match mode {
+            WeightMode::Relative => shares_that_add_up(&held, RELATIVE_TOTAL),
+            WeightMode::Absolute => {
+                let mut shares: Vec<f64> =
+                    held.iter().map(|weight| weight.max(0.0).round()).collect();
+                // No total to keep, so nothing is taken from anybody: a row
+                // that is in the mix is simply lifted to the one part it is
+                // nearest. See `rows_that_would_print_as_out` for why a row
+                // in the mix may not print the panel's word for out of it.
+                for silent in rows_that_would_print_as_out(&held, &shares) {
+                    shares[silent] = 1.0;
+                }
+                shares
+            }
+        };
+        let rows = body.child(live_id!(eq_rows));
+        for (index, id) in EQ_ROW_IDS.iter().enumerate() {
+            let row = rows.child(*id);
+            let Some(((label, weight), share)) = weights.get(index).zip(shown.get(index)) else {
+                // The group on show is the shorter of the two.
+                row.set_visible(cx, false);
+                self.eq_row_uids[index] = 0;
+                continue;
+            };
+            row.set_visible(cx, true);
+            let slider = row.child(live_id!(eq_weight));
+            self.eq_row_uids[index] = slider.widget_uid().0;
+            let slider = slider.as_fab_slider();
+            slider.set_label(cx, label);
+            // Written back every draw on purpose: in relative mode a move
+            // of one weight moves the others, and a row that only heard
+            // about its own pointer would show a share it no longer has.
+            slider.set_value_and_readout(cx, *weight, *share);
+        }
+        let row = body.child(live_id!(eq_appearance_row));
+        let absolute = row.child(live_id!(eq_absolute));
+        let relative = row.child(live_id!(eq_relative));
+        self.eq_absolute_uid = absolute.widget_uid().0;
+        self.eq_relative_uid = relative.widget_uid().0;
+        set_button_fill(cx, absolute, mode == WeightMode::Absolute);
+        set_button_fill(cx, relative, mode == WeightMode::Relative);
+        // Sharing the row and taking no fill from it. The rungs are lit to
+        // say which one you are in; the surprise leaves you in neither, so
+        // there is nothing for it to light and it is never offered.
+        self.eq_random_uid = row.child(live_id!(eq_random)).widget_uid().0;
+        let reading = self.eq_reading.clone();
+        body.child(live_id!(eq_read)).set_text(cx, &reading);
+    }
+
+    /// Open or close the mix section.
+    ///
+    /// Opening is where the whole cost of a mix is -- every theme the
+    /// library ships is resolved into its tokens -- so it happens on this
+    /// press and never on a draw and never on a drag. Closing hands the
+    /// theme back, because a blend is in force over the whole app and a
+    /// section that folded away with one standing would leave somebody in a
+    /// theme they cannot undo.
+    fn toggle_equalizer(&mut self, cx: &mut Cx) {
+        if self.eq_open {
+            self.leave_equalizer(cx);
+        } else {
+            self.eq_open = true;
+            self.enter_the_lab(cx);
+            // A number the panel already keeps, rather than one off the
+            // clock: the surprise has to be reproducible.
+            self.eq_seed = session().lock().unwrap().apply_gen;
+            // Nothing to install yet -- entering is not a mix -- but the
+            // reading under the rows has to say something about the theme
+            // that IS in force, and this is what takes it.
+            self.eq_mix_changed();
+        }
+        self.redraw_sidebar(cx);
+    }
+
+    /// Put back the theme the section was opened on, and close it.
+    ///
+    /// Three doors come through here, and there is one way out of a mix so
+    /// that there is one place that knows how to take it: the fold, walking
+    /// off the tab, and the panel itself going off with the section still
+    /// open. All three hand the theme back, for the one reason -- a mix
+    /// stands over the whole app rather than over the section that made it,
+    /// and this section is the only control surface it has.
+    ///
+    /// The third door is the widest of them and was the one left ajar.
+    /// Shift+F10 over a standing mix left the app wearing a blend with every
+    /// control that could take it off gone from the screen: no weights, no
+    /// reading, no `- mix`. Worse, the lab goes on believing it is installed
+    /// while nothing is left to tell it otherwise, so the first thing that
+    /// rebuilds the module -- a live edit, a sheet arriving from the window
+    /// manager -- drops the app to its bare base theme and no draw will ever
+    /// put anything back.
+    ///
+    /// That the person may want to look at the app without the panel over it
+    /// is true and is answered elsewhere: a mix worth keeping is kept by
+    /// making it a theme. "Save as" writes the blend out and re-anchors the
+    /// section on it, and a theme survives the panel being shut the way every
+    /// other theme does.
+    fn leave_equalizer(&mut self, cx: &mut Cx) {
+        self.eq_open = false;
+        self.eq_apply_due = false;
+        self.eq_apply_at_once = false;
+        self.eq_mix_stands = false;
+        self.eq_reading.clear();
+        cx.with_vm(|vm| self.eq_lab.leave(vm));
+        self.arm_the_saved_themes_pins();
+    }
+
+    /// A saved theme's own tokens, armed to land after the style reload
+    /// that `install_entry` has just asked for.
+    ///
+    /// Writing the pins onto the `Cx` is enough over a BARE base theme:
+    /// `theme_mod` re-emits them at its seam on every run, so they ride the
+    /// reload back up the way a mix does. It is not enough under a SHEET.
+    /// `desktop_style::apply_theme` runs in `widgets_mod`, after that seam,
+    /// and its first line points `mod.theme` back at its own base -- so it
+    /// goes over the pins exactly as it goes over a mix, and what comes back
+    /// from `- mix` is the sheet's value for every token somebody had
+    /// actually chosen.
+    ///
+    /// The panel already knows how to land tokens after a sheet, because
+    /// PICKING a saved theme has the same problem and the same shape:
+    /// `pending_theme_script`, spent by the `Event::LiveEdit` that follows
+    /// the reload, which is the one moment the tokens will survive. See
+    /// `apply_saved_theme`, whose two lines these are. Leaving a mix is that
+    /// same moment, so it takes that same route.
+    ///
+    /// Over a bare base theme this is a harmless second helping of a script
+    /// the seam has already put on, and over a built-in -- `theme_worn` is
+    /// `None` -- it is nothing at all.
+    fn arm_the_saved_themes_pins(&mut self) {
+        if let Some(worn) = &self.theme_worn {
+            self.pending_theme_script =
+                Some((worn.name.clone(), worn.pinned.script().to_string()));
+        }
+    }
+
+    /// Put the armed pins on, at the one moment they will survive.
+    ///
+    /// `request_style_reload` re-runs `script_mod` from the event loop, which
+    /// rebuilds `mod.theme` out of the base theme and the sheet;
+    /// `Event::LiveEdit` reaches a widget AFTER that rebuild and after the
+    /// tree has been re-applied over it, so this is where the tokens go on. A
+    /// frame count would be a guess; the event is the thing itself.
+    ///
+    /// Two callers arm it and this one lands it: `apply_saved_theme`, when
+    /// somebody PICKS a saved theme, and `arm_the_saved_themes_pins`, when a
+    /// mix hands one back. One landing for both, so that what a pick puts on
+    /// and what `- mix` puts back cannot drift apart.
+    fn land_the_pending_pins(&mut self, cx: &mut Cx) {
+        let Some((name, code)) = self.pending_theme_script.take() else {
+            return;
+        };
+        cx.with_vm(|vm| {
+            vm.eval(ScriptMod {
+                cargo_manifest_path: env!("CARGO_MANIFEST_DIR").into(),
+                module_path: format!("theme_store_{name}"),
+                file: format!("themes/{name}.{}", crate::theme_store::FILE_EXTENSION),
+                line: 0,
+                column: 0,
+                code,
+                values: vec![],
+            });
+        });
+        // Re-apply rather than reload: typed text and running animations
+        // survive, which is the whole point of the sanctioned override path.
+        cx.request_script_reapply();
+        self.redraw_sidebar(cx);
+    }
+
+    /// Something that is a press rather than a drag changed the mix.
+    ///
+    /// One install, asked for once, and the settle has no say: a switch or a
+    /// surprise that took up to [`EQ_SETTLE`] to show would read as the panel
+    /// having missed the press.
+    fn eq_mix_changed(&mut self) {
+        self.eq_apply_due = true;
+        self.eq_apply_at_once = true;
+    }
+
+    /// The module has been rebuilt underneath the mix.
+    ///
+    /// `script_mod` running again puts up the base theme, whatever sheet is
+    /// installed, and the mix over the top of the two: a mix is a choice held
+    /// on the `Cx` and `theme_mod` emits it on every run, so it comes back up
+    /// with the module rather than going down with it. The lab cannot see the
+    /// rebuild happen -- it holds the weights it installed, not the module it
+    /// installed them into -- so it is told, and what the word buys is a
+    /// fresh reading over a module the lab did not build.
+    ///
+    /// What it must NOT buy is an install. The panel is told about every
+    /// rebuild, including the one its own install asked for, so a lab that
+    /// reinstalled on the word would ask for the reload that told it, with a
+    /// module rebuild inside the turn. [`ThemeLab::apply`] is what refuses
+    /// that: a mix already in force does not go in twice.
+    ///
+    /// Told at the LANDING and never at the request, because a live edit off
+    /// the file watcher arrives here too and there is no request to hang it
+    /// on.
+    fn eq_module_rebuilt(&mut self) {
+        if !self.eq_open {
+            return;
+        }
+        self.eq_lab.invalidate();
+        self.eq_mix_changed();
+    }
+
+    /// One weight moved under the pointer.
+    ///
+    /// The install is deliberately not done here, and not on the next draw
+    /// either. See `eq_settle`: a drag is forty of these across forty FRAMES,
+    /// each install is a module rebuild, and the interval between them is
+    /// what keeps the forty down to a handful.
+    fn eq_weight_moved(&mut self, index: usize, weight: f64) {
+        self.eq_lab.set_weight(index, weight);
+        self.eq_apply_due = true;
+    }
+
+    /// The thumb was let go, on this value.
+    ///
+    /// The end of a gesture is a commit, so it does not wait: what the hand
+    /// stopped on is in force by the next draw, whether or not the settle had
+    /// come round again. Without this the app keeps whichever value happened
+    /// to fall on the last interval, which is a value nobody chose.
+    fn eq_gesture_ended(&mut self, index: usize, weight: f64) {
+        self.eq_lab.set_weight(index, weight);
+        self.eq_mix_changed();
+    }
+
+    /// A theme out of the mix. The gesture is a click on its name.
+    fn eq_row_cleared(&mut self, index: usize) {
+        self.eq_lab.clear_weight(index);
+        self.eq_mix_changed();
+    }
+
+    /// Mix the other group instead. Every row is replaced, weights and all:
+    /// a weight on a theme that cannot be in this mix is a number nobody
+    /// chose, and one left on screen is a number somebody will move.
+    fn eq_set_appearance(&mut self, appearance: Appearance) {
+        self.eq_lab.set_appearance(appearance);
+        self.eq_mix_changed();
+    }
+
+    /// Change what the other weights do when one of them moves.
+    fn eq_set_mode(&mut self, mode: WeightMode) {
+        self.eq_lab.set_mode(mode);
+        self.eq_mix_changed();
+    }
+
+    /// A mix nobody planned, off a seed that walks rather than a clock.
+    fn eq_surprise(&mut self) {
+        self.eq_seed = next_mix_seed(self.eq_seed);
+        self.eq_lab.randomize(self.eq_seed);
+        self.eq_mix_changed();
+    }
+
+    /// Whether the mix goes in on this frame.
+    ///
+    /// A press says so outright. A drag waits out [`EQ_SETTLE`] since the
+    /// last install, so the forty moves a half-second drag reports cost four
+    /// rebuilds instead of forty.
+    fn mix_due(&self, now: f64) -> bool {
+        self.eq_apply_due && (self.eq_apply_at_once || now - self.eq_installed_at >= EQ_SETTLE)
+    }
+
+    /// A run of edits is worn at most once per `EQ_SETTLE`, and once more
+    /// after the last of them -- the same bargain the mix strikes. Every
+    /// step lands in the heap at once; what waits is the module run that
+    /// makes the app wear it, which is the whole cost.
+    fn edit_settle(&mut self, cx: &mut Cx) {
+        if !self.edit_reload_due {
+            return;
+        }
+        let now = cx.seconds_since_app_start();
+        self.edit_settle_at(cx, now);
+    }
+
+    /// `edit_settle` with the clock in hand; what a test drives.
+    fn edit_settle_at(&mut self, cx: &mut Cx, now: f64) {
+        if !self.edit_reload_due {
+            return;
+        }
+        if now - self.edit_reloaded_at < EQ_SETTLE {
+            self.next_frame = cx.new_next_frame();
+            return;
+        }
+        self.edit_reload_due = false;
+        self.edit_reloaded_at = now;
+        self.edit_reloads = self.edit_reloads.saturating_add(1);
+        cx.request_style_reload();
+    }
+    /// The install this frame owes the mix, if the settle says now.
+    ///
+    /// One reader, in the draw, which is what makes a drag's worth of moves a
+    /// handful of installs. Answers whether a move is still waiting, so the
+    /// draw can ask for the frame that will carry it: a drag that stops
+    /// between two frames sends nothing more, and the value it stopped on
+    /// would otherwise sit on the rows and never reach the app.
+    fn eq_settle(&mut self, cx: &mut Cx, now: f64) -> bool {
+        if !self.mix_due(now) {
+            return self.eq_apply_due;
+        }
+        self.eq_apply_due = false;
+        self.eq_apply_at_once = false;
+        match cx.with_vm(|vm| self.eq_lab.apply(vm)) {
+            // Only an install starts the settle running. An apply that found
+            // nothing to do cost nothing, and the move after it must not wait
+            // out an interval nobody paid for.
+            Ok(applied) => {
+                if applied.rebuilt() {
+                    self.eq_installed_at = now;
+                }
+                // ...and what it left on the app, which is what the picker
+                // asks before it throws a mix away. `Nothing` is not an
+                // answer to that: an apply with nothing to do changed
+                // nothing about what is on the screen.
+                match applied {
+                    Applied::Mix => self.eq_mix_stands = true,
+                    // The lab put the entry theme back by itself -- an
+                    // empty mix, or a pick from outside standing the lab
+                    // down. Same restore as `- mix`, so the pins need the
+                    // same escort past the sheet.
+                    Applied::Entry => {
+                        self.eq_mix_stands = false;
+                        self.arm_the_saved_themes_pins();
+                    }
+                    Applied::Nothing => {}
+                }
+            }
+            // A mix of nothing is not a mix. Every row's name clicked in
+            // turn is every weight at nought, which is not the entry theme
+            // either -- so the blend refuses itself, the move is dropped on
+            // the floor, and the app goes on wearing the blend before it
+            // with nothing on the screen that says why. The one reading of
+            // an empty column that a person can act on is the theme the
+            // section was opened on, so that is what goes back: the weights
+            // are put there and the install is asked for again, which the
+            // return below carries a frame for.
+            Err(crate::theme_tokens::BlendError::NoWeight) => {
+                self.eq_lab.reset();
+                self.eq_mix_changed();
+                self.theme_note(
+                    cx,
+                    "an empty mix is no mix \u{2014} back to the theme it started from",
+                );
+            }
+            // In the line the store answers in, and not only in the terminal:
+            // a mix that refused itself where nobody was looking is a mix
+            // that failed silently.
+            Err(error) => self.theme_note(cx, &error.to_string()),
+        }
+        self.eq_reading = self.mix_reading();
+        // What is still owed, which is what asks the draw for the frame that
+        // will carry it. A `false` written here was a lie in exactly one
+        // case, and it was the case that needed the frame most.
+        self.eq_apply_due
+    }
+
+    /// How the mix in force reads, as a line to put under it.
+    ///
+    /// Quiet on purpose: no colour, no word like "fails". It is a
+    /// measurement of the page the person is already looking at, and the
+    /// thing it is for is the mix that has gone unreadable without looking
+    /// as though it has.
+    ///
+    /// With one exception, and it is the blend's and not this line's: the
+    /// measurement is taken off the blend, and a colour override open over a
+    /// mix lives in the draw buffers rather than in the blend. So while one
+    /// is open this reports a pair the screen is not wearing. See
+    /// `theme_heap_set`.
+    fn mix_reading(&self) -> String {
+        let reading = self.eq_lab.readability();
+        if reading.measured == 0 {
+            return "no mix to measure".to_string();
+        }
+        match reading.failures.first() {
+            Some(worst) => format!(
+                "{} of {} pairs short \u{00b7} {worst}",
+                reading.failures.len(),
+                reading.measured,
+            ),
+            None => format!(
+                "{} pairs read \u{00b7} closest {}",
+                reading.measured, reading.tightest,
+            ),
+        }
+    }
+
+    /// Whether the panel may take a hover off this pointer at all.
+    ///
+    /// The hover pass above reads the raw move instead of going through
+    /// `hits`, so the half `hits` would have done for it has to be done here.
+    /// A press on a control locks the pointer to that control until it is let
+    /// go, and nothing else may take a hover, a focus or a press-like state
+    /// from that pointer on the way.
+    ///
+    /// The case that makes it visible is the mix: a weight is dragged between
+    /// the two switch rows sitting immediately above and below it, and all
+    /// four of those buttons explain themselves on hover. Without the gate,
+    /// the thumb keeps tracking AND a bubble pops up over it saying what a
+    /// button nobody pressed would do, and stays up past the release. It is
+    /// not a mix-specific fault, either: the same intercept pops every
+    /// tooltip in the panel during any drag anywhere in it.
+    ///
+    /// No areas are excepted. Nothing in this pass owns part of anybody's
+    /// gesture -- these are tooltips and a colour pulse -- so a pointer held
+    /// by anything at all, the panel's own controls included, shuts them.
+    fn hover_is_the_panels_to_take(cx: &Cx) -> bool {
+        !cx.fingers.is_mouse_held_outside(&[])
+    }
+
+    /// Redraw the panel, and nothing under it.
+    ///
+    /// For a change that is only the panel's own: a row following the
+    /// pointer, a switch filling in. The app has not moved, and redrawing the
+    /// whole tree per pointer move is a drag paying for a picture that is
+    /// identical to the one already on the screen.
+    fn redraw_panel(&mut self, cx: &mut Cx) {
         if let Some(sidebar) = &self.sidebar {
             sidebar.redraw(cx);
         }
         if let Some(sidebar_list) = &self.sidebar_list {
             sidebar_list.redraw(cx);
         }
+    }
+
+    /// Redraw the panel and the app under it, for a change that moved both.
+    fn redraw_sidebar(&mut self, cx: &mut Cx) {
+        self.redraw_panel(cx);
         cx.redraw_all();
     }
 
@@ -16784,10 +18245,34 @@ impl Tweaker {
 }
 
 impl Tweaker {
+    /// The mode has just gone off: stand down everything the panel was in
+    /// the middle of.
+    ///
+    /// Both routes out of the mode come through here -- the key, on the
+    /// press; and the draw that notices the mode gone however it went, the
+    /// bridge's `/tweak?on=0` included -- so this is also the third door out
+    /// of a mix, and it hands the theme back like the other two. See
+    /// [`Tweaker::leave_equalizer`] for why a blend must not be left standing
+    /// behind a panel that is no longer on the screen.
+    ///
+    /// The `Cx` is not a nicety. Handing the theme back rebuilds the theme
+    /// module and the widget module and re-applies the tree over them, so the
+    /// draw route cannot call this from where it notices: it sets
+    /// `stand_down_pending` and the next event brings this a context it is
+    /// safe to tear the modules down with.
     fn cancel_interactions(&mut self, cx: &mut Cx) {
+        // Stood down, so the draw below has nothing left to queue. The key
+        // route comes through here on the PRESS with a `Cx` of its own, and
+        // the next draw then found the mode off and the panel up last frame
+        // and asked for all of this a second time -- a second theme handed
+        // back, and a frame asked for to do it on.
+        self.was_on = false;
         self.splitter_drag = false;
         self.cancel_scope = None;
         self.open_popup = None;
+        if self.eq_open {
+            self.leave_equalizer(cx);
+        }
         if let Some(sidebar) = &self.sidebar {
             sidebar.handle_event(cx,
                 &Event::Actions(vec![Box::new(crate::modal::ModalAction::Dismissed)]),
@@ -16815,6 +18300,22 @@ impl Widget for Tweaker {
         if self.cancel_scope.is_some() && (!self.splitter_drag || !tweak_is_on()) {
             if let Some(scope) = self.cancel_scope.take() {
                 cx.end_cancel_scope(scope);
+            }
+        }
+        // The draw noticed the mode go off and could not stand the panel down
+        // from inside its own pass; this is the `Cx` it was waiting for. Above
+        // the early return for the same reason the block over it is: by the
+        // time this runs the mode is already off, and a debt that could only
+        // be paid while the panel was on would never be paid at all.
+        if self.stand_down_pending {
+            self.stand_down_pending = false;
+            // The mode is asked again HERE, because the debt was queued a
+            // frame ago and a frame is long enough for the mode to have come
+            // back: a double toggle, or `/tweak?on=0` with an `on=1` behind
+            // it, would otherwise tear the mix section down and hand the
+            // theme back with the panel still on the screen.
+            if !tweak_is_on() {
+                self.cancel_interactions(cx);
             }
         }
         if !tweak_is_on() {
@@ -16868,23 +18369,18 @@ impl Widget for Tweaker {
         // tree has been re-applied over it, so this is where the tokens go
         // on. A frame count would be a guess; this is the event itself.
         if matches!(event, Event::LiveEdit) {
-            if let Some((name, code)) = self.pending_theme_script.take() {
-                cx.with_vm(|vm| {
-                    vm.eval(ScriptMod {
-                        cargo_manifest_path: env!("CARGO_MANIFEST_DIR").into(),
-                        module_path: format!("theme_store_{name}"),
-                        file: format!("themes/{name}.{}", crate::theme_store::FILE_EXTENSION),
-                        line: 0,
-                        column: 0,
-                        code,
-                        values: vec![],
-                    });
-                });
-                // Re-apply rather than reload: typed text and running
-                // animations survive, which is the whole point of the
-                // sanctioned override path.
-                cx.request_script_reapply();
-                self.redraw_sidebar(cx);
+            self.land_the_pending_pins(cx);
+            // ...and the mix, which the rebuild this event follows has just
+            // thrown away. Every `request_style_reload` the panel asks for
+            // lands here, and so does a live edit arriving from the file
+            // watcher, so this is the one place that owes the lab the word.
+            self.eq_module_rebuilt();
+            // The body's compression does not survive the rebuild. Put it
+            // back here, before the first draw, or that draw lays the app
+            // out at full width and the one after takes it back -- a jump
+            // the size of the panel on every settle.
+            if tweak_is_on() {
+                self.ensure_body_margin(cx, desired_body_margin(true));
             }
         }
         // The guard must drop before undo/redo take the session lock again
@@ -16919,12 +18415,17 @@ impl Widget for Tweaker {
             self.pulse_pinned = color.is_some();
             self.set_pulse(cx, color);
         }
+        // The panel's own hovers, taken off the raw move rather than off
+        // `hits`: several of them are chrome the panel draws itself and are
+        // not widgets at all, so there is no area to hit-test.
         if let Event::MouseMove(e) = event {
-            self.doc_tip_hover(cx, e.abs);
-            self.scope_tip_hover(cx, e.abs);
-            self.chrome_tip_hover(cx, e.abs);
-            self.states_hover(cx, e.abs);
-            self.pulse_hover(cx, e.abs);
+            if Self::hover_is_the_panels_to_take(cx) {
+                self.doc_tip_hover(cx, e.abs);
+                self.scope_tip_hover(cx, e.abs);
+                self.chrome_tip_hover(cx, e.abs);
+                self.states_hover(cx, e.abs);
+                self.pulse_hover(cx, e.abs);
+            }
         }
         if self.pulse_frame.is_event(event).is_some() {
             if let Some((_, t0)) = self.pulse {
@@ -17557,7 +19058,28 @@ impl Widget for Tweaker {
             self.focus_search_pending = true;
         }
         if !on && self.was_on {
-            self.cancel_interactions(cx);
+            // Noted here and paid at the next event, because standing down
+            // reaches `leave_equalizer`, and that goes on to
+            // `desktop_style::install`, `vm.with_reload(script_mod)` and a
+            // script reapply: the whole theme module and the whole widget
+            // module rebuilt underneath a pass that is halfway through
+            // drawing from them. `cx` here is a `Cx2d`, and a reload from
+            // inside a draw happens nowhere else in this library.
+            //
+            // It is the rule the panel already keeps for everything else it
+            // cannot do mid-pass -- the caret into the filter, the view's
+            // focus, the wheel's zoom -- and this was the one place that
+            // broke it. The key route never comes through here at all; it
+            // stands the panel down on the press, with a `Cx` of its own.
+            // What does come through here is every OTHER way the mode goes
+            // off, the bridge's `/tweak?on=0` first among them.
+            //
+            // A frame is asked for so that the next event exists: the mode
+            // going off is not otherwise a reason for anything to happen
+            // again, and a debt nothing collects is a blend left standing
+            // over an app with no panel on it.
+            self.stand_down_pending = true;
+            self.next_frame = cx.new_next_frame();
         }
         if self.view_zoom < 1.0 {
             self.view_zoom = 1.0;
@@ -17587,8 +19109,9 @@ impl Widget for Tweaker {
         // Compress the app's UI while the sidebar is up; release it when the
         // mode goes off (this draw still runs once after the toggle because
         // set_tweak_on redraws everything).
-        let desired = if on { sidebar_width() } else { 0.0 };
+        let desired = desired_body_margin(on);
         self.ensure_body_margin(cx, desired);
+        self.edit_settle(cx);
         if !on {
             // Tear the surface down for real: both overlay lists are
             // RETAINED by the window's overlay (a stored sub-list keeps its
@@ -18295,12 +19818,30 @@ mod tests {
             ("theme_head", "View"),
             ("theme_pick_row", "View"),
             ("theme_pick", "PanelDropDown"),
-            ("theme_wear", "PanelButton"),
             ("theme_save_row", "View"),
             ("theme_name", "PanelInput"),
             ("theme_save", "PanelButton"),
             ("theme_delete", "PanelButton"),
             ("theme_msg", "PanelLabelSmall"),
+            ("eq_fold", "PanelButton"),
+            ("eq_body", "View"),
+            ("eq_appearance_row", "View"),
+            ("eq_dark", "PanelButton"),
+            ("eq_light", "PanelButton"),
+            ("eq_rows", "View"),
+            ("eq_row_0", "EqRowT"),
+            ("eq_row_1", "EqRowT"),
+            ("eq_row_2", "EqRowT"),
+            ("eq_row_3", "EqRowT"),
+            ("eq_row_4", "EqRowT"),
+            ("eq_row_5", "EqRowT"),
+            ("eq_row_6", "EqRowT"),
+            ("eq_row_7", "EqRowT"),
+            ("eq_weight", "FabSlider"),
+            ("eq_absolute", "PanelButton"),
+            ("eq_relative", "PanelButton"),
+            ("eq_random", "PanelButton"),
+            ("eq_read", "PanelLabelSmall"),
         ] {
             let decl = format!("{id} := {ty}");
             assert_eq!(
@@ -18364,7 +19905,7 @@ mod tests {
                 // this template's own `draw_bg`.
                 let leaf = prop.rsplit('.').next().unwrap_or(prop);
                 assert!(
-                    kit.contains(&format!("{leaf}:")),
+                    declares(kit, leaf),
                     "the sheets override `{prop}` on a DropDown and the panel's own does not declare `{leaf}`"
                 );
             }
@@ -18414,7 +19955,7 @@ mod tests {
                     // inside this template's own `draw_bg`, and so on down.
                     let leaf = prop.rsplit('.').next().unwrap_or(prop);
                     assert!(
-                        kit.contains(&format!("{leaf}:")),
+                        declares(kit, leaf),
                         "{} overrides `{prop}` on a {widget} and PanelButton/PanelInput does not declare `{leaf}`",
                         sheet.display()
                     );
@@ -18427,38 +19968,153 @@ mod tests {
         // through `widgets.splash`: the stock templates take them from
         // `theme.mspace_1` and `theme.mspace_v_1`, which every sheet moves.
         for kit in [button, input] {
-            assert!(kit.contains("padding: Inset{"), "the padding is not written out");
-            assert!(kit.contains("margin: Inset{"), "the margin is not written out");
-            assert!(kit.contains("min_height: 0"), "the min height is not written out");
+            assert!(declares(kit, "padding"), "the padding is not written out");
+            assert!(declares(kit, "margin"), "the margin is not written out");
+            assert!(declares(kit, "min_height"), "the min height is not written out");
         }
+        // The matcher itself, because the hole this guard had was in the
+        // matcher and not in the templates: an unanchored search finds
+        // `color:` inside `border_color:` and passes a template that declares
+        // no colour at all.
+        assert!(declares("draw_bg +: { color: #x161616 }", "color"));
+        assert!(!declares("draw_bg +: { border_color: #x161616 }", "color"));
+        assert!(!declares("margin: Inset{left: 0}", "in"));
+        assert!(declares("padding: Inset{left: 0}", "left"));
     }
 
-    /// The panel's own skin is a PALETTE, and the switch that changes it is
-    /// the only thing that does.
+    /// Whether a template declares a property of its own under this name.
     ///
-    /// Three things are held together here, and the panel is wrong if any one
-    /// of them goes. A theme change on its own must not move the panel: that
-    /// immunity is the whole reason `mod.fab` exists, and it is what lets the
-    /// panel be the tool a theme is diagnosed WITH. The switch must move it,
-    /// or the button is a lie. And once the switch is on, a theme change must
-    /// move it again, or "wear the theme" would mean "wear the theme that
-    /// happened to be on when you pressed it".
+    /// Anchored at the front, because an unanchored search is answered by the
+    /// wrong property: `"color:"` is found inside `border_color:`, and a
+    /// template declaring nothing but a border colour would pass for a sheet
+    /// that overrides `draw_bg.color`. A name begins where the character
+    /// before it is not one a name can be made of.
+    fn declares(kit: &str, leaf: &str) -> bool {
+        let needle = format!("{leaf}:");
+        let mut from = 0;
+        while let Some(found) = kit[from..].find(&needle) {
+            let at = from + found;
+            let before = kit[..at].chars().next_back();
+            if !before.is_some_and(|c| c.is_alphanumeric() || c == '_') {
+                return true;
+            }
+            from = at + 1;
+        }
+        false
+    }
+
+    /// Everything about the mix's weight row that a sheet could move if the
+    /// kit ever took one of its tokens off `theme.` instead of off `fab.`:
+    /// the colour of each of its two words, and the height of the row they
+    /// sit in. `None` anywhere means the template did not resolve, which the
+    /// caller asserts against rather than comparing.
+    fn fab_slider_stamp(cx: &mut Cx) -> (Option<u32>, Option<u32>, Option<f64>) {
+        cx.with_vm(|vm| {
+            let widgets = vm.module(LiveId::from_str("widgets"));
+            let slider = vm
+                .bx
+                .heap
+                .value(widgets, LiveId::from_str("FabSlider").into(), NoTrap)
+                .as_object();
+            let ink = |vm: &mut crate::makepad_platform::ScriptVm, layer: &str| -> Option<u32> {
+                let layer = vm
+                    .bx
+                    .heap
+                    .value(slider?, LiveId::from_str(layer).into(), NoTrap)
+                    .as_object()?;
+                vm.bx.heap.value(layer, LiveId::from_str("color").into(), NoTrap).as_color()
+            };
+            let label = ink(vm, "draw_label");
+            let value = ink(vm, "draw_value");
+            let height = slider.and_then(|slider| {
+                let height = vm.bx.heap.value(slider, LiveId::from_str("height").into(), NoTrap);
+                height.as_f64().or_else(|| height.as_f32().map(f64::from))
+            });
+            (label, value, height)
+        })
+    }
+
+    /// The mix's weight row is the one control in the Theme tab that is not
+    /// one of the panel's own hardened templates, and the splash CLAIMS its
+    /// immunity rather than showing it: "its face is drawn from `mod.fab`
+    /// throughout, so it needs no hardening against the sheets the way a
+    /// stock control would". This is that claim, measured.
     ///
-    /// Measured through `fab_palette_stamp`, which is the same reading the
-    /// panel itself uses to decide whether to build its sidebar again -- so
-    /// this also tests that the rebuild fires when it should and, just as
-    /// importantly, never fires while the switch is off.
+    /// Read off the resolved template and not off the source, so a token
+    /// re-pointed at `theme.` anywhere in the chain -- the row, either of its
+    /// two words, or the palette entry either of them names -- is caught by
+    /// the value moving, however it is spelled.
     #[test]
-    fn only_the_wear_switch_puts_the_panel_in_the_apps_theme() {
+    fn no_sheet_moves_the_mixs_weight_row() {
         use crate::desktop_style::{install, uninstall, DesktopStyle, StyleSheet};
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(crate::script_mod);
+        let own = fab_slider_stamp(&mut cx);
         assert!(
-            !crate::fab_controls::panel_wears_theme(&mut cx),
-            "the panel wears its own palette until it is asked not to"
+            own.0.is_some() && own.1.is_some() && own.2.is_some(),
+            "the weight row did not resolve, so nothing below compares anything: {own:?}"
         );
+        let bare = theme_color(&mut cx, "color_bg_app");
+        for style in DesktopStyle::ALL {
+            for dark in [false, true] {
+                if dark && !style.supports_dark() {
+                    continue;
+                }
+                cx.with_vm(|vm| {
+                    install(vm, StyleSheet::load_with_appearance(style, dark));
+                    vm.with_reload(crate::script_mod);
+                });
+                // The sheet is really on and really reached the module -- the
+                // app's own ground moved -- so the row standing still below
+                // is a row that was asked and answered, not a reading taken
+                // off a module nothing happened to.
+                assert_ne!(
+                    theme_color(&mut cx, "color_bg_app"),
+                    bare,
+                    "`{}`{} did not reach the theme at all",
+                    style.id(),
+                    if dark { " dark" } else { "" }
+                );
+                assert_eq!(
+                    fab_slider_stamp(&mut cx),
+                    own,
+                    "`{}`{} moved the mix's weight row",
+                    style.id(),
+                    if dark { " dark" } else { "" }
+                );
+            }
+        }
+        // ...and taking the last sheet off leaves it where it started, which
+        // is what says the readings above were being taken at all.
+        cx.with_vm(|vm| {
+            uninstall(vm);
+            vm.with_reload(crate::script_mod);
+        });
+        assert_eq!(fab_slider_stamp(&mut cx), own);
+    }
+
+    /// The panel's own skin is a PALETTE of its own, and no theme the app
+    /// wears reaches it.
+    ///
+    /// That immunity is the whole reason `mod.fab` exists, and it is what
+    /// lets the panel be the tool a theme is diagnosed WITH: a panel that
+    /// followed the theme under test would go unreadable at exactly the
+    /// moment somebody needed to read it.
+    ///
+    /// Measured through `fab_palette_stamp`, which is the same reading the
+    /// panel itself uses to decide whether to build its sidebar again -- so
+    /// this also holds that the rebuild never fires when nothing moved, and
+    /// the panel is built once however many themes come and go over it.
+    ///
+    /// Three sheets of three different minds about colour, and then the way
+    /// back off one: a palette that survives Windows 2000 and Android in turn
+    /// is not surviving them by accident.
+    #[test]
+    fn no_theme_the_app_wears_moves_the_panels_own_chrome() {
+        use crate::desktop_style::{install, uninstall, DesktopStyle, StyleSheet};
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
         let own = fab_palette_stamp(&mut cx);
-        // A theme change alone leaves the panel where it was.
         for style in [DesktopStyle::Macos, DesktopStyle::Windows2000, DesktopStyle::Android] {
             cx.with_vm(|vm| {
                 install(vm, StyleSheet::load(style));
@@ -18467,35 +20123,17 @@ mod tests {
             assert_eq!(
                 fab_palette_stamp(&mut cx),
                 own,
-                "the panel followed `{}` without being asked to",
+                "the panel followed `{}`",
                 style.id()
             );
         }
-        // The switch does move it...
-        crate::fab_controls::set_panel_wears_theme(&mut cx, true);
-        cx.with_vm(|vm| vm.with_reload(crate::script_mod));
-        let worn = fab_palette_stamp(&mut cx);
-        assert_ne!(worn, own, "the switch changed nothing");
-        // ...and now the picker moves it too.
-        cx.with_vm(|vm| {
-            install(vm, StyleSheet::load(DesktopStyle::Omarchy));
-            vm.with_reload(crate::script_mod);
-        });
-        assert_ne!(
-            fab_palette_stamp(&mut cx),
-            worn,
-            "worn, the panel did not follow the theme it was wearing"
-        );
-        // And off is off: back to the palette it started in, whatever sheet
-        // is still installed.
-        crate::fab_controls::set_panel_wears_theme(&mut cx, false);
-        cx.with_vm(|vm| vm.with_reload(crate::script_mod));
-        assert_eq!(fab_palette_stamp(&mut cx), own, "taking it off left something behind");
+        // Coming off a sheet is a rebuild like any other, and the panel is
+        // no more moved by that one than by the three before it.
         cx.with_vm(|vm| {
             uninstall(vm);
             vm.with_reload(crate::script_mod);
         });
-        assert_eq!(fab_palette_stamp(&mut cx), own);
+        assert_eq!(fab_palette_stamp(&mut cx), own, "coming off a sheet left something behind");
     }
 
     /// The panel's own splash chunk, evaluated the way the panel evaluates
@@ -18527,15 +20165,36 @@ mod tests {
             let sidebar = panel.sidebar.clone().expect("the chunk built a sidebar");
             let errors = cx.with_vm(|vm| vm.take_errors());
             assert!(errors.is_empty(), "{errors:?}");
-            // The Theme tab's head, down to the switch added beside the
-            // picker: a row that evaluates but resolves to nothing is the
-            // same broken panel as one that does not evaluate.
+            // The Theme tab's head, down to the toggle beside the picker:
+            // a row that evaluates but resolves to nothing is the same
+            // broken panel as one that does not evaluate.
             let head = sidebar.child(live_id!(theme_head));
             assert!(!head.is_empty(), "the Theme tab has no head");
             let row = head.child(live_id!(theme_pick_row));
             assert!(!row.is_empty(), "the picker has no row");
-            for id in [live_id!(theme_pick), live_id!(theme_wear)] {
+            for id in [live_id!(theme_pick), live_id!(eq_fold)] {
                 assert!(!row.child(id).is_empty(), "the picker row is missing a control");
+            }
+            // The mix section under it, built although it is folded: a
+            // section that only comes into existence once somebody opens it
+            // is a section nobody can open.
+            let body = head.child(live_id!(eq_body));
+            assert!(!body.is_empty(), "the mix section did not build");
+            for id in [
+                live_id!(eq_appearance_row),
+                live_id!(eq_rows),
+                live_id!(eq_read),
+            ] {
+                assert!(!body.child(id).is_empty(), "the mix section is missing a part");
+            }
+            let rows = body.child(live_id!(eq_rows));
+            for id in EQ_ROW_IDS {
+                let row = rows.child(id);
+                assert!(!row.is_empty(), "the mix is missing a weight row");
+                assert!(
+                    !row.child(live_id!(eq_weight)).is_empty(),
+                    "a weight row has no slider in it"
+                );
             }
             // The filter field the panel is filtered with, while we are here.
             let input = sidebar
@@ -18639,7 +20298,7 @@ mod tests {
         let del = &del[..del.find("\n    /// What the store said").expect("the function ends")];
         // The question is asked before the store is ever called.
         let asks = del.find("pending_delete()").expect("delete asks first");
-        let does = del.find("theme_store::delete(").expect("delete deletes");
+        let does = del.find("theme_store::delete_in(").expect("delete deletes");
         assert!(asks < does, "the delete happens before the question is asked");
         // A refused delete re-reads the folder, or the row it could not
         // remove stays in the picker with a live delete button on it.
@@ -19607,5 +21266,2154 @@ line two");
         assert!(json.contains("`StageBody` is a Grid"), "{json}");
         assert!(json.ends_with("\"}]"), "{json}");
         assert_eq!(json.matches("\"do\"").count(), 1);
+    }
+
+    /// A panel and nothing built on it: no sidebar, no theme resolved. The
+    /// mix section keeps its whole state on the struct -- it has to, because
+    /// the sidebar is dropped and rebuilt whenever the panel's own palette
+    /// moves -- so this is enough to ask the section what it did.
+    fn bare_panel(cx: &mut Cx) -> WidgetRef {
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let widgets = vm.module(id!(widgets));
+            let value = vm.bx.heap.value(widgets, LiveId::from_str("Tweaker").into(), NoTrap);
+            WidgetRef::script_from_value(vm, value)
+        })
+    }
+
+    /// Open the mix section for real, on the sheet named, with every theme
+    /// the library ships resolved.
+    ///
+    /// The whole cost of the lab is here -- a sheet on, a module rebuilt and
+    /// the tokens read, once per theme -- which is why the tests that only
+    /// ask what the rows did do not pay it. The ones that ask what is ON THE
+    /// APP have to: on a lab that was never entered every method under test
+    /// is a no-op over no rows, and a test of no-ops asserts nothing whatever
+    /// it calls. `is_open` is the assertion that says which kind this is.
+    fn open_the_mix_on(cx: &mut Cx, panel: &mut Tweaker, sheet: crate::desktop_style::DesktopStyle) {
+        use crate::desktop_style::{install, StyleSheet};
+        cx.with_vm(|vm| install(vm, StyleSheet::load_with_appearance(sheet, false)));
+        crate::set_base_theme(cx, crate::BaseTheme::Dark);
+        cx.with_vm(|vm| vm.with_reload(crate::script_mod));
+        panel.toggle_equalizer(cx);
+        assert!(panel.eq_lab.is_open(), "the lab was never entered, so nothing below tests anything");
+        // The frame that opening asks for: a reading, and nothing installed.
+        panel.eq_settle(cx, 0.0);
+        assert_eq!(panel.eq_lab.rebuilds(), 0, "opening the section rebuilt the module");
+    }
+
+    /// The Theme tab's head, laid out for real.
+    ///
+    /// A press lands on a rectangle, and a control that was never drawn has
+    /// no rectangle -- so a test that presses anything in this head comes
+    /// through here first. The uid a press is ROUTED by is taken at the draw
+    /// as well, which is the other half of the same reason.
+    fn draw_the_theme_head(cx: &mut Cx, panel: &mut Tweaker, head: &WidgetRef) {
+        use crate::makepad_draw::cx_draw::CxDraw;
+        const SIZE: Vec2d = Vec2d { x: 320.0, y: 700.0 };
+        let pass = DrawPass::new(cx);
+        pass.set_size(cx, SIZE);
+        let mut draw_list = DrawList2d::new(cx);
+        let event = DrawEvent::default();
+        let mut draw = CxDraw::new(cx, &event);
+        let mut cx2d = Cx2d::new(&mut draw);
+        cx2d.begin_pass(&pass, None);
+        draw_list.begin_always(&mut cx2d);
+        cx2d.begin_root_turtle(SIZE, Layout::flow_down());
+        panel.draw_equalizer(&mut cx2d, head);
+        head.draw_all(&mut cx2d, &mut Scope::empty());
+        cx2d.end_pass_sized_turtle();
+        draw_list.end(&mut cx2d);
+        cx2d.end_pass(&pass);
+    }
+
+    /// One press, taken the whole way a hand takes it: down on the control,
+    /// up again on it, and the actions that came out routed through the
+    /// panel's own `handle_sidebar_actions`.
+    ///
+    /// The routing is the point. A button that draws, hovers and clicks is
+    /// still a button attached to nothing if its uid never reached the
+    /// panel, and nothing on the screen tells the difference -- so no test
+    /// of a control in this panel calls the method behind it directly.
+    fn one_press_on(cx: &mut Cx, panel: &mut Tweaker, root: &WidgetRef, target: &WidgetRef) {
+        use std::cell::Cell;
+        const WINDOW: WindowId = WindowId(1, 1);
+        let face = target.area().rect(cx);
+        assert!(face.size.x > 0.0, "the control was never drawn, so the press lands nowhere");
+        let at = face.pos + face.size * 0.5;
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        let down = Event::MouseDown(MouseDownEvent {
+            abs: at,
+            button: MouseButton::PRIMARY,
+            window_id: WINDOW,
+            modifiers: KeyModifiers::default(),
+            handled: Cell::new(Area::Empty),
+            time: 1.0,
+        });
+        root.handle_event(cx, &down, &mut Scope::empty());
+        cx.handle_actions();
+        let up = Event::MouseUp(MouseUpEvent {
+            abs: at,
+            button: MouseButton::PRIMARY,
+            window_id: WINDOW,
+            modifiers: KeyModifiers::default(),
+            time: 1.1,
+        });
+        let actions = cx.capture_actions(|cx| {
+            root.handle_event(cx, &up, &mut Scope::empty());
+        });
+        cx.fingers.first_mouse_button = None;
+        assert!(!actions.is_empty(), "the press produced no action whatever");
+        panel.handle_sidebar_actions(cx, &actions);
+    }
+
+    /// A folder for this panel's themes that is this test's alone, removed
+    /// with the turn that made it.
+    ///
+    /// Nothing here touches the process environment. The store's own folder
+    /// answers to a variable, and a test that writes one races every read of
+    /// it on every other thread the runner has -- which on Windows corrupted
+    /// the heap partway through a full run, while either test alone was
+    /// fine. The panel is told where its themes live instead, which is the
+    /// seam the store's own `_in` calls are built on and the same one a host
+    /// keeping its themes elsewhere would use.
+    ///
+    /// The name carries the process and a count, so that two tests running
+    /// side by side never share a folder and a run that panicked cannot
+    /// leave a theme behind for the next one to find.
+    fn a_store_of_its_own(panel: &mut Tweaker) -> StoreTurn {
+        static MADE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let turn = MADE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "makepad-tweaker-themes-{}-{turn}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a folder to keep this test's themes in");
+        panel.themes_dir = Some(dir.clone());
+        StoreTurn { dir }
+    }
+
+    struct StoreTurn {
+        dir: std::path::PathBuf,
+    }
+
+    impl Drop for StoreTurn {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// A blend that is really in force: the dark base theme brought up beside
+    /// whatever the section was opened on, and installed through the same
+    /// settle the draw goes through.
+    fn mix_in_the_dark_base(cx: &mut Cx, panel: &mut Tweaker, now: f64) {
+        use crate::theme_lab::{BlendTheme, RELATIVE_TOTAL};
+        let row = panel
+            .eq_lab
+            .index_of(BlendTheme::Base(crate::theme_tokens::Scheme::Dark))
+            .expect("the dark base theme is one of the dark group's rows");
+        panel.eq_set_mode(WeightMode::Absolute);
+        panel.eq_gesture_ended(row, RELATIVE_TOTAL);
+        let was = panel.eq_lab.rebuilds();
+        panel.eq_settle(cx, now);
+        assert_eq!(panel.eq_lab.rebuilds(), was + 1, "the mix never went in");
+        the_reload_lands(cx, panel, now);
+    }
+
+    /// The tick a `cx.request_style_reload()` lands on, driven by hand.
+    ///
+    /// An install is a choice written onto the Cx and a reload asked for; it
+    /// is that reload that re-runs `script_mod` and rebuilds every template
+    /// the app's widgets are made from, and until it has run nothing an
+    /// install did is on the screen. `app_main!`'s `Event::LiveEdit` arm is
+    /// the module re-run (the app is the library itself here); the panel's own
+    /// arm is `eq_module_rebuilt`; the draw after it is `eq_settle`.
+    ///
+    /// It also holds the loop shut. The panel is told about every rebuild,
+    /// including the one its own install asked for, so the apply that follows
+    /// MUST find the mix already in force and install nothing -- otherwise
+    /// every install asks for the reload that asks for the next install, with
+    /// a module rebuild inside the turn.
+    fn the_reload_lands(cx: &mut Cx, panel: &mut Tweaker, now: f64) {
+        assert!(
+            std::mem::take(&mut cx.pending_style_reload),
+            "nothing asked for the style reload that carries an install to the app"
+        );
+        cx.pending_live_edit_request = false;
+        cx.with_vm(|vm| vm.with_reload(crate::script_mod));
+        panel.eq_module_rebuilt();
+        let was = panel.eq_lab.rebuilds();
+        panel.eq_settle(cx, now);
+        assert_eq!(
+            panel.eq_lab.rebuilds(),
+            was,
+            "the landing installed again over a mix that is already in force"
+        );
+        assert!(
+            !cx.pending_style_reload,
+            "the landing asked for the reload that told it about the landing"
+        );
+    }
+
+    /// The colour the theme in force carries, off the module the widgets are
+    /// built from.
+    fn theme_color(cx: &mut Cx, key: &str) -> Option<u32> {
+        cx.with_vm(|vm| {
+            let theme = vm.module(LiveId::from_str("theme"));
+            vm.bx.heap.value(theme, LiveId::from_str(key).into(), NoTrap).as_color()
+        })
+    }
+
+    /// The name of the sheet in force, or none where the app is on a bare
+    /// base theme.
+    fn sheet_in_force(cx: &mut Cx) -> Option<String> {
+        cx.with_vm(crate::desktop_style::current_name)
+    }
+
+    /// A press on a control locks the pointer to it, and the panel's raw
+    /// hover pass has to stand down for as long as it is held -- otherwise
+    /// dragging a weight past the switch rows above and below it pops their
+    /// tooltips over the thumb, which is a second thing answering one press.
+    ///
+    /// Held by a real FabSlider taking a real press on its own track, which
+    /// is the gesture the fault was reported on. Nothing in a unit test can
+    /// let a digit go again -- the release runs in the platform's own event
+    /// loop -- so what is pinned here are the two states that matter: nobody
+    /// holding, and the thumb held.
+    #[test]
+    fn nothing_in_the_panel_hovers_while_a_thumb_is_held() {
+        use crate::makepad_draw::cx_draw::CxDraw;
+        use std::cell::Cell;
+        const SIZE: Vec2d = Vec2d { x: 400.0, y: 60.0 };
+        const WINDOW: WindowId = WindowId(1, 1);
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let slider = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let widgets = vm.module(id!(widgets));
+            let value = vm.bx.heap.value(widgets, LiveId::from_str("FabSlider").into(), NoTrap);
+            WidgetRef::script_from_value(vm, value)
+        });
+        // One draw, so the track has an area a press can land on.
+        let pass = DrawPass::new(&mut cx);
+        pass.set_size(&mut cx, SIZE);
+        let mut draw_list = DrawList2d::new(&mut cx);
+        {
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(&mut cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&pass, None);
+            draw_list.begin_always(&mut cx2d);
+            cx2d.begin_root_turtle(SIZE, Layout::flow_down());
+            slider.draw_all(&mut cx2d, &mut Scope::empty());
+            cx2d.end_pass_sized_turtle();
+            draw_list.end(&mut cx2d);
+            cx2d.end_pass(&pass);
+        }
+        let rect = slider.area().clipped_rect(&cx);
+        assert!(rect.size.x > 0.0, "the slider was never drawn, so nothing below holds anything");
+
+        // Nobody is holding the pointer: the panel's hovers are its own.
+        assert!(
+            Tweaker::hover_is_the_panels_to_take(&cx),
+            "the panel refuses a hover with no pointer held anywhere"
+        );
+
+        // A press in the middle of the track, which is where a weight is
+        // grabbed, and which takes the pointer.
+        let at = rect.pos + rect.size * 0.5;
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        let down = Event::MouseDown(MouseDownEvent {
+            abs: at,
+            button: MouseButton::PRIMARY,
+            window_id: WINDOW,
+            modifiers: KeyModifiers::default(),
+            handled: Cell::new(Area::Empty),
+            time: 1.0,
+        });
+        slider.handle_event(&mut cx, &down, &mut Scope::empty());
+        assert!(
+            cx.fingers.any_areas_captured(),
+            "the slider did not take the press, so this test proves nothing"
+        );
+        assert!(
+            !Tweaker::hover_is_the_panels_to_take(&cx),
+            "the panel would take a hover while the thumb is held"
+        );
+        cx.fingers.first_mouse_button = None;
+    }
+
+    /// The rows ARE the group on show. Flipping the switch replaces every
+    /// one of them rather than greying out the ones that no longer apply: a
+    /// weight on a theme that cannot be in this mix is a number nobody
+    /// chose, and one left on screen is a number somebody will move.
+    #[test]
+    fn the_mixs_rows_are_the_group_the_appearance_switch_is_showing() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        // Opened for real first: the rows are the LAB'S, and on a lab that
+        // was never entered every call below is a no-op over no rows.
+        open_the_mix_on(&mut cx, &mut panel, crate::desktop_style::DesktopStyle::Omarchy);
+        panel.eq_set_appearance(Appearance::Light);
+        let light: Vec<String> =
+            panel.eq_lab.rows().iter().map(|row| row.label.clone()).collect();
+        panel.eq_set_appearance(Appearance::Dark);
+        let dark: Vec<String> =
+            panel.eq_lab.rows().iter().map(|row| row.label.clone()).collect();
+        assert!(!light.is_empty() && !dark.is_empty(), "a group the library ships nothing in");
+        for name in &light {
+            assert!(!dark.contains(name), "`{name}` is on both sides of the switch");
+        }
+        assert!(panel.eq_row_uids.len() >= light.len().max(dark.len()), "a group has more themes than the splash has rows for");
+        // ...and the mix goes in again, because the rows it was made of are
+        // not the rows that are there now.
+        assert!(panel.eq_apply_due, "a new group is not a new mix to install");
+        assert!(panel.mix_due(0.0), "a press on the switch waits out the drag's settle");
+    }
+
+    /// A slider reports a change per pointer move, each install is a module
+    /// rebuild of some 52 ms, and the moves arrive on SEPARATE frames --
+    /// the panel redraws between them. So a half-second drag has to cost a
+    /// handful of installs rather than one per frame, and the value the hand
+    /// stopped on has to be one of them.
+    ///
+    /// Driven as frames for that reason. Forty moves inside a single frame
+    /// collapse on the flag alone, which is what the old test measured and
+    /// what the redraw beside the real call site made impossible.
+    #[test]
+    fn a_drag_across_forty_frames_is_a_handful_of_installs() {
+        use crate::desktop_style::DesktopStyle;
+        use crate::theme_lab::BlendTheme;
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        open_the_mix_on(&mut cx, &mut panel, DesktopStyle::Omarchy);
+        let row = panel
+            .eq_lab
+            .index_of(BlendTheme::Base(crate::theme_tokens::Scheme::Dark))
+            .expect("the dark base theme is one of the dark group's rows");
+        panel.eq_set_mode(WeightMode::Absolute);
+        panel.eq_settle(&mut cx, 1.0);
+
+        // Half a second of drag: a move reported and a frame drawn every
+        // 12.5 ms, which is what a display between 60 and 80 Hz hands a
+        // panel. Each move is a different weight, so each one is dirty.
+        const SPAN: f64 = 0.5;
+        const FRAMES: u32 = 40;
+        let before = panel.eq_lab.rebuilds();
+        for step in 0..FRAMES {
+            let now = 2.0 + f64::from(step) * (SPAN / f64::from(FRAMES));
+            panel.eq_weight_moved(row, f64::from(step) + 1.0);
+            panel.eq_settle(&mut cx, now);
+        }
+        let during = panel.eq_lab.rebuilds() - before;
+        // One per interval, plus the one the first move of the drag earns
+        // outright because the settle had long since come round.
+        let most = (SPAN / EQ_SETTLE).ceil() as u32 + 1;
+        assert!(
+            during <= most,
+            "a {} ms drag cost {during} module rebuilds -- about {} ms of blocked main thread",
+            SPAN * 1000.0,
+            during * 52
+        );
+        // ...and it is a settle and not a mute: the blend moves under the
+        // thumb rather than arriving all at once when it stops.
+        assert!(during >= 1, "the drag never reached the app at all");
+
+        // The release goes in whatever the settle says, so what is on the app
+        // when the hand lets go is what the hand let go of.
+        panel.eq_gesture_ended(row, f64::from(FRAMES) + 1.0);
+        panel.eq_settle(&mut cx, 2.0 + SPAN);
+        assert!(!panel.eq_apply_due, "a move is still waiting after the gesture ended");
+        assert!(!panel.eq_lab.is_dirty(), "the app is a blend behind what the rows read");
+        assert_eq!(panel.eq_lab.rows()[row].weight, f64::from(FRAMES) + 1.0);
+        // And what went in is where the thumb ended up, not where it passed.
+        assert!(
+            panel.eq_lab.rebuilds() <= before + during + 1,
+            "the release installed more than once"
+        );
+    }
+
+    /// Clicking a row's name takes that theme out of the mix and touches
+    /// nothing else. In absolute mode, where a weight is its own, that is
+    /// the whole of it: the other rows are not renormalised behind it.
+    #[test]
+    fn clicking_a_rows_name_takes_that_theme_out_and_leaves_the_rest() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        // Opened for real first: the rows are the LAB'S, and on a lab that
+        // was never entered every call below is a no-op over no rows.
+        open_the_mix_on(&mut cx, &mut panel, crate::desktop_style::DesktopStyle::Omarchy);
+        panel.eq_set_appearance(Appearance::Light);
+        panel.eq_set_mode(WeightMode::Absolute);
+        for (index, weight) in [(0usize, 10.0), (1, 20.0), (2, 30.0)] {
+            panel.eq_weight_moved(index, weight);
+        }
+        panel.eq_row_cleared(1);
+        let weights: Vec<f64> = panel.eq_lab.rows().iter().map(|row| row.weight).collect();
+        assert_eq!(weights[0], 10.0, "the row above lost weight it was not asked for");
+        assert_eq!(weights[1], 0.0, "the row that was clicked is still in the mix");
+        assert_eq!(weights[2], 30.0, "the row below lost weight it was not asked for");
+    }
+
+    /// Leaving the section is not leaving it open behind the tab. A mix is in
+    /// force over the whole app, so the fold hands the theme back and the tab
+    /// switch goes through the same call -- otherwise the only way out of a
+    /// blend is a control on a tab nobody is looking at.
+    ///
+    /// Both doors are driven for real and the answer is read off the APP: the
+    /// sheet the section was opened on is back on, and the colour with it.
+    /// The old test read the panel's own source and asserted that one call
+    /// appeared within four hundred characters of another, which would have
+    /// passed with the call wrapped in `if false` -- and, by only ever being
+    /// able to look at the tab, is why the picker went unquestioned.
+    #[test]
+    fn either_door_out_of_the_mix_puts_the_entry_theme_back() {
+        use crate::desktop_style::DesktopStyle;
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        open_the_mix_on(&mut cx, &mut panel, DesktopStyle::Omarchy);
+        let entry = theme_color(&mut cx, "color_bg_app");
+        assert!(entry.is_some(), "the theme in force carries no ground colour to compare");
+
+        // The fold.
+        mix_in_the_dark_base(&mut cx, &mut panel, 1.0);
+        assert_ne!(theme_color(&mut cx, "color_bg_app"), entry, "the mix never reached the app");
+        assert_eq!(sheet_in_force(&mut cx), None, "a mix stands on its base, not on a sheet");
+        panel.toggle_equalizer(&mut cx);
+        the_reload_lands(&mut cx, &mut panel, 1.5);
+        assert!(!panel.eq_open, "the section is still open");
+        assert!(!panel.eq_apply_due, "a mix is still queued behind a closed section");
+        assert!(panel.eq_reading.is_empty(), "the reading outlived the mix it read");
+        assert_eq!(sheet_in_force(&mut cx).as_deref(), Some("omarchy"), "the fold did not put the sheet back");
+        assert_eq!(theme_color(&mut cx, "color_bg_app"), entry, "the fold left the blend on the app");
+
+        // The tab. Opening again is free -- the themes are still resolved --
+        // and the panel has to be ON the Theme tab for walking off it to mean
+        // anything.
+        panel.panel_tab = PanelTab::Theme;
+        panel.toggle_equalizer(&mut cx);
+        assert!(panel.eq_lab.is_open());
+        panel.eq_settle(&mut cx, 2.0);
+        mix_in_the_dark_base(&mut cx, &mut panel, 3.0);
+        assert_ne!(theme_color(&mut cx, "color_bg_app"), entry, "the second mix never reached the app");
+        panel.set_panel_tab(&mut cx, 0);
+        the_reload_lands(&mut cx, &mut panel, 3.5);
+        assert!(panel.panel_tab == PanelTab::Props, "the tab did not move");
+        assert!(!panel.eq_open, "walking off the tab left the section open");
+        assert_eq!(
+            sheet_in_force(&mut cx).as_deref(),
+            Some("omarchy"),
+            "walking off the tab did not put the sheet back"
+        );
+        assert_eq!(
+            theme_color(&mut cx, "color_bg_app"),
+            entry,
+            "walking off the tab left the blend standing over the whole app"
+        );
+    }
+
+    /// The sibling the review found missing. The picker sits in the same
+    /// header six rows above the fold, and picking from it with a mix
+    /// standing is somebody saying which theme they want: it wins.
+    ///
+    /// What used to happen: the preset went on, the style reload dropped the
+    /// blend, and the lab still believed it had the section's ENTRY theme
+    /// installed -- so the next `- mix` put that back, silently replacing the
+    /// theme chosen three clicks earlier while the picker went on naming it.
+    #[test]
+    fn a_theme_picked_over_a_mix_is_the_theme_that_stays() {
+        use crate::desktop_style::DesktopStyle;
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        open_the_mix_on(&mut cx, &mut panel, DesktopStyle::Omarchy);
+        mix_in_the_dark_base(&mut cx, &mut panel, 1.0);
+        assert_eq!(sheet_in_force(&mut cx), None, "the mix never came on over the sheet");
+
+        // macOS dark, off the picker, with the blend still standing.
+        let wanted = ThemeChoice::Builtin(ThemePreset::Sheet(DesktopStyle::Macos, true));
+        let index = panel
+            .theme_entry_list()
+            .iter()
+            .position(|entry| *entry == wanted)
+            .expect("the picker offers macOS dark");
+        // Twice, because a pick over a standing mix asks before it throws one
+        // away -- see `a_pick_that_would_throw_a_mix_away_asks_first`. What
+        // this test is about is what happens once that is answered, which is
+        // that the pick wins.
+        panel.apply_theme_choice(&mut cx, index);
+        panel.apply_theme_choice(&mut cx, index);
+        // What `request_style_reload` lands a tick later, and the word the
+        // panel owes the lab when it does.
+        cx.with_vm(|vm| vm.with_reload(crate::script_mod));
+        panel.eq_module_rebuilt();
+        panel.eq_settle(&mut cx, 2.0);
+
+        assert_eq!(
+            sheet_in_force(&mut cx).as_deref(),
+            Some("macos-dark"),
+            "the pick is not what the app is wearing: either it never went on, \
+             or the mix was reinstalled over the top of it"
+        );
+        let picked = theme_color(&mut cx, "color_bg_app");
+        assert!(panel.eq_open, "a press on the picker folded the section away");
+        assert!(panel.eq_lab.is_open(), "the section is open over a lab that is not");
+
+        // ...and this is what `- mix` hands back: the theme the picker names,
+        // not the one the section happened to be opened on.
+        panel.toggle_equalizer(&mut cx);
+        assert_eq!(
+            sheet_in_force(&mut cx).as_deref(),
+            Some("macos-dark"),
+            "leaving the mix put back a theme nobody had asked for in three clicks"
+        );
+        assert_eq!(theme_color(&mut cx, "color_bg_app"), picked);
+        assert_eq!(
+            panel.theme_preset, index,
+            "the picker is naming one theme while the app wears another"
+        );
+    }
+
+    /// A theme picked in the APP's own chrome, rather than in the panel,
+    /// still wins.
+    ///
+    /// The panel's picker is six rows above the fold and stands the mix down
+    /// itself (`theme_choice_takes_the_mix_off`). An app's picker is not in
+    /// the panel at all -- `apps/storybook/src/theme.rs::select` is a drop
+    /// down in the Controls tab -- and knows nothing about a lab. All it does
+    /// is choose a base theme and ask for the style reload that carries it,
+    /// which is the same reload a mix rides back up on. Measured with the
+    /// section open and a blend standing, picking there moved nothing at all.
+    ///
+    /// So choosing a base theme takes a standing mix off, and the panel reads
+    /// the mix having gone as having been stood down: no reinstall, and the
+    /// section opens again on the theme that was picked. Driven here through
+    /// the two calls that picker makes, because they are all the library can
+    /// see of it.
+    #[test]
+    fn a_theme_picked_in_the_apps_own_chrome_is_the_theme_that_stays() {
+        use crate::desktop_style::DesktopStyle;
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        open_the_mix_on(&mut cx, &mut panel, DesktopStyle::Omarchy);
+        mix_in_the_dark_base(&mut cx, &mut panel, 1.0);
+        let blend = theme_color(&mut cx, "color_bg_app");
+
+        // The app's picker, in full: a base theme chosen, and the reload
+        // asked for. Nothing here has heard of the panel.
+        crate::set_base_theme(&mut cx, crate::BaseTheme::Light);
+        cx.request_style_reload();
+        // `the_reload_lands` asserts on the way through that the landing
+        // spent no rebuild and asked for no further reload -- which is the
+        // whole question here: a panel that reinstalled would put the blend
+        // straight back over the pick, and ask for the reload to do it with.
+        the_reload_lands(&mut cx, &mut panel, 2.0);
+
+        let picked = theme_color(&mut cx, "color_bg_app");
+        assert_ne!(picked, blend, "the blend went back over the theme just picked");
+        assert_eq!(sheet_in_force(&mut cx), None, "a base theme was picked and a sheet is on");
+        assert!(panel.eq_open, "the pick folded the section away");
+        assert!(panel.eq_lab.is_open(), "the section is open over a lab that is not");
+
+        // ...and what `- mix` hands back is the theme the picker chose, not
+        // the sheet the section happened to be opened on three clicks ago.
+        panel.toggle_equalizer(&mut cx);
+        assert!(
+            !cx.pending_style_reload,
+            "leaving a lab that had already been stood down rebuilt the module anyway"
+        );
+        assert_eq!(theme_color(&mut cx, "color_bg_app"), picked, "leaving took the pick away");
+        assert_eq!(sheet_in_force(&mut cx), None, "leaving put back a sheet nobody asked for");
+    }
+
+    /// A mix is a choice held on the Cx and emitted by `theme_mod`, so
+    /// anything that re-runs `script_mod` puts it back up: a theme reload, a
+    /// style reload the panel asked for itself, a live edit off the file
+    /// watcher. It used to be a blend evaluated once into a module, which
+    /// any of those threw away -- and putting it back cost a second rebuild
+    /// that the panel had to be told to ask for.
+    ///
+    /// The panel is still told at the landing, because that is where a file
+    /// watcher's live edit arrives too; what it must not do any more is spend
+    /// a rebuild on it.
+    #[test]
+    fn a_rebuild_under_the_mix_leaves_the_mix_standing() {
+        use crate::desktop_style::DesktopStyle;
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        open_the_mix_on(&mut cx, &mut panel, DesktopStyle::Omarchy);
+        mix_in_the_dark_base(&mut cx, &mut panel, 1.0);
+        let blend = theme_color(&mut cx, "color_bg_app");
+
+        // The reload, landing. `the_reload_lands` asserts on the way through
+        // that the landing cost no rebuild and asked for no further reload.
+        cx.request_style_reload();
+        the_reload_lands(&mut cx, &mut panel, 2.0);
+        assert_eq!(
+            theme_color(&mut cx, "color_bg_app"),
+            blend,
+            "a rebuild under the mix took it off the app"
+        );
+        assert!(!panel.eq_lab.is_dirty(), "the lab is owed an install over a mix that never came off");
+        assert!(!panel.mix_due(2.5), "a settled panel is still asking to install");
+
+        // ...and the sheet the section was opened on is still owed back: a
+        // rebuild is not a reason to forget somebody's theme.
+        panel.toggle_equalizer(&mut cx);
+        the_reload_lands(&mut cx, &mut panel, 3.0);
+        assert_eq!(sheet_in_force(&mut cx).as_deref(), Some("omarchy"));
+        assert_ne!(theme_color(&mut cx, "color_bg_app"), blend, "the fold left the blend on the app");
+    }
+
+    /// The whole road, and the step it used to stop one short of.
+    ///
+    /// A widget does not read `mod.theme` when it draws. Its colour was baked
+    /// into the template it was built from, as a literal, when that
+    /// template's module block ran -- and an APP's templates are built in the
+    /// app's own module tail, off `mod.widgets`. So moving `mod.theme` moves
+    /// nothing an app drew, and `request_script_reapply`, which re-applies
+    /// the tree from the value captured at startup WITHOUT re-running
+    /// `script_mod`, walks every widget on the screen and faithfully writes
+    /// the old colours back. The mix was going in correctly the whole time
+    /// and the app was repainting itself out of it.
+    ///
+    /// So this test is an app: the library's module, then a tail of its own
+    /// with a template derived from `mod.widgets`, a Label built from it, and
+    /// the app value captured the way `app_main!` captures it. Then the
+    /// sequence a person takes -- panel on, Theme tab, open the fold, move a
+    /// weight -- and the tick the reload lands on, which is `app_main!`'s
+    /// `Event::LiveEdit` arm written out. The assertion is on the colour that
+    /// Label will DRAW with, and not on a token in a module: a module can
+    /// carry a mix the screen never shows, which is the whole of the defect.
+    /// A theme value reads back through the panel, as a number.
+    fn theme_num(cx: &mut Cx, name: &str) -> Option<f64> {
+        theme_values(cx).into_iter().find(|(n, _, _, _)| n == name).and_then(|(_, _, v, _)| match v {
+            ThemeVal::Num(f) => Some(f),
+            _ => None,
+        })
+    }
+
+    /// The heap held an edit only until the next module run put the theme
+    /// file's own value back -- so a number never showed, and a colour showed
+    /// until anything rebuilt. Now the run re-emits the edits, and picking a
+    /// theme is what takes them off.
+    #[test]
+    fn an_edit_outlives_the_rebuild_that_used_to_forget_it() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        crate::set_base_theme(&mut cx, crate::BaseTheme::Dark);
+        cx.with_vm(|vm| crate::script_mod(vm));
+        let own = theme_num(&mut cx, "font_size_base").expect("the theme has a base font size");
+        assert_ne!(own, 18.0, "pick a value the theme does not already have");
+        theme_apply(&mut cx, "font_size_base", "18", "test", None).expect("a number applies");
+        theme_apply(&mut cx, "color_bg_app", "#ff0000ff", "test", None).expect("a colour applies");
+        cx.with_vm(|vm| vm.with_reload(crate::script_mod));
+        assert_eq!(theme_num(&mut cx, "font_size_base"), Some(18.0), "the rebuild forgot the number");
+        assert_eq!(theme_color(&mut cx, "color_bg_app"), Some(0xFF0000FF), "the rebuild forgot the colour");
+        // Back at the original is no edit at all: nothing left to pin.
+        theme_apply(&mut cx, "font_size_base", &fmt_f64(own), "test", None).expect("back to the original");
+        assert!(
+            !crate::theme_edits(&mut cx).iter().any(|(n, _)| n == "font_size_base"),
+            "an edit set back to the original went on pinning it"
+        );
+        // And a theme picked from outside is the theme, edits and all.
+        crate::set_base_theme(&mut cx, crate::BaseTheme::Light);
+        cx.with_vm(|vm| vm.with_reload(crate::script_mod));
+        assert_ne!(theme_color(&mut cx, "color_bg_app"), Some(0xFF0000FF), "the edit outlived the pick");
+    }
+
+    /// A global re-derives the theme it belongs to. `type_title_l_size` is
+    /// `font_size_base + 2 * font_size_contrast` and `space_2` is
+    /// `1.0 * space_factor`; a pin on the base left both standing.
+    #[test]
+    fn a_global_edit_moves_the_ladder_built_from_it() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        crate::set_base_theme(&mut cx, crate::BaseTheme::Dark);
+        cx.with_vm(|vm| crate::script_mod(vm));
+        let base = theme_num(&mut cx, "font_size_base").expect("a base size");
+        let contrast = theme_num(&mut cx, "font_size_contrast").expect("a contrast step");
+        let title = theme_num(&mut cx, "type_title_l_size").expect("a title size");
+        assert_eq!(title, base + 2.0 * contrast, "the ladder is not what this test believes");
+        theme_apply(&mut cx, "font_size_base", &fmt_f64(base * 2.0), "test", None).expect("applies");
+        theme_apply(&mut cx, "space_factor", "12", "test", None).expect("applies");
+        cx.with_vm(|vm| vm.with_reload(crate::script_mod));
+        assert_eq!(theme_num(&mut cx, "font_size_base"), Some(base * 2.0), "the rebuild forgot the global");
+        assert_eq!(
+            theme_num(&mut cx, "type_title_l_size"),
+            Some(base * 2.0 + 2.0 * contrast),
+            "font_size_base doubled and the title size built from it stayed at {title}"
+        );
+        assert_eq!(theme_num(&mut cx, "space_2"), Some(12.0), "space_2 is 1.0 * space_factor and did not follow it");
+        // A pick takes the globals off with everything else.
+        crate::set_base_theme(&mut cx, crate::BaseTheme::Dark);
+        cx.with_vm(|vm| vm.with_reload(crate::script_mod));
+        assert_eq!(theme_num(&mut cx, "type_title_l_size"), Some(title), "the global outlived the pick");
+    }
+
+    /// The same road the mix test drives, for an edit: the app builds a widget
+    /// off its own template, the colour it draws with is edited, the reload
+    /// lands the way `app_main!` lands it, and the widget draws the edit.
+    #[test]
+    fn a_colour_edit_reaches_a_widget_the_app_built_after_the_rebuild() {
+        use crate::makepad_platform::{Apply, ScriptApply, ScriptValue};
+        fn app_script_mod(vm: &mut ScriptVm) -> ScriptValue {
+            crate::script_mod(vm);
+            vm.heap_mut().new_module(LiveId::from_str("probe_app"));
+            vm.eval(ScriptMod {
+                cargo_manifest_path: env!("CARGO_MANIFEST_DIR").into(),
+                module_path: "probe_app".to_string(),
+                file: "probe_app.splash".to_string(),
+                line: 0,
+                column: 0,
+                code: "mod.probe_app.AppLabel = mod.widgets.Label{ text: \"x\" }\ntrue\n".to_string(),
+                values: vec![],
+            });
+            let module = vm.module(LiveId::from_str("probe_app"));
+            vm.bx.heap.value(module, LiveId::from_str("AppLabel").into(), NoTrap)
+        }
+        fn drawn(label: &WidgetRef) -> u32 {
+            let colour = label.borrow::<Label>().expect("a Label").draw_text.color;
+            let byte = |v: f32| ((v.clamp(0.0, 1.0) * 255.0).round() as u32) & 0xFF;
+            (byte(colour.x) << 24) | (byte(colour.y) << 16) | (byte(colour.z) << 8) | byte(colour.w)
+        }
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        crate::set_base_theme(&mut cx, crate::BaseTheme::Dark);
+        let (mut label, mut captured) = cx.with_vm(|vm| {
+            let value = app_script_mod(vm);
+            let object = value.as_object().expect("the app template is an object");
+            (WidgetRef::script_from_value(vm, value), vm.heap_mut().new_object_ref(object))
+        });
+        let before = drawn(&label);
+        assert_ne!(before, 0xFF0000FF, "pick a colour the theme does not already draw");
+        // `color_label_outer` is the ink a Label draws with (label.rs); in the
+        // dark theme it happens to equal `color_text`, which is not the point.
+        theme_apply(&mut cx, "color_label_outer", "#ff0000ff", "test", None).expect("the edit applies");
+        // The landing, as `app_main!` does it: the module re-run, the app value
+        // captured again, the tree re-applied from it.
+        cx.with_vm(|vm| {
+            let value = vm.with_reload(app_script_mod);
+            if let Some(object) = value.as_object() {
+                captured = vm.heap_mut().new_object_ref(object);
+            }
+            ScriptApply::script_apply(
+                &mut label,
+                vm,
+                &Apply::ScriptReapply,
+                &mut Scope::empty(),
+                ScriptValue::from(captured.as_object()),
+            );
+        });
+        assert_eq!(drawn(&label), 0xFF0000FF, "the app rebuilt and the widget still draws the theme file's own ink");
+    }
+
+    /// Forty steps of a drag over half a second are a handful of module runs,
+    /// not forty, and the last step is always worn.
+    #[test]
+    fn a_run_of_edits_is_one_reload_per_settle() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        crate::set_base_theme(&mut cx, crate::BaseTheme::Dark);
+        let panel_ref = cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let widgets = vm.module(id!(widgets));
+            let panel = vm.bx.heap.value(widgets, LiveId::from_str("Tweaker").into(), NoTrap);
+            WidgetRef::script_from_value(vm, panel)
+        });
+        let mut panel = panel_ref.borrow_mut::<Tweaker>().expect("a Tweaker");
+        for step in 0..40 {
+            panel.theme_set(&mut cx, "font_size_base", &format!("{}", 10 + step), "sidebar").expect("a step applies");
+            panel.edit_settle_at(&mut cx, step as f64 * 0.0125);
+        }
+        let most = (0.5_f64 / EQ_SETTLE).ceil() as u32 + 1;
+        assert!(panel.edit_reloads >= 1, "a drag of forty edits asked for no module run at all");
+        assert!(panel.edit_reloads <= most, "forty edits cost {} module runs; at most {most}", panel.edit_reloads);
+        panel.edit_settle_at(&mut cx, 5.0);
+        assert!(!panel.edit_reload_due, "the last step of the drag was never worn");
+        assert_eq!(theme_num(&mut cx, "font_size_base"), Some(49.0), "the heap does not hold the last step");
+    }
+
+    #[test]
+    fn a_weight_moved_reaches_a_widget_the_app_built() {
+        use crate::desktop_style::{install, DesktopStyle, StyleSheet};
+        use crate::makepad_platform::{Apply, ScriptApply, ScriptValue};
+        use crate::theme_lab::{BlendTheme, RELATIVE_TOTAL};
+
+        /// An app's `script_mod`: the library, then its own tail. Returns the
+        /// app value, as `AppMain::script_mod` does.
+        fn app_script_mod(vm: &mut ScriptVm) -> ScriptValue {
+            crate::script_mod(vm);
+            vm.heap_mut().new_module(LiveId::from_str("probe_app"));
+            vm.eval(ScriptMod {
+                cargo_manifest_path: env!("CARGO_MANIFEST_DIR").into(),
+                module_path: "probe_app".to_string(),
+                file: "probe_app.splash".to_string(),
+                line: 0,
+                column: 0,
+                code: "mod.probe_app.AppLabel = mod.widgets.Label{ text: \"x\" }\ntrue\n"
+                    .to_string(),
+                values: vec![],
+            });
+            let module = vm.module(LiveId::from_str("probe_app"));
+            vm.bx.heap.value(module, LiveId::from_str("AppLabel").into(), NoTrap)
+        }
+
+        /// The colour the Label hands its shader, packed the way a theme
+        /// token is, so the two can be compared as what they are.
+        fn drawn(label: &WidgetRef) -> u32 {
+            let colour = label.borrow::<Label>().expect("a Label").draw_text.color;
+            let byte = |v: f32| ((v.clamp(0.0, 1.0) * 255.0).round() as u32) & 0xFF;
+            (byte(colour.x) << 24) | (byte(colour.y) << 16) | (byte(colour.z) << 8) | byte(colour.w)
+        }
+
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        // A theme to open the section ON, so that raising a second one is a
+        // blend of two rather than a switch to one.
+        cx.with_vm(|vm| install(vm, StyleSheet::load_with_appearance(DesktopStyle::Omarchy, false)));
+        crate::set_base_theme(&mut cx, crate::BaseTheme::Dark);
+
+        // Startup: the app's module, the app value captured, and a widget
+        // built off the app's own template.
+        let (label, panel_ref, mut captured) = cx.with_vm(|vm| {
+            let value = app_script_mod(vm);
+            let object = value.as_object().expect("the app's template is an object");
+            let label = WidgetRef::script_from_value(vm, value);
+            let captured = vm.heap_mut().new_object_ref(object);
+            let widgets = vm.module(id!(widgets));
+            let panel = vm.bx.heap.value(widgets, LiveId::from_str("Tweaker").into(), NoTrap);
+            (label, WidgetRef::script_from_value(vm, panel), captured)
+        });
+        let entry = drawn(&label);
+        assert_ne!(entry, 0, "the Label was built with no text colour at all");
+
+        let mut panel = panel_ref.borrow_mut::<Tweaker>().expect("a Tweaker");
+        panel.panel_tab = PanelTab::Theme;
+        panel.toggle_equalizer(&mut cx);
+        assert!(panel.eq_lab.is_open(), "the fold did not open the lab");
+        panel.eq_settle(&mut cx, 0.0);
+        assert_eq!(panel.eq_lab.rebuilds(), 0, "opening the fold installed something");
+        assert_eq!(drawn(&label), entry, "opening the fold moved the app on its own");
+
+        // The weight, and the draw that spends it.
+        let row = panel
+            .eq_lab
+            .index_of(BlendTheme::Base(crate::theme_tokens::Scheme::Dark))
+            .expect("the dark base theme is one of the dark group's rows");
+        panel.eq_set_mode(WeightMode::Absolute);
+        panel.eq_gesture_ended(row, RELATIVE_TOTAL);
+        panel.eq_settle(&mut cx, 1.0);
+        assert_eq!(panel.eq_lab.rebuilds(), 1, "the mix never went in");
+        assert!(
+            cx.pending_style_reload,
+            "the install asked for a re-apply of the tree and not for the module run that \
+             rebuilds the templates the tree is applied FROM -- which is the defect itself"
+        );
+
+        // The tick that reload lands on: `app_main!`'s `Event::LiveEdit` arm,
+        // written out. The app's own `script_mod` re-runs, the app value is
+        // captured AGAIN -- the step a `ScriptReapply` skips, and the reason
+        // it wrote the old colours back -- and the tree is re-applied.
+        cx.pending_style_reload = false;
+        cx.pending_live_edit_request = false;
+        let mut label = label;
+        cx.with_vm(|vm| {
+            let value = vm.with_reload(app_script_mod);
+            if let Some(object) = value.as_object() {
+                captured = vm.heap_mut().new_object_ref(object);
+            }
+            ScriptApply::script_apply(
+                &mut label,
+                vm,
+                &Apply::ScriptReapply,
+                &mut Scope::empty(),
+                ScriptValue::from(captured.as_object()),
+            );
+        });
+        panel.eq_module_rebuilt();
+        panel.eq_settle(&mut cx, 1.0);
+
+        let mixed = drawn(&label);
+        assert_ne!(mixed, entry, "the weight moved and the widget still draws the old colour");
+        assert_eq!(
+            Some(mixed),
+            theme_color(&mut cx, "color_text"),
+            "the widget moved, but not to the blend the module is carrying"
+        );
+        assert_eq!(panel.eq_lab.rebuilds(), 1, "the landing installed the mix all over again");
+
+        // And the way back out, through the fold, on the same road.
+        panel.toggle_equalizer(&mut cx);
+        assert!(cx.pending_style_reload, "handing the theme back asked for no module run");
+        cx.pending_style_reload = false;
+        cx.pending_live_edit_request = false;
+        cx.with_vm(|vm| {
+            let value = vm.with_reload(app_script_mod);
+            if let Some(object) = value.as_object() {
+                captured = vm.heap_mut().new_object_ref(object);
+            }
+            ScriptApply::script_apply(
+                &mut label,
+                vm,
+                &Apply::ScriptReapply,
+                &mut Scope::empty(),
+                ScriptValue::from(captured.as_object()),
+            );
+        });
+        assert_eq!(sheet_in_force(&mut cx).as_deref(), Some("omarchy"), "the sheet never came back");
+        assert_eq!(drawn(&label), entry, "the fold left the blend on the widget");
+    }
+
+    /// The surprise is reproducible. It is drawn from a counter the panel
+    /// already keeps and walked on by a constant, not taken off a clock, so
+    /// the mix somebody liked can be got back to and this test can pin one.
+    #[test]
+    fn the_same_seed_is_the_same_surprise() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        // Opened for real first: the rows are the LAB'S, and on a lab that
+        // was never entered every call below is a no-op over no rows.
+        open_the_mix_on(&mut cx, &mut panel, crate::desktop_style::DesktopStyle::Omarchy);
+        panel.eq_set_appearance(Appearance::Light);
+        panel.eq_seed = 7;
+        panel.eq_surprise();
+        let first: Vec<f64> = panel.eq_lab.rows().iter().map(|row| row.weight).collect();
+        let moved = panel.eq_seed;
+        assert_ne!(moved, 7, "the seed stood still, so every press is the one mix");
+        panel.eq_seed = 7;
+        panel.eq_surprise();
+        let again: Vec<f64> = panel.eq_lab.rows().iter().map(|row| row.weight).collect();
+        assert_eq!(first, again, "the same seed drew a different mix");
+        assert_eq!(panel.eq_seed, moved, "the same seed walked on to somewhere else");
+        // ...and two presses running are two mixes.
+        panel.eq_surprise();
+        let third: Vec<f64> = panel.eq_lab.rows().iter().map(|row| row.weight).collect();
+        assert_ne!(first, third, "every press is the same surprise");
+    }
+
+    /// The mix toggle where it now lives -- beside the picker, in
+    /// `theme_pick_row` -- and a real press on it opening the lab.
+    ///
+    /// `is_open` on the LAB, and not the panel's `eq_open` flag, because the
+    /// flag is the half that cannot fail. A press that sets the flag and
+    /// never reaches `ThemeLab::enter` leaves a section that draws its rows
+    /// and moves its sliders over a lab that was never entered, where every
+    /// method is a no-op over no rows and the app never wears anything. That
+    /// failure shows nothing on the screen, so it is asserted here.
+    #[test]
+    fn a_press_on_the_mix_toggle_beside_the_picker_opens_the_lab() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        panel.ensure_sidebar(&mut cx);
+        let sidebar = panel.sidebar.clone().expect("the panel built a sidebar");
+        let head = sidebar.child(live_id!(theme_head));
+        assert!(!head.is_empty(), "the Theme tab has no head");
+        // At its address and at no other: the sidebar wiring, the tooltip
+        // table and this all name the same path, and a toggle still hanging
+        // off the head would mean one of them had not moved.
+        let fold = head.child(live_id!(theme_pick_row)).child(live_id!(eq_fold));
+        assert!(!fold.is_empty(), "the mix toggle is not beside the picker");
+        assert!(
+            head.child(live_id!(eq_fold)).is_empty(),
+            "the toggle is still a child of the head as well"
+        );
+        // The head is hidden until the Theme tab is the one on show, and
+        // nothing here drives the tabs.
+        head.set_visible(&mut cx, true);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        assert!(!panel.eq_lab.is_open(), "the lab was open before anything was pressed");
+
+        one_press_on(&mut cx, &mut panel, &head, &fold);
+        assert!(panel.eq_open, "the press never reached the toggle");
+        assert!(
+            panel.eq_lab.is_open(),
+            "the section is open over a lab that is not: the press reached the flag and \
+             not `ThemeLab::enter`, so every control under it is a no-op"
+        );
+    }
+
+    /// The surprise from its new home on the appearance row, still reaching
+    /// `randomize` -- and still not a rung of the row it sits on.
+    ///
+    /// It shares a row with four switches now, so what is asserted is the
+    /// distinction: the press does its one thing, and the mode the row is
+    /// showing is exactly the mode it was showing before. A command that
+    /// took the row's selection would be a third choice nobody made.
+    #[test]
+    fn a_press_on_the_surprise_beside_the_modes_still_reaches_the_lab() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        open_the_mix_on(&mut cx, &mut panel, crate::desktop_style::DesktopStyle::Omarchy);
+        panel.ensure_sidebar(&mut cx);
+        let sidebar = panel.sidebar.clone().expect("the panel built a sidebar");
+        let head = sidebar.child(live_id!(theme_head));
+        head.set_visible(&mut cx, true);
+        draw_the_theme_head(&mut cx, &mut panel, &head);
+        let row = head.child(live_id!(eq_body)).child(live_id!(eq_appearance_row));
+        let surprise = row.child(live_id!(eq_random));
+        assert!(!surprise.is_empty(), "the surprise is not on the appearance row");
+
+        let seed = panel.eq_seed;
+        let mode = panel.eq_lab.mode();
+        let before: Vec<f64> = panel.eq_lab.rows().iter().map(|row| row.weight).collect();
+        one_press_on(&mut cx, &mut panel, &head, &surprise);
+        assert_ne!(panel.eq_seed, seed, "the press never reached the surprise");
+        let after: Vec<f64> = panel.eq_lab.rows().iter().map(|row| row.weight).collect();
+        assert_ne!(before, after, "the seed walked on and no weight in the lab moved");
+        assert_eq!(
+            panel.eq_lab.mode(),
+            mode,
+            "the command took the switch row with it, so it is a third rung after all"
+        );
+    }
+
+    /// Saving a mix is somebody saying that this mix is a theme now, and the
+    /// panel has to mean it all the way down.
+    ///
+    /// What used to happen: the file was written and the picker named it,
+    /// while the LAB still held the theme the section had been opened on --
+    /// so the next `- mix` quietly put that back, with the picker still
+    /// naming the theme that had just been saved. The file on disk was right
+    /// and re-picking its row recovered, which is what made it easy to miss.
+    ///
+    /// Driven through the real store, in a directory of this test's own.
+    #[test]
+    fn saving_a_mix_makes_it_the_theme_the_mix_hands_back() {
+        use crate::desktop_style::DesktopStyle;
+        use crate::theme_lab::{BlendTheme, RELATIVE_TOTAL};
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let _store = a_store_of_its_own(&mut panel);
+        open_the_mix_on(&mut cx, &mut panel, DesktopStyle::Omarchy);
+        let entry = theme_color(&mut cx, "color_bg_app");
+        mix_in_the_dark_base(&mut cx, &mut panel, 1.0);
+        let blend = theme_color(&mut cx, "color_bg_app");
+        assert!(blend.is_some() && blend != entry, "the mix never reached the app");
+
+        panel.theme_name = "mixed_down".to_string();
+        panel.save_theme_as(&mut cx);
+        assert_eq!(
+            panel.theme_saved(),
+            Some("mixed_down"),
+            "the save did not take: {}",
+            panel.theme_msg
+        );
+        // The picker names what was written...
+        let entries = panel.theme_entry_list();
+        assert!(
+            matches!(
+                entries.get(panel.theme_choice_index(&entries)),
+                Some(ThemeChoice::Saved(name)) if name == "mixed_down"
+            ),
+            "the picker is not naming the theme just saved"
+        );
+        // ...and the section is still open, on it.
+        assert!(panel.eq_open && panel.eq_lab.is_open(), "saving folded the section away");
+
+        // A second mix, so that leaving has something to put back, and then
+        // out through the one door: what comes back is what the picker names,
+        // pinned tokens and all, and not the sheet the section was opened on.
+        let row = panel
+            .eq_lab
+            .index_of(BlendTheme::Sheet(DesktopStyle::Omarchy, false))
+            .expect("the theme the section was opened on is one of the rows");
+        panel.eq_set_mode(WeightMode::Absolute);
+        // A quarter and not a half: the mix that was saved was half of each,
+        // so the same weights again would be the same blend and this would
+        // prove nothing.
+        panel.eq_gesture_ended(row, RELATIVE_TOTAL / 4.0);
+        panel.eq_settle(&mut cx, 2.0);
+        // The install's own reload, landing, the way `mix_in_the_dark_base`
+        // lands the first one: until it has run, the module still carries the
+        // mix that was saved.
+        the_reload_lands(&mut cx, &mut panel, 2.0);
+        assert_ne!(theme_color(&mut cx, "color_bg_app"), blend, "the second mix never went in");
+        panel.toggle_equalizer(&mut cx);
+        // The reload that carries the theme back, landing: putting a theme
+        // back is a choice written onto the Cx and a reload asked for, the
+        // same as putting a mix on.
+        the_reload_lands(&mut cx, &mut panel, 3.0);
+        assert_eq!(
+            theme_color(&mut cx, "color_bg_app"),
+            blend,
+            "`- mix` put back the theme the section was opened on, while the \
+             picker went on naming the one that was saved"
+        );
+        assert_eq!(
+            sheet_in_force(&mut cx),
+            None,
+            "a theme saved off a mix stands on a base, and a sheet came back with it"
+        );
+    }
+
+    /// The panel going off is the third door out of a mix, and the widest.
+    ///
+    /// Shift+F10 over a standing blend used to leave the app wearing it with
+    /// every control that could take it off gone from the screen -- no
+    /// weights, no reading, no `- mix` -- and the lab still believing it was
+    /// installed, so the first module rebuild after that dropped the app to
+    /// its bare base theme with nothing left that knew how to put a theme
+    /// back.
+    ///
+    /// Driven through `cancel_interactions`, which is what the panel going
+    /// off means: the key route calls it on the press, and the draw that
+    /// notices the mode gone calls it however it went -- the bridge's
+    /// `/tweak?on=0` included.
+    #[test]
+    fn the_panel_going_off_hands_the_theme_back() {
+        use crate::desktop_style::DesktopStyle;
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        open_the_mix_on(&mut cx, &mut panel, DesktopStyle::Omarchy);
+        let entry = theme_color(&mut cx, "color_bg_app");
+        mix_in_the_dark_base(&mut cx, &mut panel, 1.0);
+        assert_ne!(theme_color(&mut cx, "color_bg_app"), entry, "the mix never reached the app");
+        assert!(panel.eq_mix_stands, "the panel does not know the app is wearing a mix");
+
+        panel.cancel_interactions(&mut cx);
+        // The reload that carries the theme back, landing: putting a theme
+        // back is a choice written onto the Cx and a reload asked for, the
+        // same as putting a mix on.
+        the_reload_lands(&mut cx, &mut panel, 2.0);
+
+        assert!(!panel.eq_open, "the panel went off with the section still open");
+        assert!(!panel.eq_mix_stands, "the panel still believes a mix is standing");
+        assert!(!panel.eq_lab.is_open(), "the lab is still open behind a panel that is gone");
+        assert_eq!(
+            theme_color(&mut cx, "color_bg_app"),
+            entry,
+            "the panel went off and left the app wearing the mix"
+        );
+        assert_eq!(
+            sheet_in_force(&mut cx).as_deref(),
+            Some("omarchy"),
+            "the panel went off without putting the sheet back"
+        );
+    }
+
+    /// The one press in this panel that destroys something somebody made.
+    ///
+    /// Picking a theme with a mix standing takes the mix off and starts a new
+    /// one from the theme picked, so every weight goes to nought -- a minute's
+    /// work gone on a press that may only have meant to look at another
+    /// theme. Both commands that destroy a FILE ask first, and a file can be
+    /// made again; so this asks too, the same way and out of the same field.
+    #[test]
+    fn a_pick_that_would_throw_a_mix_away_asks_first() {
+        use crate::desktop_style::DesktopStyle;
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        open_the_mix_on(&mut cx, &mut panel, DesktopStyle::Omarchy);
+        mix_in_the_dark_base(&mut cx, &mut panel, 1.0);
+        let blend = theme_color(&mut cx, "color_bg_app");
+        let built: Vec<f64> = panel.eq_lab.rows().iter().map(|row| row.weight).collect();
+        let preset = panel.theme_preset;
+
+        let entries = panel.theme_entry_list();
+        let wanted = ThemeChoice::Builtin(ThemePreset::Sheet(DesktopStyle::Macos, true));
+        let plain = ThemeChoice::Builtin(ThemePreset::Sheet(DesktopStyle::Macos, false));
+        let macos = entries
+            .iter()
+            .position(|entry| *entry == wanted)
+            .expect("the picker offers macOS dark");
+        let other = entries
+            .iter()
+            .position(|entry| *entry == plain)
+            .expect("the picker offers macOS light");
+
+        // The press asks, and does nothing else whatever.
+        panel.apply_theme_choice(&mut cx, macos);
+        let now: Vec<f64> = panel.eq_lab.rows().iter().map(|row| row.weight).collect();
+        assert_eq!(now, built, "the first press threw the mix away");
+        assert_eq!(sheet_in_force(&mut cx), None, "the theme went on before the question was answered");
+        assert_eq!(theme_color(&mut cx, "color_bg_app"), blend, "the app stopped wearing the mix");
+        assert_eq!(panel.theme_preset, preset, "the picker moved on a press that did nothing");
+        assert!(
+            panel.theme_msg.contains("mix"),
+            "the press was refused without a word about why: {:?}",
+            panel.theme_msg
+        );
+
+        // A press on ANOTHER row is a new question, never an answer to this
+        // one -- which is the whole reason the two questions share a field.
+        panel.apply_theme_choice(&mut cx, other);
+        let now: Vec<f64> = panel.eq_lab.rows().iter().map(|row| row.weight).collect();
+        assert_eq!(now, built, "a press on another row answered the question asked about this one");
+        assert_eq!(panel.theme_preset, preset, "a second press on a second row moved the picker");
+
+        // The same press again IS the answer, and then the mix does go: the
+        // question is a warning, not a veto.
+        panel.apply_theme_choice(&mut cx, other);
+        assert_eq!(panel.theme_preset, other, "the answered pick never went on");
+        assert_eq!(
+            sheet_in_force(&mut cx).as_deref(),
+            Some("macos"),
+            "the answered pick is not what the app is wearing"
+        );
+        let after: Vec<f64> = panel.eq_lab.rows().iter().map(|row| row.weight).collect();
+        assert_eq!(
+            after.iter().filter(|weight| **weight > 0.0).count(),
+            1,
+            "the answered pick kept the mix it had said it would drop: {after:?}"
+        );
+
+        // ...and with nothing left to lose, a pick is one press again.
+        panel.eq_settle(&mut cx, 2.0);
+        panel.apply_theme_choice(&mut cx, macos);
+        assert_eq!(panel.theme_preset, macos, "a pick with no mix standing was made to ask twice");
+        assert_eq!(sheet_in_force(&mut cx).as_deref(), Some("macos-dark"));
+    }
+
+    /// What a relative column PRINTS adds up to the hundred it is a hundred
+    /// parts of.
+    ///
+    /// The rows hold whole numbers and the arithmetic behind them does not,
+    /// so rounding a row at a time put 0 / 37.5 / 37.5 / 25 on screen as
+    /// 0 / 38 / 38 / 25 -- a hundred and one parts of a hundred, under a
+    /// switch that says the total is held. The rounding is shared out over
+    /// the column instead.
+    ///
+    /// Driven through the panel's own draw of the section, into the real
+    /// sliders, off three moves a hand could actually make: the halves come
+    /// out of the redistribution, not out of any slider, which is the only
+    /// way they can arise at all.
+    #[test]
+    fn what_a_relative_mix_prints_adds_up_to_a_hundred() {
+        use crate::desktop_style::DesktopStyle;
+        use crate::makepad_draw::cx_draw::CxDraw;
+        use crate::theme_lab::{BlendTheme, RELATIVE_TOTAL};
+        const SIZE: Vec2d = Vec2d { x: 320.0, y: 700.0 };
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        open_the_mix_on(&mut cx, &mut panel, DesktopStyle::Omarchy);
+
+        panel.eq_set_mode(WeightMode::Relative);
+        panel.eq_lab.reset();
+        let anchor = panel
+            .eq_lab
+            .index_of(BlendTheme::Sheet(DesktopStyle::Omarchy, false))
+            .expect("the theme the section was opened on is one of the rows");
+        let others: Vec<usize> = (0..panel.eq_lab.rows().len())
+            .filter(|index| *index != anchor)
+            .take(3)
+            .collect();
+        assert_eq!(others.len(), 3, "the dark group has fewer rows than this test moves");
+        // Two rows taken to half the total each and a third then taking a
+        // quarter of what the app is wearing: the quarter comes off the two
+        // in proportion, twelve and a half each, and the column is the
+        // 0 / 37.5 / 37.5 / 25 that printed as a hundred and one.
+        for (index, weight) in others.iter().zip([50.0, 50.0, 25.0]) {
+            panel.eq_gesture_ended(*index, weight);
+        }
+        // Spent before the draw, so that the draw below is the readout and
+        // nothing else.
+        panel.eq_settle(&mut cx, 1.0);
+        let held: Vec<f64> = panel.eq_lab.rows().iter().map(|row| row.weight).collect();
+        assert!(
+            held.iter().any(|weight| weight.fract() != 0.0),
+            "nothing came out fractional, so this test would pass over any readout at all: {held:?}"
+        );
+
+        panel.ensure_sidebar(&mut cx);
+        let sidebar = panel.sidebar.clone().expect("the panel built a sidebar");
+        let head = sidebar.child(live_id!(theme_head));
+        assert!(!head.is_empty(), "the Theme tab has no head to draw the section into");
+        {
+            let pass = DrawPass::new(&mut cx);
+            pass.set_size(&mut cx, SIZE);
+            let mut draw_list = DrawList2d::new(&mut cx);
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(&mut cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&pass, None);
+            draw_list.begin_always(&mut cx2d);
+            cx2d.begin_root_turtle(SIZE, Layout::flow_down());
+            panel.draw_equalizer(&mut cx2d, &head);
+            cx2d.end_pass_sized_turtle();
+            draw_list.end(&mut cx2d);
+            cx2d.end_pass(&pass);
+        }
+
+        let rows = head.child(live_id!(eq_body)).child(live_id!(eq_rows));
+        // The READOUT, which is where a share that is not a row's own value
+        // lives: a column rounded over the column is nobody's own number.
+        // What each row HOLDS is asserted against the mix underneath it.
+        let shown: Vec<f64> = EQ_ROW_IDS[..held.len()]
+            .iter()
+            .map(|id| rows.child(*id).child(live_id!(eq_weight)).as_fab_slider().readout())
+            .collect();
+        for (index, value) in shown.iter().enumerate() {
+            assert_eq!(
+                value.fract(),
+                0.0,
+                "row {index} prints {value}, which a row of whole numbers cannot print"
+            );
+            assert!(
+                (value - held[index]).abs() < 1.0,
+                "row {index} shows {value} where the mix holds {}",
+                held[index]
+            );
+            assert_eq!(
+                rows.child(EQ_ROW_IDS[index])
+                    .child(live_id!(eq_weight))
+                    .as_fab_slider()
+                    .value(),
+                held[index],
+                "row {index} was handed the share it prints as the weight it holds, which is                  where the next arrow key starts from"
+            );
+        }
+        let column: f64 = shown.iter().sum();
+        assert_eq!(
+            column, RELATIVE_TOTAL,
+            "the column reads {column} parts of {RELATIVE_TOTAL}: {shown:?} over {held:?}"
+        );
+        // ...and the mix itself is untouched by any of it.
+        assert_eq!(
+            panel.eq_lab.rows().iter().map(|row| row.weight).collect::<Vec<f64>>(),
+            held,
+            "the readout rounded the arithmetic the blend is made from"
+        );
+    }
+
+    /// A saved theme with hand edits comes back whole from a mix -- over a
+    /// SHEET, which is most of the themes anybody actually picks.
+    ///
+    /// The pins are emitted at `theme_mod`'s seam, which is where a mix is
+    /// emitted and for the same reason: after the themes exist, before a
+    /// template bakes `theme.color_x` into a literal. A sheet is not emitted
+    /// there. `desktop_style::apply_theme` runs later, in `widgets_mod`, and
+    /// its first line points `mod.theme` back at its own base -- straight over
+    /// the pins, exactly as it goes over a mix. So writing them onto the Cx
+    /// puts a saved theme back whole over a bare base and hands back the
+    /// SHEET's own colour over a sheet: the right base, the right sheet, and
+    /// none of what the person had chosen.
+    ///
+    /// `- mix` therefore takes the same road a PICK takes past a sheet --
+    /// `pending_theme_script`, landed by `land_the_pending_pins` on the
+    /// `Event::LiveEdit` after the reload. The sister test above pins the
+    /// bare-base half of this journey, and stands on a bare base on purpose;
+    /// this is the half a sheet was quietly eating.
+    #[test]
+    fn a_sheeted_saved_theme_keeps_its_own_tokens_through_a_mix() {
+        use crate::desktop_style::{install, DesktopStyle, StyleSheet};
+        use crate::theme_lab::{BlendTheme, RELATIVE_TOTAL};
+        // A colour nobody arrives at by accident, so that what is on the app
+        // at the end names where it came from.
+        const EDITED: u32 = 0x3B_1F_5C_FF;
+        const GROUND: &str = "color_bg_app";
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let _store = a_store_of_its_own(&mut panel);
+
+        // A sheet on, which is the whole point: it is `apply_theme` running
+        // after the seam that used to eat what follows.
+        cx.with_vm(|vm| install(vm, StyleSheet::load_with_appearance(DesktopStyle::Omarchy, false)));
+        crate::set_base_theme(&mut cx, crate::BaseTheme::Dark);
+        cx.with_vm(|vm| vm.with_reload(crate::script_mod));
+        let sheets_own = theme_color(&mut cx, GROUND).expect("the sheet has a page colour");
+        assert!(sheet_in_force(&mut cx).is_some(), "no sheet is on, so this tests the bare case twice");
+        assert_ne!(sheets_own, EDITED, "pick a colour the sheet does not already carry");
+
+        // The hand edit, and the theme saved over it -- the sequence the
+        // acceptance test is written in.
+        let key = LiveId::from_str(GROUND);
+        assert!(
+            theme_heap_set(&mut cx, key, ScriptValue::from_color(EDITED)),
+            "the theme has no {GROUND} to change, so nothing below is pinned"
+        );
+        assert_eq!(theme_color(&mut cx, GROUND), Some(EDITED));
+        panel.theme_name = "violet".to_string();
+        panel.save_theme_as(&mut cx);
+        assert_eq!(panel.theme_saved(), Some("violet"), "{}", panel.theme_msg);
+
+        // `+ mix`, a weight moved.
+        panel.toggle_equalizer(&mut cx);
+        assert!(panel.eq_lab.is_open(), "the lab was never entered, so nothing below is tested");
+        panel.eq_settle(&mut cx, 0.0);
+        let row = panel
+            .eq_lab
+            .index_of(BlendTheme::Base(crate::theme_tokens::Scheme::Dark))
+            .expect("the dark group offers the bare base to mix in");
+        panel.eq_set_mode(WeightMode::Absolute);
+        panel.eq_gesture_ended(row, RELATIVE_TOTAL);
+        panel.eq_settle(&mut cx, 1.0);
+        the_reload_lands(&mut cx, &mut panel, 1.0);
+        assert_ne!(theme_color(&mut cx, GROUND), Some(EDITED), "the mix never reached the app");
+
+        // ...and `- mix`, which asks for the reload that carries the theme
+        // back. The pins ride the tick AFTER it, past the sheet.
+        panel.toggle_equalizer(&mut cx);
+        assert!(
+            panel.pending_theme_script.is_some(),
+            "leaving the mix armed no pins, so the sheet below will win by default"
+        );
+        the_reload_lands(&mut cx, &mut panel, 2.0);
+        assert_eq!(
+            theme_color(&mut cx, GROUND),
+            Some(sheets_own),
+            "the sheet did not go back over the pins, so the landing below proves nothing"
+        );
+        panel.land_the_pending_pins(&mut cx);
+
+        assert_eq!(
+            theme_color(&mut cx, GROUND),
+            Some(EDITED),
+            "`- mix` put back the base and the sheet and threw away every token \r
+             the person had actually chosen"
+        );
+        assert!(sheet_in_force(&mut cx).is_some(), "the sheet went out with the mix");
+    }
+
+    /// A theme's name and a theme's pins are one fact, and "save as" used to
+    /// move half of it.
+    ///
+    /// What used to happen, with the mix section FOLDED so that the re-anchor
+    /// in `save_theme_as` never ran: the name became the new one and the pins
+    /// stayed those of the theme picked before it. From there the picker said
+    /// one thing and the panel held another, and the first `- mix` after it
+    /// installed the OLD theme's tokens over the screen -- every hand edit
+    /// made since gone, under a picker still naming the theme they were saved
+    /// into.
+    ///
+    /// Driven the way it was reported: a saved theme picked, a colour changed
+    /// by hand, saved under a second name with the section closed, and then
+    /// the section opened, a weight moved and closed again. What comes back
+    /// is read off the app.
+    #[test]
+    fn a_save_as_carries_the_pins_of_what_it_saved() {
+        use crate::desktop_style::DesktopStyle;
+        use crate::theme_lab::{BlendTheme, RELATIVE_TOTAL};
+        // Two colours nobody arrives at by accident, so that what is on the
+        // app at the end names the theme it came from.
+        const WAS: u32 = 0xFF_00_00_FF;
+        const IS: u32 = 0x00_FF_00_FF;
+        const GROUND: &str = "color_bg_app";
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        let _store = a_store_of_its_own(&mut panel);
+        // Both themes stand on the bare dark base, so that what tells them
+        // apart is their PINS and nothing else: a sheet comes back off the vm
+        // on its own and would prove nothing about what the panel held.
+        cx.with_vm(|vm| crate::desktop_style::uninstall(vm));
+        crate::set_base_theme(&mut cx, crate::BaseTheme::Dark);
+        cx.with_vm(|vm| vm.with_reload(crate::script_mod));
+
+        // "alpha": the theme in force with one colour changed by hand. The
+        // write is what `theme_apply` does for a colour, without the pulse
+        // ledger a test has no draw buffers for.
+        let key = LiveId::from_str(GROUND);
+        assert!(
+            theme_heap_set(&mut cx, key, ScriptValue::from_color(WAS)),
+            "the theme has no {GROUND} to change, so nothing below is pinned"
+        );
+        assert_eq!(theme_color(&mut cx, GROUND), Some(WAS));
+        panel.theme_name = "alpha".to_string();
+        panel.save_theme_as(&mut cx);
+        assert_eq!(panel.theme_saved(), Some("alpha"), "{}", panel.theme_msg);
+
+        // Picked off the picker, so that what the panel holds are the pins
+        // the STORE handed over and not whatever the save left behind.
+        panel.apply_saved_theme(&mut cx, "alpha");
+        assert_eq!(panel.theme_saved(), Some("alpha"), "{}", panel.theme_msg);
+
+        // The hand edit, and then "beta" -- with the section FOLDED, which is
+        // the case that had nothing to put it right afterwards.
+        assert!(theme_heap_set(&mut cx, key, ScriptValue::from_color(IS)));
+        assert_eq!(theme_color(&mut cx, GROUND), Some(IS));
+        assert!(!panel.eq_open, "the section is open, which is the case already covered");
+        panel.theme_name = "beta".to_string();
+        panel.save_theme_as(&mut cx);
+        assert_eq!(panel.theme_saved(), Some("beta"), "{}", panel.theme_msg);
+
+        // `+ mix`, a weight moved, `- mix`. The one door out of a mix puts
+        // back the theme the picker NAMES, pins and all.
+        panel.toggle_equalizer(&mut cx);
+        assert!(panel.eq_lab.is_open(), "the lab was never entered, so nothing below is tested");
+        panel.eq_settle(&mut cx, 0.0);
+        let row = panel
+            .eq_lab
+            .index_of(BlendTheme::Sheet(DesktopStyle::Omarchy, false))
+            .expect("the dark group offers a sheet to mix in");
+        panel.eq_set_mode(WeightMode::Absolute);
+        panel.eq_gesture_ended(row, RELATIVE_TOTAL);
+        panel.eq_settle(&mut cx, 1.0);
+        assert_ne!(theme_color(&mut cx, GROUND), Some(IS), "the mix never reached the app");
+        panel.toggle_equalizer(&mut cx);
+        // The reload that carries the theme back, landing: putting a theme
+        // back is a choice written onto the Cx and a reload asked for, the
+        // same as putting a mix on.
+        the_reload_lands(&mut cx, &mut panel, 2.0);
+
+        assert_eq!(
+            theme_color(&mut cx, GROUND),
+            Some(IS),
+            "`- mix` put back the pins of the theme picked BEFORE the save, \
+             or no pins at all, while the picker went on naming the one written"
+        );
+        assert_eq!(panel.theme_saved(), Some("beta"), "the picker lost the name it was given");
+        assert_eq!(
+            sheet_in_force(&mut cx),
+            None,
+            "a theme saved over a bare base came back wearing the mix's sheet"
+        );
+    }
+
+    /// The panel going off through the DRAW, which is the bridge's route and
+    /// the one route that had no test.
+    ///
+    /// `cancel_interactions` hands the theme back, and handing it back means
+    /// `desktop_style::install`, `vm.with_reload(script_mod)` and a script
+    /// reapply: the theme module and the widget module rebuilt. The draw used
+    /// to call it from inside its own pass, with a `Cx2d` -- a full module
+    /// reload underneath a pass that is drawing from that module, which
+    /// happens nowhere else in this library outside tests. The key route
+    /// never came this way; `/tweak?on=0` always did.
+    ///
+    /// So the draw notes the debt and the next event pays it, and this drives
+    /// both halves: a real `draw_walk` into a real pass, then a real event.
+    #[test]
+    fn the_bridge_turning_the_panel_off_hands_the_theme_back() {
+        use crate::desktop_style::DesktopStyle;
+        use crate::makepad_draw::cx_draw::CxDraw;
+        const SIZE: Vec2d = Vec2d { x: 320.0, y: 700.0 };
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        open_the_mix_on(&mut cx, &mut panel, DesktopStyle::Omarchy);
+        let entry = theme_color(&mut cx, "color_bg_app");
+        mix_in_the_dark_base(&mut cx, &mut panel, 1.0);
+        assert_ne!(theme_color(&mut cx, "color_bg_app"), entry, "the mix never reached the app");
+
+        // The whole of the precondition: the panel was up last frame and the
+        // mode has gone off without a key press, which is what `/tweak?on=0`
+        // is. The mode is already off in a test process.
+        assert!(!tweak_is_on(), "the mode is on, so the draw below takes the other branch");
+        panel.was_on = true;
+
+        let rebuilds = panel.eq_lab.rebuilds();
+        {
+            let pass = DrawPass::new(&mut cx);
+            pass.set_size(&mut cx, SIZE);
+            let mut draw_list = DrawList2d::new(&mut cx);
+            // The panel draws into the window's overlay and tears both of its
+            // lists down when the mode goes off, so the pass has to have one
+            // the way a window's does.
+            let overlay = cx.with_vm(crate::makepad_draw::overlay::Overlay::script_new);
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(&mut cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&pass, None);
+            draw_list.begin_always(&mut cx2d);
+            cx2d.begin_root_turtle(SIZE, Layout::flow_down());
+            overlay.begin(&mut cx2d);
+            let _ = panel.draw_walk(&mut cx2d, &mut Scope::empty(), Walk::default());
+            overlay.end(&mut cx2d);
+            cx2d.end_pass_sized_turtle();
+            draw_list.end(&mut cx2d);
+            cx2d.end_pass(&pass);
+        }
+
+        // Nothing was torn down from inside the pass...
+        assert_eq!(
+            panel.eq_lab.rebuilds(),
+            rebuilds,
+            "the draw pass rebuilt the theme module out from under itself"
+        );
+        assert!(panel.eq_open, "the draw stood the mix down mid-pass");
+        assert!(
+            panel.stand_down_pending,
+            "the draw noticed nothing, so nothing will ever hand the theme back"
+        );
+
+        // ...and the first event after it pays.
+        panel.handle_event(&mut cx, &Event::Signal, &mut Scope::empty());
+        assert!(!panel.stand_down_pending, "an event went past and the debt is still owed");
+        assert!(!panel.eq_open, "the panel is off with the section still open");
+        assert!(!panel.eq_lab.is_open(), "the lab is open behind a panel that is gone");
+        assert!(!panel.eq_mix_stands, "the panel still believes a mix is standing");
+        // The reload that carries the theme back, landing: putting a theme
+        // back is a choice written onto the Cx and a reload asked for, the
+        // same as putting a mix on.
+        the_reload_lands(&mut cx, &mut panel, 2.0);
+        assert_eq!(
+            theme_color(&mut cx, "color_bg_app"),
+            entry,
+            "the bridge turned the panel off and left the app wearing the mix"
+        );
+        assert_eq!(
+            sheet_in_force(&mut cx).as_deref(),
+            Some("omarchy"),
+            "the panel went off without putting the sheet back"
+        );
+
+        // Once, and not once per event for the rest of the session.
+        let rebuilds = panel.eq_lab.rebuilds();
+        panel.handle_event(&mut cx, &Event::Signal, &mut Scope::empty());
+        assert_eq!(
+            panel.eq_lab.rebuilds(),
+            rebuilds,
+            "every event after the mode went off rebuilds the module again"
+        );
+    }
+
+    /// An absolute row is handed the number it prints.
+    ///
+    /// A row reads `precision: 0`, so what it holds and what it shows are the
+    /// same thing only while what it holds is whole. Relative mode was made
+    /// to round for the column's sake and absolute mode was left out, one
+    /// button away: `set_mode(Absolute)` leaves the weights exactly as it
+    /// finds them, halves included, and a row does not quantise what it is
+    /// handed. So a row holding 37.5 showed 38, the arrow key took it to 38.5
+    /// and it showed 38 again -- a press that moved the mix and moved nothing
+    /// anybody could see.
+    ///
+    /// Driven through the panel's own draw of the section into the real
+    /// sliders, off the state the fault is reported from: a relative column
+    /// that came down to halves, and then the Absolute button.
+    #[test]
+    fn an_absolute_row_is_handed_the_number_it_prints() {
+        use crate::desktop_style::DesktopStyle;
+        use crate::makepad_draw::cx_draw::CxDraw;
+        use crate::theme_lab::BlendTheme;
+        const SIZE: Vec2d = Vec2d { x: 320.0, y: 700.0 };
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        open_the_mix_on(&mut cx, &mut panel, DesktopStyle::Omarchy);
+
+        panel.eq_set_mode(WeightMode::Relative);
+        panel.eq_lab.reset();
+        let anchor = panel
+            .eq_lab
+            .index_of(BlendTheme::Sheet(DesktopStyle::Omarchy, false))
+            .expect("the theme the section was opened on is one of the rows");
+        let others: Vec<usize> = (0..panel.eq_lab.rows().len())
+            .filter(|index| *index != anchor)
+            .take(3)
+            .collect();
+        assert_eq!(others.len(), 3, "the dark group has fewer rows than this test moves");
+        // The halves come out of the relative redistribution and out of no
+        // slider, which is the only way they arise at all.
+        for (index, weight) in others.iter().zip([50.0, 50.0, 25.0]) {
+            panel.eq_gesture_ended(*index, weight);
+        }
+        panel.eq_settle(&mut cx, 1.0);
+        // The button. It moves no weight, which is the whole trouble.
+        panel.eq_set_mode(WeightMode::Absolute);
+        panel.eq_settle(&mut cx, 2.0);
+        let held: Vec<f64> = panel.eq_lab.rows().iter().map(|row| row.weight).collect();
+        assert!(
+            held.iter().any(|weight| weight.fract() != 0.0),
+            "nothing came out fractional, so this test would pass over any readout at all: {held:?}"
+        );
+
+        panel.ensure_sidebar(&mut cx);
+        let sidebar = panel.sidebar.clone().expect("the panel built a sidebar");
+        let head = sidebar.child(live_id!(theme_head));
+        assert!(!head.is_empty(), "the Theme tab has no head to draw the section into");
+        let draw_the_section = |cx: &mut Cx, panel: &mut Tweaker| -> Vec<f64> {
+            let pass = DrawPass::new(cx);
+            pass.set_size(cx, SIZE);
+            let mut draw_list = DrawList2d::new(cx);
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&pass, None);
+            draw_list.begin_always(&mut cx2d);
+            cx2d.begin_root_turtle(SIZE, Layout::flow_down());
+            panel.draw_equalizer(&mut cx2d, &head);
+            cx2d.end_pass_sized_turtle();
+            draw_list.end(&mut cx2d);
+            cx2d.end_pass(&pass);
+            let rows = head.child(live_id!(eq_body)).child(live_id!(eq_rows));
+            EQ_ROW_IDS[..held.len()]
+                .iter()
+                .map(|id| rows.child(*id).child(live_id!(eq_weight)).as_fab_slider().readout())
+                .collect()
+        };
+
+        let shown = draw_the_section(&mut cx, &mut panel);
+        for (index, value) in shown.iter().enumerate() {
+            // Whole is the whole of it: at `precision: 0` a whole number is
+            // the one case where what the row holds and what it prints are
+            // the same, and what it holds is what the next arrow steps from.
+            assert_eq!(
+                value.fract(),
+                0.0,
+                "row {index} was handed {value}, which a row of whole numbers cannot print"
+            );
+        }
+        // ...and one step from there moves the number on the screen. An
+        // arrow starts from what the row HOLDS -- the half included, which is
+        // the whole point of the two numbers being separate -- so this is
+        // that press reported back the way a FabSlider reports it.
+        let moved = held
+            .iter()
+            .position(|weight| weight.fract() != 0.0)
+            .expect("a fractional row, asserted above");
+        panel.eq_gesture_ended(moved, held[moved] + 1.0);
+        panel.eq_settle(&mut cx, 3.0);
+        let after = draw_the_section(&mut cx, &mut panel);
+        assert_eq!(
+            after[moved],
+            shown[moved] + 1.0,
+            "one arrow press moved the mix and left the row reading {}",
+            shown[moved]
+        );
+        // And the blend is still made from the halves it was made from.
+        assert_eq!(
+            panel.eq_lab.rows()[anchor].weight,
+            held[anchor],
+            "the readout rounded the arithmetic the blend is made from"
+        );
+    }
+
+    /// A row that is in the mix never prints the panel's own word for out of
+    /// it.
+    ///
+    /// Clicking a theme's name sets its weight to nought and that is the
+    /// documented way to take a theme out, so 0 on a row means "not in this
+    /// mix". The column's rounding floored every row first, so eight rows at
+    /// four tenths of a part under an anchor holding almost the whole hundred
+    /// came out as some 1s and some 0s -- and the 0s went on contributing
+    /// four tenths each. A row saying it is out while moving the blend is the
+    /// panel contradicting itself in its own vocabulary, and it is what the
+    /// surprise leaves whenever its bell curve has a tail, which is most
+    /// times it is pressed.
+    ///
+    /// The tail is built here by hand rather than hunted for in a seed, so
+    /// that the test names the numbers it is about. Driven through the
+    /// panel's own draw of the section into the real sliders.
+    #[test]
+    fn a_row_in_the_mix_never_prints_as_out_of_it() {
+        use crate::desktop_style::DesktopStyle;
+        use crate::makepad_draw::cx_draw::CxDraw;
+        use crate::theme_lab::{BlendTheme, RELATIVE_TOTAL};
+        const SIZE: Vec2d = Vec2d { x: 320.0, y: 700.0 };
+        const TAIL: f64 = 0.4;
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        open_the_mix_on(&mut cx, &mut panel, DesktopStyle::Omarchy);
+        let anchor = panel
+            .eq_lab
+            .index_of(BlendTheme::Sheet(DesktopStyle::Omarchy, false))
+            .expect("the theme the section was opened on is one of the rows");
+        let count = panel.eq_lab.rows().len();
+        assert!(count >= 4, "the dark group is too short to have a tail at all");
+
+        // Absolute, because that is the mode a weight can be stated in;
+        // relative, because the column that prints is the relative one. The
+        // weights add to the total already, so going relative is a scale by
+        // one and the numbers below are the numbers on the rows.
+        panel.eq_set_mode(WeightMode::Absolute);
+        for index in 0..count {
+            let weight = if index == anchor {
+                RELATIVE_TOTAL - TAIL * (count - 1) as f64
+            } else {
+                TAIL
+            };
+            panel.eq_weight_moved(index, weight);
+        }
+        panel.eq_set_mode(WeightMode::Relative);
+        panel.eq_settle(&mut cx, 1.0);
+        let held: Vec<f64> = panel.eq_lab.rows().iter().map(|row| row.weight).collect();
+        let tail = held.iter().filter(|weight| **weight > 0.0 && **weight < 0.5).count();
+        assert!(
+            tail >= 2,
+            "no row came out under half a part, so this test would pass over any rounding at \
+             all: {held:?}"
+        );
+
+        panel.ensure_sidebar(&mut cx);
+        let sidebar = panel.sidebar.clone().expect("the panel built a sidebar");
+        let head = sidebar.child(live_id!(theme_head));
+        assert!(!head.is_empty(), "the Theme tab has no head to draw the section into");
+        {
+            let pass = DrawPass::new(&mut cx);
+            pass.set_size(&mut cx, SIZE);
+            let mut draw_list = DrawList2d::new(&mut cx);
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(&mut cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&pass, None);
+            draw_list.begin_always(&mut cx2d);
+            cx2d.begin_root_turtle(SIZE, Layout::flow_down());
+            panel.draw_equalizer(&mut cx2d, &head);
+            cx2d.end_pass_sized_turtle();
+            draw_list.end(&mut cx2d);
+            cx2d.end_pass(&pass);
+        }
+
+        let rows = head.child(live_id!(eq_body)).child(live_id!(eq_rows));
+        let shown: Vec<f64> = EQ_ROW_IDS[..held.len()]
+            .iter()
+            .map(|id| rows.child(*id).child(live_id!(eq_weight)).as_fab_slider().readout())
+            .collect();
+        for (index, value) in shown.iter().enumerate() {
+            assert_eq!(value.fract(), 0.0, "row {index} prints {value}");
+            if held[index] > 0.0 {
+                assert!(
+                    *value >= 1.0,
+                    "row {index} holds {} of the blend and prints {value}, which is this \
+                     panel's word for out of the mix",
+                    held[index]
+                );
+            } else {
+                assert_eq!(
+                    *value, 0.0,
+                    "row {index} is out of the mix and the column says it is in it"
+                );
+            }
+        }
+        // ...and the column still adds to the hundred it is a hundred parts
+        // of, which is what the lifting is taken out of.
+        let column: f64 = shown.iter().sum();
+        assert_eq!(
+            column, RELATIVE_TOTAL,
+            "the column reads {column} parts of {RELATIVE_TOTAL}: {shown:?} over {held:?}"
+        );
+        // And the mix itself is untouched by any of it.
+        assert_eq!(
+            panel.eq_lab.rows().iter().map(|row| row.weight).collect::<Vec<f64>>(),
+            held,
+            "the readout rounded the arithmetic the blend is made from"
+        );
+    }
+
+    /// The Right arrow on the biggest row of a mix moves that theme UP.
+    ///
+    /// Five clicks from opening the panel -- `+ mix`, `relative`, the
+    /// surprise, a press on the biggest row's track -- and the key the hand
+    /// reaches for first walked that row DOWN. A relative column shares its
+    /// rounding out over the column and takes the leftover parts off the
+    /// largest share, so the dominant row PRINTS several below what it
+    /// HOLDS. The panel wrote that printed number into the row, the row
+    /// stepped from it, and Right asked for four parts less than the row
+    /// already had -- every press of the key that means more taking a piece
+    /// of the biggest theme in the mix, and paying for a module rebuild to
+    /// do it. Where the gap was narrower than one step the row could not
+    /// move at all, for ever.
+    ///
+    /// Driven the whole way down: the panel's own draw into the real rows, a
+    /// real key event to the row the keyboard is on, the action it sends
+    /// routed back through the panel's own handler, and the mix read off the
+    /// lab afterwards.
+    #[test]
+    fn the_right_arrow_on_the_biggest_share_moves_the_mix_up() {
+        use crate::desktop_style::DesktopStyle;
+        use crate::makepad_draw::cx_draw::CxDraw;
+        use crate::theme_lab::BlendTheme;
+        use std::cell::Cell;
+        const SIZE: Vec2d = Vec2d { x: 320.0, y: 700.0 };
+        const WINDOW: WindowId = WindowId(1, 1);
+        // A seed whose bell curve has a tail, which is most of them. What
+        // the column has to look like for this test to be about anything is
+        // asserted below rather than trusted to the draw.
+        const SEED: u64 = 3;
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        open_the_mix_on(&mut cx, &mut panel, DesktopStyle::Omarchy);
+        assert!(
+            panel
+                .eq_lab
+                .index_of(BlendTheme::Sheet(DesktopStyle::Omarchy, false))
+                .is_some(),
+            "the theme the section was opened on is not one of the rows"
+        );
+        panel.eq_set_mode(WeightMode::Relative);
+        // What the surprise draws. Taken from the lab rather than through
+        // `eq_surprise`, which walks its own seed on every press: the mix
+        // wanted here is one with a tail, and not one particular press.
+        panel.eq_lab.randomize(SEED);
+        panel.eq_mix_changed();
+        panel.eq_settle(&mut cx, 1.0);
+        let held: Vec<f64> = panel.eq_lab.rows().iter().map(|row| row.weight).collect();
+        let top = (0..held.len())
+            .max_by(|a, b| held[*a].total_cmp(&held[*b]))
+            .expect("the mix has rows");
+
+        panel.ensure_sidebar(&mut cx);
+        let sidebar = panel.sidebar.clone().expect("the panel built a sidebar");
+        let head = sidebar.child(live_id!(theme_head));
+        assert!(!head.is_empty(), "the Theme tab has no head to draw the section into");
+        // The head is hidden until the Theme tab is the one on show, and the
+        // sidebar is what normally shows it. Nothing here drives the tabs,
+        // and a row that was never laid out has nowhere for a press to land.
+        head.set_visible(&mut cx, true);
+        let draw_the_section = |cx: &mut Cx, panel: &mut Tweaker| {
+            let pass = DrawPass::new(cx);
+            pass.set_size(cx, SIZE);
+            let mut draw_list = DrawList2d::new(cx);
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&pass, None);
+            draw_list.begin_always(&mut cx2d);
+            cx2d.begin_root_turtle(SIZE, Layout::flow_down());
+            panel.draw_equalizer(&mut cx2d, &head);
+            // ...and the rows are DRAWN, because the section's own pass only
+            // fills them in: a press needs a row that has been put somewhere,
+            // and the sidebar is what normally puts it there.
+            head.draw_all(&mut cx2d, &mut Scope::empty());
+            cx2d.end_pass_sized_turtle();
+            draw_list.end(&mut cx2d);
+            cx2d.end_pass(&pass);
+        };
+        draw_the_section(&mut cx, &mut panel);
+        let rows = head.child(live_id!(eq_body)).child(live_id!(eq_rows));
+        let row = rows.child(EQ_ROW_IDS[top]).child(live_id!(eq_weight));
+        let biggest = row.as_fab_slider();
+        assert_eq!(
+            biggest.value(),
+            held[top],
+            "the biggest row stands for {} of the blend and was handed {}",
+            held[top],
+            biggest.value()
+        );
+        let printed = biggest.readout();
+        assert!(
+            printed <= held[top] - 2.0,
+            "the biggest row prints {printed} of a held {}, so there is no gap here for an \
+             arrow to fall into and this test would pass over the fault it is about",
+            held[top]
+        );
+
+        // The keyboard, taken the way a hand has to take it: there is no tab
+        // order into the mix, so the door in is a press on the row -- which
+        // is the gesture the fault was reported on. It moves the row it
+        // lands on, and the panel is never told: the mix is put back below
+        // and drawn again, which is what returns the row to the mix's own
+        // numbers. Dispatched rather than captured, because the focus moves
+        // on the cycle that runs once the press's actions have gone out.
+        let face = row.area().rect(&cx);
+        assert!(face.size.x > 0.0, "the row was never drawn, so the press lands nowhere");
+        let at = face.pos + face.size * 0.5;
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        let down = Event::MouseDown(MouseDownEvent {
+            abs: at,
+            button: MouseButton::PRIMARY,
+            window_id: WINDOW,
+            modifiers: KeyModifiers::default(),
+            handled: Cell::new(Area::Empty),
+            time: 1.0,
+        });
+        row.handle_event(&mut cx, &down, &mut Scope::empty());
+        cx.handle_actions();
+        let up = Event::MouseUp(MouseUpEvent {
+            abs: at,
+            button: MouseButton::PRIMARY,
+            window_id: WINDOW,
+            modifiers: KeyModifiers::default(),
+            time: 1.1,
+        });
+        row.handle_event(&mut cx, &up, &mut Scope::empty());
+        cx.handle_actions();
+        cx.fingers.first_mouse_button = None;
+        assert!(
+            cx.has_key_focus(row.area()),
+            "the press left the keyboard elsewhere, so the arrows below reach nothing"
+        );
+        panel.eq_lab.randomize(SEED);
+        panel.eq_mix_changed();
+        panel.eq_settle(&mut cx, 2.0);
+        draw_the_section(&mut cx, &mut panel);
+        assert_eq!(biggest.value(), held[top], "the column is not the one the presses are about");
+
+        // ...and then the key. Four of them, because one press moving the
+        // right way is not the whole of it: the row that could not move at
+        // all moved by nothing four times running, and each of those presses
+        // cost an install.
+        let mut printing = printed;
+        for press in 0..4 {
+            let standing = panel.eq_lab.rows()[top].weight;
+            let arrow = Event::KeyDown(KeyEvent {
+                key_code: KeyCode::ArrowRight,
+                is_repeat: false,
+                modifiers: KeyModifiers::default(),
+                time: 2.0 + press as f64,
+            });
+            let actions = cx.capture_actions(|cx| {
+                row.handle_event(cx, &arrow, &mut Scope::empty());
+            });
+            let asked = biggest
+                .changed(&actions)
+                .expect("press {press}: the arrow moved nothing at all");
+            assert!(
+                asked > standing,
+                "press {press}: Right asked for {asked} on a row already holding {standing}"
+            );
+            // Through the panel's own routing, which is what turns a row's
+            // action into a weight in the lab.
+            panel.handle_sidebar_actions(&mut cx, &actions);
+            panel.eq_settle(&mut cx, 3.0 + press as f64);
+            let now = panel.eq_lab.rows()[top].weight;
+            assert!(
+                now > standing,
+                "press {press}: the key that means more took the mix from {standing} to {now}"
+            );
+            draw_the_section(&mut cx, &mut panel);
+            let shows = biggest.readout();
+            assert!(
+                shows >= printing,
+                "press {press}: the number on the screen went from {printing} to {shows}"
+            );
+            printing = shows;
+            // ...and the column is still a hundred parts of a hundred.
+            let column: f64 = (0..held.len())
+                .map(|index| {
+                    rows.child(EQ_ROW_IDS[index])
+                        .child(live_id!(eq_weight))
+                        .as_fab_slider()
+                        .readout()
+                })
+                .sum();
+            assert_eq!(column, RELATIVE_TOTAL, "press {press}: the column reads {column} parts");
+        }
+        assert!(
+            printing > printed,
+            "four presses of the key that means more left the row reading {printed} still"
+        );
+    }
+
+    /// A mix with nothing in it is not a mix, and the panel says so.
+    ///
+    /// Clicking every row's name in turn takes every theme out, and a blend
+    /// of nothing refuses itself. The refusal used to be dropped on the
+    /// floor: the flag that says an install is owed was cleared BEFORE the
+    /// install was tried, so the move went nowhere, no frame was asked for,
+    /// and the app went on wearing the blend from before with the panel
+    /// showing an empty column. Nothing short of moving a weight got out of
+    /// it. An empty column has one reading a person can act on -- the theme
+    /// the section was opened on -- so that is what goes back.
+    #[test]
+    fn a_mix_with_nothing_left_in_it_puts_the_entry_theme_back() {
+        use crate::desktop_style::DesktopStyle;
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        open_the_mix_on(&mut cx, &mut panel, DesktopStyle::Omarchy);
+        let entry = theme_color(&mut cx, "color_bg_app");
+        mix_in_the_dark_base(&mut cx, &mut panel, 1.0);
+        assert_ne!(theme_color(&mut cx, "color_bg_app"), entry, "the mix never reached the app");
+        assert!(panel.eq_mix_stands, "the panel does not know the app is wearing a mix");
+
+        // Every theme out, which is a click on every name.
+        for index in 0..panel.eq_lab.rows().len() {
+            panel.eq_row_cleared(index);
+        }
+        assert!(panel.eq_apply_due, "taking every theme out asked the panel for nothing");
+        assert!(
+            panel.eq_settle(&mut cx, 2.0),
+            "the refused install was dropped, and nothing will ever ask for it again"
+        );
+        let weights: Vec<f64> = panel.eq_lab.rows().iter().map(|row| row.weight).collect();
+        assert_eq!(
+            weights.iter().filter(|weight| **weight > 0.0).count(),
+            1,
+            "an empty column was left empty, with the app wearing a blend nobody can reach: \
+             {weights:?}"
+        );
+
+        // ...and the frame that was asked for pays it.
+        panel.eq_settle(&mut cx, 3.0);
+        assert!(!panel.eq_apply_due, "the mix is still waiting on an install nobody will ask for");
+        assert!(!panel.eq_mix_stands, "the panel still believes a mix is standing over the app");
+        // The reload that carries the theme back, landing: putting a theme
+        // back is a choice written onto the Cx and a reload asked for, the
+        // same as putting a mix on.
+        the_reload_lands(&mut cx, &mut panel, 4.0);
+        assert_eq!(
+            theme_color(&mut cx, "color_bg_app"),
+            entry,
+            "the app is still wearing the blend of a mix with nothing in it"
+        );
+    }
+
+    /// A panel that has already stood down does not queue a second one.
+    ///
+    /// Shift+F10 stands the panel down on the PRESS, with a `Cx` of its own.
+    /// The draw that follows it found the mode off and the panel up last
+    /// frame and asked for the whole of it again -- a second theme handed
+    /// back, and a frame asked for to do it on, every time the mode goes off
+    /// by the key. The draw's debt belongs to the routes that cannot stand
+    /// down where they notice, the bridge's `/tweak?on=0` first among them.
+    #[test]
+    fn a_panel_already_stood_down_does_not_queue_another() {
+        use crate::desktop_style::DesktopStyle;
+        use crate::makepad_draw::cx_draw::CxDraw;
+        const SIZE: Vec2d = Vec2d { x: 320.0, y: 700.0 };
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = bare_panel(&mut cx);
+        let mut panel = widget.borrow_mut::<Tweaker>().expect("a Tweaker");
+        open_the_mix_on(&mut cx, &mut panel, DesktopStyle::Omarchy);
+        let entry = theme_color(&mut cx, "color_bg_app");
+        mix_in_the_dark_base(&mut cx, &mut panel, 1.0);
+        assert_ne!(theme_color(&mut cx, "color_bg_app"), entry, "the mix never reached the app");
+
+        // The panel was up last frame and the key has just turned the mode
+        // off, which is the press standing it down. The mode is already off
+        // in a test process.
+        assert!(!tweak_is_on(), "the mode is on, so the draw below takes the other branch");
+        panel.was_on = true;
+        panel.cancel_interactions(&mut cx);
+        assert!(!panel.eq_open, "the press left the section open");
+        // The reload that carries the theme back, landing: putting a theme
+        // back is a choice written onto the Cx and a reload asked for, the
+        // same as putting a mix on.
+        the_reload_lands(&mut cx, &mut panel, 2.0);
+        assert_eq!(
+            theme_color(&mut cx, "color_bg_app"),
+            entry,
+            "the press went past without handing the theme back, so there is nothing here to \
+             ask about doing twice"
+        );
+
+        let frame = panel.next_frame;
+        {
+            let pass = DrawPass::new(&mut cx);
+            pass.set_size(&mut cx, SIZE);
+            let mut draw_list = DrawList2d::new(&mut cx);
+            // The panel draws into the window's overlay and tears both of its
+            // lists down when the mode goes off, so the pass has to have one
+            // the way a window's does.
+            let overlay = cx.with_vm(crate::makepad_draw::overlay::Overlay::script_new);
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(&mut cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&pass, None);
+            draw_list.begin_always(&mut cx2d);
+            cx2d.begin_root_turtle(SIZE, Layout::flow_down());
+            overlay.begin(&mut cx2d);
+            let _ = panel.draw_walk(&mut cx2d, &mut Scope::empty(), Walk::default());
+            overlay.end(&mut cx2d);
+            cx2d.end_pass_sized_turtle();
+            draw_list.end(&mut cx2d);
+            cx2d.end_pass(&pass);
+        }
+        assert!(
+            !panel.stand_down_pending,
+            "the draw queued a stand-down for a panel that has already stood down"
+        );
+        assert_eq!(
+            panel.next_frame, frame,
+            "and asked for a frame to pay a debt nobody owes"
+        );
     }
 }

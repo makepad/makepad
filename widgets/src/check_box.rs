@@ -19,6 +19,14 @@ script_mod! {
 
     /** The flat checkbox: an inset mark box with a stroked check, plus its label. */
     mod.widgets.CheckBoxFlat = set_type_default() do mod.widgets.CheckBoxBase{
+
+        // The compact face this wears when its row runs out of width. Declared
+        // with `:=` so it lands in the vec: a widget proto is frozen VALIDATED,
+        // so a key its props do not list is a hard error at construction -- but
+        // the checked path looks in the vec first, and declaring it once here
+        // makes `tight: {...}` legal on every instance and every preset below.
+        /** the face this wears when its row runs out of width */
+        tight := {}
         width: Fit
         height: Fit
         padding: theme.mspace_2
@@ -861,6 +869,53 @@ impl CheckBox {
 }
 
 impl Widget for CheckBox {
+    /// What this would be worth on a row, with `over` in force: the mark box,
+    /// the label beside it, and the gap the label's own margin keeps between
+    /// them.
+    fn measure_width(
+        &mut self,
+        cx: &mut Cx2d,
+        over: Option<&crate::width_override::WidthOverride>,
+    ) -> Option<f64> {
+        if over.is_some_and(|o| o.opaque) {
+            return None;
+        }
+        if !over.and_then(|o| o.visible).unwrap_or(self.visible) {
+            return Some(0.0);
+        }
+
+        let margin = over.and_then(|o| o.margin).unwrap_or(self.walk.margin);
+        let width = over.and_then(|o| o.width).unwrap_or(self.walk.width);
+        if let Size::Fixed(w) = width {
+            return Some(w + margin.width());
+        }
+        if let Size::Fill { min, .. } = width {
+            return Some(min.unwrap_or(0.0) + margin.width());
+        }
+
+        let pad = over.and_then(|o| o.padding).unwrap_or(self.layout.padding);
+        let gap = over.and_then(|o| o.spacing).unwrap_or(self.layout.spacing);
+
+        // The face it is wearing is the one it would draw: a toggle with an
+        // `on` word says that word while it is on.
+        let on = self.animator_in_state(cx.cx, ids!(active.on));
+        let label: &str = match over.and_then(|o| o.text.as_deref()) {
+            Some(t) => t,
+            None if on && !self.text_on.is_empty() => self.text_on.as_str(),
+            None if !on && !self.text_off.is_empty() => self.text_off.as_str(),
+            None => self.text.as_ref(),
+        };
+        let text_w = if label.is_empty() {
+            0.0
+        } else {
+            crate::badge::advance(&self.draw_text, cx, label) + self.label_walk.margin.width()
+        };
+
+        let mark = crate::badge::icon_extent(&mut self.draw_icon, cx, self.icon_walk)?;
+        let parts = if text_w > 0.0 { 2 } else { 1 };
+        Some(pad.width() + text_w + mark + gap * (parts as f64 - 1.0) + margin.width())
+    }
+
     fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
         self.animator_toggle(
             cx,

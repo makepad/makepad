@@ -13,6 +13,14 @@ script_mod! {
         height: Fit
         padding: theme.mspace_1
 
+        // The compact face this wears when its row runs out of width. Declared
+        // with `:=` so it lands in the vec: a widget proto is frozen VALIDATED,
+        // so a key its props do not list is a hard error at construction -- but
+        // the checked path looks in the vec first, and declaring it once here
+        // makes `tight: {...}` legal on every instance and every preset below.
+        /** the face this wears when its row runs out of width */
+        tight := {}
+
         draw_text +: {
             // A label is a box with text in it, and the boxes apps put labels
             // in are centered by their align, not by their baselines: center
@@ -310,6 +318,57 @@ pub struct Label {
 }
 
 impl Widget for Label {
+    /// What this label would be worth on a row, with `over` in force.
+    ///
+    /// A label that can wrap answers `None` unless its width is stated: where a
+    /// wrapping label breaks is the turtle's business, so its own width is not a
+    /// number it can give.
+    fn measure_width(
+        &mut self,
+        cx: &mut Cx2d,
+        over: Option<&crate::width_override::WidthOverride>,
+    ) -> Option<f64> {
+        if over.is_some_and(|o| o.opaque) {
+            return None;
+        }
+        // A block that states `visible` states it: the child may be wearing the
+        // opposite right now, and a price taken off what it is wearing is a
+        // price of the concession rather than of the face being priced.
+        let visible = over.and_then(|o| o.visible).unwrap_or(self.visible);
+        if !visible {
+            return Some(0.0);
+        }
+
+        let margin = over.and_then(|o| o.margin).unwrap_or(self.walk.margin);
+        let width = over.and_then(|o| o.width).unwrap_or(self.walk.width);
+        if let Size::Fixed(w) = width {
+            return Some(w + margin.width());
+        }
+        // A Fill takes what the others leave, so what it adds to the row's own
+        // width is its minimum -- nothing, for a plain spacer. Answering None
+        // here would make a row with a spacer in it unpriceable, which is most
+        // rows.
+        if let Size::Fill { min, .. } = width {
+            return Some(min.unwrap_or(0.0) + margin.width());
+        }
+        // Only a Fit label has a width of its own to report.
+        if !width.is_fit() {
+            return None;
+        }
+
+        let pad = over.and_then(|o| o.padding).unwrap_or(self.padding);
+        let text: &str = match over.and_then(|o| o.text.as_deref()) {
+            Some(t) => t,
+            None => self.text.as_ref(),
+        };
+        let text_w = if text.is_empty() {
+            0.0
+        } else {
+            crate::badge::advance(&self.draw_text, cx, text)
+        };
+        Some(pad.width() + text_w + margin.width())
+    }
+
     fn script_call(
         &mut self,
         vm: &mut ScriptVm,

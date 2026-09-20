@@ -44,7 +44,7 @@
 //! write mutates it for every widget that was built from it.
 
 use crate::desktop_style::DesktopStyle;
-use crate::makepad_platform::{LiveId, NoTrap, ScriptMod, ScriptVm};
+use crate::makepad_platform::{LiveId, NoTrap, ScriptMod, ScriptVm, ScriptVmCx};
 use crate::script_eval;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -594,6 +594,186 @@ pub fn reads_on(ground: u32, ink: u32) -> f64 {
     contrast(ground | 0xFF, over(ground | 0xFF, ink))
 }
 
+/// The four families that mean something, and the accent, each with the
+/// ink meant to be drawn on it.
+pub(crate) const MEANING: &[(&str, &str)] = &[
+    ("color_success", "color_on_success"),
+    ("color_warning", "color_on_warning"),
+    ("color_error", "color_on_error"),
+    ("color_info", "color_on_info"),
+    ("color_primary", "color_on_primary"),
+];
+
+/// Every rung of the surface ladder, against the body ink.
+pub(crate) const SURFACES: &[(&str, &str)] = &[
+    ("color_surface", "color_on_surface"),
+    ("color_surface_container", "color_on_surface"),
+    ("color_surface_container_low", "color_on_surface"),
+    ("color_surface_container_high", "color_on_surface"),
+    ("color_surface_container_highest", "color_on_surface"),
+    ("color_surface_dim", "color_on_surface"),
+    ("color_surface_bright", "color_on_surface"),
+];
+
+/// The same rungs against the second voice, which is held to `LEGIBLE`.
+pub(crate) const VARIANTS: &[(&str, &str)] = &[
+    ("color_surface", "color_on_surface_variant"),
+    ("color_surface_container", "color_on_surface_variant"),
+    ("color_surface_container_high", "color_on_surface_variant"),
+    ("color_surface_container_highest", "color_on_surface_variant"),
+];
+
+/// The page of the opposite scheme, with the only ink there is for it.
+/// A tooltip and a snackbar are the whole of it, and both carry words,
+/// so it answers to the body rule like any other page. It is also the
+/// one pair neither the ladder nor the derivation looks at: the ink is
+/// not re-derived on a blend, so nothing but this has ever asked whether
+/// the two still stand apart.
+pub(crate) const INVERSE: &[(&str, &str)] =
+    &[("color_inverse_surface", "color_inverse_on_surface")];
+
+/// The loading block, on the grounds it is laid on. Nobody reads a
+/// placeholder -- it is the shape of text that has not arrived -- so the
+/// bar is `LEGIBLE`, the same one the library holds a graphic to, and
+/// not `READABLE`.
+///
+/// Seven grounds and not the five rungs of the ladder. A block goes
+/// wherever content is about to go, which includes the two surfaces that
+/// are not rungs: `color_surface_bright`, and the lowest container, which
+/// is the page a code block, a column picker and both transfer lists are
+/// drawn on. They were left out of this table once and the numbers said
+/// nothing about them for it -- wrongly, since the block is under the bar
+/// on both in all fifteen themes, the worst showing of the seven. A ground
+/// left out of this table is not a ground that passes, it is one nobody
+/// has a number for.
+///
+/// The lowest container fails for a reason of its own on twelve of those
+/// fifteen, and not for the ink's. `GROUPS` below splits the rows.
+pub(crate) const PLACEHOLDERS: &[(&str, &str)] = &[
+    ("color_surface", "color_placeholder"),
+    ("color_surface_container", "color_placeholder"),
+    ("color_surface_container_low", "color_placeholder"),
+    ("color_surface_container_high", "color_placeholder"),
+    ("color_surface_container_highest", "color_placeholder"),
+    ("color_surface_bright", "color_placeholder"),
+    ("color_surface_container_lowest", "color_placeholder"),
+];
+
+/// Whether the themes the library ships reach a group's bar today, or
+/// whether the audit only prints how far off they are.
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum Held {
+    Yes,
+    NotYet,
+}
+
+/// Every table above with the bar its pairs answer to. The audit, the
+/// blend sweep and the panel's own reading all read this, so a pair added
+/// once is measured by all three and a pair only one of them knew about
+/// cannot happen again.
+///
+/// The loading block is measured and not held. Its bar is `LEGIBLE`,
+/// because nobody READS a placeholder -- it is the shape of text that has
+/// not arrived, a graphic standing where words will be -- and not the body
+/// rule. It does not reach that bar: 83 of the 105 pairs are under it, and
+/// not one theme of the fifteen clears all seven grounds.
+///
+/// Two faults, and the 83 divide between them. 71 of the rows are the
+/// INK's: the six grounds a sheet regrows, in all fifteen themes, and the
+/// lowest container in the three BASE themes, where that token is the
+/// theme's own value and the ground is exactly what the theme meant.
+/// `color_placeholder` is `color_opaque_u_1` / `d_1`, the same source the
+/// ladder rungs are mixed from and never put to the ladder the way the
+/// surface inks now are, so it lands on a ground of its own colour once in
+/// every base theme: the dark theme draws a #737373 block on a #737373
+/// `color_surface_container_highest`, at 1.00, and there is nothing there
+/// to see. The three base themes fail all seven of their rows this way.
+///
+/// The other 12 -- the lowest container under each of the twelve SHEETS --
+/// are the GROUND's, and are a second defect that used to sit inside the
+/// first one's tally. `color_surface_container_lowest` is not in
+/// `DERIVED_ROLES`, so unlike the six it is never regrown from a sheet's
+/// own `color_bg_app`: the audit reads #FFFFFF for it under every
+/// light-based sheet, whose pages are #D4D0C8 (windows-2000), #F2F2F7
+/// (ios) and #FEF7FF (android), and #4D4D4D under every dark-based one.
+/// Under android-dark the six regrown grounds run #141218 to #3C3A3F and
+/// this one stays at the dark base theme's #4D4D4D -- a pale slab on a
+/// near-black page, and a code block (`code_block.rs`), the column picker
+/// (`column_picker.rs`) and the transfer lists (`transfer.rs`) are all
+/// drawn on it. No ink repairs that, and those twelve rows go on failing
+/// whatever is done to `color_placeholder`.
+///
+/// The ground is left alone here on purpose: a row added to
+/// `DERIVED_ROLES` moves shipped themes, which this change has stopped
+/// doing. It is written down so that the next person starts where this
+/// one finished, and so the 83 are never again read as one token's tally.
+///
+/// The ink is the token's to fix, in the theme files, and the bar stays
+/// where a graphic's bar belongs until it is. Three things have to be
+/// settled before it can be. A repair that settled none of them was
+/// written here and taken out again, so they are written down instead.
+///
+/// One name, two roles. `Placeholder` draws this token as INK; `Media`
+/// fills its frame, and the bars beside a picture that does not fit it,
+/// with the same token as a GROUND. So the block `Media` shows while a
+/// picture is on its way is drawn at exactly the colour of the box behind
+/// it, at 1.00, in every theme -- a pair this table cannot hold, because
+/// both halves of it are the one role. Split the ink from the ground
+/// before moving either, and put the answer to `Media`: it draws both
+/// halves at once, and a change made for the ink repaints its frame
+/// whether or not that was the intent.
+///
+/// Bounded at BOTH ends. The seven grounds of a single theme are not one
+/// colour -- the dark theme's run from #4C4C4C to #767676 -- so an ink
+/// carried just far enough to clear the bar on the worst of them is well
+/// past it on the page: 5.46 on the dark theme's `color_surface`, 6.52 on
+/// the light theme's. `color_on_surface_variant`, the second voice, which
+/// carries real words, reads 4.82 and 5.15 on those same two pages. A
+/// block that out-reads the text it stands in for has stopped standing in
+/// for anything.
+///
+/// And measured on the themes, not on a copy of them. Every number above
+/// comes out of the audit below, which reads the sheets the library ships;
+/// a bound held against literals pasted into a test holds for the paste.
+pub(crate) const GROUPS: &[(&[(&str, &str)], f64, Held)] = &[
+    (MEANING, READABLE, Held::Yes),
+    (SURFACES, READABLE, Held::Yes),
+    (VARIANTS, LEGIBLE, Held::Yes),
+    (INVERSE, READABLE, Held::Yes),
+    (PLACEHOLDERS, LEGIBLE, Held::NotYet),
+];
+
+/// Every pair the library HOLDS its own themes and sheets to, flattened, each
+/// with the bar it answers to. What a mix is measured against.
+///
+/// The same table the audit walks and not a copy of it, which is what makes
+/// the number comparable: a mix that passes here is as readable as a shipped
+/// theme, and no more. A group the library only MEASURES stays out -- the
+/// loading block is one of those today -- because a mix failed on it would be
+/// failed for something every shipped theme fails too.
+///
+/// The panel kept a copy of this once. The library's audit gained the inverse
+/// page a tooltip and a snackbar are drawn on, the copy gained nothing, and
+/// the panel went on measuring sixteen pairs under a comment claiming
+/// seventeen -- passing a mix the library would have failed, on the one pair
+/// nothing else in the library ever re-derives. A test read this file's TEXT
+/// to catch that happening again. There is nothing to catch now: there is one
+/// table, and it is this one.
+pub(crate) fn held_pairs() -> &'static [(&'static str, &'static str, f64)] {
+    static HELD: std::sync::OnceLock<Vec<(&'static str, &'static str, f64)>> =
+        std::sync::OnceLock::new();
+    HELD.get_or_init(|| {
+        GROUPS
+            .iter()
+            .filter(|(_, _, held)| matches!(held, Held::Yes))
+            .flat_map(|(pairs, need, _)| {
+                let need = *need;
+                pairs.iter().map(move |(ground, ink)| (*ground, *ink, need))
+            })
+            .collect()
+    })
+}
+
 /// The ink to draw on a ground: the one asked for where it reaches `need`,
 /// and the plainer end where it does not.
 pub fn ink_for(ground: u32, ink: u32, need: f64) -> u32 {
@@ -989,13 +1169,29 @@ impl TokenValue {
 }
 
 /// A script that derives a theme from an existing one and makes it current:
-/// `mod.themes.<name> = mod.themes.<base>{ k: v ... }` followed by
-/// `mod.theme = mod.themes.<name>`. Run it between `theme_mod` and
-/// `widgets_mod`, or through a live edit, the way the catalogue switches
-/// themes. This is the only sanctioned override path: assigning into
-/// `mod.theme.k` mutates the shared base object for every widget built from
-/// it. Overriding a derived token pins it; the tokens derived from it keep
-/// their old values, since derivation happens once when the base is built.
+/// `mod.themes.<name> = mod.themes.<base>{ k: v ... }`, then
+/// `mod.theme = mod.themes.<name>`, then a bare `true`. Run it between
+/// `theme_mod` and `widgets_mod`, or through a live edit, the way the
+/// catalogue switches themes. This is the only sanctioned override path:
+/// assigning into `mod.theme.k` mutates the shared base object for every
+/// widget built from it. Overriding a derived token pins it; the tokens
+/// derived from it keep their old values, since derivation happens once when
+/// the base is built.
+///
+/// The `true` is the script's own and not the caller's to remember. The last
+/// statement of a body the VM parses from TEXT never runs -- it is taken for
+/// the body's trailing expression and dropped -- and the last statement here
+/// is the assignment that wears the theme. With nothing after it to be
+/// dropped in its place, this script pins every token into a theme under
+/// `mod.themes` and then leaves it sitting there unworn, without an error and
+/// without a line in the log, which is what a saved theme did every time one
+/// was picked. Two callers added a `true` of their own and were right to; the
+/// third evaluated the script as it was written. Every caller gets one now,
+/// and a second changes nothing -- the second is the one that gets dropped.
+/// A `script_eval!` body is no guide to any of this and is exempt: the macro
+/// ends the code it reconstructs with a `;`, so its last statement is a
+/// statement. `a_theme_module_script_wears_the_theme_it_builds` drives the VM
+/// over both shapes and fails if this `true` goes.
 pub fn theme_module_script(name: &str, base: &str, overrides: &[(String, TokenValue)]) -> String {
     let mut out = format!("mod.themes.{name} = mod.themes.{base}{{");
     for (key, value) in overrides {
@@ -1004,7 +1200,7 @@ pub fn theme_module_script(name: &str, base: &str, overrides: &[(String, TokenVa
         out.push_str(": ");
         out.push_str(&value.render());
     }
-    out.push_str(&format!(" }}\nmod.theme = mod.themes.{name}\n"));
+    out.push_str(&format!(" }}\nmod.theme = mod.themes.{name}\ntrue\n"));
     out
 }
 
@@ -1049,6 +1245,45 @@ pub fn theme_source_with_globals(name: &str, base_file_body: &str, globals: &[(S
         out.push('\n');
     }
     out
+}
+
+/// Whether a key is one of the globals the rest of a theme derives from.
+pub fn is_global_key(name: &str) -> bool {
+    GLOBAL_KEYS.contains(&name)
+}
+
+/// The script inside a theme file's `script_mod! { ... }`, as text the VM
+/// can be handed back: the `use` lines and the theme itself, nothing of the
+/// Rust around them.
+pub fn theme_script_body(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut inside = false;
+    for line in source.lines() {
+        if !inside {
+            inside = line.starts_with("script_mod! {");
+            continue;
+        }
+        if line == "}" {
+            break;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// A base theme built again from its own source with a person's globals in
+/// place of the file's, under the base's own name -- so the module's
+/// `mod.theme` and a sheet's first line both land on the re-derived one.
+/// Every rung is an expression of the globals, so a step in `space_factor`
+/// or `font_size_base` moves the whole ladder; a pin on the one token,
+/// which is all an override script can do, left every rung where it was.
+pub fn theme_rederived_script(scheme: Scheme, globals: &[(String, TokenValue)]) -> String {
+    let source = theme_source_with_globals(scheme.theme_name(), scheme.source(), globals);
+    let mut code = theme_script_body(&source);
+    // The last statement of a script is swallowed; `true` takes the fall.
+    code.push_str("true\n");
+    code
 }
 
 /// The eight keys everything else derives from.
@@ -1667,6 +1902,9 @@ impl BlendCache {
                 None => crate::desktop_style::uninstall(vm),
             }
             vm.with_reload(crate::script_mod);
+            // Fifteen resolves are fifteen module rebuilds, each leaving the
+            // last behind; collect once here rather than carry them all.
+            vm.gc();
         }
     }
 
@@ -1875,6 +2113,14 @@ pub fn assigned_keys(sheet_theme: &str) -> Vec<&str> {
 /// into the base theme OBJECT, so a theme read after another one had its sheet
 /// on would be wearing half of it.
 pub fn resolve_theme(vm: &mut ScriptVm, theme: BlendTheme) -> ThemeValues {
+    // A standing mix comes off for the duration. `theme_mod` re-emits one on
+    // every run now, and a theme resolved with the mix over the top of it
+    // would be filed in the cache as that theme -- wrong for the rest of the
+    // run, and wrong in a way that blends a mix back into itself.
+    let mix = crate::theme_mix(vm.cx_mut());
+    if mix.is_some() {
+        crate::set_theme_mix(vm.cx_mut(), None);
+    }
     let sheet = match theme {
         BlendTheme::Base(_) => {
             crate::desktop_style::uninstall(vm);
@@ -1887,20 +2133,36 @@ pub fn resolve_theme(vm: &mut ScriptVm, theme: BlendTheme) -> ThemeValues {
         }
     };
     vm.with_reload(crate::script_mod);
-    // A reload leaves `mod.theme` on the dark theme; a sheet has already moved
-    // it to its own base.
+    // `theme_mod` ends a reload by pointing `mod.theme` at whichever base the
+    // Cx is set to, which is the app's choice and has nothing to do with the
+    // theme being asked for here. So every base says which one it is outright
+    // rather than reading back what the reload happened to leave: the answer
+    // is filed in a cache under the name that was asked for, and an entry
+    // taken from the wrong theme stays wrong for the rest of the run. The
+    // match is over `Scheme` and not over `BlendTheme` so that a fourth base
+    // theme is a compile error here instead of a silent ambient answer.
     match theme {
-        BlendTheme::Base(Scheme::Light) => {
-            script_eval!(vm, {
-                mod.theme = mod.themes.light
-            });
-        }
-        BlendTheme::Base(Scheme::Skeleton) => {
-            script_eval!(vm, {
-                mod.theme = mod.themes.skeleton
-            });
-        }
-        _ => {}
+        BlendTheme::Base(scheme) => match scheme {
+            Scheme::Dark => {
+                script_eval!(vm, {
+                    mod.theme = mod.themes.dark
+                });
+            }
+            Scheme::Light => {
+                script_eval!(vm, {
+                    mod.theme = mod.themes.light
+                });
+            }
+            Scheme::Skeleton => {
+                script_eval!(vm, {
+                    mod.theme = mod.themes.skeleton
+                });
+            }
+        },
+        // A sheet's own first line moves `mod.theme` to the base it is
+        // written against, and the rest of it assigns into that object, so
+        // moving it again here would throw the sheet away.
+        BlendTheme::Sheet(..) => {}
     }
     let mut keys: Vec<String> = base_theme_keys().iter().map(|k| k.to_string()).collect();
     if let Some(sheet) = &sheet {
@@ -1919,6 +2181,12 @@ pub fn resolve_theme(vm: &mut ScriptVm, theme: BlendTheme) -> ThemeValues {
         } else if let Some(number) = value.as_number() {
             values.insert(key, BlendValue::Num(number));
         }
+    }
+    // The mix goes back on the Cx. Not evaluated again here: the caller
+    // that filled a cache reloads once at the end, and that reload re-emits
+    // it. See `BlendCache::fill`.
+    if mix.is_some() {
+        crate::set_theme_mix(vm.cx_mut(), mix);
     }
     ThemeValues { theme, values }
 }
@@ -2267,8 +2535,68 @@ mod.theme.color_surface=#123456
         ];
         assert_eq!(
             theme_module_script("mine", "dark", &overrides),
-            "mod.themes.mine = mod.themes.dark{ color_primary: #xFF5C39FF radius_m: 6.0 motion_ease_standard: Ease.Linear }\nmod.theme = mod.themes.mine\n"
+            "mod.themes.mine = mod.themes.dark{ color_primary: #xFF5C39FF radius_m: 6.0 motion_ease_standard: Ease.Linear }\nmod.theme = mod.themes.mine\ntrue\n"
         );
+    }
+
+    /// The line before the `true` is the assignment that wears the theme, and
+    /// the VM drops the last statement of a body it parsed from text, so the
+    /// script ends on something it can afford to lose.
+    ///
+    /// Driven the way the panel drives a saved theme -- one `vm.eval` of the
+    /// text, nothing added to it -- because that is the caller the terminator
+    /// was missing for. The second half runs the same script with the
+    /// terminator taken off again: it goes in without an error, files its
+    /// theme, and leaves the first one on the screen. That is what the first
+    /// half is worth, and it is what taking the `true` out would look like.
+    #[test]
+    fn a_theme_module_script_wears_the_theme_it_builds() {
+        use crate::makepad_platform::Cx;
+        const WORN: u32 = 0x1B2B3B4B;
+        const UNWORN: u32 = 0x5C6C7C8C;
+
+        fn run(vm: &mut ScriptVm, name: &str, code: &str) {
+            vm.bx.captured_errors = Some(Vec::new());
+            vm.eval(ScriptMod {
+                cargo_manifest_path: env!("CARGO_MANIFEST_DIR").into(),
+                module_path: format!("theme_tokens_test_{name}"),
+                file: format!("{name}.splash"),
+                line: 0,
+                column: 0,
+                code: code.to_string(),
+                values: vec![],
+            });
+            let errors = vm.take_errors();
+            assert!(errors.is_empty(), "{name}: {errors:?}");
+        }
+        fn worn_page(vm: &mut ScriptVm) -> Option<u32> {
+            let theme = vm.module(LiveId::from_str("theme"));
+            vm.bx.heap.value(theme, LiveId::from_str("color_bg_app").into(), NoTrap).as_color()
+        }
+        fn filed_page(vm: &mut ScriptVm, name: &str) -> Option<u32> {
+            let themes = vm.module(LiveId::from_str("themes"));
+            let one = vm.bx.heap.value(themes, LiveId::from_str(name).into(), NoTrap).as_object()?;
+            vm.bx.heap.value(one, LiveId::from_str("color_bg_app").into(), NoTrap).as_color()
+        }
+        let page = |rgba| vec![("color_bg_app".to_string(), TokenValue::Color(rgba))];
+
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let script = theme_module_script("worn", "light", &page(WORN));
+            run(vm, "worn", &script);
+            assert_eq!(worn_page(vm), Some(WORN), "the theme was pinned and never put on:\n{script}");
+
+            let stripped = theme_module_script("unworn", "light", &page(UNWORN));
+            let stripped = stripped.strip_suffix("true\n").expect("the terminator is what this is about");
+            run(vm, "unworn", stripped);
+            assert_eq!(filed_page(vm, "unworn"), Some(UNWORN), "the derived theme was never built at all");
+            assert_eq!(
+                worn_page(vm),
+                Some(WORN),
+                "the VM ran the last statement after all: read `theme_module_script` before taking its `true` out"
+            );
+        });
     }
 
     #[test]
@@ -2287,6 +2615,17 @@ mod.theme.color_surface=#123456
         assert!(out.contains("\n        space_2: 1.0 * theme.space_factor\n"));
         assert!(out.contains("\n        font_label: TextStyle{\n"));
         assert_eq!(out.lines().count(), Scheme::Dark.source().lines().count() - 3);
+    }
+
+    #[test]
+    fn a_rederived_script_is_the_theme_under_its_own_name_and_ends_in_true() {
+        let globals = [("space_factor".to_string(), TokenValue::Raw("12.0".to_string()))];
+        let code = theme_rederived_script(Scheme::Dark, &globals);
+        assert!(code.starts_with("    use mod.math.*\n"), "the use lines were lost");
+        assert!(code.contains("\n    mod.themes.dark = {\n"), "the base was renamed");
+        assert!(code.contains("\n        space_factor: 12.0\n"));
+        assert!(!code.contains("script_mod!") && !code.contains("#[cfg(test)]"), "Rust leaked into the script");
+        assert!(code.ends_with("    }\ntrue\n"), "the script does not end in the statement it can afford to lose");
     }
 
     #[test]
@@ -2340,35 +2679,6 @@ mod sheet_contrast_tests {
         (DesktopStyle::Ios, true),
         (DesktopStyle::Android, false),
         (DesktopStyle::Android, true),
-    ];
-
-    /// The four families that mean something, and the accent, each with the
-    /// ink meant to be drawn on it.
-    pub(super) const MEANING: &[(&str, &str)] = &[
-        ("color_success", "color_on_success"),
-        ("color_warning", "color_on_warning"),
-        ("color_error", "color_on_error"),
-        ("color_info", "color_on_info"),
-        ("color_primary", "color_on_primary"),
-    ];
-
-    /// Every rung of the surface ladder, against the body ink.
-    pub(super) const SURFACES: &[(&str, &str)] = &[
-        ("color_surface", "color_on_surface"),
-        ("color_surface_container", "color_on_surface"),
-        ("color_surface_container_low", "color_on_surface"),
-        ("color_surface_container_high", "color_on_surface"),
-        ("color_surface_container_highest", "color_on_surface"),
-        ("color_surface_dim", "color_on_surface"),
-        ("color_surface_bright", "color_on_surface"),
-    ];
-
-    /// The same rungs against the second voice, which is held to `LEGIBLE`.
-    pub(super) const VARIANTS: &[(&str, &str)] = &[
-        ("color_surface", "color_on_surface_variant"),
-        ("color_surface_container", "color_on_surface_variant"),
-        ("color_surface_container_high", "color_on_surface_variant"),
-        ("color_surface_container_highest", "color_on_surface_variant"),
     ];
 
     fn val(vm: &mut ScriptVm, key: &str) -> Option<u32> {
@@ -2470,43 +2780,66 @@ mod sheet_contrast_tests {
 "));
     }
 
-    /// Every ground a widget draws text on, in every theme and every sheet,
-    /// with the ink that goes on it. Not an assertion: the surface ladder
-    /// does not pass yet, and the numbers are the input to fixing it.
+    /// A tooltip and a snackbar are a page of the opposite scheme, and the
+    /// only ink there is for that page is `color_inverse_on_surface`. Neither
+    /// the ladder derivation nor the blend re-derives the pair, and a sheet
+    /// that sets one of the two and not the other gets the base theme's other
+    /// half, so nothing else in the library has ever asked whether the two
+    /// still stand apart.
+    #[test]
+    fn the_inverse_page_carries_its_own_ink_under_every_sheet() {
+        let mut bad: Vec<String> = Vec::new();
+        walk(&mut |vm, label| bad.extend(failures(vm, label, INVERSE, READABLE)));
+        assert!(bad.is_empty(), "ink that does not hold on the inverse page:
+{}", bad.join("
+"));
+    }
+
+    /// Every ground a widget lays something on, in every theme and every
+    /// sheet, with what goes on it. Not an assertion: it prints the whole of
+    /// `GROUPS`, including the pairs no test holds the library to yet, and
+    /// those numbers are the input to fixing them.
     /// `cargo test -p makepad-widgets contrast_audit -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn contrast_audit() {
-        let mut lines: Vec<String> = Vec::new();
+        let mut lines: Vec<(Held, String)> = Vec::new();
         walk(&mut |vm, label| {
-            let bar = |pairs: &[(&str, &str)]| {
-                if std::ptr::eq(pairs.as_ptr(), VARIANTS.as_ptr()) { LEGIBLE } else { READABLE }
-            };
-            for pairs in [MEANING, SURFACES, VARIANTS] {
-                let need = bar(pairs);
-                for (ground, ink) in pairs {
+            for (pairs, need, held) in GROUPS {
+                let need = *need;
+                for (ground, ink) in *pairs {
                     if let (Some(g), Some(i)) = (val(vm, ground), val(vm, ink)) {
                         let c = reads(g | 0xFF, i);
-                        lines.push(format!(
+                        lines.push((*held, format!(
                             "{label:<14} {ground:<32} {ink:<24} #{:06X} on #{:06X} = {c:5.2} (needs {need}){}",
                             i >> 8,
                             g >> 8,
                             if c < need { "  FAIL" } else { "" }
-                        ));
+                        )));
                     }
                 }
             }
         });
-        let failed = lines.iter().filter(|l| l.ends_with("FAIL")).count();
-        println!("{}", lines.join("
+        let failed = |held: Held| lines.iter().filter(|(h, l)| *h == held && l.ends_with("FAIL")).count();
+        let loose = lines.iter().filter(|(h, _)| *h == Held::NotYet).count();
+        println!("{}", lines.iter().map(|(_, l)| l.as_str()).collect::<Vec<_>>().join("
 "));
-        println!("{failed} of {} pairs below the bar for their kind", lines.len());
+        println!(
+            "{} of {} pairs below the bar for their kind",
+            failed(Held::Yes) + failed(Held::NotYet),
+            lines.len()
+        );
+        println!(
+            "{} of those are held by a test and {} of them fail; {loose} are measured only and {} of them fail",
+            lines.len() - loose,
+            failed(Held::Yes),
+            failed(Held::NotYet)
+        );
     }
 }
 
 #[cfg(test)]
 mod equalizer_tests {
-    use super::sheet_contrast_tests::{MEANING, SURFACES, VARIANTS};
     use super::*;
     use crate::desktop_style::StyleSheet;
     use crate::makepad_platform::Cx;
@@ -2668,11 +3001,11 @@ mod equalizer_tests {
         let blend = cache.blend(&[(NEAR_BLACK, 50.0), (CHARCOAL, 50.0)]).unwrap();
         let script = blend.script("equalized");
         assert!(script.starts_with("mod.themes.equalized = mod.themes.dark{ "), "{script}");
-        assert!(script.ends_with(" }\nmod.theme = mod.themes.equalized\n"), "{script}");
+        assert!(script.ends_with(" }\nmod.theme = mod.themes.equalized\ntrue\n"), "{script}");
         assert!(!script.contains("mod.theme."), "a mix must not assign into the shared theme: {script}");
         assert!(script.contains("color_bg_app: #x202020FF"), "{script}");
         assert!(script.contains("space_factor: 9.0"), "{script}");
-        assert_eq!(script.lines().count(), 2, "{script}");
+        assert_eq!(script.lines().count(), 3, "{script}");
     }
 
     /// Nothing to divide by, and a theme nobody resolved, are both said out
@@ -2904,6 +3237,53 @@ mod equalizer_tests {
         }
     }
 
+    /// A base theme has to resolve to ITSELF, whatever base the app is set
+    /// to. `theme_mod` ends a reload by pointing `mod.theme` at the Cx's own
+    /// base, so a resolve that trusts what the reload leaves behind reads the
+    /// APP's theme and files it under the name it was asked for. One cache
+    /// entry is then wrong for the rest of the run, and `blend` cannot catch
+    /// it: appearance is read off the enum and not off the values, so a dark
+    /// entry holding light tokens mixes happily with a real dark theme and
+    /// lands on the mid-grey page the appearance split exists to prevent.
+    /// `resolved()` above cannot see any of this: a fresh `Cx` is Dark, which
+    /// is the one base the ambient answer agreed with.
+    #[test]
+    fn a_base_theme_resolves_to_itself_under_another_app_base() {
+        fn resolve_all(vm: &mut ScriptVm, base: crate::BaseTheme) -> Vec<ThemeValues> {
+            use crate::makepad_draw::ScriptVmCx;
+            crate::set_base_theme(vm.cx_mut(), base);
+            vm.with_reload(crate::script_mod);
+            Scheme::ALL.iter().map(|s| resolve_theme(vm, BlendTheme::Base(*s))).collect()
+        }
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let under_light = resolve_all(vm, crate::BaseTheme::Light);
+            // A named token, so a failure reads as the thing it is rather
+            // than as a map that differs somewhere. The dark theme's page is
+            // near black and the light theme's near white; there is nothing
+            // in between for this to be wrong about.
+            let page = |scheme: Scheme| {
+                under_light
+                    .iter()
+                    .find(|v| v.theme == BlendTheme::Base(scheme))
+                    .and_then(|v| v.color("color_bg_app"))
+                    .unwrap_or_else(|| panic!("{} resolved no page at all", scheme.theme_name()))
+                    | 0xFF
+            };
+            let (dark, light) = (page(Scheme::Dark), page(Scheme::Light));
+            assert!(
+                contrast(dark, WHITE) > contrast(dark, BLACK),
+                "the dark theme resolved a {dark:08X} page under a light app"
+            );
+            assert!(contrast(light, BLACK) > contrast(light, WHITE), "the light theme gave {light:08X}");
+            assert!(contrast(dark, light) > READABLE, "{dark:08X} and {light:08X} are the same page");
+            // And not that one token alone: all three themes, all five
+            // hundred values, resolved again under the other base.
+            assert_eq!(under_light, resolve_all(vm, crate::BaseTheme::Dark));
+        });
+    }
+
     /// The case the whole re-derivation is there for. The light theme draws
     /// BLACK on its green and macOS draws WHITE on its own, so half of one
     /// and half of the other meets at a mid grey, and a mid grey stands at
@@ -2952,13 +3332,19 @@ mod equalizer_tests {
         let mut bad: Vec<String> = Vec::new();
         let mut checked = 0usize;
         let mut measured = 0usize;
+        let mut seen: BTreeSet<(&str, &str)> = BTreeSet::new();
         let mut tightest = (f64::MAX, String::new());
         let mut check = |blend: &ThemeBlend, label: &str, bad: &mut Vec<String>| {
-            for (pairs, need) in [(SURFACES, READABLE), (VARIANTS, LEGIBLE), (MEANING, READABLE)] {
-                for (ground, ink) in pairs {
+            for (pairs, need, held) in GROUPS {
+                if *held == Held::NotYet {
+                    continue;
+                }
+                let need = *need;
+                for (ground, ink) in *pairs {
                     if let (Some(g), Some(i)) = (blend.color(ground), blend.color(ink)) {
                         let c = reads_on(g | 0xFF, i);
                         measured += 1;
+                        seen.insert((*ground, *ink));
                         if c - need < tightest.0 {
                             tightest = (c - need, format!("{label}: {ink} on {ground} = {c:.2}, needs {need}"));
                         }
@@ -2997,8 +3383,17 @@ mod equalizer_tests {
         }
         assert!(checked > 200, "only {checked} mixes were tried");
         // A pair that is never found is a pair that is never checked, and a
-        // test that checks nothing passes beautifully.
+        // test that checks nothing passes beautifully. Counting the total is
+        // not enough for that: a pair a blend simply does not carry drops out
+        // silently and the other sixteen make the number up. So every named
+        // pair has to have been reached at least once.
         assert!(measured > 3000, "only {measured} pairs were actually measured");
+        let want: BTreeSet<(&str, &str)> = GROUPS
+            .iter()
+            .filter(|(_, _, held)| *held == Held::Yes)
+            .flat_map(|(pairs, _, _)| pairs.iter().copied())
+            .collect();
+        assert_eq!(seen, want, "a pair the table names was never found in a blend");
         assert!(bad.is_empty(), "{} of {checked} mixes carry ink that does not hold (the tightest pair overall was {}):\n{}", bad.len(), tightest.1, bad.join("\n"));
     }
 }

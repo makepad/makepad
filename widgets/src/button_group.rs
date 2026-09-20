@@ -35,6 +35,15 @@
 //! control. It is arithmetic with no widget attached, so the thing that
 //! shows the remainder — a menu, a popover, a second row — stays the
 //! caller's choice.
+//!
+//! [`ConcessionLadder`] answers the other crowding question. An overflowing
+//! row hides whole items and counts them; a row that is merely tight gives
+//! things up in an order someone decided — a label becomes a glyph, a
+//! title goes, a word shortens — and stops the moment it fits. That is a
+//! priority ladder rather than a count of what fits, and the hard half of
+//! it is not going down but coming back up without the row flapping between
+//! two states while the window is dragged, so it lives here as arithmetic
+//! too.
 
 use crate::{
     animator::{Animator, AnimatorAction, AnimatorImpl, Play},
@@ -204,6 +213,146 @@ impl OverflowRow {
     /// `(fitting, hidden)` for the room given.
     pub fn split(&self, room: f64) -> (usize, usize) {
         overflow_split(&self.widths, self.gap, room, self.more_width)
+    }
+}
+
+/// How far down a ladder of concessions a crowded row must go before it
+/// fits, and how far back up it may come once it is given room again.
+///
+/// A CONCESSION is something a tight row gives up to save width, and the
+/// ladder is those concessions in the order someone decided they should be
+/// made: the cheapest loss first. `costs[i]` is what concession `i` saves,
+/// `applied` is how many are in force, and `slack` is what the row had left
+/// over when it was last drawn AT THAT LEVEL — for a row that ends in a
+/// filler, the filler's own width. The answer is the level to be at now.
+///
+/// A level, not a verb and not a pair like [`overflow_split`]: there is
+/// nothing on the other side to count, and a caller whose answer equals
+/// `applied` has nothing to do, which is how a row that has settled costs
+/// nothing per frame instead of relaying itself out forever.
+///
+/// ONE RULE GOVERNS BOTH DIRECTIONS: the row keeps at least `margin` of
+/// slack. Concessions are made while it has less than that, and one is
+/// given back only when giving it back would still leave that much. The two
+/// thresholds for a single step therefore sit `costs[i]` apart rather than
+/// on top of each other, and the comparisons are complementary — `<` going
+/// down, `>=` coming back — so a slack sitting exactly on a boundary has
+/// one answer and not two. A row that decides both ways at one value flaps
+/// between two states on a single pixel while the window is dragged, which
+/// is worse than a row that stays narrow.
+///
+/// `margin` of zero is allowed and still does not flap, but a caller
+/// measuring a filler should not ask for it: a filler is never narrower
+/// than nothing, so an exactly full row and a badly overfull one both
+/// report zero, and a row with no margin has no threshold it can actually
+/// observe. A pixel or two buys both a visible gap and a measurable one.
+///
+/// A cost of zero, or one that is not a finite number, means NOT KNOWN. A
+/// caller only learns what a concession saves by making it and measuring
+/// the row again, so the first pass down the ladder is walked blind, and
+/// the two directions are not equally forgiving about that. Going down, an
+/// unknown step is taken and the pass ENDS: what that step saves decides
+/// everything after it, and one more draw settles what no arithmetic here
+/// could. Coming back up, an unknown step is NOT given back at all, because
+/// handing back a saving of unknown size is exactly how a row comes to
+/// overflow a second time.
+pub fn concession_level(costs: &[f64], margin: f64, applied: usize, slack: f64) -> usize {
+    let mut level = applied.min(costs.len());
+    // No measurement is not a reason to move: an unmeasurable width leaves
+    // the row exactly as it was drawn.
+    if !slack.is_finite() {
+        return level;
+    }
+    let known = |i: usize| costs.get(i).copied().filter(|c| c.is_finite() && *c > 0.0);
+    let margin = margin.max(0.0);
+    let mut slack = slack;
+    if slack < margin {
+        while slack < margin && level < costs.len() {
+            let Some(cost) = known(level) else {
+                return level + 1;
+            };
+            slack += cost;
+            level += 1;
+        }
+        return level;
+    }
+    // Back up in the reverse of the order they were made: the last thing
+    // given up is the first thing owed back.
+    while level > 0 {
+        let Some(cost) = known(level - 1) else {
+            break;
+        };
+        if slack - cost < margin {
+            break;
+        }
+        slack -= cost;
+        level -= 1;
+    }
+    level
+}
+
+/// The measuring half of a row that gives way, with no widget attached:
+/// WHAT each concession does to the row — a label swapped for a glyph, a
+/// title dropped — stays the caller's business.
+#[derive(Clone, Debug, Default)]
+pub struct ConcessionLadder {
+    costs: Vec<f64>,
+    margin: f64,
+    level: usize,
+}
+
+impl ConcessionLadder {
+    /// A ladder of `steps` concessions, none of their costs known yet.
+    pub fn new(steps: usize, margin: f64) -> Self {
+        Self { costs: vec![0.0; steps], margin, level: 0 }
+    }
+
+    /// What a concession turned out to save, once the caller has seen the
+    /// row drawn with and without it.
+    pub fn set_cost(&mut self, step: usize, cost: f64) {
+        if let Some(slot) = self.costs.get_mut(step) {
+            *slot = cost;
+        }
+    }
+
+    /// How many concessions are in force.
+    /// Forget every learned cost, leaving the level where it is.
+    ///
+    /// A cost is only true for the strings and the theme it was measured under.
+    /// A row that re-prices from scratch each frame clears them first rather
+    /// than carrying a number it can no longer stand behind; zero reads as NOT
+    /// KNOWN, which is the honest state for a cost nobody has measured.
+    pub fn clear_costs(&mut self) {
+        for c in self.costs.iter_mut() {
+            *c = 0.0;
+        }
+    }
+
+    /// What each rung is currently believed to save. Zero means NOT KNOWN.
+    pub fn costs(&self) -> &[f64] {
+        &self.costs
+    }
+
+    pub fn level(&self) -> usize {
+        self.level
+    }
+
+    /// Whether concession `step` is in force, which is the question the
+    /// drawing side actually asks: is the title still there, is that label
+    /// still a word.
+    pub fn is_conceded(&self, step: usize) -> bool {
+        step < self.level
+    }
+
+    /// Feed in the slack the row had when it was last drawn. Answers
+    /// whether the level MOVED, so a caller asks for a redraw only when
+    /// something actually changed — a row that has settled must cost
+    /// nothing per frame, or the measuring itself becomes the jitter.
+    pub fn measured(&mut self, slack: f64) -> bool {
+        let next = concession_level(&self.costs, self.margin, self.level, slack);
+        let moved = next != self.level;
+        self.level = next;
+        moved
     }
 }
 
@@ -1166,6 +1315,138 @@ mod tests {
         // Widen the "more" control and the second item goes too.
         assert_eq!(overflow_split(&widths, 4.0, 120.0, 60.0), (1, 2));
         assert_eq!(overflow_split(&widths, 4.0, 0.0, 30.0), (0, 3), "nothing fits");
+    }
+
+    /// A row drawn at a given level: what the filler is left with once the
+    /// concessions in force have come off the content. A filler is never
+    /// narrower than nothing, which is the whole difficulty — an overfull
+    /// row and an exactly full one measure the same.
+    fn filler_width(content: f64, costs: &[f64], level: usize, room: f64) -> f64 {
+        let saved: f64 = costs.iter().take(level).sum();
+        (room - (content - saved)).max(0.0)
+    }
+
+    /// Draw, measure, decide, draw again, until the level stops moving.
+    /// Answers where it settled and how many draws that took. A rule that
+    /// flaps never settles, and this says so rather than passing quietly.
+    fn settle(costs: &[f64], margin: f64, content: f64, room: f64, start: usize) -> (usize, usize) {
+        let mut level = start;
+        for draw in 1..=64 {
+            let slack = filler_width(content, costs, level, room);
+            let next = concession_level(costs, margin, level, slack);
+            if next == level {
+                return (level, draw);
+            }
+            level = next;
+        }
+        panic!("the ladder never settled: it is flapping between levels");
+    }
+
+    /// A row with room to spare gives nothing up, and knows it on the first
+    /// draw rather than trying a step and taking it back.
+    #[test]
+    fn a_row_with_room_to_spare_concedes_nothing() {
+        let costs = [36.0, 120.0, 90.0, 20.0];
+        assert_eq!(concession_level(&costs, 8.0, 0, 240.0), 0);
+        assert_eq!(settle(&costs, 8.0, 700.0, 940.0, 0), (0, 1), "settled without a second draw");
+    }
+
+    /// The ladder is walked in the order it was written and stops at the
+    /// first level that fits, rather than jumping to the step that saves
+    /// most or conceding the lot.
+    #[test]
+    fn the_ladder_is_taken_in_order_and_stops_as_soon_as_the_row_fits() {
+        let costs = [36.0, 120.0, 90.0, 20.0];
+        // Sixty short: the first concession does not cover it, the second
+        // does, and the two after it are never reached.
+        assert_eq!(concession_level(&costs, 8.0, 0, -60.0), 2);
+        // The same through a real draw loop, where the row can only report a
+        // filler of nothing however far over it is, so the walk takes a
+        // draw per step and still stops at the same level.
+        assert_eq!(settle(&costs, 8.0, 700.0, 640.0, 0), (2, 3));
+    }
+
+    /// When the whole ladder is not enough, everything goes and nothing
+    /// asks for a step that is not there.
+    #[test]
+    fn everything_is_conceded_when_nothing_helps_enough() {
+        let costs = [4.0, 4.0, 4.0, 4.0];
+        assert_eq!(concession_level(&costs, 8.0, 0, -100.0), 4, "the whole ladder, and no more");
+        assert_eq!(settle(&costs, 8.0, 800.0, 600.0, 0), (4, 3), "and it stops asking for a fifth");
+    }
+
+    /// The one that matters: a slack sitting exactly on a boundary has one
+    /// answer, and every width the window can be dragged through settles to
+    /// the same level whether it is approached from a narrow row or a wide
+    /// one.
+    #[test]
+    fn a_slack_on_the_boundary_does_not_flap_between_two_levels() {
+        let costs = [36.0, 120.0, 90.0, 20.0];
+        let margin = 8.0;
+        // Exactly enough to give the first concession back: the row lands on
+        // the margin, not below it, so it does not concede straight again.
+        assert_eq!(concession_level(&costs, margin, 1, 44.0), 0);
+        assert_eq!(concession_level(&costs, margin, 0, 8.0), 0, "and stays there");
+        // A hair less and the concession is kept, rather than taken back and
+        // lost again on the next draw.
+        assert_eq!(concession_level(&costs, margin, 1, 43.9), 1);
+        assert_eq!(concession_level(&costs, margin, 0, 7.9), 1, "which is the same boundary");
+        // A margin of nothing is the sharpest case and still has one answer.
+        assert_eq!(concession_level(&costs, 0.0, 1, 36.0), 0);
+        assert_eq!(concession_level(&costs, 0.0, 0, 0.0), 0);
+        for step in 0..1200 {
+            let room = 400.0 + step as f64 * 0.5;
+            let (narrowing, _) = settle(&costs, margin, 700.0, room, 0);
+            let (widening, _) = settle(&costs, margin, 700.0, room, costs.len());
+            assert_eq!(narrowing, widening, "room {room} settles to one level, not two");
+        }
+    }
+
+    /// Walked blind, the ladder still stops as soon as the row fits; it just
+    /// spends a draw on each step, and it does not hand back what it cannot
+    /// price.
+    #[test]
+    fn an_unmeasured_step_is_taken_alone_and_never_given_back() {
+        let unknown = [0.0, 0.0, 0.0, 0.0];
+        assert_eq!(concession_level(&unknown, 8.0, 0, -100.0), 1, "one step, then measure again");
+        assert_eq!(concession_level(&unknown, 8.0, 1, -100.0), 2);
+        // The costs the row really has are not the ones it has been told.
+        let real = [36.0, 120.0, 90.0, 20.0];
+        let mut level = 0;
+        let mut draws = 0;
+        loop {
+            draws += 1;
+            assert!(draws < 16, "blind, but not endless");
+            let slack = filler_width(700.0, &real, level, 640.0);
+            let next = concession_level(&unknown, 8.0, level, slack);
+            if next == level {
+                break;
+            }
+            level = next;
+        }
+        assert_eq!((level, draws), (2, 3), "the same level, a draw per step");
+        // Given room again, a row that still cannot price its concessions
+        // keeps them.
+        assert_eq!(concession_level(&unknown, 8.0, 2, 400.0), 2);
+        // Told what they save, it gives them back.
+        assert_eq!(concession_level(&real, 8.0, 2, 400.0), 0);
+    }
+
+    /// The ladder reports movement, not measurement, so a settled row asks
+    /// for no redraw however many times it is measured.
+    #[test]
+    fn the_ladder_reports_only_a_level_that_actually_moved() {
+        let mut ladder = ConcessionLadder::new(4, 8.0);
+        ladder.set_cost(0, 36.0);
+        assert!(ladder.measured(0.0), "a full row gives the first thing up");
+        assert_eq!(ladder.level(), 1);
+        assert!(ladder.is_conceded(0));
+        assert!(!ladder.is_conceded(1), "and nothing further");
+        assert!(!ladder.measured(40.0), "settled: nothing moved, so nothing redraws");
+        assert!(!ladder.measured(40.0));
+        assert!(ladder.measured(200.0), "room enough to take the step back");
+        assert_eq!(ladder.level(), 0);
+        assert!(!ladder.measured(200.0), "and settled again");
     }
 
     /// Multi keeps its own answers; single keeps one.

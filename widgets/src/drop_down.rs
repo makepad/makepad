@@ -537,6 +537,11 @@ pub struct DropDown {
     #[rust]
     popup_global: PopupMenuGlobal,
 
+    /// The key this dropdown last took up in the menu store, so a change of
+    /// template -- every rebuild is one -- lets the old key go.
+    #[rust]
+    popup_key: Option<PopupMenuKey>,
+
     #[imperative]
     #[live]
     #[apply_state]
@@ -552,6 +557,46 @@ pub struct DropDown {
 #[derive(Default, Clone)]
 struct PopupMenuGlobal {
     map: Rc<RefCell<ComponentMap<PopupMenuKey, PopupMenu>>>,
+    /// How many dropdowns stand on each key. A module rebuild hands every
+    /// dropdown a fresh template object, and so a fresh key; the menu built
+    /// for the old key has nobody left to draw it, and it goes with the last
+    /// dropdown that lets the key go. Without this the cache kept one menu
+    /// per rebuild for the life of the process -- each holding its item
+    /// template's whole tree and a draw list -- and nothing ever asked for
+    /// them again.
+    users: Rc<RefCell<std::collections::HashMap<PopupMenuKey, usize>>>,
+}
+
+impl PopupMenuGlobal {
+    fn take_up(&self, key: PopupMenuKey) {
+        *self.users.borrow_mut().entry(key).or_insert(0) += 1;
+    }
+
+    /// One dropdown fewer on the key; the last one out takes the menu with
+    /// it. The map can be mid-borrow when this runs from a nested apply,
+    /// in which case the entry waits for the next release, or for the heap
+    /// to be retired.
+    fn let_go(&self, key: PopupMenuKey) {
+        let last = {
+            let mut users = self.users.borrow_mut();
+            match users.get_mut(&key) {
+                Some(n) if *n > 1 => {
+                    *n -= 1;
+                    false
+                }
+                Some(_) => {
+                    users.remove(&key);
+                    true
+                }
+                None => false,
+            }
+        };
+        if last {
+            if let Ok(mut map) = self.map.try_borrow_mut() {
+                map.retain(|k, _| *k != key);
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
@@ -629,6 +674,18 @@ impl ScriptHook for DropDown {
 
             let popup_menu_val = self.popup_menu;
             let key = self.popup_menu_key();
+            if self.popup_key != Some(key) {
+                drop(map);
+                if let Some(old) = self.popup_key.take() {
+                    global.let_go(old);
+                }
+                global.take_up(key);
+                self.popup_key = Some(key);
+                map = match global.map.try_borrow_mut() {
+                    Ok(map) => map,
+                    Err(_) => return,
+                };
+            }
             let Some(vm_id) = cx.script_ref_vm_id(&self.source) else {
                 return;
             };
@@ -638,6 +695,14 @@ impl ScriptHook for DropDown {
                 })
             });
         });
+    }
+}
+
+impl Drop for DropDown {
+    fn drop(&mut self) {
+        if let Some(key) = self.popup_key.take() {
+            self.popup_global.let_go(key);
+        }
     }
 }
 
@@ -1299,6 +1364,64 @@ mod outside_press_tests {
         assert_eq!(cx.sweep_lock_area(), None);
         target.draw(&mut cx, &root);
         assert!(click(&mut cx, &root, on_after, &after), "with the list closed the button hears its press");
+    }
+}
+
+#[cfg(test)]
+mod popup_cache_tests {
+    use super::*;
+    use crate::makepad_script::script;
+    use crate::makepad_platform::ScriptApply;
+
+    /// A module rebuild hands every dropdown a fresh popup template, and so
+    /// a fresh cache key. The menu built for the old key went on living in
+    /// the cache with its item template's tree and its draw list -- one more
+    /// per rebuild, for the life of the process. Now the last dropdown off a
+    /// key takes the menu with it, and a dropped dropdown does the same.
+    #[test]
+    fn a_dropdown_lets_go_of_the_menu_its_old_template_earned() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| crate::script_mod(vm));
+        let build = |cx: &mut Cx| {
+            cx.with_vm(|vm| {
+                vm.eval(script! {
+                    use mod.prelude.widgets.*
+                    DropDown{ popup_menu: PopupMenuFlat{} }
+                })
+            })
+        };
+        let first = build(&mut cx);
+        let mut widget = cx.with_vm(|vm| WidgetRef::script_from_value(vm, first));
+        assert_eq!(DropDown::popup_menu_cache_len(&mut cx), 1, "the first template earned no menu");
+        // The same widget applied from a second template object, which is
+        // what a rebuild does to every dropdown in the tree.
+        let second = build(&mut cx);
+        assert_ne!(first.as_object(), second.as_object(), "the second build is the same object; the test proves nothing");
+        cx.with_vm(|vm| widget.script_apply(vm, &Apply::ScriptReapply, &mut Scope::empty(), second));
+        assert_eq!(DropDown::popup_menu_cache_len(&mut cx), 1, "the old template's menu stayed in the cache");
+        drop(widget);
+        assert_eq!(DropDown::popup_menu_cache_len(&mut cx), 0, "a dropped dropdown left its menu behind");
+    }
+
+    /// Two dropdowns on one template share one menu, and it stays as long as
+    /// either of them stands on it.
+    #[test]
+    fn a_shared_menu_stays_until_the_last_dropdown_lets_go() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| crate::script_mod(vm));
+        let (a, b) = cx.with_vm(|vm| {
+            let value = vm.eval(script! {
+                use mod.prelude.widgets.*
+                View{ one := DropDown{} two := DropDown{} }
+            });
+            let root = WidgetRef::script_from_value(vm, value);
+            (root.clone(), root)
+        });
+        assert_eq!(DropDown::popup_menu_cache_len(&mut cx), 1, "two dropdowns on one template should share one menu");
+        drop(a);
+        assert_eq!(DropDown::popup_menu_cache_len(&mut cx), 1, "the menu went while a dropdown still stood on it");
+        drop(b);
+        assert_eq!(DropDown::popup_menu_cache_len(&mut cx), 0);
     }
 }
 
