@@ -197,7 +197,7 @@ fn answer_now(cx: &mut Cx, view: &mut PhotosView, call: &ServiceCall) -> ToolRes
         "filter" => {
             let query = str_arg(call, "query").unwrap_or_default();
             view.set_query(cx, &query);
-            let shown = view.visible(cx);
+            let shown = view.visible_count(cx);
             let total = view.pictures();
             if query.is_empty() {
                 ToolResult::ok(id, format!("the wall shows all {total} pictures again"), "cleared")

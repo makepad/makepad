@@ -33,7 +33,7 @@ mod tests {
     #[test]
     fn inward_closed_shells_fail_review_and_flip_repairs_them(){
         let mut engine=Engine::new(Limits::default());engine.open("car",None,None).unwrap();
-        let mut apply=|engine:&mut Engine,id:&str,operations:Value|{
+        let apply=|engine:&mut Engine,id:&str,operations:Value|{
             let expected=head_json(engine.document("car").unwrap().head());
             engine.execute("model.apply",&json::obj(vec![("document",json::s("car")),("request_id",json::s(id)),("expected",expected),("operations",operations)]),None).unwrap()
         };

@@ -441,7 +441,9 @@ impl Widget for CalendarDateMark {
         cx.begin_turtle(walk, Layout::default());
         self.draw_mark.color = self.color;
         let c = cx.with_vm(CalendarColors::resolve);
-        let check = if contrast(c.paper, self.color) > contrast(c.ink, self.color) {
+        let check = if crate::presentation::contrast(c.paper, self.color)
+            > crate::presentation::contrast(c.ink, self.color)
+        {
             c.paper
         } else {
             c.ink

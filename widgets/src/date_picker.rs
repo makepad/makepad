@@ -44,10 +44,19 @@
 //! text — not through the calendar's Rust type. A date widget that could
 //! not say which day it holds would not be a date widget, and going through
 //! the text keeps two widgets that are useful apart from each other apart.
+//!
+//! # One picker, two templates
+//!
+//! A range is the same picker with `range: true`: the same popover, the
+//! same button, the same fields and calendars, only two of each. It is not
+//! a second widget. It IS a second template, `DateRangePicker`, because a
+//! flag cannot declare children and a range needs a second box and a second
+//! calendar; the template declares them and sets the flag, and that is all
+//! it does.
 use crate::{
     button::ButtonWidgetRefExt,
     calendar::CivilDate,
-    field::FieldWell,
+    field_well::FieldWell,
     makepad_derive_widget::*,
     makepad_draw::*,
     popover::PopoverWidgetRefExt,
@@ -62,7 +71,6 @@ script_mod! {
 
     mod.widgets.DateFieldBase = #(DateField::register_widget(vm))
     mod.widgets.DatePickerBase = #(DatePicker::register_widget(vm))
-    mod.widgets.DateRangePickerBase = #(DateRangePicker::register_widget(vm))
 
     /** The mark a date field shows while what is typed will not parse.
      *
@@ -139,6 +147,8 @@ script_mod! {
         format: "YYYY-MM-DD"
         /** the date the picker opens on, written in `format`; empty for none */
         date: ""
+        /** two ends instead of one date; `DateRangePicker` is the template that declares the second box and calendar this needs */
+        range: false
         /** nothing in the picker answers 0..1 step 1 */
         disabled: false
 
@@ -165,20 +175,23 @@ script_mod! {
     }
 
     /** Two dates and two months: a start, an end, and a calendar for each
-     * end side by side. The two are held in order however they are set. */
-    mod.widgets.DateRangePicker = set_type_default() do mod.widgets.DateRangePickerBase{
+     * end side by side. The two are held in order however they are set.
+     *
+     * The picker above with `range: true`, and a template of its own only
+     * because a flag cannot declare children: a range needs a second box
+     * and a second calendar, and this is where they are declared. */
+    mod.widgets.DateRangePicker = mod.widgets.DatePicker{
         width: 330.
-        height: 24.
 
-        /** the shape both dates are written in */
-        format: "YYYY-MM-DD"
+        range: true
         /** the date the range opens on, written in `format`; empty for none */
         start: ""
         /** the date the range ends on, written in `format`; empty for none */
         end: ""
-        /** nothing in the picker answers 0..1 step 1 */
-        disabled: false
 
+        // Replaced whole rather than merged into: nothing of the one-date
+        // panel belongs in this one, and a merge would keep its field and
+        // its calendar as children nobody drives.
         popover: mod.widgets.Popover{
             width: Fill
             height: Fill
@@ -758,6 +771,10 @@ impl DateFieldRef {
 pub enum DatePickerAction {
     /// The date the picker now holds, however it was set.
     Changed(Option<CivilDate>),
+    /// Both ends of a range, reported once both are known and in order. A
+    /// range never says `Changed`: half a range is not an answer, and a
+    /// host that was handed one would have to know to wait for the rest.
+    RangeChanged(CivilDate, CivilDate),
     #[default]
     None,
 }
@@ -782,15 +799,37 @@ pub struct DatePicker {
     pub format: String,
     #[live]
     pub date: String,
+    /// Two ends instead of one date. It says which children the template
+    /// declared — `start_field`, `end_field` and `open` beside a `left` and
+    /// a `right` calendar, in place of `field` and `calendar` — and it
+    /// cannot declare them itself, so `DateRangePicker` is the template
+    /// that sets it.
+    #[live]
+    pub range: bool,
+    /// The two ends a range opens on, written in `format`. Read only while
+    /// `range` is set; one date has `date`.
+    #[live]
+    pub start: String,
+    #[live]
+    pub end: String,
     #[live]
     pub disabled: bool,
 
+    /// The two ends of a range, in order. One date never touches it: the
+    /// field holds that, and a second copy here could only disagree.
+    #[rust]
+    ends: DateRange,
     /// What the calendar was last seen showing, so a press in it can be
-    /// told from the day it was already on.
+    /// told from the day it was already on. For a range, the left one.
     #[rust]
     seen: String,
+    /// The same for a range's right-hand calendar.
+    #[rust]
+    seen_right: String,
     #[rust]
     pushed: String,
+    #[rust]
+    pushed_ends: (String, String),
 }
 
 impl ScriptHook for DatePicker {
@@ -801,31 +840,43 @@ impl ScriptHook for DatePicker {
         _scope: &mut Scope,
         _value: ScriptValue,
     ) {
-        let field = self.field();
-        let format = self.format.clone();
-        let date = if self.date != self.pushed {
-            self.pushed = self.date.clone();
-            Some(self.date.clone())
-        } else {
-            None
-        };
-        let disabled = self.disabled;
         let cx = vm.cx_mut();
-        if !format.is_empty() {
-            field.set_format(cx, &format);
+        if self.range && !self.is_range() {
+            error!("DatePicker: `range: true` needs the two ends the DateRangePicker template declares; write DateRangePicker{{}} rather than DatePicker{{range: true}}. Running as a one-date picker.");
         }
-        if let Some(date) = date {
-            field.set_date_text(cx, &date);
+        if self.is_range() {
+            self.apply_ends(cx);
+        } else {
+            self.apply_date(cx);
         }
-        if disabled {
-            self.popover
-                .child_by_path(ids!(field))
-                .set_disabled(cx, true);
+        if self.disabled {
+            self.set_slots_disabled(cx, true);
         }
     }
 }
 
 impl DatePicker {
+    /// Whether this picker is running as a range: `range` is set AND the
+    /// template declared the two ends.
+    ///
+    /// The flag cannot declare children, so a bare `DatePicker{range: true}`
+    /// still holds one `field` and one `calendar`. Trusting the flag alone
+    /// there made a dead control with no complaint: the button opened
+    /// nothing, a typed date reported nothing, and `disabled` disabled
+    /// nothing. It stays a working one-date picker instead, and says why.
+    fn is_range(&self) -> bool {
+        self.range && !self.start_field().is_empty()
+    }
+
+    /// The shape in force, read the way the field inside reads it.
+    fn fmt(&self) -> &str {
+        if self.format.is_empty() {
+            EXCHANGE
+        } else {
+            &self.format
+        }
+    }
+
     fn field(&self) -> DateFieldRef {
         self.popover.child_by_path(ids!(field)).as_date_field()
     }
@@ -837,190 +888,6 @@ impl DatePicker {
             .child_by_path(ids!(calendar))
     }
 
-    pub fn selected(&self) -> Option<CivilDate> {
-        self.field().selected()
-    }
-
-    pub fn set_selected(&self, cx: &mut Cx, date: Option<CivilDate>) {
-        self.field().set_selected(cx, date);
-    }
-
-    pub fn is_open(&self) -> bool {
-        self.popover.as_popover().is_open()
-    }
-}
-
-impl Widget for DatePicker {
-    fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
-        self.disabled = disabled;
-        self.popover
-            .child_by_path(ids!(field))
-            .set_disabled(cx, disabled);
-    }
-
-    fn disabled(&self, _cx: &Cx) -> bool {
-        self.disabled
-    }
-
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        cx.widget_tree_insert_child(self.uid, live_id!(popover), self.popover.clone());
-        self.popover.draw_walk(cx, scope, walk)
-    }
-
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        if self.disabled {
-            return;
-        }
-        let actions = cx.capture_actions(|cx| self.popover.handle_event(cx, event, scope));
-        let popover = self.popover.as_popover();
-        let field = self.field();
-
-        if field.trailing().as_button().clicked(&actions) {
-            // The calendar opens on the day the field is holding, so it
-            // lands on the month the person is already thinking about.
-            let date = field.selected();
-            let calendar = self.calendar();
-            sync_calendar(&calendar, cx, date, &mut self.seen);
-            popover.open(cx);
-        }
-        if let Some(date) = field.changed(&actions) {
-            let calendar = self.calendar();
-            sync_calendar(&calendar, cx, date, &mut self.seen);
-            cx.widget_action(self.uid, DatePickerAction::Changed(date));
-        }
-        if popover.is_open() {
-            let calendar = self.calendar();
-            if let Some(day) = take_calendar_pick(&calendar, cx, &mut self.seen) {
-                field.set_selected(cx, Some(day));
-                // One press is the whole answer here, so the panel goes
-                // away rather than waiting to be dismissed.
-                popover.close(cx);
-                cx.widget_action(self.uid, DatePickerAction::Changed(Some(day)));
-            }
-        }
-    }
-
-    fn text(&self) -> String {
-        self.popover.child_by_path(ids!(field)).text()
-    }
-
-    fn set_text(&mut self, cx: &mut Cx, v: &str) {
-        self.field().set_date_text(cx, v);
-    }
-
-    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
-        Some(self.text())
-    }
-}
-
-impl DatePickerRef {
-    pub fn selected(&self) -> Option<CivilDate> {
-        self.borrow().and_then(|inner| inner.selected())
-    }
-
-    pub fn set_selected(&self, cx: &mut Cx, date: Option<CivilDate>) {
-        if let Some(inner) = self.borrow() {
-            inner.set_selected(cx, date);
-        }
-    }
-
-    pub fn is_open(&self) -> bool {
-        self.borrow().map(|inner| inner.is_open()).unwrap_or(false)
-    }
-
-    /// The date this picker settled on, when it settled in `actions`.
-    pub fn changed(&self, actions: &Actions) -> Option<Option<CivilDate>> {
-        match actions.find_widget_action(self.widget_uid())?.cast() {
-            DatePickerAction::Changed(date) => Some(date),
-            DatePickerAction::None => None,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Default)]
-pub enum DateRangePickerAction {
-    /// Both ends, reported once both are known and in order.
-    Changed(CivilDate, CivilDate),
-    #[default]
-    None,
-}
-
-#[derive(Script, Widget)]
-pub struct DateRangePicker {
-    #[uid]
-    uid: WidgetUid,
-    #[source]
-    source: ScriptObjectRef,
-    #[find]
-    #[redraw]
-    #[live]
-    pub popover: WidgetRef,
-    #[walk]
-    walk: Walk,
-
-    #[live]
-    pub format: String,
-    #[live]
-    pub start: String,
-    #[live]
-    pub end: String,
-    #[live]
-    pub disabled: bool,
-
-    #[rust]
-    range: DateRange,
-    #[rust]
-    seen_left: String,
-    #[rust]
-    seen_right: String,
-    #[rust]
-    pushed: (String, String),
-}
-
-impl ScriptHook for DateRangePicker {
-    fn on_after_apply(
-        &mut self,
-        vm: &mut ScriptVm,
-        _apply: &Apply,
-        _scope: &mut Scope,
-        _value: ScriptValue,
-    ) {
-        let format = self.format.clone();
-        let ends = if self.pushed != (self.start.clone(), self.end.clone()) {
-            self.pushed = (self.start.clone(), self.end.clone());
-            Some((self.start.clone(), self.end.clone()))
-        } else {
-            None
-        };
-        let disabled = self.disabled;
-        let start_field = self.start_field();
-        let end_field = self.end_field();
-        let cx = vm.cx_mut();
-        if !format.is_empty() {
-            start_field.set_format(cx, &format);
-            end_field.set_format(cx, &format);
-        }
-        if let Some((start, end)) = ends {
-            // Through the range rather than straight into the two boxes, so
-            // a pair written the wrong way round in the DSL is put in order
-            // once instead of being shown out of order forever.
-            let fmt: &str = if format.is_empty() {
-                EXCHANGE
-            } else {
-                format.as_str()
-            };
-            self.range.take_start(parse_date(fmt, &start));
-            self.range.take_end(parse_date(fmt, &end));
-            start_field.set_selected(cx, self.range.start);
-            end_field.set_selected(cx, self.range.end);
-        }
-        if disabled {
-            self.set_slots_disabled(cx, true);
-        }
-    }
-}
-
-impl DateRangePicker {
     fn start_field(&self) -> DateFieldRef {
         self.popover.child_by_path(ids!(start_field)).as_date_field()
     }
@@ -1040,16 +907,51 @@ impl DateRangePicker {
             .child_by_path(ids!(right))
     }
 
+    /// `format` and `date`, handed on to the one field.
+    fn apply_date(&mut self, cx: &mut Cx) {
+        let field = self.field();
+        if !self.format.is_empty() {
+            field.set_format(cx, &self.format);
+        }
+        if self.date != self.pushed {
+            self.pushed = self.date.clone();
+            field.set_date_text(cx, &self.date);
+        }
+    }
+
+    /// `format`, `start` and `end`, handed on to the two fields.
+    fn apply_ends(&mut self, cx: &mut Cx) {
+        let (start_field, end_field) = (self.start_field(), self.end_field());
+        if !self.format.is_empty() {
+            start_field.set_format(cx, &self.format);
+            end_field.set_format(cx, &self.format);
+        }
+        if self.pushed_ends != (self.start.clone(), self.end.clone()) {
+            self.pushed_ends = (self.start.clone(), self.end.clone());
+            // Through the range rather than straight into the two boxes, so
+            // a pair written the wrong way round in the DSL is put in order
+            // once instead of being shown out of order forever.
+            let start = parse_date(self.fmt(), &self.start);
+            let end = parse_date(self.fmt(), &self.end);
+            self.ends.take_start(start);
+            self.ends.take_end(end);
+            start_field.set_selected(cx, self.ends.start);
+            end_field.set_selected(cx, self.ends.end);
+        }
+    }
+
+    /// Everything that answers a press: the one field, whose well takes the
+    /// button in its trailing slot down with it, or the two fields and the
+    /// button that stands beside them.
     fn set_slots_disabled(&self, cx: &mut Cx, disabled: bool) {
-        self.popover
-            .child_by_path(ids!(start_field))
-            .set_disabled(cx, disabled);
-        self.popover
-            .child_by_path(ids!(end_field))
-            .set_disabled(cx, disabled);
-        self.popover
-            .child_by_path(ids!(open))
-            .set_disabled(cx, disabled);
+        let slots: &[&[LiveId]] = if self.is_range() {
+            &[ids!(start_field), ids!(end_field), ids!(open)]
+        } else {
+            &[ids!(field)]
+        };
+        for slot in slots {
+            self.popover.child_by_path(slot).set_disabled(cx, disabled);
+        }
     }
 
     /// The left calendar is the start and the right one is the end, so the
@@ -1059,37 +961,137 @@ impl DateRangePicker {
     /// and mark a day nobody picked.
     fn show_ends(&mut self, cx: &mut Cx) {
         let (left, right) = (self.left(), self.right());
-        let (start, end) = (self.range.start, self.range.end);
-        sync_calendar(&left, cx, start, &mut self.seen_left);
+        let (start, end) = (self.ends.start, self.ends.end);
+        sync_calendar(&left, cx, start, &mut self.seen);
         sync_calendar(&right, cx, end, &mut self.seen_right);
     }
 
     fn write_fields(&self, cx: &mut Cx) {
-        self.start_field().set_selected(cx, self.range.start);
-        self.end_field().set_selected(cx, self.range.end);
+        self.start_field().set_selected(cx, self.ends.start);
+        self.end_field().set_selected(cx, self.ends.end);
     }
 
     /// A day pressed in either calendar since they were last looked at.
     fn take_pick(&mut self, cx: &Cx) -> Option<CivilDate> {
         let (left, right) = (self.left(), self.right());
-        if let Some(day) = take_calendar_pick(&left, cx, &mut self.seen_left) {
+        if let Some(day) = take_calendar_pick(&left, cx, &mut self.seen) {
             return Some(day);
         }
         take_calendar_pick(&right, cx, &mut self.seen_right)
     }
 
-    pub fn range(&self) -> Option<(CivilDate, CivilDate)> {
-        self.range.settled()
+    /// The one date. A range has two and answers nothing here; it has
+    /// [`Self::selected_range`].
+    pub fn selected(&self) -> Option<CivilDate> {
+        self.field().selected()
     }
 
-    pub fn set_range(&mut self, cx: &mut Cx, start: CivilDate, end: CivilDate) {
-        self.range.take_start(Some(start));
-        self.range.take_end(Some(end));
+    pub fn set_selected(&self, cx: &mut Cx, date: Option<CivilDate>) {
+        self.field().set_selected(cx, date);
+    }
+
+    /// Both ends of a range, once both are chosen.
+    pub fn selected_range(&self) -> Option<(CivilDate, CivilDate)> {
+        self.ends.settled()
+    }
+
+    /// Set both ends from a host. Silent: the host already knows. One date
+    /// has nowhere to put a second, so only a range takes this.
+    pub fn set_selected_range(&mut self, cx: &mut Cx, start: CivilDate, end: CivilDate) {
+        if !self.is_range() {
+            return;
+        }
+        self.ends.take_start(Some(start));
+        self.ends.take_end(Some(end));
         self.write_fields(cx);
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.popover.as_popover().is_open()
+    }
+
+    /// One date: the button, the box, and one press in the calendar.
+    fn date_event(&mut self, cx: &mut Cx, actions: &Actions) {
+        let popover = self.popover.as_popover();
+        let field = self.field();
+
+        if field.trailing().as_button().clicked(actions) {
+            // The calendar opens on the day the field is holding, so it
+            // lands on the month the person is already thinking about.
+            let date = field.selected();
+            let calendar = self.calendar();
+            sync_calendar(&calendar, cx, date, &mut self.seen);
+            popover.open(cx);
+        }
+        if let Some(date) = field.changed(actions) {
+            let calendar = self.calendar();
+            sync_calendar(&calendar, cx, date, &mut self.seen);
+            cx.widget_action(self.uid, DatePickerAction::Changed(date));
+        }
+        if popover.is_open() {
+            let calendar = self.calendar();
+            if let Some(day) = take_calendar_pick(&calendar, cx, &mut self.seen) {
+                field.set_selected(cx, Some(day));
+                // One press is the whole answer here, so the panel goes
+                // away rather than waiting to be dismissed.
+                popover.close(cx);
+                cx.widget_action(self.uid, DatePickerAction::Changed(Some(day)));
+            }
+        }
+    }
+
+    /// A range: the button, either box, and two presses across the two
+    /// calendars. All three roads go through [`DateRange`], which is what
+    /// keeps the end from preceding the start whichever one was taken.
+    fn range_event(&mut self, cx: &mut Cx, actions: &Actions) {
+        let popover = self.popover.as_popover();
+
+        if self
+            .popover
+            .child_by_path(ids!(open))
+            .as_button()
+            .clicked(actions)
+        {
+            self.show_ends(cx);
+            popover.open(cx);
+        }
+
+        let mut moved = false;
+        let mut picked = false;
+        if let Some(date) = self.start_field().changed(actions) {
+            self.ends.take_start(date);
+            moved = true;
+        }
+        if let Some(date) = self.end_field().changed(actions) {
+            self.ends.take_end(date);
+            moved = true;
+        }
+        if popover.is_open() {
+            if let Some(day) = self.take_pick(cx) {
+                self.ends.pick(day);
+                moved = true;
+                picked = true;
+            }
+        }
+
+        if moved {
+            self.write_fields(cx);
+            self.show_ends(cx);
+            if let Some((start, end)) = self.ends.settled() {
+                cx.widget_action(self.uid, DatePickerAction::RangeChanged(start, end));
+                // The panel stays up between the two presses and goes away
+                // once the range is whole: a range is not chosen until both
+                // ends are, and closing after the first press would make the
+                // second one cost another trip to the button.
+                if picked {
+                    popover.close(cx);
+                }
+            }
+        }
     }
 }
 
-impl Widget for DateRangePicker {
+impl Widget for DatePicker {
     fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
         self.disabled = disabled;
         self.set_slots_disabled(cx, disabled);
@@ -1109,68 +1111,36 @@ impl Widget for DateRangePicker {
             return;
         }
         let actions = cx.capture_actions(|cx| self.popover.handle_event(cx, event, scope));
-        let popover = self.popover.as_popover();
-
-        if self
-            .popover
-            .child_by_path(ids!(open))
-            .as_button()
-            .clicked(&actions)
-        {
-            self.show_ends(cx);
-            popover.open(cx);
-        }
-
-        let mut moved = false;
-        let mut picked = false;
-        if let Some(date) = self.start_field().changed(&actions) {
-            self.range.take_start(date);
-            moved = true;
-        }
-        if let Some(date) = self.end_field().changed(&actions) {
-            self.range.take_end(date);
-            moved = true;
-        }
-        if popover.is_open() {
-            if let Some(day) = self.take_pick(cx) {
-                self.range.pick(day);
-                moved = true;
-                picked = true;
-            }
-        }
-
-        if moved {
-            self.write_fields(cx);
-            self.show_ends(cx);
-            if let Some((start, end)) = self.range.settled() {
-                cx.widget_action(self.uid, DateRangePickerAction::Changed(start, end));
-                // The panel stays up between the two presses and goes away
-                // once the range is whole: a range is not chosen until both
-                // ends are, and closing after the first press would make the
-                // second one cost another trip to the button.
-                if picked {
-                    popover.close(cx);
-                }
-            }
+        if self.is_range() {
+            self.range_event(cx, &actions);
+        } else {
+            self.date_event(cx, &actions);
         }
     }
 
+    /// What is in the one box, typo and all; or both ends of a range, and
+    /// nothing until both are chosen.
     fn text(&self) -> String {
-        match self.range.settled() {
-            Some((start, end)) => {
-                let fmt: &str = if self.format.is_empty() {
-                    EXCHANGE
-                } else {
-                    self.format.as_str()
-                };
-                format!(
-                    "{} \u{2013} {}",
-                    format_date(fmt, start),
-                    format_date(fmt, end)
-                )
-            }
+        if !self.is_range() {
+            return self.popover.child_by_path(ids!(field)).text();
+        }
+        match self.ends.settled() {
+            Some((start, end)) => format!(
+                "{} \u{2013} {}",
+                format_date(self.fmt(), start),
+                format_date(self.fmt(), end)
+            ),
             None => String::new(),
         }
+    }
+
+    /// One date as text. A range is two, and text carries one: it is set
+    /// with `set_selected_range`, where the two cannot be confused.
+    fn set_text(&mut self, cx: &mut Cx, v: &str) {
+        if self.is_range() {
+            return;
+        }
+        self.field().set_date_text(cx, v);
     }
 
     fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
@@ -1178,29 +1148,45 @@ impl Widget for DateRangePicker {
     }
 }
 
-impl DateRangePickerRef {
-    /// Both ends, once both are chosen.
-    pub fn range(&self) -> Option<(CivilDate, CivilDate)> {
-        self.borrow().and_then(|inner| inner.range())
+impl DatePickerRef {
+    pub fn selected(&self) -> Option<CivilDate> {
+        self.borrow().and_then(|inner| inner.selected())
     }
 
-    pub fn set_range(&self, cx: &mut Cx, start: CivilDate, end: CivilDate) {
+    pub fn set_selected(&self, cx: &mut Cx, date: Option<CivilDate>) {
+        if let Some(inner) = self.borrow() {
+            inner.set_selected(cx, date);
+        }
+    }
+
+    /// Both ends of a range, once both are chosen.
+    pub fn selected_range(&self) -> Option<(CivilDate, CivilDate)> {
+        self.borrow().and_then(|inner| inner.selected_range())
+    }
+
+    pub fn set_selected_range(&self, cx: &mut Cx, start: CivilDate, end: CivilDate) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.set_range(cx, start, end);
+            inner.set_selected_range(cx, start, end);
         }
     }
 
     pub fn is_open(&self) -> bool {
-        self.borrow()
-            .map(|inner| inner.popover.as_popover().is_open())
-            .unwrap_or(false)
+        self.borrow().map(|inner| inner.is_open()).unwrap_or(false)
+    }
+
+    /// The date this picker settled on, when it settled in `actions`.
+    pub fn changed(&self, actions: &Actions) -> Option<Option<CivilDate>> {
+        match actions.find_widget_action(self.widget_uid())?.cast() {
+            DatePickerAction::Changed(date) => Some(date),
+            _ => None,
+        }
     }
 
     /// Both ends, when the range settled in `actions`.
-    pub fn changed(&self, actions: &Actions) -> Option<(CivilDate, CivilDate)> {
+    pub fn range_changed(&self, actions: &Actions) -> Option<(CivilDate, CivilDate)> {
         match actions.find_widget_action(self.widget_uid())?.cast() {
-            DateRangePickerAction::Changed(start, end) => Some((start, end)),
-            DateRangePickerAction::None => None,
+            DatePickerAction::RangeChanged(start, end) => Some((start, end)),
+            _ => None,
         }
     }
 }
@@ -1351,5 +1337,85 @@ mod tests {
         assert_eq!(range.start, None);
         assert_eq!(range.end, Some(day(2026, 9, 20)));
         assert_eq!(range.settled(), None);
+    }
+
+    /// The DSL only fails at eval time, so the gate is a real build: both
+    /// templates made from `mod.widgets`, and each asked what it is holding.
+    #[test]
+    fn one_type_builds_the_date_and_the_range() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let (one, two, backwards) = cx.with_vm(|vm| {
+            let one = vm.eval(script! {
+                mod.widgets.DatePicker{date: "2026-09-10"}
+            });
+            let two = vm.eval(script! {
+                mod.widgets.DateRangePicker{start: "2026-09-07" end: "2026-09-21"}
+            });
+            let backwards = vm.eval(script! {
+                mod.widgets.DateRangePicker{start: "2026-09-21" end: "2026-09-07"}
+            });
+            (
+                DatePicker::script_from_value(vm, one),
+                DatePicker::script_from_value(vm, two),
+                DatePicker::script_from_value(vm, backwards),
+            )
+        });
+
+        assert!(!one.range, "a picker that never heard of the flag holds one date");
+        assert!(!one.field().is_empty() && !one.calendar().is_empty());
+        assert!(one.start_field().is_empty() && one.left().is_empty());
+        assert!(matches!(one.walk.width, Size::Fixed(w) if w == 170.));
+        assert_eq!(one.selected(), Some(day(2026, 9, 10)));
+        assert_eq!(one.selected_range(), None);
+        assert_eq!(one.text(), "2026-09-10");
+
+        assert!(two.range);
+        assert!(!two.start_field().is_empty() && !two.end_field().is_empty());
+        assert!(!two.left().is_empty() && !two.right().is_empty());
+        assert!(!two.popover.child_by_path(ids!(open)).is_empty());
+        assert!(
+            two.field().is_empty() && two.calendar().is_empty(),
+            "the range's panel replaces the one-date panel rather than adding to it"
+        );
+        assert!(matches!(two.walk.width, Size::Fixed(w) if w == 330.));
+        assert!(matches!(two.walk.height, Size::Fixed(h) if h == 24.));
+        assert_eq!(two.format, "YYYY-MM-DD", "what the range does not say it takes from the picker");
+        assert_eq!(two.selected(), None, "a range has no one date");
+        assert_eq!(
+            two.selected_range(),
+            Some((day(2026, 9, 7), day(2026, 9, 21)))
+        );
+        assert_eq!(two.start_field().selected(), Some(day(2026, 9, 7)));
+        assert_eq!(two.end_field().selected(), Some(day(2026, 9, 21)));
+        assert_eq!(two.text(), "2026-09-07 \u{2013} 2026-09-21");
+
+        // Written the wrong way round, the end is the one taken last, so
+        // the start gives way to it: never an end before its start.
+        assert_eq!(
+            backwards.selected_range(),
+            Some((day(2026, 9, 7), day(2026, 9, 7)))
+        );
+    }
+
+    #[test]
+    fn a_range_is_a_template_of_the_one_picker() {
+        let source = include_str!("date_picker.rs");
+        // Assembled at run time so this test's own text cannot satisfy them.
+        let preset = format!("mod.widgets.{} = mod.widgets.{}{{", "DateRangePicker", "DatePicker");
+        assert!(source.contains(&preset), "the range form derives from the picker");
+        let own_type = format!("{}::register_widget", "DateRangePicker");
+        assert!(!source.contains(&own_type), "and has no Rust type of its own");
+        // The flag is what the template is for, and its default is what
+        // keeps every picker written before it a picker of one date.
+        let on = format!("{}: true", "range");
+        let off = format!("{}: false", "range");
+        let body = &source[source.find(&preset).unwrap()..];
+        assert!(body.contains(&on), "the range template sets the flag");
+        assert_eq!(source.matches(&off).count(), 1, "and the picker declares it off");
+        // A second type default on one Rust type silently replaces the
+        // first, and the one that would win here is the range.
+        let default = format!("set_type_default() do mod.widgets.{}", "DatePickerBase");
+        assert_eq!(source.matches(&default).count(), 1, "one type default per widget");
     }
 }

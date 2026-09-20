@@ -11,6 +11,13 @@ struct IdPoolFreeState {
     retirement_pending: VecDeque<usize>,
     retirement_queued: Vec<bool>,
     reuse_cursor: usize,
+    /// Deferred frees (see [`IdPool::defer_frees`]): a dropped handle parks
+    /// its slot in `deferred` instead of freeing it, and
+    /// [`IdPool::release_deferred`] frees the parked slots nothing names any
+    /// more. `deferred_queued` coalesces per slot.
+    defer_frees: bool,
+    deferred: Vec<usize>,
+    deferred_queued: Vec<bool>,
 }
 
 #[derive(Default, Debug)]
@@ -60,6 +67,15 @@ impl PoolId {
         {
             return;
         }
+        if state.defer_frees {
+            // The slot stays live (its item drawable, its generation current)
+            // until the pool's owner releases it at a safe point.
+            if !state.deferred_queued[self.id] {
+                state.deferred_queued[self.id] = true;
+                state.deferred.push(self.id);
+            }
+            return;
+        }
         state.is_free[self.id] = true;
         state.free.push(self.id);
         if !state.retirement_queued[self.id] {
@@ -96,11 +112,6 @@ where
             .get(id)
             .copied()
             .unwrap_or(false)
-    }
-
-    /// The slots currently in the free list, as they stand now.
-    pub fn free_ids(&self) -> Vec<usize> {
-        self.free.0.borrow().free.clone()
     }
 
     /// Validate a handle using dense UI-owned metadata, without touching the
@@ -194,12 +205,53 @@ where
         state.is_free.push(false);
         state.generations.push(0);
         state.retirement_queued.push(false);
+        state.deferred_queued.push(false);
         drop(state);
         PoolId {
             id,
             generation: 0,
             free: self.free.clone(),
         }
+    }
+
+    /// From now on a dropped handle does not free its slot: the slot is
+    /// parked, still live, until [`Self::release_deferred`] frees it. For a
+    /// pool whose slots other records name by id without owning them — draw
+    /// calls name geometries — so that a drop cannot hand the slot to the
+    /// next allocation while a record still names it.
+    pub fn defer_frees(&mut self) {
+        self.free.0.borrow_mut().defer_frees = true;
+    }
+
+    /// Whether any dropped handle is parked (see [`Self::defer_frees`]).
+    pub fn has_deferred(&self) -> bool {
+        !self.free.0.borrow().deferred.is_empty()
+    }
+
+    /// Frees every parked slot for which `still_used(id, generation)` is
+    /// false; the others stay parked for a later call. Returns how many were
+    /// freed. A freed slot also enters the retirement queue, as a plain drop
+    /// would have.
+    pub fn release_deferred(&mut self, mut still_used: impl FnMut(usize, u64) -> bool) -> usize {
+        let mut state = self.free.0.borrow_mut();
+        let parked = std::mem::take(&mut state.deferred);
+        let mut freed = 0;
+        for id in parked {
+            let generation = state.generations[id];
+            if still_used(id, generation) {
+                state.deferred.push(id);
+                continue;
+            }
+            state.deferred_queued[id] = false;
+            state.is_free[id] = true;
+            state.free.push(id);
+            if !state.retirement_queued[id] {
+                state.retirement_queued[id] = true;
+                state.retirement_pending.push_back(id);
+            }
+            freed += 1;
+        }
+        freed
     }
 
     /// Allocates an item in the pool, potentially reusing an existing slot.

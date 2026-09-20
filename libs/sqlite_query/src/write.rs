@@ -433,6 +433,11 @@ impl Connection {
         if let Some(why) = &t.unsupported {
             return Err(Error::sql(format!("table {name} is unsupported: {why}")));
         }
+        if t.without_rowid {
+            // Readable (see exec::scan_without_rowid); the key-ordered writer
+            // is not implemented.
+            return Err(Error::unsupported("writing to WITHOUT ROWID tables"));
+        }
         if t.root_page == 0 {
             return Err(Error::sql(format!("table {name} has no b-tree")));
         }
@@ -1086,6 +1091,9 @@ impl Connection {
         let parsed = crate::schema::parse_create_table(name, 0, sql);
         if let Some(why) = &parsed.unsupported {
             return Err(Error::unsupported(why.clone()));
+        }
+        if parsed.without_rowid {
+            return Err(Error::unsupported("creating WITHOUT ROWID tables"));
         }
         let root = {
             let mut w = BtreeWriter::new(&mut self.pager);

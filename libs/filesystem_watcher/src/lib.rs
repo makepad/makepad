@@ -228,6 +228,7 @@ impl Emitter {
         &self.exclude
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     pub(crate) fn emit(
         &self,
         mount: String,

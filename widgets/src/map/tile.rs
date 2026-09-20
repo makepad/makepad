@@ -6264,9 +6264,6 @@ fn build_tile_buffers_from_features_profiled(
                 .atan();
             (crate::map::geometry::TILE_SIZE * n / (40_075_016.686 * lat.cos())) as f32
         };
-        // The one SceneSun also drives the legacy baked-shadow projection.
-        let sun_2d = theme.shiny.sun.dir_2d();
-        let (light_x, light_y) = (sun_2d.x, sun_2d.y);
         // v4 block dissolve: same-height touching buildings union at BAKE
         // time so shared interior walls never reach the extruder. Runtime
         // pays ZERO booleans — a signature HIT swaps the eligible jobs for

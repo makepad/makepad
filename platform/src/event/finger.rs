@@ -20,7 +20,7 @@ use {
 
 // Mouse events
 
-pub use makepad_studio_protocol::{KeyModifiers, MouseButton};
+pub use makepad_studio_protocol::{KeyModifiers, MouseButton, PinchPhase};
 
 #[derive(Clone, Debug)]
 pub struct MouseDownEvent {
@@ -125,6 +125,23 @@ pub struct ScrollEvent {
     pub is_mouse: bool,
     pub time: f64,
     pub phase: ScrollPhase,
+}
+
+/// A trackpad pinch: macOS `magnifyWithEvent:` and Wayland's
+/// `zwp_pointer_gesture_pinch_v1` (X11 and Windows report none).
+///
+/// `scale` is multiplicative and relative to the previous event of the same
+/// gesture (1 on `Begin` and `End`), so a widget zooming about `abs` applies
+/// it directly: `zoom *= scale`. Handle it through the `hit` functions as
+/// [`Hit::FingerPinch`], delivered to the widget under `abs`.
+#[derive(Clone, Debug)]
+pub struct PinchEvent {
+    pub window_id: WindowId,
+    pub abs: Vec2d,
+    pub scale: f64,
+    pub phase: PinchPhase,
+    pub modifiers: KeyModifiers,
+    pub time: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -324,14 +341,19 @@ pub struct CxFingers {
     tap: CxDigitTap,
     hovers: Vec<CxDigitHover>,
     xr_poke_locks: Vec<DigitId>,
-    /// Owners of the sweep lock, outermost first. Only the LAST entry is the
-    /// live lock: while it is held, `hits()` answers `Hit::Nothing` to any
-    /// area whose sweep area is not that owner. Nested overlays (a menu in a
-    /// popover in a dialog) each hold their own level, and removing an owner
-    /// hands the lock back to the one beneath it.
+    /// Owners of the sweep lock, outermost first; only the LAST entry is
+    /// the live lock. A single slot cannot serve NESTING OVERLAYS — a menu
+    /// over a dialog over a modal — where each level takes the pointer in
+    /// turn and has to hand it back to the one beneath it when it closes.
+    /// With one owner this behaves exactly as a single slot does.
     sweep_locks: Vec<Area>,
-    /// Owners of the scroll block, outermost first. Only the LAST entry is
-    /// live: while it is held, scrolling is allowed only within that area.
+    /// Owners of the scroll block, outermost first; only the LAST entry is
+    /// live. It nests for the reason the sweep lock does: a modal over a
+    /// modal blocks scrolling in turn, and the one that closes has to leave
+    /// the other's block standing.
+    /// * While any owner is held, scrolling is blocked *except* within the
+    ///   last one's area.
+    /// * While the stack is empty, scrolling is not blocked anywhere.
     scroll_blocks: Vec<Area>,
 }
 
@@ -499,14 +521,10 @@ impl CxFingers {
         self.captures.iter().find(|v| v.area == area).is_some()
     }
 
-    /// Whether the mouse is held by an area other than these: a control
-    /// that took the press and keeps it until the release, wherever the
-    /// pointer goes meanwhile. A widget that would start something of its
-    /// own on a press -- a carry, a rubber band -- asks this with its own
-    /// areas, and stands down while the answer is yes.
-    pub fn is_mouse_held_outside(&self, own: &[Area]) -> bool {
-        let digit_id: DigitId = live_id!(mouse).into();
-        self.captures.iter().any(|c| c.digit_id == digit_id && !own.contains(&c.area))
+    /// Whether `digit_id` is held by an area other than `area`, so a
+    /// capture-overload hit can tell a press a child already owns.
+    pub fn is_digit_captured_elsewhere(&self, digit_id: DigitId, area: Area) -> bool {
+        self.captures.iter().any(|v| v.digit_id == digit_id && v.area != area)
     }
 
     /// The area that captured the touch with the given uid, if any.
@@ -518,6 +536,60 @@ impl CxFingers {
 
     pub fn any_areas_captured(&self) -> bool {
         self.captures.len() > 0
+    }
+
+    /// Every capture of the MOUSE right now. Normally at most one, but a
+    /// container may co-capture a press a child already took, so one press
+    /// can have more than one owner.
+    fn mouse_captures(&self) -> impl Iterator<Item = &CxDigitCapture> {
+        let digit_id: DigitId = live_id!(mouse).into();
+        self.captures.iter().filter(move |c| c.digit_id == digit_id)
+    }
+
+    /// Is the mouse currently held by something that is NOT one of `mine`?
+    ///
+    /// Ask this from a gesture that starts on a RAW press (a list's
+    /// drag-to-scroll, a canvas pan, a rubber-band select) — code that never
+    /// goes through `Event::hits` and so never learns that another widget
+    /// took the press. Pass the areas the asking host owns (its own area,
+    /// its scroll bars); `true` means another control owns the pointer and
+    /// the gesture must stand down.
+    ///
+    /// # The rule this exists for
+    ///
+    /// Every control that is dragged continuously — a slider, a scrollbar, a
+    /// fader, a resizer, a long-press button — takes pointer capture on the
+    /// press. From then until the release the interaction is LOCKED to that
+    /// control: it keeps tracking the pointer outside its own bounds, and no
+    /// other element may take a hover, focus or press-like state from that
+    /// pointer on the way. A reorder carry, a scroll grab, or any other
+    /// gesture that would start from the same press stands down while
+    /// another control holds the mouse. The one exception is drag and drop:
+    /// there the source does NOT lock the pointer, because a global drag
+    /// state must let other components light their drag-over states and
+    /// accept the drop on release.
+    ///
+    /// `hits()` already implements the captured half: a press captures the
+    /// digit, and while a button is down no other area is handed hovers.
+    /// This is the other half — what a raw-press gesture has to ask for
+    /// itself, at the press AND on every move while it is still pending,
+    /// dropping itself the moment the answer is yes. The press and the
+    /// child's capture can land in either order within one event, so a raw
+    /// gesture must not rely on this alone at press time: it may only take a
+    /// press on BARE BACKGROUND, i.e. when no widget but the host itself is
+    /// found under the point, whether or not that widget captured.
+    ///
+    /// Only the mouse locks: a TOUCH capture elsewhere answers `false`,
+    /// because a touch drag that begins on a control is still allowed to
+    /// scroll the list under it.
+    ///
+    /// Areas are matched by owner, not by handle: a redraw hands the caller
+    /// a fresh `Area` for the same widget (a new `redraw_id`) while the
+    /// capture still records the one taken at the press, and that is still
+    /// `mine`.
+    pub fn is_mouse_held_outside(&self, mine: &[Area]) -> bool {
+        self.mouse_captures()
+            .any(|c| !mine.iter().any(|m| same_owner(*m, c.area)))
     }
 
     pub(crate) fn release_digit(&mut self, digit_id: DigitId) {
@@ -662,15 +734,8 @@ impl CxFingers {
         }
     }
 
-    /// The area holding the sweep lock right now — the innermost of the
-    /// owners pushed by [`Self::sweep_lock`] — if any.
-    pub fn sweep_lock_area(&self) -> Option<Area> {
-        self.sweep_locks.last().copied()
-    }
-
-    /// Take the sweep lock for `area`. While it is the innermost owner,
-    /// `hits()` answers nothing to any area whose sweep area is not `area`.
-    /// An owner already in the stack keeps its one entry and its level (the
+    /// Take the sweep lock for `area`, on top of any lock already held. An
+    /// owner already in the stack keeps its one entry and its level (the
     /// entry takes the newest handle, so a re-assertion after a redraw is
     /// not a second owner); a new owner goes on top and holds the lock
     /// until it unlocks.
@@ -681,15 +746,25 @@ impl CxFingers {
         }
     }
 
-    /// Release `area`'s sweep lock wherever it sits in the stack. Releasing
-    /// an outer owner while an inner one is held leaves the inner one on
+    /// The area holding the sweep lock right now — the innermost of the
+    /// owners pushed by [`Self::sweep_lock`] — if any.
+    ///
+    /// A popover that grabs the pointer (a drop-down, a radial menu) reads
+    /// this to tell "I hold it" from "somebody above me holds it", so it
+    /// releases only its own grab.
+    pub fn sweep_lock_area(&self) -> Option<Area> {
+        self.sweep_locks.last().copied()
+    }
+
+    /// Release `area`'s sweep lock wherever it sits in the stack. Letting go
+    /// of an outer owner while an inner one is held leaves the inner one on
     /// top; an area that holds no lock is a no-op.
     pub fn sweep_unlock(&mut self, area: Area) {
         self.sweep_locks.retain(|lock| !same_owner(*lock, area));
     }
 
     /// Returns the excepted area in which scrolling is currently allowed:
-    /// the innermost owner of the scroll block.
+    /// the innermost owner's.
     /// * If `Some`, scrolling is currently blocked *except* within the contained area.
     /// * If `None`, scrolling is not blocked anywhere.
     pub fn blocked_scrolling_exception_area(&self) -> Option<Area> {
@@ -698,9 +773,9 @@ impl CxFingers {
 
     /// `Some(area)` blocks scrolling everywhere but within `area`, on top of
     /// any block already held. An owner already in the stack keeps its one
-    /// entry, so a modal may re-assert its area on every draw. `None`
-    /// releases the innermost block only; an owner that knows its area
-    /// should use [`Self::unblock_scrolling_within_area`] instead.
+    /// entry and its level — blocks are re-asserted on every draw, with a
+    /// fresh handle each time, so they are matched by owner. `None` releases
+    /// the innermost block only.
     pub fn block_scrolling_within_area(&mut self, area: Option<Area>) {
         match area {
             Some(area) => match self.scroll_blocks.iter_mut().find(|block| same_owner(**block, area)) {
@@ -714,7 +789,12 @@ impl CxFingers {
     }
 
     /// Release the scroll block owned by `area` wherever it sits in the
-    /// stack, leaving every other owner's block in place.
+    /// stack, leaving a block another owner holds in place.
+    ///
+    /// Unlike passing `None` to [`Self::block_scrolling_within_area`], this
+    /// is safe to call from a widget that does not know whether its own
+    /// block is still the current one — a panel closing after something
+    /// else opened over it clears nothing.
     pub fn unblock_scrolling_within_area(&mut self, area: Area) {
         self.scroll_blocks.retain(|block| !same_owner(*block, area));
     }
@@ -950,6 +1030,18 @@ pub struct FingerScrollEvent {
     pub phase: ScrollPhase,
 }
 
+#[derive(Clone, Debug)]
+pub struct FingerPinchEvent {
+    pub window_id: WindowId,
+    pub abs: Vec2d,
+    /// The change since the previous event of the gesture (see [`PinchEvent`]).
+    pub scale: f64,
+    pub phase: PinchPhase,
+    pub modifiers: KeyModifiers,
+    pub time: f64,
+    pub rect: Rect,
+}
+
 /*
 pub enum HitTouch {
     Single,
@@ -1171,6 +1263,23 @@ impl Event {
                         time: e.time,
                         scroll: e.scroll,
                         phase: e.phase,
+                    });
+                }
+            }
+            Event::Pinch(e) => {
+                if cx.fingers.test_sweep_lock(options.sweep_area) {
+                    return Hit::Nothing;
+                }
+                let rect = area.clipped_rect(&cx);
+                if hit_test(e.abs, &rect, &options.margin) {
+                    return Hit::FingerPinch(FingerPinchEvent {
+                        window_id: e.window_id,
+                        abs: e.abs,
+                        scale: e.scale,
+                        phase: e.phase,
+                        modifiers: e.modifiers,
+                        time: e.time,
+                        rect,
                     });
                 }
             }

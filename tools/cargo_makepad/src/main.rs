@@ -156,6 +156,12 @@ fn show_help() {
         "       --device=<DEVICE_NAME>                    The device name to use for signing/provisioning"
     );
     println!();
+    println!("    [package.metadata.makepad.ios] (or .tvos) in Cargo.toml:");
+    println!("       info_plist = \"packaging/ios/Info.plist\"");
+    println!("       Optional XML/binary plist dictionary, relative to the package directory.");
+    println!("       Its top-level keys replace generated defaults before icons and signing.");
+    println!("       CFBundleIdentifier and CFBundleExecutable must match the generated values.");
+    println!();
     println!("Android commands:");
     println!();
     println!(
@@ -288,6 +294,19 @@ fn show_help() {
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<(), Cow<'static, str>> {
     let args: Vec<String> = std::env::args().collect();
+
+    // `RUSTC_WRAPPER` mode for the Android super-app pack: cargo runs the
+    // `makepad-dyn-rustc` link to this binary as `makepad-dyn-rustc <rustc>
+    // <args…>`. Both the name and the env var must say so: a bare inherited
+    // env var never diverts an ordinary `cargo makepad` command.
+    let invoked_as_wrapper = args
+        .first()
+        .and_then(|a| std::path::Path::new(a).file_stem())
+        .map(|stem| stem == "makepad-dyn-rustc")
+        .unwrap_or(false);
+    if invoked_as_wrapper && std::env::var_os("MAKEPAD_DYN_RUSTC_WRAPPER").is_some() && args.len() > 1 {
+        android_rustc_wrapper(&args[1..]);
+    }
 
     // Skip the first argument if it's the binary path or 'cargo'
     let args = if args.len() > 1

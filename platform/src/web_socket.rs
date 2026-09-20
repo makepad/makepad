@@ -31,6 +31,7 @@ pub type WebSocket = u64;
 
 #[derive(Debug)]
 enum StudioWebSocketThreadMsg {
+    #[cfg(any(not(target_arch = "wasm32"), target_feature = "atomics"))]
     AppToStudio { message: AppToStudio },
     Terminate,
 }
@@ -244,7 +245,7 @@ impl Cx {
                 samples.drain(0..remove);
             }
         }
-        SignalToUI::set_ui_signal();
+        SignalToUI::set_internal_signal();
     }
 
     #[cfg(any(not(target_arch = "wasm32"), target_feature = "atomics"))]
@@ -318,7 +319,6 @@ impl Cx {
 
     fn start_studio_websocket(&mut self, studio_http: &str) {
         if studio_http.is_empty() {
-            crate::log!("studio websocket disabled: empty studio_http");
             return;
         }
         self.studio_http = studio_http.into();
@@ -469,16 +469,76 @@ impl Cx {
             return;
         }
 
+        #[cfg(any(not(target_arch = "wasm32"), target_feature = "atomics"))]
         if let Some(sender) = STUDIO_WEB_SOCKET_THREAD_SENDER.lock().unwrap().as_ref() {
             let _ = sender.send(StudioWebSocketThreadMsg::AppToStudio { message: msg });
-        } else {
-            let _ = studio_ws_send_binary(AppToStudioVec(vec![msg]).serialize_bin());
+            return;
         }
+        let _ = studio_ws_send_binary(AppToStudioVec(vec![msg]).serialize_bin());
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn timed_wait_receives_message_before_deadline() {
+        let (tx, rx) = channel();
+        let now = Cell::new(0.0);
+        let parked = Cell::new(false);
+        let result = recv_studio_thread_msg_timed(
+            &rx,
+            Duration::from_millis(16),
+            || now.get(),
+            |remaining| {
+                parked.set(true);
+                tx.send(7).unwrap();
+                now.set(now.get() + remaining.as_secs_f64() * 0.5);
+            },
+        );
+        assert_eq!(result.unwrap(), 7);
+        assert!(parked.get());
+    }
+
+    #[test]
+    fn timed_wait_reaches_deadline() {
+        let (_tx, rx) = channel::<u8>();
+        let now = Cell::new(0.0);
+        let result = recv_studio_thread_msg_timed(
+            &rx,
+            Duration::from_millis(16),
+            || now.get(),
+            |remaining| now.set(now.get() + remaining.as_secs_f64()),
+        );
+        assert!(matches!(result, Err(RecvTimeoutError::Timeout)));
+    }
+
+    #[test]
+    fn timed_wait_reports_disconnect() {
+        let (tx, rx) = channel::<u8>();
+        drop(tx);
+        let result = recv_studio_thread_msg_timed(
+            &rx,
+            Duration::from_millis(16),
+            || 0.0,
+            |_| panic!("a disconnected channel must not park"),
+        );
+        assert!(matches!(result, Err(RecvTimeoutError::Disconnected)));
+    }
+
+    #[test]
+    fn empty_studio_url_spawns_no_thread() {
+        assert!(STUDIO_WEB_SOCKET_THREAD_SENDER.lock().unwrap().is_none());
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_websockets("");
+        assert!(STUDIO_WEB_SOCKET_THREAD_SENDER.lock().unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod timed_wait_tests {
     use super::*;
     use std::cell::Cell;
 

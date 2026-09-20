@@ -207,9 +207,18 @@ pub enum Event {
     /// Do not match upon or handle this event directly; instead use the family of
     /// `hit` functions ([`Event::hits()`]) and handle the returned [`Hit::FingerScroll`].
     Scroll(ScrollEvent), // this is the MouseWheel / touch scroll event sent by the OS
+    /// The raw event of a trackpad pinch (macOS magnify, Wayland pointer gestures).
+    ///
+    /// Do not match upon or handle this event directly; instead use the family of
+    /// `hit` functions ([`Event::hits()`]) and handle the returned [`Hit::FingerPinch`].
+    Pinch(PinchEvent),
 
     Timer(TimerEvent),
 
+    /// An app-facing channel has something for the UI thread: a `ToUISender`
+    /// sent, a task-pool job finished, a texture readback completed. This is a
+    /// broadcast to every widget with no payload, so each handler polls its
+    /// own queue. Makepad's own machinery never raises it.
     Signal,
     Trigger(TriggerEvent),
     MacosMenuCommand(LiveId),
@@ -254,7 +263,7 @@ pub enum Event {
 
     /// The "go back" navigational button or gesture was performed.
     ///
-    /// Tip: use the [`Event::consume_back_pressed()`] method to handle this event
+    /// Tip: use the [`Event::back_pressed()`] method to handle this event
     /// instead of matching on it directly.
     ///
     /// Once a widget has handled this event, it should set the `handled` flag to `true`
@@ -316,6 +325,7 @@ impl Event {
             23 => "TouchUpdate",
             24 => "LongPress",
             25 => "Scroll",
+            74 => "Pinch",
 
             26 => "Timer",
 
@@ -408,6 +418,7 @@ impl Event {
             Self::TouchUpdate(_) => 23,
             Self::LongPress(_) => 24,
             Self::Scroll(_) => 25,
+            Self::Pinch(_) => 74,
 
             Self::Timer(_) => 26,
 
@@ -495,9 +506,10 @@ impl Event {
     /// Marks this [`Scroll`](Self::Scroll) event's delta along `axis` as used,
     /// so the scroll views around the caller leave it alone.
     ///
-    /// Call it only after moving by the delta. A scroll view pinned at the edge
-    /// the delta points past leaves the delta for the views around it, the way
-    /// a `ScrollBar` at its limit does. Does nothing for any other event.
+    /// Call it only after moving by the delta. A scroll view pinned at the
+    /// edge the delta points past leaves the delta for the views around it,
+    /// the way a `ScrollBar` at its limit does. Does nothing for any other
+    /// event.
     pub fn set_scroll_handled(&self, axis: Vec2Index) {
         if let Self::Scroll(e) = self {
             match axis {
@@ -551,6 +563,7 @@ pub enum Hit {
     ImeAction(ImeActionEvent),
 
     FingerScroll(FingerScrollEvent),
+    FingerPinch(FingerPinchEvent),
     FingerDown(FingerDownEvent),
     FingerMove(FingerMoveEvent),
     FingerHoverIn(FingerHoverEvent),
@@ -578,7 +591,10 @@ impl Event {
             | Self::MouseMove(_)
             | Self::TweakRay(_)
             | Self::TouchUpdate(_)
-            | Self::Scroll(_) => true,
+            | Self::Scroll(_)
+            | Self::Pinch(_)
+            | Self::BackPressed { .. } => true,
+            Self::KeyDown(key) | Self::KeyUp(key) if key.key_code == KeyCode::Escape => true,
             _ => false,
         }
     }

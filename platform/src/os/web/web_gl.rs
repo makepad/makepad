@@ -79,6 +79,8 @@ impl Cx {
                 os.draw_call_uniforms_gen = None;
                 os.user_uniforms_gen = None;
                 os.inst_capacity = 0;
+                os.retained_publication = None;
+                os.retained_failed = 0;
                 os.inst_charge.take()
             });
 
@@ -149,15 +151,12 @@ impl Cx {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_order_len = self.draw_lists[draw_list_id].draw_item_order_len();
         // Exploded z-layer view: z is the call's nesting depth, not paint order.
-        // Only a pass asking for DEPTH LAYERS is sploded here: a flat
-        // viewpoint is a transform, not a layer walk.
-        //
+        let sploded = self.passes[draw_pass_id].sploded.is_some();
         // The list's own `view_transform` is the app's (a magnifier well, a
         // render stage matrix) and uploads as set — Metal and GL never reset
         // it; this walk used to overwrite it with the identity, which drew the
         // tweaker's mirrored material at the window's top-left instead of in
         // its well on the web.
-        let sploded = self.passes[draw_pass_id].sploded.is_some_and(|p| p.depth_layers);
 
         for order_index in 0..draw_order_len {
             let uniforms_gen = self.next_uniform_gen();
@@ -213,6 +212,18 @@ impl Cx {
                     continue;
                 }
 
+                // A publication the browser refused to upload is final for
+                // that content: skipped, never retried every frame. Changed
+                // content is a new publication and gets a fresh attempt.
+                if draw_item.os.retained_failed != 0
+                    && draw_item
+                        .retained_instances
+                        .as_ref()
+                        .is_some_and(|publication| publication.id() == draw_item.os.retained_failed)
+                {
+                    continue;
+                }
+
                 if sh.mapping.uses_time {
                     self.demo_time_repaint = true;
                 }
@@ -236,10 +247,32 @@ impl Cx {
                         || draw_item.instances.as_ref().map_or(0, |v| v.len() * 4),
                         |p| p.byte_len(),
                     );
+                    let plan = draw_item
+                        .retained_instances
+                        .as_ref()
+                        .and_then(|publication| {
+                            draw_item
+                                .os
+                                .retained_publication
+                                .as_ref()
+                                .filter(|_| draw_item.os.inst_capacity != 0)
+                                .map(|previous| publication.upload_plan(previous))
+                        });
                     let replaces = draw_item.retained_instances.is_none()
-                        || draw_item.retained_upload_range.start == 0
                         || draw_item.os.inst_vb_id.is_none()
-                        || bytes > draw_item.os.inst_capacity;
+                        || bytes > draw_item.os.inst_capacity
+                        || plan.as_ref().is_none_or(|plan| {
+                            !plan.can_update_in_place()
+                                || plan.writes.iter().any(|range| {
+                                    range.start
+                                        < draw_item
+                                            .os
+                                            .retained_publication
+                                            .as_ref()
+                                            .unwrap()
+                                            .float_len()
+                                })
+                        });
                     if replaces {
                         let capacity = if draw_item.retained_instances.is_some() {
                             bytes.next_power_of_two().max(256)
@@ -265,19 +298,59 @@ impl Cx {
                         self.os.vertex_buffers += 1;
                     }
 
-                    if let Some(retained) = &draw_item.retained_instances {
-                        self.os.from_wasm(FromWasmRetainedArrayBuffer {
+                    let copy_started = Cx::monotonic_now();
+                    let uploaded = if let Some(retained) = &draw_item.retained_instances {
+                        let full = vec![0..retained.float_len()];
+                        let ranges = plan
+                            .as_ref()
+                            .map_or(full.as_slice(), |plan| plan.writes.as_slice());
+                        let mut writes = Vec::new();
+                        let mut uploaded = 0;
+                        for range in ranges {
+                            for (offset, data) in retained.data_slices(range.clone()) {
+                                writes.push(WRetainedBufferWrite {
+                                    destination_slot: offset,
+                                    data: WasmPtrF32::new(data),
+                                });
+                                uploaded += std::mem::size_of_val(data);
+                            }
+                        }
+                        self.os.from_wasm(FromWasmRetainedArrayUpdate {
                             buffer_id: draw_item.os.inst_vb_id.unwrap(),
-                            data: WasmPtrF32::new(retained.data()),
-                            first_slot: draw_item.retained_upload_range.start,
+                            slot_count: retained.float_len(),
+                            capacity_bytes: draw_item.os.inst_capacity,
+                            replace: replaces,
+                            copies: plan.as_ref().map_or_else(Vec::new, |plan| {
+                                plan.copies
+                                    .iter()
+                                    .map(|copy| WRetainedBufferCopy {
+                                        source_slot: copy.source.start,
+                                        destination_slot: copy.destination,
+                                        slot_count: copy.source.len(),
+                                    })
+                                    .collect()
+                            }),
+                            writes,
                         });
+                        draw_item.os.retained_publication = Some(retained.clone());
+                        uploaded
                     } else {
                         self.os.from_wasm(FromWasmAllocArrayBuffer {
                             buffer_id: draw_item.os.inst_vb_id.unwrap(),
                             data: WasmPtrF32::new(draw_item.instances.as_deref().unwrap()),
                             byte_data: WasmPtrU8::new(&[]),
                         });
+                        draw_item.os.retained_publication = None;
+                        bytes
+                    };
+                    if replaces {
+                        draw_item.os.inst_vb_generation =
+                            draw_item.os.inst_vb_generation.wrapping_add(1);
                     }
+                    upload_budget.stats.bytes = upload_budget.stats.bytes.saturating_add(uploaded);
+                    upload_budget.stats.install_us = upload_budget.stats.install_us.saturating_add(
+                        ((Cx::monotonic_now() - copy_started).max(0.0) * 1_000_000.0) as u64,
+                    );
                     draw_call.instance_dirty = false;
                     draw_item.retained_instance_id =
                         draw_item.retained_instances.as_ref().map_or(0, |v| v.id());
@@ -1137,6 +1210,10 @@ pub struct CxOsDrawCall {
     pub inst_vb_id: Option<usize>,
     pub inst_vb_generation: u64,
     pub inst_capacity: usize,
+    pub retained_publication: Option<crate::retained_instances::RetainedInstances>,
+    /// The publication whose upload the browser refused (0 = none). That
+    /// content is not drawn and not retried; a new publication is tried.
+    pub retained_failed: u64,
     pub inst_charge: Option<crate::retained_instances::RetainedAllocation>,
     pub uniforms_recording_gen: Option<u64>,
     pub draw_call_uniforms_gen: Option<u64>,

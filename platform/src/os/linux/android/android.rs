@@ -107,6 +107,25 @@ fn android_debug_log(prio: i32, msg: &str) {
     unsafe { __android_log_write(prio as c_int, "Makepad\0".as_ptr(), msg.as_ptr()) };
 }
 
+/// An Android system property's value, empty when unset. Bionic's
+/// `__system_property_get` is in libc on every API level this runs on.
+fn android_system_property(name: &str) -> String {
+    use std::ffi::{c_char, c_int, CString};
+    extern "C" {
+        fn __system_property_get(name: *const c_char, value: *mut c_char) -> c_int;
+    }
+    const PROP_VALUE_MAX: usize = 92;
+    let Ok(name) = CString::new(name) else {
+        return String::new();
+    };
+    let mut value = [0u8; PROP_VALUE_MAX];
+    let len = unsafe { __system_property_get(name.as_ptr(), value.as_mut_ptr() as *mut c_char) };
+    if len <= 0 {
+        return String::new();
+    }
+    String::from_utf8_lossy(&value[..(len as usize).min(PROP_VALUE_MAX)]).into_owned()
+}
+
 fn android_panic_summary(info: &std::panic::PanicHookInfo<'_>) -> String {
     let payload = if let Some(payload) = info.payload().downcast_ref::<&str>() {
         (*payload).to_string()
@@ -319,6 +338,7 @@ impl Cx {
             // This ensures we're in sync with the Android Choreographer when we receive a RenderLoop message.
             match from_java_rx.recv() {
                 Ok(FromJavaMessage::RenderLoop) => {
+                    let render_loop_started = std::time::Instant::now();
                     // Drain all pending messages, coalescing consecutive touch-move
                     // events to avoid redundant event dispatch before painting.
                     // Start/Stop events are never dropped — only pure-Move events
@@ -380,6 +400,22 @@ impl Cx {
                         if self.os.needs_first_draw {
                             self.os.needs_first_draw = false;
                             self.redraw_all();
+                        }
+                        // The event side of a frame: the drained Java messages
+                        // (touches coalesced), the timers/signals and the live
+                        // edit gate, before any drawing. Only for a vsync that
+                        // draws (the same test `handle_drawing` makes): at rest
+                        // the loop wakes 120 times a second and paints nothing.
+                        if self.any_passes_dirty()
+                            || self.need_redrawing()
+                            || !self.new_next_frames.is_empty()
+                            || self.demo_time_repaint
+                        {
+                            crate::trace!(
+                                "frame.cpu",
+                                "events_ms={:.3}",
+                                render_loop_started.elapsed().as_secs_f64() * 1000.0
+                            );
                         }
                         self.handle_drawing();
                     } else {
@@ -688,8 +724,10 @@ impl Cx {
                             match CxVulkan::new(window, width_u32, height_u32) {
                                 Ok(vulkan) => {
                                     self.os.vulkan = Some(vulkan);
+                                    self.os.gl_fallback = false;
                                 }
                                 Err(err) => {
+                                    self.os.gl_fallback = true;
                                     crate::error!(
                                         "Android Vulkan backend init failed, falling back to OpenGL: {err}"
                                     );
@@ -888,7 +926,7 @@ impl Cx {
                     } else {
                         // Everything else reaches the widget as a KeyDown, including
                         // other Ctrl/Alt shortcuts like Ctrl+Enter or Ctrl+A.
-                        if makepad_keycode == KeyCode::Back {
+                        if makepad_keycode == KeyCode::Back && !is_repeat {
                             self.call_event_handler(&Event::BackPressed {
                                 handled: Cell::new(false),
                             });
@@ -1442,13 +1480,16 @@ impl Cx {
             || self.demo_time_repaint
         {
             let time_now = self.os.timers.time_now();
+            let phase_started = std::time::Instant::now();
             if !self.new_next_frames.is_empty() {
                 self.call_next_frame_event(time_now);
             }
+            let next_frame_done = std::time::Instant::now();
             if self.need_redrawing() {
                 self.call_draw_event(time_now);
                 self.compile_shaders_for_active_backend();
             }
+            let draw_done = std::time::Instant::now();
 
             if self.os.first_after_resize {
                 self.os.first_after_resize = false;
@@ -1456,6 +1497,17 @@ impl Cx {
             }
 
             self.handle_repaint();
+            // Where a frame's CPU goes on the main thread, per phase: the
+            // NextFrame step, the widget draw (`call_draw_event`) and the
+            // repaint of every dirty pass (`handle_repaint`, record + submit).
+            // `adb shell setprop debug.makepad.trace frame.cpu`.
+            crate::trace!(
+                "frame.cpu",
+                "next_frame_ms={:.3} draw_ms={:.3} repaint_ms={:.3}",
+                next_frame_done.duration_since(phase_started).as_secs_f64() * 1000.0,
+                draw_done.duration_since(next_frame_done).as_secs_f64() * 1000.0,
+                draw_done.elapsed().as_secs_f64() * 1000.0,
+            );
 
             // Run script-VM garbage collection at a safe point after paint, matching
             // the macOS backend, so the script object heap doesn't grow without bound:
@@ -1600,9 +1652,13 @@ impl Cx {
         }
 
         // Signals
-        if SignalToUI::check_and_clear_ui_signal() {
+        let internal_signal = SignalToUI::check_and_clear_internal_signal();
+        let ui_signal = SignalToUI::check_and_clear_ui_signal();
+        if internal_signal || ui_signal {
             self.handle_media_signals();
             self.handle_script_signals();
+        }
+        if ui_signal {
             self.call_event_handler(&Event::Signal);
         }
         if SignalToUI::check_and_clear_action_signal() {
@@ -1965,6 +2021,14 @@ impl Cx {
             let mut cx = startup();
             let mut libegl = LibEgl::try_load().expect("Cant load LibEGL");
 
+            // A phone has no `MAKEPAD_TRACE` environment: the trace topics
+            // come from a system property instead
+            // (`adb shell setprop debug.makepad.trace gpu.present`).
+            let trace_topics = android_system_property("debug.makepad.trace");
+            if !trace_topics.is_empty() {
+                crate::makepad_error_log::set_trace_topics(&trace_topics);
+            }
+
             cx.os.activity_thread_id = Some(activity_thread_id);
             cx.os.render_thread_id =
                 Some(unsafe { libc_sys::syscall(libc_sys::SYS_GETTID) as u64 });
@@ -2129,6 +2193,7 @@ impl Cx {
                         cx.os.vulkan = Some(vulkan);
                     }
                     Err(err) => {
+                        cx.os.gl_fallback = true;
                         crate::error!(
                             "Android Vulkan backend init failed on startup, continuing with OpenGL: {err}"
                         );
@@ -2385,6 +2450,15 @@ impl Cx {
                     self.draw_pass_to_texture_for_active_backend(*draw_pass_id);
                 }
             }
+        }
+        // A repaint that ended without a window pass (captures only, or the
+        // window pass skipped its turn) still has to reach the GPU.
+        #[cfg(use_vulkan)]
+        if let Some(mut vulkan) = self.os.vulkan.take() {
+            if let Err(err) = vulkan.end_repaint() {
+                crate::error!("Android Vulkan repaint submit failed: {err}");
+            }
+            self.os.vulkan = Some(vulkan);
         }
 
         let timestamp_ns = (self.os.timers.time_now().max(0.0) * 1_000_000_000.0) as u64;
@@ -3378,6 +3452,8 @@ impl Default for CxOs {
             surface_alive: false,
             #[cfg(use_vulkan)]
             vulkan: None,
+            #[cfg(use_vulkan)]
+            gl_fallback: false,
             quit: false,
             fullscreen: false,
             timers: Default::default(),
@@ -3535,6 +3611,10 @@ pub struct CxOs {
     pub(crate) surface_alive: bool,
     #[cfg(use_vulkan)]
     pub(crate) vulkan: Option<CxVulkan>,
+    /// Vulkan found no usable device and OpenGL ES draws instead; what
+    /// `Cx::gpu_backend` reports in a Vulkan build.
+    #[cfg(use_vulkan)]
+    pub(crate) gl_fallback: bool,
     pub(crate) media: CxAndroidMedia,
     pub(crate) video_surfaces: HashMap<LiveId, jobject>,
     pub(crate) video_configs: HashMap<LiveId, AndroidVideoConfig>,
@@ -3569,6 +3649,13 @@ pub struct CxOs {
 impl CxOs {
     pub(crate) fn gl(&self) -> &LibGl {
         &self.display.as_ref().unwrap().libgl
+    }
+
+    /// True while the Vulkan renderer exists. A Vulkan build whose
+    /// `CxVulkan::new` failed renders with OpenGL ES and answers false.
+    #[cfg(use_vulkan)]
+    pub(crate) fn vulkan_active(&self) -> bool {
+        self.vulkan.is_some()
     }
 
     /// Returns `true` only when it is currently safe to issue draw / swap-buffer

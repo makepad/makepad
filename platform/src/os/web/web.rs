@@ -485,10 +485,14 @@ impl Cx {
 
                 live_id!(ToWasmSignal) => {
                     let tw = ToWasmSignal::read_to_wasm(&mut to_wasm);
-                    if tw.flags & 1 != 0 {
+                    if tw.flags & (1 | 4) != 0 {
                         self.handle_media_signals();
                         self.handle_script_signals();
+                    }
+                    if tw.flags & 1 != 0 {
                         self.call_event_handler(&Event::Signal);
+                    }
+                    if tw.flags & (1 | 4) != 0 {
                         self.dispatch_network_runtime_events();
                     }
                     if tw.flags & 2 != 0 {
@@ -542,6 +546,38 @@ impl Cx {
 
                 live_id!(ToWasmRedrawAll) => {
                     self.redraw_all();
+                }
+
+                live_id!(ToWasmRetainedUploadFailed) => {
+                    let failed = ToWasmRetainedUploadFailed::read_to_wasm(&mut to_wasm);
+                    let lists: Vec<_> = self.draw_lists.id_iter().collect();
+                    for list in lists {
+                        for index in 0..self.draw_lists[list].draw_items.len() {
+                            let item = &mut self.draw_lists[list].draw_items[index];
+                            if item.os.inst_vb_id == Some(failed.buffer_id) {
+                                // A failed upload is final for this publication:
+                                // the browser could not allocate or fill the
+                                // buffer, and asking again every frame only
+                                // spins. The item stays off screen until its
+                                // content changes (a new publication).
+                                let publication = item
+                                    .retained_instances
+                                    .as_ref()
+                                    .map_or(item.retained_instance_id, |p| p.id());
+                                item.os.retained_failed = publication;
+                                item.os.retained_publication = None;
+                                item.os.inst_capacity = 0;
+                                item.instance_upload_pending = false;
+                                if let Some(call) = item.kind.draw_call_mut() {
+                                    call.instance_dirty = false;
+                                }
+                                crate::error!(
+                                    "WebGL retained upload failed for draw list {:?} item {}; that content stays off screen until it changes",
+                                    list, index
+                                );
+                            }
+                        }
+                    }
                 }
 
                 live_id!(ToWasmWebGLShadersDone) => {
@@ -1458,6 +1494,7 @@ impl CxOsApi for Cx {
             ToWasmPaintDirty::to_js_code(),
             ToWasmRedrawAll::to_js_code(),
             ToWasmWebGLShadersDone::to_js_code(),
+            ToWasmRetainedUploadFailed::to_js_code(),
             ToWasmLiveFileChange::to_js_code(),
             ToWasmLocationChange::to_js_code(),
             ToWasmWindowGotFocus::to_js_code(),
@@ -1523,6 +1560,7 @@ impl CxOsApi for Cx {
             FromWasmCompileWebGLShader::to_js_code(),
             FromWasmAllocArrayBuffer::to_js_code(),
             FromWasmRetainedArrayBuffer::to_js_code(),
+            FromWasmRetainedArrayUpdate::to_js_code(),
             FromWasmAllocIndexBuffer::to_js_code(),
             FromWasmAllocVao::to_js_code(),
             FromWasmFreeWebGLResources::to_js_code(),
@@ -1735,6 +1773,9 @@ pub unsafe extern "C" fn wasm_check_signal() -> u32 {
     }
     if SignalToUI::check_and_clear_action_signal() {
         x |= 2
+    }
+    if SignalToUI::check_and_clear_internal_signal() {
+        x |= 4
     }
     x
 }

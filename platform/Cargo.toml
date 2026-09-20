@@ -9,6 +9,23 @@ homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "ue5pTU0e_KaMiNqLQpo2CaD-WeQ="
 
+[features]
+# Desktop Linux binaries carry both renderers and choose when they start:
+# Vulkan when a hardware device answers, OpenGL ES otherwise (no driver, only
+# a software rasterizer, an X11 session). `MAKEPAD_GPU=auto|gl|vulkan`
+# overrides that at run time; see os/linux/gpu_preference.rs. On by default so
+# a distributed binary gets the faster API wherever one exists, without the
+# app or its user configuring anything.
+#
+# The feature only takes effect on the windowed desktop Linux backend, which is
+# the one with that fallback (see build.rs); OpenHarmony, Android, the direct
+# (DRM/KMS) renderer and other Linux triples keep OpenGL ES. `MAKEPAD=gl` at
+# build time produces an OpenGL-only binary, which an app needs today if it
+# uses the Video widget or `Texture::read_back`: neither is implemented on the
+# Vulkan renderer yet (`MAKEPAD_GPU=gl` does the same at run time).
+default = ["vulkan"]
+vulkan = []
+
 # AppKit cursor creation must run on the process main thread.
 [[test]]
 name = "macos_cursors"
@@ -159,7 +176,5 @@ features = [
     "Storage_Streams",
 ]
 
-## The vast majority of the Rust ecosystem is currently on
-## `windows-targets` v0.52.*, so we use that version to avoid duplicates.
-[target.'cfg(windows)'.dependencies.windows-targets]
-version = "0.52"
+[target.'cfg(windows)'.dependencies.windows-link]
+path = "../libs/windows/windows-link"

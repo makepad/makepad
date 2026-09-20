@@ -3544,8 +3544,16 @@ impl FontFamily {
                     continue;
                 }
             }
-            expected_member_count += 1;
             let font_id = font_member_font_id(member);
+            // A member whose resource this process can never read (a font
+            // the build's font set leaves out, an asset missing from the
+            // package) is out of the family for good. Counted, it would keep
+            // the family incomplete, and an incomplete family is redefined
+            // on every frame: the layout cache emptied, every text laid out
+            // again, the missing asset opened again.
+            if fonts.is_font_unavailable(font_id) {
+                continue;
+            }
 
             if !fonts.is_font_known(font_id) {
                 let font_data = cx.get_resource_font_bytes_by_path(&member.resource_path);
@@ -3568,8 +3576,18 @@ impl FontFamily {
                             variations: Vec::new(),
                         },
                     );
+                } else if cx.script_resource_unavailable(&member.resource_path) {
+                    if fonts.note_font_unavailable(font_id) {
+                        log!(
+                            "font member {} ({}) is not available in this build; the family renders without it",
+                            member.id,
+                            member.resource_path
+                        );
+                    }
+                    continue;
                 }
             }
+            expected_member_count += 1;
 
             if fonts.is_font_known(font_id) {
                 font_ids.push(font_id);
@@ -3604,6 +3622,7 @@ impl FontFamily {
 
         let family_id = self.to_font_family_id();
         let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
+        fonts.borrow_mut().sync_unavailable_fonts(cx.script_resource_generation());
         let expected_member_count = {
             let fonts_ref = fonts.borrow();
             self.members
@@ -3612,6 +3631,7 @@ impl FontFamily {
                     member
                         .lazy
                         .map_or(true, |lazy| fonts_ref.lazy_font_is_requested(family_id, lazy))
+                        && !fonts_ref.is_font_unavailable(font_member_font_id(member))
                 })
                 .count()
         };

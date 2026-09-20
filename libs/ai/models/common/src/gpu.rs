@@ -2078,8 +2078,6 @@ mod imp {
     pub struct GpuTensor {
         pub(crate) rows: usize,
         pub(crate) cols: usize,
-        pub(crate) data: std::cell::RefCell<Vec<f32>>,
-        pub(crate) u32s: std::cell::RefCell<Vec<u32>>,
     }
 
     #[cfg(not(target_os = "macos"))]

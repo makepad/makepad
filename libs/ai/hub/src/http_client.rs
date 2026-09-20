@@ -27,6 +27,7 @@ const MAX_HEAD_BYTES: usize = 256 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(60);
 /// Per-address TCP connect bound for plain HTTP (see `connect`): a LAN node
 /// answers a SYN within milliseconds; anything past this is a dead box.
+#[cfg(not(target_os = "windows"))]
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub struct HttpClientRequest<'a> {

@@ -4,7 +4,7 @@ use {
     crate::{
         area::Area,
         cursor::MouseCursor,
-        cx::{Cx, CxRef, OsType, XrCapabilities},
+        cx::{Cx, CxRef, GpuBackend, OsType, XrCapabilities},
         display_context::SystemBarAppearance,
         draw_list::DrawListId,
         draw_pass::{CxDrawPassParent, CxDrawPassRect, DrawPassId},
@@ -599,6 +599,54 @@ pub(crate) fn defer_platform_op(platform_ops: &mut VecDeque<CxOsOp>, op: CxOsOp)
 }
 
 impl Cx {
+    /// Update a named dynamic uniform on one retained draw item without
+    /// invalidating its immutable instance publication.
+    pub fn set_draw_item_uniform(
+        &mut self,
+        list: DrawListId,
+        item: usize,
+        name: LiveId,
+        value: &[f32],
+    ) -> bool {
+        // A stale (list, item) after eviction or re-recording is a no-op,
+        // never a UI-thread panic.
+        let draw_items = &self.draw_lists[list].draw_items;
+        let Some(shader) = (item < draw_items.len())
+            .then(|| draw_items[item].draw_call())
+            .flatten()
+            .map(|call| call.draw_shader_id)
+        else {
+            return false;
+        };
+        let Some(input) = self.draw_shaders[shader.index]
+            .mapping
+            .dyn_uniforms
+            .inputs
+            .iter()
+            .find(|input| input.id == name)
+        else {
+            return false;
+        };
+        let offset = input.offset;
+        let len = input.slots.min(value.len());
+        let draw_list = &mut self.draw_lists[list];
+        let changed = draw_list.draw_items.set_dyn_uniform(
+            item,
+            shader,
+            offset,
+            &value[..len],
+            &mut self.uniform_gen,
+        );
+        if changed {
+            if let Some(pass) = draw_list.draw_pass_id {
+                self.passes[pass].paint_dirty = true;
+            }
+        }
+        changed
+    }
+}
+
+impl Cx {
     pub fn in_draw_event(&self) -> bool {
         self.in_draw_event
     }
@@ -616,18 +664,6 @@ impl Cx {
         self.pending_script_reapply = true;
     }
 
-    /// Requests a deferred `Event::LiveEdit` on the next event-loop iteration.
-    /// The handler re-runs `script_mod` (re-evaluating any expressions that
-    /// reference primitive heap values like `mod.widgets.SAFE_INSET_PAD_TOP`)
-    /// and then re-applies the widget tree with `Apply::Reload`.
-    ///
-    /// Use this only when a primitive heap value has changed and that value
-    /// is consumed by `script_mod!` block expressions — those expressions are
-    /// not re-evaluated by `Apply::ScriptReapply`. `Apply::Reload` walks
-    /// clobber runtime widget state (animator values, dynamic instance
-    /// buffers, user-typed text in widgets that don't early-return on
-    /// LiveEdit), so prefer `request_script_reapply` when the change can be
-    /// modeled as a shared-heap-object mutation instead.
     /// Re-evaluate application Splash with a new stylesheet, preserving text and
     /// other imperative state through `Apply::ScriptReapply`.
     pub fn request_style_reload(&mut self) {
@@ -635,8 +671,27 @@ impl Cx {
         self.pending_live_edit_request = true;
     }
 
+    /// Requests a deferred `Event::LiveEdit` on the next event-loop iteration.
+    /// The handler re-runs `script_mod` (re-evaluating any expressions that
+    /// reference primitive heap values like `mod.widgets.SAFE_INSET_PAD_TOP`)
+    /// and then re-applies the widget tree with `Apply::Rebake`, which
+    /// preserves imperative runtime state since the DSL itself is unchanged.
+    ///
+    /// Use this only when a primitive heap value has changed and that value
+    /// is consumed by `script_mod!` block expressions — those expressions are
+    /// not re-evaluated by `Apply::ScriptReapply`. The re-run is still a full
+    /// tree walk, so prefer `request_script_reapply` when the change can be
+    /// modeled as a shared-heap-object mutation instead.
     pub fn request_live_edit(&mut self) {
         self.pending_live_edit_request = true;
+    }
+
+    /// The `Apply` variant the currently dispatching `Event::LiveEdit` should
+    /// be re-applied with — `Reload` for a file-change hot reload, `Rebake`
+    /// for a `request_live_edit()` re-bake. `app_main!` reads this; app code
+    /// has no reason to.
+    pub fn live_edit_apply(&self) -> crate::makepad_script::Apply {
+        self.live_edit_apply.clone()
     }
 
     /// Remap an absolute coordinate from the OS-reported logical-point space
@@ -989,6 +1044,22 @@ impl Cx {
             .map(SharedBytes::from_owned)
     }
 
+    /// The script resource at `path` can never be read in this process: no
+    /// resource is registered under it, or its load already failed (a font
+    /// left out of the build's font set, an asset missing from the package).
+    /// A resource still loading, or not yet loaded, is not unavailable.
+    pub fn script_resource_generation(&self) -> u64 {
+        self.script_data.resources.generation.get()
+    }
+
+    pub fn script_resource_unavailable(&self, path: &str) -> bool {
+        let resources = self.script_data.resources.resources.borrow();
+        match resources.iter().find(|res| res.abs_path == path) {
+            None => true,
+            Some(res) => matches!(res.data, crate::script::res::CxScriptResourceData::Error(_)),
+        }
+    }
+
     pub fn null_texture(&self) -> Texture {
         self.null_texture.clone()
     }
@@ -1001,6 +1072,61 @@ impl Cx {
 
     pub fn os_type(&self) -> &OsType {
         &self.os_type
+    }
+
+    /// The GPU API this binary renders with (see [`GpuBackend`]). Desktop Linux
+    /// picks between Vulkan and OpenGL ES at startup (a Vulkan-capable build
+    /// falls back to OpenGL when no usable hardware device answers); once the
+    /// event loop has chosen, this reports that choice (recorded on the
+    /// Linux platform state, `CxOs::gpu_backend`). Before that, and on every
+    /// other platform, it is the API compiled into the binary.
+    pub fn gpu_backend(&self) -> GpuBackend {
+        #[cfg(all(
+            target_os = "linux",
+            not(any(gpusim, linux_direct, target_env = "ohos"))
+        ))]
+        if let Some(active) = self.os.gpu_backend {
+            return active;
+        }
+        #[cfg(all(target_os = "android", use_vulkan))]
+        if self.os.gl_fallback {
+            return GpuBackend::OpenGl;
+        }
+        #[cfg(gpusim)]
+        {
+            GpuBackend::Gpusim
+        }
+        #[cfg(not(gpusim))]
+        {
+            #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+            {
+                GpuBackend::Metal
+            }
+            #[cfg(target_os = "windows")]
+            {
+                GpuBackend::Direct3d11
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                GpuBackend::WebGl
+            }
+            #[cfg(all(
+                not(any(target_os = "macos", target_os = "ios", target_os = "tvos", target_os = "windows")),
+                not(target_arch = "wasm32"),
+                use_vulkan
+            ))]
+            {
+                GpuBackend::Vulkan
+            }
+            #[cfg(all(
+                not(any(target_os = "macos", target_os = "ios", target_os = "tvos", target_os = "windows")),
+                not(target_arch = "wasm32"),
+                not(use_vulkan)
+            ))]
+            {
+                GpuBackend::OpenGl
+            }
+        }
     }
 
     /// Returns the app's writable data directory path.
@@ -1029,16 +1155,19 @@ impl Cx {
     /// GL maps clip-space z/w from [-1, 1] to window depth [0, 1].
     /// Metal, Vulkan and D3D use [0, 1] clip depth directly.
     pub fn clip_depth_scale_bias(&self) -> (f32, f32) {
-        if cfg!(all(
-            not(gpusim),
-            not(use_vulkan),
-            any(
-                target_arch = "wasm32",
-                target_os = "linux",
-                target_os = "android",
-                target_env = "ohos"
-            )
-        )) {
+        // Desktop Linux decides its API at startup (a Vulkan-capable build can
+        // render with OpenGL ES), so it asks the running backend; every other
+        // target's API is fixed at build time.
+        let gl_clip = if cfg!(gpusim) {
+            false
+        } else if cfg!(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")) {
+            cfg!(not(use_vulkan))
+        } else if cfg!(target_os = "linux") {
+            matches!(self.gpu_backend(), GpuBackend::OpenGl)
+        } else {
+            false
+        };
+        if gl_clip {
             (0.5, 0.5)
         } else {
             (1.0, 0.0)
@@ -1461,11 +1590,6 @@ impl Cx {
         self.mouse_cursor
     }
 
-    /// Take the sweep lock for `value`: until it is released, `Event::hits`
-    /// answers nothing to any area whose sweep area is not `value`. Locks
-    /// nest — an overlay opened over a locked one takes the lock for itself
-    /// and hands it back when it unlocks; an owner locking twice holds one
-    /// entry.
     pub fn sweep_lock(&mut self, value: Area) {
         self.fingers.sweep_lock(value);
     }
@@ -1487,13 +1611,15 @@ impl Cx {
         self.fingers.promote_capture_over(over)
     }
 
-    /// Release the sweep lock held by `value`, wherever it sits in the nest.
-    /// A lock held by another area is untouched.
     pub fn sweep_unlock(&mut self, value: Area) {
         self.fingers.sweep_unlock(value);
     }
 
-    /// The area holding the sweep lock right now (the innermost owner), if any.
+    /// The area holding the sweep lock right now, if any.
+    ///
+    /// A popover that takes the pointer while it is open (a drop-down, a
+    /// radial menu, a drawer) reads this to tell its own grab from one an
+    /// overlay above it took, so it releases only what it locked itself.
     pub fn sweep_lock_area(&self) -> Option<Area> {
         self.fingers.sweep_lock_area()
     }
@@ -1530,8 +1656,12 @@ impl Cx {
         self.fingers.block_scrolling_within_area(None);
     }
 
-    /// Releases the scroll block that `scrollable_area` owns, wherever it
-    /// sits in the nest; blocks held by other owners are untouched.
+    /// Releases the scroll block owned by `scrollable_area`; a block held by
+    /// another owner is left alone.
+    ///
+    /// The owner-scoped counterpart of [`Cx::unblock_scrolling()`], for a
+    /// panel that closes without knowing whether something else has since
+    /// blocked scrolling over it.
     pub fn unblock_scrolling_within_area(&mut self, scrollable_area: Area) {
         self.fingers.unblock_scrolling_within_area(scrollable_area);
     }
@@ -1907,7 +2037,7 @@ impl Cx {
     /// this is false whether or not the asker heard it: a container that
     /// stops passing events on (a closed modal) swallows it, and a widget
     /// running an animation on a frame chain can tell that way that its
-    /// chain was cut.
+    /// chain was cut and re-arm instead of stalling.
     pub fn next_frame_is_pending(&self, next_frame: NextFrame) -> bool {
         self.new_next_frames.contains(&next_frame)
     }
@@ -2394,7 +2524,7 @@ mod stale_window_tests {
     }
 }
 
-#[cfg(all(target_os = "linux", not(target_os = "android")))]
+#[cfg(all(target_os = "linux", not(target_os = "android"), not(gpusim)))]
 fn can_play_type_impl(mime: &str) -> &'static str {
     crate::os::linux::linux_video_playback::can_play_type(mime)
 }
@@ -2413,7 +2543,7 @@ fn can_play_type_impl(mime: &str) -> &'static str {
 }
 
 #[cfg(all(
-    any(target_os = "macos", target_os = "ios", target_os = "tvos"),
+    any(target_os = "macos", target_os = "ios", target_os = "tvos", target_os = "linux"),
     gpusim
 ))]
 fn can_play_type_impl(_mime: &str) -> &'static str {
@@ -2523,7 +2653,6 @@ mod tests {
         assert!(matches!(second, CxOsOp::SetTopmost(_, true)));
         assert!(platform_ops.is_empty());
     }
-
     #[test]
     fn nested_overlay_locks_unwind_one_level_at_a_time() {
         let mut cx = Cx::new(Box::new(|_cx: &mut Cx, _event: &Event| {}));
@@ -2554,6 +2683,7 @@ mod tests {
         assert_eq!(cx.sweep_lock_area(), None);
         assert_eq!(cx.fingers.blocked_scrolling_exception_area(), None);
     }
+
 }
 
 impl Cx {
@@ -2733,4 +2863,5 @@ impl Cx {
             },
         )
     }
+
 }

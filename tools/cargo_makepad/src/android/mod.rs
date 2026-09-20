@@ -1,4 +1,6 @@
 mod compile;
+mod dyn_pack;
+pub use dyn_pack::rustc_wrapper as android_rustc_wrapper;
 mod sdk;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -90,6 +92,8 @@ impl AndroidVariant {
                     android:debuggable="{debuggable_str}"
                     android:largeHeap="true"
                     tools:targetApi="{target_sdk_version}">
+                    <!-- Lets adb shell attach simpleperf to a release build (API 29+, ignored below). -->
+                    <profileable android:shell="true" tools:targetApi="29" />
                     <meta-data android:name="android.max_aspect" android:value="2.1" />
                     <activity
                     android:name=".{class_name}"
@@ -178,6 +182,7 @@ impl AndroidVariant {
                     android:debuggable="{debuggable_str}"
                     android:largeHeap="true"
                     tools:targetApi="{target_sdk_version}">
+                    <profileable android:shell="true" tools:targetApi="29" />
                     <!-- Quest 3-only CPU/GPU trade: prefer one extra CPU level over one GPU level. -->
                     <meta-data
                         android:name="com.oculus.trade_cpu_for_gpu_amount"
@@ -327,6 +332,7 @@ Self::Quest=>format!(r#"<?xml version="1.0" encoding="utf-8"?>
     "#)*/
 
 #[allow(non_camel_case_types)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum AndroidTarget {
     aarch64,
     x86_64,
@@ -453,6 +459,8 @@ fn android_help() -> &'static str {
   cargo makepad android [options] run <cargo args>\n\
   cargo makepad android [options] adb <adb args>\n\
   cargo makepad android [options] adb-tcp [port]\n\
+  cargo makepad android [options] dyn-pack [dyn options] <cargo args>\n\
+  cargo makepad android [options] dyn-rehearse [dyn options] -p <host> <apk> [package ...]\n\
 \n\
 Common options:\n\
   --abi=aarch64|x86_64|armv7|i686|all   (default: aarch64)\n\
@@ -484,6 +492,25 @@ Custom AndroidManifest:\n\
   Play Store). Tokens replaced: {package_id}, {label}, {class_name},\n\
   {min_sdk_version}, {target_sdk_version}, {version_code}, {version_name},\n\
   {debuggable}.\n\
+\n\
+Android super-app (apps/wm-dyn: tiles compiled on the phone against the shipped engine):\n\
+  dyn-pack stages the relocatable checkout, cross-builds host + engine from it,\n\
+  proves every tile build against that target/, packs the APK with the phone\n\
+  toolchain, the checkout and target/ as assets, then rehearses the phone's first\n\
+  tile open from the packed APK. dyn-rehearse runs that last gate on an APK.\n\
+  --dyn-toolchain=<dir>                   REQUIRED for dyn-pack: the musl-host rustc tree for the\n\
+                                          phone (bin/rustc, bin/cargo, bin/busybox, ld.so,\n\
+                                          lib/rustlib/<musl host>, android/lib/clang)\n\
+  --dyn-apps=<pkg,pkg>                    the tiles proven / rehearsed; default: the host's\n\
+                                          [package.metadata.makepad.dyn].apps\n\
+  --dyn-out=<apk>                         default: <target>/makepad-android-dyn/<crate>/<label>-dyn.apk\n\
+  --dyn-stage=<dir>                       default: <target>/makepad-android-dyn/<crate>/stage\n\
+  --dyn-no-rehearsal                      stop after packing\n\
+  The host's Cargo.toml names the engine and the tiles:\n\
+    [package.metadata.makepad.dyn]  engine = \"makepad-wm-engine\"  apps = [\"makepad-clock\", ...]\n\
+  Example:\n\
+    cargo makepad android --abi=aarch64 --package-name=nl.makepad.wmdyn --app-label=wmdyn \\\n\
+        dyn-pack --dyn-toolchain=/path/to/tc -p makepad-wm-dyn --release --no-default-features\n\
 \n\
 build-aab signing options (defaults: bundled debug.keystore — Play Store will reject):\n\
   --keystore=<path>                       JKS/PKCS12 keystore file (alias auto-discovered\n\
@@ -804,6 +831,30 @@ pub fn handle_android(mut args: &[String]) -> Result<(), String> {
         /*"base-apk"=>{
             compile::base_apk(&sdk_dir, host_os, &args[1..])
         }*/
+        "dyn-pack" => dyn_pack::dyn_pack(
+            &sdk_dir,
+            host_os,
+            package_name,
+            app_label,
+            version_code,
+            version_name,
+            min_sdk_version,
+            &args[1..],
+            &targets,
+            &variant,
+            &config,
+            &urls,
+        ),
+        "dyn-rehearse" => dyn_pack::dyn_rehearse(
+            &sdk_dir,
+            host_os,
+            app_label,
+            min_sdk_version,
+            &args[1..],
+            &targets,
+            &variant,
+            &urls,
+        ),
         "build" => {
             compile::build(
                 &sdk_dir,

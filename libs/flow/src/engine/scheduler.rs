@@ -292,8 +292,17 @@ pub(crate) fn run(
                 Poll::Progress { permille, stage } => {
                     let _ = events.send(RunEvent::NodeProgress {
                         node: node_id,
-                        permille,
+                        permille: Some(permille),
                         stage,
+                        stage_permille: None,
+                    });
+                }
+                Poll::Stage { stage, permille } => {
+                    let _ = events.send(RunEvent::NodeProgress {
+                        node: node_id,
+                        permille: None,
+                        stage,
+                        stage_permille: permille,
                     });
                 }
                 Poll::Delta { port, text } => {

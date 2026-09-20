@@ -81,6 +81,7 @@ pub type cef_touch_handle_state_t = c_void;
 pub type cef_composition_underline_t = c_void;
 pub type cef_color_type_t = c_int;
 pub type cef_alpha_type_t = c_int;
+pub type cef_channel_layout_t = c_int;
 pub type cef_transition_type_t = c_int;
 pub type cef_errorcode_t = c_int;
 pub type cef_window_open_disposition_t = c_int;
@@ -102,6 +103,10 @@ pub const CEF_COLOR_TYPE_BGRA_8888: cef_color_type_t = 1;
 pub const CEF_ALPHA_TYPE_OPAQUE: cef_alpha_type_t = 0;
 pub const CEF_ALPHA_TYPE_PREMULTIPLIED: cef_alpha_type_t = 1;
 pub const CEF_ALPHA_TYPE_POSTMULTIPLIED: cef_alpha_type_t = 2;
+// cef_channel_layout_t mirrors Chromium's media::ChannelLayout; existing
+// values never change.
+pub const CEF_CHANNEL_LAYOUT_MONO: cef_channel_layout_t = 2;
+pub const CEF_CHANNEL_LAYOUT_STEREO: cef_channel_layout_t = 3;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug)]
@@ -662,6 +667,54 @@ pub struct cef_client_t {
             source_process: cef_process_id_t,
             message: *mut cef_process_message_t,
         ) -> c_int,
+    >,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct cef_audio_parameters_t {
+    pub size: usize,
+    pub channel_layout: cef_channel_layout_t,
+    pub sample_rate: c_int,
+    pub frames_per_buffer: c_int,
+}
+
+#[repr(C)]
+pub struct cef_audio_handler_t {
+    pub base: cef_base_ref_counted_t,
+    pub get_audio_parameters: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_audio_handler_t,
+            browser: *mut cef_browser_t,
+            params: *mut cef_audio_parameters_t,
+        ) -> c_int,
+    >,
+    pub on_audio_stream_started: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_audio_handler_t,
+            browser: *mut cef_browser_t,
+            params: *const cef_audio_parameters_t,
+            channels: c_int,
+        ),
+    >,
+    pub on_audio_stream_packet: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_audio_handler_t,
+            browser: *mut cef_browser_t,
+            data: *const *const f32,
+            frames: c_int,
+            pts: i64,
+        ),
+    >,
+    pub on_audio_stream_stopped: Option<
+        unsafe extern "system" fn(self_: *mut cef_audio_handler_t, browser: *mut cef_browser_t),
+    >,
+    pub on_audio_stream_error: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_audio_handler_t,
+            browser: *mut cef_browser_t,
+            message: *const cef_string_t,
+        ),
     >,
 }
 

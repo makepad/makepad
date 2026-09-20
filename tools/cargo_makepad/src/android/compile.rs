@@ -284,6 +284,51 @@ pub struct BuildResult {
     java_url: String,
 }
 
+impl BuildResult {
+    /// The signed, zipaligned APK the build produced.
+    pub fn apk(&self) -> &Path {
+        &self.dst_apk
+    }
+}
+
+/// The NDK clang cargo links `android_target` with: the value of the
+/// target's `CARGO_TARGET_<TRIPLE>_LINKER`. cargo hashes this string into
+/// every fingerprint, so a tree that must stay Fresh elsewhere (the
+/// super-app's on-device target/) records exactly this path.
+pub fn android_linker_path(
+    sdk_dir: &Path,
+    host_os: HostOs,
+    urls: &AndroidSDKUrls,
+    android_target: &AndroidTarget,
+) -> Result<PathBuf, String> {
+    let (_ndk_version, ndk_prebuilt_root) =
+        resolve_ndk_prebuilt_root(sdk_dir, host_os, urls.ndk_version_full)?;
+    let clang_filename = format!("{}{}-clang", android_target.clang(), urls.sdk_version);
+    Ok(ndk_prebuilt_root
+        .join("bin")
+        .join(host_bin_name(host_os, &clang_filename, "cmd")))
+}
+
+fn host_bin_name(host_os: HostOs, bin_filename: &str, windows_extension: &str) -> String {
+    match host_os {
+        HostOs::WindowsX64 => format!("{bin_filename}.{windows_extension}"),
+        HostOs::MacosX64 | HostOs::MacosAarch64 | HostOs::LinuxX64 => bin_filename.to_string(),
+        HostOs::Unsupported => panic!("unsupported host os"),
+    }
+}
+
+/// The `RUSTFLAGS` an Android `cargo rustc` for `android_target` runs with:
+/// the caller's flags, `-C prefer-dynamic` when asked, and the
+/// `--cfg android_target="<arch>"` the platform crate reads.
+pub fn android_rustflags(
+    existing: Option<&str>,
+    android_target: &AndroidTarget,
+    prefer_dynamic: bool,
+) -> String {
+    let cfg_flag = format!("--cfg android_target=\"{}\"", android_target.to_str());
+    compose_android_rustflags(existing, &cfg_flag, prefer_dynamic)
+}
+
 fn main_java(url: &str) -> String {
     format!(
         r#"
@@ -610,17 +655,12 @@ fn rust_build(
         .to_path_buf();
     let mut font_manifest = None;
     for android_target in android_targets {
-        let clang_filename = format!("{}{}-clang", android_target.clang(), urls.sdk_version);
         let clangpp_filename = format!("{}{}-clang++", android_target.clang(), urls.sdk_version);
 
-        let bin_name = |bin_filename: &str, windows_extension: &str| match host_os {
-            HostOs::WindowsX64 => format!("{bin_filename}.{windows_extension}"),
-            HostOs::MacosX64 | HostOs::MacosAarch64 | HostOs::LinuxX64 => bin_filename.to_string(),
-            _ => panic!(),
+        let bin_name = |bin_filename: &str, windows_extension: &str| {
+            host_bin_name(host_os, bin_filename, windows_extension)
         };
-        let full_clang_path = ndk_prebuilt_root
-            .join("bin")
-            .join(bin_name(&clang_filename, "cmd"));
+        let full_clang_path = android_linker_path(sdk_dir, host_os, urls, android_target)?;
         let full_clangpp_path = ndk_prebuilt_root
             .join("bin")
             .join(bin_name(&clangpp_filename, "cmd"));
@@ -655,11 +695,9 @@ fn rust_build(
             args_out.push(arg);
         }
 
-        let target_arch_str = android_target.to_str();
-        let cfg_flag = format!("--cfg android_target=\"{}\"", target_arch_str);
-        let rustflags = compose_android_rustflags(
+        let rustflags = android_rustflags(
             std::env::var("RUSTFLAGS").ok().as_deref(),
-            &cfg_flag,
+            android_target,
             prefer_dynamic,
         );
 
@@ -814,7 +852,7 @@ fn cargo_target_root(cwd: &Path) -> PathBuf {
     }
 }
 
-fn cargo_target_dir(cwd: &Path) -> PathBuf {
+pub fn cargo_target_dir(cwd: &Path) -> PathBuf {
     if std::env::var_os("CARGO_TARGET_DIR").is_some() {
         cargo_target_root(cwd)
     } else {
@@ -893,7 +931,29 @@ fn resolve_packaging_inputs(
     //   - >= `urls.sdk_version` (going *below* the cargo-makepad floor would
     //     require knowing for sure that all NDK extern fns Makepad uses still
     //     link cleanly at that lower API; we don't audit that automatically)
-    let min_sdk_version_override = min_sdk_version_flag.or(metadata.min_sdk_version);
+    let min_sdk_version_override =
+        resolve_min_sdk_override(min_sdk_version_flag, metadata.min_sdk_version, urls)?;
+
+    Ok(ResolvedPackagingInputs {
+        java_url,
+        app_label,
+        version_code,
+        version_name,
+        min_sdk_version_override,
+    })
+}
+
+/// The validated per-app min SDK override: the flag, else the package
+/// metadata, else none. When set it must be ≥ 21 (the NDK r28 floor for
+/// arm64), ≤ `urls.target_sdk_version` (Android rule: minSdk <= targetSdk)
+/// and ≥ `urls.sdk_version` (going below the audited floor would require
+/// knowing every NDK extern fn still links at that API).
+pub fn resolve_min_sdk_override(
+    min_sdk_version_flag: Option<usize>,
+    metadata_min_sdk_version: Option<usize>,
+    urls: &AndroidSDKUrls,
+) -> Result<Option<usize>, String> {
+    let min_sdk_version_override = min_sdk_version_flag.or(metadata_min_sdk_version);
     if let Some(min) = min_sdk_version_override {
         if min < 21 {
             return Err(format!(
@@ -913,14 +973,24 @@ fn resolve_packaging_inputs(
             ));
         }
     }
+    Ok(min_sdk_version_override)
+}
 
-    Ok(ResolvedPackagingInputs {
-        java_url,
-        app_label,
-        version_code,
-        version_name,
-        min_sdk_version_override,
-    })
+/// The SDK URLs `build` compiles `build_crate` with: `urls` with the
+/// package's effective min SDK (flag, else `[package.metadata.makepad.android]
+/// .min_sdk_version`) as `sdk_version`. What the NDK clang triple, the
+/// linker string and `android:minSdkVersion` come from.
+pub fn effective_sdk_urls(
+    build_crate: &str,
+    min_sdk_version_flag: Option<usize>,
+    urls: &AndroidSDKUrls,
+) -> Result<AndroidSDKUrls, String> {
+    let metadata = read_android_package_metadata(build_crate);
+    let mut effective = *urls;
+    if let Some(min) = resolve_min_sdk_override(min_sdk_version_flag, metadata.min_sdk_version, urls)? {
+        effective.sdk_version = min;
+    }
+    Ok(effective)
 }
 
 /// Inputs to `prepare_build`. Covers everything that influences the staged
@@ -1319,7 +1389,7 @@ fn ndk_version_sort_key(version: &str) -> Vec<u64> {
         .collect()
 }
 
-fn resolve_ndk_prebuilt_root(
+pub fn resolve_ndk_prebuilt_root(
     sdk_dir: &Path,
     host_os: HostOs,
     preferred_version: &str,
@@ -1374,7 +1444,7 @@ fn resolve_ndk_prebuilt_root(
 }
 
 /// NDK host-prebuilt `llvm-readelf` path (`.exe` on Windows).
-fn llvm_readelf_path(ndk_prebuilt_root: &Path) -> Option<PathBuf> {
+pub fn llvm_readelf_path(ndk_prebuilt_root: &Path) -> Option<PathBuf> {
     let bin = ndk_prebuilt_root.join("bin");
     for name in ["llvm-readelf", "llvm-readelf.exe"] {
         let candidate = bin.join(name);
@@ -1478,7 +1548,7 @@ fn bundle_ndk_shared_deps(
     Ok(())
 }
 
-fn read_needed_shared_libs(
+pub fn read_needed_shared_libs(
     sdk_dir: &Path,
     host_os: HostOs,
     urls: &AndroidSDKUrls,
@@ -1884,16 +1954,30 @@ fn build_zipaligned_apk(
     build_paths: &BuildPaths,
     urls: &AndroidSDKUrls,
 ) -> Result<(), String> {
+    zipalign_apk(sdk_dir, urls, &build_paths.dst_unaligned_apk, &build_paths.dst_apk)
+}
+
+/// `zipalign -f 4 <unaligned> <aligned>` with the SDK's build tools.
+pub fn zipalign_apk(
+    sdk_dir: &Path,
+    urls: &AndroidSDKUrls,
+    unaligned: &Path,
+    aligned: &Path,
+) -> Result<(), String> {
+    let cwd = unaligned
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| std::env::current_dir().unwrap());
     shell_env_cap(
         &[],
-        &build_paths.out_dir,
+        &cwd,
         zipalign_path(sdk_dir, urls).to_str().unwrap(),
         &[
             "-v",
             "-f",
             "4",
-            (build_paths.dst_unaligned_apk.to_str().unwrap()),
-            (build_paths.dst_apk.to_str().unwrap()),
+            (unaligned.to_str().unwrap()),
+            (aligned.to_str().unwrap()),
         ],
     )?;
 
@@ -1901,6 +1985,11 @@ fn build_zipaligned_apk(
 }
 
 fn sign_apk(sdk_dir: &Path, build_paths: &BuildPaths, urls: &AndroidSDKUrls) -> Result<(), String> {
+    sign_apk_debug(sdk_dir, urls, &build_paths.dst_apk)
+}
+
+/// Sign `apk` in place with the bundled debug keystore (apksigner).
+pub fn sign_apk_debug(sdk_dir: &Path, urls: &AndroidSDKUrls, apk: &Path) -> Result<(), String> {
     let cwd = std::env::current_dir().unwrap();
     let cargo_manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let java_home = sdk_dir.join("openjdk");
@@ -1920,7 +2009,7 @@ fn sign_apk(sdk_dir: &Path, build_paths: &BuildPaths, urls: &AndroidSDKUrls) -> 
             "androiddebugkey",
             "--ks-pass",
             "pass:android",
-            (build_paths.dst_apk.to_str().unwrap()),
+            (apk.to_str().unwrap()),
         ],
     )?;
 
@@ -3259,7 +3348,7 @@ pub fn javac(sdk_dir: &Path, _host_os: HostOs, args: &[String]) -> Result<(), St
     Ok(())
 }
 
-fn to_snakecase(label: &str) -> String {
+pub fn to_snakecase(label: &str) -> String {
     let mut snakecase = String::new();
     let mut previous_was_underscore = false;
 

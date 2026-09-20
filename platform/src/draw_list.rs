@@ -17,6 +17,7 @@ use crate::{
     texture::{Texture, TextureFormat, TextureId, TextureUpdated},
     uniform_buffer::UniformBuffer,
 };
+use std::cell::Cell;
 use std::collections::HashSet;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -689,9 +690,6 @@ impl Cx {
             let Some(geometry_id) = draw_call.geometry_id else {
                 continue;
             };
-            if self.geometries.is_id_stale(geometry_id) {
-                continue;
-            }
             let geometry = &self.geometries[geometry_id];
             let index_count = geometry.index_count as u64;
 
@@ -849,7 +847,7 @@ impl<P: Send + 'static> RetirementBatches<P> {
         if !self.initialized {
             if self.preparing.is_none() {
                 if let Ok(slot) = pool.reserve(crate::thread::Lane::Heavy) {
-                    self.preparing = Some(slot.submit_named("retirement batch storage", || {
+                    self.preparing = Some(slot.submit_internal_named("retirement batch storage", || {
                         (0..16)
                             .map(|_| {
                                 PreparedDrawBox::new().initialize(RetirementBatch {
@@ -1052,7 +1050,7 @@ impl CxDrawListPool {
             let returned = batches.returned_tx.clone();
             let counter = self.1.retirements.clone();
             counter.fetch_add(1, Ordering::AcqRel);
-            slot.submit_named("retained draw storage retirement", move || {
+            slot.submit_internal_named("retained draw storage retirement", move || {
                 for item in &mut batch.items {
                     drop(item.take());
                 }
@@ -1060,7 +1058,7 @@ impl CxDrawListPool {
                 // that empty envelope still occurs here on the worker.
                 let _ = returned.try_send(batch);
                 counter.fetch_sub(1, Ordering::AcqRel);
-                crate::thread::SignalToUI::set_ui_signal();
+                crate::thread::SignalToUI::set_internal_signal();
             })
             .detach();
         }
@@ -1131,6 +1129,7 @@ impl CxDrawListPool {
         if let Some(call) = item.kind.draw_call_mut() {
             call.instance_dirty = true;
         }
+        item.reset_retained_content_receipt();
         let items = &self[id].draw_items;
         items.clean_leaf.set(false);
         items.instance_counters.set(None);
@@ -1166,9 +1165,10 @@ impl CxDrawListPool {
         item.consumed_instance_id = 0;
         item.consumed_serial = 0;
         item.consumed_uniforms_gen = 0;
+        item.reset_retained_content_receipt();
         item.instance_upload_pending = true;
         if let Some(publication) = &item.retained_instances {
-            item.retained_upload_range = 0..publication.data().len();
+            item.retained_upload_range = 0..publication.float_len();
         }
         if let Some(call) = item.kind.draw_call_mut() {
             call.instance_dirty = true;
@@ -1345,6 +1345,28 @@ impl CxDrawListPool {
         }
         cleared
     }
+
+    /// The geometries the draw calls of every live draw list name: what the
+    /// backend can still paint, since a list that was not redrawn is painted
+    /// as it stands. Only each list's active items count (`draw_items.len()`;
+    /// slots past it are recording spares). A dropped `Geometry` is freed
+    /// only when it is not in this set (`CxGeometryPool::release_unreferenced`).
+    pub fn referenced_geometries(&self) -> HashSet<GeometryId> {
+        let mut referenced = HashSet::new();
+        for list in 0..self.0.pool.len() {
+            let generation = self.0.pool[list].generation;
+            if !self.0.is_live_generation(list, generation) {
+                continue;
+            }
+            let items = &self.0.pool[list].item.draw_items;
+            for index in 0..items.len() {
+                if let Some(geometry_id) = items[index].kind.draw_call().and_then(|call| call.geometry_id) {
+                    referenced.insert(geometry_id);
+                }
+            }
+        }
+        referenced
+    }
 }
 impl std::ops::Index<DrawListId> for CxDrawListPool {
     type Output = CxDrawList;
@@ -1478,9 +1500,6 @@ pub struct CxDrawItem {
     /// Immutable worker payload; old callers continue using `instances`.
     pub retained_instances: Option<crate::retained_instances::RetainedInstances>,
     pub retained_instance_id: u64,
-    /// Content hash of the last immediate payload a backend fully uploaded;
-    /// an identical re-record is then a no-op upload. Zero = none.
-    pub immediate_hash: u64,
     /// Immutable layout/font interpretation of the wanted and resident bytes.
     /// Zero preserves the ordinary immediate/retained API contract.
     pub retained_schema: u64,
@@ -1490,6 +1509,10 @@ pub struct CxDrawItem {
     pub consumed_schema: u64,
     pub consumed_serial: u64,
     pub consumed_uniforms_gen: u64,
+    /// First matching retained-content receipt for this item's current
+    /// immutable publication/schema/recording cycle. Backend `consumed_serial`
+    /// stays the latest encode; this memo is observational only.
+    content_receipt: Cell<RetainedContentReceipt>,
     /// Recording may vary draw count without changing the immutable publication.
     pub retained_instance_count: usize,
     pub retained_upload_range: std::ops::Range<usize>,
@@ -1514,6 +1537,17 @@ pub struct CxDrawItem {
 }
 
 /// Why `CxDrawListPool::attach_shared` refused a block.
+/// Observational first-submit of one immutable retained content cycle.
+/// Zero `first_serial` is empty. Keyed by publication, schema, and recording
+/// identity so slot reuse and siblings cannot inherit a wait.
+#[derive(Clone, Copy, Default)]
+struct RetainedContentReceipt {
+    instance_id: u64,
+    schema: u64,
+    redraw_id: u64,
+    first_serial: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AttachError {
     /// The block's upload has not completed (`receipt().upload_ready()` is
@@ -1585,6 +1619,52 @@ impl CxDrawItem {
             && self.consumed_schema == self.retained_schema
             && self.consumed_serial != 0
             && self.consumed_serial <= completed
+    }
+    /// First GPU serial that consumed this item's current immutable retained
+    /// publication and schema, once that serial's fence has completed.
+    /// Returns that first serial, never the latest encode. Ordinary items
+    /// without a retained publication keep latest-completed semantics.
+    /// Camera/uniform/range presentation of the same content does not move
+    /// the wait. An invalid observation clears the memo.
+    pub fn retained_content_serial(&self, completed: u64) -> Option<u64> {
+        if self.retained_instances.is_none() {
+            return self
+                .retained_consumption_complete(completed)
+                .then_some(self.consumed_serial)
+                .filter(|serial| *serial != 0);
+        }
+        if !self.retained_content_observation_valid() {
+            self.reset_retained_content_receipt();
+            return None;
+        }
+        let mut stamp = self.content_receipt.get();
+        if stamp.instance_id != self.retained_instance_id
+            || stamp.schema != self.retained_schema
+            || stamp.redraw_id != self.redraw_id
+            || stamp.first_serial == 0
+        {
+            stamp = RetainedContentReceipt {
+                instance_id: self.retained_instance_id,
+                schema: self.retained_schema,
+                redraw_id: self.redraw_id,
+                first_serial: self.consumed_serial,
+            };
+            self.content_receipt.set(stamp);
+        }
+        (stamp.first_serial != 0 && stamp.first_serial <= completed).then_some(stamp.first_serial)
+    }
+    fn retained_content_observation_valid(&self) -> bool {
+        self.retained_instances.is_some()
+            && self.retained_instance_id != 0
+            && self.retained_binding_ready()
+            && !self.instance_upload_pending
+            && self.kind.draw_call().is_some_and(|call| !call.instance_dirty)
+            && self.consumed_instance_id == self.retained_instance_id
+            && self.consumed_schema == self.retained_schema
+            && self.consumed_serial != 0
+    }
+    fn reset_retained_content_receipt(&self) {
+        self.content_receipt.set(RetainedContentReceipt::default());
     }
     /// A progressive replacement may keep drawing its previous complete
     /// backing under the same instance/uniform schema. This is presentation
@@ -1866,6 +1946,7 @@ impl CxDrawItems {
     pub fn set_retained_publication(&mut self, index: usize, publication: &crate::retained_instances::RetainedInstances) -> bool {
         let item = &mut self[index];
         if item.retained_instances.as_ref().is_some_and(|p|p.id()==publication.id()) {return false;}
+        item.reset_retained_content_receipt();
         item.retained_upload_range = publication.upload_since(item.retained_instance_id);
         item.retained_instances = Some(publication.clone());
         item.retained_gpu_evicted = false;
@@ -1951,6 +2032,9 @@ impl CxDrawItems {
     /// consumption receipts. This changes no instance-count/upload predicate.
     pub fn stamp_retained_schema(&mut self, index: usize, schema: u64, prefetched: bool) {
         let item = &mut self.buffer[index];
+        if item.retained_schema != schema {
+            item.reset_retained_content_receipt();
+        }
         item.retained_schema = schema;
         if prefetched && !item.retained_prefetched {
             self.clean_leaf.set(false);
@@ -2024,7 +2108,6 @@ impl CxDrawItems {
             instances.bind_budget(&self.recording_budget);
             self.buffer.push(allocation.initialize(CxDrawItem {
                 instance_upload_pending: false,
-                immediate_hash: 0,
                 shared: None,
                 redraw_id: 0,
                 kind: CxDrawKind::Empty,
@@ -2043,6 +2126,7 @@ impl CxDrawItems {
                 consumed_schema: 0,
                 consumed_serial: 0,
                 consumed_uniforms_gen: 0,
+                content_receipt: Cell::default(),
                 retained_instance_count: 0,
                 retained_upload_range: 0..0,
                 instance_ranges: Vec::new(),
@@ -2128,6 +2212,40 @@ impl CxDrawItems {
         item.instance_ranges.extend_from_slice(ranges);
         true
     }
+    /// Presentation-only dyn-uniform write through the raw item buffer.
+    /// A matching shader with bitwise-identical stored slots leaves the call
+    /// untouched. A real change issues a new uniform generation. Instance
+    /// counters, clean-leaf, and child inventory stay valid.
+    pub fn set_dyn_uniform(
+        &mut self,
+        index: usize,
+        draw_shader_id: DrawShaderId,
+        offset: usize,
+        value: &[f32],
+        uniform_gen: &mut u64,
+    ) -> bool {
+        let Some(call) = self.buffer[index].kind.draw_call_mut() else {
+            return false;
+        };
+        if call.draw_shader_id != draw_shader_id {
+            return false;
+        }
+        // A stale mapping (shader re-bound since the caller looked it up) must
+        // not panic the UI thread; it is simply not applied.
+        let Some(dest) = call.dyn_uniforms.get(offset..offset + value.len()) else {
+            return false;
+        };
+        let unchanged = dest
+            .iter()
+            .zip(value.iter())
+            .all(|(stored, new)| stored.to_bits() == new.to_bits());
+        if unchanged {
+            return false;
+        }
+        call.dyn_uniforms[offset..offset + value.len()].copy_from_slice(value);
+        call.mark_uniforms_dirty(Cx::next_uniform_gen_from(uniform_gen));
+        true
+    }
     /// The instances an item submits: its ranges clamped to `resident`, or
     /// `0..resident` when it has none.
     pub fn submitted_instances(&self, index: usize, resident: usize) -> usize {
@@ -2169,6 +2287,8 @@ impl CxDrawItems {
                 if let Some(call) = item.kind.draw_call_mut() {
                     call.texture_slots = Default::default();
                     call.uniform_buffer_slots = Default::default();
+                    // A spare must not pin a geometry (`referenced_geometries`).
+                    call.geometry_id = None;
                 }
                 item.shared = None;
             }
@@ -2228,11 +2348,11 @@ impl CxDrawItems {
                 consumed_schema: 0,
                 consumed_serial: 0,
                 consumed_uniforms_gen: 0,
+                content_receipt: Cell::default(),
                 retained_instance_count: 0,
                 retained_upload_range: 0..0,
                 instance_ranges: Vec::new(),
                 instance_upload_pending: false,
-                immediate_hash: 0,
                 shared: None,
                 os: CxOsDrawCall::default(),
                 kind: CxDrawKind::Empty,
@@ -2261,6 +2381,7 @@ impl CxDrawItems {
             draw_item.retained_schema = 0;
             draw_item.consumed_serial = 0;
             draw_item.consumed_uniforms_gen = 0;
+            draw_item.reset_retained_content_receipt();
             draw_item.instance_ranges.clear();
             // A reused slot never keeps a previous record's lease.
             draw_item.shared = None;
@@ -3621,25 +3742,4 @@ mod uniform_generation_tests {
         assert_eq!(draw_list.recording_gen, 5);
         assert_eq!(draw_list.uniforms_gen, 6);
     }
-}
-
-/// Content hash of an immediate instance payload, for skipping the upload of
-/// a re-record whose bytes did not change (a camera move re-emitting the same
-/// world-space geometry). Bounded: payloads above 256 KiB are never hashed
-/// (returns 0, which matches nothing), so the hash cost stays under the
-/// budget of a small copy. Never returns 0 for a hashed payload.
-pub fn immediate_payload_hash(data: &[f32]) -> u64 {
-    if data.is_empty() || data.len() * 4 > 256 * 1024 {
-        return 0;
-    }
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for chunk in data.chunks(64) {
-        for v in chunk {
-            for b in v.to_bits().to_le_bytes() {
-                h ^= b as u64;
-                h = h.wrapping_mul(0x0000_0100_0000_01b3);
-            }
-        }
-    }
-    h.max(1)
 }

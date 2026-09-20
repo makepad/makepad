@@ -475,9 +475,7 @@ pub struct VideoFileDecoder {
 }
 
 impl VideoFileDecoder {
-    /// Open a container for decoding, picture and sound. Every platform
-    /// opener here wants a picture and refuses a file with none; for a
-    /// file that has only sound, see [`Self::open_audio`].
+    /// Open an mp4 (or any container the platform demuxes) for decoding.
     pub fn open(path: &str) -> Result<Self, VideoFileError> {
         #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux"))]
         {
@@ -489,31 +487,6 @@ impl VideoFileDecoder {
             });
         }
         #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux")))]
-        {
-            let _ = path;
-            return Err(VideoFileError::new(UNSUPPORTED));
-        }
-    }
-
-    /// Open a container for its SOUND alone: the audio stream is
-    /// configured and no picture is negotiated at all.
-    ///
-    /// Every platform opener behind [`Self::open`] demands a video track
-    /// before it looks at an audio one, so a file that has no picture
-    /// cannot be opened for the sound it does have. `info()` reports
-    /// width 0, height 0 and no video codec; `next_frame` is
-    /// end-of-stream from the first call.
-    pub fn open_audio(path: &str) -> Result<Self, VideoFileError> {
-        #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
-        {
-            let os = OsVideoFileDecoder::open_audio(path)?;
-            return Ok(Self {
-                os,
-                pending_video: None,
-                pending_audio: None,
-            });
-        }
-        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
         {
             let _ = path;
             return Err(VideoFileError::new(UNSUPPORTED));

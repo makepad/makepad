@@ -639,6 +639,7 @@ impl EventHub {
     /// The resume cursor a fresh (cursor-less) subscriber starts from: the
     /// current tail. The subscriber then loads its catalog view once and
     /// receives only events committed after this point.
+    #[cfg(test)]
     pub fn tail_cursor(&self) -> EventCursor {
         let j = self.journal.lock().unwrap();
         EventCursor { epoch: self.epoch, seq: j.next_seq - 1 }

@@ -2548,6 +2548,33 @@ impl FloatingAction {
             .unwrap_or_default()
     }
 
+    /// Every area a press on this set can belong to: the button, and each
+    /// action's face. Asked of [`CxFingers::is_mouse_held_outside`], so
+    /// that the set's OWN press is never mistaken for somebody else's —
+    /// which matters here more than anywhere, because the set's one gesture
+    /// is a press on the button, a drag down the dial and a release on an
+    /// action, held by the BUTTON from beginning to end.
+    fn own_areas(&self) -> Vec<Area> {
+        let mut areas = vec![self.main.area(), self.lock_area];
+        areas.extend((0..self.items.len()).map(|i| self.item_button_area(i)));
+        areas
+    }
+
+    /// Whether the mouse is held by a control this set does not own.
+    ///
+    /// The set reads presses and moves from RAW events — it has to, because
+    /// while the actions are travelling their buttons hit-test places they
+    /// have not reached yet — and a raw reader is told nothing about who
+    /// holds the pointer. So it asks. A slider, a scroll bar, a resizer
+    /// mid-drag holds the mouse until its release, and until then a press
+    /// or a hover read here would be a second answer to one press.
+    ///
+    /// Only the mouse locks: a touch capture answers false, and the touch
+    /// paths below are left as they are.
+    fn mouse_held_elsewhere(&self, cx: &Cx) -> bool {
+        cx.fingers.is_mouse_held_outside(&self.own_areas())
+    }
+
     /// The shown action resting under `abs`: where the set laid it out, not
     /// where its travel has it this frame. The layout keeps resting squares
     /// apart; in a window too small for the set, where they can meet, the
@@ -3014,14 +3041,34 @@ impl Widget for FloatingAction {
         match event {
             Event::Actions(actions) => self.handle_actions(cx, actions),
             Event::MouseDown(me) => {
-                let taken = (shielded && self.open && self.press_moving_item(me.abs)) || self.press_at(cx, me.abs, on_top);
+                // Holding a travelling action is a press-like state taken
+                // from a raw press, so it asks first. The dismissal below
+                // does not: putting a set away because the person pressed
+                // somewhere else is not a gesture competing for the pointer,
+                // and a set left out over a page being worked is the bug it
+                // was written to fix.
+                let taken = (shielded
+                    && self.open
+                    && !self.mouse_held_elsewhere(cx)
+                    && self.press_moving_item(me.abs))
+                    || self.press_at(cx, me.abs, on_top);
                 if taken && me.handled.get().is_empty() {
                     me.handled.set(self.main.area());
                 }
             }
             Event::MouseMove(me) => {
                 if self.open {
-                    let hot = self.item_at(me.abs);
+                    // An action lit under a pointer somebody else is holding
+                    // offers a press that cannot arrive: that mouse is going
+                    // back to the control that took it, whatever it passes
+                    // over on the way. The set's own press is not elsewhere,
+                    // so the hand still lights each action it travels over
+                    // on its way down the dial.
+                    let hot = if self.mouse_held_elsewhere(cx) {
+                        None
+                    } else {
+                        self.item_at(me.abs)
+                    };
                     if hot != self.hot_item {
                         self.hot_item = hot;
                         if labels_shown_in(self.labels, self.dial, self.plan.row_count()) == SpeedDialLabels::Hot {
@@ -4769,6 +4816,109 @@ mod tests {
             modifiers: KeyModifiers::default(),
             time: 0.0,
         })
+    }
+
+    fn move_to(abs: DVec2) -> Event {
+        Event::MouseMove(MouseMoveEvent {
+            abs,
+            lock_delta: DVec2::default(),
+            window_id: WindowId(1, 1),
+            modifiers: KeyModifiers::default(),
+            handled: std::cell::Cell::new(Area::Empty),
+            time: 0.0,
+        })
+    }
+
+    /// A set out over a page with an ordinary button beside it to take the
+    /// mouse and keep it. Pinned, so the press on that button does not put
+    /// the set away: dismissal is a different rule, and these two tests are
+    /// about the pointer.
+    fn a_set_and_a_grabber() -> (Cx, WidgetRef, Target) {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        cx.with_vm(crate::script_mod);
+        let root = cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.widgets.*
+                View{
+                    width: 600
+                    height: 400
+                    grabber := Button{width: 90. height: 32. text: "hold me"}
+                    fab := FloatingAction{
+                        pinned: true
+                        dial: mod.widgets.SpeedDialLayout.Vertical
+                        reduced_motion: true
+                        one := FloatingActionItem{label: "One"}
+                        two := FloatingActionItem{label: "Two"}
+                    }
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        let mut target = Target::new(&mut cx);
+        target.draw(&mut cx, &root);
+        target.draw(&mut cx, &root);
+        (cx, root, target)
+    }
+
+    /// The app-wide rule, at the place this set can break it. The actions
+    /// are read from RAW moves — they have to be, because a travelling
+    /// action's button hit-tests a place it has not reached yet — and a raw
+    /// reader is told nothing about who holds the pointer. So a mouse a
+    /// button elsewhere is holding used to light an action under it, and
+    /// offer a press that the button's release was always going to cancel.
+    #[test]
+    fn an_action_does_not_light_under_a_mouse_another_control_holds() {
+        let (mut cx, root, _target) = a_set_and_a_grabber();
+        assert!(is_open(&root, &cx), "a pinned set is out from its first draw");
+        let over_one = action_area(&root, &cx, 0).rect(&cx).center();
+
+        // Nobody holding: the pointer lights the action it is over.
+        deliver(&mut cx, &root, &move_to(over_one));
+        assert_eq!(with_set(&root, &cx, |set| set.hot_item), Some(0), "lit for a free pointer");
+
+        // The button takes the mouse and keeps it until its release.
+        let grabber = root.widget(&cx, ids!(grabber)).area().rect(&cx).center();
+        deliver(&mut cx, &root, &press(grabber));
+        assert!(cx.fingers.any_areas_captured(), "the button holds the mouse");
+        deliver(&mut cx, &root, &move_to(over_one));
+        assert_eq!(
+            with_set(&root, &cx, |set| set.hot_item),
+            None,
+            "a pointer on loan to another control is not the set's to read"
+        );
+
+        // Let go, and it is the set's pointer again. A release drops the
+        // hold in the platform's own mouse-up bookkeeping, which these tests
+        // dispatch past — `unhandle` is that one step, by hand.
+        let grabber_area = root.widget(&cx, ids!(grabber)).area();
+        press(grabber).unhandle(&mut cx, &grabber_area);
+        deliver(&mut cx, &root, &move_to(over_one));
+        assert_eq!(
+            with_set(&root, &cx, |set| set.hot_item),
+            Some(0),
+            "lit again once the hold is let go: the gate is the hold, not a mood"
+        );
+    }
+
+    /// And the other half, which is what keeps the set working at all: the
+    /// set's OWN press is not somebody else's. Press, drag down the dial,
+    /// release is one gesture, and the mouse is held by the button for the
+    /// whole of it — so every action the hand travels over still lights up.
+    #[test]
+    fn the_sets_own_press_still_lights_the_actions_it_travels_over() {
+        let (mut cx, root, mut target) = set_in_a_box();
+        let main = main_area(&root, &cx).rect(&cx).center();
+        deliver(&mut cx, &root, &press(main));
+        target.draw(&mut cx, &root);
+        assert!(cx.fingers.any_areas_captured(), "the button holds the mouse for the gesture");
+        let over_two = action_area(&root, &cx, 1).rect(&cx).center();
+        deliver(&mut cx, &root, &move_to(over_two));
+        assert_eq!(
+            with_set(&root, &cx, |set| set.hot_item),
+            Some(1),
+            "the set's own press is not a press elsewhere"
+        );
     }
 
     fn key(key_code: KeyCode, shift: bool) -> Event {

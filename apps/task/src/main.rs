@@ -547,9 +547,26 @@ impl App {
         self.ui.label(cx, ids!(down_value)).set_text(cx, &format!("{}/s", format_bytes(snapshot.net.rx_per_second as u64)));
         self.ui.label(cx, ids!(up_value)).set_text(cx, &format!("{}/s", format_bytes(snapshot.net.tx_per_second as u64)));
         let status = if self.density == Density::Phone {
-            format!("{} processes · {} cores", snapshot.processes.len(), snapshot.cpu_cores.len())
+            format!(
+                "{} · {} processes · {} cores · load {:.2}",
+                snapshot.backend,
+                snapshot.processes.len(),
+                snapshot.cpu_cores.len(),
+                snapshot.load_avg[0],
+            )
         } else {
-            format!("{} processes · {} cores · Uptime {}", snapshot.processes.len(), snapshot.cpu_cores.len(), format_uptime(snapshot.uptime_seconds))
+            format!(
+                "{} · {} processes · {} cores · load {:.2} {:.2} {:.2} · rx {} tx {} · Uptime {}",
+                snapshot.backend,
+                snapshot.processes.len(),
+                snapshot.cpu_cores.len(),
+                snapshot.load_avg[0],
+                snapshot.load_avg[1],
+                snapshot.load_avg[2],
+                format_bytes(snapshot.net.rx_total),
+                format_bytes(snapshot.net.tx_total),
+                format_uptime(snapshot.uptime_seconds),
+            )
         };
         self.ui.label(cx, ids!(host_status)).set_text(cx, &status);
         let cores = snapshot.cpu_cores.len();

@@ -23,7 +23,7 @@
 use crate::{
     makepad_derive_widget::*,
     makepad_draw::*,
-    makepad_platform::{KeyCode, KeyEvent},
+    makepad_platform::KeyCode,
     overlay_place::orphan_sweep_locks,
     view::*,
     widget::*,
@@ -78,6 +78,15 @@ pub enum ModalAction {
     None,
 }
 
+impl ModalAction {
+    /// Sent directly through a closing host's descendants, unlike the
+    /// widget-tagged dismissal action observed by the application.
+    pub(crate) fn is_dismissal(event: &Event) -> bool {
+        matches!(event, Event::Actions(actions) if actions.iter().any(|action|
+            matches!(action.downcast_ref::<Self>(), Some(Self::Dismissed))))
+    }
+}
+
 #[derive(Script, Widget)]
 pub struct Modal {
     #[source]
@@ -94,9 +103,14 @@ pub struct Modal {
 
     #[rust]
     is_open: bool,
+    /// Held while open, so an Escape belongs to this modal rather than to whatever
+    /// it was opened in front of. Kept even when `can_dismiss` is false: the modal
+    /// still owns the press, it just declines to act on it.
+    #[rust]
+    cancel_scope: Option<CancelScope>,
     /// The content's area, carried across redraws.
     ///
-    /// Escape is tested against this area, and a view hands out a fresh one
+    /// The keyboard is moved into this area, and a view hands out a fresh one
     /// on every redraw and migrates nothing — so without carrying it the
     /// focus would stop matching the moment the modal repainted.
     #[rust]
@@ -243,9 +257,17 @@ impl ScriptHook for Modal {
 }
 
 impl Widget for Modal {
+    fn visit_cancel(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
+        self.is_open && self.cancel_children_impl(visit)
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         release_orphaned_scroll_blocks(cx);
         if !self.is_open {
+            return;
+        }
+        if ModalAction::is_dismissal(event) {
+            self.close(cx);
             return;
         }
         // The content's widgets and the scrim use plain hits, which this
@@ -261,28 +283,28 @@ impl Widget for Modal {
         let bg_area = self.draw_bg.area();
         let bg_area_hit = event.hits(cx, bg_area);
 
-        if self.can_dismiss {
-            // This is fine, because we already let `content` handle this event above.
-            let content_area_hit = event.hits(cx, self.content_area);
+        let owns_cancel = self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s));
+        // This needs to be done here such that a non-dismissable modal (`can_dismiss` = false)
+        // will still block back-navigation handling for widgets that are behind it.
+        let back_pressed = owns_cancel && event.back_pressed();
 
+        if self.can_dismiss {
             // Close the modal if any of the following conditions occur:
-            // * If the back navigational action/gesture was triggered (e.g., on Android),
-            // * If the Escape key was released while `content` has key focus.
-            //   We look for KeyUp (not KeyDown) to match the FingerUp dismissal,
-            //   which also prevents a widget behind the modal from handling that Escape keypress.
+            // * If this modal owns the back navigational action/gesture (e.g., on Android),
+            // * If an `Escape` press this modal owns was released. Ownership, not key
+            //   focus, is what keeps a widget behind the modal from acting on the press.
+            // * If this modal owns a click of the mouse's back button, the desktop
+            //   equivalent of that gesture.
             // * If there was a click/tap in the background area, outside of the inner `content` view.
-            let should_close = event.back_pressed()
+            let should_close = back_pressed
                 || match bg_area_hit {
                     Hit::FingerUp(fe) => !content.area().rect(cx).contains(fe.abs),
                     _ => false,
                 }
-                || match content_area_hit {
-                    Hit::KeyUp(KeyEvent {
-                        key_code: KeyCode::Escape,
-                        ..
-                    }) => true,
-                    _ => false,
-                };
+                || (owns_cancel && (
+                    matches!(event, Event::KeyUp(key) if key.key_code == KeyCode::Escape)
+                    || matches!(event, Event::MouseUp(e) if e.button.is_back())
+                ));
             if should_close {
                 // Tagged with the MODAL's uid: `ModalRef::dismissed` looks the
                 // action up by `self.widget_uid()`, so the content view's uid
@@ -324,7 +346,7 @@ impl Widget for Modal {
         // We must re-set the blocked scrolling area, as it might've changed after each draw.
         if self.is_open {
             let content_area = self.view.widget(cx, ids!(content)).area();
-            // Move the key focus along with the area, or Escape stops
+            // Move the key focus along with the area, or the keyboard stops
             // reaching a modal that has merely repainted.
             self.content_area = cx.update_area_refs(self.content_area, content_area);
             if self.wants_focus && !self.content_area.is_empty() {
@@ -360,12 +382,28 @@ impl Modal {
         self.is_open
     }
 
+    /// The scrim's area: what this modal holds the pointer with, and what a
+    /// press on the scrim captures.
+    ///
+    /// A widget built on a modal needs it to tell its OWN pointer from
+    /// another control's. While a control holds the mouse the interaction is
+    /// locked to that control, so a raw gesture on the panel — a sheet's
+    /// grabber, a press read straight off the event — must stand down; but a
+    /// press on the scrim is captured by this area and is the panel's own,
+    /// not somebody else's. See `Fingers::is_mouse_held_outside`.
+    pub fn scrim_area(&self) -> Area {
+        self.draw_bg.area()
+    }
+
     pub fn open(&mut self, cx: &mut Cx) {
         if !self.is_open {
             // Before this modal moves the keyboard into its content.
             self.restore_focus = cx.key_focus();
         }
         self.is_open = true;
+        // Assigning drops any previous scope, which matters because `open()` has no
+        // already-open guard and callers re-open freely.
+        self.cancel_scope = Some(self.begin_cancel_scope(cx));
         // Redraw the overlay draw_list directly so the first open is visible
         // even before the overlay content has refreshed its draw area.
         if let Some(draw_list) = &self.draw_list {
@@ -374,10 +412,9 @@ impl Modal {
         self.draw_bg.redraw(cx);
         let content = self.view.widget(cx, ids!(content));
         // NOT the key focus here: at this point the content has never been
-        // drawn and its area is Empty, so the focus went to nothing at all —
-        // and Escape, which is tested against that area, had never once
-        // closed a modal. It is taken in `draw_walk`, where the content has
-        // an area to take it with.
+        // drawn and its area is Empty, so the focus went to nothing at all.
+        // It is taken in `draw_walk`, where the content has an area to take
+        // it with.
         self.wants_focus = true;
         content.set_scroll_pos(cx, Vec2d { x: 0.0, y: 0.0 });
         self.take_lock(cx);
@@ -470,6 +507,9 @@ impl Modal {
         // which on mobile then dismisses the soft keyboard.
         if !self.is_open {
             return;
+        }
+        if let Some(scope) = self.cancel_scope.take() {
+            cx.end_cancel_scope(scope);
         }
         // Inform the inner modal content that its modal is being dismissed.
         let content = self.view.widget(cx, ids!(content));

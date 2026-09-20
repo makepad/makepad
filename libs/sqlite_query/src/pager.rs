@@ -1310,7 +1310,22 @@ impl Pager {
             }
         }
     }
+}
 
+/// A connection dropped mid-transaction (an error propagated out of a write,
+/// a thread unwinding) must not keep the file's in-process write slot: the
+/// registry outlives every connection, so a leaked slot answers "another
+/// connection in this process is writing" to every later opener of that path
+/// for the life of the process. Rolling back also restores spilled pages and
+/// clears the journal, the same recovery the next opener would otherwise do.
+impl Drop for Pager {
+    fn drop(&mut self) {
+        let _ = self.rollback();
+        self.release_process_write();
+    }
+}
+
+impl Pager {
     /// Undo the open transaction. Pages that were only staged in memory are
     /// dropped; anything already spilled to the file is restored from the
     /// journal.

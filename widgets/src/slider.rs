@@ -2344,8 +2344,23 @@ impl Widget for Slider {
             }
         }
 
-        if self.hover_actions_enabled {
-            match event.hits_with_capture_overload(cx, self.label_area, true) {
+        // Where the pointer is over the WORD, for a tooltip to hang off. A
+        // report, not a claim: the drag below is what owns this pointer.
+        //
+        // This asked with `capture_overload`, which buys a hover nothing --
+        // `hits` reads that flag only on a press -- and cost the label a
+        // co-capture of every press landing on it. The label sits across the
+        // top of the slider's own face, so that co-capture ran first, marked
+        // the press `handled` as the LABEL's, and the drag's own `hits` two
+        // lines below then refused it: with hover actions on, a press that
+        // started on the word could not slide the control at all.
+        //
+        // Hovers leave `hits` on these two events and no others, so asking on
+        // them alone reports what it always reported and takes nothing.
+        if self.hover_actions_enabled
+            && matches!(event, Event::MouseMove(_) | Event::MouseLeave(_))
+        {
+            match event.hits(cx, self.label_area) {
                 Hit::FingerHoverIn(fh) => {
                     cx.widget_action(uid, SliderAction::LabelHoverIn(fh.rect));
                 }
@@ -2896,5 +2911,158 @@ mod drag_tests {
         // And let go again: the plain rate from that point, no jump back.
         value += drag_value_delta(step, DragAxis::Vertical, false, &mods(false, false, false), span);
         assert!((value - 0.46).abs() < 1e-12, "{}", value);
+    }
+}
+
+/// THE POINTER-CAPTURE RULE, as it applies to a slider.
+///
+/// The drag is the control and it owns the pointer from the press. What is
+/// tested here is that nothing on the slider quietly takes that pointer first:
+/// the label's hover report used to co-capture every press that landed on the
+/// word, which marked the press as the LABEL's and left the drag refusing it.
+#[cfg(test)]
+mod pointer_capture_tests {
+    #![allow(dead_code)]
+    use super::*;
+    use crate::makepad_draw::cx_draw::CxDraw;
+    use std::cell::Cell;
+
+    const SIZE: Vec2d = Vec2d { x: 800.0, y: 600.0 };
+    const WINDOW: WindowId = WindowId(1, 1);
+
+    struct Target {
+        pass: DrawPass,
+        draw_list: DrawList2d,
+    }
+
+    impl Target {
+        fn new(cx: &mut Cx) -> Self {
+            Target { pass: DrawPass::new(cx), draw_list: DrawList2d::new(cx) }
+        }
+
+        fn draw(&mut self, cx: &mut Cx, root: &WidgetRef) {
+            self.pass.set_size(cx, SIZE);
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&self.pass, None);
+            self.draw_list.begin_always(&mut cx2d);
+            cx2d.begin_root_turtle(SIZE, Layout::flow_down());
+            root.draw_all(&mut cx2d, &mut Scope::empty());
+            cx2d.end_pass_sized_turtle();
+            self.draw_list.end(&mut cx2d);
+            cx2d.end_pass(&self.pass);
+        }
+    }
+
+    fn press(abs: Vec2d) -> Event {
+        Event::MouseDown(MouseDownEvent {
+            abs,
+            button: MouseButton::PRIMARY,
+            window_id: WINDOW,
+            modifiers: KeyModifiers::default(),
+            handled: Cell::new(Area::Empty),
+            time: 0.0,
+        })
+    }
+
+    fn send(cx: &mut Cx, root: &WidgetRef, event: &Event) -> ActionsBuf {
+        cx.capture_actions(|cx| root.handle_event(cx, event, &mut Scope::empty()))
+    }
+
+    fn middle(cx: &Cx, widget: &WidgetRef) -> Vec2d {
+        let rect = widget.area().rect(cx);
+        assert!(rect.size.x > 0.0 && rect.size.y > 0.0, "not drawn");
+        rect.pos + rect.size * 0.5
+    }
+
+    fn scene(cx: &mut Cx) -> WidgetRef {
+        cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    gain := Slider{
+                        width: 300.
+                        flow: Right
+                        text: "gain"
+                        hover_actions_enabled: true
+                    }
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        })
+    }
+
+    fn start(cx: &mut Cx) -> (WidgetRef, WidgetRef) {
+        cx.init_cx_os();
+        cx.with_vm(crate::script_mod);
+        let root = scene(cx);
+        let mut target = Target::new(cx);
+        target.draw(cx, &root);
+        let gain = root.widget(cx, ids!(gain));
+        (root, gain)
+    }
+
+    /// Where the WORD is, which is the part of the face the hover report
+    /// covers.
+    fn on_the_word(cx: &Cx, gain: &WidgetRef) -> Vec2d {
+        let inner = gain.borrow::<Slider>().unwrap();
+        let rect = inner.label_area.rect(cx);
+        assert!(
+            rect.size.x > 0.0 && rect.size.y > 0.0,
+            "the label was drawn, or this test is pressing nothing"
+        );
+        rect.pos + rect.size * 0.5
+    }
+
+    fn started_sliding(actions: &ActionsBuf, gain: &WidgetRef) -> bool {
+        actions.iter().filter_map(|a| a.as_widget_action()).any(|a| {
+            a.widget_uid == gain.widget_uid()
+                && matches!(a.cast::<SliderAction>(), SliderAction::StartSlide)
+        })
+    }
+
+    /// A press on the word is still a press on the slider. With hover actions
+    /// on, the label co-captured it and marked it handled, and the drag's own
+    /// `hits` two lines later refused a press that was already spoken for --
+    /// so the control could not be slid from its own legend at all.
+    #[test]
+    fn a_press_on_the_label_still_starts_the_slide() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, gain) = start(&mut cx);
+        let at = on_the_word(&cx, &gain);
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        let actions = send(&mut cx, &root, &press(at));
+        assert!(
+            started_sliding(&actions, &gain),
+            "the press on the word reached the drag"
+        );
+        cx.fingers.first_mouse_button = None;
+    }
+
+    /// And it is the FACE that holds the pointer, not the legend: one press,
+    /// one owner. A second, stray capture is what makes every host around a
+    /// slider stand its own gesture down for the wrong reason.
+    #[test]
+    fn the_face_is_the_only_thing_holding_that_press() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, gain) = start(&mut cx);
+        let at = on_the_word(&cx, &gain);
+        let face = gain.borrow::<Slider>().unwrap().draw_bg.area();
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        send(&mut cx, &root, &press(at));
+        assert!(
+            cx.fingers.is_area_captured(face),
+            "the drag took the pointer"
+        );
+        assert!(
+            !cx.fingers.is_mouse_held_outside(&[face]),
+            "and nothing else on the slider took a second hold of it"
+        );
+        cx.fingers.first_mouse_button = None;
     }
 }

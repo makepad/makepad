@@ -252,6 +252,10 @@ pub struct ReorderList {
     drag_threshold: f64,
     #[rust]
     drag: Option<ReorderDrag>,
+    /// Acquired when the drag starts and released when it ends, before the
+    /// next event's cancel owner is selected.
+    #[rust]
+    cancel_scope: Option<CancelScope>,
     /// Pointer y of the live drag — read by the edge auto-scroll pump so a
     /// finger HELD at the viewport's edge keeps scrolling between moves,
     /// and by the draw pass to put the carried row under the pointer.
@@ -336,6 +340,7 @@ impl ReorderList {
     /// the virtualised viewport). The carry is redrawn away with it.
     fn cancel_drag(&mut self, cx: &mut Cx) {
         self.drag = None;
+        self.cancel_scope = None;
         self.drag_pointer_y = None;
         self.list.redraw(cx);
     }
@@ -350,14 +355,15 @@ impl ReorderList {
         // A live drag: the finger capture on the gripper routes every move
         // and the release here, wherever the pointer wanders.
         if let Some(drag) = self.drag {
-            // Escape cancels outright. The stale capture in cx.fingers dies
+            // Escape or Back cancels outright. The stale capture in cx.fingers dies
             // by itself at release; until then the swallowed pointer events
             // keep the list from scroll-grabbing mid-gesture.
-            if let Event::KeyDown(ke) = event {
-                if ke.key_code == KeyCode::Escape {
-                    self.cancel_drag(cx);
-                    return true;
-                }
+            if self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s))
+                && (matches!(event, Event::KeyDown(ke) if ke.key_code == KeyCode::Escape)
+                    || event.back_pressed())
+            {
+                self.cancel_drag(cx);
+                return true;
             }
             // A live drag is modal for the list: a wheel scroll would slide
             // the rows away under the pointer, and so would a page around the
@@ -432,9 +438,7 @@ impl ReorderList {
                 || matches!(event, Event::TouchUpdate(e)
                     if e.touches.iter().any(|t| matches!(t.state, makepad_draw::makepad_platform::event::TouchState::Stop)));
             if released {
-                self.drag = None;
-                self.drag_pointer_y = None;
-                self.list.redraw(cx);
+                self.cancel_drag(cx);
                 if let Some((from, to)) = drag.commit() {
                     let uid = self.widget_uid();
                     cx.widget_action(uid, ReorderListAction::Reordered { from, to });
@@ -474,6 +478,7 @@ impl ReorderList {
         if let Some((from, y, top, height)) = start {
             self.drag = Some(ReorderDrag::press(from, y).on_row(top, height));
             self.drag_pointer_y = Some(y);
+            self.cancel_scope = Some(self.begin_cancel_scope(cx));
             return true;
         }
         false
@@ -600,6 +605,7 @@ impl ReorderList {
         self.list.stop_all_scroll_motion();
         self.drag = Some(ReorderDrag::press(id, point.y).on_row(row.pos.y, row.size.y));
         self.drag_pointer_y = Some(point.y);
+        self.cancel_scope = Some(self.begin_cancel_scope(cx));
     }
 
     /// The carry itself: the lifted row drawn under the pointer and over
@@ -659,6 +665,12 @@ impl ReorderList {
 
 impl Widget for ReorderList {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if self.drag.is_some()
+            && (crate::modal::ModalAction::is_dismissal(event)
+                || matches!(event, Event::WindowLostFocus(_)))
+        {
+            self.cancel_drag(cx);
+        }
         if self.handle_drag(cx, event) {
             return;
         }

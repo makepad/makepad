@@ -3,9 +3,9 @@ use crate::{
     libc_sys::{self, munmap},
     makepad_math::{dvec2, Vec2d},
     wayland::{wayland_type, xkb_sys},
-    Area, KeyEvent, KeyModifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    TextClipboardEvent, TextInputEvent, WindowClosedEvent, WindowDragQueryEvent,
-    WindowDragQueryResponse,
+    Area, DragEvent, DragItem, DragResponse, DropEvent, KeyEvent, KeyModifiers, MouseButton,
+    MouseCursor, MouseDownEvent, MouseMoveEvent, MouseUpEvent, TextClipboardEvent, TextInputEvent,
+    WindowClosedEvent, WindowDragQueryEvent, WindowDragQueryResponse,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -20,7 +20,8 @@ use wayland_client::{
         wl_buffer, wl_callback, wl_compositor, wl_data_device, wl_data_device_manager,
         wl_data_offer, wl_data_source, wl_keyboard, wl_output,
         wl_pointer::{self, ButtonState},
-        wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface,
+        wl_region, wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_subcompositor, wl_subsurface,
+        wl_surface,
     },
     Connection, Dispatch, Proxy, QueueHandle, WEnum,
 };
@@ -31,6 +32,7 @@ use wayland_protocols::{
             wp_cursor_shape_manager_v1::{self, WpCursorShapeManagerV1},
         },
         fractional_scale::v1::client::{wp_fractional_scale_manager_v1, wp_fractional_scale_v1},
+        pointer_gestures::zv1::client::{zwp_pointer_gesture_pinch_v1, zwp_pointer_gestures_v1},
         primary_selection::zv1::client::{
             zwp_primary_selection_device_manager_v1, zwp_primary_selection_device_v1,
             zwp_primary_selection_offer_v1, zwp_primary_selection_source_v1,
@@ -48,7 +50,10 @@ use wayland_protocols::{
 
 use crate::{
     cx_native::EventFlow,
-    event::{PopupDismissReason, PopupDismissedEvent, ScrollEvent, ScrollPhase, WindowGeom},
+    event::{
+        PinchEvent, PinchPhase, PopupDismissReason, PopupDismissedEvent, ScrollEvent, ScrollPhase,
+        WindowGeom, TAP_COUNT_DISTANCE, TAP_COUNT_TIME,
+    },
     select_timer::SelectTimers,
     wayland::wayland_app::WaylandApp,
     x11::xlib_event::XlibEvent,
@@ -60,6 +65,244 @@ use super::opengl_wayland::{WaylandPopupWindow, WaylandWindow};
 
 /// Reserved timer ID for keyboard repeat. Uses a high value to avoid conflicts with app timers.
 const KEY_REPEAT_TIMER_ID: u64 = u64::MAX - 1;
+
+/// Whether a pointer frame's scroll came from a wheel-like source: one that ratchets in
+/// coarse steps, so its detents drive the delta, it carries no gesture phase, and it is
+/// reported to widgets as mouse input.
+///
+/// `source` is the frame's `wl_pointer::AxisSource`, or `None` when the compositor sent
+/// none — the event is optional and only sent when the source is known. With no source,
+/// the detents settle it: a device without discrete steps does not generate them, which
+/// the spec spells out for `axis_discrete`. Guessing wheel-like is in any case the safe
+/// guess, being the one classification that cannot strand a stretched rubber band waiting
+/// for a terminator the spec does not promise.
+fn scroll_is_wheel_like(source: Option<wl_pointer::AxisSource>, has_detents: bool) -> bool {
+    match source {
+        Some(wl_pointer::AxisSource::Wheel) | Some(wl_pointer::AxisSource::WheelTilt) => true,
+        // A trackpoint or button-held scroll is smooth, so it takes the raw pixel path even
+        // though it is not a gesture.
+        Some(wl_pointer::AxisSource::Finger) | Some(wl_pointer::AxisSource::Continuous) => false,
+        _ => has_detents,
+    }
+}
+
+/// What one pointer frame's axis events add up to.
+struct FrameScroll {
+    /// The delta in logical pixels.
+    delta: Vec2d,
+    phase: ScrollPhase,
+    /// Reported as `ScrollEvent::is_mouse`: a wheel that ratchets in steps, which widgets may
+    /// ease between. False for every smooth source, which needs no easing.
+    is_mouse: bool,
+}
+
+/// Resolve a pointer frame's accumulated axis events into one scroll, or `None` when the
+/// frame carries nothing worth dispatching.
+///
+/// `source` is the frame's `wl_pointer::AxisSource` (`None` if the compositor sent none),
+/// `gesture_active` whether the previous frame was a live touchpad gesture, and `stopped`
+/// whether an `AxisStop` arrived in this frame.
+fn frame_scroll(
+    source: Option<wl_pointer::AxisSource>,
+    gesture_active: bool,
+    stopped: bool,
+    acc: Vec2d,
+    detents: Vec2d,
+) -> Option<FrameScroll> {
+    let has_detents = detents.x != 0.0 || detents.y != 0.0;
+    let has_delta = acc.x != 0.0 || acc.y != 0.0 || has_detents;
+    let is_wheel_like = scroll_is_wheel_like(source, has_detents);
+    // `axis_source` is per-frame and optional, so a compositor may name the source on a
+    // gesture's motion frames and omit it on the lift-off frame. Treating that frame as
+    // sourceless would drop the terminator and leave a stretched rubber band with nothing
+    // to release it, so a gesture already in flight carries its classification forward --
+    // but never over a frame whose detents say it is a wheel.
+    let is_finger = match source {
+        Some(wl_pointer::AxisSource::Finger) => true,
+        None => gesture_active && !is_wheel_like,
+        _ => false,
+    };
+    // A stop alongside live motion is not the end of the gesture. Per the `frame` event:
+    // "When a wl_pointer.axis and a wl_pointer.axis_stop event occur within the same frame,
+    // this indicates that axis movement in one axis has stopped but continues in the other
+    // axis." The lift-off frame that does end the gesture carries its stops alone.
+    let gesture_ended = is_finger && stopped && !has_delta;
+    if !has_delta && !gesture_ended {
+        // Only `Finger` is guaranteed an `AxisStop`; the spec tells clients to treat wheel,
+        // wheel_tilt and continuous sequences "as unterminated by default". A bare stop from
+        // one of those says nothing, and dispatching a zero-delta `ScrollPhase::None` for it
+        // would clear a widget's overscroll and cut short a running bounce.
+        return None;
+    }
+    // Scale wheel detents to a fixed distance each, so slow deliberate clicks and fast spins
+    // both move proportionally. Decided per axis: a frame can carry detents on one axis and
+    // only a smooth value on the other, and scaling that second axis by a zero detent count
+    // would silently drop it.
+    //
+    // An axis with no detents keeps its raw value. Compositors pair a detent event with every
+    // wheel-source axis event — `axis_discrete` is documented as absent only for continuous
+    // devices — and the seat binds above the v5 that introduced it, so a physical wheel
+    // always brings one. The fallback is for virtual pointers: `zwlr_virtual_pointer_v1` lets
+    // a client send a wheel-source axis value with no discrete step, and `wl_pointer.axis`
+    // defines that value as a "length of vector in surface-local coordinate space" — already
+    // a distance, with no detent count to recover and no units-per-detent constant that could
+    // recover one (compositors disagree, and hwdb ships wheels from 10 to 30 degrees a click).
+    let axis_scroll = |detent: f64, raw: f64| {
+        if detent != 0.0 {
+            detent * PIXELS_PER_WHEEL_DETENT
+        } else {
+            raw
+        }
+    };
+    // Finger-driven (touchpad) scrolling reports `Changed` per frame and `Ended` when the
+    // fingers lift, which is what drives the rubber band at a scroll limit. Every other
+    // source is a plain delta with no gesture.
+    //
+    // Note this yields no kinetic scrolling for Wayland touchpads: widgets start their fling
+    // on `ScrollPhase::Momentum`, which only macOS emits — there the OS synthesizes that
+    // stream, while Wayland compositors do not and neither Linux backend fabricates one.
+    let phase = if !is_finger {
+        ScrollPhase::None
+    } else if gesture_ended {
+        ScrollPhase::Ended
+    } else {
+        ScrollPhase::Changed
+    };
+    Some(FrameScroll {
+        delta: if is_wheel_like {
+            dvec2(axis_scroll(detents.x, acc.x), axis_scroll(detents.y, acc.y))
+        } else {
+            acc
+        },
+        phase,
+        is_mouse: is_wheel_like,
+    })
+}
+
+fn is_caption_double_click(
+    previous: Option<(WindowId, Vec2d, u32)>,
+    window_id: WindowId,
+    pos: Vec2d,
+    time: u32,
+) -> bool {
+    previous.is_some_and(|(last_window_id, last_pos, last_time)| {
+        last_window_id == window_id
+            && time.wrapping_sub(last_time) <= (TAP_COUNT_TIME * 1000.0) as u32
+            && (pos - last_pos).length() < TAP_COUNT_DISTANCE
+    })
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CaptionPress {
+    window_id: WindowId,
+    pos: Vec2d,
+    time: u32,
+    serial: u32,
+    drag_started: bool,
+}
+
+impl CaptionPress {
+    fn start_drag_if_needed(&mut self, window_id: WindowId, pos: Vec2d) -> Option<(WindowId, u32)> {
+        if self.drag_started {
+            return None;
+        }
+        if self.window_id != window_id {
+            self.drag_started = true;
+            return None;
+        }
+        if (pos - self.pos).length() < TAP_COUNT_DISTANCE {
+            return None;
+        }
+        self.drag_started = true;
+        Some((self.window_id, self.serial))
+    }
+
+    fn completed_click(self, window_id: WindowId, pos: Vec2d) -> Option<(WindowId, Vec2d, u32)> {
+        (self.window_id == window_id
+            && !self.drag_started
+            && (pos - self.pos).length() < TAP_COUNT_DISTANCE)
+            .then_some((self.window_id, self.pos, self.time))
+    }
+}
+
+const RESIZE_EDGE_LEFT: u8 = 1 << 0;
+const RESIZE_EDGE_RIGHT: u8 = 1 << 1;
+const RESIZE_EDGE_TOP: u8 = 1 << 2;
+const RESIZE_EDGE_BOTTOM: u8 = 1 << 3;
+
+fn xdg_toplevel_edge_mask(states: &[u8], first_state: u32) -> u8 {
+    [
+        (first_state, RESIZE_EDGE_LEFT),
+        (first_state + 1, RESIZE_EDGE_RIGHT),
+        (first_state + 2, RESIZE_EDGE_TOP),
+        (first_state + 3, RESIZE_EDGE_BOTTOM),
+    ]
+    .into_iter()
+    .filter_map(|(state, edge)| WaylandState::xdg_toplevel_has_state(states, state).then_some(edge))
+    .fold(0, |mask, edge| mask | edge)
+}
+
+fn resize_edge_mask(edge: xdg_toplevel::ResizeEdge) -> u8 {
+    match edge {
+        xdg_toplevel::ResizeEdge::Top => RESIZE_EDGE_TOP,
+        xdg_toplevel::ResizeEdge::Bottom => RESIZE_EDGE_BOTTOM,
+        xdg_toplevel::ResizeEdge::Left => RESIZE_EDGE_LEFT,
+        xdg_toplevel::ResizeEdge::TopLeft => RESIZE_EDGE_TOP | RESIZE_EDGE_LEFT,
+        xdg_toplevel::ResizeEdge::BottomLeft => RESIZE_EDGE_BOTTOM | RESIZE_EDGE_LEFT,
+        xdg_toplevel::ResizeEdge::Right => RESIZE_EDGE_RIGHT,
+        xdg_toplevel::ResizeEdge::TopRight => RESIZE_EDGE_TOP | RESIZE_EDGE_RIGHT,
+        xdg_toplevel::ResizeEdge::BottomRight => RESIZE_EDGE_BOTTOM | RESIZE_EDGE_RIGHT,
+        _ => 0,
+    }
+}
+
+fn resize_edge_from_mask(mask: u8) -> Option<xdg_toplevel::ResizeEdge> {
+    use xdg_toplevel::ResizeEdge;
+    Some(
+        match (
+            mask & (RESIZE_EDGE_LEFT | RESIZE_EDGE_RIGHT),
+            mask & (RESIZE_EDGE_TOP | RESIZE_EDGE_BOTTOM),
+        ) {
+            (RESIZE_EDGE_LEFT, RESIZE_EDGE_TOP) => ResizeEdge::TopLeft,
+            (RESIZE_EDGE_LEFT, RESIZE_EDGE_BOTTOM) => ResizeEdge::BottomLeft,
+            (RESIZE_EDGE_RIGHT, RESIZE_EDGE_TOP) => ResizeEdge::TopRight,
+            (RESIZE_EDGE_RIGHT, RESIZE_EDGE_BOTTOM) => ResizeEdge::BottomRight,
+            (RESIZE_EDGE_LEFT, 0) => ResizeEdge::Left,
+            (RESIZE_EDGE_RIGHT, 0) => ResizeEdge::Right,
+            (0, RESIZE_EDGE_TOP) => ResizeEdge::Top,
+            (0, RESIZE_EDGE_BOTTOM) => ResizeEdge::Bottom,
+            _ => return None,
+        },
+    )
+}
+
+/// Narrows `edge` to the components the compositor still allows. A tiled window shares
+/// its inner borders with a neighbour and cannot resize them, but its outer ones stay
+/// free; dropping the whole corner in that case would cost the user a grab they still
+/// have, so a corner degrades to whichever of its two edges survives.
+pub(crate) fn available_resize_edge(
+    edge: xdg_toplevel::ResizeEdge,
+    unavailable: u8,
+) -> Option<xdg_toplevel::ResizeEdge> {
+    resize_edge_from_mask(resize_edge_mask(edge) & !unavailable)
+}
+
+pub(crate) fn resize_edge_cursor(
+    edge: xdg_toplevel::ResizeEdge,
+) -> wp_cursor_shape_device_v1::Shape {
+    use wp_cursor_shape_device_v1::Shape;
+    match edge {
+        xdg_toplevel::ResizeEdge::Top => Shape::NResize,
+        xdg_toplevel::ResizeEdge::Bottom => Shape::SResize,
+        xdg_toplevel::ResizeEdge::Left => Shape::WResize,
+        xdg_toplevel::ResizeEdge::Right => Shape::EResize,
+        xdg_toplevel::ResizeEdge::TopLeft => Shape::NwResize,
+        xdg_toplevel::ResizeEdge::TopRight => Shape::NeResize,
+        xdg_toplevel::ResizeEdge::BottomLeft => Shape::SwResize,
+        xdg_toplevel::ResizeEdge::BottomRight => Shape::SeResize,
+        _ => Shape::Default,
+    }
+}
 
 /// State for tracking keyboard key repeat.
 struct KeyRepeatState {
@@ -81,6 +324,7 @@ struct PendingClipboardRead {
 
 pub(crate) struct WaylandState {
     pub(crate) compositor: Option<wl_compositor::WlCompositor>,
+    pub(crate) subcompositor: Option<wl_subcompositor::WlSubcompositor>,
     pub(crate) wm_base: Option<xdg_wm_base::XdgWmBase>,
     pub(crate) seat: Option<wl_seat::WlSeat>,
     pub(crate) shm: Option<wl_shm::WlShm>,
@@ -97,14 +341,28 @@ pub(crate) struct WaylandState {
     pub(crate) cursor_manager: Option<wp_cursor_shape_manager_v1::WpCursorShapeManagerV1>,
     pub(crate) cursor_shape: Option<wp_cursor_shape_device_v1::WpCursorShapeDeviceV1>,
     pub(crate) pointer: Option<wl_pointer::WlPointer>,
+    /// The touchpad gestures global (`zwp_pointer_gestures_v1`) when the compositor
+    /// offers one, and the pinch object it hands out for our pointer.
+    pub(crate) pointer_gestures: Option<zwp_pointer_gestures_v1::ZwpPointerGesturesV1>,
+    pub(crate) pinch_gesture: Option<zwp_pointer_gesture_pinch_v1::ZwpPointerGesturePinchV1>,
+    /// The pinch's scale at its previous update: the protocol reports the scale since
+    /// `begin`, `PinchEvent::scale` is the change since the previous event.
+    pub(crate) pinch_scale: f64,
     pub(crate) last_mouse_pos: Vec2d,
     pub(crate) pointer_serial: Option<u32>,
+    pub(crate) pointer_enter_serial: Option<u32>,
+    pub(crate) requested_cursor: MouseCursor,
     pub(crate) keyboard_serial: Option<u32>,
     pub(crate) decoration_manager: Option<zxdg_decoration_manager_v1::ZxdgDecorationManagerV1>,
     pub(crate) icon_manager: Option<xdg_toplevel_icon_manager_v1::XdgToplevelIconManagerV1>,
     pub(crate) windows: Vec<WaylandWindow>,
     pub(crate) popups: Vec<WaylandPopupWindow>,
     pub(crate) pointer_window: Option<WindowId>,
+    /// Set while the pointer is over a window's shadow gutter rather than the window
+    /// itself, together with the edge a press there would resize. Kept apart from
+    /// [`Self::pointer_window`] because the gutter is outside the window: the app must
+    /// not see hover or clicks at coordinates that fall outside its own surface.
+    pub(crate) pointer_shadow: Option<(WindowId, xdg_toplevel::ResizeEdge)>,
     /// The latest un-dispatched pointer motion `(window_id, pos)`, coalesced across a whole
     /// `dispatch_pending` batch. A high-Hz mouse queues many `wl_pointer` motion+frame pairs between
     /// paints; dispatching each as a `MouseMove` runs a redundant hover hit-test across the whole
@@ -135,6 +393,9 @@ pub(crate) struct WaylandState {
         Option<zwp_primary_selection_source_v1::ZwpPrimarySelectionSourceV1>,
     pub(crate) primary_selection_text: String,
     pub(crate) last_resize_edge: Option<xdg_toplevel::ResizeEdge>,
+    caption_press: Option<CaptionPress>,
+    last_caption_click: Option<(WindowId, Vec2d, u32)>,
+    consumed_pointer_buttons: MouseButton,
     event_callback: Option<Box<dyn FnMut(&mut WaylandState, XlibEvent)>>,
 
     pub(crate) scroll_accumulator: Vec2d,
@@ -142,17 +403,41 @@ pub(crate) struct WaylandState {
     /// (fractional detents on high-resolution wheels) or `AxisDiscrete` on pre-v8
     /// compositors. Same sign convention as `scroll_accumulator`.
     pub(crate) scroll_detents: Vec2d,
-    pub(crate) scroll_is_wheel: bool,
-    /// Set when `wl_pointer::AxisStop` arrives in the current pointer frame: the fingers
-    /// lifted off the touchpad. The frame's Scroll event is then sent with
-    /// `ScrollPhase::Ended` (even if its delta is zero) so widgets can start their own
-    /// fling — Wayland compositors do not synthesize momentum scrolling for clients.
+    /// The `wl_pointer::AxisSource` reported for the current pointer frame, or `None`
+    /// when the compositor sent no `AxisSource` event — the event is optional ("If the
+    /// source is unknown for a particular axis event sequence, no event is sent") and a
+    /// source value newer than this protocol copy is likewise recorded as `None`. Scoped
+    /// to one frame, so it resets on every `Frame` and must never be assumed to carry
+    /// over. See [`scroll_is_wheel_like`].
+    pub(crate) scroll_source: Option<wl_pointer::AxisSource>,
+    /// Set when `wl_pointer::AxisStop` arrives in the current pointer frame. It ends the
+    /// gesture — sending that frame's Scroll event with `ScrollPhase::Ended`, which springs
+    /// a stretched rubber band back and releases the widget's gesture ownership — only on a
+    /// finger frame that carries no motion of its own. A stop alongside live motion means
+    /// that one axis stopped while the other continues (see the `frame` event), not lift-off,
+    /// and a stop from a source that is not a gesture says nothing at all. See
+    /// [`frame_scroll`].
     pub(crate) scroll_stopped: bool,
+    /// Whether the last dispatched pointer frame was a live touchpad gesture, so that a
+    /// lift-off frame on which the compositor omitted its `AxisSource` is still recognised
+    /// as the end of that gesture rather than as an unclassified scroll.
+    pub(crate) scroll_gesture_active: bool,
     /// Windows whose last presented frame's `wl_surface::frame` callback has not fired
     /// yet. While a window is listed here the compositor is not ready for a new frame
     /// on that surface, so presenting it is skipped (its pass stays dirty). See the
     /// frame-callback pacing in `linux_wayland.rs`.
-    frame_callbacks_pending: Vec<WindowId>,
+    frame_callbacks_pending: Vec<(WindowId, usize)>,
+    /// Decides how many presents may await their `wl_surface::frame` callback
+    /// before a window's next present is held back; see `frame_pacer.rs`.
+    pub(crate) frame_pacer: super::frame_pacer::FramePacer,
+    /// The compositor advertises `wp_fifo_manager_v1`, so a FIFO swapchain
+    /// queues a present behind the previous one instead of blocking on it.
+    pub(crate) has_fifo_v1: bool,
+    /// Windows presented since the Paint arm last cleared this.
+    pub(crate) presents_this_cycle: usize,
+    /// When every surface became held back by the compositor (see the Paint
+    /// arm in `linux_wayland.rs`); `None` while at least one can present.
+    pub(crate) frame_gate_since: Option<std::time::Instant>,
     pub(crate) event_flow: EventFlow,
     pub(crate) event_loop_running: bool,
 
@@ -168,6 +453,7 @@ impl WaylandState {
     pub fn new(event_callback: Box<dyn FnMut(&mut WaylandState, XlibEvent)>) -> Self {
         Self {
             compositor: None,
+            subcompositor: None,
             wm_base: None,
             seat: None,
             shm: None,
@@ -183,6 +469,9 @@ impl WaylandState {
             cursor_manager: None,
             cursor_shape: None,
             pointer: None,
+            pointer_gestures: None,
+            pinch_gesture: None,
+            pinch_scale: 1.0,
             decoration_manager: None,
             icon_manager: None,
             scale_manager: None,
@@ -190,9 +479,12 @@ impl WaylandState {
             windows: Vec::new(),
             popups: Vec::new(),
             pointer_window: None,
+            pointer_shadow: None,
             pending_motion: None,
             keyboard_window: None,
             pointer_serial: None,
+            pointer_enter_serial: None,
+            requested_cursor: MouseCursor::Default,
             keyboard_serial: None,
             modifiers: KeyModifiers::default(),
             xkb_state: None,
@@ -208,13 +500,21 @@ impl WaylandState {
             primary_selection_text: String::new(),
             last_mouse_pos: dvec2(0., 0.),
             last_resize_edge: None,
+            caption_press: None,
+            last_caption_click: None,
+            consumed_pointer_buttons: MouseButton::empty(),
             timers: SelectTimers::new(),
             event_callback: Some(event_callback),
             scroll_accumulator: dvec2(0.0, 0.0),
             scroll_detents: dvec2(0.0, 0.0),
-            scroll_is_wheel: false,
+            scroll_source: None,
+            scroll_gesture_active: false,
             scroll_stopped: false,
             frame_callbacks_pending: Vec::new(),
+            frame_pacer: super::frame_pacer::FramePacer::new(),
+            has_fifo_v1: false,
+            presents_this_cycle: 0,
+            frame_gate_since: None,
             event_flow: EventFlow::Wait,
             event_loop_running: true,
             key_repeat_rate: 25,
@@ -252,6 +552,114 @@ impl WaylandState {
                     .map(|win| win.xdg_surface.clone())
             })
     }
+
+    fn clear_resize_edge(&mut self, force_cursor_update: bool) {
+        if self.last_resize_edge.take().is_some() || force_cursor_update {
+            if let (Some(cursor), Some(serial)) =
+                (self.cursor_shape.as_ref(), self.pointer_enter_serial)
+            {
+                cursor.set_shape(serial, self.requested_cursor.into());
+            }
+        }
+    }
+
+    fn update_resize_edge(
+        &mut self,
+        window_id: WindowId,
+        pos: Vec2d,
+        force_cursor_update: bool,
+    ) {
+        self.last_mouse_pos = pos;
+        let window_state = self
+            .windows
+            .iter()
+            .find(|window| window.window_id == window_id)
+            .filter(|window| {
+                window.uses_client_side_decorations
+                    && !window.is_maximized
+                    && !window.is_fullscreen
+                    // The gutter already owns the grabs, and hit-testing here as well would
+                    // charge every pointer motion near an edge for a whole-widget-tree
+                    // `WindowDragQuery` dispatch that cannot change the answer.
+                    && !window.csd_shadow_gutter_active()
+            })
+            .map(|window| {
+                (
+                    window.window_geom.inner_size,
+                    window.unavailable_resize_edges,
+                )
+            });
+        // The gutter outside the window is the primary way to resize, so these interior
+        // bands only need to cover the case where the shadow could not be created and
+        // there is no gutter to aim at. They stay narrow because every pixel they claim
+        // is a pixel the app's own widgets do not get.
+        let mut edge = window_state.and_then(|(size, unavailable)| {
+            let mut mask = 0;
+            if pos.x < 10.0 {
+                mask |= RESIZE_EDGE_LEFT;
+            } else if pos.x >= size.x - 10.0 {
+                mask |= RESIZE_EDGE_RIGHT;
+            }
+            if pos.y < 10.0 {
+                mask |= RESIZE_EDGE_TOP;
+            } else if pos.y >= size.y - 10.0 {
+                mask |= RESIZE_EDGE_BOTTOM;
+            }
+            // Away from a corner the band narrows to 5 px, so a single-axis hit outside
+            // that has to fall through to the app.
+            if mask.count_ones() == 1
+                && pos.x >= 5.0
+                && pos.x < size.x - 5.0
+                && pos.y >= 5.0
+                && pos.y < size.y - 5.0
+            {
+                return None;
+            }
+            resize_edge_from_mask(mask & !unavailable)
+        });
+        if edge.is_some() {
+            let response = Rc::new(Cell::new(WindowDragQueryResponse::NoAnswer));
+            self.do_callback(XlibEvent::WindowDragQuery(WindowDragQueryEvent {
+                window_id,
+                abs: pos,
+                response: response.clone(),
+            }));
+            if matches!(response.get(), WindowDragQueryResponse::Client) {
+                edge = None;
+            }
+        }
+        if let Some(resize_edge) = edge {
+            self.last_resize_edge = Some(resize_edge);
+            if let (Some(cursor), Some(serial)) =
+                (self.cursor_shape.as_ref(), self.pointer_enter_serial)
+            {
+                cursor.set_shape(serial, resize_edge_cursor(resize_edge));
+            }
+        } else {
+            self.clear_resize_edge(force_cursor_update);
+        }
+    }
+
+    /// Handles the pointer entering one of a window's shadow surfaces: the pointer is in
+    /// the gutter, outside the window proper, where the only gesture is a resize. Returns
+    /// false when `surface` belongs to no shadow, leaving the caller's normal path intact.
+    fn enter_shadow_gutter(&mut self, surface: &wl_surface::WlSurface) -> bool {
+        let surface_id = surface.id();
+        let Some((window_id, edge, shape)) = self.windows.iter().find_map(|window| {
+            window
+                .csd_shadow_resize_for_surface(&surface_id)
+                .map(|(edge, shape)| (window.window_id, edge, shape))
+        }) else {
+            return false;
+        };
+        self.pointer_shadow = Some((window_id, edge));
+        if let (Some(cursor), Some(serial)) =
+            (self.cursor_shape.as_ref(), self.pointer_enter_serial)
+        {
+            cursor.set_shape(serial, shape);
+        }
+        true
+    }
 }
 
 impl Dispatch<wl_registry::WlRegistry, ()> for WaylandState {
@@ -275,9 +683,19 @@ impl Dispatch<wl_registry::WlRegistry, ()> for WaylandState {
                         wl_registry.bind::<wl_compositor::WlCompositor, _, _>(name, 1, qhandle, ());
                     state.compositor = Some(compositor);
                 }
+                "wl_subcompositor" => {
+                    let subcompositor = wl_registry
+                        .bind::<wl_subcompositor::WlSubcompositor, _, _>(name, 1, qhandle, ());
+                    state.subcompositor = Some(subcompositor);
+                }
                 "xdg_wm_base" => {
                     let wm_base =
-                        wl_registry.bind::<xdg_wm_base::XdgWmBase, _, _>(name, 1, qhandle, ());
+                        wl_registry.bind::<xdg_wm_base::XdgWmBase, _, _>(
+                            name,
+                            version.min(7),
+                            qhandle,
+                            (),
+                        );
                     state.wm_base = Some(wm_base);
                 }
                 "wl_seat" => {
@@ -338,6 +756,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for WaylandState {
                     let shm = wl_registry.bind::<wl_shm::WlShm, _, _>(name, 1, qhandle, ());
                     state.shm = Some(shm);
                 }
+                // Not bound: the Vulkan swapchain uses it, the pacer only needs
+                // to know it is there.
+                "wp_fifo_manager_v1" => state.has_fifo_v1 = true,
                 "xdg_toplevel_icon_manager_v1" => {
                     let icon_manager = wl_registry
                         .bind::<xdg_toplevel_icon_manager_v1::XdgToplevelIconManagerV1, _, _>(
@@ -368,6 +789,20 @@ impl Dispatch<wl_registry::WlRegistry, ()> for WaylandState {
                     );
                     state.primary_selection_manager = Some(manager);
                     state.ensure_primary_selection_device(qhandle);
+                }
+                "zwp_pointer_gestures_v1" => {
+                    let manager = wl_registry.bind::<zwp_pointer_gestures_v1::ZwpPointerGesturesV1, _, _>(
+                        name,
+                        1,
+                        qhandle,
+                        (),
+                    );
+                    // The seat may have handed out the pointer before this global
+                    // arrived (the order is the compositor's); either side finishes.
+                    if let Some(pointer) = state.pointer.as_ref() {
+                        state.pinch_gesture = Some(manager.get_pinch_gesture(pointer, qhandle, ()));
+                    }
+                    state.pointer_gestures = Some(manager);
                 }
                 _ => {}
             }
@@ -450,7 +885,14 @@ impl Dispatch<xdg_toplevel::XdgToplevel, WindowId> for WaylandState {
                 height,
                 states,
             } => {
-                if let Some(window) = state.windows.iter().find(|win| win.window_id == *window_id) {
+                let mut geom_change = None;
+                let mut disable_client_resize = false;
+                let mut refresh_client_resize = false;
+                if let Some(window) = state
+                    .windows
+                    .iter_mut()
+                    .find(|win| win.window_id == *window_id)
+                {
                     let inner_size = if width > 0 && height > 0 {
                         dvec2(width as f64, height as f64)
                     } else {
@@ -460,13 +902,37 @@ impl Dispatch<xdg_toplevel::XdgToplevel, WindowId> for WaylandState {
                         WaylandState::xdg_toplevel_has_state(&states, 1 /* maximized */);
                     let is_fullscreen =
                         WaylandState::xdg_toplevel_has_state(&states, 2 /* fullscreen */);
-                    state.do_callback(XlibEvent::WindowGeomChange(WindowGeomChangeEvent {
+                    let is_active =
+                        WaylandState::xdg_toplevel_has_state(&states, 4 /* activated */);
+                    let tiled_edges = xdg_toplevel_edge_mask(&states, 5 /* tiled_left */);
+                    let constrained_edges =
+                        xdg_toplevel_edge_mask(&states, 10 /* constrained_left */);
+                    let unavailable_resize_edges = tiled_edges | constrained_edges;
+                    let resize_was_disabled = window.is_maximized || window.is_fullscreen;
+                    let resize_edges_changed =
+                        window.unavailable_resize_edges != unavailable_resize_edges;
+                    window.is_maximized = is_maximized;
+                    window.is_fullscreen = is_fullscreen;
+                    window.is_tiled = tiled_edges != 0;
+                    window.is_active = is_active;
+                    window.unavailable_resize_edges = unavailable_resize_edges;
+                    disable_client_resize = is_maximized || is_fullscreen;
+                    // A size change moves the right and bottom bands out from under a
+                    // stationary pointer. Without re-running the hit test the window keeps
+                    // a resize cursor it no longer has an edge for, and the next click is
+                    // swallowed starting a resize from nowhere.
+                    refresh_client_resize = resize_edges_changed
+                        || resize_was_disabled != disable_client_resize
+                        || window.window_geom.inner_size != inner_size;
+                    geom_change = Some(WindowGeomChangeEvent {
                         window_id: *window_id,
                         old_geom: window.window_geom.clone(),
                         new_geom: WindowGeom {
                             dpi_factor: window.window_geom.dpi_factor,
                             can_fullscreen: false,
                             xr_is_presenting: false,
+                            // Preserve the established Makepad API: on Wayland this
+                            // flag has always represented maximized or fullscreen.
                             is_fullscreen: is_fullscreen || is_maximized,
                             is_topmost: false,
                             position: dvec2(0., 0.),
@@ -474,7 +940,17 @@ impl Dispatch<xdg_toplevel::XdgToplevel, WindowId> for WaylandState {
                             outer_size: inner_size,
                             ..Default::default()
                         },
-                    }));
+                    });
+                }
+                if let Some(event) = geom_change {
+                    state.do_callback(XlibEvent::WindowGeomChange(event));
+                }
+                if state.pointer_window == Some(*window_id) {
+                    if disable_client_resize {
+                        state.clear_resize_edge(false);
+                    } else if refresh_client_resize {
+                        state.update_resize_edge(*window_id, state.last_mouse_pos, false);
+                    }
                 }
             }
             xdg_toplevel::Event::Close => {
@@ -485,6 +961,38 @@ impl Dispatch<xdg_toplevel::XdgToplevel, WindowId> for WaylandState {
                 }))
             }
             _ => {}
+        }
+    }
+}
+
+impl Dispatch<zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1, WindowId>
+    for WaylandState
+{
+    fn event(
+        state: &mut Self,
+        _decoration: &zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1,
+        event: zxdg_toplevel_decoration_v1::Event,
+        window_id: &WindowId,
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        let zxdg_toplevel_decoration_v1::Event::Configure { mode } = event else {
+            return;
+        };
+        let uses_client_side_decorations = match mode {
+            WEnum::Value(zxdg_toplevel_decoration_v1::Mode::ServerSide) => false,
+            WEnum::Value(zxdg_toplevel_decoration_v1::Mode::ClientSide)
+            | WEnum::Value(_)
+            | WEnum::Unknown(_) => true,
+        };
+        if let Some(window) = state
+            .windows
+            .iter_mut()
+            .find(|window| window.window_id == *window_id)
+        {
+            // Decoration state is double-buffered with xdg_surface state. Keep
+            // only the latest mode and apply it at the matching surface configure.
+            window.pending_client_side_decorations = Some(uses_client_side_decorations);
         }
     }
 }
@@ -499,19 +1007,57 @@ impl Dispatch<xdg_surface::XdgSurface, WindowId> for WaylandState {
     ) {
         if let xdg_surface::Event::Configure { serial, .. } = event {
             xdg_surface.ack_configure(serial);
-            let mut first_configure_event = None;
+            let mut configure_event = None;
+            let mut clear_resize_edge = false;
+            let mut update_resize_edge = false;
+            // Proxy clones are cheap handles and let us initialize CSD shadow
+            // resources while mutably borrowing the matching window.
+            let compositor = state.compositor.clone();
+            let subcompositor = state.subcompositor.clone();
+            let shm = state.shm.clone();
+            let viewporter = state.viewporter.clone();
             if let Some(window) = state
                 .windows
                 .iter_mut()
                 .find(|win| win.window_id == *window_id)
             {
+                let decoration_changed =
+                    if let Some(uses_csd) = window.pending_client_side_decorations.take() {
+                        if uses_csd == window.uses_client_side_decorations {
+                            false
+                        } else {
+                            if uses_csd {
+                                if let Some(compositor) = compositor.as_ref() {
+                                    window.ensure_csd_shadow(
+                                        compositor,
+                                        subcompositor.as_ref(),
+                                        shm.as_ref(),
+                                        viewporter.as_ref(),
+                                        qhandle,
+                                    );
+                                }
+                            }
+                            clear_resize_edge = !uses_csd;
+                            update_resize_edge = uses_csd;
+                            window.uses_client_side_decorations = uses_csd;
+                            true
+                        }
+                    } else {
+                        false
+                    };
                 if !window.configured {
                     let mut old_geom = window.window_geom.clone();
                     old_geom.inner_size = dvec2(0., 0.);
                     old_geom.outer_size = dvec2(0., 0.);
-                    first_configure_event = Some(WindowGeomChangeEvent {
+                    configure_event = Some(WindowGeomChangeEvent {
                         window_id: *window_id,
                         old_geom,
+                        new_geom: window.window_geom.clone(),
+                    });
+                } else if decoration_changed {
+                    configure_event = Some(WindowGeomChangeEvent {
+                        window_id: *window_id,
+                        old_geom: window.window_geom.clone(),
                         new_geom: window.window_geom.clone(),
                     });
                 }
@@ -525,7 +1071,7 @@ impl Dispatch<xdg_surface::XdgSurface, WindowId> for WaylandState {
                     let mut old_geom = window.window_geom.clone();
                     old_geom.inner_size = dvec2(0., 0.);
                     old_geom.outer_size = dvec2(0., 0.);
-                    first_configure_event = Some(WindowGeomChangeEvent {
+                    configure_event = Some(WindowGeomChangeEvent {
                         window_id: *window_id,
                         old_geom,
                         new_geom: window.window_geom.clone(),
@@ -533,8 +1079,13 @@ impl Dispatch<xdg_surface::XdgSurface, WindowId> for WaylandState {
                 }
                 window.configured = true;
             }
-            if let Some(event) = first_configure_event {
+            if let Some(event) = configure_event {
                 state.do_callback(XlibEvent::WindowGeomChange(event));
+            }
+            if clear_resize_edge && state.pointer_window == Some(*window_id) {
+                state.clear_resize_edge(false);
+            } else if update_resize_edge && state.pointer_window == Some(*window_id) {
+                state.update_resize_edge(*window_id, state.last_mouse_pos, false);
             }
         }
     }
@@ -622,6 +1173,9 @@ impl Dispatch<wl_seat::WlSeat, ()> for WaylandState {
                 let pointer = seat.get_pointer(qhandle, ());
                 if let Some(manager) = state.cursor_manager.as_ref() {
                     state.cursor_shape = Some(manager.get_pointer(&pointer, qhandle, ()));
+                }
+                if let Some(manager) = state.pointer_gestures.as_ref() {
+                    state.pinch_gesture = Some(manager.get_pinch_gesture(&pointer, qhandle, ()));
                 }
                 state.pointer = Some(pointer);
             }
@@ -1122,12 +1676,26 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
             wl_pointer::Event::Enter {
                 serial,
                 surface,
-                surface_x: _,
-                surface_y: _,
+                surface_x,
+                surface_y,
             } => {
                 state.pointer_serial = Some(serial);
+                state.pointer_enter_serial = Some(serial);
                 state.flush_pending_clipboard_copy(qhandle, serial);
+                state.clear_resize_edge(true);
+                state.pointer_shadow = None;
+                state.pointer_window = None;
+                if state.enter_shadow_gutter(&surface) {
+                    return;
+                }
                 state.pointer_window = state.window_id_for_surface(&surface);
+                if let Some(window_id) = state.pointer_window {
+                    let pos = dvec2(surface_x as f64, surface_y as f64);
+                    state.last_mouse_pos = pos;
+                    // Deliver the enter position through the normal coalesced motion path so
+                    // stationary pointers establish hover state and the right app cursor.
+                    state.pending_motion = Some((window_id, pos));
+                }
             }
             wl_pointer::Event::Leave { serial, surface: _ } => {
                 // Dispatch any buffered motion before the pointer leaves, so the final hover
@@ -1136,93 +1704,41 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                 state.pointer_serial = Some(serial);
                 state.flush_pending_clipboard_copy(qhandle, serial);
                 state.pointer_window = None;
+                state.pointer_shadow = None;
+                state.scroll_gesture_active = false;
+                state.pointer_enter_serial = None;
                 state.last_resize_edge = None;
+                state.caption_press = None;
+                state.last_caption_click = None;
             }
             wl_pointer::Event::Motion {
-                time,
+                time: _,
                 surface_x,
                 surface_y,
             } => {
                 if let Some(window_id) = state.pointer_window {
                     let pos = dvec2(surface_x as f64, surface_y as f64);
                     state.last_mouse_pos = pos;
-
-                    // Edge-resize detection (matches X11 backend thresholds)
-                    let window_size = state
-                        .windows
-                        .iter()
-                        .find(|w| w.window_id == window_id)
-                        .map(|w| w.window_geom.inner_size);
-                    if let Some(ws) = window_size {
-                        let edge = if pos.x < 10.0 && pos.y < 10.0 {
-                            Some((
-                                xdg_toplevel::ResizeEdge::TopLeft,
-                                wp_cursor_shape_device_v1::Shape::NwResize,
-                            ))
-                        } else if pos.x < 10.0 && pos.y >= ws.y - 10.0 {
-                            Some((
-                                xdg_toplevel::ResizeEdge::BottomLeft,
-                                wp_cursor_shape_device_v1::Shape::SwResize,
-                            ))
-                        } else if pos.x < 5.0 {
-                            Some((
-                                xdg_toplevel::ResizeEdge::Left,
-                                wp_cursor_shape_device_v1::Shape::WResize,
-                            ))
-                        } else if pos.x >= ws.x - 10.0 && pos.y < 10.0 {
-                            Some((
-                                xdg_toplevel::ResizeEdge::TopRight,
-                                wp_cursor_shape_device_v1::Shape::NeResize,
-                            ))
-                        } else if pos.x >= ws.x - 10.0 && pos.y >= ws.y - 10.0 {
-                            Some((
-                                xdg_toplevel::ResizeEdge::BottomRight,
-                                wp_cursor_shape_device_v1::Shape::SeResize,
-                            ))
-                        } else if pos.x >= ws.x - 5.0 {
-                            Some((
-                                xdg_toplevel::ResizeEdge::Right,
-                                wp_cursor_shape_device_v1::Shape::EResize,
-                            ))
-                        } else if pos.y < 5.0 {
-                            Some((
-                                xdg_toplevel::ResizeEdge::Top,
-                                wp_cursor_shape_device_v1::Shape::NResize,
-                            ))
-                        } else if pos.y >= ws.y - 5.0 {
-                            Some((
-                                xdg_toplevel::ResizeEdge::Bottom,
-                                wp_cursor_shape_device_v1::Shape::SResize,
-                            ))
-                        } else {
-                            None
-                        };
-                        if let Some((resize_edge, cursor_shape)) = edge {
-                            state.last_resize_edge = Some(resize_edge);
-                            if let (Some(cursor_dev), Some(serial)) =
-                                (state.cursor_shape.as_ref(), state.pointer_serial)
-                            {
-                                cursor_dev.set_shape(serial, cursor_shape);
-                            }
-                        } else {
-                            if state.last_resize_edge.is_some() {
-                                if let (Some(cursor_dev), Some(serial)) =
-                                    (state.cursor_shape.as_ref(), state.pointer_serial)
-                                {
-                                    cursor_dev.set_shape(
-                                        serial,
-                                        wp_cursor_shape_device_v1::Shape::Default,
-                                    );
-                                }
-                            }
-                            state.last_resize_edge = None;
+                    let drag_request = state
+                        .caption_press
+                        .as_mut()
+                        .and_then(|press| press.start_drag_if_needed(window_id, pos));
+                    if let Some((press_window, press_serial)) = drag_request {
+                        state.last_caption_click = None;
+                        if let (Some(seat), Some(window)) = (
+                            state.seat.as_ref(),
+                            state
+                                .windows
+                                .iter()
+                                .find(|window| window.window_id == press_window),
+                        ) {
+                            window.toplevel._move(seat, press_serial);
                         }
                     }
 
                     // Buffer this motion instead of dispatching immediately; the latest one is
                     // flushed as a single MouseMove once the whole event batch is drained (or before
-                    // an intervening button/leave). The edge-resize cursor above still updates per
-                    // motion so the resize cursor stays responsive. See `flush_pending_motion`.
+                    // an intervening button/leave). See `flush_pending_motion`.
                     state.pending_motion = Some((window_id, pos));
                 }
             }
@@ -1240,7 +1756,12 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                 // Outside-click popup dismissal: if press lands on a
                 // regular window while popups are open, fire dismiss.
                 if let WEnum::Value(ButtonState::Pressed) = key_state {
-                    if let Some(win_id) = state.pointer_window {
+                    // A press in the shadow gutter is as much "outside" as one on the
+                    // window, so it dismisses popups too.
+                    if let Some(win_id) = state.pointer_window.or(state
+                        .pointer_shadow
+                        .map(|(window_id, _)| window_id))
+                    {
                         if state.windows.iter().any(|w| w.window_id == win_id)
                             && !state.popups.is_empty()
                         {
@@ -1255,26 +1776,47 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                         }
                     }
                 }
+                // In the gutter the only gesture is a resize, and the app is not told about
+                // it: these coordinates are outside its surface, and the compositor takes
+                // the pointer grab for the duration of the drag.
+                if let Some((window_id, resize_edge)) = state.pointer_shadow {
+                    if let (WEnum::Value(ButtonState::Pressed), Some(MouseButton::PRIMARY)) =
+                        (key_state, wayland_type::from_mouse(button))
+                    {
+                        if let (Some(seat), Some(window)) = (
+                            state.seat.as_ref(),
+                            state.windows.iter().find(|win| win.window_id == window_id),
+                        ) {
+                            window.toplevel.resize(seat, serial, resize_edge);
+                        }
+                    }
+                    return;
+                }
                 if let Some(btn) = wayland_type::from_mouse(button) {
                     if let Some(window_id) = state.pointer_window {
                         match key_state {
                             WEnum::Value(ButtonState::Pressed) => {
-                                if btn == MouseButton::PRIMARY {
-                                    if state.windows.iter().any(|win| win.window_id == window_id) {
-                                        // Edge resize takes priority
-                                        if let Some(resize_edge) = state.last_resize_edge.take() {
-                                            if let (Some(seat), Some(window)) = (
-                                                state.seat.as_ref(),
-                                                state
-                                                    .windows
-                                                    .iter()
-                                                    .find(|win| win.window_id == window_id),
-                                            ) {
-                                                window.toplevel.resize(seat, serial, resize_edge);
-                                                return;
-                                            }
-                                        }
-
+                                // A surface can disappear before delivering a release. Do not let
+                                // that stale bit consume the next independent press/release pair.
+                                state.consumed_pointer_buttons.remove(btn);
+                                let previous_caption_click = if btn == MouseButton::PRIMARY {
+                                    state.last_caption_click.take()
+                                } else {
+                                    state.last_caption_click = None;
+                                    None
+                                };
+                                state.caption_press = None;
+                                if btn == MouseButton::PRIMARY
+                                    || btn == MouseButton::SECONDARY
+                                {
+                                    let uses_client_side_decorations = state
+                                        .windows
+                                        .iter()
+                                        .find(|win| win.window_id == window_id)
+                                        .is_some_and(|win| {
+                                            win.uses_client_side_decorations && !win.is_fullscreen
+                                        });
+                                    if uses_client_side_decorations {
                                         let response =
                                             Rc::new(Cell::new(WindowDragQueryResponse::NoAnswer));
                                         state.do_callback(XlibEvent::WindowDragQuery(
@@ -1284,10 +1826,41 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                                                 response: response.clone(),
                                             },
                                         ));
+                                        let response = response.get();
+                                        // The top resize zone overlaps the caption vertically, but
+                                        // caption buttons must keep their full-height click target.
+                                        if btn == MouseButton::PRIMARY
+                                            && !matches!(
+                                                response,
+                                                WindowDragQueryResponse::Client
+                                            )
+                                        {
+                                            if let Some(resize_edge) = state.last_resize_edge {
+                                                if let (Some(seat), Some(window)) = (
+                                                    state.seat.as_ref(),
+                                                    state
+                                                        .windows
+                                                        .iter()
+                                                        .find(|win| win.window_id == window_id),
+                                                ) {
+                                                    window
+                                                        .toplevel
+                                                        .resize(seat, serial, resize_edge);
+                                                    state.consumed_pointer_buttons.insert(btn);
+                                                    return;
+                                                }
+                                            }
+                                        }
                                         if matches!(
-                                            response.get(),
+                                            response,
                                             WindowDragQueryResponse::Caption
                                         ) {
+                                            let is_double_click = is_caption_double_click(
+                                                previous_caption_click,
+                                                window_id,
+                                                state.last_mouse_pos,
+                                                time,
+                                            );
                                             if let (Some(seat), Some(window)) = (
                                                 state.seat.as_ref(),
                                                 state
@@ -1295,7 +1868,33 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                                                     .iter()
                                                     .find(|win| win.window_id == window_id),
                                             ) {
-                                                window.toplevel._move(seat, serial);
+                                                if btn == MouseButton::SECONDARY {
+                                                    window.toplevel.show_window_menu(
+                                                        seat,
+                                                        serial,
+                                                        state.last_mouse_pos.x as i32,
+                                                        state.last_mouse_pos.y as i32,
+                                                    );
+                                                    state.consumed_pointer_buttons.insert(btn);
+                                                    return;
+                                                }
+                                                if is_double_click {
+                                                    if window.is_maximized {
+                                                        window.toplevel.unset_maximized();
+                                                    } else {
+                                                        window.toplevel.set_maximized();
+                                                    }
+                                                    state.consumed_pointer_buttons.insert(btn);
+                                                    return;
+                                                }
+                                                state.caption_press = Some(CaptionPress {
+                                                    window_id,
+                                                    pos: state.last_mouse_pos,
+                                                    time,
+                                                    serial,
+                                                    drag_started: false,
+                                                });
+                                                state.consumed_pointer_buttons.insert(btn);
                                                 return;
                                             }
                                         }
@@ -1311,6 +1910,20 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                                 }))
                             }
                             WEnum::Value(ButtonState::Released) => {
+                                let consumed = state.consumed_pointer_buttons.contains(btn);
+                                if consumed {
+                                    state.consumed_pointer_buttons.remove(btn);
+                                }
+                                if btn == MouseButton::PRIMARY {
+                                    if let Some(press) = state.caption_press.take() {
+                                        state.last_caption_click =
+                                            press.completed_click(window_id, state.last_mouse_pos);
+                                        return;
+                                    }
+                                }
+                                if consumed {
+                                    return;
+                                }
                                 state.do_callback(XlibEvent::MouseUp(MouseUpEvent {
                                     abs: state.last_mouse_pos,
                                     button: btn,
@@ -1324,118 +1937,116 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                     }
                 }
             }
-            // Wayland axis values use motion-event coordinates: positive
-            // vertical = downward on screen = content slides down = viewport
-            // moves UP. Makepad's internal convention is positive = viewport
-            // moves DOWN (matching X11 button mapping and macOS after its
-            // negation of scrollingDeltaY). Negate to align conventions,
-            // same as winit does for the same reason.
+            // Wayland axis values already match Makepad's convention: positive vertical =
+            // scroll down = viewport moves DOWN. The spec pins the sign in
+            // wl_pointer::axis_relative_direction, whose `identical` case is fingers moving
+            // down producing a "vertical_scroll down" axis event; libinput documents the
+            // same ("the positive direction being down or right"). So pass the values
+            // through untouched — the compositor has already applied the user's
+            // natural-scrolling preference to the sign, and negating here would invert both
+            // settings. Toolkits that do negate (winit, SDL, Chromium) only do so because
+            // their own convention is inverted; GTK, which shares Makepad's, does not.
             wl_pointer::Event::Axis {
                 time: _,
                 axis,
                 value,
             } => match axis {
                 WEnum::Value(wl_pointer::Axis::VerticalScroll) => {
-                    state.scroll_accumulator.y -= value;
+                    state.scroll_accumulator.y += value;
                 }
                 WEnum::Value(wl_pointer::Axis::HorizontalScroll) => {
-                    state.scroll_accumulator.x -= value;
+                    state.scroll_accumulator.x += value;
                 }
                 _ => {}
             },
             wl_pointer::Event::AxisSource { axis_source } => {
-                state.scroll_is_wheel = axis_source == WEnum::Value(wl_pointer::AxisSource::Wheel);
+                // A source this protocol copy predates (`AxisSource` is `#[non_exhaustive]`)
+                // is as good as no source: record `None` rather than letting it fall through
+                // to the finger branch, which is the one classification that can strand a
+                // stretched rubber band.
+                state.scroll_source = match axis_source {
+                    WEnum::Value(source) => Some(source),
+                    WEnum::Unknown(_) => None,
+                };
             }
             wl_pointer::Event::Frame => {
-                let acc = state.scroll_accumulator;
-                let detents = state.scroll_detents;
-                // Dispatch when there is a scroll delta, or when the touchpad gesture just
-                // ended (AxisStop): the `Ended` event may carry a zero delta but is what lets
-                // widgets start their fling animation at finger lift-off.
-                if acc.x != 0.0
-                    || acc.y != 0.0
-                    || detents.x != 0.0
-                    || detents.y != 0.0
-                    || state.scroll_stopped
-                {
-                    if let Some(window_id) = state.pointer_window {
-                        // Deliver any buffered motion first so the Scroll event's hover
-                        // position is current (Button and Leave already do this).
-                        state.flush_pending_motion();
-                        let time_now = state.time_now();
-                        let scroll = if state.scroll_is_wheel {
-                            if detents.x != 0.0 || detents.y != 0.0 {
-                                // Scale wheel detents to a fixed distance each so slow,
-                                // deliberate clicks and fast spins both move proportionally.
-                                dvec2(
-                                    detents.x * PIXELS_PER_WHEEL_DETENT,
-                                    detents.y * PIXELS_PER_WHEEL_DETENT,
-                                )
-                            } else {
-                                // Some compositors send wheel frames without discrete or
-                                // value120 information; the accumulated axis value is
-                                // already a real distance in pixels.
-                                acc
-                            }
-                        } else {
-                            acc
-                        };
-                        // Wheels have no gesture phases. Finger-driven (touchpad) scrolling
-                        // reports `Changed` per frame and `Ended` when the fingers lift
-                        // (AxisStop), letting widgets run their own momentum fling —
-                        // Wayland compositors do not synthesize momentum for clients.
-                        let phase = if state.scroll_is_wheel {
-                            ScrollPhase::None
-                        } else if state.scroll_stopped {
-                            ScrollPhase::Ended
-                        } else {
-                            ScrollPhase::Changed
-                        };
-                        state.do_callback(XlibEvent::Scroll(ScrollEvent {
-                            window_id,
-                            scroll,
-                            abs: state.last_mouse_pos,
-                            modifiers: state.modifiers,
-                            is_mouse: state.scroll_is_wheel,
-                            handled_x: Cell::new(false),
-                            handled_y: Cell::new(false),
-                            time: time_now,
-                            phase,
-                        }));
-                    }
+                let frame = frame_scroll(
+                    state.scroll_source,
+                    state.scroll_gesture_active,
+                    state.scroll_stopped,
+                    state.scroll_accumulator,
+                    state.scroll_detents,
+                );
+                if let Some(frame) = &frame {
+                    // Tracked whether or not a window is under the pointer, so a gesture that
+                    // starts over one window and lifts over another still terminates.
+                    state.scroll_gesture_active = frame.phase == ScrollPhase::Changed;
+                }
+                if let (Some(frame), Some(window_id)) = (frame, state.pointer_window) {
+                    // Deliver any buffered motion first so the Scroll event's hover
+                    // position is current (Button and Leave already do this).
+                    state.flush_pending_motion();
+                    let time_now = state.time_now();
+                    state.do_callback(XlibEvent::Scroll(ScrollEvent {
+                        window_id,
+                        scroll: frame.delta,
+                        abs: state.last_mouse_pos,
+                        modifiers: state.modifiers,
+                        is_mouse: frame.is_mouse,
+                        handled_x: Cell::new(false),
+                        handled_y: Cell::new(false),
+                        time: time_now,
+                        phase: frame.phase,
+                    }));
                 }
                 state.scroll_accumulator = dvec2(0.0, 0.0);
                 state.scroll_detents = dvec2(0.0, 0.0);
-                state.scroll_is_wheel = false;
+                state.scroll_source = None;
                 state.scroll_stopped = false;
             }
-            wl_pointer::Event::AxisStop { time: _, axis: _ } => {
-                // Fingers lifted off the touchpad: mark the gesture ended so this pointer
-                // frame's Scroll event goes out with `ScrollPhase::Ended`.
-                state.scroll_stopped = true;
+            wl_pointer::Event::AxisStop { time: _, axis } => {
+                // An axis stopped. One flag for the whole frame rather than one per axis:
+                // `ScrollEvent` carries a single phase for both axes, so a per-axis mask
+                // could not be expressed anyway. `frame_scroll` separates the two cases the
+                // protocol defines — "this axis stopped, the other continues" from a real
+                // lift-off — by whether the frame also carries motion.
+                if matches!(
+                    axis,
+                    WEnum::Value(wl_pointer::Axis::VerticalScroll)
+                        | WEnum::Value(wl_pointer::Axis::HorizontalScroll)
+                ) {
+                    state.scroll_stopped = true;
+                }
             }
-            // Wheel detent counts, negated to match the Axis sign convention above.
+            // Wheel detent counts, carrying the same sign convention as the Axis event
+            // above: the spec states each expresses its direction in terms of the positive
+            // or negative direction of the same axis, never inverted relative to it.
             // AxisDiscrete is only sent by compositors below seat v8; v8+ compositors
             // send AxisValue120 instead (120 units per detent, fractional detents
             // allowed for high-resolution wheels), so the two never double-count.
             wl_pointer::Event::AxisDiscrete { axis, discrete } => match axis {
                 WEnum::Value(wl_pointer::Axis::VerticalScroll) => {
-                    state.scroll_detents.y -= discrete as f64;
+                    state.scroll_detents.y += discrete as f64;
                 }
                 WEnum::Value(wl_pointer::Axis::HorizontalScroll) => {
-                    state.scroll_detents.x -= discrete as f64;
+                    state.scroll_detents.x += discrete as f64;
                 }
                 _ => {}
             },
             wl_pointer::Event::AxisValue120 { axis, value120 } => match axis {
                 WEnum::Value(wl_pointer::Axis::VerticalScroll) => {
-                    state.scroll_detents.y -= value120 as f64 / 120.0;
+                    state.scroll_detents.y += value120 as f64 / 120.0;
                 }
                 WEnum::Value(wl_pointer::Axis::HorizontalScroll) => {
-                    state.scroll_detents.x -= value120 as f64 / 120.0;
+                    state.scroll_detents.x += value120 as f64 / 120.0;
                 }
                 _ => {}
             },
+            // Purely informational: the physical direction of the entity that caused the
+            // axis event. The axis value itself already reflects the user's natural-scrolling
+            // setting, so scrolling content must ignore this. It exists for widgets that
+            // should follow the physical wheel regardless of that setting — the spec's
+            // example is a volume slider — which Makepad has no plumbing for, so drop it.
             wl_pointer::Event::AxisRelativeDirection {
                 axis: _,
                 direction: _,
@@ -1458,8 +2069,8 @@ impl Dispatch<wl_callback::WlCallback, WindowId> for WaylandState {
         // pending flag; the Paint that follows event dispatch in the event loop presents
         // the window's pass if it is still dirty. The window may have been closed while
         // the callback was in flight, in which case there is nothing left to clear.
-        if let wl_callback::Event::Done { .. } = event {
-            state.clear_frame_callback_pending(*window_id);
+        if let wl_callback::Event::Done { callback_data } = event {
+            state.frame_callback_done(*window_id, callback_data);
         }
     }
 }
@@ -1483,10 +2094,58 @@ delegate_noop!(WaylandState: ignore wp_viewport::WpViewport);
 delegate_noop!(WaylandState: ignore wp_viewporter::WpViewporter);
 delegate_noop!(WaylandState: ignore wl_surface::WlSurface);
 delegate_noop!(WaylandState: ignore wp_cursor_shape_device_v1::WpCursorShapeDeviceV1);
+delegate_noop!(WaylandState: ignore zwp_pointer_gestures_v1::ZwpPointerGesturesV1);
+
+impl Dispatch<zwp_pointer_gesture_pinch_v1::ZwpPointerGesturePinchV1, ()> for WaylandState {
+    fn event(
+        state: &mut Self,
+        _: &zwp_pointer_gesture_pinch_v1::ZwpPointerGesturePinchV1,
+        event: zwp_pointer_gesture_pinch_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        // The protocol's `scale` is cumulative since `begin`; the platform's
+        // `PinchEvent::scale` is the change since the previous event. A cancelled
+        // gesture ends like a lifted one: the zoom stays where it got.
+        let (scale, phase) = match event {
+            zwp_pointer_gesture_pinch_v1::Event::Begin { .. } => {
+                state.pinch_scale = 1.0;
+                (1.0, PinchPhase::Begin)
+            }
+            zwp_pointer_gesture_pinch_v1::Event::Update { scale, .. } => {
+                let step = if state.pinch_scale > 0.0 { scale / state.pinch_scale } else { 1.0 };
+                state.pinch_scale = scale;
+                (step, PinchPhase::Update)
+            }
+            zwp_pointer_gesture_pinch_v1::Event::End { .. } => {
+                state.pinch_scale = 1.0;
+                (1.0, PinchPhase::End)
+            }
+            _ => return,
+        };
+        let Some(window_id) = state.pointer_window else {
+            return;
+        };
+        // Deliver any buffered motion first so the pinch lands at the current pointer.
+        state.flush_pending_motion();
+        let time = state.time_now();
+        state.do_callback(XlibEvent::Pinch(PinchEvent {
+            window_id,
+            abs: state.last_mouse_pos,
+            scale,
+            phase,
+            modifiers: state.modifiers,
+            time,
+        }));
+    }
+}
 delegate_noop!(WaylandState: ignore wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1);
 delegate_noop!(WaylandState: ignore wl_compositor::WlCompositor);
+delegate_noop!(WaylandState: ignore wl_region::WlRegion);
+delegate_noop!(WaylandState: ignore wl_subcompositor::WlSubcompositor);
+delegate_noop!(WaylandState: ignore wl_subsurface::WlSubsurface);
 delegate_noop!(WaylandState: ignore zxdg_decoration_manager_v1::ZxdgDecorationManagerV1);
-delegate_noop!(WaylandState: ignore zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1);
 delegate_noop!(WaylandState: ignore xdg_toplevel_icon_v1::XdgToplevelIconV1);
 delegate_noop!(WaylandState: ignore wl_shm::WlShm);
 delegate_noop!(WaylandState: ignore wl_shm_pool::WlShmPool);
@@ -1745,6 +2404,7 @@ impl WaylandState {
         {
             return;
         }
+        self.update_resize_edge(window_id, pos, false);
         self.do_callback(XlibEvent::MouseMove(MouseMoveEvent {
                 lock_delta: Default::default(),
             abs: pos,
@@ -1755,27 +2415,83 @@ impl WaylandState {
         }));
     }
 
-    /// True while the given window's last presented frame awaits its `wl_surface::frame`
-    /// callback, meaning the compositor is not ready for another frame on that surface.
+    /// Presents of this window whose `wl_surface::frame` callback has not fired yet.
+    pub(crate) fn frame_callbacks_in_flight(&self, window_id: WindowId) -> usize {
+        self.frame_callbacks_pending
+            .iter()
+            .find(|(id, _)| *id == window_id)
+            .map_or(0, |(_, count)| *count)
+    }
+
+    /// Presents a window may have awaiting their callbacks right now.
+    fn frames_in_flight_allowed(&self) -> usize {
+        self.frame_pacer
+            .frames_in_flight(self.has_fifo_v1, std::time::Instant::now())
+            .max(1)
+    }
+
+    /// True while the window has as many presents awaiting their callbacks as the
+    /// pacer allows: the compositor has not consumed enough of them for another
+    /// present, so the window's pass stays dirty until a callback fires.
     pub(crate) fn is_frame_callback_pending(&self, window_id: WindowId) -> bool {
-        self.frame_callbacks_pending.contains(&window_id)
+        self.frame_callbacks_in_flight(window_id) >= self.frames_in_flight_allowed()
     }
 
     pub(crate) fn set_frame_callback_pending(&mut self, window_id: WindowId) {
-        if !self.frame_callbacks_pending.contains(&window_id) {
-            self.frame_callbacks_pending.push(window_id);
+        self.presents_this_cycle += 1;
+        match self.frame_callbacks_pending.iter_mut().find(|(id, _)| *id == window_id) {
+            Some((_, count)) => *count += 1,
+            None => self.frame_callbacks_pending.push((window_id, 1)),
         }
     }
 
-    /// Clear a window's pending frame callback. Called when the callback fires and when
-    /// a window is closed, since the compositor never fires callbacks for a destroyed
-    /// surface and a stale entry would keep the window's presents gated forever.
-    pub(crate) fn clear_frame_callback_pending(&mut self, window_id: WindowId) {
-        self.frame_callbacks_pending.retain(|id| *id != window_id);
+    /// One frame callback fired: the compositor consumed one present of the window.
+    pub(crate) fn frame_callback_done(&mut self, window_id: WindowId, compositor_ms: u32) {
+        self.frame_pacer
+            .callback_arrived(std::time::Instant::now(), compositor_ms);
+        if let Some((_, count)) = self.frame_callbacks_pending.iter_mut().find(|(id, _)| *id == window_id) {
+            *count = count.saturating_sub(1);
+        }
+        self.frame_callbacks_pending.retain(|(_, count)| *count > 0);
     }
 
+    /// Forget a window's pending frame callbacks. Called when a window is closed,
+    /// since the compositor never fires callbacks for a destroyed surface and a
+    /// stale entry would keep the window's presents gated forever.
+    pub(crate) fn clear_frame_callback_pending(&mut self, window_id: WindowId) {
+        self.frame_callbacks_pending.retain(|(id, _)| *id != window_id);
+    }
+
+    /// Some window is held back waiting for the compositor.
     pub(crate) fn any_frame_callback_pending(&self) -> bool {
-        !self.frame_callbacks_pending.is_empty()
+        let allowed = self.frames_in_flight_allowed();
+        self.frame_callbacks_pending
+            .iter()
+            .any(|(_, count)| *count >= allowed)
+    }
+
+    /// Every configured surface is held back waiting for the compositor: nothing
+    /// drawn now could be presented, so the app's next-frame and draw events can
+    /// wait for the next callback instead of producing a frame that is thrown away.
+    pub(crate) fn all_windows_frame_callback_pending(&self) -> bool {
+        let mut any = false;
+        for window in &self.windows {
+            if window.configured {
+                any = true;
+                if !self.is_frame_callback_pending(window.window_id) {
+                    return false;
+                }
+            }
+        }
+        for popup in &self.popups {
+            if popup.configured {
+                any = true;
+                if !self.is_frame_callback_pending(popup.window_id) {
+                    return false;
+                }
+            }
+        }
+        any
     }
 
     /// Called from the event loop when the key repeat timer fires.
@@ -1826,5 +2542,309 @@ impl WaylandState {
     }
     pub fn time_now(&self) -> f64 {
         self.timers.time_now()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wheel_like_sources_take_the_detent_path() {
+        // Wheels and wheel tilts ratchet, whether or not this frame carried detents.
+        for source in [
+            wl_pointer::AxisSource::Wheel,
+            wl_pointer::AxisSource::WheelTilt,
+        ] {
+            assert!(scroll_is_wheel_like(Some(source), true));
+            assert!(scroll_is_wheel_like(Some(source), false));
+        }
+        // A touchpad gesture and a trackpoint / button-held scroll are both smooth.
+        for source in [
+            wl_pointer::AxisSource::Finger,
+            wl_pointer::AxisSource::Continuous,
+        ] {
+            assert!(!scroll_is_wheel_like(Some(source), false));
+            assert!(!scroll_is_wheel_like(Some(source), true));
+        }
+    }
+
+    #[test]
+    fn a_frame_without_an_axis_source_is_classified_by_its_detents() {
+        // `axis_source` is optional, and an unknown value is recorded as `None`. Detents
+        // then decide, and the sourceless default must not be the finger path.
+        assert!(scroll_is_wheel_like(None, true));
+        assert!(!scroll_is_wheel_like(None, false));
+    }
+
+    /// A frame carrying no stop, from a source with no gesture in flight.
+    fn plain_frame(
+        source: Option<wl_pointer::AxisSource>,
+        acc: Vec2d,
+        detents: Vec2d,
+    ) -> Option<FrameScroll> {
+        frame_scroll(source, false, false, acc, detents)
+    }
+
+    #[test]
+    fn each_axis_chooses_detents_or_raw_pixels_on_its_own() {
+        // A wheel frame with a detented vertical axis and a smooth horizontal one: scaling
+        // the horizontal by its zero detent count would drop it entirely.
+        let frame = plain_frame(
+            Some(wl_pointer::AxisSource::Wheel),
+            dvec2(7.5, 15.0),
+            dvec2(0.0, 1.0),
+        )
+        .expect("a frame with a delta dispatches");
+        assert_eq!(frame.delta, dvec2(7.5, PIXELS_PER_WHEEL_DETENT));
+        assert!(frame.is_mouse);
+        assert_eq!(frame.phase, ScrollPhase::None);
+    }
+
+    #[test]
+    fn a_wheel_frame_without_detents_keeps_its_raw_distance_unscaled() {
+        let frame = plain_frame(
+            Some(wl_pointer::AxisSource::Wheel),
+            dvec2(0.0, 15.0),
+            dvec2(0.0, 0.0),
+        )
+        .expect("a frame with a delta dispatches");
+        assert_eq!(frame.delta, dvec2(0.0, 15.0));
+    }
+
+    #[test]
+    fn a_sourceless_frame_with_detents_takes_the_wheel_path() {
+        let frame = plain_frame(None, dvec2(0.0, 15.0), dvec2(0.0, 1.0))
+            .expect("a frame with a delta dispatches");
+        assert_eq!(frame.delta, dvec2(0.0, PIXELS_PER_WHEEL_DETENT));
+        assert!(frame.is_mouse);
+        assert_eq!(frame.phase, ScrollPhase::None);
+    }
+
+    #[test]
+    fn a_touchpad_gesture_reports_changed_then_ended_at_lift_off() {
+        let moving = plain_frame(
+            Some(wl_pointer::AxisSource::Finger),
+            dvec2(0.0, 12.0),
+            dvec2(0.0, 0.0),
+        )
+        .expect("a frame with a delta dispatches");
+        assert_eq!(moving.phase, ScrollPhase::Changed);
+        assert_eq!(moving.delta, dvec2(0.0, 12.0));
+        assert!(!moving.is_mouse);
+
+        // Lift-off: the stops arrive alone, and the zero-delta event is what springs a
+        // stretched rubber band back.
+        let lifted = frame_scroll(
+            Some(wl_pointer::AxisSource::Finger),
+            true,
+            true,
+            dvec2(0.0, 0.0),
+            dvec2(0.0, 0.0),
+        )
+        .expect("a bare stop ends the gesture");
+        assert_eq!(lifted.phase, ScrollPhase::Ended);
+        assert_eq!(lifted.delta, dvec2(0.0, 0.0));
+    }
+
+    #[test]
+    fn a_stop_alongside_live_motion_is_one_axis_stopping_not_lift_off() {
+        // The `frame` event defines axis + axis_stop in one frame as "movement in one axis
+        // has stopped but continues in the other axis".
+        let frame = frame_scroll(
+            Some(wl_pointer::AxisSource::Finger),
+            true,
+            true,
+            dvec2(0.0, 12.0),
+            dvec2(0.0, 0.0),
+        )
+        .expect("a frame with a delta dispatches");
+        assert_eq!(frame.phase, ScrollPhase::Changed);
+    }
+
+    #[test]
+    fn a_gesture_in_flight_still_ends_when_the_compositor_drops_the_axis_source() {
+        // `axis_source` is per-frame and optional, so the lift-off frame may carry none.
+        // Losing the terminator would strand a stretched rubber band.
+        let frame = frame_scroll(None, true, true, dvec2(0.0, 0.0), dvec2(0.0, 0.0))
+            .expect("the in-flight gesture recognises its own lift-off");
+        assert_eq!(frame.phase, ScrollPhase::Ended);
+
+        // With no gesture in flight the same frame says nothing and must not dispatch.
+        assert!(frame_scroll(None, false, true, dvec2(0.0, 0.0), dvec2(0.0, 0.0)).is_none());
+    }
+
+    #[test]
+    fn a_bare_stop_from_a_source_with_no_gesture_dispatches_nothing() {
+        // Only `Finger` is guaranteed an AxisStop. A zero-delta `ScrollPhase::None` from one
+        // of the others would clear a widget's overscroll and cut short a running bounce.
+        for source in [
+            wl_pointer::AxisSource::Wheel,
+            wl_pointer::AxisSource::WheelTilt,
+            wl_pointer::AxisSource::Continuous,
+        ] {
+            assert!(
+                frame_scroll(Some(source), true, true, dvec2(0.0, 0.0), dvec2(0.0, 0.0))
+                    .is_none(),
+                "{source:?} has no gesture to end"
+            );
+        }
+    }
+
+    #[test]
+    fn a_trackpoint_scroll_is_a_plain_delta_that_skips_wheel_easing() {
+        let frame = plain_frame(
+            Some(wl_pointer::AxisSource::Continuous),
+            dvec2(0.0, 9.0),
+            dvec2(0.0, 0.0),
+        )
+        .expect("a frame with a delta dispatches");
+        assert_eq!(frame.phase, ScrollPhase::None);
+        assert_eq!(frame.delta, dvec2(0.0, 9.0));
+        assert!(!frame.is_mouse);
+    }
+
+    #[test]
+    fn an_empty_frame_dispatches_nothing() {
+        assert!(plain_frame(None, dvec2(0.0, 0.0), dvec2(0.0, 0.0)).is_none());
+    }
+
+    fn encoded_states(states: &[u32]) -> Vec<u8> {
+        states
+            .iter()
+            .flat_map(|state| state.to_ne_bytes())
+            .collect()
+    }
+
+    #[test]
+    fn caption_double_click_requires_matching_window_time_and_position() {
+        let window = WindowId(2, 1);
+        let previous = Some((window, dvec2(10.0, 10.0), u32::MAX - 100));
+        assert!(is_caption_double_click(
+            previous,
+            window,
+            dvec2(12.0, 11.0),
+            50
+        ));
+        assert!(!is_caption_double_click(
+            previous,
+            WindowId(3, 1),
+            dvec2(12.0, 11.0),
+            50
+        ));
+        assert!(!is_caption_double_click(
+            previous,
+            window,
+            dvec2(20.0, 10.0),
+            50
+        ));
+        assert!(!is_caption_double_click(
+            previous,
+            window,
+            dvec2(12.0, 11.0),
+            600
+        ));
+    }
+
+    #[test]
+    fn caption_press_waits_for_drag_threshold_before_requesting_move() {
+        let window = WindowId(2, 1);
+        let mut press = CaptionPress {
+            window_id: window,
+            pos: dvec2(10.0, 10.0),
+            time: 100,
+            serial: 77,
+            drag_started: false,
+        };
+
+        assert_eq!(
+            press.start_drag_if_needed(window, dvec2(13.0, 13.0)),
+            None
+        );
+        assert!(!press.drag_started);
+        assert_eq!(
+            press.completed_click(window, dvec2(13.0, 13.0)),
+            Some((window, dvec2(10.0, 10.0), 100))
+        );
+    }
+
+    #[test]
+    fn caption_drag_requests_move_once_and_cannot_complete_as_click() {
+        let window = WindowId(2, 1);
+        let mut press = CaptionPress {
+            window_id: window,
+            pos: dvec2(10.0, 10.0),
+            time: 100,
+            serial: 77,
+            drag_started: false,
+        };
+
+        assert_eq!(
+            press.start_drag_if_needed(window, dvec2(15.0, 10.0)),
+            Some((window, 77))
+        );
+        assert!(press.drag_started);
+        assert_eq!(
+            press.start_drag_if_needed(window, dvec2(20.0, 10.0)),
+            None
+        );
+        assert_eq!(press.completed_click(window, dvec2(10.0, 10.0)), None);
+    }
+
+    #[test]
+    fn tiled_and_constrained_states_disable_only_their_resize_edges() {
+        let states = encoded_states(&[5, 7, 11, 13]);
+        let tiled = xdg_toplevel_edge_mask(&states, 5);
+        let constrained = xdg_toplevel_edge_mask(&states, 10);
+        assert_eq!(tiled, RESIZE_EDGE_LEFT | RESIZE_EDGE_TOP);
+        assert_eq!(constrained, RESIZE_EDGE_RIGHT | RESIZE_EDGE_BOTTOM);
+        // A corner whose edges are both free is kept whole.
+        assert_eq!(
+            available_resize_edge(xdg_toplevel::ResizeEdge::BottomRight, tiled),
+            Some(xdg_toplevel::ResizeEdge::BottomRight)
+        );
+        // A corner with one tiled edge degrades to the edge that is still free,
+        // rather than losing the grab entirely.
+        assert_eq!(
+            available_resize_edge(xdg_toplevel::ResizeEdge::TopLeft, constrained),
+            Some(xdg_toplevel::ResizeEdge::TopLeft)
+        );
+        assert_eq!(
+            available_resize_edge(xdg_toplevel::ResizeEdge::TopRight, tiled),
+            Some(xdg_toplevel::ResizeEdge::Right)
+        );
+        assert_eq!(
+            available_resize_edge(xdg_toplevel::ResizeEdge::BottomLeft, constrained),
+            Some(xdg_toplevel::ResizeEdge::Left)
+        );
+        // Both components gone means no grab at all.
+        assert_eq!(
+            available_resize_edge(xdg_toplevel::ResizeEdge::TopLeft, tiled),
+            None
+        );
+        assert_eq!(
+            available_resize_edge(xdg_toplevel::ResizeEdge::Top, tiled),
+            None
+        );
+    }
+
+    #[test]
+    fn resize_edge_cursor_matches_every_edge() {
+        use wp_cursor_shape_device_v1::Shape;
+        use xdg_toplevel::ResizeEdge;
+        for (edge, shape) in [
+            (ResizeEdge::Top, Shape::NResize),
+            (ResizeEdge::Bottom, Shape::SResize),
+            (ResizeEdge::Left, Shape::WResize),
+            (ResizeEdge::Right, Shape::EResize),
+            (ResizeEdge::TopLeft, Shape::NwResize),
+            (ResizeEdge::TopRight, Shape::NeResize),
+            (ResizeEdge::BottomLeft, Shape::SwResize),
+            (ResizeEdge::BottomRight, Shape::SeResize),
+        ] {
+            assert_eq!(resize_edge_cursor(edge), shape);
+            // Every edge must survive a round trip through the mask it degrades with.
+            assert_eq!(available_resize_edge(edge, 0), Some(edge));
+        }
     }
 }

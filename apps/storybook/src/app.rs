@@ -361,9 +361,12 @@ impl MatchEvent for App {
                 .check_box(cx, ids!(new_only))
                 .set_active(cx, true, Animate::No);
         }
-        self.ui
-            .drop_down(cx, ids!(theme_select))
-            .set_selected_item(cx, theme::choice());
+        // The list is the library's, read at startup: the base themes and
+        // every sheet it ships. The markup above names only the three it
+        // could not do without if this never ran.
+        let theme_select = self.ui.drop_down(cx, ids!(theme_select));
+        theme_select.set_labels(cx, theme::labels());
+        theme_select.set_selected_item(cx, theme::choice());
         self.refresh_new_count(cx);
         let key = match settings::get(settings::LAST_STORY) {
             Some(k) if registry::find(&k).is_some() => k,
@@ -462,9 +465,18 @@ impl MatchEvent for App {
 
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
-        if let Some(name) = settings::get(settings::THEME) {
-            if let Some(index) = theme::index_of(&name) {
-                theme::set_choice(index);
+        // Restore the saved theme ONCE, at startup. Done on every run, as it
+        // was, this made the catalogue's own list the last writer on every
+        // reload: the developer panel's theme picker was undone a tick after
+        // it was used, and so would anything else that set a theme.
+        static RESTORED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !RESTORED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            if let Some(name) = settings::get(settings::THEME) {
+                if let Some(index) = theme::index_of(&name) {
+                    theme::set_choice(index);
+                    let picked = theme::choices()[index];
+                    theme::apply_choice(vm, picked);
+                }
             }
         }
         theme::widgets_script_mod(vm);
@@ -476,6 +488,11 @@ impl AppMain for App {
         crate::controls::script_mod(vm);
         crate::actions::script_mod(vm);
         crate::theme_panel::script_mod(vm);
+        // Evaluates no story file. It throws away the record of which files
+        // this context has already evaluated -- `shell` above has just
+        // emptied `mod.stories`, and every page that was in it belonged to
+        // the theme being left. The canvas evaluates the one page it is
+        // showing on the rebuild that follows.
         crate::stories::script_mod(vm);
         self::script_mod(vm)
     }
@@ -483,7 +500,12 @@ impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         if let Event::LiveEdit = event {
             let choice = theme::choice();
-            self.ui.drop_down(cx, ids!(theme_select)).set_selected_item(cx, choice);
+            // A switch re-applies the whole tree from its markup, and the
+            // markup knows three names: the list has to go back on before
+            // the fourteenth of them can be the one that is selected.
+            let theme_select = self.ui.drop_down(cx, ids!(theme_select));
+            theme_select.set_labels(cx, theme::labels());
+            theme_select.set_selected_item(cx, choice);
             remote::install(cx);
         }
         self.drain_requests(cx);

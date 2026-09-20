@@ -54,9 +54,9 @@
 //! something with a real height, because `Fill` inside a `Fit` page resolves
 //! to nothing at all and a list laid out with no height is drawn with none.
 use crate::{
+    column_fit::{column_count, column_width, finite, item_walk},
     makepad_derive_widget::*,
     makepad_draw::*,
-    masonry::{column_count, column_width, finite, item_walk},
     portal_list::PortalList,
     widget::*,
     widget_async::CxSplashVmExt,
@@ -283,8 +283,7 @@ fn answer_grid(draw: TileGrid, count: usize) -> TileGrid {
 /// Above rather than below, and none at all above the first, so that the gap
 /// falls BETWEEN rows: carried below, the last row ends the scroll extent
 /// with a band of dead space that the reader can scroll to and nothing is
-/// in. The sibling this widget borrows its arithmetic from drops its
-/// trailing gap for the same reason.
+/// in. The masonry drops its trailing gap for the same reason.
 fn gap_above(row: usize, row_gap: f64) -> f64 {
     if row == 0 {
         0.0
@@ -1067,8 +1066,8 @@ mod tests {
 
     #[test]
     fn the_column_count_comes_from_the_width_when_no_number_is_given() {
-        // The masonry's arithmetic, called the way this widget calls it:
-        // four tiles of 160 with 8 between them need 664.
+        // The shared column arithmetic, called the way this widget calls
+        // it: four tiles of 160 with 8 between them need 664.
         assert_eq!(column_count(Some(664.0), 0, 160.0, 8.0), 4);
         assert_eq!(column_count(Some(663.0), 0, 160.0, 8.0), 3);
         // A number that was asked for wins at any width, and one across is

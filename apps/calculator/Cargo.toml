@@ -18,6 +18,10 @@ path = "src/main.rs"
 required-features = ["standalone"]
 
 [features]
+# On-demand dylib for the Android super-app (apps/wm-dyn). No engine dep
+# here: the host that builds the lib binds it to its engine dylib itself
+# (apps/wm/src/dylib_host.rs), so this crate's manifest is the desktop's.
+dynamic-module = []
 default = ["standalone"]
 # The standalone window (src/main.rs); a host that links the module leaves it off.
 standalone = []

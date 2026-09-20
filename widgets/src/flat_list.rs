@@ -181,6 +181,16 @@ impl FlatList {
 }
 
 impl Widget for FlatList {
+    fn visit_cancel(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
+        if !self.visible() {
+            return false;
+        }
+        for (id, item) in self.items.iter() {
+            visit(*id, item.widget.clone());
+        }
+        true
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
         self.scroll_bars.handle_event(cx, event, scope);

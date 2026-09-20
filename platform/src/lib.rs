@@ -115,6 +115,7 @@ pub mod font_policy;
 #[macro_use]
 mod app_main;
 pub mod remote;
+pub mod devtools;
 pub mod pixel_probe;
 pub mod screen_capture;
 pub mod audio_output_fence;
@@ -161,7 +162,7 @@ pub use {
         audio::*,
         component::{ComponentInfo, ComponentRegistries, ComponentRegistry},
         cursor::MouseCursor,
-        cx::{Cx, CxMemoryReport, CxRef, LinuxWindowParams, OsType},
+        cx::{Cx, CxMemoryReport, CxRef, GpuBackend, LinuxWindowParams, OsType},
         cx_api::{AccessibilityUpdatePayload, CxOsApi, CxOsOp, CxThreadPriority, OpenUrlInPlace, ScreenEdges},
         display_context::{DisplayContext, SystemBarAppearance},
         font_policy::{
@@ -170,7 +171,7 @@ pub use {
             INTERNATIONAL_FONT_ASSET_MANIFEST, LATIN_FONT_ASSET_MANIFEST,
             LATIN_FONT_ASSET_PACKAGE_MANIFEST, MATH_VIEW_FONT_ASSET, UI_SYMBOL_FALLBACK,
         },
-        draw_list::{immediate_payload_hash, CxDrawCall, CxDrawItem, CxDrawListPool, CxRectArea, DrawList, DrawListId, DrawListRecordingStorage},
+        draw_list::{CxDrawCall, CxDrawItem, CxDrawListPool, CxRectArea, DrawList, DrawListId, DrawListRecordingStorage},
         shared_instances::{
             upload_pacing, FrameLease, FrameLeases, PublicationAccounting, PublicationIds, Publications,
             PublishBackpressure, PublishError, PublishHints, PublishReceipt, ReceiptPhase, SharedInstances,
@@ -184,6 +185,8 @@ pub use {
         draw_vars::DrawVars,
         sploded::{SplodedParams, SplodedView},
         event::{
+            CancelScope,
+            CancelScopeKind,
             CharOffset,
             DigitDevice,
             DragEvent,
@@ -199,6 +202,7 @@ pub use {
             FingerDownEvent,
             FingerHoverEvent,
             FingerMoveEvent,
+            FingerPinchEvent,
             FingerScrollEvent,
             FingerUpEvent,
             FullTextState,
@@ -223,6 +227,8 @@ pub use {
             StorageResponsesEvent,
             NextFrame,
             NextFrameEvent,
+            PinchEvent,
+            PinchPhase,
             QuitReason,
             QuitRequestedEvent,
             SafeAreaInsets,
@@ -290,7 +296,7 @@ pub use {
             StorageEstimate, StorageResponse, StorageResult, StorageStat, DEFAULT_STORAGE_VALUE_CAP,
             MAX_STORAGE_KEY_BYTES, MAX_STORAGE_LIST_LIMIT, MAX_STORAGE_NAMESPACE_BYTES,
         },
-        texture::{ReadbackTicket, ReadbackRequest, ReadbackChannelOrder, ReadbackOrigin, ReadbackError, TextureReadback, 
+        texture::{ReadbackTicket, ReadbackRequest, ReadbackChannelOrder, ReadbackOrigin, ReadbackError, TextureReadback, TEXTURE_READBACK_MAX_BYTES,
             image_cache_use_mipmaps, Texture, TextureAnimation, TextureFormat, TextureId,
             TextureSize, TextureUpdated, TextureWrap,
         },
@@ -306,8 +312,8 @@ pub use {
         web_socket::{WebSocket, WebSocketMessage},
         window::{
             CxWindowPool, MacosWindowChrome, MacosWindowConfig, MacosWindowKind, MacosWindowLevel,
-            ScriptWindowHandle, WindowBackdrop, WindowHandle, WindowIcon, WindowIconBuffer,
-            WindowId, WindowVisuals,
+            ScriptWindowHandle, WaylandDecorationPreference, WindowBackdrop, WindowHandle,
+            WindowIcon, WindowIconBuffer, WindowId, WindowVisuals,
         },
         xr_tsdf::{
             ChunkKey, SparseTsdGridReadSnapshot, SparseTsdReadChunk, TsdfPublishedSnapshot,

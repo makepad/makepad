@@ -60,7 +60,7 @@ impl StorageChanges {
     fn released(&self) {
         self.revision.fetch_add(1, Ordering::Release);
         if self.waiting.swap(false, Ordering::AcqRel) {
-            crate::thread::SignalToUI::set_ui_signal();
+            crate::thread::SignalToUI::set_internal_signal();
         }
     }
 }

@@ -147,12 +147,25 @@ impl DesktopInit {
         })
     }
 
-    fn devices(&self) -> Result<Vec<vk::PhysicalDevice>, String> {
+    /// `allow_cpu`: a CPU rasterizer (lavapipe ships with the Mesa drivers on
+    /// most distributions) is a working Vulkan device that renders a desktop
+    /// window at a few frames per second. The presenting Wayland path passes
+    /// false unless Vulkan was insisted on, and falls back to OpenGL ES; the
+    /// offscreen (hosted) and direct renderers have no other API and take it.
+    fn devices(&self, allow_cpu: bool) -> Result<Vec<vk::PhysicalDevice>, String> {
         let instance = self.instance.as_ref().unwrap();
         let mut devices = unsafe { instance.enumerate_physical_devices() }
             .map_err(|e| format!("enumerate Vulkan devices: {e:?}"))?;
         devices.retain(|device| {
             let properties = unsafe { instance.get_physical_device_properties(*device) };
+            if !allow_cpu && properties.device_type == vk::PhysicalDeviceType::CPU {
+                let name = unsafe { CStr::from_ptr(properties.device_name.as_ptr()) };
+                crate::log!(
+                    "Vulkan: skipping software device {:?} (MAKEPAD_GPU=vulkan uses it anyway)",
+                    name.to_string_lossy()
+                );
+                return false;
+            }
             properties.api_version >= vk::API_VERSION_1_1
                 && unsafe { instance.enumerate_device_extension_properties(*device) }
                     .map(|extensions| {
@@ -179,7 +192,7 @@ impl DesktopInit {
         #[cfg(linux_direct)]
         {
             desktop.gpu.devices = self
-                .devices()?
+                .devices(true)?
                 .into_iter()
                 .map(|device| gpu_identity(instance, device))
                 .collect();
@@ -267,6 +280,9 @@ impl DesktopInit {
         }
         let mut renderer = CxVulkan {
             frame_serial_in_flight: 0,
+            retained_instances: HashMap::new(),
+            retained_prune_repaint: u64::MAX,
+            retained_transfer_generation: 0,
             _entry: self.entry.take().unwrap(),
             instance: self.instance.take().unwrap(),
             desktop,
@@ -294,6 +310,8 @@ impl DesktopInit {
             framebuffers: Vec::new(),
             pipelines: HashMap::new(),
             offscreen_render_passes: HashMap::new(),
+            offscreen_draw_render_passes: HashMap::new(),
+            offscreen_framebuffers: HashMap::new(),
             geometries: HashMap::new(),
             textures: HashMap::new(),
             frame_resources: FrameResources::default(),
@@ -472,7 +490,14 @@ impl CxVulkan {
     pub(super) fn new_offscreen_on(uuid: Option<[u8; 16]>) -> Result<Self, String> {
         let init = DesktopInit::new(&[])?;
         let instance = init.instance.as_ref().unwrap();
-        let mut devices = init.devices()?;
+        // Same rule as a window: a software rasterizer is slower than the
+        // OpenGL ES fallback, so take it only when the host pinned a device or
+        // Vulkan was insisted on. Rejecting it here makes `new_offscreen` fail,
+        // and the caller hosts with OpenGL instead.
+        let allow_cpu = uuid.is_some()
+            || crate::os::linux::gpu_preference::gpu_preference()
+                == crate::os::linux::gpu_preference::GpuPreference::Vulkan;
+        let mut devices = init.devices(allow_cpu)?;
         // An explicit pin is a contract: a frame rendered on any other GPU
         // cannot be shared with the compositor that asked for this one, so a
         // malformed or unavailable pin is an error, never a silent fallback.
@@ -512,7 +537,9 @@ impl CxVulkan {
         let instance = init.instance.as_ref().unwrap();
         let loader =
             ash::khr::wayland_surface::Instance::new(init.entry.as_ref().unwrap(), instance);
-        for physical_device in init.devices()? {
+        let allow_cpu = crate::os::linux::gpu_preference::gpu_preference()
+            == crate::os::linux::gpu_preference::GpuPreference::Vulkan;
+        for physical_device in init.devices(allow_cpu)? {
             let queues =
                 unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
             for (index, queue) in queues.iter().enumerate() {
@@ -541,6 +568,47 @@ impl CxVulkan {
             }
         }
         Err("No Vulkan 1.1 device with Wayland graphics/presentation support".into())
+    }
+
+    /// Whether this driver's FIFO swapchain queues a present behind the
+    /// previous one (through the compositor's `fifo-v1`) instead of waiting for
+    /// the previous present's frame callback inside `vkQueuePresentKHR`. Mesa
+    /// before 25 always waits there, with no timeout, so a second present
+    /// issued to an occluded window would hang the event loop; see
+    /// `wayland/frame_pacer.rs`. Drivers this cannot identify, and NVIDIA
+    /// releases older than the one this was verified on, answer false.
+    pub fn fifo_presents_queue(&self) -> bool {
+        let has_driver_properties = unsafe {
+            self.instance
+                .enumerate_device_extension_properties(self.physical_device)
+        }
+        .is_ok_and(|extensions| {
+            extensions.iter().any(|extension| {
+                extension.extension_name_as_c_str() == Ok(vk::KHR_DRIVER_PROPERTIES_NAME)
+            })
+        });
+        if !has_driver_properties {
+            return false;
+        }
+        let mut driver = vk::PhysicalDeviceDriverProperties::default();
+        let mut properties = vk::PhysicalDeviceProperties2::default().push_next(&mut driver);
+        unsafe {
+            self.instance
+                .get_physical_device_properties2(self.physical_device, &mut properties)
+        };
+        let driver_version = properties.properties.driver_version;
+        if driver.driver_id == vk::DriverId::NVIDIA_PROPRIETARY {
+            // NVIDIA packs its major version into the top ten bits.
+            return driver_version >> 22 >= 580;
+        }
+        driver
+            .driver_info_as_c_str()
+            .ok()
+            .and_then(|info| info.to_str().ok())
+            .and_then(|info| info.strip_prefix("Mesa "))
+            .and_then(|version| version.split('.').next())
+            .and_then(|major| major.parse::<u32>().ok())
+            .is_some_and(|major| major >= 25)
     }
 
     fn take_desktop_window(&mut self) -> DesktopWindow {
@@ -1054,7 +1122,7 @@ impl CxVulkan {
             Ok(bridge) => bridge,
             Err(error) => {
                 self.destroy_swapchain();
-                self.destroy_texture_resource(composition);
+                self.destroy_uncached_texture_resource(composition);
                 return Err(error);
             }
         };
@@ -1081,7 +1149,7 @@ impl CxVulkan {
         }
         unsafe { output.bridge.destroy(self, display) };
         self.destroy_swapchain();
-        self.destroy_texture_resource(output.composition);
+        self.destroy_uncached_texture_resource(output.composition);
     }
 
     pub(super) fn prepared_gpu_output_idle(
@@ -1127,7 +1195,7 @@ impl CxVulkan {
             // Old framebuffers/views must retire before their composition.
             old.destroy_swapchain();
             if let Some(composition) = routed.composition.take() {
-                old.destroy_texture_resource(composition);
+                old.destroy_uncached_texture_resource(composition);
             }
             (
                 routed.display,
@@ -2082,7 +2150,7 @@ impl CxVulkan {
         let (physical_device, queue, desktop_extent, desktop) = {
             let instance = init.instance.as_ref().unwrap();
             let entry = init.entry.as_ref().unwrap();
-            let devices = init.devices()?;
+            let devices = init.devices(true)?;
             let mut direct = DirectState {
                 physical_device: vk::PhysicalDevice::null(),
                 display_loader: ash::khr::display::Instance::new(entry, instance),
@@ -2454,7 +2522,7 @@ impl CxVulkan {
             }
             let composition = self.install_composition_targets(targets);
             if let Some(old) = routed.composition.replace(composition) {
-                self.destroy_texture_resource(old);
+                self.destroy_uncached_texture_resource(old);
             }
             let mut direct = routed.display.desktop.direct.take().unwrap();
             routed
@@ -3421,15 +3489,15 @@ impl CxVulkan {
         let depth = match self.create_depth_target(extent.width, extent.height, depth_format) {
             Ok(depth) => depth,
             Err(err) => {
-                self.destroy_texture_resource(resource);
+                self.destroy_uncached_texture_resource(resource);
                 return Err(err);
             }
         };
         let render_pass = match self.direct_create_composition_render_pass(depth_format) {
             Ok(render_pass) => render_pass,
             Err(err) => {
-                self.destroy_texture_resource(depth);
-                self.destroy_texture_resource(resource);
+                self.destroy_uncached_texture_resource(depth);
+                self.destroy_uncached_texture_resource(resource);
                 return Err(err);
             }
         };
@@ -3448,8 +3516,8 @@ impl CxVulkan {
             Ok(framebuffer) => framebuffer,
             Err(e) => {
                 unsafe { self.device.destroy_render_pass(render_pass, None) };
-                self.destroy_texture_resource(depth);
-                self.destroy_texture_resource(resource);
+                self.destroy_uncached_texture_resource(depth);
+                self.destroy_uncached_texture_resource(resource);
                 return Err(format!("create composition framebuffer: {e:?}"));
             }
         };
@@ -3464,8 +3532,8 @@ impl CxVulkan {
                     self.device.destroy_framebuffer(framebuffer, None);
                     self.device.destroy_render_pass(render_pass, None);
                 }
-                self.destroy_texture_resource(depth);
-                self.destroy_texture_resource(resource);
+                self.destroy_uncached_texture_resource(depth);
+                self.destroy_uncached_texture_resource(resource);
                 return Err(err);
             }
         };
@@ -3574,7 +3642,7 @@ impl CxVulkan {
         let extent = targets.extent;
         let resource = self.install_composition_targets(targets);
         if let Some(old) = direct.composition.replace(resource) {
-            self.destroy_texture_resource(old);
+            self.destroy_uncached_texture_resource(old);
         }
         direct.desktop_extent = extent;
         direct.composition_epoch += 1;
@@ -3606,8 +3674,8 @@ impl CxVulkan {
             self.device.destroy_buffer(targets.readback.buffer, None);
             self.device.free_memory(targets.readback.memory, None);
         }
-        self.destroy_texture_resource(targets.depth);
-        self.destroy_texture_resource(targets.resource);
+        self.destroy_uncached_texture_resource(targets.depth);
+        self.destroy_uncached_texture_resource(targets.resource);
     }
 
     /// Choose the render source and, when its mode differs from the desktop,
@@ -5211,7 +5279,7 @@ impl CxVulkan {
                 unsafe { bridge.destroy(self, &routed.display) };
             }
             if let Some(composition) = routed.composition.take() {
-                self.destroy_texture_resource(composition);
+                self.destroy_uncached_texture_resource(composition);
             }
             // Presenter Drop releases its WSI resources before either parent.
             drop(routed);
@@ -5276,7 +5344,7 @@ impl CxVulkan {
             }
         }
         if let Some(resource) = direct.composition.take() {
-            self.destroy_texture_resource(resource);
+            self.destroy_uncached_texture_resource(resource);
         }
         if let Some(blit) = direct.blit.take() {
             unsafe {

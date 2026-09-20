@@ -14,13 +14,20 @@ pub enum DesktopStyle {
     NextStep,
     Ios,
     Android,
+    /// A dark style in near-black and orange, the only one here not modelled
+    /// on somebody else's desktop. Declared last: the window manager's style
+    /// tween reads its weights by discriminant (1 is macOS, 3 Windows 2000,
+    /// 4 NeXTSTEP), so a new style takes the next number and `ALL` below
+    /// keeps the order they are shown in.
+    BlackOrange,
 }
 
 impl DesktopStyle {
-    pub const ALL: [Self; 7] = [Self::Omarchy, Self::Macos, Self::Windows, Self::Windows2000, Self::NextStep, Self::Ios, Self::Android];
+    pub const ALL: [Self; 8] = [Self::Omarchy, Self::BlackOrange, Self::Macos, Self::Windows, Self::Windows2000, Self::NextStep, Self::Ios, Self::Android];
     pub fn id(self) -> &'static str {
         match self {
             Self::Omarchy => "omarchy",
+            Self::BlackOrange => "black-orange",
             Self::Macos => "macos",
             Self::Windows => "windows",
             Self::Windows2000 => "windows-2000",
@@ -32,6 +39,7 @@ impl DesktopStyle {
     pub fn label(self) -> &'static str {
         match self {
             Self::Omarchy => "Omarchy",
+            Self::BlackOrange => "Black orange",
             Self::Macos => "macOS",
             Self::Windows => "Windows",
             Self::Windows2000 => "Windows 2000",
@@ -46,15 +54,33 @@ impl DesktopStyle {
     }
     pub fn supports_dark(self) -> bool { matches!(self, Self::Macos | Self::Windows | Self::Ios | Self::Android) }
     pub fn mobile(self) -> bool { matches!(self, Self::Ios | Self::Android) }
+    /// Which set of app artwork this style draws, as an index into the icon
+    /// table. A style is free to borrow another's drawings rather than have
+    /// every icon redrawn for it -- the table is one entry per SET, not one
+    /// per style, so the enum's own order must not be read as an index into
+    /// it.
+    pub fn icon_set(self) -> usize {
+        match self {
+            Self::Omarchy | Self::BlackOrange => 0,
+            Self::Macos => 1,
+            Self::Windows => 2,
+            Self::Windows2000 => 3,
+            Self::NextStep => 4,
+            Self::Ios => 5,
+            Self::Android => 6,
+        }
+    }
     pub fn next(self) -> Self {
-        Self::ALL[(self as usize + 1) % Self::ALL.len()]
+        // By place in `ALL`, not by discriminant: the two orders differ.
+        let at = Self::ALL.iter().position(|style| *style == self).unwrap_or(0);
+        Self::ALL[(at + 1) % Self::ALL.len()]
     }
     pub fn floating(self) -> bool {
-        self != Self::Omarchy && !self.mobile()
+        !matches!(self, Self::Omarchy | Self::BlackOrange) && !self.mobile()
     }
     pub fn shelf_height(self) -> f64 {
         match self {
-            Self::Omarchy => 0.0,
+            Self::Omarchy | Self::BlackOrange => 0.0,
             Self::Macos => 86.0,
             Self::Windows => 54.0,
             Self::Windows2000 => 34.0,
@@ -63,7 +89,7 @@ impl DesktopStyle {
     }
     pub fn title_height(self) -> f64 {
         match self {
-            Self::Omarchy => 0.0,
+            Self::Omarchy | Self::BlackOrange => 0.0,
             Self::Macos => 32.0,
             Self::Windows => 34.0,
             Self::Windows2000 => 20.0,
@@ -107,6 +133,10 @@ impl StyleSheet {
             DesktopStyle::Omarchy => (
                 include_str!("../themes/omarchy/theme.splash"),
                 include_str!("../themes/omarchy/widgets.splash"),
+            ),
+            DesktopStyle::BlackOrange => (
+                include_str!("../themes/black-orange/theme.splash"),
+                include_str!("../themes/black-orange/widgets.splash"),
             ),
             DesktopStyle::Macos if dark => (
                 include_str!("../themes/macos-dark/theme.splash"),
@@ -198,16 +228,24 @@ pub fn install(vm: &mut ScriptVm, sheet: StyleSheet) {
     let key = vm.bx.heap.heap_key();
     vm.cx_mut().global::<Styles>().heaps.insert(key, sheet);
 }
+/// Take the sheet off again, so the next evaluation runs under the plain
+/// theme. `install` had no way back: an app that lets somebody try a sheet
+/// could put one on and never return to what it started with. A sheet named
+/// by `MAKEPAD_WIDGET_STYLE` comes back on the next read, as it would have
+/// arrived in the first place.
+pub fn uninstall(vm: &mut ScriptVm) {
+    let key = vm.bx.heap.heap_key();
+    vm.cx_mut().global::<Styles>().heaps.remove(&key);
+}
 pub fn current(vm: &mut ScriptVm) -> Option<StyleSheet> {
     let key = vm.bx.heap.heap_key();
     if let Some(sheet) = vm.cx_mut().global::<Styles>().heaps.get(&key).cloned() {
         return Some(sheet);
     }
-    let name = std::env::var("MAKEPAD_WIDGET_STYLE").ok().or_else(|| match vm.cx().os_type() {
-        OsType::Ios(_) => Some("ios".into()),
-        OsType::Android(_) => Some("android".into()),
-        _ => None,
-    })?;
+    // Opt-in only. Picking a sheet from OsType restyled every app that had
+    // never asked for one, and an app that calls `theme_mod` + `widgets_mod`
+    // without `script_mod` got the theme half of it and not the widget half.
+    let name = std::env::var("MAKEPAD_WIDGET_STYLE").ok()?;
     let style = DesktopStyle::parse(&name)?;
     let sheet = StyleSheet::load_with_appearance(style, name.ends_with("-dark"));
     install(vm, sheet.clone());
@@ -243,6 +281,14 @@ fn evaluate(vm: &mut ScriptVm, sheet: &StyleSheet, phase: &str, code: String) {
 pub fn apply_theme(vm: &mut ScriptVm) {
     if let Some(sheet) = current(vm) {
         evaluate(vm, &sheet, "theme", sheet.theme.clone());
+        // The library's own roles are younger than the sheets and no sheet
+        // names them, so they are brought into line with what this one set.
+        let roles = {
+            let theme = vm.module(id!(theme));
+            let mut read = |key: &str| vm.bx.heap.value(theme, LiveId::from_str(key).into(), NoTrap).as_color();
+            crate::theme_tokens::sheet_roles_script(&sheet.theme, &mut read)
+        };
+        evaluate(vm, &sheet, "roles", roles);
         if DesktopStyle::parse(&sheet.name).is_some_and(|style| style.mobile()) {
             crate::font_policy::append_style_fallbacks(vm);
         }
@@ -290,7 +336,9 @@ mod tests {
                     let text=TextStyle::script_from_value(vm,value);
                     let members=text.font_family.member_ids().collect::<Vec<_>>();
                     assert_eq!(members.first(),Some(&"latin"));
-                    assert!(members.contains(&"jetbrains_ui_symbols"),"{members:?}");
+                    // The mobile policy's fallback chain (font_policy.rs) ends
+                    // in the emoji face; it must survive every appearance.
+                    assert!(members.contains(&"noto_color_emoji"),"{members:?}");
                     assert!(vm.take_errors().is_empty());
                 }
             }
@@ -323,6 +371,7 @@ mod tests {
                         DesktopStyle::Windows => 4.0,
                         DesktopStyle::Ios => 14.0,
                         DesktopStyle::Android => 20.0,
+                        DesktopStyle::BlackOrange => 2.5,
                         _ => 0.0,
                     }
                 );

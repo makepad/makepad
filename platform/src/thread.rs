@@ -5,7 +5,9 @@
 //! start-up and stay warm. A job is submitted lock-free from any thread and
 //! its result comes back through a [`TaskHandle`] polled with `try_take`
 //! (never a blocking join on the UI thread) or over whatever channel the job
-//! carries; every completion raises the UI signal. The pool has two lanes so
+//! carries. A `submit` completion raises the UI signal, so the handle can be
+//! polled on `Event::Signal`; makepad's own jobs use `submit_internal`, whose
+//! completion only wakes the runtime. The pool has two lanes so
 //! a long job (an mp3 decode, a stem fetch, a bake) never queues in front of
 //! a short interactive one (an icon, a thumbnail, a catalog request).
 //!
@@ -45,8 +47,9 @@ use {
 };
 
 pub use makepad_network::{
-    to_ui_bounded, to_ui_oneshot, FromUIReceiver, FromUISender, ReceiverAlreadyTaken, SignalFromUI,
-    SignalToUI, ToUIOneshotReceiver, ToUIOneshotSender, ToUIReceiver, ToUISender, UiWaker,
+    to_ui_bounded, to_ui_oneshot, wake_ui_loop, FromUIReceiver, FromUISender, ReceiverAlreadyTaken,
+    SignalFromUI, SignalToUI, ToUIOneshotReceiver, ToUIOneshotSender, ToUIReceiver, ToUISender,
+    UiWaker,
 };
 
 fn lock_without_wasm_wait<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -656,6 +659,7 @@ impl MachineTopology {
         (self.performance.saturating_sub(2).max(1), light)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn limited_to(mut self, logical: usize) -> Self {
         self.logical = self.logical.min(logical.max(1));
         self.physical = self.physical.min(self.logical).max(1);
@@ -925,7 +929,7 @@ impl Cx {
 
     pub(crate) fn warm_task_pool(&self) {
         let status = Cx::set_thread_priority(CxThreadPriority::UserInteractive);
-        crate::log!("UI thread priority UserInteractive: {status:?}");
+        crate::trace!("pool", "UI thread priority UserInteractive: {status:?}");
         let _ = self.task_pool();
     }
 
@@ -939,7 +943,7 @@ impl Cx {
 
     pub(crate) fn close_task_pool(&self) {
         if let Some(pool) = self.task_pool.get() {
-            crate::log!("{}", pool.summary());
+            crate::trace!("pool", "{}", pool.summary());
             pool.close(ShutdownMode::CancelPending);
         }
     }
@@ -1249,6 +1253,7 @@ struct PoolInner {
     lanes: [LaneQueue; 2],
     workers: Vec<WorkerSlot>,
     light_reserve: usize,
+    heavy_priority: CxThreadPriority,
     closed: AtomicU8,
     started: AtomicUsize,
     exited: AtomicUsize,
@@ -1275,7 +1280,7 @@ impl PoolInner {
             while self.lanes[1].try_take().is_some() {}
             return None;
         }
-        // Reserved Light workers stay available; utility workers alternate
+        // Reserved Light workers stay available; heavy workers alternate
         // preference so a continuous short-job stream cannot starve Heavy.
         if heavy_capable && self.heavy_turn.fetch_add(1, Ordering::Relaxed) % 2 == 0 {
             if let Some(job) = self.lanes[Lane::Heavy.index()].try_take() { return Some(job); }
@@ -1283,8 +1288,8 @@ impl PoolInner {
         if let Some(job) = self.lanes[Lane::Light.index()].try_take() {
             return Some(job);
         }
-        // Utility workers may help with short jobs at utility priority. The
-        // user-initiated workers never run heavy work or promote its priority.
+        // Heavy workers may help with short jobs at their configured priority.
+        // Reserved light workers never take heavy work.
         if heavy_capable {
             self.lanes[Lane::Heavy.index()].try_take()
         } else {
@@ -1360,7 +1365,7 @@ impl PoolInner {
             self.next_report_us.store(due, Ordering::Relaxed);
         }
         if now >= due {
-            crate::log!("{}", self.summary());
+            crate::trace!("pool", "{}", self.summary());
             self.reported_completed.store(completed, Ordering::Relaxed);
             self.next_report_us
                 .store(now + POOL_REPORT_US, Ordering::Relaxed);
@@ -1413,8 +1418,8 @@ impl PoolInner {
                 lane_stats.run_max_ms,
             ));
         }
-        out.push_str(&format!("; priority applied {}/{} (light UserInitiated / heavy Utility); light >2ms {} offenders=[",
-            stats.priority_applied, stats.workers, stats.light_over_budget));
+        out.push_str(&format!("; priority applied {}/{} (light UserInitiated / heavy {:?}); light >2ms {} offenders=[",
+            stats.priority_applied, stats.workers, self.heavy_priority, stats.light_over_budget));
         for (index, offender) in self.light_offenders().iter().enumerate() {
             if index > 0 {
                 out.push_str(", ");
@@ -1496,7 +1501,7 @@ fn pool_worker(inner: Arc<PoolInner>, index: usize) {
     let slot = &inner.workers[index];
     let _ = slot.thread.set(std::thread::current());
     let priority = if slot.heavy_capable {
-        CxThreadPriority::Utility
+        inner.heavy_priority
     } else {
         CxThreadPriority::UserInitiated
     };
@@ -1625,6 +1630,17 @@ impl fmt::Debug for TaskPool {
 impl TaskPool {
     /// Spawn the workers now; they park until the first job.
     pub fn new(spawner: ThreadSpawner, options: PoolOptions) -> Result<Self, SpawnError> {
+        Self::new_with_priority(spawner, options, CxThreadPriority::Utility)
+    }
+
+    /// A dedicated pool may serve a foreground operation the user is waiting
+    /// for (for example, indexing). Shared/background pools retain Utility.
+    /// Reserved light workers always retain their UserInitiated priority.
+    pub fn new_with_priority(
+        spawner: ThreadSpawner,
+        options: PoolOptions,
+        heavy_priority: CxThreadPriority,
+    ) -> Result<Self, SpawnError> {
         let worker_len = options.workers.get();
         let light_reserve = options.light_reserve.min(worker_len - 1);
         let workers = (0..worker_len)
@@ -1642,6 +1658,7 @@ impl TaskPool {
             ],
             workers,
             light_reserve,
+            heavy_priority,
             closed: AtomicU8::new(POOL_OPEN),
             started: AtomicUsize::new(0),
             exited: AtomicUsize::new(0),
@@ -1668,7 +1685,7 @@ impl TaskPool {
                     priority: if index < light_reserve {
                         CxThreadPriority::UserInitiated
                     } else {
-                        CxThreadPriority::Utility
+                        heavy_priority
                     },
                     ..Default::default()
                 },
@@ -1699,6 +1716,7 @@ impl TaskPool {
             lanes: [LaneQueue::new(1), LaneQueue::new(1)],
             workers: Vec::new(),
             light_reserve: 0,
+            heavy_priority: CxThreadPriority::Utility,
             closed: AtomicU8::new(POOL_CANCELLED),
             started: AtomicUsize::new(0),
             exited: AtomicUsize::new(0),
@@ -1775,6 +1793,18 @@ impl TaskPool {
     {
         self.try_submit_named(lane, label, f)
             .map_err(|refused| refused.error)
+    }
+
+    /// [`submit`](Self::submit) for one of makepad's own jobs, whose result the
+    /// runtime polls from its own draw or beat path. Completion raises the
+    /// internal signal, so no widget is woken with an `Event::Signal` for it.
+    pub fn submit_internal<F, T>(&self, lane: Lane, f: F) -> Result<TaskHandle<T>, SubmitError>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        self.reserve(lane)
+            .map(|slot| slot.submit_internal_named(std::any::type_name::<F>(), f))
     }
 
     /// Like [`submit`](Self::submit) but a refused job comes back intact so
@@ -2013,6 +2043,8 @@ impl PoolSlot {
 
     /// Queue the job. It cannot be refused any more: if the pool closed in
     /// the meantime the handle completes as `TaskError::Cancelled`.
+    /// Completion raises the UI signal, so the handle can be polled on
+    /// `Event::Signal`.
     pub fn submit<F, T>(self, f: F) -> TaskHandle<T>
     where
         F: FnOnce() -> T + Send + 'static,
@@ -2021,7 +2053,26 @@ impl PoolSlot {
         self.submit_named(std::any::type_name::<F>(), f)
     }
 
-    pub fn submit_named<F, T>(mut self, label: &'static str, f: F) -> TaskHandle<T>
+    pub fn submit_named<F, T>(self, label: &'static str, f: F) -> TaskHandle<T>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        self.submit_with(label, f, false)
+    }
+
+    /// [`submit_named`](Self::submit_named) for one of makepad's own jobs, whose
+    /// result the runtime polls from its own draw or beat path. Completion
+    /// raises the internal signal, so no widget is woken for it.
+    pub fn submit_internal_named<F, T>(self, label: &'static str, f: F) -> TaskHandle<T>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        self.submit_with(label, f, true)
+    }
+
+    fn submit_with<F, T>(mut self, label: &'static str, f: F, internal: bool) -> TaskHandle<T>
     where
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
@@ -2042,7 +2093,7 @@ impl PoolSlot {
             run_priority_status.store(status as u8, Ordering::Release);
             if run_token.is_cancelled() {
                 run_state.complete(Err(TaskError::Cancelled));
-                signal_ui_completion();
+                signal_completion(internal);
                 return;
             }
             let result = catch_unwind(AssertUnwindSafe(f)).map_err(|payload| {
@@ -2056,7 +2107,7 @@ impl PoolSlot {
                 TaskError::Panicked(report)
             });
             run_state.complete(result);
-            signal_ui_completion();
+            signal_completion(internal);
         };
         let job = PoolJob {
             lane: self.lane,
@@ -2104,9 +2155,15 @@ impl Drop for PoolSlot {
     }
 }
 
-fn signal_ui_completion() {
+fn signal_completion(internal: bool) {
+    #[cfg(test)]
+    let _ = internal;
     #[cfg(not(test))]
-    SignalToUI::set_ui_signal();
+    if internal {
+        SignalToUI::set_internal_signal();
+    } else {
+        SignalToUI::set_ui_signal();
+    }
 }
 
 /// A UI-owned staging queue in front of the pool for work that needs
@@ -2422,6 +2479,8 @@ impl Scheduler {
 }
 
 fn wake_scheduler_ui() {
+    // The app signal, not the internal one: `service_scheduler` re-arms the
+    // platform timer from `call_event_handler`, which only the app half runs.
     #[cfg(not(test))]
     SignalToUI::set_ui_signal();
 }

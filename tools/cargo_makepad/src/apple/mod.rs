@@ -1,4 +1,5 @@
 mod compile;
+mod info_plist;
 mod sdk;
 use crate::utils::{get_build_crate_from_args, get_package_binary_name};
 use compile::*;

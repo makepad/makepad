@@ -401,7 +401,7 @@ impl PhotosView {
     }
 
     /// How many pictures the wall shows under the current filter.
-    pub fn visible(&self, cx: &mut Cx) -> usize {
+    pub fn visible_count(&self, cx: &mut Cx) -> usize {
         self.view.widget(cx, ids!(grid)).borrow::<TileGrid>().map(|g| g.visible_count()).unwrap_or(0)
     }
 

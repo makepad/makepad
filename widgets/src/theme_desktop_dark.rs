@@ -441,7 +441,7 @@ script_mod! {
         color_on_tertiary: #x172645FF
         color_tertiary_container: #x324367FF
         color_on_tertiary_container: #xD8E1F3FF
-        color_on_error: #x4F0D0DFF
+        color_on_error: #xFFFFFFFF
         color_error_container: #x732626FF
         color_on_error_container: #xFAD1D1FF
         color_on_warning: #x553E07FF
@@ -462,13 +462,13 @@ script_mod! {
         color_surface: theme.color_bg_app
         color_surface_container: theme.color_fg_app
         color_surface_container_low: mix(theme.color_bg_app, theme.color_fg_app, 0.5)
-        color_surface_container_high: theme.color_opaque_u_1
-        color_surface_container_highest: theme.color_opaque_u_2
+        color_surface_container_high: mix(theme.color_fg_app, #F, 0.08)
+        color_surface_container_highest: mix(theme.color_fg_app, #F, 0.15)
         color_surface_container_lowest: theme.color_opaque_d_1
-        color_surface_dim: theme.color_opaque_d_2
-        color_surface_bright: theme.color_opaque_u_3
-        color_on_surface: theme.color_text
-        color_on_surface_variant: theme.color_u_4
+        color_surface_dim: mix(theme.color_fg_app, #0, 0.25)
+        color_surface_bright: mix(theme.color_fg_app, #F, 0.17)
+        color_on_surface: #xFFFFFFFF
+        color_on_surface_variant: #xFFFFFFA8
         color_outline: theme.color_u_3
         color_outline_variant: theme.color_u_15
         color_inverse_surface: theme.color_opaque_u_6
@@ -833,6 +833,7 @@ mod crate_tint_role_tests {
             assert_design_kind_roles(vm, "light-default");
             for (style, dark) in [
                 (DesktopStyle::Omarchy, false),
+                (DesktopStyle::BlackOrange, false),
                 (DesktopStyle::Macos, false),
                 (DesktopStyle::Macos, true),
                 (DesktopStyle::Windows, false),
@@ -872,6 +873,7 @@ mod crate_tint_role_tests {
     fn crate_tint_roles_resolve_in_every_shipped_theme() {
         let sheets = [
             (DesktopStyle::Omarchy, false, &DARK_TINTS),
+            (DesktopStyle::BlackOrange, false, &DARK_TINTS),
             (DesktopStyle::Macos, false, &LIGHT_TINTS),
             (DesktopStyle::Macos, true, &DARK_TINTS),
             (DesktopStyle::Windows, false, &LIGHT_TINTS),
@@ -898,3 +900,4 @@ mod crate_tint_role_tests {
         });
     }
 }
+

@@ -1,7 +1,11 @@
 //! The TWEAKER — the design-feedback overlay every `--remote` app grows.
 //!
 //! Hardcoded into `Window` (like the caption bar: zero app wiring), inert
-//! unless the remote bridge is live, zero cost while off. Turned on (Shift+F10 or
+//! unless the remote bridge is live, zero cost while off. The Shift+F10 / F12
+//! keys need the dev overlays switched on (`makepad_platform::devtools`:
+//! `--devtools`, `MAKEPAD_DEVTOOLS=1`, or `--remote`); [`set_tweak_on`] is
+//! always there for an app that wants to open the panel itself. Turned on
+//! (Shift+F10, F12 or
 //! `GET /tweak?on=1`), a person points at the UI and live-edits it while the
 //! AI watches the same session through the bridge:
 //!
@@ -87,8 +91,10 @@
 use crate::{
     check_box::{CheckBox, CheckBoxAction},
     fab_controls::{format_hex, parse_hex, rgb_to_hsv, FabColorPick, FabColorPickAction, FabValueInput, FabValueInputAction, FabValueInputWidgetRefExt},
+    makepad_draw::makepad_platform::devtools,
     makepad_draw::makepad_platform::sploded::{SPLODED_SPREAD_DEFAULT, SPLODED_SPREAD_MAX, SPLODED_SPREAD_MIN},
     dock::DockWidgetRefExt,
+    drop_down::{DropDownAction, DropDownWidgetRefExt},
     file_tree::{FileTree, FileTreeAction},
     fold_header::{FoldHeader, FoldHeaderWidgetRefExt},
     page_flip::PageFlipWidgetRefExt,
@@ -2109,7 +2115,10 @@ pub fn window_intercept(
     // Shift+F10 toggles the mode, bridge or no bridge: the design surface is
     // in-process and owes the remote nothing. Only the HTTP endpoints and
     // the AI vibecode loop need --remote; without it they simply are not
-    // there, and the panel still is.
+    // there, and the panel still is. It does need the dev overlays to be
+    // switched on though (`--devtools` / `MAKEPAD_DEVTOOLS=1` / `--remote`) —
+    // in a shipped app F12 belongs to the app, and `set_tweak_on` is still
+    // there for one that wants to open the panel itself.
     //
     // Ctrl+F10 is not ours: that is the screen recorder
     // (widgets/src/screen_cap.rs), and it must not drag the design surface
@@ -2120,7 +2129,7 @@ pub fn window_intercept(
             && !key_event.modifiers.control
             && !key_event.modifiers.alt
             && !key_event.modifiers.logo;
-        if key_event.is_tweaker_toggle() || f12 {
+        if devtools::enabled() && (key_event.is_tweaker_toggle() || f12) {
             let flip = {
                 let mut s = session().lock().unwrap();
                 if s.toggle_event_id != cx.event_id() {
@@ -2132,6 +2141,15 @@ pub fn window_intercept(
             };
             if flip {
                 set_tweak_on(cx, !tweak_is_on());
+            }
+            if !tweak_is_on() {
+                if let Some((_, tweaker)) = window_view.children.iter()
+                    .find(|(id, _)| *id == live_id!(tweaker))
+                {
+                    if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
+                        tw.cancel_interactions(cx);
+                    }
+                }
             }
             return true;
         }
@@ -2356,6 +2374,7 @@ pub fn window_intercept(
                 log!("TWEAK press {:.0},{:.0} with a stale splitter drag: ended, picking", abs.x, abs.y);
                 if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
                     tw.splitter_drag = false;
+                    tw.cancel_scope = None;
                 }
             } else {
                 if kind == PointerKind::Move {
@@ -5270,9 +5289,48 @@ fn sight_target(cx: &Cx, uid: u64, in_frame: bool) -> TargetSighting {
 /// flat (negative alpha) for the same reason — the theme gives the hover and
 /// focus states a second stop, and a two-tone face reads as a third state
 /// that does not exist.
+/// One colour off the fab palette, ready to apply. Opaque: these are FILLS,
+/// and a role that carries an alpha (the base theme's well is a translucent
+/// black) would let the panel's ground through a control that is meant to
+/// sit on it.
+fn fab_fill(cx: &mut Cx, key: LiveId) -> Vec4f {
+    let rgba = cx.with_vm(|vm| {
+        let fab = vm.module(id!(fab));
+        vm.bx.heap.value(fab, key.into(), NoTrap).as_color().unwrap_or(0)
+    });
+    vec4(
+        ((rgba >> 24) & 0xff) as f32 / 255.0,
+        ((rgba >> 16) & 0xff) as f32 / 255.0,
+        ((rgba >> 8) & 0xff) as f32 / 255.0,
+        1.0,
+    )
+}
+
 fn set_button_fill(cx: &mut Cx, btn: WidgetRef, selected: bool) {
     let mut btn = btn;
-    let (base, hover, down): (Vec4f, Vec4f, Vec4f) = if selected {
+    // Worn (the Theme tab's "wear" switch), the literals below would be a
+    // dark slab under a light theme with the panel's now-dark words on it --
+    // unreadable, and on every switch in the panel at once. So worn, the two
+    // states come off the palette instead: the accent's own CONTAINER for
+    // on, which is the tint that role exists to carry ink on, and the well
+    // tone for off. Both keep `fab.color_text` readable, which is what the
+    // button draws its word in; `worn_the_panel_takes_the_themes_colours_and_still_reads`
+    // holds that to a number under every sheet.
+    let (base, hover, down): (Vec4f, Vec4f, Vec4f) = if crate::fab_controls::panel_wears_theme(cx) {
+        if selected {
+            (
+                fab_fill(cx, live_id!(color_accent_dim)),
+                fab_fill(cx, live_id!(color_accent)),
+                fab_fill(cx, live_id!(color_accent_dim)),
+            )
+        } else {
+            (
+                fab_fill(cx, live_id!(color_input)),
+                fab_fill(cx, live_id!(color_input_hover)),
+                fab_fill(cx, live_id!(color_input_active)),
+            )
+        }
+    } else if selected {
         (
             vec4(0.23, 0.45, 0.83, 1.0),
             vec4(0.31, 0.54, 0.92, 1.0),
@@ -7641,6 +7699,126 @@ enum PanelTab {
     Spec,
 }
 
+/// One built-in thing the Theme tab's picker offers: a theme the library is
+/// written in, or a style sheet laid over one. Both are permanent -- they
+/// live in the binary, and nothing in the panel can remove one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ThemePreset {
+    Base(crate::BaseTheme),
+    Sheet(crate::desktop_style::DesktopStyle, bool),
+}
+
+impl ThemePreset {
+    /// What the button says.
+    fn label(self) -> String {
+        match self {
+            Self::Base(base) => base.label().to_string(),
+            Self::Sheet(style, false) => style.label().to_string(),
+            Self::Sheet(style, true) => format!("{} dark", style.label()),
+        }
+    }
+}
+
+/// Everything the strip offers, in the order it offers it: the base themes,
+/// then every sheet the library ships, each followed by its dark appearance
+/// where it has one.
+///
+/// Read off the library's own lists rather than written out here, so a theme
+/// or a sheet added there turns up in the panel without anybody remembering
+/// to add it, and so the panel names none of them itself.
+fn theme_presets() -> Vec<ThemePreset> {
+    let mut out: Vec<ThemePreset> = crate::BaseTheme::ALL
+        .into_iter()
+        .map(ThemePreset::Base)
+        .collect();
+    for style in crate::desktop_style::DesktopStyle::ALL {
+        out.push(ThemePreset::Sheet(style, false));
+        if style.supports_dark() {
+            out.push(ThemePreset::Sheet(style, true));
+        }
+    }
+    out
+}
+
+/// One row of the Theme tab's picker.
+///
+/// The two halves are kept apart on purpose, because only one of them may be
+/// deleted: a `Builtin` is the library's own and is permanent, a `Saved` is
+/// the person's and is the only kind [`crate::theme_store::delete`] will
+/// touch. The panel never decides that itself -- it asks the store, which
+/// enforces the same rule again.
+#[derive(Clone, Debug, PartialEq)]
+enum ThemeChoice {
+    /// A base theme or a style sheet, from the library's own lists.
+    Builtin(ThemePreset),
+    /// A theme the person saved, by the name the store files it under.
+    Saved(String),
+}
+
+impl ThemeChoice {
+    /// What the picker shows for this row.
+    fn label(&self) -> String {
+        match self {
+            Self::Builtin(preset) => preset.label(),
+            Self::Saved(name) => name.clone(),
+        }
+    }
+}
+
+/// A question the Theme tab has asked and is waiting on a second press to
+/// answer, and the name it was asked about.
+///
+/// One field holds both, rather than a flag per command, so there is one
+/// place a question is asked, one place it is answered and one place it
+/// lapses -- and so asking one question CANCELS the other. Two flags would
+/// have let a "save again to replace it" still standing answer a delete, or
+/// the other way round, which is the class of bug a confirmation exists to
+/// prevent.
+#[derive(Clone, Debug, PartialEq)]
+enum ThemeConfirm {
+    /// "save as" has offered to write over this saved theme.
+    Replace(String),
+    /// "delete" has offered to remove this saved theme from disk.
+    Delete(String),
+}
+
+/// Everything the picker offers, in the order it offers it: every built-in
+/// first, in the library's own order, then whatever the store holds.
+///
+/// `saved` is the store's list as the panel last read it, rather than a read
+/// from here: this is called on every frame the Theme tab draws, and
+/// [`crate::theme_store::list`] is a directory read.
+fn theme_choices(saved: &[String]) -> Vec<ThemeChoice> {
+    let mut out: Vec<ThemeChoice> = theme_presets()
+        .into_iter()
+        .map(ThemeChoice::Builtin)
+        .collect();
+    out.extend(saved.iter().map(|name| ThemeChoice::Saved(name.clone())));
+    out
+}
+
+/// Which preset the library is running under right now: the sheet
+/// `desktop_style` has installed, or the base theme when there is none.
+/// Read once, when the panel is built -- an app may well have put a sheet on
+/// before the panel existed, and the picker must not claim otherwise.
+fn current_theme_preset(cx: &mut Cx) -> usize {
+    let sheet = cx.with_vm(|vm| crate::desktop_style::current_name(vm));
+    let base = crate::base_theme(cx);
+    let wanted = match sheet
+        .as_deref()
+        .and_then(|name| {
+            crate::desktop_style::DesktopStyle::parse(name)
+                .map(|style| (style, name.ends_with("-dark")))
+        }) {
+        Some((style, dark)) => ThemePreset::Sheet(style, dark),
+        None => ThemePreset::Base(base),
+    };
+    theme_presets()
+        .iter()
+        .position(|preset| *preset == wanted)
+        .unwrap_or(0)
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum BoxKind {
     Margin,
@@ -8027,6 +8205,67 @@ pub struct Tweaker {
     /// Tab-bar button uids, captured at draw.
     #[rust]
     tab_uids: [u64; 5],
+    /// The Theme tab's picker and its three commands, captured at draw. A
+    /// click arrives as a uid and nothing else; 0 is no widget, so a control
+    /// that is not on screen routes nothing.
+    #[rust]
+    theme_pick_uid: u64,
+    #[rust]
+    theme_name_uid: u64,
+    #[rust]
+    theme_save_uid: u64,
+    #[rust]
+    theme_delete_uid: u64,
+    /// The switch that puts the panel itself in the chosen theme.
+    #[rust]
+    theme_wear_uid: u64,
+    /// Which built-in preset the picker shows as the one in force.
+    #[rust]
+    theme_preset: usize,
+    /// The store's list, as the Theme tab last read it. Re-read when the
+    /// panel opens, when the tab is entered and after a save or a delete --
+    /// never per frame, because it is a directory read.
+    #[rust]
+    theme_saved_names: Vec<String>,
+    /// The picker's rows as it was last filled, so the index a click carries
+    /// means the same thing here as it did on screen, and so the labels are
+    /// only pushed at the widget when they actually change.
+    #[rust]
+    theme_entries: Vec<ThemeChoice>,
+    /// The saved theme in force, or `None` when a built-in is. Kept beside
+    /// `theme_preset` rather than folded into it: deleting a saved theme has
+    /// to fall back to something, and the built-in last picked is it.
+    #[rust]
+    theme_saved: Option<String>,
+    /// The name box's text, mirrored here so a click on "save as" can read it
+    /// without going back through the widget.
+    #[rust]
+    theme_name: String,
+    /// A name to put INTO the box on the next draw (after a saved theme is
+    /// picked). Taken, not held, so it never fights the caret.
+    #[rust]
+    theme_name_seed: Option<String>,
+    /// The question the Theme tab has asked and is waiting on a second press
+    /// to answer. A second press of the SAME command on the SAME name is the
+    /// answer; anything else -- another name typed, another theme picked, the
+    /// tab entered again -- clears it, so an answer is never carried over to
+    /// a question that was not the one asked.
+    #[rust]
+    theme_confirm: Option<ThemeConfirm>,
+    /// What the store last said, shown under the save row. Empty hides it.
+    #[rust]
+    theme_msg: String,
+    /// A saved theme's own tokens, waiting for the style reload to land:
+    /// `script_mod` rebuilds `mod.theme` from the base theme and the sheet,
+    /// so tokens pinned before that would only be rebuilt away.
+    #[rust]
+    pending_theme_script: Option<(String, String)>,
+    /// Frames left to re-read the theme after a preset switch. The switch
+    /// lands on a later tick (`request_style_reload` re-runs `script_mod`
+    /// from the event loop), so the rows and the palette are read from the
+    /// theme the panel just left for a frame or two unless it keeps looking.
+    #[rust]
+    theme_reload_frames: u8,
     /// The two PortalLists' uids (props, tree), captured at ensure.
     #[rust]
     props_list_uid: u64,
@@ -8225,14 +8464,117 @@ pub struct Tweaker {
     /// The body's own margin.right before the panel compressed it.
     #[rust]
     saved_body_right: Option<f64>,
+    /// Set when the body has been applied from its own DSL again, which
+    /// throws the panel's runtime margin away. See
+    /// [`body_margin_needs_apply`].
+    #[rust]
+    margin_stale: bool,
+    /// The palette the sidebar was built from. See [`fab_palette_stamp`].
+    #[rust]
+    sidebar_palette: u64,
     #[rust]
     splitter_drag: bool,
+    /// Held for as long as `splitter_drag` is, including the event that starts it.
+    #[rust]
+    cancel_scope: Option<CancelScope>,
+}
+
+/// What the panel's chrome is painted from right now, as one number.
+///
+/// The sidebar is built ONCE, from a runtime splash chunk, and it reads
+/// `mod.fab` as it is built -- so nothing that changes the palette afterwards
+/// reaches it. That is the point: the panel is immune to whatever theme the
+/// app is wearing. But it also means the Theme tab's "wear" switch, which
+/// changes the palette and nothing else, would leave the panel in the
+/// colours it was built with until somebody closed and reopened it.
+///
+/// So the panel watches the PALETTE rather than the switch. That way it also
+/// follows a theme change made while the switch is on, and a switch thrown
+/// from anywhere else, without either having to remember to tell it. Three
+/// entries are enough to tell one palette from another, and this is three
+/// reads of a table already in memory. With the switch off the palette never
+/// moves, so the stamp never changes and the panel is built exactly once, as
+/// it always was.
+fn fab_palette_stamp(cx: &mut Cx) -> u64 {
+    cx.with_vm(|vm| {
+        let fab = vm.module(id!(fab));
+        let read = |key: LiveId| -> u64 {
+            vm.bx.heap.value(fab, key.into(), NoTrap).as_color().unwrap_or(0) as u64
+        };
+        // Folded rather than packed: five 32-bit colours do not fit in 64
+        // bits side by side, and two palettes that collided would be a
+        // repaint that never happened.
+        let mut stamp = 0xcbf2_9ce4_8422_2325u64;
+        for key in [
+            live_id!(color_area),
+            live_id!(color_text),
+            live_id!(color_accent),
+            live_id!(color_input),
+            live_id!(color_button),
+        ] {
+            stamp = (stamp ^ read(key)).wrapping_mul(0x100_0000_01b3);
+        }
+        stamp
+    })
+}
+
+/// Is the body's right margin due to be applied again?
+///
+/// `desired` alone is not enough to answer this. The margin is a RUNTIME
+/// override on a widget the APP declares in its own splash, so any script
+/// re-apply puts the body back to what its own DSL says and the override is
+/// gone -- while `applied_margin` here still says it is on. A theme switch
+/// is exactly that: it goes through `request_style_reload`, `script_mod`
+/// runs again and every widget is re-applied. The app then draws at full
+/// width UNDER the panel, which is the right-hand side of the app
+/// "disappearing"; toggling the panel off and on was the only way back,
+/// because that drives `desired` to 0 and back and so defeats the guard.
+///
+/// The guard itself has to stay: without it this runs an eval against the
+/// body on every frame the panel draws.
+///
+/// The apply generation the palette follows (`palette_gen`) is deliberately
+/// NOT what this hangs off: that moves on every property apply, so scrubbing
+/// a single value would re-evaluate the body's margin on every frame of the
+/// drag. `stale` is set by [`Tweaker::on_after_reload`] instead, which fires
+/// on precisely the applies that wipe the override -- the body is re-applied
+/// by the same pass that re-applies this widget, so the flag and the wipe
+/// cannot come apart.
+fn body_margin_needs_apply(applied: f64, desired: f64, stale: bool) -> bool {
+    stale || (applied - desired).abs() >= 0.5
+}
+
+/// The body's OWN right margin, as read back off the widget -- or `None`
+/// when what came back is the panel's own compression still standing on it,
+/// in which case the body's own is whatever was remembered before.
+///
+/// Releasing the panel gives the body back this value, so filing the panel's
+/// own width as "what the body had before" would indent the app by a sidebar
+/// for the rest of the session. A re-apply can run either side of the wipe
+/// -- after it, the body is back to its DSL and what is read back really is
+/// its own; before it (a splitter drag, a release), what is read back is
+/// what this panel wrote -- so the two cases are told apart by value rather
+/// than assumed.
+fn body_own_right(read_back: f64, applied: f64) -> Option<f64> {
+    if applied > 0.5 && (read_back - applied).abs() < 0.5 {
+        None
+    } else {
+        Some(read_back)
+    }
 }
 
 impl ScriptHook for Tweaker {
     fn on_after_new(&mut self, vm: &mut ScriptVm) {
         self.overlay_list = Some(DrawList2d::script_new(vm));
         self.sidebar_list = Some(DrawList2d::script_new(vm));
+    }
+    /// A reload -- a live edit, a `request_script_reapply`, or the style
+    /// reload a theme switch asks for -- has just re-applied this widget
+    /// from its DSL. The same pass re-applied the window body, so the
+    /// runtime margin the panel had put on it is gone and has to be put back
+    /// even though nothing about the panel's own geometry changed.
+    fn on_after_reload(&mut self, _vm: &mut ScriptVm) {
+        self.margin_stale = true;
     }
 }
 
@@ -8264,7 +8606,7 @@ impl Tweaker {
     /// size of the sidebar band, through the ordinary apply machinery so the
     /// relayout is the real one. Not a user edit — never enters the diff.
     fn ensure_body_margin(&mut self, cx: &mut Cx, desired: f64) {
-        if (self.applied_margin - desired).abs() < 0.5 {
+        if !body_margin_needs_apply(self.applied_margin, desired, self.margin_stale) {
             return;
         }
         let Some(body) = self.find_body(cx) else {
@@ -8285,8 +8627,14 @@ impl Tweaker {
         let left = leg("margin.left").or(scalar).unwrap_or(0.0);
         let top = leg("margin.top").or(scalar).unwrap_or(0.0);
         let bottom = leg("margin.bottom").or(scalar).unwrap_or(0.0);
-        if self.saved_body_right.is_none() {
-            self.saved_body_right = Some(leg("margin.right").or(scalar).unwrap_or(0.0));
+        // What the body itself carries -- unless the panel's own
+        // compression is still standing on it, which is not the body's own
+        // and must never replace what was remembered.
+        if let Some(own) = body_own_right(
+            leg("margin.right").or(scalar).unwrap_or(0.0),
+            self.applied_margin,
+        ) {
+            self.saved_body_right = Some(own);
         }
         let right = if desired > 0.5 {
             desired
@@ -8299,12 +8647,14 @@ impl Tweaker {
         match eval_chunk(cx, &body, &chunk) {
             Ok(()) => {
                 self.applied_margin = desired;
+                self.margin_stale = false;
                 cx.redraw_all();
             }
             Err(error) => {
                 log!("TWEAK body compress failed: {error}");
                 // Don't retry every frame.
                 self.applied_margin = desired;
+                self.margin_stale = false;
             }
         }
     }
@@ -8312,14 +8662,49 @@ impl Tweaker {
     /// Build the sidebar widget from a runtime splash chunk, once (every
     /// widget type — the fab controls included — is registered by then).
     fn ensure_sidebar(&mut self, cx: &mut Cx) {
+        let palette = fab_palette_stamp(cx);
         if self.sidebar.is_some() {
-            return;
+            if self.sidebar_palette == palette {
+                return;
+            }
+            // The chrome moved underneath it -- the Theme tab's "wear"
+            // switch, or a theme change while that switch is on. The chunk
+            // below is where every fab colour lands, and it is evaluated
+            // here and nowhere else, so the only way to repaint the panel is
+            // to build it again. Everything the panel REMEMBERS is on this
+            // struct rather than in those widgets, so what is lost is what
+            // was typed into the panel's own boxes, which is the price of
+            // changing its skin on purpose.
+            //
+            // Two of those boxes are MIRRORED on this struct, though, and a
+            // box that comes back empty beside a mirror that did not would
+            // leave the panel filtering by a word nobody can see and
+            // offering to save under a name nobody typed. The name is
+            // re-seeded through the channel that already exists for it; the
+            // filter is dropped, because its mirror is lower-cased and
+            // putting that back would change what the person wrote.
+            if !self.theme_name.is_empty() {
+                self.theme_name_seed = Some(self.theme_name.clone());
+            }
+            self.filter.clear();
+            // The property list is a NEW, empty list; the rows are refilled
+            // only when this says they are stale. The reload that changed
+            // the palette bumps the apply generation and would do it anyway,
+            // but a rebuild asked for any other way would leave the panel
+            // showing an empty tab.
+            self.rows_uid = 0;
+            self.sidebar = None;
         }
         if self.theme_colors.is_empty() {
             self.theme_colors = theme_palette(cx);
             self.palette_gen = session().lock().unwrap().apply_gen;
             log!("TWEAK theme palette: {} colours", self.theme_colors.len());
         }
+        self.sidebar_palette = palette;
+        // What the app is already running under, before the picker offers
+        // to change it: a sheet installed at startup is the selected row.
+        self.theme_preset = current_theme_preset(cx);
+        self.refresh_saved_themes();
         // The shader source view is a plain multiline TextInput, on purpose:
         // the real code editor as a sidebar child would put a CodeView in
         // the main window's widget tree for every app the tweaker rides in.
@@ -8338,8 +8723,45 @@ impl Tweaker {
                 // The dim grades are the panel's, not fab's: see
                 // `mod.tweak_panel`.
                 let panel = mod.tweak_panel
+                // The panel's command button, and the same trap
+                // `PanelDropDown` below exists to dodge -- these three now
+                // sit in the Theme tab beside it, where the control that
+                // picks the theme must stay usable under every theme.
+                //
+                // `windows-2000` and `nextstep` REPLACE
+                // `mod.widgets.Button.draw_bg.pixel` outright in their
+                // `widgets.splash` and hard-code that desktop's own palette
+                // (a #d4d0c8 face with black-and-white bevels), which over
+                // the panel's dark ground is a light slab with the panel's
+                // own colours ignored. `android` and `ios` set `min_height`
+                // to 48 and 44 and a 10px vertical padding, which a walk
+                // applies whatever the height asked for, so the save row
+                // would grow to more than twice its height. Every sheet
+                // moves `border_radius`, `border_size` and `color_2`, and
+                // the padding and the margin ride the theme's own space
+                // tokens even where a sheet says nothing.
+                //
+                // So every one of those is written out here, on the TEMPLATE
+                // rather than on the instances: a control added to the panel
+                // later inherits the immunity instead of having to remember
+                // it.
+                // The numbers are the ones the default theme already gives
+                // -- `space_factor` is 6, so `mspace_1` is 3 and `space_2` is
+                // 6 -- so pinning them moves nothing that is on screen today
+                // and stops everything moving under a sheet: the sheets set
+                // `space_factor` anywhere from 5 to 7 and the skeleton base
+                // sets 10. The bevel and the corner are `PanelDropDown`'s, so
+                // the save row reads as one set of controls rather than three
+                // borrowed from the theme and one that is not.
                 let PanelButton = Button {
+                    min_height: 0
+                    padding: Inset{left: 6 right: 6 top: 3 bottom: 3}
+                    margin: Inset{left: 0 right: 0 top: 3 bottom: 3}
+                    spacing: 6
                     draw_bg +: {
+                        border_size: 1.0
+                        border_radius: 2.0
+                        color_dither: 0.0
                         color: fab.color_button
                         color_hover: fab.color_button_hover
                         color_down: fab.color_button_down
@@ -8365,6 +8787,39 @@ impl Tweaker {
                         border_color_2_down: vec4(-1.0, -1.0, -1.0, -1.0)
                         border_color_2_focus: vec4(-1.0, -1.0, -1.0, -1.0)
                         border_color_2_disabled: vec4(-1.0, -1.0, -1.0, -1.0)
+                        // The panel's own face, so a sheet that replaces the
+                        // stock one replaces something this button does not
+                        // use. Flat fill, one hairline, the same state mix
+                        // order the stock face has. The wait spinner is left
+                        // out on purpose: no button on this panel is ever put
+                        // in the loading state, and the arc is the one part
+                        // of the stock face that is not just a box.
+                        pixel: fn() {
+                            let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                            sdf.box(
+                                self.border_size
+                                self.border_size
+                                self.rect_size.x - self.border_size * 2.
+                                self.rect_size.y - self.border_size * 2.
+                                self.border_radius
+                            )
+                            sdf.fill_keep(
+                                self.color
+                                    .mix(self.color_focus, self.focus)
+                                    .mix(self.color_hover, self.hover)
+                                    .mix(self.color_down, self.down)
+                                    .mix(self.color_disabled, self.disabled)
+                            )
+                            sdf.stroke(
+                                self.border_color
+                                    .mix(self.border_color_focus, self.focus)
+                                    .mix(self.border_color_hover, self.hover)
+                                    .mix(self.border_color_down, self.down)
+                                    .mix(self.border_color_disabled, self.disabled)
+                                self.border_size
+                            )
+                            return sdf.result
+                        }
                     }
                     draw_text +: {
                         color: fab.color_text
@@ -8374,8 +8829,20 @@ impl Tweaker {
                         color_disabled: panel.text_muted
                     }
                 }
+                // The panel's text field, hardened the same way and for the
+                // same reasons: `windows-2000` and `nextstep` replace
+                // `mod.widgets.TextInput.draw_bg.pixel` with a sunken white
+                // Win95 field, `android` and `ios` set `min_height` to 48 and
+                // 44 with a 10px vertical padding, and every sheet moves the
+                // corner and the bevel.
                 let PanelInput = TextInput {
+                    min_height: 0
+                    padding: Inset{left: 6 right: 6 top: 3 bottom: 3}
+                    margin: Inset{left: 0 right: 0 top: 3 bottom: 3}
                     draw_bg +: {
+                        border_size: 1.0
+                        border_radius: 2.0
+                        color_dither: 0.0
                         color: fab.color_input
                         color_hover: fab.color_input_hover
                         color_focus: fab.color_input_active
@@ -8388,6 +8855,35 @@ impl Tweaker {
                         border_color_down: fab.color_border
                         border_color_empty: fab.color_border
                         border_color_disabled: fab.color_border
+                        // The panel's own field face. The `empty` state is
+                        // mixed first, exactly as the stock face mixes it, or
+                        // the placeholder row would lose its ground.
+                        pixel: fn() {
+                            let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                            sdf.box(
+                                self.border_size
+                                self.border_size
+                                self.rect_size.x - self.border_size * 2.
+                                self.rect_size.y - self.border_size * 2.
+                                self.border_radius
+                            )
+                            sdf.fill_keep(
+                                self.color
+                                    .mix(self.color_empty, self.empty)
+                                    .mix(self.color_focus, self.focus)
+                                    .mix(self.color_hover.mix(self.color_down, self.down), self.hover)
+                                    .mix(self.color_disabled, self.disabled)
+                            )
+                            sdf.stroke(
+                                self.border_color
+                                    .mix(self.border_color_empty, self.empty)
+                                    .mix(self.border_color_focus, self.focus)
+                                    .mix(self.border_color_hover.mix(self.border_color_down, self.down), self.hover)
+                                    .mix(self.border_color_disabled, self.disabled)
+                                self.border_size
+                            )
+                            return sdf.result
+                        }
                     }
                     draw_text +: {
                         color: fab.color_text
@@ -8463,6 +8959,213 @@ impl Tweaker {
                         color_focus: fab.color_text
                         color_active: fab.color_text
                         color_disabled: panel.text_muted
+                    }
+                }
+
+                // The Theme tab's picker, and the trap it exists to dodge.
+                //
+                // `windows-2000` and `nextstep` each REPLACE
+                // `mod.widgets.DropDown.draw_bg.pixel` outright in their
+                // `widgets.splash`, and the replacement reads only `active`,
+                // `disabled` and `down` and hard-codes that desktop's own
+                // palette. A stock DropDown on this panel would therefore go
+                // unreadable -- a white field on the panel's dark ground, no
+                // hover, no focus -- the moment one of those sheets is
+                // picked, and the control that picks the theme is the one
+                // control that must stay readable under every theme. So it
+                // carries its own shader and its own metrics, the popup half
+                // with it: a picker you cannot read is a picker you cannot
+                // leave.
+                //
+                // The panel's face and size for it, likewise: a sheet moves
+                // `theme.font_regular` (android takes Roboto, ios Inter) and
+                // `theme.font_size_p` with it, and this is chrome, not app
+                // text. Latin-only is safe here and nowhere else -- every
+                // label is a theme name, and the store admits no character
+                // outside `[a-z0-9_]`.
+                let PanelFont = mod.text.TextStyle{
+                    font_family: mod.text.FontFamily{
+                        latin := mod.text.FontMember{
+                            res: crate_resource("self:resources/IBMPlexSans-Text.ttf")
+                            asc: -0.1
+                            desc: 0.0
+                        }
+                    }
+                    line_spacing: 1.2
+                    font_size: 8.0
+                }
+                // One row of the open list. Its ground, its hover and the
+                // row in force, all the panel's own.
+                let PanelMenuItem = PopupMenuItem {
+                    width: Fill
+                    height: Fit
+                    align: Align{x: 0.0 y: 0.5}
+                    padding: Inset{left: 7 right: 7 top: 3 bottom: 3}
+                    draw_text +: {
+                        color: fab.color_text
+                        color_hover: fab.color_text_active
+                        color_active: fab.color_text_active
+                        color_disabled: panel.text_muted
+                        text_style: PanelFont{}
+                    }
+                    draw_icon +: { color: fab.color_text }
+                    draw_bg +: {
+                        border_size: 0.0
+                        border_radius: 2.0
+                        color: fab.color_popover
+                        color_hover: fab.color_row_hover
+                        color_active: fab.color_selection_bg
+                        color_disabled: fab.color_popover
+                        color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+                        color_2_hover: vec4(-1.0, -1.0, -1.0, -1.0)
+                        color_2_active: vec4(-1.0, -1.0, -1.0, -1.0)
+                        color_2_disabled: vec4(-1.0, -1.0, -1.0, -1.0)
+                        border_color: vec4(0.0, 0.0, 0.0, 0.0)
+                        border_color_hover: vec4(0.0, 0.0, 0.0, 0.0)
+                        border_color_active: vec4(0.0, 0.0, 0.0, 0.0)
+                        border_color_disabled: vec4(0.0, 0.0, 0.0, 0.0)
+                        border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+                        mark_color: vec4(0.0, 0.0, 0.0, 0.0)
+                        mark_color_active: vec4(0.0, 0.0, 0.0, 0.0)
+                        mark_color_disabled: vec4(0.0, 0.0, 0.0, 0.0)
+                        pixel: fn() {
+                            let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                            sdf.box(0.0, 0.0, self.rect_size.x, self.rect_size.y, self.border_radius)
+                            sdf.fill(
+                                self.color
+                                    .mix(self.color_active, self.active)
+                                    .mix(self.color_hover, self.hover)
+                                    .mix(self.color_disabled, self.disabled)
+                            )
+                            return sdf.result
+                        }
+                    }
+                }
+                // The open list's own plate: the popover tone, one hairline,
+                // and no theme token anywhere in it.
+                let PanelPopupMenu = PopupMenu {
+                    width: 224.
+                    height: Fit
+                    flow: Down
+                    padding: Inset{left: 3 right: 3 top: 3 bottom: 3}
+                    menu_item: PanelMenuItem{}
+                    draw_bg +: {
+                        border_size: 1.0
+                        border_radius: 3.0
+                        color: fab.color_popover
+                        color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+                        border_color: fab.color_popover_border
+                        border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+                        pixel: fn() {
+                            let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                            sdf.box(
+                                0.5
+                                0.5
+                                self.rect_size.x - 1.0
+                                self.rect_size.y - 1.0
+                                self.border_radius
+                            )
+                            sdf.fill_keep(self.color)
+                            sdf.stroke(self.border_color, self.border_size)
+                            return sdf.result
+                        }
+                    }
+                }
+                // The closed face. Every metric a sheet could reach is
+                // written out here -- `min_height`, the padding, the margin,
+                // the bevel and the corner -- and the shader is this
+                // panel's, not the theme's.
+                let PanelDropDown = DropDown {
+                    width: Fill
+                    height: 20
+                    min_height: 0
+                    align: Align{x: 0.0 y: 0.5}
+                    padding: Inset{left: 6 right: 18 top: 2 bottom: 2}
+                    margin: Inset{left: 0 right: 0 top: 0 bottom: 0}
+                    popup_menu: PanelPopupMenu{}
+                    draw_text +: {
+                        color: fab.color_text
+                        color_hover: fab.color_text_active
+                        color_focus: fab.color_text_active
+                        color_down: fab.color_text_active
+                        color_disabled: panel.text_muted
+                        text_style: PanelFont{}
+                    }
+                    draw_icon +: { color: fab.color_text }
+                    draw_bg +: {
+                        border_size: 1.0
+                        border_radius: 2.0
+                        color_dither: 0.0
+                        color: fab.color_input
+                        color_hover: fab.color_input_hover
+                        color_focus: fab.color_input
+                        color_down: fab.color_input_active
+                        color_disabled: panel.face_off
+                        // Flat in every state, like PanelButton: with a
+                        // gradient stop left on, the other states' -1 stops
+                        // are mixed in as colours.
+                        color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+                        color_2_hover: vec4(-1.0, -1.0, -1.0, -1.0)
+                        color_2_focus: vec4(-1.0, -1.0, -1.0, -1.0)
+                        color_2_down: vec4(-1.0, -1.0, -1.0, -1.0)
+                        color_2_disabled: vec4(-1.0, -1.0, -1.0, -1.0)
+                        border_color: fab.color_border
+                        border_color_hover: fab.color_border_light
+                        border_color_focus: fab.color_focus_ring
+                        border_color_down: fab.color_border
+                        border_color_disabled: fab.color_border
+                        border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+                        border_color_2_hover: vec4(-1.0, -1.0, -1.0, -1.0)
+                        border_color_2_focus: vec4(-1.0, -1.0, -1.0, -1.0)
+                        border_color_2_down: vec4(-1.0, -1.0, -1.0, -1.0)
+                        border_color_2_disabled: vec4(-1.0, -1.0, -1.0, -1.0)
+                        arrow_color: panel.text_dim
+                        arrow_color_hover: fab.color_text_active
+                        arrow_color_focus: fab.color_text_active
+                        arrow_color_down: fab.color_text_active
+                        arrow_color_disabled: panel.text_muted
+                        pixel: fn() {
+                            let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                            // The arrow goes down FIRST and the face over
+                            // it, exactly as the stock face does it: the
+                            // path leaves a clip behind that the fill reads.
+                            let c = vec2(self.rect_size.x - 10.0, self.rect_size.y * 0.5)
+                            let sz = 2.5
+                            sdf.move_to(c.x - sz, c.y - sz + 1.0)
+                            sdf.line_to(c.x + sz, c.y - sz + 1.0)
+                            sdf.line_to(c.x, c.y + sz * 0.25 + 1.0)
+                            sdf.close_path()
+                            sdf.fill_keep(
+                                self.arrow_color
+                                    .mix(self.arrow_color_focus, self.focus)
+                                    .mix(self.arrow_color_hover, self.hover)
+                                    .mix(self.arrow_color_down, self.down)
+                                    .mix(self.arrow_color_disabled, self.disabled)
+                            )
+                            sdf.box(
+                                self.border_size
+                                self.border_size
+                                self.rect_size.x - self.border_size * 2.
+                                self.rect_size.y - self.border_size * 2.
+                                self.border_radius
+                            )
+                            sdf.fill_keep(
+                                self.color
+                                    .mix(self.color_focus, self.focus)
+                                    .mix(self.color_hover, self.hover)
+                                    .mix(self.color_down, self.down * self.hover)
+                                    .mix(self.color_disabled, self.disabled)
+                            )
+                            sdf.stroke(
+                                self.border_color
+                                    .mix(self.border_color_focus, self.focus)
+                                    .mix(self.border_color_hover, self.hover)
+                                    .mix(self.border_color_down, self.down * self.hover)
+                                    .mix(self.border_color_disabled, self.disabled)
+                                self.border_size
+                            )
+                            return sdf.result
+                        }
                     }
                 }
 
@@ -9140,7 +9843,10 @@ impl Tweaker {
                     flow: Down
                     show_bg: true
                     draw_bg +: {
-                        color: #x303030
+                        // The panel's ground, off the palette rather than
+                        // written out: the same colour it has always been,
+                        // but one the Theme tab's "wear" switch can move.
+                        color: fab.color_area
                     }
                     padding: Inset{left: 4 right: 4 top: 6 bottom: 4}
                     spacing: 4
@@ -9212,6 +9918,102 @@ impl Tweaker {
                         tab_tree := PanelButton { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Tree" draw_text +: { text_style +: { font_size: 8.0 } } }
                         tab_theme := PanelButton { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Theme" draw_text +: { text_style +: { font_size: 8.0 } } }
                         tab_spec := PanelButton { width: Fit height: 20 padding: Inset{left: 8 right: 8 top: 2 bottom: 2} text: "Spec" draw_text +: { text_style +: { font_size: 8.0 } } }
+                    }
+                    // The Theme tab's head: which theme the whole library
+                    // is running under, and what may be done with it. It
+                    // sits above the rows because it decides what they are
+                    // rows OF -- pick a theme and every value under it is a
+                    // different value.
+                    //
+                    // A dropdown rather than a strip of buttons because the
+                    // list now grows: every theme the person saves joins it,
+                    // and a wrapping strip of those would push the rows off
+                    // the bottom of the panel.
+                    theme_head := View {
+                        visible: false
+                        width: Fill
+                        height: Fit
+                        flow: Down
+                        spacing: 3
+                        padding: Inset{left: 4 right: 4 top: 0 bottom: 3}
+                        // The picker, and beside it the switch that decides
+                        // whether the PANEL wears what the picker chose. One
+                        // row, because they are one question asked from two
+                        // sides: which theme, and who is wearing it.
+                        theme_pick_row := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            spacing: 3
+                            align: Align{x: 0.0 y: 0.5}
+                            theme_pick := PanelDropDown {
+                                width: Fill
+                                height: 20
+                            }
+                            // A TOGGLE and not a command: it lights while
+                            // the panel is wearing the theme and goes out
+                            // when the panel is back in its own palette --
+                            // the same on/off fill the filter row's search,
+                            // select and explode switches use
+                            // (`set_button_fill`), so the panel has one way
+                            // of showing a mode you are in.
+                            //
+                            // Off is the default and has to stay the
+                            // default: this panel is the tool a theme is
+                            // diagnosed WITH, so it has to be able to stand
+                            // outside the theme under test. The switch is
+                            // for the other question -- what a theme
+                            // actually looks like to work in.
+                            theme_wear := PanelButton {
+                                width: Fit
+                                height: 20
+                                padding: Inset{left: 7 right: 7 top: 2 bottom: 2}
+                                text: "wear"
+                                draw_text +: { text_style +: { font_size: 7.5 } }
+                            }
+                        }
+                        theme_save_row := View {
+                            width: Fill
+                            height: Fit
+                            flow: Right
+                            spacing: 3
+                            align: Align{x: 0.0 y: 0.5}
+                            theme_name := PanelInput {
+                                width: Fill
+                                height: 20
+                                empty_text: "name this theme"
+                                draw_bg +: { border_radius: 2.0 }
+                                draw_text +: { text_style +: { font_size: 8.0 } }
+                            }
+                            theme_save := PanelButton {
+                                width: Fit
+                                height: 20
+                                padding: Inset{left: 7 right: 7 top: 2 bottom: 2}
+                                text: "save as"
+                                draw_text +: { text_style +: { font_size: 7.5 } }
+                            }
+                            // Offered for a SAVED theme and for nothing else.
+                            // A built-in gets no delete affordance at all --
+                            // not a dead one that answers with a refusal,
+                            // which only teaches that the button lies.
+                            theme_delete := PanelButton {
+                                visible: false
+                                width: Fit
+                                height: 20
+                                padding: Inset{left: 7 right: 7 top: 2 bottom: 2}
+                                text: "delete"
+                                draw_text +: { text_style +: { font_size: 7.5 } }
+                            }
+                        }
+                        // What the store said. Shown rather than logged: a
+                        // save that refuses itself in the terminal is a save
+                        // that failed silently.
+                        theme_msg := PanelLabelSmall {
+                            visible: false
+                            width: Fill
+                            text: ""
+                            max_lines: 2
+                        }
                     }
                     shader_col := ScrollYView {
                         width: Fill
@@ -10492,7 +11294,8 @@ impl Tweaker {
             }
         }
 
-        let chrome: [(&[LiveId], &str); 26] = [
+        let chrome: [(&[LiveId], &str); 27] = [
+            (&[live_id!(theme_head), live_id!(theme_pick_row), live_id!(theme_wear)], "put this panel in the theme above too \u{00b7} off, the panel keeps its own colours whatever the app is wearing"),
             (&[live_id!(filter_row), live_id!(search)], "filter the properties by name \u{00b7} or search them, with the magnifier"),
             (&[live_id!(filter_row), live_id!(find)], "search instead of filter: every row stays, the hits are counted \u{00b7} F3 next, Shift+F3 previous"),
             (&[live_id!(filter_row), live_id!(nav), live_id!(prev)], "the previous hit (Shift+F3)"),
@@ -11907,6 +12710,9 @@ impl Tweaker {
             sidebar
                 .child(live_id!(spec_col))
                 .set_visible(cx, tab == PanelTab::Spec);
+            sidebar
+                .child(live_id!(theme_head))
+                .set_visible(cx, tab == PanelTab::Theme);
             if tab == PanelTab::Tree {
                 // The toggle shows its state by fill, like the scope buttons,
                 // and says what it is isolating — a tree cut down to one
@@ -11933,6 +12739,56 @@ impl Tweaker {
                     (false, _) => String::new(),
                 };
                 head.child(live_id!(isolate_hint)).set_text(cx, &hint);
+            }
+            if tab == PanelTab::Theme {
+                // The picker, the save box and the delete button. Their uids
+                // are cached here because a click arrives as a uid and
+                // nothing else.
+                let head = sidebar.child(live_id!(theme_head));
+                let pick_row = head.child(live_id!(theme_pick_row));
+                let pick = pick_row.child(live_id!(theme_pick));
+                self.theme_pick_uid = pick.widget_uid().0;
+                // The switch beside it, lit while the panel is wearing the
+                // theme. Read off the palette rather than off a flag of this
+                // widget's own, so what the switch SAYS and what the panel
+                // is actually painted in cannot drift apart.
+                let wear = pick_row.child(live_id!(theme_wear));
+                self.theme_wear_uid = wear.widget_uid().0;
+                let worn = crate::fab_controls::panel_wears_theme(cx);
+                set_button_fill(cx, wear, worn);
+                let entries = self.theme_entry_list();
+                // Only when they actually changed: `set_labels` redraws, and
+                // this runs on every frame the tab is up.
+                if self.theme_entries != entries {
+                    self.theme_entries = entries.clone();
+                    pick.as_drop_down()
+                        .set_labels(cx, entries.iter().map(|e| e.label()).collect());
+                }
+                pick.as_drop_down()
+                    .set_selected_item(cx, self.theme_choice_index(&entries));
+                let row = head.child(live_id!(theme_save_row));
+                let name = row.child(live_id!(theme_name));
+                self.theme_name_uid = name.widget_uid().0;
+                if let Some(seed) = self.theme_name_seed.take() {
+                    name.set_text(cx, &seed);
+                    self.theme_name = seed;
+                }
+                self.theme_save_uid = row.child(live_id!(theme_save)).widget_uid().0;
+                // A built-in has no delete affordance AT ALL, and the route
+                // to one is closed with it: a uid of 0 is no widget. Read off
+                // the row the picker is actually SHOWING rather than off the
+                // remembered name, so the button and the picker can never
+                // disagree about what would be deleted.
+                let deletable = matches!(
+                    entries.get(self.theme_choice_index(&entries)),
+                    Some(ThemeChoice::Saved(_))
+                );
+                let del = row.child(live_id!(theme_delete));
+                del.set_visible(cx, deletable);
+                self.theme_delete_uid = if deletable { del.widget_uid().0 } else { 0 };
+                let msg = head.child(live_id!(theme_msg));
+                msg.set_visible(cx, !self.theme_msg.is_empty());
+                msg.set_text(cx, &self.theme_msg);
             }
             {
                 // The filter works on the row list, which the Shader and
@@ -14323,7 +15179,64 @@ impl Tweaker {
                         4 => PanelTab::Spec,
                         _ => PanelTab::Props,
                     };
+                    // Entering the Theme tab is the moment to look at the
+                    // theme folder again: another window, another app or the
+                    // person's own editor may have changed what is in it.
+                    if self.panel_tab == PanelTab::Theme {
+                        self.refresh_saved_themes();
+                        // ...and the moment to drop what the tab last said.
+                        // A note is the answer to a press, so a "deleted
+                        // sunset" still sitting there on the way back in
+                        // reports something that happened a tab ago as if it
+                        // had just happened. The question that goes with it
+                        // lapses for the same reason: coming back to the tab
+                        // is not an answer to anything.
+                        self.theme_msg.clear();
+                        self.theme_confirm = None;
+                    }
                     self.redraw_sidebar(cx);
+                }
+            }
+            if self.theme_pick_uid != 0 && widget_action.widget_uid.0 == self.theme_pick_uid {
+                if let DropDownAction::Select(index) = widget_action.cast::<DropDownAction>() {
+                    self.apply_theme_choice(cx, index);
+                }
+            }
+            if self.theme_wear_uid != 0 && widget_action.widget_uid.0 == self.theme_wear_uid {
+                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                    let on = !crate::fab_controls::panel_wears_theme(cx);
+                    self.set_panel_wears_theme(cx, on);
+                }
+            }
+            if self.theme_name_uid != 0 && widget_action.widget_uid.0 == self.theme_name_uid {
+                match widget_action.cast::<TextInputAction>() {
+                    TextInputAction::Changed(text) => {
+                        // A different name is a different question, so the
+                        // offer to replace the last one lapses -- and so does
+                        // an offer to DELETE, which was asked about a theme
+                        // and not about whatever is being typed now.
+                        let typed = crate::theme_store::normalize_name(&text);
+                        if self.pending_replace() != typed.as_deref() {
+                            self.theme_confirm = None;
+                        }
+                        self.theme_name = text;
+                    }
+                    // Enter in the box is the same press as the button.
+                    TextInputAction::Returned(text, _) => {
+                        self.theme_name = text;
+                        self.save_theme_as(cx);
+                    }
+                    _ => {}
+                }
+            }
+            if self.theme_save_uid != 0 && widget_action.widget_uid.0 == self.theme_save_uid {
+                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                    self.save_theme_as(cx);
+                }
+            }
+            if self.theme_delete_uid != 0 && widget_action.widget_uid.0 == self.theme_delete_uid {
+                if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
+                    self.delete_saved_theme(cx);
                 }
             }
             if self.tree_list_uid != 0 && widget_action.widget_uid.0 == self.tree_list_uid {
@@ -15046,6 +15959,286 @@ impl Tweaker {
         let _ = cx;
     }
 
+    /// Put the whole library under another preset.
+    ///
+    /// A sheet goes on with `desktop_style::install`; a base theme takes the
+    /// last one off again, or a sheet tried once would stay under every
+    /// theme picked after it. Neither is visible until `script_mod` runs
+    /// again -- `theme_mod` is where the base is emitted and where a sheet's
+    /// tokens are read -- so the switch lands on `request_style_reload`,
+    /// which re-runs it and then re-applies the tree with
+    /// `Apply::ScriptReapply`: typed text and running animations survive,
+    /// which the `Apply::Reload` of a plain live edit would not.
+    fn apply_theme_preset(&mut self, cx: &mut Cx, index: usize) {
+        let Some(preset) = theme_presets().get(index).copied() else {
+            return;
+        };
+        self.theme_preset = index;
+        // A built-in is now in force, so nothing saved is, and a saved
+        // theme's tokens that had not landed yet must not land on top of it.
+        self.theme_saved = None;
+        self.pending_theme_script = None;
+        match preset {
+            ThemePreset::Base(base) => {
+                crate::set_base_theme(cx, base);
+                cx.with_vm(|vm| crate::desktop_style::uninstall(vm));
+            }
+            ThemePreset::Sheet(style, dark) => {
+                // A sheet is laid over the dark base, exactly as it is when
+                // one arrives from the window manager.
+                crate::set_base_theme(cx, crate::BaseTheme::Dark);
+                let sheet =
+                    crate::desktop_style::StyleSheet::load_with_appearance(style, dark);
+                cx.with_vm(|vm| crate::desktop_style::install(vm, sheet));
+            }
+        }
+        log!("TWEAK theme preset: {}", preset.label());
+        self.theme_reload_frames = 6;
+        self.next_frame = cx.new_next_frame();
+        cx.request_style_reload();
+        self.redraw_sidebar(cx);
+    }
+
+    /// Put the panel itself in the theme the picker is showing, or back in
+    /// its own palette.
+    ///
+    /// Only the CHOICE is made here. The palette is built by
+    /// `fab_controls::script_mod`, so what this does is record the switch and
+    /// ask for the style reload that re-runs it; the panel then notices that
+    /// its chrome has moved and builds itself again ([`fab_palette_stamp`]).
+    ///
+    /// Deliberately not the other way round -- dropping the sidebar here and
+    /// letting the next draw rebuild it. `request_style_reload` lands a tick
+    /// or more later, so that rebuild would run against the palette that had
+    /// not changed yet and the panel would come back in the colours it was
+    /// already in. `theme_reload_frames` is the same answer the theme picker
+    /// already needed for the same reason.
+    fn set_panel_wears_theme(&mut self, cx: &mut Cx, on: bool) {
+        crate::fab_controls::set_panel_wears_theme(cx, on);
+        log!(
+            "TWEAK panel skin: {}",
+            if on { "the theme the app is wearing" } else { "its own palette" }
+        );
+        self.theme_reload_frames = 6;
+        self.next_frame = cx.new_next_frame();
+        cx.request_style_reload();
+        self.redraw_sidebar(cx);
+    }
+
+    /// Re-read the store's list of saved themes.
+    ///
+    /// Done when the panel opens, when the Theme tab is entered and after a
+    /// save or a delete -- deliberately not per frame: the picker is refilled
+    /// on every frame the tab is up, and this is a directory read.
+    fn refresh_saved_themes(&mut self) {
+        self.theme_saved_names = crate::theme_store::list();
+        // A theme that is no longer there is no longer the one in force, as
+        // far as the picker is concerned: another window or the person's own
+        // editor may have removed the file. Letting the name stand would
+        // leave the picker highlighting nothing and the delete button
+        // offering to remove something twice.
+        if self
+            .theme_saved
+            .as_deref()
+            .is_some_and(|name| !self.theme_saved_names.iter().any(|n| n == name))
+        {
+            self.theme_saved = None;
+        }
+    }
+
+    /// Everything the picker offers right now.
+    fn theme_entry_list(&self) -> Vec<ThemeChoice> {
+        theme_choices(&self.theme_saved_names)
+    }
+
+    /// Which row the picker shows as the one in force. A saved theme is found
+    /// by name rather than by a remembered index, because the list it sits in
+    /// changes under it -- a save inserts a row, a delete removes one.
+    fn theme_choice_index(&self, entries: &[ThemeChoice]) -> usize {
+        match &self.theme_saved {
+            Some(name) => entries
+                .iter()
+                .position(|entry| matches!(entry, ThemeChoice::Saved(saved) if saved == name))
+                .unwrap_or(0),
+            None => self.theme_preset.min(entries.len().saturating_sub(1)),
+        }
+    }
+
+    /// A row of the picker was chosen. The built-ins come first and in
+    /// `theme_presets()` order, so a built-in row's index is its preset's.
+    fn apply_theme_choice(&mut self, cx: &mut Cx, index: usize) {
+        let entries = self.theme_entry_list();
+        match entries.get(index) {
+            Some(ThemeChoice::Builtin(_)) => {
+                self.theme_msg.clear();
+                self.theme_confirm = None;
+                self.apply_theme_preset(cx, index);
+            }
+            Some(ThemeChoice::Saved(name)) => {
+                let name = name.clone();
+                self.apply_saved_theme(cx, &name);
+            }
+            None => {}
+        }
+    }
+
+    /// Put a saved theme on. Its base theme and its sheet go on the way a
+    /// preset's do; its own tokens follow in `pending_theme_script`, because
+    /// the style reload that carries the sheet rebuilds `mod.theme` from the
+    /// base and would rebuild them away. See the `Event::LiveEdit` arm in
+    /// `handle_event` for where they land.
+    fn apply_saved_theme(&mut self, cx: &mut Cx, name: &str) {
+        let theme = match crate::theme_store::load(name) {
+            Ok(theme) => theme,
+            Err(error) => {
+                self.theme_note(cx, &error.to_string());
+                return;
+            }
+        };
+        let base = match theme.base {
+            crate::theme_tokens::Scheme::Dark => crate::BaseTheme::Dark,
+            crate::theme_tokens::Scheme::Light => crate::BaseTheme::Light,
+            crate::theme_tokens::Scheme::Skeleton => crate::BaseTheme::Skeleton,
+        };
+        crate::set_base_theme(cx, base);
+        match theme.sheet {
+            Some((style, dark)) => {
+                let sheet = crate::desktop_style::StyleSheet::load_with_appearance(style, dark);
+                cx.with_vm(|vm| crate::desktop_style::install(vm, sheet));
+            }
+            // A theme saved over a bare base theme must take the last sheet
+            // OFF, or it wears whatever was tried before it.
+            None => cx.with_vm(|vm| crate::desktop_style::uninstall(vm)),
+        }
+        log!("TWEAK theme: {}", theme.name);
+        self.theme_saved = Some(theme.name.clone());
+        self.theme_name_seed = Some(theme.name.clone());
+        self.pending_theme_script = Some((theme.name.clone(), theme.script()));
+        self.theme_msg.clear();
+        self.theme_confirm = None;
+        self.theme_reload_frames = 6;
+        self.next_frame = cx.new_next_frame();
+        cx.request_style_reload();
+        self.redraw_sidebar(cx);
+    }
+
+    /// "Save as": the theme in force, under the name in the box.
+    ///
+    /// The name is normalised first and the answer shown back, so nobody is
+    /// left guessing what was actually written. A collision with something
+    /// already saved is a QUESTION -- press save again and it is answered --
+    /// while a built-in name is refused by the store outright and no second
+    /// press changes that.
+    fn save_theme_as(&mut self, cx: &mut Cx) {
+        let typed = self.theme_name.clone();
+        let Some(name) = crate::theme_store::normalize_name(&typed) else {
+            self.theme_note(cx, "name it first: lower-case letters, digits and _");
+            return;
+        };
+        let theme = match crate::theme_store::snapshot(cx, &name) {
+            Ok(theme) => theme,
+            Err(error) => {
+                self.theme_confirm = None;
+                self.theme_note(cx, &error.to_string());
+                return;
+            }
+        };
+        let answered = self.pending_replace() == Some(name.as_str());
+        let written = if answered {
+            crate::theme_store::save_replacing(&theme)
+        } else {
+            crate::theme_store::save(&theme)
+        };
+        match written {
+            Ok(path) => {
+                log!("TWEAK theme saved: {}", path.display());
+                self.theme_confirm = None;
+                self.refresh_saved_themes();
+                // What was saved is a snapshot of what is in force, so it is
+                // already on: the picker only has to say so.
+                self.theme_saved = Some(name.clone());
+                if name != typed {
+                    self.theme_name_seed = Some(name.clone());
+                }
+                let count = theme.overrides.len();
+                self.theme_note(cx, &format!("saved {name} ({count} values)"));
+            }
+            Err(crate::theme_store::StoreError::Exists(_)) => {
+                self.theme_confirm = Some(ThemeConfirm::Replace(name.clone()));
+                self.theme_note(cx, &format!("{name} exists \u{2014} save again to replace it"));
+            }
+            Err(error) => {
+                self.theme_confirm = None;
+                self.theme_note(cx, &error.to_string());
+            }
+        }
+    }
+
+    /// The name a question has been asked about, when it is the question
+    /// "save again to replace it".
+    fn pending_replace(&self) -> Option<&str> {
+        match &self.theme_confirm {
+            Some(ThemeConfirm::Replace(name)) => Some(name.as_str()),
+            _ => None,
+        }
+    }
+
+    /// The name a question has been asked about, when it is the question
+    /// "press delete again".
+    fn pending_delete(&self) -> Option<&str> {
+        match &self.theme_confirm {
+            Some(ThemeConfirm::Delete(name)) => Some(name.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Delete the saved theme in force. Only ever reached with one in force —
+    /// a built-in has no delete button and no uid to route one — and the
+    /// store refuses a built-in again regardless.
+    ///
+    /// Takes TWO presses. Removing the file is the only thing this panel does
+    /// that cannot be undone, and the far milder overwrite already asks
+    /// (`save_theme_as` refuses a collision once and writes on the second
+    /// press of the same name); a one-click delete beside a two-click
+    /// overwrite had the asymmetry backwards. It is the same mechanism, not a
+    /// second one: the first press asks the question into `theme_confirm` and
+    /// only a second press about the same name answers it, so picking another
+    /// theme, typing another name, saving or leaving the tab all let it lapse.
+    fn delete_saved_theme(&mut self, cx: &mut Cx) {
+        let Some(name) = self.theme_saved.clone() else {
+            return;
+        };
+        if self.pending_delete() != Some(name.as_str()) {
+            self.theme_confirm = Some(ThemeConfirm::Delete(name.clone()));
+            self.theme_note(cx, &format!("delete {name}? \u{2014} press delete again to remove it"));
+            return;
+        }
+        self.theme_confirm = None;
+        if let Err(error) = crate::theme_store::delete(&name) {
+            // A delete that did not go through still changed what the picker
+            // knows: the file may have gone out from under it, or its folder
+            // may have. Re-read before saying so, or the row that could not
+            // be deleted stays in the list with a live delete button on it.
+            self.refresh_saved_themes();
+            self.theme_note(cx, &error.to_string());
+            return;
+        }
+        log!("TWEAK theme deleted: {name}");
+        self.refresh_saved_themes();
+        // Nothing may go on pointing at a theme that is gone: back to the
+        // built-in the picker was last on, which is one that cannot go away.
+        let preset = self.theme_preset;
+        self.apply_theme_preset(cx, preset);
+        self.theme_note(cx, &format!("deleted {name}"));
+    }
+
+    /// What the store said, on the panel rather than only in the terminal.
+    fn theme_note(&mut self, cx: &mut Cx, text: &str) {
+        log!("TWEAK theme: {text}");
+        self.theme_msg = text.to_string();
+        self.redraw_sidebar(cx);
+    }
+
     fn redraw_sidebar(&mut self, cx: &mut Cx) {
         if let Some(sidebar) = &self.sidebar {
             sidebar.redraw(cx);
@@ -15590,9 +16783,42 @@ impl Tweaker {
     }
 }
 
+impl Tweaker {
+    fn cancel_interactions(&mut self, cx: &mut Cx) {
+        self.splitter_drag = false;
+        self.cancel_scope = None;
+        self.open_popup = None;
+        if let Some(sidebar) = &self.sidebar {
+            sidebar.handle_event(cx,
+                &Event::Actions(vec![Box::new(crate::modal::ModalAction::Dismissed)]),
+                &mut Scope::empty());
+        }
+    }
+}
+
 impl Widget for Tweaker {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+    fn visit_cancel(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
         if !tweak_is_on() {
+            return false;
+        }
+        if let Some(sidebar) = &self.sidebar {
+            visit(id!(sidebar), sidebar.clone());
+        }
+        // Upstream's cancel walk also visited the floating note card. This
+        // fork removed that card, so there is nothing here to visit.
+        true
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        // Above the early return on purpose: F12 turns the panel off without
+        // clearing splitter_drag, and a stranded scope would wedge Escape app-wide.
+        if self.cancel_scope.is_some() && (!self.splitter_drag || !tweak_is_on()) {
+            if let Some(scope) = self.cancel_scope.take() {
+                cx.end_cancel_scope(scope);
+            }
+        }
+        if !tweak_is_on() {
+            self.splitter_drag = false;
             return;
         }
         discard_unavailable_picks(cx);
@@ -15634,6 +16860,32 @@ impl Widget for Tweaker {
         }
         if self.live_timer.is_event(event).is_some() {
             self.live_apply(cx);
+        }
+        // A saved theme's own tokens, at the one moment they will survive.
+        // `request_style_reload` re-runs `script_mod` from the event loop,
+        // which rebuilds `mod.theme` out of the base theme and the sheet;
+        // `Event::LiveEdit` reaches a widget AFTER that rebuild and after the
+        // tree has been re-applied over it, so this is where the tokens go
+        // on. A frame count would be a guess; this is the event itself.
+        if matches!(event, Event::LiveEdit) {
+            if let Some((name, code)) = self.pending_theme_script.take() {
+                cx.with_vm(|vm| {
+                    vm.eval(ScriptMod {
+                        cargo_manifest_path: env!("CARGO_MANIFEST_DIR").into(),
+                        module_path: format!("theme_store_{name}"),
+                        file: format!("themes/{name}.{}", crate::theme_store::FILE_EXTENSION),
+                        line: 0,
+                        column: 0,
+                        code,
+                        values: vec![],
+                    });
+                });
+                // Re-apply rather than reload: typed text and running
+                // animations survive, which is the whole point of the
+                // sanctioned override path.
+                cx.request_script_reapply();
+                self.redraw_sidebar(cx);
+            }
         }
         // The guard must drop before undo/redo take the session lock again
         // (an `if let` scrutinee's temporary lives for the whole body).
@@ -15778,6 +17030,7 @@ impl Widget for Tweaker {
                     && e.abs.y >= self.band.pos.y
                 {
                     self.splitter_drag = true;
+                    self.cancel_scope = Some(self.begin_cancel_scope(cx));
                 } else if let Some(k) = grip {
                     // Grab where it was grabbed: the boundary moves by how far
                     // the pointer has moved since, not to where it is. The
@@ -16213,20 +17466,26 @@ impl Widget for Tweaker {
             }
             // ANY up releases the drag, wherever it lands — the capture
             // must never outlive the press.
-            Event::MouseUp(_) => {
+            Event::MouseUp(_) | Event::WindowLostFocus(_) => {
                 self.splitter_drag = false;
                 self.spec_resize = None;
+                self.cancel_scope = None;
             }
-            // Safeties: focus loss or Escape frees the pointer too.
-            Event::WindowLostFocus(_) => {
-                self.splitter_drag = false;
-                self.spec_resize = None;
-            }
-            Event::KeyDown(ke)
-                if ke.key_code == KeyCode::Escape
-                    && (self.splitter_drag || self.spec_resize.is_some()) =>
+            _ if self.splitter_drag
+                && self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s))
+                && (matches!(event, Event::KeyDown(ke) if ke.key_code == KeyCode::Escape)
+                    || event.back_pressed()) =>
             {
                 self.splitter_drag = false;
+                self.spec_resize = None;
+                self.cancel_scope = None;
+            }
+            // The spec-row resize is a drag of its own with no cancel scope
+            // behind it, so Escape ends it here rather than through the arm
+            // above — which is gated on owning the splitter's scope.
+            Event::KeyDown(ke)
+                if ke.key_code == KeyCode::Escape && self.spec_resize.is_some() =>
+            {
                 self.spec_resize = None;
             }
             _ => {}
@@ -16297,10 +17556,23 @@ impl Widget for Tweaker {
             // Opening the panel lands the caret in the filter.
             self.focus_search_pending = true;
         }
+        if !on && self.was_on {
+            self.cancel_interactions(cx);
+        }
         if self.view_zoom < 1.0 {
             self.view_zoom = 1.0;
         }
         self.was_on = on;
+        // A preset switch re-runs `script_mod` from the event loop, a tick
+        // or more after the click, so for a frame or two the rows and the
+        // palette would still be the ones read under the theme just left.
+        // Both hang off the apply generation, so keep bumping it until the
+        // switch has landed.
+        if self.theme_reload_frames > 0 {
+            self.theme_reload_frames -= 1;
+            session().lock().unwrap().apply_gen += 1;
+            self.next_frame = cx.new_next_frame();
+        }
         // A theme edit made outside this overlay (a tool going through
         // `reflect::theme_set_value`) bumps the session's apply generation;
         // the palette strip and the swatch names follow it here instead of
@@ -16688,6 +17960,706 @@ impl Widget for Tweaker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_theme_picker_offers_every_base_theme_and_every_sheet_the_library_ships() {
+        let presets = theme_presets();
+        // The base themes first, in the library's own order.
+        for (slot, base) in crate::BaseTheme::ALL.into_iter().enumerate() {
+            assert_eq!(presets[slot], ThemePreset::Base(base));
+        }
+        // Then every sheet, each followed by its dark appearance where it
+        // has one -- read off `DesktopStyle::ALL`, never written out here.
+        let mut expect = Vec::new();
+        for style in crate::desktop_style::DesktopStyle::ALL {
+            expect.push(ThemePreset::Sheet(style, false));
+            if style.supports_dark() {
+                expect.push(ThemePreset::Sheet(style, true));
+            }
+        }
+        assert_eq!(&presets[crate::BaseTheme::ALL.len()..], &expect[..]);
+        // And every label says something.
+        for preset in presets {
+            assert!(!preset.label().trim().is_empty(), "{preset:?}");
+        }
+    }
+
+    /// The picker's rows are the library's own two lists followed by the
+    /// store's, and nothing else: the panel names no theme itself, so a base
+    /// theme or a sheet added to the library turns up here without anybody
+    /// remembering to come back for it.
+    #[test]
+    fn the_picker_lists_every_builtin_then_every_saved_theme() {
+        let saved = vec!["my_sunset".to_string(), "studio".to_string()];
+        let entries = theme_choices(&saved);
+        let presets = theme_presets();
+        assert_eq!(entries.len(), presets.len() + saved.len());
+        // The built-ins first, in the library's order and unchanged.
+        for (at, preset) in presets.iter().enumerate() {
+            assert_eq!(entries[at], ThemeChoice::Builtin(*preset));
+            assert_eq!(entries[at].label(), preset.label());
+        }
+        // Then the store's, in the order it gave them, labelled by name.
+        for (at, name) in saved.iter().enumerate() {
+            let entry = &entries[presets.len() + at];
+            assert_eq!(*entry, ThemeChoice::Saved(name.clone()));
+            assert_eq!(entry.label(), *name);
+        }
+        // An empty store is the built-ins alone -- never an empty picker.
+        assert_eq!(theme_choices(&[]).len(), presets.len());
+    }
+
+    /// Not one built-in is deletable, whatever the picker shows for it. The
+    /// panel offers `delete` only for a `ThemeChoice::Saved`, and this is the
+    /// other half of that rule: every name the picker can be sitting on for a
+    /// built-in row is one the store itself refuses to remove.
+    #[test]
+    fn no_row_the_library_ships_can_be_deleted() {
+        for preset in theme_presets() {
+            let name = match preset {
+                ThemePreset::Base(base) => base.id().to_string(),
+                ThemePreset::Sheet(style, false) => style.id().to_string(),
+                ThemePreset::Sheet(style, true) => format!("{}-dark", style.id()),
+            };
+            assert!(
+                crate::theme_store::is_builtin(&name),
+                "{name} is offered as a built-in but the store does not know it as one"
+            );
+            assert!(!crate::theme_store::can_delete(&name), "{name}");
+        }
+    }
+
+    /// Every DSL spelling the Theme tab's head brings into the panel's own
+    /// splash chunk, against the real widget module: the re-skinned dropdown
+    /// with its own shader, the re-skinned popup and row, the panel's own
+    /// text style, and the head that holds them. That chunk is evaluated
+    /// once, when somebody first opens the panel, so nothing else here would
+    /// catch a spelling the VM turns down.
+    ///
+    /// The re-skin is not decoration. `windows-2000` and `nextstep` each
+    /// replace `mod.widgets.DropDown.draw_bg.pixel` wholesale, so a stock
+    /// dropdown in this panel would be unreadable under either -- and it is
+    /// the control that picks the theme, so it must stay readable under all
+    /// of them.
+    #[test]
+    fn the_theme_head_and_its_reskinned_dropdown_evaluate() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            vm.bx.captured_errors = Some(Vec::new());
+            let value = script_eval!(vm, {
+                use mod.prelude.widgets.*
+
+                let PanelFont = mod.text.TextStyle{
+                    font_family: mod.text.FontFamily{
+                        latin := mod.text.FontMember{
+                            res: crate_resource("self:resources/IBMPlexSans-Text.ttf")
+                            asc: -0.1
+                            desc: 0.0
+                        }
+                    }
+                    line_spacing: 1.2
+                    font_size: 8.0
+                }
+                let PanelMenuItem = PopupMenuItem {
+                    width: Fill
+                    height: Fit
+                    align: Align{x: 0.0 y: 0.5}
+                    padding: Inset{left: 7 right: 7 top: 3 bottom: 3}
+                    draw_text +: {
+                        color: #xe6e6e6
+                        color_hover: #xffffff
+                        color_active: #xffffff
+                        color_disabled: #x8c8c8c
+                        text_style: PanelFont{}
+                    }
+                    draw_icon +: { color: #xe6e6e6 }
+                    draw_bg +: {
+                        border_size: 0.0
+                        border_radius: 2.0
+                        color: #x1a1a1a
+                        color_hover: #x3a3a3a
+                        color_active: #x334d80
+                        color_disabled: #x1a1a1a
+                        color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+                        color_2_hover: vec4(-1.0, -1.0, -1.0, -1.0)
+                        color_2_active: vec4(-1.0, -1.0, -1.0, -1.0)
+                        color_2_disabled: vec4(-1.0, -1.0, -1.0, -1.0)
+                        border_color: vec4(0.0, 0.0, 0.0, 0.0)
+                        border_color_hover: vec4(0.0, 0.0, 0.0, 0.0)
+                        border_color_active: vec4(0.0, 0.0, 0.0, 0.0)
+                        border_color_disabled: vec4(0.0, 0.0, 0.0, 0.0)
+                        border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+                        mark_color: vec4(0.0, 0.0, 0.0, 0.0)
+                        mark_color_active: vec4(0.0, 0.0, 0.0, 0.0)
+                        mark_color_disabled: vec4(0.0, 0.0, 0.0, 0.0)
+                        pixel: fn() {
+                            let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                            sdf.box(0.0, 0.0, self.rect_size.x, self.rect_size.y, self.border_radius)
+                            sdf.fill(
+                                self.color
+                                    .mix(self.color_active, self.active)
+                                    .mix(self.color_hover, self.hover)
+                                    .mix(self.color_disabled, self.disabled)
+                            )
+                            return sdf.result
+                        }
+                    }
+                }
+                let PanelPopupMenu = PopupMenu {
+                    width: 224.
+                    height: Fit
+                    flow: Down
+                    padding: Inset{left: 3 right: 3 top: 3 bottom: 3}
+                    menu_item: PanelMenuItem{}
+                    draw_bg +: {
+                        border_size: 1.0
+                        border_radius: 3.0
+                        color: #x1a1a1a
+                        color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+                        border_color: #x545454
+                        border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+                        pixel: fn() {
+                            let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                            sdf.box(
+                                0.5
+                                0.5
+                                self.rect_size.x - 1.0
+                                self.rect_size.y - 1.0
+                                self.border_radius
+                            )
+                            sdf.fill_keep(self.color)
+                            sdf.stroke(self.border_color, self.border_size)
+                            return sdf.result
+                        }
+                    }
+                }
+                let PanelDropDown = DropDown {
+                    width: Fill
+                    height: 20
+                    min_height: 0
+                    align: Align{x: 0.0 y: 0.5}
+                    padding: Inset{left: 6 right: 18 top: 2 bottom: 2}
+                    margin: Inset{left: 0 right: 0 top: 0 bottom: 0}
+                    popup_menu: PanelPopupMenu{}
+                    draw_text +: {
+                        color: #xe6e6e6
+                        color_hover: #xffffff
+                        color_focus: #xffffff
+                        color_down: #xffffff
+                        color_disabled: #x8c8c8c
+                        text_style: PanelFont{}
+                    }
+                    draw_icon +: { color: #xe6e6e6 }
+                    draw_bg +: {
+                        border_size: 1.0
+                        border_radius: 2.0
+                        color_dither: 0.0
+                        color: #x1d1d1d
+                        color_hover: #x232323
+                        color_focus: #x1d1d1d
+                        color_down: #x161616
+                        color_disabled: #x1d1d1d
+                        color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+                        color_2_hover: vec4(-1.0, -1.0, -1.0, -1.0)
+                        color_2_focus: vec4(-1.0, -1.0, -1.0, -1.0)
+                        color_2_down: vec4(-1.0, -1.0, -1.0, -1.0)
+                        color_2_disabled: vec4(-1.0, -1.0, -1.0, -1.0)
+                        border_color: #x161616
+                        border_color_hover: #x4a4a4a
+                        border_color_focus: #x7aa2e8
+                        border_color_down: #x161616
+                        border_color_disabled: #x161616
+                        border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
+                        border_color_2_hover: vec4(-1.0, -1.0, -1.0, -1.0)
+                        border_color_2_focus: vec4(-1.0, -1.0, -1.0, -1.0)
+                        border_color_2_down: vec4(-1.0, -1.0, -1.0, -1.0)
+                        border_color_2_disabled: vec4(-1.0, -1.0, -1.0, -1.0)
+                        arrow_color: #xb4b4b4
+                        arrow_color_hover: #xffffff
+                        arrow_color_focus: #xffffff
+                        arrow_color_down: #xffffff
+                        arrow_color_disabled: #x8c8c8c
+                        pixel: fn() {
+                            let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                            let c = vec2(self.rect_size.x - 10.0, self.rect_size.y * 0.5)
+                            let sz = 2.5
+                            sdf.move_to(c.x - sz, c.y - sz + 1.0)
+                            sdf.line_to(c.x + sz, c.y - sz + 1.0)
+                            sdf.line_to(c.x, c.y + sz * 0.25 + 1.0)
+                            sdf.close_path()
+                            sdf.fill_keep(
+                                self.arrow_color
+                                    .mix(self.arrow_color_focus, self.focus)
+                                    .mix(self.arrow_color_hover, self.hover)
+                                    .mix(self.arrow_color_down, self.down)
+                                    .mix(self.arrow_color_disabled, self.disabled)
+                            )
+                            sdf.box(
+                                self.border_size
+                                self.border_size
+                                self.rect_size.x - self.border_size * 2.
+                                self.rect_size.y - self.border_size * 2.
+                                self.border_radius
+                            )
+                            sdf.fill_keep(
+                                self.color
+                                    .mix(self.color_focus, self.focus)
+                                    .mix(self.color_hover, self.hover)
+                                    .mix(self.color_down, self.down * self.hover)
+                                    .mix(self.color_disabled, self.disabled)
+                            )
+                            sdf.stroke(
+                                self.border_color
+                                    .mix(self.border_color_focus, self.focus)
+                                    .mix(self.border_color_hover, self.hover)
+                                    .mix(self.border_color_down, self.down * self.hover)
+                                    .mix(self.border_color_disabled, self.disabled)
+                                self.border_size
+                            )
+                            return sdf.result
+                        }
+                    }
+                }
+                View {
+                    visible: false
+                    width: Fill
+                    height: Fit
+                    flow: Down
+                    spacing: 3
+                    padding: Inset{left: 4 right: 4 top: 0 bottom: 3}
+                    theme_pick := PanelDropDown {
+                        width: Fill
+                        height: 20
+                    }
+                    theme_save_row := View {
+                        width: Fill
+                        height: Fit
+                        flow: Right
+                        spacing: 3
+                        align: Align{x: 0.0 y: 0.5}
+                        theme_name := TextInput {
+                            width: Fill
+                            height: 20
+                            empty_text: "name this theme"
+                            draw_bg +: { border_radius: 2.0 }
+                            draw_text +: { text_style +: { font_size: 8.0 } }
+                        }
+                        theme_save := Button {
+                            width: Fit
+                            height: 20
+                            padding: Inset{left: 7 right: 7 top: 2 bottom: 2}
+                            text: "save as"
+                            draw_text +: { text_style +: { font_size: 7.5 } }
+                        }
+                        theme_delete := Button {
+                            visible: false
+                            width: Fit
+                            height: 20
+                            padding: Inset{left: 7 right: 7 top: 2 bottom: 2}
+                            text: "delete"
+                            draw_text +: { text_style +: { font_size: 7.5 } }
+                        }
+                    }
+                    theme_msg := Label {
+                        visible: false
+                        width: Fill
+                        text: ""
+                        max_lines: 2
+                    }
+                }
+            });
+            assert!(value.as_object().is_some());
+            assert!(vm.take_errors().is_empty());
+        });
+    }
+
+    /// The panel's kit and the chunk that uses it have to agree by NAME, and
+    /// the splash is a macro body no compiler checks: every id the Theme tab
+    /// addresses from Rust is declared once in the splash, and the re-skinned
+    /// dropdown really is what the picker is built from.
+    /// Everything before `#[cfg(test)]`: the panel itself, without the tests
+    /// that talk about it. A test looking for a spelling in the whole file
+    /// finds its own words and passes on them.
+    fn panel_source() -> &'static str {
+        include_str!("tweaker.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("the file has a first half")
+    }
+
+    #[test]
+    fn every_theme_head_id_the_panel_addresses_is_declared_in_the_splash() {
+        let src = panel_source();
+        for (id, ty) in [
+            ("theme_head", "View"),
+            ("theme_pick_row", "View"),
+            ("theme_pick", "PanelDropDown"),
+            ("theme_wear", "PanelButton"),
+            ("theme_save_row", "View"),
+            ("theme_name", "PanelInput"),
+            ("theme_save", "PanelButton"),
+            ("theme_delete", "PanelButton"),
+            ("theme_msg", "PanelLabelSmall"),
+        ] {
+            let decl = format!("{id} := {ty}");
+            assert_eq!(
+                src.matches(&decl).count(),
+                1,
+                "`{id}` is addressed by the panel but not declared once as `{decl}`"
+            );
+            // And it is addressed: an id declared and never used is a
+            // control nothing drives.
+            assert!(src.contains(&format!("live_id!({id})")), "`{id}` is declared but never addressed");
+        }
+        // The picker's kit, and the popup half with it: a face re-skinned
+        // over a stock list is still a list a sheet can reach.
+        for (name, ty) in [
+            ("PanelDropDown", "DropDown"),
+            ("PanelPopupMenu", "PopupMenu"),
+            ("PanelMenuItem", "PopupMenuItem"),
+        ] {
+            assert!(
+                src.contains(&format!("let {name} = {ty} {{")),
+                "the panel's picker is missing `{name}`"
+            );
+        }
+        assert!(src.contains(&format!("popup_menu: {}{{}}", "PanelPopupMenu")));
+        assert!(src.contains(&format!("menu_item: {}{{}}", "PanelMenuItem")));
+        // The strip it replaced is gone, buttons and all.
+        assert!(
+            !src.contains(&format!("preset{}row", "_")),
+            "the old preset strip is still here"
+        );
+    }
+
+    /// The one property a style sheet is known to take off a `DropDown` is
+    /// its shader, and the panel's own dropdown must therefore carry one.
+    /// Read off the shipped sheets rather than named here, so a sheet that
+    /// starts overriding `DropDown` later is caught by this test rather than
+    /// by somebody finding an unreadable picker.
+    #[test]
+    fn the_panels_dropdown_answers_what_the_sheets_override() {
+        let kit = panel_source()
+            .split("let PanelDropDown = DropDown {")
+            .nth(1)
+            .expect("the panel declares its own dropdown");
+        for sheet in ["windows-2000", "nextstep"] {
+            let text = std::fs::read_to_string(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("themes")
+                    .join(sheet)
+                    .join("widgets.splash"),
+            )
+            .expect("the sheet is in the tree");
+            for line in text.lines() {
+                let Some(prop) = line
+                    .trim()
+                    .strip_prefix("mod.widgets.DropDown.")
+                    .and_then(|rest| rest.split([' ', '=']).next())
+                else {
+                    continue;
+                };
+                // `draw_bg.pixel` is answered by declaring `pixel:` inside
+                // this template's own `draw_bg`.
+                let leaf = prop.rsplit('.').next().unwrap_or(prop);
+                assert!(
+                    kit.contains(&format!("{leaf}:")),
+                    "the sheets override `{prop}` on a DropDown and the panel's own does not declare `{leaf}`"
+                );
+            }
+        }
+    }
+
+    /// The same question of the other two templates the Theme tab is built
+    /// from, and of EVERY sheet rather than the two that replace a shader.
+    ///
+    /// `PanelButton` and `PanelInput` were left open when `PanelDropDown`
+    /// was hardened: `windows-2000` and `nextstep` replace
+    /// `Button.draw_bg.pixel` and `TextInput.draw_bg.pixel` outright with a
+    /// hard-coded Win95 palette, and `android` and `ios` set a 44-48px
+    /// `min_height` and their own padding, which a walk applies whatever
+    /// height the instance asked for. Read off the sheets, so a sheet that
+    /// starts overriding something else is caught here rather than by
+    /// somebody finding the save row twice its height with a white slab on it.
+    #[test]
+    fn the_panels_button_and_input_answer_what_the_sheets_override() {
+        let src = panel_source();
+        // The template's own text, and not the next one's: every `let
+        // Panel...` after it is a different widget.
+        let slice = |open: &str, next: &str| -> &'static str {
+            let rest = src.split(open).nth(1).unwrap_or_else(|| panic!("the panel declares `{open}`"));
+            let end = rest.find(next).unwrap_or_else(|| panic!("`{open}` is not followed by `{next}`"));
+            &rest[..end]
+        };
+        let button = slice("let PanelButton = Button {", "let PanelInput = TextInput {");
+        let input = slice("let PanelInput = TextInput {", "let PanelTreeNode = FileTreeNode {");
+        let themes = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("themes");
+        let mut seen = 0usize;
+        for entry in std::fs::read_dir(&themes).expect("the themes folder is in the tree") {
+            let sheet = entry.expect("a readable entry").path().join("widgets.splash");
+            let Ok(text) = std::fs::read_to_string(&sheet) else {
+                continue;
+            };
+            for line in text.lines() {
+                for (widget, kit) in [("Button", button), ("TextInput", input)] {
+                    let Some(prop) = line
+                        .trim()
+                        .strip_prefix(&format!("mod.widgets.{widget}."))
+                        .and_then(|rest| rest.split([' ', '=']).next())
+                    else {
+                        continue;
+                    };
+                    // `draw_bg.pixel` is answered by declaring `pixel:`
+                    // inside this template's own `draw_bg`, and so on down.
+                    let leaf = prop.rsplit('.').next().unwrap_or(prop);
+                    assert!(
+                        kit.contains(&format!("{leaf}:")),
+                        "{} overrides `{prop}` on a {widget} and PanelButton/PanelInput does not declare `{leaf}`",
+                        sheet.display()
+                    );
+                    seen += 1;
+                }
+            }
+        }
+        assert!(seen > 20, "only {seen} overrides were read -- the sheets did not load");
+        // The two that a sheet reaches through a THEME token rather than
+        // through `widgets.splash`: the stock templates take them from
+        // `theme.mspace_1` and `theme.mspace_v_1`, which every sheet moves.
+        for kit in [button, input] {
+            assert!(kit.contains("padding: Inset{"), "the padding is not written out");
+            assert!(kit.contains("margin: Inset{"), "the margin is not written out");
+            assert!(kit.contains("min_height: 0"), "the min height is not written out");
+        }
+    }
+
+    /// The panel's own skin is a PALETTE, and the switch that changes it is
+    /// the only thing that does.
+    ///
+    /// Three things are held together here, and the panel is wrong if any one
+    /// of them goes. A theme change on its own must not move the panel: that
+    /// immunity is the whole reason `mod.fab` exists, and it is what lets the
+    /// panel be the tool a theme is diagnosed WITH. The switch must move it,
+    /// or the button is a lie. And once the switch is on, a theme change must
+    /// move it again, or "wear the theme" would mean "wear the theme that
+    /// happened to be on when you pressed it".
+    ///
+    /// Measured through `fab_palette_stamp`, which is the same reading the
+    /// panel itself uses to decide whether to build its sidebar again -- so
+    /// this also tests that the rebuild fires when it should and, just as
+    /// importantly, never fires while the switch is off.
+    #[test]
+    fn only_the_wear_switch_puts_the_panel_in_the_apps_theme() {
+        use crate::desktop_style::{install, uninstall, DesktopStyle, StyleSheet};
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        assert!(
+            !crate::fab_controls::panel_wears_theme(&mut cx),
+            "the panel wears its own palette until it is asked not to"
+        );
+        let own = fab_palette_stamp(&mut cx);
+        // A theme change alone leaves the panel where it was.
+        for style in [DesktopStyle::Macos, DesktopStyle::Windows2000, DesktopStyle::Android] {
+            cx.with_vm(|vm| {
+                install(vm, StyleSheet::load(style));
+                vm.with_reload(crate::script_mod);
+            });
+            assert_eq!(
+                fab_palette_stamp(&mut cx),
+                own,
+                "the panel followed `{}` without being asked to",
+                style.id()
+            );
+        }
+        // The switch does move it...
+        crate::fab_controls::set_panel_wears_theme(&mut cx, true);
+        cx.with_vm(|vm| vm.with_reload(crate::script_mod));
+        let worn = fab_palette_stamp(&mut cx);
+        assert_ne!(worn, own, "the switch changed nothing");
+        // ...and now the picker moves it too.
+        cx.with_vm(|vm| {
+            install(vm, StyleSheet::load(DesktopStyle::Omarchy));
+            vm.with_reload(crate::script_mod);
+        });
+        assert_ne!(
+            fab_palette_stamp(&mut cx),
+            worn,
+            "worn, the panel did not follow the theme it was wearing"
+        );
+        // And off is off: back to the palette it started in, whatever sheet
+        // is still installed.
+        crate::fab_controls::set_panel_wears_theme(&mut cx, false);
+        cx.with_vm(|vm| vm.with_reload(crate::script_mod));
+        assert_eq!(fab_palette_stamp(&mut cx), own, "taking it off left something behind");
+        cx.with_vm(|vm| {
+            uninstall(vm);
+            vm.with_reload(crate::script_mod);
+        });
+        assert_eq!(fab_palette_stamp(&mut cx), own);
+    }
+
+    /// The panel's own splash chunk, evaluated the way the panel evaluates
+    /// it: by building a real Tweaker and asking it for its sidebar.
+    ///
+    /// That chunk is a macro body no compiler reads, it is a thousand lines
+    /// long, and it is evaluated ONCE -- when somebody first opens the panel.
+    /// A misspelling in it is a panel that comes up empty in front of
+    /// whoever opened it, and nothing before this caught one.
+    #[test]
+    fn the_panels_own_splash_chunk_builds_a_sidebar_with_the_theme_row_in_it() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            vm.bx.captured_errors = Some(Vec::new());
+        });
+        let tweaker = cx.with_vm(|vm| {
+            let widgets = vm.module(id!(widgets));
+            let value = vm
+                .bx
+                .heap
+                .value(widgets, LiveId::from_str("Tweaker").into(), NoTrap);
+            WidgetRef::script_from_value(vm, value)
+        });
+        assert!(!tweaker.is_empty(), "the Tweaker built no widget");
+        {
+            let mut panel = tweaker.borrow_mut::<Tweaker>().expect("a Tweaker");
+            panel.ensure_sidebar(&mut cx);
+            let sidebar = panel.sidebar.clone().expect("the chunk built a sidebar");
+            let errors = cx.with_vm(|vm| vm.take_errors());
+            assert!(errors.is_empty(), "{errors:?}");
+            // The Theme tab's head, down to the switch added beside the
+            // picker: a row that evaluates but resolves to nothing is the
+            // same broken panel as one that does not evaluate.
+            let head = sidebar.child(live_id!(theme_head));
+            assert!(!head.is_empty(), "the Theme tab has no head");
+            let row = head.child(live_id!(theme_pick_row));
+            assert!(!row.is_empty(), "the picker has no row");
+            for id in [live_id!(theme_pick), live_id!(theme_wear)] {
+                assert!(!row.child(id).is_empty(), "the picker row is missing a control");
+            }
+            // The filter field the panel is filtered with, while we are here.
+            let input = sidebar
+                .child(live_id!(filter_row))
+                .child(live_id!(search))
+                .child(live_id!(input));
+            assert!(!input.is_empty(), "the filter row has no field");
+        }
+    }
+
+    /// A theme switch asks for a style reload, `script_mod` runs again and
+    /// the window body is applied from ITS OWN splash -- which throws away
+    /// the runtime margin the panel had put on it, while the panel still
+    /// believes it is applied. With the guard reading `desired` alone, that
+    /// same `desired` early-returns, the margin is never put back and the
+    /// app draws full width under the panel: the right-hand side of the app
+    /// "disappears". Pressing the panel off and on was the only way back,
+    /// because that drives `desired` to 0 and back.
+    #[test]
+    fn a_style_reload_makes_the_body_margin_due_again() {
+        let band = 300.0;
+        // Settled: applied and wanted agree, so nothing runs -- the guard is
+        // there so this does not evaluate a chunk on every frame.
+        assert!(!body_margin_needs_apply(band, band, false));
+        // The reload has wiped the override. The SAME `desired` must run.
+        assert!(body_margin_needs_apply(band, band, true));
+        // ...and once it has run, it settles again.
+        assert!(!body_margin_needs_apply(band, band, false));
+        // The old escape hatch still works, and still costs two applies.
+        assert!(body_margin_needs_apply(band, 0.0, false));
+        assert!(body_margin_needs_apply(0.0, band, false));
+        // A splitter drag under half a pixel is not worth an eval; over it is.
+        assert!(!body_margin_needs_apply(band, band + 0.4, false));
+        assert!(body_margin_needs_apply(band, band + 0.6, false));
+        // A reload while the panel is OFF is answered by re-applying zero,
+        // not by leaving the app compressed.
+        assert!(body_margin_needs_apply(0.0, 0.0, true));
+    }
+
+    /// Releasing the panel hands the body back its OWN right margin, so what
+    /// is read off the body must never be the panel's own compression
+    /// misfiled as the body's. A re-apply can run either side of the wipe,
+    /// and getting this wrong leaves the app indented by a sidebar for the
+    /// rest of the session -- with the panel closed.
+    #[test]
+    fn the_bodys_own_margin_is_never_the_panels_own_compression() {
+        // Nothing applied yet, so whatever the body carries is its own.
+        assert_eq!(body_own_right(0.0, 0.0), Some(0.0));
+        assert_eq!(body_own_right(12.0, 0.0), Some(12.0));
+        // The override is still standing on the body: NOT the body's own,
+        // so the remembered value has to survive this read.
+        assert_eq!(body_own_right(300.0, 300.0), None);
+        assert_eq!(body_own_right(300.4, 300.0), None);
+        // A reload has put the body back to its own splash, so this is its
+        // own again -- and re-reading it here is how a body whose DSL margin
+        // changed across the reload is picked up.
+        assert_eq!(body_own_right(0.0, 300.0), Some(0.0));
+        assert_eq!(body_own_right(12.0, 300.0), Some(12.0));
+    }
+
+    /// Deleting a saved theme takes two presses, the same way saving over
+    /// one does -- and asking one of the two questions cancels the other, so
+    /// a standing "save again to replace it" can never answer a delete.
+    #[test]
+    fn a_delete_is_a_question_before_it_is_a_delete() {
+        let mut confirm: Option<ThemeConfirm> = None;
+        let pending_delete = |c: &Option<ThemeConfirm>| match c {
+            Some(ThemeConfirm::Delete(name)) => Some(name.clone()),
+            _ => None,
+        };
+        let pending_replace = |c: &Option<ThemeConfirm>| match c {
+            Some(ThemeConfirm::Replace(name)) => Some(name.clone()),
+            _ => None,
+        };
+        // Nothing is pending, so the first press only asks.
+        assert_eq!(pending_delete(&confirm), None);
+        confirm = Some(ThemeConfirm::Delete("sunset".to_string()));
+        assert_eq!(pending_delete(&confirm).as_deref(), Some("sunset"));
+        // A replace standing on the same name is NOT an answer to it.
+        confirm = Some(ThemeConfirm::Replace("sunset".to_string()));
+        assert_eq!(pending_delete(&confirm), None);
+        assert_eq!(pending_replace(&confirm).as_deref(), Some("sunset"));
+        // ...and a delete standing is not an answer to a replace either.
+        confirm = Some(ThemeConfirm::Delete("sunset".to_string()));
+        assert_eq!(pending_replace(&confirm), None);
+        // A question asked about another name is not an answer to this one.
+        confirm = Some(ThemeConfirm::Delete("dusk".to_string()));
+        assert_ne!(pending_delete(&confirm).as_deref(), Some("sunset"));
+    }
+
+    /// The panel's two destructive commands read the confirm the same way,
+    /// and both let it lapse. Read off the source, because the defect was
+    /// that one of them did not ask at all.
+    #[test]
+    fn the_theme_tab_asks_before_it_deletes_and_forgets_when_it_is_left() {
+        let src = panel_source();
+        let del = src
+            .split("fn delete_saved_theme(&mut self, cx: &mut Cx) {")
+            .nth(1)
+            .expect("the panel deletes saved themes");
+        let del = &del[..del.find("\n    /// What the store said").expect("the function ends")];
+        // The question is asked before the store is ever called.
+        let asks = del.find("pending_delete()").expect("delete asks first");
+        let does = del.find("theme_store::delete(").expect("delete deletes");
+        assert!(asks < does, "the delete happens before the question is asked");
+        // A refused delete re-reads the folder, or the row it could not
+        // remove stays in the picker with a live delete button on it.
+        let failed = del.find("Err(error)").expect("a delete can fail");
+        assert!(
+            del[failed..].contains("self.refresh_saved_themes();"),
+            "a failed delete leaves the list as it was"
+        );
+        // Entering the tab drops the last note and the standing question.
+        // One-line anchors on purpose: this file is CRLF and `include_str!`
+        // hands it over byte for byte, so an anchor spanning a line break
+        // would never match.
+        let enter = src
+            .split("// ...and the moment to drop what the tab last said.")
+            .nth(1)
+            .expect("entering the tab drops what it last said");
+        let enter = &enter[..600.min(enter.len())];
+        assert!(enter.contains("self.theme_msg.clear();"), "a stale note survives the tab");
+        assert!(enter.contains("self.theme_confirm = None;"), "a stale question survives the tab");
+    }
 
     #[test]
     fn a_size_row_reads_as_one_value_however_it_was_spelled() {

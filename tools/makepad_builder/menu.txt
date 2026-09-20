@@ -1,0 +1,5 @@
+1|Download compiler|Set up {tools} and Rust, then compile and run {app}
+2|Compile and run {app}|Download/update source code, compile and open {app}
+3|Makepad WM|Compile and run the Makepad desktop
+4|Makepad Apps|Compile and run another Makepad application
+5|AI Terminal|Open Claude, Codex or a shell with the Builder compiler environment

@@ -365,8 +365,10 @@ struct AnimatorTrack {
     play: Play,
     /// The ease function
     ease: Ease,
-    /// Keep the target alive if a stylesheet reapply replaces its template
-    /// while this animation is still running.
+    /// The target apply object (what we're animating to).
+    /// Held as a `ScriptObjectRef` so a stylesheet reapply or a `script_mod`
+    /// re-run (safe-area inset change, hot reload) cannot dangle it while
+    /// `interpolate_object` walks it every frame.
     target_apply: ScriptObjectRef,
     /// The starting values SNAPSHOT (captured/copied when animation begins)
     /// This is a SEPARATE object from state_object - it must not be mutated during animation
@@ -430,6 +432,16 @@ impl ScriptHook for Animator {
         let Some(obj) = value.as_object() else {
             return false;
         };
+        // A `script_mod` re-run replaces every template object an in-flight
+        // track is animating against. The track's refs keep those objects
+        // alive, so walking them is safe, but they now describe the previous
+        // template — and a `Play::Loop` track would pin them for good. Drop
+        // the tracks instead. `current_states` is kept: the logical state is
+        // still meaningful, and the next `cut`/`play` re-resolves its objects
+        // from the new heap.
+        if apply.follows_script_rerun() {
+            self.tracks.clear();
+        }
         let obj_ref = vm.bx.heap.new_object_ref(obj);
         // Minted from the VM we are running in, so this always resolves; the
         // fallback only exists because the lookup is fallible in general.
@@ -494,7 +506,11 @@ impl ScriptApplyDefault for Animator {
         _scope: &mut Scope,
         _value: ScriptValue,
     ) -> Option<ScriptValue> {
-        if apply.is_live_edit_reload() || apply.is_animate() || apply.is_eval() {
+        // `follows_script_rerun` rather than `is_live_edit_reload`: what makes
+        // injecting the current state unsafe is not that the DSL changed, it
+        // is that `script_mod` re-ran and freed the objects `state_object` and
+        // `groups` point at. Both `Reload` and `Rebake` re-run it.
+        if apply.follows_script_rerun() || apply.is_animate() || apply.is_eval() {
             return None;
         }
 
@@ -674,7 +690,7 @@ impl Animator {
         // The snapshot must be a separate object that won't be mutated during animation.
         // We sample from state_object (current animated values) or fall back to static state apply.
         let vm_id = self.vm_id;
-        let (from_snapshot, target_apply) = cx.with_script_vm_id(vm_id, |vm| {
+        let (from_snapshot, target_apply_ref) = cx.with_script_vm_id(vm_id, |vm| {
             let snapshot = vm.bx.heap.new_object();
 
             // Get the default state's apply for fallback values
@@ -721,7 +737,9 @@ impl Animator {
                 },
             );
 
-            // Both inputs must outlive the stylesheet that started the track.
+            // Both inputs must outlive the stylesheet that started the track,
+            // and any later `script_mod` re-run, so GC cannot free them under
+            // the running animation.
             (
                 vm.bx.heap.new_object_ref(snapshot),
                 vm.bx.heap.new_object_ref(target_apply),
@@ -739,7 +757,7 @@ impl Animator {
             start_time: f64::NEG_INFINITY,
             play,
             ease,
-            target_apply,
+            target_apply: target_apply_ref,
             from_snapshot,
             redraw: target_state.redraw,
         };
@@ -844,6 +862,19 @@ impl Animator {
 
     /// Check if the animator is in a specific state
     pub fn in_state(&self, _cx: &Cx, state: &[LiveId; 2]) -> bool {
+        self.current_state_matches(state)
+    }
+
+    /// Inspect the requested state without a draw context. Cancel visibility must
+    /// follow a pending open/close even before its animation has drawn a frame.
+    pub(crate) fn in_state_id(&self, state: &[LiveId; 2]) -> bool {
+        if let Some(deferred) = self.deferred.iter().rev().find(|op| op.state[0] == state[0]) {
+            return deferred.state[1] == state[1];
+        }
+        self.current_state_matches(state)
+    }
+
+    fn current_state_matches(&self, state: &[LiveId; 2]) -> bool {
         let group_id = state[0];
         let state_id = state[1];
 

@@ -541,14 +541,14 @@ impl NotesView {
                 if !self.invoker.is_empty() {
                     cx.set_key_focus(self.invoker.area());
                 }
-                self.visible(cx, ids!(overlay), false);
+                self.set_path_visible(cx, ids!(overlay), false);
             }
         } else {
             self.menu_frame = cx.new_next_frame();
         }
         self.redraw(cx);
     }
-    fn visible(&self, cx: &mut Cx, path: &[LiveId], visible: bool) {
+    fn set_path_visible(&self, cx: &mut Cx, path: &[LiveId], visible: bool) {
         self.view.widget(cx, path).set_visible(cx, visible);
     }
     fn text(&self, cx: &mut Cx, path: &[LiveId], text: &str) {
@@ -564,13 +564,13 @@ impl NotesView {
             .as_ref()
             .or(self.edit_error.as_ref())
             .or(self.save.error.as_ref());
-        self.visible(cx, ids!(status), message.is_some());
+        self.set_path_visible(cx, ids!(status), message.is_some());
         self.text(
             cx,
             ids!(status_text),
             message.map(String::as_str).unwrap_or(""),
         );
-        self.visible(cx, ids!(loading), self.load == LoadState::Loading);
+        self.set_path_visible(cx, ids!(loading), self.load == LoadState::Loading);
     }
     fn configure_folders(&mut self, cx: &mut Cx, parent: WidgetRef, compact: bool, overlay: bool) {
         for (index, (name, count)) in [
@@ -626,12 +626,12 @@ impl NotesView {
         self.view
             .children(&mut |_, child| set_control_motion(&child, self.reduced_motion));
         self.sync_status(cx);
-        self.visible(
+        self.set_path_visible(
             cx,
             ids!(wide),
             !self.layout.is_compact() && self.load == LoadState::Ready,
         );
-        self.visible(
+        self.set_path_visible(
             cx,
             ids!(compact_host),
             self.layout.is_compact() && self.load == LoadState::Ready,
@@ -688,14 +688,14 @@ impl NotesView {
         let deleted = self.ui.collection == Collection::RecentlyDeleted;
         let allows_create = self.ui.collection.allows_create();
         if compact {
-            self.visible(cx, ids!(compact.root_view.dock.compose), true);
-            self.visible(
+            self.set_path_visible(cx, ids!(compact.root_view.dock.compose), true);
+            self.set_path_visible(
                 cx,
                 ids!(compact.list_view.screen.dock.compose),
                 allows_create,
             );
         } else {
-            self.visible(
+            self.set_path_visible(
                 cx,
                 ids!(wide.notes_list.short_header.compose),
                 allows_create,
@@ -773,7 +773,7 @@ impl NotesView {
         self.sync_overlay(cx);
     }
     fn sync_overlay(&mut self, cx: &mut Cx) {
-        self.visible(cx, ids!(overlay), self.overlay != OverlayKind::None);
+        self.set_path_visible(cx, ids!(overlay), self.overlay != OverlayKind::None);
         if self.overlay == OverlayKind::None {
             return;
         }
@@ -909,11 +909,11 @@ impl NotesView {
         self.layout = decision;
         self.size = size;
         self.applied_reduced_motion = self.reduced_motion;
-        self.visible(cx, ids!(wide.folders), decision.is_three());
-        self.visible(cx, ids!(wide.divider_a), decision.is_three());
-        self.visible(cx, ids!(wide.notes_list.header), decision.is_three());
-        self.visible(cx, ids!(wide.notes_list.short_header), !decision.is_three());
-        self.visible(cx, ids!(wide.notes_list.count), !decision.short_chrome);
+        self.set_path_visible(cx, ids!(wide.folders), decision.is_three());
+        self.set_path_visible(cx, ids!(wide.divider_a), decision.is_three());
+        self.set_path_visible(cx, ids!(wide.notes_list.header), decision.is_three());
+        self.set_path_visible(cx, ids!(wide.notes_list.short_header), !decision.is_three());
+        self.set_path_visible(cx, ids!(wide.notes_list.count), !decision.short_chrome);
         let width = engine::list_column_width(decision, size.x);
         let toolbar_height = if decision.short_chrome { 44.0 } else { 56.0 };
         let mut list = self.view.widget(cx, ids!(wide.notes_list));

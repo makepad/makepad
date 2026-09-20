@@ -1,6 +1,5 @@
 use crate::{
     badge::measure,
-    chart_more::{parse_rows, Row},
     makepad_derive_widget::*,
     makepad_draw::*,
     widget::*,
@@ -219,6 +218,77 @@ impl PointData for FlatPointData {
         let s = start.min(self.points.len());
         let e = end.min(self.points.len());
         &self.points[s..e]
+    }
+}
+
+// ---- Rows: the data as markup writes it ----
+//
+// The data model lives in the base. `TrendChart` here and every shape in
+// `chart_shapes` read their lines through it, so the shapes import from
+// this file and this file imports nothing from them.
+
+/// One part of a chart as it was written down: a name, and the numbers
+/// after it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Row {
+    pub label: String,
+    pub values: Vec<f64>,
+}
+
+impl Row {
+    pub fn new(label: &str, values: &[f64]) -> Self {
+        Self { label: label.to_string(), values: values.to_vec() }
+    }
+
+    /// The row's first number, a row without one counting as nothing. A
+    /// line that carried no number is a part worth nothing, which is a
+    /// thing a chart can draw; it is not a part that is missing.
+    pub fn value(&self) -> f64 {
+        self.values.first().copied().unwrap_or(0.0)
+    }
+
+    pub fn value_at(&self, i: usize) -> f64 {
+        self.values.get(i).copied().unwrap_or(0.0)
+    }
+}
+
+/// Read one line of markup as a label and the numbers after it.
+///
+/// `"Rent 420"`, `"Public transport 120"`, `"Speed: 4 3 5 2"`. A colon, if
+/// there is one, splits the two. Without one the numbers are the longest
+/// run of them at the END of the line, so a label may be several words and
+/// may hold a number of its own as long as a word comes after it — `"Q1
+/// 2024 480"` is one quarter worth 480 and not three numbers.
+pub fn parse_row(line: &str) -> Row {
+    if let Some((name, rest)) = line.split_once(':') {
+        return Row {
+            label: name.trim().to_string(),
+            values: rest.split_whitespace().filter_map(|t| t.parse::<f64>().ok()).collect(),
+        };
+    }
+    let words: Vec<&str> = line.split_whitespace().collect();
+    let mut first = words.len();
+    while first > 0 && words[first - 1].parse::<f64>().is_ok() {
+        first -= 1;
+    }
+    Row {
+        label: words[..first].join(" "),
+        values: words[first..].iter().filter_map(|t| t.parse::<f64>().ok()).collect(),
+    }
+}
+
+pub fn parse_rows(lines: &[String]) -> Vec<Row> {
+    lines.iter().map(|line| parse_row(line)).collect()
+}
+
+/// A number as a chart writes it: whole when it is whole, one decimal when
+/// it is not. Charts are read at a glance, and a trailing `.00` on every
+/// part of every one of them is noise.
+pub fn fmt_value(v: f64) -> String {
+    if (v - v.round()).abs() < 1e-9 && v.abs() < 1e15 {
+        format!("{}", v.round() as i64)
+    } else {
+        format!("{:.1}", v)
     }
 }
 
@@ -466,14 +536,29 @@ pub struct ChartView {
 
 impl Widget for ChartView {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        // Who owns this pointer? The hit below is taken with
+        // `capture_overload`, so this chart co-captures EVERY press landing
+        // inside it, one a child control already holds included — the answer
+        // therefore has to be asked for rather than assumed from having been
+        // handed a hit. The chart's own co-capture is `mine` and does not
+        // count. Asked once, before the hit, and used at the press and on
+        // every move: the press and a child's capture can land in either
+        // order inside one event.
+        let held_outside = cx.fingers.is_mouse_held_outside(&[self.draw_bg.area()]);
         match event.hits_with_capture_overload(cx, self.draw_bg.area(), true) {
-            Hit::FingerDown(fe) if fe.is_primary_hit() => {
+            Hit::FingerDown(fe) if press_starts_pan(fe.is_primary_hit(), held_outside) => {
                 self.drag_start_abs = Some(fe.abs);
                 self.drag_start_viewport = self.viewport.clone();
                 cx.set_cursor(MouseCursor::Grabbing);
             }
             Hit::FingerMove(fe) => {
-                if let Some(start_abs) = self.drag_start_abs {
+                if pan_stands_down(held_outside) {
+                    // Handed back mid-gesture: whatever took the pointer owns
+                    // the rest of this press, and a half-finished pan left
+                    // waiting here would resume the moment that control let
+                    // go.
+                    self.drag_start_abs = None;
+                } else if let Some(start_abs) = self.drag_start_abs {
                     let delta = fe.abs - start_abs;
                     let pr = &self.plot_rect;
                     if pr.size.x > 0.0 && pr.size.y > 0.0 {
@@ -1681,8 +1766,8 @@ pub struct DrawChartSegment {
 /// # Several lines
 ///
 /// The data is lines of markup, one per plotted line — `"cpu 32 35 41"`, a
-/// name and then its numbers, read by [`crate::chart_more::parse_row`]
-/// exactly as the shapes in that module read theirs — or the same thing
+/// name and then its numbers, read by [`parse_row`] exactly as the shapes
+/// in [`crate::chart_shapes`] read theirs — or the same thing
 /// from Rust through [`TrendChart::set_rows`]. [`TrendChart::set_series`]
 /// is one line with no name, which is what it has always been. Every line
 /// shares the one value axis and the one spacing along the bottom: the
@@ -1778,7 +1863,7 @@ pub struct TrendChart {
     #[live]
     pub range_max: f64,
     /// One line of markup per plotted line: a name, then its numbers. See
-    /// [`crate::chart_more::parse_row`].
+    /// [`parse_row`].
     #[live]
     pub series: Vec<String>,
     /// Compact history when the surrounding UI already displays its value.
@@ -2230,12 +2315,71 @@ impl TrendChartRef {
     }
 }
 
+/// Whether a press may start the chart's pan.
+///
+/// Panning is a gesture the chart starts from a press that is not
+/// necessarily its own: the hit is taken with `capture_overload`, so the
+/// chart is handed the `FingerDown` for every press inside it, including one
+/// a child control already captured. So it has to decide, and the rule it
+/// decides by is the app-wide one — a control that is dragged continuously
+/// locks the pointer, and any other gesture that would start from the same
+/// press stands down until the release.
+///
+/// `mouse_held_outside` is [`CxFingers::is_mouse_held_outside`] asked with
+/// the chart's own area: true means a slider, fader, scroll bar or resizer
+/// owns the mouse right now, and this press is that control's. A TOUCH
+/// capture answers `false` there by design, so a finger that lands on a
+/// control may still pan the chart under it, the way it may still drag a
+/// list — which is why no touch exemption is spelled out here.
+fn press_starts_pan(is_primary_hit: bool, mouse_held_outside: bool) -> bool {
+    is_primary_hit && !mouse_held_outside
+}
+
+/// Whether a pan already under way must stand down on this move.
+///
+/// The press and a child's capture can land in either order inside one
+/// event, and a control can take the pointer AFTER the pan began, so the
+/// question is re-asked on every move rather than only at the press.
+fn pan_stands_down(mouse_held_outside: bool) -> bool {
+    mouse_held_outside
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn close(a: f64, b: f64) -> bool {
         (a - b).abs() < 1e-9
+    }
+
+    /// The operator's rule, on the chart's own gesture: a press the pointer
+    /// is already locked to must not also pan the chart under it.
+    ///
+    /// `capture_overload` is what makes this reachable — a press a child
+    /// slider captured is handed to the chart as well, and without the
+    /// question being asked the chart would pan through the whole of that
+    /// control's drag.
+    #[test]
+    fn a_press_another_control_holds_never_starts_a_pan() {
+        assert!(
+            press_starts_pan(true, false),
+            "an ordinary press on the chart pans it"
+        );
+        assert!(
+            !press_starts_pan(true, true),
+            "a press the pointer is locked to belongs to whatever holds it"
+        );
+        // A secondary button is not a pan on an unheld pointer either.
+        assert!(!press_starts_pan(false, false));
+        assert!(!press_starts_pan(false, true));
+    }
+
+    /// And the other half, asked again on every move: a control that takes
+    /// the pointer after the pan began ends the pan there and then.
+    #[test]
+    fn a_pan_stands_down_the_move_a_control_takes_the_mouse() {
+        assert!(pan_stands_down(true));
+        assert!(!pan_stands_down(false), "an unheld pointer keeps panning");
     }
 
     #[test]
@@ -2425,5 +2569,50 @@ mod tests {
         chart.set_series(&[4.0, 5.0]);
         assert_eq!(chart.rows().len(), 1);
         assert!(chart.candles().is_empty());
+    }
+
+    #[test]
+    fn a_line_is_read_as_a_name_and_the_numbers_after_it() {
+        assert_eq!(parse_row("Rent 420"), Row::new("Rent", &[420.0]));
+        assert_eq!(
+            parse_row("Public transport 120"),
+            Row::new("Public transport", &[120.0]),
+            "a name may be several words"
+        );
+        assert_eq!(
+            parse_row("Q1 2024 480"),
+            Row::new("Q1", &[2024.0, 480.0]),
+            "the numbers are the whole trailing run"
+        );
+        assert_eq!(
+            parse_row("Speed: 4 3 5 2"),
+            Row::new("Speed", &[4.0, 3.0, 5.0, 2.0]),
+            "a colon says where the name stops"
+        );
+        assert_eq!(
+            parse_row("Q1 2024: 480"),
+            Row::new("Q1 2024", &[480.0]),
+            "which is how a name keeps a number of its own"
+        );
+    }
+
+    #[test]
+    fn a_line_with_no_number_is_a_part_worth_nothing_and_not_a_broken_one() {
+        let row = parse_row("Nothing here");
+        assert_eq!(row.label, "Nothing here");
+        assert!(row.values.is_empty());
+        assert_eq!(row.value(), 0.0, "which a chart can draw");
+        assert_eq!(row.value_at(3), 0.0);
+        assert_eq!(parse_row(""), Row::default());
+        // A run of numbers with no name is a nameless part, not a name.
+        assert_eq!(parse_row("12 40 8"), Row::new("", &[12.0, 40.0, 8.0]));
+    }
+
+    #[test]
+    fn a_whole_number_is_written_without_a_decimal_point() {
+        assert_eq!(fmt_value(420.0), "420");
+        assert_eq!(fmt_value(0.0), "0");
+        assert_eq!(fmt_value(-7.0), "-7");
+        assert_eq!(fmt_value(3.14), "3.1");
     }
 }

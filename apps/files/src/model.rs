@@ -506,7 +506,7 @@ pub fn local_utc_offset_secs() -> i64 {
 }
 
 /// `+0200` / `-0730` -> seconds east of UTC.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), any(target_os = "macos", target_os = "linux")))]
 fn parse_utc_offset(text: &str) -> i64 {
     let bytes = text.as_bytes();
     if bytes.len() < 5 || (bytes[0] != b'+' && bytes[0] != b'-') {

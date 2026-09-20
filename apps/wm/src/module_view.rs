@@ -31,7 +31,7 @@
 //! see the panic.
 
 use crate::desk::phone::DrawPhoneApp;
-use crate::dock_warp::WindowFrame;
+use crate::dock_warp::{capture_y_flip, WindowFrame};
 use crate::hub::ClientId;
 use crate::run_view::MpRunViewAction;
 use crate::tile::TileHost;
@@ -324,7 +324,7 @@ impl Widget for MpModuleView {
             frame.end(cx);
             self.draw_capture.draw_vars.set_texture(0, frame.texture());
             self.draw_capture.opacity = self.fade;
-            self.draw_capture.y_flip = if matches!(cx.os_type(), OsType::Android(_)) { 1.0 } else { 0.0 };
+            self.draw_capture.y_flip = capture_y_flip(cx);
             self.draw_capture.draw_abs(cx, rect);
         }
         cx.end_turtle_with_area(&mut self.area);

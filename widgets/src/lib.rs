@@ -24,6 +24,7 @@ pub mod theme_desktop_dark;
 pub mod theme_desktop_light;
 pub mod theme_desktop_skeleton;
 pub mod theme_tokens;
+pub mod theme_store;
 pub mod widget;
 pub mod widget_async;
 pub mod splash_host;
@@ -49,7 +50,6 @@ pub mod menu;
 pub mod select;
 pub mod accordion;
 pub mod dialog;
-pub mod drawer;
 pub mod toast;
 pub mod breadcrumb;
 pub mod browser;
@@ -87,7 +87,7 @@ pub mod window_menu;
 mod window_voice_input;
 
 pub mod combo_box;
-pub mod field;
+pub mod field_well;
 pub mod drop_down;
 pub mod drop_down2;
 pub mod popup_menu;
@@ -126,7 +126,7 @@ pub mod calendar;
 pub mod date_picker;
 pub mod time_picker;
 pub mod rating;
-pub mod tags;
+pub mod tag_field;
 pub mod radio_group;
 pub mod kbd;
 pub mod typography;
@@ -143,26 +143,29 @@ pub mod waveform;
 pub mod chat;
 pub mod code_block;
 pub mod carousel;
-pub mod upload;
+pub mod dropzone;
 pub mod form;
 pub mod color;
 pub mod column_picker;
+pub mod picker_parts;
+pub mod tree_select;
+pub mod transfer;
 pub mod command_palette;
-pub mod pie_menu;
 pub mod radial_menu;
 pub mod floating_action;
 pub mod hamburger_menu;
-pub mod drag_number;
-pub mod chart_more;
+pub mod property_inspector;
+pub mod chart_shapes;
 pub mod toolbar;
+mod column_fit;
 pub mod masonry;
 pub mod tile_list;
 pub mod item_grid;
 pub mod kanban;
-pub mod splitter_more;
 pub mod svg_select;
 pub mod rich_text;
-pub mod scroll_more;
+pub mod scroll_marks;
+pub mod scroll_fade;
 pub mod line_menu;
 pub mod tour;
 pub mod wheel_picker;
@@ -249,7 +252,6 @@ pub use crate::{
     select::*,
     accordion::*,
     dialog::*,
-    drawer::*,
     toast::*,
     placeholder::*,
     animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
@@ -260,7 +262,7 @@ pub use crate::{
     callout_tooltip::*,
     check_box::*,
     combo_box::*,
-    field::*,
+    field_well::*,
     desktop_button::*,
     dock::*,
 
@@ -305,7 +307,7 @@ pub use crate::{
     date_picker::*,
     time_picker::*,
     rating::*,
-    tags::*,
+    tag_field::*,
     radio_group::*,
     kbd::*,
     typography::*,
@@ -321,26 +323,28 @@ pub use crate::{
     chat::*,
     code_block::*,
     carousel::*,
-    upload::*,
+    dropzone::*,
     form::*,
     color::*,
     column_picker::*,
+    picker_parts::*,
+    tree_select::*,
+    transfer::*,
     command_palette::*,
-    pie_menu::*,
     radial_menu::*,
     floating_action::*,
     hamburger_menu::*,
-    drag_number::*,
-    chart_more::*,
+    property_inspector::*,
+    chart_shapes::*,
     toolbar::*,
     masonry::*,
     tile_list::*,
     item_grid::*,
     kanban::*,
-    splitter_more::*,
     svg_select::*,
     rich_text::*,
-    scroll_more::*,
+    scroll_marks::*,
+    scroll_fade::*,
     line_menu::*,
     tour::*,
     wheel_picker::*,
@@ -390,8 +394,9 @@ pub use crate::{
         WidgetSet, WidgetSetIterator, WidgetUid,
     },
     widget_async::{
-        enter_isolate, leave_isolate, set_widget_async_trace, CxSplashVmExt, CxWidgetToScriptCallExt,
-        IsolateEntry, ScriptAsyncCalls, ScriptAsyncId, ScriptAsyncResult, SplashVmId, MAIN_SPLASH_VM_ID,
+        enter_isolate, leave_isolate, set_splash_theme, set_widget_async_trace, CxSplashVmExt,
+        CxWidgetToScriptCallExt, IsolateEntry, ScriptAsyncCalls, ScriptAsyncId, ScriptAsyncResult,
+        SplashTheme, SplashVmId, MAIN_SPLASH_VM_ID,
     },
     widget_match_event::WidgetMatchEvent,
     widget_tree::{set_ui_root, CxWidgetExt},
@@ -434,6 +439,63 @@ pub use crate::corner_cap_view::*;
 pub use crate::screen_cap::*;
 
 pub use crate::video::*;
+
+/// Which of the three themes the library is written in `theme_mod` leaves in
+/// `mod.theme`. A `desktop_style` sheet is laid OVER one of these rather than
+/// replacing it, so the two are separate choices.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BaseTheme {
+    #[default]
+    Dark,
+    Light,
+    Skeleton,
+}
+
+impl BaseTheme {
+    pub const ALL: [Self; 3] = [Self::Dark, Self::Light, Self::Skeleton];
+    /// What a settings file or a remote surface calls it.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Dark => "dark",
+            Self::Light => "light",
+            Self::Skeleton => "skeleton",
+        }
+    }
+    /// What a picker shows.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Dark => "Dark",
+            Self::Light => "Light",
+            Self::Skeleton => "Skeleton",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| v.id() == s)
+    }
+}
+
+/// One value, not one per heap: every heap's `theme_mod` has to end on the
+/// same base or two windows of one app disagree about what light means.
+/// `desktop_style::Styles` is per-heap because a sheet is installed into the
+/// heap that evaluates it; this is a preference, and nothing about it is
+/// heap-shaped.
+#[derive(Default)]
+struct BaseThemeChoice(BaseTheme);
+
+/// The base theme `theme_mod` will emit. `Dark` until somebody says otherwise,
+/// which is exactly what the module hard-coded before there was a choice.
+pub fn base_theme(cx: &mut Cx) -> BaseTheme {
+    cx.global::<BaseThemeChoice>().0
+}
+
+/// Choose the base theme. It is read by `theme_mod`, so it takes effect on the
+/// next `script_mod` run and no sooner: a caller switching a running app
+/// follows this with `cx.request_style_reload()`, which re-runs `script_mod`
+/// and then re-applies the tree with `Apply::ScriptReapply` (typed text and
+/// running animations survive, which `Apply::Reload` would not).
+pub fn set_base_theme(cx: &mut Cx, theme: BaseTheme) {
+    cx.global::<BaseThemeChoice>().0 = theme;
+}
 
 pub fn theme_mod(vm: &mut ScriptVm) {
     makepad_draw::script_mod(vm);
@@ -486,9 +548,27 @@ pub fn theme_mod(vm: &mut ScriptVm) {
             draw:mod.draw,
             MouseCursor:mod.draw.MouseCursor
         }
-        mod.theme = mod.themes.dark
-
     });
+    // The base theme, last, so everything after it reads the one that was
+    // chosen. `Dark` is the default, so an app that never calls
+    // `set_base_theme` gets precisely what this used to say outright.
+    match base_theme(vm.cx_mut()) {
+        BaseTheme::Dark => {
+            script_eval!(vm, {
+                mod.theme = mod.themes.dark
+            });
+        }
+        BaseTheme::Light => {
+            script_eval!(vm, {
+                mod.theme = mod.themes.light
+            });
+        }
+        BaseTheme::Skeleton => {
+            script_eval!(vm, {
+                mod.theme = mod.themes.skeleton
+            });
+        }
+    }
 }
 
 pub fn widgets_mod(vm: &mut ScriptVm) {
@@ -564,7 +644,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::fab_controls::script_mod(vm);
     crate::menu_bar::script_mod(vm);
     crate::combo_box::script_mod(vm);
-    crate::field::script_mod(vm);
+    crate::field_well::script_mod(vm);
     crate::number_field::script_mod(vm);
 
     crate::splitter::script_mod(vm);
@@ -604,7 +684,7 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::date_picker::script_mod(vm);
     crate::time_picker::script_mod(vm);
     crate::rating::script_mod(vm);
-    crate::tags::script_mod(vm);
+    crate::tag_field::script_mod(vm);
     crate::radio_group::script_mod(vm);
     crate::kbd::script_mod(vm);
     crate::wheel_picker::script_mod(vm);
@@ -621,24 +701,27 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::chat::script_mod(vm);
     crate::code_block::script_mod(vm);
     crate::carousel::script_mod(vm);
-    crate::upload::script_mod(vm);
+    crate::dropzone::script_mod(vm);
     crate::form::script_mod(vm);
     crate::color::script_mod(vm);
+    // Before the three that draw with its panel and row surfaces.
+    crate::picker_parts::script_mod(vm);
     crate::column_picker::script_mod(vm);
+    crate::tree_select::script_mod(vm);
+    crate::transfer::script_mod(vm);
     crate::command_palette::script_mod(vm);
-    crate::pie_menu::script_mod(vm);
     crate::radial_menu::script_mod(vm);
-    crate::drag_number::script_mod(vm);
+    crate::property_inspector::script_mod(vm);
     crate::tour::script_mod(vm);
-    crate::chart_more::script_mod(vm);
+    crate::chart_shapes::script_mod(vm);
     crate::toolbar::script_mod(vm);
     crate::floating_action::script_mod(vm);
     crate::masonry::script_mod(vm);
     crate::tile_list::script_mod(vm);
     crate::item_grid::script_mod(vm);
     crate::kanban::script_mod(vm);
-    crate::splitter_more::script_mod(vm);
-    crate::scroll_more::script_mod(vm);
+    crate::scroll_marks::script_mod(vm);
+    crate::scroll_fade::script_mod(vm);
     // After the pill nav, whose surface shader draws its card, and the nav
     // list, whose ground is its hit rect.
     crate::line_menu::script_mod(vm);
@@ -663,9 +746,9 @@ pub fn widgets_mod(vm: &mut ScriptVm) {
     crate::expandable_panel::script_mod(vm);
     crate::modal::script_mod(vm);
     crate::dialog::script_mod(vm);
-    crate::drawer::script_mod(vm);
-    // After the drawer: the menu is built from a drawer, a popover, a nav
-    // list and a burger button, and this is the last of the four to land.
+    // After the dialog: the menu is built from a drawer, which is a dialog
+    // on an edge, a popover, a nav list and a burger button, and this is
+    // the last of the four to land.
     crate::hamburger_menu::script_mod(vm);
     crate::tooltip::script_mod(vm);
     crate::callout_tooltip::script_mod(vm);
@@ -754,6 +837,59 @@ pub fn script_mod(vm: &mut ScriptVm) {
 }
 
 #[cfg(test)]
+mod base_theme_tests {
+    use super::*;
+
+    /// The base theme is a choice now, and `dark` is still what an app that
+    /// never makes one gets.
+    #[test]
+    fn theme_mod_emits_the_chosen_base_and_still_defaults_to_dark() {
+        fn bg(vm: &mut ScriptVm) -> Option<u32> {
+            let theme = vm.module(id!(theme));
+            vm.bx
+                .heap
+                .value(theme, id!(color_bg_app).into(), NoTrap)
+                .as_color()
+        }
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let dark = bg(vm);
+            assert!(dark.is_some());
+            assert_eq!(base_theme(vm.cx_mut()), BaseTheme::Dark);
+
+            set_base_theme(vm.cx_mut(), BaseTheme::Light);
+            vm.with_reload(crate::script_mod);
+            let light = bg(vm);
+            assert!(light.is_some() && light != dark, "{light:?} vs {dark:?}");
+            assert!(vm.take_errors().is_empty());
+
+            set_base_theme(vm.cx_mut(), BaseTheme::Skeleton);
+            vm.with_reload(crate::script_mod);
+            let skeleton = bg(vm);
+            assert!(skeleton.is_some());
+            assert!(vm.take_errors().is_empty());
+
+            // And back: the choice is a setting, not a one-way door.
+            set_base_theme(vm.cx_mut(), BaseTheme::Dark);
+            vm.with_reload(crate::script_mod);
+            assert_eq!(bg(vm), dark);
+            assert!(vm.take_errors().is_empty());
+        });
+    }
+
+    #[test]
+    fn every_base_theme_has_a_name_and_parses_back() {
+        for base in BaseTheme::ALL {
+            assert_eq!(BaseTheme::parse(base.id()), Some(base));
+            assert!(!base.label().is_empty());
+        }
+        assert_eq!(BaseTheme::parse("omarchy"), None);
+        assert_eq!(BaseTheme::default(), BaseTheme::Dark);
+    }
+}
+
+#[cfg(test)]
 mod animated_image_gif_registration_tests {
     #[test]
     fn test_animated_image_gif_is_registered_separately_from_image() {
@@ -824,37 +960,6 @@ mod button_group_registration_tests {
 }
 
 #[cfg(test)]
-mod drawer_registration_tests {
-    /// The drawer registers after the modal it is built on and the dialog
-    /// it sits beside, with one type default and its two sheet presets.
-    #[test]
-    fn test_drawer_is_registered_after_its_bases() {
-        let lib = include_str!("lib.rs");
-        let drawer = include_str!("drawer.rs");
-        assert!(lib.contains("pub mod drawer;"));
-        assert!(lib.contains("drawer::*"));
-        let at = lib.find("crate::drawer::script_mod(vm);").expect("drawer registered");
-        for base in [
-            "crate::modal::script_mod(vm);",
-            "crate::button::script_mod(vm);",
-            "crate::label::script_mod(vm);",
-        ] {
-            assert!(lib.find(base).expect(base) < at, "{base} must register before the drawer");
-        }
-        assert!(drawer.contains("mod.widgets.DrawerBase = #(Drawer::register_widget(vm))"));
-        assert!(drawer.contains("mod.widgets.Drawer = set_type_default()"));
-        assert!(drawer.contains("mod.widgets.BottomSheet = mod.widgets.Drawer{"));
-        assert!(drawer.contains("mod.widgets.SideSheet = mod.widgets.Drawer{"));
-        assert_eq!(drawer.matches("set_type_default() do mod.widgets.DrawerBase").count(), 1);
-        // The widget derive takes any field type beginning with "Draw" for
-        // a shader layer, which is why these two are not called DrawerSide
-        // and DrawerSize.
-        assert!(!drawer.contains("pub enum DrawerSide"));
-        assert!(!drawer.contains("pub enum DrawerSize"));
-    }
-}
-
-#[cfg(test)]
 mod dialog_registration_tests {
     /// The dialog registers after the modal it is built on and the button
     /// and label its chrome uses, with one type default and the presets
@@ -878,6 +983,14 @@ mod dialog_registration_tests {
         assert!(dialog.contains("mod.widgets.AlertDialog = mod.widgets.Dialog{"));
         assert!(dialog.contains("mod.widgets.ConfirmDialog = mod.widgets.Dialog{"));
         assert_eq!(dialog.matches("set_type_default() do mod.widgets.DialogBase").count(), 1);
+        // The drawer and the two sheets are the dialog on an edge: presets
+        // of it, with no type and so no type default of their own.
+        assert!(dialog.contains("mod.widgets.Drawer = mod.widgets.Dialog{"));
+        assert!(dialog.contains("mod.widgets.SideSheet = mod.widgets.Drawer{"));
+        assert!(dialog.contains("mod.widgets.BottomSheet = mod.widgets.Drawer{"));
+        // The widget derive takes any field type beginning with "Draw" for
+        // a shader layer, which is why the side is not called DrawerSide.
+        assert!(!dialog.contains("pub enum DrawerSide"));
     }
 }
 
@@ -1126,21 +1239,27 @@ fn assert_registered_after(call: &str, bases: &[&str]) {
 
 #[cfg(test)]
 mod radial_menu_registration_tests {
-    /// The ring menu registers directly after the pie menu whose angle
-    /// measure and keys it shares, after the glass it samples, with one type
-    /// default.
+    /// The ring menu registers after the glass it samples and the badge
+    /// whose text measure it uses, with one type default: `PieMenu` and the
+    /// other presets derive from it and must not take the default with them.
+    /// Neither base is its neighbour, so the order is read here rather than
+    /// through `assert_registered_after`, which also pins the slot.
     #[test]
     fn test_radial_menu_is_registered_after_its_bases() {
         let lib = include_str!("lib.rs");
         let radial = include_str!("radial_menu.rs");
         assert!(lib.contains("\npub mod radial_menu;"));
         assert!(lib.contains("\n    radial_menu::*,"));
-        crate::assert_registered_after(
-            "crate::radial_menu::script_mod(vm);",
-            &["crate::pie_menu::script_mod(vm);", "crate::gauss_view::script_mod(vm);", "crate::badge::script_mod(vm);"],
-        );
+        let calls = crate::widgets_mod_source();
+        let call = "crate::radial_menu::script_mod(vm);";
+        let at = calls.find(call).unwrap_or_else(|| panic!("{call} is not registered"));
+        for base in ["crate::gauss_view::script_mod(vm);", "crate::badge::script_mod(vm);"] {
+            let base_at = calls.find(base).unwrap_or_else(|| panic!("{base} is not registered"));
+            assert!(base_at < at, "{base} must register before {call}");
+        }
         assert!(radial.contains("mod.widgets.RadialMenuBase = #(RadialMenu::register_widget(vm))"));
         assert_eq!(radial.matches("set_type_default() do mod.widgets.RadialMenuBase").count(), 1);
+        assert!(radial.contains("mod.widgets.PieMenu = mod.widgets.RadialMenu{"), "the ring in its field is a preset, not a type");
     }
 }
 
@@ -1169,8 +1288,8 @@ mod floating_action_registration_tests {
 #[cfg(test)]
 mod hamburger_menu_registration_tests {
     /// The menu is composed of a drawer, a popover, a nav list and a burger
-    /// button, so it registers after all four, directly after the drawer,
-    /// which lands last.
+    /// button, so it registers after all four, directly after the dialog a
+    /// drawer is a preset of, which lands last.
     #[test]
     fn test_hamburger_menu_is_registered_after_its_bases() {
         let lib = include_str!("lib.rs");
@@ -1180,7 +1299,7 @@ mod hamburger_menu_registration_tests {
         crate::assert_registered_after(
             "crate::hamburger_menu::script_mod(vm);",
             &[
-                "crate::drawer::script_mod(vm);",
+                "crate::dialog::script_mod(vm);",
                 "crate::popover::script_mod(vm);",
                 "crate::nav_list::script_mod(vm);",
                 "crate::button::script_mod(vm);",
@@ -1225,7 +1344,7 @@ mod line_menu_registration_tests {
         crate::assert_registered_after(
             "crate::line_menu::script_mod(vm);",
             &[
-                "crate::scroll_more::script_mod(vm);",
+                "crate::scroll_fade::script_mod(vm);",
                 "crate::nav_list::script_mod(vm);",
                 "crate::pill_nav::script_mod(vm);",
             ],

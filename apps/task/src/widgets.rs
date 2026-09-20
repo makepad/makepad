@@ -366,7 +366,11 @@ impl AggregateGraph {
             self.draw_grid.color = item.color;
             self.draw_grid.draw_abs(cx, Rect {pos: origin + dvec2(0.0, 4.0), size: dvec2(7.0, 7.0)});
             self.draw_text.color = self.color_text;
-            self.draw_text.draw_abs(cx, origin + dvec2(13.0, 0.0), &item.label);
+            self.draw_text.draw_abs(
+                cx,
+                origin + dvec2(13.0, 0.0),
+                &format!("{} {}", item.label, item.value),
+            );
         }
     }
 

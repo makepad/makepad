@@ -406,6 +406,20 @@ impl CaptureGauss {
     }
 }
 
+/// A capture's own gauss pyramid — the blur an app hosted in a texture of
+/// its own gets when it asks for the window's ([`request_window_gauss`]):
+/// built from the APP'S frame, never the window's, and recorded into the
+/// app's pass tree, so the result is baked into the app's texture and the
+/// host only composites that.
+///
+/// Same shape as the `Window`'s gauss frame: when something asked for it
+/// last frame, the app's body renders into a scene pass (sized and shifted
+/// like the capture), the pyramid is built from that at `end`, and the
+/// scene is drawn back into the capture under the app's overlays. Frames
+/// nobody asks for cost nothing: the body records straight into the
+/// capture. A request that appears or disappears repaints the capture once
+/// (`end` returns `true`), the way the window repaints itself.
+
 // DRAW-ORDER RULE FOR GLASS SURFACES
 // -----------------------------------
 // Gauss/lens surfaces render their refraction overlay in a LATER pass that

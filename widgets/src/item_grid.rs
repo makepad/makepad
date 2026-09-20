@@ -860,7 +860,7 @@ impl ItemGrid {
     ///
     /// `visible` is the part of the grid that is actually on screen and
     /// `claimed` is where whatever took the press already is, if anything
-    /// took it. Two things stop a press from being the grid's. A point
+    /// took it. Three things stop a press from being the grid's. A point
     /// outside the visible part is not in the grid at all, however far the
     /// authored rect reaches — inside a page that scrolls, that rect runs
     /// on up behind whatever stands above the page, and a press on a field
@@ -870,13 +870,31 @@ impl ItemGrid {
     /// it. Everything the grid contains — the bar, the rows, the faces —
     /// lies within it, so a claim from one of those is the grid's own and
     /// the keyboard stays.
-    pub fn keeps_keys(visible: Rect, claimed: Option<Rect>, point: DVec2) -> bool {
+    ///
+    /// `held_outside` is the third, and it is the app-wide pointer-capture
+    /// rule: a control that is dragged continuously locks the pointer, and
+    /// nothing else may take a press, a hover or a FOCUS from that pointer
+    /// until the release. A press arriving while a slider, a scroll bar or a
+    /// resizer holds the mouse is handed straight off the capture list and
+    /// marks nothing on the event, so it reaches here looking exactly like
+    /// bare background — which is why the two rects above cannot see it and
+    /// the capture list has to be asked. It is consulted ONLY when nothing
+    /// claimed the press: a claim is the better answer when there is one,
+    /// and the grid's own layout and bar capture on the way past, so reading
+    /// the capture list first would refuse the keyboard on every ordinary
+    /// press.
+    pub fn keeps_keys(
+        visible: Rect,
+        claimed: Option<Rect>,
+        point: DVec2,
+        held_outside: bool,
+    ) -> bool {
         if !visible.contains(point) {
             return false;
         }
         match claimed {
             Some(rect) => rect.is_inside_of(visible),
-            None => true,
+            None => !held_outside,
         }
     }
 
@@ -897,7 +915,12 @@ impl ItemGrid {
             return;
         };
         let claimed = (!taken.is_empty()).then(|| taken.clipped_rect(cx));
-        if Self::keeps_keys(self.area.clipped_rect(cx), claimed, abs) {
+        // The grid and the layout inside it are both `mine`: a press either
+        // of them holds is the grid's own press and not an outside one.
+        let held_outside = cx
+            .fingers
+            .is_mouse_held_outside(&[self.area, self.grid.area()]);
+        if Self::keeps_keys(self.area.clipped_rect(cx), claimed, abs, held_outside) {
             cx.set_key_focus(self.area);
         }
     }
@@ -1607,22 +1630,34 @@ mod tests {
         let visible = rect(0.0, 100.0, 300.0, 200.0);
         // The ordinary press: inside the part on screen, nothing else
         // holding it.
-        assert!(ItemGrid::keeps_keys(visible, None, dvec2(150.0, 150.0)));
+        assert!(ItemGrid::keeps_keys(
+            visible,
+            None,
+            dvec2(150.0, 150.0),
+            false
+        ));
         // The rest of the authored rect — in a page that scrolls, the part
         // that has gone up behind whatever stands above the page. A press
         // there belongs to whatever is drawn there.
-        assert!(!ItemGrid::keeps_keys(visible, None, dvec2(150.0, 40.0)));
+        assert!(!ItemGrid::keeps_keys(
+            visible,
+            None,
+            dvec2(150.0, 40.0),
+            false
+        ));
         // A claim from inside the grid is the grid's own: the bar, a row,
         // the grid itself having taken a press on an item.
         assert!(ItemGrid::keeps_keys(
             visible,
             Some(rect(290.0, 100.0, 10.0, 200.0)),
-            dvec2(295.0, 150.0)
+            dvec2(295.0, 150.0),
+            false
         ));
         assert!(ItemGrid::keeps_keys(
             visible,
             Some(visible),
-            dvec2(150.0, 150.0)
+            dvec2(150.0, 150.0),
+            false
         ));
         // A sheet or a menu over the top of the grid is not inside it, and
         // the press was for that: taking the keyboard here would leave what
@@ -1630,8 +1665,35 @@ mod tests {
         assert!(!ItemGrid::keeps_keys(
             visible,
             Some(rect(100.0, 50.0, 200.0, 120.0)),
-            dvec2(150.0, 150.0)
+            dvec2(150.0, 150.0),
+            false
         ));
+    }
+
+    /// The app-wide pointer-capture rule, on the one press-driven thing the
+    /// grid does outside its own hit test.
+    ///
+    /// A press that arrives while a slider, a scroll bar or a resizer holds
+    /// the mouse is handed off the capture list and marks NOTHING on the
+    /// event, so it reaches `claim_keys` looking like bare background. The
+    /// grid must not take the keyboard off the control being dragged.
+    #[test]
+    fn a_press_another_control_holds_does_not_take_the_keyboard() {
+        let visible = rect(0.0, 100.0, 300.0, 200.0);
+        let point = dvec2(150.0, 150.0);
+        assert!(
+            ItemGrid::keeps_keys(visible, None, point, false),
+            "the same press on an unheld pointer is the grid's"
+        );
+        assert!(
+            !ItemGrid::keeps_keys(visible, None, point, true),
+            "the keyboard was taken off a control mid-drag"
+        );
+        // A press something inside the grid DID claim is still the grid's,
+        // whatever the capture list says: the grid's own layout and bar
+        // capture on the way past, so reading the capture list first would
+        // refuse the keyboard on every ordinary press.
+        assert!(ItemGrid::keeps_keys(visible, Some(visible), point, true));
     }
 
     /// The keyboard rule is asked the same question by a finger as by a

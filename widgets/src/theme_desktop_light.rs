@@ -447,11 +447,11 @@ script_mod! {
         color_on_error: #xFFFFFFFF
         color_error_container: #xFAD1D1FF
         color_on_error_container: #x350909FF
-        color_on_warning: #xFFFFFFFF
+        color_on_warning: #x392905FF
         color_warning_container: #xFDEFCEFF
         color_on_warning_container: #x392905FF
         color_success: #x2E9E53FF
-        color_on_success: #xFFFFFFFF
+        color_on_success: #x000000FF
         color_success_container: #xD6F5E0FF
         color_on_success_container: #x0E2F19FF
         color_info: #x1F61ADFF
@@ -465,13 +465,13 @@ script_mod! {
         color_surface: theme.color_bg_app
         color_surface_container: theme.color_fg_app
         color_surface_container_low: mix(theme.color_bg_app, theme.color_fg_app, 0.5)
-        color_surface_container_high: theme.color_opaque_d_1
-        color_surface_container_highest: theme.color_opaque_d_2
+        color_surface_container_high: mix(theme.color_fg_app, #0, 0.15)
+        color_surface_container_highest: mix(theme.color_fg_app, #0, 0.25)
         color_surface_container_lowest: #xFFFFFFFF
-        color_surface_dim: theme.color_opaque_d_1
-        color_surface_bright: theme.color_opaque_u_3
-        color_on_surface: theme.color_text
-        color_on_surface_variant: theme.color_d_3
+        color_surface_dim: mix(theme.color_fg_app, #0, 0.15)
+        color_surface_bright: mix(theme.color_fg_app, #F, 0.35)
+        color_on_surface: #x000000BF
+        color_on_surface_variant: #x00000099
         color_outline: theme.color_d_2
         color_outline_variant: theme.color_d_1
         color_inverse_surface: theme.color_opaque_d_5

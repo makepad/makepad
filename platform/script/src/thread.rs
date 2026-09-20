@@ -111,6 +111,9 @@ pub struct ScriptThread {
     /// Base of the CURRENT slot frame (see CallFrame::prev_slot_base).
     pub(crate) slot_base: usize,
     pub(crate) instruction_limit_remaining: Option<usize>,
+    /// The innermost scope when the root frame returned, kept alive so
+    /// the body can hand it to host->script calls.
+    pub(crate) root_end_scope: Option<ScriptObjectRef>,
     pub trap: ScriptTrapInner,
     //pub(crate) last_err: ScriptValue,
     pub(crate) json_parser: JsonParserThread,
@@ -122,6 +125,7 @@ impl ScriptThread {
         Self {
             thread_id,
             is_paused: false,
+            root_end_scope: None,
             //last_err: NIL,
             // pre-reserve the hot stacks so steady-state execution never
             // pays Vec growth in the interpreter loop

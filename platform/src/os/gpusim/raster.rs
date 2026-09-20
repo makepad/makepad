@@ -1325,7 +1325,7 @@ impl Cx {
     ) {
         let draw_order_len = self.draw_lists[draw_list_id].draw_item_order_len();
         // Exploded z-layer view: z is the call's nesting depth, not paint order.
-        let sploded = self.passes[draw_pass_id].sploded.is_some_and(|p| p.depth_layers);
+        let sploded = self.passes[draw_pass_id].sploded.is_some();
 
         for order_index in 0..draw_order_len {
             let uniforms_gen = self.next_uniform_gen();
@@ -1612,15 +1612,11 @@ impl Cx {
                 sh.mapping.geometry_stride_bytes()
             };
 
-            let instances_data = match draw_item
-                .retained_instances
-                .as_ref()
-                .map(|v| v.data())
-                .or(draw_item.instances.as_deref())
-            {
-                Some(data) => data,
-                None => continue,
-            };
+            let instances_data = draw_item.instances.as_deref().unwrap_or(&[]);
+            let retained_instances = draw_item.retained_instances.as_ref();
+            if retained_instances.is_none() && instances_data.is_empty() {
+                continue;
+            }
 
             let total_instance_slots = sh.mapping.instances.total_slots;
             if total_instance_slots == 0 {
@@ -1636,11 +1632,17 @@ impl Cx {
                 item.instance_upload_pending = false;
                 item.retained_gpu_evicted = false;
                 item.retained_instance_id = item.retained_instances.as_ref().map_or(0, |v| v.id());
-            item.resident_schema = item.retained_schema;
-            item.consumed_instance_id = item.retained_instance_id;
-                    item.consumed_schema = item.resident_schema;
-            item.consumed_serial=self.textures.1.serials.submitted.load(std::sync::atomic::Ordering::Acquire);
-            item.consumed_uniforms_gen=item.kind.draw_call().map_or(0,|call|call.uniforms_gen);
+                item.resident_schema = item.retained_schema;
+                item.consumed_instance_id = item.retained_instance_id;
+                item.consumed_schema = item.resident_schema;
+                item.consumed_serial = self
+                    .textures
+                    .1
+                    .serials
+                    .submitted
+                    .load(std::sync::atomic::Ordering::Acquire);
+                item.consumed_uniforms_gen =
+                    item.kind.draw_call().map_or(0, |call| call.uniforms_gen);
                 if let Some(call) = item.kind.draw_call_mut() {
                     call.instance_dirty = false;
                 }
@@ -1652,7 +1654,15 @@ impl Cx {
                     draw_item_id,
                     sh,
                     draw_call,
-                    instances_data,
+                    &retained_instances.map_or_else(
+                        || instances_data.to_vec(),
+                        |publication| {
+                            publication
+                                .data_slices(0..publication.float_len())
+                                .flat_map(|(_, data)| data.iter().copied())
+                                .collect()
+                        },
+                    ),
                     instance_count,
                 );
             }
@@ -1708,7 +1718,17 @@ impl Cx {
 
             for (slot, &inst_idx) in submitted.iter().enumerate() {
                 let inst_offset = inst_idx * total_instance_slots;
-                let inst_slice = &instances_data[inst_offset..inst_offset + total_instance_slots];
+                let inst_slice = if let Some(publication) = retained_instances {
+                    // Segment boundaries are whole instance records. Read the
+                    // record directly without materializing the publication.
+                    publication
+                        .data_slices(inst_offset..inst_offset + total_instance_slots)
+                        .next()
+                        .unwrap()
+                        .1
+                } else {
+                    &instances_data[inst_offset..inst_offset + total_instance_slots]
+                };
                 let inst_base = slot * vertex_count;
 
                 let mut decoded_geom = vec![0.0f32; geom_slots.max(1)];

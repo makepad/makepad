@@ -250,6 +250,11 @@ impl X11Cx {
                 cx.dpi_override_scale(&mut e.abs, e.window_id);
                 cx.call_event_handler(&Event::Scroll(e.into()))
             }
+            XlibEvent::Pinch(mut e) => {
+                let mut cx = self.cx.borrow_mut();
+                cx.dpi_override_scale(&mut e.abs, e.window_id);
+                cx.call_event_handler(&Event::Pinch(e))
+            }
             XlibEvent::WindowDragQuery(mut e) => {
                 let mut cx = self.cx.borrow_mut();
                 cx.dpi_override_scale(&mut e.abs, e.window_id);
@@ -310,10 +315,14 @@ impl X11Cx {
             XlibEvent::Timer(e) => {
                 let mut cx = self.cx.borrow_mut();
                 if e.timer_id == 0 {
-                    if SignalToUI::check_and_clear_ui_signal() {
+                    let internal_signal = SignalToUI::check_and_clear_internal_signal();
+                    let ui_signal = SignalToUI::check_and_clear_ui_signal();
+                    if internal_signal || ui_signal {
                         cx.handle_termination_signal();
                         cx.handle_media_signals();
                         cx.handle_script_signals();
+                    }
+                    if ui_signal {
                         cx.call_event_handler(&Event::Signal);
                     }
                     if SignalToUI::check_and_clear_action_signal() {

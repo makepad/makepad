@@ -140,10 +140,20 @@ fn derive_script_impl_inner(
                 .iter()
                 .any(|a| a.name == "live" || a.name == "apply_default")
             {
-                // Runtime widget state survives a stylesheet reapply. Explicit
+                // Runtime widget state survives a stylesheet reapply and a
+                // Rebake (`script_mod` re-run with unchanged DSL). Explicit
                 // edits and ordinary source reloads still update the property.
+                // `#[apply_state]` is the stylesheet-reapply mark; `#[visible]`
+                // / `#[imperative]` mark fields whose canonical mutation path
+                // is an imperative setter sharing storage with the DSL value.
                 let preserve_state = field.attrs.iter().any(|a| a.name == "apply_state");
-                if preserve_state { tb.add("if !matches!(apply, Apply::ScriptReapply) {"); }
+                let imperative = field
+                    .attrs
+                    .iter()
+                    .any(|a| a.name == "imperative" || a.name == "visible");
+                if preserve_state || imperative {
+                    tb.add("if !apply.preserves_runtime_state() {");
+                }
                 tb.add("{ let mut __field_value = vm.bx.heap.value_for_apply(value, id!(")
                     .ident(&field.name)
                     .add(").into(), apply);");
@@ -163,7 +173,9 @@ fn derive_script_impl_inner(
                     .add(",vm, apply, scope, v);");
                 tb.add("}");
                 tb.add("}");
-                if preserve_state { tb.add("}"); }
+                if preserve_state || imperative {
+                    tb.add("}");
+                }
             }
             if field
                 .attrs

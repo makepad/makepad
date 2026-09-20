@@ -78,8 +78,13 @@ pub enum ControlKind {
 }
 
 /// Every story, in navigator order.
+///
+/// Read off the Rust tables, never off the script heap: the navigator, the
+/// search, the story count and the coverage page's "is this documented"
+/// column all come through here, and all of them work with no story template
+/// evaluated at all. That is what lets the templates be lazy.
 pub fn all() -> impl Iterator<Item = &'static Story> {
-    crate::stories::tables().iter().flat_map(|table| table.iter())
+    crate::stories::modules().iter().flat_map(|file| file.stories.iter())
 }
 
 /// The story under this key. A key that no longer names a page finds the
@@ -112,8 +117,9 @@ pub const MOVED: &[(&str, &str)] = &[
     ("navigation/adaptiveview/overview", "layout/layout/responsive"),
     ("containers/grid/overview", "layout/grid/overview"),
     ("containers/masonry/overview", "layout/masonry/overview"),
-    ("containers/splitpane/overview", "layout/splitpane/overview"),
-    ("containers/splitter/overview", "layout/splitpane/overview"),
+    ("containers/splitpane/overview", "layout/splitter/overview"),
+    ("layout/splitpane/overview", "layout/splitter/overview"),
+    ("containers/splitter/overview", "layout/splitter/overview"),
     ("containers/dock/overview", "layout/dock/overview"),
     ("containers/alignscroll/overview", "layout/scrolling/overview"),
     ("containers/scrollbar/overview", "layout/scrolling/overview"),
@@ -185,6 +191,7 @@ pub const MOVED: &[(&str, &str)] = &[
     ("overlay/messages/overview", "overlay/tip/overview"),
     ("overlay/nesting/overview", "overlay/popover/overview"),
     ("overlay/modal/overview", "overlay/dialog/modal"),
+    ("overlay/drawer/overview", "overlay/dialog/drawer"),
     // Feedback
     ("feedback/level-meter/overview", "feedback/progress/level-meter"),
     // Collections
@@ -332,7 +339,7 @@ mod tests {
                 ("Layout", &["Overview", "Responsive"]),
                 ("Grid", &["Overview"]),
                 ("Masonry", &["Overview"]),
-                ("SplitPane", &["Overview"]),
+                ("Splitter", &["Overview"]),
                 ("Dock", &["Overview"]),
                 ("Scrolling", &["Overview", "Marks and shadows"]),
                 ("Divider", &["Overview"]),
@@ -355,7 +362,7 @@ mod tests {
             "Text",
             &[
                 ("Label", &["Overview", "Text styles"]),
-                ("TextFlow", &["Overview", "Html", "Markdown"]),
+                ("TextFlow", &["Overview", "Marked spans", "Html", "Markdown"]),
                 ("RichTextEditor", &["Overview"]),
                 ("CodeBlock", &["Overview"]),
                 ("Marquee", &["Overview"]),
@@ -391,7 +398,7 @@ mod tests {
                 ("DatePicker", &["Overview", "Calendar"]),
                 ("TimePicker", &["Overview"]),
                 ("ColorPicker", &["Overview"]),
-                ("Dropzone", &["Overview"]),
+                ("Dropzone", &["Overview", "Well states"]),
                 ("Form", &["Overview"]),
                 ("PropertyInspector", &["Overview"]),
             ],
@@ -404,6 +411,7 @@ mod tests {
                 ("Select", &["Overview", "Combo box"]),
                 ("Chip", &["Overview"]),
                 ("WheelPicker", &["Overview"]),
+                ("SlidingRuler", &["Overview"]),
                 ("ColumnPicker", &["Overview"]),
                 ("SvgSelect", &["Overview"]),
             ],
@@ -430,8 +438,7 @@ mod tests {
                 ("Menu", &["Overview"]),
                 ("PieMenu", &["Overview", "Radial menu"]),
                 ("CommandPalette", &["Overview"]),
-                ("Dialog", &["Overview", "Modal"]),
-                ("Drawer", &["Overview"]),
+                ("Dialog", &["Overview", "Modal", "Drawer"]),
                 ("FloatingPanel", &["Overview"]),
                 ("Tour", &["Overview"]),
             ],
@@ -442,7 +449,7 @@ mod tests {
                 ("Alert", &["Overview"]),
                 ("Toast", &["Overview"]),
                 ("Progress", &["Overview", "Level meter"]),
-                ("Spinner", &["Overview"]),
+                ("Spinner", &["Overview", "Stopped, and the comet"]),
                 ("Placeholder", &["Overview"]),
                 ("EmptyState", &["Overview"]),
             ],

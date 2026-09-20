@@ -355,7 +355,22 @@ pub fn define_makepad_text_view() -> *const Class {
             sel.location as usize,
             (sel.location + sel.length) as usize,
         );
-        IosApp::send_text_selection_changed(text, char_start, char_end);
+        // Marked text is the keyboard's composition (kana awaiting conversion and
+        // the like). Report it so the widget treats those bytes as the keyboard's
+        // until it commits, instead of seeing them as plain typed text.
+        let marked_range: ObjcId = msg_send![view, markedTextRange];
+        let composition = if marked_range == nil {
+            None
+        } else {
+            let document_start: ObjcId = msg_send![view, beginningOfDocument];
+            let marked_start: ObjcId = msg_send![marked_range, start];
+            let marked_end: ObjcId = msg_send![marked_range, end];
+            let start: i64 = msg_send![view, offsetFromPosition: document_start toPosition: marked_start];
+            let end: i64 = msg_send![view, offsetFromPosition: document_start toPosition: marked_end];
+            (start >= 0 && end > start)
+                .then(|| utf16_indices_to_char_offsets(&text, start as usize, end as usize))
+        };
+        IosApp::send_text_selection_changed(text, char_start, char_end, composition);
     }
 
     extern "C" fn text_view_did_change(this: &Object, _: Sel, _tv: ObjcId) {

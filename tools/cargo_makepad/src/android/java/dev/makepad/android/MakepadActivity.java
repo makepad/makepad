@@ -1454,7 +1454,8 @@ public class MakepadActivity
     @Override
     @SuppressWarnings("deprecation")
     public void onBackPressed() {
-        super.onBackPressed();
+        // Navigation is handled asynchronously by the Makepad UI. The superclass
+        // would finish/background this activity before that UI can dismiss an overlay.
         MakepadNative.onBackPressed();
     }
 

@@ -149,7 +149,7 @@ impl CxVulkan {
         } {
             Ok(semaphore) => semaphore,
             Err(e) => {
-                self.destroy_texture_resource(resource);
+                self.destroy_uncached_texture_resource(resource);
                 return Err(format!("create imported timeline: {e:?}"));
             }
         };
@@ -164,7 +164,7 @@ impl CxVulkan {
         };
         if let Err(e) = result {
             unsafe { self.device.destroy_semaphore(semaphore, None) };
-            self.destroy_texture_resource(resource);
+            self.destroy_uncached_texture_resource(resource);
             return Err(format!("import timeline FD: {e:?}"));
         }
         let _ = shared.semaphore_fd.into_raw_fd();
@@ -176,7 +176,7 @@ impl CxVulkan {
             Ok(value) if value >= INITIAL_WRITE && value < u64::MAX => value + (value & 1),
             result => {
                 unsafe { self.device.destroy_semaphore(semaphore, None) };
-                self.destroy_texture_resource(resource);
+                self.destroy_uncached_texture_resource(resource);
                 return Err(format!("invalid imported timeline state: {result:?}"));
             }
         };
@@ -288,7 +288,7 @@ impl CxVulkan {
             unsafe { self.device.destroy_semaphore(image.semaphore, None) };
         }
         if let Some(resource) = self.textures.remove(&key) {
-            self.destroy_texture_resource(resource);
+            self.destroy_texture_resource_now(resource);
         }
     }
 
@@ -348,6 +348,7 @@ impl CxVulkan {
             image: resource.image,
             memory: resource.memory,
             view,
+            mip_levels: 1,
             face_views: [vk::ImageView::null(); 6],
             width: resource.width,
             height: resource.height,
@@ -553,7 +554,7 @@ impl CxVulkan {
     pub(super) fn destroy_shared_state(&mut self) {
         #[cfg(linux_direct)]
         for (_, _, resource) in std::mem::take(&mut self.desktop.shared.snapshots) {
-            self.destroy_texture_resource(resource);
+            self.destroy_uncached_texture_resource(resource);
         }
         for (_, image) in self.desktop.shared.images.drain() {
             unsafe { self.device.destroy_semaphore(image.semaphore, None) };
@@ -719,6 +720,7 @@ impl CxVulkan {
                     image,
                     memory,
                     view,
+                    mip_levels: 1,
                     face_views: [vk::ImageView::null(); 6],
                     width,
                     height,
@@ -912,7 +914,7 @@ impl CxVulkan {
                 self.desktop.shared.signals.clear();
                 self.retire_shared_texture(key);
                 if let Some(resource) = self.textures.remove(&key) {
-                    self.destroy_texture_resource(resource);
+                    self.destroy_texture_resource_now(resource);
                 }
                 return Err(error);
             }
@@ -997,7 +999,7 @@ impl CxVulkan {
         if self.desktop.shared.quiesce_pending {
             for (key, source_key, resource) in std::mem::take(&mut self.desktop.shared.snapshots) {
                 if let Some(old) = self.textures.remove(&key) {
-                    self.destroy_texture_resource(old);
+                    self.destroy_uncached_texture_resource(old);
                 }
                 self.desktop.shared.frames.remove(&key);
                 if let Some(shared) = self.desktop.shared.images.get_mut(&source_key) {
@@ -1008,7 +1010,7 @@ impl CxVulkan {
                         && !cx.textures.0.is_free(key.0 .0)
                 });
                 if !live {
-                    self.destroy_texture_resource(resource);
+                    self.destroy_uncached_texture_resource(resource);
                     continue;
                 }
                 let texture = &mut cx.textures[key.0];
@@ -1205,7 +1207,7 @@ impl CxVulkan {
         })();
         if let Err(error) = prepared {
             for (_, _, resource) in snapshots {
-                self.destroy_texture_resource(resource);
+                self.destroy_uncached_texture_resource(resource);
             }
             return Err(error);
         }

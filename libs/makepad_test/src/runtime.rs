@@ -99,15 +99,6 @@ impl TestConfig {
 
         let mut env = HashMap::new();
         env.insert("RUST_BACKTRACE".to_string(), "1".to_string());
-        // `MAKEPAD_TEST_TARGET_DIR` builds every package under test into one
-        // shared target dir, so a run over many suites compiles the platform
-        // once. Unset, the package builds where cargo would put it anyway.
-        if let Some(target_dir) = shared_target_dir_from_env() {
-            env.insert(
-                "CARGO_TARGET_DIR".to_string(),
-                target_dir.to_string_lossy().to_string(),
-            );
-        }
 
         Ok(Self {
             package_name,
@@ -341,22 +332,6 @@ impl TestApp {
             }
             thread::sleep(self.poll_interval());
         }
-    }
-
-    /// Every log line the app has written so far, oldest first, so a test
-    /// can assert on startup output (a missing template, a script error)
-    /// rather than only wait for one line to appear.
-    pub fn logs(&self) -> Vec<String> {
-        match self.try_logs() {
-            Ok(lines) => lines,
-            Err(err) => panic_for_error(err),
-        }
-    }
-
-    /// The fallible form of [`Self::logs`].
-    pub fn try_logs(&self) -> TestResult<Vec<String>> {
-        self.ensure_running()?;
-        Ok(self.client().log_since(0)?.lines)
     }
 
     /// Raw escape hatch: replay protocol events through the remote input
@@ -641,30 +616,6 @@ impl Locator {
         }
         Err(TestError::new(format!(
             "timed out waiting for selector `{query}` to match {expected} visible widgets"
-        )))
-    }
-
-    /// Like `wait_count`, but satisfied by `min` or more matches: for lists
-    /// whose exact length a test does not control. Same loop, same timeout
-    /// and poll interval as `wait_count`.
-    pub fn wait_count_at_least(self, min: usize) -> Self {
-        if let Err(err) = self.try_wait_count_at_least(min) {
-            panic_for_error(err);
-        }
-        self
-    }
-
-    pub fn try_wait_count_at_least(&self, min: usize) -> TestResult<()> {
-        let query = self.selector.describe();
-        let deadline = Instant::now() + self.app.action_timeout();
-        while Instant::now() < deadline {
-            if self.app.query_widgets(&self.selector, true)?.len() >= min {
-                return Ok(());
-            }
-            thread::sleep(self.app.poll_interval());
-        }
-        Err(TestError::new(format!(
-            "timed out waiting for selector `{query}` to match at least {min} visible widgets"
         )))
     }
 
@@ -1201,6 +1152,7 @@ fn studio_msg_name(msg: &StudioToApp) -> &'static str {
         StudioToApp::TextCopy => "TextCopy",
         StudioToApp::TextCut => "TextCut",
         StudioToApp::Scroll(_) => "Scroll",
+        StudioToApp::Pinch(_) => "Pinch",
         StudioToApp::GameInput(_) => "GameInput",
         StudioToApp::Custom(_) => "Custom",
         StudioToApp::None => "None",
@@ -1303,18 +1255,6 @@ fn visible_mode_enabled() -> bool {
     env_truthy("MAKEPAD_TEST_VISIBLE")
 }
 
-/// `MAKEPAD_TEST_TARGET_DIR=<dir>` (any mode) builds every package under test
-/// into one shared Cargo target directory instead of the package's own, so a
-/// run over many suites compiles the gpusim platform once. Failure artifacts
-/// stay under the package. Unset or empty, nothing changes.
-fn shared_target_dir_from_env() -> Option<PathBuf> {
-    std::env::var("MAKEPAD_TEST_TARGET_DIR")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-}
-
 fn env_truthy(name: &str) -> bool {
     std::env::var(name).is_ok_and(|value| {
         matches!(
@@ -1353,8 +1293,8 @@ fn primary_shortcut_modifiers() -> KeyModifiers {
 mod tests {
     use super::{
         button_index, env_duration_ms, primary_window_scope, sanitize_path_component,
-        shared_target_dir_from_env, snapshot_is_visible, snapshot_sort_key,
-        visible_mode_enabled, TestError, TestResult, WidgetMatch,
+        snapshot_is_visible, snapshot_sort_key, visible_mode_enabled, TestError, TestResult,
+        WidgetMatch,
     };
     use crate::{Selector, TestConfig};
     use makepad_studio_protocol::{MouseButton, WidgetSnapshot};
@@ -1429,38 +1369,6 @@ mod tests {
         assert!(!config.env.contains_key("MAKEPAD"));
         assert!(!config.env.contains_key("CARGO_TARGET_DIR"));
         assert_eq!(config.requested_screenshot_dpi(), None);
-    }
-
-    #[test]
-    fn shared_target_dir_env_replaces_the_package_target_dir() {
-        let _guard = ENV_MUTEX
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let old_target = std::env::var("MAKEPAD_TEST_TARGET_DIR").ok();
-        std::env::set_var("MAKEPAD_TEST_TARGET_DIR", " /tmp/shared-target ");
-        assert_eq!(
-            shared_target_dir_from_env(),
-            Some(PathBuf::from("/tmp/shared-target"))
-        );
-        let config =
-            TestConfig::current_package("/tmp/example", "makepad-example", "ui::test").unwrap();
-        std::env::set_var("MAKEPAD_TEST_TARGET_DIR", "   ");
-        assert_eq!(shared_target_dir_from_env(), None);
-        restore_env_var("MAKEPAD_TEST_TARGET_DIR", old_target);
-
-        assert_eq!(
-            config.env.get("CARGO_TARGET_DIR"),
-            Some(&"/tmp/shared-target".to_string())
-        );
-        assert_eq!(
-            config.artifacts_dir,
-            PathBuf::from("/tmp/example")
-                .join("target")
-                .join("makepad_test")
-                .join("makepad-example")
-                .join("ui__test")
-        );
     }
 
     #[test]

@@ -5,8 +5,8 @@ use {
         cx_api::CxOsApi,
         draw_pass::{CxDrawPassParent, DrawPassId},
         event::{
-            DrawEvent, Event, KeyFocusEvent, NextFrameEvent, TextClipboardEvent, TimerEvent,
-            TriggerEvent,
+            DrawEvent, Event, KeyFocusEvent, NextFrameEvent, TextClipboardEvent,
+            TimerEvent, TriggerEvent,
         },
         makepad_live_id::{live_id, LiveId},
         makepad_network::NetworkResponse,
@@ -140,9 +140,7 @@ impl Cx {
         // current inside an orphaned capture; it must not revive that capture.
         // Mark a walk inactive while visiting it so recycled parent cycles
         // cannot keep obsolete passes alive. Each slot is visited once.
-        // Sized by SLOTS, not by live passes: `live` is indexed by slot, the
-        // iterator skips freed slots, and a parent walk can land on one.
-        let slot_cap = self.passes.slot_count();
+        let slot_cap = self.passes.id_iter().count();
         let mut live = vec![None; slot_cap];
         let mut path = Vec::new();
         for draw_pass_id in self.passes.id_iter() {
@@ -479,7 +477,7 @@ impl Cx {
         }
         self.run_view_frame_encode_in_flight = true;
         let sender = self.run_view_frame_results.sender();
-        if let Ok(task) = self.task_pool().submit(crate::thread::Lane::Heavy, move || {
+        if let Ok(task) = self.task_pool().submit_internal(crate::thread::Lane::Heavy, move || {
             let result = Cx::prepare_studio_run_view_rgba(&request, width, height, rgba).and_then(
                 |(width, height, rgba)| {
                     Cx::encode_rgba_as_png(width, height, &rgba).map(|png| RunViewFrameData {
@@ -830,6 +828,16 @@ impl Cx {
                     phase: crate::event::ScrollPhase::None,
                 }));
             }
+            StudioToApp::Pinch(e) => {
+                self.call_event_handler(&Event::Pinch(crate::event::PinchEvent {
+                    abs: self.stdin_pointer_abs(crate::makepad_math::dvec2(e.x, e.y), pos, window_id),
+                    window_id,
+                    scale: e.scale,
+                    phase: e.phase,
+                    modifiers: e.modifiers.into_key_modifiers(),
+                    time: e.time,
+                }));
+            }
             StudioToApp::GameInput(states) => {
                 // Replace wholesale rather than merge: Studio sends the whole
                 // set, so a pad that unplugs disappears by being absent.
@@ -996,6 +1004,7 @@ impl Cx {
             LiveEditTrigger::FileChange => {
                 self.draw_shaders.reset_for_live_reload();
                 self.pending_script_reapply = false;
+                self.live_edit_apply = crate::makepad_script::Apply::Reload;
                 self.call_event_handler(&Event::LiveEdit);
                 self.redraw_all();
                 if self.pending_script_reapply {
@@ -1010,6 +1019,10 @@ impl Cx {
                 // app-level handler that re-broadcasts sets a fresh flag
                 // that lands on the next tick.
                 self.pending_script_reapply = false;
+                // The DSL did not change, so re-apply with `Rebake`: the
+                // re-run only exists to pick up new `SAFE_INSET_PAD_*`
+                // values, and imperative runtime state must survive it.
+                self.live_edit_apply = crate::makepad_script::Apply::Rebake;
                 self.call_event_handler(&Event::LiveEdit);
                 self.redraw_all();
             }
@@ -1223,9 +1236,16 @@ impl Cx {
         if self.event_dispatch_is_reentrant(event) {
             return;
         }
+        crate::remote::note_user_event(self, event);
         #[cfg(any(target_arch = "wasm32", target_os = "linux", test))]
-        if let Some(event) = self.drag_drop.internal_drag_event(event) {
-            match event {
+        if let Some(drag) = self.drag_drop.internal_drag_event(event) {
+            // The pointer event goes out first and the drag one is appended, the
+            // way every other backend orders it: a widget that ends its gesture on
+            // FingerUp never sees one otherwise, and stays stuck mid-drag.
+            self.drag_drop.suspend_internal_drag();
+            self.call_event_handler(event);
+            self.drag_drop.resume_internal_drag();
+            match drag {
                 crate::event::InternalDragEvent::Drag(event) => {
                     self.call_event_handler(&Event::Drag(event));
                     self.drag_drop.cycle_drag();
@@ -1248,6 +1268,7 @@ impl Cx {
         if !matches!(event, Event::Shutdown) {
             crate::thread::service_scheduler(self, event);
         }
+
         // A scrub pin listens for the button-up ITSELF: release must never
         // depend on a widget hit path. Schedule the cursor release here,
         // but do NOT clear the capture's pin flag yet — the flag must
@@ -1268,7 +1289,14 @@ impl Cx {
         // its ray lands on so ordinary dispatch — hover, wheel scrolling,
         // the tweaker's pick — works on the exploded app. (After the pin
         // hook: leaving mid-drag must never strand a hidden cursor.)
-        if self.sploded_intercept(event) {
+        let intercepted = self.sploded_intercept(event);
+        // Settle ownership before widget dispatch, including presses consumed by a
+        // platform overlay so their release cannot cancel a second thing underneath.
+        let widget_owner = self.cancel_scopes.resolve_widget_owner(event, intercepted, |lookup| {
+            self.cancel_scope_resolver.and_then(|resolve| resolve(self, lookup))
+        });
+        self.cancel_scopes.handle_event(event, intercepted, widget_owner);
+        if intercepted {
             return;
         }
         let routed = self.sploded_route(event);
@@ -1360,6 +1388,15 @@ impl Cx {
             if self.post_draw_hook.is_none() {
                 self.post_draw_hook = Some(hook);
             }
+        }
+
+        // The frame's recording boundary: every draw list has finished
+        // recording. The geometries dropped since the last redraw are freed
+        // now, except those a live draw call still names (see
+        // `CxGeometryPool`); the scan runs only when something was dropped.
+        if self.geometries.has_unreleased() {
+            let referenced = self.draw_lists.referenced_geometries();
+            self.geometries.release_unreferenced(&referenced);
         }
 
         if Cx::has_studio_web_socket() {

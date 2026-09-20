@@ -91,7 +91,7 @@ pub fn load_assets(style: DesktopStyle) -> Vec<IconAsset> {
         .iter()
         .map(|icon| IconAsset {
             name: icon.name.into(),
-            svg: icon.variants[style as usize].into(),
+            svg: icon.variants[style.icon_set()].into(),
         })
         .collect();
     #[cfg(not(target_arch = "wasm32"))]
@@ -170,7 +170,7 @@ pub fn source(cx: &mut Cx, style: DesktopStyle, name: &str) -> Arc<str> {
         .get(&key)
         .or_else(|| catalog.sources.get(&(style as usize, "app".into())))
         .cloned()
-        .unwrap_or_else(|| Arc::from(ICONS.last().unwrap().variants[style as usize]))
+        .unwrap_or_else(|| Arc::from(ICONS.last().unwrap().variants[style.icon_set()]))
 }
 
 struct CachedIcon {
@@ -259,6 +259,9 @@ pub struct AppIcon {
     color: Vec4f,
     #[live(1.0)]
     opacity: f32,
+    #[live(true)]
+    #[visible]
+    visible: bool,
     #[rust]
     resolved: DesktopStyle,
     #[rust]
@@ -315,6 +318,9 @@ impl AppIcon {
 impl Widget for AppIcon {
     fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        if !self.visible {
+            return DrawStep::done();
+        }
         let rect = cx.walk_turtle_with_area(&mut self.area, walk);
         self.renderer.draw(
             cx,

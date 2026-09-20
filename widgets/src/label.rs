@@ -299,10 +299,12 @@ pub struct Label {
     #[visible]
     visible: bool,
 
-    // Indicates if this label responds to hover events
-    // It is not turned on by default because it will consume finger events
-    // and prevent other widgets from receiving them, if it is not considered with care
-    // The primary use case for this kind of emitted actions is for tooltips displaying
+    /// Report where the pointer is over this label, for a tooltip to hang
+    /// off. Off by default: it is one more widget asking about every mouse
+    /// move, and most labels have nothing to say about it.
+    ///
+    /// It does NOT consume presses. A label reports the pointer; it never
+    /// owns it. See `handle_event`.
     #[live(false)]
     hover_actions_enabled: bool,
 }
@@ -389,8 +391,23 @@ impl Widget for Label {
 
         let uid = self.widget_uid();
 
-        if self.hover_actions_enabled {
-            match event.hits_with_capture_overload(cx, self.area, true) {
+        // A label REPORTS where the pointer is. It never takes it.
+        //
+        // This asked with `capture_overload`, which buys a hover nothing at
+        // all -- `hits` reads that flag only on a press -- while costing the
+        // label a co-capture of every press that landed on it, and the
+        // `handled` mark of the widget that really took that press along with
+        // it. Under the pointer-capture rule a capture is a claim on the
+        // pointer, and a host that sees one stands its own gesture down: a
+        // plain row of text with hover actions on was enough to stop a
+        // drag-to-scroll dead.
+        //
+        // Hovers leave `hits` on these two events and no others, so asking on
+        // them alone reports exactly what it reported before and takes
+        // nothing. There is no press path left to take anything on.
+        if self.hover_actions_enabled && matches!(event, Event::MouseMove(_) | Event::MouseLeave(_))
+        {
+            match event.hits(cx, self.area) {
                 Hit::FingerHoverIn(fh) => {
                     cx.widget_action(uid, LabelAction::HoverIn(fh.rect));
                 }
@@ -464,5 +481,155 @@ impl LabelRef {
         if let Some(mut inner) = self.borrow_mut() {
             f(inner.text.as_mut())
         }
+    }
+}
+
+/// THE POINTER-CAPTURE RULE, as it applies to a label.
+///
+/// A label with hover actions on REPORTS where the pointer is. It must not
+/// take the pointer to do it: a capture is a claim, and every host that drags,
+/// pans or scrolls stands its own gesture down while something else holds the
+/// mouse. A row of text that quietly captured every press on it was enough to
+/// stop a list scrolling.
+#[cfg(test)]
+mod pointer_capture_tests {
+    #![allow(dead_code)]
+    use super::*;
+    use crate::makepad_draw::cx_draw::CxDraw;
+    use std::cell::Cell;
+
+    const SIZE: Vec2d = Vec2d { x: 800.0, y: 600.0 };
+    const WINDOW: WindowId = WindowId(1, 1);
+
+    struct Target {
+        pass: DrawPass,
+        draw_list: DrawList2d,
+    }
+
+    impl Target {
+        fn new(cx: &mut Cx) -> Self {
+            Target { pass: DrawPass::new(cx), draw_list: DrawList2d::new(cx) }
+        }
+
+        fn draw(&mut self, cx: &mut Cx, root: &WidgetRef) {
+            self.pass.set_size(cx, SIZE);
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&self.pass, None);
+            self.draw_list.begin_always(&mut cx2d);
+            cx2d.begin_root_turtle(SIZE, Layout::flow_down());
+            root.draw_all(&mut cx2d, &mut Scope::empty());
+            cx2d.end_pass_sized_turtle();
+            self.draw_list.end(&mut cx2d);
+            cx2d.end_pass(&self.pass);
+        }
+    }
+
+    fn press(abs: Vec2d) -> Event {
+        Event::MouseDown(MouseDownEvent {
+            abs,
+            button: MouseButton::PRIMARY,
+            window_id: WINDOW,
+            modifiers: KeyModifiers::default(),
+            handled: Cell::new(Area::Empty),
+            time: 0.0,
+        })
+    }
+
+    fn mouse_move(abs: Vec2d) -> Event {
+        Event::MouseMove(MouseMoveEvent {
+            abs,
+            lock_delta: Vec2d::default(),
+            window_id: WINDOW,
+            modifiers: KeyModifiers::default(),
+            time: 0.02,
+            handled: Cell::new(Area::Empty),
+        })
+    }
+
+    fn send(cx: &mut Cx, root: &WidgetRef, event: &Event) -> ActionsBuf {
+        cx.capture_actions(|cx| root.handle_event(cx, event, &mut Scope::empty()))
+    }
+
+    fn middle(cx: &Cx, widget: &WidgetRef) -> Vec2d {
+        let rect = widget.area().rect(cx);
+        assert!(rect.size.x > 0.0 && rect.size.y > 0.0, "not drawn");
+        rect.pos + rect.size * 0.5
+    }
+
+    fn scene(cx: &mut Cx) -> WidgetRef {
+        cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    note := Label{
+                        width: 200.
+                        height: 40.
+                        text: "hover me"
+                        hover_actions_enabled: true
+                    }
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        })
+    }
+
+    fn start(cx: &mut Cx) -> (WidgetRef, WidgetRef) {
+        cx.init_cx_os();
+        cx.with_vm(crate::script_mod);
+        let root = scene(cx);
+        let mut target = Target::new(cx);
+        target.draw(cx, &root);
+        let note = root.widget(cx, ids!(note));
+        (root, note)
+    }
+
+    fn hovered(actions: &Actions, note: &WidgetRef) -> bool {
+        actions
+            .iter()
+            .filter_map(|a| a.as_widget_action())
+            .any(|a| {
+                a.widget_uid == note.widget_uid()
+                    && matches!(a.cast::<LabelAction>(), LabelAction::HoverIn(_))
+            })
+    }
+
+    /// The control. Without this the test below would pass on a label that
+    /// had stopped reporting hovers altogether.
+    #[test]
+    fn a_label_with_hover_actions_on_still_reports_the_hover() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, note) = start(&mut cx);
+        let at = middle(&cx, &note);
+        let actions = send(&mut cx, &root, &mouse_move(at));
+        assert!(hovered(&actions, &note), "the pointer arriving is reported");
+    }
+
+    /// The bug: reporting a hover used to cost a co-capture of every press,
+    /// which under the pointer-capture rule tells every host around it to
+    /// stand its own gesture down.
+    #[test]
+    fn a_press_on_a_label_takes_no_hold_on_the_pointer() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (root, note) = start(&mut cx);
+        let at = middle(&cx, &note);
+        cx.fingers.first_mouse_button = Some((MouseButton::PRIMARY, WINDOW));
+        let event = press(at);
+        send(&mut cx, &root, &event);
+        assert!(
+            !cx.fingers.any_areas_captured(),
+            "a label reports the pointer; it never holds it"
+        );
+        let Event::MouseDown(e) = &event else { unreachable!() };
+        assert!(
+            e.handled.get().is_empty(),
+            "and it does not claim the press out from under whoever the press was for"
+        );
+        cx.fingers.first_mouse_button = None;
     }
 }

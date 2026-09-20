@@ -291,6 +291,10 @@ impl Cx {
                 let (window_id, pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
                 return self.dispatch_studio_msg(msg, window_id, pos);
             }
+            StudioToApp::Pinch(ref e) => {
+                let (window_id, pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
+                return self.dispatch_studio_msg(msg, window_id, pos);
+            }
             // Stdin-specific: window geometry and swapchain management.
             StudioToApp::WindowGeomChange {
                 dpi_factor,
@@ -362,10 +366,14 @@ impl Cx {
                         }
                     }
                 }
-                if SignalToUI::check_and_clear_ui_signal() {
+                let internal_signal = SignalToUI::check_and_clear_internal_signal();
+                let ui_signal = SignalToUI::check_and_clear_ui_signal();
+                if internal_signal || ui_signal {
                     self.handle_termination_signal();
                     self.handle_media_signals();
                     self.handle_script_signals();
+                }
+                if ui_signal {
                     self.call_event_handler(&Event::Signal);
                 }
                 if SignalToUI::check_and_clear_action_signal() {

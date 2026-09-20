@@ -12,8 +12,8 @@ use {
         draw_pass::CxDrawPassPool,
         draw_shader::CxDrawShaders,
         event::{
-            CxDragDrop, CxFingers, CxKeyboard, DrawEvent, Event, NextFrame, Trigger,
-            WindowGeomChangeEvent,
+            CancelScope, CancelScopeKind, CxCancelScopes, CxDragDrop, CxFingers, CxKeyboard, DrawEvent, Event,
+            NextFrame, Trigger, WindowGeomChangeEvent,
         },
         file_dialogs::FileDialogState,
         geometry::CxGeometryPool,
@@ -65,6 +65,13 @@ pub struct Cx {
     pub script_vm: Option<Box<ScriptVmBase>>,
     pub script_data: CxScriptData,
     pub package_root: Option<String>,
+    /// `crate_name` → source directory for a compile-on-device installation,
+    /// from the map beside the executable (`os::cx_native::load_package_paths`).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) package_paths: std::collections::HashMap<String, std::path::PathBuf>,
+    /// Native user-input bookkeeping for the `--remote` interface.
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+    pub(crate) remote_activity: crate::remote::RemoteActivity,
     pub(crate) font_set: crate::font_policy::FontSet,
     pub(crate) font_set_frozen: bool,
 
@@ -122,6 +129,7 @@ pub struct Cx {
     pub(crate) storage_state: StorageState,
 
     pub keyboard: CxKeyboard,
+    pub(crate) cancel_scopes: CxCancelScopes,
     pub fingers: CxFingers,
     pub(crate) ime_area: Area,
     pub keyboard_shift: f64,
@@ -169,17 +177,26 @@ pub struct Cx {
     pub pending_script_reapply: bool,
 
     /// When true, the next event-loop iteration will fire `Event::LiveEdit`,
-    /// which re-runs `script_mod` and re-applies with `Apply::Reload`. Use
+    /// which re-runs `script_mod` and re-applies with `Apply::Rebake`. Use
     /// this when a primitive heap value (e.g. `mod.widgets.SAFE_INSET_PAD_TOP`)
     /// has changed and needs to be re-baked into widget definitions that
     /// reference it via expressions like `top: (mod.widgets.SAFE_INSET_PAD_TOP)`
     /// — those expressions are only re-evaluated when `script_mod` re-runs.
-    /// `Apply::Reload` clobbers runtime widget state (animator values, etc.),
-    /// so prefer `pending_script_reapply` whenever the change can be modeled
-    /// as a shared-heap-object mutation instead.
+    /// The re-run is still a full-tree walk, so prefer
+    /// `pending_script_reapply` whenever the change can be modeled as a
+    /// shared-heap-object mutation instead.
     pub pending_live_edit_request: bool,
     /// Re-evaluate Splash definitions while preserving imperative widget state.
     pub pending_style_reload: bool,
+
+    /// Which `Apply` variant the pending `Event::LiveEdit` should re-apply
+    /// the freshly re-run `script_mod` value with. A file-change hot reload
+    /// means the DSL actually changed, so the new template wins
+    /// (`Apply::Reload`). A `request_live_edit()` re-bake did not change the
+    /// DSL, so imperative runtime state must survive (`Apply::Rebake`) —
+    /// otherwise every safe-area inset change wipes each `set_text`,
+    /// `set_visible` and animator state in the tree.
+    pub(crate) live_edit_apply: Apply,
 
     /// `WindowGeomChange` events queued up during an event dispatch.
     pub(crate) pending_window_geom_changes: Vec<WindowGeomChangeEvent>,
@@ -233,6 +250,10 @@ pub struct Cx {
     pub widget_tree_dump_callback: Option<fn(&Cx) -> String>,
     pub widget_query_callback: Option<fn(&Cx, &str) -> Vec<String>>,
     pub widget_snapshot_callback: Option<fn(&Cx) -> Vec<WidgetSnapshot>>,
+    /// Selects a cancel scope from the currently active widget hierarchy. The lookup
+    /// returns the newest matching scope for a widget UID. Called only for a new
+    /// Escape/Back press; widgets install this without a platform dependency on them.
+    pub cancel_scope_resolver: Option<fn(&Cx, &dyn Fn(u64) -> Option<u64>) -> Option<u64>>,
     /// The tweaker overlay's remote dispatcher (widgets/src/tweaker.rs).
     /// Registered by the widgets crate at startup, exactly like the widget
     /// tree callbacks above; the /tweak routes in remote.rs delegate here so
@@ -341,6 +362,36 @@ pub enum OsType {
     LinuxDirect,
     #[live(WebParams::default())]
     Web(WebParams),
+}
+
+/// The GPU API this process renders with. On most targets that is the API the
+/// binary was built against (`MAKEPAD=…`). A desktop Linux build with the
+/// `vulkan` cargo feature carries OpenGL ES as well and chooses between them
+/// when its event loop starts (`MAKEPAD_GPU` overrides, see
+/// `os/linux/gpu_preference.rs`); `Cx::gpu_backend` reports the running API
+/// from then on, and the built default before that. An app offers the other
+/// renderer by restarting itself with `MAKEPAD_GPU` set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GpuBackend {
+    Metal,
+    Direct3d11,
+    Vulkan,
+    OpenGl,
+    WebGl,
+    Gpusim,
+}
+
+impl GpuBackend {
+    pub fn name(self) -> &'static str {
+        match self {
+            GpuBackend::Metal => "Metal",
+            GpuBackend::Direct3d11 => "Direct3D 11",
+            GpuBackend::Vulkan => "Vulkan",
+            GpuBackend::OpenGl => "OpenGL",
+            GpuBackend::WebGl => "WebGL",
+            GpuBackend::Gpusim => "simulated GPU",
+        }
+    }
 }
 
 #[derive(Default)]
@@ -673,7 +724,8 @@ impl Cx {
         self.memory_budget_initialized = true;
         let (budget, source) = platform_memory_budget(self.memory_budget_bytes);
         self.memory_budget_bytes = budget;
-        crate::log!(
+        crate::trace!(
+            "memory",
             "memory budget: {} MiB ({})",
             budget / (1024 * 1024),
             source
@@ -766,6 +818,47 @@ impl Cx {
         self.font_set_frozen
     }
 
+    /// Begins a global scope for Escape and Back. Widget operations should use
+    /// [`Self::begin_widget_cancel_scope()`] so visibility and ancestry are handled
+    /// automatically. Global scopes are ordered by activation and have no widget
+    /// visibility check; end or drop one when its operation stops being active.
+    pub fn begin_cancel_scope(&mut self) -> CancelScope {
+        self.cancel_scopes.begin()
+    }
+
+    /// Begins a global scope for only the specified gestures. For widget operations,
+    /// use [`Self::begin_widget_cancel_scope()`] with the desired gesture kind.
+    pub fn begin_cancel_scope_for(&mut self, kind: CancelScopeKind) -> CancelScope {
+        self.cancel_scopes.begin_for(kind)
+    }
+
+    /// Begins a cancel scope owned by a widget. The widgets framework automatically
+    /// excludes hidden or detached owners, and gives descendants priority over their
+    /// ancestors. Keep the scope while the operation remains active, including while
+    /// its page is hidden. `owner` is the widget's nonzero UID, not its reusable named
+    /// ID. Zero is reserved for global scopes. A widgets resolver must be installed
+    /// for a bound scope to receive input.
+    pub fn begin_widget_cancel_scope(&mut self, owner: u64, kind: CancelScopeKind) -> CancelScope {
+        self.cancel_scopes.begin_widget(owner, kind)
+    }
+
+    /// Gives up a scope from [`Self::begin_cancel_scope()`]. Dropping it does the same.
+    pub fn end_cancel_scope(&mut self, scope: CancelScope) {
+        self.cancel_scopes.end(scope)
+    }
+
+    /// Whether the cancel gesture being delivered belongs to `scope`, which is the only
+    /// case in which that scope's owner should act on it.
+    pub fn owns_cancel(&self, scope: &CancelScope) -> bool {
+        self.cancel_scopes.owns_press(scope)
+    }
+
+    /// Whether this physical cancel press was assigned to any scope. Remains true
+    /// after that scope is dropped, so a focused fallback cannot reuse its release.
+    pub fn has_cancel_owner(&self) -> bool {
+        self.cancel_scopes.has_press_owner()
+    }
+
     pub fn new(event_handler: Box<dyn FnMut(&mut Cx, &Event)>) -> Self {
         crate::thread::ui_hang::initialize();
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
@@ -807,7 +900,7 @@ impl Cx {
 
         let net = Arc::new(NetworkRuntime::new(Default::default()));
         net.set_wake_fn(Some(Arc::new(|| {
-            SignalToUI::set_ui_signal();
+            SignalToUI::set_internal_signal();
         })));
 
         let script_std = makepad_script_std::ScriptStd::with_network_runtime(net.clone());
@@ -818,6 +911,10 @@ impl Cx {
         let publications = crate::shared_instances::Publications::new(textures.1.serials.clone());
         let mut cx = Self {
             package_root: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            package_paths: crate::os::cx_native::load_package_paths(),
+            #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+            remote_activity: Default::default(),
             font_set: crate::font_policy::FontSet::target_default(),
             font_set_frozen: false,
             demo_time_repaint: false,
@@ -862,6 +959,7 @@ impl Cx {
             storage_state: StorageState::default(),
 
             keyboard: Default::default(),
+            cancel_scopes: Default::default(),
             fingers: Default::default(),
             drag_drop: Default::default(),
             file_dialogs: Default::default(),
@@ -911,6 +1009,7 @@ impl Cx {
             pending_script_reapply: false,
             pending_style_reload: false,
             pending_live_edit_request: false,
+            live_edit_apply: Apply::Reload,
             pending_window_geom_changes: Default::default(),
             clear_hover_queued: false,
 
@@ -921,6 +1020,7 @@ impl Cx {
             widget_tree_dump_callback: None,
             widget_query_callback: None,
             widget_snapshot_callback: None,
+            cancel_scope_resolver: None,
             tweak_callback: None,
             ai_callback: None,
             net,

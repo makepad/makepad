@@ -51,7 +51,7 @@
 use crate::{
     animator::{Animate, Ease},
     button::ButtonWidgetRefExt,
-    drawer::{Drawer, DrawerWidgetRefExt, PanelEdge, PanelSize},
+    dialog::{Dialog, DialogSize, DialogWidgetRefExt, PanelEdge},
     event::TouchState,
     makepad_derive_widget::*,
     makepad_draw::*,
@@ -197,11 +197,21 @@ pub fn panel_travel(from: f64, to: f64, elapsed: f64, secs: f64, ease: &Ease, re
     from + (to - from) * ease.map((elapsed / secs).max(0.0))
 }
 
+/// The edge a menu's drawer comes from. `PanelEdge.Center` is the card in
+/// the middle of the window, which is not a drawer at all, so a menu given
+/// it keeps to the left, where a menu's drawer is looked for.
+fn drawer_edge(side: PanelEdge) -> PanelEdge {
+    if side.is_edge() {
+        side
+    } else {
+        PanelEdge::Left
+    }
+}
+
 /// The drawer's length along its axis in a pass of `pass`, as the drawer
 /// works it out for the holder it places.
-fn drawer_extent(side: PanelEdge, size: PanelSize, pass: DVec2) -> f64 {
-    let column = side.is_column();
-    size.extent(column).unwrap_or(if column { pass.x } else { pass.y })
+fn drawer_extent(side: PanelEdge, size: DialogSize, pass: DVec2) -> f64 {
+    size.extent(side).unwrap_or(if side.is_column() { pass.x } else { pass.y })
 }
 
 /// Where the drawer's panel is drawn when it stands `v` of the way in, for a
@@ -215,7 +225,7 @@ pub fn drawer_panel_rect(side: PanelEdge, extent: f64, pass: DVec2, v: f64) -> R
     let along = extent * v.max(1.0);
     let short = extent * (1.0 - v.min(1.0));
     match side {
-        PanelEdge::Left => Rect { pos: dvec2(-short, 0.0), size: dvec2(along, pass.y) },
+        PanelEdge::Left | PanelEdge::Center => Rect { pos: dvec2(-short, 0.0), size: dvec2(along, pass.y) },
         PanelEdge::Right => Rect { pos: dvec2(pass.x - along + short, 0.0), size: dvec2(along, pass.y) },
         PanelEdge::Top => Rect { pos: dvec2(0.0, -short), size: dvec2(pass.x, along) },
         PanelEdge::Bottom => Rect { pos: dvec2(0.0, pass.y - along + short), size: dvec2(pass.x, along) },
@@ -331,12 +341,13 @@ script_mod! {
 
     use mod.widgets.*
 
-    mod.widgets.HamburgerMotionBase = #(HamburgerMotion::register_widget(vm))
-
-    /** The part of a hamburger menu's panel that moves: drawn where it rests,
-     * on a list of its own, carried to where the travel has it by that list's
-     * view transform. */
-    mod.widgets.HamburgerMotion = set_type_default() do mod.widgets.HamburgerMotionBase{
+    // The part of the menu's panel that moves: drawn where it rests, on a
+    // list of its own, carried to where the travel has it by that list's
+    // view transform. Kept to this module rather than put under
+    // `mod.widgets`: it is the menu's own plumbing, and a name there is one
+    // an app could build on.
+    let HamburgerMotionBase = #(HamburgerMotion::register_widget(vm))
+    let HamburgerMotion = set_type_default() do HamburgerMotionBase{
         width: Fill
         height: Fit
         flow: Down
@@ -371,7 +382,7 @@ script_mod! {
         close_on_pick: true
         /** which edge the drawer comes from: PanelEdge.Left Right Top Bottom */
         drawer_side: PanelEdge.Left
-        /** how much room the drawer takes: Sm Md Lg Full */
+        /** how much room the drawer takes: Xs Sm Md Lg Xl Full */
         drawer_size: Sm
         /** the drawer's title */
         drawer_title: ""
@@ -414,7 +425,7 @@ script_mod! {
                 flow: Down
                 clip_x: false
                 clip_y: false
-                drop_motion := mod.widgets.HamburgerMotion{
+                drop_motion := HamburgerMotion{
                     // The popover's panel, as a sheet: its fill, bevelled
                     // outline, corners and level-two shadow.
                     drop_sheet := RoundedShadowView{
@@ -459,7 +470,7 @@ script_mod! {
                 flow: Down
                 clip_x: false
                 clip_y: false
-                drawer_motion := mod.widgets.HamburgerMotion{
+                drawer_motion := HamburgerMotion{
                     height: Fill
                     drawer_sheet := Drawer.content{
                         body +: {
@@ -574,10 +585,10 @@ pub struct HamburgerMenu {
     pub hysteresis: f64,
     #[live(true)]
     pub close_on_pick: bool,
-    #[live]
+    #[live(PanelEdge::Left)]
     pub drawer_side: PanelEdge,
-    #[live(PanelSize::Sm)]
-    pub drawer_size: PanelSize,
+    #[live(DialogSize::Sm)]
+    pub drawer_size: DialogSize,
     #[live]
     pub drawer_title: String,
     #[live(240.0)]
@@ -879,7 +890,7 @@ impl HamburgerMenu {
         }
         self.ensure_seeded(cx);
         match self.surface {
-            HamburgerSurface::Drawer => self.part(live_id!(drawer)).as_drawer().open(cx),
+            HamburgerSurface::Drawer => self.part(live_id!(drawer)).as_dialog().open(cx),
             HamburgerSurface::Drop => self.part(live_id!(burger_pop)).as_popover().open(cx),
         }
         self.follow_surfaces_from(cx, from_burger);
@@ -902,7 +913,7 @@ impl HamburgerMenu {
         let open = self.open_surface;
         match open {
             Some(HamburgerSurface::Drawer) => {
-                let drawer = self.part(live_id!(drawer)).as_drawer();
+                let drawer = self.part(live_id!(drawer)).as_dialog();
                 // Asked only when open: a drawer's close hands the keyboard
                 // back to where it was when it opened, and doing that for a
                 // drawer already shut takes it from wherever it is now.
@@ -1021,9 +1032,10 @@ impl HamburgerMenu {
         // Always at a rect of the pass, never filling the holder: the drawer
         // slides the holder in on its first frame, and a panel that followed
         // it would arrive a frame late.
-        let extent = drawer_extent(self.drawer_side, self.drawer_size, pass);
-        let rest = drawer_panel_rect(self.drawer_side, extent, pass, 1.0);
-        let drawn = drawer_panel_rect(self.drawer_side, extent, pass, self.shown(HamburgerSurface::Drawer, now));
+        let side = drawer_edge(self.drawer_side);
+        let extent = drawer_extent(side, self.drawer_size, pass);
+        let rest = drawer_panel_rect(side, extent, pass, 1.0);
+        let drawn = drawer_panel_rect(side, extent, pass, self.shown(HamburgerSurface::Drawer, now));
         let drawer = self.part(live_id!(drawer));
         if let Some(mut sheet) = drawer.widget(cx, ids!(drawer_sheet)).borrow_mut::<View>() {
             sheet.walk = walk_at(rest);
@@ -1100,9 +1112,10 @@ impl HamburgerMenu {
             let v = travel.at(now);
             match travel.surface {
                 HamburgerSurface::Drawer => {
-                    let extent = drawer_extent(self.drawer_side, self.drawer_size, pass);
-                    let rest = drawer_panel_rect(self.drawer_side, extent, pass, 1.0);
-                    transform = rest_to_drawn(rest, drawer_panel_rect(self.drawer_side, extent, pass, v));
+                    let side = drawer_edge(self.drawer_side);
+                    let extent = drawer_extent(side, self.drawer_size, pass);
+                    let rest = drawer_panel_rect(side, extent, pass, 1.0);
+                    transform = rest_to_drawn(rest, drawer_panel_rect(side, extent, pass, v));
                     // Before the draw too, for the text: see `HamburgerMotion`.
                     leaving.set_view_transform_self_only(cx, &transform);
                     let sheet = self.part(live_id!(drawer)).widget(cx, ids!(drawer_sheet));
@@ -1151,10 +1164,9 @@ impl HamburgerMenu {
 
     /// Bring the menu's idea of what is out in line with the surfaces.
     ///
-    /// Read from the surfaces rather than from their reports: a drawer's
-    /// scrim is answered by the modal inside it and by the drawer, under the
-    /// same widget, and a lookup that takes the first report under that
-    /// widget finds the modal's and misses the drawer's.
+    /// Read from the surfaces rather than from their reports, so a close is
+    /// followed however it came about: the scrim, Escape, the close mark, the
+    /// back gesture, or a host that shut the drawer or the popover itself.
     fn follow_surfaces(&mut self, cx: &mut Cx) {
         // A surface that opened itself did so on a press on its anchor,
         // which is the burger.
@@ -1162,7 +1174,7 @@ impl HamburgerMenu {
     }
 
     fn follow_surfaces_from(&mut self, cx: &mut Cx, from_burger: bool) {
-        let drawer_open = self.part(live_id!(drawer)).as_drawer().is_open();
+        let drawer_open = self.part(live_id!(drawer)).as_dialog().is_open();
         let pop_open = self.part(live_id!(burger_pop)).as_popover().is_open();
         let open = self.open_surface;
         match open {
@@ -1301,8 +1313,8 @@ impl HamburgerMenu {
             pop.trigger = popover_trigger_for(self.surface);
         }
         let drawer = self.part(live_id!(drawer));
-        if let Some(mut drawer) = drawer.borrow_mut::<Drawer>() {
-            drawer.side = self.drawer_side;
+        if let Some(mut drawer) = drawer.borrow_mut::<Dialog>() {
+            drawer.side = drawer_edge(self.drawer_side);
             drawer.size = self.drawer_size;
             if drawer.title != self.drawer_title {
                 drawer.set_text(cx, &self.drawer_title);
@@ -1666,9 +1678,9 @@ mod tests {
         // A spring on the way out goes further out, never back across.
         assert!(drawer_panel_rect(PanelEdge::Left, 260.0, pass, -0.1).pos.x < -260.0);
         // A drawer the full size of the window takes the window's length.
-        assert_eq!(drawer_extent(PanelEdge::Left, PanelSize::Full, pass), 800.0);
-        assert_eq!(drawer_extent(PanelEdge::Bottom, PanelSize::Full, pass), 600.0);
-        assert_eq!(drawer_extent(PanelEdge::Right, PanelSize::Sm, pass), 260.0);
+        assert_eq!(drawer_extent(PanelEdge::Left, DialogSize::Full, pass), 800.0);
+        assert_eq!(drawer_extent(PanelEdge::Bottom, DialogSize::Full, pass), 600.0);
+        assert_eq!(drawer_extent(PanelEdge::Right, DialogSize::Sm, pass), 260.0);
     }
 
     /// The drop panel grows away from the button, whichever side the popover
@@ -1744,15 +1756,15 @@ mod tests {
         assert_eq!(format_snapshot(true, Some(HamburgerSurface::Drop)), "collapsed open drop");
     }
 
-    /// Composed of a drawer, a popover and a nav list, so it must register
-    /// after all three.
+    /// Composed of a drawer, which is a dialog on an edge, a popover and a
+    /// nav list, so it must register after all three.
     #[test]
-    fn it_registers_after_the_drawer() {
+    fn it_registers_after_the_dialog() {
         let calls = crate::widgets_mod_source();
         let at = calls
             .find("crate::hamburger_menu::script_mod(vm);")
             .expect("the menu is registered");
-        for base in ["drawer", "popover", "nav_list", "button"] {
+        for base in ["dialog", "popover", "nav_list", "button"] {
             let call = format!("crate::{base}::script_mod(vm);");
             let base_at = calls.find(&call).unwrap_or_else(|| panic!("{call} is not registered"));
             assert!(base_at < at, "{call} must register before the menu");
@@ -1858,7 +1870,7 @@ mod tests {
         assert_eq!(inner.hysteresis, 16.0);
         assert!(inner.close_on_pick);
         assert_eq!(inner.drawer_side, PanelEdge::Left);
-        assert_eq!(inner.drawer_size, PanelSize::Sm);
+        assert_eq!(inner.drawer_size, DialogSize::Sm);
         assert_eq!(inner.drop_width, 240.0);
         assert!(!inner.reduced_motion);
         for name in [ids!(burger), ids!(drawer_nav), ids!(drop_nav)] {
@@ -1867,7 +1879,7 @@ mod tests {
         for name in [live_id!(burger_pop), live_id!(inline_nav), live_id!(drawer)] {
             assert!(!inner.part(name).is_empty(), "no part {name:?}");
         }
-        assert!(inner.part(live_id!(drawer)).borrow::<Drawer>().is_some());
+        assert!(inner.part(live_id!(drawer)).borrow::<Dialog>().is_some());
         assert!(inner.part(live_id!(burger_pop)).borrow::<Popover>().is_some());
         for list in inner.lists(&cx) {
             assert!(list.borrow::<NavList>().is_some(), "a list is not a NavList");
@@ -1912,7 +1924,7 @@ mod tests {
         let pass = dvec2(800.0, 600.0);
         let close = |a: Rect, b: Rect| (a.pos - b.pos).length() < 1e-3 && (a.size - b.size).length() < 1e-3;
         for side in [PanelEdge::Left, PanelEdge::Right, PanelEdge::Top, PanelEdge::Bottom] {
-            let extent = drawer_extent(side, PanelSize::Sm, pass);
+            let extent = drawer_extent(side, DialogSize::Sm, pass);
             let rest = drawer_panel_rect(side, extent, pass, 1.0);
             assert_eq!(rest_to_drawn(rest, rest).v, Mat4f::identity().v, "{side:?} at rest");
             for v in [0.0, 0.3, 0.5, 1.2] {
@@ -2017,17 +2029,17 @@ mod tests {
         assert_eq!(reports(&actions), vec![HamburgerAction::Opened]);
         {
             let inner = root.borrow::<HamburgerMenu>().unwrap();
-            assert!(inner.part(live_id!(drawer)).as_drawer().is_open());
+            assert!(inner.part(live_id!(drawer)).as_dialog().is_open());
             assert!(inner.burger(&cx).as_button().open(), "the bars are a cross");
             assert_eq!(inner.snapshot_value(&cx).as_deref(), Some("collapsed open drawer"));
             // The drawer's own slide is cut to its floor: the menu moves the panel.
-            assert_eq!(inner.part(live_id!(drawer)).borrow::<Drawer>().unwrap().slide_secs, DRAWER_SLIDE_FLOOR_SECS);
+            assert_eq!(inner.part(live_id!(drawer)).borrow::<Dialog>().unwrap().slide_secs, DRAWER_SLIDE_FLOOR_SECS);
         }
         let actions = cx.capture_actions(|cx| menu.close(cx));
         assert_eq!(reports(&actions), vec![HamburgerAction::Closed]);
         {
             let inner = root.borrow::<HamburgerMenu>().unwrap();
-            assert!(!inner.part(live_id!(drawer)).as_drawer().is_open());
+            assert!(!inner.part(live_id!(drawer)).as_dialog().is_open());
             assert!(!inner.burger(&cx).as_button().open(), "the cross is bars again");
         }
         // A close with nothing out reports nothing.
@@ -2043,7 +2055,7 @@ mod tests {
         let inner = root.borrow::<HamburgerMenu>().unwrap();
         assert!(inner.part(live_id!(burger_pop)).as_popover().is_open());
         assert_eq!(inner.snapshot_value(&cx).as_deref(), Some("collapsed open drop"));
-        assert!(!inner.part(live_id!(drawer)).as_drawer().is_open(), "the drawer stayed shut");
+        assert!(!inner.part(live_id!(drawer)).as_dialog().is_open(), "the drawer stayed shut");
     }
 
     /// A panel that is out when the window grows past the breakpoint goes
@@ -2072,7 +2084,7 @@ mod tests {
         assert!(reported.contains(&HamburgerAction::Closed), "{reported:?}");
         assert!(!menu.is_collapsed() && !menu.is_open());
         let inner = root.borrow::<HamburgerMenu>().unwrap();
-        assert!(!inner.part(live_id!(drawer)).as_drawer().is_open());
+        assert!(!inner.part(live_id!(drawer)).as_dialog().is_open());
         assert!(!inner.burger(&cx).as_button().open());
     }
 
@@ -2239,7 +2251,7 @@ mod tests {
         assert_eq!(turn(&root), 1.0, "a cross");
 
         menu.close(&mut cx);
-        assert!(!root.borrow::<HamburgerMenu>().unwrap().part(live_id!(drawer)).as_drawer().is_open(), "the drawer let go at once");
+        assert!(!root.borrow::<HamburgerMenu>().unwrap().part(live_id!(drawer)).as_dialog().is_open(), "the drawer let go at once");
         travel_to(&mut cx, &root, 0.5);
         target.draw(&mut cx, &root, size);
         let v = 1.0 - exit.map(0.5);
@@ -2725,7 +2737,7 @@ mod tests {
             assert!(!menu.is_open(), "{surface:?}");
             {
                 let inner = root.borrow::<HamburgerMenu>().unwrap();
-                assert!(!inner.part(live_id!(drawer)).as_drawer().is_open(), "{surface:?}");
+                assert!(!inner.part(live_id!(drawer)).as_dialog().is_open(), "{surface:?}");
                 assert!(!inner.part(live_id!(burger_pop)).as_popover().is_open(), "{surface:?}");
                 assert!(!inner.burger(&cx).as_button().open(), "{surface:?}: the cross is bars again");
             }

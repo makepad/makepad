@@ -356,6 +356,48 @@ fn mask_for_len(len: usize) -> u32 {
     }
 }
 
+/// What to do with a raw press while the popover is open.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PanelPress {
+    /// In the panel, and nothing else holds the mouse: work the row under
+    /// it, and the press is spent.
+    Row,
+    /// In the panel, but a control that is dragged continuously holds the
+    /// mouse. No row is worked — that control keeps the pointer until the
+    /// release — and the press is spent all the same, since the panel is
+    /// drawn over whatever is under it.
+    Swallow,
+    /// On the chip: the chip's own hit deals with it, this must not.
+    Chip,
+    /// Outside both: the popover closes.
+    Dismiss,
+}
+
+/// Which of those a press is.
+///
+/// `mouse_held_outside` is [`CxFingers::is_mouse_held_outside`] asked with
+/// this widget's chip area. It is the app-wide rule: a control that is
+/// dragged continuously locks the pointer on its press, and every other
+/// gesture that would start from the same press stands down until the
+/// release. The chip's own press — the one that opened the popover, still
+/// held — is `mine`, so press-the-chip-drag-onto-a-row still works.
+/// Dismissing is not such a gesture and is left alone by it: a press that
+/// lands nowhere near the popover closes the popover whatever else is going
+/// on.
+fn panel_press(inside_panel: bool, inside_chip: bool, mouse_held_outside: bool) -> PanelPress {
+    if inside_panel {
+        if mouse_held_outside {
+            PanelPress::Swallow
+        } else {
+            PanelPress::Row
+        }
+    } else if inside_chip {
+        PanelPress::Chip
+    } else {
+        PanelPress::Dismiss
+    }
+}
+
 fn row_layout() -> Layout {
     Layout {
         padding: Inset {
@@ -585,23 +627,43 @@ impl DropToggles {
     /// `primary` is false for the secondary and middle buttons: they may
     /// dismiss the popover from outside, but they never work a row and never
     /// reach through it to whatever is underneath.
-    fn press_at(&mut self, cx: &mut Cx, abs: DVec2, primary: bool) -> bool {
-        if self.panel_rect.contains(abs) {
-            if primary {
-                if let Some(row) = self.row_at(abs) {
-                    let on = !bit(self.active, row);
-                    self.toggle_bit(row, on);
-                    let uid = self.widget_uid();
-                    cx.widget_action(uid, DropTogglesAction::Toggled(row, on));
-                    self.redraw_all(cx);
+    ///
+    /// `mouse_held_outside` says another control has the pointer; see
+    /// [`panel_press`] for what that changes and what it deliberately does
+    /// not. A TOUCH press hands in false: a finger on a row still works it
+    /// while a mouse elsewhere is held, which is the same asymmetry
+    /// `is_mouse_held_outside` is built on.
+    fn press_at(
+        &mut self,
+        cx: &mut Cx,
+        abs: DVec2,
+        primary: bool,
+        mouse_held_outside: bool,
+    ) -> bool {
+        match panel_press(
+            self.panel_rect.contains(abs),
+            self.chip_rect.contains(abs),
+            mouse_held_outside,
+        ) {
+            PanelPress::Row => {
+                if primary {
+                    if let Some(row) = self.row_at(abs) {
+                        let on = !bit(self.active, row);
+                        self.toggle_bit(row, on);
+                        let uid = self.widget_uid();
+                        cx.widget_action(uid, DropTogglesAction::Toggled(row, on));
+                        self.redraw_all(cx);
+                    }
                 }
+                true
             }
-            return true;
+            PanelPress::Swallow => true,
+            PanelPress::Chip => false,
+            PanelPress::Dismiss => {
+                self.set_open(cx, false);
+                false
+            }
         }
-        if !self.chip_rect.contains(abs) {
-            self.set_open(cx, false);
-        }
-        false
     }
 
     fn hover_at(&mut self, cx: &mut Cx, abs: DVec2) {
@@ -732,7 +794,8 @@ impl Widget for DropToggles {
             };
             match event {
                 Event::MouseDown(me) => {
-                    if self.press_at(cx, me.abs, me.button.is_primary()) {
+                    let held = cx.fingers.is_mouse_held_outside(&[self.draw_bg.area()]);
+                    if self.press_at(cx, me.abs, me.button.is_primary(), held) {
                         me.handled.set(self.draw_bg.area());
                     }
                 }
@@ -744,7 +807,7 @@ impl Widget for DropToggles {
                     if let Some(touch) = te.touches.first() {
                         match touch.state {
                             TouchState::Start => {
-                                if self.press_at(cx, touch.abs, true) {
+                                if self.press_at(cx, touch.abs, true, false) {
                                     touch.handled.set(self.draw_bg.area());
                                 }
                             }
@@ -753,7 +816,19 @@ impl Widget for DropToggles {
                         }
                     }
                 }
-                Event::MouseMove(me) => self.hover_at(cx, me.abs),
+                // A hover is a press-like state, and while another control
+                // holds the mouse nothing else may take one from that
+                // pointer. Reached raw, so `hits`' half of the rule never
+                // runs and the question has to be asked here. The chip's own
+                // capture — the press that opened the popover, still held —
+                // is `mine`, so press-drag-over-the-rows still lights them;
+                // and a TOUCH capture answers false there by design, so a
+                // finger driving the popover is untouched.
+                Event::MouseMove(me) => {
+                    if !cx.fingers.is_mouse_held_outside(&[self.draw_bg.area()]) {
+                        self.hover_at(cx, me.abs);
+                    }
+                }
                 Event::KeyDown(ke) if ke.key_code == KeyCode::Escape => {
                     self.set_open(cx, false);
                 }
@@ -831,5 +906,190 @@ impl DropTogglesRef {
 
     pub fn active_count(&self) -> usize {
         self.borrow().map(|i| i.active_count()).unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_press_on_a_row_works_it_and_is_spent() {
+        assert_eq!(panel_press(true, false, false), PanelPress::Row);
+    }
+
+    #[test]
+    fn a_press_in_the_panel_while_another_control_holds_the_mouse_works_no_row() {
+        // The control that took the pointer keeps it until the release. The
+        // press is still the popover's, so it is swallowed rather than
+        // pressed through the panel into whatever is underneath.
+        assert_eq!(panel_press(true, false, true), PanelPress::Swallow);
+    }
+
+    #[test]
+    fn a_press_on_the_chip_is_left_to_the_chips_own_hit() {
+        assert_eq!(panel_press(false, true, false), PanelPress::Chip);
+        assert_eq!(panel_press(false, true, true), PanelPress::Chip);
+    }
+
+    #[test]
+    fn a_press_outside_both_closes_the_popover_whatever_holds_the_mouse() {
+        // Dismissal is not a drag and does not stand down: a popover left up
+        // while a control elsewhere is being dragged must still be closable.
+        assert_eq!(panel_press(false, false, false), PanelPress::Dismiss);
+        assert_eq!(panel_press(false, false, true), PanelPress::Dismiss);
+    }
+}
+
+/// The rule driven through the real event path, with a button holding the
+/// pointer the way any control that is dragged continuously holds it.
+#[cfg(test)]
+mod pointer_tests {
+    use super::*;
+    use crate::makepad_draw::cx_draw::CxDraw;
+    use std::cell::Cell;
+
+    const SIZE: DVec2 = DVec2 { x: 800.0, y: 600.0 };
+
+    /// A pass and a list to draw a page into, the way a window holds one.
+    struct Target {
+        pass: DrawPass,
+        draw_list: DrawList2d,
+        overlay: Overlay,
+    }
+
+    impl Target {
+        fn new(cx: &mut Cx) -> Self {
+            let overlay = cx.with_vm(|vm| Overlay::script_new(vm));
+            Target { pass: DrawPass::new(cx), draw_list: DrawList2d::new(cx), overlay }
+        }
+
+        fn draw(&mut self, cx: &mut Cx, root: &WidgetRef) {
+            self.pass.set_size(cx, SIZE);
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&self.pass, None);
+            self.draw_list.begin_always(&mut cx2d);
+            self.overlay.begin(&mut cx2d);
+            cx2d.begin_root_turtle(SIZE, Layout::flow_down());
+            root.draw_all(&mut cx2d, &mut Scope::empty());
+            cx2d.end_pass_sized_turtle();
+            self.overlay.end(&mut cx2d);
+            self.draw_list.end(&mut cx2d);
+            cx2d.end_pass(&self.pass);
+        }
+    }
+
+    fn cx() -> Cx {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        cx.with_vm(crate::script_mod);
+        cx
+    }
+
+    /// A button to hold the pointer down on, and a chip with three switches
+    /// in its popover.
+    fn page(cx: &mut Cx) -> WidgetRef {
+        let root = cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    grab := Button{text: "Grab"}
+                    chip := DropToggles{text: "FILTER"}
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        let labels = ["One".to_string(), "Two".to_string(), "Three".to_string()];
+        root.widget(cx, ids!(chip)).as_drop_toggles().set_labels(cx, &labels);
+        root
+    }
+
+    fn press(abs: DVec2) -> Event {
+        Event::MouseDown(MouseDownEvent {
+            abs,
+            button: MouseButton::PRIMARY,
+            window_id: WindowId(1, 1),
+            modifiers: KeyModifiers::default(),
+            handled: Cell::new(Area::Empty),
+            time: 0.0,
+        })
+    }
+
+    fn drag(abs: DVec2) -> Event {
+        Event::MouseMove(MouseMoveEvent {
+            abs,
+            lock_delta: DVec2::default(),
+            window_id: WindowId(1, 1),
+            modifiers: KeyModifiers::default(),
+            time: 0.0,
+            handled: Cell::new(Area::Empty),
+        })
+    }
+
+    /// The popover open, drawn, and its panel rect worked out the way an
+    /// event does: the middle of its second row, and the row the widget
+    /// itself says is there.
+    fn row_point(cx: &mut Cx, root: &WidgetRef, target: &mut Target) -> DVec2 {
+        target.draw(cx, root);
+        // The first move is what puts the panel rect on the widget; where it
+        // points does not matter, only that it is off the panel.
+        root.handle_event(cx, &drag(dvec2(700.0, 560.0)), &mut Scope::empty());
+        let chip = root.widget(cx, ids!(chip));
+        let inner = chip.borrow::<DropToggles>().expect("a chip");
+        let panel = inner.panel_rect;
+        let at = dvec2(panel.pos.x + panel.size.x * 0.5, panel.pos.y + PANEL_PAD_Y + ROW_H * 1.5);
+        assert_eq!(inner.row_at(at), Some(1), "the point is on a row");
+        at
+    }
+
+    fn hovered(cx: &Cx, root: &WidgetRef) -> Option<usize> {
+        let chip = root.widget(cx, ids!(chip));
+        let inner = chip.borrow::<DropToggles>().expect("a chip");
+        inner.hover_row
+    }
+
+    /// A control that is dragged continuously holds the pointer until the
+    /// release, and an open popover lights no row under it.
+    #[test]
+    fn no_row_lights_under_a_pointer_another_control_holds() {
+        let mut cx = cx();
+        let root = page(&mut cx);
+        let mut target = Target::new(&mut cx);
+        target.draw(&mut cx, &root);
+
+        let grab = root.widget(&cx, ids!(grab)).area().rect(&cx);
+        root.handle_event(&mut cx, &press(grab.center()), &mut Scope::empty());
+        assert!(cx.fingers.is_mouse_held_outside(&[]), "the button took the pointer");
+
+        let chip = root.widget(&cx, ids!(chip)).area().rect(&cx);
+        root.handle_event(&mut cx, &press(chip.center()), &mut Scope::empty());
+        let at = row_point(&mut cx, &root, &mut target);
+        root.handle_event(&mut cx, &drag(at), &mut Scope::empty());
+        assert_eq!(hovered(&cx, &root), None, "the row under the drag stays unlit");
+    }
+
+    /// And the other half: the chip's own press — the one that opened the
+    /// popover, still held — is the popover's own pointer, so dragging from
+    /// the chip onto a row lights it.
+    #[test]
+    fn the_chips_own_press_still_lights_the_row_it_is_dragged_onto() {
+        let mut cx = cx();
+        let root = page(&mut cx);
+        let mut target = Target::new(&mut cx);
+        target.draw(&mut cx, &root);
+
+        let chip = root.widget(&cx, ids!(chip)).area().rect(&cx);
+        root.handle_event(&mut cx, &press(chip.center()), &mut Scope::empty());
+        assert!(cx.fingers.is_mouse_held_outside(&[]), "the chip took the pointer");
+
+        let at = row_point(&mut cx, &root, &mut target);
+        root.handle_event(&mut cx, &drag(at), &mut Scope::empty());
+        assert_eq!(hovered(&cx, &root), Some(1), "its own press lights the row it reaches");
     }
 }

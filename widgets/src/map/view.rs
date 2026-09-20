@@ -12,7 +12,7 @@ use crate::{
 };
 use crate::makepad_draw::vector::{
     FACE_IMPLICIT_UV, FACE_TYPED_VERTEX_BYTES, FILL_TYPED_VERTEX_BYTES,
-    MAP_VERTEX_POSITION_SCALE, ROAD_TYPED_VERTEX_BYTES, VECTOR_FLOATS_PER_VERTEX,
+    MAP_VERTEX_POSITION_SCALE, ROAD_TYPED_VERTEX_BYTES,
     VECTOR_ZBIAS_STEP, SubdivisionBudget,
 };
 use crate::makepad_draw::event::{TouchState, TouchUpdateEvent};
@@ -21,6 +21,7 @@ use std::fs;
 use std::path::Path;
 use std::cell::RefCell;
 use std::rc::Rc;
+#[cfg(test)]
 use std::sync::Arc;
 use crate::makepad_draw::text::fonts::{Fonts, FontsMemoryBytes};
 
@@ -12512,7 +12513,7 @@ mod tests {
         // Cached road arrows are appended only in insert_ready_tile, after
         // worker/staging admission. Model that exact growth edge here.
         let cached_indices = (0..1_024).collect::<Vec<u32>>();
-        let cached_vertices = vec![0.0; VECTOR_FLOATS_PER_VERTEX * 1_024];
+        let cached_vertices = vec![0.0; crate::makepad_draw::vector::VECTOR_FLOATS_PER_VERTEX * 1_024];
         buffers.append_cached_road_icons(&cached_indices, &cached_vertices);
         let grown_bytes = buffers.allocated_byte_size();
         assert!(grown_bytes > limit);

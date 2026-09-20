@@ -642,6 +642,9 @@ impl Widget for FabricMeasurementGrid {
                 DataGridAction::EditCell { row, col, replace } if col == 1 => {
                     self.start_edit(cx, row, replace);
                 }
+                DataGridAction::CellDoubleClicked { row, col } if col == 1 => {
+                    self.start_edit(cx, row, None);
+                }
                 DataGridAction::CellClicked { .. } => {
                     if self.editing.is_some() {
                         self.commit_current(cx);

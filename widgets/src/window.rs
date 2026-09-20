@@ -158,7 +158,9 @@ script_mod! {
             caption_label := View {
                 width: Fill height: Fill flow: Right
                 align: Center
-                caption_icon := AppIcon{width: 16 height: 16 margin: Inset{right: 6}}
+                // Off by default: an app id makepad ships no artwork for falls back
+                // to a generic tile, so apps opt in with `caption_icon +: {visible: true}`.
+                caption_icon := AppIcon{visible: false width: 16 height: 16 margin: Inset{right: 6}}
                 label := Label {text: "Makepad"}
             }
             voice_wave := VoiceWave {}
@@ -169,7 +171,7 @@ script_mod! {
                     draw_bg.button_type: DesktopButtonType.WindowsMin
                     width: 46 height: 29
                     draw_bg +: {
-                        color: #000, color_hover: #000, color_down: #000
+                        color: theme.color_label_inner, color_hover: #000, color_down: #000
                         bg_color_hover: #E9E9E9, bg_color_down: #CCCCCC
                     }
                 }
@@ -177,7 +179,7 @@ script_mod! {
                     draw_bg.button_type: DesktopButtonType.WindowsMax
                     width: 46 height: 29
                     draw_bg +: {
-                        color: #000, color_hover: #000, color_down: #000
+                        color: theme.color_label_inner, color_hover: #000, color_down: #000
                         bg_color_hover: #E9E9E9, bg_color_down: #CCCCCC
                     }
                 }
@@ -185,7 +187,7 @@ script_mod! {
                     draw_bg.button_type: DesktopButtonType.WindowsClose
                     width: 46 height: 29
                     draw_bg +: {
-                        color: #000, color_hover: #FFF, color_down: #FFF
+                        color: theme.color_label_inner, color_hover: #FFF, color_down: #FFF
                         bg_color_hover: #E81123, bg_color_down: #F1707A
                     }
                 }
@@ -374,13 +376,26 @@ pub struct Window {
     /// Used to only emit a platform op when the resolved value actually changes.
     #[rust]
     system_bar_dark_icons: Option<bool>,
-    /// Cached `(caption_bar visible, caption rect, buttons rect)` for `WindowDragQuery`. That event
-    /// fires once per `WM_NCHITTEST` — i.e. on every mouse move on Windows — and resolving the
-    /// views + their areas each time runs widget-tree lookups, a real source of scroll jitter when
-    /// the mouse is moved during a fling. These only change on relayout, so we recompute lazily and
-    /// invalidate on `WindowGeomChange`.
+    /// Cached `(caption_bar visible, caption rect, buttons rect, caption bar area)` for
+    /// `WindowDragQuery`. It is refreshed only after layout finishes, so a synchronous native
+    /// hit-test between configure and redraw cannot preserve rectangles from the previous
+    /// window size.
+    ///
+    /// That event fires once per `WM_NCHITTEST` — i.e. on every mouse move on Windows — and
+    /// resolving the views + their areas each time runs widget-tree lookups, a real source of
+    /// scroll jitter when the mouse is moved during a fling.
+    ///
+    /// The area is what the caption question passes as its own (see
+    /// `caption_press_is_clients`). A cached handle is a handle from an earlier draw, which is
+    /// exactly what `is_mouse_held_outside` matches by owner rather than by handle.
     #[rust]
-    drag_query_cache: Option<(bool, Rect, Rect)>,
+    drag_query_cache: Option<(bool, Rect, Rect, Area)>,
+    /// Whether a completed draw has made this frame's areas authoritative, so a geometry
+    /// computed now may be cached. Between a configure and the redraw that answers it the
+    /// areas still describe the previous size, and a query in that window is answered live
+    /// without being stored.
+    #[rust]
+    drag_query_layout_valid: bool,
     /// The caption-layout inputs (show_caption_bar, height override, system caption height) that
     /// `drag_query_cache` was last computed against. When they change without a platform
     /// `WindowGeomChange` (e.g. a live/DSL reload toggling the caption), we drop the cache in
@@ -484,6 +499,54 @@ fn supersample_factor() -> f64 {
             .unwrap_or(1.0)
             .clamp(1.0, 4.0)
     })
+}
+
+fn classify_window_drag_query(
+    visible: bool,
+    caption_rect: Rect,
+    buttons_rect: Rect,
+    transitional_buttons_rect: Rect,
+    point: Vec2d,
+) -> WindowDragQueryResponse {
+    if !visible {
+        return WindowDragQueryResponse::NoAnswer;
+    }
+    let hits_buttons = (buttons_rect.size != Vec2d::default() && buttons_rect.contains(point))
+        || (transitional_buttons_rect.size != Vec2d::default()
+            && transitional_buttons_rect.contains(point));
+    if hits_buttons {
+        WindowDragQueryResponse::Client
+    } else if caption_rect.contains(point) {
+        WindowDragQueryResponse::Caption
+    } else {
+        WindowDragQueryResponse::NoAnswer
+    }
+}
+
+fn configured_window_buttons_rect(buttons_rect: Rect, configured_rect: Rect) -> Rect {
+    if buttons_rect.size == Vec2d::default() || configured_rect.size == Vec2d::default() {
+        return configured_rect;
+    }
+    Rect {
+        pos: dvec2(
+            configured_rect.pos.x + configured_rect.size.x - buttons_rect.size.x,
+            buttons_rect.pos.y,
+        ),
+        size: buttons_rect.size,
+    }
+}
+
+fn configured_window_caption_rect(caption_rect: Rect, configured_size: Vec2d) -> Rect {
+    if caption_rect.size == Vec2d::default() || configured_size == Vec2d::default() {
+        return caption_rect;
+    }
+    Rect {
+        pos: caption_rect.pos,
+        size: dvec2(
+            (configured_size.x - caption_rect.pos.x).max(0.0),
+            caption_rect.size.y,
+        ),
+    }
 }
 
 /// Body target for the exploded z-layer view.
@@ -783,12 +846,22 @@ impl Window {
                     .set_visible(cx, self.show_caption_bar && (!is_fullscreen || has_content));
             }
             OsType::LinuxWindow(params) => {
+                let custom_chrome = params.custom_window_chrome
+                    && self
+                        .window
+                        .handle
+                        .uses_wayland_client_side_decorations(cx);
+                let wayland_fullscreen = self.window.handle.is_wayland_fullscreen(cx);
                 // With server-side decorations, app caption controls become
                 // a content toolbar; only the native window buttons disappear.
-                let custom_chrome = params.custom_window_chrome;
-                self.view(cx, ids!(caption_bar))
-                    .set_visible(cx, self.show_caption_bar && (custom_chrome || has_content));
-                self.view(cx, ids!(windows_buttons)).set_visible(cx, custom_chrome);
+                self.view(cx, ids!(caption_bar)).set_visible(
+                    cx,
+                    self.show_caption_bar
+                        && (custom_chrome || has_content)
+                        && (!wayland_fullscreen || has_content),
+                );
+                self.view(cx, ids!(windows_buttons))
+                    .set_visible(cx, custom_chrome && !wayland_fullscreen);
             }
             OsType::LinuxDirect | OsType::Android(_) => {
                 //self.frame.get_view(ids!(caption_bar)).set_visible(false);
@@ -798,6 +871,24 @@ impl Window {
             }
             _ => (),
         }
+    }
+
+    fn caption_drag_geometry(&self, cx: &mut Cx) -> (bool, Rect, Rect, Area) {
+        // Each `self.view` is a widget-tree walk, so the caption bar is resolved once
+        // rather than once per field read.
+        let caption = self.view(cx, ids!(caption_bar));
+        let visible = caption.visible();
+        // The handle as well as the rect: the caption press question is asked with the
+        // areas this window owns, and an owner is what a capture is matched by.
+        let caption_area = caption.area();
+        let caption_rect = caption_area.rect(cx);
+        let buttons = self.view(cx, ids!(windows_buttons));
+        let buttons_rect = if buttons.visible() {
+            buttons.area().rect(cx)
+        } else {
+            Rect::default()
+        };
+        (visible, caption_rect, buttons_rect, caption_area)
     }
 
     fn sync_caption_bar_height(&mut self, cx: &mut Cx) {
@@ -922,6 +1013,7 @@ impl Window {
         if self.caption_query_sig != Some(caption_sig) {
             self.caption_query_sig = Some(caption_sig);
             self.drag_query_cache = None;
+            self.drag_query_layout_valid = false;
         }
 
         self.sync_caption_bar_state(cx);
@@ -1142,6 +1234,14 @@ impl Window {
 
         cx.end_pass_sized_turtle();
 
+        // Areas are authoritative only after this frame's layout has completed, so this is
+        // where a cached answer becomes allowed. Computing it here instead would charge
+        // every frame for three widget-tree walks that only a drag query ever reads, and
+        // most frames never see one. Dropping last frame's answer rather than keeping it
+        // means the first query after any relayout still recomputes, whether or not the
+        // relayout was one of the two that invalidate explicitly.
+        self.drag_query_cache = None;
+        self.drag_query_layout_valid = true;
         self.main_draw_list.end(cx);
         cx.end_pass(&self.pass.handle);
     }
@@ -1171,6 +1271,16 @@ impl Window {
         self.window.handle.configure_macos_window(cx, config);
     }
 
+    pub fn configure_wayland_decorations(
+        &mut self,
+        cx: &mut Cx,
+        preference: WaylandDecorationPreference,
+    ) {
+        self.window
+            .handle
+            .configure_wayland_decorations(cx, preference);
+    }
+
     pub fn window_index(&self) -> usize {
         self.window.handle.window_id().id()
     }
@@ -1178,6 +1288,33 @@ impl Window {
     pub fn position(&self, cx: &Cx) -> Vec2d {
         self.window.handle.get_position(cx)
     }
+}
+
+/// Whether a press in the caption bar is the client's rather than the window
+/// manager's drag-to-move.
+///
+/// Moving the window is a gesture started from a press, and it obeys the
+/// app-wide rule like any other: it may start only on BARE background, and it
+/// stands down while something else holds the pointer. The window manager asks
+/// this question per mouse-move (`WM_NCHITTEST` and its equivalents), so the
+/// question is re-asked all through a drag rather than only at the press —
+/// which is what the last of the three answers is for.
+///
+/// * `over_content` — the caption doubles as the app's own toolbar, the window
+///   chrome buttons are under the point, or the design overlay's panel owns it.
+///   This is the press half of the rule, and it is enumerated rather than asked
+///   of the widget tree on purpose: `find_interactive_widget_from_point` counts
+///   every widget that has not opted out — a caption's own title Label and icon
+///   among them — so asking it here would answer Client over the title and
+///   leave the window undraggable by its own caption bar.
+/// * `mouse_held_outside` — `CxFingers::is_mouse_held_outside`: a control owns
+///   the mouse right now. Answering Caption then hands the pointer to the
+///   window manager and the control loses the rest of its drag. It is asked
+///   with the areas the window itself owns — its root view and its caption
+///   bar — so that only a capture by something ELSE stands the caption down;
+///   the caller has the whole of that reasoning.
+fn caption_press_is_clients(over_content: bool, mouse_held_outside: bool) -> bool {
+    over_content || mouse_held_outside
 }
 
 #[cfg(test)]
@@ -1193,6 +1330,28 @@ mod tests {
         );
     }
 
+    /// The bare caption is the window manager's to drag — that is the whole
+    /// point of a caption bar, and the fix must not take it away.
+    #[test]
+    fn a_press_on_bare_caption_still_drags_the_window() {
+        assert!(!caption_press_is_clients(false, false));
+    }
+
+    /// A control that holds the mouse keeps it: this query arrives per
+    /// mouse-move, so a fader dragged up into the caption must not hand the
+    /// pointer to the window manager half way through its drag.
+    #[test]
+    fn a_control_holding_the_mouse_never_drags_the_window() {
+        assert!(caption_press_is_clients(false, true));
+    }
+
+    /// And the press half, unchanged: the chrome buttons, the app's own
+    /// toolbar and the design panel keep their presses.
+    #[test]
+    fn a_press_over_caption_content_is_the_clients() {
+        assert!(caption_press_is_clients(true, false));
+    }
+
     #[test]
     fn window_can_defer_its_initial_native_surface() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
@@ -1201,6 +1360,66 @@ mod tests {
         assert!(!apply_initial_create_policy(&mut cx, &window, true));
         assert!(apply_initial_create_policy(&mut cx, &window, false));
         assert!(!apply_initial_create_policy(&mut cx, &window, false));
+    }
+
+    #[test]
+    fn native_button_geometry_wins_during_configure_to_draw_transition() {
+        let stale_caption = Rect {
+            pos: dvec2(0.0, 0.0),
+            size: dvec2(800.0, 29.0),
+        };
+        let stale_buttons = Rect {
+            pos: dvec2(662.0, 0.0),
+            size: dvec2(138.0, 29.0),
+        };
+        let configured_buttons = Rect {
+            pos: dvec2(1782.0, 0.0),
+            size: dvec2(138.0, 29.0),
+        };
+        assert!(matches!(
+            classify_window_drag_query(
+                true,
+                stale_caption,
+                stale_buttons,
+                configured_buttons,
+                dvec2(1851.0, 14.0),
+            ),
+            WindowDragQueryResponse::Client
+        ));
+        assert!(matches!(
+            classify_window_drag_query(
+                true,
+                stale_caption,
+                stale_buttons,
+                Rect::default(),
+                dvec2(400.0, 14.0),
+            ),
+            WindowDragQueryResponse::Caption
+        ));
+
+        let zoomed_buttons = Rect {
+            pos: dvec2(708.0, 0.0),
+            size: dvec2(92.0, 19.0),
+        };
+        assert_eq!(
+            configured_window_buttons_rect(zoomed_buttons, configured_buttons),
+            Rect {
+                pos: dvec2(1828.0, 0.0),
+                size: dvec2(92.0, 19.0),
+            }
+        );
+        let configured_caption =
+            configured_window_caption_rect(stale_caption, dvec2(1920.0, 1080.0));
+        assert!(matches!(
+            classify_window_drag_query(
+                true,
+                configured_caption,
+                stale_buttons,
+                configured_buttons,
+                dvec2(1200.0, 14.0),
+            ),
+            WindowDragQueryResponse::Caption
+        ));
     }
 }
 
@@ -1332,9 +1551,23 @@ impl WindowRef {
             inner.configure_macos_window(cx, config);
         }
     }
+
+    pub fn configure_wayland_decorations(
+        &self,
+        cx: &mut Cx,
+        preference: WaylandDecorationPreference,
+    ) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.configure_wayland_decorations(cx, preference);
+        }
+    }
 }
 
 impl Widget for Window {
+    fn visit_cancel(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
+        self.has_focus && self.cancel_children_impl(visit)
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         // Before anything under the window can hit-test this event against a
         // lock whose owner no longer exists.
@@ -1462,8 +1695,10 @@ impl Widget for Window {
                         self.main_draw_list.redraw(cx);
                     }
                     // The caption / buttons may have been re-laid-out; drop the WindowDragQuery
-                    // geometry cache so it is recomputed on the next hit-test.
+                    // geometry cache so it is recomputed on the next hit-test, and mark the
+                    // areas non-authoritative until the redraw that answers this configure.
                     self.drag_query_cache = None;
+                    self.drag_query_layout_valid = false;
                     match cx.os_type() {
                         OsType::Windows | OsType::Macos => {
                             if self.hide_caption_on_fullscreen && !cx.in_makepad_studio() {
@@ -1525,52 +1760,92 @@ impl Widget for Window {
             }
             Event::WindowDragQuery(dq) => {
                 if dq.window_id == self.window.window_id() {
-                    // Resolve the caption / buttons geometry at most once per relayout; this event
-                    // arrives per mouse-move (per WM_NCHITTEST) and the view lookups are not free.
-                    let (visible, caption_rect, buttons_rect) = match self.drag_query_cache {
-                        Some(c) => c,
+                    // A native query can arrive synchronously after configure but before redraw.
+                    // Use live areas for that one query, but only a completed draw may cache them.
+                    let cache_ready = self.drag_query_cache.is_some() || self.drag_query_layout_valid;
+                    let geometry = match self.drag_query_cache {
+                        Some(cached) => cached,
                         None => {
-                            let visible = self.view(cx, ids!(caption_bar)).visible();
-                            let caption_rect = self.view(cx, ids!(caption_bar)).area().rect(cx);
-                            let buttons_view = self.view(cx, ids!(windows_buttons));
-                            let buttons_visible = buttons_view.visible();
-                            let buttons_rect = buttons_view.area().rect(cx);
-                            // Only cache once the caption bar AND its (visible) buttons have actually
-                            // been laid out, so an early query doesn't pin a stale rect. Pinning a
-                            // zero buttons_rect while the buttons are visible-but-not-yet-laid-out
-                            // would make the min/max/close strip respond as draggable Caption (a
-                            // click on Close would drag the window) until the next geometry change. A
-                            // window with no (hidden) buttons keeps a zero buttons_rect, which is fine.
-                            let caption_ready = caption_rect.size != Vec2d::default();
-                            let buttons_ready =
-                                !buttons_visible || buttons_rect.size != Vec2d::default();
-                            if !visible || (caption_ready && buttons_ready) {
-                                self.drag_query_cache = Some((visible, caption_rect, buttons_rect));
+                            let live = self.caption_drag_geometry(cx);
+                            if self.drag_query_layout_valid {
+                                self.drag_query_cache = Some(live);
                             }
-                            (visible, caption_rect, buttons_rect)
+                            live
                         }
                     };
-                    if visible {
-                        if caption_rect.contains(dq.abs) {
-                            // The design overlay's panel is drawn OVER the
-                            // caption bar, top of the window down. Answering
-                            // Caption there hands the press to the OS as a
-                            // window drag and the panel never sees it — its
-                            // filter field could not be focused at all.
-                            let content_toolbar = cx.in_makepad_studio()
-                                || matches!(cx.os_type(), OsType::LinuxWindow(params) if !params.custom_window_chrome)
-                                || (matches!(cx.os_type(), OsType::Macos) && self.window.handle.is_fullscreen(cx));
-                            if crate::tweaker::panel_owns_pointer(dq.abs) {
-                                dq.response.set(WindowDragQueryResponse::Client);
-                            } else if content_toolbar || (buttons_rect.size != Vec2d::default()
-                                && buttons_rect.contains(dq.abs)
-                            ) {
-                                dq.response.set(WindowDragQueryResponse::Client);
-                            } else {
-                                dq.response.set(WindowDragQueryResponse::Caption);
-                            }
+                    let (visible, mut caption_rect, buttons_rect, caption_area) = geometry;
+                    if !cache_ready {
+                        caption_rect = configured_window_caption_rect(
+                            caption_rect,
+                            cx.windows[dq.window_id].window_geom.inner_size,
+                        );
+                    }
+                    let transitional_buttons = if cache_ready {
+                        Rect::default()
+                    } else {
+                        configured_window_buttons_rect(
+                            buttons_rect,
+                            cx.windows[dq.window_id].window_geom.window_chrome_buttons,
+                        )
+                    };
+                    let content_toolbar = cx.in_makepad_studio()
+                        || matches!(cx.os_type(), OsType::LinuxWindow(params) if !params.custom_window_chrome)
+                        || (matches!(cx.os_type(), OsType::LinuxWindow(_))
+                            && !self.window.handle.uses_wayland_client_side_decorations(cx))
+                        || (matches!(cx.os_type(), OsType::Macos)
+                            && self.window.handle.is_fullscreen(cx));
+                    // The design overlay's panel is drawn OVER the caption bar, top of the
+                    // window down. Answering Caption there hands the press to the OS as a
+                    // window drag and the panel never sees it — its filter field could not be
+                    // focused at all. The chrome buttons need no clause of their own: a point
+                    // over them is already the client's by the classification below.
+                    let over_content = content_toolbar || crate::tweaker::panel_owns_pointer(dq.abs);
+                    // And a control that already holds the mouse keeps it: this query arrives
+                    // per mouse-move, so without it a fader dragged up into the caption would
+                    // hand the pointer to the window manager mid-drag.
+                    //
+                    // Asked with what the window itself owns: its root view and the caption
+                    // bar it draws. A capture by either is the window's own chrome and says
+                    // nothing about a client gesture — while an EMPTY list claimed the window
+                    // owned nothing at all, so a press held ANYWHERE in the application
+                    // answered "the client's" here and left this caption undraggable for as
+                    // long as it was held.
+                    //
+                    // The chrome BUTTONS are deliberately not ours: a min/max/close button
+                    // holding the press is a control holding the press, and the caption stands
+                    // down for it exactly as it does for a fader — which is what keeps the
+                    // pointer with the button when it is dragged off the button and along the
+                    // bar. Content a host hangs in the caption is not ours either, for the
+                    // same reason.
+                    //
+                    // What is left: a capture records no window, so a drag in ANOTHER window
+                    // of the same application still reads as held here. That one cannot be
+                    // told apart from this side.
+                    let mine = [self.view.area(), caption_area];
+                    let mouse_held = cx.fingers.is_mouse_held_outside(&mine);
+                    // A press on the caption that is the client's rather than the window
+                    // manager's, for the `Caption` arm below.
+                    let caption_is_clients = caption_press_is_clients(over_content, mouse_held);
+                    match classify_window_drag_query(
+                        visible,
+                        caption_rect,
+                        buttons_rect,
+                        transitional_buttons,
+                        dq.abs,
+                    ) {
+                        WindowDragQueryResponse::Client => {
+                            dq.response.set(WindowDragQueryResponse::Client);
                             cx.set_cursor(MouseCursor::Default);
                         }
+                        WindowDragQueryResponse::Caption if caption_is_clients => {
+                            dq.response.set(WindowDragQueryResponse::Client);
+                            cx.set_cursor(MouseCursor::Default);
+                        }
+                        WindowDragQueryResponse::Caption => {
+                            dq.response.set(WindowDragQueryResponse::Caption);
+                            cx.set_cursor(MouseCursor::Default);
+                        }
+                        WindowDragQueryResponse::NoAnswer | WindowDragQueryResponse::SysMenu => {}
                     }
                 }
                 true

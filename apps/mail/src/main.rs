@@ -1,8 +1,8 @@
-//! Mail — a local demo mailbox as a standalone Makepad window.
+//! Standalone Mail: read-only local Apple Mail search, with an explicit demo mode.
 
 pub use makepad_widgets;
 use makepad_ai_services::port::{AiServicePort, PortEvent};
-use makepad_mail::{ai, view::MailView};
+use makepad_mail::{ai, view::MailView, local_view::LocalMailView, source::LocalConfig};
 use makepad_strict_json::Value;
 use makepad_widgets::*;
 
@@ -16,11 +16,12 @@ script_mod! {
         ui: Root{
             main_window := Window{
                 window.title: "Mail"
-                window.inner_size: vec2(1240, 800)
+                window.inner_size: vec2(1360, 860)
                 pass +: { clear_color: theme.color_bg_app }
                 body +: {
-                    padding: 0 margin: 0 spacing: 0
+                    padding: 0 margin: 0 spacing: 0 flow: Overlay
                     mail := MailView{}
+                    local_mail := LocalMailView{visible: false}
                 }
             }
         }
@@ -37,6 +38,8 @@ pub struct App {
     ai_context: String,
     #[rust]
     closing: bool,
+    #[rust]
+    local_mode: bool,
 }
 
 impl App {
@@ -114,6 +117,29 @@ fn is_close_requested(json: &str) -> bool {
 
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
+        let args: Vec<_> = std::env::args().collect();
+        self.local_mode = !args.iter().any(|a| a == "--demo") && (cfg!(target_os = "macos") || args.iter().any(|a| a == "--mail-root"));
+        if self.local_mode {
+            let arg = |key: &str| args.iter().position(|a| a == key).and_then(|i| args.get(i+1)).map(std::path::PathBuf::from);
+            let home = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default();
+            let config = LocalConfig::for_mail_root(
+                arg("--mail-root").unwrap_or_else(|| home.join("Library/Mail")),
+                arg("--mail-cache"),
+            );
+            // Resolve the initial, hidden child before the indexed tree has been drawn.
+            let local = self.ui.child_by_path(ids!(local_mail));
+            if let Some(mut view) = local.borrow_mut::<LocalMailView>() {
+                view.configure(config);
+                log!("mail: local view configured");
+            } else {
+                error!("mail: local view was not created");
+                return;
+            }
+            self.ui.child_by_path(ids!(mail)).set_visible(cx, false);
+            local.set_visible(cx, true);
+            // Private mailbox contents are not registered with the demo AI bus.
+            return;
+        }
         self.ai_port = AiServicePort::open(cx, ai::manifest());
         if let Some(mut view) = self.ui.widget(cx, ids!(mail)).borrow_mut::<MailView>() {
             view.set_storage(cx.storage("mail"));
@@ -123,8 +149,45 @@ impl MatchEvent for App {
     fn handle_actions(&mut self, _cx: &mut Cx, _actions: &Actions) {}
 }
 
+#[cfg(target_os = "macos")]
+fn native_mail_dark_appearance() -> bool {
+    use makepad_widgets::makepad_platform::os::apple::apple_sys::*;
+    // Use the same AppKit matching as the standalone workspace appearance
+    // picker. Contrast variants resolve to the corresponding light/dark theme.
+    unsafe {
+        extern "C" {
+            static NSAppearanceNameAqua: ObjcId;
+            static NSAppearanceNameDarkAqua: ObjcId;
+        }
+        let main_thread: bool = msg_send![class!(NSThread), isMainThread];
+        if !main_thread { return false; }
+        let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
+        let app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
+        let appearance: ObjcId = msg_send![app, effectiveAppearance];
+        let names = [NSAppearanceNameAqua, NSAppearanceNameDarkAqua];
+        let supported: ObjcId = msg_send![class!(NSArray), arrayWithObjects: names.as_ptr() count: names.len()];
+        let best: ObjcId = msg_send![appearance, bestMatchFromAppearancesWithNames: supported];
+        let dark = if best.is_null() { false } else {
+            let result: BOOL = msg_send![best, isEqualToString: NSAppearanceNameDarkAqua];
+            result == YES
+        };
+        let () = msg_send![pool, drain];
+        dark
+    }
+}
+
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+        #[cfg(target_os = "macos")]
+        if desktop_style::current_name(vm).is_none()
+            && std::env::var_os("MAKEPAD_WM_THEME_SPLASH").is_none()
+        {
+            let dark = native_mail_dark_appearance();
+            desktop_style::install(vm, desktop_style::StyleSheet::load_with_appearance(
+                desktop_style::DesktopStyle::Macos, dark,
+            ));
+            log!("mail: using macOS {} appearance", if dark { "dark" } else { "light" });
+        }
         makepad_widgets::script_mod(vm);
         makepad_wm_theme::apply(vm);
         makepad_mail::script_mod(vm);
@@ -134,6 +197,11 @@ impl AppMain for App {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         if let Event::Custom(json) = event {
             if is_close_requested(json) {
+                if self.local_mode {
+                    if let Some(mut view) = self.ui.child_by_path(ids!(local_mail)).borrow_mut::<LocalMailView>() { view.shutdown(); }
+                    cx.quit();
+                    return;
+                }
                 let ready = self
                     .ui
                     .widget(cx, ids!(mail))

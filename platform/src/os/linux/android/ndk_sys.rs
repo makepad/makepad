@@ -28,6 +28,7 @@ pub struct AAsset {
     _unused: [u8; 0],
 }
 
+pub const AASSET_MODE_STREAMING: ::std::os::raw::c_uint = 2;
 pub const AASSET_MODE_BUFFER: ::std::os::raw::c_uint = 3;
 
 #[link(name = "android")]

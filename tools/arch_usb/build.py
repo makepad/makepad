@@ -2,8 +2,11 @@
 """Assemble a persistent Arch USB on macOS using Python 3.14 and Apple tools.
 
 Example:
-  python3 tools/arch_usb/build.py --assets /path/to/arch-assets \
-      --output /path/to/arch-image --device diskN --writer-app
+  python3 tools/arch_usb/build.py --device diskN --clone arch@10.0.0.165 --writer-app
+
+Repeat without contacting the clone using --cached-clone. Cached OS/driver/CEF
+assets are reused; no software is downloaded or installed on either host.
+Use --assets and --output to override the checkout-local cache/output paths.
 
 Select --device with `diskutil list external physical`. An attached USB is
 required for identity and size. After reconnect or reboot, rebuild the prepared
@@ -17,6 +20,9 @@ build/setup/writer logic lives beside this script, independently of the cache.
 The source snapshot is refreshed from this checkout unless --cached-source is set.
 Use --include-checkout apps/sandbox to package an optional local Sandbox clone;
 the default snapshot does not require a network or private clone.
+SSH is enabled for arch using a memorable password generated on first boot
+and shown on the local console. No personal SSH key is copied into the image.
+Use sudo makepad-ssh show/disable/enable/reset-password on the booted USB.
 
 Outputs: clean arch-boot.raw, CIDATA ISO, backup GPT, a pinned write-plan.json,
 and a validation report. Device identity is read-only metadata; this command
@@ -43,6 +49,7 @@ from btrfs_read import Btrfs
 from efi_boot import Fat, prepare
 from iso9660 import validate_seed
 from usb_device import snapshot_device
+from clone_assets import refresh_packages, refresh_source, verify_source
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
@@ -140,7 +147,15 @@ def prepare_seed(args, output):
     for path in seed.iterdir():
         original_name = ('mirror.tar.'+path.stem.removeprefix('mirror-')) if path.name.startswith('mirror-') else ('fanatec.tar.gz' if path.name == 'fanatec.tgz' else path.name)
         assert digest(path) == cached_hashes[original_name], f'Cached payload changed: {path.name}'
-    if args.cached_source:
+    clone = None
+    if args.clone or args.cached_clone:
+        clone, manifest = verify_source(args.assets)
+        for name in ('makepad-source.tgz', 'cargo-cache.tar', 'source-revision.txt'):
+            copy(clone/name, seed/name)
+        for name in ('wm', 'makepad-ai-hub'):
+            copy(clone/'binaries'/name, seed/name)
+        (seed/'clone.json').write_text(json.dumps(manifest, indent=2)+'\n')
+    elif args.cached_source:
         if args.include_checkout:
             raise ValueError('--cached-source is incompatible with --include-checkout')
         for name, target in (('makepad-source.tar.gz', 'makepad-source.tgz'), ('SOURCE-REVISION.txt', 'source-revision.txt')): copy(original/name, seed/target)
@@ -161,16 +176,20 @@ def prepare_seed(args, output):
         assert cef_root+'/include/cef_version.h' in members
     copy(cef_archive, seed/'cef-linux.bz2')
     (seed/'cef-directory.txt').write_text(cef_root+'\n')
-    for name in ('firstboot.sh', 'provision.sh', 'mount-win.sh', 'status.sh', 'wm-session.sh', 'aihub-session.sh', 'gbelt-bind.sh'):
+    for name in ('firstboot.sh', 'ssh.sh', 'provision.sh', 'mount-win.sh', 'status.sh', 'wm-session.sh', 'aihub-session.sh', 'gbelt-bind.sh'):
         copy(HERE/name, seed/name)
         subprocess.run(['/bin/bash', '-n', str(seed/name)], check=True)
     for name in ('makepad-wm.service', 'wm.env', 'makepad-aihub.service', 'aihub.env', '70-makepad-game-hardware.rules'):
         copy(HERE/name, seed/name)
+    if clone:
+        # Preserve the known-working service setup. SSH and firstboot logic
+        # always come from this repository's current builder.
+        for path in (clone/'config').iterdir():
+            copy(path, seed/path.name)
+            if path.suffix == '.sh':
+                subprocess.run(['/bin/bash', '-n', str(seed/path.name)], check=True)
+        assert cef_root == manifest['cef_directory'], 'CEF archive differs from the installed clone'
     (seed/'requested-packages.txt').write_text('\n'.join(packages)+'\n')
-    key = args.ssh_key.read_text().strip()
-    assert key.startswith('ssh-ed25519 ') and '\n' not in key, 'Expected one Ed25519 public key'
-    (seed/'authorized_keys').write_text(key+'\n')
-    (seed/'sshd.conf').write_text('PubkeyAuthentication yes\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nAuthenticationMethods publickey\nPermitRootLogin no\nAllowUsers arch\n')
     # Cloned USB/internal roots must identify their own adapter to DHCP.
     (seed/'wired.network').write_text('[Match]\nName=eth* en*\n\n[Network]\nDHCP=ipv4\nIPv6AcceptRA=yes\n\n[DHCPv4]\nClientIdentifier=mac\n\n[Link]\nRequiredForOnline=no\n')
     (seed/'wifi.network').write_text('[Match]\nName=wl*\n\n[Network]\nDHCP=ipv4\nIPv6AcceptRA=yes\n\n[DHCPv4]\nClientIdentifier=mac\nRouteMetric=2048\n\n[IPv6AcceptRA]\nRouteMetric=2048\n\n[Link]\nRequiredForOnline=no\n')
@@ -222,7 +241,7 @@ exec /usr/bin/bash /run/makepad-seed/firstboot.sh'''
     (seed/'meta-data').write_text(json.dumps({'instance-id': args.build_id, 'local-hostname': 'makepad-arch'})+'\n')
     # The installed renderer uses the interface's name, not nested match.name.
     (seed/'network-config').write_text(json.dumps({'version': 2, 'renderer': 'networkd', 'ethernets': {'eth0': {'dhcp4': True, 'dhcp6': False, 'optional': True}}}, indent=2)+'\n')
-    small = [p for p in seed.iterdir() if p.name.endswith(('.sh', '.conf', '.network', '.rules', '.service')) or p.name in ('authorized_keys', 'realtek-firmware.tar')]
+    small = [p for p in seed.iterdir() if p.name.endswith(('.sh', '.conf', '.network', '.rules', '.service')) or p.name == 'realtek-firmware.tar']
     (seed/'config.sha256').write_text(''.join(f'{digest(p)}  {p.name}\n' for p in sorted(small)))
     (seed/'sha256sums').write_text(''.join(f'{digest(p)}  {p.name}\n' for p in sorted(seed.iterdir())))
     iso = output/'makepad-seed.iso'
@@ -258,8 +277,14 @@ def assemble(args, output, iso):
         efi_start, efi_end = struct.unpack_from('<QQ', entries, 128+32)
         root_start, root_end = struct.unpack_from('<QQ', entries, 256+32)
         fs = Btrfs(stream, root_start*BLOCK)
-        for name in ('pacman', 'sshd', 'sudo', 'visudo', 'bash', 'networkctl', 'systemctl'):
+        for name in ('pacman', 'sshd', 'sudo', 'visudo', 'bash', 'chpasswd', 'agetty', 'networkctl', 'systemctl'):
             assert fs.read('/usr/bin/'+name)[:4] == b'\x7fELF'
+        python = fs.read('/usr/bin/python3')
+        if not python.startswith(b'\x7fELF'):
+            target = python.decode()
+            assert target.startswith('python3.') and '/' not in target
+            python = fs.read('/usr/bin/'+target)
+        assert python[:4] == b'\x7fELF', 'Python is required to generate the console SSH password'
         assert b'@includedir /etc/sudoers.d' in fs.read('/etc/sudoers')
         assert fs.read('/etc/systemd/system/multi-user.target.wants/systemd-networkd.service') == b'/usr/lib/systemd/system/systemd-networkd.service'
         for path in ('/var/lib/makepad-firstboot/complete', '/var/lib/makepad-access/v2-complete'):
@@ -377,14 +402,17 @@ def main():
     if sys.flags.optimize:
         raise RuntimeError('Python optimization is not allowed; safety assertions must remain enabled')
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--assets', type=Path, required=True)
-    parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--assets', type=Path, default=REPO/'local/agent_state/arch-usb', help='Offline OS/package assets cache')
+    parser.add_argument('--output', type=Path, default=REPO/'local/arch-usb-image', help='Prepared image and writer output')
     parser.add_argument('--base-image', type=Path)
-    parser.add_argument('--ssh-key', type=Path, default=Path.home()/'.ssh/id_ed25519.pub')
     parser.add_argument('--disk-bytes', type=int, help='Optional size assertion; must match the attached USB')
     parser.add_argument('--device', required=True, help='Whole disk from diskutil list external physical (diskN)')
     parser.add_argument('--build-id', default='makepad-clean-'+time.strftime('%Y%m%d-%H%M%S'))
     parser.add_argument('--cached-source', action='store_true')
+    clone = parser.add_mutually_exclusive_group()
+    clone.add_argument('--clone', metavar='USER@HOST', help='Refresh packages and working WM/AI Hub/source from an installed clone over SSH')
+    clone.add_argument('--cached-clone', action='store_true', help='Reuse the last verified clone snapshot without SSH')
+    parser.add_argument('--clone-root', default='/home/arch/makepad', help='Source directory on the installed clone')
     parser.add_argument('--include-checkout', action='append', default=[], type=Path, metavar='PATH',
                         help='Optional nested git checkout to package (repeatable; e.g. apps/sandbox)')
     parser.add_argument('--cef-archive', type=Path, help='Cached Linux x86_64 CEF tar.bz2 (default: ASSETS/cef-linux.tar.bz2)')
@@ -392,14 +420,19 @@ def main():
     args = parser.parse_args()
     if args.cached_source and args.include_checkout:
         parser.error('--cached-source is incompatible with --include-checkout')
+    if (args.clone or args.cached_clone) and (args.cached_source or args.include_checkout):
+        parser.error('Clone snapshots cannot be combined with --cached-source or --include-checkout')
     args.assets = args.assets.expanduser().resolve(); output = args.output.expanduser().resolve()
     assert output != args.assets and args.assets not in output.parents and output not in args.assets.parents, 'Keep output separate from input assets'
     assert output != REPO and output not in REPO.parents, 'Keep output separate from the repository root'
     assert output != HERE and HERE not in output.parents and output not in HERE.parents, 'Keep output separate from the builder sources'
     args.base_image = (args.base_image or args.assets/'arch-base.raw').expanduser().resolve()
-    args.ssh_key = args.ssh_key.expanduser().resolve()
+    if args.cef_archive is None and not (args.assets/'cef-linux.tar.bz2').exists():
+        candidates = sorted((REPO/'local/cef-prebuilt').glob('cef_binary_*_linux64.tar.bz2'))
+        if len(candidates) == 1:
+            args.cef_archive = candidates[0]
     args.cef_archive = (args.cef_archive or args.assets/'cef-linux.tar.bz2').expanduser().resolve()
-    for source in (args.base_image, args.ssh_key, args.cef_archive):
+    for source in (args.base_image, args.cef_archive):
         assert source != output and output not in source.parents, 'Keep source inputs outside the output directory'
     args.device_info = snapshot_device(args.device)
     args.device = args.device_info['device']
@@ -407,6 +440,12 @@ def main():
         assert args.disk_bytes == args.device_info['size'], f'--disk-bytes {args.disk_bytes} does not match attached device size {args.device_info["size"]}'
     args.disk_bytes = args.device_info['size']
     print(f'Selected {args.device}: {args.device_info["registry_name"]}, {args.disk_bytes} bytes', flush=True)
+    for path in (args.base_image, args.cef_archive):
+        if not path.is_file():
+            raise ValueError(f'Required cached OS/CEF input is missing: {path}')
+    if args.clone:
+        refresh_packages(args.assets, args.clone, (HERE/'packages.txt').read_text().splitlines())
+        refresh_source(args.assets, args.clone, args.clone_root)
     output.mkdir(parents=True, exist_ok=True)
     assert args.disk_bytes % BLOCK == 0
     iso = prepare_seed(args, output)

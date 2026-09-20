@@ -15,8 +15,11 @@ use crate::{
     window::CxWindowPool,
     CxOsApi,
 };
-#[cfg(not(use_vulkan))]
-use crate::{gl_sys, texture::TextureSize, os::shared_framebuf::LinuxSharedSoftwareBuffer};
+use crate::gl_sys;
+// Only the swapchain-import path below uses these, and the direct Vulkan build
+// compiles this file without it.
+#[cfg(not(all(use_vulkan, linux_direct)))]
+use crate::{os::shared_framebuf::LinuxSharedSoftwareBuffer, texture::TextureSize};
 use makepad_studio_protocol::{AppToStudio, GCSample, StudioToApp, StudioToAppVec};
 #[cfg(not(all(use_vulkan, linux_direct)))]
 use crate::os::shared_framebuf::shared_presentable_image_recv_fds_from_aux_chan;
@@ -37,7 +40,7 @@ pub(crate) struct StdinWindow {
     gpu_host_announced: bool,
     #[cfg(all(use_vulkan, linux_direct))]
     gpu_ready_epoch: u64,
-    #[cfg(not(use_vulkan))]
+    /// The OpenGL software-fallback readback target; unused under Vulkan.
     readback_framebuffer: Option<u32>,
     last_trace_draw: Option<(u32, u32, u32, u32, u64)>,
 }
@@ -454,8 +457,9 @@ impl Cx {
     pub(crate) fn stdin_handle_repaint(&mut self, windows: &mut Vec<StdinWindow>) {
         #[cfg(all(use_vulkan, linux_direct))]
         if self.os.vulkan.as_ref().is_some_and(|gpu| gpu.gpu_transition_pending()) { return; }
-        #[cfg(not(use_vulkan))]
-        self.os.opengl_cx.as_ref().unwrap().make_current();
+        if let Some(opengl_cx) = self.os.opengl_cx.as_ref() {
+            opengl_cx.make_current();
+        }
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
@@ -483,24 +487,38 @@ impl Cx {
                                 continue;
                             }
                         }
-                        #[cfg(not(use_vulkan))]
-                        let current_index = window.present_index;
+                        // OpenGL writes the next image in order; Vulkan asks which
+                        // of them the host has finished reading.
                         #[cfg(use_vulkan)]
-                        let Some(current_index) = (0..swapchain.presentable_images.len())
-                            .map(|offset| (window.present_index + offset) % swapchain.presentable_images.len())
-                            .find(|index| self.os.vulkan.as_ref().unwrap()
-                                .shared_write_available(swapchain.presentable_images[*index].texture.texture_id())
-                                .unwrap_or_else(|error| panic!("Shared Vulkan image availability: {error}")))
-                        else { continue; };
+                        let vulkan_index = self.os.vulkan_active().then(|| {
+                            (0..swapchain.presentable_images.len())
+                                .map(|offset| {
+                                    (window.present_index + offset) % swapchain.presentable_images.len()
+                                })
+                                .find(|index| {
+                                    self.os.vulkan.as_ref().unwrap()
+                                        .shared_write_available(swapchain.presentable_images[*index].texture.texture_id())
+                                        .unwrap_or_else(|error| panic!("Shared Vulkan image availability: {error}"))
+                                })
+                        });
+                        #[cfg(not(use_vulkan))]
+                        let vulkan_index: Option<Option<usize>> = None;
+                        let current_index = match vulkan_index {
+                            Some(Some(index)) => index,
+                            // Vulkan is rendering and every image is still in use.
+                            Some(None) => continue,
+                            None => window.present_index,
+                        };
                         window.present_index =
                             (current_index + 1) % swapchain.presentable_images.len();
                         let current_image = &mut swapchain.presentable_images[current_index];
 
                         // render to swapchain
-                        #[cfg(not(use_vulkan))]
-                        self.draw_pass_to_texture(draw_pass_id, Some(&current_image.texture));
+                        if !self.os.vulkan_active() {
+                            self.draw_pass_to_texture(draw_pass_id, Some(&current_image.texture));
+                        }
                         #[cfg(use_vulkan)]
-                        {
+                        if self.os.vulkan_active() {
                             let pass = &mut self.passes[draw_pass_id];
                             pass.color_textures[0].texture = current_image.texture.clone();
                             // Match the GL target override: preserve the app's
@@ -516,19 +534,26 @@ impl Cx {
                             }
                         }
 
-                        // wait for GPU to finish rendering
-                        #[cfg(not(use_vulkan))]
-                        unsafe {
-                            (self.os.gl().glFinish)();
+                        // wait for GPU to finish rendering (the Vulkan path waits
+                        // on its own fence inside stdin_vulkan_draw_pass)
+                        if self.os.opengl_cx.is_some() {
+                            unsafe {
+                                (self.os.gl().glFinish)();
+                            }
                         }
 
                         let dpi_factor = self.passes[draw_pass_id].dpi_factor.unwrap();
                         let pass_rect = self.get_pass_rect(draw_pass_id, dpi_factor).unwrap();
+                        // OpenGL has no per-draw sequence; Vulkan stamps the shared
+                        // image's so the host can tell which draw it is showing.
+                        #[cfg(use_vulkan)]
+                        let sequence = self.os.vulkan.as_ref().map_or(0, |vulkan| {
+                            vulkan.shared_draw_sequence(current_image.texture.texture_id())
+                        });
+                        #[cfg(not(use_vulkan))]
+                        let sequence = 0;
                         let presentable_draw = PresentableDraw {
-                            #[cfg(not(use_vulkan))]
-                            sequence: 0,
-                            #[cfg(use_vulkan)]
-                            sequence: self.os.vulkan.as_ref().unwrap().shared_draw_sequence(current_image.texture.texture_id()),
+                            sequence,
                             window_id: window_id.id(),
                             target_id: current_image.id,
                             width: (pass_rect.size.x * dpi_factor) as u32,
@@ -561,11 +586,9 @@ impl Cx {
                             }
                         }
 
-                        #[cfg(not(use_vulkan))]
+                        // Only the OpenGL path ever maps a software buffer.
                         if let Some(software_buffer) = current_image.software_buffer.as_mut() {
-                            #[cfg(not(use_vulkan))]
                             software_buffer.as_bytes_mut().fill(0);
-                            #[cfg(not(use_vulkan))]
                             unsafe {
                                 let gl = self.os.gl();
 
@@ -664,19 +687,25 @@ impl Cx {
                 }
                 CxDrawPassParent::DrawPass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    #[cfg(not(use_vulkan))]
-                    self.draw_pass_to_texture(draw_pass_id, None);
+                    if !self.os.vulkan_active() {
+                        self.draw_pass_to_texture(draw_pass_id, None);
+                    }
                     #[cfg(use_vulkan)]
-                    if let Err(error) = self.stdin_vulkan_draw_pass(draw_pass_id) {
-                        crate::error!("Vulkan hosted offscreen pass failed: {error}");
+                    if self.os.vulkan_active() {
+                        if let Err(error) = self.stdin_vulkan_draw_pass(draw_pass_id) {
+                            crate::error!("Vulkan hosted offscreen pass failed: {error}");
+                        }
                     }
                 }
                 CxDrawPassParent::None => {
-                    #[cfg(not(use_vulkan))]
-                    self.draw_pass_to_texture(draw_pass_id, None);
+                    if !self.os.vulkan_active() {
+                        self.draw_pass_to_texture(draw_pass_id, None);
+                    }
                     #[cfg(use_vulkan)]
-                    if let Err(error) = self.stdin_vulkan_draw_pass(draw_pass_id) {
-                        crate::error!("Vulkan hosted offscreen pass failed: {error}");
+                    if self.os.vulkan_active() {
+                        if let Err(error) = self.stdin_vulkan_draw_pass(draw_pass_id) {
+                            crate::error!("Vulkan hosted offscreen pass failed: {error}");
+                        }
                     }
                 }
             }
@@ -901,25 +930,32 @@ impl Cx {
                 let presentable_images = std::array::from_fn(|i| {
                     let shared_pi = shared_images[i];
                     let mut texture = Texture::new(self);
-                    #[cfg(not(use_vulkan))]
-                    let mut software_buffer = None;
-                    #[cfg(use_vulkan)]
-                    let software_buffer = None;
+                    // Only the OpenGL import fills this; under Vulkan it stays None.
+                    #[allow(unused_mut)]
+                    let mut software_buffer: Option<LinuxSharedSoftwareBuffer> = None;
                     match shared_presentable_image_recv_fds_from_aux_chan(
                         shared_pi,
                         aux_chan_client_endpoint,
                     ) {
                         Ok(pi) => {
+                            // Which import to use follows the renderer this process
+                            // actually started, not the build: a Vulkan-capable
+                            // binary that fell back to OpenGL takes the OpenGL
+                            // paths below, and its host exports for them.
                             #[cfg(use_vulkan)]
-                            {
-                                texture = Texture::new_with_format(self, TextureFormat::SharedBGRAu8 {
-                                    id: pi.id, width: alloc_width as usize, height: alloc_height as usize, initial: true,
-                                });
-                                self.os.vulkan.as_mut().unwrap().import_shared_image(&texture, alloc_width, alloc_height, pi.image)
-                                    .unwrap_or_else(|error| panic!("Shared Vulkan image import: {error}"));
-                            }
+                            let vulkan_import = self.os.vulkan_active() && !pi.image.is_software_fallback();
                             #[cfg(not(use_vulkan))]
-                            if pi.image.is_software_fallback() {
+                            let vulkan_import = false;
+                            if vulkan_import {
+                                #[cfg(use_vulkan)]
+                                {
+                                    texture = Texture::new_with_format(self, TextureFormat::SharedBGRAu8 {
+                                        id: pi.id, width: alloc_width as usize, height: alloc_height as usize, initial: true,
+                                    });
+                                    self.os.vulkan.as_mut().unwrap().import_shared_image(&texture, alloc_width, alloc_height, pi.image)
+                                        .unwrap_or_else(|error| panic!("Shared Vulkan image import: {error}"));
+                                }
+                            } else if pi.image.is_software_fallback() {
                                 texture = Texture::new_with_format(
                                     self,
                                     TextureFormat::RenderBGRAu8 {
@@ -959,7 +995,6 @@ impl Cx {
                                     }
                                 }
                             } else {
-                                #[cfg(not(use_vulkan))]
                                 {
                                 let desc = TextureFormat::SharedBGRAu8 {
                                     id: pi.id,
@@ -1017,10 +1052,14 @@ impl Cx {
             }
             StudioToApp::RunViewFrameRequest(_) => {}
             StudioToApp::Tick => {
-                if SignalToUI::check_and_clear_ui_signal() {
+                let internal_signal = SignalToUI::check_and_clear_internal_signal();
+                let ui_signal = SignalToUI::check_and_clear_ui_signal();
+                if internal_signal || ui_signal {
                     self.handle_termination_signal();
                     self.handle_media_signals();
                     self.handle_script_signals();
+                }
+                if ui_signal {
                     self.call_event_handler(&Event::Signal);
                 }
                 if SignalToUI::check_and_clear_action_signal() {
@@ -1064,8 +1103,11 @@ impl Cx {
 
                 if self.need_redrawing() {
                     self.call_draw_event(time_now);
-                    #[cfg(not(use_vulkan))]
-                    self.opengl_compile_shaders();
+                    // Only when OpenGL is the renderer: a hosted child that
+                    // started on Vulkan has no EGL context, and `gl()` panics.
+                    if self.os.opengl_cx.is_some() {
+                        self.opengl_compile_shaders();
+                    }
                 }
 
                 self.stdin_handle_repaint(stdin_windows);

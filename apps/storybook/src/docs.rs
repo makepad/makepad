@@ -125,7 +125,7 @@ impl DocsPanel {
         self.view.redraw(cx);
     }
 
-    fn visible(&self) -> Vec<&Prop> {
+    fn visible_props(&self) -> Vec<&Prop> {
         self.props.iter().filter(|p| p.is_set || self.show_inherited).collect()
     }
 }
@@ -145,7 +145,7 @@ impl Widget for DocsPanel {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = item.borrow_mut::<PortalList>() {
-                let rows = self.visible();
+                let rows = self.visible_props();
                 list.set_item_range(cx, 0, rows.len());
                 while let Some(item_id) = list.next_visible_item(cx) {
                     let Some(prop) = rows.get(item_id) else {

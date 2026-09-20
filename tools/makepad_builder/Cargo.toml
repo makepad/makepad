@@ -1,0 +1,33 @@
+[package]
+name = "makepad-loader"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Makepad Builder: compile and customize commercial Makepad apps from source"
+
+[features]
+default = ["ui"]
+ui = ["dep:makepad-widgets", "dep:makepad-terminal"]
+
+[lib]
+name = "makepad_loader"
+path = "src/lib.rs"
+
+[[bin]]
+name = "makepad-builder"
+path = "src/main.rs"
+required-features = ["ui"]
+
+[[bin]]
+name = "makepad-builder-cli"
+path = "src/bin/makepad-loader-cli.rs"
+
+[dependencies]
+makepad-loader-bundle = { path = "../../libs/loader_bundle" }
+makepad-widgets = { path = "../../widgets", optional = true }
+makepad-terminal = { path = "../../apps/terminal", optional = true }
+makepad-network = { path = "../../platform/network" }
+makepad-zip-file = { path = "../../libs/zip_file" }
+makepad-git = { path = "../../libs/git" }
+makepad-fast-inflate = { path = "../../libs/fast_inflate" }
+makepad-strict-json = { path = "../../libs/strict_json" }

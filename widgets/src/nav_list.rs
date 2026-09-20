@@ -323,8 +323,16 @@ impl Widget for NavList {
         // and a grouped radio that is pressed while already lit raises no
         // action at all — so waiting for one left the focus stranded on the
         // row, where the arrows no longer reached the list.
+        //
+        // The raw event and not a hit, because a hit would claim the press
+        // this is deliberately letting through — so the question `hits`
+        // answers for itself has to be asked here by hand instead. See
+        // [`press_keeps_keys`].
         if let Event::MouseDown(me) = event {
-            if self.area.rect(cx).contains(me.abs) {
+            let taken = me.handled.get();
+            let claimed = (!taken.is_empty()).then(|| taken.clipped_rect(cx));
+            let held_outside = cx.fingers.is_mouse_held_outside(&[self.area]);
+            if press_keeps_keys(self.area.clipped_rect(cx), claimed, me.abs, held_outside) {
                 cx.set_key_focus(self.area);
             }
         }
@@ -409,9 +417,91 @@ impl NavListRef {
     }
 }
 
+/// Whether a raw press leaves the keyboard with the LIST.
+///
+/// The strip claims the keyboard from a press anywhere inside it so that the
+/// arrows walk destinations afterwards rather than staying with the row that
+/// was pressed. Three things stop that claim from being the strip's to make,
+/// and this is the whole of the rule — the same one [`ItemGrid::keeps_keys`]
+/// follows for the same reason.
+///
+/// `visible` is the part of the strip actually ON SCREEN, the CLIPPED rect
+/// and not the authored one: inside a page that scrolls, the authored rect
+/// runs on up behind whatever stands above the page, and a press on a field
+/// up there must not have its focus taken away by a strip nobody can see.
+///
+/// `claimed` is where whatever already took this press is, if anything did. A
+/// claim from inside the strip is one of its own rows and the keyboard stays
+/// — that is the case this whole dance exists for, since a grouped radio
+/// pressed while already lit raises no action to answer. A claim from a sheet
+/// or a menu over the top of the strip was for that thing.
+///
+/// `held_outside` answers what neither rect can see. A press that arrives
+/// while another control already holds the mouse — a slider mid-drag, a
+/// scroll bar, a resizer — is handed off the capture list and marks nothing
+/// on the event at all, so it reaches here looking exactly like bare
+/// background. Taking the keyboard off that control mid-drag is precisely
+/// what the app-wide pointer-capture rule forbids. It is only consulted when
+/// nothing claimed the press, because a claim is the better answer when there
+/// is one: the strip's own rows capture on the way past and would otherwise
+/// read as "held outside" on every single press.
+fn press_keeps_keys(
+    visible: Rect,
+    claimed: Option<Rect>,
+    point: DVec2,
+    held_outside: bool,
+) -> bool {
+    if !visible.contains(point) {
+        return false;
+    }
+    match claimed {
+        Some(rect) => rect.is_inside_of(visible),
+        None => !held_outside,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rect(x: f64, y: f64, w: f64, h: f64) -> Rect {
+        Rect { pos: dvec2(x, y), size: dvec2(w, h) }
+    }
+
+    /// The keyboard rule the strip's raw press is judged by.
+    ///
+    /// The bug it was written for: the strip claimed the keyboard from any
+    /// press inside its UNCLIPPED rect, whoever the press belonged to. A
+    /// slider being dragged elsewhere, a menu standing over the strip, and a
+    /// row scrolled up out of sight all lost their press to it.
+    #[test]
+    fn the_strip_takes_the_keyboard_only_from_a_press_that_is_its_own() {
+        let visible = rect(0.0, 100.0, 300.0, 200.0);
+        // The ordinary press: inside the part on screen, nothing holding it.
+        assert!(press_keeps_keys(visible, None, dvec2(150.0, 150.0), false));
+        // The rest of the authored rect — in a page that scrolls, the part
+        // that has gone up behind whatever stands above the page.
+        assert!(!press_keeps_keys(visible, None, dvec2(150.0, 40.0), false));
+        // A row's own claim is the strip's: this is the case the raw press
+        // exists for, since a row takes the focus itself on FingerDown.
+        assert!(press_keeps_keys(
+            visible,
+            Some(rect(0.0, 100.0, 300.0, 40.0)),
+            dvec2(150.0, 120.0),
+            false
+        ));
+        // A sheet or a menu over the top of the strip is not inside it.
+        assert!(!press_keeps_keys(
+            visible,
+            Some(rect(100.0, 50.0, 200.0, 120.0)),
+            dvec2(150.0, 150.0),
+            false
+        ));
+        // And the pointer-capture rule: a press that marks nothing while
+        // another control holds the mouse belongs to that control, and the
+        // strip must not take the keyboard off it mid-drag.
+        assert!(!press_keeps_keys(visible, None, dvec2(150.0, 150.0), true));
+    }
 
     /// Choosing survives a set that still holds the choice, and falls to the
     /// first when it does not: a nav with nothing lit does not say where

@@ -5,8 +5,8 @@ use makepad_widgets::*;
 pub struct StyleTween {
     pub target: DesktopStyle,
     pub dark: bool,
-    pub weights: [f64; 7],
-    from: [f64; 7],
+    pub weights: [f64; 8],
+    from: [f64; 8],
     elapsed: f64,
 }
 impl Default for StyleTween {
@@ -14,8 +14,8 @@ impl Default for StyleTween {
         Self {
             target: DesktopStyle::Omarchy,
             dark: false,
-            weights: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-            from: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            weights: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            from: [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             elapsed: 1.0,
         }
     }

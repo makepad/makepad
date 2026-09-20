@@ -1,4 +1,4 @@
-//! Alerts, banners, inline tips and callouts: the message that sits in the
+//! Alerts, banners, guides and callouts: the message that sits in the
 //! page. One overview of every shape, a controlled instance, and the host
 //! that shows one banner at a time.
 use crate::makepad_widgets::alert::AlertIntent;
@@ -72,13 +72,13 @@ script_mod! {
         }
         banner_host := BannerHost{}
 
-        StoryHeading{text: "Inline tip"}
-        StoryNote{text: "A guide banner: folded guidance, a media slot and a dismiss key the host persists."}
-        tip := InlineTip{
+        StoryHeading{text: "Guide"}
+        StoryNote{text: "AlertGuide is the alert that teaches rather than reports: folded guidance, a media slot and a dismiss key the host persists."}
+        guide := AlertGuide{
             title: "Drag rows to reorder them"
             description: "Every row in this list has a handle at its left edge."
             guidance: "Hold the handle, move the row to where it belongs and let go. Press Escape while dragging to put it back where it was. The order is saved as soon as you drop."
-            dismiss_key: "tip.reorder"
+            dismiss_key: "guide.reorder"
             media: RoundedView{
                 width: 56.
                 height: 40.
@@ -113,7 +113,7 @@ fn overview_actions(cx: &mut Cx, root: &WidgetRef, actions: &Actions) {
         ids!(closable),
         ids!(with_action),
         ids!(offline),
-        ids!(tip),
+        ids!(guide),
         ids!(callout),
     ];
     if root.button(cx, ids!(reopen)).clicked(actions) {
@@ -164,12 +164,12 @@ pub const STORIES: &[Story] = &[
         key: "feedback/alert/overview",
         category: "Feedback",
         component: "Alert",
-        also: &["Banner", "Callout", "InlineTip", "BannerHost"],
+        also: &["Banner", "Callout", "AlertGuide", "BannerHost"],
         name: "Overview",
         dsl: "AlertOverview",
         added: "2026-09-05",
         tags: &["controls", "new"],
-        doc: "# Alert\n\nA message that sits in the page: an intent icon, a bold title, a description, an action slot and a close cross on a face coloured by intent. `Alert` is the bevelled standard, `AlertFlat` the plain face, `Banner` the full-width strip, `InlineTip` the guide banner with folded guidance and a media slot, `Callout` the card nudge with an accent bar.\n\nClosing folds the alert away over `motion_medium_1` and raises `Closed`; a tip with a `dismiss_key` also raises `Dismissed(key)`. A click on the widget in an action slot raises `Action`. `open` brings a closed alert back.\n\nWhile the title, the description and the actions fit on one line they share it; when the width shrinks the text stacks and the actions drop under it.\n\n## BannerHost\n\n`BannerHost` is the place under a toolbar for the one banner that matters now. It holds a single `Banner`, folded away and taking no room until `show(cx, intent, title, description)` fills and unfolds it. A second `show` replaces the text in place, so only the latest message is ever on screen; `dismiss` folds it away and `is_showing` asks. `banner()` hands over the inner banner for a host that reads its actions, and the host's `banner` property is where the banner is styled.",
+        doc: "# Alert\n\nA message that sits in the page: an intent icon, a bold title, a description, an action slot and a close cross on a face coloured by intent. `Alert` is the bevelled standard, `AlertFlat` the plain face, `Banner` the full-width strip, `AlertGuide` the guide with folded guidance and a media slot, `Callout` the card nudge with an accent bar.\n\nClosing folds the alert away over `motion_medium_1` and raises `Closed`; a guide with a `dismiss_key` also raises `Dismissed(key)`. A click on the widget in an action slot raises `Action`. `open` brings a closed alert back.\n\nWhile the title, the description and the actions fit on one line they share it; when the width shrinks the text stacks and the actions drop under it.\n\n## BannerHost\n\n`BannerHost` is the place under a toolbar for the one banner that matters now. It holds a single `Banner`, folded away and taking no room until `show(cx, intent, title, description)` fills and unfolds it. A second `show` replaces the text in place, so only the latest message is ever on screen; `dismiss` folds it away and `is_showing` asks. `banner()` hands over the inner banner for a host that reads its actions, and the host's `banner` property is where the banner is styled.",
         subject: "closable",
         feature: None,
         controls: &[
@@ -203,3 +203,38 @@ pub const STORIES: &[Story] = &[
         on_actions: Some(alert_page_actions),
     },
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The page reads without a script error and holds every alert its
+    /// handler addresses. Nothing the compiler checks reads the DSL: a
+    /// preset the page names and the library no longer registers is one log
+    /// line and a gap where the guide was meant.
+    #[test]
+    fn the_page_builds_and_holds_the_alerts_its_handler_addresses() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let errors = cx.with_vm(|vm| {
+            crate::theme::widgets_script_mod(vm);
+            crate::shell::script_mod(vm);
+            vm.bx.captured_errors = Some(Vec::new());
+            self::script_mod(vm);
+            let _ = makepad_platform::shader_error::take();
+            vm.take_errors()
+        });
+        assert!(errors.is_empty(), "{errors:?}");
+        let story = &STORIES[0];
+        let page = cx.with_vm(|vm| {
+            let stories = vm.module(id!(stories));
+            let value = vm.bx.heap.value(stories, LiveId::from_str(story.dsl).into(), NoTrap);
+            assert!(value.as_object().is_some(), "no template {}", story.dsl);
+            WidgetRef::script_from_value(vm, value)
+        });
+        assert!(!page.is_empty(), "{} built no widget", story.key);
+        for path in [ids!(subject), ids!(closable), ids!(with_action), ids!(offline), ids!(guide), ids!(callout)] {
+            assert!(page.alert(&cx, path).borrow().is_some(), "{}: no alert {path:?}", story.key);
+        }
+        assert!(page.banner_host(&cx, ids!(banner_host)).borrow().is_some(), "{}: no banner host", story.key);
+    }
+}

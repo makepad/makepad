@@ -1162,6 +1162,11 @@ pub struct Button {
     icon_end_walk: Walk,
     #[live]
     label_walk: Walk,
+    /// Per-row horizontal alignment of the label, which only shows once the text
+    /// wraps onto more rows; give `label_walk` a `Fill` width so the rows have
+    /// room to move within.
+    #[live]
+    label_align: Align,
     #[walk]
     walk: Walk,
 
@@ -1388,7 +1393,6 @@ impl Widget for Button {
                     );
                 }
                 self.animator_play(cx, ids!(hover.down));
-                self.set_key_focus(cx);
             }
             Hit::FingerHoverIn(_) => {
                 if takes_input {
@@ -1544,7 +1548,7 @@ impl Button {
         self.draw_bg.begin(cx, self.walk, self.layout);
         self.draw_icon.draw_walk(cx, self.icon_walk);
         self.draw_text
-            .draw_walk(cx, self.label_walk, Align::default(), label);
+            .draw_walk(cx, self.label_walk, self.label_align, label);
         self.draw_bg.end(cx);
     }
 
@@ -1558,7 +1562,7 @@ impl Button {
         };
         if self.description.is_empty() {
             self.draw_text
-                .draw_walk(cx, self.label_walk, Align::default(), label);
+                .draw_walk(cx, self.label_walk, self.label_align, label);
             return;
         }
         cx.begin_turtle(
@@ -1571,7 +1575,7 @@ impl Button {
             },
         );
         self.draw_text
-            .draw_walk(cx, self.label_walk, Align::default(), label);
+            .draw_walk(cx, self.label_walk, self.label_align, label);
         self.draw_description
             .draw_walk(cx, self.description_walk, Align::default(), &self.description);
         cx.end_turtle();

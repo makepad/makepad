@@ -1,6 +1,6 @@
 //! The radial menu story: rings of choices whose outer rings open in the
 //! direction of their parent, so one flick outward picks two or three rings
-//! deep.
+//! deep. The page before this one is the same widget drawn in its own field.
 use crate::makepad_widgets::*;
 use crate::registry::{Control, ControlKind, Story};
 
@@ -176,7 +176,7 @@ A ring of choices around a point, where a choice can hold choices of its own.
 
 A choice with children opens an **outer ring on the same centre**, and that ring's arc is centred on the parent wedge's own direction. The hand keeps travelling the way it was already going, so one continuous flick outward picks a choice two or three rings deep. The distance past a ring's inner edge never matters, only the direction within the rings that are open.
 
-It floats over everything on an overlay of its own. That lets the rings reach past the panel that opened them, and it is what makes the frosted look possible.
+It floats over everything on an overlay of its own. That lets the rings reach past the panel that opened them, and it is what makes the frosted look possible. `overlay: false` draws the rings in the field instead and `pinned` keeps a ring up there; `PieMenu`, the page before this one, is that preset of this same widget.
 
 ## Items
 
@@ -193,6 +193,8 @@ RadialMenu{
 ```
 
 A parent has to come before its children. An item with an empty segment, a missing parent, a key used twice, or more than three segments is dropped and named in the log. `set_items` takes a tree of `RadialNode`s from Rust instead.
+
+`labels: [\"Cut\" \"Copy\"]` is the short way to say a flat ring: each word's position is its key, and `picked_index` reads that position back. It is read only when `items` is empty.
 
 ## Three rings at most
 
@@ -252,7 +254,7 @@ Nothing animates away: a pick, a cancel or a move inward takes its rings down at
 
 ## What it does not do
 
-No pinned mode: a ring that stays on the surface is `PieMenu`. No memory of the last pick. No arrow keys. No more than three rings. Labels are drawn at their measured width and are not shortened, so a ring is for short words.",
+No memory of the last pick, pinned or not. No arrow keys. No more than three rings. A floating menu is never pinned: `pinned` always draws the ring in its field, because a menu over the window holds the pointer for as long as it is up. Labels are drawn at their measured width and are not shortened, so a ring is for short words.",
     subject: "subject",
     feature: None,
     controls: &[

@@ -12,9 +12,12 @@
 //!
 //! **The title bar is the handle and the bottom-right corner is the grip.**
 //! Both are read from what was actually drawn rather than guessed from
-//! padding, and both claim a press before the panel's own contents see it:
-//! a drag that begins by dropping a caret into a text field is a drag the
-//! user has to undo.
+//! padding, and both take the presses no control took first. The panel's
+//! contents are dispatched before the handles are read, so a control
+//! genuinely under the pointer — the scroll bar whose bottom end sits under
+//! the corner grip, a field or a button someone put in the title bar — owns
+//! its own press and keeps the mouse until it is let go. What is left over
+//! is bare chrome, and bare chrome is what moves and sizes the panel.
 //!
 //! **It cannot be dragged off the screen.** The panel is pulled back inside
 //! the pass every draw with `span_inboard`, the same arithmetic every
@@ -42,6 +45,16 @@ pub enum FloatingPanelAction {
     None,
 }
 
+/// What a press takes hold of, with nothing of the press in it. The
+/// question "may this gesture start, and which one" is answered by
+/// [`grab_at`] alone, so it can be asked of a test as easily as of a
+/// pointer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Grab {
+    Move,
+    Size,
+}
+
 /// What the pointer is doing to the panel.
 #[derive(Clone, Copy, Debug)]
 enum Handling {
@@ -53,6 +66,49 @@ enum Handling {
 
 /// How big the corner grip is, in layout points.
 const GRIP: f64 = 14.0;
+
+/// What a press at `at` takes hold of, if anything.
+///
+/// `held_elsewhere` is [`CxFingers::is_mouse_held_outside`] asked with the
+/// panel's own area. A control that is dragged continuously — a slider, a
+/// scroll bar, another panel's grip — takes the mouse on its press and
+/// keeps it until the release, and every other gesture that would start
+/// from that same pointer stands down meanwhile. Moving and sizing a panel
+/// are two such gestures, so they ask before they start.
+///
+/// `primary` keeps the secondary button out of it: a right-press is a
+/// press on a menu, not a hold on a handle, and this used to answer it by
+/// dragging the panel around.
+///
+/// `unclaimed` is the press with nothing on it yet — `me.handled` still
+/// empty. It answers the half of the rule `held_elsewhere` cannot: the
+/// press that lands ON a control, whose capture does not exist yet when
+/// the press is read. The panel's contents are dispatched before this is
+/// asked, so by now the control has both captured and marked the press, and
+/// a handle that took it anyway would drag the panel out from under a
+/// pointer that is already somebody's.
+fn grab_at(
+    at: Vec2d,
+    band: Rect,
+    close_mark: Rect,
+    grip: Rect,
+    movable: bool,
+    resizable: bool,
+    primary: bool,
+    held_elsewhere: bool,
+    unclaimed: bool,
+) -> Option<Grab> {
+    if !primary || held_elsewhere || !unclaimed {
+        return None;
+    }
+    if resizable && grip.contains(at) {
+        return Some(Grab::Size);
+    }
+    if movable && band.contains(at) && !close_mark.contains(at) {
+        return Some(Grab::Move);
+    }
+    None
+}
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -167,6 +223,13 @@ pub struct FloatingPanel {
     band: Rect,
     #[rust]
     close_mark: Rect,
+    /// The sheet as it was last drawn — the area the drag CAPTURES, so the
+    /// pointer is locked to this panel from the press until the release.
+    /// The deref `View`'s own area is empty here (this widget draws its
+    /// content itself onto an overlay list and never ends a turtle into
+    /// it), so it is the content's area or nothing.
+    #[rust]
+    panel_area: Area,
 }
 
 impl ScriptHook for FloatingPanel {
@@ -238,6 +301,14 @@ impl FloatingPanel {
         content.widget(cx, ids!(close)).set_visible(cx, self.closable);
     }
 
+    /// The corner grip, in window points.
+    fn grip_rect(&self) -> Rect {
+        Rect {
+            pos: dvec2(self.pos.x + self.size.x - GRIP, self.pos.y + self.size.y - GRIP),
+            size: dvec2(GRIP, GRIP),
+        }
+    }
+
     fn say_placed(&mut self, cx: &mut Cx) {
         let uid = self.widget_uid();
         let (pos, size) = (self.pos, self.size);
@@ -277,9 +348,10 @@ impl Widget for FloatingPanel {
             drop(view);
             let _ = content.draw_all(cx, scope);
 
-            // The handle and the mark, as drawn.
+            // The handle, the mark and the sheet, as drawn.
             self.band = content.widget(cx.cx.cx, ids!(header)).area().rect(cx.cx.cx);
             self.close_mark = content.widget(cx.cx.cx, ids!(close)).area().rect(cx.cx.cx);
+            self.panel_area = content.area();
         }
 
         cx.end_pass_sized_turtle();
@@ -291,60 +363,109 @@ impl Widget for FloatingPanel {
         if !self.open {
             return;
         }
-        let grip = Rect {
-            pos: dvec2(self.pos.x + self.size.x - GRIP, self.pos.y + self.size.y - GRIP),
-            size: dvec2(GRIP, GRIP),
-        };
+        let grip = self.grip_rect();
         let panel = Rect { pos: self.pos, size: self.size };
 
-        // The handle claims a press BEFORE the panel's own contents see it.
-        // A drag that starts by dropping a caret into a field underneath is
-        // a drag the person then has to undo.
-        match event {
-            Event::MouseDown(me) if self.handling.is_none() => {
-                if self.resizable && grip.contains(me.abs) {
-                    self.handling = Some(Handling::Size { held_at: me.abs, from: self.size });
-                    return;
-                }
-                if self.movable && self.band.contains(me.abs) && !self.close_mark.contains(me.abs) {
-                    self.handling = Some(Handling::Move { held_at: me.abs, from: self.pos });
-                    return;
-                }
-            }
-            Event::MouseMove(me) => {
-                match self.handling {
+        // A drag that has hold of the pointer hears about it wherever the
+        // pointer goes, and hears about it first. That is what the capture
+        // taken at the press below buys: `hits` hands these moves to this
+        // panel alone, outside its own bounds included, and no other widget
+        // takes a hover or a press from them on the way past.
+        if self.handling.is_some() {
+            match event.hits(cx, self.panel_area) {
+                Hit::FingerMove(fe) => match self.handling {
                     Some(Handling::Move { held_at, from }) => {
-                        self.pos = from + (me.abs - held_at);
+                        self.pos = from + (fe.abs - held_at);
                         cx.set_cursor(MouseCursor::Move);
                         self.redraw(cx);
                         return;
                     }
                     Some(Handling::Size { held_at, from }) => {
-                        let to = from + (me.abs - held_at);
+                        let to = from + (fe.abs - held_at);
                         self.size = dvec2(to.x.max(self.min_size.x), to.y.max(self.min_size.y));
                         cx.set_cursor(MouseCursor::NwseResize);
                         self.redraw(cx);
                         return;
                     }
-                    None => {
-                        // The corner says what it does before it is grabbed.
-                        if self.resizable && grip.contains(me.abs) {
-                            cx.set_cursor(MouseCursor::NwseResize);
-                        }
-                    }
-                }
+                    None => {}
+                },
+                _ => {}
             }
-            Event::MouseUp(_) => {
+            // The release ends it, and the RAW release does — not the hit.
+            // A capture can be handed on or dropped under a widget's feet
+            // (a sweep, a redraw that lost the area), and a panel still
+            // holding a drag it was never told had ended would follow the
+            // pointer with the button up.
+            if let Event::MouseUp(_) = event {
                 if self.handling.take().is_some() {
                     self.say_placed(cx);
                     self.redraw(cx);
                     return;
                 }
             }
-            _ => {}
         }
 
+        // The contents go FIRST, and that order is the whole fix. A gesture
+        // that starts from a pointer may only start on a press nothing else
+        // wanted, and neither way of asking works before the contents have
+        // run: a capture does not exist until the control has been given the
+        // press, so `is_mouse_held_outside` asked ahead of them was blind to
+        // exactly the case it is there for — a slider inside the panel,
+        // pressed, and the panel dragged out from under it.
+        //
+        // The two other ways of getting there were weighed and lost.
+        // DECIDING later, on the first move, gives up the capture: `hits`
+        // takes one on a press and nowhere else, so the panel would be back
+        // to dragging off raw moves with no lock on the pointer at all.
+        // Testing for bare background with
+        // `find_interactive_widget_from_point` cannot see the body's scroll
+        // bars — a `View` keeps those beside its children and the search
+        // walks children — which is the collision the default chrome
+        // actually has, the vertical bar's bottom end under the 14pt corner
+        // grip; and it WOULD see this panel's own title `Label`, which does
+        // not opt out of `is_interactive` (`window.rs` records the same
+        // trap), leaving the bar undraggable by the one thing it is for.
         self.view.widget(cx, ids!(content)).handle_event(cx, event, scope);
+
+        // Everything this panel owns, for the one question a gesture that
+        // starts from a pointer has to ask: is the mouse already held by
+        // something else? The panel draws its whole subtree into one area,
+        // so that area is the whole answer. Asked after the contents ran, so
+        // a control inside the panel that just took the press is on the list.
+        let held_elsewhere = cx.fingers.is_mouse_held_outside(&[self.panel_area]);
+
+        // The handle takes a press the contents did not.
+        //
+        // It takes it through `hits` and not the raw press it used to read,
+        // because `hits` CAPTURES: from here until the release the mouse
+        // belongs to this panel. Before that, `grab_at` asks whether there is
+        // anything to take at all — a control that already holds the mouse
+        // keeps it, a control that has just been handed this press keeps it,
+        // and a secondary press holds nothing.
+        if let Event::MouseDown(me) = event {
+            if self.handling.is_none() {
+                let grab = grab_at(
+                    me.abs,
+                    self.band,
+                    self.close_mark,
+                    grip,
+                    self.movable,
+                    self.resizable,
+                    me.button.is_primary(),
+                    held_elsewhere,
+                    me.handled.get().is_empty(),
+                );
+                if let Some(grab) = grab {
+                    if let Hit::FingerDown(fe) = event.hits(cx, self.panel_area) {
+                        self.handling = Some(match grab {
+                            Grab::Move => Handling::Move { held_at: fe.abs, from: self.pos },
+                            Grab::Size => Handling::Size { held_at: fe.abs, from: self.size },
+                        });
+                        return;
+                    }
+                }
+            }
+        }
 
         if let Event::Actions(actions) = event {
             let content = self.view.widget(cx, ids!(content));
@@ -354,13 +475,35 @@ impl Widget for FloatingPanel {
                 cx.widget_action(uid, FloatingPanelAction::Closed);
             }
         }
-        // A press anywhere on the panel is the panel's, so the page beneath
-        // it does not also act on it. Outside the panel nothing is claimed —
-        // that is what "does not stop the work" means.
-        if let Event::MouseDown(me) = event {
-            if panel.contains(me.abs) {
-                cx.set_key_focus(self.view.area());
+
+        match event {
+            // The corner says what it does before it is grabbed — unless the
+            // mouse is out on loan to a drag somewhere else, in which case
+            // the pointer showing is that drag's to decide and not ours to
+            // paint a resize arrow over.
+            Event::MouseMove(me) if self.handling.is_none() => {
+                if self.resizable
+                    && grip.contains(me.abs)
+                    && me.handled.get().is_empty()
+                    && !held_elsewhere
+                {
+                    cx.set_cursor(MouseCursor::NwseResize);
+                }
             }
+            // A press anywhere on the panel is the panel's, so the page
+            // beneath it does not also act on it. Outside the panel nothing
+            // is claimed — that is what "does not stop the work" means.
+            //
+            // A press one of the panel's OWN contents took is that widget's,
+            // and taking the key focus here would pull it straight back off
+            // the caret it just placed: the contents run above, so a press
+            // they wanted is marked handled by the time this is read.
+            Event::MouseDown(me) => {
+                if panel.contains(me.abs) && me.handled.get().is_empty() && !held_elsewhere {
+                    cx.set_key_focus(self.panel_area);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -439,10 +582,241 @@ mod tests {
         assert_eq!(span_inboard(100.0, 320.0, 0.0, 1000.0), 100.0);
     }
 
+    /// A panel at 100,100 sized 320x240: its title bar, its close mark and
+    /// its corner, where a draw would leave them.
+    fn handles() -> (Rect, Rect, Rect) {
+        let band = Rect { pos: dvec2(100.0, 100.0), size: dvec2(320.0, 38.0) };
+        let close_mark = Rect { pos: dvec2(392.0, 108.0), size: dvec2(22.0, 22.0) };
+        let grip = Rect { pos: dvec2(406.0, 326.0), size: dvec2(14.0, 14.0) };
+        (band, close_mark, grip)
+    }
+
+    /// What each part of the panel does with a press, and what the parts
+    /// that are not handles do with one: nothing, so the press goes on to
+    /// the contents.
+    #[test]
+    fn the_bar_moves_it_the_corner_sizes_it_and_the_close_mark_does_neither() {
+        let (band, close_mark, grip) = handles();
+        let take = |at| grab_at(at, band, close_mark, grip, true, true, true, false, true);
+        assert_eq!(take(dvec2(200.0, 115.0)), Some(Grab::Move), "the title bar is the handle");
+        assert_eq!(take(dvec2(410.0, 330.0)), Some(Grab::Size), "the corner is the grip");
+        assert_eq!(take(dvec2(400.0, 115.0)), None, "the close mark closes, it does not move");
+        assert_eq!(take(dvec2(200.0, 250.0)), None, "the body belongs to the contents");
+        assert_eq!(take(dvec2(50.0, 50.0)), None, "and the page is not the panel");
+        // A panel told it does not move, or does not size, does not.
+        assert_eq!(
+            grab_at(dvec2(200.0, 115.0), band, close_mark, grip, false, true, true, false, true),
+            None
+        );
+        assert_eq!(
+            grab_at(dvec2(410.0, 330.0), band, close_mark, grip, true, false, true, false, true),
+            None
+        );
+    }
+
+    /// The app-wide rule, at the one place this panel can break it: a
+    /// control that is dragged continuously holds the mouse from its press
+    /// until its release, and neither of the panel's two gestures may start
+    /// from that pointer meanwhile.
+    ///
+    /// Reachable with one hand: hold a slider down and press the panel's
+    /// corner with the other button. The panel used to read the raw press,
+    /// ask nobody, and start sizing itself against a pointer the slider was
+    /// still tracking.
+    #[test]
+    fn neither_gesture_starts_while_another_control_holds_the_mouse() {
+        let (band, close_mark, grip) = handles();
+        let held = |at| grab_at(at, band, close_mark, grip, true, true, true, true, true);
+        assert_eq!(held(dvec2(200.0, 115.0)), None, "the bar stands down");
+        assert_eq!(held(dvec2(410.0, 330.0)), None, "and so does the corner");
+    }
+
+    /// A press that is not the primary button holds nothing either. It is a
+    /// press on a menu on its way somewhere, and this used to answer it by
+    /// carrying the panel around.
+    #[test]
+    fn a_secondary_press_takes_no_handle() {
+        let (band, close_mark, grip) = handles();
+        let second = |at| grab_at(at, band, close_mark, grip, true, true, false, false, true);
+        assert_eq!(second(dvec2(200.0, 115.0)), None);
+        assert_eq!(second(dvec2(410.0, 330.0)), None);
+    }
+
+    /// The same rule at the press itself, where no capture exists yet to
+    /// ask about. A control the press landed on has been handed it by the
+    /// dispatch above and has marked it; a handle that took it anyway would
+    /// be moving the panel with a pointer that is already somebody's.
+    #[test]
+    fn a_press_a_control_has_already_taken_takes_no_handle() {
+        let (band, close_mark, grip) = handles();
+        let taken = |at| grab_at(at, band, close_mark, grip, true, true, true, false, false);
+        assert_eq!(taken(dvec2(200.0, 115.0)), None, "a control in the title bar keeps its press");
+        assert_eq!(taken(dvec2(410.0, 330.0)), None, "and one under the corner keeps its press");
+    }
+
     /// A panel wider than the window keeps its low edge on screen rather
     /// than being pushed off the other side to make its width fit.
     #[test]
     fn a_panel_wider_than_the_window_keeps_its_near_edge() {
         assert_eq!(span_inboard(40.0, 1200.0, 0.0, 1000.0), 0.0);
+    }
+
+    // The two above are the decision on its own. What follows presses a
+    // real panel, because the decision is only as good as the moment it is
+    // asked at, and that moment is an ordering — the thing a pure test of
+    // `grab_at` cannot see.
+
+    use crate::button::ButtonAction;
+    use crate::makepad_draw::cx_draw::CxDraw;
+    use std::cell::Cell;
+
+    const SIZE: DVec2 = DVec2 { x: 800.0, y: 600.0 };
+
+    fn cx() -> Cx {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        cx.with_vm(crate::script_mod);
+        cx
+    }
+
+    /// A window-less pass with the overlay a window keeps, which the panel's
+    /// own draw list hangs off.
+    struct Target {
+        pass: DrawPass,
+        draw_list: DrawList2d,
+        overlay: Overlay,
+    }
+
+    impl Target {
+        fn new(cx: &mut Cx) -> Self {
+            let overlay = cx.with_vm(|vm| Overlay::script_new(vm));
+            Target { pass: DrawPass::new(cx), draw_list: DrawList2d::new(cx), overlay }
+        }
+
+        fn draw(&mut self, cx: &mut Cx, root: &WidgetRef) {
+            self.pass.set_size(cx, SIZE);
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&self.pass, None);
+            self.draw_list.begin_always(&mut cx2d);
+            self.overlay.begin(&mut cx2d);
+            cx2d.begin_root_turtle(SIZE, Layout::flow_down());
+            root.draw_all(&mut cx2d, &mut Scope::empty());
+            cx2d.end_pass_sized_turtle();
+            self.overlay.end(&mut cx2d);
+            self.draw_list.end(&mut cx2d);
+            cx2d.end_pass(&self.pass);
+        }
+    }
+
+    fn press(abs: DVec2) -> Event {
+        Event::MouseDown(MouseDownEvent {
+            abs,
+            button: MouseButton::PRIMARY,
+            window_id: WindowId(1, 1),
+            modifiers: KeyModifiers::default(),
+            handled: Cell::new(Area::Empty),
+            time: 0.0,
+        })
+    }
+
+    /// What the panel has hold of, if anything. The moves that carry a
+    /// drag arrive as `Hit::FingerMove`, which needs the button state the
+    /// real event pump keeps, so what a test can see is the decision itself:
+    /// whether the press was taken as a handle at all.
+    fn handling(panel: &WidgetRef) -> Option<Handling> {
+        panel.borrow::<FloatingPanel>().expect("a FloatingPanel").handling
+    }
+
+    fn pressed(actions: &Actions, button: &WidgetRef) -> bool {
+        actions
+            .iter()
+            .filter_map(|action| action.as_widget_action())
+            .any(|action| {
+                action.widget_uid == button.widget_uid()
+                    && matches!(action.cast::<ButtonAction>(), ButtonAction::Pressed(_))
+            })
+    }
+
+    /// A panel with a button in its title bar, open and drawn where it was
+    /// told to stand.
+    fn panel_page(cx: &mut Cx, target: &mut Target) -> WidgetRef {
+        let root = cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    flow: Overlay
+                    panel := FloatingPanel{
+                        title: "Readings"
+                        pos: vec2(100., 100.)
+                        size: vec2(320., 240.)
+                        content +: {
+                            header +: {
+                                knob := Button{width: 40. height: 22. text: "K"}
+                            }
+                        }
+                    }
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        target.draw(cx, &root);
+        root.widget(cx, ids!(panel)).as_floating_panel().open(cx);
+        target.draw(cx, &root);
+        root
+    }
+
+    /// The app-wide rule where this panel could only break it at the press
+    /// itself: a control sitting IN the title bar owns presses that land on
+    /// it, and the handle around it does not carry the panel off instead.
+    ///
+    /// The contents used to be dispatched after the handle had already taken
+    /// the press and returned, so the button never saw it at all — and no
+    /// capture had been taken for `is_mouse_held_outside` to find.
+    #[test]
+    fn a_control_in_the_title_bar_keeps_its_press() {
+        let mut cx = cx();
+        let mut target = Target::new(&mut cx);
+        let root = panel_page(&mut cx, &mut target);
+        let panel = root.widget(&cx, ids!(panel));
+        let knob = panel.widget(&cx, ids!(knob));
+        let knob_rect = knob.area().rect(&cx);
+        assert!(knob_rect.size.x > 0.0, "the button in the title bar is drawn");
+        let band = panel.widget(&cx, ids!(header)).area().rect(&cx);
+        let at = knob_rect.pos + knob_rect.size * 0.5;
+        assert!(band.contains(at), "and it stands on the handle, which is the whole point");
+
+        let actions = cx.capture_actions(|cx| root.handle_event(cx, &press(at), &mut Scope::empty()));
+        assert!(pressed(&actions, &knob), "the press reached the button");
+        assert!(handling(&panel).is_none(), "and the handle around it took nothing");
+    }
+
+    /// And the handle still works: the bare bar moves the panel. The title
+    /// `Label` lies across it and does not stand the handle down — a `Label`
+    /// reports where the pointer is and never takes it, which is why the
+    /// question asked here is who TOOK the press rather than what is drawn
+    /// under it.
+    #[test]
+    fn the_bare_title_bar_still_moves_the_panel() {
+        let mut cx = cx();
+        let mut target = Target::new(&mut cx);
+        let root = panel_page(&mut cx, &mut target);
+        let panel = root.widget(&cx, ids!(panel));
+        let band = panel.widget(&cx, ids!(header)).area().rect(&cx);
+        let knob = panel.widget(&cx, ids!(knob)).area().rect(&cx);
+        let close = panel.widget(&cx, ids!(close)).area().rect(&cx);
+        let at = dvec2(band.pos.x + 30.0, band.pos.y + band.size.y * 0.5);
+        assert!(band.contains(at), "the press lands on the bar");
+        assert!(!knob.contains(at) && !close.contains(at), "and on none of the controls standing in it");
+
+        root.handle_event(&mut cx, &press(at), &mut Scope::empty());
+        assert!(
+            matches!(handling(&panel), Some(Handling::Move { .. })),
+            "the bar took the handle"
+        );
     }
 }

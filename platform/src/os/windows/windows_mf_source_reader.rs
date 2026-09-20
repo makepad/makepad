@@ -619,7 +619,7 @@ fn push_event(ev: SrEvent) {
         q.retain(|e| !matches!(e, SrEvent::Frame { session, .. } if *session == sid));
     }
     q.push(ev);
-    SignalToUI::set_ui_signal();
+    SignalToUI::set_internal_signal();
 }
 
 fn drain_events_for(session: u64) -> Vec<SrEvent> {

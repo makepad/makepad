@@ -117,6 +117,26 @@ script_mod! {
 
     mod.widgets.Markdown = set_type_default() do mod.widgets.MarkdownBase{
         width: Fill height: Fit
+        // Restated from TextFlow rather than inherited. These reach TextFlow
+        // through a Rust `#[deref]`, not through the prototype chain, so on a
+        // reload -- and a theme switch is a reload -- any of them this block
+        // does not name is reset to its FIELD TYPE's default instead of to
+        // what TextFlow's own block says. The `Layout` default flows Right,
+        // which laid every table row side by side: the header took the whole
+        // width, each body row was left zero wide, and a table drew its box
+        // and its header and nothing else. `heading_margin` and
+        // `paragraph_margin` went to zero the same way.
+        table_walk: Walk{width: Fill, height: Fit}
+        table_layout: Layout{flow: Flow.Down}
+        table_row_walk: Walk{width: Fill, height: Fit}
+        table_row_layout: Layout{flow: Flow.Right}
+        table_cell_layout: Layout{
+            flow: Flow.Right{wrap: true}
+            padding: Inset{left: 6, right: 6, top: 4, bottom: 4}
+        }
+        heading_margin: Inset{top: 1.0, bottom: 0.1}
+        paragraph_margin: Inset{top: 0.33, bottom: 0.33}
+
         flow: Flow.Right{wrap: true}
         padding: theme.mspace_1
 
@@ -406,7 +426,6 @@ impl Markdown {
                         self.code_block_string.clear();
                     } else {
                         tf.push_size_rel_scale(tf.fixed_font_size_scale);
-                        tf.combine_spaces.push(false);
                         tf.fixed.push();
                         tf.begin_code(cx);
                     }
@@ -445,7 +464,6 @@ impl Markdown {
                     } else {
                         tf.font_sizes.pop();
                         tf.fixed.pop();
-                        tf.combine_spaces.pop();
                         tf.end_code(cx);
                     }
                 }

@@ -60,10 +60,7 @@ script_mod! {
                         return sdf.result
                     }
                     DesktopButtonType.WindowsMaxToggled => {
-                        let sz = 5.
-                        sdf.rect(c.x - sz + 1., c.y - sz - 1., 2. * sz, 2. * sz)
-                        sdf.stroke(#f, 0.5 + 0.5 * self.draw_pass.dpi_dilate)
-                        sdf.rect(c.x - sz - 1., c.y - sz + 1., 2. * sz, 2. * sz)
+                        sdf.rect(c.x - sz, c.y - sz, 2. * sz, 2. * sz)
                         sdf.stroke(color, 0.5 + 0.5 * self.draw_pass.dpi_dilate)
                         return sdf.result
                     }

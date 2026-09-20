@@ -204,19 +204,19 @@ script_mod! {
             text_style: TextStyle{
                 font_family: FontFamily{
                     latin := FontMember{
-                        res: crate_resource("self:../../widgets/resources/jetbrains_mono_variable.ttf")
+                        res: crate_resource("makepad_widgets:resources/jetbrains_mono_variable.ttf")
                         asc: 0.0 desc: 0.0 weight: 400.0
                     }
                     icons := FontMember{
-                        res: crate_resource("self:../../widgets/resources/fa-solid-900.ttf")
+                        res: crate_resource("makepad_widgets:resources/fa-solid-900.ttf")
                         asc: 0.0 desc: 0.0
                     }
                     emoji := FontMember{
-                        res: crate_resource("self:../../widgets/resources/NotoColorEmoji.ttf")
+                        res: crate_resource("makepad_widgets:resources/NotoColorEmoji.ttf")
                         asc: 0.0 desc: 0.0
                     }
                     symbols := FontMember{
-                        res: crate_resource("self:../../widgets/resources/Inter.ttf")
+                        res: crate_resource("makepad_widgets:resources/Inter.ttf")
                         asc: 0.0 desc: 0.0
                     }
                 }
@@ -226,19 +226,19 @@ script_mod! {
         bold_text_style: TextStyle{
             font_family: FontFamily{
                 latin := FontMember{
-                    res: crate_resource("self:../../widgets/resources/jetbrains_mono_variable.ttf")
+                    res: crate_resource("makepad_widgets:resources/jetbrains_mono_variable.ttf")
                     asc: 0.0 desc: 0.0 weight: 800.0
                 }
                 icons := FontMember{
-                    res: crate_resource("self:../../widgets/resources/fa-solid-900.ttf")
+                    res: crate_resource("makepad_widgets:resources/fa-solid-900.ttf")
                     asc: 0.0 desc: 0.0
                 }
                 emoji := FontMember{
-                    res: crate_resource("self:../../widgets/resources/NotoColorEmoji.ttf")
+                    res: crate_resource("makepad_widgets:resources/NotoColorEmoji.ttf")
                     asc: 0.0 desc: 0.0
                 }
                 symbols := FontMember{
-                    res: crate_resource("self:../../widgets/resources/Inter.ttf")
+                    res: crate_resource("makepad_widgets:resources/Inter.ttf")
                     asc: 0.0 desc: 0.0
                 }
             }
@@ -633,6 +633,11 @@ impl MpTerm {
         self.area.redraw(cx);
     }
 
+    /// Nonblocking child status for hosts that close when their command ends.
+    pub fn process_exited(&mut self) -> bool {
+        self.session.as_mut().is_some_and(Session::process_exited)
+    }
+
     /// Quick Look unload (`WmEvent::PreviewUnload`): drop the job and idle
     /// blank until the next retarget. Not a close — the process stays warm.
     pub fn unload(&mut self, cx: &mut Cx) {
@@ -649,8 +654,13 @@ impl MpTerm {
         if self.session.is_some() || self.dormant {
             return;
         }
-        let cols = 80;
-        let rows = 24;
+        // draw_walk already measured this widget and its font. Starting an
+        // 80x24 ConPTY and immediately resizing it reflows the first TUI frame
+        // before the child's differential renderer knows its screen changed.
+        let (cols, rows) = if self.rect.size.x > 0.0 && self.rect.size.y > 0.0
+            && self.cell_w > 0.0 && self.cell_h > 0.0 {
+            self.grid_size()
+        } else { (80, 24) };
         if let Ok(spec) = std::env::var("MAKEPAD_TERMINAL_OPACITY") {
             let mut it = spec
                 .split_whitespace()

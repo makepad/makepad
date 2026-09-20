@@ -153,6 +153,7 @@ pub fn splash_host_respond(
         return SplashRespondOutcome::IsolateGone;
     };
     let mut delivered = true;
+    let contained = crate::widget_async::contain_isolate_panic("host request callback", || {
     cx.with_script_vm_id(vm_id, |vm| {
         // Prove we landed in the heap this request came from before minting
         // anything in it. `vm_id` is looked up through a map; if that map is
@@ -181,7 +182,20 @@ pub fn splash_host_respond(
         vm.with_instruction_limit(WIDGET_SCRIPT_INSTRUCTION_LIMIT, |vm| {
             vm.call(callback.as_object().into(), &[obj.into()]);
         });
+        // A callback that errors (or pauses and errors later on its own
+        // thread) leaves its errors queued on the trap; nothing else drains
+        // this entry path, so they used to vanish and a broken callback
+        // looked like a delivered-but-inert answer.
+        for err in vm.take_errors() {
+            crate::makepad_draw::error!("splash host callback error: {err}");
+        }
     });
+    });
+    if !contained {
+        // The callback panicked; the panic was contained and that isolate is
+        // suspect, but the host app carries on.
+        return SplashRespondOutcome::Delivered;
+    }
     if !delivered {
         return SplashRespondOutcome::IsolateGone;
     }

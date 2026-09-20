@@ -609,10 +609,12 @@ fn body_text(response: &HttpResponse) -> &str {
 
 fn parse_search(json: &str) -> Result<Vec<SearchResult>, String> {
     let wire = SearchResponseWire::deserialize_json(json).map_err(json_error)?;
-    if wire.results.len() > MAX_SEARCH_RESULTS {
+    let SearchResponseWire { query, results } = wire;
+    let _ = query;
+    if results.len() > MAX_SEARCH_RESULTS {
         return Err("search response has too many results".to_string());
     }
-    for result in &wire.results {
+    for result in &results {
         let point = LonLat::new(result.lon, result.lat);
         if !valid_point(point)
             || !result.score.is_finite()
@@ -623,8 +625,7 @@ fn parse_search(json: &str) -> Result<Vec<SearchResult>, String> {
             return Err("search response contains an invalid result".to_string());
         }
     }
-    Ok(wire
-        .results
+    Ok(results
         .into_iter()
         .enumerate()
         .map(|(doc_id, result)| SearchResult {
@@ -641,6 +642,7 @@ fn parse_search(json: &str) -> Result<Vec<SearchResult>, String> {
 
 fn parse_route(json: &str) -> Result<Route, String> {
     let wire = RouteResponseWire::deserialize_json(json).map_err(json_error)?;
+    let _graph = &wire.graph;
     let mode = match wire.mode.as_str() {
         "car" => TravelMode::Car,
         "bike" => TravelMode::Bike,
@@ -693,12 +695,23 @@ fn parse_route(json: &str) -> Result<Route, String> {
         .maneuvers
         .into_iter()
         .map(|maneuver| {
+            let ManeuverWire {
+                kind,
+                roundabout_exit,
+                lon,
+                lat,
+                name,
+                dist_m,
+                point_index,
+                text,
+            } = maneuver;
+            let _ = text;
             Ok(Maneuver {
-                kind: maneuver_kind(&maneuver.kind, maneuver.roundabout_exit)?,
-                at: LonLat::new(maneuver.lon, maneuver.lat),
-                name: maneuver.name,
-                dist_m: maneuver.dist_m,
-                point_index: maneuver.point_index,
+                kind: maneuver_kind(&kind, roundabout_exit)?,
+                at: LonLat::new(lon, lat),
+                name,
+                dist_m,
+                point_index,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;

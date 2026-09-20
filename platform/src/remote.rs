@@ -27,8 +27,39 @@
 //!   not by the time their clients opened sockets. Each sequence deadline is
 //!   a new boundary; it does not freeze the app for the entire sequence.
 
+/// Marks synchronous injected dispatch, including hardware-path mouse input and
+/// nested events. Native input delivered on a later event-loop turn stays native.
+/// The flag is the `Cx`'s (`RemoteActivity::remote_input`); the guard holds a
+/// handle to it so the dispatch it brackets is free to borrow the `Cx`.
+#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+pub(crate) struct RemoteInputScope {
+    origin: std::rc::Rc<std::cell::Cell<bool>>,
+    previous: bool,
+}
+
+#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+pub(crate) fn remote_input_scope(cx: &crate::cx::Cx) -> RemoteInputScope {
+    let origin = cx.remote_activity.remote_input.clone();
+    let previous = origin.replace(true);
+    RemoteInputScope { origin, previous }
+}
+
+#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+impl Drop for RemoteInputScope {
+    fn drop(&mut self) {
+        self.origin.set(self.previous);
+    }
+}
+
+#[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+#[path = "remote_activity.rs"]
+mod activity;
+
 #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
 mod imp {
+    use super::activity;
+    pub(crate) use activity::note_user_event;
+    pub(crate) use activity::RemoteActivity;
     use crate::cx::Cx;
     use crate::cx_api::CxOsApi;
     use crate::makepad_math::{dvec2, Vec2d};
@@ -37,8 +68,8 @@ mod imp {
     };
     use crate::window::WindowId;
     use makepad_studio_protocol::{
-        KeyCode, KeyEvent, RemoteKeyModifiers, RemoteMouseDown, RemoteMouseMove, RemoteMouseUp,
-        RemoteScroll, ScreenshotRequest, StudioToApp, TextInputEvent,
+        KeyCode, KeyEvent, PinchPhase, RemoteKeyModifiers, RemoteMouseDown, RemoteMouseMove,
+        RemoteMouseUp, RemotePinch, RemoteScroll, ScreenshotRequest, StudioToApp, TextInputEvent,
     };
     use std::collections::HashMap;
     use std::io::{Read, Write};
@@ -55,28 +86,34 @@ mod imp {
 
     static ACTIVE: AtomicBool = AtomicBool::new(false);
     /// When the bridge last injected input, in milliseconds since it came
-    /// up; zero until it has. The window wears a red frame while this is
+    /// up; zero until it has. A window may wear a marker while this is
     /// recent, so a person watching a scripted run can see that the pointer
     /// and the keyboard are spoken for and keep their hands off.
     static INJECTED_AT_MS: AtomicU64 = AtomicU64::new(0);
-    /// `/handsoff?on=1` holds the frame up regardless of recency, for a run
+    /// `/handsoff?on=1` holds the marker up regardless of recency, for a run
     /// that thinks between its inputs; `?on=0` lets it go.
     static HANDS_OFF: AtomicBool = AtomicBool::new(false);
-    /// How long the frame stays lit after the last injected input.
+    /// How long hands-off stays true after the last injected input.
     const HANDS_OFF_LINGER_MS: u64 = 3000;
 
     fn uptime_ms() -> u64 {
-        static T0: OnceLock<std::time::Instant> = OnceLock::new();
-        T0.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64
+        static T0: OnceLock<Instant> = OnceLock::new();
+        T0.get_or_init(Instant::now).elapsed().as_millis() as u64
     }
 
-    /// Called by every route that injects input.
+    /// Called when the bridge applies injected input.
     fn note_injected_input() {
         INJECTED_AT_MS.store(uptime_ms().max(1), Ordering::Relaxed);
     }
 
     /// Is the bridge driving right now, as far as a person watching the
-    /// window should be told? Read by the tweaker's draw on every frame.
+    /// window should be told?
+    ///
+    /// Read by app chrome on every frame: a scripted run injects a burst of
+    /// events and then thinks, so this stays true for a few seconds after
+    /// the last one rather than flickering off between them. Because it goes
+    /// quiet on its own, a caller that draws something from it must keep
+    /// asking for frames until it does.
     pub fn hands_off_active() -> bool {
         if HANDS_OFF.load(Ordering::Relaxed) {
             return true;
@@ -85,11 +122,14 @@ mod imp {
         at != 0 && uptime_ms().saturating_sub(at) < HANDS_OFF_LINGER_MS
     }
 
-    /// True when this process was started with `--remote` (any form). Pure
-    /// argv scan, usable before the bridge itself is up — the platform's
-    /// focus policy reads it while the first window is being created.
+    /// True when this process asked for the remote bridge, in any of the forms
+    /// [`requested_bind`] accepts — including `MAKEPAD_REMOTE`, which a plain
+    /// argv scan used to miss, so `MAKEPAD_REMOTE=1` started the bridge while
+    /// everything keyed off this said no. Pure argv + env, usable before the
+    /// bridge itself is up: the platform's focus policy reads it while the
+    /// first window is being created.
     pub fn requested() -> bool {
-        std::env::args().any(|a| a == "--remote" || a.starts_with("--remote="))
+        requested_bind().is_some()
     }
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);
     static LIVE_CONNS: AtomicUsize = AtomicUsize::new(0);
@@ -105,8 +145,8 @@ mod imp {
     static PENDING_GRABS: AtomicUsize = AtomicUsize::new(0);
     static GRAB_BYTES: AtomicUsize = AtomicUsize::new(0);
 
-    fn queue() -> &'static Mutex<Vec<Cmd>> {
-        static Q: OnceLock<Mutex<Vec<Cmd>>> = OnceLock::new();
+    fn queue() -> &'static Mutex<Vec<QueuedCmd>> {
+        static Q: OnceLock<Mutex<Vec<QueuedCmd>>> = OnceLock::new();
         Q.get_or_init(|| Mutex::new(Vec::new()))
     }
 
@@ -139,6 +179,14 @@ mod imp {
         app: String,
         pid: u32,
         windows: Vec<WinInfo>,
+        /// The `Cx`'s user sequence, shared when the service starts so the
+        /// request threads can stamp headers without asking the UI thread.
+        user_seq: Arc<AtomicU64>,
+    }
+
+    /// The user sequence as the request threads see it.
+    fn user_seq_now() -> u64 {
+        status_cell().lock().unwrap().user_seq.load(Ordering::Acquire)
     }
 
     #[derive(Clone, PartialEq)]
@@ -188,7 +236,14 @@ mod imp {
     thread_local! {
         // This state belongs only to the UI, unlike the HTTP reply sinks.
         static CAPTURES: std::cell::RefCell<Captures> = Default::default();
-        static FRAME_WAITERS: std::cell::RefCell<Vec<(u64, Sender<Reply>, Option<String>)>> = Default::default();
+        static FRAME_WAITERS: std::cell::RefCell<Vec<(u64, Sender<Reply>, Option<String>, u64)>> = Default::default();
+        // Each connection owns its request context; it never crosses threads
+        // implicitly. Queued commands carry the explicit expected user epoch.
+        /// The `if_user_seq` a request carried, if any: a driver that names
+        /// the sequence it started from is refused once the person has
+        /// intervened; one that sends nothing only meets the quiet-period gate.
+        static REQUEST_USER_SEQ: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+        static REQUEST_START_USER_SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     }
 
     struct EncodeJob {
@@ -278,7 +333,14 @@ mod imp {
     // command queue
     // ------------------------------------------------------------------
 
+    struct QueuedCmd {
+        cmd: Cmd,
+        user_seq: Option<u64>,
+        deadline: Instant,
+    }
+
     enum Cmd {
+        Activity(Sender<Reply>),
         Input {
             window: Option<usize>,
             inputs: Vec<Input>,
@@ -351,6 +413,19 @@ mod imp {
         },
     }
 
+    impl Cmd {
+        fn mutation_reply(&self) -> Option<&Sender<Reply>> {
+            match self {
+                Self::Input { tx, .. } | Self::Close { tx, .. }
+                | Self::Quit(tx) | Self::ShaderConstPatch { tx, .. } => Some(tx),
+                Self::Tweak { op, tx, .. }
+                    if !matches!(op.as_str(), "state" | "diff" | "final") => Some(tx),
+                Self::Ai { op, tx, .. } if op != "transcript" => Some(tx),
+                _ => None,
+            }
+        }
+    }
+
     enum Input {
         Mouse {
             kind: MouseKind,
@@ -363,6 +438,19 @@ mod imp {
             /// Hardware-faithful: route through the same pointer-lock/pin
             /// transform physical mouse events take (`/m?hw=1`).
             hw: bool,
+            /// The event's timestamp on the app clock (`/m?time=`), or now:
+            /// drag samples with their own times drive velocity-dependent
+            /// gestures (a flick's momentum) the same way every run.
+            time: Option<f64>,
+        },
+        /// One step of a trackpad pinch (`/m?k=pinch&scale=&phase=`).
+        Pinch {
+            x: f64,
+            y: f64,
+            scale: f64,
+            phase: PinchPhase,
+            mods: RemoteKeyModifiers,
+            time: Option<f64>,
         },
         Key {
             down: bool,
@@ -395,6 +483,7 @@ mod imp {
         /// `poll` in a later tick.
         Text(String),
         Err(String),
+        Conflict(String),
     }
 
     /// `(target repaint_id, responder, payload)` — resolved once the app has
@@ -517,7 +606,7 @@ mod imp {
     /// Bind the control port and start the accept loop. Prints
     /// `[makepad-remote] listening on HOST:PORT grabs=DIR` and flushes
     /// (HOST is `127.0.0.1` unless the bind named another interface).
-    pub fn start_if_requested() {
+    pub fn start_if_requested(cx: &mut Cx) {
         let Some((host, port)) = requested_bind() else {
             return;
         };
@@ -547,6 +636,7 @@ mod imp {
             let mut status = status_cell().lock().unwrap();
             status.app = app.clone();
             status.pid = pid;
+            status.user_seq = cx.remote_activity.seq_handle();
         }
         ACTIVE.store(true, Ordering::SeqCst);
         // One line, everything an agent needs to drive and clean up this
@@ -638,9 +728,14 @@ mod imp {
     /// "the user dismissed this" apart from "the app crashed", and remember it
     /// so requests aimed at that window get the real reason.
     pub fn note_user_closed_window(window_id: usize, title: &str) {
+        // Only chatter when the bridge is actually up: this line is for the
+        // agent driving the app, and a shipped app should not print
+        // `[makepad-remote] ...` to stdout every time a window closes.
         let line = format!("[makepad-remote] user closed window {window_id} ({title:?})");
-        println!("{line}");
-        let _ = std::io::stdout().flush();
+        if is_active() {
+            println!("{line}");
+            let _ = std::io::stdout().flush();
+        }
         push_log_line(line);
         if let Ok(mut closed) = closed_windows().lock() {
             if !closed.iter().any(|(id, _)| *id == window_id) {
@@ -653,8 +748,10 @@ mod imp {
     /// away. Not a crash.
     pub fn note_user_closed_last_window() {
         let line = "[makepad-remote] app exit: user closed the last window".to_string();
-        println!("{line}");
-        let _ = std::io::stdout().flush();
+        if is_active() {
+            println!("{line}");
+            let _ = std::io::stdout().flush();
+        }
         push_log_line(line);
     }
 
@@ -995,7 +1092,7 @@ mod imp {
         publish_windows(cx);
         let mut pending = false;
 
-        let cmds: Vec<Cmd> = {
+        let cmds: Vec<QueuedCmd> = {
             match queue().try_lock() {
                 Ok(mut q) => std::mem::take(&mut *q),
                 Err(_) => Vec::new(),
@@ -1007,7 +1104,7 @@ mod imp {
         for cmd in cmds {
             poll_captures(cx);
             pending |= present_captures(cx, &mut present);
-            let wait_window = match &cmd {
+            let wait_window = match &cmd.cmd {
                 Cmd::Input {
                     window, wait: true, ..
                 } => Some(*window),
@@ -1023,7 +1120,7 @@ mod imp {
                 match present(cx, window) {
                     Some(false) => {
                         FRAME_WAITERS.with_borrow_mut(|waiters| {
-                            for (_, tx, _) in waiters.drain(..) {
+                            for (_, tx, _, _) in waiters.drain(..) {
                                 let _ = tx.send(Reply::Err(
                                     "requested input frame could not be submitted; retry".into(),
                                 ));
@@ -1087,7 +1184,11 @@ mod imp {
         // Resolve anyone who asked to be answered after the next frame.
         let repaint_id = cx.repaint_id;
         FRAME_WAITERS.with_borrow_mut(|waiters| {
-            waiters.retain(|(target, tx, payload)| {
+            waiters.retain(|(target, tx, payload, user_seq)| {
+                if *user_seq != cx.remote_activity.user_seq() {
+                    let _ = tx.send(Reply::Conflict(activity::interrupted(cx)));
+                    return false;
+                }
                 if repaint_id >= *target {
                     let text = match payload {
                         Some(payload) => payload.clone(),
@@ -1149,14 +1250,30 @@ mod imp {
         }
     }
 
-    fn apply(cx: &mut Cx, cmd: Cmd) {
-        match cmd {
+    fn apply(cx: &mut Cx, request: QueuedCmd) {
+        if let Some(tx) = request.cmd.mutation_reply() {
+            if let Some(conflict) = activity::conflict(cx, request.user_seq) {
+                let _ = tx.send(Reply::Conflict(conflict));
+                return;
+            }
+            if Instant::now() >= request.deadline {
+                let _ = tx.send(Reply::Err("expired command was not applied".into()));
+                return;
+            }
+        }
+        let user_seq = cx.remote_activity.user_seq();
+        let _origin = super::remote_input_scope(cx);
+        match request.cmd {
+            Cmd::Activity(tx) => {
+                let _ = tx.send(Reply::Text(activity::json(cx)));
+            }
             Cmd::Input {
                 window,
                 inputs,
                 wait,
                 tx,
             } => {
+                note_injected_input();
                 let window_id = match resolve_window(cx, window) {
                     Ok(window_id) => window_id,
                     Err(err) => {
@@ -1185,8 +1302,10 @@ mod imp {
                         dy,
                         mods,
                         hw: true,
+                        time: at,
                     } = input
                     {
+                        let time = at.unwrap_or(time);
                         let raw = dvec2(x, y);
                         match kind {
                             MouseKind::Move => {
@@ -1262,7 +1381,9 @@ mod imp {
                             dy,
                             mods,
                             hw: _,
+                            time: at,
                         } => {
+                            let time = at.unwrap_or(time);
                             // Remote /click and /m are window-local layout points.
                             // dispatch_studio_msg calls stdin_pointer_abs ->
                             // dpi_override_scale and remaps native OS points into
@@ -1302,6 +1423,25 @@ mod imp {
                                     modifiers: mods,
                                 }),
                             }
+                        }
+                        Input::Pinch {
+                            x,
+                            y,
+                            scale,
+                            phase,
+                            mods,
+                            time: at,
+                        } => {
+                            let native = cx.windows[window_id]
+                                .layout_vec2d_to_native_points(dvec2(x, y));
+                            StudioToApp::Pinch(RemotePinch {
+                                time: at.unwrap_or(time),
+                                x: native.x,
+                                y: native.y,
+                                scale,
+                                phase,
+                                modifiers: mods,
+                            })
                         }
                         Input::Key { down, code, mods } => {
                             let event = KeyEvent {
@@ -1354,7 +1494,7 @@ mod imp {
                 }
                 if wait {
                     FRAME_WAITERS.with_borrow_mut(|waiters| {
-                        waiters.push((cx.repaint_id + 1, tx, input_result))
+                        waiters.push((cx.repaint_id + 1, tx, input_result, user_seq))
                     });
                 } else {
                     let _ = tx.send(input_result.map_or(Reply::Ok, Reply::Text));
@@ -1561,6 +1701,7 @@ mod imp {
                     cx.repaint_id + 1,
                     tx,
                     Some(format!("{{\"resize\":[{},{}]}}", size.x, size.y)),
+                    user_seq,
                 )));
                 cx.redraw_all();
             }
@@ -1573,7 +1714,7 @@ mod imp {
                     Ok(json) => {
                         if wait {
                             FRAME_WAITERS.with_borrow_mut(|waiters| {
-                                waiters.push((cx.repaint_id + 1, tx, Some(json)))
+                            waiters.push((cx.repaint_id + 1, tx, Some(json), user_seq))
                             });
                         } else {
                             let _ = tx.send(Reply::Text(json));
@@ -1595,7 +1736,7 @@ mod imp {
                     Ok(json) => {
                         if wait {
                             FRAME_WAITERS.with_borrow_mut(|waiters| {
-                                waiters.push((cx.repaint_id + 1, tx, Some(json)))
+                            waiters.push((cx.repaint_id + 1, tx, Some(json), user_seq))
                             });
                         } else {
                             let _ = tx.send(Reply::Text(json));
@@ -1756,6 +1897,7 @@ mod imp {
             400 => "Bad Request",
             404 => "Not Found",
             408 => "Request Timeout",
+            409 => "Conflict",
             431 => "Request Header Fields Too Large",
             503 => "Service Unavailable",
             _ => "Error",
@@ -1763,8 +1905,8 @@ mod imp {
         let mut out = Vec::with_capacity(body.len() + 256);
         out.extend_from_slice(
             format!(
-                "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
-                body.len()
+                "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Expose-Headers: X-Makepad-User-Seq, X-Makepad-User-Seq-Start\r\nX-Makepad-User-Seq: {}\r\nX-Makepad-User-Seq-Start: {}\r\nConnection: close\r\n\r\n",
+                body.len(), user_seq_now(), REQUEST_START_USER_SEQ.get()
             )
             .as_bytes(),
         );
@@ -1784,12 +1926,25 @@ mod imp {
     }
 
     fn route(method: &str, path: &str, p: &Params) -> Out {
+        REQUEST_START_USER_SEQ.set(user_seq_now());
+        let expected = match p.get(&["if_user_seq"]) {
+            Some(value) => match value.parse::<u64>() {
+                Ok(value) => Some(value),
+                Err(_) => return Out::Json(400, "{\"err\":\"if_user_seq must be an unsigned integer\"}".into()),
+            },
+            // A script that does not track the sequence is gated by the quiet
+            // period alone; one that does is refused once the person has
+            // intervened since the sequence it named.
+            None => None,
+        };
+        REQUEST_USER_SEQ.set(expected);
         if method != "GET" && method != "POST" && method != "HEAD" {
             return Out::Json(400, "{\"err\":\"method\"}".to_string());
         }
         match path {
             "/" | "/help" => Out::Text(200, cheat_sheet()),
             "/s" | "/status" => route_status(p),
+            "/activity" => reply_to_out(ask(Cmd::Activity, ACTIVITY_WAIT_SECS)),
             "/g" | "/grab" => route_grab(p),
             "/gseq" => route_grab_sequence(p),
             "/gq" => route_grab_quit(p),
@@ -1990,13 +2145,19 @@ mod imp {
              all routes are GET; every answer is one line of JSON; x/y are layout points, window-local, y down\n\
              /                 this sheet\n\
              /s[?w=ID]         {{\"app\":..,\"pid\":..,\"w\":[{{\"i\":id,\"t\":title,\"sz\":[w,h],\"px\":[w,h],\"dpi\":f,\"pos\":[x,y]}}]}}\n\
+             /activity         native user activity: user_active, user_seq, idle_ms, quiet_ms, held, last_input, window (also in /s)\n\
+             \x20                 native input increments user_seq; injected input does not. No input contents are recorded\n\
+             \x20                 mutations need 2 seconds without native input; with if_user_seq=N they are also refused once the person intervened after N; held pointer/touch input stays active\n\
+             \x20                 HTTP 409 user_interacting/user_intervened means STOP automation; reads remain available. Resume only after user handoff\n\
+             \x20                 all replies include X-Makepad-User-Seq[-Start]; changed epochs invalidate test/capture attribution\n\
              \x20                 a window the HUMAN closed is reported as {{\"err\":\"window N closed by user\"}} — not a crash, do not relaunch\n\
              /g?w=&scale=&raw= grab window w (default: first). returns {{\"png\":path,\"w\":id,\"sz\":[w,h],\"capture_ms\":ms,\"encode_ms\":ms}}; raw=1 sends image/png bytes\n\
              \x20                 standalone macOS: pending Draw + immediate present at UI arming, before later input; no animation tick. Other backends: next render\n\
              /gseq?n=8&every_ms=50&scale=1  a separate present per deadline; n=1..64, every_ms>=8, span<=60s; {{\"png\":[paths],\"frames\":[per-frame timings]}}\n\
              \x20                 scheduled_ms and pixels_ms share the request origin; capture_ms = pixels_ms - scheduled_ms; cadence never waits for PNG encoding\n\
              \x20                 commands follow UI queue order (concurrent sockets have no client-time order); macOS wait=1 input replies after submitting its applied frame\n\
-             /m?k=&x=&y=&w=    mouse. k=move|down|up|click|scroll  b=0 left,1 right,2 middle  scroll: dx=,dy=\n\
+             /m?k=&x=&y=&w=    mouse. k=move|down|up|click|scroll|pinch  b=0 left,1 right,2 middle  scroll: dx=,dy=  pinch: scale= (relative to the previous step), phase=begin|update|end\n\
+                               time= stamps the event in app-clock seconds (default: now) so drag samples carry their own timing\n\
                                add hw=1 to take the hardware pointer path (pointer-lock/pin transform included)\n\
                                shift=1 ctrl=1 alt=1 cmd=1 hold modifiers down for the press: a\n\
                                gesture that only exists under a modifier cannot be driven\n\
@@ -2027,9 +2188,9 @@ mod imp {
              /resize?w=&h=     give the window a new inner size, in layout points (like dragging its edge); answers after the frame that shows it\n\
              /gq[?scale=&w=]   FINISH HERE: grab every window, then quit. {{\"png\":[paths],\"quit\":1}}\n\
              /quit             shut the app down gracefully (no final grab)\n\
-             if you launched this app, you MUST end with /gq (or /quit) — never leave test windows on the user's screen, never pkill\n\
+             finish owned tests with /gq (or /quit); if the user intervened, leave their app running — never force-close on 409\n\
              add &wait=1 to any input route to answer only after the next frame is drawn (so a following /g sees it)\n\
-             add &w=ID to target a window; omit for the first one. errors are {{\"err\":\"...\"}} with status 404\n\
+             add &w=ID to target a window; omit for the first one. ordinary errors are {{\"err\":\"...\"}} with status 404; interaction conflicts use 409\n\
              POST the same routes with a flat JSON body ({{\"x\":10,\"y\":20}}) when quoting query strings is painful\n",
             status.app,
             status.pid,
@@ -2161,7 +2322,11 @@ mod imp {
                 out.push(']');
             }
         }
-        out.push('}');
+        drop(status);
+        match ask(Cmd::Activity, ACTIVITY_WAIT_SECS) {
+            Reply::Text(activity) => out.push_str(&format!(",\"activity\":{activity}}}")),
+            other => return reply_to_out(other),
+        }
         Out::Json(200, out)
     }
 
@@ -2179,6 +2344,7 @@ mod imp {
         let dy = p.f64(&["dy", "sy"], 0.0);
         let mods = p.mods();
         let hw = p.flag(&["hw"]);
+        let time = p.get(&["time"]).and_then(|v| v.parse::<f64>().ok());
         let mouse = |kind| Input::Mouse {
             kind,
             x,
@@ -2188,6 +2354,7 @@ mod imp {
             dy,
             mods,
             hw,
+            time,
         };
         let inputs = match kind.as_str() {
             "move" => vec![mouse(MouseKind::Move)],
@@ -2199,6 +2366,22 @@ mod imp {
                 mouse(MouseKind::Up),
             ],
             "scroll" | "wheel" => vec![mouse(MouseKind::Scroll)],
+            "pinch" => {
+                let phase = match p.get(&["phase"]).unwrap_or("update") {
+                    "begin" => PinchPhase::Begin,
+                    "update" => PinchPhase::Update,
+                    "end" => PinchPhase::End,
+                    other => return err(&format!("bad pinch phase {other}")),
+                };
+                vec![Input::Pinch {
+                    x,
+                    y,
+                    scale: p.f64(&["scale", "s"], 1.0),
+                    phase,
+                    mods,
+                    time,
+                }]
+            }
             other => return err(&format!("bad kind {other}")),
         };
         send_input(window, inputs, p.flag(&["wait"]))
@@ -2395,7 +2578,7 @@ mod imp {
         let mut seen = Vec::new();
         for (key, _) in &p.0 {
             let key = match key.as_str() {
-                "path" | "x" | "y" | "wait" => key.as_str(),
+                "path" | "x" | "y" | "wait" | "if_user_seq" => key.as_str(),
                 "w" | "window" => "w",
                 _ => return Err("unknown drop parameter"),
             };
@@ -2537,7 +2720,11 @@ mod imp {
             queue()
                 .lock()
                 .unwrap()
-                .push(Cmd::CancelGrabs(self.ids.clone()));
+                .push(QueuedCmd {
+                    cmd: Cmd::CancelGrabs(self.ids.clone()),
+                    user_seq: None,
+                    deadline: Instant::now(),
+                });
             wake_commands();
         }
     }
@@ -2606,7 +2793,7 @@ mod imp {
         ) {
             Reply::Ok => Ok(pending),
             Reply::Err(msg) => Err(msg),
-            Reply::Text(_) => Err("unexpected grab reply".into()),
+            Reply::Text(_) | Reply::Conflict(_) => Err("unexpected grab reply".into()),
         }
     }
 
@@ -2725,8 +2912,13 @@ mod imp {
                 Err(msg) => problems.push(format!("w{window_id}: {msg}")),
             }
         }
-        // Quit regardless: a failed grab must never leave the app on screen.
-        let quit = matches!(ask(|tx| Cmd::Quit(tx), 4), Reply::Ok);
+        // Capture failure still permits cleanup, but human intervention does
+        // not. Check on the UI thread after all the potentially slow grabs.
+        let quit = match ask(Cmd::Quit, 4) {
+            Reply::Ok => true,
+            Reply::Conflict(json) => return Out::Json(409, json),
+            other => return reply_to_out(other),
+        };
         let mut out = String::from("{\"png\":[");
         for (index, path) in paths.iter().enumerate() {
             if index > 0 {
@@ -2872,16 +3064,25 @@ mod imp {
         #[cfg(all(target_os = "macos", not(gpusim)))]
         crate::os::apple::macos::macos_app::wake_event_loop();
         #[cfg(not(all(target_os = "macos", not(gpusim))))]
-        crate::thread::SignalToUI::set_ui_signal();
+        crate::thread::SignalToUI::set_internal_signal();
     }
 
     /// Queue a command and block this HTTP thread until the event loop answers.
+    /// A status or activity read waits for the UI thread through a stall
+    /// instead of answering 408 from a snapshot; the bound only keeps a
+    /// wedged app from pinning the request thread forever.
+    const ACTIVITY_WAIT_SECS: u64 = 600;
+
     fn ask<F>(make: F, timeout_secs: u64) -> Reply
     where
         F: FnOnce(Sender<Reply>) -> Cmd,
     {
         let (tx, rx) = channel();
-        queue().lock().unwrap().push(make(tx));
+        queue().lock().unwrap().push(QueuedCmd {
+            cmd: make(tx),
+            user_seq: REQUEST_USER_SEQ.get(),
+            deadline: Instant::now() + Duration::from_secs(timeout_secs),
+        });
         wake_commands();
         match rx.recv_timeout(Duration::from_secs(timeout_secs)) {
             Ok(reply) => reply,
@@ -2894,6 +3095,7 @@ mod imp {
             Reply::Ok => Out::Json(200, "{\"ok\":1}".to_string()),
             Reply::Text(text) => Out::Json(200, text),
             Reply::Err(msg) => err(&msg),
+            Reply::Conflict(json) => Out::Json(409, json),
         }
     }
 
@@ -3404,8 +3606,17 @@ mod imp {
 mod imp {
     use crate::cx::Cx;
 
-    pub fn start_if_requested() {}
+    pub fn start_if_requested(_cx: &mut Cx) {}
+    pub(crate) fn note_user_event(_cx: &mut Cx, _event: &crate::event::Event) {}
+    /// There is no remote bridge on these targets, so nothing ever asked for one.
+    pub fn requested() -> bool {
+        false
+    }
     pub fn is_active() -> bool {
+        false
+    }
+    /// There is no bridge on these targets, so nothing is ever driving.
+    pub fn hands_off_active() -> bool {
         false
     }
     #[allow(dead_code)] // only the macos paint clock asks

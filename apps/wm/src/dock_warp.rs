@@ -55,6 +55,20 @@ pub struct DrawDockWarp {
     y_flip: f32,
 }
 
+/// Whether a capture sampled into the window needs its V flipped. Vulkan
+/// renders every pass, window and capture alike, through a negative-height
+/// viewport: a capture's rows are stored top-left as Metal stores them and
+/// the window shares that origin, so nothing flips and no pass inverts its
+/// `camera_projection`. The OpenGL ES fallback on Android keeps the flip
+/// its captures needed.
+pub fn capture_y_flip(cx: &Cx) -> f32 {
+    if cx.gpu_backend() == GpuBackend::OpenGl && matches!(cx.os_type(), OsType::Android(_)) {
+        1.0
+    } else {
+        0.0
+    }
+}
+
 /// An app's frame in a texture of its own. Everything the app draws — its
 /// root, the lists it lifts with `begin_overlay_*` (popups, a blur layer),
 /// and the gauss pyramid those may ask for — records into THIS pass tree:
@@ -249,11 +263,7 @@ impl DockWarp {
             self.dock.size.y as f32,
         );
         draw.progress = self.progress as f32;
-        draw.y_flip = if matches!(cx.os_type(), OsType::Android(_)) {
-            1.0
-        } else {
-            0.0
-        };
+        draw.y_flip = capture_y_flip(cx);
         draw.draw_abs(cx, self.bounds());
     }
 }

@@ -132,6 +132,21 @@ pub enum Apply {
     /// is the new source of truth and template values should override
     /// any prior runtime state.
     Reload,
+    /// `script_mod` was re-run and the fresh template re-walked, but the DSL
+    /// source did NOT change — the re-run exists only to re-bake heap
+    /// primitives that are evaluated at `script_mod` time and are therefore
+    /// unreachable to `ScriptReapply` (canonical case:
+    /// `mod.widgets.SAFE_INSET_PAD_*` after a safe-area inset change, which
+    /// `cx.request_live_edit()` triggers on every Android system-bar hide and
+    /// every rotation).
+    ///
+    /// Structurally this is a reload — children lists are rebuilt and the
+    /// `#[source]` object is re-bound, because the template really is a new
+    /// object. Semantically it is a `ScriptReapply` — nothing the developer
+    /// wrote changed, so imperative runtime state must survive. Routing it
+    /// through `Reload` is what used to wipe every `set_text`, every
+    /// `set_visible`, and every animator state on each inset change.
+    Rebake,
     /// Heap-mutation broadcast triggered by `cx.request_script_reapply()`
     /// (e.g. preference change, safe-area inset change). The template has
     /// NOT changed — the same cached `app_value` is being re-walked so
@@ -150,6 +165,7 @@ impl Apply {
         match self {
             Self::New => true,
             Self::Reload => true,
+            Self::Rebake => true,
             Self::ScriptReapply => true,
             Self::Eval => true,
             _ => false,
@@ -161,11 +177,13 @@ impl Apply {
     /// creates temporary objects that would become dangling after GC.
     /// Excludes ScriptReapply because the template hasn't changed —
     /// the same source object is being re-walked, so re-binding it is
-    /// unnecessary work.
+    /// unnecessary work. Includes `Rebake`: `script_mod` re-ran, so the
+    /// source object really is new even though the DSL text is unchanged.
     pub fn is_template_apply(&self) -> bool {
         match self {
             Self::New => true,
             Self::Reload => true,
+            Self::Rebake => true,
             _ => false,
         }
     }
@@ -192,13 +210,15 @@ impl Apply {
     pub fn is_reload(&self) -> bool {
         match self {
             Self::Reload => true,
+            Self::Rebake => true,
             Self::ScriptReapply => true,
             _ => false,
         }
     }
 
     /// True only for `Apply::Reload` — a LiveEdit-driven hot-reload where
-    /// the DSL itself changed. Excludes `Apply::ScriptReapply`. Use this
+    /// the DSL itself changed. Excludes `Apply::ScriptReapply` and
+    /// `Apply::Rebake` (a `script_mod` re-run with unchanged source). Use this
     /// (rather than `is_reload`) when behavior should fire only when the
     /// template source has actually changed (e.g. re-running script_mod
     /// scaffolding, invalidating template-derived caches).
@@ -210,13 +230,48 @@ impl Apply {
     }
 
     /// True only for `Apply::ScriptReapply` — a `request_script_reapply`-driven
-    /// re-walk where the template has NOT changed. Field impls whose value
-    /// should not be clobbered by template defaults on this kind of re-walk
-    /// should early-return when this is true (canonical example:
-    /// `ArcStringMut::script_apply`).
+    /// re-walk where the template has NOT changed.
+    ///
+    /// Prefer `preserves_runtime_state()` when the question is "may I clobber
+    /// the runtime value here?"; this predicate exists for the narrower cases
+    /// that care about the specific trigger.
     pub fn is_script_reapply(&self) -> bool {
         match self {
             Self::ScriptReapply => true,
+            _ => false,
+        }
+    }
+
+    /// True for the walks that follow a `script_mod` re-run (`Reload`,
+    /// `Rebake`). The re-run builds a fresh object heap, so any script object
+    /// reference a widget cached during an earlier walk is now dangling —
+    /// `Animator`'s cached state objects are the canonical example. Code
+    /// holding such references must re-resolve them from the incoming value
+    /// rather than reuse what it stored.
+    ///
+    /// `ScriptReapply` is excluded: it re-walks the same cached `app_value`,
+    /// so cached references stay alive.
+    pub fn follows_script_rerun(&self) -> bool {
+        match self {
+            Self::Reload => true,
+            Self::Rebake => true,
+            _ => false,
+        }
+    }
+
+    /// True for the re-apply walks where nothing the developer wrote changed,
+    /// so template values must NOT overwrite state that was set through an
+    /// imperative setter (`Label::set_text`, `set_visible`, animator state).
+    /// Field impls whose canonical mutation path is such a setter should
+    /// early-return when this is true (canonical example:
+    /// `ArcStringMut::script_apply`).
+    ///
+    /// Excludes `Apply::Reload`, where the DSL genuinely changed and the new
+    /// template is meant to win.
+    pub fn preserves_runtime_state(&self) -> bool {
+        match self {
+            Self::ScriptReapply => true,
+            Self::Rebake => true,
             _ => false,
         }
     }

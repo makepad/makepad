@@ -19,7 +19,13 @@ pub trait Executor {
 #[derive(Clone, Debug)]
 pub enum Poll {
     Pending,
+    /// Progress of the whole node: `permille` is the executor's estimate of
+    /// the complete operation and reaches 1000 only with `Done`.
     Progress { permille: u16, stage: String },
+    /// The node entered or advanced a stage and its overall completion is
+    /// unknown. `permille` is that stage's own fraction when the producer
+    /// reports one; it restarts with every stage and is never node progress.
+    Stage { stage: String, permille: Option<u16> },
     Delta { port: String, text: String },
     Done(Vec<(String, Value)>),
     Failed(String),

@@ -371,6 +371,14 @@ impl WmDesk {
         let state=scope.data.get_mut::<WmState>().unwrap();
         state.phone.band_from_app=band_painted;
         self.phone_ui.draw_overlay(cx,state,screen,backdrop);
+        // The super-app's first run: what is streaming out of the APK,
+        // above the dock while the home page shows.
+        if let Some(text)=state.provision.clone() {
+            if state.phone.home_visible() {
+                let fade=(1.0-state.phone.openness).clamp(0.0,1.0) as f32;
+                self.phone_ui.draw_provision_band(cx,screen,state.phone.chrome,state.style.target,state.style.dark,fade,&text);
+            }
+        }
     }
     pub(super) fn handle_phone_event(&mut self,cx:&mut Cx,event:&Event,scope:&mut Scope) {
         let state=scope.data.get_mut::<WmState>().unwrap();

@@ -396,6 +396,10 @@ pub struct WmState {
     pub launchable: crate::apps::Launchable,
     /// Reduce Transparency / Reduce Motion (desktop.rs `Accessibility`).
     pub accessibility: crate::desktop::Accessibility,
+    /// The super-app's first-run provisioning (dylib_host): its newest
+    /// progress line while the toolchain streams out of the APK, shown on
+    /// the desk; None once provisioned (or when nothing is provisioning).
+    pub provision: Option<String>,
 }
 
 impl WmState {
@@ -436,8 +440,10 @@ script_mod! {
         angle: 0.0
         /** ring thickness in pixels 1..8 step 0.5 */
         border_size: 2.0
-        // A hard square ring, measured straight off the quad edges rather
-        // than as an Sdf2d box and stroke.
+        // A hard square ring, measured straight off the quad edges. NOT an
+        // Sdf2d box + stroke: with radius 0 that box has no interior
+        // distance (it saturates at 0), so the stroke floods the whole
+        // tile — which only showed wherever the child did not cover it.
         pixel: fn() {
             let p = self.pos * self.rect_size
             let bs = self.border_size
@@ -997,8 +1003,10 @@ impl WmDesk {
     }
 
     /// The next tile asked for `client` is a module tile.
+    /// Drop a compile-time RunView splash so the isolate actually draws.
     pub fn mark_module(&mut self, client: ClientId) {
         self.module_clients.insert(client);
+        self.items.remove(&client);
     }
 
     /// The tile as its host trait, whichever kind it is (tile.rs).

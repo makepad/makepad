@@ -1,4 +1,5 @@
 /// Missing-kernel fallbacks fire per matmul; print each distinct message once.
+#[cfg(target_os = "macos")]
 fn log_metal_error_once(msg: impl std::fmt::Display) {
     use std::collections::HashSet;
     use std::sync::{Mutex, OnceLock};

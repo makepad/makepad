@@ -25,7 +25,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         mpsc::{channel, Receiver, Sender},
-        Arc, OnceLock,
+        Arc,
     },
 };
 
@@ -374,29 +374,6 @@ fn downscale(width: usize, height: usize, src: &[u32]) -> ThumbPixels {
     }
 }
 
-/// The kind icons, compiled in and shared: `Image::load_svg_from_shared_data`
-/// skips a re-parse when handed the same allocation, so every tile showing a
-/// folder shares one `Arc` and parses once.
-fn kind_svg(kind: FileKind) -> Arc<[u8]> {
-    static ICONS: OnceLock<HashMap<&'static str, Arc<[u8]>>> = OnceLock::new();
-    let icons = ICONS.get_or_init(|| {
-        let mut map: HashMap<&'static str, Arc<[u8]>> = HashMap::new();
-        map.insert("folder", Arc::from(&include_bytes!("../resources/icons/folder.svg")[..]));
-        map.insert("file", Arc::from(&include_bytes!("../resources/icons/file.svg")[..]));
-        map.insert("image", Arc::from(&include_bytes!("../resources/icons/image.svg")[..]));
-        map.insert("text", Arc::from(&include_bytes!("../resources/icons/text.svg")[..]));
-        map.insert("code", Arc::from(&include_bytes!("../resources/icons/code.svg")[..]));
-        map.insert("audio", Arc::from(&include_bytes!("../resources/icons/audio.svg")[..]));
-        map.insert("video", Arc::from(&include_bytes!("../resources/icons/video.svg")[..]));
-        map.insert("archive", Arc::from(&include_bytes!("../resources/icons/archive.svg")[..]));
-        map.insert("pdf", Arc::from(&include_bytes!("../resources/icons/pdf.svg")[..]));
-        map
-    });
-    icons
-        .get(kind.icon_name())
-        .cloned()
-        .unwrap_or_else(|| icons["file"].clone())
-}
 
 /// What an [`MpfThumb`] currently shows.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -514,27 +491,6 @@ mod tests {
         assert_eq!(out.data.len(), 32);
     }
 
-    #[test]
-    fn every_kind_has_an_icon() {
-        for kind in [
-            FileKind::Folder,
-            FileKind::Image,
-            FileKind::Text,
-            FileKind::Code,
-            FileKind::Audio,
-            FileKind::Video,
-            FileKind::Archive,
-            FileKind::Pdf,
-            FileKind::Generic,
-        ] {
-            assert!(!kind_svg(kind).is_empty(), "{:?} has no icon", kind);
-        }
-        // Distinct kinds get distinct drawings.
-        assert!(!Arc::ptr_eq(&kind_svg(FileKind::Folder), &kind_svg(FileKind::Generic)));
-        // The same kind shares one allocation, which is what lets the SVG
-        // load be skipped on repopulate.
-        assert!(Arc::ptr_eq(&kind_svg(FileKind::Audio), &kind_svg(FileKind::Audio)));
-    }
 
     #[test]
     fn demo_source_pool_is_distinct_decodable_and_uses_one_video_still() {
@@ -558,4 +514,5 @@ mod tests {
             + DemoThumbSource::VIDEO_STILL.len();
         assert!(total_bytes < 1_500_000, "embedded demo picture pool is {total_bytes} bytes");
     }
+
 }

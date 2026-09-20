@@ -21,6 +21,9 @@ pub struct ClockModule;
 /// The one linked instance of the module description: immutable, no state.
 pub static CLOCK_MODULE: ClockModule = ClockModule;
 
+#[cfg(feature = "dynamic-module")]
+makepad_app_module::export_app_module!(CLOCK_MODULE);
+
 impl AppModule for ClockModule {
     fn id(&self) -> &'static str {
         "clock"

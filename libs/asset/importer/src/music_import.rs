@@ -77,15 +77,6 @@ impl Container {
         }
     }
 
-    /// The word a search for "mp3" or "wav" is typing -- library-c3.
-    pub fn tag(self) -> &'static str {
-        match self {
-            Container::Mp3 => "mp3",
-            Container::Ogg => "ogg",
-            Container::Wav => "wav",
-        }
-    }
-
     fn from_ext(ext: &str) -> Option<Container> {
         match ext {
             "mp3" => Some(Container::Mp3),
@@ -360,11 +351,6 @@ pub struct TrackTags {
     pub album: Option<String>,
     pub track: Option<String>,
     pub year: Option<String>,
-    /// ID3v2 (TCON/TCO) and Vorbis (GENRE) text genre only. ID3v1's own
-    /// genre byte -- an index into a ~192-entry predefined list, not
-    /// text -- is not decoded: a v1-only file is rare enough today, and
-    /// a v2 tag is present alongside v1 far more often than not.
-    pub genre: Option<String>,
 }
 
 impl TrackTags {
@@ -387,7 +373,6 @@ impl TrackTags {
             "TALB" | "TAL" | "ALBUM" => Self::set(&mut self.album, value),
             "TRCK" | "TRK" | "TRACKNUMBER" => Self::set(&mut self.track, value),
             "TYER" | "TDRC" | "TYE" | "DATE" => Self::set(&mut self.year, value),
-            "TCON" | "TCO" | "GENRE" => Self::set(&mut self.genre, value),
             _ => {}
         }
     }
@@ -1140,20 +1125,7 @@ pub struct PlannedTrack {
 /// Every relative directory name under the root, plus the constant `music`
 /// tag and (when the container knows them) the artist and album. Slugified to
 /// the catalog label charset, deduplicated, order-stable, bounded.
-/// `extra` is genre, year and track number, whichever the file's own tags
-/// carried -- library-c3. `stem` and `container_tag` (`Container::tag`)
-/// are always pushed: a file's own name and its format are as searchable
-/// as anything a tag frame said. Reaching every already-imported file
-/// needs a reindex of the search store itself, a separate, larger job;
-/// this is the forwarding half, for every import from here on.
-pub fn music_tags(
-    dirs: &[String],
-    artist: &str,
-    album: &str,
-    extra: [Option<&str>; 3],
-    stem: &str,
-    container_tag: &str,
-) -> Vec<String> {
+pub fn music_tags(dirs: &[String], artist: &str, album: &str) -> Vec<String> {
     let mut out: Vec<String> = vec![MUSIC_TAG.to_string()];
     let mut push = |raw: &str| {
         let slug = alias_slug(raw, MAX_TAG_BYTES);
@@ -1166,11 +1138,6 @@ pub fn music_tags(
     }
     push(artist);
     push(album);
-    for value in extra.into_iter().flatten() {
-        push(value);
-    }
-    push(stem);
-    push(container_tag);
     out
 }
 
@@ -1266,14 +1233,7 @@ pub fn plan_tracks(
             artist: artist.clone(),
             album: album.clone(),
             alias: String::new(),
-            tags: music_tags(
-                &file.dirs,
-                &artist,
-                &album,
-                [tags.genre.as_deref(), tags.year.as_deref(), tags.track.as_deref()],
-                &file.stem,
-                file.container.tag(),
-            ),
+            tags: music_tags(&file.dirs, &artist, &album),
         });
     }
     progress(total, total, "");
@@ -1663,7 +1623,7 @@ pub fn publish_request_from_bytes(
         .unwrap_or_else(|| sanitize_text(stem.trim(), MAX_TITLE));
     let artist = tags.artist.unwrap_or_default();
     let album = tags.album.unwrap_or_default();
-    let title = if title.is_empty() { stem.clone() } else { title };
+    let title = if title.is_empty() { stem } else { title };
     let track = PlannedTrack {
         rel: file_name.to_string(),
         path: PathBuf::new(),
@@ -1672,14 +1632,7 @@ pub fn publish_request_from_bytes(
         artist: artist.clone(),
         album: album.clone(),
         alias: music_alias(namespace, &artist, &title, None),
-        tags: music_tags(
-            &[],
-            &artist,
-            &album,
-            [tags.genre.as_deref(), tags.year.as_deref(), tags.track.as_deref()],
-            &stem,
-            container.tag(),
-        ),
+        tags: music_tags(&[], &artist, &album),
     };
     let baked = bake_track_bytes(&track, bytes)?;
     build_publish_request(&track, baked, namespace, rights, None)
@@ -2241,7 +2194,7 @@ mod tests {
     #[test]
     fn tags_come_from_the_directory_names() {
         let dirs = vec!["Echo, Red Axes".to_string(), "Nofar".to_string()];
-        let tags = music_tags(&dirs, "Echo & Red Axes", "Nofar", [None, None, None], "", "");
+        let tags = music_tags(&dirs, "Echo & Red Axes", "Nofar");
         assert_eq!(tags[0], MUSIC_TAG);
         assert!(tags.contains(&"echo-red-axes".to_string()), "{tags:?}");
         assert!(tags.contains(&"nofar".to_string()));
@@ -2258,33 +2211,11 @@ mod tests {
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-' || c == b'_'));
         }
         // Names with nothing ASCII-able contribute no tag rather than a bad one.
-        let cjk = music_tags(&["音楽".to_string()], "", "", [None, None, None], "", "");
+        let cjk = music_tags(&["音楽".to_string()], "", "");
         assert_eq!(cjk, [MUSIC_TAG]);
         // The label budget is honoured even by a pathological tree.
         let many: Vec<String> = (0..60).map(|i| format!("dir{i}")).collect();
-        assert_eq!(music_tags(&many, "", "", [None, None, None], "", "").len(), MAX_TAGS);
-    }
-
-    /// library-c3: genre, year, track number, the file's own stem and its
-    /// container all reach the searchable tag set now, not just the
-    /// directory names and the artist/album pair.
-    #[test]
-    fn search_reaches_genre_year_track_stem_and_type() {
-        let tags = music_tags(
-            &[],
-            "Boards of Canada",
-            "Music Has the Right to Children",
-            [Some("IDM"), Some("1998"), Some("3")],
-            "03 Roygbiv",
-            "flac",
-        );
-        for expect in ["idm", "1998", "3", "03-roygbiv", "flac"] {
-            assert!(tags.contains(&expect.to_string()), "{expect} missing from {tags:?}");
-        }
-        // A tag frame that simply was not there contributes nothing, not
-        // a slug for an empty string.
-        let sparse = music_tags(&[], "Boards of Canada", "", [None, None, None], "stem", "mp3");
-        assert!(!sparse.iter().any(|t| t.is_empty()), "{sparse:?}");
+        assert_eq!(music_tags(&many, "", "").len(), MAX_TAGS);
     }
 
     #[test]
@@ -2469,7 +2400,6 @@ mod tests {
                         exclude_tag: None,
                         creator: None,
                         live_only: true,
-                        newest: false,
                         page_size: 50,
                         facets: 0,
                         newest: false,

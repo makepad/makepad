@@ -744,20 +744,17 @@ mod tests {
             })+};
         }
         same_indices!(
-            fill_indices,
             fill_misc_indices,
-            casing_indices,
-            stroke_indices,
             icon_indices,
             icon_high_indices,
-            fringe_indices,
-            fill_3d_indices,
             fill_3d_misc_indices,
             wall_indices,
             tree_indices,
             tree_cross_indices,
             tree_template_indices,
             tree_cross_template_indices,
+            stalk_template_indices,
+            stoplight_template_indices,
             road_icon_indices,
         );
         same_floats!(
@@ -767,20 +764,25 @@ mod tests {
             shadow_disc_instances,
             fill_3d_misc_vertices,
             wall_vertices,
-            wall_instances,
             tree_vertices,
             tree_cross_vertices,
             tree_template_vertices,
             tree_cross_template_vertices,
             tree_instances,
+            stalk_template_vertices,
+            stoplight_template_vertices,
             road_icon_vertices,
         );
         same_bytes!(
-            fill_vertices,
-            casing_vertices,
-            stroke_vertices,
-            fringe_vertices,
-            fill_3d_vertices,
+            fill,
+            face,
+            casing,
+            stroke,
+            fringe,
+            fill_3d,
+            wall_instances,
+            stalk_instances,
+            stoplight_instances,
         );
         let same_instances = |left: &[makepad_widgets::map::tile::IconInstances],
                               right: &[makepad_widgets::map::tile::IconInstances]| {

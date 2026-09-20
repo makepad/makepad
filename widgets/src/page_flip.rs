@@ -22,6 +22,7 @@ pub struct PageFlip {
     layout: Layout,
     #[live(false)]
     lazy_init: bool,
+    #[imperative]
     #[live]
     #[apply_state]
     active_page: LiveId,
@@ -141,6 +142,13 @@ impl WidgetNode for PageFlip {
         for (id, page) in self.pages.iter() {
             visit(*id, page.clone());
         }
+    }
+
+    fn cancel_children_impl(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
+        if let Some(page) = self.pages.get(&self.active_page) {
+            visit(self.active_page, page.clone());
+        }
+        true
     }
 
     fn redraw(&mut self, cx: &mut Cx) {

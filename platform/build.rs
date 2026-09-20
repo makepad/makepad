@@ -132,6 +132,38 @@ fn main() {
     println!("cargo:rerun-if-env-changed=MAKEPAD_BUNDLE_IDENTIFIER");
     println!("cargo:rerun-if-env-changed=IPHONEOS_DEPLOYMENT_TARGET");
 
+    // The GPU API on desktop Linux. The `vulkan` feature builds both
+    // renderers into the binary; it picks between them at startup (see
+    // os/linux/gpu_preference.rs), so the feature is a capability, not a
+    // choice of API. `MAKEPAD=gl` wins over it and produces an OpenGL-only
+    // binary; `MAKEPAD=vulkan` is the workspace-wide switch; the simulated
+    // GPU (`MAKEPAD=gpusim`) is never combined with either.
+    //
+    // The feature only reaches the windowed desktop backend, which is what
+    // has the runtime fallback. It must not follow from `target_os` alone:
+    // OpenHarmony (`*-unknown-linux-ohos`) reports Linux too, and neither it
+    // nor a Linux target outside the two tables that carry `naga` (see
+    // Cargo.toml) can compile the Vulkan renderer at all. `linux_direct`
+    // (DRM/KMS) can, but it drives the display exclusively and has no OpenGL
+    // fallback of its own, so it stays opt-in through
+    // `MAKEPAD=linux_direct+vulkan`.
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_VULKAN");
+    let makepad_configs: Vec<String> = env::var("MAKEPAD")
+        .map(|configs| configs.split(['+', ',']).map(str::to_string).collect())
+        .unwrap_or_default();
+    let names_gpu_api = makepad_configs
+        .iter()
+        .any(|config| matches!(config.as_str(), "gl" | "vulkan" | "use_vulkan" | "gpusim" | "quest"));
+    let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    let windowed_desktop_linux = target_os == "linux"
+        && target_env == "gnu"
+        && matches!(target_arch.as_str(), "x86_64" | "aarch64")
+        && !makepad_configs.iter().any(|config| config == "linux_direct");
+    if windowed_desktop_linux && env::var("CARGO_FEATURE_VULKAN").is_ok() && !names_gpu_api {
+        println!("cargo:rustc-cfg=use_vulkan");
+    }
+
     if let Ok(configs) = env::var("MAKEPAD") {
         for config in configs.split(['+', ',']) {
             match config {
@@ -148,6 +180,10 @@ fn main() {
                 "gpusim" => println!("cargo:rustc-cfg=gpusim"),
                 "use_gles_3" => println!("cargo:rustc-cfg=use_gles_3"),
                 "vulkan" | "use_vulkan" => println!("cargo:rustc-cfg=use_vulkan"),
+                // The OpenGL-only build; the word overrides the `vulkan` cargo
+                // feature above, so an app that enables it can still be built
+                // without the Vulkan renderer.
+                "gl" => {}
                 _ => {}
             }
         }

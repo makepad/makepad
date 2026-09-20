@@ -11,6 +11,9 @@ pub struct CalculatorModule;
 /// The one linked instance of the module description: immutable, no state.
 pub static CALCULATOR_MODULE: CalculatorModule = CalculatorModule;
 
+#[cfg(feature = "dynamic-module")]
+makepad_app_module::export_app_module!(CALCULATOR_MODULE);
+
 impl AppModule for CalculatorModule {
     fn id(&self) -> &'static str {
         "calculator"

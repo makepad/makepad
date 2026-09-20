@@ -11,10 +11,10 @@ script_mod! {
     mod.widgets.PhoneSurface = set_type_default() do mod.widgets.PhoneSurfaceBase {
         width: Fill height: Fill
         d +: {text.text_style: theme.font_regular text_bold.text_style: theme.font_bold}
-        ios_font: theme.font_regular{font_family: FontFamily{latin := FontMember{res: crate_resource("self:../../widgets/resources/Inter.ttf") weight: 400.0 asc: 0.0 desc: 0.0}}}
-        ios_bold: theme.font_bold{font_family: FontFamily{latin := FontMember{res: crate_resource("self:../../widgets/resources/Inter.ttf") weight: 600.0 asc: 0.0 desc: 0.0}}}
-        android_font: theme.font_regular{font_family: FontFamily{latin := FontMember{res: crate_resource("self:../../widgets/resources/RobotoFlex.ttf") weight: 400.0 asc: 0.0 desc: 0.0}}}
-        android_bold: theme.font_bold{font_family: FontFamily{latin := FontMember{res: crate_resource("self:../../widgets/resources/RobotoFlex.ttf") weight: 600.0 asc: 0.0 desc: 0.0}}}
+        ios_font: theme.font_regular{font_family: FontFamily{latin := FontMember{res: crate_resource("makepad_widgets:resources/Inter.ttf") weight: 400.0 asc: 0.0 desc: 0.0}}}
+        ios_bold: theme.font_bold{font_family: FontFamily{latin := FontMember{res: crate_resource("makepad_widgets:resources/Inter.ttf") weight: 600.0 asc: 0.0 desc: 0.0}}}
+        android_font: theme.font_regular{font_family: FontFamily{latin := FontMember{res: crate_resource("makepad_widgets:resources/RobotoFlex.ttf") weight: 400.0 asc: 0.0 desc: 0.0}}}
+        android_bold: theme.font_bold{font_family: FontFamily{latin := FontMember{res: crate_resource("makepad_widgets:resources/RobotoFlex.ttf") weight: 600.0 asc: 0.0 desc: 0.0}}}
         chrome +: {}
         key_shift +: {svg: crate_resource("self:resources/icons/key-shift.svg")}
         key_backspace +: {svg: crate_resource("self:resources/icons/key-backspace.svg")}
@@ -242,6 +242,23 @@ impl PhoneSurface {
                 self.label(cx,rect(r.pos.x+10.0,top+icon+50.0,r.size.x-20.0,18.0),detail,9.5,false,alpha(ink,0.55*opacity));
             }
         }
+    }
+    /// The super-app's first run: the toolchain and checkout streaming out
+    /// of the APK (dylib_host `provision`). A pill above the dock with the
+    /// newest progress line, so the minutes before a tile can compile are
+    /// not a silent desk; a failure stays up in the same place.
+    pub fn draw_provision_band(&mut self, cx: &mut Cx2d, screen: Rect, chrome: PhoneChrome, style: DesktopStyle, dark: bool, opacity: f32, text: &str) {
+        if opacity<0.01 {return;}
+        self.use_fonts(style==DesktopStyle::Ios);
+        let (face, ink)=Self::card_colors(style, dark);
+        let dock=Self::home_dock(screen, chrome);
+        let h=58.0;
+        let r=rect(dock.pos.x, dock.pos.y-h-12.0, dock.size.x, h);
+        self.rounded(cx, r, 18.0, alpha(face, 0.9*opacity));
+        let ink=alpha(ink, opacity);
+        let headline=if text.starts_with("provision failed") {"Could not set up apps"} else {"Setting up apps for the first time"};
+        self.label(cx,rect(r.pos.x+14.0,r.pos.y+9.0,r.size.x-28.0,22.0),headline,13.0,true,ink);
+        self.label(cx,rect(r.pos.x+14.0,r.pos.y+31.0,r.size.x-28.0,20.0),text,11.0,false,alpha(ink,0.7*opacity));
     }
     /// A window opened straight from its tile, before its first full-size
     /// frame: the launch card the zoom-in plays over.
@@ -548,7 +565,12 @@ impl PhoneSurface {
         let nav_ink=if phone.screen==PhoneScreen::App || phone.keyboard>0.5 {
             if state.style.dark {rgb(238,238,242)}else{rgb(30,30,34)}
         }else if phone.screen==PhoneScreen::Drawer && !state.style.dark {rgb(30,30,34)}else{rgb(255,255,255)};
-        if chrome.fake_indicator() {self.rounded(cx,rect(bottom.pos.x+bottom.size.x*0.5-60.0,bottom.pos.y+12.0,120.0,4.0),2.0,nav_ink);}
+        // iOS skin on a real Android phone: still draw the home pill so
+        // there is a way out of an in-process app (the OS Home button
+        // leaves wmdyn entirely; Back is gesture-nav and never arrives).
+        if chrome.fake_indicator() || ios {
+            self.rounded(cx,rect(bottom.pos.x+bottom.size.x*0.5-60.0,bottom.pos.y+(bottom_h-4.0)*0.5,120.0,4.0),2.0,nav_ink);
+        }
         if bottom_h>0.0 {self.hits.push((bottom,PhoneHit::Home));}
         if !ios && phone.keyboard>0.5 {
             let back=rect(bottom.pos.x+12.0,bottom.pos.y-10.0,40.0,34.0);

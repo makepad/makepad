@@ -5104,6 +5104,96 @@ mod tests {
         }
     }
 
+    /// A press a widget in a cell took is that widget's alone. The grid
+    /// neither presses the cell nor drags itself to scroll, so a slider, a
+    /// scroll bar or a field seated in a cell keeps the pointer for itself
+    /// and the rows under it stand still while its thumb moves.
+    ///
+    /// Every gesture the grid has starts from `Event::hits` on its own
+    /// area, and a press a child captured is already marked handled by the
+    /// time that runs — which is why this drives `handle_event` rather
+    /// than `press_cell`: the ordering that makes it true (cells first,
+    /// the grid's own hits after) lives nowhere else.
+    #[test]
+    fn a_press_a_cell_widget_took_never_presses_or_scrolls_the_grid() {
+        // A drag on bare cells is the grid's own, so what follows is
+        // about the editor holding the press and not about a drag that
+        // does nothing anywhere.
+        let mut bare_cx = cx();
+        let mut bare = grid(&mut bare_cx);
+        let mut bare_frame = Frame::new(&mut bare_cx, dvec2(300.0, 200.0));
+        bare_frame.draw(&mut bare_cx, &mut bare, |_, _| {});
+        bare.set_drag_scrolling(true);
+        let at = middle(&bare, 5, 1);
+        let out = primary_drag(&mut bare_cx, &mut bare, &[at, at + dvec2(0.0, -52.0)]).concat();
+        assert_eq!(clicked(&out).len(), 1, "a bare cell took no press: {out:?}");
+        assert_eq!(bare.scroll, dvec2(0.0, 52.0), "a bare cell did not drag-scroll");
+
+        let mut cx = cx();
+        let mut grid = grid(&mut cx);
+        let mut frame = Frame::new(&mut cx, dvec2(300.0, 200.0));
+        frame.draw(&mut cx, &mut grid, |_, _| {});
+        grid.set_drag_scrolling(true);
+        grid.row_drag = true;
+        // A seated editor is a real widget in a cell that takes a press and
+        // then tracks the pointer itself, exactly as a slider in a cell
+        // would; it is the one such widget the grid can seat on its own.
+        grid.edit_cell(&mut cx, 5, 1, "abc");
+        frame.draw(&mut cx, &mut grid, |_, _| {});
+
+        let at = middle(&grid, 5, 1);
+        let out = primary_drag(&mut cx, &mut grid, &[at, at + dvec2(0.0, -52.0)]).concat();
+        assert!(
+            clicked(&out).is_empty(),
+            "the grid pressed a cell the editor holds: {out:?}"
+        );
+        assert!(
+            carried(&out).is_empty(),
+            "the grid carried a row out from under the editor: {out:?}"
+        );
+        assert_eq!(
+            grid.scroll,
+            DVec2::default(),
+            "the grid drag-scrolled under a press the editor holds"
+        );
+        assert!(
+            matches!(grid.interact, Interact::None),
+            "the grid started a gesture from a press a cell widget holds"
+        );
+
+    }
+
+    /// A column edge dragged is a control that holds the pointer: it goes
+    /// on resizing while the pointer is far outside the grid, and the
+    /// release out there is still its own. Capture, not the rectangle,
+    /// decides who a moving pointer belongs to.
+    #[test]
+    fn a_column_resize_keeps_the_pointer_outside_the_grid() {
+        let mut cx = cx();
+        let mut grid = grid(&mut cx);
+        let mut frame = Frame::new(&mut cx, dvec2(300.0, 200.0));
+        frame.draw(&mut cx, &mut grid, |_, _| {});
+        let (_, x, w) = grid.vp.vis_cols[0];
+        let edge = dvec2(x + w, heading(&grid, 0).y);
+        let start = grid.col_widths()[0];
+        let out = primary_drag(
+            &mut cx,
+            &mut grid,
+            &[edge, edge + dvec2(20.0, 0.0), edge + dvec2(40.0, 900.0)],
+        )
+        .concat();
+        assert_eq!(
+            grid.col_widths()[0],
+            start + 40.0,
+            "the resize stopped at the grid's own edge"
+        );
+        let resized = out
+            .iter()
+            .filter(|a| matches!(a, DataGridAction::ColumnResized { .. }))
+            .count();
+        assert_eq!(resized, 1, "the release outside the grid ended no resize: {out:?}");
+    }
+
     /// The columns as a frame hands them out, left to right: each one's
     /// data column and width.
     fn drawn_columns(cells: &[GridCell]) -> Vec<(usize, f64)> {

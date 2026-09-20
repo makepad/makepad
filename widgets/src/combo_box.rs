@@ -695,6 +695,10 @@ pub struct ComboBox {
     state: ComboFilter,
     #[rust]
     is_open: bool,
+    /// Held while the popup is open, so `Escape` belongs to it rather than to
+    /// whatever it was opened in front of.
+    #[rust]
+    cancel_scope: Option<CancelScope>,
     #[rust]
     hover_row: Option<usize>,
     #[rust]
@@ -781,6 +785,7 @@ impl ComboBox {
         }
         if !self.is_open {
             self.is_open = true;
+            self.cancel_scope = Some(self.begin_cancel_scope(cx));
             cx.sweep_lock(self.draw_bg.area());
         }
         self.hover_row = None;
@@ -794,8 +799,14 @@ impl ComboBox {
     fn close_popup(&mut self, cx: &mut Cx) {
         if self.is_open {
             self.is_open = false;
+            if let Some(scope) = self.cancel_scope.take() {
+                cx.end_cancel_scope(scope);
+            }
             cx.sweep_unlock(self.draw_bg.area());
         }
+        // Editing used to outlive the popup, which left `Escape` reverting a box that
+        // owned no cancel scope. One flag, one scope.
+        self.state.editing = false;
         self.hover_row = None;
         self.geom = None;
         self.draw_bg.redraw(cx);
@@ -870,6 +881,7 @@ impl ComboBox {
         self.state.set_filter(&self.labels, text, self.selected_item);
         if !self.is_open {
             self.is_open = true;
+            self.cancel_scope = Some(self.begin_cancel_scope(cx));
             cx.sweep_lock(self.draw_bg.area());
         }
         self.hover_row = None;
@@ -933,7 +945,11 @@ impl ComboBox {
                 true
             }
             KeyCode::Escape => {
-                self.revert(cx);
+                // Eaten either way: letting it through would reach the inner text input,
+                // which emits `Escaped` and reverts anyway.
+                if self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s)) {
+                    self.revert(cx);
+                }
                 true
             }
             KeyCode::Tab => {
@@ -1181,6 +1197,17 @@ impl Widget for ComboBox {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.animator_handle_event(cx, event);
+        if self.is_open && crate::modal::ModalAction::is_dismissal(event) {
+            self.revert(cx);
+            return;
+        }
+        if self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s))
+            && (matches!(event, Event::KeyDown(ke) if ke.key_code == KeyCode::Escape)
+                || event.back_pressed())
+        {
+            self.revert(cx);
+            return;
+        }
         // Between draws every deferred alignment has been applied, so this is
         // the field's true on-screen rect (see `aligned_rect`).
         let rect = self.draw_bg.area().rect(cx);

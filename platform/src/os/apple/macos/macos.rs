@@ -125,7 +125,7 @@ impl DrawableWorker {
                 let drawable = NonNull::new(drawable).map(RcObjcId::from_unowned);
                 unsafe { let _: () = msg_send![pool, release]; }
                 if ready.try_send(drawable).is_err() { break; }
-                SignalToUI::set_ui_signal();
+                crate::thread::wake_ui_loop();
             }
         }).expect("drawable acquisition worker");
         Self { request, ready: replies, pending: false, wait_ns, started: None }
@@ -140,6 +140,18 @@ impl DrawableWorker {
         } else { None };
         if !self.pending && self.request.try_send(()).is_ok() { self.pending = true; self.started = Some(Instant::now()); }
         result
+    }
+
+    /// Acquire on the UI thread, for a beat whose prefetched drawable can't be
+    /// used. The pool was just rebuilt for the new size, so this doesn't block.
+    fn acquire_now(&mut self, layer: ObjcId) -> Option<RcObjcId> {
+        let pool: ObjcId = unsafe { msg_send![class!(NSAutoreleasePool), new] };
+        let start = Instant::now();
+        let drawable: ObjcId = unsafe { msg_send![layer, nextDrawable] };
+        self.wait_ns.store(start.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Release);
+        let drawable = NonNull::new(drawable).map(RcObjcId::from_unowned);
+        unsafe { let _: () = msg_send![pool, release]; }
+        drawable
     }
 }
 
@@ -322,6 +334,16 @@ impl MetalWindow {
         } else {
             false
         }
+    }
+
+    /// The worker vends a drawable it acquired a beat ago, so one that predates
+    /// a resize still has the old texture size. Painting into it lands the frame
+    /// in a corner of the texture and leaves the rest of the layer unpainted.
+    fn drawable_matches_layer(&self, drawable: ObjcId) -> bool {
+        let texture: ObjcId = unsafe { msg_send![drawable, texture] };
+        let width: u64 = unsafe { msg_send![texture, width] };
+        let height: u64 = unsafe { msg_send![texture, height] };
+        (width as f64 - self.cal_size.x).abs() < 1.0 && (height as f64 - self.cal_size.y).abs() < 1.0
     }
 }
 
@@ -612,6 +634,8 @@ impl Cx {
     }
 
     pub fn event_loop(cx: Rc<RefCell<Cx>>) {
+        // Before anything reads a relative path or loads a resource.
+        let dev_launch = dev_launch_begin();
         cx.borrow_mut().self_ref = Some(cx.clone());
         cx.borrow_mut().os_type = OsType::Macos;
         crate::startup_trace("event_loop: MetalCx::new begin");
@@ -657,6 +681,11 @@ impl Cx {
         }
         crate::startup_trace("event_loop: entering AppKit loop");
         MacosApp::event_loop();
+        if let Some(dir) = dev_launch {
+            // The app closed its own windows rather than being killed, which is
+            // the only outcome the runner can read as a clean exit.
+            let _ = std::fs::write(dir.join("status"), "0\n");
+        }
     }
 
     // `pass_root_window` now lives in os/cx_shared.rs — the Windows frame-latency
@@ -794,7 +823,19 @@ impl Cx {
                             // a remote grab on a beat without a drawable
                             // leaves the pass dirty and is polled again on
                             // the next beat: never a wait on the UI thread
-                            let drawable = worker.take();
+                            let drawable = match worker.take() {
+                                Some(stale) if !metal_window.drawable_matches_layer(stale.as_id()) => {
+                                    crate::trace!("present", "drawable predates the layer's resize, reacquiring");
+                                    drop(stale);
+                                    // Only while the pool has a free drawable. Exhausted, the
+                                    // acquire would block the UI thread on the compositor, which
+                                    // is what the worker exists to avoid; skip and stay dirty.
+                                    (in_flight < PRESENT_GATE_IN_FLIGHT)
+                                        .then(|| worker.acquire_now(metal_window.ca_layer))
+                                        .flatten()
+                                }
+                                drawable => drawable,
+                            };
                             if let Some(trace) = &metal_cx.present_trace {
                                 trace.drawable_wait(worker.started.map_or(0, |t| t.elapsed().as_nanos() as u64).max(worker.wait_ns.load(Ordering::Acquire)));
                                 if drawable.is_none() && worker.pending { trace.cause(PresentCause::DrawableWait); }
@@ -1064,6 +1105,7 @@ impl Cx {
             | MacosEvent::MouseMove(_)
             | MacosEvent::MouseUp(_)
             | MacosEvent::Scroll(_)
+            | MacosEvent::Pinch(_)
             | MacosEvent::KeyDown(_)
             | MacosEvent::KeyUp(_)
             | MacosEvent::TextInput(_) => {
@@ -1114,12 +1156,16 @@ impl Cx {
                     }
 
                     // check signals
-                    if SignalToUI::check_and_clear_ui_signal() {
+                    let internal_signal = SignalToUI::check_and_clear_internal_signal();
+                    let ui_signal = SignalToUI::check_and_clear_ui_signal();
+                    if internal_signal || ui_signal {
                         self.handle_termination_signal();
                         self.handle_media_signals();
                         self.handle_script_signals();
-                        self.call_event_handler(&Event::Signal);
                         needs_timer = true;
+                    }
+                    if ui_signal {
+                        self.call_event_handler(&Event::Signal);
                     }
 
                     if SignalToUI::check_and_clear_action_signal() {
@@ -1570,6 +1616,13 @@ impl Cx {
                 }
                 self.dpi_override_scale(&mut e.abs, e.window_id);
                 self.call_event_handler(&Event::Scroll(e.into()));
+            }
+            MacosEvent::Pinch(mut e) => {
+                if !self.windows.is_valid(e.window_id) || !self.windows[e.window_id].is_created {
+                    return EventFlow::Wait;
+                }
+                self.dpi_override_scale(&mut e.abs, e.window_id);
+                self.call_event_handler(&Event::Pinch(e));
             }
             MacosEvent::WindowDragQuery(mut e) => {
                 if !self.windows.is_valid(e.window_id) || !self.windows[e.window_id].is_created {
@@ -2459,7 +2512,7 @@ impl CxOsApi for Cx {
         let sender = self.os.game_input_events.sender.clone();
         self.os.apple_game_input = Some(AppleGameInput::init(move |event| {
             let _ = sender.send(event);
-            SignalToUI::set_ui_signal();
+            SignalToUI::set_internal_signal();
         }));
     }
 
@@ -2555,4 +2608,41 @@ pub struct CxOs {
     pub(crate) native_camera_previews: HashMap<LiveId, MacosNativeCameraPreview>,
     pub(crate) system_browsers: HashMap<LiveId, MacosSystemBrowser>,
     pub(crate) internal_drag_items: Option<Arc<Vec<DragItem>>>,
+}
+
+/// Completes the handshake with a development runner, if one launched us.
+///
+/// `cargo run` normally starts a bare executable, which macOS gives no bundle
+/// identity: microphone, speech, location and similar prompts are then attributed
+/// to the terminal or editor that spawned it, and are denied outright when that
+/// process lacks the matching usage description. A development runner works around
+/// this by launching a real `.app` through LaunchServices instead.
+///
+/// That costs three things the runner cannot recover on its own, because
+/// LaunchServices forks the process and starts it in `/`: it never learns the
+/// app's pid (so it has nothing to forward a Ctrl-C to), it cannot pass on the
+/// terminal's working directory, and it never sees the app's exit code. All three
+/// are only knowable in-process, so report them through the directory named by
+/// `MAKEPAD_DEV_LAUNCH_DIR`: adopt `MAKEPAD_DEV_WORKING_DIR`, write `pid` on the
+/// way in, and `status` on the way out.
+///
+/// Both variables are set only by such a runner, so an app launched any other way
+/// does nothing here.
+fn dev_launch_begin() -> Option<std::path::PathBuf> {
+    let dir = std::path::PathBuf::from(std::env::var_os("MAKEPAD_DEV_LAUNCH_DIR")?);
+    let report = || -> std::io::Result<()> {
+        let working_dir = std::env::var_os("MAKEPAD_DEV_WORKING_DIR").ok_or_else(|| {
+            std::io::Error::other("the development runner supplied no working directory")
+        })?;
+        std::env::set_current_dir(working_dir)?;
+        std::fs::write(dir.join("pid"), format!("{}\n", std::process::id()))
+    };
+    if let Err(error) = report() {
+        // The runner is waiting on that pid, so fail here rather than leave it
+        // watching a process it cannot see.
+        eprintln!("makepad: could not complete the development launch: {error}");
+        let _ = std::fs::write(dir.join("status"), "1\n");
+        std::process::exit(1);
+    }
+    Some(dir)
 }

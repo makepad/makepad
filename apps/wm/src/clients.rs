@@ -907,6 +907,19 @@ pub fn cargo_progress(raw: &str) -> Option<(String, bool)> {
         Some((format!("compiling {package}…"), false))
     } else if raw.starts_with("error:") || raw.starts_with("error[") {
         Some(("build failed — see the app log".into(), false))
+    } else if raw.starts_with("extracting ")
+        || raw.starts_with("unpacking ")
+        || raw.starts_with("unpacked ")
+        || raw.starts_with("inflating ")
+        || raw.starts_with("provision")
+        || raw.starts_with("bootstrapping")
+        || raw.starts_with("aligning ")
+        || raw.starts_with("target dir ")
+        || raw.starts_with("cargo rustc")
+        || raw.starts_with("rewriting ")
+        || raw.starts_with("patch")
+    {
+        Some((raw.to_string(), false))
     } else {
         None
     }
@@ -1069,6 +1082,10 @@ mod tests {
         assert_eq!(cargo_progress("Blocking waiting for file lock on build directory"), Some(("waiting for another build…".into(), false)));
         assert_eq!(cargo_progress("    Finished `release` profile in 2s"), Some(("launching…".into(), true)));
         assert_eq!(cargo_progress("     Running `/a/checkout/target/release/photos`"), Some(("launching…".into(), true)));
+        // The super-app's provisioning lines reach the desk verbatim.
+        for line in ["extracting tc: already on disk", "inflating tc 120/292 MB · 88 files", "provisioning wmdyn x: resuming", "provision failed: unpack tc.tar.lz4: archive is truncated", "provisioned in 212 s"] {
+            assert_eq!(cargo_progress(line), Some((line.into(), false)), "{line}");
+        }
         assert!(cargo_progress("warning: unused variable").is_none());
         assert!(cargo_progress(" --> /a/checkout/src/main.rs:2").is_none());
         assert!(cargo_progress("app: first frame").is_none());

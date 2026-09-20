@@ -221,7 +221,7 @@ pub trait MediaPlaybackSession {
     /// Optional Linux zero-copy present: NV12 DMA-Buf planes → `TEXTURE_EXTERNAL_OES`.
     ///
     /// Platform poll uses [`crate::os::linux::linux_video_gpu::present_dmabuf_nv12`].
-    #[cfg(all(target_os = "linux", not(any(target_env = "ohos", linux_direct))))]
+    #[cfg(all(target_os = "linux", not(any(target_env = "ohos", linux_direct, gpusim))))]
     fn take_linux_dmabuf_nv12_frame(
         &mut self,
     ) -> Option<crate::os::linux::linux_video_gpu::LinuxDmabufNv12Frame> {
@@ -230,7 +230,7 @@ pub trait MediaPlaybackSession {
     /// Optional Linux zero-copy present: share-group GLMemory RGBA texture.
     ///
     /// Platform poll uses [`crate::os::linux::linux_video_gpu::present_gl_memory_rgba`].
-    #[cfg(all(target_os = "linux", not(any(target_env = "ohos", linux_direct))))]
+    #[cfg(all(target_os = "linux", not(any(target_env = "ohos", linux_direct, gpusim))))]
     fn take_linux_gl_memory_rgba_frame(
         &mut self,
     ) -> Option<crate::os::linux::linux_video_gpu::LinuxGlMemoryRgbaFrame> {
