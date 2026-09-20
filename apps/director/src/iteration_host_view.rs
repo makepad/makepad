@@ -42,10 +42,9 @@ script_mod! {
             tex_scale: instance(vec2(0.0, 0.0))
             tex_size: instance(vec2(1.0, 1.0))
             host_dpi_factor: instance(1.0)
-            y_flip: instance(0.0)
             packed_header: instance(1.0)
             pixel: fn() {
-                let uv = vec2(self.pos.x, self.pos.y + self.y_flip - 2.0 * self.y_flip * self.pos.y)
+                let uv = self.pos
                 if self.packed_header < 0.5 {
                     return self.tex.sample(uv * self.tex_scale)
                 }
@@ -237,9 +236,6 @@ impl IterationRunView {
             .set_dyn_instance(cx, id!(tex_size), &[1.0f32, 1.0f32]);
         self.draw_app
             .draw_vars
-            .set_dyn_instance(cx, id!(y_flip), &[0.0f32]);
-        self.draw_app
-            .draw_vars
             .set_dyn_instance(cx, id!(packed_header), &[1.0f32]);
         self.redraw(cx);
     }
@@ -315,24 +311,6 @@ impl IterationRunView {
         draw_app
             .draw_vars
             .set_dyn_instance(cx, id!(packed_header), &[if presentable_draw.sequence == 0 { 1.0f32 } else { 0.0f32 }]);
-        // Linux's software fallback is copied row-for-row from a top-left
-        // framebuffer and needs the historical shader flip. A GPU-shared
-        // DMA-BUF texture already has the orientation expected by the GL
-        // sampler; flipping that path turns every hosted app upside down.
-        #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-        draw_app.draw_vars.set_dyn_instance(
-            cx,
-            id!(y_flip),
-            &[if drawn.software_buffer.is_some() {
-                1.0f32
-            } else {
-                0.0f32
-            }],
-        );
-        #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
-        draw_app
-            .draw_vars
-            .set_dyn_instance(cx, id!(y_flip), &[0.0f32]);
 
         *redraw_countdown = (*redraw_countdown).max(20);
         true
