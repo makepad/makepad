@@ -206,6 +206,7 @@ pub trait WidgetNode: ScriptApply {
         true
     }
 
+
     // Selection API - override for widgets that support text selection.
     // Containers should delegate to children (the derive macro does this
     // automatically for #[deref], #[wrap], and #[find] fields).
@@ -257,6 +258,41 @@ pub struct SnapshotPart {
 }
 
 pub trait Widget: WidgetNode {
+    /// The OUTER width this widget would take if it were drawn now with `over`
+    /// in force, its margin included -- or `None` when it cannot say without
+    /// drawing.
+    ///
+    /// `None` is not a failure. It is the honest answer for a widget whose width
+    /// is its children's business, and a caller that needs a number for every
+    /// child reads one `None` as "this rung is unpriced", leaving its cost at
+    /// zero -- which [`crate::button_group::concession_level`] already treats as
+    /// NOT KNOWN and walks one rung per draw, exactly as it does today.
+    ///
+    /// The default answers for a stated width, which is free and correct for
+    /// every widget. Only a `Fit`-width widget needs a body of its own, because
+    /// `Turtle::next_walk_width` is NaN for `Fit` and stays NaN until the subtree
+    /// has drawn.
+    fn measure_width(
+        &mut self,
+        cx: &mut Cx2d,
+        over: Option<&crate::width_override::WidthOverride>,
+    ) -> Option<f64> {
+        if let Some(o) = over {
+            if o.opaque {
+                return None;
+            }
+            if o.hides() {
+                return Some(0.0);
+            }
+        }
+        let walk = self.walk(cx.cx);
+        let width = over.and_then(|o| o.width).unwrap_or(walk.width);
+        let margin = over.and_then(|o| o.margin).unwrap_or(walk.margin);
+        match width {
+            Size::Fixed(w) => Some(w + margin.width()),
+            _ => None,
+        }
+    }
     /// Visit the current active children and report whether this widget can own
     /// cancel input. Return false without visiting when inactive. Override this
     /// for runtime open states or children not represented by derived fields.
@@ -1335,6 +1371,18 @@ impl WidgetRef {
             return inner.widget.visible();
         }
         true
+    }
+
+    /// What this child would be worth on a row, with `over` in force.
+    ///
+    /// A row holds its children as refs, and the ref's inner is private, so
+    /// without this a caller cannot reach the widget's own answer at all.
+    pub fn measure_width(
+        &self,
+        cx: &mut Cx2d,
+        over: Option<&crate::width_override::WidthOverride>,
+    ) -> Option<f64> {
+        self.0.borrow_mut().as_mut()?.widget.measure_width(cx, over)
     }
 
     pub fn text(&self) -> String {

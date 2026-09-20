@@ -310,6 +310,51 @@ pub struct Label {
 }
 
 impl Widget for Label {
+    /// What this label would be worth on a row, with `over` in force.
+    ///
+    /// A label that can wrap answers `None` unless its width is stated: where a
+    /// wrapping label breaks is the turtle's business, so its own width is not a
+    /// number it can give.
+    fn measure_width(
+        &mut self,
+        cx: &mut Cx2d,
+        over: Option<&crate::width_override::WidthOverride>,
+    ) -> Option<f64> {
+        if let Some(o) = over {
+            if o.opaque {
+                return None;
+            }
+            if o.hides() {
+                return Some(0.0);
+            }
+        }
+        if !self.visible {
+            return Some(0.0);
+        }
+
+        let margin = over.and_then(|o| o.margin).unwrap_or(self.walk.margin);
+        let width = over.and_then(|o| o.width).unwrap_or(self.walk.width);
+        if let Size::Fixed(w) = width {
+            return Some(w + margin.width());
+        }
+        // Only a Fit label has a width of its own to report.
+        if !width.is_fit() {
+            return None;
+        }
+
+        let pad = over.and_then(|o| o.padding).unwrap_or(self.padding);
+        let text: &str = match over.and_then(|o| o.text.as_deref()) {
+            Some(t) => t,
+            None => self.text.as_ref(),
+        };
+        let text_w = if text.is_empty() {
+            0.0
+        } else {
+            crate::badge::advance(&self.draw_text, cx, text)
+        };
+        Some(pad.width() + text_w + margin.width())
+    }
+
     fn script_call(
         &mut self,
         vm: &mut ScriptVm,

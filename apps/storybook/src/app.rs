@@ -1143,4 +1143,79 @@ mod tests {
         );
     }
 
+
+    /// A measured width is the width that actually gets drawn.
+    ///
+    /// This is the claim the whole ladder rests on: a row prices every rung
+    /// before it draws anything, so if `measure_width` and the turtle disagree
+    /// the row settles on a number that is not the one on screen -- and prices a
+    /// rung wrong, which is a rung it never gives back.
+    #[test]
+    fn a_measured_button_is_the_width_it_actually_draws() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        let root = cx.with_vm(|vm| {
+            <App as AppMain>::script_mod(vm);
+            let value = script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    a := ButtonFlat{ text: "Inspect" }
+                    b := ButtonFlat{ text: "<>" }
+                    c := ButtonFlat{ text: "New only" }
+                    d := ButtonFlat{ text: "Reset" }
+                    e := Label{ width: Fit  text: "12 new in the last day" }
+                }
+            });
+            assert!(vm.take_errors().is_empty());
+            WidgetRef::script_from_value(vm, value)
+        });
+
+        let pass = DrawPass::new(&mut cx);
+        let mut list = DrawList2d::new(&mut cx);
+        let size = dvec2(600.0, 400.0);
+        pass.set_size(&mut cx, size);
+        cx.redraw_all();
+
+        let names = [id!(a), id!(b), id!(c), id!(d), id!(e)];
+        let mut measured = Vec::new();
+        {
+            let event = std::mem::take(&mut cx.new_draw_event);
+            let mut draw = CxDraw::new(&mut cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&pass, Some(1.0));
+            list.begin_always(&mut cx2d);
+            cx2d.begin_root_turtle(size, Layout::flow_down());
+            // Measured mid-pass, from the same Cx2d that is about to draw them.
+            for n in names {
+                let w = root.widget(cx2d.cx, &[n]);
+                measured.push(w.measure_width(&mut cx2d, None));
+            }
+            root.draw_all(&mut cx2d, &mut Scope::empty());
+            cx2d.end_pass_sized_turtle();
+            list.end(&mut cx2d);
+            cx2d.end_pass(&pass);
+        }
+
+        for (n, m) in names.into_iter().zip(measured) {
+            let m = m.unwrap_or_else(|| panic!("{n:?} must price itself"));
+            if n == id!(e) {
+                // A Label's area is not its drawn width -- it reports a few
+                // points wide whatever it renders -- so there is nothing here to
+                // check a measurement against. That the label answers a width at
+                // all, and one in the right order of magnitude for its string,
+                // is all this can say.
+                assert!(m > 80.0, "the label priced its own string at {m}");
+                continue;
+            }
+            let drawn = root.widget(&cx, &[n]).area().rect(&cx).size.x;
+            assert!(
+                (m - drawn).abs() < 2.0,
+                "{n:?}: measured {m} but drew {drawn}"
+            );
+        }
+    }
 }

@@ -27,6 +27,7 @@ pub mod theme_tokens;
 pub mod theme_store;
 pub mod theme_lab;
 pub mod widget;
+pub mod width_override;
 pub mod widget_async;
 pub mod splash_host;
 pub mod splash_storage;

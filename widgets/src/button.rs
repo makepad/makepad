@@ -1295,6 +1295,94 @@ impl ScriptHook for Button {
 }
 
 impl Widget for Button {
+    /// What this button would be worth on a row, with `over` in force.
+    ///
+    /// Measured, not drawn: `DrawText::layout` touches no turtle and comes out
+    /// of an LRU cache keyed on the string and its style, so measuring a label
+    /// here and drawing it afterwards is a cache hit rather than a second
+    /// shaping pass.
+    ///
+    /// `None` wherever an honest number is not available -- an icon whose
+    /// document has not loaded answers `None` rather than a guess, because a
+    /// rung priced wrong is a rung the ladder never gives back.
+    fn measure_width(
+        &mut self,
+        cx: &mut Cx2d,
+        over: Option<&crate::width_override::WidthOverride>,
+    ) -> Option<f64> {
+        if let Some(o) = over {
+            if o.opaque {
+                return None;
+            }
+            if o.hides() {
+                return Some(0.0);
+            }
+        }
+        if !self.visible {
+            return Some(0.0);
+        }
+
+        let margin = over.and_then(|o| o.margin).unwrap_or(self.walk.margin);
+        // A stated width is the answer whatever is inside it.
+        let width = over.and_then(|o| o.width).unwrap_or(self.walk.width);
+        if let Size::Fixed(w) = width {
+            return Some(w + margin.width());
+        }
+
+        let pad = over.and_then(|o| o.padding).unwrap_or(self.layout.padding);
+        let gap = over.and_then(|o| o.spacing).unwrap_or(self.layout.spacing);
+
+        let label: &str = match over.and_then(|o| o.text.as_deref()) {
+            Some(t) => t,
+            None if self.copied && !self.copied_text.is_empty() => self.copied_text.as_str(),
+            None => self.text.as_ref(),
+        };
+        let mut text_w = if label.is_empty() {
+            0.0
+        } else {
+            crate::badge::advance(&self.draw_text, cx, label)
+        };
+        // A description stacks BELOW the label, so the pair is as wide as the
+        // wider of the two, not as wide as both.
+        if !self.description.is_empty() {
+            text_w = text_w.max(crate::badge::advance(
+                &self.draw_description,
+                cx,
+                &self.description,
+            ));
+        }
+
+        let mut icon_w = 0.0;
+        let mut parts = if text_w > 0.0 { 1 } else { 0 };
+        let icons = [
+            (self.icon_walk, self.draw_icon.svg.is_none()),
+            (self.icon_end_walk, self.draw_icon_end.svg.is_none()),
+        ];
+        for (i, (iw, empty)) in icons.into_iter().enumerate() {
+            if empty {
+                continue;
+            }
+            let svg = if i == 0 {
+                &mut self.draw_icon
+            } else {
+                &mut self.draw_icon_end
+            };
+            // `None` means the document has not loaded, or the walk leaves a
+            // side to a turtle. Either way this button has no width to give.
+            let sz = svg.measure(cx.cx, iw)?;
+            icon_w += sz.x + iw.margin.width();
+            parts += 1;
+        }
+
+        Some(
+            pad.width()
+                + text_w
+                + icon_w
+                + gap * (parts as f64 - 1.0).max(0.0)
+                + margin.width(),
+        )
+    }
+
     fn script_call(
         &mut self,
         vm: &mut ScriptVm,

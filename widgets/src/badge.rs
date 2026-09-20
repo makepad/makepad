@@ -807,11 +807,21 @@ const TEXT_SLACK: f64 = 2.0;
 /// slack a drawn run needs; a per-character estimate only for text the
 /// layout engine returns no row for.
 pub(crate) fn measure(draw_text: &DrawText, cx: &mut Cx2d, text: &str) -> f64 {
+    advance(draw_text, cx, text) + TEXT_SLACK
+}
+
+/// How far a drawn run advances the pen, without the slack a box drawn AROUND
+/// it needs.
+///
+/// This is what a widget laying its own label out takes: the turtle walks the
+/// advance, so a width measured with the slack on is two points wider than the
+/// box that gets drawn. Use [`measure`] to draw a box around a run, and this to
+/// predict the width of a widget that already contains one.
+pub(crate) fn advance(draw_text: &DrawText, cx: &mut Cx2d, text: &str) -> f64 {
     draw_text
         .prepare_single_line_run(cx, text)
         .map(|run| run.width_in_lpxs as f64)
         .unwrap_or_else(|| text.chars().count() as f64 * draw_text.text_style.font_size as f64 * 0.62)
-        + TEXT_SLACK
 }
 
 #[derive(Script, ScriptHook, Widget)]
