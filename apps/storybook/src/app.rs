@@ -1324,4 +1324,121 @@ mod tests {
         );
     }
 
+
+    /// The order is the author's, and the numbers in it are only an order.
+    ///
+    /// Three things are being asserted, and the middle one is the one a reader
+    /// is most likely to get wrong: ranks need not be dense. `give_up := 9` is
+    /// not the ninth rung, it is "after 5, which is after 1" -- the ladder
+    /// indexes a contiguous slice and silently ignores a step outside it, so a
+    /// row authored 1/5/9 with nothing compacting it would be a row whose
+    /// rungs were all priced at nothing, and a rung priced at nothing is one
+    /// that is never given back.
+    #[test]
+    fn ranks_are_an_order_not_an_index_and_equal_ranks_go_together() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        let root = cx.with_vm(|vm| {
+            <App as AppMain>::script_mod(vm);
+            let value = script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    row := ConcedingRow{
+                        // Deliberately sparse, and deliberately out of order in
+                        // the markup: the rank decides, not the position.
+                        late := ButtonFlat{ text: "Goes last of all"   give_up := 9  tight: { text: "L" } }
+                        mid  := ButtonFlat{ text: "Goes in the middle" give_up := 5  tight: { text: "M" } }
+                        one  := ButtonFlat{ text: "Goes first"         give_up := 1  tight: { text: "A" } }
+                        also := ButtonFlat{ text: "Goes first as well" give_up := 1  tight: { text: "B" } }
+                        stay := ButtonFlat{ text: "Never goes" }
+                    }
+                }
+            });
+            assert!(vm.take_errors().is_empty());
+            WidgetRef::script_from_value(vm, value)
+        });
+
+        let pass = DrawPass::new(&mut cx);
+        let mut list = DrawList2d::new(&mut cx);
+        let mut one = |cx: &mut Cx, w: f64| {
+            let size = dvec2(w, 120.0);
+            pass.set_size(cx, size);
+            cx.redraw_all();
+            let event = std::mem::take(&mut cx.new_draw_event);
+            let mut draw = CxDraw::new(cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&pass, Some(1.0));
+            list.begin_always(&mut cx2d);
+            cx2d.begin_root_turtle(size, Layout::flow_down());
+            root.draw_all(&mut cx2d, &mut Scope::empty());
+            cx2d.end_pass_sized_turtle();
+            list.end(&mut cx2d);
+            cx2d.end_pass(&pass);
+        };
+        let face = |cx: &Cx| {
+            [id!(one), id!(also), id!(mid), id!(late), id!(stay)]
+                .map(|n| root.widget(cx, &[n]).text())
+        };
+        let long = [
+            "Goes first",
+            "Goes first as well",
+            "Goes in the middle",
+            "Goes last of all",
+            "Never goes",
+        ]
+        .map(String::from);
+
+        // Wide: the authored faces.
+        one(&mut cx, 900.0);
+        assert_eq!(face(&cx), long, "a row with room to spare gave something up");
+
+        // Walk it in, collecting each distinct state in the order it appears.
+        let mut seen: Vec<[String; 5]> = vec![face(&cx)];
+        let mut w = 900.0;
+        while w > 100.0 {
+            one(&mut cx, w);
+            let now = face(&cx);
+            if seen.last() != Some(&now) {
+                seen.push(now);
+            }
+            w -= 4.0;
+        }
+
+        // Rank 1 is two widgets, and they go on the same step -- not one after
+        // the other, which a row indexing by rank rather than by order would do.
+        assert_eq!(
+            seen[1],
+            ["A", "B", "Goes in the middle", "Goes last of all", "Never goes"].map(String::from),
+            "the two widgets that share a rank did not go together"
+        );
+        assert_eq!(
+            seen[2],
+            ["A", "B", "M", "Goes last of all", "Never goes"].map(String::from),
+            "rank 5 is the second step, whatever its number says"
+        );
+        assert_eq!(
+            seen[3],
+            ["A", "B", "M", "L", "Never goes"].map(String::from),
+            "rank 9 is the third step, whatever its number says"
+        );
+        assert_eq!(seen.len(), 4, "three ranks are three steps: {seen:?}");
+
+        // And back out, through the same states in reverse.
+        let mut back: Vec<[String; 5]> = vec![face(&cx)];
+        while w < 900.0 {
+            w += 4.0;
+            one(&mut cx, w);
+            let now = face(&cx);
+            if back.last() != Some(&now) {
+                back.push(now);
+            }
+        }
+        let mut wanted = seen.clone();
+        wanted.reverse();
+        assert_eq!(back, wanted, "the row did not come back through the same states");
+    }
+
 }
