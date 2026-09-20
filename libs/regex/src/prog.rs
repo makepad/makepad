@@ -6,6 +6,9 @@ pub struct Prog {
     pub start: InstPtr,
     pub byte_classes: Box<[u8]>,
     pub has_word_boundary: bool,
+    /// `\b` is decided on ASCII word characters; non-ASCII bytes are not
+    /// word characters and never leave the DFA.
+    pub ascii_word_boundary: bool,
     pub slot_count: usize,
 }
 
