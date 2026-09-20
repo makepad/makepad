@@ -657,7 +657,18 @@ impl Setup {
         activity(&release.describe_sources(&self.root));
         with_progress(|| {
             catalog::checkout(&self.service, &self.email, &self.root, &release)?;
-            Environment::prepare(&self.root, &release, self.cuda)?.build(&release)
+            let environment = Environment::prepare(&self.root, &release, self.cuda)?;
+            // Scope's release pins the Makepad tree the Builder itself is
+            // compiled from. A Builder that fails to compile from the new
+            // tree does not withhold the app; the next start tries again.
+            if release.id == "scope" {
+                match runtime::update_builder(&environment, &release) {
+                    Ok(Some(note)) => activity(&note),
+                    Ok(None) => {}
+                    Err(error) => activity(&format!("Builder not updated: {error}")),
+                }
+            }
+            environment.build(&release)
         })?;
         fs::create_dir_all(self.root.join("installed")).map_err(|e| e.to_string())?;
         release.save(&self.root.join("installed").join(format!("{}.json", release.id)))?;
@@ -667,6 +678,14 @@ impl Setup {
             if self.cuda { "1" } else { "0" },
         )
         .map_err(|e| e.to_string())?;
+        match catalog::prune_snapshots(&self.root, std::slice::from_ref(&release)) {
+            Ok(removed) => {
+                for label in removed {
+                    activity(&format!("Removed the unused sources {label}; nothing was built from them any more and they held no edits."));
+                }
+            }
+            Err(error) => activity(&format!("Unused sources kept: {error}")),
+        }
         activity(&format!("Build complete. Opening {}.", release.title));
         self.open()?;
         activity(&format!("{} is running; Builder remains open.", release.title));

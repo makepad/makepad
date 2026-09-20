@@ -1,8 +1,9 @@
 //! Authenticated commercial releases. Credentials never enter Git configs or build commands.
 use crate::{http, progress, sha256};
 use makepad_git::{
+    compute_status_with_options, flatten_tree,
     http_sync::{apply_pack_and_checkout, HttpSyncHooks},
-    ObjectId,
+    FileStatus, ObjectId, StatusOptions,
 };
 use makepad_strict_json::{self as json, Value};
 use std::{
@@ -419,6 +420,74 @@ pub fn checkout(
     release.save(&dest.join(format!("{}.json", release.id)))?;
     progress::stage("Ready", "Source repositories verified and checked out", 1.0);
     Ok(release.source(root))
+}
+
+/// Remove the source snapshots nothing refers to any more: neither the
+/// releases in `keep` nor those recorded under `installed/` and
+/// `available/`. Every checkout a snapshot's receipts name must be there,
+/// with no local change, edited, deleted, new or staged: a snapshot the user
+/// or an agent worked in stays, and so does one whose layout this Builder
+/// does not recognise. Returns the labels removed, for the activity log.
+pub fn prune_snapshots(root: &Path, keep: &[Release]) -> Result<Vec<String>, String> {
+    let mut kept: Vec<PathBuf> = keep.iter().map(|release| release.directory(root)).collect();
+    for directory in ["installed", "available"] {
+        for entry in fs::read_dir(root.join(directory)).into_iter().flatten().flatten() {
+            if let Some(release) = fs::read(entry.path()).ok().and_then(|bytes| Release::parse(&json::parse(&bytes).ok()?).ok()) {
+                kept.push(release.directory(root));
+            }
+        }
+    }
+    let mut removed = Vec::new();
+    for entry in fs::read_dir(root.join("sources")).into_iter().flatten().flatten() {
+        let snapshot = entry.path();
+        let Some(label) = entry.file_name().to_str().map(str::to_owned) else { continue };
+        if !snapshot.is_dir() || kept.contains(&snapshot) || !snapshot_unchanged(&snapshot)? {
+            continue;
+        }
+        fs::remove_dir_all(&snapshot).map_err(|e| format!("Remove {}: {e}", snapshot.display()))?;
+        removed.push(label);
+    }
+    Ok(removed)
+}
+
+/// True when every repository the snapshot's receipts name is checked out
+/// at a known path without local changes. The paths come from the release
+/// files saved beside the checkouts; the bootstrap's own snapshot holds only
+/// Makepad, which it always checks out under `makepad`.
+fn snapshot_unchanged(snapshot: &Path) -> Result<bool, String> {
+    let mut paths = vec![("makepad".to_owned(), "makepad".to_owned())];
+    for entry in fs::read_dir(snapshot).map_err(|e| e.to_string())?.flatten() {
+        if entry.path().extension().is_some_and(|extension| extension == "json") {
+            if let Some(release) = fs::read(entry.path()).ok().and_then(|bytes| Release::parse(&json::parse(&bytes).ok()?).ok()) {
+                paths.extend(release.repositories.into_iter().map(|repo| (repo.name, repo.path)));
+            }
+        }
+    }
+    for receipt in fs::read_dir(snapshot.join(".builder-repositories")).map_err(|e| e.to_string())?.flatten() {
+        let name = receipt.file_name().to_string_lossy().into_owned();
+        let Some((_, path)) = paths.iter().find(|(known, _)| *known == name) else { return Ok(false) };
+        if !checkout_unchanged(&snapshot.join(path))? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn checkout_unchanged(checkout: &Path) -> Result<bool, String> {
+    let describe = |error: makepad_git::GitError| format!("{}: {error}", checkout.display());
+    let mut repository = makepad_git::Repository::open(checkout).map_err(describe)?;
+    let head = repository.head_oid().map_err(describe)?;
+    let commit = repository.read_commit(&head).map_err(describe)?;
+    let tree = repository.read_tree(&commit.tree).map_err(describe)?;
+    let files = flatten_tree(&tree, "", &mut |oid| repository.read_tree(oid)).map_err(describe)?;
+    let index = repository.read_index().map_err(describe)?;
+    let options = StatusOptions { skip_hidden: false, skip_target_dirs: true, skip_worktree_content_compare: false };
+    let status = compute_status_with_options(&files, &index, &repository.workdir, options).map_err(describe)?;
+    // Makepad tracks a few symbolic links. The Builder's checkout does not
+    // create them, and Git's own checkout in the bootstrap leaves them
+    // dangling, so their absence is how every snapshot starts, not an edit.
+    let symbolic_link = |path: &str| index.entries.iter().any(|entry| entry.path == path && entry.mode & 0o170000 == 0o120000);
+    Ok(status.entries.iter().all(|entry| entry.status == FileStatus::Deleted && symbolic_link(&entry.path)))
 }
 
 pub fn email(value: &str) -> Result<String, String> {
