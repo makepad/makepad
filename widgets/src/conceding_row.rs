@@ -153,7 +153,19 @@ impl ConcedingRow {
     }
 
     /// The row's natural outer width with rungs `0..level` in force, or `None`
-    /// when a child on it cannot price itself under those rungs.
+    /// when a child ON A RUNG cannot price itself under those rungs.
+    ///
+    /// A child that gives way has to answer exactly, because what a rung saves
+    /// is the difference its face makes and an inexact answer prices the rung
+    /// wrong -- which is a rung the ladder never gives back.
+    ///
+    /// A child that never gives way is a different matter: it is the same width
+    /// at every level, so it cancels out of `span(i) - span(i+1)` entirely and
+    /// only moves the absolute number. For those, the width it last drew at
+    /// will do, and a row full of widgets that cannot measure themselves still
+    /// gets its rungs priced exactly. Before the first draw that width is zero,
+    /// so a cold row reads narrower than it is and settles on the draw after --
+    /// once, not per rung.
     fn span(&mut self, cx: &mut Cx2d, level: usize) -> Option<f64> {
         let mut total = 0.0;
         let mut shown = 0usize;
@@ -177,7 +189,12 @@ impl ConcedingRow {
             if over.as_ref().is_some_and(WidthOverride::hides) {
                 continue;
             }
-            let w = child.measure_width(cx, over.as_ref())?;
+            let ranked = over.is_some();
+            let w = match child.measure_width(cx, over.as_ref()) {
+                Some(w) => w,
+                None if ranked => return None,
+                None => child.area().rect(cx.cx).size.x,
+            };
             if w > 0.0 {
                 shown += 1;
             }

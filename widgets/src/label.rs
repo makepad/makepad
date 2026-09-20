@@ -13,6 +13,14 @@ script_mod! {
         height: Fit
         padding: theme.mspace_1
 
+        // The compact face this wears when its row runs out of width. Declared
+        // with `:=` so it lands in the vec: a widget proto is frozen VALIDATED,
+        // so a key its props do not list is a hard error at construction -- but
+        // the checked path looks in the vec first, and declaring it once here
+        // makes `tight: {...}` legal on every instance and every preset below.
+        /** the face this wears when its row runs out of width */
+        tight := {}
+
         draw_text +: {
             // A label is a box with text in it, and the boxes apps put labels
             // in are centered by their align, not by their baselines: center
@@ -335,6 +343,13 @@ impl Widget for Label {
         let width = over.and_then(|o| o.width).unwrap_or(self.walk.width);
         if let Size::Fixed(w) = width {
             return Some(w + margin.width());
+        }
+        // A Fill takes what the others leave, so what it adds to the row's own
+        // width is its minimum -- nothing, for a plain spacer. Answering None
+        // here would make a row with a spacer in it unpriceable, which is most
+        // rows.
+        if let Size::Fill { min, .. } = width {
+            return Some(min.unwrap_or(0.0) + margin.width());
         }
         // Only a Fit label has a width of its own to report.
         if !width.is_fit() {

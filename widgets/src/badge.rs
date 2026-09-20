@@ -817,6 +817,21 @@ pub(crate) fn measure(draw_text: &DrawText, cx: &mut Cx2d, text: &str) -> f64 {
 /// advance, so a width measured with the slack on is two points wider than the
 /// box that gets drawn. Use [`measure`] to draw a box around a run, and this to
 /// predict the width of a widget that already contains one.
+/// How much room an icon takes across, margin included -- or `None` when that
+/// cannot be said without drawing.
+///
+/// A stated width is the answer whether or not there is a document behind it,
+/// which matters for a mark drawn as a quad rather than loaded from a file: its
+/// `DrawSvg` has nothing to measure, and asking it would say `None` for a width
+/// the walk states plainly. Only an icon whose width is left to the turtle needs
+/// the document, and before that has loaded there is no honest number.
+pub(crate) fn icon_extent(svg: &mut DrawSvg, cx: &mut Cx2d, walk: Walk) -> Option<f64> {
+    if let Size::Fixed(w) = walk.width {
+        return Some(w + walk.margin.width());
+    }
+    Some(svg.measure(cx.cx, walk)?.x + walk.margin.width())
+}
+
 pub(crate) fn advance(draw_text: &DrawText, cx: &mut Cx2d, text: &str) -> f64 {
     draw_text
         .prepare_single_line_run(cx, text)

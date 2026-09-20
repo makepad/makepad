@@ -1327,6 +1327,13 @@ impl Widget for Button {
         if let Size::Fixed(w) = width {
             return Some(w + margin.width());
         }
+        // A Fill takes what the others leave, so what it adds to the row's own
+        // width is its minimum -- nothing, for a plain spacer. Answering None
+        // here would make a row with a spacer in it unpriceable, which is most
+        // rows.
+        if let Size::Fill { min, .. } = width {
+            return Some(min.unwrap_or(0.0) + margin.width());
+        }
 
         let pad = over.and_then(|o| o.padding).unwrap_or(self.layout.padding);
         let gap = over.and_then(|o| o.spacing).unwrap_or(self.layout.spacing);
@@ -1366,10 +1373,9 @@ impl Widget for Button {
             } else {
                 &mut self.draw_icon_end
             };
-            // `None` means the document has not loaded, or the walk leaves a
-            // side to a turtle. Either way this button has no width to give.
-            let sz = svg.measure(cx.cx, iw)?;
-            icon_w += sz.x + iw.margin.width();
+            // `None` means the walk leaves this icon's width to a turtle and
+            // the document has not loaded. Either way there is no honest number.
+            icon_w += crate::badge::icon_extent(svg, cx, iw)?;
             parts += 1;
         }
 

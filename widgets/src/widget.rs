@@ -288,10 +288,17 @@ pub trait Widget: WidgetNode {
         let walk = self.walk(cx.cx);
         let width = over.and_then(|o| o.width).unwrap_or(walk.width);
         let margin = over.and_then(|o| o.margin).unwrap_or(walk.margin);
-        match width {
-            Size::Fixed(w) => Some(w + margin.width()),
-            _ => None,
+        if let Size::Fixed(w) = width {
+            return Some(w + margin.width());
         }
+        // A Fill takes what the others leave, so what it adds to the row's own
+        // width is its minimum -- nothing, for a plain spacer. Answering None
+        // here would make a row with a spacer in it unpriceable, which is most
+        // rows.
+        if let Size::Fill { min, .. } = width {
+            return Some(min.unwrap_or(0.0) + margin.width());
+        }
+        None
     }
     /// Visit the current active children and report whether this widget can own
     /// cancel input. Return false without visiting when inactive. Override this

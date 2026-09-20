@@ -20,7 +20,7 @@ script_mod! {
     /** The row across the top. A template of its own, and not part of the
      * shell below, because the app measures it: what gives way when the row
      * runs out of width is decided from the row alone. */
-    mod.storybook.CatalogueToolbar = View{
+    mod.storybook.CatalogueToolbar = ConcedingRow{
         width: Fill
         height: Fit
         flow: Right
@@ -31,7 +31,12 @@ script_mod! {
         // A stated width, not Fit. A label that can wrap shares the
         // row's leftover with the Filler at the end, half each, so
         // the title broke into lines as soon as the row filled up.
-        catalogue_title := H4{text: "Widget catalogue" width: 200.}
+        catalogue_title := H4{
+            text: "Widget catalogue"
+            width: 200.
+            give_up := 2
+            tight: { visible: false }
+        }
         story_search := TextInput{
             width: 160.
             empty_text: "Search stories"
@@ -48,7 +53,11 @@ script_mod! {
         // since the catalogue was started, so the default marker
         // stays on that date. The count after the field says the
         // same thing in a sentence.
-        new_only := Toggle{text: "New only"}
+        new_only := Toggle{
+            text: "New only"
+            give_up := 4
+            tight: { text: "New" }
+        }
         new_days := NumberField{
             width: 84.
             min: 1.0
@@ -56,20 +65,34 @@ script_mod! {
             step: 1.0
             suffix: " days"
         }
-        new_count := Label{text: ""}
+        new_count := Label{
+            text: ""
+            give_up := 3
+            tight: { visible: false }
+        }
         theme_select := DropDown{
             labels: ["Dark" "Light" "Skeleton"]
             selected_item: 0
         }
-        inspect := ButtonFlat{text: "Inspect"}
+        inspect := ButtonFlat{
+            text: "Inspect"
+            give_up := 1
+            tight: { text: "<>" }
+        }
         // One command with two faces: the word while the row has the width
         // for it, the mark when it has not. The mark is a button preset of
         // its own rather than this one emptied of its text, because a
         // button with a label keeps the gap in front of one whether or not
         // there is anything in it, and the mark sits off to one side.
-        reset := ButtonFlat{text: "Reset"}
+        reset := ButtonFlat{
+            text: "Reset"
+            give_up := 1
+            tight: { visible: false }
+        }
         reset_icon := ButtonFlatIcon{
             visible: false
+            give_up := 1
+            tight: { visible: true }
             icon_walk: Walk{width: 14. height: Fit}
             draw_icon +: {
                 svg: crate_resource("self:resources/reset.svg")
@@ -196,15 +219,6 @@ pub struct App {
     /// The key of the story on the canvas.
     #[rust]
     current: Option<String>,
-    /// How far down its ladder the toolbar has had to go, and what each
-    /// step turned out to save.
-    #[rust(ConcessionLadder::new(TOOLBAR_STEPS, TOOLBAR_MARGIN))]
-    toolbar: ConcessionLadder,
-    /// A step taken and not yet priced: which one, and what the row was
-    /// giving to the controls it changes before it was taken. The draw
-    /// that follows says what it saved.
-    #[rust]
-    toolbar_pricing: Option<(usize, f64)>,
 }
 
 impl App {
@@ -239,108 +253,6 @@ impl App {
         settings::set(settings::LAST_STORY, story.key);
         remote::set_current(story.key);
         log!("storybook: story {}", story.key);
-    }
-
-    /// What the row is giving to the controls step `step` changes, as it
-    /// stands in the draw just made. A step's cost is this before it was
-    /// taken less this after.
-    ///
-    /// A control that only changes what it says is measured by its own
-    /// width: it keeps its place in the row either way. A control that goes
-    /// away is measured as the room between the two controls it sits
-    /// between, because it takes the gap in front of the next one with it,
-    /// and a saving read short of what it really was is what makes a row
-    /// give something back and immediately want it again. Measuring the
-    /// room rather than the control also keeps the reading off the control
-    /// itself, which is not on the row to be measured once the step is
-    /// taken -- and, for a label, is not there to be measured while it is
-    /// still waiting to be told what to say.
-    ///
-    /// Only true while the ladder and the pixels agree, which is where it
-    /// is called from: before the level is moved, and on the pass after the
-    /// draw that moved it.
-    fn step_span(&self, cx: &Cx, step: usize) -> f64 {
-        let rect = |path: &[LiveId]| self.ui.widget(cx, path).area().rect(cx);
-        let x = |path: &[LiveId]| rect(path).pos.x;
-        let w = |path: &[LiveId]| rect(path).size.x;
-        match step {
-            STEP_MARKS => {
-                let reset = if self.toolbar.is_conceded(step) { ids!(reset_icon) } else { ids!(reset) };
-                w(ids!(inspect)) + w(reset)
-            }
-            // The title is the first thing in the row, so the room in front
-            // of the search box is measured from the row's own edge.
-            STEP_TITLE => x(ids!(story_search)) - x(ids!(toolbar)),
-            STEP_NEW_COUNT => x(ids!(theme_select)) - (x(ids!(new_days)) + w(ids!(new_days))),
-            STEP_NEW_ONLY => w(ids!(new_only)),
-            _ => 0.0,
-        }
-    }
-
-    /// Read the row after a draw and settle how much of it has to give way.
-    ///
-    /// The Filler between the last command and the story title is what the
-    /// row has left over, so that one width says whether the row fits, and
-    /// says it with the title counted. Answers whether anything had to
-    /// move: a row that has settled changes nothing and asks for no redraw,
-    /// which is the whole of what keeps the measuring from becoming the
-    /// jitter it is there to prevent.
-    fn fit_toolbar(&mut self, cx: &mut Cx) -> bool {
-        // A row that has not been laid out yet answers nothing to every
-        // width asked of it, and a row with no slack is exactly what an
-        // overfull one looks like. A style reload hands back a tree in
-        // that state for a draw or two -- long enough for the row to walk
-        // the whole ladder down on a measurement of zeroes, and to price
-        // every step it took at nothing, which is a step it may never give
-        // back. Nothing is read until the row has a width of its own.
-        if self.ui.widget(cx, ids!(toolbar)).area().rect(cx).size.x <= 0.0 {
-            return false;
-        }
-        // The step taken last time has been drawn since. The two readings
-        // say what it saved, and a step whose saving is known is one the
-        // row can safely give back later.
-        if let Some((step, before)) = self.toolbar_pricing.take() {
-            let saved = before - self.step_span(cx, step);
-            self.toolbar.set_cost(step, saved);
-        }
-        let mut spans = [0.0; TOOLBAR_STEPS];
-        for (step, span) in spans.iter_mut().enumerate() {
-            *span = self.step_span(cx, step);
-        }
-        let slack = self.ui.widget(cx, ids!(slack)).area().rect(cx).size.x;
-        let level = self.toolbar.level();
-        if !self.toolbar.measured(slack) {
-            return false;
-        }
-        let taken = self.toolbar.level();
-        self.toolbar_pricing = (taken > level).then(|| (taken - 1, spans[taken - 1]));
-        self.show_toolbar(cx);
-        // The row is read inside the draw event, and a redraw asked for
-        // from in there is refused unless it is the whole-window one --
-        // so the redraws the sets above ask for on their own account are
-        // dropped, and without this the row changes its mind once and
-        // then never lays itself out to prove it. Asked for only on a
-        // level that moved: a settled row goes on costing nothing.
-        cx.redraw_all();
-        true
-    }
-
-    /// Put the row in the state the ladder says it is in.
-    fn show_toolbar(&self, cx: &mut Cx) {
-        let marks = self.toolbar.is_conceded(STEP_MARKS);
-        self.ui
-            .button(cx, ids!(inspect))
-            .set_text(cx, if marks { "<>" } else { "Inspect" });
-        self.ui.button(cx, ids!(reset)).set_visible(cx, !marks);
-        self.ui.button(cx, ids!(reset_icon)).set_visible(cx, marks);
-        self.ui
-            .widget(cx, ids!(catalogue_title))
-            .set_visible(cx, !self.toolbar.is_conceded(STEP_TITLE));
-        self.ui
-            .label(cx, ids!(new_count))
-            .set_visible(cx, !self.toolbar.is_conceded(STEP_NEW_COUNT));
-        let new_only = if self.toolbar.is_conceded(STEP_NEW_ONLY) { "New" } else { "New only" };
-        self.ui.widget(cx, ids!(new_only)).set_text(cx, new_only);
     }
 
     /// Whether the reset was pressed, whichever of its two faces the row
@@ -541,7 +453,6 @@ impl MatchEvent for App {
     /// window resized, the splitter moved, a longer story title beside the
     /// Filler -- so the row is read after a draw and nowhere else.
     fn handle_draw(&mut self, cx: &mut Cx, _e: &DrawEvent) {
-        self.fit_toolbar(cx);
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
@@ -704,8 +615,6 @@ impl AppMain for App {
             // carries its own type: what the steps were worth under the
             // last one is worth nothing here. It starts again from the
             // state the markup is in, and the next draw walks it down.
-            self.toolbar = ConcessionLadder::new(TOOLBAR_STEPS, TOOLBAR_MARGIN);
-            self.toolbar_pricing = None;
         }
     }
 }
@@ -756,8 +665,6 @@ mod tests {
         let app = App {
             ui,
             current: None,
-            toolbar: ConcessionLadder::new(TOOLBAR_STEPS, TOOLBAR_MARGIN),
-            toolbar_pricing: None,
         };
         (cx, app, pass, list)
     }
@@ -779,18 +686,33 @@ mod tests {
         cx2d.end_pass(pass);
     }
 
-    /// Draw and fit until the row stops moving, which is what the running
-    /// app does: a fit that changes anything asks for another draw. Panics
-    /// rather than spinning, so a row that flaps between two states fails
-    /// the test instead of hanging it. Answers how many draws it took.
+    /// Draw until the row stops changing what it says. Answers how many
+    /// draws it took, which for a row that can price its own rungs is one.
+    ///
+    /// The bound and the panic stay: they are what stands between a row that
+    /// flaps and a test that hangs, and a row deciding from its own
+    /// measurements is not by itself a proof that it cannot.
     fn settle(cx: &mut Cx, app: &mut App, pass: &DrawPass, list: &mut DrawList2d, width: f64) -> usize {
+        draw(cx, app, pass, list, width);
+        let mut was = shown(cx, app);
         for draws in 1..=16 {
             draw(cx, app, pass, list, width);
-            if !app.fit_toolbar(cx) {
+            let now = shown(cx, app);
+            if now == was {
                 return draws;
             }
+            was = now;
         }
         panic!("the toolbar never settled at {width}");
+    }
+
+    /// Which rung the row has settled on, read off what it says rather than
+    /// off a number it keeps. The number is the row's own business now.
+    fn rung(cx: &Cx, app: &App) -> usize {
+        let now = shown(cx, app);
+        (0..=TOOLBAR_STEPS)
+            .find(|l| expected(*l) == now)
+            .unwrap_or_else(|| panic!("the row is in no state the ladder describes: {now:?}"))
     }
 
     /// What the row says, read off the controls rather than off the ladder.
@@ -845,7 +767,7 @@ mod tests {
         let (mut cx, mut app, pass, mut list) = fixture();
         let draws = settle(&mut cx, &mut app, &pass, &mut list, WIDE);
         assert_eq!(draws, 1, "a row with room to spare was laid out twice");
-        assert_eq!(app.toolbar.level(), 0);
+        assert_eq!(rung(&cx, &app), 0);
         assert_eq!(shown(&cx, &app), expected(0));
     }
 
@@ -861,7 +783,7 @@ mod tests {
         let mut width = WIDE;
         while width >= 300.0 {
             settle(&mut cx, &mut app, &pass, &mut list, width);
-            let now = app.toolbar.level();
+            let now = rung(&cx, &app);
             assert!(now >= level, "the row gave something back as it was narrowed, at {width}");
             assert_eq!(shown(&cx, &app), expected(now), "at {width}");
             if now != level {
@@ -885,13 +807,13 @@ mod tests {
         let mut down = Vec::new();
         for width in &widths {
             settle(&mut cx, &mut app, &pass, &mut list, *width);
-            down.push(app.toolbar.level());
+            down.push(rung(&cx, &app));
         }
         assert_eq!(down.last(), Some(&TOOLBAR_STEPS), "the narrow end gave up everything");
         let mut up = Vec::new();
         for width in widths.iter().rev() {
             settle(&mut cx, &mut app, &pass, &mut list, *width);
-            up.push(app.toolbar.level());
+            up.push(rung(&cx, &app));
         }
         up.reverse();
         assert_eq!(up, down, "the row settled elsewhere coming back up");
@@ -907,70 +829,75 @@ mod tests {
         for width in [WIDE, 900.0, 800.0, 700.0, 600.0, 500.0, 400.0] {
             settle(&mut cx, &mut app, &pass, &mut list, width);
             let settled = shown(&cx, &app);
-            let level = app.toolbar.level();
             for _ in 0..3 {
                 draw(&mut cx, &app, &pass, &mut list, width);
-                assert!(!app.fit_toolbar(&mut cx), "the row went on deciding at {width}");
+                assert_eq!(shown(&cx, &app), settled, "the row went on deciding at {width}");
             }
-            assert_eq!(app.toolbar.level(), level);
-            assert_eq!(shown(&cx, &app), settled, "at {width}");
         }
     }
-
-    /// Nothing is decided off a row that has never been laid out. Every
-    /// width it is asked for comes back as nothing, and a row with no
-    /// room left is precisely what that looks like -- so a row read in
-    /// that state walks the whole ladder down for no reason and, worse,
-    /// prices each step it takes at nothing, which is a step it is never
-    /// allowed to give back. A style reload hands the app a tree in that
-    /// state, so this is not a hypothetical opening frame.
+    /// A row decides from what it measures, not from what it drew last time,
+    /// so the state that used to be dangerous is now merely uninteresting.
+    ///
+    /// The old loop read the row AFTER a draw. A tree not yet laid out answered
+    /// nothing to every width asked of it, and a row with no slack looks
+    /// exactly like an overfull one -- so it walked the whole ladder down and
+    /// priced every step it took at nothing, which is a step it is never
+    /// allowed to give back. A style reload handed the app a tree in that
+    /// state, so it was not a hypothetical opening frame.
+    ///
+    /// Pricing before the draw removes that rather than guarding it: a row that
+    /// has never drawn has nothing to read back and nothing to be misled by.
+    /// What is left worth checking is that it still gives way, and still gives
+    /// back.
     #[test]
-    fn a_row_that_has_not_been_laid_out_is_not_read_at_all() {
+    fn a_row_prices_itself_from_scratch_rather_than_from_its_last_layout() {
         let (mut cx, mut app, pass, mut list) = fixture();
-        for _ in 0..8 {
-            assert!(!app.fit_toolbar(&mut cx), "the row decided off a layout it does not have");
-        }
-        assert_eq!(app.toolbar.level(), 0, "and gave nothing up");
-        // The half that makes the above worth asserting: a ladder that
-        // was left able to price its steps still comes back up.
+        // Never drawn: the authored face, nothing given up.
+        assert_eq!(shown(&cx, &app), expected(0), "an undrawn row gave something up");
+
         settle(&mut cx, &mut app, &pass, &mut list, 700.0);
-        assert!(app.toolbar.level() > 0, "the narrow row gave nothing up");
+        assert!(rung(&cx, &app) > 0, "the narrow row gave nothing up");
+
         settle(&mut cx, &mut app, &pass, &mut list, WIDE);
-        assert_eq!(app.toolbar.level(), 0, "a step priced at nothing is a step kept for good");
+        assert_eq!(rung(&cx, &app), 0, "a step priced at nothing is a step kept for good");
         assert_eq!(shown(&cx, &app), expected(0));
     }
 
-    /// A row that moved has to ask for the draw that proves it, and the
-    /// ask has to be one that survives where it is made. The fit runs
-    /// inside the draw event, and in there every redraw is refused but
-    /// the whole-window one -- so the redraws `set_text` and
-    /// `set_visible` ask for on their own account go nowhere, and a row
-    /// that leant on them gave something up, never laid itself out
-    /// again, and sat there with the old widths on screen and a ladder
-    /// that thought it had moved. And the other half: a row that has
-    /// settled asks for no draw at all, or the asking is the jitter.
+    /// One draw settles it, however many rungs it owes.
+    ///
+    /// This is what pricing before the draw buys, and it is the whole
+    /// difference from the loop this replaced. That one decided AFTER the draw
+    /// which had already shown the old state, and could only learn what a rung
+    /// saved by taking it and measuring the result -- so falling four rungs
+    /// took four draws, and each one had to ask for the next with
+    /// `cx.redraw_all()`, because inside a draw event every redraw is refused
+    /// but the whole-window one. Deciding first means the draw that follows is
+    /// already the right one, and there is nothing to ask for.
     #[test]
-    fn a_level_that_moved_asks_for_the_one_redraw_a_draw_event_allows() {
+    fn a_row_that_gives_way_needs_no_second_draw() {
         let (mut cx, mut app, pass, mut list) = fixture();
         settle(&mut cx, &mut app, &pass, &mut list, WIDE);
-        // Narrow enough that the first step is owed. The draw clears
-        // what is pending, so what is pending after the fit is the
-        // fit's own asking and nothing else.
-        let mut moves = 0;
-        for _ in 0..16 {
-            draw(&mut cx, &app, &pass, &mut list, 700.0);
-            cx.new_draw_event = DrawEvent::default();
-            if !app.fit_toolbar(&mut cx) {
-                break;
-            }
-            moves += 1;
-            assert!(
-                cx.new_draw_event.redraw_all,
-                "the row moved and asked for a redraw the draw event throws away"
+
+        // Each of these owes more than the last, and the deepest owes several
+        // rungs at once. Every one of them is one draw.
+        for width in [900.0, 700.0, 500.0, 400.0, 300.0] {
+            assert_eq!(
+                settle(&mut cx, &mut app, &pass, &mut list, width),
+                1,
+                "the row needed more than one draw to settle at {width}"
             );
         }
-        assert!(moves > 0, "nothing moved, so nothing was proved");
-        assert!(!cx.new_draw_event.will_redraw(), "a settled row asked to be drawn again");
+        assert_ne!(shown(&cx, &app), expected(0), "nothing moved, so nothing was proved");
+
+        // And the same coming back up, in one draw each.
+        for width in [400.0, 600.0, 800.0, WIDE] {
+            assert_eq!(
+                settle(&mut cx, &mut app, &pass, &mut list, width),
+                1,
+                "the row needed more than one draw to give its faces back at {width}"
+            );
+        }
+        assert_eq!(shown(&cx, &app), expected(0), "the faces did not all come back");
     }
 
     /// The reset is one command with two faces, and a press on either is
