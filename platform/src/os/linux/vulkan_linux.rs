@@ -156,12 +156,15 @@ impl DesktopInit {
         let instance = self.instance.as_ref().unwrap();
         let mut devices = unsafe { instance.enumerate_physical_devices() }
             .map_err(|e| format!("enumerate Vulkan devices: {e:?}"))?;
+        let mut software_skipped = 0;
         devices.retain(|device| {
             let properties = unsafe { instance.get_physical_device_properties(*device) };
             if !allow_cpu && properties.device_type == vk::PhysicalDeviceType::CPU {
                 let name = unsafe { CStr::from_ptr(properties.device_name.as_ptr()) };
-                crate::log!(
-                    "Vulkan: skipping software device {:?} (MAKEPAD_GPU=vulkan uses it anyway)",
+                software_skipped += 1;
+                crate::trace!(
+                    "vulkan.device",
+                    "skipping software device {:?}",
                     name.to_string_lossy()
                 );
                 return false;
@@ -176,6 +179,17 @@ impl DesktopInit {
                     })
                     .unwrap_or(false)
         });
+        // Mesa ships lavapipe nearly everywhere, so stepping over a software
+        // device is routine and stays quiet. Having nothing else is not: every
+        // caller then reports no usable device, which reads as if the machine
+        // had no Vulkan at all rather than no accelerated one. Say why, and
+        // leave what happens next to the caller that decides it.
+        if devices.is_empty() && software_skipped > 0 {
+            crate::log!(
+                "Vulkan: every device present is a software rasterizer \
+                 (MAKEPAD_GPU=vulkan renders on one anyway)"
+            );
+        }
         devices.sort_by_key(|device| device_type_rank(instance, *device));
         Ok(devices)
     }
