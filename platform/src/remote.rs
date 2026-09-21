@@ -305,6 +305,8 @@ mod imp {
             return;
         }
         let len = job.pixels.len();
+        // Keep fetch_update for older stable toolchains without try_update.
+        #[allow(deprecated)]
         if GRAB_BYTES
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
                 used.checked_add(len)
@@ -2707,6 +2709,8 @@ mod imp {
                 .or_else(|| status_cell().lock().unwrap().windows.first().map(|w| w.id))
                 .ok_or("no windows")?,
         );
+        // Keep fetch_update for older stable toolchains without try_update.
+        #[allow(deprecated)]
         PENDING_GRABS
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
                 used.checked_add(n)

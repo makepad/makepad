@@ -117,7 +117,17 @@ pub fn screen_helper() -> io::Result<PathBuf> {
     } else {
         directory
     };
-    Ok(directory.join("makepad-screen"))
+    let helper = directory.join("makepad-screen");
+    if !helper.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "the pty helper {} is not built; build it with the same profile: cargo build -p makepad-screen",
+                helper.display()
+            ),
+        ));
+    }
+    Ok(helper)
 }
 
 /// Start a new session with `slave` as its controlling terminal and stdio.

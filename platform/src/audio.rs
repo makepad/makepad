@@ -248,8 +248,8 @@ impl AudioBuffer {
         out.resize(self.data.len(), 0);
         for i in 0..self.data.len() {
             let f = (self.data[i] * 32767.0)
-                .max(std::i16::MIN as f32)
-                .min(std::i16::MAX as f32);
+                .max(i16::MIN as f32)
+                .min(i16::MAX as f32);
             out[i] = f as i16;
         }
         out

@@ -41,7 +41,8 @@ pub fn init_tvos_app_global(
 }
 
 pub fn get_tvos_app_global() -> std::cell::RefMut<'static, TvosApp> {
-    unsafe { TVOS_APP.as_mut().unwrap().borrow_mut() }
+    // The initialized cell is shared; RefCell guards the app's mutable borrow.
+    unsafe { (*std::ptr::addr_of!(TVOS_APP)).as_ref().unwrap().borrow_mut() }
 }
 
 /// The Metal device the app was started with. `None` before the app global
