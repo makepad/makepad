@@ -38,23 +38,7 @@ fn options(vm: &mut ScriptVm, v: ScriptValue) -> Result<Options> {
     if !timeout.is_finite() || !(1.0..=86400.0).contains(&timeout) {
         return Err("invalid timeout_secs".into());
     }
-    let mut env = Vec::new();
-    let e = object_field(vm, v, id!(env));
-    if !e.is_nil() {
-        let obj = e.as_object().ok_or("env must be an object")?;
-        let entries: Vec<_> = vm
-            .bx
-            .heap
-            .map_ref(obj)
-            .iter()
-            .map(|(k, v)| (*k, v.value))
-            .collect();
-        for (k, v) in entries {
-            let mut key = String::new();
-            vm.bx.heap.cast_to_string(k, &mut key);
-            env.push((key, text(vm, v)?));
-        }
-    }
+    let env = env_pairs(vm, object_field(vm, v, id!(env)), "env")?;
     Ok(Options {
         target: field_text(vm, v, id!(target))?,
         timeout: timeout as u64,
@@ -214,13 +198,36 @@ fn build(vm: &mut ScriptVm, v: ScriptValue) -> Result<PathBuf> {
     result?;
     Ok(path)
 }
+/// `{NAME: "value"}` as pairs; nil is no pairs.
+fn env_pairs(vm: &mut ScriptVm, e: ScriptValue, what: &str) -> Result<Vec<(String, String)>> {
+    let mut env = Vec::new();
+    if !e.is_nil() {
+        let obj = e.as_object().ok_or_else(|| format!("{what} must be an object"))?;
+        let entries: Vec<_> = vm
+            .bx
+            .heap
+            .map_ref(obj)
+            .iter()
+            .map(|(k, v)| (*k, v.value))
+            .collect();
+        for (k, v) in entries {
+            let mut key = String::new();
+            vm.bx.heap.cast_to_string(k, &mut key);
+            env.push((key, text(vm, v)?));
+        }
+    }
+    Ok(env)
+}
 pub(super) fn launch(vm: &mut ScriptVm, v: ScriptValue) -> Result<usize> {
-    let (binary, cwd) = if v.is_object() {
+    // `env` is the build's environment; `app_env` is what the app itself runs
+    // with (a demo data switch, so a test never reads the machine's real files).
+    let (binary, cwd, app_env) = if v.is_object() {
         let p = build(vm, v)?;
         let cwd = field_text(vm, v, id!(cwd))?.unwrap_or_else(|| ".".into());
-        (p, PathBuf::from(cwd))
+        let app_env = env_pairs(vm, object_field(vm, v, id!(app_env)), "app_env")?;
+        (p, PathBuf::from(cwd), app_env)
     } else {
-        (PathBuf::from(text(vm, v)?), PathBuf::from("."))
+        (PathBuf::from(text(vm, v)?), PathBuf::from("."), Vec::new())
     };
     if rt(vm).validate {
         return Ok(usize::MAX);
@@ -232,7 +239,7 @@ pub(super) fn launch(vm: &mut ScriptVm, v: ScriptValue) -> Result<usize> {
         binary.file_name().unwrap_or_default().to_string_lossy()
     ));
     r.run.begin(i, &format!("{} --remote", binary.display()));
-    let result = r.launch(binary, cwd);
+    let result = r.launch(binary, cwd, &app_env);
     match &result {
         Ok(_) => r.run.end(i, "passed", ""),
         Err(e) => {

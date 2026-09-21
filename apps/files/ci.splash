@@ -10,7 +10,10 @@ ci.step("check other platforms", fn(){
     ci.check_targets({packages: ["makepad-files"] targets: ci.host.targets})
 })
 
-let app = ci.launch({package: "makepad-files" binary: "files" cwd: "."})
+// Files measures disk usage, and pointed at the real home it walks into
+// ~/Downloads, ~/Documents and ~/Desktop, which makes macOS ask the person at
+// the CI box for access. The test runs on the app's synthetic tree instead.
+let app = ci.launch({package: "makepad-files" binary: "files" cwd: "." app_env: {MAKEPAD_FILES_DEMO: "1"}})
 
 ci.step("comes up", fn(){
     ci.sleep(3.0)

@@ -39,10 +39,12 @@ script_mod! {
     }
     mod.widgets.CiBranches = #(CiBranches::register_widget(vm)){
         width: Fill height: Fit
-        draw_name +: {color: #b7bec7 text_style: theme.font_bold{font_size: 17}}
+        draw_name +: {color: #b7bec7 text_style: theme.font_bold{font_size: 22}}
+        draw_progress +: {color: #b7bec7 text_style: theme.font_bold{font_size: 30}}
         draw_tip +: {color: #75808d text_style: theme.font_code{font_size: 11}}
         draw_state +: {color: #a0aab6 text_style: theme.font_regular{font_size: 13}}
-        draw_age +: {color: #636f7d text_style: theme.font_regular{font_size: 10}}
+        draw_age +: {color: #x7b8590 text_style: theme.font_regular{font_size: 11}}
+        draw_problem +: {color: #x626b76 text_style: theme.font_regular{font_size: 10}}
     }
 
     mod.widgets.CiSteps = #(CiSteps::register_widget(vm)){
@@ -277,10 +279,15 @@ impl Widget for CiWall {
             let (p, w, f) = state.counts();
             let short = |s: &crate::report::Stage| s.name.rsplit(" / ").next().unwrap_or(&s.name).to_string();
             let lines: Vec<String> = match state.color_verdict() {
-                "running" => vec![
-                    state.steps.iter().rev().find(|s| s.state == "running").map(short).unwrap_or_else(|| "starting".into()),
-                    format!("{} done · {}", p + w + f, clock(state.started.map(|t| t.elapsed().as_secs_f64()).unwrap_or(state.seconds))),
-                ],
+                "running" => {
+                    let step = state.steps.iter().rev().find(|s| s.state == "running");
+                    vec![
+                        step.map(short).unwrap_or_else(|| "starting".into()),
+                        // What a long command is doing, so a ten-minute build moves.
+                        step.map(|s| s.progress.clone()).unwrap_or_default(),
+                        format!("{} done · {}", p + w + f, clock(state.started.map(|t| t.elapsed().as_secs_f64()).unwrap_or(state.seconds))),
+                    ]
+                }
                 "red" => vec![
                     state.steps.iter().find(|s| s.state == "failed").map(short).unwrap_or_else(|| "failed".into()),
                     state.detail.lines().next().unwrap_or("").trim_start_matches("VERDICT: NO - ").into(),
@@ -296,7 +303,8 @@ impl Widget for CiWall {
                 // history, told in the detail, never on the wall.
                 _ => vec!["untested".into()],
             };
-            for (index, line) in lines.iter().filter(|l| !l.is_empty()).enumerate() {
+            let lines: Vec<&String> = lines.iter().filter(|l| !l.is_empty()).collect();
+            for (index, line) in lines.iter().enumerate() {
                 let y = if r.size.y >= 110.0 && index + 1 == lines.len() && lines.len() > 1 {
                     r.size.y - 12.0 - font * 1.4
                 } else {12.0 + name_font * 1.33 + index as f64 * (font * 1.4)};
@@ -337,6 +345,9 @@ impl CiWallRef {
 pub struct BranchLine {
     pub name: String,
     pub tip: String,
+    pub progress: String,
+    pub failed: usize,
+    pub warned: usize,
     pub state: String,
     pub age: String,
 }
@@ -348,35 +359,63 @@ pub struct CiBranches {
     #[redraw] #[rust] area: Area,
     #[live] draw_name: DrawText,
     #[live] draw_tip: DrawText,
+    #[live] draw_progress: DrawText,
     #[live] draw_state: DrawText,
     #[live] draw_age: DrawText,
+    #[live] draw_problem: DrawText,
     #[rust] branches: Vec<BranchLine>,
+    #[rust] problem: String,
 }
 impl Widget for CiBranches {
     fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
-        let rect = cx.walk_turtle(Walk{height: Size::Fixed(30.0*self.branches.len().max(1) as f64), ..walk});
+        let rect = cx.walk_turtle(Walk{height: Size::Fixed(58.0*self.branches.len().max(1) as f64), ..walk});
         cx.add_rect_area(&mut self.area, rect);
+        if self.branches.is_empty() && !self.problem.is_empty() {
+            let text = ellipsis(&self.draw_problem,cx,&self.problem,rect.size.x);
+            self.draw_problem.draw_abs(cx,rect.pos+dvec2(0.0,42.0),&text);
+        }
         for (i, branch) in self.branches.iter().enumerate() {
-            let pos = rect.pos+dvec2(0.0, 30.0*i as f64);
-            let name = ellipsis(&self.draw_name, cx, &branch.name, rect.size.x*0.25);
+            let pos = rect.pos+dvec2(0.0, 58.0*i as f64);
+            let progress_x = (rect.size.x * 0.36).min(360.0);
+            let name = ellipsis(&self.draw_name, cx, &branch.name, (progress_x-110.0).max(50.0));
             let width = self.draw_name.layout(cx,0.0,0.0,None,false,Align::default(),&name).size_in_lpxs.width as f64;
-            self.draw_name.draw_abs(cx,pos,&name);
-            let x = width+18.0;
-            self.draw_tip.draw_abs(cx,pos+dvec2(x,6.0),&branch.tip);
-            let x = x+94.0;
-            self.draw_state.draw_abs(cx,pos+dvec2(x,4.0),&branch.state);
-            let width = self.draw_state.layout(cx,0.0,0.0,None,false,Align::default(),&branch.state).size_in_lpxs.width as f64;
-            let x = x+width+18.0;
-            let age = ellipsis(&self.draw_age,cx,&branch.age,(rect.size.x-x).max(0.0));
-            self.draw_age.draw_abs(cx,pos+dvec2(x,7.0),&age);
+            let problem = i == 0 && !self.problem.is_empty();
+            let name_y = if problem {4.0} else {11.0};
+            self.draw_name.draw_abs(cx,pos+dvec2(0.0,name_y),&name);
+            self.draw_tip.draw_abs(cx,pos+dvec2(width+16.0,name_y+10.0),&branch.tip);
+            if problem {
+                let text = ellipsis(&self.draw_problem,cx,&self.problem,(progress_x-18.0).max(0.0));
+                self.draw_problem.draw_abs(cx,pos+dvec2(0.0,42.0),&text);
+            }
+            self.draw_progress.draw_abs(cx,pos+dvec2(progress_x,4.0),&branch.progress);
+            let width = self.draw_progress.layout(cx,0.0,0.0,None,false,Align::default(),&branch.progress).size_in_lpxs.width as f64;
+            let x = progress_x+width+20.0;
+            let available = (rect.size.x-x).max(0.0);
+            let mut counts_x = x;
+            if branch.failed > 0 {
+                self.draw_state.color = colour("red");
+                let text = format!("{} failed", branch.failed);
+                self.draw_state.draw_abs(cx,pos+dvec2(counts_x,8.0),&text);
+                counts_x += self.draw_state.layout(cx,0.0,0.0,None,false,Align::default(),&text).size_in_lpxs.width as f64 + 14.0;
+            }
+            if branch.warned > 0 {
+                self.draw_state.color = rgb(142,150,161);
+                let text = format!("{} warning{}", branch.warned, if branch.warned == 1 {""} else {"s"});
+                let text = ellipsis(&self.draw_state,cx,&text,(rect.size.x-counts_x).max(0.0));
+                self.draw_state.draw_abs(cx,pos+dvec2(counts_x,8.0),&text);
+            }
+            let status = if branch.state.is_empty() {branch.age.clone()} else if branch.age.is_empty() {branch.state.clone()} else {format!("{} · {}",branch.state,branch.age)};
+            let y = if branch.failed > 0 || branch.warned > 0 {33.0} else {22.0};
+            let status = ellipsis(&self.draw_age,cx,&status,available);
+            self.draw_age.draw_abs(cx,pos+dvec2(x,y),&status);
         }
         DrawStep::done()
     }
 }
 impl CiBranchesRef {
-    pub fn set_branches(&self, cx: &mut Cx, branches: Vec<BranchLine>) {
-        if let Some(mut inner)=self.borrow_mut() {inner.branches=branches;inner.area.redraw(cx);}
+    pub fn set_branches(&self, cx: &mut Cx, branches: Vec<BranchLine>, problem: String) {
+        if let Some(mut inner)=self.borrow_mut() {inner.branches=branches;inner.problem=problem;inner.area.redraw(cx);}
     }
 }
 

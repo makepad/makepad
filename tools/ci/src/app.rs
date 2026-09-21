@@ -47,31 +47,23 @@ script_mod! {
                         width: Fill height: Fill flow: Down padding: 18 spacing: 12
                         draw_bg.color: #x050607
                         header := View{
-                            width: Fill height: Fit flow: Down spacing: 10
+                            width: Fill height: Fit flow: Down spacing: 8
                             View{
-                                width: Fill height: 30 spacing: 10 align: Align{y: 0.5}
-                                QuietLabel{text: "MAKEPAD CI" draw_text +: {color: #a9afb7 text_style: theme.font_bold{font_size: 12}}}
-                                View{width: Fill}
-                                poll := SingleLine{text: "Watcher starting" draw_text.color: #x6f7781}
-                                run := QuietButton{text: "Run now"}
-                                stop := QuietButton{text: "Stop"}
-                                install := QuietButton{text: "Install model (accept license)" visible: false}
-                            }
-                            View{
-                                width: Fill height: Fit spacing: 16 align: Align{y: 0.5}
+                                width: Fill height: Fit spacing: 20 align: Align{y: 0.5}
                                 branches := CiBranches{}
-                                model := SingleLine{width: 235 text: "Model idle" draw_text.color: #x737b85}
+                                View{
+                                    width: Fit height: Fit spacing: 10
+                                    run := QuietButton{text: "Run now"}
+                                    stop := QuietButton{text: "Stop"}
+                                }
                             }
                             run_progress := SolidView{
-                                width: Fill height: 3 visible: false
+                                width: Fill height: 2
                                 draw_bg +: {
-                                    progress: instance(0.0)
+                                    progress: instance(-1.0)
                                     pixel: fn(){if self.pos.x <= self.progress {return #x737d87}; return #x20252a}
                                 }
                             }
-                            progress := SingleLine{width: Fill text: "Waiting for scripts" draw_text +: {color: #x919aa5 text_style +: {font_size: 12}}}
-                            activity := SingleLine{width: Fill visible: false text: "" draw_text +: {color: #828e9b text_style +: {font_size: 11}}}
-                            status := SingleLine{width: Fill text: "Starting watcher" draw_text +: {color: #x626b76 text_style +: {font_size: 10}}}
                         }
                         content := View{
                             width: Fill height: Fill flow: Down spacing: 12
@@ -116,7 +108,11 @@ script_mod! {
                                 }
                             }
                         }
-                        footer := SingleLine{width: Fill text: "Checkout pending · targets pending · run not started" draw_text +: {color: #x535f6b text_style: theme.font_code{font_size: 9}}}
+                        View{
+                            width: Fill height: Fit spacing: 10 align: Align{y: 0.5}
+                            footer := SingleLine{width: Fill text: "Watcher starting" draw_text +: {color: #x535f6b text_style: theme.font_code{font_size: 9}}}
+                            install := QuietButton{text: "Install model (accept license)" visible: false}
+                        }
                     }
                 }
             }
@@ -128,7 +124,7 @@ struct DashboardMeta {
     poll_secs: u64,
     poll_anchor: Instant,
     base: PathBuf,
-    targets: String,
+    targets: usize,
     model: String,
 }
 struct Worker {
@@ -157,7 +153,7 @@ impl Worker {
                         poll_secs: config.poll_secs,
                         poll_anchor: Instant::now(),
                         base: base.clone(),
-                        targets: config.targets.join(", "),
+                        targets: config.targets.len(),
                         model: config.model.clone(),
                     });
                     let installed = config.no_vision || crate::uihub::model_installed(&config.model);
@@ -204,6 +200,14 @@ pub struct App {
     run_directory: Option<PathBuf>,
     #[rust]
     active: bool,
+    #[rust]
+    run_started: Option<Instant>,
+    #[rust]
+    run_branch: String,
+    #[rust]
+    model_status: String,
+    #[rust]
+    watcher_problem: String,
     #[rust]
     quitting: bool,
     #[rust]
@@ -348,64 +352,61 @@ impl App {
             self.selected = next;
         }
     }
-    /// How far the run is, in words: what is done, what failed, what runs now.
-    fn progress_line(&self) -> String {
-        let total = self.scripts.len();
-        let count = |v: &str| self.scripts.values().filter(|s| s.color_verdict() == v).count();
-        let (failed, warned, passed) = (count("red"), count("orange"), count("green"));
-        let done = failed + warned + passed;
-        if total == 0 {
-            return String::new();
-        }
-        format!("{done} of {total} tested  ·  {passed} passed  ·  {warned} warnings  ·  {failed} failed")
-    }
     fn refresh(&mut self, cx: &mut Cx) {
         self.adapt(cx, self.window_width);
-        let branches = self
-            .branches
-            .iter()
-            .map(|b| {
-                let running = self.scripts.iter().any(|(k, s)| {
-                    s.verdict == "running" && k.split('\n').next() == Some(b.name.as_str())
-                });
-                let state = if running { "testing now" } else {match b.verdict.as_str() {
-                    "green" => "passing", "orange" => "passing with warnings", "red" => "FAILING", "running" => "testing now", _ => "not tested yet",
-                }};
-                let age = match report::now().saturating_sub(b.finished) {
-                    _ if b.finished == 0 || running => String::new(),
-                    seconds if seconds < 60 => "just now".into(),
-                    seconds if seconds < 7200 => format!("{}m ago", seconds/60),
-                    seconds => format!("{}h ago", seconds/3600),
-                };
-                BranchLine{name:b.name.clone(),tip:if b.tip.is_empty() {"no tip".into()} else {b.tip.chars().take(8).collect()},state:state.into(),age}
-            })
-            .collect();
-        self.ui.ci_branches(cx, ids!(branches)).set_branches(cx, branches);
-        self.ui.label(cx, ids!(progress)).set_text(cx, &self.progress_line());
-        self.ui.widget(cx, ids!(run_progress)).set_visible(cx, self.active);
-        self.ui.widget(cx, ids!(activity)).set_visible(cx, self.active);
-        if self.active {
-            let running = self.scripts.values().filter(|s|s.verdict == "running").map(|s| {
-                let step = s.steps.iter().rev().find(|s|s.state=="running").map(|s|s.name.rsplit(" / ").next().unwrap_or(&s.name)).unwrap_or("starting");
-                let seconds = s.started.map(|t|t.elapsed().as_secs()).unwrap_or(0);
-                format!("{} · {step} · {seconds}s", short_name(&s.name))
-            }).collect::<Vec<_>>().join("    /    ");
-            self.ui.label(cx, ids!(activity)).set_text(cx, if running.is_empty() {"Preparing the next script…"} else {&running});
-        }
-        if self.active {
-            let done = self.scripts.values().filter(|s| matches!(s.color_verdict(), "green" | "orange" | "red")).count();
-            let fraction = done as f64 / self.scripts.len().max(1) as f64;
-            let mut widget = self.ui.widget(cx, ids!(run_progress));
-            script_apply_eval!(cx, widget, {use mod.prelude.widgets.*; draw_bg +: {progress: #(fraction)}});
-        }
+        let branches = self.branches.iter().map(|b| {
+            let scripts = self.scripts.iter().filter(|(k, _)| k.split('\n').next() == Some(b.name.as_str()));
+            let (mut total, mut done, mut failed, mut warned) = (0, 0, 0, 0);
+            for (_, script) in scripts {
+                total += 1;
+                match script.color_verdict() {
+                    "red" => { done += 1; failed += 1; }
+                    "orange" => { done += 1; warned += 1; }
+                    "green" => done += 1,
+                    _ => {}
+                }
+            }
+            let running = self.active && self.run_branch == b.name;
+            let state = if running { "" } else { match b.verdict.as_str() {
+                "green" | "orange" => "passing", "red" => "FAILING", _ => "not tested yet",
+            }};
+            let age = if running {
+                let seconds = self.run_started.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+                if seconds >= 60 { format!("{}m {:02}s", seconds / 60, seconds % 60) } else { format!("{seconds}s") }
+            } else { match report::now().saturating_sub(b.finished) {
+                _ if b.finished == 0 => String::new(),
+                seconds if seconds < 60 => "just now".into(),
+                seconds if seconds < 7200 => format!("{} min ago", seconds / 60),
+                seconds => format!("{} hr ago", seconds / 3600),
+            }};
+            BranchLine {
+                name: b.name.clone(),
+                tip: if b.tip.is_empty() { "no tip".into() } else { b.tip.chars().take(8).collect() },
+                progress: format!("{done} / {total}"), failed, warned,
+                state: state.into(), age,
+            }
+        }).collect();
+        self.ui.ci_branches(cx, ids!(branches)).set_branches(cx, branches, self.watcher_problem.clone());
+        let done = self.scripts.values().filter(|s| matches!(s.color_verdict(), "green" | "orange" | "red")).count();
+        let fraction = if self.active { done as f64 / self.scripts.len().max(1) as f64 } else { -1.0 };
+        let mut widget = self.ui.widget(cx, ids!(run_progress));
+        script_apply_eval!(cx, widget, {use mod.prelude.widgets.*; draw_bg +: {progress: #(fraction)}});
         if let Some(meta) = &self.metadata {
             let period = meta.poll_secs.max(1);
             let left = period - meta.poll_anchor.elapsed().as_secs() % period;
-            let next = if left >= 60 {format!("Next poll ≈ {}m", left.div_ceil(60))} else {format!("Next poll ≈ {left}s")};
-            self.ui.label(cx, ids!(poll)).set_text(cx, &next);
+            let next = if left >= 60 {format!("next poll ≈ {}m", left.div_ceil(60))} else {format!("next poll ≈ {left}s")};
             let tip = self.branches.first().map(|b| b.tip.chars().take(8).collect::<String>()).filter(|s| !s.is_empty()).unwrap_or_else(|| "pending".into());
             let run = self.run_directory.as_ref().map(|p|p.strip_prefix(&meta.base).unwrap_or(p).display().to_string()).unwrap_or_else(|| if self.active {"in progress".into()} else {"no record".into()});
-            self.ui.label(cx, ids!(footer)).set_text(cx, &format!("checkout {tip}  ·  {}  ·  {}  ·  run: {run}", meta.targets, meta.model));
+            let model = if self.model_status.starts_with("vision off") {
+                format!("{} · vision off", meta.model)
+            } else if self.model_status.is_empty() {
+                format!("{} · idle", meta.model)
+            } else if self.model_status.starts_with(&meta.model) {
+                self.model_status.clone()
+            } else {
+                format!("{} · {}", meta.model, self.model_status)
+            };
+            self.ui.label(cx, ids!(footer)).set_text(cx, &format!("checkout {tip}  ·  {} target{}  ·  {next}  ·  {model}  ·  run: {run}", meta.targets, if meta.targets == 1 {""} else {"s"}));
         }
         let Some(state) = self.selected.as_ref().and_then(|k| self.scripts.get(k)) else {
             return;
@@ -455,7 +456,7 @@ impl App {
             }
         }
     }
-    fn scoped(&mut self, cx: &mut Cx, branch: String, name: String, update: Update) -> bool {
+    fn scoped(&mut self, branch: String, name: String, update: Update) -> bool {
         let k = key(&branch, &name);
         let state = self
             .scripts
@@ -513,7 +514,7 @@ impl App {
                 state.verdict = report::verdict(&state.steps, !passed).into();
             }
             Update::Model(s) => {
-                self.ui.label(cx, ids!(model)).set_text(cx, &s);
+                self.model_status = s;
                 wall = false;
             }
             _ => {}
@@ -541,7 +542,7 @@ impl App {
             count += 1;
             match update {
                 Update::Script(branch, name, update) => {
-                    wall |= self.scoped(cx, branch, name, *update)
+                    wall |= self.scoped(branch, name, *update)
                 }
                 Update::Scripts(branch, states) => {
                     let names: Vec<_> = states.iter().map(|s| key(&branch, &s.name)).collect();
@@ -572,10 +573,9 @@ impl App {
                     self.active = true;
                     self.run_directory = None;
                     if let Some(b) = self.branches.iter_mut().find(|b|b.name==branch) {b.tip=tip.clone();}
-                    self.ui.label(cx, ids!(status)).set_text(
-                        cx,
-                        &format!("Watching {branch} · testing checkout {}", &tip[..tip.len().min(8)]),
-                    );
+                    self.run_started = Some(Instant::now());
+                    self.run_branch = branch;
+                    self.watcher_problem.clear();
                     cx.stop_timer(self.timer);
                     self.timer = cx.start_interval(1.0);
                 }
@@ -584,13 +584,12 @@ impl App {
                 Update::Failed(s) => {
                     // One line in the header; the whole text is in the log.
                     let first: String = s.lines().next().unwrap_or("").chars().take(110).collect();
-                    let status = if first.contains("does not appear to be a git repository") {
-                        "Watcher · remote unavailable; will retry on the next poll.".into()
+                    self.watcher_problem = if first.contains("does not appear to be a git repository") {
+                        "Watcher · remote unavailable".into()
                     } else {format!("Watcher · {first}")};
-                    self.ui.label(cx, ids!(status)).set_text(cx, &status);
                     self.log(cx, &s);
                 }
-                Update::Model(s) => self.ui.label(cx, ids!(model)).set_text(cx, &s),
+                Update::Model(s) => self.model_status = s,
                 Update::ModelInstalled(installed) => {
                     self.ui.widget(cx, ids!(install)).set_visible(cx, !installed);
                 }
@@ -600,13 +599,10 @@ impl App {
                     }
                     self.images.insert(path, bytes);
                 }
-                Update::Done(passed, path) => {
+                Update::Done(_, path) => {
                     self.run_directory = Some(path.clone());
                     self.active = false;
                     cx.stop_timer(self.timer);
-                    self.ui
-                        .label(cx, ids!(status))
-                        .set_text(cx, if passed { "Run complete" } else { "Run FAILED" });
                     self.log(cx, &format!("Evidence: {}", path.display()));
                 }
                 Update::Idle => {

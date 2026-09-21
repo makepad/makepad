@@ -135,7 +135,7 @@ impl Runtime {
         }
         Ok(alive)
     }
-    fn launch(&mut self, binary: PathBuf, cwd: PathBuf) -> Result<usize> {
+    fn launch(&mut self, binary: PathBuf, cwd: PathBuf, app_env: &[(String, String)]) -> Result<usize> {
         let binary = self.run.root.join(binary);
         let name = binary
             .file_name()
@@ -155,7 +155,8 @@ impl Runtime {
             .env("MAKEPAD_HIDE_WINDOWS", "1")
             .env_remove("MAKEPAD_FOCUS")
             .env("SANDBOX_MUTE", "1")
-            .env("CARGO_TARGET_DIR", self.run.root.join("target"));
+            .env("CARGO_TARGET_DIR", self.run.root.join("target"))
+            .envs(app_env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
         let child = ChildLog::spawn(&mut command, path)?;
         self.run
             .log(&format!("owned {} pid={}", name, child.child.id()));
@@ -1282,9 +1283,10 @@ mod tests {
             .collect();
         apps.sort();
         assert!(apps.len() >= 20, "the app scripts are missing: {apps:?}");
-        // The terminal also builds the pty helper it starts its shell through.
+        // The terminal, and director which embeds one, also build the pty
+        // helper a terminal starts its shell through.
         scripts.extend(apps.into_iter().map(|app| {
-            let steps = if app == "terminal" { 3 } else { 2 };
+            let steps = if app == "terminal" || app == "director" { 3 } else { 2 };
             (format!("apps/{app}/ci.splash"), steps)
         }));
         for (path, count) in scripts.iter().map(|(path, count)| (path.as_str(), *count)) {

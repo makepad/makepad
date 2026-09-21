@@ -40,6 +40,9 @@ pub struct Stage {
     pub seconds: f64,
     pub command: String,
     pub detail: String,
+    /// What a long command is doing right now ("compiled makepad_draw · 212
+    /// crates"): live only, so a wall shows motion inside a ten-minute build.
+    pub progress: String,
     pub started: Option<Instant>,
 }
 impl Stage {
@@ -50,6 +53,7 @@ impl Stage {
             ("seconds", Value::F64(self.seconds)),
             ("command", json::s(&self.command)),
             ("detail", json::s(&self.detail)),
+            ("progress", json::s(&self.progress)),
         ])
     }
 }
@@ -149,7 +153,7 @@ impl ScriptState {
                     command: f("command"),
                     detail: f("detail"),
                     seconds: number(v.get("seconds")),
-                    started: None,
+                    progress: String::new(), started: None,
                 });
             }
         }
@@ -351,7 +355,7 @@ impl Run {
             seconds: 0.0,
             command: String::new(),
             detail: String::new(),
-            started: None,
+            progress: String::new(), started: None,
         });
         self.publish();
         i
@@ -381,6 +385,7 @@ impl Run {
         let s = &mut self.stages[i];
         s.seconds = s.started.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
         s.state = state.into();
+        s.progress.clear();
         if !detail.is_empty() && !s.detail.contains(detail) {
             s.detail = if s.detail.is_empty() { detail.into() } else { format!("{detail}\n{}", s.detail) };
         }
@@ -454,10 +459,24 @@ impl Run {
         let mut write_error = None;
         let env = crate::cargo::target_env(&self.root, env);
         let mut diagnostics = crate::cargo::DiagnosticLimit::default();
+        let (mut crates, mut told) = (0usize, Instant::now());
         let output = process::run(program, args, cwd, &env, timeout, capture.clone(), &control, &mut |line| {
-            if json::parse_depth(line.as_bytes(), 128).is_ok() {
+            if let Ok(message) = json::parse_depth(line.as_bytes(), 128) {
                 if let Err(e) = writeln!(json_file, "{line}") {
                     write_error = Some(e.to_string());
+                }
+                // Every finished crate moves the running step's progress text,
+                // told at most twice a second.
+                if message.get("reason").and_then(Value::as_str) == Some("compiler-artifact") {
+                    crates += 1;
+                    if told.elapsed() >= std::time::Duration::from_millis(500) {
+                        told = Instant::now();
+                        let name = message.get("target").and_then(|t| t.get("name")).and_then(Value::as_str).unwrap_or("");
+                        if let Some(i) = self.stages.iter().rposition(|s| s.state == "running") {
+                            self.stages[i].progress = format!("compiled {name} · {crates} crates");
+                            self.publish();
+                        }
+                    }
                 }
             }
             if let Some(text) = diagnostics.render(line) {
@@ -715,13 +734,13 @@ mod tests {
         orange.previous = "red".into(); // UI history must not colour this CLI run.
         orange.steps.push(Stage {
             name: "apps/wm / check wasm".into(), state: "warning".into(), seconds: 0.0,
-            command: String::new(), detail: "no lib target for web\nraw cargo JSON: file".into(), started: None,
+            command: String::new(), detail: "no lib target for web\nraw cargo JSON: file".into(), progress: String::new(), started: None,
         });
         let mut red = ScriptState::waiting("apps/demo");
         red.verdict = "red".into();
         red.steps.push(Stage {
             name: "apps/demo / build".into(), state: "failed".into(), seconds: 0.0,
-            command: String::new(), detail: "error: broken\nsource.rs:2".into(), started: None,
+            command: String::new(), detail: "error: broken\nsource.rs:2".into(), progress: String::new(), started: None,
         });
         assert_eq!(cli_summary(&[green, orange, red]),
             "Script summary:\nGREEN .\nORANGE apps/wm\nRED apps/demo\n  apps/wm / check wasm [warning]: no lib target for web\n  apps/demo / build [failed]: error: broken");
