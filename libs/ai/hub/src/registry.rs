@@ -889,6 +889,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn registry_ci_vision_pairs_have_pinned_roles_and_admit_metal() {
+        let registry = Registry::embedded().unwrap();
+        for id in ["qwen3.5-9b-vision", "qwen3.5-4b-vision"] {
+            let model = registry.find(id).unwrap();
+            assert_eq!(model.domain, Domain::Vision);
+            assert_eq!(model.backend, "vision");
+            assert!(model.available && !model.gated);
+            assert_eq!(model.min_vram_gb, None);
+            assert_eq!(model.files.len(), 2);
+            for role in ["llm-gguf", "mmproj"] {
+                let file = model.file_by_role(role).unwrap();
+                assert!(file.size.unwrap() > 0);
+                assert_eq!(file.sha256.as_ref().unwrap().len(), 64);
+                assert_eq!(file.revision.as_ref().unwrap().len(), 40);
+            }
+            crate::vision_backend::spec_is_servable(model).unwrap();
+        }
+    }
+
+    #[test]
     fn embedded_registry_parses() {
         let registry = Registry::embedded().unwrap();
         assert!(registry.models.len() >= 4);

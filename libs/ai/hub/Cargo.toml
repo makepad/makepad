@@ -173,3 +173,8 @@ path = "src/bin/ocr_bench.rs"
 [[bin]]
 name = "speech-roundtrip"
 path = "src/bin/speech_roundtrip.rs"
+
+[[bin]]
+name = "hub-install"
+path = "src/bin/hub_install.rs"
+required-features = ["local"]

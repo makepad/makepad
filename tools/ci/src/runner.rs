@@ -1,0 +1,313 @@
+//! A bounded pool of script workers; all blocking state is worker-owned.
+use crate::{
+    drive,
+    process::{Control, Result},
+    report::{Run, ScriptState, Update},
+    smoke::Script,
+    uihub::{Judge, JudgeWorker},
+    watch::Config,
+};
+use std::{
+    sync::{mpsc, Arc, Condvar, Mutex},
+    thread,
+    time::Duration,
+};
+#[derive(Default)]
+struct GateState {
+    active: usize,
+    exclusive: bool,
+    waiting: usize,
+}
+#[derive(Default)]
+pub struct Gate {
+    state: Mutex<GateState>,
+    changed: Condvar,
+}
+pub struct Permit {
+    gate: Arc<Gate>,
+    exclusive: bool,
+    active: bool,
+}
+impl Gate {
+    pub fn enter(self: &Arc<Self>, control: &Control) -> Result<Permit> {
+        let mut s = self.state.lock().map_err(|e| e.to_string())?;
+        while s.exclusive || s.waiting > 0 {
+            control.check()?;
+            s = self
+                .changed
+                .wait_timeout(s, Duration::from_millis(100))
+                .map_err(|e| e.to_string())?
+                .0;
+        }
+        s.active += 1;
+        Ok(Permit {
+            gate: self.clone(),
+            exclusive: false,
+            active: true,
+        })
+    }
+}
+impl Permit {
+    pub fn exclusive(&mut self, control: &Control) -> Result<()> {
+        if self.exclusive {
+            return Ok(());
+        }
+        let mut s = self.gate.state.lock().map_err(|e| e.to_string())?;
+        s.active -= 1;
+        self.active = false;
+        s.waiting += 1;
+        self.gate.changed.notify_all();
+        while s.active > 0 || s.exclusive {
+            if let Err(e) = control.check() {
+                s.waiting -= 1;
+                self.gate.changed.notify_all();
+                return Err(e);
+            }
+            s = self
+                .gate
+                .changed
+                .wait_timeout(s, Duration::from_millis(100))
+                .map_err(|e| e.to_string())?
+                .0;
+        }
+        s.waiting -= 1;
+        s.exclusive = true;
+        self.exclusive = true;
+        Ok(())
+    }
+}
+impl Drop for Permit {
+    fn drop(&mut self) {
+        if let Ok(mut s) = self.gate.state.lock() {
+            if self.exclusive {
+                s.exclusive = false;
+            } else if self.active {
+                s.active -= 1;
+            }
+            self.gate.changed.notify_all();
+        }
+    }
+}
+
+pub fn ordered(mut scripts: Vec<Script>) -> Vec<Script> {
+    scripts.sort_by(|a, b| {
+        let root = |s: &Script| s.path == std::path::Path::new("ci.splash");
+        root(b).cmp(&root(a)).then(a.name.cmp(&b.name))
+    });
+    scripts
+}
+fn execute(mut run: Run, config: Config, judge: Judge, script: Script, gate: &Arc<Gate>) -> Run {
+    let mut permit = match gate.enter(&run.control) {
+        Ok(p) => p,
+        Err(e) => {
+            run.fail(&script.name, &e);
+            return run;
+        }
+    };
+    if script.path == std::path::Path::new("ci.splash") {
+        if let Err(e) = permit.exclusive(&run.control) {
+            run.fail(&script.name, &e);
+            return run;
+        }
+    }
+    (run.notify)(Update::Begin(run.branch.clone(), run.tip.clone()));
+    drive::run_script(run, config, judge, &script, Some(permit))
+}
+fn collect(parent: &mut Run, mut child: Run, name: &str, previous: &str) {
+    if child.control.stopped() && !child.failed {
+        child.fail("stopped", "stopped by user");
+    }
+    let mut state = child.summary(name);
+    state.previous = previous.into();
+    parent.failed |= child.failed;
+    parent.stages.extend(child.stages.clone());
+    parent.evidence.extend(child.evidence.clone());
+    parent.grabs.extend(child.grabs.clone());
+    parent.held_pids.extend(child.held_pids.clone());
+    let code = child.finish();
+    parent.failed |= code == 1;
+    if code == 1 {
+        state.verdict = "red".into();
+        if state.detail.is_empty() {
+            state.detail = "script finalization failed; see run log".into();
+        }
+    }
+    if let Some(old) = parent.scripts.iter_mut().find(|s| s.name == name) {
+        if state.failed_at == 0 {
+            state.failed_at = old.failed_at;
+        }
+        *old = state;
+    }
+    (parent.notify)(Update::Scripts(
+        parent.branch.clone(),
+        parent.scripts.clone(),
+    ));
+}
+pub fn run(
+    parent: &mut Run,
+    config: &Config,
+    scripts: Vec<Script>,
+    previous: &[ScriptState],
+) -> Result<()> {
+    let scripts = ordered(scripts);
+    parent.scripts = scripts
+        .iter()
+        .map(|s| {
+            let mut state = ScriptState::waiting(&s.name);
+            if let Some(old) = previous.iter().find(|old| old.name == s.name) {
+                state.previous = old.color_verdict().into();
+                state.detail = old.detail.clone();
+                state.failed_at = old.failed_at;
+            }
+            state
+        })
+        .collect();
+    (parent.notify)(Update::Scripts(
+        parent.branch.clone(),
+        parent.scripts.clone(),
+    ));
+    let worker = JudgeWorker::start(&config.model, config.no_vision)?;
+    let gate = Arc::new(Gate::default());
+    let result = (|| {
+        let mut scripts = scripts.into_iter().enumerate().peekable();
+        if scripts
+            .peek()
+            .is_some_and(|(_, s)| s.path == std::path::Path::new("ci.splash"))
+        {
+            let (i, script) = scripts.next().unwrap();
+            let child = parent.fork(&script.name, i)?;
+            let name = script.name.clone();
+            let previous = parent.scripts[i].previous.clone();
+            let child = execute(child, config.clone(), worker.judge.clone(), script, &gate);
+            collect(parent, child, &name, &previous);
+        }
+        let (jobs_tx, jobs_rx) = mpsc::sync_channel::<(Run, Script, String)>(config.parallel);
+        let jobs = Arc::new(Mutex::new(jobs_rx));
+        let (done_tx, done_rx) = mpsc::channel();
+        thread::scope(|scope| -> Result<()> {
+            for index in 0..config.parallel {
+                let jobs = jobs.clone();
+                let done = done_tx.clone();
+                let config = config.clone();
+                let judge = worker.judge.clone();
+                let gate = gate.clone();
+                thread::Builder::new()
+                    .name(format!("ci-script-{index}"))
+                    .spawn_scoped(scope, move || loop {
+                        let job = match jobs.lock() {
+                            Ok(rx) => rx.recv(),
+                            Err(_) => return,
+                        };
+                        let Ok((run, script, previous)) = job else {
+                            return;
+                        };
+                        let name = script.name.clone();
+                        let run = execute(run, config.clone(), judge.clone(), script, &gate);
+                        if done.send((run, name, previous)).is_err() {
+                            return;
+                        }
+                    })
+                    .map_err(|e| e.to_string())?;
+            }
+            drop(done_tx);
+            let mut pending = 0;
+            loop {
+                while pending < config.parallel {
+                    let Some((index, script)) = scripts.next() else {
+                        break;
+                    };
+                    let previous = parent.scripts[index].previous.clone();
+                    let child = parent.fork(&script.name, index)?;
+                    jobs_tx
+                        .send((child, script, previous))
+                        .map_err(|_| "script pool disconnected")?;
+                    pending += 1;
+                }
+                if pending == 0 {
+                    break;
+                }
+                let (child, name, previous) = done_rx.recv().map_err(|_| "script worker failed")?;
+                pending -= 1;
+                collect(parent, child, &name, &previous);
+            }
+            drop(jobs_tx);
+            Ok(())
+        })
+    })();
+    worker.finish();
+    result
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn root_is_first_and_gate_respects_exclusive() {
+        let script = |name: &str| Script {
+            path: name.into(),
+            name: name.into(),
+            target: None,
+        };
+        let order = ordered(vec![
+            script("apps/z/ci.splash"),
+            script("ci.splash"),
+            script("apps/a/ci.splash"),
+        ]);
+        assert_eq!(order[0].name, "ci.splash");
+        let gate = Arc::new(Gate::default());
+        let c = Control::default();
+        let mut p = gate.enter(&c).unwrap();
+        assert_eq!(gate.state.lock().unwrap().active, 1);
+        p.exclusive(&c).unwrap();
+        assert!(gate.state.lock().unwrap().exclusive);
+        assert_eq!(gate.state.lock().unwrap().active, 0);
+        drop(p);
+        assert!(!gate.state.lock().unwrap().exclusive);
+    }
+}
+
+#[cfg(test)]
+mod concurrency_tests {
+    use super::*;
+    #[test]
+    fn exclusive_waits_for_active_scripts_and_blocks_new_entries() {
+        let gate = Arc::new(Gate::default());
+        let control = Control::default();
+        let mut first = gate.enter(&control).unwrap();
+        let second = gate.enter(&control).unwrap();
+        let (entered, entry) = mpsc::sync_channel(1);
+        let (release, leave) = mpsc::sync_channel(1);
+        let c = control.clone();
+        let exclusive = thread::spawn(move || {
+            first.exclusive(&c).unwrap();
+            entered.send(()).unwrap();
+            leave.recv().unwrap();
+        });
+        let mut state = gate.state.lock().unwrap();
+        while state.waiting == 0 {
+            let (s, timeout) = gate
+                .changed
+                .wait_timeout(state, Duration::from_secs(5))
+                .unwrap();
+            assert!(!timeout.timed_out());
+            state = s;
+        }
+        assert_eq!(state.active, 1);
+        drop(state);
+        assert!(entry.try_recv().is_err());
+        let (next_tx, next_rx) = mpsc::sync_channel(1);
+        let next_gate = gate.clone();
+        let next_control = control.clone();
+        let next = thread::spawn(move || {
+            let _p = next_gate.enter(&next_control).unwrap();
+            next_tx.send(()).unwrap();
+        });
+        drop(second);
+        entry.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(next_rx.try_recv().is_err());
+        release.send(()).unwrap();
+        next_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        exclusive.join().unwrap();
+        next.join().unwrap();
+        assert_eq!(gate.state.lock().unwrap().active, 0);
+    }
+}

@@ -1,0 +1,18 @@
+[package]
+name = "makepad-ci"
+version = "0.1.0"
+edition = "2021"
+publish = false
+default-run = "ci"
+
+[[bin]]
+name = "ci"
+path = "src/main.rs"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets" }
+makepad-strict-json = { path = "../../libs/strict_json" }
+makepad-toml-parser = { path = "../../libs/toml_parser" }
+makepad-script = { path = "../../platform/script" }
+makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false, features = ["local", "llm"] }
+makepad-ai-llm = { path = "../../libs/ai/llm" }

@@ -1,0 +1,28 @@
+// Shared checks warm the checkout's cache before any app script starts.
+use mod.std.*
+use mod.ci;
+
+ci.exclusive()
+
+ci.step("check host", fn(){
+    ci.cargo(["check", "--workspace"], {
+        deny_warnings: ["makepad-platform", "makepad-draw", "makepad-widgets"]
+    })
+})
+
+// Each app owns its other-platform checks. These are the shared UI crates.
+ci.check_targets({
+    packages: ["makepad-platform", "makepad-draw", "makepad-widgets"]
+    targets: ci.host.targets
+    deny_warnings: ["makepad-platform", "makepad-draw", "makepad-widgets"]
+})
+
+ci.step("tests", fn(){
+    ci.test({workspace: true})
+})
+
+// Optional native Windows coverage, with [machines.windows] in ci.toml:
+// let win = ci.machine("windows")
+// win.sync()
+// win.cargo(["test", "-p", "makepad-platform"])
+nil
