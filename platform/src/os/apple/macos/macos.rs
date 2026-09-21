@@ -1348,6 +1348,9 @@ impl Cx {
                 if with_macos_app(|app| app.all_windows_miniaturized()) {
                     self.ensure_timer0_stopped();
                 } else {
+                    // The links are only paused, not dropped, so the armed flag
+                    // would early-out before anything unpauses them.
+                    self.os.timer0_armed = false;
                     self.ensure_timer0_started();
                 }
             }
