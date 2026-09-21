@@ -31,6 +31,10 @@ fn splash_toggle_and_dropdown_smoke(app: TestApp) {
         .click()
         .wait_checked(true);
 
+    // The Quick Select dropdown is the last thing on the Toggles page, below
+    // the fold of the left panel. Scroll that page from a widget that is on it
+    // (the dock's centre belongs to another panel).
+    app.locator(Selector::id("toggle")).scroll(0.0, 600.0);
     app.locator(Selector::id("smoke_dropdown"))
         .wait_visible()
         .wait_text("Option A");
