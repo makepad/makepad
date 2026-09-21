@@ -410,6 +410,16 @@ impl XlibWindow {
     }
 
     fn restore_or_maximize(&self, add_remove: c_long) {
+        let atoms = &get_xlib_app_global().atoms;
+        let (horz, vert) = (
+            atoms.new_wm_state_maximized_horz,
+            atoms.new_wm_state_maximized_vert,
+        );
+        self.set_net_wm_state(add_remove, horz, vert);
+    }
+
+    /// Sends a `_NET_WM_STATE` client message. `second` is 0 when only one state changes.
+    fn set_net_wm_state(&self, add_remove: c_long, first: x11_sys::Atom, second: x11_sys::Atom) {
         unsafe {
             let default_screen = x11_sys::XDefaultScreen(get_xlib_app_global().display);
             let root_window = x11_sys::XRootWindow(get_xlib_app_global().display, default_screen);
@@ -424,8 +434,8 @@ impl XlibWindow {
                 data: {
                     let mut msg = mem::zeroed::<x11_sys::XClientMessageEvent__bindgen_ty_1>();
                     msg.l[0] = add_remove;
-                    msg.l[1] = get_xlib_app_global().atoms.new_wm_state_maximized_horz as c_long;
-                    msg.l[2] = get_xlib_app_global().atoms.new_wm_state_maximized_vert as c_long;
+                    msg.l[1] = first as c_long;
+                    msg.l[2] = second as c_long;
                     msg
                 },
             };
@@ -445,6 +455,18 @@ impl XlibWindow {
 
     pub fn maximize(&self) {
         self.restore_or_maximize(_NET_WM_STATE_ADD);
+    }
+
+    pub fn fullscreen(&self) {
+        let atom = get_xlib_app_global().atoms.net_wm_state_fullscreen;
+        self.set_net_wm_state(_NET_WM_STATE_ADD, atom, 0);
+    }
+
+    /// Leaves fullscreen. Maximized is left alone, so a window that was maximized
+    /// before it went fullscreen comes back maximized.
+    pub fn normal(&self) {
+        let atom = get_xlib_app_global().atoms.net_wm_state_fullscreen;
+        self.set_net_wm_state(_NET_WM_STATE_REMOVE, atom, 0);
     }
 
     pub fn close_window(&mut self) {
@@ -483,7 +505,10 @@ impl XlibWindow {
             xr_is_presenting: false,
             can_fullscreen: false,
             is_topmost: self.get_is_topmost(),
-            is_fullscreen: self.get_is_maximized(),
+            // Maximize-or-fullscreen, the flag's meaning everywhere; Wayland reports
+            // the same union. Creation still only ever maximizes, so a saved `true`
+            // cannot come back as fullscreen.
+            is_fullscreen: self.get_is_maximized() || self.get_is_fullscreen(),
             inner_size: self.get_inner_size(),
             outer_size: self.get_outer_size(),
             dpi_factor: self.get_dpi_factor(),
@@ -493,7 +518,22 @@ impl XlibWindow {
     }
 
     pub fn get_is_maximized(&self) -> bool {
-        let mut maximized = false;
+        let atoms = &get_xlib_app_global().atoms;
+        let wanted = [
+            atoms.new_wm_state_maximized_horz,
+            atoms.new_wm_state_maximized_vert,
+        ];
+        self.has_net_wm_state(&wanted)
+    }
+
+    pub fn get_is_fullscreen(&self) -> bool {
+        let wanted = [get_xlib_app_global().atoms.net_wm_state_fullscreen];
+        self.has_net_wm_state(&wanted)
+    }
+
+    /// Whether `_NET_WM_STATE` currently carries any of `wanted`.
+    fn has_net_wm_state(&self, wanted: &[x11_sys::Atom]) -> bool {
+        let mut found = false;
         unsafe {
             let mut prop_type = mem::MaybeUninit::uninit();
             let mut format = mem::MaybeUninit::uninit();
@@ -523,17 +563,15 @@ impl XlibWindow {
                 let items =
                     std::slice::from_raw_parts::<c_ulong>(properties as *mut _, n_item as usize);
                 for item in items {
-                    if *item == get_xlib_app_global().atoms.new_wm_state_maximized_horz
-                        || *item == get_xlib_app_global().atoms.new_wm_state_maximized_vert
-                    {
-                        maximized = true;
+                    if wanted.contains(item) {
+                        found = true;
                         break;
                     }
                 }
                 x11_sys::XFree(properties as *mut _);
             }
         }
-        maximized
+        found
     }
 
     unsafe fn create_position_xic_with_spot(

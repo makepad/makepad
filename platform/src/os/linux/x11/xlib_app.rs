@@ -1691,6 +1691,7 @@ pub struct XlibAtoms {
     pub net_wm_state: x11_sys::Atom,
     pub new_wm_state_maximized_horz: x11_sys::Atom,
     pub new_wm_state_maximized_vert: x11_sys::Atom,
+    pub net_wm_state_fullscreen: x11_sys::Atom,
     pub targets: x11_sys::Atom,
     pub string: x11_sys::Atom,
     pub utf8_string: x11_sys::Atom,
@@ -1756,6 +1757,11 @@ impl XlibAtoms {
                 new_wm_state_maximized_vert: x11_sys::XInternAtom(
                     display,
                     "_NET_WM_STATE_MAXIMIZED_VERT\0".as_ptr() as *const _,
+                    0,
+                ),
+                net_wm_state_fullscreen: x11_sys::XInternAtom(
+                    display,
+                    "_NET_WM_STATE_FULLSCREEN\0".as_ptr() as *const _,
                     0,
                 ),
                 targets: x11_sys::XInternAtom(display, "TARGETS\0".as_ptr() as *const _, 0),

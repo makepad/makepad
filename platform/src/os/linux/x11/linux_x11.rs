@@ -628,6 +628,24 @@ impl X11Cx {
                     if let Some(window) =
                         opengl_windows.iter_mut().find(|w| w.window_id == window_id)
                     {
+                        // Drop both, same as the Wayland arm: `is_fullscreen()` is the
+                        // union, so a caller restoring off it means "make it small again".
+                        window.xlib_window.normal();
+                        window.xlib_window.restore();
+                    }
+                }
+                CxOsOp::FullscreenWindow(window_id) => {
+                    if let Some(window) =
+                        opengl_windows.iter_mut().find(|w| w.window_id == window_id)
+                    {
+                        window.xlib_window.fullscreen();
+                    }
+                }
+                CxOsOp::NormalizeWindow(window_id) => {
+                    if let Some(window) =
+                        opengl_windows.iter_mut().find(|w| w.window_id == window_id)
+                    {
+                        window.xlib_window.normal();
                         window.xlib_window.restore();
                     }
                 }
