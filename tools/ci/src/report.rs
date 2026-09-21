@@ -208,6 +208,8 @@ pub enum Update {
 pub type Notify = Arc<dyn Fn(Update) + Send + Sync>;
 
 pub struct Run {
+    pub cargo_cache: Arc<std::sync::Mutex<crate::cargo_cache::Cache>>,
+    pub app_targets: Arc<Vec<crate::smoke::Target>>,
     pub root: PathBuf,
     pub dir: PathBuf,
     pub branch: String,
@@ -246,6 +248,8 @@ impl Run {
         let log = File::create(dir.join("log.txt")).map_err(|e| e.to_string())?;
         notify(Update::Begin(branch.into(), tip.into()));
         Ok(Self {
+            cargo_cache: Default::default(),
+            app_targets: Default::default(),
             root,
             dir,
             branch: branch.into(),
@@ -281,6 +285,8 @@ impl Run {
             ))
         });
         Ok(Self {
+            cargo_cache: self.cargo_cache.clone(),
+            app_targets: self.app_targets.clone(),
             root: self.root.clone(),
             dir,
             branch: self.branch.clone(),
@@ -379,6 +385,12 @@ impl Run {
         self.publish();
     }
     pub fn fail(&mut self, name: &str, detail: &str) {
+        // A failure that a failed step already carries is said once.
+        if !detail.is_empty()
+            && self.stages.iter().any(|s| s.state == "failed" && s.detail.contains(detail))
+        {
+            return;
+        }
         let i = self.plan(name);
         self.end(i, "failed", detail);
     }
@@ -405,11 +417,12 @@ impl Run {
             display_command(program, args),
             cwd.display()
         ));
+        let env = crate::cargo::target_env(&self.root, env);
         process::run(
             program,
             args,
             cwd,
-            env,
+            &env,
             timeout,
             path,
             &control,
@@ -431,16 +444,19 @@ impl Run {
         let start = Instant::now();
         self.log(&format!("$ {} (cwd={})", display_command(program, args), cwd.display()));
         let mut write_error = None;
-        let output = process::run(program, args, cwd, env, timeout, capture.clone(), &control, &mut |line| {
+        let env = crate::cargo::target_env(&self.root, env);
+        let mut diagnostics = crate::cargo::DiagnosticLimit::default();
+        let output = process::run(program, args, cwd, &env, timeout, capture.clone(), &control, &mut |line| {
             if json::parse_depth(line.as_bytes(), 128).is_ok() {
                 if let Err(e) = writeln!(json_file, "{line}") {
                     write_error = Some(e.to_string());
                 }
             }
-            if let Some(text) = crate::cargo::rendered_diagnostic(line) {
+            if let Some(text) = diagnostics.render(line) {
                 self.log(&text);
             }
         });
+        if let Some(text) = diagnostics.summary() { self.log(&text); }
         let files = format!("raw cargo JSON: {}\nfull cargo output: {}", raw.display(), capture.display());
         // Includes metadata and timeout/spawn failures, whose caller may have
         // no CargoResult to attach. Nested target steps have their own entry.

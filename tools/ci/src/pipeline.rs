@@ -76,15 +76,7 @@ pub fn warning_counts(out: &str) -> BTreeMap<String, u64> {
         // omitted (#version), it is the URL's final path segment. Legacy
         // Cargo IDs start with `name version (...)`. Never use target.name:
         // binaries and dependency library targets need not match a package.
-        let name = if let Some((source, fragment)) = package.rsplit_once('#') {
-            if fragment.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-                source.rsplit('/').next().unwrap_or("unknown")
-            } else {
-                fragment.split('@').next().unwrap_or("unknown")
-            }
-        } else {
-            package.split_whitespace().next().unwrap_or("unknown")
-        }.to_string();
+        let name = crate::cargo::package_name(package).to_string();
         *counts.entry(name).or_insert(0) += 1;
     }
     counts

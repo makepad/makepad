@@ -64,8 +64,12 @@ fn run() -> Result<(), String> {
         for msg in handle.poll() {
             match msg {
                 InstallMsg::Progress { file, done, total } => {
-                    current = file.clone();
-                    files.insert(file, (done, total));
+                    // Progress names the source path; FileDone names cache_as.
+                    // Store both under cache_as so verified files count once.
+                    let key = spec.files.iter().find(|f| f.path == file)
+                        .map(|f| f.cache_as.clone()).unwrap_or(file);
+                    current = key.clone();
+                    files.insert(key, (done, total));
                 }
                 InstallMsg::FileDone { file } => {
                     if let Some(f) = spec.files.iter().find(|f| f.cache_as == file) {

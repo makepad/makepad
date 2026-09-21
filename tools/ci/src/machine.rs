@@ -69,6 +69,9 @@ impl Machine {
         }) {
             return Err("invalid environment name".into());
         }
+        let mut env = env.to_vec();
+        env.retain(|(key, _)| key != "CARGO_TARGET_DIR");
+        env.push(("CARGO_TARGET_DIR".into(), format!("{}/target", self.root.trim_end_matches(['/', '\\']))));
         let shell = if self.os == "windows" {
             let assignments = env
                 .iter()

@@ -126,7 +126,7 @@ impl ChildLog {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Output {
     pub code: i32,
     pub out: String,

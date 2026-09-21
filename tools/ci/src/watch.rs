@@ -17,7 +17,6 @@ pub const DEFAULT_SKIPS: &[&str] = &[
     "stage",
     "stage-browser",
     "stage-live",
-    "scope",
     "sandbox",
     "source-library",
     "mixer",
@@ -74,6 +73,7 @@ impl Config {
         Self::parse(&text, base, installed)
     }
     fn parse(text: &str, base: &Path, installed: Vec<String>) -> Result<Self> {
+        crate::window_geometry::configured(text)?;
         let doc = parse_toml(text).map_err(|e| e.to_string())?;
         let string = |key: &str, default: &str| -> Result<String> {
             match doc.root.get(key) {

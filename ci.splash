@@ -2,6 +2,8 @@
 use mod.std.*
 use mod.ci;
 
+ci.warm({packages: ci.apps, targets: ci.host.targets})
+
 ci.exclusive()
 
 ci.step("check host", fn(){

@@ -657,7 +657,11 @@ fn register(vm: &mut ScriptVm, target: Option<&Target>) {
                 Err(e) => {
                     rt(vm).fatal = true;
                     rt(vm).fail(&e);
-                    NIL
+                    // A script keeps its shape after a failed launch: the app
+                    // it holds is inert (the run is fatal, so every method
+                    // returns before acting) instead of nil, which would add
+                    // a "method not found on nil" error per later call.
+                    app_object(vm, usize::MAX)
                 }
             }
         },
@@ -777,16 +781,12 @@ fn register(vm: &mut ScriptVm, target: Option<&Target>) {
                         runtime.run.end(i, "warning", &verdict.raw);
                     }
                     if accept && !verdict.yes {
-                        return Err(format!(
-                            "{}\n{}\n{}",
-                            if verdict.parse_error {
-                                "vision parse failed"
-                            } else {
-                                "VERDICT: NO"
-                            },
-                            verdict.reasons.join("\n"),
+                        // The raw answer already contains both reasons and verdict.
+                        return Err(if verdict.parse_error {
+                            format!("vision parse failed\n{}", verdict.raw)
+                        } else {
                             verdict.raw
-                        ));
+                        });
                     }
                     Ok(verdict.json())
                 })();
@@ -1131,8 +1131,14 @@ fn execute(
             nightly: None,
         }
     } else {
-        match crate::cargo::Host::detect(&run) {
-            Ok(h) => h,
+        let shared = run.cargo_cache.clone();
+        let mut cache = shared.lock().unwrap();
+        let detected = match &cache.host {
+            Some(host) => Ok(host.clone()),
+            None => crate::cargo::Host::detect(&run),
+        };
+        match detected {
+            Ok(h) => { cache.host = Some(h.clone()); h },
             Err(e) => {
                 let mut run = run;
                 run.fail("host discovery", &e);
@@ -1287,6 +1293,8 @@ mod tests {
                     name: "test".into(),
                 }),
             };
+            let mut run = run;
+            run.app_targets = Arc::new(script.target.iter().cloned().collect());
             let (run, steps) = execute(
                 run,
                 config.clone(),

@@ -106,13 +106,24 @@ pub fn discover(root: &Path, config: &Config) -> Result<(Vec<Target>, Vec<Script
     walk(root, root, &mut files)?;
     files.sort();
     let mut targets = Vec::new();
+    let mut skipped_dirs = Vec::new();
     for manifest in files
         .iter()
-        .filter(|p| p.starts_with("apps") && p.file_name().is_some_and(|n| n == "Cargo.toml"))
+        // An app is a direct child of apps/: `apps/<name>/Cargo.toml`. Crates
+        // nested deeper (a private app's own `deps/*`) are its libraries.
+        .filter(|p| {
+            p.starts_with("apps")
+                && p.components().count() == 3
+                && p.file_name().is_some_and(|n| n == "Cargo.toml")
+        })
     {
         let text = fs::read_to_string(root.join(manifest)).map_err(|e| e.to_string())?;
         let doc = parse_toml(&text).map_err(|e| format!("{}: {e}", manifest.display()))?;
         let dir = manifest.parent().unwrap();
+        let package = doc.get_path(&["package", "name"]).and_then(|v| v.as_str()).unwrap_or("");
+        if skips_package(package, dir, &config.skip_apps) {
+            skipped_dirs.push(dir.to_path_buf());
+        }
         targets.extend(targets_from_doc(
             &doc,
             dir,
@@ -120,12 +131,15 @@ pub fn discover(root: &Path, config: &Config) -> Result<(Vec<Target>, Vec<Script
             &config.skip_apps,
         )?);
     }
+    // Skipping an application also skips tools inside its private workspace.
+    targets.retain(|target| !skipped_dirs.iter().any(|dir| target.manifest.starts_with(dir)));
     let mut scripts = Vec::new();
     let mut covered = BTreeSet::new();
     for path in files
         .iter()
         .filter(|p| p.file_name().is_some_and(|n| n == "ci.splash"))
     {
+        if skipped_dirs.iter().any(|dir| path.starts_with(dir)) { continue; }
         let dir = path.parent().unwrap();
         let related: Vec<_> = targets
             .iter()
@@ -205,4 +219,26 @@ mod tests {
             "plain"
         );
     }
+    #[test]
+    fn warm_app_discovery_excludes_tools_under_skipped_workspaces() {
+        let root = std::env::temp_dir().join(format!("ci-discover-{}-{}", std::process::id(), crate::report::stamp()));
+        for (dir, name) in [("apps/private", "private"), ("apps/private/tools/helper", "helper"), ("apps/kept", "kept")] {
+            let dir = root.join(dir);
+            fs::create_dir_all(dir.join("src")).unwrap();
+            fs::write(dir.join("Cargo.toml"), format!("[package]\nname='{name}'\nversion='0.1.0'\n")).unwrap();
+            fs::write(dir.join("src/main.rs"), "fn main() {}\n").unwrap();
+            fs::write(dir.join("ci.splash"), "nil\n").unwrap();
+        }
+        let config = Config {
+            remote: "origin".into(), branches: vec!["work".into()], poll_secs: 60,
+            checkout: root.clone(), skip_apps: vec!["private".into()], model: "test".into(),
+            targets: Vec::new(), allowed_errors: Vec::new(), no_vision: true, parallel: 1,
+            machines: Default::default(),
+        };
+        let (targets, scripts) = discover(&root, &config).unwrap();
+        assert_eq!(targets.iter().map(|t| t.package.as_str()).collect::<Vec<_>>(), vec!["kept"]);
+        assert_eq!(scripts.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), vec!["apps/kept"]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
 }

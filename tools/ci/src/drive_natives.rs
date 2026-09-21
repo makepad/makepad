@@ -186,22 +186,32 @@ fn build(vm: &mut ScriptVm, v: ScriptValue) -> Result<PathBuf> {
     let package = field_text(vm, v, id!(package))?.ok_or("build requires package")?;
     let binary = field_text(vm, v, id!(binary))?.unwrap_or_else(|| package.clone());
     let path = cargo::binary_path(&rt(vm).run.root, &binary)?;
-    let mut args = vec![
-        "build".into(),
-        "--release".into(),
-        "-p".into(),
-        package.clone(),
-        "--bin".into(),
-        binary,
-    ];
-    // Standalone app workspaces are built through their owning manifest.
-    if let Some(manifest) =
-        field_text(vm, v, id!(manifest))?.or_else(|| package_manifest(vm, &package))
-    {
-        args.extend(["--manifest-path".into(), manifest]);
+    let manifest = field_text(vm, v, id!(manifest))?
+        .or_else(|| package_manifest(vm, &package)).map(PathBuf::from);
+    let mut opts = options(vm, v)?;
+    let host = rt(vm).host.clone();
+    if let Some(target) = &opts.target {
+        if target != &host.target { return Err("other platforms may only be checked".into()); }
+        // The native build API always returns target/release/<bin>.
+        opts.target = None;
     }
-    let opts = options(vm, v)?;
-    cargo_call(vm, args, opts, None)?;
+    if rt(vm).validate { return Ok(path); }
+    let own = rt(vm).step.is_none();
+    let i = rt(vm).step.unwrap_or_else(|| {
+        let r = rt(vm);
+        let i = r.run.plan(&format!("{} / build {package} / {binary}", r.group));
+        r.run.begin(i, "release build (run cache)");
+        i
+    });
+    let parent = rt(vm).step.replace(i);
+    let outcome = crate::cargo_cache::build(&mut rt(vm).run, &host, &package, &binary, manifest.as_deref(), &opts);
+    let result = outcome.and_then(|outcome| record_outcome(vm, &outcome, &opts));
+    rt(vm).step = parent;
+    if own {
+        let state = match &result { Err(_) => "failed", Ok(true) => "warning", Ok(false) => "passed" };
+        rt(vm).run.end(i, state, &result.as_ref().err().cloned().unwrap_or_default());
+    }
+    result?;
     Ok(path)
 }
 pub(super) fn launch(vm: &mut ScriptVm, v: ScriptValue) -> Result<usize> {
@@ -232,10 +242,92 @@ pub(super) fn launch(vm: &mut ScriptVm, v: ScriptValue) -> Result<usize> {
     }
     result
 }
+fn record_outcome(vm: &mut ScriptVm, outcome: &crate::cargo_cache::Outcome, opts: &Options) -> Result<bool> {
+    match outcome {
+        crate::cargo_cache::Outcome::Cargo(result) => record(vm, result, opts),
+        crate::cargo_cache::Outcome::Warning(detail) => {
+            if let Some(i) = rt(vm).step { rt(vm).run.annotate(i, detail); }
+            warning(vm, detail);
+            Ok(true)
+        }
+        crate::cargo_cache::Outcome::Failed(detail) => Err(detail.clone()),
+    }
+}
+fn finish_batch(vm: &mut ScriptVm, i: usize, outcomes: Result<Vec<(String, crate::cargo_cache::Outcome)>>, opts: &Options) -> bool {
+    let parent = rt(vm).step.replace(i);
+    let mut failures = Vec::new();
+    let mut orange = false;
+    match outcomes {
+        Err(e) => failures.push(e),
+        Ok(outcomes) => for (package, outcome) in outcomes {
+            match record_outcome(vm, &outcome, opts) {
+                Ok(warning) => orange |= warning,
+                Err(e) => failures.push(format!("{package}: {e}")),
+            }
+        }
+    }
+    rt(vm).step = parent;
+    rt(vm).run.end(i, if !failures.is_empty() { "failed" } else if orange { "warning" } else { "passed" }, &failures.join("\n"));
+    !failures.is_empty()
+}
+fn check_targets(vm: &mut ScriptVm, v: ScriptValue, warm: bool) -> Result<()> {
+    let packages = fields(vm, v, id!(packages))?;
+    let workspace = object_field(vm, v, id!(workspace)).as_bool() == Some(true);
+    if packages.is_empty() && !workspace {
+        // An empty discovered app list has nothing to warm.
+        if warm { return Ok(()); }
+        return Err("check_targets needs packages or workspace: true".into());
+    }
+    if warm && workspace { return Err("warm takes packages, not workspace".into()); }
+    let mut targets = fields(vm, v, id!(targets))?;
+    let host = rt(vm).host.clone();
+    if targets == host.targets || object_field(vm, v, id!(targets)).is_nil() {
+        targets = cargo::matrix_targets(&host.target);
+        for target in rt(vm).config.targets.clone() {
+            if !targets.contains(&target) { targets.push(target); }
+        }
+    }
+    let opts = options(vm, v)?;
+    if opts.target.is_some() { return Err("check_targets/warm takes targets, not target".into()); }
+    if warm && !opts.env.is_empty() { return Err("warm uses the matrix environment".into()); }
+    let manifest = if !warm && packages.len() == 1 {
+        package_manifest(vm, &packages[0]).map(PathBuf::from)
+    } else { None };
+    let mut failed = false;
+    for check in cargo::target_checks(&host, &targets, &packages, workspace) {
+        let mut check_opts = opts.clone();
+        check_opts.toolchain = check.toolchain.clone();
+        check_opts.env.retain(|(key, _)| key != "MAKEPAD");
+        check_opts.env.extend(check.env.clone());
+        let args = cargo::command_args(&check.args, &check_opts, &host.target)?;
+        if rt(vm).validate { continue; }
+        let r = rt(vm);
+        let i = r.run.plan(&format!("{} / {}check {}", r.group, if warm { "warm " } else { "" }, check.label));
+        r.run.begin(i, &crate::report::display_command("cargo", &args));
+        let outcomes = crate::cargo_cache::checks(&mut r.run, &host, &check, &packages, workspace, manifest.as_deref(), &check_opts);
+        failed |= finish_batch(vm, i, outcomes, &opts);
+    }
+    if warm {
+        cargo::command_args(&crate::cargo_cache::release_args(&packages), &opts, &host.target)?;
+        if !rt(vm).validate {
+            let r = rt(vm);
+            let i = r.run.plan(&format!("{} / warm host builds", r.group));
+            r.run.begin(i, "cargo build --release --bins (all app packages)");
+            let outcomes = crate::cargo_cache::warm_builds(&mut r.run, &host, &packages, &opts);
+            failed |= finish_batch(vm, i, outcomes, &opts);
+        }
+    }
+    if failed { Err("one or more cargo batches failed; see target/build steps".into()) } else { Ok(()) }
+}
 pub(super) fn register(vm: &mut ScriptVm, ci: ScriptObject) {
     let host = rt(vm).host.json();
     let host = json_value(vm, host);
     vm.bx.heap.set_value_def(ci, id!(host).into(), host);
+    let mut packages: Vec<_> = rt(vm).run.app_targets.iter().map(|t| t.package.clone()).collect();
+    packages.sort();
+    packages.dedup();
+    let apps = json_value(vm, Value::Arr(packages.iter().map(json::s).collect()));
+    vm.bx.heap.set_value_def(ci, id!(apps).into(), apps);
     vm.add_method(ci, id_lut!(exclusive), script_args!(), |vm, _| {
         if allow(vm) {
             let r = rt(vm);
@@ -267,111 +359,14 @@ pub(super) fn register(vm: &mut ScriptVm, ci: ScriptObject) {
             result(vm, result_value)
         },
     );
-    vm.add_method(
-        ci,
-        id_lut!(check_targets),
-        script_args!(options = NIL),
-        |vm, args| {
-            if !allow(vm) {
-                return NIL;
-            }
-            let result_value = (|| {
-                let v = value(vm, args, id!(options));
-                let packages = fields(vm, v, id!(packages))?;
-                let workspace = object_field(vm, v, id!(workspace)).as_bool() == Some(true);
-                if packages.is_empty() && !workspace {
-                    return Err("check_targets needs packages or workspace: true".into());
-                }
-                let mut targets = fields(vm, v, id!(targets))?;
-                let host = rt(vm).host.clone();
-                // The usual host list also reports missing matrix coverage.
-                // Explicit subsets stay subsets. Arbitrary configured/rustup
-                // triples are discarded by target_checks' matrix iteration.
-                if targets == host.targets || object_field(vm, v, id!(targets)).is_nil() {
-                    targets = cargo::matrix_targets(&host.target);
-                    for t in rt(vm).config.targets.clone() {
-                        if !targets.contains(&t) {
-                            targets.push(t);
-                        }
-                    }
-                }
-                let opts = options(vm, v)?;
-                if opts.target.is_some() {
-                    return Err("check_targets takes targets, not a single target option".into());
-                }
-                let manifest = if packages.len() == 1 {
-                    package_manifest(vm, &packages[0]).map(PathBuf::from)
-                } else { None };
-                let mut libraries = None;
-                let mut failed = false;
-                for mut check in cargo::target_checks(&host, &targets, &packages, workspace) {
-                    let mut check_opts = opts.clone();
-                    check_opts.toolchain = check.toolchain.clone();
-                    check_opts.env.retain(|(name, _)| name != "MAKEPAD");
-                    check_opts.env.extend(check.env.clone());
-                    if check.skip.is_none() && check.ty == cargo::BuildTy::Lib && !rt(vm).validate {
-                        if libraries.is_none() {
-                            libraries = Some(cargo::library_packages(&mut rt(vm).run, manifest.as_deref())?);
-                        }
-                        let (present, missing) = cargo::library_selection(&packages, workspace, libraries.as_ref().unwrap())?;
-                        if !missing.is_empty() {
-                            let detail = check.no_lib_detail(&missing);
-                            let r = rt(vm);
-                            let i = r.run.plan(&format!("{} / check {} / libraries", r.group, check.label));
-                            r.run.end(i, "warning", &detail);
-                            if !r.warning.is_empty() { r.warning.push('\n'); }
-                            r.warning.push_str(&format!("{}: {detail}", check.label));
-                            if present.is_empty() {
-                                continue;
-                            }
-                            // Check the remaining libraries even in a mixed
-                            // workspace with binary-only tools.
-                            let mut args = Vec::new();
-                            let mut iter = check.args.into_iter();
-                            while let Some(arg) = iter.next() {
-                                if arg == "-p" { iter.next(); }
-                                else if arg != "--workspace" { args.push(arg); }
-                            }
-                            for name in present { args.extend(["-p".into(), name]); }
-                            check.args = args;
-                        }
-                    }
-                    if let Some(m) = &manifest {
-                        check.args.extend(["--manifest-path".into(), m.display().to_string()]);
-                    }
-                    let args = cargo::command_args(&check.args, &check_opts, &host.target)?;
-                    let r = rt(vm);
-                    let i = r.run.plan(&format!("{} / check {}", r.group, check.label));
-                    r.run.begin(i, &crate::report::display_command("cargo", &args));
-                    if let Some(detail) = &check.skip {
-                        r.run.end(i, "warning", detail);
-                        if !r.warning.is_empty() { r.warning.push('\n'); }
-                        r.warning.push_str(&format!("{}: {detail}", check.label));
-                        continue;
-                    }
-                    let parent = rt(vm).step.replace(i);
-                    match cargo_call(vm, check.args, check_opts, None) {
-                        Ok(out) => {
-                            let owner = owner(vm);
-                            rt(vm).run.end(i,
-                                if out.own_warnings(owner.as_deref()) { "warning" } else { "passed" }, "");
-                        }
-                        Err(e) => {
-                            failed = true;
-                            rt(vm).run.end(i, "failed", &e);
-                        }
-                    }
-                    rt(vm).step = parent;
-                }
-                if failed {
-                    Err("one or more target checks failed; see target steps".into())
-                } else {
-                    Ok(Value::Null)
-                }
-            })();
-            result(vm, result_value)
-        },
-    );
+    for (name, warm) in [(id_lut!(check_targets), false), (id_lut!(warm), true)] {
+        vm.add_method(ci, name, script_args!(options = NIL), move |vm, args| {
+            if !allow(vm) { return NIL; }
+            let v = value(vm, args, id!(options));
+            let r = check_targets(vm, v, warm).map(|_| Value::Null);
+            result(vm, r)
+        });
+    }
     vm.add_method(
         ci,
         id_lut!(test),

@@ -13,6 +13,7 @@ use std::{
 };
 app_main!(App);
 pub fn run() {
+    crate::window_geometry::initialize(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     main();
 }
 script_mod! {
@@ -22,7 +23,8 @@ script_mod! {
         ui: Root{
             main_window := Window{
                 window.title: "Makepad CI"
-                window.inner_size: vec2(1600,1000)
+                window.position: vec2(#(crate::window_geometry::geometry().x), #(crate::window_geometry::geometry().y))
+                window.inner_size: vec2(#(crate::window_geometry::geometry().width), #(crate::window_geometry::geometry().height))
                 body +: {
                     flow: Down padding: 12 spacing: 10 show_bg: true
                     draw_bg +: {color: #181b21}

@@ -3,13 +3,20 @@ use makepad_widgets::*;
 
 script_mod! {
     use mod.prelude.widgets_internal.*
+    // The square's draw type: DrawQuad's vertex stage and rect, plus the four
+    // instance fields the Rust struct below declares. They are instance
+    // fields because they are `#[live]` after the `#[deref]`; the script only
+    // gives them values.
+    set_type_default() do #(DrawSquare::script_shader(vm)){
+        ..mod.draw.DrawQuad
+    }
     mod.widgets.CiWall = #(CiWall::register_widget(vm)){
         width: Fill height: Fill
-        draw_square: #(DrawSquare::script_shader(vm)){
-            color: instance(#3a3f46)
-            pulse: instance(1.0)
-            progress: instance(-1.0)
-            selected: instance(0.0)
+        draw_square +: {
+            color: #3a3f46
+            pulse: 1.0
+            progress: -1.0
+            selected: 0.0
             pixel: fn(){
                 let p = self.pos * self.rect_size
                 let edge = min(min(p.x, p.y), min(self.rect_size.x-p.x, self.rect_size.y-p.y))

@@ -112,7 +112,7 @@ pub struct Options {
     pub deny: Vec<String>,
     pub toolchain: Option<String>,
 }
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct CargoResult {
     pub output: Output,
     pub warnings: BTreeMap<String, u64>,
@@ -267,6 +267,39 @@ pub fn execute(
         },
     )
 }
+/// Every local command (including metadata and scripts which spawn Cargo)
+/// inherits the same absolute checkout target directory.
+pub fn target_env(root: &Path, env: &[(String, String)]) -> Vec<(String, String)> {
+    let mut env = env.to_vec();
+    env.retain(|(key, _)| key != "CARGO_TARGET_DIR");
+    env.push(("CARGO_TARGET_DIR".into(), root.join("target").display().to_string()));
+    env
+}
+
+#[derive(Default)]
+pub struct DiagnosticLimit { count: usize }
+impl DiagnosticLimit {
+    pub fn render(&mut self, line: &str) -> Option<String> {
+        let text = rendered_diagnostic(line)?;
+        self.count += 1;
+        (self.count <= 20).then_some(text)
+    }
+    pub fn summary(&self) -> Option<String> {
+        (self.count > 20).then(|| format!("{} more cargo diagnostics omitted; see raw cargo JSON/full output", self.count - 20))
+    }
+}
+
+pub fn package_name(package: &str) -> &str {
+    if let Some((source, fragment)) = package.rsplit_once('#') {
+        if fragment.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+            source.rsplit('/').next().unwrap_or("unknown")
+        } else {
+            fragment.split('@').next().unwrap_or("unknown")
+        }
+    } else {
+        package.split_whitespace().next().unwrap_or("unknown")
+    }
+}
 #[derive(Debug)]
 pub struct TargetCheck {
     pub label: String,
@@ -326,41 +359,6 @@ pub fn target_checks(
         });
     }
     result
-}
-/// Cargo metadata detects both explicit [lib] and Cargo's implicit src/lib.rs.
-pub fn library_packages(run: &mut Run, manifest: Option<&Path>) -> Result<BTreeMap<String, bool>> {
-    let mut args = strings(&["metadata", "--no-deps", "--format-version=1"]);
-    if let Some(manifest) = manifest {
-        args.extend(["--manifest-path".into(), manifest.display().to_string()]);
-    }
-    let root = run.root.clone();
-    let i = run.plan("cargo metadata / library targets");
-    run.begin(i, &crate::report::display_command("cargo", &args));
-    let result = run.cargo_command("cargo", &args, &root, &[], 60);
-    let result = match result {
-        Ok(result) if result.output.code == 0 => { run.end(i, "passed", ""); result }
-        Ok(result) => { let detail = result.detail(); run.end(i, "failed", &detail); return Err(detail); }
-        Err(e) => { run.end(i, "failed", &e); return Err(e); }
-    };
-    let metadata = result.output.out.lines().find_map(|line| {
-        json::parse_depth(line.as_bytes(), 128).ok().filter(|v| v.get("packages").is_some())
-    }).ok_or("cargo metadata did not return packages")?;
-    let members = metadata.get("workspace_members").and_then(Value::as_arr)
-        .ok_or("cargo metadata missing workspace members")?;
-    let mut packages = BTreeMap::new();
-    for package in metadata.get("packages").and_then(Value::as_arr).ok_or("missing packages")? {
-        if !members.iter().any(|id| id.as_str() == package.get("id").and_then(Value::as_str)) {
-            continue;
-        }
-        let name = package.get("name").and_then(Value::as_str).ok_or("missing package name")?;
-        let has_lib = package.get("targets").and_then(Value::as_arr).is_some_and(|targets| {
-            targets.iter().any(|target| target.get("kind").and_then(Value::as_arr).is_some_and(|kinds| {
-                kinds.iter().any(|kind| matches!(kind.as_str(), Some("lib" | "rlib" | "dylib" | "cdylib" | "staticlib" | "proc-macro")))
-            }))
-        });
-        packages.insert(name.into(), has_lib);
-    }
-    Ok(packages)
 }
 pub fn library_selection(
     packages: &[String], workspace: bool, libraries: &BTreeMap<String, bool>,

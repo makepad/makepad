@@ -1,6 +1,8 @@
 pub use makepad_widgets;
 mod app;
 mod cargo;
+mod cargo_cache;
+mod window_geometry;
 mod drive;
 mod machine;
 mod pipeline;

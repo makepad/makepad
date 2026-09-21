@@ -149,6 +149,7 @@ pub fn run(
     scripts: Vec<Script>,
     previous: &[ScriptState],
 ) -> Result<()> {
+    parent.app_targets = Arc::new(crate::smoke::discover(&parent.root, config)?.0);
     let scripts = ordered(scripts);
     parent.scripts = scripts
         .iter()
