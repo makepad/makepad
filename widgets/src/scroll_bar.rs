@@ -243,6 +243,10 @@ pub struct ScrollBar {
     source: ScriptObjectRef,
     #[live]
     draw_bg: DrawScrollBar,
+    /// Whether the handle is drawn and can be grabbed. With it off the view still
+    /// scrolls by wheel, trackpad and API, there's just nothing to click.
+    #[live(true)]
+    show_handle: bool,
     #[live]
     pub bar_size: f64,
     #[live]
@@ -1010,6 +1014,10 @@ impl ScrollBar {
                 return dispatch_action(cx, self.make_scroll_action());
             }
 
+            if !self.show_handle {
+                return;
+            }
+
             match event.hits(cx, self.draw_bg.area()) {
                 Hit::FingerDown(fe) if fe.is_primary_hit() => {
                     self.animator_play(cx, ids!(hover.drag));
@@ -1234,7 +1242,7 @@ impl ScrollBar {
                     .min(self.view_total - self.view_visible)
                     .max(0.);
 
-                if self.visible {
+                if self.visible && self.show_handle {
                     let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
                     self.draw_bg.is_vertical = 0.0;
                     self.draw_bg.norm_scroll = norm_scroll as f32;
@@ -1266,7 +1274,7 @@ impl ScrollBar {
                     .min(self.view_total - self.view_visible)
                     .max(0.);
 
-                if self.visible {
+                if self.visible && self.show_handle {
                     let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
                     self.draw_bg.is_vertical = 1.0;
                     self.draw_bg.norm_scroll = norm_scroll as f32;
