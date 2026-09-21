@@ -141,7 +141,7 @@ pub fn home_layout_for(screen: Rect, top: f64, dock: Rect, tile_apps: &[(&'stati
 /// every launch target is reachable from exactly one card.
 pub const LIBRARY_GROUPS: [(&str, &[&str]); 5] = [
     ("Utilities", &["clock", "weather", "calculator", "terminal", "files", "task"]),
-    ("Creativity", &["photos", "mixer", "score", "vj", "fab", "fabric"]),
+    ("Creativity", &["photos", "mixer", "score", "fab", "fabric"]),
     ("Productivity", &["sheets", "finance", "mail", "notes", "calendar", "reminders", "browser", "route", "studio"]),
     ("Media", &["video", "image", "pdf"]),
     ("Other", &[]),

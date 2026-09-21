@@ -33,10 +33,9 @@ default = ["engine", "gen"]
 # build without a model runtime — the web page answers with NoModel and the
 # tool console still works.
 engine = ["makepad-ai-services/engine"]
-# The assistant's own `gen` service (src/gen.rs): the creator runner picks
-# a fleet node and brings the picture back. Ordinary apps that embed the
-# overlay leave this off so they do not link the 3D renderer.
-gen = ["dep:makepad-asset-creator"]
+# The assistant's own `gen` service (src/gen.rs): the hub's one-job runner
+# picks a fleet node and brings the picture back.
+gen = ["dep:makepad-ai-hub"]
 
 [dependencies]
 makepad-widgets = { path = "../../widgets" }
@@ -44,5 +43,5 @@ makepad-wm-theme = { path = "../../libs/wm_theme" }
 makepad-wm-api = { path = "../../libs/wm_api" }
 makepad-ai-services = { path = "../../libs/ai/services", default-features = false }
 makepad-strict-json = { path = "../../libs/strict_json" }
-# The generative pipelines behind `gen`. Native only.
-makepad-asset-creator = { path = "../../libs/asset/creator", optional = true }
+# The fleet client behind `gen`. Native only.
+makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false, optional = true }

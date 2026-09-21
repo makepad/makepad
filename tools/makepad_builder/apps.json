@@ -16,22 +16,6 @@
     "features": []
   },
   {
-    "id": "asset-ui",
-    "title": "Asset Library",
-    "package": "makepad-app-asset-ui",
-    "binary": "makepad-app-asset-ui",
-    "workspace": "makepad/apps/asset-ui",
-    "features": []
-  },
-  {
-    "id": "asset-server",
-    "title": "Asset Server",
-    "package": "makepad-app-asset-server",
-    "binary": "makepad-asset-server",
-    "workspace": "makepad/apps/asset-server",
-    "features": []
-  },
-  {
     "id": "browser",
     "title": "Browser",
     "package": "makepad-browser",
@@ -118,14 +102,6 @@
       "standalone"
     ],
     "menu": "other"
-  },
-  {
-    "id": "flow-server",
-    "title": "Flow Server",
-    "package": "makepad-flow-server",
-    "binary": "makepad-flow-server",
-    "workspace": "makepad/apps/flow-server",
-    "features": []
   },
   {
     "id": "gltf",
@@ -261,15 +237,6 @@
     "binary": "video",
     "workspace": "makepad/apps/video",
     "features": []
-  },
-  {
-    "id": "vj",
-    "title": "VJ",
-    "package": "makepad-vj",
-    "binary": "makepad-vj",
-    "workspace": "makepad/apps/vj",
-    "features": [],
-    "menu": "other"
   },
   {
     "id": "weather",

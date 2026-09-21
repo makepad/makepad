@@ -456,7 +456,6 @@ pub fn app_icon(id: &str) -> Ico {
         "video" => Ico::Play,
         "pdf" => Ico::Check,
         "mixer" => Ico::Speaker,
-        "vj" => Ico::Headphone,
         "score" => Ico::Bell,
         "route" => Ico::Globe,
         "fabric" => Ico::Shirt,
