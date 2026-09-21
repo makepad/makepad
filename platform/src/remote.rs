@@ -112,6 +112,14 @@ mod imp {
     /// quiet on its own, a caller that draws something from it must keep
     /// asking for frames until it does.
     pub fn hands_off_active() -> bool {
+        // The marker is for a person watching the window. A hidden window has
+        // no watcher, and there the frame only lands in the grabs, where it
+        // changes what a pixel test or a vision check sees from one capture
+        // to the next (present within three seconds of a click, absent after).
+        static HIDDEN: OnceLock<bool> = OnceLock::new();
+        if *HIDDEN.get_or_init(|| std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_some()) {
+            return false;
+        }
         let at = INJECTED_AT_MS.load(Ordering::Relaxed);
         at != 0 && uptime_ms().saturating_sub(at) < HANDS_OFF_LINGER_MS
     }
