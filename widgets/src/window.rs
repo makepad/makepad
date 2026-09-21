@@ -361,8 +361,6 @@ pub struct Window {
     #[new]
     depth_texture: Texture,
     #[live]
-    hide_caption_on_fullscreen: bool,
-    #[live]
     show_performance_view: bool,
     #[rust]
     has_focus: bool,
@@ -1634,20 +1632,6 @@ impl Widget for Window {
                     // areas non-authoritative until the redraw that answers this configure.
                     self.drag_query_cache = None;
                     self.drag_query_layout_valid = false;
-                    match cx.os_type() {
-                        OsType::Windows | OsType::Macos => {
-                            if self.hide_caption_on_fullscreen && !cx.in_makepad_studio() {
-                                if ev.new_geom.is_fullscreen && !ev.old_geom.is_fullscreen {
-                                    let content = self.caption_contains_app_content(cx);
-                                    self.view(cx, ids!(caption_bar)).set_visible(cx, self.show_caption_bar && content);
-                                } else if !ev.new_geom.is_fullscreen && ev.old_geom.is_fullscreen {
-                                    self.view(cx, ids!(caption_bar))
-                                        .set_visible(cx, self.show_caption_bar);
-                                };
-                            }
-                        }
-                        _ => (),
-                    }
 
                     // Update the display context if the screen size has changed.
                     // Some platforms send spurious zero-size geometry at startup (notably macOS);
