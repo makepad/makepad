@@ -29,7 +29,10 @@ use crate::host;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
-use makepad_widgets::makepad_platform::thread::{CancellationToken, Lane, SignalToUI, TaskPool, ThreadSpawner, ThreadOptions};
+use makepad_widgets::makepad_platform::thread::{Lane, SignalToUI, TaskPool, ThreadSpawner, ThreadOptions};
+#[cfg(any(unix, test))]
+use makepad_widgets::makepad_platform::thread::CancellationToken;
+#[cfg(any(unix, test))]
 use makepad_widgets::Cx;
 
 use crate::hub::ClientId;
@@ -793,7 +796,10 @@ fn reap_child_group(mut child: Child, grace: std::time::Duration, pool: &TaskPoo
                     }
                 }
                 #[cfg(not(unix))]
-                let _ = child.kill();
+                {
+                    let _ = grace;
+                    let _ = child.kill();
+                }
                 let _ = child.wait();
             })
             .detach(),

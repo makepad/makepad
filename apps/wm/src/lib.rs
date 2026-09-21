@@ -47,6 +47,12 @@ use linux_controls::LinuxControls;
 use linux_gpu::LinuxGpuController;
 pub mod module_host;
 pub mod module_view;
+// Compiling an app to a dylib and dlopen-ing it needs a process, a linker and
+// a loader: none of that exists on the web, where the stand-in refuses.
+#[cfg(not(target_arch = "wasm32"))]
+mod dylib_host;
+#[cfg(target_arch = "wasm32")]
+#[path = "dylib_host_web.rs"]
 mod dylib_host;
 mod pane_links;
 mod preview;

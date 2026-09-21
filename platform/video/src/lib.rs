@@ -536,7 +536,11 @@ impl VideoFileDecoder {
     /// width 0, height 0 and no video codec; `next_frame` is
     /// end-of-stream from the first call.
     pub fn open_audio(path: &str) -> Result<Self, VideoFileError> {
-        #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+        // The same split as every other entry point in this file: the Apple
+        // decoder is built for every Apple target, not macOS alone. Guarded
+        // by `target_os = "macos"` this fell through to `UNSUPPORTED` on
+        // iOS and tvOS, a constant those targets do not have.
+        #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux"))]
         {
             let os = OsVideoFileDecoder::open_audio(path)?;
             return Ok(Self {
@@ -545,7 +549,7 @@ impl VideoFileDecoder {
                 pending_audio: None,
             });
         }
-        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+        #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux")))]
         {
             let _ = path;
             return Err(VideoFileError::new(UNSUPPORTED));
