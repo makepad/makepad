@@ -257,12 +257,26 @@ fn record_outcome(vm: &mut ScriptVm, outcome: &crate::cargo_cache::Outcome, opts
         crate::cargo_cache::Outcome::Failed(detail) => Err(detail.clone()),
     }
 }
-fn finish_batch(vm: &mut ScriptVm, i: usize, outcomes: Result<Vec<(String, crate::cargo_cache::Outcome)>>, opts: &Options) -> bool {
+fn finish_batch(vm: &mut ScriptVm, i: usize, outcomes: Result<Vec<(String, crate::cargo_cache::Outcome)>>, opts: &Options, warm: bool) -> bool {
     let parent = rt(vm).step.replace(i);
     let mut failures = Vec::new();
     let mut orange = false;
     match outcomes {
         Err(e) => failures.push(e),
+        // Warming only fills the cache. A package that fails or warns here is
+        // told by the script that asks for it, on its OWN tile; the warming
+        // script goes red only when cargo itself could not run.
+        Ok(outcomes) if warm => {
+            let failing: Vec<_> = outcomes.iter().filter(|(_, outcome)| match outcome {
+                crate::cargo_cache::Outcome::Failed(_) => true,
+                crate::cargo_cache::Outcome::Cargo(r) => r.output.code != 0 || !r.errors.is_empty(),
+                _ => false,
+            }).map(|(package, _)| package.as_str()).collect();
+            if !failing.is_empty() {
+                let note = format!("cached; failing here, told on their own tiles: {}", failing.join(", "));
+                rt(vm).run.annotate(i, &note);
+            }
+        }
         Ok(outcomes) => for (package, outcome) in outcomes {
             match record_outcome(vm, &outcome, opts) {
                 Ok(warning) => orange |= warning,
@@ -309,7 +323,7 @@ fn check_targets(vm: &mut ScriptVm, v: ScriptValue, warm: bool) -> Result<()> {
         let i = r.run.plan(&format!("{} / {}check {}", r.group, if warm { "warm " } else { "" }, check.label));
         r.run.begin(i, &crate::report::display_command("cargo", &args));
         let outcomes = crate::cargo_cache::checks(&mut r.run, &host, &check, &packages, workspace, manifest.as_deref(), &check_opts);
-        failed |= finish_batch(vm, i, outcomes, &opts);
+        failed |= finish_batch(vm, i, outcomes, &opts, warm);
     }
     if warm {
         cargo::command_args(&crate::cargo_cache::release_args(&packages), &opts, &host.target)?;
@@ -318,7 +332,7 @@ fn check_targets(vm: &mut ScriptVm, v: ScriptValue, warm: bool) -> Result<()> {
             let i = r.run.plan(&format!("{} / warm host builds", r.group));
             r.run.begin(i, "cargo build --release --bins (all app packages)");
             let outcomes = crate::cargo_cache::warm_builds(&mut r.run, &host, &packages, &opts);
-            failed |= finish_batch(vm, i, outcomes, &opts);
+            failed |= finish_batch(vm, i, outcomes, &opts, true);
         }
     }
     if failed { Err("one or more cargo batches failed; see target/build steps".into()) } else { Ok(()) }
