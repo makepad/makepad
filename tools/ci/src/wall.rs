@@ -13,26 +13,55 @@ script_mod! {
     mod.widgets.CiWall = #(CiWall::register_widget(vm)){
         width: Fill height: Fill
         draw_square +: {
-            color: #3a3f46
+            color: #x3a3f46
             pulse: 1.0
             progress: -1.0
             selected: 0.0
             pixel: fn(){
                 let p = self.pos * self.rect_size
-                let edge = min(min(p.x, p.y), min(self.rect_size.x-p.x, self.rect_size.y-p.y))
-                if edge < 2.0 && self.selected > 0.5 {return #9aa1ab}
-                if self.progress >= 0.0 && p.y > self.rect_size.y-10.0 {
-                    if self.pos.x < self.progress {return #8f98a3}
-                    return #0009
+                let sdf = Sdf2d.viewport(p)
+                sdf.box(1.0, 1.0, self.rect_size.x-2.0, self.rect_size.y-2.0, 4.0)
+                let mut fill = vec4(self.color.xyz * self.pulse, 1.0)
+                if self.progress >= 0.0 && p.y > self.rect_size.y-5.0 {
+                    fill = #x1c2229
+                    if p.x < 8.0 + (self.rect_size.x-16.0) * self.progress {fill = #x788491}
                 }
-                return vec4(self.color.xyz * self.pulse, 1.0)
+                sdf.fill_keep(fill)
+                if self.selected > 0.5 {sdf.stroke(#x899098, 1.0)}
+                return sdf.result
             }
         }
         // A named family: an empty one only renders where a system fallback
         // happens to exist, and the tiles came up blank on the CI box.
+        scroll_bars: mod.widgets.ScrollBars{show_scroll_x: false show_scroll_y: true}
         draw_name +: {color: #c9ced6 text_style: theme.font_bold{font_size: 14}}
-        draw_text +: {color: #8e96a1 text_style: theme.font_regular{font_size: 11}}
+        draw_text +: {color: #x8e96a1 text_style: theme.font_regular{font_size: 11}}
     }
+    mod.widgets.CiBranches = #(CiBranches::register_widget(vm)){
+        width: Fill height: Fit
+        draw_name +: {color: #b7bec7 text_style: theme.font_bold{font_size: 17}}
+        draw_tip +: {color: #75808d text_style: theme.font_code{font_size: 11}}
+        draw_state +: {color: #a0aab6 text_style: theme.font_regular{font_size: 13}}
+        draw_age +: {color: #636f7d text_style: theme.font_regular{font_size: 10}}
+    }
+
+    mod.widgets.CiSteps = #(CiSteps::register_widget(vm)){
+        width: Fill height: Fill
+        scroll_bars: mod.widgets.ScrollBars{show_scroll_x: false show_scroll_y: true}
+        draw_block +: {
+            color: #x080b0e pulse: 1.0 progress: -1.0 selected: 0.0
+            pixel: fn(){
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                sdf.box(0.0, 0.0, self.rect_size.x, self.rect_size.y, 3.0)
+                sdf.fill(self.color)
+                return sdf.result
+            }
+        }
+        draw_name +: {color: #959faa text_style: theme.font_regular{font_size: 11}}
+        draw_time +: {color: #697480 text_style: theme.font_code{font_size: 10}}
+        draw_reason +: {color: #8d97a3 text_style: theme.font_code{font_size: 10}}
+    }
+
 }
 #[derive(Script, ScriptHook)]
 #[repr(C)]
@@ -66,6 +95,10 @@ pub struct CiWall {
     #[redraw]
     #[rust]
     area: Area,
+    #[live]
+    draw_list: DrawList2d,
+    #[live]
+    scroll_bars: ScrollBars,
     #[live]
     draw_square: DrawSquare,
     #[live]
@@ -139,19 +172,26 @@ pub fn layout(width: f64, height: f64, count: usize) -> (usize, DVec2) {
     }
     (best.0, best.1)
 }
-fn ellipsis(line: &str, chars: usize) -> String {
-    if line.chars().count() > chars {
-        format!("{}…", line.chars().take(chars.saturating_sub(1)).collect::<String>())
-    } else {
-        line.into()
+/// Text shaping supplies actual advances, including fallback and wide glyphs.
+fn ellipsis(draw: &DrawText, cx: &mut Cx, line: &str, width: f64) -> String {
+    let measure = |cx: &mut Cx, text: &str| draw.layout(cx, 0.0, 0.0, None, false, Align::default(), text).size_in_lpxs.width as f64;
+    if measure(cx, line) <= width { return line.into(); }
+    let mut ends: Vec<usize> = line.char_indices().map(|(i, _)| i).collect();
+    ends.push(line.len());
+    let (mut low, mut high) = (0, ends.len()-1);
+    while low < high {
+        let mid = (low+high+1)/2;
+        if measure(cx, &format!("{}…", &line[..ends[mid]])) <= width { low=mid; } else { high=mid-1; }
     }
+    format!("{}…", &line[..ends[low]])
 }
 fn clock(seconds: f64) -> String {
     let s = seconds.max(0.0) as u64;
     if s >= 60 { format!("{}m{:02}s", s / 60, s % 60) } else { format!("{s}s") }
 }
 impl Widget for CiWall {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if !self.scroll_bars.handle_event(cx, event, scope).is_empty() { self.area.redraw(cx); }
         if let Hit::FingerDown(e) = event.hits(cx, self.area) {
             if let Some(index) = self.rects.iter().position(|r| r.contains(e.abs)) {
                 self.selected = Some(self.tiles[index].key.clone());
@@ -164,10 +204,31 @@ impl Widget for CiWall {
         }
     }
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
-        let rect = cx.walk_turtle(walk);
-        cx.add_rect_area(&mut self.area, rect);
-        let (cols, cell) = layout(rect.size.x, rect.size.y, self.tiles.len());
-        let gap = (cell.y * 0.05).clamp(3.0, 8.0);
+        // Keep the wall's batched geometry and text in one owned recording.
+        self.draw_list.begin_always(cx);
+        self.scroll_bars.begin(cx, walk, Layout::flow_down());
+        let viewport = cx.turtle().rect();
+        let width = viewport.size.x - 8.0;
+        // Keep the existing fit-to-height packing for normal walls, but give
+        // dense walls a readable virtual surface that the scrollbars expose.
+        let min_height = if self.tiles.len() > 40 { 950.0 } else { viewport.size.y };
+        let (cols, mut cell) = layout(width, min_height, self.tiles.len());
+        let preferred_cols = ((width / 150.0).floor() as usize).max(1).min(self.tiles.len().max(1));
+        let mut cols = cols.min(preferred_cols);
+        let mut best = f64::MAX;
+        for candidate in 1..=preferred_cols {
+            let rows = self.tiles.len().div_ceil(candidate).max(1);
+            let height = (min_height / rows as f64).clamp(84.0, 192.0);
+            let aspect = (width / candidate as f64 - 8.0) / (height - 8.0);
+            let score = (aspect / (5.0/3.0)).ln().abs();
+            if score < best {best=score;cols=candidate;}
+        }
+        cell.x = width / cols as f64;
+        let rows = self.tiles.len().div_ceil(cols).max(1);
+        cell.y = if self.tiles.len() <= 40 { (viewport.size.y / rows as f64).min(cell.x * 0.64).clamp(84.0, if self.tiles.len() <= 8 {192.0} else {160.0}) } else { (cell.x * 0.64).clamp(96.0, 160.0) };
+        let gap = 8.0;
+        let height = self.tiles.len().div_ceil(cols) as f64 * cell.y;
+        let rect = cx.walk_turtle(Walk::fixed(width, height));
         self.rects.clear();
         self.draw_square.begin_many_instances(cx);
         for (index, tile) in self.tiles.iter().enumerate() {
@@ -186,7 +247,7 @@ impl Widget for CiWall {
             };
             let (p, w, f) = tile.state.counts();
             self.draw_square.progress = if running {
-                ((p + w + f) as f32 / (tile.state.steps.len() + 1) as f32).min(0.98)
+                ((p + w + f) as f32 / tile.state.steps.len().max(1) as f32).min(0.98)
             } else {
                 -1.0
             };
@@ -194,21 +255,23 @@ impl Widget for CiWall {
             self.draw_square.draw_abs(cx, r);
         }
         self.draw_square.end_many_instances(cx);
-        let name_font = name_font(cell);
-        let font = (name_font * 0.72).clamp(9.0, 15.0);
+        let name_font = name_font(cell).clamp(13.0, 24.0);
+        let font = (name_font * 0.66).clamp(10.0, 12.0);
         self.draw_name.text_style.font_size = name_font as f32;
         self.draw_text.text_style.font_size = font as f32;
         self.draw_name.begin_many_instances(cx);
         for (tile, r) in self.tiles.iter().zip(&self.rects) {
-            let chars = ((r.size.x - 20.0) / (name_font * NAME_ADVANCE)).max(1.0) as usize;
             self.draw_name.color = ink(tile.state.color_verdict(), true);
-            self.draw_name.draw_abs(cx, r.pos + dvec2(10.0, 8.0), &ellipsis(&tile.label, chars));
+            self.draw_name.text_style.font_size = name_font as f32;
+            while self.draw_name.text_style.font_size > 13.0 && self.draw_name.layout(cx, 0.0, 0.0, None, false, Align::default(), &tile.label).size_in_lpxs.width as f64 > r.size.x-24.0 {
+                self.draw_name.text_style.font_size = (self.draw_name.text_style.font_size-1.0).max(13.0);
+            }
+            let label = ellipsis(&self.draw_name, cx, &tile.label, r.size.x-24.0);
+            self.draw_name.draw_abs(cx, r.pos + dvec2(12.0, 10.0), &label);
         }
         self.draw_name.end_many_instances(cx);
         self.draw_text.begin_many_instances(cx);
         for (tile, r) in self.tiles.iter().zip(&self.rects) {
-            // Capitals and digits run wide ("VERDICT: NO"): a line never leaves its tile.
-            let chars = ((r.size.x - 24.0) / (font * 0.68)).max(1.0) as usize;
             let state = &tile.state;
             self.draw_text.color = ink(state.color_verdict(), false);
             let (p, w, f) = state.counts();
@@ -220,7 +283,7 @@ impl Widget for CiWall {
                 ],
                 "red" => vec![
                     state.steps.iter().find(|s| s.state == "failed").map(short).unwrap_or_else(|| "failed".into()),
-                    state.detail.lines().next().unwrap_or("").into(),
+                    state.detail.lines().next().unwrap_or("").trim_start_matches("VERDICT: NO - ").into(),
                     clock(state.seconds),
                 ],
                 "orange" => vec![
@@ -234,14 +297,20 @@ impl Widget for CiWall {
                 _ => vec!["untested".into()],
             };
             for (index, line) in lines.iter().filter(|l| !l.is_empty()).enumerate() {
-                let y = 10.0 + name_font * 1.55 + index as f64 * (font * 1.5);
+                let y = if r.size.y >= 110.0 && index + 1 == lines.len() && lines.len() > 1 {
+                    r.size.y - 12.0 - font * 1.4
+                } else {12.0 + name_font * 1.33 + index as f64 * (font * 1.4)};
                 if y + font > r.size.y - 12.0 {
                     break;
                 }
-                self.draw_text.draw_abs(cx, r.pos + dvec2(10.0, y), &ellipsis(line, chars));
+                let line = ellipsis(&self.draw_text, cx, line, r.size.x-24.0);
+                self.draw_text.draw_abs(cx, r.pos + dvec2(12.0, y), &line);
             }
         }
         self.draw_text.end_many_instances(cx);
+        self.scroll_bars.end(cx);
+        cx.add_rect_area(&mut self.area, viewport);
+        self.draw_list.end(cx);
         DrawStep::done()
     }
 }
@@ -265,6 +334,107 @@ impl CiWallRef {
         self.borrow().and_then(|inner| inner.selected.clone())
     }
 }
+pub struct BranchLine {
+    pub name: String,
+    pub tip: String,
+    pub state: String,
+    pub age: String,
+}
+#[derive(Script, ScriptHook, Widget)]
+pub struct CiBranches {
+    #[uid] uid: WidgetUid,
+    #[source] source: ScriptObjectRef,
+    #[walk] walk: Walk,
+    #[redraw] #[rust] area: Area,
+    #[live] draw_name: DrawText,
+    #[live] draw_tip: DrawText,
+    #[live] draw_state: DrawText,
+    #[live] draw_age: DrawText,
+    #[rust] branches: Vec<BranchLine>,
+}
+impl Widget for CiBranches {
+    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        let rect = cx.walk_turtle(Walk{height: Size::Fixed(30.0*self.branches.len().max(1) as f64), ..walk});
+        cx.add_rect_area(&mut self.area, rect);
+        for (i, branch) in self.branches.iter().enumerate() {
+            let pos = rect.pos+dvec2(0.0, 30.0*i as f64);
+            let name = ellipsis(&self.draw_name, cx, &branch.name, rect.size.x*0.25);
+            let width = self.draw_name.layout(cx,0.0,0.0,None,false,Align::default(),&name).size_in_lpxs.width as f64;
+            self.draw_name.draw_abs(cx,pos,&name);
+            let x = width+18.0;
+            self.draw_tip.draw_abs(cx,pos+dvec2(x,6.0),&branch.tip);
+            let x = x+94.0;
+            self.draw_state.draw_abs(cx,pos+dvec2(x,4.0),&branch.state);
+            let width = self.draw_state.layout(cx,0.0,0.0,None,false,Align::default(),&branch.state).size_in_lpxs.width as f64;
+            let x = x+width+18.0;
+            let age = ellipsis(&self.draw_age,cx,&branch.age,(rect.size.x-x).max(0.0));
+            self.draw_age.draw_abs(cx,pos+dvec2(x,7.0),&age);
+        }
+        DrawStep::done()
+    }
+}
+impl CiBranchesRef {
+    pub fn set_branches(&self, cx: &mut Cx, branches: Vec<BranchLine>) {
+        if let Some(mut inner)=self.borrow_mut() {inner.branches=branches;inner.area.redraw(cx);}
+    }
+}
+
+#[derive(Script, ScriptHook, Widget)]
+pub struct CiSteps {
+    #[uid] uid: WidgetUid,
+    #[source] source: ScriptObjectRef,
+    #[walk] walk: Walk,
+    #[redraw] #[rust] area: Area,
+    #[live] scroll_bars: ScrollBars,
+    #[live] draw_block: DrawSquare,
+    #[live] draw_name: DrawText,
+    #[live] draw_time: DrawText,
+    #[live] draw_reason: DrawText,
+    #[rust] steps: Vec<crate::report::Stage>,
+}
+impl Widget for CiSteps {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if !self.scroll_bars.handle_event(cx, event, scope).is_empty() {self.area.redraw(cx);}
+    }
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        self.scroll_bars.begin(cx, walk, Layout::flow_down());
+        let viewport = cx.turtle().rect();
+        let width = (viewport.size.x-8.0).max(0.0);
+        if self.steps.is_empty() {
+            self.draw_name.color = rgb(105, 115, 126);
+            self.draw_name.draw_walk(cx, Walk::fill_fit(), Align::default(), "No steps recorded yet.");
+        }
+        for step in &self.steps {
+            let row = cx.walk_turtle(Walk::fixed(width, 27.0));
+            let failed = step.state == "failed";
+            self.draw_name.color = if failed {colour("red")} else {rgb(125, 137, 149)};
+            self.draw_name.draw_abs(cx, row.pos+dvec2(0.0, 3.0), match step.state.as_str(){"passed"=>"✓", "failed"=>"×", "running"=>"◦", "warning"=>"!", _=>"–"});
+            self.draw_name.color = rgb(159, 168, 179);
+            let name = step.name.rsplit(" / ").next().unwrap_or(&step.name);
+            let label = ellipsis(&self.draw_name, cx, name, width-86.0);
+            self.draw_name.draw_abs(cx, row.pos+dvec2(22.0, 3.0), &label);
+            let seconds = step.started.filter(|_| step.state=="running").map(|s|s.elapsed().as_secs_f64()).unwrap_or(step.seconds);
+            self.draw_time.draw_abs(cx, row.pos+dvec2(width-55.0, 4.0), &format!("{seconds:.1}s"));
+            if matches!(step.state.as_str(), "failed" | "warning") && !step.detail.is_empty() {
+                let text = self.draw_reason.layout(cx, 0.0, 0.0, Some((width-40.0).max(1.0) as f32), true, Align::default(), &step.detail);
+                let height = text.size_in_lpxs.height as f64 + 20.0;
+                let block = cx.walk_turtle(Walk::fixed(width, height+6.0));
+                self.draw_block.draw_abs(cx, Rect{pos:block.pos+dvec2(20.0,0.0), size:dvec2(width-20.0,height)});
+                self.draw_reason.draw_walk_laidout(cx, Walk::abs_rect(Rect{pos:block.pos+dvec2(30.0,10.0), size:dvec2(width-40.0,height-20.0)}), &text);
+            }
+        }
+        self.scroll_bars.end(cx);
+        cx.add_rect_area(&mut self.area, viewport);
+        DrawStep::done()
+    }
+}
+impl CiStepsRef {
+    pub fn set_steps(&self, cx: &mut Cx, steps: Vec<crate::report::Stage>) {
+        if let Some(mut inner) = self.borrow_mut() {inner.steps=steps; inner.area.redraw(cx);}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
