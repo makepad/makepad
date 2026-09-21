@@ -1052,6 +1052,29 @@ pub struct cef_image_t {
 }
 
 #[repr(C)]
+pub struct cef_completion_callback_t {
+    pub base: cef_base_ref_counted_t,
+    pub on_complete: Option<unsafe extern "system" fn(self_: *mut cef_completion_callback_t)>,
+}
+
+/// The cookie store of a request context. Same layout in the 138 and 144
+/// headers: five methods, of which only the flush is called.
+#[repr(C)]
+pub struct cef_cookie_manager_t {
+    pub base: cef_base_ref_counted_t,
+    pub visit_all_cookies: cef_unused_callback_t,
+    pub visit_url_cookies: cef_unused_callback_t,
+    pub set_cookie: cef_unused_callback_t,
+    pub delete_cookies: cef_unused_callback_t,
+    pub flush_store: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_cookie_manager_t,
+            callback: *mut cef_completion_callback_t,
+        ) -> c_int,
+    >,
+}
+
+#[repr(C)]
 pub struct cef_download_image_callback_t {
     pub base: cef_base_ref_counted_t,
     pub on_download_image_finished: Option<
@@ -1082,7 +1105,14 @@ pub struct cef_frame_t {
     pub load_request: cef_unused_callback_t,
     pub load_url:
         Option<unsafe extern "system" fn(self_: *mut cef_frame_t, url: *const cef_string_t)>,
-    pub execute_java_script: cef_unused_callback_t,
+    pub execute_java_script: Option<
+        unsafe extern "system" fn(
+            self_: *mut cef_frame_t,
+            code: *const cef_string_t,
+            script_url: *const cef_string_t,
+            start_line: c_int,
+        ),
+    >,
     pub is_main: Option<unsafe extern "system" fn(self_: *mut cef_frame_t) -> c_int>,
     pub is_focused: Option<unsafe extern "system" fn(self_: *mut cef_frame_t) -> c_int>,
 }

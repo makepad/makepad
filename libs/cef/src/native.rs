@@ -1,6 +1,6 @@
 use crate::{
     ffi, AudioCaptureConfig, AudioCaptureStats, AudioEvent, AudioFormat, AudioPacket,
-    BootstrapResult, Error, Frame, Result, TEXT_INPUT_MODE_NONE,
+    BootstrapResult, ConsoleMessage, Error, Evaluation, Frame, Result, TEXT_INPUT_MODE_NONE,
 };
 use libloading::Library;
 #[cfg(target_os = "macos")]
@@ -24,6 +24,7 @@ use std::slice;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
+use std::time::{Duration, Instant};
 use std::sync::{Arc, Mutex, OnceLock};
 
 #[cfg(target_os = "macos")]
@@ -281,6 +282,9 @@ struct CefApi {
     cef_get_exit_code: unsafe extern "C" fn() -> c_int,
     cef_shutdown: unsafe extern "C" fn(),
     cef_do_message_loop_work: unsafe extern "C" fn(),
+    cef_cookie_manager_get_global_manager: unsafe extern "C" fn(
+        callback: *mut ffi::cef_completion_callback_t,
+    ) -> *mut ffi::cef_cookie_manager_t,
     cef_browser_host_create_browser_sync: unsafe extern "C" fn(
         window_info: *const ffi::cef_window_info_t,
         client: *mut ffi::cef_client_t,
@@ -325,6 +329,9 @@ struct Runtime {
     api: CefApi,
     _paths: RuntimePaths,
     state: Mutex<RuntimeState>,
+    /// Browsers created and not yet gone: counted up when one is made and
+    /// down when CEF says it has closed, which is what `shutdown` waits for.
+    live_browsers: AtomicUsize,
 }
 
 #[derive(Default)]
@@ -389,6 +396,13 @@ struct SharedBrowserState {
     /// Audio capture, absent until the embedder asks for it: a browser that
     /// never does hands CEF no audio handler at all.
     audio: OnceLock<AudioTap>,
+    /// What the page wrote to its console, newest last, until the embedder
+    /// takes it; bounded, so a page that logs in a loop costs a few
+    /// kilobytes and nothing else.
+    console: Mutex<std::collections::VecDeque<ConsoleMessage>>,
+    /// Evaluations handed out so far: each one's answer comes back through
+    /// the console under its own number.
+    evaluations: AtomicU64,
 }
 
 /// Packets the queue to the embedder holds before the capture thread drops
@@ -552,6 +566,19 @@ struct LifeSpanHandler {
 }
 
 #[repr(C)]
+/// Told once when something CEF was asked to do is done. Holds a flag the
+/// asker polls while turning the loop; the object lives as long as CEF
+/// holds a reference to it.
+#[repr(C)]
+struct CompletionCallback {
+    cef_callback: ffi::cef_completion_callback_t,
+    ref_count: AtomicUsize,
+    done: Arc<AtomicBool>,
+}
+
+/// `#[repr(C)]` like every handler CEF is handed: CEF gets a pointer to
+/// the first field and hands it back as the whole struct.
+#[repr(C)]
 struct DownloadImageCallback {
     cef_callback: ffi::cef_download_image_callback_t,
     ref_count: AtomicUsize,
@@ -595,6 +622,14 @@ macro_rules! impl_ref_counted {
 
 unsafe fn no_drop_hook<T>(_this: *mut T) {}
 
+impl_ref_counted!(
+    CompletionCallback,
+    completion_add_ref,
+    completion_release,
+    completion_has_one_ref,
+    completion_has_at_least_one_ref,
+    no_drop_hook
+);
 impl_ref_counted!(
     DisplayHandler,
     display_add_ref,
@@ -681,6 +716,17 @@ struct ExternalPump {
     timer: Mutex<usize>,
     is_active: AtomicBool,
     reentrancy_detected: AtomicBool,
+}
+
+/// How a browser is made, beyond its address and size.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BrowserOptions {
+    /// Deliver every frame as a CPU buffer through [`Browser::take_frame`]
+    /// even where GPU paint is available: for an embedder that reads the
+    /// pixels (records them, delays them, sends them on) rather than
+    /// showing the page as it is painted. Off, the browser paints the way
+    /// [`accelerated_paint_requested`] says.
+    pub software_frames: bool,
 }
 
 pub struct Browser {
@@ -898,6 +944,10 @@ fn runtime() -> Result<&'static Runtime> {
                 cef_get_exit_code: load_symbol(&library, b"cef_get_exit_code\0")?,
                 cef_shutdown: load_symbol(&library, b"cef_shutdown\0")?,
                 cef_do_message_loop_work: load_symbol(&library, b"cef_do_message_loop_work\0")?,
+                cef_cookie_manager_get_global_manager: load_symbol(
+                    &library,
+                    b"cef_cookie_manager_get_global_manager\0",
+                )?,
                 cef_browser_host_create_browser_sync: load_symbol(
                     &library,
                     b"cef_browser_host_create_browser_sync\0",
@@ -915,6 +965,7 @@ fn runtime() -> Result<&'static Runtime> {
         }
 
         Ok(Runtime {
+            live_browsers: AtomicUsize::new(0),
             _library: library,
             api,
             _paths: paths,
@@ -3062,6 +3113,42 @@ unsafe extern "system" fn display_on_title_change(
     (*handler).state.update_nav(|nav| nav.title = title);
 }
 
+/// Console messages the embedder may take. A page that logs in a loop
+/// costs this many strings and no more.
+const CONSOLE_KEEP: usize = 256;
+
+/// What an evaluation's answer is written to the console as: the mark,
+/// the evaluation's number, then `ok:` and the JSON of the value or
+/// `err:` and the exception's text.
+const EVALUATION_MARK: &str = "\u{1}makepad-cef-evaluation\u{1}";
+
+unsafe extern "system" fn display_on_console_message(
+    self_: *mut ffi::cef_display_handler_t,
+    browser: *mut ffi::cef_browser_t,
+    level: ffi::cef_log_severity_t,
+    message: *const ffi::cef_string_t,
+    source: *const ffi::cef_string_t,
+    line: c_int,
+) -> c_int {
+    release_param(browser);
+    let handler = self_ as *mut DisplayHandler;
+    let message = cef_string_to_string(message);
+    // An evaluation's answer is the embedder's, not the log's.
+    let ours = message.starts_with(EVALUATION_MARK);
+    let state: &SharedBrowserState = &(*handler).state;
+    let mut console = state.console.lock().unwrap();
+    if console.len() >= CONSOLE_KEEP {
+        console.pop_front();
+    }
+    console.push_back(ConsoleMessage {
+        level: level as i32,
+        message,
+        source: cef_string_to_string(source),
+        line: line as i32,
+    });
+    ours as c_int
+}
+
 unsafe extern "system" fn display_on_favicon_urlchange(
     self_: *mut ffi::cef_display_handler_t,
     browser: *mut ffi::cef_browser_t,
@@ -3284,7 +3371,7 @@ impl DisplayHandler {
                 on_fullscreen_mode_change: None,
                 on_tooltip: None,
                 on_status_message: None,
-                on_console_message: None,
+                on_console_message: Some(display_on_console_message),
                 on_auto_resize: None,
                 on_loading_progress_change: None,
                 on_cursor_change: None,
@@ -3336,11 +3423,104 @@ impl LifeSpanHandler {
                 on_before_dev_tools_popup: None,
                 on_after_created: None,
                 do_close: None,
-                on_before_close: None,
+                on_before_close: Some(life_span_on_before_close),
             },
             ref_count: AtomicUsize::new(1),
             state,
         }))
+    }
+}
+
+/// The browser is gone: one fewer for `shutdown` to wait for.
+unsafe extern "system" fn life_span_on_before_close(
+    _self: *mut ffi::cef_life_span_handler_t,
+    browser: *mut ffi::cef_browser_t,
+) {
+    release_param(browser);
+    if let Ok(runtime) = runtime() {
+        let _ = runtime.live_browsers.fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+            Some(count.saturating_sub(1))
+        });
+    }
+}
+
+impl CompletionCallback {
+    fn allocate(done: Arc<AtomicBool>) -> *mut CompletionCallback {
+        Box::into_raw(Box::new(Self {
+            cef_callback: ffi::cef_completion_callback_t {
+                base: ffi::cef_base_ref_counted_t {
+                    size: std::mem::size_of::<ffi::cef_completion_callback_t>(),
+                    add_ref: Some(completion_add_ref),
+                    release: Some(completion_release),
+                    has_one_ref: Some(completion_has_one_ref),
+                    has_at_least_one_ref: Some(completion_has_at_least_one_ref),
+                },
+                on_complete: Some(completion_on_complete),
+            },
+            ref_count: AtomicUsize::new(1),
+            done,
+        }))
+    }
+}
+
+unsafe extern "system" fn completion_on_complete(self_: *mut ffi::cef_completion_callback_t) {
+    let callback = self_ as *mut CompletionCallback;
+    (*callback).done.store(true, Ordering::Release);
+}
+
+/// Write the profile out now — its cookies, which Chromium commits in
+/// batches half a minute apart and does not commit for a process that
+/// simply ends. Call it when the app is told it is shutting down: on macOS
+/// the platform terminates the process from inside the event loop, so
+/// nothing after `event_loop` (and so [`shutdown`]) ever runs, and a login
+/// made in the last half minute of a session would be gone at the next
+/// launch. Waits for the store's answer on the loop, bounded; harmless to
+/// call more than once or with pages still open.
+pub fn flush_profile() {
+    let Ok(runtime) = runtime() else {
+        return;
+    };
+    {
+        let state = runtime.state.lock().unwrap();
+        if !state.initialized || state.shutting_down {
+            return;
+        }
+    }
+    let flushed = flush_cookies(runtime);
+    eprintln!("[makepad-cef] profile: cookie store {flushed}");
+}
+
+/// The cookie flush itself: asked of the global store, waited for on the
+/// loop, bounded so a store that never answers does not hold the process.
+fn flush_cookies(runtime: &Runtime) -> String {
+    let done = Arc::new(AtomicBool::new(false));
+    unsafe {
+        let manager = (runtime.api.cef_cookie_manager_get_global_manager)(ptr::null_mut());
+        if manager.is_null() {
+            return "not flushed: no global cookie manager".to_string();
+        }
+        let asked = match (*manager).flush_store {
+            Some(flush_store) => {
+                let callback = CompletionCallback::allocate(done.clone());
+                flush_store(manager, &mut (*callback).cef_callback) != 0
+            }
+            None => false,
+        };
+        release_ref_counted(&mut (*manager).base as *mut _);
+        if !asked {
+            return "not flushed: flush_store refused".to_string();
+        }
+    }
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(2);
+    while !done.load(Ordering::Acquire) && Instant::now() < deadline {
+        do_message_loop_work_impl();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    if done.load(Ordering::Acquire) {
+        format!("flushed in {} ms", started.elapsed().as_millis())
+    } else {
+        "flush not confirmed within 2 s".to_string()
     }
 }
 
@@ -3607,6 +3787,17 @@ impl Browser {
     /// `width x height` pixels. Mouse coordinates handed to `send_mouse_*`
     /// are in points as well.
     pub fn new(url: &str, width: usize, height: usize, scale_factor: f32) -> Result<Self> {
+        Self::new_with_options(url, width, height, scale_factor, BrowserOptions::default())
+    }
+
+    /// [`Self::new`] with a say in how the browser paints.
+    pub fn new_with_options(
+        url: &str,
+        width: usize,
+        height: usize,
+        scale_factor: f32,
+        options: BrowserOptions,
+    ) -> Result<Self> {
         ensure_initialized()?;
         let runtime = runtime()?;
 
@@ -3624,7 +3815,7 @@ impl Browser {
             life_span_handler,
             audio_handler,
         );
-        let accelerated = accelerated_paint_available();
+        let accelerated = accelerated_paint_available() && !options.software_frames;
 
         let url = CefString::new(
             &runtime.api,
@@ -3701,6 +3892,7 @@ impl Browser {
                 "cef_browser_host_create_browser_sync returned null",
             ));
         }
+        runtime.live_browsers.fetch_add(1, Ordering::AcqRel);
 
         let mut this = Self {
             browser,
@@ -3933,6 +4125,72 @@ impl Browser {
         self.state.favicon.lock().unwrap().take()
     }
 
+    /// Whether Chromium last said a text field holds the page's focus
+    /// (`OnVirtualKeyboardRequested`, kept from the render thread). Desktop
+    /// OSR often never fires it, so `false` means "not said", not "no
+    /// field": key events from the widget are sent as field input either
+    /// way (`focus_on_editable_field` in [`Self::send_key_event`]). An
+    /// embedder that wants to keep its own single-letter shortcuts off a
+    /// page reads this as one more sign, not as the truth.
+    pub fn editable_focus(&self) -> bool {
+        self.state.editable_focus()
+    }
+
+    /// What the page wrote to its console since the last take, oldest
+    /// first: `console.log` and its siblings, and the errors Chromium
+    /// reports there. The answers to [`Self::evaluate_javascript`] are
+    /// taken out first (see [`Self::take_evaluations`]).
+    pub fn take_console_messages(&mut self) -> Vec<ConsoleMessage> {
+        let mut console = self.state.console.lock().unwrap();
+        let (ours, theirs): (Vec<_>, Vec<_>) =
+            console.drain(..).partition(|message| message.message.starts_with(EVALUATION_MARK));
+        console.extend(ours);
+        theirs
+    }
+
+    /// Run an expression in the main frame and have its value come back.
+    /// The value is JSON (`undefined` reads as `null`; what JSON cannot
+    /// carry, such as a DOM node, reads as `{}`), or the exception's text.
+    /// Returns the number the answer will carry in
+    /// [`Self::take_evaluations`], some pumps later; an expression that
+    /// never runs (no document yet) never answers. Statements are not
+    /// expressions: wrap them in `(function(){..})()`. Call on the thread
+    /// that pumps CEF.
+    pub fn evaluate_javascript(&mut self, expression: &str) -> Result<u64> {
+        let number = self.state.evaluations.fetch_add(1, Ordering::AcqRel) + 1;
+        let code = format!(
+            "(function(){{var m=\"\\u0001makepad-cef-evaluation\\u0001{number}:\";try{{var r=(function(){{return ({expression}\n);}})();console.log(m+\"ok:\"+JSON.stringify(r===undefined?null:r));}}catch(e){{console.log(m+\"err:\"+String(e&&e.message||e));}}}})()"
+        );
+        self.execute_javascript(&code)?;
+        Ok(number)
+    }
+
+    /// The answers that have come back, oldest first, each under the
+    /// number [`Self::evaluate_javascript`] gave out.
+    pub fn take_evaluations(&mut self) -> Vec<Evaluation> {
+        let mut console = self.state.console.lock().unwrap();
+        let mut answers = Vec::new();
+        console.retain(|message| {
+            let Some(rest) = message.message.strip_prefix(EVALUATION_MARK) else {
+                return true;
+            };
+            let Some((number, rest)) = rest.split_once(':') else {
+                return true;
+            };
+            let Ok(number) = number.parse::<u64>() else {
+                return true;
+            };
+            let result = match rest.split_once(':') {
+                Some(("ok", json)) => Ok(json.to_string()),
+                Some(("err", text)) => Err(text.to_string()),
+                _ => Err(rest.to_string()),
+            };
+            answers.push(Evaluation { number, result });
+            false
+        });
+        answers
+    }
+
     pub fn resize(&mut self, width: usize, height: usize, scale_factor: f32) -> Result<()> {
         let width = width.max(1);
         let height = height.max(1);
@@ -3947,10 +4205,8 @@ impl Browser {
         self.state.update_view(width, height, scale_factor);
 
         self.with_host(|host| unsafe {
-            if scale_changed {
-                if let Some(notify_screen_info_changed) = (*host).notify_screen_info_changed {
-                    notify_screen_info_changed(host);
-                }
+            if let Some(notify_screen_info_changed) = (*host).notify_screen_info_changed {
+                notify_screen_info_changed(host);
             }
             if let Some(was_resized) = (*host).was_resized {
                 was_resized(host);
@@ -3973,6 +4229,26 @@ impl Browser {
                 .load_url
                 .ok_or_else(|| Error::new("cef_frame_t::load_url missing"))?(
                 frame, &url.value
+            );
+            Ok(())
+        })
+    }
+
+    /// Run `code` in the page's main frame, as a script of the page's own
+    /// would. Fire and forget: nothing comes back, and a frame that has no
+    /// document yet runs nothing. Call on the thread that pumps CEF.
+    pub fn execute_javascript(&mut self, code: &str) -> Result<()> {
+        let runtime = runtime()?;
+        let code = CefString::new(&runtime.api, code)?;
+        let script_url = CefString::new(&runtime.api, "")?;
+        self.with_main_frame(|frame| unsafe {
+            (*frame)
+                .execute_java_script
+                .ok_or_else(|| Error::new("cef_frame_t::execute_java_script missing"))?(
+                frame,
+                &code.value,
+                &script_url.value,
+                0,
             );
             Ok(())
         })
@@ -4072,7 +4348,11 @@ impl Browser {
             is_system_key: is_system_key as c_int,
             character,
             unmodified_character,
-            focus_on_editable_field: self.state.editable_focus() as c_int,
+            // The widget only sends keys when it has keyboard focus. Treat
+            // those as field input so the page's player shortcuts (YouTube
+            // L = skip 10s) do not steal letters meant for a text box.
+            // CEF's virtual-keyboard callback is also honoured when it fires.
+            focus_on_editable_field: 1,
         };
         self.with_host(|host| unsafe {
             (*host)
@@ -4306,6 +4586,30 @@ pub fn shutdown() {
     let Ok(runtime) = runtime() else {
         return;
     };
+    {
+        let state = runtime.state.lock().unwrap();
+        if !state.initialized || state.shutting_down {
+            return;
+        }
+    }
+    // Browsers that were dropped have been told to close, and CEF closes
+    // them on its own loop: it has to be turned until they are gone, or
+    // the shutdown below finds them open and the profile they were using —
+    // the cookies of a session, kept in batches — never reaches the disk.
+    // Bounded, so a page that will not close does not hold the process.
+    let open = runtime.live_browsers.load(Ordering::Acquire);
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(2);
+    while runtime.live_browsers.load(Ordering::Acquire) > 0 && Instant::now() < deadline {
+        do_message_loop_work_impl();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let left = runtime.live_browsers.load(Ordering::Acquire);
+    let closed_ms = started.elapsed().as_millis();
+    let flushed = flush_cookies(runtime);
+    eprintln!(
+        "[makepad-cef] shutdown: {open} browsers open, {left} left after {closed_ms} ms; cookie store {flushed}"
+    );
     let mut state = runtime.state.lock().unwrap();
     if !state.initialized || state.shutting_down {
         return;

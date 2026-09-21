@@ -1939,6 +1939,7 @@ mod imp {
             "/t" | "/text" => route_text(p),
             "/drop" => route_drop(p),
             "/log" => route_log(p),
+            "/midi" => route_midi(p),
             "/trace" => route_trace(p),
             "/d" | "/dump" => match ask(|tx| Cmd::Dump(tx), 4) {
                 Reply::Text(text) => Out::Text(200, text),
@@ -2127,6 +2128,10 @@ mod imp {
              /t?t=TEXT         same as /k?t=\n\
              /drop?path=&x=&y= drop one absolute file path through Drag/Drop/DragEnd; optional w= and wait=1; app validates/loads it\n\
              /log?n=50         {{\"n\":lastseq,\"l\":[lines]}}; /log?since=N for everything after seq N\n\
+             /midi?a=&b=&c=    inject a MIDI message as if a device sent it (three bytes; p= port id or name)\n\
+             \x20                 /midi?k=ports&n=NAME[,NAME] declares ports for the app to adopt (NAME:i / NAME:o for one end)
+                               /midi?k=out reads back what the app SENT (its LED writes); /midi?k=reset forgets both
+                               it enters at the app's own receive, so enumeration and the OS handles are NOT proved
              /trace             get topics; ?topics=gpu.pass,wm sets them; ?off=1 clears them\n\
              /snap?q=&w=&all=  widget rects, ready to click: {{\"s\":[{{\"i\":id,\"ty\":type,\"r\":[x,y,w,h],\"w\":win,\"t\":text}}]}}\n\
              \x20                 q= filters id/type/text (substring); default lists only visible, sized widgets\n\
@@ -2338,6 +2343,120 @@ mod imp {
             other => return err(&format!("bad kind {other}")),
         };
         send_input(window, inputs, p.flag(&["wait"]))
+    }
+
+    /// The port names a `/midi?k=ports` list asks for, each with the ends it
+    /// carries.
+    ///
+    /// A name may be suffixed with the direction it has: `Surface:i`,
+    /// `Surface:o`, `Surface:io`. Only a suffix made entirely of `i` and `o`
+    /// counts as one, because a real port name is full of colons -- an ALSA
+    /// port is called things like `Through:Through Port-0 14:0` -- and a name
+    /// that happens to contain one must survive being written down here.
+    fn port_names(list: &str) -> Vec<(String, bool, bool)> {
+        let mut names = Vec::new();
+        for entry in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            let (name, dirs) = match entry.rsplit_once(':') {
+                Some((name, dirs))
+                    if !name.is_empty()
+                        && !dirs.is_empty()
+                        && dirs.chars().all(|c| c == 'i' || c == 'o') =>
+                {
+                    (name, dirs)
+                }
+                _ => (entry, "io"),
+            };
+            names.push((name.to_string(), dirs.contains('i'), dirs.contains('o')));
+        }
+        names
+    }
+
+    /// Drive the MIDI input path with no hardware, and read back what the
+    /// app sent.
+    ///
+    /// `in` queues a message as though a device had sent it: three bytes,
+    /// on a port named by id. `out` takes everything the app has sent since
+    /// the last read. `reset` forgets both, so one test cannot read the
+    /// tail of another's traffic.
+    ///
+    /// This proves everything the app does WITH a message. It proves nothing
+    /// about enumeration, the OS handles or real hot-plug, which all sit
+    /// below the seam it enters at.
+    fn route_midi(p: &Params) -> Out {
+        use crate::midi::{MidiData, MidiPortId};
+        use crate::makepad_live_id::LiveId;
+        match p.get(&["k", "kind"]).unwrap_or("in") {
+            "reset" => {
+                crate::midi_inject::reset();
+                Out::Json(200, "{\"ok\":1}".to_string())
+            }
+            "ports" => {
+                // Names, comma separated, each optionally suffixed with the
+                // direction it carries: "Surface:io", ":i", ":o". Both ends
+                // by default, because a controller is normally both.
+                let names = port_names(p.get(&["n", "names"]).unwrap_or(""));
+                if names.is_empty() {
+                    return err("need n=NAME[,NAME] (suffix :i or :o for one direction)");
+                }
+                let descs = crate::midi_inject::declare_ports(&names);
+                let rows: Vec<String> = descs
+                    .iter()
+                    .map(|d| {
+                        format!(
+                            "{{\"name\":{},\"id\":{},\"dir\":\"{}\"}}",
+                            json_str(&d.name),
+                            d.port_id.0 .0,
+                            if d.port_type.is_input() { "in" } else { "out" }
+                        )
+                    })
+                    .collect();
+                Out::Json(200, format!("{{\"n\":{},\"ports\":[{}]}}", rows.len(), rows.join(",")))
+            }
+            "out" => {
+                let sent = crate::midi_inject::drain_outgoing();
+                let rows: Vec<String> = sent
+                    .iter()
+                    .map(|(port, data)| {
+                        format!(
+                            "{{\"port\":{},\"d\":[{},{},{}]}}",
+                            port.0 .0, data.data[0], data.data[1], data.data[2]
+                        )
+                    })
+                    .collect();
+                Out::Json(200, format!("{{\"n\":{},\"m\":[{}]}}", rows.len(), rows.join(",")))
+            }
+            "in" => {
+                let byte = |keys: &[&str]| p.f64(keys, -1.0);
+                let (a, b, c) = (byte(&["a", "status"]), byte(&["b", "d1"]), byte(&["c", "d2"]));
+                if a < 0.0 || b < 0.0 || c < 0.0 {
+                    return err("need a= b= c= (three MIDI bytes)");
+                }
+                if a > 255.0 || b > 127.0 || c > 127.0 {
+                    return err("a<=255, b<=127, c<=127");
+                }
+                // A port may be given by the NAME it was declared under or
+                // by its raw id. Absent, it is 0, which is what the app sees
+                // for a message it never attributed to a port.
+                let port = match p.get(&["p", "port"]) {
+                    None => MidiPortId(LiveId(0)),
+                    Some(value) => match value.parse::<u64>() {
+                        Ok(raw) => MidiPortId(LiveId(raw)),
+                        Err(_) => crate::midi_inject::port_id_for(value),
+                    },
+                };
+                let data = MidiData { data: [a as u8, b as u8, c as u8] };
+                let queued = crate::midi_inject::push_incoming(port, data);
+                Out::Json(
+                    200,
+                    format!(
+                        "{{\"ok\":{},\"dropped\":{}}}",
+                        queued as u8,
+                        crate::midi_inject::dropped()
+                    ),
+                )
+            }
+            other => err(&format!("bad kind {other}")),
+        }
     }
 
     fn route_key(p: &Params) -> Out {
@@ -3397,6 +3516,36 @@ mod imp {
             assert_eq!(num(2.0), "2");
             assert_eq!(num(1.5), "1.5");
             assert_eq!(json_str("a\"b\n"), "\"a\\\"b\\n\"");
+        }
+
+        /// A port name is the caller's own text and a direction suffix is
+        /// optional, so the split has to be conservative: only a suffix made
+        /// of `i` and `o` is a direction, and everything else -- including
+        /// the colons a real ALSA port name is full of -- is part of the name.
+        #[test]
+        fn a_direction_suffix_is_told_from_a_colon_in_the_name() {
+            let both = |name: &str| (name.to_string(), true, true);
+            assert_eq!(port_names("Wide Surface"), vec![both("Wide Surface")]);
+            assert_eq!(
+                port_names(" A , B "),
+                vec![both("A"), both("B")],
+                "spaces around a name are not part of it"
+            );
+            assert_eq!(
+                port_names("Deck:i,Lamps:o"),
+                vec![("Deck".to_string(), true, false), ("Lamps".to_string(), false, true)]
+            );
+            assert_eq!(port_names("Both:io"), vec![both("Both")]);
+            // The colons a real port name carries.
+            assert_eq!(
+                port_names("Through:Through Port-0 14:0"),
+                vec![both("Through:Through Port-0 14:0")]
+            );
+            assert_eq!(port_names("Port: 2"), vec![both("Port: 2")]);
+            // A bare suffix names nothing, so it is a name, not a direction.
+            assert_eq!(port_names(":i"), vec![both(":i")]);
+            assert!(port_names("").is_empty());
+            assert!(port_names(" , ").is_empty(), "empty entries are not ports");
         }
 
         #[test]

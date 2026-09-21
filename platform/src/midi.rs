@@ -55,7 +55,16 @@ unsafe impl Send for MidiInput {}
 
 impl MidiInput {
     pub fn receive(&mut self) -> Option<(MidiPortId, MidiData)> {
-        self.0.as_mut().unwrap().receive()
+        // Injected messages first, and before the device is touched at all,
+        // so a run with no hardware still exercises everything downstream of
+        // here. Inert — one relaxed load — until something arms it.
+        if let Some(injected) = crate::midi_inject::take_incoming() {
+            return Some(injected);
+        }
+        // A handle that was never given a backend yields nothing rather than
+        // panicking. `MidiInput` derives Default, so one exists from the
+        // moment a struct holding it is built until the app fills it in.
+        self.0.as_mut()?.receive()
     }
 }
 
@@ -65,7 +74,10 @@ unsafe impl Send for MidiOutput {}
 
 impl MidiOutput {
     pub fn send(&self, port: Option<MidiPortId>, data: MidiData) {
-        let output = self.0.as_ref().unwrap();
+        // Recorded before it goes, so what the app sends to a controller can
+        // be read back by a test with no controller to look at.
+        crate::midi_inject::record_outgoing(port.unwrap_or_default(), data);
+        let Some(output) = self.0.as_ref() else { return };
         output.send(port, data);
     }
 }
