@@ -186,6 +186,20 @@ fn equality_charges_instruction_fuel() {
 }
 
 #[test]
+fn an_unbounded_evaluation_compares_past_the_work_ceiling() {
+    // No instruction limit, run budget or allocation budget: the host asked
+    // for no bound, so large structural comparisons are legitimate.
+    let vm = &mut test_vm();
+    vm.bx.captured_errors = Some(Vec::new());
+    inject_arrays(vm, equality::MAX_EQUALITY_WORK, false);
+
+    let result = vm.eval(script("unbounded", "left == right"));
+
+    assert_eq!(result.as_bool(), Some(true), "{:#?}", vm.take_errors());
+    assert!(vm.take_errors().is_empty());
+}
+
+#[test]
 fn equality_work_ceiling_bails_and_cannot_be_caught() {
     let vm = &mut test_vm();
     vm.bx.captured_errors = Some(Vec::new());
@@ -194,10 +208,14 @@ fn equality_work_ceiling_bails_and_cannot_be_caught() {
     let state = vm.heap_mut().new_object();
     vm.set_injected_global(id!(state), state.into());
 
-    let result = vm.eval(script(
-        "work_ceiling",
-        "try { left == right } { state.caught = 1 }\nstate.after = 1",
-    ));
+    // The ceiling belongs to bounded evaluations; the instruction limit is far
+    // above it so the work ceiling is what stops the comparison.
+    let result = vm.with_instruction_limit(10_000_000, |vm| {
+        vm.eval(script(
+            "work_ceiling",
+            "try { left == right } { state.caught = 1 }\nstate.after = 1",
+        ))
+    });
 
     assert!(result.is_err());
     let errors = vm.take_errors();
@@ -271,6 +289,7 @@ fn hard_time_budget_drains_its_uncatchable_error() {
 #[test]
 fn uncaught_error_bails_before_the_next_instruction() {
     let vm = &mut test_vm();
+    vm.bx.bail_on_uncaught_error = true;
     vm.bx.captured_errors = Some(Vec::new());
     let state = vm.heap_mut().new_object();
     vm.set_injected_global(id!(state), state.into());
@@ -337,6 +356,7 @@ fn debug_output_is_allowed_by_default() {
 #[test]
 fn disabled_debug_output_rejects_log_as_a_catchable_error() {
     let vm = &mut test_vm();
+    vm.bx.bail_on_uncaught_error = true;
     vm.bx.allow_debug_output = false;
     vm.bx.captured_errors = Some(Vec::new());
     let state = vm.heap_mut().new_object();

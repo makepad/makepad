@@ -156,6 +156,7 @@ impl ScriptHeap {
     pub(crate) fn note_string_limit_exceeded(&mut self, len: usize, operation: &'static str) {
         self.string_limit_exceeded = true;
         if self.pending_string_limit_error.is_none() {
+            self.allocation_error_pending = true;
             self.pending_string_limit_error = Some(format!(
                 "script string allocation limit exceeded while {operation}: {len} bytes, maximum {}",
                 self.max_string_bytes.unwrap_or(usize::MAX)

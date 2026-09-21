@@ -39,9 +39,14 @@ impl ScriptHeap {
             remaining = remaining.checked_sub(1)?;
             charge_host().then_some(())
         };
-        let mut pending = vec![(a, b)];
-        let mut visited = HashSet::new();
-        while let Some((a, b)) = pending.pop() {
+        // The root pair is held outside the worklist and the visited set is
+        // made on first use, so a scalar comparison allocates nothing: `==` on
+        // numbers and strings is hot (string-tag dispatch, `a.kind == "..."`)
+        // and only a container pair needs either structure.
+        let mut root = Some((a, b));
+        let mut pending: Vec<(ScriptValue, ScriptValue)> = Vec::new();
+        let mut visited: Option<HashSet<(ScriptValue, ScriptValue)>> = None;
+        while let Some((a, b)) = root.take().or_else(|| pending.pop()) {
             charge()?;
             if a.is_nan() || b.is_nan() {
                 return Some(false);
@@ -60,7 +65,7 @@ impl ScriptHeap {
                 continue;
             }
             if let (Some(pa), Some(pb)) = (a.as_object(), b.as_object()) {
-                if !visited.insert((a, b)) {
+                if !visited.get_or_insert_with(HashSet::new).insert((a, b)) {
                     continue;
                 }
                 let oa = &self.objects[pa];
@@ -106,7 +111,7 @@ impl ScriptHeap {
                 continue;
             }
             if let (Some(pa), Some(pb)) = (a.as_array(), b.as_array()) {
-                if !visited.insert((a, b)) {
+                if !visited.get_or_insert_with(HashSet::new).insert((a, b)) {
                     continue;
                 }
                 let a = &self.arrays[pa].storage;

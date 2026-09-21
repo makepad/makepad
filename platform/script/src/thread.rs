@@ -347,13 +347,24 @@ impl ScriptThread {
             .unwrap_or(false)
     }
 
-    /// Whether any active call frame (not just the innermost) owns a try
+    /// Whether a call frame of this run (not just the innermost) owns a try
     /// frame, so an error in a nested script call can unwind to it.
+    ///
+    /// The scan stops at the nearest root frame (`return_ip == None`). The
+    /// frames below it belong to an outer `run_core` that is still live on
+    /// the Rust stack under a native call (`array.retain(fn)` calls back on
+    /// this same thread); unwinding into them from here would pop frames that
+    /// outer loop is still executing.
     pub(crate) fn call_stack_has_try(&self) -> bool {
-        self.calls
-            .iter()
-            .rev()
-            .any(|call| self.tries.len() > call.bases.tries)
+        for call in self.calls.iter().rev() {
+            if self.tries.len() > call.bases.tries {
+                return true;
+            }
+            if call.return_ip.is_none() {
+                return false;
+            }
+        }
+        false
     }
 
     // lets resolve an id to a ScriptValue

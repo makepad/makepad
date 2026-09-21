@@ -19,7 +19,7 @@ use crate::trap::*;
 use crate::value::*;
 use crate::*;
 use std::any::Any;
-use std::cell::RefCell;
+use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
@@ -89,11 +89,39 @@ impl ScriptBuiltins {
     }
 }
 
+/// The script bodies, behind the same `borrow()` / `borrow_mut()` surface a
+/// `RefCell` has. Every mutable borrow advances `epoch`: a mutation is the only
+/// thing that can move or free a body's opcode buffer (a native call can
+/// re-enter `eval` and reload the very body that is running), and `run_core`
+/// compares the epoch before it trusts its cached pointer into that buffer.
+#[derive(Default)]
+pub struct ScriptBodies {
+    bodies: RefCell<Vec<ScriptBody>>,
+    epoch: Cell<u64>,
+}
+
+impl ScriptBodies {
+    #[inline(always)]
+    pub fn borrow(&self) -> Ref<'_, Vec<ScriptBody>> {
+        self.bodies.borrow()
+    }
+
+    pub fn borrow_mut(&self) -> RefMut<'_, Vec<ScriptBody>> {
+        self.epoch.set(self.epoch.get().wrapping_add(1));
+        self.bodies.borrow_mut()
+    }
+
+    #[inline(always)]
+    pub(crate) fn epoch(&self) -> u64 {
+        self.epoch.get()
+    }
+}
+
 #[derive(Default)]
 pub struct ScriptCode {
     pub builtins: ScriptBuiltins,
     pub native: RefCell<ScriptNative>,
-    pub bodies: RefCell<Vec<ScriptBody>>,
+    pub bodies: ScriptBodies,
     pub crate_manifests: Rc<RefCell<HashMap<String, String>>>,
     pub script_mod_overrides: Rc<RefCell<HashMap<ScriptModKey, String>>>,
 }
@@ -591,6 +619,7 @@ impl<'a> ScriptVm<'a> {
                         self.bx.threads.cur().mes.push(me);
                     }
                     self.bx.threads.cur().trap.ip = sip;
+                    self.drain_stale_errors();
                     return self.run_core();
                 }
             }
@@ -856,18 +885,21 @@ impl<'a> ScriptVm<'a> {
                 .trap
                 .goto(try_frame.start_ip + try_frame.jump);
         } else {
-            // An uncaught error terminates this evaluation before another
-            // instruction (and therefore another host effect) can execute.
-            // The diagnostic is drained first so it reaches the captured
-            // sink or the log exactly once; the error value then rides the
-            // Bail back to the host as the evaluation result.
+            // An uncaught error is reported and the evaluation continues with
+            // the error value in hand: one bad statement in a module must not
+            // take the rest of the module with it, a live edit is broken half
+            // the time, and scripts inspect returned error values (`?`).
             //
-            // Incremental (streaming) evaluation is the one exception: the
-            // host set `silence_errors` because incomplete source inevitably
-            // raises errors that are meaningless until the rest arrives, and
-            // Splash's live widget tree relies on the evaluation continuing
-            // past them. Those evals keep the historical drain-and-continue
-            // behaviour; every other eval terminates.
+            // A host that runs script it did not write opts into
+            // `bail_on_uncaught_error`: the error then terminates the
+            // evaluation before another instruction (and therefore another
+            // host effect) can execute, and rides the Bail back as its result.
+            // Streaming evals (`silence_errors`) never bail: incomplete source
+            // inevitably raises errors that mean nothing until the rest arrives.
+            if !self.bx.bail_on_uncaught_error || self.bx.silence_errors {
+                self.drain_errors();
+                return;
+            }
             let error = self
                 .bx
                 .threads
@@ -877,9 +909,6 @@ impl<'a> ScriptVm<'a> {
                 .front()
                 .map(|e| e.value);
             self.drain_errors();
-            if self.bx.silence_errors {
-                return;
-            }
             if let Some(error) = error {
                 self.bx
                     .threads
@@ -924,6 +953,19 @@ impl<'a> ScriptVm<'a> {
             .expect("resource-limit Bail must return a VM value")
     }
 
+    /// Errors raised while no script was running (a host apply, a host call of
+    /// a value that is not a function) belong to no evaluation. They are
+    /// reported here, at the Rust -> script boundary, so the run that starts
+    /// now can neither be caught by them nor be ended by them.
+    #[inline(always)]
+    fn drain_stale_errors(&mut self) {
+        if self.bx.threads.cur_ref().trap.has_err() {
+            self.drain_errors();
+        }
+    }
+
+    #[inline(never)]
+    #[cold]
     fn handle_execution_limit_failure(&mut self) -> Option<ScriptValue> {
         let stack_limit_exceeded = self.bx.threads.cur().take_stack_limit_exceeded();
         let call_frame_limit_exceeded = self.bx.threads.cur().take_call_frame_limit_exceeded();
@@ -976,10 +1018,23 @@ impl<'a> ScriptVm<'a> {
     }
 
     pub fn run_core(&mut self) -> ScriptValue {
-        loop {
+        // Cached pointer into the active body's opcode buffer, so the loop
+        // pays no RefCell borrow per instruction. It is only trusted while
+        // `bodies.epoch()` is unchanged: see `ScriptBodies`.
+        let mut cached_body_index: usize = usize::MAX;
+        let mut cached_epoch: u64 = 0;
+        let mut opcodes_ptr: *const ScriptValue = std::ptr::null();
+        let mut opcodes_len: usize = 0;
+
+        // A limit signal raised before this run started (a rejected frame, a
+        // stale flag) fails it before the first instruction.
+        if self.bx.threads.cur_ref().has_execution_limit_exceeded() {
             if let Some(value) = self.handle_execution_limit_failure() {
                 return value;
             }
+        }
+
+        loop {
             // Heap growth paths cannot own the interpreter trap (many are
             // shared with parsers/native bindings), so they record one hard
             // refusal on the heap. Turn it into the same uncatchable Bail as
@@ -1065,23 +1120,31 @@ impl<'a> ScriptVm<'a> {
             let body_index = thread.trap.ip.body as usize;
             let ip_index = thread.trap.ip.index as usize;
 
-            // Copy the opcode while the body borrow is live. Native calls may
-            // re-enter the VM and replace a body's parser, so a cached pointer
-            // into its opcode buffer cannot outlive this iteration.
-            let opcode = {
+            // Re-derive the pointer when the body changes or when anything
+            // mutated the bodies since it was taken: a native call may have
+            // re-entered the VM and reloaded the very body that is running.
+            let epoch = self.bx.code.bodies.epoch();
+            if body_index != cached_body_index || epoch != cached_epoch {
                 let bodies = self.bx.code.bodies.borrow();
-                let body = &bodies[body_index];
-                body.parser.opcodes.get(ip_index).copied()
-            };
+                let opcodes = &bodies[body_index].parser.opcodes;
+                opcodes_ptr = opcodes.as_ptr();
+                opcodes_len = opcodes.len();
+                cached_body_index = body_index;
+                cached_epoch = epoch;
+            }
 
-            let Some(opcode) = opcode else {
+            if ip_index >= opcodes_len {
                 // If there's a value on the stack, return it (for expression-style scripts)
                 let stack_len = self.bx.threads.cur().stack.len();
                 if stack_len > 0 {
                     return self.bx.threads.cur().pop_stack_value();
                 }
                 return NIL;
-            };
+            }
+
+            // SAFETY: the buffer can only move or be freed through
+            // `bodies.borrow_mut()`, which advances the epoch checked above.
+            let opcode = unsafe { *opcodes_ptr.add(ip_index) };
 
             if self.bx.debug_trace {
                 let stack_len = self.bx.threads.cur_ref().stack.len();
@@ -1094,8 +1157,10 @@ impl<'a> ScriptVm<'a> {
 
             if let Some((opcode, args)) = opcode.as_opcode() {
                 self.opcode(opcode, args);
-                if let Some(value) = self.handle_execution_limit_failure() {
-                    return value;
+                if self.bx.threads.cur_ref().has_execution_limit_exceeded() {
+                    if let Some(value) = self.handle_execution_limit_failure() {
+                        return value;
+                    }
                 }
                 // single-load poll for both interrupt sources (errors + traps)
                 let pending = self.bx.threads.cur().trap.pending();
@@ -1111,6 +1176,11 @@ impl<'a> ScriptVm<'a> {
                 // its a direct value-to-stack
                 self.bx.threads.cur().push_stack_value(opcode);
                 self.bx.threads.cur().trap.goto_next();
+                if self.bx.threads.cur_ref().has_execution_limit_exceeded() {
+                    if let Some(value) = self.handle_execution_limit_failure() {
+                        return value;
+                    }
+                }
             }
         }
     }
@@ -1154,6 +1224,7 @@ impl<'a> ScriptVm<'a> {
         self.bx.threads.cur().trap.ip.index = 0;
 
         // the main interpreter loop
+        self.drain_stale_errors();
         let value = self.run_core();
         if let Some(end) = self.bx.threads.cur().root_end_scope.take() {
             self.bx.code.bodies.borrow_mut()[body_id as usize].end_scope = Some(end);
@@ -1732,6 +1803,12 @@ pub struct ScriptVmBase {
     /// a standalone sandboxed runtime turns it off before any source runs,
     /// which makes `~` a catchable script error instead of an output path.
     pub allow_debug_output: bool,
+    /// Whether an uncaught script error ends the evaluation (a Bail carrying
+    /// the error) instead of being reported while the evaluation continues.
+    /// Off for Makepad hosts: a module keeps evaluating past one bad statement
+    /// and scripts may inspect returned error values. A host that runs script
+    /// it did not write turns it on before any source runs.
+    pub bail_on_uncaught_error: bool,
     /// When Some, drained errors are pushed here (formatted) instead of being
     /// logged or dropped — even under `silence_errors`. Install before an
     /// eval/call, take after, to feed diagnostics back to a host (e.g. an AI
@@ -1758,6 +1835,7 @@ impl ScriptVmBase {
             debug_trace: false,
             silence_errors: false,
             allow_debug_output: true,
+            bail_on_uncaught_error: false,
             captured_errors: None,
             run_budget: None,
             last_limit_consumed: 0,
@@ -1794,6 +1872,7 @@ impl ScriptVmBase {
             debug_trace: false,
             silence_errors: false,
             allow_debug_output: true,
+            bail_on_uncaught_error: false,
             captured_errors: None,
             run_budget: None,
             last_limit_consumed: 0,
@@ -2070,23 +2149,37 @@ mod tests {
     }
 
     #[test]
-    fn uncaught_error_terminates_a_plain_eval_but_not_a_silenced_streaming_eval() {
+    fn uncaught_error_terminates_an_eval_only_when_the_host_opts_in() {
         // `f()` on a number raises an uncaught script error; `42` follows it.
         let source = "let f = 1\nf()\n42";
+        let plain_eval = |vm: &mut ScriptVm| {
+            vm.bx.captured_errors = Some(Vec::new());
+            vm.eval(ScriptMod {
+                file: "uncaught-plain.octoscript".to_owned(),
+                code: format!("{source}\n;"),
+                ..Default::default()
+            })
+        };
 
+        // Default: the error is reported and the module keeps evaluating.
         let mut host = ScriptVmHost::new((), ());
         let mut vm = plain_vm(&mut host);
-        vm.bx.captured_errors = Some(Vec::new());
-        let plain = vm.eval(ScriptMod {
-            file: "uncaught-plain.octoscript".to_owned(),
-            code: format!("{source}\n;"),
-            ..Default::default()
-        });
-        assert!(plain.is_err(), "{plain:?}");
+        let plain = plain_eval(&mut vm);
+        assert_eq!(plain.as_number(), Some(42.0), "{plain:?}");
         assert!(!vm.take_errors().is_empty());
 
+        // Opted in: the error ends the evaluation and is its result.
         let mut host = ScriptVmHost::new((), ());
         let mut vm = plain_vm(&mut host);
+        vm.bx.bail_on_uncaught_error = true;
+        let bailed = plain_eval(&mut vm);
+        assert!(bailed.is_err(), "{bailed:?}");
+        assert!(!vm.take_errors().is_empty());
+
+        // Streaming evals never bail, opted in or not.
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = plain_vm(&mut host);
+        vm.bx.bail_on_uncaught_error = true;
         let streaming = vm.eval_with_append_source(
             ScriptMod {
                 file: "uncaught-streaming.octoscript".to_owned(),

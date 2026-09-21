@@ -1132,8 +1132,10 @@ impl ScriptValue {
     /// cannot truncate, saturate, or turn a non-number into item zero.
     pub fn checked_index(&self) -> Option<usize> {
         let value = self.as_number()?;
-        (value.is_finite() && value >= 0.0 && value.fract() == 0.0 && value < usize::MAX as f64)
-            .then_some(value as usize)
+        // The cast saturates and maps NaN to zero, so only a finite,
+        // non-negative, integral value in range survives the round trip.
+        let index = value as usize;
+        (index as f64 == value && index != usize::MAX).then_some(index)
     }
 
     pub const fn as_index(&self) -> usize {

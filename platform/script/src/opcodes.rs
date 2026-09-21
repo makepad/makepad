@@ -249,10 +249,8 @@ impl<'a> ScriptVm<'a> {
 
             _ => self.bail("undefined VM opcode"),
         }
-        if self.bx.threads.cur_ref().has_execution_limit_exceeded() {
-            return;
-        }
-        if opargs.is_pop_to_me() {
+        // A limit failure leaves the operand stack short; never pop to me then.
+        if opargs.is_pop_to_me() && !self.bx.threads.cur_ref().has_execution_limit_exceeded() {
             self.pop_to_me();
         }
     }

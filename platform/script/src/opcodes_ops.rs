@@ -106,7 +106,8 @@ impl<'a> ScriptVm<'a> {
 
     /// Structural `==` / `!=`. Every unit of native comparison work charges
     /// one instruction of VM fuel, the hard deadline is sampled while the
-    /// comparison runs, and `MAX_EQUALITY_WORK` caps a single comparison.
+    /// comparison runs, and `MAX_EQUALITY_WORK` caps a single comparison of a
+    /// bounded evaluation.
     /// Exhaustion is an uncatchable bail, exactly like the instruction limit.
     fn handle_structural_equality(&mut self, negate: bool) {
         /// Work units between clock reads. A trivial comparison never
@@ -116,11 +117,22 @@ impl<'a> ScriptVm<'a> {
         let a = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
         let deadline = self.bx.run_budget.as_ref().map(|budget| budget.hard_deadline);
         let thread = self.bx.threads.cur();
+        // The work ceiling belongs to bounded evaluations. With no instruction
+        // limit, run budget or allocation budget the host asked for no bound,
+        // and comparing two large arrays is legitimate in trusted code.
+        let maximum_work = if thread.instruction_limit_remaining.is_some()
+            || deadline.is_some()
+            || self.bx.heap.has_allocation_budget()
+        {
+            crate::equality::MAX_EQUALITY_WORK
+        } else {
+            usize::MAX
+        };
         let mut units_until_clock = DEADLINE_SAMPLE_UNITS;
         let result = self
             .bx
             .heap
-            .deep_eq_bounded(a, b, crate::equality::MAX_EQUALITY_WORK, || {
+            .deep_eq_bounded(a, b, maximum_work, || {
                 if let Some(remaining) = thread.instruction_limit_remaining.as_mut() {
                     if *remaining == 0 {
                         return false;

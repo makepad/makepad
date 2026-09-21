@@ -132,6 +132,10 @@ pub struct ScriptHeap {
     /// A refusal raised by the per-string ceiling, surfaced through the same
     /// `take_allocation_error` poll the VM uses for budget refusals.
     pub(crate) pending_string_limit_error: Option<String>,
+    /// Set whenever a refusal is recorded (scoped budget, retained cap or
+    /// string ceiling). The interpreter asks `take_allocation_error` before
+    /// every instruction, so the no-error case must be one flag read.
+    pub(crate) allocation_error_pending: bool,
 }
 
 impl ScriptHeap {
@@ -180,15 +184,28 @@ impl ScriptHeap {
     /// grows. Both the scoped run budget and the persistent retained cap are
     /// charged; either one can refuse. Arithmetic is saturating so a hostile
     /// sparse index cannot wrap into a small allocation request.
+    #[inline]
     pub(crate) fn charge_allocation(&mut self, bytes: usize, operation: &'static str) -> bool {
+        // Every container growth lands here; a VM with no budget and no cap
+        // (every Makepad host) pays this one check.
+        if self.allocation_budget.is_none() && self.heap_cap.is_none() {
+            return true;
+        }
+        self.charge_limited_allocation(bytes, operation)
+    }
+
+    #[inline(never)]
+    fn charge_limited_allocation(&mut self, bytes: usize, operation: &'static str) -> bool {
         if let Some(budget) = self.allocation_budget.as_mut() {
             if !budget.charge(bytes, operation, "allocation") {
+                self.allocation_error_pending = true;
                 return false;
             }
         }
         if let Some(cap) = self.heap_cap.as_mut() {
             if !cap.charge(bytes, operation, "heap allocation") {
                 self.heap_limit_exceeded = true;
+                self.allocation_error_pending = true;
                 return false;
             }
         }
@@ -221,7 +238,28 @@ impl ScriptHeap {
     /// The pending refusal the interpreter turns into an uncatchable bail
     /// before the next opcode: a scoped-budget refusal, a retained-cap
     /// refusal, or a per-string ceiling refusal, in that order.
+    #[inline(always)]
     pub(crate) fn take_allocation_error(&mut self) -> Option<String> {
+        if !self.allocation_error_pending {
+            return None;
+        }
+        self.take_pending_allocation_error()
+    }
+
+    #[inline(never)]
+    #[cold]
+    fn take_pending_allocation_error(&mut self) -> Option<String> {
+        let error = self.take_first_allocation_error();
+        self.allocation_error_pending = self
+            .allocation_budget
+            .as_ref()
+            .is_some_and(|budget| budget.error.is_some())
+            || self.heap_cap.as_ref().is_some_and(|cap| cap.error.is_some())
+            || self.pending_string_limit_error.is_some();
+        error
+    }
+
+    fn take_first_allocation_error(&mut self) -> Option<String> {
         if let Some(error) = self
             .allocation_budget
             .as_mut()
@@ -673,6 +711,13 @@ impl ScriptHeap {
         if let Some(v) = v.as_u40() {
             return v as _;
         }
+        // Numbers are the hot case (every arithmetic opcode lands here) and
+        // stay inlinable; everything else converts out of line.
+        self.cast_non_number_to_f64(v, ip)
+    }
+
+    #[inline(never)]
+    fn cast_non_number_to_f64(&self, v: ScriptValue, ip: ScriptIp) -> f64 {
         // Inline and heap strings convert alike; text that is not a number
         // is NaN rather than 0, so `"abc" * 2` cannot masquerade as zero.
         if let Some(number) = self.string_with(v, |_, text| text.parse::<f64>()) {
