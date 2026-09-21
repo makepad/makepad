@@ -1813,9 +1813,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                                         .windows
                                         .iter()
                                         .find(|win| win.window_id == window_id)
-                                        .is_some_and(|win| {
-                                            win.uses_client_side_decorations && !win.is_fullscreen
-                                        });
+                                        .is_some_and(|win| win.uses_client_side_decorations);
                                     if uses_client_side_decorations {
                                         let response =
                                             Rc::new(Cell::new(WindowDragQueryResponse::NoAnswer));
@@ -1879,7 +1877,11 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                                                     return;
                                                 }
                                                 if is_double_click {
-                                                    if window.is_maximized {
+                                                    // Fullscreen first: `set_maximized` under it
+                                                    // is a no-op, so the bar would look dead.
+                                                    if window.is_fullscreen {
+                                                        window.toplevel.unset_fullscreen();
+                                                    } else if window.is_maximized {
                                                         window.toplevel.unset_maximized();
                                                     } else {
                                                         window.toplevel.set_maximized();

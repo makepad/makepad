@@ -321,7 +321,10 @@ impl WaylandCx {
                         cx_window.os_dpi_factor = Some(re.new_geom.dpi_factor);
                         re.new_geom = cx_window.native_window_geom_to_layout(re.new_geom);
                     }
-                    if uses_csd && !is_fullscreen {
+                    // Also in fullscreen: we keep drawing our chrome there, and a click
+                    // lands on a button rather than starting a caption drag only if the
+                    // geom says where the buttons are.
+                    if uses_csd {
                         const BUTTONS_SIZE: Vec2d = Vec2d { x: 138.0, y: 29.0 };
                         re.new_geom.window_chrome_buttons = Rect {
                             pos: dvec2(re.new_geom.inner_size.x - BUTTONS_SIZE.x, 0.0),

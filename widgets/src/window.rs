@@ -842,17 +842,18 @@ impl Window {
                         .window
                         .handle
                         .uses_wayland_client_side_decorations(cx);
-                let wayland_fullscreen = self.window.handle.is_wayland_fullscreen(cx);
                 // With server-side decorations, app caption controls become
                 // a content toolbar; only the native window buttons disappear.
+                //
+                // Our own chrome stays up in fullscreen too. The compositor draws none
+                // there, so dropping ours leaves no way back out -- the max button is the
+                // only path to RestoreWindow, and it lives in this bar.
                 self.view(cx, ids!(caption_bar)).set_visible(
                     cx,
-                    self.show_caption_bar
-                        && (custom_chrome || has_content)
-                        && (!wayland_fullscreen || has_content),
+                    self.show_caption_bar && (custom_chrome || has_content),
                 );
                 self.view(cx, ids!(windows_buttons))
-                    .set_visible(cx, custom_chrome && !wayland_fullscreen);
+                    .set_visible(cx, custom_chrome);
             }
             OsType::LinuxDirect | OsType::Android(_) => {
                 //self.frame.get_view(ids!(caption_bar)).set_visible(false);
