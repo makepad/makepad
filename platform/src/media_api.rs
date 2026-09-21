@@ -339,17 +339,18 @@ mod tests {
     /// with it, so a recorder loses that buffer and every one after.
     /// Fenced, it is handed the silence and goes on being handed buffers.
     ///
-    /// Index 0 is the one the taps listen to, so this one takes the
-    /// registry's turn.
+    /// Taps receive every output, so distinguish this test's device from
+    /// the callbacks other tests can feed concurrently.
     #[test]
     fn the_taps_are_handed_the_silence_too_so_a_recording_keeps_its_place() {
-        // The tap registry is global and this is the one test in the crate
-        // that feeds it; the counts below are this closure's own, so no
-        // other test can move them.
+        let tap_info = AudioInfo { device_id: AudioDeviceId(LiveId(12)), ..info() };
         let fed = Arc::new(AtomicUsize::new(0));
         let quiet = Arc::new(AtomicUsize::new(0));
         let (seen, was_quiet) = (fed.clone(), quiet.clone());
-        let id = crate::audio_output_tap::add_audio_output_tap(move |_info, buffer| {
+        let id = crate::audio_output_tap::add_audio_output_tap(move |info, buffer| {
+            if info.device_id != tap_info.device_id {
+                return;
+            }
             seen.fetch_add(1, Ordering::SeqCst);
             if buffer.data.iter().all(|sample| *sample == 0.0) {
                 was_quiet.fetch_add(1, Ordering::SeqCst);
@@ -361,8 +362,8 @@ mod tests {
             }
             panic!("mid buffer");
         });
-        call(info(), &mut loud());
-        call(info(), &mut loud());
+        call(tap_info, &mut loud());
+        call(tap_info, &mut loud());
         crate::audio_output_tap::remove_audio_output_tap(id);
         assert_eq!(fed.load(Ordering::SeqCst), 2, "the fault buffer and the one after");
         assert_eq!(quiet.load(Ordering::SeqCst), 2, "and both were silence");
