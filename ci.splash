@@ -1,4 +1,6 @@
-// Shared checks warm the checkout's cache before any app script starts.
+// The workspace script. It runs ALONE while it warms the cache every other
+// script reads, then gives the wall back: the app tiles start while it goes on
+// with the workspace's own checks and tests beside them.
 // A compiler warning is orange, never red: only an error fails a check.
 use mod.std.*
 use mod.ci;
@@ -7,7 +9,14 @@ use mod.ci;
 // warmed for the desktop rows only, as its own script asks.
 ci.warm({packages: ci.apps, targets: ci.host.targets, desktop_only: ["makepad-director"]})
 
-ci.exclusive()
+// The pty helper a terminal starts its shell through. The terminal, director
+// and window manager scripts ask for it; built here it is a cache answer for
+// them instead of a cargo run that waits on the test build below.
+ci.step("build the pty helper", fn(){
+    ci.build({package: "makepad-screen" binary: "makepad-screen"})
+})
+
+ci.shared()
 
 ci.step("check host", fn(){
     ci.cargo(["check", "--workspace"])

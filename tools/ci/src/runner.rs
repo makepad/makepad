@@ -29,6 +29,9 @@ pub struct Permit {
     active: bool,
 }
 impl Gate {
+    pub fn is_exclusive(&self) -> bool {
+        self.state.lock().map(|s| s.exclusive).unwrap_or(true)
+    }
     pub fn enter(self: &Arc<Self>, control: &Control) -> Result<Permit> {
         let mut s = self.state.lock().map_err(|e| e.to_string())?;
         while s.exclusive || s.waiting > 0 {
@@ -74,6 +77,23 @@ impl Permit {
         s.exclusive = true;
         self.exclusive = true;
         Ok(())
+    }
+}
+impl Permit {
+    /// Give the wall back. A script that ran alone for the part only it may do
+    /// alone (the workspace script warming the cache every other script reads)
+    /// goes on as an ordinary script, and the waiting ones start beside it.
+    pub fn shared(&mut self) {
+        if !self.exclusive {
+            return;
+        }
+        if let Ok(mut s) = self.gate.state.lock() {
+            s.exclusive = false;
+            s.active += 1;
+            self.exclusive = false;
+            self.active = true;
+            self.gate.changed.notify_all();
+        }
     }
 }
 impl Drop for Permit {
@@ -186,17 +206,13 @@ pub fn run(
     let gate = Arc::new(Gate::default());
     let result = (|| {
         let mut scripts = scripts.into_iter().enumerate().peekable();
-        if scripts
+        // The workspace script goes first and ALONE (it warms the cache every
+        // other script reads), but through the same pool as the rest: once it
+        // gives the wall back (`ci.shared()`), the others start beside it
+        // instead of waiting for its checks and its whole test suite.
+        let mut root_alone = scripts
             .peek()
-            .is_some_and(|(_, s)| s.path == std::path::Path::new("ci.splash"))
-        {
-            let (i, script) = scripts.next().unwrap();
-            let child = parent.fork(&script.name, i)?;
-            let name = script.name.clone();
-            let previous = parent.scripts[i].previous.clone();
-            let child = execute(child, config.clone(), worker.judge.clone(), script, &gate);
-            collect(parent, child, &name, &previous);
-        }
+            .is_some_and(|(_, s)| s.path == std::path::Path::new("ci.splash"));
         let (jobs_tx, jobs_rx) = mpsc::sync_channel::<(Run, Script, String)>(config.parallel);
         let jobs = Arc::new(Mutex::new(jobs_rx));
         let (done_tx, done_rx) = mpsc::channel();
@@ -229,6 +245,15 @@ pub fn run(
             let mut pending = 0;
             loop {
                 while pending < config.parallel {
+                    // Nothing else is handed out until the workspace script
+                    // holds the wall; the gate keeps them out until it lets go.
+                    if root_alone && pending > 0 {
+                        if gate.is_exclusive() {
+                            root_alone = false;
+                        } else {
+                            break;
+                        }
+                    }
                     let Some((index, script)) = scripts.next() else {
                         break;
                     };
@@ -242,7 +267,19 @@ pub fn run(
                 if pending == 0 {
                     break;
                 }
-                let (child, name, previous) = done_rx.recv().map_err(|_| "script worker failed")?;
+                let (child, name, previous) = if root_alone {
+                    // Only the workspace script is out: look again soon, it
+                    // may hold the wall by then.
+                    match done_rx.recv_timeout(Duration::from_millis(50)) {
+                        Ok(done) => done,
+                        Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => return Err("script worker failed".into()),
+                    }
+                } else {
+                    done_rx.recv().map_err(|_| "script worker failed")?
+                };
+                // Whatever finished while it was alone was the workspace script.
+                root_alone = false;
                 pending -= 1;
                 collect(parent, child, &name, &previous);
             }
@@ -284,6 +321,25 @@ mod tests {
 #[cfg(test)]
 mod concurrency_tests {
     use super::*;
+    #[test]
+    fn a_script_that_gives_the_wall_back_lets_the_waiting_ones_in() {
+        let gate = Arc::new(Gate::default());
+        let c = Control::default();
+        let mut root = gate.enter(&c).unwrap();
+        root.exclusive(&c).unwrap();
+        assert!(gate.state.lock().unwrap().exclusive);
+        root.shared();
+        {
+            let s = gate.state.lock().unwrap();
+            assert!(!s.exclusive);
+            assert_eq!(s.active, 1, "the root script goes on as an ordinary one");
+        }
+        let app = gate.enter(&c).unwrap();
+        assert_eq!(gate.state.lock().unwrap().active, 2);
+        drop(app);
+        drop(root);
+        assert_eq!(gate.state.lock().unwrap().active, 0);
+    }
     #[test]
     fn exclusive_waits_for_active_scripts_and_blocks_new_entries() {
         let gate = Arc::new(Gate::default());

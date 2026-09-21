@@ -1271,7 +1271,7 @@ mod tests {
         // The three contract scripts with their pinned step counts, then every
         // app script in the tree: each follows the default shape, two steps.
         let mut scripts: Vec<(String, usize)> = vec![
-            ("ci.splash".into(), 2),
+            ("ci.splash".into(), 3),
             ("apps/wm/ci.splash".into(), 6),
             ("tools/ci/default.ci.splash".into(), 2),
         ];

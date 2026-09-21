@@ -399,6 +399,17 @@ pub(super) fn register(vm: &mut ScriptVm, ci: ScriptObject) {
         }
         NIL
     });
+    vm.add_method(ci, id_lut!(shared), script_args!(), |vm, _| {
+        if allow(vm) {
+            let r = rt(vm);
+            if !r.validate {
+                if let Some(p) = &mut r.permit {
+                    p.shared();
+                }
+            }
+        }
+        NIL
+    });
     vm.add_method(
         ci,
         id_lut!(cargo),
