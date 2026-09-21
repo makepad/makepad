@@ -152,8 +152,7 @@ impl Widget for PerfGraph {
                 abs_pos: Some(rect.pos),
                 width: Size::Fixed(rect.size.x),
                 height: Size::Fixed(rect.size.y),
-                margin: Inset::default(),
-                metrics: Metrics::default(),
+                ..Default::default()
             },
             Layout {
                 clip_x: true,

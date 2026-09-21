@@ -113,7 +113,7 @@ pub struct Browser {
     resized_to: Option<(usize, usize)>,
     #[cfg(feature = "cef")]
     #[rust]
-    resized_at: Option<std::time::Instant>,
+    resized_at: Option<f64>,
     #[cfg(feature = "cef")]
     #[rust]
     deferred_resize: Option<(usize, usize, f32)>,
@@ -122,7 +122,7 @@ pub struct Browser {
     wanted_size: Option<(usize, usize)>,
     #[cfg(feature = "cef")]
     #[rust]
-    wanted_at: Option<std::time::Instant>,
+    wanted_at: Option<f64>,
     #[cfg(feature = "cef")]
     #[rust]
     cef_browser: Option<makepad_cef::Browser>,
@@ -139,6 +139,9 @@ pub struct Browser {
     #[cfg(feature = "cef")]
     #[rust]
     pressed_buttons: MouseButton,
+    #[cfg(feature = "cef")]
+    #[rust]
+    scroll_remainder: Vec2d,
     #[cfg(feature = "cef")]
     #[rust]
     suppress_next_paste_shortcut: bool,
@@ -302,6 +305,18 @@ impl Browser {
             out |= makepad_cef::EVENTFLAG_RIGHT_MOUSE_BUTTON;
         }
         out
+    }
+
+    /// Makepad ScrollEvent uses +y for down and +x for right; CEF uses the
+    /// opposite. Fractional pixels stay in `remainder` across events.
+    #[cfg(feature = "cef")]
+    pub fn cef_scroll_delta(delta: Vec2d, remainder: &mut Vec2d) -> (i32, i32) {
+        *remainder += -delta;
+        let dx = remainder.x as i32;
+        let dy = remainder.y as i32;
+        remainder.x -= dx as f64;
+        remainder.y -= dy as f64;
+        (dx, dy)
     }
 
     #[cfg(feature = "cef")]
@@ -614,16 +629,17 @@ impl Browser {
         let Some((x, y)) = self.cef_position(cx, abs) else {
             return;
         };
+        if self.cef_browser.is_none() {
+            return;
+        }
+        let (dx, dy) = Self::cef_scroll_delta(delta, &mut self.scroll_remainder);
+        if dx == 0 && dy == 0 {
+            return;
+        }
         let cef_modifiers = Self::cef_modifiers(modifiers, self.pressed_buttons)
             | makepad_cef::EVENTFLAG_PRECISION_SCROLLING_DELTA;
         if let Some(browser) = &mut self.cef_browser {
-            if let Err(err) = browser.send_mouse_wheel(
-                x,
-                y,
-                cef_modifiers,
-                delta.x.round() as i32,
-                delta.y.round() as i32,
-            ) {
+            if let Err(err) = browser.send_mouse_wheel(x, y, cef_modifiers, dx, dy) {
                 log!("Browser mouse wheel failed: {err}");
             }
         }
@@ -653,7 +669,7 @@ impl Browser {
             }
         }
 
-        let now = std::time::Instant::now();
+        let now = Cx::monotonic_now();
         if self.wanted_size != Some((width, height)) {
             self.wanted_size = Some((width, height));
             self.wanted_at = Some(now);
@@ -686,13 +702,13 @@ impl Browser {
         width: usize,
         height: usize,
         scale_factor: f32,
-        now: std::time::Instant,
+        now: f64,
     ) {
         let same = self.resized_to == Some((width, height));
         if !same
             && self
                 .resized_at
-                .is_some_and(|last| now.duration_since(last) < RESIZE_INTERVAL)
+                .is_some_and(|last| now - last < RESIZE_INTERVAL.as_secs_f64())
         {
             self.deferred_resize = Some((width, height, scale_factor));
             return;
@@ -729,7 +745,7 @@ impl Browser {
         cx: &mut Cx,
         width: usize,
         height: usize,
-        now: std::time::Instant,
+        now: f64,
     ) {
         #[cfg(target_os = "macos")]
         {
@@ -743,7 +759,7 @@ impl Browser {
             let want = surface_alloc(width, height);
             let settled = self
                 .wanted_at
-                .is_some_and(|since| now.duration_since(since) >= SETTLE);
+                .is_some_and(|since| now - since >= SETTLE.as_secs_f64());
             if !needs_new_surface(self.accel_target_size, self.pending_alloc, want, settled) {
                 return;
             }
@@ -821,7 +837,7 @@ impl Browser {
         // A resize that arrived faster than CEF can take them: apply the last
         // one now, so the end of a drag always reaches the page.
         if let Some((w, h, dpi)) = self.deferred_resize {
-            self.sync_browser_size(w, h, dpi, std::time::Instant::now());
+            self.sync_browser_size(w, h, dpi, Cx::monotonic_now());
             self.redraw(cx);
         }
     }

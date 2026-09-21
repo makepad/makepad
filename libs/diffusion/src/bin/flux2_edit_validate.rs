@@ -154,16 +154,18 @@ fn load_png_rgb(path: &Path) -> Result<(Vec<u8>, usize, usize), String> {
     Ok((rgb, w, h))
 }
 
-fn parse_args() -> Result<(PathBuf, PathBuf, bool), String> {
+fn parse_args() -> Result<(PathBuf, PathBuf, bool, bool), String> {
     let mut models = None;
     let mut dumps = None;
     let mut strict = false;
+    let mut decode_oracle = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--models" => models = args.next().map(PathBuf::from),
             "--dumps" => dumps = args.next().map(PathBuf::from),
             "--strict" => strict = true,
+            "--decode-oracle" => decode_oracle = true,
             other => return Err(format!("unknown arg {other}")),
         }
     }
@@ -171,6 +173,7 @@ fn parse_args() -> Result<(PathBuf, PathBuf, bool), String> {
         models.unwrap_or_else(|| PathBuf::from(r"C:\ai\flux2edit\weights\FLUX.2-klein-4B")),
         dumps.unwrap_or_else(|| PathBuf::from(r"C:\ai\flux2edit\dumps\jacket_red")),
         strict,
+        decode_oracle,
     ))
 }
 
@@ -185,7 +188,7 @@ fn run() -> Result<(), String> {
     if !gpu_device_available() {
         return Err("CUDA is required; refusing CPU/Metal fallback".into());
     }
-    let (models, dumps, strict) = parse_args()?;
+    let (models, dumps, strict, decode_oracle) = parse_args()?;
     if !dumps.is_dir() {
         return Err(format!(
             "oracle dump dir missing: {} (run ref_dump_flux2_klein_edit.py first)",
@@ -195,10 +198,10 @@ fn run() -> Result<(), String> {
     let paths = flux2_klein_paths_from_root(&models).map_err(|err| err.to_string())?;
     let mut pipe = Flux2KleinPipeline::load(paths).map_err(|err| err.to_string())?;
 
-    // FLUX2_DECODE_ORACLE=1: decode the oracle's own final latents through
+    // Decode the oracle's own final latents through
     // the native VAE and exit — isolates VAE decode error from denoise
     // trajectory drift when the decoded PNG looks systematically off.
-    if std::env::var("FLUX2_DECODE_ORACLE").as_deref() == Ok("1") {
+    if decode_oracle {
         let latents = load_npy(&dumps.join("latents_final_packed.npy"))?.as_f32()?;
         let tokens = latents.len() / 128;
         let side = (tokens as f64).sqrt() as usize;

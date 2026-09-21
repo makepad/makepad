@@ -155,7 +155,8 @@ pub fn set_current_thread_priority(priority: crate::CxThreadPriority) {
     }
 
     let nice = match priority {
-        crate::CxThreadPriority::Normal => 0,
+        crate::CxThreadPriority::Normal | crate::CxThreadPriority::UserInteractive => 0,
+        crate::CxThreadPriority::UserInitiated => 1,
         crate::CxThreadPriority::Utility => 5,
         crate::CxThreadPriority::Background => 10,
         crate::CxThreadPriority::Idle => 15,
@@ -262,10 +263,12 @@ impl Cx {
             }
         }
 
+        let spawner = self.thread_spawner();
         let mut vulkan = self.os.vulkan.take();
         let result = self.os.openxr.create_session(
             self.os.display.as_ref().unwrap(),
             vulkan.as_mut(),
+            &spawner,
             self.current_android_xr_options(),
             &self.os_type,
         );
@@ -478,14 +481,20 @@ impl Cx {
     fn copy_or_cut_to_clipboard(&mut self, cut: bool) {
         let response = Rc::new(RefCell::new(None));
         let e = if cut {
-            Event::TextCut(TextClipboardEvent { response: response.clone() })
+            Event::TextCut(TextClipboardEvent {
+                response: response.clone(),
+            })
         } else {
-            Event::TextCopy(TextClipboardEvent { response: response.clone() })
+            Event::TextCopy(TextClipboardEvent {
+                response: response.clone(),
+            })
         };
         self.call_event_handler(&e);
         let text = response.borrow().clone();
         if let Some(text) = text {
-            unsafe { to_java_copy_to_clipboard(text); }
+            unsafe {
+                to_java_copy_to_clipboard(text);
+            }
         }
     }
 
@@ -879,7 +888,7 @@ impl Cx {
                     } else {
                         // Everything else reaches the widget as a KeyDown, including
                         // other Ctrl/Alt shortcuts like Ctrl+Enter or Ctrl+A.
-                        if makepad_keycode == KeyCode::Back {
+                        if makepad_keycode == KeyCode::Back && !is_repeat {
                             self.call_event_handler(&Event::BackPressed {
                                 handled: Cell::new(false),
                             });
@@ -1200,33 +1209,33 @@ impl Cx {
                                 error
                             );
                         } else {
-                        crate::log!(
+                            crate::log!(
                             "VIDEO: Android native decode failed for {}, falling back to software video: {}",
                             live_id.0,
                             error
                         );
-                        let (oes_bridge, oes_surface, oes_tex_id) =
-                            self.setup_mediacodec_oes_bridge(config.texture_id);
-                        let asp = AndroidSoftwarePlayer {
-                            player: PlaybackSessionHandle::new(
-                                live_id,
-                                config.texture_id,
-                                config.source,
-                                config.autoplay,
-                                config.should_loop,
-                            ),
-                            tex_y_id: config.tex_y_id,
-                            tex_u_id: config.tex_u_id,
-                            tex_v_id: config.tex_v_id,
-                            texture_id: config.texture_id,
-                            yuv_matrix: 0.0,
-                            oes_bridge,
-                            oes_surface,
-                            oes_tex_id,
-                        };
-                        self.os.software_video_players.insert(live_id, asp);
-                        self.redraw_all();
-                        return;
+                            let (oes_bridge, oes_surface, oes_tex_id) =
+                                self.setup_mediacodec_oes_bridge(config.texture_id);
+                            let asp = AndroidSoftwarePlayer {
+                                player: PlaybackSessionHandle::new(
+                                    live_id,
+                                    config.texture_id,
+                                    config.source,
+                                    config.autoplay,
+                                    config.should_loop,
+                                ),
+                                tex_y_id: config.tex_y_id,
+                                tex_u_id: config.tex_u_id,
+                                tex_v_id: config.tex_v_id,
+                                texture_id: config.texture_id,
+                                yuv_matrix: 0.0,
+                                oes_bridge,
+                                oes_surface,
+                                oes_tex_id,
+                            };
+                            self.os.software_video_players.insert(live_id, asp);
+                            self.redraw_all();
+                            return;
                         }
                     }
                 }
@@ -1591,9 +1600,13 @@ impl Cx {
         }
 
         // Signals
-        if SignalToUI::check_and_clear_ui_signal() {
+        let internal_signal = SignalToUI::check_and_clear_internal_signal();
+        let ui_signal = SignalToUI::check_and_clear_ui_signal();
+        if internal_signal || ui_signal {
             self.handle_media_signals();
             self.handle_script_signals();
+        }
+        if ui_signal {
             self.call_event_handler(&Event::Signal);
         }
         if SignalToUI::check_and_clear_action_signal() {
@@ -1619,10 +1632,10 @@ impl Cx {
                     biplanar: false,
                     full_range: false,
                     rotation_steps: 0.0,
-                external: false,
-                array: false,
+                    external: false,
+                    array: false,
                 },
-            rgba_gl_2d: false,
+                rgba_gl_2d: false,
             });
             self.call_event_handler(&e);
         }
@@ -1726,7 +1739,7 @@ impl Cx {
                                 video_id: player.video_id,
                                 current_position_ms: 0,
                                 yuv,
-                            rgba_gl_2d: false,
+                                rgba_gl_2d: false,
                             }));
                         }
                         Err(error) => {
@@ -1771,10 +1784,10 @@ impl Cx {
                         biplanar: false,
                         full_range: false,
                         rotation_steps: player.yuv_rotation_steps(),
-                    external: false,
-                    array: false,
+                        external: false,
+                        array: false,
                     },
-                rgba_gl_2d: false,
+                    rgba_gl_2d: false,
                 }));
             }
         }
@@ -1847,10 +1860,7 @@ impl Cx {
                     let tex_id = if asp.oes_tex_id != 0 {
                         asp.oes_tex_id
                     } else {
-                        self.textures[asp.texture_id]
-                            .os
-                            .gl_texture
-                            .unwrap_or(0)
+                        self.textures[asp.texture_id].os.gl_texture.unwrap_or(0)
                     };
                     if tex_id != 0 {
                         let tex = &mut self.textures[asp.texture_id];
@@ -1867,10 +1877,10 @@ impl Cx {
                                 biplanar: false,
                                 full_range: false,
                                 rotation_steps: 0.0,
-                            external: false,
-                            array: false,
+                                external: false,
+                                array: false,
                             },
-                        rgba_gl_2d: false,
+                            rgba_gl_2d: false,
                         }));
                         presented_oes = true;
                     }
@@ -1900,10 +1910,10 @@ impl Cx {
                             biplanar: false,
                             full_range: false,
                             rotation_steps: 0.0,
-                        external: false,
-                        array: false,
+                            external: false,
+                            array: false,
                         },
-                    rgba_gl_2d: false,
+                        rgba_gl_2d: false,
                     }));
                 }
                 // Pending take_oes_frame without a successful drain: leave markers
@@ -2327,7 +2337,8 @@ impl Cx {
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
         for draw_pass_id in &passes_todo {
-            self.passes[*draw_pass_id].set_time(self.os.timers.time_now() as f32);
+            let uniforms_gen = self.next_uniform_gen();
+            self.passes[*draw_pass_id].set_time(self.os.timers.time_now() as f32, uniforms_gen);
             match self.passes[*draw_pass_id].parent.clone() {
                 CxDrawPassParent::Xr => {
                     // cant happen
@@ -2831,7 +2842,9 @@ impl Cx {
                     }
                     // Notify widget so it can bind textures to shader slots
                     // (needed if native decode fails and we fall back to software)
-                    self.call_event_handler(&Event::VideoYuvTexturesReady(VideoYuvTexturesReady::planes(video_id, tex_y, tex_u, tex_v)));
+                    self.call_event_handler(&Event::VideoYuvTexturesReady(
+                        VideoYuvTexturesReady::planes(video_id, tex_y, tex_u, tex_v),
+                    ));
 
                     unsafe {
                         let env = attach_jni_env();
@@ -3076,12 +3089,10 @@ impl Cx {
                         android_jni::to_java_set_full_screen(env, false);
                     }
                 }
-                CxOsOp::SetSystemBarDarkIcons(dark_icons) => {
-                    unsafe {
-                        let env = attach_jni_env();
-                        android_jni::to_java_set_system_bar_appearance(env, dark_icons);
-                    }
-                }
+                CxOsOp::SetSystemBarDarkIcons(dark_icons) => unsafe {
+                    let env = attach_jni_env();
+                    android_jni::to_java_set_system_bar_appearance(env, dark_icons);
+                },
                 CxOsOp::SetCursor(_) => {
                     // no need
                 }
@@ -3117,13 +3128,6 @@ impl CxOsApi for Cx {
     fn init_cx_os(&mut self) {
         super::android_network::install_network_backend_shim();
         self.package_root = Some("makepad".to_string());
-    }
-
-    fn spawn_thread<F>(&mut self, f: F)
-    where
-        F: FnOnce() + Send + 'static,
-    {
-        std::thread::spawn(f);
     }
 
     fn seconds_since_app_start(&self) -> f64 {
@@ -3569,6 +3573,13 @@ pub struct CxOs {
 impl CxOs {
     pub(crate) fn gl(&self) -> &LibGl {
         &self.display.as_ref().unwrap().libgl
+    }
+
+    /// True while the Vulkan renderer exists. A Vulkan build whose
+    /// `CxVulkan::new` failed renders with OpenGL ES and answers false.
+    #[cfg(use_vulkan)]
+    pub(crate) fn vulkan_active(&self) -> bool {
+        self.vulkan.is_some()
     }
 
     /// Returns `true` only when it is currently safe to issue draw / swap-buffer

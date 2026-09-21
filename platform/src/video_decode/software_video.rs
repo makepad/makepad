@@ -73,14 +73,14 @@ impl PlaybackSessionHandle {
         self.inner.as_mut().and_then(|p| p.take_oes_frame())
     }
 
-    #[cfg(all(any(target_os = "macos", target_os = "ios"), not(headless)))]
+    #[cfg(all(any(target_os = "macos", target_os = "ios"), not(gpusim)))]
     pub fn take_metal_nv12_frame(&mut self) -> Option<crate::gpu_texture::MetalNv12Frame> {
         self.inner
             .as_mut()
             .and_then(|p| p.take_metal_nv12_frame())
     }
 
-    #[cfg(all(target_os = "linux", not(any(target_env = "ohos", linux_direct))))]
+    #[cfg(all(target_os = "linux", not(any(target_env = "ohos", linux_direct, gpusim))))]
     pub fn take_linux_dmabuf_nv12_frame(
         &mut self,
     ) -> Option<crate::os::linux::linux_video_gpu::LinuxDmabufNv12Frame> {
@@ -89,7 +89,7 @@ impl PlaybackSessionHandle {
             .and_then(|p| p.take_linux_dmabuf_nv12_frame())
     }
 
-    #[cfg(all(target_os = "linux", not(any(target_env = "ohos", linux_direct))))]
+    #[cfg(all(target_os = "linux", not(any(target_env = "ohos", linux_direct, gpusim))))]
     pub fn take_linux_gl_memory_rgba_frame(
         &mut self,
     ) -> Option<crate::os::linux::linux_video_gpu::LinuxGlMemoryRgbaFrame> {

@@ -1,0 +1,43 @@
+# sheets — a spreadsheet as a plain full-window Makepad app, part of the
+# Makepad family (wm hosts it as a tile; terminal/browser/files/task are
+# siblings). The grid is the stock `DataGrid` widget; everything above it —
+# the formula engine, the dependency graph, formats, undo, CSV — lives here.
+#
+# sheets runs standalone, and unmodified inside makepad-wm / Studio tiles via
+# the shared --stdin-loop client runtime every Makepad app has.
+
+[package]
+name = "makepad-sheets"
+version = "0.1.0"
+edition = "2021"
+default-run = "sheets"
+
+[[bin]]
+name = "sheets"
+path = "src/main.rs"
+required-features = ["standalone"]
+
+[lib]
+name = "makepad_sheets"
+path = "src/lib.rs"
+
+[features]
+dynamic-module = []
+default = ["standalone"]
+demo = []
+# The standalone window: the F10 overlay and the port toward it. A host
+# that links the MODULE (makepad-wm) leaves this off and gets the lib only.
+standalone = ["dep:makepad-aichat", "dep:makepad-wm-api"]
+
+[dependencies]
+makepad-widgets = { path = "../../widgets" }
+makepad-wm-theme = { path = "../../libs/wm_theme" }
+# The assistant: the F10 overlay in this window, and the bounded sheet tools
+# exposed to it (src/ai.rs).
+makepad-aichat = { path = "../aichat", default-features = false, features = ["engine"], optional = true }
+# The window manager's vocabulary for the standalone window: the bar's
+# title and the polite close (the module has no window of its own).
+makepad-wm-api = { path = "../../libs/wm_api", optional = true }
+makepad-ai-services = { path = "../../libs/ai/services" }
+# The module contract: what the window manager seats in-process (src/module.rs).
+makepad-app-module = { path = "../../libs/app_module" }

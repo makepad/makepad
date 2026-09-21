@@ -9,6 +9,24 @@ pub trait ScriptVmCx {
     fn with_cx_mut<R, F: FnOnce(&mut Cx) -> R>(&mut self, f: F) -> R;
 }
 
+impl ScriptHost for Cx {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn script_std(&mut self) -> &mut dyn Any {
+        &mut self.script_data.std
+    }
+
+    fn script_vm_slot(&mut self) -> &mut Option<Box<ScriptVmBase>> {
+        &mut self.script_vm
+    }
+}
+
 /// `with_cx`/`with_cx_mut` park the executing `bx` into `cx.script_vm` so the closure
 /// can re-enter the VM through `Cx`. That is only sound when the VM being executed is
 /// the one that was taken *out of* `cx.script_vm` — i.e. the VM is "installed" on `Cx`.
@@ -30,44 +48,66 @@ fn assert_vm_slot_free(cx: &Cx) {
 
 impl<'a> ScriptVmCx for ScriptVm<'a> {
     fn cx_mut(&mut self) -> &mut Cx {
-        self.host.downcast_mut().unwrap()
+        self.host.as_any_mut().downcast_mut().unwrap()
     }
     fn cx(&mut self) -> &Cx {
-        self.host.downcast_ref().unwrap()
+        self.host.as_any().downcast_ref().unwrap()
     }
     fn with_cx<R, F: FnOnce(&Cx) -> R>(&mut self, f: F) -> R {
-        // Store current thread ID to restore after
-        let saved_thread_id = self.bx.threads.current();
-
-        let cx: &mut Cx = self.host.downcast_mut().unwrap();
-        assert_vm_slot_free(cx);
-        // Swap bx back onto Cx
-        let bx = std::mem::replace(&mut self.bx, Box::new(ScriptVmBase::empty()));
-        cx.script_vm = Some(bx);
-        let r = f(cx);
-        // Swap bx back out
-        self.bx = cx.script_vm.take().unwrap();
-
-        // Restore current thread
-        self.bx.threads.set_current(saved_thread_id);
-        r
+        with_vm_parked(self, |host| f(host.as_any().downcast_ref().unwrap()))
     }
     fn with_cx_mut<R, F: FnOnce(&mut Cx) -> R>(&mut self, f: F) -> R {
-        // Store current thread ID to restore after
-        let saved_thread_id = self.bx.threads.current();
+        with_vm_parked(self, |host| f(host.as_any_mut().downcast_mut().unwrap()))
+    }
+}
 
-        let cx: &mut Cx = self.host.downcast_mut().unwrap();
-        assert_vm_slot_free(cx);
-        // Swap bx back onto Cx
-        let bx = std::mem::replace(&mut self.bx, Box::new(ScriptVmBase::empty()));
-        cx.script_vm = Some(bx);
-        let r = f(cx);
-        // Swap bx back out
-        self.bx = cx.script_vm.take().unwrap();
+/// Park the executing base back onto `Cx` for the duration of `f`, so
+/// native code reached through `f` can `cx.with_vm` again, and take it
+/// back out afterwards — whether `f` returned or unwound. A panic caught
+/// above (a platform's event catcher, a host isolating a guest) must find
+/// this `ScriptVm` holding its base again, or the enclosing `with_vm`
+/// parks the placeholder instead of the VM.
+fn with_vm_parked<R>(vm: &mut ScriptVm, f: impl FnOnce(&mut dyn ScriptHost) -> R) -> R {
+    let saved_thread_id = vm.bx.threads.current();
+    assert_vm_slot_free(vm.host.as_any().downcast_ref().unwrap());
+    let bx = std::mem::replace(&mut vm.bx, Box::new(ScriptVmBase::empty()));
+    *vm.host.script_vm_slot() = Some(bx);
+    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut *vm.host)));
+    match (vm.host.script_vm_slot().take(), out) {
+        (Some(bx), Ok(out)) => {
+            vm.bx = bx;
+            vm.bx.threads.set_current(saved_thread_id);
+            out
+        }
+        (None, Ok(_)) => {
+            panic!("the closure took the script VM off Cx and never parked it back")
+        }
+        (bx, Err(payload)) => {
+            // An inner `with_vm` parked it before resuming; a frame that
+            // lost it leaves the placeholder, and the entry above says so.
+            if let Some(bx) = bx {
+                vm.bx = bx;
+                vm.bx.threads.set_current(saved_thread_id);
+            }
+            std::panic::resume_unwind(payload)
+        }
+    }
+}
 
-        // Restore current thread
-        self.bx.threads.set_current(saved_thread_id);
-        r
+impl ScriptVmCx for &mut dyn ScriptHost {
+    fn cx_mut(&mut self) -> &mut Cx {
+        self.as_any_mut().downcast_mut().unwrap()
+    }
+    fn cx(&mut self) -> &Cx {
+        self.as_any().downcast_ref().unwrap()
+    }
+    fn with_cx<R, F: FnOnce(&Cx) -> R>(&mut self, f: F) -> R {
+        let cx: &Cx = self.as_any().downcast_ref().unwrap();
+        f(cx)
+    }
+    fn with_cx_mut<R, F: FnOnce(&mut Cx) -> R>(&mut self, f: F) -> R {
+        let cx: &mut Cx = self.as_any_mut().downcast_mut().unwrap();
+        f(cx)
     }
 }
 

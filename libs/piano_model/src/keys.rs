@@ -254,11 +254,20 @@ pub fn build_key(key: u8, sample_rate: f64, p: &DesignParams) -> KeyDesign {
     // Felt stiffness scaled so mf contact times land on the measured 4 ms
     // (bass) .. <1 ms (treble); voicing scatter moves individual hammers
     // the way real felt varies needle-to-needle.
-    let felt_k = 10f64.powf(
-        p.feltk_lo + p.feltk_span * t + p.feltk_top * ((t - 0.75) / 0.25).clamp(0.0, 1.0),
-    ) * (2f64).powf(0.5 * sc * kj(idx, 1));
-    let felt_p = p.feltp_lo + p.feltp_span * t;
-    let felt_lambda = 1.0;
+    // Bass felt regime (see params::feltp_bass): the bottom octaves'
+    // exponent and stiffness are pulled down on a quadratic ramp that
+    // vanishes at felt_bass_t, leaving the mid/treble law untouched.
+    let bass_ramp = if p.felt_bass_t > p.felt_bass_t0 + 1e-9 {
+        ((p.felt_bass_t - t) / (p.felt_bass_t - p.felt_bass_t0)).clamp(0.0, 1.0).powf(p.felt_bass_pow.max(0.1))
+    } else {
+        0.0
+    };
+    let logk_law = p.feltk_lo + p.feltk_span * t + p.feltk_top * ((t - 0.75) / 0.25).clamp(0.0, 1.0);
+    let p_law = p.feltp_lo + p.feltp_span * t;
+    let logk = (1.0 - bass_ramp) * logk_law + bass_ramp * (p.feltk_bass_lo + p.feltk_bass_slope * t);
+    let felt_k = 10f64.powf(logk) * (2f64).powf(0.5 * sc * kj(idx, 1));
+    let felt_p = ((1.0 - bass_ramp) * p_law + bass_ramp * p.feltp_bass).max(1.02);
+    let felt_lambda = 1.0 - p.lambda_bass.clamp(0.0, 1.0) * bass_ramp;
     // Mezzo-forte felt compression estimate; lock-up starts just below it,
     // and bites harder in the bass (thick, graded felt) than in the treble
     // (thin felt that is near its compacted state already).
@@ -280,7 +289,12 @@ pub fn build_key(key: u8, sample_rate: f64, p: &DesignParams) -> KeyDesign {
     let core_w = core_up * core_dn;
     let core_k = p.core_mul * 1.0e7 * core_w * core_w;
     let u_core = p.core_frac * u_mf;
-    let felt_lock_w = p.lockw_lo + (p.lockw_hi - p.lockw_lo) * t;
+    // Lock-up is a compacted-felt phenomenon; the thick bass felt never
+    // reaches compaction under playing loads, so it is gated out with the
+    // bass regime (see params::feltp_bass): a linear bass spring that still
+    // locked up at forte kept a 5 dB pp->ff swing in C2's sub-kHz ladder
+    // that the recordings do not have.
+    let felt_lock_w = (p.lockw_lo + (p.lockw_hi - p.lockw_lo) * t) * (1.0 - bass_ramp);
     // Treble hammer-speed range compression (see params::vel_q_*): the
     // measured level span from velocity 30 to 127 was ~23-26 dB across
     // A0..C4 but 39-48 dB at C5..C7 — twice the dynamic slope, pivoting
@@ -293,8 +307,9 @@ pub fn build_key(key: u8, sample_rate: f64, p: &DesignParams) -> KeyDesign {
     } else {
         1.0
     };
-    let strike_pos =
-        (p.spos_lo - (p.spos_lo - p.spos_hi) * t.powf(p.spos_pow)) * (1.0 + 0.04 * sc * kj(idx, 2));
+    let spos_bass = if p.spos_bass_t > 1e-9 { p.spos_bass * (1.0 - t / p.spos_bass_t).max(0.0) } else { 0.0 };
+    let strike_pos = (p.spos_lo - (p.spos_lo - p.spos_hi) * t.powf(p.spos_pow) + spos_bass)
+        * (1.0 + 0.04 * sc * kj(idx, 2));
     let t1_seconds = 2.0 * strike_pos * length / c_wave;
     let z_total = z_char * n_strings as f64;
 
@@ -349,8 +364,15 @@ pub fn build_key(key: u8, sample_rate: f64, p: &DesignParams) -> KeyDesign {
     // lowest admittance at its far end, so the singles' factor is small
     // and the doubles ramp in over the first half octave above the
     // break.
+    // Singles 0.12 -> 0.03 (2026-09-01): measured per partial on the
+    // Salamander A0 and C1, the singles' partials 8-30 (200-850 Hz) decay
+    // at 2-12 dB/s over the first second (median 4-5, sigma ~0.5) with
+    // only a few drains near 12 dB/s; at 0.12 the model's ran 10-25 dB/s
+    // (median 11) on top of the corrected intrinsic law — the prompt
+    // stage of the bottom octave still ate its upper partials twice as
+    // fast as the instrument does.
     let lo_fac = if n_strings == 1 {
-        0.12
+        0.03
     } else if n_strings == 2 {
         0.5 + 0.5 * ((idx as f64 - 8.0) / 6.0).clamp(0.0, 1.0)
     } else {
@@ -393,12 +415,17 @@ pub fn build_key(key: u8, sample_rate: f64, p: &DesignParams) -> KeyDesign {
         }
         let fk = fn_hz / 1000.0;
         let f0k = f0 / 1000.0;
-        let wound = p.a1_wound * (1.0 - t).powi(3);
+        let wound = (1.0 - t).powi(3);
+        // wound-string law on the copper-wound keys, the plain-wire law
+        // above the break (idx 24), blended over ~a fifth (params::a1_plain)
+        let wg = if t > 0.28 { 1.0 / (1.0 + ((t - 0.28) / 0.05).powi(2)) } else { 1.0 };
+        let a1w = wg * p.a1_wound + (1.0 - wg) * p.a1_plain;
+        let a2w = wg * p.a2_wound;
         // intrinsic string loss (winding, viscous/air, quartic) — what
         // the aftersound decays at
         let sig_intr = (sigma_fund
-            + wound * (fk - f0k)
-            + a2 * (fk * fk - f0k * f0k)
+            + a1w * wound * (fk - f0k)
+            + (a2 + a2w * wound) * (fk * fk - f0k * f0k)
             + p.a4 * (fk.powi(4) - f0k.powi(4)))
         .max(0.15);
         // complex bridge admittance at this partial
@@ -617,10 +644,15 @@ pub fn build_key(key: u8, sample_rate: f64, p: &DesignParams) -> KeyDesign {
         }
         let fk = fn_hz / 1000.0;
         let f0k = f0 / 1000.0;
-        let wound = p.a1_wound * (1.0 - t).powi(3);
+        let wound = (1.0 - t).powi(3);
+        // wound-string law on the copper-wound keys, the plain-wire law
+        // above the break (idx 24), blended over ~a fifth (params::a1_plain)
+        let wg = if t > 0.28 { 1.0 / (1.0 + ((t - 0.28) / 0.05).powi(2)) } else { 1.0 };
+        let a1w = wg * p.a1_wound + (1.0 - wg) * p.a1_plain;
+        let a2w = wg * p.a2_wound;
         let sigma = ((sigma_fund
-            + wound * (fk - f0k)
-            + a2 * (fk * fk - f0k * f0k)
+            + a1w * wound * (fk - f0k)
+            + (a2 + a2w * wound) * (fk * fk - f0k * f0k)
             + p.a4 * (fk.powi(4) - f0k.powi(4)))
         .max(0.15)
             * 1.2)

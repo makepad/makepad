@@ -29,3 +29,4 @@ pub mod substr;
 //     #[test]
 //     fn test() { ... }
 // }
+pub mod async_labels;

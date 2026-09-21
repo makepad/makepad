@@ -1,5 +1,6 @@
 mod buffer;
 mod augment;
+mod authoring;
 mod animation;
 mod document;
 mod error;
@@ -8,6 +9,12 @@ mod loader;
 mod parser;
 mod skin_augmentation;
 mod writer;
+mod pbr_augmentation;
+mod vehicle_visual;
+mod soft_body;
+pub use soft_body::*;
+pub use vehicle_visual::VisualWheelMotion;
+pub use pbr_augmentation::*;
 #[cfg(test)]
 mod sample_tests;
 
@@ -21,6 +28,7 @@ pub use crate::animation::{
     replace_glb_node_animations, GlbNodeAnimChannel, GlbNodeAnimClip,
 };
 pub use crate::document::*;
+pub use crate::authoring::*;
 pub use crate::error::GltfError;
 pub use crate::image::load_image_bytes;
 pub use crate::loader::{load_gltf_from_bytes, load_gltf_from_path, GltfContainerKind, LoadedGltf};
@@ -30,10 +38,13 @@ pub use crate::skin_augmentation::{
 };
 pub use crate::writer::{
     compute_vertex_normals, write_glb_mesh, write_glb_mesh_colored, write_glb_mesh_skinned,
-    write_glb_mesh_textured, write_glb_mesh_textured_parts, write_glb_mesh_unwrapped,
+    write_glb_mesh_textured, write_glb_mesh_textured_parts, write_glb_mesh_textured_parts_linear, write_glb_mesh_unwrapped,
     write_glb_named_parts,
     GlbAnimChannel, GlbAnimClip, GlbAnimPath, GlbJoint, GlbSkinnedMesh, GlbTexturedMesh,
     GlbNamedPart, GlbPartAnimation, GlbPartAnimationKind, GlbTexturedPart,
 };
 pub use makepad_math::DecodedPrimitive;
 pub use makepad_micro_serde::JsonValue;
+
+mod morph_augmentation;
+pub use morph_augmentation::*;

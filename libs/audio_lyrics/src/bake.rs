@@ -13,8 +13,8 @@ use std::path::Path;
 
 /// A loaded whisper model plus its decode state, reusable across tracks.
 pub struct LyricsBaker {
-    model: Box<makepad_voice::WhisperModel>,
-    state: makepad_voice::WhisperState,
+    model: Box<makepad_ai_speech::whisper::WhisperModel>,
+    state: makepad_ai_speech::whisper::WhisperState,
     model_name: String,
 }
 
@@ -22,9 +22,9 @@ impl LyricsBaker {
     /// Load the checkpoint at `path` (a ggml whisper file).
     pub fn open(path: &Path) -> Result<LyricsBaker, String> {
         let text = path.to_string_lossy().to_string();
-        let model = makepad_voice::WhisperModel::load_file(&text)
+        let model = makepad_ai_speech::whisper::WhisperModel::load_file(&text)
             .map_err(|error| format!("whisper model: {error}"))?;
-        let state = makepad_voice::WhisperState::new(&model);
+        let state = makepad_ai_speech::whisper::WhisperState::new(&model);
         let model_name = path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
@@ -44,7 +44,7 @@ impl LyricsBaker {
     ) -> Option<TrackLyrics> {
         let samples_16k = align::resample(vocals_mono, rate, align::WHISPER_RATE);
         let analysis = align::analyze_vocals(vocals_mono, rate, OnsetPreset::Snapping);
-        let mut params = makepad_voice::WhisperParams::default();
+        let mut params = makepad_ai_speech::whisper::WhisperParams::default();
         params.language = language.to_string();
         params.no_timestamps = false;
         params.single_segment = false;

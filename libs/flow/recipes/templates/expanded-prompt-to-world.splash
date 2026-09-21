@@ -1,0 +1,18 @@
+use mod.flow.*
+
+/** The walkable scene idea to expand and reconstruct. */
+let prompt = Input{ type: @text default: "a mossy observatory above a cloud sea" }
+let expand = Llm{
+    system: "Rewrite the prompt as one coherent wide scene brief for a walkable 3D world. Preserve the place and add spatial landmarks."
+    prompt: prompt.text()
+}
+let image = Image{ prompt: expand.text() width: 512 height: 512 }
+let world = World{ prompt: expand.text() image: image.image() model: "flashworld" }
+/** Publish the world splat into the flow asset library. */
+let published = Publish{ value: world.mesh() namespace: "flows" tags: ["flow", "world"] }
+
+Flow{
+    label: "Expanded prompt to world"
+    brief: "Expands a scene, paints its reference, and reconstructs a walkable world splat."
+    prompt, expand, image, world, published
+}

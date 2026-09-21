@@ -12,6 +12,9 @@ use crate::{
     script::vm::*,
 };
 
+#[cfg(any(target_arch = "wasm32", test))]
+use crate::event::{Event, WindowGeomChangeEvent};
+
 pub struct WindowHandle(PoolId);
 
 #[derive(Clone, Debug, PartialEq, Copy)]
@@ -222,6 +225,33 @@ impl WindowHandle {
 #[derive(Default)]
 pub struct CxWindowPool(IdPool<CxWindow>);
 impl CxWindowPool {
+    /// A hosted (stdin-loop) window's geometry as the HOST reports it: the
+    /// host's logical size at the host's dpi. Recorded as the window's native
+    /// geometry and converted into layout points through any `dpi_override`
+    /// the app has set — exactly what a native window's geometry goes
+    /// through — so an app that lays out at its own scale (a console that
+    /// shrinks to fit a tile) still gets the host's pointer coordinates
+    /// remapped into its points (`remap_dpi_override`).
+    #[cfg(any(
+        test,
+        target_os = "macos",
+        target_os = "windows",
+        target_os = "linux",
+        gpusim,
+    ))]
+    pub(crate) fn stdin_apply_native_geom(
+        &mut self,
+        window_id: WindowId,
+        native_geom: WindowGeom,
+    ) -> crate::event::WindowGeomChangeEvent {
+        let window = &mut self[window_id];
+        let old_geom = window.window_geom.clone();
+        window.os_dpi_factor = Some(native_geom.dpi_factor);
+        let new_geom = window.native_window_geom_to_layout(native_geom);
+        window.window_geom = new_geom.clone();
+        crate::event::WindowGeomChangeEvent { window_id, old_geom, new_geom }
+    }
+
     fn alloc(&mut self) -> WindowHandle {
         WindowHandle(self.0.alloc())
     }
@@ -230,23 +260,27 @@ impl CxWindowPool {
         self.0.pool.len()
     }
 
+    /// The window under a HOST pointer position (native points), and that
+    /// window's origin in the same points. Compared in native points: a
+    /// window with a `dpi_override` lays out in points of its own, and its
+    /// stored size is in those.
     pub fn window_id_contains(&self, pos: Vec2d) -> (WindowId, Vec2d) {
         for (index, item) in self.0.pool.iter().enumerate() {
             let window = &item.item;
-            if pos.x >= window.window_geom.position.x
-                && pos.y >= window.window_geom.position.y
-                && pos.x <= window.window_geom.position.x + window.window_geom.inner_size.x
-                && pos.y <= window.window_geom.position.y + window.window_geom.inner_size.y
+            let position = window.layout_vec2d_to_native_points(window.window_geom.position);
+            let size = window.layout_vec2d_to_native_points(window.window_geom.inner_size);
+            if pos.x >= position.x
+                && pos.y >= position.y
+                && pos.x <= position.x + size.x
+                && pos.y <= position.y + size.y
             {
-                return (
-                    WindowId(index, item.generation),
-                    window.window_geom.position,
-                );
+                return (WindowId(index, item.generation), position);
             }
         }
+        let first = &self.0.pool[0];
         return (
-            WindowId(0, self.0.pool[0].generation),
-            self.0.pool[0].item.window_geom.position,
+            WindowId(0, first.generation),
+            first.item.layout_vec2d_to_native_points(first.item.window_geom.position),
         );
     }
 
@@ -280,6 +314,63 @@ impl CxWindowPool {
             .map(|(index, item)| WindowId(index, item.generation))
     }
 
+    /// Returns physical slot zero with its current generation, if it exists.
+    #[cfg(any(target_arch = "wasm32", test))]
+    pub(crate) fn current_id_zero(&self) -> Option<WindowId> {
+        self.id_iter().next()
+    }
+
+    #[cfg(any(target_arch = "wasm32", test))]
+    pub(crate) fn web_resize_window_geom(
+        &mut self,
+        cached_native_geom: &mut WindowGeom,
+        cached_window_zero_geom: &mut WindowGeom,
+        new_native_geom: WindowGeom,
+    ) -> Option<WindowGeomChangeEvent> {
+        *cached_native_geom = new_native_geom.clone();
+        let Some(window_id) = self.current_id_zero() else {
+            *cached_window_zero_geom = new_native_geom;
+            return None;
+        };
+
+        let window = &mut self[window_id];
+        let old_geom = window.window_geom.clone();
+        window.os_dpi_factor = Some(new_native_geom.dpi_factor);
+        let new_geom = window.native_window_geom_to_layout(new_native_geom);
+        if old_geom == new_geom {
+            return None;
+        }
+
+        *cached_window_zero_geom = new_geom.clone();
+        window.window_geom = new_geom.clone();
+        Some(WindowGeomChangeEvent {
+            window_id,
+            old_geom,
+            new_geom,
+        })
+    }
+
+    #[cfg(any(target_arch = "wasm32", test))]
+    pub(crate) fn web_create_window_geom(
+        &mut self,
+        window_id: WindowId,
+        cached_native_geom: &WindowGeom,
+        cached_window_zero_geom: &mut WindowGeom,
+    ) -> crate::event::WindowGeomChangeEvent {
+        let window = &mut self[window_id];
+        window.os_dpi_factor = Some(cached_native_geom.dpi_factor);
+        let new_geom = window.native_window_geom_to_layout(cached_native_geom.clone());
+        window.window_geom = new_geom.clone();
+        if window_id.0 == 0 {
+            *cached_window_zero_geom = new_geom.clone();
+        }
+        WindowGeomChangeEvent {
+            window_id,
+            old_geom: new_geom.clone(),
+            new_geom,
+        }
+    }
+
     pub fn is_valid(&self, v: WindowId) -> bool {
         if v.0 < self.0.pool.len() {
             if self.0.pool[v.0].generation == v.1 {
@@ -295,6 +386,22 @@ impl CxWindowPool {
 
     pub fn from_usize(v: usize) -> WindowId {
         WindowId(v, 0)
+    }
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+impl Cx {
+    pub(crate) fn call_window_zero_focus_event(&mut self, focused: bool) {
+        let window_id = self
+            .windows
+            .current_id_zero()
+            .unwrap_or_else(CxWindowPool::id_zero);
+        let event = if focused {
+            Event::WindowGotFocus(window_id)
+        } else {
+            Event::WindowLostFocus(window_id)
+        };
+        self.call_event_handler(&event);
     }
 }
 
@@ -374,6 +481,22 @@ impl WindowHandle {
         cx.platform_ops
             .push_back(CxOsOp::CreateWindow(window.window_id()));
         window
+    }
+
+    /// Cancels the create queued by [`Self::new`] while leaving the stable
+    /// window slot available for an explicit later `CreateWindow`.
+    ///
+    /// This only affects a surface that has not been created yet and never
+    /// closes an existing native window.
+    pub fn cancel_initial_create(&self, cx: &mut Cx) -> bool {
+        let window_id = self.window_id();
+        if cx.windows[window_id].is_created {
+            return false;
+        }
+        let old_len = cx.platform_ops.len();
+        cx.platform_ops
+            .retain(|op| !matches!(op, CxOsOp::CreateWindow(id) if *id == window_id));
+        cx.platform_ops.len() != old_len
     }
 
     /// Creates a popup window that must be explicitly closed by the app.
@@ -971,9 +1094,170 @@ mod tests {
     use super::*;
     use crate::event::Event;
     use crate::script::vm::ScriptVmCx;
+    use std::{cell::RefCell, rc::Rc};
 
     fn test_cx() -> Cx {
         Cx::new(Box::new(|_cx: &mut Cx, _event: &Event| {}))
+    }
+
+    fn web_geom(dpi_factor: f64, width: f64, height: f64) -> WindowGeom {
+        WindowGeom {
+            dpi_factor,
+            inner_size: dvec2(width, height),
+            outer_size: dvec2(width, height),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn web_cached_native_geometry_is_applied_when_window_zero_is_created() {
+        let mut windows = CxWindowPool::default();
+        let mut native_cache = WindowGeom::default();
+        let mut window_zero_cache = WindowGeom::default();
+        let native_geom = web_geom(3.0, 400.0, 300.0);
+
+        assert!(windows
+            .web_resize_window_geom(
+                &mut native_cache,
+                &mut window_zero_cache,
+                native_geom.clone(),
+            )
+            .is_none());
+        let window_zero = windows.alloc();
+        let window_zero_id = window_zero.window_id();
+        windows[window_zero_id].dpi_override = Some(2.0);
+
+        let event = windows.web_create_window_geom(
+            window_zero_id,
+            &native_cache,
+            &mut window_zero_cache,
+        );
+
+        assert_eq!(native_cache, native_geom);
+        assert_eq!(event.window_id, window_zero_id);
+        assert_eq!(event.old_geom, event.new_geom);
+        assert_eq!(event.new_geom.inner_size, dvec2(600.0, 450.0));
+        assert_eq!(windows[window_zero_id].window_geom, event.new_geom);
+        assert_eq!(window_zero_cache, event.new_geom);
+    }
+
+    #[test]
+    fn web_resize_caches_before_creation_then_converts_and_emits_after() {
+        let mut windows = CxWindowPool::default();
+        let mut native_cache = WindowGeom::default();
+        let mut window_zero_cache = WindowGeom::default();
+        let first_native = web_geom(2.0, 100.0, 80.0);
+        let replacement_native = web_geom(3.0, 120.0, 90.0);
+
+        assert!(windows
+            .web_resize_window_geom(
+                &mut native_cache,
+                &mut window_zero_cache,
+                first_native,
+            )
+            .is_none());
+        assert!(windows
+            .web_resize_window_geom(
+                &mut native_cache,
+                &mut window_zero_cache,
+                replacement_native.clone(),
+            )
+            .is_none());
+        assert_eq!(native_cache, replacement_native);
+        assert_eq!(window_zero_cache, replacement_native);
+
+        let window_zero = windows.alloc();
+        let window_zero_id = window_zero.window_id();
+        windows[window_zero_id].dpi_override = Some(2.0);
+        windows.web_create_window_geom(
+            window_zero_id,
+            &native_cache,
+            &mut window_zero_cache,
+        );
+        let old_window_geom = windows[window_zero_id].window_geom.clone();
+        window_zero_cache = web_geom(9.0, 1.0, 1.0);
+        let resized_native = web_geom(4.0, 200.0, 150.0);
+
+        let event = windows
+            .web_resize_window_geom(
+                &mut native_cache,
+                &mut window_zero_cache,
+                resized_native.clone(),
+            )
+            .unwrap();
+
+        assert_eq!(event.window_id, window_zero_id);
+        assert_eq!(event.old_geom, old_window_geom);
+        assert_eq!(event.new_geom.inner_size, dvec2(400.0, 300.0));
+        assert_eq!(native_cache, resized_native);
+        assert_eq!(window_zero_cache, event.new_geom);
+        assert_eq!(windows[window_zero_id].window_geom, event.new_geom);
+    }
+
+    #[test]
+    fn web_focus_is_delivered_without_a_window_and_uses_current_generation() {
+        let received = Rc::new(RefCell::new(Vec::new()));
+        let received_by_handler = received.clone();
+        let mut cx = Cx::new(Box::new(move |_cx, event| match event {
+            Event::WindowGotFocus(window_id) => {
+                received_by_handler.borrow_mut().push((true, *window_id));
+            }
+            Event::WindowLostFocus(window_id) => {
+                received_by_handler
+                    .borrow_mut()
+                    .push((false, *window_id));
+            }
+            _ => {}
+        }));
+
+        assert!(cx.windows.current_id_zero().is_none());
+        cx.call_window_zero_focus_event(true);
+        cx.call_window_zero_focus_event(false);
+
+        let first_window_zero = WindowHandle::new(&mut cx);
+        drop(first_window_zero);
+        let recycled_window_zero = WindowHandle::new(&mut cx);
+        assert_eq!(recycled_window_zero.window_id(), WindowId(0, 1));
+        cx.call_window_zero_focus_event(true);
+
+        assert_eq!(
+            *received.borrow(),
+            vec![
+                (true, WindowId(0, 0)),
+                (false, WindowId(0, 0)),
+                (true, recycled_window_zero.window_id()),
+            ]
+        );
+    }
+
+    #[test]
+    fn web_nonzero_window_creation_preserves_window_zero_geometry() {
+        let mut windows = CxWindowPool::default();
+        let mut window_zero_cache = WindowGeom::default();
+        let native_cache = web_geom(2.0, 100.0, 80.0);
+        let window_zero = windows.alloc();
+        let window_zero_id = window_zero.window_id();
+        windows[window_zero_id].dpi_override = Some(2.0);
+        windows.web_create_window_geom(
+            window_zero_id,
+            &native_cache,
+            &mut window_zero_cache,
+        );
+        let cached_before = window_zero_cache.clone();
+        let window_zero_before = windows[window_zero_id].window_geom.clone();
+
+        let second_window = windows.alloc();
+        let second_window_id = second_window.window_id();
+        windows[second_window_id].dpi_override = Some(1.0);
+        let event = windows.web_create_window_geom(
+            second_window_id,
+            &native_cache,
+            &mut window_zero_cache,
+        );
+
+        assert_eq!(event.new_geom.inner_size, dvec2(200.0, 160.0));
+        assert_eq!(window_zero_cache, cached_before);
+        assert_eq!(windows[window_zero_id].window_geom, window_zero_before);
     }
 
     #[test]
@@ -1093,27 +1377,23 @@ mod tests {
     #[test]
     fn macos_window_config_script_hook_applies_floating_panel_defaults_only_when_missing() {
         let mut host = test_cx();
-        let mut std = ();
-        let mut vm = ScriptVm {
-            host: &mut host,
-            std: &mut std,
-            bx: Box::new(ScriptVmBase::new()),
-        };
+        let config = host.with_vm(|vm| {
+            let obj = vm.heap_mut().new_object();
+            vm.map_mut_with(obj, |_vm, map| {
+                map.insert(
+                    ScriptValue::from_id(id!(kind)),
+                    ScriptMapValue {
+                        tag: Default::default(),
+                        value: NIL,
+                    },
+                );
+            });
 
-        let obj = vm.heap_mut().new_object();
-        vm.map_mut_with(obj, |_vm, map| {
-            map.insert(
-                ScriptValue::from_id(id!(kind)),
-                ScriptMapValue {
-                    tag: Default::default(),
-                    value: NIL,
-                },
-            );
+            let mut config = MacosWindowConfig::default();
+            config.kind = MacosWindowKind::FloatingPanel;
+            config.on_after_apply(vm, &Apply::New, &mut Scope::empty(), obj.into());
+            config
         });
-
-        let mut config = MacosWindowConfig::default();
-        config.kind = MacosWindowKind::FloatingPanel;
-        config.on_after_apply(&mut vm, &Apply::New, &mut Scope::empty(), obj.into());
 
         assert_eq!(config.level, MacosWindowLevel::Floating);
         assert!(config.non_activating);
@@ -1148,55 +1428,50 @@ mod tests {
     #[test]
     fn script_window_handle_on_after_apply_writes_macos_config_into_cx_window() {
         let mut host = test_cx();
-        let mut std = ();
-        let mut vm = ScriptVm {
-            host: &mut host,
-            std: &mut std,
-            bx: Box::new(ScriptVmBase::new()),
-        };
-
-        let handle = WindowHandle::new(vm.cx_mut());
-        let window_id = handle.window_id();
-        let mut script_window = ScriptWindowHandle {
-            handle,
-            title: "Floating Panel".to_string(),
-            app_id: "floating-panel".to_string(),
-            inner_size: Some(dvec2(320.0, 80.0)),
-            position: Some(dvec2(40.0, 50.0)),
-            kind_id: 7,
-            dpi_override: Some(2.0),
-            topmost: false,
-            transparent: true,
-            backdrop: WindowBackdrop::Blur,
-            backdrop_intensity: 0.5,
-            macos: MacosWindowConfig::floating_panel(),
-            wayland_decorations: WaylandDecorationPreference::ClientSide,
-            caption_bar_height_override: None,
-        };
-
-        script_window.on_after_apply(&mut vm, &Apply::New, &mut Scope::empty(), NIL);
-
-        let cx = vm.cx_mut();
-        let cx_window = &cx.windows[window_id];
-        assert_eq!(cx_window.create_title, "Floating Panel");
-        assert_eq!(cx_window.create_app_id, "floating-panel");
-        assert_eq!(cx_window.create_inner_size, Some(dvec2(320.0, 80.0)));
-        assert_eq!(cx_window.create_position, Some(dvec2(40.0, 50.0)));
-        assert_eq!(cx_window.kind_id, 7);
-        assert_eq!(cx_window.dpi_override, Some(2.0));
-        assert_eq!(
-            cx_window.window_visuals(),
-            WindowVisuals {
+        host.with_vm(|vm| {
+            let handle = WindowHandle::new(vm.cx_mut());
+            let window_id = handle.window_id();
+            let mut script_window = ScriptWindowHandle {
+                handle,
+                title: "Floating Panel".to_string(),
+                app_id: "floating-panel".to_string(),
+                inner_size: Some(dvec2(320.0, 80.0)),
+                position: Some(dvec2(40.0, 50.0)),
+                kind_id: 7,
+                dpi_override: Some(2.0),
+                topmost: false,
                 transparent: true,
                 backdrop: WindowBackdrop::Blur,
                 backdrop_intensity: 0.5,
-            }
-        );
-        assert_eq!(cx_window.macos, MacosWindowConfig::floating_panel());
-        assert_eq!(
-            cx_window.wayland_decorations,
-            WaylandDecorationPreference::ClientSide
-        );
+                macos: MacosWindowConfig::floating_panel(),
+                wayland_decorations: WaylandDecorationPreference::ClientSide,
+                caption_bar_height_override: None,
+            };
+
+            script_window.on_after_apply(vm, &Apply::New, &mut Scope::empty(), NIL);
+
+            let cx = vm.cx_mut();
+            let cx_window = &cx.windows[window_id];
+            assert_eq!(cx_window.create_title, "Floating Panel");
+            assert_eq!(cx_window.create_app_id, "floating-panel");
+            assert_eq!(cx_window.create_inner_size, Some(dvec2(320.0, 80.0)));
+            assert_eq!(cx_window.create_position, Some(dvec2(40.0, 50.0)));
+            assert_eq!(cx_window.kind_id, 7);
+            assert_eq!(cx_window.dpi_override, Some(2.0));
+            assert_eq!(
+                cx_window.window_visuals(),
+                WindowVisuals {
+                    transparent: true,
+                    backdrop: WindowBackdrop::Blur,
+                    backdrop_intensity: 0.5,
+                }
+            );
+            assert_eq!(cx_window.macos, MacosWindowConfig::floating_panel());
+            assert_eq!(
+                cx_window.wayland_decorations,
+                WaylandDecorationPreference::ClientSide
+            );
+        });
     }
 
     #[test]

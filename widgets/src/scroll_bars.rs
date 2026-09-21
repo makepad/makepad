@@ -372,26 +372,14 @@ impl ScrollBars {
         // The turtle's rect might be `NaN` if either size dimension is `Fit`,
         // so we look at each dimension's max value to ensure that it can be scrollable.
         if rect_now.size.y.is_nan() {
-            let height = cx.turtle().walk().height;
-            // `Fit { max }` bounds the OUTER height (incl. margin), matching
-            // Turtle::compute_final_size, so subtract the margin for the visible height.
-            let margin = cx.turtle().walk().margin.height();
-            rect_now.size.y = match height {
-                Size::Fit { max: Some(max), .. } => {
-                    max.eval_height(cx).map_or(view_total.y, |m| view_total.y.min(m - margin))
-                }
-                _ => view_total.y,
-            };
+            rect_now.size.y = cx
+                .current_turtle_max_height()
+                .map_or(view_total.y, |max| view_total.y.min(max));
         }
         if rect_now.size.x.is_nan() {
-            let width = cx.turtle().walk().width;
-            let margin = cx.turtle().walk().margin.width();
-            rect_now.size.x = match width {
-                Size::Fit { max: Some(max), .. } => {
-                    max.eval_width(cx).map_or(view_total.x, |m| view_total.x.min(m - margin))
-                }
-                _ => view_total.x,
-            };
+            rect_now.size.x = cx
+                .current_turtle_max_width()
+                .map_or(view_total.x, |max| view_total.x.min(max));
         }
 
         if self.show_scroll_x {
@@ -418,5 +406,35 @@ impl ScrollBars {
 
     pub fn redraw(&self, cx: &mut Cx) {
         self.area.redraw(cx);
+    }
+}
+
+#[cfg(test)]
+mod style_reapply_tests {
+    use super::*;
+    use crate::desktop_style::{install, DesktopStyle, StyleSheet};
+
+    /// Scroll offsets are runtime (`#[rust]`) state on both the bar pair and
+    /// each bar; re-walking the template on a style change must not move them.
+    #[test]
+    fn style_reapply_preserves_scroll_offset() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            let original = crate::script_eval!(vm, {use mod.widgets.* ScrollBars{}});
+            let mut bars = ScrollBars::script_from_value(vm, original);
+            vm.with_cx_mut(|cx| {
+                assert!(bars.set_scroll_pos_no_clip(cx, dvec2(0.0, 120.0)));
+            });
+            assert_eq!(bars.get_scroll_pos(), dvec2(0.0, 120.0));
+            for (style, dark) in [(DesktopStyle::NextStep, false), (DesktopStyle::Windows, true), (DesktopStyle::Omarchy, false)] {
+                install(vm, StyleSheet::load_with_appearance(style, dark));
+                vm.with_reload(crate::script_mod);
+                bars.script_apply(vm, &Apply::ScriptReapply, &mut Scope::empty(), original);
+                assert_eq!(bars.get_scroll_pos(), dvec2(0.0, 120.0), "{}", style.id());
+                assert_eq!(bars.scroll_bar_y.get_scroll_pos(), 120.0, "{}", style.id());
+                assert_eq!(bars.scroll_bar_x.get_scroll_pos(), 0.0, "{}", style.id());
+            }
+        });
     }
 }

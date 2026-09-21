@@ -84,6 +84,68 @@ pub struct FromWasmTextCopyResponse {
 }
 
 #[derive(FromWasm)]
+pub struct FromWasmStorageGet {
+    pub request_id_lo: u32,
+    pub request_id_hi: u32,
+    pub namespace: String,
+    pub key: String,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmStorageSet {
+    pub request_id_lo: u32,
+    pub request_id_hi: u32,
+    pub namespace: String,
+    pub key: String,
+    pub value: WasmDataU8,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmStorageDelete {
+    pub request_id_lo: u32,
+    pub request_id_hi: u32,
+    pub namespace: String,
+    pub key: String,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmStorageList {
+    pub request_id_lo: u32,
+    pub request_id_hi: u32,
+    pub namespace: String,
+    pub prefix: String,
+    pub after: String,
+    pub has_after: bool,
+    pub limit: u32,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmStorageGetRange {
+    pub request_id_lo: u32,
+    pub request_id_hi: u32,
+    pub namespace: String,
+    pub key: String,
+    pub offset_lo: u32,
+    pub offset_hi: u32,
+    pub len: u32,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmStorageStat {
+    pub request_id_lo: u32,
+    pub request_id_hi: u32,
+    pub namespace: String,
+    pub key: String,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmStorageEstimate {
+    pub request_id_lo: u32,
+    pub request_id_hi: u32,
+    pub namespace: String,
+}
+
+#[derive(FromWasm)]
 pub struct FromWasmOpenUrl {
     pub url: String,
     pub in_place: bool,
@@ -108,6 +170,22 @@ pub struct FromWasmShowTextIME {
 
 #[derive(FromWasm)]
 pub struct FromWasmHideTextIME {}
+
+#[derive(FromWasm)]
+pub struct FromWasmSetVirtualFileLimits {
+    pub max_file_size: f64,
+    pub max_total_size: f64,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmSelectFileDialog {
+    pub id_lo: u32,
+    pub id_hi: u32,
+    pub accept: String,
+    pub multiple: bool,
+    pub max_file_size: f64,
+    pub max_total_size: f64,
+}
 /*
 #[derive(FromWasm)]
 pub struct FromWasmWebSocketOpen {
@@ -142,6 +220,7 @@ pub struct WTextureInput {
 impl DrawShaderTextureInput {
     pub fn to_from_wasm_texture_input(&self) -> WTextureInput {
         let ty = match self.tex_type {
+            TextureType::TextureDepth => "sampler2DShadow",
             TextureType::TextureCube | TextureType::TextureCubeArray => "samplerCube",
             _ => "sampler2D",
         };
@@ -150,13 +229,6 @@ impl DrawShaderTextureInput {
             name: self.id.to_string(),
         }
     }
-}
-
-#[cfg(target_feature = "atomics")]
-#[derive(FromWasm)]
-pub struct FromWasmCreateThread {
-    pub context_ptr: u32,
-    pub timer: u32,
 }
 
 #[derive(FromWasm)]
@@ -192,6 +264,17 @@ pub struct FromWasmRequestPermission {
 // WebGL API
 
 #[derive(FromWasm)]
+pub struct WVertexAttrib {
+    pub name: String,
+    pub offset: u32,
+    pub size: u32,
+    pub stride: u32,
+    pub gl_type: u32,
+    pub normalized: u32,
+    pub integer: u32,
+}
+
+#[derive(FromWasm)]
 pub struct FromWasmCompileWebGLShader {
     pub shader_id: usize,
     pub vertex: String,
@@ -199,18 +282,61 @@ pub struct FromWasmCompileWebGLShader {
     pub geometry_slots: usize,
     pub instance_slots: usize,
     pub textures: Vec<WTextureInput>,
+    pub geom_attribs: Vec<WVertexAttrib>,
+    pub inst_attribs: Vec<WVertexAttrib>,
 }
 
 #[derive(FromWasm)]
 pub struct FromWasmAllocArrayBuffer {
     pub buffer_id: usize,
     pub data: WasmPtrF32,
+    pub byte_data: WasmPtrU8,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmRetainedArrayBuffer {
+    pub buffer_id: usize,
+    pub data: WasmPtrF32,
+    pub first_slot: usize,
+}
+
+#[derive(FromWasm)]
+pub struct WRetainedBufferCopy {
+    pub source_slot: usize,
+    pub destination_slot: usize,
+    pub slot_count: usize,
+}
+
+#[derive(FromWasm)]
+pub struct WRetainedBufferWrite {
+    pub destination_slot: usize,
+    pub data: WasmPtrF32,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmRetainedArrayUpdate {
+    pub buffer_id: usize,
+    pub slot_count: usize,
+    pub capacity_bytes: usize,
+    pub replace: bool,
+    pub copies: Vec<WRetainedBufferCopy>,
+    pub writes: Vec<WRetainedBufferWrite>,
+}
+
+#[derive(FromWasm)]
+pub struct WCustomUniformBuffer {
+    pub block_name: String,
+    pub data: WasmPtrU8,
+    pub generation_lo: u32,
+    pub generation_hi: u32,
 }
 
 #[derive(FromWasm)]
 pub struct FromWasmAllocIndexBuffer {
     pub buffer_id: usize,
     pub data: WasmPtrU32,
+    pub byte_data: WasmPtrU8,
+    pub index_width: u32,
 }
 
 #[derive(FromWasm)]
@@ -220,6 +346,24 @@ pub struct FromWasmAllocVao {
     pub geom_ib_id: usize,
     pub geom_vb_id: usize,
     pub inst_vb_id: usize,
+}
+
+/// Deletes WebGL objects whose owning Rust pool slots are genuinely free.
+/// Each list contains the exact JavaScript table ids; the consumer also
+/// invalidates VAOs which depend on a retired vertex/index buffer.
+#[derive(FromWasm)]
+pub struct FromWasmFreeWebGLResources {
+    pub array_buffer_ids: Vec<usize>,
+    pub index_buffer_ids: Vec<usize>,
+    pub vao_ids: Vec<usize>,
+    pub texture_ids: Vec<usize>,
+    pub framebuffer_ids: Vec<usize>,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmPollGpuCompletion {
+    pub serial_lo: u32,
+    pub serial_hi: u32,
 }
 
 #[derive(FromWasm, Default)]
@@ -282,13 +426,16 @@ pub struct WColorTarget {
     pub texture_id: usize,
     pub init_only: bool,
     pub clear_color: WColor,
-    /// Attachment pixel format: 0 = RGBA8 (default), 1 = R32F
-    /// (`TextureFormat::RenderRf32`, needs EXT_color_buffer_float).
+    /// Attachment format: 0 RGBA8, 1 R32F, 2 RGBA32F, 3 RGBA16F.
+    /// Float color attachments require EXT_color_buffer_float.
     pub format: u32,
 }
 
 #[derive(FromWasm, Default)]
 pub struct WDepthTarget {
+    /// false = the pass has no depth texture (`Default`); a texture id of 0 is
+    /// a real texture, so absence needs its own flag.
+    pub attached: bool,
     pub texture_id: usize,
     pub init_only: bool,
     pub clear_depth: f32,
@@ -303,6 +450,19 @@ pub struct FromWasmBeginRenderTexture {
     pub depth_target: WDepthTarget,
 }
 
+/// Starts an asynchronous WebGL2 readback of a render-target texture.
+/// JavaScript uses a pixel-pack buffer plus a fence and reports the bytes
+/// through `ToWasmRenderTextureCapture` on a later animation frame.
+#[derive(FromWasm)]
+pub struct FromWasmRequestRenderTextureCapture {
+    pub texture_id: usize,
+    pub register_only: bool,
+    pub ticket_lo: u32,
+    pub ticket_hi: u32,
+    pub width: usize,
+    pub height: usize,
+}
+
 #[derive(FromWasm)]
 pub struct FromWasmBeginRenderCanvas {
     pub clear_color: WColor,
@@ -314,15 +474,29 @@ pub struct FromWasmSetDefaultDepthAndBlendMode {}
 
 #[derive(FromWasm)]
 pub struct FromWasmDrawCall {
+    pub custom_uniforms: Vec<WCustomUniformBuffer>,
     pub vao_id: usize,
     pub shader_id: usize,
+    pub index_width: u32,
     pub depth_write: bool,
+    pub alpha_blend: bool,
     pub backface_culling: bool,
     pub pass_uniforms: WasmPtrF32,
+    pub pass_uniforms_gen_lo: u32,
+    pub pass_uniforms_gen_hi: u32,
     pub draw_list_uniforms: WasmPtrF32,
+    pub draw_list_uniforms_gen_lo: u32,
+    pub draw_list_uniforms_gen_hi: u32,
     pub draw_call_uniforms: WasmPtrF32,
+    pub draw_call_uniforms_gen_lo: u32,
+    pub draw_call_uniforms_gen_hi: u32,
     pub user_uniforms: WasmPtrF32,
+    pub user_uniforms_gen_lo: u32,
+    pub user_uniforms_gen_hi: u32,
     pub live_uniforms: WasmPtrF32,
+    pub live_uniforms_gen_lo: u32,
+    pub live_uniforms_gen_hi: u32,
+    pub reset_draw_uniforms: bool,
     pub const_table: WasmPtrF32,
     pub textures: [Option<usize>; DRAW_CALL_TEXTURE_SLOTS],
 }

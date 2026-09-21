@@ -800,6 +800,9 @@ fn scan_access(
 ) -> Result<bool> {
     match access {
         Access::Scan => {
+            if let Some(t) = table.filter(|t| t.without_rowid) {
+                return scan_without_rowid(rt, root, t, visit);
+            }
             let mut cursor = TableCursor::new(root);
             cursor.rewind(rt.pager)?;
             while let Some(row) = cursor.next(rt.pager)? {
@@ -977,6 +980,37 @@ fn seek_value(v: Value, table: Option<&crate::schema::TableInfo>, col: Option<us
 
 /// Records may be shorter than the table (columns added by ALTER TABLE); fill
 /// from the column defaults, exactly like SQLite.
+/// A WITHOUT ROWID table is stored as an index b-tree. Each entry's record
+/// holds the PRIMARY KEY columns first, in key order, then the remaining
+/// columns in declared order; a column added later may be absent and takes
+/// its default. Rows are handed on in declared order with no rowid.
+fn scan_without_rowid(
+    rt: &mut Runtime,
+    root: u32,
+    table: &crate::schema::TableInfo,
+    visit: &mut dyn FnMut(&mut Runtime, RowData) -> Result<bool>,
+) -> Result<bool> {
+    let ncols = table.columns.len();
+    let mut order: Vec<usize> = table.pk_columns.clone();
+    order.extend((0..ncols).filter(|c| !table.pk_columns.contains(c)));
+    let mut cursor = IndexCursor::new(root);
+    cursor.rewind(rt.pager)?;
+    while let Some(payload) = cursor.next(rt.pager)? {
+        let stored = payload.prefix(rt.pager, ncols, TextMode::Strict)?;
+        let mut values: Vec<Value> = table.columns.iter().map(|c| c.default.clone()).collect();
+        for (pos, value) in stored.into_iter().enumerate() {
+            if let Some(&col) = order.get(pos) {
+                values[col] = value;
+            }
+        }
+        table.fix_real_affinity(&mut values);
+        if !visit(rt, RowData { rowid: 0, values })? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 fn pad(
     mut values: Vec<Value>,
     table: Option<&crate::schema::TableInfo>,

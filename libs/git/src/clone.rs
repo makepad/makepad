@@ -6,12 +6,11 @@ use std::time::Instant;
 use crate::commit::parse_commit;
 use crate::error::GitError;
 use crate::index::Index;
-use crate::object::{read_loose_object, Object};
+use crate::object::Object;
 use crate::oid::ObjectId;
-use crate::pack::{
-    find_packs, read_pack_object, read_pack_object_from_data, PackIndex, PackLookup,
-};
+use crate::pack::{read_pack_object_from_data, PackIndex, PackLookup};
 use crate::refs;
+use crate::repo::{object_sources, read_loose_object_from_objects_dir, ObjectSources};
 use crate::tree::parse_tree;
 
 /// Timings for the various phases of a local clone.
@@ -108,20 +107,18 @@ pub fn local_clone_depth1(
     // --- Phase 1: Resolve ref ---
     let resolve_start = Instant::now();
 
-    let src_git_dir = src.join(".git");
-    if !src_git_dir.is_dir() {
-        return Err(GitError::InvalidRef(format!(
-            "not a git repository: {}",
-            src.display()
-        )));
-    }
+    let src_paths = crate::repo::repository_paths(src)?.ok_or_else(|| {
+        GitError::InvalidRef(format!("not a git repository: {}", src.display()))
+    })?;
+    let src_git_dir = src_paths.git_dir;
+    let src_common_dir = src_paths.common_dir;
 
     let (target_oid, ref_name) = if let Some(branch) = branch {
         let refname = format!("refs/heads/{}", branch);
-        let oid = refs::resolve_ref(&src_git_dir, &refname)?;
+        let oid = refs::resolve_ref_in(&src_git_dir, &src_common_dir, &refname)?;
         (oid, refname)
     } else {
-        let oid = refs::resolve_head(&src_git_dir)?;
+        let oid = refs::resolve_head_in(&src_git_dir, &src_common_dir)?;
         let ref_name = match refs::read_head(&src_git_dir)? {
             refs::RefTarget::Symbolic(s) => s,
             refs::RefTarget::Direct(_) => "refs/heads/main".to_string(),
@@ -129,8 +126,10 @@ pub fn local_clone_depth1(
         (oid, ref_name)
     };
 
-    let src_packs = find_packs(&src_git_dir)?;
-    let commit_obj = read_object_from(&src_git_dir, &src_packs, &target_oid)?;
+    // Objects, packs and alternates live in the shared common dir; the
+    // source's own alternates count as well.
+    let sources = object_sources(&src_common_dir)?;
+    let commit_obj = sources.read(&target_oid)?;
     let commit = parse_commit(&commit_obj.data)?;
 
     let resolve_ms = resolve_start.elapsed().as_secs_f64() * 1000.0;
@@ -142,14 +141,15 @@ pub fn local_clone_depth1(
     fs::create_dir_all(dst_git_dir.join("objects/info"))?;
     fs::create_dir_all(dst_git_dir.join("refs/heads"))?;
 
-    let src_objects = src_git_dir
-        .join("objects")
-        .canonicalize()
-        .map_err(GitError::Io)?;
-    fs::write(
-        dst_git_dir.join("objects/info/alternates"),
-        format!("{}\n", src_objects.display()),
-    )?;
+    // Every loose directory of the source (its own store plus its alternates)
+    // becomes an alternate of the clone, so one level of lookup reaches all
+    // of them.
+    let mut alternates = String::new();
+    for dir in &sources.loose_dirs {
+        let dir = dir.canonicalize().map_err(GitError::Io)?;
+        alternates.push_str(&format!("{}\n", dir.display()));
+    }
+    fs::write(dst_git_dir.join("objects/info/alternates"), alternates)?;
 
     refs::update_head(&dst_git_dir, &refs::RefTarget::Symbolic(ref_name.clone()))?;
     refs::write_ref(&dst_git_dir, &ref_name, &target_oid)?;
@@ -169,13 +169,12 @@ pub fn local_clone_depth1(
     // --- Phase 3: Walk tree to collect all entries + directories ---
     let walk_start = Instant::now();
 
-    let tree = parse_tree(&read_object_from(&src_git_dir, &src_packs, &commit.tree)?.data)?;
+    let tree = parse_tree(&sources.read(&commit.tree)?.data)?;
 
     let mut file_entries = Vec::new();
     let mut dirs = Vec::new();
     collect_entries(
-        &src_git_dir,
-        &src_packs,
+        &sources,
         &tree,
         "",
         &mut file_entries,
@@ -191,15 +190,16 @@ pub fn local_clone_depth1(
     }
 
     // --- Phase 5: Build thread-safe pack readers ---
-    for pack in &src_packs {
+    for pack in &sources.packs {
         pack.ensure_loaded()?;
     }
-    let shared_packs: Vec<SharedPack> = src_packs
+    let shared_packs: Vec<SharedPack> = sources
+        .packs
         .iter()
         .filter_map(|p| SharedPack::from_pack_index(p).ok())
         .collect();
     let shared_packs = Arc::new(shared_packs);
-    let src_git_dir_arc = Arc::new(src_git_dir.clone());
+    let loose_dirs_arc = Arc::new(sources.loose_dirs.clone());
 
     // --- Phase 6: Parallel decompress + write ---
     let parallel_start = Instant::now();
@@ -228,7 +228,7 @@ pub fn local_clone_depth1(
     for chunk in chunks {
         let packs = Arc::clone(&shared_packs);
         let wd = Arc::clone(&workdir_arc);
-        let git_dir = Arc::clone(&src_git_dir_arc);
+        let loose_dirs = Arc::clone(&loose_dirs_arc);
 
         handles.push(std::thread::spawn(
             move || -> Result<(Vec<crate::index::IndexEntry>, u64), GitError> {
@@ -240,7 +240,7 @@ pub fn local_clone_depth1(
 
                     if fe.mode == 0o120000 {
                         // Symlink
-                        let blob = read_object_shared(&git_dir, &packs, &fe.oid)?;
+                        let blob = read_object_shared(&loose_dirs, &packs, &fe.oid)?;
                         #[cfg(unix)]
                         {
                             let target = std::str::from_utf8(&blob.data).unwrap_or("");
@@ -251,7 +251,7 @@ pub fn local_clone_depth1(
                         bytes += blob.data.len() as u64;
                     } else {
                         // Regular file
-                        let blob = read_object_shared(&git_dir, &packs, &fe.oid)?;
+                        let blob = read_object_shared(&loose_dirs, &packs, &fe.oid)?;
                         fs::write(&file_path, &blob.data)?;
                         bytes += blob.data.len() as u64;
 
@@ -353,8 +353,7 @@ pub fn local_clone_depth1(
 
 /// Recursively walk a tree and collect all file entries and directory paths.
 fn collect_entries(
-    git_dir: &Path,
-    packs: &[PackIndex],
+    sources: &ObjectSources,
     tree: &crate::tree::Tree,
     prefix: &str,
     file_entries: &mut Vec<FileEntry>,
@@ -369,11 +368,10 @@ fn collect_entries(
 
         if entry.is_tree() {
             dirs.push(path.clone());
-            let sub_obj = read_object_from(git_dir, packs, &entry.oid)?;
+            let sub_obj = sources.read(&entry.oid)?;
             let sub_tree = parse_tree(&sub_obj.data)?;
             collect_entries(
-                git_dir,
-                packs,
+                sources,
                 &sub_tree,
                 &format!("{}/", path),
                 file_entries,
@@ -392,39 +390,23 @@ fn collect_entries(
     Ok(())
 }
 
-/// Read an object using thread-safe shared packs (for parallel checkout).
+/// Read an object using thread-safe shared packs (for parallel checkout):
+/// loose objects from every source directory first, then the packs.
 fn read_object_shared(
-    git_dir: &Path,
+    loose_dirs: &[std::path::PathBuf],
     packs: &[SharedPack],
     oid: &ObjectId,
 ) -> Result<Object, GitError> {
-    match read_loose_object(git_dir, oid) {
-        Ok(obj) => return Ok(obj),
-        Err(GitError::ObjectNotFound(_)) => {}
-        Err(e) => return Err(e),
+    for dir in loose_dirs {
+        match read_loose_object_from_objects_dir(dir, oid) {
+            Ok(obj) => return Ok(obj),
+            Err(GitError::ObjectNotFound(_)) => {}
+            Err(e) => return Err(e),
+        }
     }
     for pack in packs {
         if let Ok(obj) = pack.read_object(oid) {
             return Ok(obj);
-        }
-    }
-    Err(GitError::ObjectNotFound(oid.to_hex()))
-}
-
-/// Read an object from a git dir, trying loose first then packs.
-fn read_object_from(
-    git_dir: &Path,
-    packs: &[PackIndex],
-    oid: &ObjectId,
-) -> Result<Object, GitError> {
-    match read_loose_object(git_dir, oid) {
-        Ok(obj) => return Ok(obj),
-        Err(GitError::ObjectNotFound(_)) => {}
-        Err(e) => return Err(e),
-    }
-    for pack in packs {
-        if let Some(offset) = pack.find_offset(oid) {
-            return read_pack_object(&pack.pack_path, offset, pack);
         }
     }
     Err(GitError::ObjectNotFound(oid.to_hex()))

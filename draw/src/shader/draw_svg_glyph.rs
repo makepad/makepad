@@ -54,6 +54,7 @@ impl DrawSvgGlyph {
         if self.svg_doc.is_none() {
             return Rect::default();
         }
+        let walk = cx.resolve_walk(walk, ResolveAt::BeforeBegin);
         let walk = self.resolve_walk(walk);
         let rect = cx.walk_turtle(walk);
         self.render_to_rect(cx, &rect);
@@ -220,11 +221,12 @@ impl DrawSvgGlyph {
             return;
         };
         let handle = handle_ref.as_handle();
-        let data = if let Some(data) = cx.get_resource(handle) {
+        let heap_key = handle_ref.heap_key();
+        let data = if let Some(data) = cx.get_resource(heap_key, handle) {
             data
         } else {
-            cx.load_script_resource(handle);
-            match cx.get_resource(handle) {
+            cx.load_script_resource(heap_key, handle);
+            match cx.get_resource(heap_key, handle) {
                 Some(data) => data,
                 None => return,
             }

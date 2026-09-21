@@ -1,16 +1,494 @@
+use super::archive::*;
 use super::geometry::*;
-use super::icons::ICON_MIN_ZOOM;
+use super::icons::icon_mesh_by_slot;
 use super::label::*;
 use super::overlay::*;
 use super::style::*;
 use super::tile::*;
+use super::tile_draw::*;
 use crate::{
     makepad_derive_widget::*, makepad_draw::*, widget::*, DrawRotatedText, DrawVector,
     PathGlyphInstance, PathTextPlacement, PreparedTextRun, WidgetMatchEvent,
 };
+use crate::makepad_draw::vector::{
+    FACE_IMPLICIT_UV, FACE_TYPED_VERTEX_BYTES, FILL_TYPED_VERTEX_BYTES,
+    MAP_VERTEX_POSITION_SCALE, ROAD_TYPED_VERTEX_BYTES,
+    VECTOR_ZBIAS_STEP, SubdivisionBudget,
+};
+use crate::makepad_draw::event::{TouchState, TouchUpdateEvent};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
+use std::cell::RefCell;
+use std::rc::Rc;
+#[cfg(test)]
+use std::sync::Arc;
+use crate::makepad_draw::text::fonts::{Fonts, FontsMemoryBytes};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MapMemoryBudgets {
+    upload: usize,
+    pending: usize,
+    tile_cache: usize,
+    http_tile_cache: usize,
+    /// In-memory archive caches (decoded leaves + fetched ranges) for the
+    /// base archive; the detail archive gets half, each overlay a quarter.
+    archive_cache: usize,
+    /// Tile bakes allowed in flight at once. A bake's working set (decoded
+    /// tile, features, geometry streams) is tens of MB, so the transient
+    /// peak scales with this, not with the core count.
+    bake_slots: usize,
+}
+
+const MIB_BYTES: usize = 1024 * 1024;
+const WEB_DESKTOP_MIN_BUDGET_BYTES: usize = 768 * MIB_BYTES;
+const WEB_UPLOAD_MAX_BYTES: usize = 32 * MIB_BYTES;
+const WEB_PENDING_MAX_BYTES: usize = 64 * MIB_BYTES;
+const WEB_DESKTOP_TILE_CACHE_MAX_BYTES: usize = 384 * MIB_BYTES;
+const WEB_SPACE_WARP_REFINEMENT_MAX_BYTES: usize = 4 * MIB_BYTES;
+const WEB_SPACE_WARP_REFINEMENT_MAX_WORK: usize = 1_000_000;
+const WEB_SOURCE_LOD_MAX: u8 = 3;
+const COMBINED_ARCHIVE_DETAIL_MIN_ZOOM: u32 = 14;
+const MEMORY_PRESSURE_RETRY_FRAMES: u64 = 30;
+const MEMORY_PRESSURE_RELEASE_FRAMES: u64 = 300;
+const MAX_RADAR_FRAMES: usize = 64;
+const MAX_RADAR_DIMENSION: usize = 8_192;
+const MAX_RADAR_RESIDENT_BYTES: usize = 64 * MIB_BYTES;
+const RADAR_BYTES_PER_PIXEL: usize = std::mem::size_of::<u32>();
+
+fn radar_texture_bytes(size: (usize, usize)) -> Option<usize> {
+    if !(1..=MAX_RADAR_DIMENSION).contains(&size.0)
+        || !(1..=MAX_RADAR_DIMENSION).contains(&size.1)
+    {
+        return None;
+    }
+    size.0
+        .checked_mul(size.1)?
+        .checked_mul(RADAR_BYTES_PER_PIXEL)
+        .filter(|bytes| *bytes <= MAX_RADAR_RESIDENT_BYTES)
+}
+
+fn radar_sequence_resident_bytes(
+    frame_count: usize,
+    display_size: (usize, usize),
+    hires_size: Option<(usize, usize)>,
+) -> Option<usize> {
+    if frame_count > MAX_RADAR_FRAMES {
+        return None;
+    }
+    let display_bytes = frame_count.checked_mul(radar_texture_bytes(display_size)?)?;
+    let hires_bytes = match hires_size {
+        Some(size) => radar_texture_bytes(size)?,
+        None => 0,
+    };
+    display_bytes
+        .checked_add(hires_bytes)
+        .filter(|bytes| *bytes <= MAX_RADAR_RESIDENT_BYTES)
+}
+
+fn radar_texel_payload_admitted(texel_count: usize, size: (usize, usize)) -> bool {
+    radar_texture_bytes(size).is_some()
+        && size
+            .0
+            .checked_mul(size.1)
+            .is_some_and(|expected| texel_count == expected)
+}
+
+fn radar_legacy_batch_admitted(
+    mut frame_lengths: impl ExactSizeIterator<Item = usize>,
+    display_size: (usize, usize),
+    hires_size: Option<(usize, usize)>,
+) -> bool {
+    let frame_count = frame_lengths.len();
+    let Some(expected_pixels) = display_size.0.checked_mul(display_size.1) else {
+        return false;
+    };
+    radar_sequence_resident_bytes(frame_count, display_size, hires_size).is_some()
+        && frame_lengths.all(|length| length == expected_pixels)
+}
+
+struct RainFrame {
+    minute: i64,
+    texture: Texture,
+}
+
+#[derive(Default)]
+struct MapMemoryPressure {
+    /// Finite 0..=3 degradation ladder. The source zoom only follows it
+    /// when the archive explicitly advertises a usable lower zoom.
+    level: u8,
+    last_pressure_frame: u64,
+    last_level_change_frame: u64,
+    events: u64,
+    deferred: HashMap<TileKey, MemoryDeferral>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TileAdmissionPolicy {
+    render_bucket: u32,
+    source_zoom: u32,
+    style_epoch: u64,
+    buildings_3d: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ExhaustionBlocker {
+    failed_limit: usize,
+    required_bytes: usize,
+    policy: TileAdmissionPolicy,
+}
+
+impl ExhaustionBlocker {
+    fn retry_ready(self, current_limit: Option<usize>, current_policy: TileAdmissionPolicy) -> bool {
+        current_policy != self.policy
+            || current_limit.is_some_and(|limit| {
+                limit > self.failed_limit && limit >= self.required_bytes
+            })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MemoryDeferral {
+    Until(u64),
+    Exhausted(ExhaustionBlocker),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MemoryPressureOutcome {
+    Advanced,
+    RetryLater,
+    Exhausted,
+}
+
+impl MapMemoryBudgets {
+    fn from_cx(cx: &Cx) -> Self {
+        Self::from_total(cx.memory_budget_bytes(), cfg!(target_arch = "wasm32"))
+    }
+
+    fn from_total(total: usize, is_web: bool) -> Self {
+        let fraction = |numerator: u128, denominator: u128| {
+            ((total as u128 * numerator) / denominator).min(usize::MAX as u128) as usize
+        };
+        if is_web {
+            // A 1 GiB wasm linear-memory ceiling is not a 1 GiB tile heap:
+            // the allocator cannot return pages, a bake temporarily owns
+            // decoded features plus output, and upload briefly has CPU/GPU
+            // copies. Keep all transient caps absolute as well as relative.
+            let desktop = total >= WEB_DESKTOP_MIN_BUDGET_BYTES;
+            return Self {
+                upload: if desktop {
+                    fraction(1, 32).min(WEB_UPLOAD_MAX_BYTES)
+                } else {
+                    fraction(1, 64).min(8 * MIB_BYTES)
+                },
+                pending: if desktop {
+                    fraction(1, 16).min(WEB_PENDING_MAX_BYTES)
+                } else {
+                    fraction(3, 64).min(48 * MIB_BYTES)
+                },
+                tile_cache: if desktop {
+                    fraction(3, 8).min(WEB_DESKTOP_TILE_CACHE_MAX_BYTES)
+                } else {
+                    fraction(3, 16)
+                },
+                http_tile_cache: if desktop {
+                    fraction(3, 8).min(WEB_DESKTOP_TILE_CACHE_MAX_BYTES)
+                } else {
+                    fraction(5, 32)
+                },
+                archive_cache: fraction(1, 16).min(48 * MIB_BYTES),
+                bake_slots: (total / (512 * MIB_BYTES)).clamp(1, 2),
+            };
+        }
+        Self {
+            upload: fraction(1, 64),
+            pending: fraction(1, 4),
+            tile_cache: fraction(25, 32),
+            http_tile_cache: fraction(5, 32),
+            archive_cache: fraction(1, 16),
+            bake_slots: (total / (192 * MIB_BYTES)).clamp(1, 16),
+        }
+    }
+}
+
+fn pressure_source_zoom(nominal: u32, range: Option<(u32, u32)>, level: u8) -> u32 {
+    let Some((min_zoom, max_zoom)) = range.filter(|(min, max)| min <= max && *max <= 30) else {
+        return nominal;
+    };
+    let nominal = nominal.clamp(min_zoom, max_zoom);
+    if min_zoom == max_zoom {
+        return nominal;
+    }
+    nominal.saturating_sub(level as u32).max(min_zoom)
+}
+
+fn pressure_source_zoom_for_archives(
+    nominal: u32,
+    base_range: Option<(u32, u32)>,
+    required_detail_range: Option<Option<(u32, u32)>>,
+    level: u8,
+) -> u32 {
+    let pressured = pressure_source_zoom(nominal, base_range, level);
+    let detail_supported = required_detail_range.is_none_or(|range| {
+        range.is_some_and(|(min, max)| min <= pressured && pressured <= max)
+    });
+    if detail_supported {
+        pressured
+    } else {
+        pressure_source_zoom(nominal, base_range, 0)
+    }
+}
+
+fn pending_byte_cap<T>(
+    pending: &mut Vec<T>,
+    byte_budget: usize,
+    keep_one_oversized: bool,
+    byte_size: impl Fn(&T) -> usize,
+) -> Vec<T> {
+    let mut total = pending
+        .iter()
+        .map(&byte_size)
+        .fold(0usize, usize::saturating_add);
+    let mut dropped = Vec::new();
+    let minimum = usize::from(keep_one_oversized);
+    while total > byte_budget && pending.len() > minimum {
+        let item = pending.pop().unwrap();
+        total = total.saturating_sub(byte_size(&item));
+        dropped.push(item);
+    }
+    dropped
+}
+
+fn ready_tile_admission_limit(
+    budgets: MapMemoryBudgets,
+    resident_budget: usize,
+    committed_visible_bytes: usize,
+    is_web: bool,
+) -> Option<usize> {
+    is_web.then(|| {
+        budgets
+            .upload
+            .min(resident_budget.saturating_sub(committed_visible_bytes))
+    })
+}
+
+/// Re-check a tile after UI-thread growth (cached road icons and optional
+/// space-warp subdivision). Native has no per-result cap and takes the
+/// historical zero-work path.
+fn admit_final_ready_tile_payload(buffers: &mut TileBuffers, limit: Option<usize>) -> bool {
+    let Some(limit) = limit else {
+        return true;
+    };
+    if buffers.allocated_byte_size() <= limit {
+        return true;
+    }
+    buffers.degrade_to_memory_limit(limit);
+    buffers.allocated_byte_size() <= limit
+}
+
+fn space_warp_refinement_budget(
+    tile_payload_limit: Option<usize>,
+    allocated_tile_bytes: usize,
+) -> Option<SubdivisionBudget> {
+    tile_payload_limit.map(|limit| {
+        SubdivisionBudget::new(
+            limit
+                .saturating_sub(allocated_tile_bytes)
+                .min(WEB_SPACE_WARP_REFINEMENT_MAX_BYTES),
+            WEB_SPACE_WARP_REFINEMENT_MAX_WORK,
+        )
+    })
+}
+
+/// Tile payload sources only. Navigation data is deliberately outside this
+/// contract; applications layer routing datasets over MapView separately.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TileSourceConfig {
+    LocalArchive {
+        mbtiles_path: String,
+        detail_mbtiles_path: String,
+        bridge_dz_path: String,
+    },
+    HttpArchive {
+        root_url: String,
+        detail_root_url: String,
+        bridge_dz_path: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OverlaySource {
+    pub name: String,
+    pub source: TileSourceConfig,
+}
+
+impl OverlaySource {
+    pub fn new(name: impl Into<String>, source: TileSourceConfig) -> Self {
+        Self {
+            name: name.into(),
+            source,
+        }
+    }
+
+    pub fn with_option(
+        name: impl Into<String>,
+        mut source: TileSourceConfig,
+        option: Option<&str>,
+    ) -> Self {
+        if let Some(option) = option {
+            match &mut source {
+                TileSourceConfig::LocalArchive { mbtiles_path, .. } => {
+                    mbtiles_path.push('?');
+                    mbtiles_path.push_str(option);
+                }
+                TileSourceConfig::HttpArchive { root_url, .. } => {
+                    root_url.push('?');
+                    root_url.push_str(option);
+                }
+            }
+        }
+        Self::new(name, source)
+    }
+}
+
+fn is_mkmap_path_shape(path: &str) -> bool {
+    let path = Path::new(path);
+    path.extension().is_some_and(|extension| extension == "mkmap")
+        || path.file_name().is_some_and(|name| name == "root.mkidx")
+}
+
+fn split_overlay_option(source: &str) -> (&str, u8) {
+    match source.rsplit_once('?') {
+        Some((source, "fast")) => (source, 1),
+        Some((source, "slow")) => (source, 2),
+        _ => (source, 0),
+    }
+}
+
+fn overlay_fetch_key(key: TileKey, zoom_range: (u32, u32)) -> Option<TileKey> {
+    let (min_zoom, max_zoom) = zoom_range;
+    if key.z < min_zoom {
+        return None;
+    }
+    let shift = key.z.saturating_sub(max_zoom);
+    Some(TileKey {
+        z: key.z - shift,
+        x: key.x >> shift,
+        y: key.y >> shift,
+    })
+}
+
+fn want_fringe_for_tilt(tilt: f64, currently_baked: bool) -> bool {
+    if tilt < 30.0 {
+        true
+    } else if tilt > 40.0 {
+        false
+    } else {
+        currently_baked
+    }
+}
+
+fn detail_matches_base(config: &TileSourceConfig) -> bool {
+    match config {
+        TileSourceConfig::LocalArchive {
+            mbtiles_path,
+            detail_mbtiles_path,
+            ..
+        } => !detail_mbtiles_path.is_empty() && detail_mbtiles_path == mbtiles_path,
+        TileSourceConfig::HttpArchive {
+            root_url,
+            detail_root_url,
+            ..
+        } => !detail_root_url.is_empty() && detail_root_url == root_url,
+    }
+}
+
+fn needs_separate_detail_archive(config: &TileSourceConfig) -> bool {
+    match config {
+        TileSourceConfig::LocalArchive {
+            mbtiles_path,
+            detail_mbtiles_path,
+            ..
+        } => {
+            is_mkmap_path_shape(mbtiles_path)
+                && is_mkmap_path_shape(detail_mbtiles_path)
+                && !detail_mbtiles_path.is_empty()
+                && detail_mbtiles_path != mbtiles_path
+        }
+        TileSourceConfig::HttpArchive {
+            root_url,
+            detail_root_url,
+            ..
+        } => !detail_root_url.is_empty() && detail_root_url != root_url,
+    }
+}
+
+impl TileSourceConfig {
+    pub fn local_archive(path: impl Into<String>) -> Self {
+        let path = path.into();
+        Self::LocalArchive {
+            detail_mbtiles_path: path.clone(),
+            mbtiles_path: path,
+            bridge_dz_path: String::new(),
+        }
+    }
+
+    /// Hosted `.mkmap` archive constructor: base and detail from one root, no
+    /// sidecars. Keeping variant construction in the map crate lets callers stay
+    /// stable as HTTP sidecar fields come and go.
+    pub fn http_archive(root_url: impl Into<String>) -> Self {
+        let root_url = root_url.into();
+        Self::HttpArchive {
+            detail_root_url: root_url.clone(),
+            root_url,
+            bridge_dz_path: String::new(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ArchiveTileParts {
+    generation: u64,
+    base: Option<Result<Option<TileBlob>, String>>,
+    detail: Option<Result<Option<TileBlob>, String>>,
+    detail_required: bool,
+    reuse_base_as_detail: bool,
+    overlays: Vec<ArchiveOverlayPart>,
+}
+
+#[derive(Debug)]
+struct ArchiveOverlayPart {
+    archive_index: usize,
+    name: String,
+    filter: u8,
+    fetch_key: Option<TileKey>,
+    result: Option<Result<Option<TileBlob>, String>>,
+}
+
+struct ActiveOverlayArchive {
+    name: String,
+    filter: u8,
+    archive: Option<MapTileArchive>,
+    local_mbtiles_path: Option<String>,
+}
+
+#[derive(Debug)]
+#[cfg(not(target_arch = "wasm32"))]
+struct ArchiveWatchResult {
+    path: String,
+    mtime: Option<u128>,
+    zoom_range: Option<(u32, u32)>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn archive_mtime(path: &Path) -> Option<u128> {
+    std::fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_nanos())
+}
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -37,6 +515,10 @@ script_mod! {
         // (and trees/signals) grow out of the ground as their 3D bake fades
         // in.
         height_grow: uniform(1.0)
+        // Tilted-camera per-pass depth offset: a uniform because it moves
+        // with the tilt and the relief in view while the tile's instances
+        // stay resident (see tile_draw.rs).
+        pass_depth: uniform(0.0)
         // Heading-up camera: cos/sin of the screen rotation and its pivot
         // (the view center). Identity when north-up.
         view_rot: uniform(vec2(1.0, 0.0))
@@ -49,6 +531,14 @@ script_mod! {
         // 3D terrain displacement: terrarium-packed elevation texture over
         // a pre-rotation screen rect; span zero = disabled.
         terrain_tex: texture_2d(float)
+        shadow_mask: texture_2d(float)
+        shadow_mask_on: uniform(0.0)
+        shadow_mask_size: uniform(vec2(1.0, 1.0))
+        shadow_mask_flip: uniform(0.0)
+        shadow_dir: uniform(vec2(0.0, 0.0))
+        shadow_cast: uniform(0.0)
+        v_screen: varying(vec2f)
+        v_lift: varying(float)
         terrain_org: uniform(vec2(0.0, 0.0))
         terrain_span: uniform(vec2(0.0, 0.0))
         // Texel-center remap for the elevation texture (half-texel inset),
@@ -76,13 +566,53 @@ script_mod! {
         shiny_gates: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         // x=dynamic_sun (reserved), y=shadow_alpha, z/w unused.
         shiny_gates2: uniform(vec4(0.0, 0.22, 0.0, 0.0))
+        // Water/foliage shimmer clock, written once into the map's pass
+        // uniforms as elapsed seconds. NEVER read `draw_pass.time` here:
+        // the platform statically flags any shader
+        // whose compiled source contains that accessor as `uses_time`,
+        // which forces a full-pass GPU repaint on EVERY frame forever —
+        // for as long as ANY draw call using this shader is on screen —
+        // regardless of whether the water/foliage gates above are even on.
+        // Since this pixel function is inherited by every DrawMap* variant
+        // (road/wall/roof/icon/prop/shadow/fill), that pinned the whole map
+        // at display-rate GPU cost permanently, in 2D and 3D alike. A
+        // The dedicated pass slot carries the same value without tripping
+        // the static check; the interaction-gated `shiny_anim_timer`
+        // heartbeat advances it at 20 Hz, then leaves its last drawn value
+        // frozen.
         sun_dir: uniform(vec3(-0.379, -0.575, 0.724))
         sun_color: uniform(vec3(1.0, 0.98, 0.94))
         sun_sky: uniform(vec3(0.55, 0.62, 0.72))
 
         fragment: fn(){
+            if self.shadow_cast > 0.5 {
+                if self.shadow_cast < 1.5 {
+                    if self.v_lift < 0.05 {
+                        discard()
+                    }
+                    self.fb0 = vec4(1.0, 1.0, 1.0, 1.0)
+                    return
+                }
+                if self.shadow_cast < 2.5 {
+                    self.fb0 = vec4(0.0, 0.0, 0.0, 1.0)
+                    return
+                }
+                let c = self.v_color.w
+                self.fb0 = vec4(c, c, c, c)
+                return
+            }
             var color = self.pixel() * self.tile_fade * self.fill_pattern()
             color = self.material_fx(color)
+            if self.shadow_mask_on > 0.5 && self.v_lift < 0.05 {
+                if self.v_shape_id < 19.5 || self.v_shape_id > 20.5 {
+                    var uv = self.v_screen / self.shadow_mask_size
+                    if self.shadow_mask_flip > 0.5 {
+                        uv.y = 1.0 - uv.y
+                    }
+                    let m = self.shadow_mask.sample(uv).x
+                    color = color * (1.0 - m * self.shiny_gates2.y)
+                }
+            }
             // Dashed tunnel gaps and the zero-coverage tails of analytic
             // vectors are transparent. Discard them before depth_clip so an
             // invisible carrier cannot occlude the road above it in 3D.
@@ -149,11 +679,6 @@ script_mod! {
             if mat < 0.5 {
                 return color
             }
-            // 6: baked shadow decal — alpha rides the live shadow uniform
-            // so time-of-day fades don't need a rebake.
-            if mat > 5.5 && mat < 6.5 {
-                return color * self.shiny_gates2.y
-            }
             // 7: emissive road (Circuit City) — push the theme's line
             // color toward white-hot by the baked class strength; the
             // dark ground around it does the rest of the glow illusion.
@@ -180,7 +705,7 @@ script_mod! {
                 }
                 let k = self.shiny_gates2.z
                 let uv = vec2(self.v_param1, self.v_param2) * k
-                let t = self.draw_pass.time
+                let t = self.draw_pass.shiny_time
                 let ct = clamp(self.tilt_params.x, 0.0, 1.0)
                 let st = sqrt(max(1.0 - ct * ct, 0.0))
                 let closeness = clamp(1.6 - k, 0.0, 1.0)
@@ -331,7 +856,7 @@ script_mod! {
                 }
                 let k = self.shiny_gates2.z
                 let uv = vec2(self.v_param1, self.v_param2) * k
-                let t = self.draw_pass.time
+                let t = self.draw_pass.shiny_time
                 // Broad meadow tone patches (static).
                 let patch = self.mat_noise(uv * 0.023) * 0.65 + self.mat_noise(uv * 0.11) * 0.35
                 var f = 0.93 + 0.11 * patch
@@ -378,7 +903,7 @@ script_mod! {
             let g_p0s = unpack2f16(self.geom.p0s)
             let g_p12 = unpack2f16(self.geom.p12)
             let g_p3c = unpack2f16(self.geom.p3c)
-            let pos = vec2(self.geom.x, self.geom.y);
+            let pos = vec2(self.geom.x, self.geom.y) + self.inst_anchor;
             var transformed = pos * self.map_scale + self.map_offset;
             var shape_id = g_p0s.y;
             var expanded = 0.0;
@@ -429,6 +954,20 @@ script_mod! {
                 terrain_pos = terrain_pos + off;
                 surface_decal = 1.0;
             }
+            var feature_lift = self.geom.param4 * self.height_grow;
+            if shape_id > 19.5 && shape_id < 20.5 {
+                if surface_decal > 0.5 {
+                    feature_lift = self.geom.param4 * self.height_grow;
+                } else {
+                    let icon_floor = modf(self.geom.param4, 100.0);
+                    feature_lift = (self.geom.param4 - icon_floor) * 0.0025 * self.height_grow;
+                }
+            }
+            if self.shadow_cast > 0.5 && self.shadow_cast < 1.5 {
+                let delta = self.shadow_dir * feature_lift * self.map_scale;
+                transformed = transformed + delta;
+                terrain_pos = terrain_pos + delta;
+            }
             // 3D terrain: every vertex lifts by the ground elevation under
             // it, so roads/fills/buildings ride the displaced surface.
             // Sampled at the centerline anchor (pre width-expansion): the
@@ -465,20 +1004,12 @@ script_mod! {
             if expanded < 0.5 {
                 ground_fill = ground_m * self.terrain_fill_lift;
             }
-            var lift_m = self.geom.param4 * self.height_grow + ground_fill;
+            var lift_m = feature_lift + ground_fill;
             if shape_id > 19.5 && shape_id < 20.5 {
-                if surface_decal > 0.5 {
-                    // Surface-decal param4 is exact signed deck meters per
-                    // vertex. No 0.25m icon-height quantization: the two
-                    // triangles follow a ramp's local slope continuously.
-                    lift_m = self.geom.param4 * self.height_grow + ground_m;
-                } else {
-                    // Icon param4 = zoom_floor + pin_lift_m*100: markers fly
-                    // at their encoded height (0 for grounded icons).
-                    let icon_floor = modf(self.geom.param4, 100.0);
-                    lift_m = (self.geom.param4 - icon_floor) * 0.0025 * self.height_grow
-                        + ground_m;
-                }
+                lift_m = feature_lift + ground_m;
+            }
+            if self.shadow_cast > 0.5 {
+                lift_m = ground_fill;
             }
             // The Inception mode: fold + perspective camera (CPU twin:
             // overlay.rs SpaceWarp::project — keep in LOCKSTEP). Ground
@@ -626,6 +1157,8 @@ script_mod! {
 
             let shifted = transformed + self.draw_list.view_shift;
             self.v_world = shifted;
+            self.v_screen = transformed - self.rot_pivot + self.shadow_mask_size * 0.5;
+            self.v_lift = feature_lift;
 
             let cr = (g_p3c.y + expand_slack) * max(self.map_scale.x, self.map_scale.y);
             let clip = vec4(
@@ -649,9 +1182,9 @@ script_mod! {
                 // keeps casing/center/icon layering, baked feature order
                 // shrinks to the smallest scale. draw_call.zbias would
                 // otherwise grow with call count and beat small lifts.
-                self.draw_depth + self.tilt_params.w
+                self.draw_depth + self.pass_depth + self.tilt_params.w
                     + mix(
-                        self.draw_call.zbias + self.geom.zbias,
+                        self.draw_call.zbias + self.geom.zbias + self.inst_zbias,
                         // Lifted geometry carries its lift into depth: a
                         // deck 2.5 m up must beat the water/ground drawn at
                         // its DISPLAY position, and the required margin is
@@ -802,6 +1335,1201 @@ script_mod! {
                 return self.dash(8.0, 8.0)
             }
             return 1.0
+        }
+    }
+
+    // Ground polygon fills: 16-byte typed vertices. Their UVs are map-anchored
+    // position, and all other generic-vector channels are constants. The
+    // inherited fragment/material/pattern path remains the source of truth.
+    mod.draw.DrawMapFill = mod.std.set_type_default() do #(DrawMapFill::script_shader(vm)){
+        ..mod.draw.DrawMapVector
+        geom: vertex_buffer(geom.FillVertexTyped, geom.FillGeomTyped)
+
+        vertex: fn() {
+            let pos = self.geom.pos / #(MAP_VERTEX_POSITION_SCALE)
+            let fill = self.geom.params
+            let color = self.geom.color
+            let depth = self.geom.zbias
+            let flat_zbias = depth.x * 0.000001
+            let param5 = depth.y * 0.00001
+            var shape_id = 0.0
+            var material = fill.x
+            if fill.x > 29.5 {
+                shape_id = fill.x
+                material = 0.0
+            }
+
+            var transformed = pos * self.map_scale + self.map_offset
+            let terrain_pos = transformed
+            var ground_m = 0.0
+            if self.terrain_span.x > 0.5 {
+                let tuv = (terrain_pos - self.terrain_org) / self.terrain_span
+                if tuv.x > 0.0 && tuv.x < 1.0 && tuv.y > 0.0 && tuv.y < 1.0 {
+                    let fit = tuv * self.terrain_uvfit.xy + self.terrain_uvfit.zw
+                    let enc = self.terrain_tex.sample_lod(fit, 0.0)
+                    ground_m = max(
+                        enc.x * 65280.0 + enc.y * 255.0 + enc.z * 0.99609375 - 32768.0,
+                        0.0
+                    )
+                }
+            }
+            let rel = transformed - self.rot_pivot
+            transformed = self.rot_pivot + vec2(
+                rel.x * self.view_rot.x - rel.y * self.view_rot.y,
+                rel.x * self.view_rot.y + rel.y * self.view_rot.x
+            )
+            let ground_rel_y = transformed.y - self.rot_pivot.y
+            let lift_m = ground_m * self.terrain_fill_lift
+            if self.space_warp.x > 0.0001 {
+                let cos_t = self.tilt_params.x
+                let sin_t = self.space_warp.w
+                let hpx = lift_m * self.space_warp2.y
+                let wg = 0.0 - ground_rel_y
+                var wf = wg
+                var wu = 0.0
+                var wnx = 0.0
+                var wny = 1.0
+                let wa = wg - self.space_warp.y
+                if wa > 0.0 {
+                    let wr = max(self.space_warp.z, 1.0)
+                    let cap = self.space_warp2.z
+                    let th = min(wa / wr, cap)
+                    let sth = sin(th)
+                    let cth = cos(th)
+                    wf = self.space_warp.y + wr * sth
+                    wu = wr * (1.0 - cth)
+                    let we = wa - wr * cap
+                    if we > 0.0 {
+                        wf = wf + we * cos_t
+                        wu = wu + we * sin_t
+                    }
+                    wnx = 0.0 - sth
+                    wny = cth
+                }
+                let pf = wf + hpx * wnx
+                let pu = wu + hpx * wny
+                let bf = wg + (pf - wg) * self.space_warp.x
+                let bu = hpx + (pu - hpx) * self.space_warp.x
+                let zrel = bf * sin_t - bu * cos_t
+                let pw = 1.0 / max(1.0 + self.space_warp2.x * zrel, 0.12)
+                transformed = vec2(
+                    self.rot_pivot.x + (transformed.x - self.rot_pivot.x) * pw,
+                    self.rot_pivot.y - (bf * cos_t + bu * sin_t) * pw
+                )
+            } else {
+                transformed.y = self.rot_pivot.y
+                    + ground_rel_y * self.tilt_params.x
+                    - lift_m * self.tilt_params.y
+            }
+
+            self.v_tcoord = vec2(fill.y, 1.0)
+            self.v_color = color
+            self.v_stroke_mult = 1e6
+            self.v_stroke_dist = 0.0
+            self.v_shape_id = shape_id
+            self.v_param0 = 0.0
+            if shape_id > 29.5 || (material > 2.5 && material < 3.5)
+                || (material > 4.5 && material < 5.5) {
+                let map_uv = pos * self.map_scale
+                self.v_param1 = map_uv.x
+                self.v_param2 = map_uv.y
+            } else {
+                self.v_param1 = 0.0
+                self.v_param2 = 0.0
+            }
+            self.v_param3 = material
+            self.v_param4 = 0.0
+            self.v_param5 = param5
+
+            let shifted = transformed + self.draw_list.view_shift
+            self.v_world = shifted
+            self.v_screen = transformed - self.rot_pivot + self.shadow_mask_size * 0.5
+            self.v_lift = 0.0
+            let world = self.draw_list.view_transform * vec4(
+                shifted.x
+                shifted.y
+                self.draw_depth + self.pass_depth + self.tilt_params.w
+                    + mix(
+                        self.draw_call.zbias + flat_zbias,
+                        param5 + (ground_rel_y + lift_m * self.tilt_params.y)
+                            * self.tilt_params.z,
+                        sign(self.tilt_params.z)
+                    )
+                1.
+            )
+            self.v_world_clip = world
+            self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * world)
+        }
+    }
+
+    // Typed road-only path: 28-byte records instead of DrawMapVector's 48.
+    // params.x is an f16 integer: class + 8*material in the low
+    // six bits, then dash (get_stroke_mask 10/11/12 as 1/2/3) and kind
+    // (stroke/fill/fringe). params.y carries the one kind-specific pixel
+    // scalar (dash distance, route-emissive strength, or coverage); uv
+    // preserves both tessellator coordinates.
+    mod.draw.DrawMapRoad = mod.std.set_type_default() do #(DrawMapRoad::script_shader(vm)){
+        ..mod.draw.DrawMapVector
+        geom: vertex_buffer(geom.RoadVertexTyped, geom.RoadGeomTyped)
+
+        vertex: fn() {
+            let off = self.geom.off
+            let road_params = self.geom.params
+            let road_depth = self.geom.depth
+            // uv.y <= 1 is cap coverage; round-cap carriers use
+            // uv.y = 1 + cap_axis, where cap_axis runs 0..1 from centre to tip.
+            let road_uv = self.geom.uv
+            let expanded = floor(road_params.x / 1024.0)
+            let meta = road_params.x - expanded * 1024.0
+            let kind = floor(meta / 256.0)
+            let dash_id = floor(modf(meta, 256.0) / 64.0)
+            let class_material = modf(meta, 64.0)
+            var cls = modf(class_material, 8.0)
+            let material = floor(class_material / 8.0)
+
+            let pos = self.geom.pos / #(MAP_VERTEX_POSITION_SCALE)
+            var transformed = pos * self.map_scale + self.map_offset
+            let terrain_pos = transformed
+            var corr = self.width_correction.x
+            if cls > 3.5 {
+                cls = cls - 4.0
+                corr = self.face_correction.x
+                if cls > 2.5 {
+                    corr = self.face_correction.w
+                } else if cls > 1.5 {
+                    corr = self.face_correction.z
+                } else if cls > 0.5 {
+                    corr = self.face_correction.y
+                }
+            } else if cls > 2.5 {
+                corr = self.width_correction.w
+            } else if cls > 1.5 {
+                corr = self.width_correction.z
+            } else if cls > 0.5 {
+                corr = self.width_correction.y
+            }
+            transformed = transformed + off * self.map_scale * corr
+            if self.shadow_cast > 0.5 && self.shadow_cast < 1.5 {
+                transformed = transformed
+                    + self.shadow_dir * self.geom.deck * self.height_grow * self.map_scale
+            }
+
+            // Roads sample terrain at their centerline anchor, so casing and
+            // center remain on one plane even though their offsets differ.
+            var ground_m = 0.0
+            if self.terrain_span.x > 0.5 {
+                let tuv = (terrain_pos - self.terrain_org) / self.terrain_span
+                if tuv.x > 0.0 && tuv.x < 1.0 && tuv.y > 0.0 && tuv.y < 1.0 {
+                    let fit = tuv * self.terrain_uvfit.xy + self.terrain_uvfit.zw
+                    let enc = self.terrain_tex.sample_lod(fit, 0.0)
+                    ground_m = max(
+                        enc.x * 65280.0 + enc.y * 255.0 + enc.z * 0.99609375 - 32768.0,
+                        0.0
+                    )
+                }
+            }
+
+            let rel = transformed - self.rot_pivot
+            transformed = self.rot_pivot + vec2(
+                rel.x * self.view_rot.x - rel.y * self.view_rot.y,
+                rel.x * self.view_rot.y + rel.y * self.view_rot.x
+            )
+            let ground_rel_y = transformed.y - self.rot_pivot.y
+            var ground_fill = ground_m
+            if expanded < 0.5 {
+                ground_fill = ground_m * self.terrain_fill_lift
+            }
+            let lift_m = self.geom.deck * self.height_grow + ground_fill
+
+            // Inception/space-warp projection, in lockstep with the generic
+            // vector path. Road meshes use their own typed-stride midpoint
+            // subdivision before upload, so long chords follow the fold.
+            if self.space_warp.x > 0.0001 {
+                let cos_t = self.tilt_params.x
+                let sin_t = self.space_warp.w
+                let hpx = lift_m * self.space_warp2.y
+                let wg = 0.0 - ground_rel_y
+                var wf = wg
+                var wu = 0.0
+                var wnx = 0.0
+                var wny = 1.0
+                let wa = wg - self.space_warp.y
+                if wa > 0.0 {
+                    let wr = max(self.space_warp.z, 1.0)
+                    let cap = self.space_warp2.z
+                    let th = min(wa / wr, cap)
+                    let sth = sin(th)
+                    let cth = cos(th)
+                    wf = self.space_warp.y + wr * sth
+                    wu = wr * (1.0 - cth)
+                    let we = wa - wr * cap
+                    if we > 0.0 {
+                        wf = wf + we * cos_t
+                        wu = wu + we * sin_t
+                    }
+                    wnx = 0.0 - sth
+                    wny = cth
+                }
+                let pf = wf + hpx * wnx
+                let pu = wu + hpx * wny
+                let bf = wg + (pf - wg) * self.space_warp.x
+                let bu = hpx + (pu - hpx) * self.space_warp.x
+                let zrel = bf * sin_t - bu * cos_t
+                let pw = 1.0 / max(1.0 + self.space_warp2.x * zrel, 0.12)
+                transformed = vec2(
+                    self.rot_pivot.x + (transformed.x - self.rot_pivot.x) * pw,
+                    self.rot_pivot.y - (bf * cos_t + bu * sin_t) * pw
+                )
+            } else {
+                transformed.y = self.rot_pivot.y
+                    + ground_rel_y * self.tilt_params.x
+                    - lift_m * self.tilt_params.y
+            }
+
+            // get_stroke_mask distinguishes 10 / 11 / 12; anything else is solid.
+            var shape_id = 0.0
+            if dash_id > 0.5 && dash_id < 1.5 {
+                shape_id = 10.0
+            } else if dash_id > 1.5 && dash_id < 2.5 {
+                shape_id = 11.0
+            } else if dash_id > 2.5 {
+                shape_id = 12.0
+            }
+            let color = self.geom.color
+            if kind > 1.5 {
+                self.v_color = color
+                self.v_stroke_mult = 2000000.0
+            } else if kind > 0.5 {
+                self.v_color = color
+                self.v_stroke_mult = 1000000.0
+            } else {
+                self.v_color = color
+                self.v_stroke_mult = 1.0
+            }
+            self.v_tcoord = road_uv
+            self.v_stroke_dist = road_params.y * self.map_scale.x
+            self.v_shape_id = shape_id
+            self.v_param0 = 0.0
+            self.v_param1 = 0.0
+            self.v_param2 = 0.0
+            self.v_param3 = 0.0
+            self.v_param4 = 0.0
+            if expanded < 0.5 {
+                if material > 6.5 {
+                    self.v_param1 = road_params.y
+                }
+                self.v_param3 = material
+                self.v_param4 = self.geom.deck
+            }
+            self.v_param5 = road_depth.x
+
+            let shifted = transformed + self.draw_list.view_shift
+            self.v_world = shifted
+            self.v_screen = transformed - self.rot_pivot + self.shadow_mask_size * 0.5
+            self.v_lift = self.geom.deck * self.height_grow
+            let world = self.draw_list.view_transform * vec4(
+                shifted.x
+                shifted.y
+                self.draw_depth + self.pass_depth + self.tilt_params.w
+                    + mix(
+                        self.draw_call.zbias + road_depth.y * 0.000001,
+                        road_depth.x
+                            + (ground_rel_y + lift_m * self.tilt_params.y)
+                                * self.tilt_params.z,
+                        sign(self.tilt_params.z)
+                    )
+                1.
+            )
+            self.v_world_clip = world
+            self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * world)
+        }
+    }
+
+    // Grounded road-union faces on 16-byte `FaceVertexTyped` records: the
+    // road drawer with the fields such a record does not vary substituted
+    // by their implicit values (`FACE_IMPLICIT_*` in the packer) — no
+    // expansion offset, no deck lift, the tessellator's fill uv, and
+    // therefore no dash, no width class and no shadow-cast displacement.
+    // What remains is the road vertex function's arithmetic in the road
+    // vertex function's order, so a face record draws the pixels it drew
+    // from its 28-byte form.
+    mod.draw.DrawMapFace = mod.std.set_type_default() do #(DrawMapFace::script_shader(vm)){
+        ..mod.draw.DrawMapRoad
+        geom: vertex_buffer(geom.FaceVertexTyped, geom.FaceGeomTyped)
+
+        vertex: fn() {
+            let face_params = self.geom.params
+            let face_depth = self.geom.depth
+            let meta = face_params.x
+            let kind = floor(meta / 256.0)
+            let material = floor(modf(meta, 64.0) / 8.0)
+
+            let pos = self.geom.pos / #(MAP_VERTEX_POSITION_SCALE)
+            var transformed = pos * self.map_scale + self.map_offset
+            let terrain_pos = transformed
+
+            var ground_m = 0.0
+            if self.terrain_span.x > 0.5 {
+                let tuv = (terrain_pos - self.terrain_org) / self.terrain_span
+                if tuv.x > 0.0 && tuv.x < 1.0 && tuv.y > 0.0 && tuv.y < 1.0 {
+                    let fit = tuv * self.terrain_uvfit.xy + self.terrain_uvfit.zw
+                    let enc = self.terrain_tex.sample_lod(fit, 0.0)
+                    ground_m = max(
+                        enc.x * 65280.0 + enc.y * 255.0 + enc.z * 0.99609375 - 32768.0,
+                        0.0
+                    )
+                }
+            }
+
+            let rel = transformed - self.rot_pivot
+            transformed = self.rot_pivot + vec2(
+                rel.x * self.view_rot.x - rel.y * self.view_rot.y,
+                rel.x * self.view_rot.y + rel.y * self.view_rot.x
+            )
+            let ground_rel_y = transformed.y - self.rot_pivot.y
+            // A face is never a GPU-expanded record: the ground follows the
+            // fill lift, and with no deck the lift is the ground alone.
+            let lift_m = ground_m * self.terrain_fill_lift
+
+            if self.space_warp.x > 0.0001 {
+                let cos_t = self.tilt_params.x
+                let sin_t = self.space_warp.w
+                let hpx = lift_m * self.space_warp2.y
+                let wg = 0.0 - ground_rel_y
+                var wf = wg
+                var wu = 0.0
+                var wnx = 0.0
+                var wny = 1.0
+                let wa = wg - self.space_warp.y
+                if wa > 0.0 {
+                    let wr = max(self.space_warp.z, 1.0)
+                    let cap = self.space_warp2.z
+                    let th = min(wa / wr, cap)
+                    let sth = sin(th)
+                    let cth = cos(th)
+                    wf = self.space_warp.y + wr * sth
+                    wu = wr * (1.0 - cth)
+                    let we = wa - wr * cap
+                    if we > 0.0 {
+                        wf = wf + we * cos_t
+                        wu = wu + we * sin_t
+                    }
+                    wnx = 0.0 - sth
+                    wny = cth
+                }
+                let pf = wf + hpx * wnx
+                let pu = wu + hpx * wny
+                let bf = wg + (pf - wg) * self.space_warp.x
+                let bu = hpx + (pu - hpx) * self.space_warp.x
+                let zrel = bf * sin_t - bu * cos_t
+                let pw = 1.0 / max(1.0 + self.space_warp2.x * zrel, 0.12)
+                transformed = vec2(
+                    self.rot_pivot.x + (transformed.x - self.rot_pivot.x) * pw,
+                    self.rot_pivot.y - (bf * cos_t + bu * sin_t) * pw
+                )
+            } else {
+                transformed.y = self.rot_pivot.y
+                    + ground_rel_y * self.tilt_params.x
+                    - lift_m * self.tilt_params.y
+            }
+
+            let color = self.geom.color
+            if kind > 1.5 {
+                self.v_color = color
+                self.v_stroke_mult = 2000000.0
+            } else if kind > 0.5 {
+                self.v_color = color
+                self.v_stroke_mult = 1000000.0
+            } else {
+                self.v_color = color
+                self.v_stroke_mult = 1.0
+            }
+            self.v_tcoord = vec2(#(FACE_IMPLICIT_UV.0), #(FACE_IMPLICIT_UV.1))
+            self.v_stroke_dist = face_params.y * self.map_scale.x
+            self.v_shape_id = 0.0
+            self.v_param0 = 0.0
+            self.v_param1 = 0.0
+            self.v_param2 = 0.0
+            self.v_param3 = material
+            self.v_param4 = 0.0
+            if material > 6.5 {
+                self.v_param1 = face_params.y
+            }
+            self.v_param5 = face_depth.x
+
+            let shifted = transformed + self.draw_list.view_shift
+            self.v_world = shifted
+            self.v_screen = transformed - self.rot_pivot + self.shadow_mask_size * 0.5
+            self.v_lift = 0.0
+            let world = self.draw_list.view_transform * vec4(
+                shifted.x
+                shifted.y
+                self.draw_depth + self.pass_depth + self.tilt_params.w
+                    + mix(
+                        self.draw_call.zbias + face_depth.y * 0.000001,
+                        face_depth.x
+                            + (ground_rel_y + lift_m * self.tilt_params.y)
+                                * self.tilt_params.z,
+                        sign(self.tilt_params.z)
+                    )
+                1.
+            )
+            self.v_world_clip = world
+            self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * world)
+        }
+    }
+
+    // Lifted shape-0 roofs: the 16-byte typed geometry keeps exact metre height
+    // and reconstructs the fixed generic-vector channels here. Shadow-mask
+    // modes 1/2 deliberately share this vertex path with the color pass.
+    mod.draw.DrawMapRoof = mod.std.set_type_default() do #(DrawMapRoof::script_shader(vm)){
+        ..mod.draw.DrawMapVector
+        geom: vertex_buffer(geom.RoofVertexTyped, geom.RoofGeomTyped)
+
+        vertex: fn() {
+            let pos = self.geom.pos / #(MAP_VERTEX_POSITION_SCALE)
+            let roof = self.geom.params
+            let color = self.geom.color
+            let feature_lift = self.geom.height * self.height_grow
+            var surface_depth = 0.5
+            if self.geom.height > 0.0 {
+                surface_depth = 0.5 + 0.30 * min(self.geom.height / 2.0, 1.0)
+            }
+            var transformed = pos * self.map_scale + self.map_offset
+            var terrain_pos = transformed
+            if self.shadow_cast > 0.5 && self.shadow_cast < 1.5 {
+                let delta = self.shadow_dir * feature_lift * self.map_scale
+                transformed = transformed + delta
+                terrain_pos = terrain_pos + delta
+            }
+            var ground_m = 0.0
+            if self.terrain_span.x > 0.5 {
+                let tuv = (terrain_pos - self.terrain_org) / self.terrain_span
+                if tuv.x > 0.0 && tuv.x < 1.0 && tuv.y > 0.0 && tuv.y < 1.0 {
+                    let fit = tuv * self.terrain_uvfit.xy + self.terrain_uvfit.zw
+                    let enc = self.terrain_tex.sample_lod(fit, 0.0)
+                    ground_m = max(
+                        enc.x * 65280.0 + enc.y * 255.0 + enc.z * 0.99609375 - 32768.0,
+                        0.0
+                    )
+                }
+            }
+            let rel = transformed - self.rot_pivot
+            transformed = self.rot_pivot + vec2(
+                rel.x * self.view_rot.x - rel.y * self.view_rot.y,
+                rel.x * self.view_rot.y + rel.y * self.view_rot.x
+            )
+            let ground_rel_y = transformed.y - self.rot_pivot.y
+            let ground_fill = ground_m * self.terrain_fill_lift
+            var lift_m = feature_lift + ground_fill
+            if self.shadow_cast > 0.5 {
+                lift_m = ground_fill
+            }
+            if self.space_warp.x > 0.0001 {
+                let cos_t = self.tilt_params.x
+                let sin_t = self.space_warp.w
+                let hpx = lift_m * self.space_warp2.y
+                let wg = 0.0 - ground_rel_y
+                var wf = wg
+                var wu = 0.0
+                var wnx = 0.0
+                var wny = 1.0
+                let wa = wg - self.space_warp.y
+                if wa > 0.0 {
+                    let wr = max(self.space_warp.z, 1.0)
+                    let cap = self.space_warp2.z
+                    let th = min(wa / wr, cap)
+                    let sth = sin(th)
+                    let cth = cos(th)
+                    wf = self.space_warp.y + wr * sth
+                    wu = wr * (1.0 - cth)
+                    let we = wa - wr * cap
+                    if we > 0.0 {
+                        wf = wf + we * cos_t
+                        wu = wu + we * sin_t
+                    }
+                    wnx = 0.0 - sth
+                    wny = cth
+                }
+                let pf = wf + hpx * wnx
+                let pu = wu + hpx * wny
+                let bf = wg + (pf - wg) * self.space_warp.x
+                let bu = hpx + (pu - hpx) * self.space_warp.x
+                let zrel = bf * sin_t - bu * cos_t
+                let pw = 1.0 / max(1.0 + self.space_warp2.x * zrel, 0.12)
+                transformed = vec2(
+                    self.rot_pivot.x + (transformed.x - self.rot_pivot.x) * pw,
+                    self.rot_pivot.y - (bf * cos_t + bu * sin_t) * pw
+                )
+            } else {
+                transformed.y = self.rot_pivot.y
+                    + ground_rel_y * self.tilt_params.x
+                    - lift_m * self.tilt_params.y
+            }
+
+            self.v_tcoord = vec2(0.5, 1.0)
+            self.v_color = color
+            self.v_stroke_mult = 1e6
+            self.v_stroke_dist = 0.0
+            self.v_shape_id = 0.0
+            self.v_param0 = 0.0
+            self.v_param1 = 0.0
+            self.v_param2 = 0.0
+            self.v_param3 = roof.x
+            self.v_param4 = self.geom.height
+            self.v_param5 = surface_depth
+
+            let shifted = transformed + self.draw_list.view_shift
+            self.v_world = shifted
+            self.v_screen = transformed - self.rot_pivot + self.shadow_mask_size * 0.5
+            self.v_lift = feature_lift
+
+            let world = self.draw_list.view_transform * vec4(
+                shifted.x
+                shifted.y
+                self.draw_depth + self.pass_depth + self.tilt_params.w
+                    + mix(
+                        self.draw_call.zbias + roof.y * 0.000001,
+                        surface_depth + (ground_rel_y + lift_m * self.tilt_params.y)
+                            * self.tilt_params.z,
+                        sign(self.tilt_params.z)
+                    )
+                1.
+            )
+            self.v_world_clip = world
+            self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * world)
+        }
+    }
+
+    // Instanced POI symbols: one shared mesh per symbol slot, an 8-float
+    // record per placement (anchor, screen offset, scale, the zoom-floor /
+    // pin-lift composite, zbias, colour). This is DrawMapVector's shape-20
+    // vertex path with the per-placement slots read from the instance —
+    // keep the two in LOCKSTEP; the pixel side is inherited unchanged.
+    mod.draw.DrawMapIcon = mod.std.set_type_default() do #(DrawMapIcon::script_shader(vm)){
+        ..mod.draw.DrawMapVector
+        geom: vertex_buffer(geom.IconVertexPacked, geom.IconGeomPacked)
+
+        vertex: fn() {
+            var transformed = self.inst_anchor * self.map_scale + self.map_offset;
+            let terrain_pos = transformed;
+            var ground_m = 0.0;
+            if self.terrain_span.x > 0.5 {
+                let tuv = (terrain_pos - self.terrain_org) / self.terrain_span;
+                if tuv.x > 0.0 && tuv.x < 1.0 && tuv.y > 0.0 && tuv.y < 1.0 {
+                    let fit = tuv * self.terrain_uvfit.xy + self.terrain_uvfit.zw;
+                    let enc = self.terrain_tex.sample_lod(fit, 0.0);
+                    ground_m = max(
+                        enc.x * 65280.0 + enc.y * 255.0 + enc.z * 0.99609375 - 32768.0,
+                        0.0
+                    );
+                }
+            }
+            let rel = transformed - self.rot_pivot;
+            transformed = self.rot_pivot + vec2(
+                rel.x * self.view_rot.x - rel.y * self.view_rot.y,
+                rel.x * self.view_rot.y + rel.y * self.view_rot.x
+            );
+            let ground_rel_y = transformed.y - self.rot_pivot.y;
+            // param4 = zoom_floor + pin_lift_m*100: markers fly at their
+            // encoded height (0 for grounded icons).
+            let icon_floor = modf(self.inst_param4, 100.0);
+            let lift_m = (self.inst_param4 - icon_floor) * 0.0025 * self.height_grow + ground_m;
+            if self.space_warp.x > 0.0001 {
+                let cos_t = self.tilt_params.x
+                let sin_t = self.space_warp.w
+                let hpx = lift_m * self.space_warp2.y
+                let wg = 0.0 - ground_rel_y
+                var wf = wg
+                var wu = 0.0
+                var wnx = 0.0
+                var wny = 1.0
+                let wa = wg - self.space_warp.y
+                if wa > 0.0 {
+                    let wr = max(self.space_warp.z, 1.0)
+                    let cap = self.space_warp2.z
+                    let th = min(wa / wr, cap)
+                    let sth = sin(th)
+                    let cth = cos(th)
+                    wf = self.space_warp.y + wr * sth
+                    wu = wr * (1.0 - cth)
+                    let we = wa - wr * cap
+                    if we > 0.0 {
+                        wf = wf + we * cos_t
+                        wu = wu + we * sin_t
+                    }
+                    wnx = 0.0 - sth
+                    wny = cth
+                }
+                let pf = wf + hpx * wnx
+                let pu = wu + hpx * wny
+                let bf = wg + (pf - wg) * self.space_warp.x
+                let bu = hpx + (pu - hpx) * self.space_warp.x
+                let zrel = bf * sin_t - bu * cos_t
+                let pw = 1.0 / max(1.0 + self.space_warp2.x * zrel, 0.12)
+                transformed = vec2(
+                    self.rot_pivot.x + (transformed.x - self.rot_pivot.x) * pw,
+                    self.rot_pivot.y - (bf * cos_t + bu * sin_t) * pw
+                );
+            } else {
+                transformed.y = self.rot_pivot.y
+                    + ground_rel_y * self.tilt_params.x
+                    - lift_m * self.tilt_params.y;
+            }
+            // 0.6 grace below the floor: markers fade out on a zoom
+            // gesture instead of vanishing the instant the tier line is
+            // crossed. FAIL-OPEN when the icon_zoom uniform has not landed.
+            if self.icon_zoom > 1.0 && icon_floor > self.icon_zoom + 0.6 {
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 0.0);
+                return
+            }
+            // Zoom-constant symbol: the mesh vertex is a screen-px offset
+            // from the anchor, added after the map transform.
+            let off = vec2(self.geom.x, self.geom.y) * self.inst_scale + self.inst_offset;
+            transformed = transformed + off;
+
+            let g_uv = unpack2f16(self.geom.uv)
+            self.v_tcoord = vec2(g_uv.x, g_uv.y);
+            self.v_color = unpack4u8(self.inst_color);
+            self.v_stroke_mult = 1e6;
+            self.v_stroke_dist = self.geom.stroke_dist * self.map_scale.x;
+            self.v_shape_id = 20.0;
+            self.v_param0 = 0.0;
+            self.v_param1 = off.x;
+            self.v_param2 = off.y;
+            self.v_param3 = 0.0;
+            self.v_param4 = self.inst_param4;
+            // Tilt depth bias of a free-standing symbol (ICON_INSTANCE_DEPTH_BIAS).
+            self.v_param5 = 0.35;
+
+            let shifted = transformed + self.draw_list.view_shift;
+            self.v_world = shifted;
+            self.v_screen = transformed - self.rot_pivot + self.shadow_mask_size * 0.5;
+            self.v_lift = 1000.0;
+
+            // Clip radius of a symbol (ICON_INSTANCE_CLIP_RADIUS) in view px.
+            let cr = 24.0 * max(self.map_scale.x, self.map_scale.y);
+            let clip = vec4(
+                max(self.draw_clip.x, self.draw_list.view_clip.x - self.draw_list.view_shift.x),
+                max(self.draw_clip.y, self.draw_list.view_clip.y - self.draw_list.view_shift.y),
+                min(self.draw_clip.z, self.draw_list.view_clip.z - self.draw_list.view_shift.x),
+                min(self.draw_clip.w, self.draw_list.view_clip.w - self.draw_list.view_shift.y)
+            )
+            if transformed.x + cr < clip.x || transformed.y + cr < clip.y
+                || transformed.x - cr > clip.z || transformed.y - cr > clip.w {
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 0.0);
+                return
+            }
+
+            let world = self.draw_list.view_transform * vec4(
+                shifted.x
+                shifted.y
+                self.draw_depth + self.pass_depth + self.tilt_params.w
+                    + mix(
+                        self.draw_call.zbias + self.inst_zbias,
+                        0.35 + (ground_rel_y + lift_m * self.tilt_params.y) * self.tilt_params.z,
+                        sign(self.tilt_params.z)
+                    )
+                1.
+            );
+            self.v_world_clip = world;
+            self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * world)
+        }
+    }
+
+    // Marker stalks and stoplights: a tile keeps one generic-vector template
+    // for each shape and repeats only this compact typed placement. Template
+    // xy and height are normalized independently by inst_size; all material,
+    // terrain, shadow and depth varyings remain the generic fill path's.
+    mod.draw.DrawMapProp = mod.std.set_type_default() do #(DrawMapProp::script_shader(vm)){
+        ..mod.draw.DrawMapVector
+        geom: vertex_buffer(geom.VectorVertexPacked, geom.VectorGeomPacked)
+
+        vertex: fn() {
+            let g_uv = unpack2f16(self.geom.uv)
+            let g_color = unpack4u8(self.geom.color)
+            let g_p0s = unpack2f16(self.geom.p0s)
+            let g_p12 = unpack2f16(self.geom.p12)
+            let g_p3c = unpack2f16(self.geom.p3c)
+            let pos = self.inst_anchor
+                + vec2(self.geom.x, self.geom.y) * self.inst_size.x
+            let h = self.geom.param4 * self.inst_size.y
+            var transformed = pos * self.map_scale + self.map_offset
+            var terrain_pos = transformed
+            let feature_lift = h * self.height_grow
+            if self.shadow_cast > 0.5 && self.shadow_cast < 1.5 {
+                let delta = self.shadow_dir * feature_lift * self.map_scale
+                transformed = transformed + delta
+                terrain_pos = terrain_pos + delta
+            }
+            var ground_m = 0.0
+            if self.terrain_span.x > 0.5 {
+                let tuv = (terrain_pos - self.terrain_org) / self.terrain_span
+                if tuv.x > 0.0 && tuv.x < 1.0 && tuv.y > 0.0 && tuv.y < 1.0 {
+                    let fit = tuv * self.terrain_uvfit.xy + self.terrain_uvfit.zw
+                    let enc = self.terrain_tex.sample_lod(fit, 0.0)
+                    ground_m = max(
+                        enc.x * 65280.0 + enc.y * 255.0 + enc.z * 0.99609375 - 32768.0,
+                        0.0
+                    )
+                }
+            }
+            let rel = transformed - self.rot_pivot
+            transformed = self.rot_pivot + vec2(
+                rel.x * self.view_rot.x - rel.y * self.view_rot.y,
+                rel.x * self.view_rot.y + rel.y * self.view_rot.x
+            )
+            let ground_rel_y = transformed.y - self.rot_pivot.y
+            let ground_fill = ground_m * self.terrain_fill_lift
+            var lift_m = feature_lift + ground_fill
+            if self.shadow_cast > 0.5 {
+                lift_m = ground_fill
+            }
+            if self.space_warp.x > 0.0001 {
+                let cos_t = self.tilt_params.x
+                let sin_t = self.space_warp.w
+                let hpx = lift_m * self.space_warp2.y
+                let wg = 0.0 - ground_rel_y
+                var wf = wg
+                var wu = 0.0
+                var wnx = 0.0
+                var wny = 1.0
+                let wa = wg - self.space_warp.y
+                if wa > 0.0 {
+                    let wr = max(self.space_warp.z, 1.0)
+                    let cap = self.space_warp2.z
+                    let th = min(wa / wr, cap)
+                    let sth = sin(th)
+                    let cth = cos(th)
+                    wf = self.space_warp.y + wr * sth
+                    wu = wr * (1.0 - cth)
+                    let we = wa - wr * cap
+                    if we > 0.0 {
+                        wf = wf + we * cos_t
+                        wu = wu + we * sin_t
+                    }
+                    wnx = 0.0 - sth
+                    wny = cth
+                }
+                let pf = wf + hpx * wnx
+                let pu = wu + hpx * wny
+                let bf = wg + (pf - wg) * self.space_warp.x
+                let bu = hpx + (pu - hpx) * self.space_warp.x
+                let zrel = bf * sin_t - bu * cos_t
+                let pw = 1.0 / max(1.0 + self.space_warp2.x * zrel, 0.12)
+                transformed = vec2(
+                    self.rot_pivot.x + (transformed.x - self.rot_pivot.x) * pw,
+                    self.rot_pivot.y - (bf * cos_t + bu * sin_t) * pw
+                )
+            } else {
+                transformed.y = self.rot_pivot.y
+                    + ground_rel_y * self.tilt_params.x
+                    - lift_m * self.tilt_params.y
+            }
+
+            self.v_tcoord = vec2(g_uv.x, g_uv.y)
+            self.v_color = vec4(g_color.x, g_color.y, g_color.z, g_color.w)
+                * unpack4u8(self.inst_color)
+            self.v_stroke_mult = self.geom.stroke_mult
+            self.v_stroke_dist = self.geom.stroke_dist * self.map_scale.x
+            self.v_shape_id = g_p0s.y
+            self.v_param0 = g_p0s.x
+            self.v_param1 = g_p12.x
+            self.v_param2 = g_p12.y
+            self.v_param3 = g_p3c.x
+            self.v_param4 = h
+            self.v_param5 = self.geom.param5
+
+            let shifted = transformed + self.draw_list.view_shift
+            self.v_world = shifted
+            self.v_screen = transformed - self.rot_pivot + self.shadow_mask_size * 0.5
+            self.v_lift = feature_lift
+
+            let cr = g_p3c.y * self.inst_size.x
+                * max(self.map_scale.x, self.map_scale.y)
+            let clip = vec4(
+                max(self.draw_clip.x, self.draw_list.view_clip.x - self.draw_list.view_shift.x),
+                max(self.draw_clip.y, self.draw_list.view_clip.y - self.draw_list.view_shift.y),
+                min(self.draw_clip.z, self.draw_list.view_clip.z - self.draw_list.view_shift.x),
+                min(self.draw_clip.w, self.draw_list.view_clip.w - self.draw_list.view_shift.y)
+            )
+            if transformed.x + cr < clip.x || transformed.y + cr < clip.y
+                || transformed.x - cr > clip.z || transformed.y - cr > clip.w {
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 0.0)
+                return
+            }
+
+            let world = self.draw_list.view_transform * vec4(
+                shifted.x
+                shifted.y
+                self.draw_depth + self.pass_depth + self.tilt_params.w
+                    + mix(
+                        self.draw_call.zbias + self.geom.zbias + self.inst_zbias,
+                        self.geom.param5
+                            + (ground_rel_y + lift_m * self.tilt_params.y)
+                                * self.tilt_params.z,
+                        sign(self.tilt_params.z)
+                    )
+                1.0
+            )
+            self.v_world_clip = world
+            self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * world)
+        }
+    }
+
+    // Instanced building walls: the unit quad is extruded per footprint edge
+    // from a compact typed record. Its canonical edge direction lets the
+    // shader derive the outward normal. Varyings match the vertices
+    // `append_wall_quad` used to bake (fill, material MAT_WALL, height in
+    // param4, BUILDING_SURFACE_DEPTH in param5) — keep in LOCKSTEP with
+    // DrawMapVector's fill path; the pixel side is inherited unchanged.
+    mod.draw.DrawMapWall = mod.std.set_type_default() do #(DrawMapWall::script_shader(vm)){
+        ..mod.draw.DrawMapVector
+        geom: vertex_buffer(geom.QuadVertex, geom.QuadGeom)
+
+        vertex: fn() {
+            let along = self.geom.pos.x;
+            let up = self.geom.pos.y;
+            let pos = mix(self.inst_a, self.inst_b, along);
+            let edge = self.inst_b - self.inst_a;
+            let normal = vec2(edge.y, 0.0 - edge.x) / max(length(edge), 0.0001);
+            let h = mix(self.inst_heights.x, self.inst_heights.y, up);
+            let ao = mix(self.inst_ao, 1.0, up);
+            var transformed = pos * self.map_scale + self.map_offset;
+            let terrain_pos = transformed;
+            var ground_m = 0.0;
+            if self.terrain_span.x > 0.5 {
+                let tuv = (terrain_pos - self.terrain_org) / self.terrain_span;
+                if tuv.x > 0.0 && tuv.x < 1.0 && tuv.y > 0.0 && tuv.y < 1.0 {
+                    let fit = tuv * self.terrain_uvfit.xy + self.terrain_uvfit.zw;
+                    let enc = self.terrain_tex.sample_lod(fit, 0.0);
+                    ground_m = max(
+                        enc.x * 65280.0 + enc.y * 255.0 + enc.z * 0.99609375 - 32768.0,
+                        0.0
+                    );
+                }
+            }
+            let rel = transformed - self.rot_pivot;
+            transformed = self.rot_pivot + vec2(
+                rel.x * self.view_rot.x - rel.y * self.view_rot.y,
+                rel.x * self.view_rot.y + rel.y * self.view_rot.x
+            );
+            let ground_rel_y = transformed.y - self.rot_pivot.y;
+            // Fills ride the terrain by terrain_fill_lift; the height grows
+            // with the 2D->3D reveal.
+            let lift_m = h * self.height_grow + ground_m * self.terrain_fill_lift;
+            if self.space_warp.x > 0.0001 {
+                let cos_t = self.tilt_params.x
+                let sin_t = self.space_warp.w
+                let hpx = lift_m * self.space_warp2.y
+                let wg = 0.0 - ground_rel_y
+                var wf = wg
+                var wu = 0.0
+                var wnx = 0.0
+                var wny = 1.0
+                let wa = wg - self.space_warp.y
+                if wa > 0.0 {
+                    let wr = max(self.space_warp.z, 1.0)
+                    let cap = self.space_warp2.z
+                    let th = min(wa / wr, cap)
+                    let sth = sin(th)
+                    let cth = cos(th)
+                    wf = self.space_warp.y + wr * sth
+                    wu = wr * (1.0 - cth)
+                    let we = wa - wr * cap
+                    if we > 0.0 {
+                        wf = wf + we * cos_t
+                        wu = wu + we * sin_t
+                    }
+                    wnx = 0.0 - sth
+                    wny = cth
+                }
+                let pf = wf + hpx * wnx
+                let pu = wu + hpx * wny
+                let bf = wg + (pf - wg) * self.space_warp.x
+                let bu = hpx + (pu - hpx) * self.space_warp.x
+                let zrel = bf * sin_t - bu * cos_t
+                let pw = 1.0 / max(1.0 + self.space_warp2.x * zrel, 0.12)
+                transformed = vec2(
+                    self.rot_pivot.x + (transformed.x - self.rot_pivot.x) * pw,
+                    self.rot_pivot.y - (bf * cos_t + bu * sin_t) * pw
+                );
+            } else {
+                transformed.y = self.rot_pivot.y
+                    + ground_rel_y * self.tilt_params.x
+                    - lift_m * self.tilt_params.y;
+            }
+
+            let color = unpack4u8(self.inst_color);
+            self.v_tcoord = vec2(0.5, 1.0);
+            self.v_color = vec4(color.x * ao, color.y * ao, color.z * ao, color.w);
+            self.v_stroke_mult = 1e6;
+            self.v_stroke_dist = 0.0;
+            self.v_shape_id = 0.0;
+            self.v_param0 = 0.0;
+            // Outward normal, material MAT_WALL, height, surface depth: the
+            // slots the wall pixel path reads.
+            self.v_param1 = normal.x;
+            self.v_param2 = normal.y;
+            self.v_param3 = 1.0;
+            self.v_param4 = h;
+            self.v_param5 = 0.5;
+
+            let shifted = transformed + self.draw_list.view_shift;
+            self.v_world = shifted;
+            self.v_screen = transformed - self.rot_pivot + self.shadow_mask_size * 0.5;
+            self.v_lift = h;
+
+            // Clip radius of a wall vertex (90 units) in view px.
+            let cr = 90.0 * max(self.map_scale.x, self.map_scale.y);
+            let clip = vec4(
+                max(self.draw_clip.x, self.draw_list.view_clip.x - self.draw_list.view_shift.x),
+                max(self.draw_clip.y, self.draw_list.view_clip.y - self.draw_list.view_shift.y),
+                min(self.draw_clip.z, self.draw_list.view_clip.z - self.draw_list.view_shift.x),
+                min(self.draw_clip.w, self.draw_list.view_clip.w - self.draw_list.view_shift.y)
+            )
+            if transformed.x + cr < clip.x || transformed.y + cr < clip.y
+                || transformed.x - cr > clip.z || transformed.y - cr > clip.w {
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 0.0);
+                return
+            }
+
+            let world = self.draw_list.view_transform * vec4(
+                shifted.x
+                shifted.y
+                self.draw_depth + self.pass_depth + self.tilt_params.w
+                    + mix(
+                        self.draw_call.zbias + self.inst_zbias,
+                        0.5 + (ground_rel_y + lift_m * self.tilt_params.y) * self.tilt_params.z,
+                        sign(self.tilt_params.z)
+                    )
+                1.
+            );
+            self.v_world_clip = world;
+            self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * world)
+        }
+    }
+
+    // Instanced building-wall shadow casters: the same compact wall
+    // records, extruded along the sun on the ground (no building lift).
+    mod.draw.DrawMapShadow = mod.std.set_type_default() do #(DrawMapShadow::script_shader(vm)){
+        ..mod.draw.DrawMapVector
+        geom: vertex_buffer(geom.QuadVertex, geom.QuadGeom)
+
+        vertex: fn() {
+            let along = self.geom.pos.x;
+            let up = self.geom.pos.y;
+            let pos = mix(self.inst_a, self.inst_b, along)
+                + self.shadow_dir * self.inst_heights.y * self.height_grow * up;
+            var transformed = pos * self.map_scale + self.map_offset;
+            let terrain_pos = transformed;
+            var ground_m = 0.0;
+            if self.terrain_span.x > 0.5 {
+                let tuv = (terrain_pos - self.terrain_org) / self.terrain_span;
+                if tuv.x > 0.0 && tuv.x < 1.0 && tuv.y > 0.0 && tuv.y < 1.0 {
+                    let fit = tuv * self.terrain_uvfit.xy + self.terrain_uvfit.zw;
+                    let enc = self.terrain_tex.sample_lod(fit, 0.0);
+                    ground_m = max(
+                        enc.x * 65280.0 + enc.y * 255.0 + enc.z * 0.99609375 - 32768.0,
+                        0.0
+                    );
+                }
+            }
+            let rel = transformed - self.rot_pivot;
+            transformed = self.rot_pivot + vec2(
+                rel.x * self.view_rot.x - rel.y * self.view_rot.y,
+                rel.x * self.view_rot.y + rel.y * self.view_rot.x
+            );
+            let ground_rel_y = transformed.y - self.rot_pivot.y;
+            let lift_m = ground_m * self.terrain_fill_lift;
+            if self.space_warp.x > 0.0001 {
+                let cos_t = self.tilt_params.x
+                let sin_t = self.space_warp.w
+                let hpx = lift_m * self.space_warp2.y
+                let wg = 0.0 - ground_rel_y
+                var wf = wg
+                var wu = 0.0
+                var wnx = 0.0
+                var wny = 1.0
+                let wa = wg - self.space_warp.y
+                if wa > 0.0 {
+                    let wr = max(self.space_warp.z, 1.0)
+                    let cap = self.space_warp2.z
+                    let th = min(wa / wr, cap)
+                    let sth = sin(th)
+                    let cth = cos(th)
+                    wf = self.space_warp.y + wr * sth
+                    wu = wr * (1.0 - cth)
+                    let we = wa - wr * cap
+                    if we > 0.0 {
+                        wf = wf + we * cos_t
+                        wu = wu + we * sin_t
+                    }
+                    wnx = 0.0 - sth
+                    wny = cth
+                }
+                let pf = wf + hpx * wnx
+                let pu = wu + hpx * wny
+                let bf = wg + (pf - wg) * self.space_warp.x
+                let bu = hpx + (pu - hpx) * self.space_warp.x
+                let zrel = bf * sin_t - bu * cos_t
+                let pw = 1.0 / max(1.0 + self.space_warp2.x * zrel, 0.12)
+                transformed = vec2(
+                    self.rot_pivot.x + (transformed.x - self.rot_pivot.x) * pw,
+                    self.rot_pivot.y - (bf * cos_t + bu * sin_t) * pw
+                );
+            } else {
+                transformed.y = self.rot_pivot.y
+                    + ground_rel_y * self.tilt_params.x
+                    - lift_m * self.tilt_params.y;
+            }
+
+            self.v_tcoord = vec2(0.5, 1.0);
+            self.v_color = vec4(1.0, 1.0, 1.0, 1.0);
+            self.v_stroke_mult = 1e6;
+            self.v_stroke_dist = 0.0;
+            self.v_shape_id = 0.0;
+            self.v_param0 = 0.0;
+            self.v_param1 = 0.0;
+            self.v_param2 = 0.0;
+            self.v_param3 = 0.0;
+            self.v_param4 = 0.0;
+            self.v_param5 = 0.0;
+
+            let shifted = transformed + self.draw_list.view_shift;
+            self.v_world = shifted;
+            self.v_screen = transformed - self.rot_pivot + self.shadow_mask_size * 0.5;
+            self.v_lift = 0.0;
+
+            let cr = 90.0 * max(self.map_scale.x, self.map_scale.y);
+            let clip = vec4(
+                max(self.draw_clip.x, self.draw_list.view_clip.x - self.draw_list.view_shift.x),
+                max(self.draw_clip.y, self.draw_list.view_clip.y - self.draw_list.view_shift.y),
+                min(self.draw_clip.z, self.draw_list.view_clip.z - self.draw_list.view_shift.x),
+                min(self.draw_clip.w, self.draw_list.view_clip.w - self.draw_list.view_shift.y)
+            )
+            if transformed.x + cr < clip.x || transformed.y + cr < clip.y
+                || transformed.x - cr > clip.z || transformed.y - cr > clip.w {
+                self.vertex_pos = vec4(0.0, 0.0, 0.0, 0.0);
+                return
+            }
+
+            let world = self.draw_list.view_transform * vec4(
+                shifted.x
+                shifted.y
+                self.draw_depth + self.pass_depth + self.draw_call.zbias + self.inst_zbias
+                1.
+            );
+            self.v_world_clip = world;
+            self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * world)
+        }
+
+        fragment: fn() {
+            self.fb0 = vec4(1.0, 1.0, 1.0, 1.0)
+        }
+    }
+
+    // Tree/signal contact shadows: one shared quad and four floats per disc.
+    // The fragment reconstructs the radial ramp that the old ten-segment
+    // triangle fan carried as per-vertex alpha.
+    mod.draw.DrawMapShadowDisc = mod.std.set_type_default() do #(DrawMapShadowDisc::script_shader(vm)){
+        ..mod.draw.DrawMapVector
+        geom: vertex_buffer(geom.QuadVertex, geom.QuadGeom)
+        disc_coord: varying(vec2f)
+
+        vertex: fn() {
+            self.disc_coord = self.geom.pos * 2.0 - vec2(1.0, 1.0)
+            let pos = self.inst_center + self.disc_coord * self.inst_radius
+            var transformed = pos * self.map_scale + self.map_offset
+            let terrain_pos = transformed
+            var ground_m = 0.0
+            if self.terrain_span.x > 0.5 {
+                let tuv = (terrain_pos - self.terrain_org) / self.terrain_span
+                if tuv.x > 0.0 && tuv.x < 1.0 && tuv.y > 0.0 && tuv.y < 1.0 {
+                    let fit = tuv * self.terrain_uvfit.xy + self.terrain_uvfit.zw
+                    let enc = self.terrain_tex.sample_lod(fit, 0.0)
+                    ground_m = max(
+                        enc.x * 65280.0 + enc.y * 255.0 + enc.z * 0.99609375 - 32768.0,
+                        0.0
+                    )
+                }
+            }
+            let rel = transformed - self.rot_pivot
+            transformed = self.rot_pivot + vec2(
+                rel.x * self.view_rot.x - rel.y * self.view_rot.y,
+                rel.x * self.view_rot.y + rel.y * self.view_rot.x
+            )
+            let ground_rel_y = transformed.y - self.rot_pivot.y
+            let lift_m = ground_m * self.terrain_fill_lift
+            if self.space_warp.x > 0.0001 {
+                let cos_t = self.tilt_params.x
+                let sin_t = self.space_warp.w
+                let hpx = lift_m * self.space_warp2.y
+                let wg = 0.0 - ground_rel_y
+                var wf = wg
+                var wu = 0.0
+                var wnx = 0.0
+                var wny = 1.0
+                let wa = wg - self.space_warp.y
+                if wa > 0.0 {
+                    let wr = max(self.space_warp.z, 1.0)
+                    let cap = self.space_warp2.z
+                    let th = min(wa / wr, cap)
+                    let sth = sin(th)
+                    let cth = cos(th)
+                    wf = self.space_warp.y + wr * sth
+                    wu = wr * (1.0 - cth)
+                    let we = wa - wr * cap
+                    if we > 0.0 {
+                        wf = wf + we * cos_t
+                        wu = wu + we * sin_t
+                    }
+                    wnx = 0.0 - sth
+                    wny = cth
+                }
+                let pf = wf + hpx * wnx
+                let pu = wu + hpx * wny
+                let bf = wg + (pf - wg) * self.space_warp.x
+                let bu = hpx + (pu - hpx) * self.space_warp.x
+                let zrel = bf * sin_t - bu * cos_t
+                let pw = 1.0 / max(1.0 + self.space_warp2.x * zrel, 0.12)
+                transformed = vec2(
+                    self.rot_pivot.x + (transformed.x - self.rot_pivot.x) * pw,
+                    self.rot_pivot.y - (bf * cos_t + bu * sin_t) * pw
+                )
+            } else {
+                transformed.y = self.rot_pivot.y
+                    + ground_rel_y * self.tilt_params.x
+                    - lift_m * self.tilt_params.y
+            }
+
+            let shifted = transformed + self.draw_list.view_shift
+            let world = self.draw_list.view_transform * vec4(
+                shifted.x
+                shifted.y
+                self.tilt_params.w
+                    + mix(
+                        self.draw_call.zbias,
+                        0.405 + (ground_rel_y + lift_m * self.tilt_params.y)
+                            * self.tilt_params.z,
+                        sign(self.tilt_params.z)
+                    )
+                1.
+            )
+            self.v_world_clip = world
+            self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * world)
+        }
+
+        fragment: fn() {
+            if self.shadow_cast < 2.5 {
+                discard()
+            }
+            let radial = length(self.disc_coord)
+            if radial > 1.0 {
+                discard()
+            }
+            let alpha = self.inst_strength * (1.0 - radial)
+            self.fb0 = vec4(alpha, alpha, alpha, alpha)
         }
     }
 
@@ -1140,6 +2868,93 @@ script_mod! {
 const ZOOM_SETTLE_SECONDS: f64 = 0.08;
 /// Frames before an archive-absent tile is probed again (~30 s at 60 fps).
 const MISSING_RECHECK_FRAMES: u64 = 1800;
+const ARCHIVE_REQUEST_TIMEOUT_SECONDS: f64 = 10.0;
+const READY_TILE_INSERTS_PER_FRAME: usize = 2;
+
+#[derive(Default)]
+struct ReadyTileDrainStats {
+    count: usize,
+    bytes: usize,
+    seconds: f64,
+}
+
+fn drain_pending_ready_tiles<T>(
+    pending: &mut Vec<T>,
+    byte_budget: usize,
+    allow_first_oversized: bool,
+    byte_size: impl Fn(&T) -> usize,
+    mut insert: impl FnMut(T) -> f64,
+) -> ReadyTileDrainStats {
+    let mut stats = ReadyTileDrainStats::default();
+    while stats.count < READY_TILE_INSERTS_PER_FRAME && !pending.is_empty() {
+        let size = byte_size(&pending[0]);
+        if stats.bytes.saturating_add(size) > byte_budget
+            && (stats.count > 0 || !allow_first_oversized)
+        {
+            break;
+        }
+        let ready = pending.remove(0);
+        stats.count += 1;
+        stats.bytes = stats.bytes.saturating_add(size);
+        stats.seconds += insert(ready).max(0.0);
+    }
+    stats
+}
+
+fn sort_ready_tiles_for_insert<T>(
+    pending: &mut [(TileKey, T)],
+    visible_tiles: &[TileKey],
+    center_norm: Vec2d,
+    rotation: (f64, f64),
+    tilt_cos: f64,
+) {
+    pending.sort_unstable_by_key(|(key, _)| {
+        (
+            !visible_tiles.contains(key),
+            tile_screen_priority(*key, key.z, center_norm, rotation, tilt_cos),
+            key.z,
+            key.y,
+            key.x,
+        )
+    });
+}
+
+fn tile_screen_priority(
+    key: TileKey,
+    zoom: u32,
+    center_norm: Vec2d,
+    rotation: (f64, f64),
+    tilt_cos: f64,
+) -> u64 {
+    let tile_count = (1_u64 << zoom.min(30)) as f64;
+    let center = center_norm * tile_count;
+    let mut dx = key.x as f64 + 0.5 - center.x;
+    if dx > tile_count * 0.5 {
+        dx -= tile_count;
+    } else if dx < -tile_count * 0.5 {
+        dx += tile_count;
+    }
+    let dy = key.y as f64 + 0.5 - center.y;
+    let sx = dx * rotation.0 - dy * rotation.1;
+    let sy = (dx * rotation.1 + dy * rotation.0) * tilt_cos.clamp(0.001, 1.0);
+    ((sx * sx + sy * sy) * 4096.0).max(0.0) as u64
+}
+
+fn sort_tiles_center_out(
+    tiles: &mut [TileKey],
+    zoom: u32,
+    center_norm: Vec2d,
+    rotation: (f64, f64),
+    tilt_cos: f64,
+) {
+    tiles.sort_unstable_by_key(|key| {
+        (
+            tile_screen_priority(*key, zoom, center_norm, rotation, tilt_cos),
+            key.y,
+            key.x,
+        )
+    });
+}
 
 /// Camera tilt ceiling (degrees from top-down). Flat enough to read
 /// terrain relief against the horizon without the far plane exploding.
@@ -1169,6 +2984,19 @@ const LABEL_REPLACE_MIN_SECONDS: f64 = 0.30;
 /// camera+fold transforms exactly — regenerating mid-gesture cost 5-20ms a
 /// beat and landed a frame stale, which read as labels trailing the map.
 const LABEL_SETTLE_SECONDS: f64 = 0.15;
+/// Keep water/foliage motion alive briefly after the last interaction or
+/// camera-animation step, then leave the last rendered phase frozen.
+const SHIMMER_SETTLE_SECS: f64 = 1.0;
+/// Two-finger travel collected before committing to pinch/rotate/tilt.
+const TOUCH_GESTURE_CLASSIFY_PX: f64 = 20.0;
+/// A smaller angular change is treated as pinch noise.
+const TOUCH_ROTATE_DEAD_ZONE_DEG: f64 = 5.0;
+/// Each finger must have moved at least this far vertically, in the same
+/// direction as the other, for the pair to count as a tilt stroke.
+const TOUCH_TILT_MIN_FINGER_PX: f64 = 6.0;
+/// How far sideways a tilt stroke may lean, as a fraction of its vertical
+/// travel ("up/down with about 20 % acceptance").
+const TOUCH_TILT_SIDEWAYS_RATIO: f64 = 0.2;
 /// One shared time-lapse for ALL weather layers: the rain nowcast frame
 /// rate AND the wind-particle advection derive from it, so cloud drift and
 /// wind streaks move as one physical system (900x real time).
@@ -1176,10 +3004,19 @@ const WEATHER_TIMELAPSE: f64 = 900.0;
 /// Rain nowcast frames are 5 minutes of real weather apart.
 const RAIN_FRAME_REAL_SECONDS: f64 = 300.0;
 /// Cross-fade duration when a tile's new geometry replaces the old.
-const TILE_FADE_SECONDS: f64 = 0.25;
+pub(crate) const TILE_FADE_SECONDS: f64 = 0.25;
 /// Hard time budget for one placement pass; labels that don't make it are
 /// picked up by the next re-place.
 const LABEL_PLACE_BUDGET_MS: f64 = 7.0;
+/// How many consecutive at-rest follow-up passes a budget-truncated
+/// placement may chain before the tail is given up until the camera moves:
+/// every pass restarts from the top candidates, so a tail that never fits
+/// the rest budget must not become a standing 12 Hz re-place loop.
+const LABEL_FOLLOWUP_MAX: u32 = 4;
+/// Label cross-fade: a name entering the placed set rises from transparent
+/// over this long; one leaving it sinks over the same time from its last
+/// placement, riding the camera — a re-place never pops a label.
+const LABEL_FADE_SECONDS: f64 = 0.25;
 
 /// Inclusive tile-index span covering the half-open world-space interval
 /// `[world_min, world_max)` plus one prefetch tile on either side.
@@ -1234,13 +3071,199 @@ pub enum MapViewAction {
 /// Animated camera flight (zoom-out-then-in arc when the target is far).
 #[derive(Clone, Copy)]
 struct FlyTo {
-    started: std::time::Instant,
+    started: f64,
     duration: f64,
     from_center: Vec2d,
     to_center: Vec2d,
     from_zoom: f64,
     to_zoom: f64,
     arc: f64,
+    /// `(map point, screen-relative ground offset)`. Present for a
+    /// double-tap zoom, whose anchor must stay under the finger throughout
+    /// the animation; ordinary flights interpolate their centres as before.
+    anchor: Option<(Vec2d, Vec2d)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TouchGestureMode {
+    Pending,
+    Pinch,
+    Rotate,
+    Tilt,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TouchSample {
+    uid: u64,
+    abs: Vec2d,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TouchPair {
+    a: TouchSample,
+    b: TouchSample,
+}
+
+impl TouchPair {
+    fn midpoint(self) -> Vec2d {
+        (self.a.abs + self.b.abs) * 0.5
+    }
+
+    fn delta(self) -> Vec2d {
+        self.b.abs - self.a.abs
+    }
+
+    fn distance(self) -> f64 {
+        self.delta().length()
+    }
+
+    fn angle(self) -> f64 {
+        let delta = self.delta();
+        delta.y.atan2(delta.x)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum TouchGesture {
+    None,
+    Pan {
+        uid: u64,
+        start_abs: Vec2d,
+        start_center_norm: Vec2d,
+        tap_count: u32,
+        can_tap: bool,
+        settle_camera: bool,
+        snap_tilt: bool,
+    },
+    TwoFinger {
+        start: TouchPair,
+        start_zoom: f64,
+        start_center_norm: Vec2d,
+        start_midpoint_rel: Vec2d,
+        start_rotation: f64,
+        start_tilt: f64,
+        mode: TouchGestureMode,
+    },
+}
+
+impl Default for TouchGesture {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+fn touch_angle_delta(start: TouchPair, current: TouchPair) -> f64 {
+    (current.angle() - start.angle() + std::f64::consts::PI)
+        .rem_euclid(std::f64::consts::TAU)
+        - std::f64::consts::PI
+}
+
+fn classify_touch_gesture(start: TouchPair, current: TouchPair) -> TouchGestureMode {
+    let a_motion = current.a.abs - start.a.abs;
+    let b_motion = current.b.abs - start.b.abs;
+    let midpoint_motion = current.midpoint() - start.midpoint();
+    let distance_motion = (current.distance() - start.distance()).abs();
+    let angle_motion_deg = touch_angle_delta(start, current).abs().to_degrees();
+
+    let travel = a_motion
+        .length()
+        .max(b_motion.length())
+        .max(midpoint_motion.length())
+        .max(distance_motion);
+    if travel < TOUCH_GESTURE_CLASSIFY_PX {
+        return TouchGestureMode::Pending;
+    }
+    // Tilt is two fingers moving TOGETHER up or down: both travel in the
+    // same vertical direction and the pair as a whole has moved far enough
+    // vertically. Nothing else matters — not the spread, not the angle,
+    // not how the fingers sit relative to each other or how diagonal the
+    // stroke is. A pinch or rotate moves the fingers against each other,
+    // so their vertical motions disagree and never pass this test.
+    let same_vertical_direction = a_motion.y * b_motion.y > 0.0
+        && a_motion.y.abs().min(b_motion.y.abs()) >= TOUCH_TILT_MIN_FINGER_PX;
+    // "Up/down" with a little slack: the pair's stroke may lean sideways by
+    // a fifth of its vertical travel and still read as vertical.
+    let mostly_vertical = midpoint_motion.y.abs() >= TOUCH_GESTURE_CLASSIFY_PX
+        && midpoint_motion.x.abs() <= midpoint_motion.y.abs() * TOUCH_TILT_SIDEWAYS_RATIO;
+    if same_vertical_direction && mostly_vertical {
+        return TouchGestureMode::Tilt;
+    }
+    if angle_motion_deg >= TOUCH_ROTATE_DEAD_ZONE_DEG {
+        TouchGestureMode::Rotate
+    } else {
+        TouchGestureMode::Pinch
+    }
+}
+
+/// Centre for a two-finger zoom/pan. The map point below the initial
+/// midpoint is placed below the current midpoint at the new zoom.
+fn pinch_anchor_center_norm(
+    start_center_norm: Vec2d,
+    start_midpoint_rel: Vec2d,
+    current_midpoint_rel: Vec2d,
+    old_world_size: f64,
+    new_world_size: f64,
+) -> Vec2d {
+    let anchor_norm = start_center_norm + start_midpoint_rel / old_world_size;
+    (anchor_norm * new_world_size - current_midpoint_rel) / new_world_size
+}
+
+fn touch_abs(event: &TouchUpdateEvent, uid: u64) -> Option<Vec2d> {
+    event
+        .touches
+        .iter()
+        .find(|touch| touch.uid == uid && touch.state != TouchState::Stop)
+        .map(|touch| touch.abs)
+}
+
+fn first_active_touch(event: &TouchUpdateEvent) -> Option<TouchSample> {
+    event
+        .touches
+        .iter()
+        .filter(|touch| touch.state != TouchState::Stop)
+        .min_by_key(|touch| touch.uid)
+        .map(|touch| TouchSample {
+            uid: touch.uid,
+            abs: touch.abs,
+        })
+}
+
+fn first_two_active_touches(event: &TouchUpdateEvent) -> Option<TouchPair> {
+    let mut first: Option<TouchSample> = None;
+    let mut second: Option<TouchSample> = None;
+    for touch in event
+        .touches
+        .iter()
+        .filter(|touch| touch.state != TouchState::Stop)
+    {
+        let sample = TouchSample {
+            uid: touch.uid,
+            abs: touch.abs,
+        };
+        if first.is_none_or(|candidate| sample.uid < candidate.uid) {
+            second = first;
+            first = Some(sample);
+        } else if second.is_none_or(|candidate| sample.uid < candidate.uid) {
+            second = Some(sample);
+        }
+    }
+    Some(TouchPair {
+        a: first?,
+        b: second?,
+    })
+}
+
+fn active_touch_pair(event: &TouchUpdateEvent, start: TouchPair) -> Option<TouchPair> {
+    Some(TouchPair {
+        a: TouchSample {
+            uid: start.a.uid,
+            abs: touch_abs(event, start.a.uid)?,
+        },
+        b: TouchSample {
+            uid: start.b.uid,
+            abs: touch_abs(event, start.b.uid)?,
+        },
+    })
 }
 
 // --- Draw shaders ---
@@ -1330,163 +3353,957 @@ pub struct DrawRainOverlay {
     pub texel: Vec2f,
 }
 
+/// The per-draw view state every map shader stamps as uniforms: one struct
+/// so the vector and the instanced draws cannot drift apart. Built by ONE
+/// function (`tile_draw::call_uniforms`) both when a tile list is recorded
+/// and when its retained calls are refreshed, so the two paths cannot
+/// disagree.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct MapDrawUniforms {
+    pub map_scale: Vec2f,
+    pub map_offset: Vec2f,
+    pub fade: f32,
+    pub width_correction: [f32; 4],
+    pub view_rot: [f32; 2],
+    pub rot_pivot: [f32; 2],
+    pub tilt_params: [f32; 4],
+    pub icon_zoom: f32,
+    pub height_grow: f32,
+    pub terrain_org: [f32; 2],
+    pub terrain_span: [f32; 2],
+    pub terrain_uvfit: [f32; 4],
+    pub terrain_fill_lift: f32,
+    pub shadow_dir: [f32; 2],
+    pub shadow_cast: f32,
+    pub shadow_mask_on: f32,
+    pub shadow_mask_size: [f32; 2],
+    pub shadow_mask_flip: f32,
+    pub space_warp: [f32; 4],
+    pub space_warp2: [f32; 4],
+    /// Tilted-camera per-pass depth offset (`pass_boost + k * 0.02`), a
+    /// uniform rather than the instance `draw_depth` because it moves with
+    /// the tilt and the relief in view while the instances stay resident.
+    pub pass_depth: f32,
+}
+
+/// Textures and theme gates a tile draw binds beside its uniforms.
+#[derive(Clone, Copy)]
+pub(crate) struct MapDrawEnv<'a> {
+    pub shiny: &'a ShinyConfig,
+    pub terrain_tex: &'a Texture,
+    /// The frame's shadow mask; `None` binds the terrain texture in its slot
+    /// (inside the mask pass itself, where sampling the target would be a
+    /// feedback loop, and whenever the mask is off).
+    pub shadow_mask: Option<&'a Texture>,
+}
+
+/// One dyn-uniform's position in a shader's uniform block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct UniformSlot {
+    offset: u32,
+    slots: u32,
+}
+
+impl UniformSlot {
+    const ABSENT: UniformSlot = UniformSlot {
+        offset: u32::MAX,
+        slots: 0,
+    };
+
+    #[inline]
+    fn put(self, buf: &mut [f32], value: &[f32]) {
+        if self.offset == u32::MAX {
+            return;
+        }
+        let offset = self.offset as usize;
+        for (i, v) in value.iter().take(self.slots as usize).enumerate() {
+            buf[offset + i] = *v;
+        }
+    }
+}
+
+/// Where every map uniform lives in one shader's dyn-uniform block,
+/// resolved once per frame per drawer. The retained tile calls are
+/// re-stamped every frame (a pan is uniforms only), so the per-uniform
+/// name search of `DrawVars::set_uniform` is paid once here instead of
+/// thirty times per draw call.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct MapUniformSlots {
+    tile_fade: UniformSlot,
+    map_scale: UniformSlot,
+    map_offset: UniformSlot,
+    width_correction: UniformSlot,
+    face_correction: UniformSlot,
+    view_rot: UniformSlot,
+    rot_pivot: UniformSlot,
+    tilt_params: UniformSlot,
+    icon_zoom: UniformSlot,
+    height_grow: UniformSlot,
+    terrain_org: UniformSlot,
+    terrain_span: UniformSlot,
+    terrain_uvfit: UniformSlot,
+    terrain_fill_lift: UniformSlot,
+    shiny_gates: UniformSlot,
+    shiny_gates2: UniformSlot,
+    sun_dir: UniformSlot,
+    sun_color: UniformSlot,
+    sun_sky: UniformSlot,
+    shadow_dir: UniformSlot,
+    shadow_cast: UniformSlot,
+    shadow_mask_on: UniformSlot,
+    shadow_mask_size: UniformSlot,
+    shadow_mask_flip: UniformSlot,
+    space_warp: UniformSlot,
+    space_warp2: UniformSlot,
+    pass_depth: UniformSlot,
+}
+
+impl Default for MapUniformSlots {
+    fn default() -> Self {
+        let a = UniformSlot::ABSENT;
+        Self {
+            tile_fade: a,
+            map_scale: a,
+            map_offset: a,
+            width_correction: a,
+            face_correction: a,
+            view_rot: a,
+            rot_pivot: a,
+            tilt_params: a,
+            icon_zoom: a,
+            height_grow: a,
+            terrain_org: a,
+            terrain_span: a,
+            terrain_uvfit: a,
+            terrain_fill_lift: a,
+            shiny_gates: a,
+            shiny_gates2: a,
+            sun_dir: a,
+            sun_color: a,
+            sun_sky: a,
+            shadow_dir: a,
+            shadow_cast: a,
+            shadow_mask_on: a,
+            shadow_mask_size: a,
+            shadow_mask_flip: a,
+            space_warp: a,
+            space_warp2: a,
+            pass_depth: a,
+        }
+    }
+}
+
+impl MapUniformSlots {
+    pub(crate) fn resolve(cx: &Cx, draw_vars: &DrawVars) -> Self {
+        let Some(draw_shader_id) = draw_vars.draw_shader_id else {
+            return Self::default();
+        };
+        let inputs = &cx.draw_shaders[draw_shader_id.index].mapping.dyn_uniforms.inputs;
+        let find = |id: LiveId| {
+            inputs
+                .iter()
+                .find(|input| input.id == id)
+                .map(|input| UniformSlot {
+                    offset: input.offset as u32,
+                    slots: input.slots as u32,
+                })
+                .unwrap_or(UniformSlot::ABSENT)
+        };
+        Self {
+            tile_fade: find(live_id!(tile_fade)),
+            map_scale: find(live_id!(map_scale)),
+            map_offset: find(live_id!(map_offset)),
+            width_correction: find(live_id!(width_correction)),
+            face_correction: find(live_id!(face_correction)),
+            view_rot: find(live_id!(view_rot)),
+            rot_pivot: find(live_id!(rot_pivot)),
+            tilt_params: find(live_id!(tilt_params)),
+            icon_zoom: find(live_id!(icon_zoom)),
+            height_grow: find(live_id!(height_grow)),
+            terrain_org: find(live_id!(terrain_org)),
+            terrain_span: find(live_id!(terrain_span)),
+            terrain_uvfit: find(live_id!(terrain_uvfit)),
+            terrain_fill_lift: find(live_id!(terrain_fill_lift)),
+            shiny_gates: find(live_id!(shiny_gates)),
+            shiny_gates2: find(live_id!(shiny_gates2)),
+            sun_dir: find(live_id!(sun_dir)),
+            sun_color: find(live_id!(sun_color)),
+            sun_sky: find(live_id!(sun_sky)),
+            shadow_dir: find(live_id!(shadow_dir)),
+            shadow_cast: find(live_id!(shadow_cast)),
+            shadow_mask_on: find(live_id!(shadow_mask_on)),
+            shadow_mask_size: find(live_id!(shadow_mask_size)),
+            shadow_mask_flip: find(live_id!(shadow_mask_flip)),
+            space_warp: find(live_id!(space_warp)),
+            space_warp2: find(live_id!(space_warp2)),
+            pass_depth: find(live_id!(pass_depth)),
+        }
+    }
+}
+
+/// Orientation of the shadow-mask pass texture when the ground shader samples
+/// it by screen position. The pass is a child pass at the window's dpi over
+/// the map rect; on Metal it comes back bottom-up (grab-verified: unflipped,
+/// every shadow lands on the far side of its building and hides behind it).
+fn shadow_mask_y_flip_for_os(os_type: &OsType) -> f32 {
+    match os_type {
+        OsType::Macos | OsType::Ios(_) => 1.0,
+        _ => 0.0,
+    }
+}
+
+/// Writes one draw's uniforms and textures into `draw_vars`: the staging
+/// copy a new draw call is created from, and the source
+/// `DrawVars::update_uniforms_on_area` pushes onto a retained call.
+pub(crate) fn stamp_map_uniforms(
+    draw_vars: &mut DrawVars,
+    slots: &MapUniformSlots,
+    u: &MapDrawUniforms,
+    env: &MapDrawEnv,
+) {
+    let buf = &mut draw_vars.dyn_uniforms[..];
+    slots.tile_fade.put(buf, &[u.fade]);
+    slots.map_scale.put(buf, &[u.map_scale.x, u.map_scale.y]);
+    slots.map_offset.put(buf, &[u.map_offset.x, u.map_offset.y]);
+    slots.width_correction.put(buf, &u.width_correction);
+    // Face variant, clamped >= 1: union faces may only WIDEN (inward morph
+    // inverts narrow features); stale cross-band tiles render at keyframe
+    // width magnified instead of garbling.
+    let face_correction: [f32; 4] = [
+        u.width_correction[0].max(1.0),
+        u.width_correction[1].max(1.0),
+        u.width_correction[2].max(1.0),
+        u.width_correction[3].max(1.0),
+    ];
+    slots.face_correction.put(buf, &face_correction);
+    slots.view_rot.put(buf, &u.view_rot);
+    slots.rot_pivot.put(buf, &u.rot_pivot);
+    slots.tilt_params.put(buf, &u.tilt_params);
+    slots.icon_zoom.put(buf, &[u.icon_zoom]);
+    slots.height_grow.put(buf, &[u.height_grow]);
+    slots.terrain_org.put(buf, &u.terrain_org);
+    slots.terrain_span.put(buf, &u.terrain_span);
+    slots.terrain_uvfit.put(buf, &u.terrain_uvfit);
+    slots.terrain_fill_lift.put(buf, &[u.terrain_fill_lift]);
+    let shiny = env.shiny;
+    slots.shiny_gates.put(
+        buf,
+        &[
+            if shiny.water_fx { 1.0 } else { 0.0 },
+            if shiny.building_sheen { shiny.gloss } else { 0.0 },
+            if shiny.foliage_fx { 1.0 } else { 0.0 },
+            if shiny.route_glow { 1.0 } else { 0.0 },
+        ],
+    );
+    // Water/green noise anchors physically to the map: scale the baked
+    // view-px UV by exp2(16 - view_zoom) so ripple size tracks meters, not
+    // screen pixels. The lower bound keeps refining well past z20 (the
+    // shaders gate their finest octaves on this value); the upper bound
+    // keeps far-out zooms from going sub-pixel.
+    let mat_uv_scale = (16.0 - u.icon_zoom).exp2().clamp(0.03, 1.25);
+    // Wide-range variant for patterns that stay physical further out
+    // (shrub fills) and want to know the true zoom for LOD blending.
+    let mat_uv_wide = (16.0 - u.icon_zoom).exp2().clamp(0.03, 8.0);
+    slots.shiny_gates2.put(
+        buf,
+        &[
+            if shiny.dynamic_sun { 1.0 } else { 0.0 },
+            shiny.sun.shadow_alpha,
+            mat_uv_scale,
+            mat_uv_wide,
+        ],
+    );
+    let sun = &shiny.sun;
+    slots.sun_dir.put(buf, &[sun.dir.x, sun.dir.y, sun.dir.z]);
+    slots.sun_color.put(buf, &[sun.color.x, sun.color.y, sun.color.z]);
+    slots.sun_sky.put(buf, &[sun.sky.x, sun.sky.y, sun.sky.z]);
+    slots.shadow_dir.put(buf, &u.shadow_dir);
+    slots.shadow_cast.put(buf, &[u.shadow_cast]);
+    slots.shadow_mask_on.put(buf, &[u.shadow_mask_on]);
+    slots.shadow_mask_size.put(buf, &u.shadow_mask_size);
+    slots.shadow_mask_flip.put(buf, &[u.shadow_mask_flip]);
+    slots.space_warp.put(buf, &u.space_warp);
+    slots.space_warp2.put(buf, &u.space_warp2);
+    slots.pass_depth.put(buf, &[u.pass_depth]);
+    draw_vars.set_texture(1, env.terrain_tex);
+    draw_vars.set_texture(2, env.shadow_mask.unwrap_or(env.terrain_tex));
+}
+
+/// One draw call of a whole geometry: the single aligned instance every
+/// tile-mesh draw is. `Area::Empty` when the shader is not compiled, in
+/// which case no draw call exists either. The drawer keeps no area of its
+/// own: the call lives in a tile's retained list, and the tile entry owns
+/// that reference (`TileCallSpec`) for exactly as long as the list exists.
+fn draw_one_geometry(
+    cx: &mut Cx2d,
+    draw_vars: &mut DrawVars,
+    geometry_id: GeometryId,
+) -> Area {
+    draw_vars.geometry_id = Some(geometry_id);
+    cx.new_draw_call(draw_vars);
+    if !draw_vars.can_instance() {
+        return Area::Empty;
+    }
+    cx.add_aligned_instance(draw_vars)
+}
+
 #[derive(Script, ScriptHook, Debug)]
 #[repr(C)]
 pub struct DrawMapVector {
     #[deref]
     pub draw_super: DrawVector,
-    #[rust(vec2(1.0, 1.0))]
-    pub map_scale: Vec2f,
-    #[rust(vec2(0.0, 0.0))]
-    pub map_offset: Vec2f,
-    #[rust(1.0)]
-    pub tile_fade: f32,
-    /// shiny.md gates + SceneSun, stamped once per frame from the active
-    /// theme; draw_geometry feeds them to the shader uniforms.
-    #[rust(ShinyConfig::default())]
-    pub shiny: ShinyConfig,
+    /// Per-instance placement of a shared mesh (street trees): added to
+    /// every vertex position before the map transform. Zero for the
+    /// ordinary one-instance tile geometry draws.
+    #[live]
+    pub inst_anchor: Vec2f,
+    /// Per-instance zbias shift on top of the vertex's own.
+    #[live]
+    pub inst_zbias: f32,
 }
 
 impl DrawMapVector {
-    #[allow(clippy::too_many_arguments)]
-    fn draw_geometry(
+    pub(crate) fn draw_geometry(
         &mut self,
         cx: &mut Cx2d,
         geometry_id: GeometryId,
-        map_scale: Vec2f,
-        map_offset: Vec2f,
-        fade: f32,
-        width_correction: [f32; 4],
-        view_rot: [f32; 2],
-        rot_pivot: [f32; 2],
-        tilt_params: [f32; 4],
-        icon_zoom: f32,
-        height_grow: f32,
-        terrain_org: [f32; 2],
-        terrain_span: [f32; 2],
-        terrain_uvfit: [f32; 4],
-        terrain_tex: &Texture,
-        pass_depth: f32,
-        terrain_fill_lift: f32,
-    ) {
-        // Casings/centers/icons ride far above the displaced terrain
-        // surface: quad-twist between the GPU bilinear lift and the mesh
-        // triangles is bounded well below this.
-        self.draw_super.draw_depth = pass_depth;
-        self.map_scale = map_scale;
-        self.map_offset = map_offset;
-        self.tile_fade = fade;
-        self.draw_super
-            .draw_vars
-            .set_uniform(cx.cx, live_id!(tile_fade), &[fade]);
-        self.draw_super.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(map_scale),
-            &[map_scale.x, map_scale.y],
-        );
-        self.draw_super.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(map_offset),
-            &[map_offset.x, map_offset.y],
-        );
-        self.draw_super.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(width_correction),
-            &width_correction,
-        );
-        let face_correction: [f32; 4] = [
-            width_correction[0].max(1.0),
-            width_correction[1].max(1.0),
-            width_correction[2].max(1.0),
-            width_correction[3].max(1.0),
-        ];
-        self.draw_super.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(face_correction),
-            &face_correction,
-        );
-        self.draw_super
-            .draw_vars
-            .set_uniform(cx.cx, live_id!(view_rot), &view_rot);
-        self.draw_super
-            .draw_vars
-            .set_uniform(cx.cx, live_id!(rot_pivot), &rot_pivot);
-        self.draw_super
-            .draw_vars
-            .set_uniform(cx.cx, live_id!(tilt_params), &tilt_params);
-        self.draw_super
-            .draw_vars
-            .set_uniform(cx.cx, live_id!(icon_zoom), &[icon_zoom]);
-        self.draw_super
-            .draw_vars
-            .set_uniform(cx.cx, live_id!(height_grow), &[height_grow]);
-        self.draw_super
-            .draw_vars
-            .set_uniform(cx.cx, live_id!(terrain_org), &terrain_org);
-        self.draw_super
-            .draw_vars
-            .set_uniform(cx.cx, live_id!(terrain_span), &terrain_span);
-        self.draw_super
-            .draw_vars
-            .set_uniform(cx.cx, live_id!(terrain_uvfit), &terrain_uvfit);
-        self.draw_super
-            .draw_vars
-            .set_uniform(cx.cx, live_id!(terrain_fill_lift), &[terrain_fill_lift]);
-        let shiny = &self.shiny;
-        self.draw_super.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(shiny_gates),
-            &[
-                if shiny.water_fx { 1.0 } else { 0.0 },
-                if shiny.building_sheen { shiny.gloss } else { 0.0 },
-                if shiny.foliage_fx { 1.0 } else { 0.0 },
-                if shiny.route_glow { 1.0 } else { 0.0 },
-            ],
-        );
-        // Water/green noise anchors physically to the map: scale the
-        // baked view-px UV by exp2(16 - view_zoom) so ripple size tracks
-        // meters, not screen pixels. The lower bound keeps refining well
-        // past z20 (the shaders gate their finest octaves on this value);
-        // the upper bound keeps far-out zooms from going sub-pixel.
-        let mat_uv_scale = (16.0 - icon_zoom).exp2().clamp(0.03, 1.25);
-        // Wide-range variant for patterns that stay physical further out
-        // (shrub fills) and want to know the true zoom for LOD blending.
-        let mat_uv_wide = (16.0 - icon_zoom).exp2().clamp(0.03, 8.0);
-        self.draw_super.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(shiny_gates2),
-            &[
-                if shiny.dynamic_sun { 1.0 } else { 0.0 },
-                shiny.sun.shadow_alpha,
-                mat_uv_scale,
-                mat_uv_wide,
-            ],
-        );
-        let sun = &shiny.sun;
-        self.draw_super.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(sun_dir),
-            &[sun.dir.x, sun.dir.y, sun.dir.z],
-        );
-        self.draw_super.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(sun_color),
-            &[sun.color.x, sun.color.y, sun.color.z],
-        );
-        self.draw_super.draw_vars.set_uniform(
-            cx.cx,
-            live_id!(sun_sky),
-            &[sun.sky.x, sun.sky.y, sun.sky.z],
-        );
-        self.draw_super.draw_vars.set_texture(1, terrain_tex);
+        slots: &MapUniformSlots,
+        uniforms: &MapDrawUniforms,
+        env: &MapDrawEnv,
+        draw_depth: f32,
+    ) -> Area {
+        self.draw_super.draw_depth = draw_depth;
+        stamp_map_uniforms(&mut self.draw_super.draw_vars, slots, uniforms, env);
+        draw_one_geometry(cx, &mut self.draw_super.draw_vars, geometry_id)
+    }
+
+    /// Draw one shared mesh once per record (`TREE_INSTANCE_FLOATS`: anchor
+    /// xy, zbias shift), with the same uniforms as `draw_geometry`.
+    pub(crate) fn draw_instanced(
+        &mut self,
+        cx: &mut Cx2d,
+        geometry_id: GeometryId,
+        records: &[f32],
+        slots: &MapUniformSlots,
+        uniforms: &MapDrawUniforms,
+        env: &MapDrawEnv,
+        draw_depth: f32,
+    ) -> Area {
+        if records.is_empty() || self.draw_super.draw_vars.draw_shader_id.is_none() {
+            return Area::Empty;
+        }
+        self.draw_super.draw_depth = draw_depth;
+        stamp_map_uniforms(&mut self.draw_super.draw_vars, slots, uniforms, env);
         self.draw_super.draw_vars.geometry_id = Some(geometry_id);
         cx.new_draw_call(&self.draw_super.draw_vars);
-        if self.draw_super.draw_vars.can_instance() {
-            let new_area = cx.add_aligned_instance(&self.draw_super.draw_vars);
-            self.draw_super.draw_vars.area =
-                cx.update_area_refs(self.draw_super.draw_vars.area, new_area);
+        let Some(mut instances) = cx.begin_many_aligned_instances(&self.draw_super.draw_vars)
+        else {
+            return Area::Empty;
+        };
+        for record in records.chunks_exact(TREE_INSTANCE_FLOATS) {
+            self.inst_anchor = vec2(record[0], record[1]);
+            self.inst_zbias = record[2];
+            instances
+                .instances
+                .extend_from_slice(self.draw_super.draw_vars.as_slice());
+        }
+        self.inst_anchor = vec2(0.0, 0.0);
+        self.inst_zbias = 0.0;
+        cx.end_many_instances(instances)
+    }
+}
+
+/// Road-only draw path backed by `RoadVertexTyped`. It deliberately has no
+/// per-placement instance inputs: each tile road mesh is one ordinary draw.
+#[derive(Script, ScriptHook, Debug)]
+#[repr(C)]
+pub struct DrawMapRoad {
+    #[deref]
+    pub draw_vars: DrawVars,
+    #[live]
+    pub draw_clip: Vec4f,
+    #[live(1.0)]
+    pub depth_clip: f32,
+    #[live(0.0)]
+    pub draw_depth: f32,
+}
+
+impl DrawMapRoad {
+    pub(crate) fn draw_geometry(
+        &mut self,
+        cx: &mut Cx2d,
+        geometry_id: GeometryId,
+        slots: &MapUniformSlots,
+        uniforms: &MapDrawUniforms,
+        env: &MapDrawEnv,
+        draw_depth: f32,
+    ) -> Area {
+        self.draw_depth = draw_depth;
+        stamp_map_uniforms(&mut self.draw_vars, slots, uniforms, env);
+        draw_one_geometry(cx, &mut self.draw_vars, geometry_id)
+    }
+}
+
+/// The road drawer under the face vertex program (script `DrawMapFace`):
+/// grounded union faces on 16-byte `FaceVertexTyped` records. Its own
+/// shader type because a field's shader is fixed by its type default; the
+/// draw path and uniforms are `DrawMapRoad`'s.
+#[derive(Script, ScriptHook, Debug)]
+#[repr(C)]
+pub struct DrawMapFace {
+    #[deref]
+    pub road: DrawMapRoad,
+}
+
+/// Compact ground fills. Unlike the generic vector drawer this has no
+/// per-instance channels; every varying is reconstructed from five geometry
+/// slots in the script vertex function above.
+#[derive(Script, ScriptHook, Debug)]
+#[repr(C)]
+pub struct DrawMapFill {
+    #[deref]
+    pub draw_vars: DrawVars,
+    #[live]
+    pub draw_clip: Vec4f,
+    #[live(1.0)]
+    pub depth_clip: f32,
+    #[live(0.0)]
+    pub draw_depth: f32,
+}
+
+impl DrawMapFill {
+    pub(crate) fn draw_geometry(
+        &mut self,
+        cx: &mut Cx2d,
+        geometry_id: GeometryId,
+        slots: &MapUniformSlots,
+        uniforms: &MapDrawUniforms,
+        env: &MapDrawEnv,
+        draw_depth: f32,
+    ) -> Area {
+        self.draw_depth = draw_depth;
+        stamp_map_uniforms(&mut self.draw_vars, slots, uniforms, env);
+        draw_one_geometry(cx, &mut self.draw_vars, geometry_id)
+    }
+}
+
+/// Compact lifted roofs: the single aligned instance submitted per geometry.
+#[derive(Script, ScriptHook, Debug)]
+#[repr(C)]
+pub struct DrawMapRoof {
+    #[deref]
+    pub draw_vars: DrawVars,
+    #[live]
+    pub draw_clip: Vec4f,
+    #[live(1.0)]
+    pub depth_clip: f32,
+    #[live(0.0)]
+    pub draw_depth: f32,
+}
+
+impl DrawMapRoof {
+    pub(crate) fn draw_geometry(
+        &mut self,
+        cx: &mut Cx2d,
+        geometry_id: GeometryId,
+        slots: &MapUniformSlots,
+        uniforms: &MapDrawUniforms,
+        env: &MapDrawEnv,
+        draw_depth: f32,
+    ) -> Area {
+        self.draw_depth = draw_depth;
+        stamp_map_uniforms(&mut self.draw_vars, slots, uniforms, env);
+        draw_one_geometry(cx, &mut self.draw_vars, geometry_id)
+    }
+}
+
+/// Instanced POI symbols: the registry mesh is bound as the geometry (one
+/// GPU copy per slot, see `MapView::icon_mesh_geometries`), every placement
+/// is one instance of `DrawMapIcon`'s per-instance fields. The shader is
+/// `DrawMapVector`'s icon path (see the script twin).
+#[derive(Script, ScriptHook, Debug)]
+#[repr(C)]
+pub struct DrawMapIcon {
+    #[deref]
+    pub draw_vars: DrawVars,
+    #[live]
+    pub draw_clip: Vec4f,
+    #[live(1.0)]
+    pub depth_clip: f32,
+    #[live(0.0)]
+    pub draw_depth: f32,
+    #[live]
+    pub inst_anchor: Vec2f,
+    #[live]
+    pub inst_offset: Vec2f,
+    #[live(1.0)]
+    pub inst_scale: f32,
+    #[live]
+    pub inst_param4: f32,
+    #[live]
+    pub inst_zbias: f32,
+    #[live]
+    pub inst_color: f32,
+}
+
+impl DrawMapIcon {
+    /// Draw one instance group of a tile: one draw call per symbol mesh.
+    pub(crate) fn draw_group(
+        &mut self,
+        cx: &mut Cx2d,
+        group: &IconInstances,
+        mesh_geometries: &mut HashMap<u16, Geometry>,
+        slots: &MapUniformSlots,
+        uniforms: &MapDrawUniforms,
+        env: &MapDrawEnv,
+        draw_depth: f32,
+    ) -> Area {
+        if self.draw_vars.draw_shader_id.is_none() || group.data.is_empty() {
+            return Area::Empty;
+        }
+        let Some(mesh) = icon_mesh_by_slot(group.mesh_slot) else {
+            return Area::Empty;
+        };
+        self.draw_depth = draw_depth;
+        let geometry = mesh_geometries.entry(group.mesh_slot).or_insert_with(|| {
+            let geometry = Geometry::new(cx.cx);
+            geometry.update(
+                cx.cx,
+                mesh.indices.clone(),
+                crate::makepad_draw::vector::pack_icon_vertices(&mesh.verts),
+            );
+            geometry
+        });
+        stamp_map_uniforms(&mut self.draw_vars, slots, uniforms, env);
+        self.draw_vars.geometry_id = Some(geometry.geometry_id());
+        cx.new_draw_call(&self.draw_vars);
+        let Some(mut instances) = cx.begin_many_aligned_instances(&self.draw_vars) else {
+            return Area::Empty;
+        };
+        for record in group.data.chunks_exact(ICON_INSTANCE_FLOATS) {
+            self.inst_anchor = vec2(record[0], record[1]);
+            self.inst_offset = vec2(record[2], record[3]);
+            self.inst_scale = record[4];
+            self.inst_param4 = record[5];
+            self.inst_zbias = record[6];
+            self.inst_color = record[7];
+            instances.instances.extend_from_slice(self.draw_vars.as_slice());
+        }
+        cx.end_many_instances(instances)
+    }
+}
+
+/// Instanced marker stalks and stoplights. Their meshes remain on the
+/// generic vector layout so the existing material and shadow fragment path
+/// stays authoritative; only placement/scale/colour repeat per feature.
+#[derive(Script, ScriptHook, Debug)]
+#[repr(C)]
+pub struct DrawMapProp {
+    #[deref]
+    pub draw_vars: DrawVars,
+    #[live]
+    pub draw_clip: Vec4f,
+    #[live(1.0)]
+    pub depth_clip: f32,
+    #[live(0.0)]
+    pub draw_depth: f32,
+    #[live]
+    pub inst_anchor: Vec2f,
+    #[live(vec2(1.0, 1.0))]
+    pub inst_size: Vec2f,
+    #[live]
+    pub inst_color: f32,
+    #[live]
+    pub inst_zbias: f32,
+}
+
+impl DrawMapProp {
+    pub(crate) fn draw_instances(
+        &mut self,
+        cx: &mut Cx2d,
+        geometry_id: GeometryId,
+        records: &[MapPropInstance],
+        slots: &MapUniformSlots,
+        uniforms: &MapDrawUniforms,
+        env: &MapDrawEnv,
+        draw_depth: f32,
+    ) -> Area {
+        if records.is_empty() || self.draw_vars.draw_shader_id.is_none() {
+            return Area::Empty;
+        }
+        self.draw_depth = draw_depth;
+        stamp_map_uniforms(&mut self.draw_vars, slots, uniforms, env);
+        self.draw_vars.geometry_id = Some(geometry_id);
+        cx.new_draw_call(&self.draw_vars);
+        let Some(mut instances) = cx.begin_many_aligned_instances(&self.draw_vars) else {
+            return Area::Empty;
+        };
+        for record in records {
+            self.inst_anchor = record.anchor;
+            self.inst_size = record.size;
+            self.inst_color = f32::from_bits(u32::from_le_bytes(record.color.0));
+            self.inst_zbias = record.zbias;
+            instances.instances.extend_from_slice(self.draw_vars.as_slice());
+        }
+        self.inst_anchor = vec2(0.0, 0.0);
+        self.inst_size = vec2(1.0, 1.0);
+        self.inst_color = 0.0;
+        self.inst_zbias = 0.0;
+        cx.end_many_instances(instances)
+    }
+}
+
+/// Instanced building walls: the shared unit quad is the geometry, every
+/// footprint edge is one compact typed instance; the shader is `DrawMapWall`
+/// in the script block.
+#[derive(Script, ScriptHook, Debug)]
+#[repr(C)]
+pub struct DrawMapWall {
+    #[deref]
+    pub draw_vars: DrawVars,
+    #[live]
+    pub draw_clip: Vec4f,
+    #[live(1.0)]
+    pub depth_clip: f32,
+    #[live(0.0)]
+    pub draw_depth: f32,
+    #[live]
+    pub inst_a: Vec2f,
+    #[live]
+    pub inst_b: Vec2f,
+    /// x = base metres, y = top metres.
+    #[live]
+    pub inst_heights: Vec2f,
+    #[live(1.0)]
+    pub inst_ao: f32,
+    #[live]
+    pub inst_color: f32,
+    #[live]
+    pub inst_zbias: f32,
+}
+
+impl DrawMapWall {
+    /// Draw one tile's wall edges as a single instanced call.
+    pub(crate) fn draw_edges(
+        &mut self,
+        cx: &mut Cx2d,
+        records: &[MapWallInstance],
+        slots: &MapUniformSlots,
+        uniforms: &MapDrawUniforms,
+        env: &MapDrawEnv,
+        draw_depth: f32,
+    ) -> Area {
+        if records.is_empty() || self.draw_vars.draw_shader_id.is_none() {
+            return Area::Empty;
+        }
+        self.draw_depth = draw_depth;
+        stamp_map_uniforms(&mut self.draw_vars, slots, uniforms, env);
+        cx.new_draw_call(&self.draw_vars);
+        let Some(mut instances) = cx.begin_many_aligned_instances(&self.draw_vars) else {
+            return Area::Empty;
+        };
+        for record in records {
+            self.inst_a = MapWallInstance::unpack_position(record.a);
+            self.inst_b = MapWallInstance::unpack_position(record.b);
+            let (base_m, height_m) = record.unpack_heights();
+            self.inst_heights = vec2(base_m, height_m);
+            let (ao, zbias_ticks) = record.ao_zbias.to_f32();
+            self.inst_ao = ao;
+            self.inst_color = f32::from_bits(u32::from_le_bytes(record.color.0));
+            self.inst_zbias = zbias_ticks * VECTOR_ZBIAS_STEP;
+            instances.instances.extend_from_slice(self.draw_vars.as_slice());
+        }
+        cx.end_many_instances(instances)
+    }
+}
+
+/// Instanced wall-edge shadows: same records as `DrawMapWall`, projected
+/// along the sun onto the ground in the vertex shader.
+#[derive(Script, ScriptHook, Debug)]
+#[repr(C)]
+pub struct DrawMapShadow {
+    #[deref]
+    pub draw_vars: DrawVars,
+    #[live]
+    pub draw_clip: Vec4f,
+    #[live(1.0)]
+    pub depth_clip: f32,
+    #[live(0.0)]
+    pub draw_depth: f32,
+    #[live]
+    pub inst_a: Vec2f,
+    #[live]
+    pub inst_b: Vec2f,
+    #[live]
+    pub inst_heights: Vec2f,
+    #[live]
+    pub inst_zbias: f32,
+}
+
+impl DrawMapShadow {
+    pub(crate) fn draw_edges(
+        &mut self,
+        cx: &mut Cx2d,
+        records: &[MapWallInstance],
+        slots: &MapUniformSlots,
+        uniforms: &MapDrawUniforms,
+        env: &MapDrawEnv,
+        draw_depth: f32,
+    ) -> Area {
+        if records.is_empty() || self.draw_vars.draw_shader_id.is_none() {
+            return Area::Empty;
+        }
+        self.draw_depth = draw_depth;
+        stamp_map_uniforms(&mut self.draw_vars, slots, uniforms, env);
+        cx.new_draw_call(&self.draw_vars);
+        let Some(mut instances) = cx.begin_many_aligned_instances(&self.draw_vars) else {
+            return Area::Empty;
+        };
+        for record in records {
+            self.inst_a = MapWallInstance::unpack_position(record.a);
+            self.inst_b = MapWallInstance::unpack_position(record.b);
+            let (base_m, height_m) = record.unpack_heights();
+            self.inst_heights = vec2(base_m, height_m);
+            self.inst_zbias = record.ao_zbias.to_f32().1 * VECTOR_ZBIAS_STEP;
+            instances.instances.extend_from_slice(self.draw_vars.as_slice());
+        }
+        cx.end_many_instances(instances)
+    }
+}
+
+/// Instanced contact-shadow discs. The geometry is the shared unit quad;
+/// only centre, radius and strength are repeated per placement.
+#[derive(Script, ScriptHook, Debug)]
+#[repr(C)]
+pub struct DrawMapShadowDisc {
+    #[deref]
+    pub draw_vars: DrawVars,
+    #[live]
+    pub inst_center: Vec2f,
+    #[live]
+    pub inst_radius: f32,
+    #[live]
+    pub inst_strength: f32,
+}
+
+impl DrawMapShadowDisc {
+    pub(crate) fn draw_discs(
+        &mut self,
+        cx: &mut Cx2d,
+        records: &[f32],
+        slots: &MapUniformSlots,
+        uniforms: &MapDrawUniforms,
+        env: &MapDrawEnv,
+    ) -> Area {
+        if records.is_empty() || self.draw_vars.draw_shader_id.is_none() {
+            return Area::Empty;
+        }
+        stamp_map_uniforms(&mut self.draw_vars, slots, uniforms, env);
+        cx.new_draw_call(&self.draw_vars);
+        let Some(mut instances) = cx.begin_many_aligned_instances(&self.draw_vars) else {
+            return Area::Empty;
+        };
+        for record in records.chunks_exact(SHADOW_DISC_INSTANCE_FLOATS) {
+            self.inst_center = vec2(record[0], record[1]);
+            self.inst_radius = record[2];
+            self.inst_strength = record[3];
+            instances.instances.extend_from_slice(self.draw_vars.as_slice());
+        }
+        cx.end_many_instances(instances)
+    }
+}
+
+/// The tile drawers borrowed field-wise out of a `MapView` for one pass, so
+/// `self.tiles` stays free to hand out mutable entries beside them.
+macro_rules! tile_draw_ctx {
+    ($self:ident, $frame:expr, $slots:expr) => {
+        TileDrawCtx {
+            frame: $frame,
+            draw_map: &mut $self.draw_map,
+            draw_fill: &mut $self.draw_fill,
+            draw_road: &mut $self.draw_road,
+            draw_face: &mut $self.draw_face,
+            draw_roof: &mut $self.draw_roof,
+            draw_icon: &mut $self.draw_icon,
+            draw_prop: &mut $self.draw_prop,
+            draw_wall: &mut $self.draw_wall,
+            draw_shadow: &mut $self.draw_shadow,
+            draw_shadow_disc: &mut $self.draw_shadow_disc,
+            icon_mesh_geometries: &mut $self.icon_mesh_geometries,
+            slots: $slots,
+        }
+    };
+}
+
+/// Once a backend has uploaded a stream, its CPU staging is dead weight:
+/// the GPU copy is the resident one. A tile can always be rebaked from the
+/// archive, so nothing needs the vectors back. The free itself happens on a
+/// pool worker: on the threaded web build a large free on the UI thread
+/// contends the allocator lock with the bakes, and a contended lock there
+/// is an `Atomics.wait` the main thread may not make. No pool: the staging
+/// simply stays.
+fn release_uploaded_staging(cx: &mut Cx2d, state: &TileLoadState) {
+    let TileLoadState::Ready {
+        fill_geometry,
+        fill_misc_geometry,
+        face_geometry,
+        casing_geometry,
+        stroke_geometry,
+        icon_geometry,
+        icon_high_geometry,
+        fringe_geometry,
+        fill_3d_geometry,
+        fill_3d_misc_geometry,
+        wall_geometry,
+        tree_geometry,
+        tree_cross_geometry,
+        tree_template_geometry,
+        tree_cross_template_geometry,
+        stalk_template_geometry,
+        stoplight_template_geometry,
+        ..
+    } = state
+    else {
+        return;
+    };
+    let pool = cx.cx.task_pool();
+    for geometry in fill_geometry
+        .iter()
+        .chain(fill_misc_geometry.iter())
+        .chain(face_geometry.iter())
+        .chain(casing_geometry.iter())
+        .chain(stroke_geometry.iter())
+        .chain(icon_geometry.iter())
+        .chain(icon_high_geometry.iter())
+        .chain(fringe_geometry.iter())
+        .chain(fill_3d_geometry.iter())
+        .chain(fill_3d_misc_geometry.iter())
+        .chain(wall_geometry.iter())
+        .chain(tree_geometry.iter())
+        .chain(tree_cross_geometry.iter())
+        .chain(tree_template_geometry.iter())
+        .chain(tree_cross_template_geometry.iter())
+        .chain(stalk_template_geometry.iter())
+        .chain(stoplight_template_geometry.iter())
+    {
+        if !pool.is_open() {
+            break;
+        }
+        let Some((indices, vertices)) = geometry.take_cpu_buffers_if_uploaded(cx.cx) else {
+            continue;
+        };
+        match pool.submit(Lane::Light, move || drop((indices, vertices))) {
+            Ok(handle) => handle.detach(),
+            Err(_) => {
+                // The pool is full: keep the staging until a later frame
+                // can hand it over.
+                break;
+            }
         }
     }
+}
+
+/// What a recorded glyph batch depended on beyond the plans themselves.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct LabelListSig {
+    gen: u64,
+    /// The clip the aligned glyph instances were stamped with at `end_turtle`.
+    clip: Rect,
+    theme: u32,
+    dark_theme: bool,
+    shader: bool,
+}
+
+/// One placed label in a retained batch: a glyph range in the owning
+/// glyph buffer plus what the draw needs to shift, colour and fade it.
+#[derive(Clone, Copy, Debug)]
+struct LabelPlan {
+    score: f64,
+    glyph_start: usize,
+    glyph_end: usize,
+    color_class: u8,
+    post_icon: bool,
+    upright: bool,
+    anchor: Vec2f,
+    baked_lift: f32,
+    /// `stable_label_key` — the identity carried across re-places.
+    key: u64,
+    /// App seconds when the label entered the placed set; survivors keep
+    /// theirs across re-places so a fade-in never restarts.
+    born: f64,
+}
+
+/// The camera a label placement was computed for: its glyphs live in that
+/// camera's screen space and ride the per-frame delta from it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct LabelCacheCam {
+    offset: Vec2d,
+    zoom: f64,
+    rotation: f64,
+    tilt: f64,
+}
+
+/// The per-frame delta from a placement's camera to the drawn frame, as
+/// the glyph shader consumes it (`label_cache_transform`).
+#[derive(Clone, Copy, Debug)]
+struct LabelDrawXf {
+    scale: f32,
+    shift: Vec2f,
+    rot: f32,
+    pivot: Vec2f,
+    cached_tilt_cos: f32,
+}
+
+impl Default for LabelDrawXf {
+    fn default() -> Self {
+        Self {
+            scale: 1.0,
+            shift: Vec2f { x: 0.0, y: 0.0 },
+            rot: 0.0,
+            pivot: Vec2f { x: 0.0, y: 0.0 },
+            cached_tilt_cos: 1.0,
+        }
+    }
+}
+
+/// Labels that left the placed set at a re-place: their old glyphs keep
+/// drawing from the old placement's camera space, sinking to transparent
+/// over `LABEL_FADE_SECONDS`, so a re-place never pops a name.
+#[derive(Default, Debug)]
+struct LabelRetiring {
+    plans: Vec<LabelPlan>,
+    glyphs: Vec<PathGlyphInstance>,
+    cam: LabelCacheCam,
+    /// Fade-out start; None = slot free.
+    since: Option<f64>,
+    /// Batch generation for the retained list signature.
+    gen: u64,
+    /// This frame's transform, replayed by the pin-text phase.
+    xf: LabelDrawXf,
+}
+
+/// Two retiring slots: a re-place inside a still-running fade (an at-rest
+/// follow-up pass) keeps the earlier fade running instead of cutting it.
+const LABEL_RETIRING_SLOTS: usize = 2;
+
+#[derive(Default, Debug)]
+struct LabelRetiringSet {
+    slots: [LabelRetiring; LABEL_RETIRING_SLOTS],
+}
+
+/// Which placement a glyph batch draws from.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum LabelSet {
+    Live,
+    Retiring(usize),
+}
+
+/// The map's retained glyph batches: `[street labels, pin text]` for the
+/// live set, then the same pair per retiring slot.
+#[derive(Default, Debug)]
+struct LabelLists {
+    lists: [Option<DrawList2d>; 2 + 2 * LABEL_RETIRING_SLOTS],
+    sigs: [Option<LabelListSig>; 2 + 2 * LABEL_RETIRING_SLOTS],
 }
 
 // --- MapView widget ---
@@ -1513,6 +4330,43 @@ pub struct MapView {
     #[redraw]
     #[live]
     draw_map: DrawMapVector,
+    #[redraw]
+    #[live]
+    draw_fill: DrawMapFill,
+    #[redraw]
+    #[live]
+    draw_road: DrawMapRoad,
+    #[redraw]
+    #[live]
+    draw_face: DrawMapFace,
+    #[redraw]
+    #[live]
+    draw_roof: DrawMapRoof,
+    #[redraw]
+    #[live]
+    draw_icon: DrawMapIcon,
+    #[redraw]
+    #[live]
+    draw_prop: DrawMapProp,
+    #[redraw]
+    #[live]
+    draw_wall: DrawMapWall,
+    #[redraw]
+    #[live]
+    draw_shadow: DrawMapShadow,
+    #[redraw]
+    #[live]
+    draw_shadow_disc: DrawMapShadowDisc,
+    /// One GPU copy of every symbol mesh the resident tiles reference,
+    /// keyed by registry slot; instanced draws bind these.
+    #[rust]
+    icon_mesh_geometries: HashMap<u16, Geometry>,
+    #[rust]
+    shadow_mask_pass: Option<DrawPass>,
+    #[rust]
+    shadow_mask_texture: Option<Texture>,
+    #[rust]
+    shadow_mask_list: Option<DrawList2d>,
     #[redraw]
     #[live]
     draw_label: DrawRotatedText,
@@ -1548,6 +4402,13 @@ pub struct MapView {
     /// camera is tilted (needs `detail_mbtiles_path`).
     #[live(false)]
     buildings_3d: bool,
+    /// Runtime presentation switches used by compact map-layer panels. The
+    /// vector buffers stay resident; hiding roads or labels is therefore an
+    /// immediate draw-pass decision, not a tile rebuild.
+    #[live(true)]
+    show_roads: bool,
+    #[live(true)]
+    show_labels: bool,
     #[live(false)]
     dark_theme: bool,
     /// Active theme: 0 = light, 1 = dark, 2 = circuit city. `dark_theme`
@@ -1570,11 +4431,13 @@ pub struct MapView {
     /// can point its MapView at its own tile archive.
     #[live]
     mbtiles_path: String,
-    /// Semicolon-separated list of geodata overlay mbtiles (layers.md
-    /// track: chargers, transit, nature, districts…). Set at runtime via
-    /// set_overlay_paths; tiles rebuild on change.
-    #[live]
-    overlay_mbtiles_paths: String,
+    /// Geodata overlays share the base archive plane. Hosted/local `.mkmap`
+    /// sources use `MapTileArchive`; only native `.mbtiles` development
+    /// overrides take the legacy worker-side reader path.
+    #[rust]
+    overlays: Vec<OverlaySource>,
+    #[rust]
+    overlay_archives: Vec<ActiveOverlayArchive>,
     /// Optional all-tag detail archive (pbf-detail output) composed over the
     /// base for micro-POI symbols: trees, benches, bins, artwork…
     #[live]
@@ -1589,11 +4452,32 @@ pub struct MapView {
     /// probed at z13/z12 — those tiles cannot exist.
     #[rust]
     local_source_zoom_range: Option<(u32, u32)>,
+    /// Last non-default range announced for this source installation.
+    #[rust]
+    local_source_logged_zoom_range: Option<(u32, u32)>,
     #[rust]
     local_source_zoom_range_path: Option<String>,
     /// True when the metadata read ran while the archive file existed.
     #[rust]
     local_source_zoom_range_checked: bool,
+    #[rust]
+    tile_source_config: Option<TileSourceConfig>,
+    #[rust]
+    base_archive: Option<MapTileArchive>,
+    #[rust]
+    detail_archive: Option<MapTileArchive>,
+    #[rust]
+    archive_generation: u64,
+    #[rust]
+    archive_pending_tiles: HashMap<TileKey, ArchiveTileParts>,
+    #[rust]
+    archive_worker_pool: Option<ArchiveWorkerPool>,
+    #[cfg(not(target_arch = "wasm32"))]
+    #[rust]
+    archive_watch_rx: ToUIReceiver<ArchiveWatchResult>,
+    #[cfg(not(target_arch = "wasm32"))]
+    #[rust]
+    archive_watch_in_flight: bool,
 
     #[rust]
     center_norm: Vec2d,
@@ -1621,14 +4505,21 @@ pub struct MapView {
     local_source_missing_logged: bool,
     #[rust]
     tile_worker_rx: ToUIReceiver<TileWorkerMessage>,
+    /// Tile parses/bakes staged newest-first in front of the runtime pool's
+    /// light lane; a re-request replaces the staged job for its key and a pan
+    /// prunes what has not been handed over yet.
+    #[rust(TaskQueue::new(Lane::Light, 1, 1024))]
+    tile_queue: TaskQueue<TileKey>,
     #[rust]
-    tile_thread_pool: Option<TagThreadPool<TileKey>>,
-    /// Last (request zoom, bucket, 3D mode, epoch) the worker queue was
-    /// pruned for — obsolete queued jobs are dropped when this changes.
+    local_requested_tiles: HashMap<TileKey, f64>,
     #[rust]
-    last_pool_prune: Option<(u32, u32, bool, u64)>,
+    archive_request_watchdog_rx: ToUIReceiver<()>,
     #[rust]
-    local_requested_tiles: HashMap<TileKey, u64>,
+    archive_request_watchdog_scheduler: Option<Scheduler>,
+    #[rust]
+    archive_request_watchdog_handle: Option<TimerHandle>,
+    #[rust]
+    archive_request_watchdog_unavailable: bool,
     #[rust]
     /// Tiles the archive reported absent, stamped with the frame we learned
     /// it — re-checked after MISSING_RECHECK_FRAMES so a rebuilt/replaced
@@ -1642,7 +4533,10 @@ pub struct MapView {
     /// Rain radar nowcast: one mercator-aligned RGBA texture per +5 min
     /// frame, animated on a timer while enabled.
     #[rust]
-    rain_frames: Vec<Texture>,
+    rain_frames: Vec<RainFrame>,
+    /// Sorted manifest minutes accepted by the incremental browser path.
+    #[rust]
+    rain_sequence_minutes: Vec<i64>,
     #[rust]
     rain_frame_index: usize,
     #[rust]
@@ -1652,6 +4546,10 @@ pub struct MapView {
     rain_bbox: (f64, f64, f64, f64),
     #[rust]
     rain_tex_size: (usize, usize),
+    #[rust]
+    rain_expected_hires_size: Option<(usize, usize)>,
+    #[rust]
+    rain_sequence_budgeted: bool,
     /// Hi-res dual-radar composite shown in place of animation frame 0 (the
     /// "now" frame): texture + its own pixel size (bbox is rain_bbox).
     #[rust]
@@ -1692,6 +4590,9 @@ pub struct MapView {
     /// are detected in `ensure_visible_tiles`, the single invalidation owner.
     #[rust]
     baked_3d_mode: bool,
+    /// Whether the current tile set was baked with analytic road fringes.
+    #[rust]
+    baked_fringe_mode: bool,
     #[rust]
     compiled_style_light: CompiledMapTheme,
     #[rust]
@@ -1713,28 +4614,59 @@ pub struct MapView {
     scratch_accepted_centers: HashMap<String, Vec<Vec2d>>,
     #[rust]
     scratch_accepted_bounds: Vec<Rect>,
+    /// The live placement's plans (glyph ranges into `path_glyphs`).
     #[rust]
-    scratch_accepted_plans: Vec<(f64, usize, usize, u8, bool, bool, Vec2f, f32)>,
-    // Labels drawn last frame (hashed name+position key); kept to stabilize
-    // placement while panning instead of flickering between candidates.
+    scratch_accepted_plans: Vec<LabelPlan>,
+    /// Labels placed by the previous pass, key -> birth time: the
+    /// hysteresis set (a previous winner outscores an equal newcomer, so
+    /// panning doesn't flicker between candidates) and the fade-in carry.
     #[rust]
-    prev_label_keys: HashSet<u64>,
+    prev_label_keys: HashMap<u64, f64>,
+    /// Keys this pass placed (retire test for the previous placement).
     #[rust]
-    scratch_accepted_hashes: Vec<u64>,
+    scratch_new_keys: HashSet<u64>,
+    /// The previous placement's buffers, swapped aside at a re-place so its
+    /// dropped labels can move into a retiring slot without a copy.
+    #[rust]
+    old_plans: Vec<LabelPlan>,
+    #[rust]
+    old_glyphs: Vec<PathGlyphInstance>,
+    /// Labels fading out from their last placement (see `LabelRetiring`).
+    #[rust]
+    label_retiring: LabelRetiringSet,
+    #[rust]
+    retire_gen: u64,
+    /// 60 Hz wake while a label fade is live (uniform-only re-presents).
+    #[rust]
+    label_fade_timer: Timer,
+    #[rust]
+    label_fade_until: f64,
     // Frame of the last zoom change; zoom-bucket restyles are deferred until
     // the gesture settles so widths don't flicker mid-zoom.
     #[rust]
     last_zoom_change_frame: u64,
     #[rust]
-    last_zoom_change_time: Option<std::time::Instant>,
+    last_zoom_change_time: Option<f64>,
     #[rust]
     zoom_settle_timer: Timer,
     #[rust]
     tile_fade_timer: Timer,
+    /// One owner-breakdown line per second for the first minute, then one
+    /// whenever the heap grew; see `log_memory_report`.
+    #[rust]
+    memory_report_timer: Timer,
+    #[rust]
+    memory_report_armed: bool,
+    #[rust]
+    memory_report_slow: bool,
+    #[rust]
+    memory_report_last_bytes: usize,
+    #[cfg(not(target_arch = "wasm32"))]
     #[rust]
     archive_watch_timer: Timer,
+    #[cfg(not(target_arch = "wasm32"))]
     #[rust]
-    archive_watch_mtime: Option<std::time::SystemTime>,
+    archive_watch_mtime: Option<u128>,
     // Label placement cache: while panning at the same zoom over the same
     // tiles, last placement's glyphs are redrawn shifted by the pan delta
     // instead of re-scanning/re-shaping/re-colliding thousands of labels.
@@ -1752,10 +4684,18 @@ pub struct MapView {
     label_cache_tiles: Vec<TileKey>,
     #[rust]
     label_cache_generation: u64,
-    #[rust((1.0, Vec2f { x: 0.0, y: 0.0 }, 0.0, Vec2f { x: 0.0, y: 0.0 }, 1.0))]
-    label_draw_transform: (f32, Vec2f, f32, Vec2f, f32),
-    #[rust(1.0)]
-    label_cache_tilt_cos_for_delta: f32,
+    /// The live set's transform this frame, replayed by the pin-text phase.
+    #[rust]
+    label_draw_transform: LabelDrawXf,
+    /// The retained glyph batches (street labels; pin text drawn over the
+    /// icons — for the live set and each retiring slot), recorded on a
+    /// full label place and re-presented under the camera-delta / fold /
+    /// pan / fade-clock uniforms on every other frame.
+    #[rust]
+    label_lists: LabelLists,
+    /// Bumped whenever the accepted label plans are rebuilt.
+    #[rust]
+    label_gen: u64,
     /// Inception fold setting: the USER'S INTENT (survives leaving close-3D
     /// — un-tilting tweens the fold out, tilting back in tweens it back).
     #[rust]
@@ -1764,7 +4704,7 @@ pub struct MapView {
     #[rust]
     space_warp_t: f64,
     #[rust]
-    space_warp_last_step: Option<std::time::Instant>,
+    space_warp_last_step: Option<f64>,
     /// The effective warp this frame — stamped in draw_walk, read by every
     /// OverlayCamera construction so CPU projections match the GPU tiles.
     #[rust]
@@ -1772,29 +4712,36 @@ pub struct MapView {
     #[rust]
     tiles_generation: u64,
     #[rust]
-    last_full_place_time: Option<std::time::Instant>,
-    /// When the camera (rotation/tilt/zoom/warp tween) last CHANGED — the
-    /// full label re-place waits for ~a beat of camera quiet, so labels
+    last_full_place_time: Option<f64>,
+    /// When the camera (pan/rotation/tilt/zoom/warp tween) last CHANGED —
+    /// the full label re-place waits for ~a beat of camera quiet, so labels
     /// ride the exact GPU transforms through the whole gesture and settle
     /// once, where the transforms already put them.
     #[rust]
-    camera_motion_last: Option<std::time::Instant>,
+    camera_motion_last: Option<f64>,
     /// Camera signature of the previous draw, for the motion detector.
     #[rust]
-    camera_motion_sig: (f64, f64, f64, f64),
+    camera_motion_sig: (f64, f64, f64, f64, f64, f64),
     #[rust]
     needs_label_followup: bool,
+    /// Consecutive at-rest follow-up passes since the last complete one
+    /// (see `LABEL_FOLLOWUP_MAX`).
+    #[rust]
+    label_followups: u32,
     // Shaped text runs keyed by (text hash, len, quantized font_scale bits);
     // shaping dominates label placement cost.
     #[rust]
     shaped_runs: HashMap<(u64, u32, u32), Option<PreparedTextRun>>,
-    // Finished tile buffers waiting for GPU upload; drained a couple per
-    // frame so a 10-tile rebuild batch doesn't stall a single frame with
-    // hundreds of MB of buffer creation/upload.
+    // Finished tile buffers waiting for GPU upload; drained within per-frame
+    // count and byte budgets so a rebuild burst cannot monopolize a frame.
     #[rust]
     pending_ready_tiles: Vec<(TileKey, TileBuffers)>,
     #[rust]
     last_tile_upload_frame: u64,
+    /// Web-only bounded degradation/retry state. Kept on every target so
+    /// native unit tests can exercise the policy without cfg-shaped APIs.
+    #[rust]
+    memory_pressure: MapMemoryPressure,
     // Frame-time instrumentation, aggregated to local/map_perf.log.
     #[rust]
     perf_frames: u32,
@@ -1813,7 +4760,7 @@ pub struct MapView {
     #[rust]
     perf_label_full_places: u32,
     #[rust]
-    perf_last_frame: Option<std::time::Instant>,
+    perf_last_frame: Option<f64>,
     #[rust]
     perf_ms_gap_max: f64,
     #[rust]
@@ -1833,7 +4780,7 @@ pub struct MapView {
     #[rust]
     prev_status_label_perf: LabelPerfStats,
     #[rust]
-    prev_status_counters: (usize, usize, usize, usize, usize, usize),
+    prev_status_counters: (usize, usize, usize, usize, usize, usize, usize, usize, usize),
 
     // --- Interaction layer (overlay + camera API) ---
     #[live]
@@ -1853,14 +4800,18 @@ pub struct MapView {
     #[rust]
     last_tap_count: u32,
     #[rust]
+    touch_gesture: TouchGesture,
+    #[rust]
     pending_viewport_changed: bool,
-    /// shiny.md: gentle idle heartbeat so time-driven materials (water
-    /// flow, grass sway) animate without interaction. Only runs while an
-    /// animated material is on and the view is close enough to show it.
+    /// Interaction-gated heartbeat for water flow and foliage sway.
     #[rust]
     shiny_anim_timer: Timer,
     #[rust]
-    shiny_anim_on: bool,
+    shiny_last_activity: Option<f64>,
+    /// Last phase actually requested for drawing; left untouched when the
+    /// heartbeat stops so unrelated redraws cannot jump or reset it.
+    #[rust]
+    shiny_time: f32,
 }
 
 impl ScriptHook for MapView {
@@ -1874,6 +4825,8 @@ impl ScriptHook for MapView {
         if apply.is_eval() {
             return;
         }
+
+        super::warm_shared_registries();
 
         let min_zoom = self.min_zoom.max(0.0);
         let max_zoom = self.max_zoom.max(min_zoom);
@@ -1904,80 +4857,236 @@ impl ScriptHook for MapView {
         if self.next_request_id == 0 {
             self.next_request_id = 1;
         }
-        ensure_cache_dir();
         if self.status.is_empty() {
             self.status = "Loading Amsterdam tiles from local cache/mbtiles...".to_string();
         }
     }
 }
 
+const MEMORY_REPORT_EVERY_SECOND_UNTIL: f64 = 61.0;
+const MEMORY_REPORT_SLOW_INTERVAL: f64 = 10.0;
+const MEMORY_REPORT_GROWTH_BYTES: usize = 16 * 1024 * 1024;
+
+fn mib(bytes: usize) -> f64 {
+    bytes as f64 / (1024.0 * 1024.0)
+}
+
+impl MapView {
+    /// One line naming every owner of memory the map controls, next to what
+    /// the platform pools and the wasm allocator hold, so a heap number
+    /// always has an explanation. `unattributed` is allocator-live bytes no
+    /// counter here claims; `slack` is linear memory the allocator holds
+    /// free (wasm memory never shrinks). Walks the tile map once; runs from
+    /// a slow timer, never per frame.
+    fn log_memory_report(&mut self, cx: &mut Cx, reason: &str) {
+        let platform = cx.memory_report();
+        let now = cx.seconds_since_app_start();
+        let mut baked_bytes = 0usize;
+        let mut ready = 0usize;
+        let mut label_bytes = 0usize;
+        let mut instance_bytes = 0usize;
+        let mut road_icon_bytes = 0usize;
+        for entry in self.tiles.values() {
+            baked_bytes = baked_bytes.saturating_add(entry.working_set_bytes());
+            road_icon_bytes = road_icon_bytes
+                .saturating_add(entry.road_icon_vertices.capacity().saturating_mul(4))
+                .saturating_add(entry.road_icon_indices.capacity().saturating_mul(4));
+            if let TileLoadState::Ready {
+                labels,
+                wall_instances,
+                tree_instances,
+                stalk_instances,
+                stoplight_instances,
+                shadow_disc_instances,
+                ..
+            } = &entry.state
+            {
+                ready += 1;
+                label_bytes = label_bytes
+                    .saturating_add(labels.capacity().saturating_mul(std::mem::size_of::<TileLabel>()));
+                instance_bytes = instance_bytes
+                    .saturating_add(
+                        wall_instances
+                            .capacity()
+                            .saturating_mul(std::mem::size_of::<MapWallInstance>()),
+                    )
+                    .saturating_add(tree_instances.capacity().saturating_mul(4))
+                    .saturating_add(
+                        (stalk_instances.capacity() + stoplight_instances.capacity())
+                            .saturating_mul(std::mem::size_of::<MapPropInstance>()),
+                    )
+                    .saturating_add(shadow_disc_instances.capacity().saturating_mul(4));
+            }
+        }
+        let pending_bytes = self
+            .pending_ready_tiles
+            .iter()
+            .map(|(_, buffers)| buffers.allocated_byte_size())
+            .fold(0usize, usize::saturating_add);
+        let part_len = |part: &Option<Result<Option<TileBlob>, String>>| -> usize {
+            match part {
+                Some(Ok(Some(blob))) => blob.held_len(),
+                _ => 0,
+            }
+        };
+        let archive_pending_bytes = self
+            .archive_pending_tiles
+            .values()
+            .map(|parts| {
+                part_len(&parts.base)
+                    .saturating_add(part_len(&parts.detail))
+                    .saturating_add(
+                        parts
+                            .overlays
+                            .iter()
+                            .map(|overlay| part_len(&overlay.result))
+                            .fold(0usize, usize::saturating_add),
+                    )
+            })
+            .fold(0usize, usize::saturating_add);
+        let archive_bytes = self
+            .base_archive
+            .iter()
+            .chain(self.detail_archive.iter())
+            .chain(self.overlay_archives.iter().filter_map(|overlay| overlay.archive.as_ref()))
+            .map(MapTileArchive::memory_bytes)
+            .fold(0usize, usize::saturating_add);
+        let fonts = if cx.has_global::<Rc<RefCell<Fonts>>>() {
+            cx.get_global::<Rc<RefCell<Fonts>>>().borrow().memory_bytes()
+        } else {
+            FontsMemoryBytes::default()
+        };
+        let glyph_bytes = (self.path_glyphs.capacity() + self.old_glyphs.capacity())
+            .saturating_mul(std::mem::size_of::<PathGlyphInstance>());
+        let terrain_bytes = self.terrain_elev.capacity().saturating_mul(4);
+        let wind_bytes = self
+            .wind_field
+            .as_ref()
+            .map_or(0, |(_, _, u, v, _)| (u.capacity() + v.capacity()).saturating_mul(4))
+            .saturating_add(
+                self.wind_particles
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<WindParticle>()),
+            );
+        let known = [
+            platform.geometry_cpu_bytes,
+            platform.instance_cpu_bytes,
+            platform.texture_cpu_bytes,
+            platform.resource_bytes,
+            pending_bytes,
+            archive_pending_bytes,
+            archive_bytes,
+            fonts.atlas_bytes,
+            fonts.layout_cache_bytes,
+            road_icon_bytes,
+            label_bytes,
+            instance_bytes,
+            glyph_bytes,
+            terrain_bytes,
+            wind_bytes,
+        ]
+        .into_iter()
+        .fold(0usize, usize::saturating_add);
+        let alloc_live = platform
+            .alloc_large_bytes
+            .saturating_add(platform.alloc_chunk_bytes);
+        let big = cx
+            .take_big_allocation_events()
+            .into_iter()
+            .map(|(bytes, heap)| format!("{:.1}@{:.0}", mib(bytes), mib(heap)))
+            .collect::<Vec<_>>()
+            .join(" ");
+        self.memory_report_last_bytes = platform.wasm_memory_bytes;
+        log!(
+            "map memory ({reason}) t={now:.1}s wasm={:.1} MiB alloc={:.1} (large {:.1} x{} + chunks {:.1}) \
+known={:.1} [geom_cpu={:.1} inst_cpu={:.1} tex_cpu={:.1} resources={:.1} pending={:.1} \
+arch_pending={:.1} archives={:.1} font_atlas={:.1} layout_cache={:.1} road_icons={:.1} \
+labels={:.1} tile_inst={:.1} glyphs={:.1} terrain={:.1} wind={:.1}] unattributed={:.1} \
+slack={:.1} tiles={}/{} baked={:.1} lists={} geoms={} budget={:.0} big=[{big}]",
+            mib(platform.wasm_memory_bytes),
+            mib(alloc_live),
+            mib(platform.alloc_large_bytes),
+            platform.alloc_large_count,
+            mib(platform.alloc_chunk_bytes),
+            mib(known),
+            mib(platform.geometry_cpu_bytes),
+            mib(platform.instance_cpu_bytes),
+            mib(platform.texture_cpu_bytes),
+            mib(platform.resource_bytes),
+            mib(pending_bytes),
+            mib(archive_pending_bytes),
+            mib(archive_bytes),
+            mib(fonts.atlas_bytes),
+            mib(fonts.layout_cache_bytes),
+            mib(road_icon_bytes),
+            mib(label_bytes),
+            mib(instance_bytes),
+            mib(glyph_bytes),
+            mib(terrain_bytes),
+            mib(wind_bytes),
+            mib(alloc_live.saturating_sub(known)),
+            mib(platform.wasm_memory_bytes.saturating_sub(alloc_live)),
+            ready,
+            self.tiles.len(),
+            mib(baked_bytes),
+            platform.draw_list_slots,
+            platform.geometry_slots,
+            mib(cx.memory_budget_bytes()),
+        );
+    }
+}
+
 impl Widget for MapView {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if self.use_local_mbtiles {
+            self.ensure_archive_source(cx);
+            self.handle_archive_events(cx, event);
+        }
         self.handle_tile_worker_messages(cx);
+        if matches!(event, Event::Signal) {
+            self.pump_tile_queue(cx);
+            if let Some(workers) = self.archive_worker_pool.as_ref() {
+                workers.pump();
+            }
+        }
+        if self.archive_request_watchdog_rx.try_recv_flush().is_ok() {
+            self.archive_request_watchdog_handle = None;
+            self.expire_archive_requests(cx);
+        }
+        self.sync_archive_request_watchdog(cx);
         self.widget_match_event(cx, event, scope);
 
         if self.wind_timer.is_event(event).is_some() && self.wind_field.is_some() {
             self.tick_wind();
             self.redraw(cx);
         }
-        // Animated shiny materials: keep a modest heartbeat while they can
-        // actually show (close zoom, feature on); stop it otherwise.
-        {
-            let shiny = &self.active_style().shiny;
-            let want = (shiny.water_fx || shiny.foliage_fx) && self.render_bucket() >= 14;
-            if want != self.shiny_anim_on {
-                self.shiny_anim_on = want;
-                cx.stop_timer(self.shiny_anim_timer);
-                if want {
-                    self.shiny_anim_timer = cx.start_interval(1.0 / 20.0);
-                }
-            }
-        }
         if self.shiny_anim_timer.is_event(event).is_some() {
-            self.redraw(cx);
+            let now = cx.seconds_since_app_start();
+            let settled = self
+                .shiny_last_activity
+                .is_none_or(|last| now - last >= SHIMMER_SETTLE_SECS);
+            if settled || !self.shimmer_can_animate() {
+                self.stop_shimmer_timer(cx);
+            } else {
+                self.advance_shimmer(cx, now);
+            }
         }
         if self.rain_timer.is_event(event).is_some() && !self.rain_frames.is_empty() {
             self.rain_frame_index = (self.rain_frame_index + 1) % self.rain_frames.len();
             self.retune_rain_timer(cx);
             self.redraw(cx);
         }
-        // Growing-archive watch: the world spiral atomically swaps the
-        // shard dir as cells weave in. Workers reopen per batch already;
-        // here we notice the new index, drop Failed placeholders and let
-        // the visible loop re-request — the map grows live, no restart.
-        if self.archive_watch_timer.is_event(event).is_some()
-            || (self.archive_watch_timer.is_empty() && self.use_local_mbtiles)
-        {
-            let path = std::path::PathBuf::from(self.active_mbtiles_path());
-            let probe = if makepad_mbtile_reader::TileArchiveReader::is_mkmap_path(&path) {
-                path.join("root.mkidx")
-            } else {
-                path
-            };
-            let mtime = std::fs::metadata(&probe).and_then(|m| m.modified()).ok();
-            if mtime != self.archive_watch_mtime {
-                let had = self.archive_watch_mtime.is_some() || mtime.is_some();
-                self.archive_watch_mtime = mtime;
-                if had {
-                    let before = self.tiles.len();
-                    self.tiles.retain(|_, entry| {
-                        !matches!(entry.state, TileLoadState::Failed { .. })
-                    });
-                    if self.tiles.len() != before {
-                        log!(
-                            "MapView: archive changed — cleared {} failed tiles for reload",
-                            before - self.tiles.len()
-                        );
-                    }
-                    self.redraw(cx);
-                }
-            }
-            self.archive_watch_timer = cx.start_timeout(5.0);
-        }
+        self.handle_archive_watch(cx, event);
         if self.tile_fade_timer.is_event(event).is_some() {
             self.redraw(cx);
             if self.tiles.values().any(|entry| entry.fade.is_some()) {
                 self.tile_fade_timer = cx.start_timeout(0.016);
+            }
+        }
+        if self.label_fade_timer.is_event(event).is_some() {
+            self.redraw(cx);
+            if cx.seconds_since_app_start() < self.label_fade_until {
+                self.label_fade_timer = cx.start_timeout(0.016);
             }
         }
         if self.zoom_settle_timer.is_event(event).is_some() {
@@ -1987,7 +5096,7 @@ impl Widget for MapView {
                 self.sync_camera_fields();
                 self.emit_viewport_changed(cx);
             }
-            if self.needs_label_followup || !self.pending_ready_tiles.is_empty() {
+            if self.needs_label_followup {
                 self.zoom_settle_timer = cx.start_timeout(0.08);
             }
         }
@@ -1996,6 +5105,24 @@ impl Widget for MapView {
         // user types in a text input elsewhere (the old 'T' theme toggle).
         // Theme/layer switching is app UI now.
 
+        if self.memory_report_timer.is_event(event).is_some() {
+            let now = cx.seconds_since_app_start();
+            if now < MEMORY_REPORT_EVERY_SECOND_UNTIL {
+                self.log_memory_report(cx, "tick");
+            } else {
+                if !self.memory_report_slow {
+                    self.memory_report_slow = true;
+                    cx.stop_timer(self.memory_report_timer);
+                    self.memory_report_timer = cx.start_interval(MEMORY_REPORT_SLOW_INTERVAL);
+                }
+                let heap = cx.memory_report().wasm_memory_bytes;
+                if heap >= self.memory_report_last_bytes.saturating_add(MEMORY_REPORT_GROWTH_BYTES)
+                    || (heap == 0 && !cx.take_big_allocation_events().is_empty())
+                {
+                    self.log_memory_report(cx, "grew");
+                }
+            }
+        }
         if self.fly_timer.is_event(event).is_some() {
             self.tick_fly(cx);
         }
@@ -2003,8 +5130,15 @@ impl Widget for MapView {
         // Respect the handled flag (no capture overload): floating UI panels
         // drawn on top of the map must win the hit test (EventOrder::Up
         // dispatches them first).
-        match event.hits(cx, self.draw_bg.area()) {
+        let hit = event.hits(cx, self.draw_bg.area());
+        if let Event::TouchUpdate(touch_event) = event {
+            if self.handle_touch_update(cx, touch_event, &hit) {
+                return;
+            }
+        }
+        match hit {
             Hit::FingerDown(fe) => {
+                self.note_shimmer_activity(cx);
                 let rotate_gesture = fe
                     .device
                     .mouse_button()
@@ -2025,6 +5159,7 @@ impl Widget for MapView {
                 }
             }
             Hit::FingerMove(fe) => {
+                self.note_shimmer_activity(cx);
                 if let Some((start_abs, start_rotation, start_tilt)) = self.rotate_drag {
                     let delta = fe.abs - start_abs;
                     self.rotation = (start_rotation - delta.x * 0.35).rem_euclid(360.0);
@@ -2062,12 +5197,15 @@ impl Widget for MapView {
                 }
             }
             Hit::FingerLongPress(lp) => {
+                self.note_shimmer_activity(cx);
                 // Long press cancels the pan gesture and reports map coords.
                 self.drag_start_abs = None;
+                self.touch_gesture = TouchGesture::None;
                 let (lon, lat) = self.screen_to_lon_lat(lp.abs);
                 cx.widget_action(self.uid, MapViewAction::LongPressed { lon, lat, abs: lp.abs });
             }
             Hit::FingerUp(fe) => {
+                self.note_shimmer_activity(cx);
                 if self.rotate_drag.take().is_some() {
                     // Releasing near straight-above settles on EXACTLY 0:
                     // a 5-10 degree residual reads as "3D mode stuck on".
@@ -2125,15 +5263,21 @@ impl Widget for MapView {
                 };
                 self.fly = None;
                 self.zoom_with_anchor(cx, scroll, fs.abs);
+                self.note_shimmer_activity(cx);
             }
             _ => {}
         }
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
-        let perf_start = std::time::Instant::now();
+        let perf_start = cx.seconds_since_app_start();
+        if !self.memory_report_armed {
+            self.memory_report_armed = true;
+            self.memory_report_timer = cx.start_interval(1.0);
+            self.log_memory_report(cx, "first draw");
+        }
         if let Some(last_frame) = self.perf_last_frame {
-            let gap_ms = last_frame.elapsed().as_secs_f64() * 1000.0;
+            let gap_ms = (perf_start - last_frame).max(0.0) * 1000.0;
             self.perf_ms_gap_max = self.perf_ms_gap_max.max(gap_ms);
             // only count gaps from continuous animation, not idle pauses
             if gap_ms < 100.0 {
@@ -2161,6 +5305,7 @@ impl Widget for MapView {
         let rect = cx.turtle().rect();
         self.view_rect = rect;
         self.draw_bg.draw_abs(cx, rect);
+        self.write_shimmer_pass_uniform(cx.cx, false);
         self.ensure_visible_tiles(cx, rect);
 
         let view_zoom = self.view_zoom();
@@ -2202,10 +5347,10 @@ impl Widget for MapView {
             0.0
         };
         if (self.space_warp_t - warp_target).abs() > 1e-4 {
-            let now = std::time::Instant::now();
+            let now = perf_start;
             let dt = self
                 .space_warp_last_step
-                .map(|t| (now - t).as_secs_f64().clamp(0.0, 0.1))
+                .map(|t| (now - t).clamp(0.0, 0.1))
                 .unwrap_or(1.0 / 60.0);
             let step = dt / 0.6; // ~600ms full travel
             self.space_warp_t = if warp_target > self.space_warp_t {
@@ -2214,6 +5359,7 @@ impl Widget for MapView {
                 (self.space_warp_t - step).max(warp_target)
             };
             self.space_warp_last_step = Some(now);
+            self.note_shimmer_activity(cx.cx);
             self.redraw(cx);
         } else {
             self.space_warp_last_step = None;
@@ -2254,16 +5400,6 @@ impl Widget for MapView {
             self.space_warp_eff.cap as f32,
             0.0,
         ];
-        // One uniform set for the whole frame: every draw_geometry call
-        // below shares draw_map's draw_vars.
-        self.draw_map
-            .draw_super
-            .draw_vars
-            .set_uniform(cx.cx, live_id!(space_warp), &warp_uniform);
-        self.draw_map
-            .draw_super
-            .draw_vars
-            .set_uniform(cx.cx, live_id!(space_warp2), &warp2_uniform);
         // Tilted map depth lives in a negative domain well below every UI
         // element, so panels/labels/overlay drawn later always win by call
         // order. Within the map, view-ground y dominates for occlusion and
@@ -2273,7 +5409,8 @@ impl Widget for MapView {
         // with the fold on, the visible (unwarped) ground fan extends past
         // the flat frustum, so the ladder budget must cover the warp's
         // cull reach or far-wall depth overflows the domain.
-        let tilt_uniform = if tilt_rad > 1e-4 {
+        let tilted = tilt_rad > 1e-4;
+        let tilt_uniform = if tilted {
             let mut max_rel = (rect.size.y * 0.5
                 + self.terrain_elev_max as f64 * self.terrain_lift_px_per_m())
                 / tilt_rad.cos().max(0.05);
@@ -2297,8 +5434,6 @@ impl Widget for MapView {
         // Below city buckets, fills stay flat (their sparse vertices cannot
         // track the surface) and the hillshade becomes the visible ground.
         let terrain_fill_lift = if self.render_bucket() >= 14 { 1.0f32 } else { 0.0 };
-        // shiny.md gates + sun for the material dispatch, per active theme.
-        self.draw_map.shiny = self.active_style().shiny;
         // Road/symbol clearance over the terrain surface, scaled by the
         // relief actually in view: the margin exists to beat interpolation
         // twist (which grows with relief), but a flat-city boost lets
@@ -2317,7 +5452,7 @@ impl Widget for MapView {
         // zero disables the lift; a 1x1 fallback keeps the slot bound.
         let mut terrain_org = [0.0f32; 2];
         let mut terrain_span = [0.0f32; 2];
-        let terrain_tex = match (tilt_rad > 1e-4, self.terrain_elev_texture.clone()) {
+        let terrain_tex = match (tilted, self.terrain_elev_texture.clone()) {
             (true, Some(tex)) => {
                 let camera = self.overlay_camera();
                 let (west, north, east, south) = self.terrain_bbox;
@@ -2359,393 +5494,151 @@ impl Widget for MapView {
         });
         let draw_tiles = draw_tiles;
 
-        // Four global passes (carto layer order): every tile's fills, then
-        // every tile's road casings, then road centers, then POI symbols.
-        // Casings interleaved per tile would stamp over neighbor tiles' road
-        // interiors in the clip-padding overlap at tile seams.
-        for pass in 0..3 {
-            if pass == 1 {
+        let shadow_mask_live = self.buildings_3d
+            && self.tilt > 0.0
+            && self.active_style().shiny.bake_shadows;
+        if shadow_mask_live {
+            self.ensure_shadow_mask_pass(cx);
+        }
+        let (shadow_mask, shadow_mask_on, shadow_mask_flip) = if shadow_mask_live {
+            (
+                self.shadow_mask_texture.clone(),
+                1.0,
+                shadow_mask_y_flip_for_os(cx.os_type()),
+            )
+        } else {
+            (None, 0.0, 0.0)
+        };
+        // Near-ring radius of the 3D distance LOD, from the actual frustum
+        // extent (see `tile_draw::tile_view`).
+        let frustum = {
+            let half_w = rect.size.x * 0.5;
+            // .max(0.087): honest at the 85° street-level cap (the
+            // clamp was tuned to the old 78° base cap's cos).
+            let mut half_h = rect.size.y * 0.5 / self.tilt_cos().max(0.087);
+            if self.space_warp_eff.is_on() {
+                // The fold sees further than the flat frustum: keep
+                // the bend region inside the full-detail ring.
+                let (reach, _) = self
+                    .space_warp_eff
+                    .cull_extents(rect.size.y * 0.5, half_h);
+                half_h = reach;
+            }
+            (half_w * half_w + half_h * half_h).sqrt()
+        };
+        // shiny.md gates + sun for the material dispatch, per active theme.
+        let shiny = self.active_style().shiny;
+        let sun_2d = shiny.sun.dir_2d();
+        let len_per_m = shiny.sun.shadow_len_per_m();
+        let frame = TileFrame {
+            now: perf_start,
+            view_zoom,
+            map_offset,
+            rect,
+            view_rot: view_rot_uniform,
+            rot_pivot: rot_pivot_uniform,
+            tilt_params: tilt_uniform,
+            tilted,
+            // Flat mode orders by the paint-order counter and the tiles
+            // author their layering on it; tilted depth never reads the
+            // counter, and the exploded view replaces it with the nesting
+            // depth.
+            flat_fix: !(tilted || cx.sploded_active()),
+            zbias_step: cx.current_pass_zbias_step(),
+            pass_boost,
+            fringe: self.tilt < 25.0,
+            high_band: !(view_zoom < 16.25),
+            frustum,
+            terrain_org,
+            terrain_span,
+            terrain_uvfit,
+            terrain_fill_lift,
+            terrain_tex,
+            shadow_mask,
+            shadow_mask_on,
+            shadow_mask_size: [rect.size.x as f32, rect.size.y as f32],
+            shadow_mask_flip,
+            shadow_sun: [-sun_2d.x * len_per_m, -sun_2d.y * len_per_m],
+            space_warp: warp_uniform,
+            space_warp2: warp2_uniform,
+            shiny,
+        };
+        let slots = TileDrawCtx::resolve_slots(
+            cx.cx,
+            &self.draw_map,
+            &self.draw_fill,
+            &self.draw_road,
+            &self.draw_face,
+            &self.draw_roof,
+            &self.draw_icon,
+            &self.draw_prop,
+            &self.draw_wall,
+            &self.draw_shadow,
+            &self.draw_shadow_disc,
+        );
+
+        if shadow_mask_live {
+            self.draw_shadow_mask_pass(cx, &frame, &draw_tiles, slots);
+        } else {
+            self.clear_shadow_mask_pass(cx, rect);
+        }
+
+        // Five global passes (carto layer order): every tile's fills, then
+        // every tile's road casings, then road centers, then POI symbols,
+        // then the street-band symbols. Casings interleaved per tile would
+        // stamp over neighbor tiles' road interiors in the clip-padding
+        // overlap at tile seams. Each tile's share of a pass is a retained
+        // draw list: recorded when its bake arrived, re-attached with fresh
+        // uniforms on every other frame (see `tile_draw`).
+        for phase in [TilePhase::Fill, TilePhase::Casing, TilePhase::Stroke] {
+            if phase == TilePhase::Casing {
                 // Hillshade sits over the land fills but UNDER the roads.
                 self.draw_terrain_overlay(cx);
             }
+            if phase != TilePhase::Fill && !self.show_roads {
+                continue;
+            }
+            let mut ctx = tile_draw_ctx!(self, &frame, slots);
             for key in &draw_tiles {
-                let Some(entry) = self.tiles.get(key) else {
+                let Some(entry) = self.tiles.get_mut(key) else {
                     continue;
                 };
-                let TileLoadState::Ready {
-                    fill_geometry,
-                    casing_geometry,
-                    stroke_geometry,
-                    icon_geometry,
-                    icon_high_geometry,
-                    fringe_geometry,
-                    fill_3d_geometry,
-                    wall_geometry,
-                    tree_geometry,
-                    tree_cross_geometry,
-                    ..
-                } = &entry.state
-                else {
-                    continue;
-                };
-                // Stale higher-bucket tiles keep their baked symbols until
-                // the rebuild lands. Charger pins bake from z9 so the pass
-                // itself stays on when zoomed out — but a stale POI-carpet
-                // tile (baked at z16+) hides its symbols the moment the
-                // view drops below icon level, instead of splattering
-                // hundreds of full-size shop icons across the region.
-                if pass >= 3
-                    && (view_zoom < 7.75
-                        || (entry.bucket >= ICON_MIN_ZOOM
-                            && view_zoom < ICON_MIN_ZOOM as f64 - 0.25))
-                {
-                    continue;
+                if phase == TilePhase::Fill {
+                    release_uploaded_staging(cx, &entry.state);
                 }
-                let geometry = match pass {
-                    0 => fill_geometry,
-                    1 => casing_geometry,
-                    2 => stroke_geometry,
-                    3 => icon_geometry,
-                    _ => icon_high_geometry,
-                };
-                let scale = 2.0_f64.powf(view_zoom - key.z as f64);
-                let tile_offset = map_offset
-                    + dvec2(
-                        key.x as f64 * TILE_SIZE * scale,
-                        key.y as f64 * TILE_SIZE * scale,
-                    );
-                let map_scale = Vec2f {
-                    x: scale as f32,
-                    y: scale as f32,
-                };
-                let screen_offset = Vec2f {
-                    x: tile_offset.x as f32,
-                    y: tile_offset.y as f32,
-                };
-                let mut fade_alpha = 1.0_f32;
-                if let Some(fade) = &entry.fade {
-                    fade_alpha = ((fade.started.elapsed().as_secs_f64() / TILE_FADE_SECONDS)
-                        as f32)
-                        .clamp(0.0, 1.0);
-                    let outgoing = match pass {
-                        0 => &fade.fill_geometry,
-                        1 => &fade.casing_geometry,
-                        2 => &fade.stroke_geometry,
-                        3 => &fade.icon_geometry,
-                        _ => &None,
-                    };
-                    if let Some(outgoing) = outgoing {
-                        let outgoing_id = outgoing.geometry_id();
-                        self.draw_map.draw_geometry(
-                            cx,
-                            outgoing_id,
-                            map_scale,
-                            screen_offset,
-                            1.0,
-                            stroke_width_correction(fade.bucket, view_zoom),
-                            view_rot_uniform,
-                            rot_pivot_uniform,
-                            tilt_uniform,
-                            view_zoom as f32,
-                            1.0,
-                            terrain_org,
-                            terrain_span,
-                            terrain_uvfit,
-                            &terrain_tex,
-                            if tilt_rad > 1e-4 && pass != 0 {
-                                pass_boost + (pass - 1) as f32 * 0.02
-                            } else {
-                                0.0
-                            },
-                            terrain_fill_lift,
-                        );
-                    }
-                }
-                let reused_road_pass = matches!(pass, 1 | 2)
-                    && entry
-                        .fade
-                        .as_ref()
-                        .is_some_and(|fade| fade.reuse_road_core);
-                let Some(geometry) = geometry else {
-                    continue;
-                };
-                let geometry_id = geometry.geometry_id();
-                self.draw_map.draw_geometry(
-                    cx,
-                    geometry_id,
-                    map_scale,
-                    screen_offset,
-                    if reused_road_pass { 1.0 } else { fade_alpha },
-                    stroke_width_correction(entry.bucket, view_zoom),
-                    view_rot_uniform,
-                    rot_pivot_uniform,
-                    tilt_uniform,
-                    view_zoom as f32,
-                    if reused_road_pass {
-                        1.0
-                    } else if entry.fade.as_ref().is_some_and(|fade| fade.grow_heights) {
-                        fade_alpha
-                    } else {
-                        1.0
-                    },
-                    terrain_org,
-                    terrain_span,
-                    terrain_uvfit,
-                    &terrain_tex,
-                    if tilt_rad > 1e-4 && pass != 0 {
-                                pass_boost + (pass - 1) as f32 * 0.02
-                            } else {
-                                0.0
-                            },
-                    terrain_fill_lift,
-                );
-                // 3D volume rides the fill pass with a ground-circle
-                // distance fade from the view focus: the far field under
-                // tilt (the blurred zone) skips walls/trees/roofs — the
-                // bulk of the fill vertex mass. Flat views sit inside the
-                // near radius everywhere, so nothing changes at top-down.
-                if pass == 0 {
-                    let tile_center_px = dvec2(
-                        tile_offset.x + TILE_SIZE * scale * 0.5,
-                        tile_offset.y + TILE_SIZE * scale * 0.5,
-                    );
-                    let focus = rect.pos + rect.size * 0.5;
-                    let dist = ((tile_center_px.x - focus.x).powi(2)
-                        + (tile_center_px.y - focus.y).powi(2))
-                    .sqrt();
-                    // Ring radii from the actual frustum extent: the near
-                    // ring must contain every visible tile CENTER with
-                    // margin (a tile diagonal), under any rotation and the
-                    // full tilt stretch — visible geometry never drops
-                    // below full detail (perf-never-breaks-the-picture).
-                    let half_w = rect.size.x * 0.5;
-                    // .max(0.087): honest at the 85° street-level cap (the
-                    // clamp was tuned to the old 78° base cap's cos).
-                    let mut half_h = rect.size.y * 0.5 / self.tilt_cos().max(0.087);
-                    if self.space_warp_eff.is_on() {
-                        // The fold sees further than the flat frustum: keep
-                        // the bend region inside the full-detail ring.
-                        let (reach, _) = self
-                            .space_warp_eff
-                            .cull_extents(rect.size.y * 0.5, half_h);
-                        half_h = reach;
-                    }
-                    let frustum = (half_w * half_w + half_h * half_h).sqrt();
-                    let near = frustum * 1.35 + TILE_SIZE * scale;
-                    let far = near * 1.7;
-                    let lod = (1.0 - ((dist - near) / (far - near)).clamp(0.0, 1.0)) as f32;
-                    // LOD rings: near = full detail; mid = roofs + crossed-
-                    // quad trees ("roofs only"); far = heights sink to 0.
-                    let bands: [(&Option<Geometry>, f32, f32); 4] = [
-                        (fill_3d_geometry, 0.003, 1.01),
-                        (wall_geometry, 0.55, 1.01),
-                        (tree_geometry, 0.55, 1.01),
-                        (tree_cross_geometry, 0.003, 0.55),
-                    ];
-                    for (band, min_lod, max_lod) in bands {
-                        if lod <= min_lod || lod > max_lod {
-                            continue;
-                        }
-                        let Some(volume) = band else { continue };
-                        let volume_id = volume.geometry_id();
-                        self.draw_map.draw_geometry(
-                            cx,
-                            volume_id,
-                            map_scale,
-                            screen_offset,
-                            fade_alpha,
-                            stroke_width_correction(entry.bucket, view_zoom),
-                            view_rot_uniform,
-                            rot_pivot_uniform,
-                            tilt_uniform,
-                            view_zoom as f32,
-                            // Distance LOD sinks heights, never alpha:
-                            // translucent buildings read as broken.
-                            lod * if entry.fade.as_ref().is_some_and(|fade| fade.grow_heights) {
-                                fade_alpha
-                            } else {
-                                1.0
-                            },
-                            terrain_org,
-                            terrain_span,
-                            terrain_uvfit,
-                            &terrain_tex,
-                            0.0,
-                            terrain_fill_lift,
-                        );
-                    }
-                }
-                // AA fringes ride the casing pass, but only where 1px edge
-                // AA is visible: at strong tilt the tilt-shift blur and
-                // 3D density hide it, and the fringes are ~2/3 of the
-                // casing vertex mass on street tiles.
-                if pass == 1 && self.tilt < 25.0 {
-                    if let Some(fringe) = fringe_geometry {
-                        let fringe_id = fringe.geometry_id();
-                        self.draw_map.draw_geometry(
-                            cx,
-                            fringe_id,
-                            map_scale,
-                            screen_offset,
-                            if reused_road_pass { 1.0 } else { fade_alpha },
-                            stroke_width_correction(entry.bucket, view_zoom),
-                            view_rot_uniform,
-                            rot_pivot_uniform,
-                            tilt_uniform,
-                            view_zoom as f32,
-                            1.0,
-                            terrain_org,
-                            terrain_span,
-                            terrain_uvfit,
-                            &terrain_tex,
-                            if tilt_rad > 1e-4 { pass_boost } else { 0.0 },
-                            terrain_fill_lift,
-                        );
-                    }
-                }
+                ctx.draw_tile(cx, *key, entry, phase);
             }
         }
 
-        let geo_ms = perf_start.elapsed().as_secs_f64() * 1000.0;
+        let geo_ms = (cx.seconds_since_app_start() - perf_start).max(0.0) * 1000.0;
 
         // Labels place and draw BEFORE the icon pass: charger pins must sit
         // OVER street names (EV navigator), while their own in-bubble kW
         // text redraws after the pins in draw_pin_label_phase.
-        let labels_start = std::time::Instant::now();
-        let full_place =
-            self.place_and_draw_labels(cx, &draw_tiles, view_zoom, map_offset, rect);
-        let labels_ms = labels_start.elapsed().as_secs_f64() * 1000.0;
-        let icons_start = std::time::Instant::now();
+        let labels_start = cx.seconds_since_app_start();
+        let full_place = if self.show_labels {
+            self.place_and_draw_labels(cx, &draw_tiles, view_zoom, map_offset, rect)
+        } else {
+            false
+        };
+        let labels_ms = (cx.seconds_since_app_start() - labels_start).max(0.0) * 1000.0;
+        let icons_start = cx.seconds_since_app_start();
 
-        for pass in 3..5 {
-            // Pass 4: street-band icons (zoom floor > 16) — whole band
-            // skipped below the reveal zoom instead of vertex-processing
-            // millions of shader-collapsed glyphs every frame.
-            if pass == 4 && view_zoom < 16.25 {
+        for phase in [TilePhase::Icon, TilePhase::IconHigh] {
+            // Street-band icons (zoom floor > 16) — whole band skipped below
+            // the reveal zoom instead of vertex-processing millions of
+            // shader-collapsed glyphs every frame.
+            if phase == TilePhase::IconHigh && !frame.high_band {
                 continue;
             }
+            let mut ctx = tile_draw_ctx!(self, &frame, slots);
             for key in &draw_tiles {
-                let Some(entry) = self.tiles.get(key) else {
+                let Some(entry) = self.tiles.get_mut(key) else {
                     continue;
                 };
-                let TileLoadState::Ready {
-                    fill_geometry,
-                    casing_geometry,
-                    stroke_geometry,
-                    icon_geometry,
-                    icon_high_geometry,
-                    ..
-                } = &entry.state
-                else {
-                    continue;
-                };
-                // Stale higher-bucket tiles keep their baked symbols until
-                // the rebuild lands. Charger pins bake from z9 so the pass
-                // itself stays on when zoomed out — but a stale POI-carpet
-                // tile (baked at z16+) hides its symbols the moment the
-                // view drops below icon level, instead of splattering
-                // hundreds of full-size shop icons across the region.
-                if pass >= 3
-                    && (view_zoom < 7.75
-                        || (entry.bucket >= ICON_MIN_ZOOM
-                            && view_zoom < ICON_MIN_ZOOM as f64 - 0.25))
-                {
-                    continue;
-                }
-                let geometry = match pass {
-                    0 => fill_geometry,
-                    1 => casing_geometry,
-                    2 => stroke_geometry,
-                    3 => icon_geometry,
-                    _ => icon_high_geometry,
-                };
-                let scale = 2.0_f64.powf(view_zoom - key.z as f64);
-                let tile_offset = map_offset
-                    + dvec2(
-                        key.x as f64 * TILE_SIZE * scale,
-                        key.y as f64 * TILE_SIZE * scale,
-                    );
-                let map_scale = Vec2f {
-                    x: scale as f32,
-                    y: scale as f32,
-                };
-                let screen_offset = Vec2f {
-                    x: tile_offset.x as f32,
-                    y: tile_offset.y as f32,
-                };
-                let mut fade_alpha = 1.0_f32;
-                if let Some(fade) = &entry.fade {
-                    fade_alpha = ((fade.started.elapsed().as_secs_f64() / TILE_FADE_SECONDS)
-                        as f32)
-                        .clamp(0.0, 1.0);
-                    let outgoing = match pass {
-                        0 => &fade.fill_geometry,
-                        1 => &fade.casing_geometry,
-                        2 => &fade.stroke_geometry,
-                        3 => &fade.icon_geometry,
-                        _ => &None,
-                    };
-                    if let Some(outgoing) = outgoing {
-                        let outgoing_id = outgoing.geometry_id();
-                        self.draw_map.draw_geometry(
-                            cx,
-                            outgoing_id,
-                            map_scale,
-                            screen_offset,
-                            1.0,
-                            stroke_width_correction(fade.bucket, view_zoom),
-                            view_rot_uniform,
-                            rot_pivot_uniform,
-                            tilt_uniform,
-                            view_zoom as f32,
-                            1.0,
-                            terrain_org,
-                            terrain_span,
-                            terrain_uvfit,
-                            &terrain_tex,
-                            if tilt_rad > 1e-4 && pass != 0 {
-                                pass_boost + (pass - 1) as f32 * 0.02
-                            } else {
-                                0.0
-                            },
-                            terrain_fill_lift,
-                        );
-                    }
-                }
-                let Some(geometry) = geometry else {
-                    continue;
-                };
-                let geometry_id = geometry.geometry_id();
-                self.draw_map.draw_geometry(
-                    cx,
-                    geometry_id,
-                    map_scale,
-                    screen_offset,
-                    fade_alpha,
-                    stroke_width_correction(entry.bucket, view_zoom),
-                    view_rot_uniform,
-                    rot_pivot_uniform,
-                    tilt_uniform,
-                    view_zoom as f32,
-                    if entry.fade.as_ref().is_some_and(|fade| fade.grow_heights) {
-                        fade_alpha
-                    } else {
-                        1.0
-                    },
-                    terrain_org,
-                    terrain_span,
-                    terrain_uvfit,
-                    &terrain_tex,
-                    if tilt_rad > 1e-4 && pass != 0 {
-                                pass_boost + (pass - 1) as f32 * 0.02
-                            } else {
-                                0.0
-                            },
-                    terrain_fill_lift,
-                );
+                ctx.draw_tile(cx, *key, entry, phase);
             }
         }
-
 
         // Pin-class label text (white kW numbers) over the pins.
         // Rain radar overlay: over all map content, under labels/UI. The
@@ -2769,9 +5662,13 @@ impl Widget for MapView {
             let frame_index = self.rain_frame_index % self.rain_frames.len();
             // The "now" frame swaps in the hi-res dual-radar composite when
             // one is loaded; forecast frames stay at nowcast resolution.
-            let (texture, tex_size) = match (frame_index, &self.rain_now_hires) {
-                (0, Some((texture, size))) => (texture.clone(), *size),
-                _ => (self.rain_frames[frame_index].clone(), self.rain_tex_size),
+            let is_now = self.rain_frames[frame_index].minute == 0;
+            let (texture, tex_size) = match (is_now, &self.rain_now_hires) {
+                (true, Some((texture, size))) => (texture.clone(), *size),
+                _ => (
+                    self.rain_frames[frame_index].texture.clone(),
+                    self.rain_tex_size,
+                ),
             };
             self.draw_rain.draw_super.draw_vars.set_texture(0, &texture);
             self.draw_rain.c0 = Vec2f { x: c0.x as f32, y: c0.y as f32 };
@@ -2795,7 +5692,9 @@ impl Widget for MapView {
             );
         }
 
-        self.draw_pin_label_phase(cx);
+        if self.show_labels {
+            self.draw_pin_label_phase(cx);
+        }
         self.draw_wind_particles(cx);
 
 
@@ -2825,10 +5724,10 @@ impl Widget for MapView {
             self.overlay = overlay;
         }
 
-        let total_ms = perf_start.elapsed().as_secs_f64() * 1000.0;
+        let total_ms = (cx.seconds_since_app_start() - perf_start).max(0.0) * 1000.0;
         // icons_ms spans the icon pass through overlays; tail = whatever
         // the section timers do not cover (uniform churn, overhead).
-        let icons_ms = icons_start.elapsed().as_secs_f64() * 1000.0;
+        let icons_ms = (cx.seconds_since_app_start() - icons_start).max(0.0) * 1000.0;
         self.perf_ms_icons += icons_ms;
         self.perf_ms_tail += (total_ms - geo_ms - labels_ms - icons_ms).max(0.0);
         self.perf_frames += 1;
@@ -2839,7 +5738,7 @@ impl Widget for MapView {
         if full_place {
             self.perf_label_full_places += 1;
         }
-        if self.perf_frames >= 240 {
+        if self.is_local_archive() && self.perf_frames >= 240 {
             use std::io::Write;
             // GPU time per presented frame from the platform monitor
             // (command-buffer start->end, completion-handler thread).
@@ -2981,16 +5880,18 @@ impl WidgetMatchEvent for MapView {
         };
 
         // Offload heavy JSON parsing + tessellation to the thread pool
-        self.ensure_tile_thread_pool(cx);
-        let pool = self.tile_thread_pool.as_ref().unwrap();
         let sender = self.tile_worker_rx.sender();
         let style_epoch = self.style_epoch;
         let theme_style = self.active_style().clone();
         let bucket = self.render_bucket();
+        let tile_payload_limit = self.tile_upload_limit(cx);
 
-        pool.execute_rev(tile_key, move |_tag| {
+        if let Err(error) = self.submit_tile_job(cx, tile_key, move || {
             match build_tile_buffers_from_body(tile_key, &body, &theme_style, bucket) {
-                Ok(buffers) => {
+                Ok(mut buffers) => {
+                    if let Some(limit) = tile_payload_limit {
+                        buffers.degrade_to_memory_limit(limit);
+                    }
                     store_tile_data_cache_on_disk(tile_key, &body);
                     let _ = sender.send(TileWorkerMessage::NetworkTileParsed {
                         style_epoch,
@@ -3006,7 +5907,11 @@ impl WidgetMatchEvent for MapView {
                     });
                 }
             }
-        });
+        }) {
+            self.mark_tile_failed(tile_key, &format!("tile worker submission failed: {error}"));
+            self.update_status_text();
+            self.redraw(cx);
+        }
     }
 
     fn handle_http_request_error(
@@ -3029,6 +5934,116 @@ impl WidgetMatchEvent for MapView {
         self.update_status_text();
         self.redraw(cx);
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl MapView {
+    fn handle_archive_watch(&mut self, cx: &mut Cx, event: &Event) {
+        while let Ok(watch) = self.archive_watch_rx.try_recv() {
+            self.archive_watch_in_flight = false;
+            if !self.is_local_archive() || watch.path != self.active_mbtiles_path() {
+                continue;
+            }
+            if let Some(range) = watch.zoom_range {
+                self.local_source_zoom_range = Some(range);
+                self.local_source_zoom_range_checked = true;
+            }
+            if watch.mtime != self.archive_watch_mtime {
+                let had = self.archive_watch_mtime.is_some() || watch.mtime.is_some();
+                self.archive_watch_mtime = watch.mtime;
+                if had {
+                    if let Some(config) = self.tile_source_config.clone() {
+                        self.install_archive_source(cx, config);
+                    }
+                    self.local_requested_tiles.clear();
+                    let before = self.tiles.len();
+                    self.tiles
+                        .retain(|_, entry| matches!(entry.state, TileLoadState::Ready { .. }));
+                    if self.tiles.len() != before {
+                        log!(
+                            "MapView: archive changed — cleared {} pending/failed tiles for reload",
+                            before - self.tiles.len()
+                        );
+                    }
+                    self.redraw(cx);
+                }
+            }
+        }
+
+        // Growing-archive watch: both directory probing and metadata stay on
+        // the persistent archive pool; the UI only consumes the timestamp.
+        if self.is_local_archive()
+            && (self.archive_watch_timer.is_event(event).is_some()
+                || (self.archive_watch_timer.is_empty() && self.use_local_mbtiles))
+        {
+            if !self.archive_watch_in_flight {
+                self.archive_watch_in_flight = true;
+                let path = self.active_mbtiles_path().to_string();
+                let sender = self.archive_watch_rx.sender();
+                let workers = self.ensure_archive_worker_pool(cx);
+                match workers.submit(next_archive_task_token(), move || {
+                    let archive_path = std::path::PathBuf::from(&path);
+                    let probe = if is_mkmap_path_shape(&path) {
+                        if archive_path.file_name().is_some_and(|name| name == "root.mkidx") {
+                            archive_path
+                        } else {
+                            archive_path.join("root.mkidx")
+                        }
+                    } else {
+                        archive_path
+                    };
+                    let mtime = archive_mtime(&probe);
+                    let zoom_range = makepad_mbtile_reader::TileArchiveReader::open(
+                        Path::new(&path),
+                    )
+                    .ok()
+                    .and_then(|mut reader| reader.validated_zoom_range());
+                    let _ = sender.send(ArchiveWatchResult {
+                        path,
+                        mtime,
+                        zoom_range,
+                    });
+                }) {
+                    Ok(()) => {}
+                    Err(error) => {
+                        self.archive_watch_in_flight = false;
+                        log!("MapView: archive watch submission failed: {error}");
+                    }
+                }
+            }
+            self.archive_watch_timer = cx.start_timeout(5.0);
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl MapView {
+    fn handle_archive_watch(&mut self, _cx: &mut Cx, _event: &Event) {}
+}
+
+fn upload_typed_stream(
+    cx: &mut Cx,
+    stream: TypedStream,
+    layout: &DrawShaderInputs,
+) -> Vec<Geometry> {
+    stream
+        .chunks
+        .into_iter()
+        .filter(|chunk| !chunk.indices.is_empty() && !chunk.vertices.is_empty())
+        .map(|chunk| {
+            debug_assert!(chunk.vertices.len() / layout.stride_bytes < 65_536);
+            let geometry = Geometry::new(cx);
+            geometry.update_typed(cx, IndexData::U16(chunk.indices), chunk.vertices, layout);
+            geometry
+        })
+        .collect()
+}
+
+/// The typed upload needs the shader's physical layout, which exists once the
+/// shader has drawn; a tile that lands earlier waits in the pending queue.
+fn geometry_layout(cx: &Cx, draw_vars: &DrawVars) -> Option<DrawShaderInputs> {
+    let shader_id = draw_vars.draw_shader_id?;
+    Some(cx.draw_shaders[shader_id.index].mapping.geometries.clone())
 }
 
 // --- MapView impl ---
@@ -3058,6 +6073,65 @@ impl MapView {
         }
     }
 
+    fn shimmer_can_animate(&self) -> bool {
+        let shiny = &self.active_style().shiny;
+        (shiny.water_fx || shiny.foliage_fx) && self.render_bucket() >= 14
+    }
+
+    fn note_shimmer_activity(&mut self, cx: &mut Cx) {
+        if !self.shimmer_can_animate() {
+            self.stop_shimmer_timer(cx);
+            return;
+        }
+        let now = cx.seconds_since_app_start();
+        self.shiny_last_activity = Some(now);
+        self.shiny_time = now as f32;
+        if self.shiny_anim_timer.is_empty() {
+            self.shiny_anim_timer = cx.start_interval(1.0 / 20.0);
+        }
+    }
+
+    /// Write the map's clock into the pass block shared by its retained child
+    /// lists. Child lists bind their own draw-list block, so the map root's
+    /// draw-list uniforms cannot carry this value to them.
+    fn write_shimmer_pass_uniform(&self, cx: &mut Cx, repaint: bool) -> bool {
+        let area = self.draw_bg.area();
+        if !area.is_valid(cx) {
+            return false;
+        }
+        let Some(draw_list_id) = area.draw_list_id() else {
+            return false;
+        };
+        let Some(pass_id) = cx.draw_lists[draw_list_id].draw_pass_id else {
+            return false;
+        };
+        cx.passes[pass_id].pass_uniforms.shiny_time = self.shiny_time;
+        if repaint {
+            cx.repaint_pass(pass_id);
+        }
+        true
+    }
+
+    /// The 20 Hz shimmer heartbeat: the clock advances in the map's one
+    /// pass-uniform slot and the pass repaints. Never a redraw — that would
+    /// re-record the map's own list and re-place the labels twenty times a
+    /// second for one float. Before the first draw establishes an owning pass,
+    /// the classic redraw carries the clock into the next record.
+    fn advance_shimmer(&mut self, cx: &mut Cx, now: f64) {
+        self.shiny_time = now as f32;
+        if !self.write_shimmer_pass_uniform(cx, true) {
+            self.redraw(cx);
+        }
+    }
+
+    fn stop_shimmer_timer(&mut self, cx: &mut Cx) {
+        if !self.shiny_anim_timer.is_empty() {
+            cx.stop_timer(self.shiny_anim_timer);
+            self.shiny_anim_timer = Timer::empty();
+        }
+        self.shiny_last_activity = None;
+    }
+
     /// The Inception fold ON/OFF (the SETTING — remembers intent; the fold
     /// itself tweens in only while the camera is in a close 3D view and
     /// tweens back out when it leaves one).
@@ -3066,6 +6140,7 @@ impl MapView {
             return;
         }
         self.space_warp_want = on;
+        self.note_shimmer_activity(cx);
         // Restyle resident tiles both ways: turning ON re-uploads the
         // ground meshes chord-refined against the fold (insert_ready_tile),
         // turning OFF restores the pristine buffers so flat mode stays
@@ -3109,6 +6184,41 @@ impl MapView {
         self.redraw(cx);
     }
 
+    /// Show or hide the road casing and centreline passes without touching
+    /// the resident GPU geometry.
+    pub fn set_roads_visible(&mut self, cx: &mut Cx, visible: bool) {
+        if self.show_roads == visible {
+            return;
+        }
+        self.show_roads = visible;
+        self.redraw(cx);
+    }
+
+    /// Show or hide all map labels. Re-enabling invalidates placement once
+    /// so the retained glyph batches are rebuilt for the current viewport.
+    pub fn set_labels_visible(&mut self, cx: &mut Cx, visible: bool) {
+        if self.show_labels == visible {
+            return;
+        }
+        self.show_labels = visible;
+        if visible {
+            self.label_cache_valid = false;
+            self.needs_label_followup = true;
+        }
+        self.redraw(cx);
+    }
+
+    /// Enable the extruded-building bake used by tilted views. This is the
+    /// one layer switch that requires a keep-stale tile restyle.
+    pub fn set_buildings_3d(&mut self, cx: &mut Cx, visible: bool) {
+        if self.buildings_3d == visible {
+            return;
+        }
+        self.buildings_3d = visible;
+        self.restyle_tiles_keep_stale(cx);
+        self.redraw(cx);
+    }
+
     fn normalize_source_mode(&mut self) {
         if self.use_local_mbtiles && self.use_network {
             log!("MapView: both sources enabled; selecting OFFLINE mode (mbtiles only). Set use_local_mbtiles:false for ONLINE mode.");
@@ -3131,6 +6241,7 @@ impl MapView {
         self.request_to_tile.clear();
         self.local_requested_tiles.clear();
         self.pending_ready_tiles.clear();
+        self.clear_memory_deferrals();
         self.tiles_generation = self.tiles_generation.wrapping_add(1);
         self.label_cache_valid = false;
     }
@@ -3153,6 +6264,90 @@ impl MapView {
         self.draw_bg.redraw(cx);
     }
 
+    pub(crate) fn tile_units_per_m(key: TileKey) -> f32 {
+        let n = (1u32 << key.z) as f64;
+        let lat = (std::f64::consts::PI * (1.0 - 2.0 * (key.y as f64 + 0.5) / n))
+            .sinh()
+            .atan();
+        (TILE_SIZE * n / (40_075_016.686 * lat.cos())) as f32
+    }
+
+    /// The mask pass, its target texture and its draw list, allocated the
+    /// first frame shadows are live.
+    fn ensure_shadow_mask_pass(&mut self, cx: &mut Cx2d) {
+        if self.shadow_mask_pass.is_some() {
+            return;
+        }
+        let pass = DrawPass::new(cx);
+        let tex = Texture::new_with_format(
+            cx,
+            TextureFormat::RenderBGRAu8 {
+                size: TextureSize::Auto,
+                initial: true,
+            },
+        );
+        pass.set_color_texture(
+            cx,
+            &tex,
+            DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)),
+        );
+        self.shadow_mask_pass = Some(pass);
+        self.shadow_mask_texture = Some(tex);
+        self.shadow_mask_list = Some(DrawList2d::new(cx));
+    }
+
+    /// The camera went flat: the mask pass stays registered as a child pass
+    /// and keeps re-presenting its list, so the tile lists the last tilted
+    /// frame attached there must not linger once their tiles rebake. One
+    /// empty record, then nothing until shadows are live again.
+    fn clear_shadow_mask_pass(&mut self, cx: &mut Cx2d, rect: Rect) {
+        let (Some(pass), Some(list)) = (self.shadow_mask_pass.as_ref(), self.shadow_mask_list.as_mut()) else {
+            return;
+        };
+        if cx.draw_lists[list.id()].draw_items.len() == 0 {
+            return;
+        }
+        pass.set_size(cx, rect.size);
+        cx.set_pass_area(pass, self.draw_bg.area());
+        cx.make_child_pass(pass);
+        let dpi = cx.current_dpi_factor();
+        cx.begin_pass(pass, Some(dpi));
+        list.begin_always(cx);
+        list.end(cx);
+        cx.end_pass(pass);
+    }
+
+    /// Cast every drawn tile's 3D volume into the shadow mask: a child pass
+    /// over the map rect whose texture the ground shaders sample by screen
+    /// position. Each tile's cast is its retained `Shadow` list.
+    fn draw_shadow_mask_pass(
+        &mut self,
+        cx: &mut Cx2d,
+        frame: &TileFrame,
+        draw_tiles: &[TileKey],
+        slots: [MapUniformSlots; TILE_DRAWER_COUNT],
+    ) {
+        let pass = self.shadow_mask_pass.as_ref().unwrap();
+        pass.set_size(cx, frame.rect.size);
+        cx.set_pass_area(pass, self.draw_bg.area());
+        cx.make_child_pass(pass);
+        let dpi = cx.current_dpi_factor();
+        cx.begin_pass(pass, Some(dpi));
+        self.shadow_mask_list.as_mut().unwrap().begin_always(cx);
+        {
+            let mut ctx = tile_draw_ctx!(self, frame, slots);
+            for key in draw_tiles {
+                let Some(entry) = self.tiles.get_mut(key) else {
+                    continue;
+                };
+                ctx.draw_tile(cx, *key, entry, TilePhase::Shadow);
+            }
+        }
+        self.shadow_mask_list.as_mut().unwrap().end(cx);
+        let pass = self.shadow_mask_pass.as_ref().unwrap();
+        cx.end_pass(pass);
+    }
+
     fn insert_ready_tile(&mut self, cx: &mut Cx, tile_key: TileKey, mut buffers: TileBuffers) {
         // An overlay-only result has no roads of its own. Never accept it if
         // eviction, a zoom restyle, or another transition replaced the exact
@@ -3162,87 +6357,31 @@ impl MapView {
             && !self.tiles.get(&tile_key).is_some_and(|entry| {
                 entry.bucket == buffers.render_zoom
                     && entry.road_core_cached
+                    && entry.baked_fringe == self.baked_fringe_mode
                     && matches!(entry.state, TileLoadState::Ready { .. })
             })
         {
             return;
         }
-        let old_entry = self.tiles.remove(&tile_key);
-        let (
-            old_bucket,
-            old_baked_3d,
-            old_fill,
-            old_casing,
-            old_stroke,
-            old_icon,
-            old_feature_count,
-            old_bytes,
-            old_road_core_cached,
-            old_road_icon_indices,
-            old_road_icon_vertices,
-        ) = match old_entry {
-            Some(TileEntry {
-                state:
-                    TileLoadState::Ready {
-                        fill_geometry,
-                        casing_geometry,
-                        stroke_geometry,
-                        icon_geometry,
-                feature_count,
-                ..
-            },
-                bytes,
-                bucket,
-                baked_3d,
-                road_core_cached,
-                road_icon_indices,
-                road_icon_vertices,
-                ..
-            }) => (
-                bucket,
-                baked_3d,
-                fill_geometry,
-                casing_geometry,
-                stroke_geometry,
-                icon_geometry,
-                feature_count,
-                bytes,
-                road_core_cached,
-                road_icon_indices,
-                road_icon_vertices,
-            ),
-            _ => (
-                buffers.render_zoom,
-                false,
-                None,
-                None,
-                None,
-                None,
-                0,
-                0,
-                false,
-                Vec::new(),
-                Vec::new(),
-            ),
-        };
 
-        // A mode-only bake is valid only while the exact same render-bucket
-        // road core is still resident. Append its cached arrow subset to the
-        // replacement POI buffer and move (not duplicate) its GPU meshes.
+        // A mode-only bake grows here by restoring cached road arrows. Do
+        // this before the final admission gate, while the old drawable tile
+        // remains resident in case the replacement must be deferred.
         let reuse_road_core = buffers.mode_overlay_only
-            && old_road_core_cached
-            && old_bucket == buffers.render_zoom;
+            && self.tiles.get(&tile_key).is_some_and(|entry| {
+                entry.bucket == buffers.render_zoom
+                    && entry.road_core_cached
+                    && entry.baked_fringe == self.baked_fringe_mode
+                    && matches!(entry.state, TileLoadState::Ready { .. })
+            });
         if reuse_road_core {
+            let old = self.tiles.get(&tile_key).unwrap();
             buffers.append_cached_road_icons(
-                &old_road_icon_indices,
-                &old_road_icon_vertices,
+                &old.road_icon_indices,
+                &old.road_icon_vertices,
             );
         }
-        let tile_bytes = if reuse_road_core {
-            buffers.byte_size().max(old_bytes)
-        } else {
-            buffers.byte_size()
-        };
+
         // Space-warp mode: refine long chords in the ground meshes before
         // upload. A flat triangle with far-apart vertices (full-tile land
         // sheets, long straight road quads) warps only at its corners, so
@@ -3255,60 +6394,260 @@ impl MapView {
         if self.space_warp_want {
             let scale = (self.view_zoom() - tile_key.z as f64).exp2().max(1.0);
             let max_edge = (64.0 / scale).clamp(4.0, 64.0) as f32;
-            crate::makepad_draw::vector::subdivide_packed_mesh(
-                &mut buffers.fill_indices,
-                &mut buffers.fill_vertices,
-                max_edge,
+            // One web allowance is shared by every stream. Each helper
+            // refuses a whole pass before allocating, so an early stream
+            // cannot leave a later stream with half-refined shared edges.
+            let mut refinement_budget = space_warp_refinement_budget(
+                self.tile_payload_limit(cx, tile_key),
+                buffers.allocated_byte_size(),
             );
-            crate::makepad_draw::vector::subdivide_packed_mesh(
-                &mut buffers.casing_indices,
-                &mut buffers.casing_vertices,
-                max_edge,
+            let (mut fill_indices, mut fill_vertices) =
+                std::mem::take(&mut buffers.fill).into_u32(FILL_TYPED_VERTEX_BYTES);
+            if let Some(budget) = refinement_budget.as_mut() {
+                crate::makepad_draw::vector::subdivide_fill_packed_mesh_budgeted(
+                    &mut fill_indices,
+                    &mut fill_vertices,
+                    max_edge,
+                    budget,
+                );
+            } else {
+                crate::makepad_draw::vector::subdivide_fill_packed_mesh(
+                    &mut fill_indices,
+                    &mut fill_vertices,
+                    max_edge,
+                );
+            }
+            buffers.fill = TypedStream::from_u32(
+                fill_indices,
+                fill_vertices,
+                FILL_TYPED_VERTEX_BYTES,
             );
-            crate::makepad_draw::vector::subdivide_packed_mesh(
-                &mut buffers.stroke_indices,
-                &mut buffers.stroke_vertices,
-                max_edge,
+            if let Some(budget) = refinement_budget.as_mut() {
+                crate::makepad_draw::vector::subdivide_packed_mesh_budgeted(
+                    &mut buffers.fill_misc_indices,
+                    &mut buffers.fill_misc_vertices,
+                    max_edge,
+                    budget,
+                );
+            } else {
+                crate::makepad_draw::vector::subdivide_packed_mesh(
+                    &mut buffers.fill_misc_indices,
+                    &mut buffers.fill_misc_vertices,
+                    max_edge,
+                );
+            }
+            let (mut face_indices, mut face_vertices) =
+                std::mem::take(&mut buffers.face).into_u32(FACE_TYPED_VERTEX_BYTES);
+            if let Some(budget) = refinement_budget.as_mut() {
+                crate::makepad_draw::vector::subdivide_face_typed_mesh_budgeted(
+                    &mut face_indices,
+                    &mut face_vertices,
+                    max_edge,
+                    budget,
+                );
+            } else {
+                crate::makepad_draw::vector::subdivide_face_typed_mesh(
+                    &mut face_indices,
+                    &mut face_vertices,
+                    max_edge,
+                );
+            }
+            buffers.face = TypedStream::from_u32(
+                face_indices,
+                face_vertices,
+                FACE_TYPED_VERTEX_BYTES,
             );
-            crate::makepad_draw::vector::subdivide_packed_mesh(
-                &mut buffers.fringe_indices,
-                &mut buffers.fringe_vertices,
-                max_edge,
+            let (mut casing_indices, mut casing_vertices) =
+                std::mem::take(&mut buffers.casing).into_u32(ROAD_TYPED_VERTEX_BYTES);
+            if let Some(budget) = refinement_budget.as_mut() {
+                crate::makepad_draw::vector::subdivide_road_mesh_budgeted(
+                    &mut casing_indices,
+                    &mut casing_vertices,
+                    max_edge,
+                    budget,
+                );
+            } else {
+                crate::makepad_draw::vector::subdivide_road_mesh(
+                    &mut casing_indices,
+                    &mut casing_vertices,
+                    max_edge,
+                );
+            }
+            buffers.casing = TypedStream::from_u32(
+                casing_indices,
+                casing_vertices,
+                ROAD_TYPED_VERTEX_BYTES,
+            );
+            let (mut stroke_indices, mut stroke_vertices) =
+                std::mem::take(&mut buffers.stroke).into_u32(ROAD_TYPED_VERTEX_BYTES);
+            if let Some(budget) = refinement_budget.as_mut() {
+                crate::makepad_draw::vector::subdivide_road_mesh_budgeted(
+                    &mut stroke_indices,
+                    &mut stroke_vertices,
+                    max_edge,
+                    budget,
+                );
+            } else {
+                crate::makepad_draw::vector::subdivide_road_mesh(
+                    &mut stroke_indices,
+                    &mut stroke_vertices,
+                    max_edge,
+                );
+            }
+            buffers.stroke = TypedStream::from_u32(
+                stroke_indices,
+                stroke_vertices,
+                ROAD_TYPED_VERTEX_BYTES,
+            );
+            let (mut fringe_indices, mut fringe_vertices) =
+                std::mem::take(&mut buffers.fringe).into_u32(ROAD_TYPED_VERTEX_BYTES);
+            if let Some(budget) = refinement_budget.as_mut() {
+                crate::makepad_draw::vector::subdivide_road_mesh_budgeted(
+                    &mut fringe_indices,
+                    &mut fringe_vertices,
+                    max_edge,
+                    budget,
+                );
+            } else {
+                crate::makepad_draw::vector::subdivide_road_mesh(
+                    &mut fringe_indices,
+                    &mut fringe_vertices,
+                    max_edge,
+                );
+            }
+            buffers.fringe = TypedStream::from_u32(
+                fringe_indices,
+                fringe_vertices,
+                ROAD_TYPED_VERTEX_BYTES,
             );
         }
-        let fill_geometry = if !buffers.fill_indices.is_empty() && !buffers.fill_vertices.is_empty()
+
+        let admission_limit = self.tile_payload_limit(cx, tile_key);
+        if !admit_final_ready_tile_payload(&mut buffers, admission_limit) {
+            let required_bytes = buffers.allocated_byte_size();
+            let failed_limit = admission_limit.expect("uncapped tile admission cannot reject");
+            let outcome =
+                self.note_memory_pressure(cx, "post-growth tile exceeded its admission cap");
+            let outcome = if buffers.render_zoom > self.render_bucket() { MemoryPressureOutcome::RetryLater } else { outcome };
+            self.defer_tile_for_memory_with_outcome(
+                tile_key,
+                "post-growth payload could not be bounded",
+                outcome,
+                failed_limit,
+                required_bytes,
+            );
+            return;
+        }
+
+        let old_entry = self.tiles.remove(&tile_key);
+        let (
+            old_bucket,
+            old_baked_3d,
+            old_fill,
+            old_fill_misc,
+            old_face,
+            old_casing,
+            old_stroke,
+            old_icon,
+            old_feature_count,
+            old_bytes,
+            old_icon_instances,
+        ) = match old_entry {
+            Some(TileEntry {
+                state:
+                    TileLoadState::Ready {
+                        fill_geometry,
+                        fill_misc_geometry,
+                        face_geometry,
+                        casing_geometry,
+                        stroke_geometry,
+                        icon_geometry,
+                        icon_instances,
+                feature_count,
+                ..
+            },
+                bytes,
+                bucket,
+                baked_3d,
+                ..
+            }) => (
+                bucket,
+                baked_3d,
+                fill_geometry,
+                fill_misc_geometry,
+                face_geometry,
+                casing_geometry,
+                stroke_geometry,
+                icon_geometry,
+                feature_count,
+                bytes,
+                icon_instances,
+            ),
+            _ => (
+                buffers.render_zoom,
+                false,
+                Vec::new(),
+                None,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                None,
+                0,
+                0,
+                Vec::new(),
+            ),
+        };
+
+        // A mode-only bake moves (not duplicates) its resident GPU road
+        // meshes into the replacement generation.
+        let buffer_bytes = if cfg!(target_arch = "wasm32") {
+            buffers.allocated_byte_size()
+        } else {
+            buffers.byte_size()
+        };
+        let tile_bytes = if reuse_road_core {
+            buffer_bytes.max(old_bytes)
+        } else {
+            buffer_bytes
+        };
+        let (Some(fill_layout), Some(face_layout), Some(road_layout), Some(roof_layout)) = (
+            geometry_layout(cx, &self.draw_fill.draw_vars),
+            geometry_layout(cx, &self.draw_face.draw_vars),
+            geometry_layout(cx, &self.draw_road.draw_vars),
+            geometry_layout(cx, &self.draw_roof.draw_vars),
+        ) else {
+            self.pending_ready_tiles.insert(0, (tile_key, buffers));
+            cx.redraw_all();
+            return;
+        };
+        let fill_geometry = upload_typed_stream(cx, buffers.fill, &fill_layout);
+        let fill_misc_geometry = if !buffers.fill_misc_indices.is_empty()
+            && !buffers.fill_misc_vertices.is_empty()
         {
             let geometry = Geometry::new(cx);
-            geometry.update(cx, buffers.fill_indices, buffers.fill_vertices);
+            geometry.update(cx, buffers.fill_misc_indices, buffers.fill_misc_vertices);
             Some(geometry)
         } else {
             None
         };
 
-        let new_casing_geometry =
-            if !buffers.casing_indices.is_empty() && !buffers.casing_vertices.is_empty() {
-                let geometry = Geometry::new(cx);
-                geometry.update(cx, buffers.casing_indices, buffers.casing_vertices);
-                Some(geometry)
-            } else {
-                None
-            };
+        let new_face_geometry = upload_typed_stream(cx, buffers.face, &face_layout);
+        let (face_geometry, fade_face_geometry) = if reuse_road_core {
+            (old_face, Vec::new())
+        } else {
+            (new_face_geometry, old_face)
+        };
+
+        let new_casing_geometry = upload_typed_stream(cx, buffers.casing, &road_layout);
         let (casing_geometry, fade_casing_geometry) = if reuse_road_core {
-            (old_casing, None)
+            (old_casing, Vec::new())
         } else {
             (new_casing_geometry, old_casing)
         };
 
-        let new_stroke_geometry =
-            if !buffers.stroke_indices.is_empty() && !buffers.stroke_vertices.is_empty() {
-                let geometry = Geometry::new(cx);
-                geometry.update(cx, buffers.stroke_indices, buffers.stroke_vertices);
-                Some(geometry)
-            } else {
-                None
-            };
+        let new_stroke_geometry = upload_typed_stream(cx, buffers.stroke, &road_layout);
         let (stroke_geometry, fade_stroke_geometry) = if reuse_road_core {
-            (old_stroke, None)
+            (old_stroke, Vec::new())
         } else {
             (new_stroke_geometry, old_stroke)
         };
@@ -3330,24 +6669,8 @@ impl MapView {
         } else {
             None
         };
-        let fringe_geometry = if !buffers.fringe_indices.is_empty()
-            && !buffers.fringe_vertices.is_empty()
-        {
-            let geometry = Geometry::new(cx);
-            geometry.update(cx, buffers.fringe_indices, buffers.fringe_vertices);
-            Some(geometry)
-        } else {
-            None
-        };
-        let fill_3d_geometry = if !buffers.fill_3d_indices.is_empty()
-            && !buffers.fill_3d_vertices.is_empty()
-        {
-            let geometry = Geometry::new(cx);
-            geometry.update(cx, buffers.fill_3d_indices, buffers.fill_3d_vertices);
-            Some(geometry)
-        } else {
-            None
-        };
+        let fringe_geometry = upload_typed_stream(cx, buffers.fringe, &road_layout);
+        let fill_3d_geometry = upload_typed_stream(cx, buffers.fill_3d, &roof_layout);
         let mut band = |indices: Vec<u32>, vertices: Vec<f32>| {
             if indices.is_empty() || vertices.is_empty() {
                 None
@@ -3357,10 +6680,24 @@ impl MapView {
                 Some(geometry)
             }
         };
+        let fill_3d_misc_geometry =
+            band(buffers.fill_3d_misc_indices, buffers.fill_3d_misc_vertices);
         let wall_geometry = band(buffers.wall_indices, buffers.wall_vertices);
         let tree_geometry = band(buffers.tree_indices, buffers.tree_vertices);
         let tree_cross_geometry =
             band(buffers.tree_cross_indices, buffers.tree_cross_vertices);
+        let tree_template_geometry =
+            band(buffers.tree_template_indices, buffers.tree_template_vertices);
+        let tree_cross_template_geometry = band(
+            buffers.tree_cross_template_indices,
+            buffers.tree_cross_template_vertices,
+        );
+        let stalk_template_geometry =
+            band(buffers.stalk_template_indices, buffers.stalk_template_vertices);
+        let stoplight_template_geometry = band(
+            buffers.stoplight_template_indices,
+            buffers.stoplight_template_vertices,
+        );
 
         // Cross-fade: keep the replaced generation's geometry under the new
         // one for TILE_FADE_SECONDS instead of popping.
@@ -3374,39 +6711,73 @@ impl MapView {
                 .tiles
                 .values()
                 .any(|entry| entry.baked_3d && matches!(entry.state, TileLoadState::Ready { .. }));
-        let fade = if old_fill.is_some()
+        let fade = if !old_fill.is_empty()
+            || old_fill_misc.is_some()
             || old_icon.is_some()
-            || fade_casing_geometry.is_some()
-            || fade_stroke_geometry.is_some()
+            || !old_icon_instances.is_empty()
+            || !fade_face_geometry.is_empty()
+            || !fade_casing_geometry.is_empty()
+            || !fade_stroke_geometry.is_empty()
         {
             Some(TileFade {
-                started: std::time::Instant::now(),
+                started: cx.seconds_since_app_start(),
                 bucket: old_bucket,
                 grow_heights: new_baked_3d && !old_baked_3d && !three_d_established,
                 reuse_road_core,
+                bytes: old_bytes,
                 fill_geometry: old_fill,
+                fill_misc_geometry: old_fill_misc,
                 // Stable road geometry stays current across a mode switch;
                 // drawing it again as outgoing fade would darken the roads.
+                face_geometry: fade_face_geometry,
                 casing_geometry: fade_casing_geometry,
                 stroke_geometry: fade_stroke_geometry,
                 icon_geometry: old_icon,
+                icon_instances: old_icon_instances,
             })
         } else {
             Some(TileFade {
-                started: std::time::Instant::now(),
+                started: cx.seconds_since_app_start(),
                 bucket: buffers.render_zoom,
                 grow_heights: new_baked_3d && !three_d_established,
                 reuse_road_core: false,
-                fill_geometry: None,
-                casing_geometry: None,
-                stroke_geometry: None,
+                bytes: 0,
+                fill_geometry: Vec::new(),
+                fill_misc_geometry: None,
+                face_geometry: Vec::new(),
+                casing_geometry: Vec::new(),
+                stroke_geometry: Vec::new(),
                 icon_geometry: None,
+                icon_instances: Vec::new(),
             })
         };
         // In an established 3D scene tiles snap in whole: any fade of
         // opaque 3D reads as a flash (user call — fades are for 2D and
         // for the one flat->3D mode reveal).
-        let fade = if three_d_established { None } else { fade };
+        let mut fade = if three_d_established { None } else { fade };
+        if cfg!(target_arch = "wasm32") && fade.is_some() {
+            let budgets = MapMemoryBudgets::from_cx(cx);
+            let resident_budget = if matches!(
+                self.tile_source_config,
+                Some(TileSourceConfig::HttpArchive { .. })
+            ) {
+                budgets.http_tile_cache
+            } else {
+                budgets.tile_cache
+            };
+            let projected = self
+                .tiles
+                .values()
+                .map(TileEntry::working_set_bytes)
+                .fold(tile_bytes, usize::saturating_add)
+                .saturating_add(fade.as_ref().map_or(0, |old| old.bytes));
+            if projected > resident_budget {
+                // The old generation is still visible up to this exact
+                // insertion. Under pressure, replace atomically instead of
+                // paying a quarter-second double copy for aesthetics.
+                fade = None;
+            }
+        }
         cx.stop_timer(self.tile_fade_timer);
         self.tile_fade_timer = cx.start_timeout(0.016);
 
@@ -3415,15 +6786,29 @@ impl MapView {
             TileEntry {
                 state: TileLoadState::Ready {
                     fill_geometry,
+                    fill_misc_geometry,
+                    face_geometry,
                     casing_geometry,
                     stroke_geometry,
                     icon_geometry,
                     icon_high_geometry,
+                    shadow_disc_instances: buffers.shadow_disc_instances,
+                    icon_instances: buffers.icon_instances,
+                    icon_high_instances: buffers.icon_high_instances,
                     fringe_geometry,
                     fill_3d_geometry,
+                    fill_3d_misc_geometry,
                     wall_geometry,
+                    wall_instances: buffers.wall_instances,
                     tree_geometry,
                     tree_cross_geometry,
+                    tree_template_geometry,
+                    tree_cross_template_geometry,
+                    tree_instances: buffers.tree_instances,
+                    stalk_template_geometry,
+                    stalk_instances: buffers.stalk_instances,
+                    stoplight_template_geometry,
+                    stoplight_instances: buffers.stoplight_instances,
                     feature_count: if reuse_road_core {
                         buffers.feature_count.max(old_feature_count)
                     } else {
@@ -3438,29 +6823,344 @@ impl MapView {
                 bytes: tile_bytes,
                 bucket: buffers.render_zoom,
                 baked_3d: self.baked_3d_mode,
+                baked_fringe: self.baked_fringe_mode,
                 road_core_cached: !buffers.mode_overlay_only || reuse_road_core,
                 road_icon_indices: buffers.road_icon_indices,
                 road_icon_vertices: buffers.road_icon_vertices,
                 fade,
+                draw: TileDrawLists::default(),
             },
         );
         self.tiles_generation = self.tiles_generation.wrapping_add(1);
     }
 
-    /// The upload queue drains only 2 tiles per frame; a fast pan across 3D
-    /// building tiles can park gigabytes of baked buffers here. Drop the
-    /// oldest queued bakes beyond a byte budget — they were about to be
-    /// stale anyway.
-    fn cap_pending_ready_tiles(&mut self) {
-        const PENDING_BYTE_BUDGET: usize = 384_000_000;
-        let mut total: usize = self
+    fn sort_pending_ready_tiles(&mut self) {
+        let center_norm = self.center_norm;
+        let rotation = self.screen_rotation();
+        let tilt_cos = self.tilt_cos();
+        sort_ready_tiles_for_insert(
+            &mut self.pending_ready_tiles,
+            &self.visible_tiles,
+            center_norm,
+            rotation,
+            tilt_cos,
+        );
+    }
+
+    fn resident_tile_budget(&self, budgets: MapMemoryBudgets) -> usize {
+        if matches!(
+            self.tile_source_config,
+            Some(TileSourceConfig::HttpArchive { .. })
+        ) {
+            budgets.http_tile_cache
+        } else {
+            budgets.tile_cache
+        }
+    }
+
+    /// Worker-side cap. The UI performs the demand-aware resident admission
+    /// once actual neighboring payload sizes are known.
+    fn tile_upload_limit(&self, cx: &Cx) -> Option<usize> {
+        let budgets = MapMemoryBudgets::from_cx(cx);
+        cfg!(target_arch = "wasm32").then_some(budgets.upload)
+    }
+
+    /// Give an incoming visible tile the upload cap or the actual remaining
+    /// resident space, whichever is smaller. Unlike an equal split, sparse
+    /// neighbors leave their unused share available to a legitimately dense
+    /// tile while the visible set as a whole remains bounded.
+    fn tile_payload_limit(&self, cx: &Cx, incoming: TileKey) -> Option<usize> {
+        if !cfg!(target_arch = "wasm32") {
+            return None;
+        }
+        self.tile_payload_limit_for_platform(cx, incoming, true)
+    }
+
+    fn tile_payload_limit_for_platform(
+        &self,
+        cx: &Cx,
+        incoming: TileKey,
+        is_web: bool,
+    ) -> Option<usize> {
+        if !is_web {
+            return None;
+        }
+        let budgets = MapMemoryBudgets::from_total(cx.memory_budget_bytes(), is_web);
+        let committed_visible_bytes = self
+            .tiles
+            .iter()
+            .filter(|(key, _)| **key != incoming && self.visible_tiles.contains(key))
+            .map(|(_, entry)| entry.working_set_bytes())
+            .chain(
+                self.pending_ready_tiles
+                    .iter()
+                    .filter(|(key, _)| *key != incoming && self.visible_tiles.contains(key))
+                    .map(|(_, buffers)| buffers.allocated_byte_size()),
+            )
+            .fold(0usize, usize::saturating_add);
+        ready_tile_admission_limit(
+            budgets,
+            self.resident_tile_budget(budgets),
+            committed_visible_bytes,
+            true,
+        )
+    }
+
+    fn tile_admission_policy_for_platform(&self, is_web: bool) -> TileAdmissionPolicy {
+        TileAdmissionPolicy {
+            render_bucket: self.render_bucket_for_platform(is_web),
+            source_zoom: self.request_zoom_level_for_platform(is_web),
+            style_epoch: self.style_epoch,
+            buildings_3d: self.buildings_3d && self.tilt > 0.0,
+        }
+    }
+
+    fn note_memory_pressure(&mut self, cx: &mut Cx, reason: &str) -> MemoryPressureOutcome {
+        self.note_memory_pressure_for_platform(cx, reason, cfg!(target_arch = "wasm32"))
+    }
+
+    fn note_memory_pressure_for_platform(
+        &mut self,
+        cx: &mut Cx,
+        reason: &str,
+        is_web: bool,
+    ) -> MemoryPressureOutcome {
+        self.memory_pressure.events = self.memory_pressure.events.saturating_add(1);
+        self.memory_pressure.last_pressure_frame = self.frame_counter;
+        if self.memory_pressure.last_level_change_frame != 0
+            && self.memory_pressure.last_level_change_frame == self.frame_counter
+        {
+            return MemoryPressureOutcome::RetryLater;
+        }
+        if self.memory_pressure.level >= WEB_SOURCE_LOD_MAX {
+            return MemoryPressureOutcome::Exhausted;
+        }
+        let old_level = self.memory_pressure.level;
+        let old_bucket = self.render_bucket_for_platform(is_web);
+        let old_zoom = self.request_zoom_level_for_platform(is_web);
+        self.memory_pressure.level += 1;
+        if self.render_bucket_for_platform(is_web) == old_bucket
+            && self.request_zoom_level_for_platform(is_web) == old_zoom
+        {
+            // At the archive floor (or on a single-zoom source) there is no
+            // further policy to apply. Keep the finite effective level and
+            // compact results in place instead of scheduling identical
+            // rebakes forever.
+            self.memory_pressure.level = old_level;
+            return MemoryPressureOutcome::Exhausted;
+        }
+        self.memory_pressure.last_level_change_frame = self.frame_counter;
+        for entry in self.tiles.values_mut() {
+            if matches!(entry.state, TileLoadState::Ready { .. }) {
+                entry.bucket = u32::MAX;
+            }
+        }
+        log!(
+            "MapView: web memory pressure level {} ({reason}); keeping imagery while lower-cost replacements load",
+            self.memory_pressure.level
+        );
+        self.label_cache_valid = false;
+        self.redraw(cx);
+        MemoryPressureOutcome::Advanced
+    }
+
+    fn maybe_release_memory_pressure(&mut self, cx: &mut Cx) {
+        if !cfg!(target_arch = "wasm32") || self.memory_pressure.level == 0 {
+            return;
+        }
+        let budgets = MapMemoryBudgets::from_cx(cx);
+        let resident = self
+            .tiles
+            .values()
+            .map(TileEntry::working_set_bytes)
+            .fold(0usize, usize::saturating_add);
+        let pending = self
             .pending_ready_tiles
             .iter()
-            .map(|(_, buffers)| buffers.byte_size())
-            .sum();
-        while total > PENDING_BYTE_BUDGET && self.pending_ready_tiles.len() > 1 {
-            let (_, dropped) = self.pending_ready_tiles.remove(0);
-            total -= dropped.byte_size();
+            .map(|(_, buffers)| buffers.allocated_byte_size())
+            .fold(0usize, usize::saturating_add);
+        if self.frame_counter.saturating_sub(self.memory_pressure.last_pressure_frame)
+                < MEMORY_PRESSURE_RELEASE_FRAMES
+            || resident > self.resident_tile_budget(budgets) / 2
+            || pending > budgets.pending / 2
+        {
+            return;
+        }
+        self.memory_pressure.level -= 1;
+        self.memory_pressure.last_level_change_frame = self.frame_counter;
+        self.memory_pressure.last_pressure_frame = self.frame_counter;
+        for entry in self.tiles.values_mut() {
+            if matches!(entry.state, TileLoadState::Ready { .. }) {
+                entry.bucket = u32::MAX;
+            }
+        }
+        log!(
+            "MapView: web memory pressure relaxed to level {} after {} quiet frames",
+            self.memory_pressure.level,
+            MEMORY_PRESSURE_RELEASE_FRAMES
+        );
+        self.redraw(cx);
+    }
+
+    fn defer_tile_for_memory(&mut self, tile_key: TileKey, reason: &str) {
+        self.defer_tile_for_memory_until(
+            tile_key,
+            reason,
+            self.frame_counter
+                .saturating_add(MEMORY_PRESSURE_RETRY_FRAMES),
+        );
+    }
+
+    fn defer_tile_for_memory_with_outcome(
+        &mut self,
+        tile_key: TileKey,
+        reason: &str,
+        outcome: MemoryPressureOutcome,
+        failed_limit: usize,
+        required_bytes: usize,
+    ) {
+        let deferral = if outcome == MemoryPressureOutcome::Exhausted {
+            MemoryDeferral::Exhausted(ExhaustionBlocker {
+                failed_limit,
+                required_bytes,
+                policy: self.tile_admission_policy_for_platform(true),
+            })
+        } else {
+            MemoryDeferral::Until(
+                self.frame_counter
+                    .saturating_add(MEMORY_PRESSURE_RETRY_FRAMES),
+            )
+        };
+        self.defer_tile_for_memory_with_gate(tile_key, reason, deferral);
+    }
+
+    fn defer_tile_for_memory_until(&mut self, tile_key: TileKey, reason: &str, retry_after: u64) {
+        self.defer_tile_for_memory_with_gate(tile_key, reason, MemoryDeferral::Until(retry_after));
+    }
+
+    fn defer_tile_for_memory_with_gate(
+        &mut self,
+        tile_key: TileKey,
+        reason: &str,
+        deferral: MemoryDeferral,
+    ) {
+        self.memory_pressure.deferred.insert(tile_key, deferral);
+        self.local_requested_tiles.remove(&tile_key);
+        if self
+            .tiles
+            .get(&tile_key)
+            .is_some_and(|entry| matches!(entry.state, TileLoadState::LoadingLocal | TileLoadState::LoadingNetwork))
+        {
+            self.tiles.remove(&tile_key);
+        } else if let Some(entry) = self.tiles.get_mut(&tile_key) {
+            // A stale drawable result stays on screen and observes the same
+            // retry gate as a removed placeholder.
+            let retry_after = match deferral {
+                MemoryDeferral::Until(frame) => frame,
+                MemoryDeferral::Exhausted(_) => u64::MAX,
+            };
+            entry.retry_after = entry.retry_after.max(retry_after);
+        }
+        if cfg!(target_arch = "wasm32") {
+            log!(
+                "MapView: deferred tile z{} x{} y{} for memory pressure: {reason}",
+                tile_key.z,
+                tile_key.x,
+                tile_key.y
+            );
+        }
+    }
+
+    fn release_memory_deferral(&mut self, tile_key: TileKey) {
+        if self.memory_pressure.deferred.remove(&tile_key).is_some() {
+            if let Some(entry) = self.tiles.get_mut(&tile_key) {
+                entry.retry_after = 0;
+            }
+        }
+    }
+
+    fn clear_memory_deferrals(&mut self) {
+        for tile_key in self.memory_pressure.deferred.keys() {
+            if let Some(entry) = self.tiles.get_mut(tile_key) {
+                entry.retry_after = 0;
+            }
+        }
+        self.memory_pressure.deferred.clear();
+    }
+
+    fn expire_memory_deferrals(&mut self, cx: &Cx) {
+        if self.memory_pressure.deferred.is_empty() { return; }
+        let frame = self.frame_counter;
+        let is_web = cfg!(target_arch = "wasm32");
+        let policy = self.tile_admission_policy_for_platform(is_web);
+        // Move the map out temporarily so the retained allocation is reused
+        // while admission is re-evaluated without a per-frame key vector.
+        let mut deferred = std::mem::take(&mut self.memory_pressure.deferred);
+        deferred.retain(|tile_key, deferral| {
+            let retry_ready = match *deferral {
+                MemoryDeferral::Until(retry_after) => frame >= retry_after,
+                MemoryDeferral::Exhausted(blocker) => blocker.retry_ready(
+                    self.tile_payload_limit_for_platform(cx, *tile_key, is_web),
+                    policy,
+                ),
+            };
+            if retry_ready {
+                if let Some(entry) = self.tiles.get_mut(tile_key) {
+                    entry.retry_after = 0;
+                }
+            }
+            !retry_ready
+        });
+        self.memory_pressure.deferred = deferred;
+    }
+
+    fn stage_ready_tile(&mut self, cx: &mut Cx, tile_key: TileKey, mut buffers: TileBuffers) {
+        if let Some(limit) = self.tile_payload_limit(cx, tile_key) {
+            buffers.degrade_to_memory_limit(limit);
+            if buffers.allocated_byte_size() > limit {
+                let required_bytes = buffers.allocated_byte_size();
+                let outcome =
+                    self.note_memory_pressure(cx, "single tile exceeded its admission cap");
+                let outcome = if buffers.render_zoom > self.render_bucket() { MemoryPressureOutcome::RetryLater } else { outcome };
+                self.defer_tile_for_memory_with_outcome(
+                    tile_key,
+                    "payload could not be bounded",
+                    outcome,
+                    limit,
+                    required_bytes,
+                );
+                return;
+            }
+            if buffers.memory_lod >= 2 {
+                self.note_memory_pressure(cx, "dense tile degraded before upload");
+            }
+        }
+        self.release_memory_deferral(tile_key);
+        self.pending_ready_tiles.retain(|(key, _)| *key != tile_key);
+        self.pending_ready_tiles.push((tile_key, buffers));
+        self.sort_pending_ready_tiles();
+        self.cap_pending_ready_tiles(cx);
+    }
+
+    /// A fast pan across 3D building tiles can park gigabytes of baked
+    /// buffers here. The queue is centre-out, so discard its least useful
+    /// tail beyond the byte budget.
+    fn cap_pending_ready_tiles(&mut self, cx: &Cx) {
+        let byte_budget = MapMemoryBudgets::from_cx(cx).pending;
+        let dropped = pending_byte_cap(
+            &mut self.pending_ready_tiles,
+            byte_budget,
+            !cfg!(target_arch = "wasm32"),
+            |(_, buffers)| {
+                if cfg!(target_arch = "wasm32") {
+                    buffers.allocated_byte_size()
+                } else {
+                    buffers.byte_size()
+                }
+            },
+        );
+        for (tile_key, _) in dropped {
+            self.defer_tile_for_memory(tile_key, "pending-ready queue cap");
         }
     }
 
@@ -3501,11 +7201,8 @@ impl MapView {
                         // A stale-bucket result is still drawable; the
                         // bucket-restyle path rebuilds it in due course.
                         let _ = current_bucket;
-                        self.pending_ready_tiles
-                            .retain(|(key, _)| *key != tile.tile_key);
-                        self.pending_ready_tiles.push((tile.tile_key, tile.buffers));
+                        self.stage_ready_tile(cx, tile.tile_key, tile.buffers);
                     }
-                    self.cap_pending_ready_tiles();
                     if !empty_feature_tiles.is_empty() {
                         empty_feature_tiles.sort_unstable();
                         log!("MapView: local mbtiles loaded {} tile(s) with 0 rendered features sample:{}", empty_feature_tiles.len(), format_tile_key_sample(&empty_feature_tiles, 8));
@@ -3563,9 +7260,7 @@ impl MapView {
                     if style_epoch != self.style_epoch {
                         continue;
                     }
-                    self.pending_ready_tiles.retain(|(key, _)| *key != tile_key);
-                    self.pending_ready_tiles.push((tile_key, buffers));
-                    self.cap_pending_ready_tiles();
+                    self.stage_ready_tile(cx, tile_key, buffers);
                     redraw = true;
                 }
                 TileWorkerMessage::NetworkTileParseFailed {
@@ -3579,54 +7274,74 @@ impl MapView {
                     self.mark_tile_failed(tile_key, &format!("parse: {}", error));
                     redraw = true;
                 }
+                TileWorkerMessage::TileJobPanicked {
+                    style_epoch,
+                    tile_key,
+                    error,
+                } => {
+                    self.local_requested_tiles.remove(&tile_key);
+                    if style_epoch != self.style_epoch {
+                        continue;
+                    }
+                    self.mark_tile_failed(tile_key, &error);
+                    redraw = true;
+                }
             }
         }
-        // Drain at most two pending uploads per frame; a bucket-17+ tile can
-        // carry tens of MB of vertex data, and creating/uploading a whole
-        // 10-tile batch in one frame showed up as 200-550ms frame gaps.
+        if !self.pending_ready_tiles.is_empty() {
+            self.sort_pending_ready_tiles();
+            self.cap_pending_ready_tiles(cx);
+        }
+        // Drain at most two inserts, and stop sooner at the byte budget.
+        // Native keeps its historical first-tile allowance; web admission
+        // has already degraded or deferred every oversized result, so an
+        // oversized payload can never bypass the upload cap there.
         if !self.pending_ready_tiles.is_empty()
             && self.last_tile_upload_frame != self.frame_counter
         {
             self.last_tile_upload_frame = self.frame_counter;
-            let upload_start = std::time::Instant::now();
-            // Budget by BYTES, not just count: two 3D/overzoom tiles can
-            // carry 60+ MB of buffers each and stall the frame for hundreds
-            // of ms; always ship at least one so progress never stops.
-            const UPLOAD_BYTE_BUDGET: usize = 24_000_000;
-            let mut count = 0usize;
-            let mut budget = 0usize;
-            for (_, buffers) in self.pending_ready_tiles.iter() {
-                if count >= 2 {
-                    break;
-                }
-                let size = buffers.byte_size();
-                if count > 0 && budget + size > UPLOAD_BYTE_BUDGET {
-                    break;
-                }
-                budget += size;
-                count += 1;
+            let mut pending = std::mem::take(&mut self.pending_ready_tiles);
+            let stats = drain_pending_ready_tiles(
+                &mut pending,
+                MapMemoryBudgets::from_cx(cx).upload,
+                !cfg!(target_arch = "wasm32"),
+                |(_, buffers)| {
+                    if cfg!(target_arch = "wasm32") {
+                        buffers.allocated_byte_size()
+                    } else {
+                        buffers.byte_size()
+                    }
+                },
+                |(tile_key, buffers)| {
+                    let started = cx.seconds_since_app_start();
+                    self.insert_ready_tile(cx, tile_key, buffers);
+                    cx.seconds_since_app_start() - started
+                },
+            );
+            if self.pending_ready_tiles.is_empty() {
+                self.pending_ready_tiles = pending;
+            } else {
+                self.pending_ready_tiles.append(&mut pending);
             }
-            let batch = self
-                .pending_ready_tiles
-                .drain(..count)
-                .collect::<Vec<_>>();
-            for (tile_key, buffers) in batch {
-                self.insert_ready_tile(cx, tile_key, buffers);
-            }
-            let upload_ms = upload_start.elapsed().as_secs_f64() * 1000.0;
-            if upload_ms > 4.0 {
+            let upload_ms = stats.seconds * 1000.0;
+            if self.is_local_archive() && upload_ms > 4.0 {
                 use std::io::Write;
                 if let Ok(mut file) = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
                     .open("local/map_perf.log")
                 {
-                    let _ = writeln!(file, "upload_ms:{:.2} tiles:{}", upload_ms, count);
+                    let _ = writeln!(file, "upload_ms:{:.2} tiles:{}", upload_ms, stats.count);
                 }
             }
             redraw = true;
         }
         if !self.pending_ready_tiles.is_empty() {
+            // A pass runs once per frame, and a draw alone never re-enters
+            // handle_event: the continuation has to be an event that arrives
+            // after the next frame, or the queue waits for an unrelated timer.
+            cx.new_next_frame();
+            cx.redraw_all();
             redraw = true;
         }
         if redraw {
@@ -3645,58 +7360,575 @@ impl MapView {
         }
     }
 
-    fn request_visible_tiles_from_local_source(&mut self, _cx: &mut Cx) {
-        if !self.use_local_mbtiles {
+    fn ensure_archive_source(&mut self, cx: &mut Cx) {
+        if self.tile_source_config.is_some() {
             return;
         }
+        let config = self
+            .tile_source_config
+            .clone()
+            .unwrap_or_else(|| TileSourceConfig::LocalArchive {
+                mbtiles_path: self.active_mbtiles_path().to_string(),
+                detail_mbtiles_path: self.detail_mbtiles_path.clone(),
+                bridge_dz_path: self.bridge_dz_mbtiles_path.clone(),
+            });
+        self.install_archive_source(cx, config);
+    }
 
-        let active_path = self.active_mbtiles_path().to_string();
-        let mbtiles_path = Path::new(&active_path);
-        if !mbtiles_path.exists() && !self.local_source_missing_logged {
-            log!("MapView: local mbtiles source missing at {} — serving disk tile cache only", active_path);
-            self.local_source_missing_logged = true;
+    fn ensure_archive_worker_pool(&mut self, cx: &mut Cx) -> ArchiveWorkerPool {
+        if self.archive_worker_pool.is_none() {
+            self.archive_worker_pool = Some(new_archive_worker_pool(cx));
         }
+        self.archive_worker_pool.as_ref().unwrap().clone()
+    }
 
-        let bucket = self.render_bucket();
-        // OBSOLETE-WORK CANCELLATION: when the request context changes
-        // (zoom gesture reversed, bucket advanced, 2D/3D flip, restyle),
-        // queued builds for the dead context would hold every pool slot
-        // ahead of current work — running jobs finish, but nothing stale
-        // may START. Drop queued jobs for keys outside the current visible
-        // set and free their in-flight slots.
-        let request_zoom = self.request_zoom_level();
-        let prune_sig = (request_zoom, bucket, self.baked_3d_mode, self.style_epoch);
-        if self.last_pool_prune != Some(prune_sig) {
-            self.last_pool_prune = Some(prune_sig);
-            if let Some(pool) = self.tile_thread_pool.as_ref() {
-                let visible: HashSet<TileKey> = self.visible_tiles.iter().copied().collect();
-                let dropped =
-                    pool.retain_queued(|key| key.z == request_zoom && visible.contains(key));
-                for key in dropped {
-                    self.local_requested_tiles.remove(&key);
-                    // A queued-then-dropped placeholder must not linger as
-                    // Loading forever; keep-stale Ready entries stay.
-                    if self
-                        .tiles
-                        .get(&key)
-                        .is_some_and(|entry| matches!(entry.state, TileLoadState::LoadingLocal))
-                    {
-                        self.tiles.remove(&key);
+    /// Every archive's in-memory ceiling follows the one platform budget.
+    fn apply_archive_cache_budgets(&mut self, cx: &Cx) {
+        let budget = MapMemoryBudgets::from_cx(cx).archive_cache;
+        if let Some(archive) = self.base_archive.as_mut() {
+            archive.set_cache_budget(budget);
+        }
+        if let Some(archive) = self.detail_archive.as_mut() {
+            archive.set_cache_budget(budget / 2);
+        }
+        for overlay in &mut self.overlay_archives {
+            if let Some(archive) = overlay.archive.as_mut() {
+                archive.set_cache_budget(budget / 4);
+            }
+        }
+    }
+
+    fn install_overlay_sources(&mut self, cx: &mut Cx) {
+        let workers = self.ensure_archive_worker_pool(cx);
+        self.overlay_archives = self
+            .overlays
+            .iter()
+            .map(|overlay| {
+                let (archive, local_mbtiles_path, filter) = match &overlay.source {
+                    TileSourceConfig::LocalArchive { mbtiles_path, .. } => {
+                        let (path, filter) = split_overlay_option(mbtiles_path);
+                        if is_mkmap_path_shape(path) {
+                            (
+                                Some(MapTileArchive::file(path, workers.clone())),
+                                None,
+                                filter,
+                            )
+                        } else {
+                            (None, Some(path.to_string()), filter)
+                        }
+                    }
+                    TileSourceConfig::HttpArchive { root_url, .. } => {
+                        let (root_url, filter) = split_overlay_option(root_url);
+                        (
+                            Some(MapTileArchive::http(root_url, workers.clone())),
+                            None,
+                            filter,
+                        )
+                    }
+                };
+                ActiveOverlayArchive {
+                    name: overlay.name.clone(),
+                    filter,
+                    archive,
+                    local_mbtiles_path,
+                }
+            })
+            .collect();
+        self.apply_archive_cache_budgets(cx);
+    }
+
+    fn install_archive_source(&mut self, cx: &mut Cx, config: TileSourceConfig) {
+        self.archive_generation = self.archive_generation.wrapping_add(1).max(1);
+        self.style_epoch = self.style_epoch.wrapping_add(1).max(1);
+        if let Some(archive) = self.base_archive.as_mut() {
+            archive.reset_generation(cx, self.archive_generation);
+        }
+        if let Some(archive) = self.detail_archive.as_mut() {
+            archive.reset_generation(cx, self.archive_generation);
+        }
+        let workers = self.ensure_archive_worker_pool(cx);
+        match &config {
+            TileSourceConfig::LocalArchive {
+                mbtiles_path,
+                detail_mbtiles_path,
+                bridge_dz_path,
+                ..
+            } => {
+                self.mbtiles_path = mbtiles_path.clone();
+                self.detail_mbtiles_path = detail_mbtiles_path.clone();
+                self.bridge_dz_mbtiles_path = bridge_dz_path.clone();
+                self.base_archive = is_mkmap_path_shape(mbtiles_path)
+                    .then(|| MapTileArchive::file(mbtiles_path, workers.clone()));
+                self.detail_archive = needs_separate_detail_archive(&config)
+                    .then(|| MapTileArchive::file(detail_mbtiles_path, workers.clone()));
+                self.use_local_mbtiles = true;
+                self.use_network = false;
+            }
+            TileSourceConfig::HttpArchive {
+                root_url,
+                detail_root_url,
+                bridge_dz_path,
+            } => {
+                self.mbtiles_path.clear();
+                self.detail_mbtiles_path = detail_root_url.clone();
+                self.bridge_dz_mbtiles_path = bridge_dz_path.clone();
+                self.base_archive = Some(MapTileArchive::http(root_url, workers.clone()));
+                self.detail_archive = needs_separate_detail_archive(&config)
+                    .then(|| MapTileArchive::http(detail_root_url, workers));
+                self.use_local_mbtiles = true;
+                self.use_network = false;
+            }
+        }
+        self.tile_source_config = Some(config);
+        self.apply_archive_cache_budgets(cx);
+        self.archive_pending_tiles.clear();
+        self.pending_ready_tiles.clear();
+        self.local_source_zoom_range = None;
+        self.local_source_logged_zoom_range = None;
+        self.local_source_zoom_range_path = None;
+        self.local_source_zoom_range_checked = false;
+    }
+
+    fn is_local_archive(&self) -> bool {
+        matches!(self.tile_source_config, Some(TileSourceConfig::LocalArchive { .. }))
+    }
+
+    fn handle_archive_events(&mut self, cx: &mut Cx, event: &Event) {
+        let base = self
+            .base_archive
+            .as_mut()
+            .map(|archive| archive.drain(cx, event))
+            .unwrap_or_default();
+        let detail = self
+            .detail_archive
+            .as_mut()
+            .map(|archive| archive.drain(cx, event))
+            .unwrap_or_default();
+        let overlay_results = self
+            .overlay_archives
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(index, overlay)| {
+                let archive = overlay.archive.as_mut()?;
+                let tiles = archive.drain(cx, event);
+                Some((index, archive.zoom_range(), tiles))
+            })
+            .collect::<Vec<_>>();
+
+        if let Some(range) = self.base_archive.as_ref().and_then(MapTileArchive::zoom_range) {
+            if self.local_source_zoom_range != Some(range) {
+                self.local_source_zoom_range = Some(range);
+                self.local_source_zoom_range_checked = true;
+                self.redraw(cx);
+            }
+        }
+        for tile in base {
+            if tile.generation != self.archive_generation {
+                continue;
+            }
+            if let Some(parts) = self.archive_pending_tiles.get_mut(&tile.key) {
+                parts.base = Some(match tile.result {
+                    TileBytesResult::Bytes(bytes) => Ok(Some(bytes)),
+                    TileBytesResult::Missing => Ok(None),
+                    TileBytesResult::Error(error) => Err(error),
+                });
+            }
+        }
+        for tile in detail {
+            if tile.generation != self.archive_generation {
+                continue;
+            }
+            if let Some(parts) = self.archive_pending_tiles.get_mut(&tile.key) {
+                parts.detail = Some(match tile.result {
+                    TileBytesResult::Bytes(bytes) => Ok(Some(bytes)),
+                    TileBytesResult::Missing => Ok(None),
+                    TileBytesResult::Error(error) => Err(error),
+                });
+            }
+        }
+        let mut follow_up = vec![HashSet::<TileKey>::new(); self.overlay_archives.len()];
+        for (archive_index, zoom_range, tiles) in overlay_results {
+            for tile in tiles {
+                if tile.generation != self.archive_generation {
+                    continue;
+                }
+                for (logical_key, parts) in self.archive_pending_tiles.iter_mut() {
+                    for overlay in parts.overlays.iter_mut().filter(|overlay| {
+                        overlay.archive_index == archive_index
+                            && overlay.fetch_key == Some(tile.key)
+                            && overlay.result.is_none()
+                    }) {
+                        let desired =
+                            zoom_range.map(|range| overlay_fetch_key(*logical_key, range));
+                        match desired {
+                            Some(None) => {
+                                overlay.fetch_key = None;
+                                overlay.result = Some(Ok(None));
+                            }
+                            Some(Some(desired)) if desired != tile.key => {
+                                overlay.fetch_key = Some(desired);
+                                follow_up[archive_index].insert(desired);
+                            }
+                            Some(Some(_)) | None => {
+                                overlay.result = Some(match tile.result.clone() {
+                                    TileBytesResult::Bytes(bytes) => Ok(Some(bytes)),
+                                    TileBytesResult::Missing => Ok(None),
+                                    TileBytesResult::Error(error) => Err(error),
+                                });
+                            }
+                        }
                     }
                 }
             }
         }
-        // Watchdog: a worker job that dies (or a lost message) would leak its
-        // key here forever and choke the 12-slot in-flight cap; time out and
-        // retry, clearing any stuck Loading placeholder so it can re-request.
-        let now = self.frame_counter;
-        let timed_out: Vec<TileKey> = self
-            .local_requested_tiles
+        for (archive_index, keys) in follow_up.into_iter().enumerate() {
+            let Some(archive) = self
+                .overlay_archives
+                .get_mut(archive_index)
+                .and_then(|overlay| overlay.archive.as_mut())
+            else {
+                continue;
+            };
+            for key in keys {
+                archive.request_tile(cx, key, self.archive_generation, u64::MAX);
+            }
+            archive.flush(cx);
+        }
+
+        let ready: Vec<TileKey> = self
+            .archive_pending_tiles
             .iter()
-            .filter(|(_, started)| now.saturating_sub(**started) > 600)
+            .filter(|(_, parts)| {
+                parts.base.is_some()
+                    && (!parts.detail_required || parts.detail.is_some())
+                    && parts.overlays.iter().all(|overlay| overlay.result.is_some())
+            })
             .map(|(key, _)| *key)
             .collect();
-        for key in timed_out {
+        for key in ready {
+            let parts = self.archive_pending_tiles.remove(&key).unwrap();
+            if parts.generation != self.archive_generation {
+                continue;
+            }
+            let base = match parts.base.unwrap() {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    self.local_requested_tiles.remove(&key);
+                    self.mark_tile_failed(key, &error);
+                    self.update_status_text();
+                    self.redraw(cx);
+                    continue;
+                }
+            };
+            let detail = if parts.reuse_base_as_detail {
+                base.clone()
+            } else {
+                parts.detail.and_then(Result::ok).flatten()
+            };
+            let mut overlays = Vec::new();
+            let mut overlay_error = None;
+            for overlay in parts.overlays {
+                let result = overlay.result.unwrap();
+                match result {
+                    Ok(Some(raw)) => {
+                        let fetch_key = overlay.fetch_key.unwrap();
+                        let shift = key.z.saturating_sub(fetch_key.z);
+                        overlays.push(OverlayTileData {
+                            raw,
+                            shift,
+                            quadrant_x: key.x as u32 - ((fetch_key.x as u32) << shift),
+                            quadrant_y: key.y as u32 - ((fetch_key.y as u32) << shift),
+                            filter: overlay.filter,
+                            has_chargers: overlay.name == "chargers",
+                        });
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        overlay_error = Some(error);
+                        break;
+                    }
+                }
+            }
+            if let Some(error) = overlay_error {
+                self.local_requested_tiles.remove(&key);
+                self.mark_tile_failed(key, &error);
+                self.update_status_text();
+                self.redraw(cx);
+                continue;
+            }
+            self.dispatch_archive_tile_build(cx, key, base, detail, overlays);
+        }
+    }
+
+    fn dispatch_archive_tile_build(
+        &mut self,
+        cx: &mut Cx,
+        key: TileKey,
+        base: Option<TileBlob>,
+        detail: Option<TileBlob>,
+        overlays: Vec<OverlayTileData>,
+    ) {
+        let sender = self.tile_worker_rx.sender();
+        let style_epoch = self.style_epoch;
+        let requested = vec![key];
+        let theme_style = self.active_style().clone();
+        let bucket = self.render_bucket();
+        let tile_payload_limit = self.tile_upload_limit(cx);
+        let buildings_3d = self.buildings_3d && self.tilt > 0.0;
+        let want_fringe = self.baked_fringe_mode;
+        let build_road_core = !self.tiles.get(&key).is_some_and(|entry| {
+            matches!(entry.state, TileLoadState::Ready { .. })
+                && entry.bucket == bucket
+                && entry.road_core_cached
+                && entry.baked_fringe == want_fringe
+        });
+        let (detail_path, bridge_dz_path) = match self.tile_source_config.as_ref() {
+            Some(TileSourceConfig::LocalArchive {
+                detail_mbtiles_path,
+                bridge_dz_path,
+                ..
+            }) => (detail_mbtiles_path, bridge_dz_path),
+            Some(TileSourceConfig::HttpArchive {
+                detail_root_url,
+                bridge_dz_path,
+                ..
+            }) => (detail_root_url, bridge_dz_path),
+            None => (&self.detail_mbtiles_path, &self.bridge_dz_mbtiles_path),
+        };
+        let detail_path = (!detail_path.is_empty() && !is_mkmap_path_shape(detail_path))
+            .then_some(detail_path.clone());
+        let bridge_dz_path = (!bridge_dz_path.is_empty()).then_some(bridge_dz_path.clone());
+        let overlay_paths = self
+            .overlay_archives
+            .iter()
+            .filter_map(|overlay| {
+                let path = overlay.local_mbtiles_path.as_ref()?;
+                Some(match overlay.filter {
+                    1 => format!("{path}?fast"),
+                    2 => format!("{path}?slow"),
+                    _ => path.clone(),
+                })
+            })
+            .collect::<Vec<_>>();
+        if let Err(error) = self.submit_tile_job(cx, key, move || {
+            // The packed archive bytes decode here, on the bake job.
+            let decoded = base
+                .as_ref()
+                .map(TileBlob::decode)
+                .transpose()
+                .and_then(|base| {
+                    detail
+                        .as_ref()
+                        .map(TileBlob::decode)
+                        .transpose()
+                        .map(|detail| (base, detail))
+                });
+            let result = decoded.and_then(|(base, detail)| {
+                build_local_tile_from_archive_bytes(
+                    key,
+                    base,
+                    detail,
+                    detail_path.as_deref().map(Path::new),
+                    bridge_dz_path.as_deref().map(Path::new),
+                    overlays,
+                    &overlay_paths,
+                    &theme_style,
+                    bucket,
+                    buildings_3d,
+                    want_fringe,
+                    build_road_core,
+                )
+                .map(|tile| {
+                    tile.map(|mut tile| {
+                        if let Some(limit) = tile_payload_limit {
+                            tile.buffers.degrade_to_memory_limit(limit);
+                        }
+                        tile
+                    })
+                })
+            });
+            match result {
+                Ok(tile) => {
+                    let _ = sender.send(TileWorkerMessage::LocalBatchLoaded {
+                        style_epoch,
+                        requested,
+                        loaded: tile.into_iter().collect(),
+                        failed: Vec::new(),
+                    });
+                }
+                Err(error) => {
+                    let _ = sender.send(TileWorkerMessage::LocalBatchLoaded {
+                        style_epoch,
+                        requested: requested.clone(),
+                        loaded: Vec::new(),
+                        failed: requested,
+                    });
+                    log!("MapView: archive tile build failed: {}", error);
+                }
+            }
+        }) {
+            self.local_requested_tiles.remove(&key);
+            self.mark_tile_failed(key, &format!("tile worker submission failed: {error}"));
+            self.update_status_text();
+            self.redraw(cx);
+        }
+    }
+
+    fn cancel_archive_tile(&mut self, cx: &mut Cx, key: TileKey) {
+        let overlays = self
+            .archive_pending_tiles
+            .remove(&key)
+            .map(|parts| parts.overlays)
+            .unwrap_or_default();
+        if let Some(archive) = self.base_archive.as_mut() {
+            archive.cancel_tile(cx, key);
+        }
+        if let Some(archive) = self.detail_archive.as_mut() {
+            archive.cancel_tile(cx, key);
+        }
+        for overlay in overlays {
+            let Some(fetch_key) = overlay.fetch_key else {
+                continue;
+            };
+            let still_needed = self.archive_pending_tiles.values().any(|parts| {
+                parts.overlays.iter().any(|candidate| {
+                    candidate.archive_index == overlay.archive_index
+                        && candidate.fetch_key == Some(fetch_key)
+                        && candidate.result.is_none()
+                })
+            });
+            if !still_needed {
+                if let Some(archive) = self
+                    .overlay_archives
+                    .get_mut(overlay.archive_index)
+                    .and_then(|overlay| overlay.archive.as_mut())
+                {
+                    archive.cancel_tile(cx, fetch_key);
+                }
+            }
+        }
+    }
+
+    fn dispatch_legacy_tile_builds(&mut self, cx: &mut Cx, keys: Vec<TileKey>, bucket: u32) {
+        let style_epoch = self.style_epoch;
+        let active_path = self.active_mbtiles_path().to_string();
+        for key in keys {
+            let sender = self.tile_worker_rx.sender();
+            let requested = vec![key];
+            let mbtiles_path = active_path.clone();
+            let detail_path = self.detail_mbtiles_path.clone();
+            let bridge_dz_path = self.bridge_dz_mbtiles_path.clone();
+            let overlay_paths = self
+                .overlay_archives
+                .iter()
+                .filter_map(|overlay| {
+                    let path = overlay.local_mbtiles_path.as_ref()?;
+                    Some(match overlay.filter {
+                        1 => format!("{path}?fast"),
+                        2 => format!("{path}?slow"),
+                        _ => path.clone(),
+                    })
+                })
+                .collect::<Vec<_>>();
+            let buildings_3d = self.buildings_3d && self.tilt > 0.0;
+            let want_fringe = self.baked_fringe_mode;
+            let theme_style = self.active_style().clone();
+            let tile_payload_limit = self.tile_upload_limit(cx);
+            let build_road_core = !self.tiles.get(&key).is_some_and(|entry| {
+                matches!(entry.state, TileLoadState::Ready { .. })
+                    && entry.bucket == bucket
+                    && entry.road_core_cached
+                    && entry.baked_fringe == want_fringe
+            });
+            if let Err(error) = self.submit_tile_job(cx, key, move || {
+                let detail_path = (!detail_path.is_empty()).then_some(detail_path);
+                let bridge_dz_path = (!bridge_dz_path.is_empty()).then_some(bridge_dz_path);
+                match load_local_tile_batch(
+                    Path::new(&mbtiles_path),
+                    detail_path.as_deref().map(Path::new),
+                    bridge_dz_path.as_deref().map(Path::new),
+                    &overlay_paths,
+                    &requested,
+                    &theme_style,
+                    bucket,
+                    buildings_3d,
+                    want_fringe,
+                    build_road_core,
+                ) {
+                    Ok((mut loaded, failed)) => {
+                        if let Some(limit) = tile_payload_limit {
+                            for tile in &mut loaded {
+                                tile.buffers.degrade_to_memory_limit(limit);
+                            }
+                        }
+                        let _ = sender.send(TileWorkerMessage::LocalBatchLoaded {
+                            style_epoch,
+                            requested,
+                            loaded,
+                            failed,
+                        });
+                    }
+                    Err(error) => {
+                        let _ = sender.send(TileWorkerMessage::LocalBatchFailed {
+                            style_epoch,
+                            requested,
+                            error,
+                        });
+                    }
+                }
+            }) {
+                self.local_requested_tiles.remove(&key);
+                self.mark_tile_failed(key, &format!("tile worker submission failed: {error}"));
+            }
+        }
+    }
+
+    fn request_visible_tiles_from_local_source(&mut self, cx: &mut Cx) {
+        if !self.use_local_mbtiles {
+            return;
+        }
+
+        self.ensure_archive_source(cx);
+
+        let bucket = self.render_bucket();
+        // OBSOLETE-WORK CANCELLATION runs on every viewport pass, including
+        // same-zoom pans. Running jobs finish, but queued jobs outside the
+        // current visible set may not start or retain an in-flight slot.
+        let request_zoom = self.request_zoom_level();
+        let visible: HashSet<TileKey> = self.visible_tiles.iter().copied().collect();
+        let rotation = self.screen_rotation();
+        let tilt_cos = self.tilt_cos();
+        let mut priority_order = self.visible_tiles.clone();
+        sort_tiles_center_out(
+            &mut priority_order,
+            request_zoom,
+            self.center_norm,
+            rotation,
+            tilt_cos,
+        );
+        let priorities = priority_order
+            .iter()
+            .map(|key| {
+                (
+                    *key,
+                    tile_screen_priority(
+                        *key,
+                        request_zoom,
+                        self.center_norm,
+                        rotation,
+                        tilt_cos,
+                    ),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let obsolete_archive: Vec<TileKey> = self
+            .archive_pending_tiles
+            .keys()
+            .filter(|key| key.z != request_zoom || !visible.contains(key))
+            .copied()
+            .collect();
+        for key in obsolete_archive {
+            self.cancel_archive_tile(cx, key);
             self.local_requested_tiles.remove(&key);
             if self
                 .tiles
@@ -3706,6 +7938,62 @@ impl MapView {
                 self.tiles.remove(&key);
             }
         }
+        if let Some(archive) = self.base_archive.as_mut() {
+            archive.reprioritize_tiles(&priorities);
+        }
+        if let Some(archive) = self.detail_archive.as_mut() {
+            archive.reprioritize_tiles(&priorities);
+        }
+        let mut overlay_priorities =
+            vec![HashMap::<TileKey, u64>::new(); self.overlay_archives.len()];
+        for (logical_key, parts) in &self.archive_pending_tiles {
+            let priority = priorities.get(logical_key).copied().unwrap_or(u64::MAX);
+            for overlay in &parts.overlays {
+                if let Some(fetch_key) = overlay.fetch_key {
+                    overlay_priorities[overlay.archive_index]
+                        .entry(fetch_key)
+                        .and_modify(|current| *current = (*current).min(priority))
+                        .or_insert(priority);
+                }
+            }
+        }
+        for (overlay, priorities) in self
+            .overlay_archives
+            .iter_mut()
+            .zip(overlay_priorities.iter())
+        {
+            if let Some(archive) = overlay.archive.as_mut() {
+                archive.reprioritize_tiles(priorities);
+            }
+        }
+        if let Some(archive) = self.base_archive.as_mut() {
+            archive.flush(cx);
+        }
+        if let Some(archive) = self.detail_archive.as_mut() {
+            archive.flush(cx);
+        }
+        for overlay in &mut self.overlay_archives {
+            if let Some(archive) = overlay.archive.as_mut() {
+                archive.flush(cx);
+            }
+        }
+        let dropped = self
+            .tile_queue
+            .retain(|key| key.z == request_zoom && visible.contains(key));
+        for key in dropped {
+            self.local_requested_tiles.remove(&key);
+            // A staged-then-dropped placeholder must not linger as
+            // Loading forever; keep-stale Ready entries stay.
+            if self
+                .tiles
+                .get(&key)
+                .is_some_and(|entry| matches!(entry.state, TileLoadState::LoadingLocal))
+            {
+                self.tiles.remove(&key);
+            }
+        }
+        self.sync_archive_request_watchdog(cx);
+        let now = self.frame_counter;
         // Absent tiles get re-checked after a while: our mbtiles archives
         // are rebuilt in place during development, and a one-off read
         // glitch must not leave a permanent hole.
@@ -3716,22 +8004,24 @@ impl MapView {
         // tile-batch by tile-batch under the gesture.
         let zoom_settling = self
             .last_zoom_change_time
-            .is_some_and(|at| at.elapsed().as_secs_f64() < ZOOM_SETTLE_SECONDS);
+            .is_some_and(|at| cx.seconds_since_app_start() - at < ZOOM_SETTLE_SECONDS);
         let mut missing = Vec::<TileKey>::new();
         for key in &self.visible_tiles {
             if self.local_requested_tiles.contains_key(key)
                 || self.local_missing_tiles.contains_key(key)
+                || self.memory_pressure.deferred.contains_key(key)
             {
                 continue;
             }
             if let Some(entry) = self.tiles.get(key) {
                 match &entry.state {
                     // Stale geometry stays drawable but gets rebuilt. A
-                    // same-bucket mode flip can retain the stable road core;
-                    // zoom/style rebuilds cannot.
+                    // same-bucket 2D/3D flip can retain the stable road core;
+                    // fringe, zoom, and style rebuilds cannot.
                     TileLoadState::Ready { .. }
                         if entry.bucket != bucket
                             || entry.baked_3d != self.baked_3d_mode
+                            || entry.baked_fringe != self.baked_fringe_mode
                             || !entry.road_core_cached =>
                     {
                         if zoom_settling {
@@ -3756,34 +8046,13 @@ impl MapView {
         // Load center-out: visible_tiles is generated row-major, and with
         // only max_in_flight slots per frame the top-left corner otherwise
         // fills before what the user is actually looking at.
-        {
-            let zoom = self.request_zoom_level();
-            let center = self.center_norm * tile_world_size(zoom) / TILE_SIZE as f64;
-            if self.tilt > 0.0 {
-                // Screen-space priority under tilt: the flat grid distance
-                // ranks the near field (screen-bottom, LARGEST on screen)
-                // no better than the compressed far field, so it loaded
-                // last. Project tile centers through the camera rotation +
-                // tilt foreshortening and give toward-camera tiles a
-                // tilt-scaled head start. Untilted behavior is unchanged.
-                let (rot_cos, rot_sin) = self.screen_rotation();
-                let tilt_cos = self.tilt.to_radians().cos().clamp(0.2, 1.0);
-                missing.sort_by_key(|key| {
-                    let dx = (key.x as f64 + 0.5) - center.x;
-                    let dy = (key.y as f64 + 0.5) - center.y;
-                    let sx = dx * rot_cos - dy * rot_sin;
-                    let sy = (dx * rot_sin + dy * rot_cos) * tilt_cos;
-                    let near_bias = sy.max(0.0) * (1.0 - tilt_cos) * 3.0;
-                    (((sx * sx + sy * sy).sqrt() - near_bias) * 4096.0) as i64
-                });
-            } else {
-                missing.sort_by_key(|key| {
-                    let dx = (key.x as f64 + 0.5) - center.x;
-                    let dy = (key.y as f64 + 0.5) - center.y;
-                    ((dx * dx + dy * dy) * 4096.0) as i64
-                });
-            }
-        }
+        sort_tiles_center_out(
+            &mut missing,
+            request_zoom,
+            self.center_norm,
+            rotation,
+            tilt_cos,
+        );
         // Dispatch each tile as its own worker job so builds run in parallel
         // across the pool; keep enough in flight to cover a viewport restyle.
         // While a zoom gesture is live, dispatch only the innermost tiles:
@@ -3804,7 +8073,17 @@ impl MapView {
             })
             .count();
         let restyle_burst = stale_rebuilds * 2 >= missing.len();
-        let slot_cap = if zoom_settling && !restyle_burst {
+        let slot_cap = if cfg!(target_arch = "wasm32") {
+            // Bound decoded archive parts waiting behind the one/two bake
+            // slots. A large visible set is priority input, not permission
+            // to hold one raw+detail payload per visible tile.
+            MapMemoryBudgets::from_cx(cx).bake_slots
+        } else if matches!(
+            self.tile_source_config,
+            Some(TileSourceConfig::HttpArchive { .. })
+        ) {
+            64usize
+        } else if zoom_settling && !restyle_burst {
             4usize
         } else {
             12usize
@@ -3818,7 +8097,8 @@ impl MapView {
         }
 
         for key in &missing {
-            self.local_requested_tiles.insert(*key, self.frame_counter);
+            self.local_requested_tiles
+                .insert(*key, cx.seconds_since_app_start());
             let prev_attempts = self.tiles.get(key).map_or(0, |entry| entry.attempts);
             let keep_stale = self
                 .tiles
@@ -3835,70 +8115,165 @@ impl MapView {
                         bytes: 0,
                         bucket,
                         baked_3d: self.baked_3d_mode,
+                        baked_fringe: self.baked_fringe_mode,
                         road_core_cached: false,
                         road_icon_indices: Vec::new(),
                         road_icon_vertices: Vec::new(),
                         fade: None,
+                        draw: TileDrawLists::default(),
                     },
                 );
             }
         }
+        self.sync_archive_request_watchdog(cx);
 
-        let pool = self.tile_thread_pool.as_ref().unwrap();
-        let style_epoch = self.style_epoch;
+        if self.base_archive.is_none() {
+            self.dispatch_legacy_tile_builds(cx, missing, bucket);
+            return;
+        }
+
+        let detail_needed = bucket >= 14;
+        let reuse_base_as_detail = detail_needed
+            && self
+                .tile_source_config
+                .as_ref()
+                .is_some_and(detail_matches_base);
+        let detail_required = detail_needed && self.detail_archive.is_some();
+        let generation = self.archive_generation;
         for key in missing {
-            let build_road_core = !self.tiles.get(&key).is_some_and(|entry| {
-                matches!(entry.state, TileLoadState::Ready { .. })
-                    && entry.bucket == bucket
-                    && entry.road_core_cached
-            });
-            let sender = self.tile_worker_rx.sender();
-            let requested = vec![key];
-            let mbtiles_path = active_path.clone();
-            let detail_path = self.detail_mbtiles_path.clone();
-            let bridge_dz_path = self.bridge_dz_mbtiles_path.clone();
-            let overlay_paths: Vec<String> = self
-                .overlay_mbtiles_paths
-                .split(';')
-                .filter(|p| !p.trim().is_empty())
-                .map(|p| p.trim().to_string())
-                .collect();
-            // Extruded buildings only bake while the camera is tilted; flat
-            // mode keeps the classic 2D building and tree style.
-            let buildings_3d = self.buildings_3d && self.tilt > 0.0;
-            let theme_style = self.active_style().clone();
-            pool.execute_rev(key, move |_tag| {
-                let detail_path = (!detail_path.is_empty()).then_some(detail_path);
-                let bridge_dz_path = (!bridge_dz_path.is_empty()).then_some(bridge_dz_path);
-                let result = load_local_tile_batch(
-                    Path::new(&mbtiles_path),
-                    detail_path.as_deref().map(Path::new),
-                    bridge_dz_path.as_deref().map(Path::new),
-                    &overlay_paths,
-                    &requested,
-                    &theme_style,
-                    bucket,
-                    buildings_3d,
-                    build_road_core,
-                );
-            match result {
-                Ok((loaded, failed)) => {
-                    let _ = sender.send(TileWorkerMessage::LocalBatchLoaded {
-                        style_epoch,
-                        requested,
-                        loaded,
-                        failed,
-                    });
+            let priority = priorities.get(&key).copied().unwrap_or(u64::MAX);
+            let mut overlays = Vec::new();
+            for (archive_index, overlay) in self.overlay_archives.iter_mut().enumerate() {
+                let Some(archive) = overlay.archive.as_mut() else {
+                    continue;
+                };
+                let (fetch_key, result) = match archive.zoom_range() {
+                    Some(range) => match overlay_fetch_key(key, range) {
+                        Some(fetch_key) => (Some(fetch_key), None),
+                        None => (None, Some(Ok(None))),
+                    },
+                    None => (Some(key), None),
+                };
+                if let Some(fetch_key) = fetch_key {
+                    archive.request_tile(cx, fetch_key, generation, priority);
                 }
-                Err(error) => {
-                    let _ = sender.send(TileWorkerMessage::LocalBatchFailed {
-                        style_epoch,
-                        requested,
-                        error,
-                    });
+                overlays.push(ArchiveOverlayPart {
+                    archive_index,
+                    name: overlay.name.clone(),
+                    filter: overlay.filter,
+                    fetch_key,
+                    result,
+                });
+            }
+            self.archive_pending_tiles.insert(
+                key,
+                ArchiveTileParts {
+                    generation,
+                    base: None,
+                    detail: None,
+                    detail_required,
+                    reuse_base_as_detail: reuse_base_as_detail && key.z >= 14,
+                    overlays,
+                },
+            );
+            if let Some(archive) = self.base_archive.as_mut() {
+                archive.request_tile(cx, key, generation, priority);
+            }
+            if detail_required {
+                if let Some(archive) = self.detail_archive.as_mut() {
+                    archive.request_tile(cx, key, generation, priority);
                 }
             }
-            });
+        }
+        if let Some(archive) = self.base_archive.as_mut() {
+            archive.flush(cx);
+        }
+        if let Some(archive) = self.detail_archive.as_mut() {
+            archive.flush(cx);
+        }
+        for overlay in &mut self.overlay_archives {
+            if let Some(archive) = overlay.archive.as_mut() {
+                archive.flush(cx);
+            }
+        }
+        self.sync_archive_request_watchdog(cx);
+    }
+
+    fn expire_archive_requests(&mut self, cx: &mut Cx) {
+        // Hosted archives have their dispatch-aware stall clock in the web
+        // transport. A tile can wait here for a browser connection without
+        // becoming eligible for cancellation.
+        if !self.is_local_archive() {
+            return;
+        }
+        let now = cx.seconds_since_app_start();
+        let timed_out: Vec<TileKey> = self
+            .local_requested_tiles
+            .iter()
+            .filter(|(_, started)| now - **started >= ARCHIVE_REQUEST_TIMEOUT_SECONDS)
+            .map(|(key, _)| *key)
+            .collect();
+        let expired_any = !timed_out.is_empty();
+        for key in timed_out {
+            self.local_requested_tiles.remove(&key);
+            self.cancel_archive_tile(cx, key);
+            if self
+                .tiles
+                .get(&key)
+                .is_some_and(|entry| matches!(entry.state, TileLoadState::LoadingLocal))
+            {
+                self.tiles.remove(&key);
+            }
+        }
+        if expired_any {
+            self.redraw(cx);
+        }
+    }
+
+    fn sync_archive_request_watchdog(&mut self, cx: &mut Cx) {
+        if !self.is_local_archive() {
+            self.archive_request_watchdog_handle = None;
+            return;
+        }
+        if self.local_requested_tiles.is_empty() {
+            self.archive_request_watchdog_handle = None;
+        } else if self.archive_request_watchdog_handle.is_none()
+            && !self.archive_request_watchdog_unavailable
+        {
+            if self.archive_request_watchdog_scheduler.is_none() {
+                match cx.thread_spawner().scheduler() {
+                    Ok(scheduler) => {
+                        self.archive_request_watchdog_scheduler = Some(scheduler);
+                    }
+                    Err(error) => {
+                        self.archive_request_watchdog_unavailable = true;
+                        log!("MapView: archive watchdog unavailable: {error}");
+                        return;
+                    }
+                }
+            }
+            let now = cx.seconds_since_app_start();
+            let deadline = self
+                .local_requested_tiles
+                .values()
+                .copied()
+                .fold(f64::INFINITY, f64::min)
+                + ARCHIVE_REQUEST_TIMEOUT_SECONDS;
+            let scheduler_deadline = Cx::monotonic_now() + (deadline - now).max(0.001);
+            let sender = self.archive_request_watchdog_rx.sender();
+            match self.archive_request_watchdog_scheduler.as_ref().unwrap().at(
+                scheduler_deadline,
+                CancellationToken::new(),
+                move || {
+                    let _ = sender.send(());
+                },
+            ) {
+                Ok(handle) => self.archive_request_watchdog_handle = Some(handle),
+                Err(error) => {
+                    self.archive_request_watchdog_unavailable = true;
+                    log!("MapView: archive watchdog scheduling failed: {error}");
+                }
+            }
         }
     }
 
@@ -3940,10 +8315,12 @@ impl MapView {
                 bytes: 0,
                 bucket,
                 baked_3d: self.baked_3d_mode,
+                baked_fringe: self.baked_fringe_mode,
                 road_core_cached: false,
                 road_icon_indices: Vec::new(),
                 road_icon_vertices: Vec::new(),
                 fade: None,
+                draw: TileDrawLists::default(),
             },
         );
         log!(
@@ -3968,6 +8345,308 @@ impl MapView {
         let half_y = (self.view_rect.size.y * 0.5 / world).min(0.5);
         self.center_norm.x = if half_x >= 0.5 { 0.5 } else { self.center_norm.x.clamp(half_x, 1.0 - half_x) };
         self.center_norm.y = if half_y >= 0.5 { 0.5 } else { self.center_norm.y.clamp(half_y, 1.0 - half_y) };
+    }
+
+    fn touch_world_rel(&self, abs: Vec2d) -> Vec2d {
+        if self.space_warp_eff.is_on() {
+            self.overlay_camera().screen_to_world_rel(abs)
+        } else {
+            let rect_center = self.view_rect.pos + self.view_rect.size * 0.5;
+            self.screen_delta_to_world(abs - rect_center)
+        }
+    }
+
+    fn begin_two_finger_gesture(&mut self, pair: TouchPair) {
+        self.fly = None;
+        self.drag_start_abs = None;
+        self.gesture_panned = true;
+        self.touch_gesture = TouchGesture::TwoFinger {
+            start: pair,
+            start_zoom: self.view_zoom(),
+            start_center_norm: self.center_norm,
+            start_midpoint_rel: self.touch_world_rel(pair.midpoint()),
+            start_rotation: self.rotation,
+            start_tilt: self.tilt,
+            mode: TouchGestureMode::Pending,
+        };
+    }
+
+    fn finish_touch_interaction(
+        &mut self,
+        cx: &mut Cx,
+        settle_camera: bool,
+        snap_tilt: bool,
+    ) {
+        if settle_camera {
+            // Match the mouse rotate/tilt release: a small residual tilt is
+            // visually indistinguishable from a 3D mode that failed to end.
+            if snap_tilt && self.tilt > 0.0 && self.tilt < 10.0 {
+                self.tilt = 0.0;
+                cx.widget_action(self.uid, MapViewAction::TiltChanged { tilt: 0.0 });
+            }
+            cx.stop_timer(self.zoom_settle_timer);
+            self.zoom_settle_timer =
+                cx.start_timeout(LABEL_REPLACE_MIN_SECONDS + 0.05);
+            self.redraw(cx);
+        }
+        if self.gesture_panned {
+            self.pending_viewport_changed = false;
+            self.sync_camera_fields();
+            self.emit_viewport_changed(cx);
+        }
+        self.gesture_panned = false;
+    }
+
+    fn start_double_tap_zoom(&mut self, cx: &mut Cx, abs: Vec2d) {
+        let min_zoom = self.min_zoom.max(0.0);
+        let max_zoom = self.max_zoom.max(min_zoom);
+        let from_zoom = self.view_zoom();
+        let to_zoom = (from_zoom + 1.0).clamp(min_zoom, max_zoom);
+        if (to_zoom - from_zoom).abs() < 1e-9 {
+            return;
+        }
+        let anchor_rel = self.touch_world_rel(abs);
+        let from_world_size = tile_world_size_zoom(from_zoom);
+        let to_world_size = tile_world_size_zoom(to_zoom);
+        let anchor_norm = self.center_norm + anchor_rel / from_world_size;
+        let to_center = (anchor_norm * to_world_size - anchor_rel) / to_world_size;
+        self.fly = Some(FlyTo {
+            started: cx.seconds_since_app_start(),
+            duration: 0.25,
+            from_center: self.center_norm,
+            to_center,
+            from_zoom,
+            to_zoom,
+            arc: 0.0,
+            anchor: Some((anchor_norm, anchor_rel)),
+        });
+        self.note_shimmer_activity(cx);
+        cx.stop_timer(self.fly_timer);
+        self.fly_timer = cx.start_timeout(0.016);
+        self.redraw(cx);
+    }
+
+    fn handle_touch_tap(&mut self, cx: &mut Cx, abs: Vec2d, tap_count: u32) {
+        if tap_count == 2 {
+            self.start_double_tap_zoom(cx, abs);
+        } else if let Some((lon, lat, info)) = self.pin_at(abs) {
+            cx.widget_action(self.uid, MapViewAction::PinTapped { lon, lat, info });
+        } else if let Some(id) = self.overlay.marker_at(&self.overlay_camera(), abs) {
+            cx.widget_action(self.uid, MapViewAction::MarkerClicked { id });
+        } else {
+            let (lon, lat) = self.screen_to_lon_lat(abs);
+            cx.widget_action(self.uid, MapViewAction::Tapped { lon, lat, abs });
+        }
+    }
+
+    /// Raw multi-touch is handled after `Event::hits` has established that
+    /// the map owns the first touch. From then until release this state
+    /// machine consumes touch updates so the synthesized one-finger pan
+    /// cannot fight a two-finger camera gesture.
+    fn handle_touch_update(
+        &mut self,
+        cx: &mut Cx,
+        event: &TouchUpdateEvent,
+        hit: &Hit,
+    ) -> bool {
+        let gesture = std::mem::take(&mut self.touch_gesture);
+        let gesture = match gesture {
+            TouchGesture::None => {
+                let Hit::FingerDown(fe) = hit else {
+                    return false;
+                };
+                let DigitDevice::Touch { uid } = &fe.device else {
+                    return false;
+                };
+                let Some(abs) = touch_abs(event, *uid) else {
+                    return false;
+                };
+                self.fly = None;
+                self.gesture_panned = false;
+                TouchGesture::Pan {
+                    uid: *uid,
+                    start_abs: abs,
+                    start_center_norm: self.center_norm,
+                    tap_count: fe.tap_count,
+                    can_tap: true,
+                    settle_camera: false,
+                    snap_tilt: false,
+                }
+            }
+            gesture => gesture,
+        };
+
+        self.note_shimmer_activity(cx);
+        match gesture {
+            TouchGesture::None => unreachable!(),
+            TouchGesture::Pan {
+                uid,
+                start_abs,
+                start_center_norm,
+                tap_count,
+                can_tap,
+                settle_camera,
+                snap_tilt,
+            } => {
+                if let Some(pair) = first_two_active_touches(event) {
+                    self.begin_two_finger_gesture(pair);
+                    return true;
+                }
+                if let Some(abs) = touch_abs(event, uid) {
+                    let delta = abs - start_abs;
+                    if delta.length() > 6.0 {
+                        self.gesture_panned = true;
+                    }
+                    let world_delta = if self.space_warp_eff.is_on() {
+                        let camera = self.overlay_camera();
+                        camera.screen_to_world_rel(abs) - camera.screen_to_world_rel(start_abs)
+                    } else {
+                        self.screen_delta_to_world(delta)
+                    };
+                    let world_size = tile_world_size_zoom(self.view_zoom());
+                    self.center_norm = start_center_norm
+                        - dvec2(world_delta.x / world_size, world_delta.y / world_size);
+                    self.wrap_and_clamp_center();
+                    self.redraw(cx);
+                    self.touch_gesture = TouchGesture::Pan {
+                        uid,
+                        start_abs,
+                        start_center_norm,
+                        tap_count,
+                        can_tap,
+                        settle_camera,
+                        snap_tilt,
+                    };
+                    return true;
+                }
+
+                if let Some(remaining) = first_active_touch(event) {
+                    self.touch_gesture = TouchGesture::Pan {
+                        uid: remaining.uid,
+                        start_abs: remaining.abs,
+                        start_center_norm: self.center_norm,
+                        tap_count: 0,
+                        can_tap: false,
+                        settle_camera,
+                        snap_tilt,
+                    };
+                    return true;
+                }
+
+                let was_tap = can_tap
+                    && matches!(hit, Hit::FingerUp(fe)
+                        if matches!(&fe.device, DigitDevice::Touch { uid: up_uid } if *up_uid == uid)
+                            && fe.was_tap());
+                self.finish_touch_interaction(cx, settle_camera, snap_tilt);
+                if was_tap {
+                    let abs = event
+                        .touches
+                        .iter()
+                        .find(|touch| touch.uid == uid)
+                        .map_or(start_abs, |touch| touch.abs);
+                    self.handle_touch_tap(cx, abs, tap_count);
+                }
+                self.touch_gesture = TouchGesture::None;
+            }
+            TouchGesture::TwoFinger {
+                start,
+                start_zoom,
+                start_center_norm,
+                start_midpoint_rel,
+                start_rotation,
+                start_tilt,
+                mode,
+            } => {
+                let Some(current) = active_touch_pair(event, start) else {
+                    if let Some(pair) = first_two_active_touches(event) {
+                        self.begin_two_finger_gesture(pair);
+                    } else if let Some(remaining) = first_active_touch(event) {
+                        self.touch_gesture = TouchGesture::Pan {
+                            uid: remaining.uid,
+                            start_abs: remaining.abs,
+                            start_center_norm: self.center_norm,
+                            tap_count: 0,
+                            can_tap: false,
+                            settle_camera: true,
+                            snap_tilt: mode == TouchGestureMode::Tilt,
+                        };
+                    } else {
+                        self.finish_touch_interaction(
+                            cx,
+                            true,
+                            mode == TouchGestureMode::Tilt,
+                        );
+                        self.touch_gesture = TouchGesture::None;
+                    }
+                    return true;
+                };
+
+                let mode = if mode == TouchGestureMode::Pending {
+                    classify_touch_gesture(start, current)
+                } else {
+                    mode
+                };
+                match mode {
+                    TouchGestureMode::Pending => {}
+                    TouchGestureMode::Pinch => {
+                        let distance_ratio =
+                            current.distance().max(1.0) / start.distance().max(1.0);
+                        let min_zoom = self.min_zoom.max(0.0);
+                        let max_zoom = self.max_zoom.max(min_zoom);
+                        let new_zoom =
+                            (start_zoom + distance_ratio.log2()).clamp(min_zoom, max_zoom);
+                        let old_world_size = tile_world_size_zoom(start_zoom);
+                        let new_world_size = tile_world_size_zoom(new_zoom);
+                        let current_midpoint_rel = self.touch_world_rel(current.midpoint());
+                        self.zoom = new_zoom;
+                        self.center_norm = pinch_anchor_center_norm(
+                            start_center_norm,
+                            start_midpoint_rel,
+                            current_midpoint_rel,
+                            old_world_size,
+                            new_world_size,
+                        );
+                        self.wrap_and_clamp_center();
+                        self.last_zoom_change_frame = self.frame_counter;
+                        self.last_zoom_change_time = Some(cx.seconds_since_app_start());
+                        self.pending_viewport_changed = true;
+                        cx.stop_timer(self.zoom_settle_timer);
+                        self.zoom_settle_timer = cx.start_timeout(0.15);
+                        self.redraw(cx);
+                    }
+                    TouchGestureMode::Rotate => {
+                        let delta_deg = touch_angle_delta(start, current).to_degrees();
+                        self.rotation = (start_rotation - delta_deg).rem_euclid(360.0);
+                        self.redraw(cx);
+                    }
+                    TouchGestureMode::Tilt => {
+                        // Phone convention (Apple/Google Maps): two fingers
+                        // sliding UP tilt the camera into 3D, sliding down
+                        // flatten it — the opposite sign of the desktop
+                        // right-drag.
+                        let delta_y = start.midpoint().y - current.midpoint().y;
+                        let raw_tilt =
+                            (start_tilt + delta_y * 0.25).clamp(0.0, self.tilt_max_deg_now());
+                        self.tilt = if raw_tilt < 6.0 { 0.0 } else { raw_tilt };
+                        cx.widget_action(
+                            self.uid,
+                            MapViewAction::TiltChanged { tilt: self.tilt },
+                        );
+                        self.redraw(cx);
+                    }
+                }
+                self.touch_gesture = TouchGesture::TwoFinger {
+                    start,
+                    start_zoom,
+                    start_center_norm,
+                    start_midpoint_rel,
+                    start_rotation,
+                    start_tilt,
+                    mode,
+                };
+            }
+        }
+        true
     }
 
     fn zoom_with_anchor(&mut self, cx: &mut Cx, scroll: f64, anchor_abs: Vec2d) {
@@ -4011,7 +8690,7 @@ impl MapView {
         );
         self.wrap_and_clamp_center();
         self.last_zoom_change_frame = self.frame_counter;
-        self.last_zoom_change_time = Some(std::time::Instant::now());
+        self.last_zoom_change_time = Some(cx.seconds_since_app_start());
         self.pending_viewport_changed = true;
         // The paint beat idles when input stops; without a timer wake the
         // settle window would never elapse and stale-bucket restyles only
@@ -4021,51 +8700,126 @@ impl MapView {
         self.redraw(cx);
     }
 
-    fn ensure_tile_thread_pool(&mut self, cx: &mut Cx) {
-        if self.tile_thread_pool.is_none() {
-            let num_threads = cx.cpu_cores().max(3) - 2;
-            self.tile_thread_pool = Some(TagThreadPool::new(cx, num_threads));
+    fn submit_tile_job<F>(&mut self, cx: &mut Cx, key: TileKey, job: F) -> Result<(), SubmitError>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        let sender = self.tile_worker_rx.sender();
+        let style_epoch = self.style_epoch;
+        let guarded_job = move || {
+            if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)) {
+                let message = if let Some(message) = payload.downcast_ref::<&str>() {
+                    (*message).to_string()
+                } else if let Some(message) = payload.downcast_ref::<String>() {
+                    message.clone()
+                } else {
+                    "non-string panic payload".to_string()
+                };
+                let error = format!(
+                    "tile bake z{} x{} y{} panicked: {}",
+                    key.z, key.x, key.y, message
+                );
+                crate::error!("MapView: {error}");
+                let _ = sender.send(TileWorkerMessage::TileJobPanicked {
+                    style_epoch,
+                    tile_key: key,
+                    error,
+                });
+            }
+        };
+        let pool = cx.task_pool();
+        if pool.is_open() {
+            let window = self.bake_window(cx, &pool);
+            self.tile_queue.set_in_flight_limit(window);
+            self.tile_queue
+                .push(&pool, key, true, QueueOrder::Lifo, guarded_job)
+        } else {
+            // Pure parsing/tessellation has an explicit serial fallback when
+            // wasm was built without atomics.
+            guarded_job();
+            Ok(())
         }
+    }
+
+    /// Hand staged tile jobs over as workers free up: after every request
+    /// pass and on the UI signal each pool completion raises.
+    /// Bakes in flight at once: the idle workers, capped by the memory
+    /// budget's bake slots so a burst of arrivals cannot park seven bakes'
+    /// working sets in memory at the same time on a small heap.
+    fn bake_window(&self, cx: &Cx, pool: &TaskPool) -> usize {
+        pool_window(pool, self.tile_queue.in_flight())
+            .min(MapMemoryBudgets::from_cx(cx).bake_slots)
+            .max(1)
+    }
+
+    fn pump_tile_queue(&mut self, cx: &mut Cx) {
+        if self.tile_queue.staged_len() == 0 {
+            return;
+        }
+        let pool = cx.task_pool();
+        let window = self.bake_window(cx, &pool);
+        self.tile_queue.set_in_flight_limit(window);
+        self.tile_queue.pump(&pool);
     }
 
     fn ensure_visible_tiles(&mut self, cx: &mut Cx, rect: Rect) {
         self.frame_counter = self.frame_counter.wrapping_add(1);
-        // This is the sole owner of the 2D/3D tile transition. `set_tilt`
-        // only updates the camera and redraws, avoiding duplicate restyles.
+        self.maybe_release_memory_pressure(cx);
+        if cfg!(target_arch = "wasm32") {
+            let budgets = MapMemoryBudgets::from_cx(cx);
+            let resident = self
+                .tiles
+                .values()
+                .map(TileEntry::working_set_bytes)
+                .fold(0usize, usize::saturating_add);
+            if resident > self.resident_tile_budget(budgets) {
+                self.note_memory_pressure(cx, "resident tile cache exceeded its fixed cap");
+            }
+        }
+        let now_seconds = cx.seconds_since_app_start();
+        // This is the sole owner of tilt-dependent tile-mode transitions.
+        // `set_tilt` only updates the camera and redraws, avoiding duplicate
+        // restyles.
         let mode_3d = self.buildings_3d && self.tilt > 0.0;
-        if mode_3d != self.baked_3d_mode {
+        let fringe_mode = want_fringe_for_tilt(self.tilt, self.baked_fringe_mode);
+        if mode_3d != self.baked_3d_mode || fringe_mode != self.baked_fringe_mode {
             self.baked_3d_mode = mode_3d;
+            self.baked_fringe_mode = fringe_mode;
             self.restyle_mode_overlay_keep_stale(cx);
         }
         // Read the archive's declared zoom range BEFORE computing visible
         // tile keys — request_zoom_level clamps to it, and reading it after
         // meant the very first frame requested impossible zoom levels.
         if self.use_local_mbtiles {
-            let active_path = self.active_mbtiles_path().to_string();
-            self.ensure_local_zoom_range(&active_path, Path::new(&active_path));
+            self.ensure_archive_source(cx);
+            self.ensure_local_zoom_range();
         }
         for entry in self.tiles.values_mut() {
             if entry
                 .fade
                 .as_ref()
-                .is_some_and(|fade| fade.started.elapsed().as_secs_f64() > TILE_FADE_SECONDS)
+                .is_some_and(|fade| now_seconds - fade.started > TILE_FADE_SECONDS)
             {
-                entry.fade = None;
+                entry.end_fade();
             }
         }
         self.visible_tiles = self.visible_tile_keys(rect);
+        // A pan can evict enough neighboring payload to admit a previously
+        // exhausted tile. Recheck after installing this frame's visible set
+        // so the headroom calculation observes that event immediately.
+        self.expire_memory_deferrals(cx);
         let target_zoom = self.request_zoom_level();
         // Keep frames coming briefly after a zoom change so the deferred
         // bucket restyle actually fires once the gesture settles.
         if self
             .last_zoom_change_time
-            .is_some_and(|at| at.elapsed().as_secs_f64() < ZOOM_SETTLE_SECONDS + 0.05)
+            .is_some_and(|at| now_seconds - at < ZOOM_SETTLE_SECONDS + 0.05)
         {
             self.redraw(cx);
         }
 
-        self.ensure_tile_thread_pool(cx);
         self.request_visible_tiles_from_local_source(cx);
+        self.pump_tile_queue(cx);
 
         let mut visible_set = HashSet::with_capacity(self.visible_tiles.len());
         for key in &self.visible_tiles {
@@ -4082,6 +8836,9 @@ impl MapView {
             .count();
 
         for key in self.visible_tiles.clone() {
+            if self.memory_pressure.deferred.contains_key(&key) {
+                continue;
+            }
             let retry_attempt = self.tiles.get(&key).and_then(|entry| {
                 if let TileLoadState::Failed { retry_after } = entry.state {
                     if entry.attempts < MAX_TILE_RETRIES && self.frame_counter >= retry_after {
@@ -4138,8 +8895,17 @@ impl MapView {
         // 60-90 MB per tile (CPU floats AND a GPU copy), so even a modest
         // resident set can eat the machine. Evict least-recently-used
         // non-visible tiles until the geometry footprint fits.
-        const TILE_CACHE_BYTE_BUDGET: usize = 1_200_000_000;
-        let total_bytes: usize = self.tiles.values().map(|entry| entry.bytes).sum();
+        let total_bytes: usize = self
+            .tiles
+            .values()
+            .map(|entry| {
+                if cfg!(target_arch = "wasm32") {
+                    entry.working_set_bytes()
+                } else {
+                    entry.bytes
+                }
+            })
+            .sum();
         // Anti-thrash: street-zoom tiles now carry the full icon horizon
         // (50-85 MB each), so a fixed budget can sit BELOW visible+ring —
         // pure LRU then evicts the exact neighbor a pan re-enters seconds
@@ -4151,9 +8917,37 @@ impl MapView {
             .tiles
             .iter()
             .filter(|(key, _)| visible_set.contains(*key))
-            .map(|(_, entry)| entry.bytes)
+            .map(|(_, entry)| {
+                if cfg!(target_arch = "wasm32") {
+                    entry.working_set_bytes()
+                } else {
+                    entry.bytes
+                }
+            })
             .sum();
-        let byte_budget = TILE_CACHE_BYTE_BUDGET.max(visible_bytes.saturating_mul(2));
+        let budgets = MapMemoryBudgets::from_cx(cx);
+        // Native keeps the same margin beyond the exact visible set: a
+        // budget pinned at visible_bytes evicts the trailing edge of a pan
+        // on the next frame. Web cannot manufacture that headroom; its
+        // pressure LOD and per-result admission cap provide the anti-thrash
+        // behavior while keeping the logical resident limit fixed.
+        let visible_floor = visible_bytes.saturating_mul(2);
+        let nominal_budget = if matches!(
+            self.tile_source_config,
+            Some(TileSourceConfig::HttpArchive { .. })
+        ) {
+            budgets.http_tile_cache
+        } else {
+            budgets.tile_cache
+        };
+        // Native preserves the two-visible-set anti-thrash floor. Web has a
+        // hard logical resident cap: visibility triggers bounded rebakes or
+        // metadata-approved coarser source tiles, never budget inflation.
+        let byte_budget = if cfg!(target_arch = "wasm32") {
+            nominal_budget
+        } else {
+            nominal_budget.max(visible_floor)
+        };
         if total_bytes > byte_budget {
             let center = self.center_norm;
             let mut evictable: Vec<(TileKey, u64, usize)> = self
@@ -4166,7 +8960,17 @@ impl MapView {
                             TileLoadState::LoadingNetwork | TileLoadState::LoadingLocal
                         )
                 })
-                .map(|(key, entry)| (*key, entry.last_used, entry.bytes))
+                .map(|(key, entry)| {
+                    (
+                        *key,
+                        entry.last_used,
+                        if cfg!(target_arch = "wasm32") {
+                            entry.working_set_bytes()
+                        } else {
+                            entry.bytes
+                        },
+                    )
+                })
                 .collect();
             let norm_dist = |key: &TileKey| -> f64 {
                 let n = (1u64 << key.z.min(30)) as f64;
@@ -4269,10 +9073,13 @@ impl MapView {
     fn tile_fading_from_empty(&self, key: TileKey) -> bool {
         self.tiles.get(&key).is_some_and(|entry| {
             entry.fade.as_ref().is_some_and(|fade| {
-                fade.fill_geometry.is_none()
-                    && fade.casing_geometry.is_none()
-                    && fade.stroke_geometry.is_none()
+                fade.fill_geometry.is_empty()
+                    && fade.fill_misc_geometry.is_none()
+                    && fade.face_geometry.is_empty()
+                    && fade.casing_geometry.is_empty()
+                    && fade.stroke_geometry.is_empty()
                     && fade.icon_geometry.is_none()
+                    && fade.icon_instances.is_empty()
             })
         })
     }
@@ -4335,7 +9142,7 @@ impl MapView {
                 ..
             } = &entry.state
             {
-                *feature_count > 0 || fill_geometry.is_some() || stroke_geometry.is_some()
+                *feature_count > 0 || !fill_geometry.is_empty() || !stroke_geometry.is_empty()
             } else {
                 false
             }
@@ -4379,12 +9186,11 @@ impl MapView {
             let cache_path = tile_data_cache_path_for(tile_key);
             if let Ok(cached_body) = fs::read_to_string(&cache_path) {
                 // Offload heavy JSON parsing + tessellation to the thread pool
-                self.ensure_tile_thread_pool(cx);
-                let pool = self.tile_thread_pool.as_ref().unwrap();
                 let sender = self.tile_worker_rx.sender();
                 let style_epoch = self.style_epoch;
                 let theme_style = self.active_style().clone();
                 let bucket = self.render_bucket();
+                let tile_payload_limit = self.tile_upload_limit(cx);
                 self.tiles.insert(
                     tile_key,
                     TileEntry {
@@ -4395,16 +9201,21 @@ impl MapView {
                         bytes: 0,
                         bucket,
                         baked_3d: self.baked_3d_mode,
+                        baked_fringe: self.baked_fringe_mode,
                         road_core_cached: false,
                         road_icon_indices: Vec::new(),
                         road_icon_vertices: Vec::new(),
                         fade: None,
+                        draw: TileDrawLists::default(),
                     },
                 );
-                pool.execute_rev(tile_key, move |_tag| {
+                if let Err(error) = self.submit_tile_job(cx, tile_key, move || {
                     match build_tile_buffers_from_body(tile_key, &cached_body, &theme_style, bucket)
                     {
-                        Ok(buffers) => {
+                        Ok(mut buffers) => {
+                            if let Some(limit) = tile_payload_limit {
+                                buffers.degrade_to_memory_limit(limit);
+                            }
                             let _ = sender.send(TileWorkerMessage::NetworkTileParsed {
                                 style_epoch,
                                 tile_key,
@@ -4420,7 +9231,11 @@ impl MapView {
                             });
                         }
                     }
-                });
+                }) {
+                    self.mark_tile_failed(tile_key, &format!("tile worker submission failed: {error}"));
+                    self.update_status_text();
+                    self.redraw(cx);
+                }
                 return false;
             }
         }
@@ -4456,10 +9271,12 @@ impl MapView {
                 bytes: 0,
                 bucket,
                 baked_3d: self.baked_3d_mode,
+                baked_fringe: self.baked_fringe_mode,
                 road_core_cached: false,
                 road_icon_indices: Vec::new(),
                 road_icon_vertices: Vec::new(),
                 fade: None,
+                draw: TileDrawLists::default(),
             },
         );
         cx.http_request(request_id, request);
@@ -4474,6 +9291,7 @@ impl MapView {
         map_offset: Vec2d,
         rect: Rect,
     ) -> bool {
+        let now = cx.seconds_since_app_start();
         // Pan-only frames: redraw the cached placement shifted by the pan
         // delta instead of re-scanning/re-shaping/re-colliding every label.
         let pan_delta = map_offset - self.label_cache_offset;
@@ -4484,49 +9302,69 @@ impl MapView {
         // uniforms the tiles get, so warp-amount changes (and rotation
         // under the fold) ride the GPU exactly like tile geometry.
         let tilt_delta = self.tilt != self.label_cache_tilt;
+        // A budget-truncated pass is never a strict cache hit: its follow-up
+        // wake must run the full at-rest pass, else the truncated placement
+        // (on a slow frame: no labels at all) would stand until the camera
+        // moved far enough to invalidate the cache by itself.
         let cache_strict = self.label_cache_valid
+            && !self.needs_label_followup
             && self.label_cache_zoom == view_zoom
             && rot_delta == 0.0
             && !tilt_delta
             && self.label_cache_generation == self.tiles_generation
             && self.label_cache_tiles.as_slice() == draw_tiles
             && pan_dist < LABEL_REPLACE_PAN_PX;
-        // Softly-stale cache is still fine to show briefly; rate-limit the
-        // expensive full re-place. This covers active zooming too — labels
-        // stay pinned in screen space for up to ~125ms during the gesture
-        // (pinch behavior a la Google Maps) instead of re-placing every
-        // frame, which was 5-20ms/frame at label-dense zooms. Small
-        // rotation deltas reuse the cache RIGIDLY rotated about the pivot —
-        // that's what keeps labels from wiggling during heading-up nav —
-        // but only at identical zoom (rotation+zoom compose non-affinely
-        // with the cached-screen transform below).
-        // While the camera is MOVING (rotation, tilt, zoom gesture, warp
-        // tween), keep riding the cached placement on the GPU transforms —
-        // a mid-gesture re-place costs 5-20ms AND lands on positions a
-        // frame stale, which reads as labels trailing the map. The full
-        // re-place runs once the camera has been quiet for a beat, and
-        // lands where the transforms already put everything.
+        // The motion detector: ANY camera change — pan, zoom, rotation,
+        // tilt, the fold tween, a fly-to — marks the camera as moving for
+        // the settle window. A pan counts too: a slow drag used to look
+        // "quiet" to this detector, so every tile entering the view (the
+        // strict cache misses on the tile set) re-placed mid-drag on the
+        // gesture budget — a different subset of the candidates each time,
+        // names swapping and jumping under the finger.
         let camera_sig = (
             self.rotation,
             self.tilt,
             view_zoom,
             self.space_warp_eff.amount,
+            map_offset.x,
+            map_offset.y,
         );
         if camera_sig != self.camera_motion_sig {
             self.camera_motion_sig = camera_sig;
-            self.camera_motion_last = Some(std::time::Instant::now());
+            self.camera_motion_last = Some(now);
         }
         let camera_moving = self
             .camera_motion_last
-            .is_some_and(|at| at.elapsed().as_secs_f64() < LABEL_SETTLE_SECONDS);
-        let cache_soft = self.label_cache_valid
-            && ((rot_delta == 0.0 && !tilt_delta)
-                || self.label_cache_zoom == view_zoom)
-            && (self.label_cache_zoom - view_zoom).abs() < 0.5
-            && (camera_moving
+            .is_some_and(|at| now - at < LABEL_SETTLE_SECONDS);
+        // The cached placement is DRAWABLE while the GPU delta from its
+        // camera is exact: screen positions transform affinely under
+        // zoom-about-cursor and pan, and small rotation/tilt deltas ride the
+        // 2x2 camera matrix — but only at identical zoom (rotation+zoom
+        // compose non-affinely with the cached-screen transform). Within
+        // half a zoom level the glyphs scale acceptably (pinch behaviour a
+        // la Google Maps: labels stay pinned to the map through the gesture).
+        let cache_drawable = self.label_cache_valid
+            && ((rot_delta == 0.0 && !tilt_delta) || self.label_cache_zoom == view_zoom)
+            && (self.label_cache_zoom - view_zoom).abs() < 0.5;
+        // The gesture hold: while the camera moves, the settled placement
+        // (its identities, positions and fades) rides the GPU transforms —
+        // no re-place lands mid-gesture (5-20 ms a beat AND a frame stale,
+        // which read as labels trailing the map). The full re-place runs
+        // once the camera has been quiet for a beat, where the transforms
+        // already put everything. The hold yields only when a same-zoom pan
+        // outruns the margin law (the cached set no longer covers the
+        // viewport edge): that mid-gesture pass keeps the previous winners
+        // through the hysteresis bonus and cross-fades the rest.
+        let hold = camera_moving
+            && (self.label_cache_zoom != view_zoom || pan_dist < LABEL_REPLACE_PAN_PX);
+        // Softly-stale cache is still fine to show briefly; at rest the
+        // expensive full re-place is rate-limited (tile arrivals invalidated
+        // the strict cache almost every other frame while a burst landed).
+        let cache_soft = cache_drawable
+            && (hold
                 || self
                     .last_full_place_time
-                    .is_some_and(|at| at.elapsed().as_secs_f64() < LABEL_REPLACE_MIN_SECONDS));
+                    .is_some_and(|at| now - at < LABEL_REPLACE_MIN_SECONDS));
         if cache_strict || cache_soft {
             if camera_moving {
                 // Guarantee the settle re-place: the last gesture frame
@@ -4535,108 +9373,61 @@ impl MapView {
                 cx.cx.stop_timer(self.zoom_settle_timer);
                 self.zoom_settle_timer = cx.cx.start_timeout(LABEL_SETTLE_SECONDS + 0.02);
             }
-            // Screen positions transform affinely under zoom-about-cursor:
-            // s_new = s_old * k + R·(off_new - off_old * k) with the
-            // heading-up rotation R applied about the view pivot. A plain
-            // offset during zoom flung cached labels thousands of px away.
-            let k = 2.0_f64.powf(view_zoom - self.label_cache_zoom);
-            let raw_shift = map_offset - self.label_cache_offset * k;
-            let camera_vec = |v: Vec2d| {
-                let r = self.rotate_screen_vec(v);
-                dvec2(r.x, r.y * self.tilt_cos())
-            };
-            let mut shift = camera_vec(raw_shift);
-            if k != 1.0 {
-                let pivot = rect.pos + rect.size * 0.5;
-                shift += (pivot - camera_vec(pivot)) * (1.0 - k);
-            }
-            // The GPU camera-delta matrix transforms everything AFTER the
-            // CPU offsets are applied — pre-invert the pan shift so it
-            // lands where intended: shift_pre = M^-1 * shift.
-            {
-                let (dc, ds) = ((-rot_delta).to_radians().cos(), (-rot_delta).to_radians().sin());
-                let t0 = self
-                    .label_cache_tilt
-                    .clamp(0.0, TILT_HARD_MAX_DEG)
-                    .to_radians()
-                    .cos()
-                    .max(1e-6);
-                let t1 = self.tilt_cos().max(1e-6);
-                let (a, b, c, d) = (dc, -ds / t0, t1 * ds, t1 * dc / t0);
-                let det = a * d - b * c;
-                if det.abs() > 1e-9 {
-                    let (sx, sy) = (shift.x, shift.y);
-                    shift = dvec2((d * sx - b * sy) / det, (-c * sx + a * sy) / det);
-                }
-            }
-            // Screen-space delta rotation about the view pivot (phi = -rotation);
-            // the cached placement's tilt_cos rides along so the draw can
-            // build the exact non-commuting delta matrix.
-            let rot_rad = (-rot_delta).to_radians() as f32;
-            let cached_tilt_cos =
-                (self.label_cache_tilt.clamp(0.0, TILT_HARD_MAX_DEG).to_radians().cos() as f32).max(1e-4);
-            let pivot = rect.pos + rect.size * 0.5;
-            self.draw_label_plans_scaled(
-                cx,
-                k as f32,
-                Vec2f {
-                    x: shift.x as f32,
-                    y: shift.y as f32,
-                },
-                rot_rad,
-                Vec2f {
-                    x: pivot.x as f32,
-                    y: pivot.y as f32,
-                },
-                cached_tilt_cos,
-                false,
-            );
+            let xf = self.label_cache_transform(self.label_cache_cam(), view_zoom, map_offset, rect);
+            self.draw_label_set(cx, xf, false, LabelSet::Live);
+            self.draw_retiring_labels(cx, view_zoom, map_offset, rect, now);
             return false;
         }
-        self.last_full_place_time = Some(std::time::Instant::now());
+        self.last_full_place_time = Some(now);
 
         let mut label_perf = LabelPerfStats::default();
         self.collect_label_candidates(draw_tiles, view_zoom, map_offset, rect, &mut label_perf);
-        if self.scratch_candidates.is_empty() {
-            self.path_glyphs.clear();
-            self.scratch_accepted_plans.clear();
-            self.store_label_cache(draw_tiles, view_zoom, map_offset);
-            self.label_perf = label_perf;
-            return true;
-        }
-        self.scratch_candidates
-            .sort_unstable_by(|a, b| {
-                b.score
-                    .total_cmp(&a.score)
-                    .then_with(|| a.name_key.cmp(&b.name_key))
-            });
-        let candidate_budget = label_candidate_budget(view_zoom);
-        if self.scratch_candidates.len() > candidate_budget {
-            self.scratch_candidates.truncate(candidate_budget);
-        }
-        label_perf.candidates_kept = self.scratch_candidates.len();
-        label_perf.shape_budget = label_shape_attempt_budget(view_zoom);
 
+        // The placement being replaced steps aside (the buffers swap, no
+        // copy): whatever it placed that this pass does not keeps drawing
+        // from its own placement space while it fades out (`retire_labels`).
+        std::mem::swap(&mut self.path_glyphs, &mut self.old_glyphs);
+        std::mem::swap(&mut self.scratch_accepted_plans, &mut self.old_plans);
         self.path_glyphs.clear();
+        self.scratch_accepted_plans.clear();
+        self.scratch_new_keys.clear();
         // Clear but retain allocations from previous frames
         for v in self.scratch_accepted_centers.values_mut() {
             v.clear();
         }
         self.scratch_accepted_bounds.clear();
-        self.scratch_accepted_plans.clear();
 
-        // During gestures the budget keeps re-places to ~a frame; at rest run
-        // a full pass, otherwise the tail (house numbers) would never place —
-        // each pass restarts from the same highest-scored candidates.
-        let at_rest = pan_dist < 1.0
-            && (self.label_cache_zoom - view_zoom).abs() < 1e-9
+        // At rest = the camera has been quiet for the settle window (the
+        // wake after a gesture lands here) and no zoom step is in flight:
+        // run the full pass, otherwise the tail (house numbers) would never
+        // place — each pass restarts from the same highest-scored
+        // candidates. A pass forced mid-gesture keeps to ~a frame.
+        let at_rest = !camera_moving
             && self
                 .last_zoom_change_time
-                .is_none_or(|at| at.elapsed().as_secs_f64() > 0.25);
+                .is_none_or(|at| now - at > 0.25);
         let place_budget_ms = if at_rest { 40.0 } else { LABEL_PLACE_BUDGET_MS };
-        let place_start = std::time::Instant::now();
+        // The budget is for placement: candidate collection and the sort
+        // below are already paid for, and on a slow frame (the web at dense
+        // zooms spends 5-6 ms collecting) charging them here left nothing
+        // for the loop — a pass that placed zero labels and committed that.
+        let place_start = cx.seconds_since_app_start();
+        if !self.scratch_candidates.is_empty() {
+            self.scratch_candidates
+                .sort_unstable_by(|a, b| {
+                    b.score
+                        .total_cmp(&a.score)
+                        .then_with(|| a.name_key.cmp(&b.name_key))
+                });
+            let candidate_budget = label_candidate_budget(view_zoom);
+            if self.scratch_candidates.len() > candidate_budget {
+                self.scratch_candidates.truncate(candidate_budget);
+            }
+            label_perf.candidates_kept = self.scratch_candidates.len();
+            label_perf.shape_budget = label_shape_attempt_budget(view_zoom);
+        }
         for candidate_index in 0..self.scratch_candidates.len() {
-            if place_start.elapsed().as_secs_f64() * 1000.0 > place_budget_ms {
+            if (cx.seconds_since_app_start() - place_start).max(0.0) * 1000.0 > place_budget_ms {
                 label_perf.rejected_budget +=
                     label_perf.candidates_kept.saturating_sub(candidate_index);
                 break;
@@ -4734,8 +9525,11 @@ impl MapView {
             label_perf.drawn_labels += 1;
             label_perf.drawn_glyphs += glyph_count;
             let score = candidate.score + candidate.source_rank as f64 * 2.0;
-            self.scratch_accepted_hashes
-                .push(stable_label_key(&candidate.name_key, &candidate.road_kind));
+            let key = stable_label_key(&candidate.name_key, &candidate.road_kind);
+            // A survivor keeps its birth (no fade restarts); a newcomer
+            // rises from transparent starting now.
+            let born = self.prev_label_keys.get(&key).copied().unwrap_or(now);
+            self.scratch_new_keys.insert(key);
             // Post-icon phase: in-pin text and charger brand draw AFTER
             // the symbol pass so they sit on the pins, not under them.
             let post_icon = candidate.color_class == LABEL_CLASS_PIN
@@ -4758,72 +9552,240 @@ impl MapView {
             } else {
                 (0.0, 0.0)
             };
-            self.scratch_accepted_plans.push((
+            self.scratch_accepted_plans.push(LabelPlan {
                 score,
-                placement.glyph_start,
-                placement.glyph_end,
-                candidate.color_class,
+                glyph_start: placement.glyph_start,
+                glyph_end: placement.glyph_end,
+                color_class: candidate.color_class,
                 post_icon,
-                candidate.screen_point,
-                Vec2f {
+                upright: candidate.screen_point,
+                anchor: Vec2f {
                     x: placement.center.x as f32 - layout_shift.0,
                     y: placement.center.y as f32 - layout_shift.1,
                 },
-                candidate.baked_lift_px,
-            ));
+                baked_lift: candidate.baked_lift_px,
+                key,
+                born,
+            });
+        }
+        let truncated = label_perf.rejected_budget > 0;
+
+        // Retire what this pass no longer places (it moved out of the accept
+        // window, lost a collision, or fell past the budget): those glyphs
+        // fade out from the OLD placement's space, riding the camera like
+        // everything else, instead of popping.
+        let old_cam = self.label_cache_cam();
+        self.old_plans
+            .retain(|plan| !self.scratch_new_keys.contains(&plan.key));
+        let retired = !self.old_plans.is_empty() && self.label_cache_valid;
+        if retired {
+            self.retire_labels(old_cam, now);
+        }
+        let born_now = self
+            .scratch_accepted_plans
+            .iter()
+            .any(|plan| plan.born == now);
+        if retired || born_now {
+            // Fades need frames: a 60 Hz wake for the fade window, each
+            // re-presenting the batches under a new clock (uniforms only).
+            self.label_fade_until = now + LABEL_FADE_SECONDS;
+            cx.cx.stop_timer(self.label_fade_timer);
+            self.label_fade_timer = cx.cx.start_timeout(0.016);
+        }
+        // The hysteresis set for the next pass (and the births it carries).
+        self.prev_label_keys.clear();
+        for plan in &self.scratch_accepted_plans {
+            self.prev_label_keys.insert(plan.key, plan.born);
         }
 
-        self.prev_label_keys.clear();
-        self.prev_label_keys
-            .extend(self.scratch_accepted_hashes.drain(..));
-
         self.scratch_accepted_plans
-            .sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
-        self.draw_label_plans(cx, Vec2f { x: 0.0, y: 0.0 });
+            .sort_unstable_by(|a, b| a.score.total_cmp(&b.score));
+        // The cache (and `label_gen`) first: the batch recorded below is
+        // the one this generation keeps.
         self.store_label_cache(draw_tiles, view_zoom, map_offset);
-        // budget-truncated passes need another wake to place the tail
-        self.needs_label_followup = label_perf.rejected_budget > 0;
+        // A fresh placement draws at identity — but the fold's origin is
+        // the view pivot in EVERY frame: the shader folds the ground about
+        // `cam_pivot`, so the fresh frame must carry the same pivot the
+        // cached frames do (a zero pivot folded about the screen corner and
+        // blew the whole label set up for one frame at every re-place).
+        let pivot = rect.pos + rect.size * 0.5;
+        let xf = LabelDrawXf {
+            scale: 1.0,
+            shift: Vec2f { x: 0.0, y: 0.0 },
+            rot: 0.0,
+            pivot: Vec2f {
+                x: pivot.x as f32,
+                y: pivot.y as f32,
+            },
+            cached_tilt_cos: (self.tilt_cos() as f32).max(1e-4),
+        };
+        self.draw_label_set(cx, xf, false, LabelSet::Live);
+        self.draw_retiring_labels(cx, view_zoom, map_offset, rect, now);
+        // A budget-truncated pass leaves a tail (on a slow gesture frame:
+        // most of the labels) unplaced: flag it and arm the settle wake so
+        // the next quiet frame runs the full at-rest pass — `cache_strict`
+        // yields to the flag. At rest the chain is capped (every pass
+        // restarts from the top candidates).
+        self.label_followups = if at_rest && truncated {
+            self.label_followups + 1
+        } else {
+            0
+        };
+        self.needs_label_followup = truncated && self.label_followups < LABEL_FOLLOWUP_MAX;
+        if self.needs_label_followup {
+            cx.cx.stop_timer(self.zoom_settle_timer);
+            self.zoom_settle_timer = cx.cx.start_timeout(LABEL_SETTLE_SECONDS + 0.02);
+        }
         self.label_perf = label_perf;
         true
     }
 
-    /// Draw the current accepted label plans (halo underdraw + colored text)
-    /// as one glyph instance batch, optionally shifted by a screen offset
-    /// (used to redraw the cached placement while panning).
-    fn draw_label_plans(&mut self, cx: &mut Cx2d, extra_offset: Vec2f) {
-        let current_tilt_cos = (self.tilt_cos() as f32).max(1e-4);
-        self.draw_label_plans_scaled(
-            cx,
-            1.0,
-            extra_offset,
-            0.0,
-            Vec2f { x: 0.0, y: 0.0 },
-            current_tilt_cos,
-            false,
-        );
+    /// The camera the live placement was computed for.
+    fn label_cache_cam(&self) -> LabelCacheCam {
+        LabelCacheCam {
+            offset: self.label_cache_offset,
+            zoom: self.label_cache_zoom,
+            rotation: self.label_cache_rotation,
+            tilt: self.label_cache_tilt,
+        }
+    }
+
+    /// The exact per-frame delta from a placement's camera to this frame's,
+    /// for the glyph shader: screen positions transform affinely under
+    /// zoom-about-cursor, s_new = s_old * k + R·(off_new - off_old * k)
+    /// with the heading-up rotation R applied about the view pivot (a plain
+    /// offset during zoom flung cached labels thousands of px away), and
+    /// the rotation/tilt delta is the general 2x2 S(t1)*R(d)*S(1/t0).
+    fn label_cache_transform(
+        &self,
+        cam: LabelCacheCam,
+        view_zoom: f64,
+        map_offset: Vec2d,
+        rect: Rect,
+    ) -> LabelDrawXf {
+        let rot_delta = self.rotation - cam.rotation;
+        let k = 2.0_f64.powf(view_zoom - cam.zoom);
+        let raw_shift = map_offset - cam.offset * k;
+        let camera_vec = |v: Vec2d| {
+            let r = self.rotate_screen_vec(v);
+            dvec2(r.x, r.y * self.tilt_cos())
+        };
+        let mut shift = camera_vec(raw_shift);
+        let pivot = rect.pos + rect.size * 0.5;
+        if k != 1.0 {
+            shift += (pivot - camera_vec(pivot)) * (1.0 - k);
+        }
+        // The GPU camera-delta matrix transforms everything AFTER the
+        // CPU offsets are applied — pre-invert the pan shift so it
+        // lands where intended: shift_pre = M^-1 * shift.
+        let cached_tilt_cos = cam
+            .tilt
+            .clamp(0.0, TILT_HARD_MAX_DEG)
+            .to_radians()
+            .cos()
+            .max(1e-6);
+        {
+            let (dc, ds) = ((-rot_delta).to_radians().cos(), (-rot_delta).to_radians().sin());
+            let t0 = cached_tilt_cos;
+            let t1 = self.tilt_cos().max(1e-6);
+            let (a, b, c, d) = (dc, -ds / t0, t1 * ds, t1 * dc / t0);
+            let det = a * d - b * c;
+            if det.abs() > 1e-9 {
+                let (sx, sy) = (shift.x, shift.y);
+                shift = dvec2((d * sx - b * sy) / det, (-c * sx + a * sy) / det);
+            }
+        }
+        LabelDrawXf {
+            scale: k as f32,
+            shift: Vec2f {
+                x: shift.x as f32,
+                y: shift.y as f32,
+            },
+            rot: (-rot_delta).to_radians() as f32,
+            pivot: Vec2f {
+                x: pivot.x as f32,
+                y: pivot.y as f32,
+            },
+            cached_tilt_cos: (cached_tilt_cos as f32).max(1e-4),
+        }
+    }
+
+    /// Move the labels the current pass dropped (already filtered into
+    /// `old_plans`, their glyphs in `old_glyphs`) into a retiring slot: a
+    /// free one, else the one furthest into its fade.
+    fn retire_labels(&mut self, cam: LabelCacheCam, now: f64) {
+        let slots = &mut self.label_retiring.slots;
+        let slot = (0..LABEL_RETIRING_SLOTS)
+            .find(|&i| slots[i].since.is_none())
+            .unwrap_or_else(|| {
+                (0..LABEL_RETIRING_SLOTS)
+                    .min_by(|&a, &b| {
+                        slots[a]
+                            .since
+                            .unwrap_or(0.0)
+                            .total_cmp(&slots[b].since.unwrap_or(0.0))
+                    })
+                    .unwrap_or(0)
+            });
+        let retiring = &mut slots[slot];
+        std::mem::swap(&mut retiring.glyphs, &mut self.old_glyphs);
+        std::mem::swap(&mut retiring.plans, &mut self.old_plans);
+        retiring.cam = cam;
+        retiring.since = Some(now);
+        self.retire_gen = self.retire_gen.wrapping_add(1);
+        retiring.gen = self.retire_gen;
+    }
+
+    /// Draw the retiring sets under the delta from THEIR placement camera,
+    /// freeing a slot once its fade has run out.
+    fn draw_retiring_labels(
+        &mut self,
+        cx: &mut Cx2d,
+        view_zoom: f64,
+        map_offset: Vec2d,
+        rect: Rect,
+        now: f64,
+    ) {
+        for i in 0..LABEL_RETIRING_SLOTS {
+            let Some(since) = self.label_retiring.slots[i].since else {
+                continue;
+            };
+            if now - since >= LABEL_FADE_SECONDS {
+                let slot = &mut self.label_retiring.slots[i];
+                slot.since = None;
+                slot.plans.clear();
+                continue;
+            }
+            let cam = self.label_retiring.slots[i].cam;
+            let xf = self.label_cache_transform(cam, view_zoom, map_offset, rect);
+            self.label_retiring.slots[i].xf = xf;
+            self.draw_label_set(cx, xf, false, LabelSet::Retiring(i));
+        }
     }
 
     /// Redraw only the pin-class (in-bubble) label plans — called after
     /// the icon pass so kW text sits on top of the charger pins.
     fn draw_pin_label_phase(&mut self, cx: &mut Cx2d) {
-        let (scale, offset, rot, pivot, cached_tilt_cos) = self.label_draw_transform;
-        self.draw_label_plans_scaled(cx, scale, offset, rot, pivot, cached_tilt_cos, true);
+        let xf = self.label_draw_transform;
+        self.draw_label_set(cx, xf, true, LabelSet::Live);
+        for i in 0..LABEL_RETIRING_SLOTS {
+            if self.label_retiring.slots[i].since.is_some() {
+                let xf = self.label_retiring.slots[i].xf;
+                self.draw_label_set(cx, xf, true, LabelSet::Retiring(i));
+            }
+        }
     }
 
-    fn draw_label_plans_scaled(
-        &mut self,
-        cx: &mut Cx2d,
-        scale: f32,
-        extra_offset: Vec2f,
-        rot: f32,
-        pivot: Vec2f,
-        cached_tilt_cos: f32,
-        pin_phase: bool,
-    ) {
-        // Remember the transform so the pin-text phase redraws with the
-        // exact same mapping after the icon pass.
-        self.label_draw_transform = (scale, extra_offset, rot, pivot, cached_tilt_cos);
-        self.label_cache_tilt_cos_for_delta = cached_tilt_cos;
+    /// Draw one placement's label plans (halo underdraw + colored text) as
+    /// one retained glyph batch under the transform `xf` from its camera to
+    /// this frame's; `pin_phase` selects the in-pin plans drawn after the
+    /// icon pass.
+    fn draw_label_set(&mut self, cx: &mut Cx2d, xf: LabelDrawXf, pin_phase: bool, set: LabelSet) {
+        if set == LabelSet::Live {
+            // Remember the transform so the pin-text phase redraws with the
+            // exact same mapping after the icon pass.
+            self.label_draw_transform = xf;
+        }
         // 4 diagonal offsets read as a solid halo at map label sizes and
         // halve the glyph volume vs an 8-direction ring
         const HALO_OFFSETS: [(f32, f32); 4] = [
@@ -4837,19 +9799,17 @@ impl MapView {
             let style = self.active_style();
             (style.label, style.label_halo)
         };
-        // Rigid delta-rotation of the cached placement about the pivot
-        // (heading-up nav): transform a copy once, draw slices from it.
         // Camera-delta on the GPU: the EXACT delta between the cached
         // placement's camera and now. The placement maps world points as
         // rotate-about-pivot THEN y-compress by tilt_cos; the delta from
         // (r0, t0) to (r1, t1) is S(t1)*R(d)*S(1/t0) — a general 2x2 (S
         // and R do not commute), which is why a plain rotate+scale
         // snapped visibly at every re-place in 2.5D.
-        let (dc, ds) = (rot.cos(), rot.sin());
-        let t0 = self.label_cache_tilt_cos_for_delta;
+        let (dc, ds) = (xf.rot.cos(), xf.rot.sin());
+        let t0 = xf.cached_tilt_cos;
         let t1 = self.tilt_cos() as f32;
         let m = [dc, -ds / t0, t1 * ds, t1 * dc / t0];
-        self.draw_label.set_camera_delta(cx.cx, m, pivot);
+        self.draw_label.set_camera_delta(cx.cx, m, xf.pivot);
         // The fold, stamped with the SAME values the tile shader carries
         // this frame: labels are emitted unwarped and bend on the GPU, so
         // they track rotation/tilt/warp exactly like tile geometry.
@@ -4862,26 +9822,60 @@ impl MapView {
         );
         // Pan/zoom ride uniforms too (same-frame as the tile map_offset):
         // glyphs below emit in CACHED placement space, scale 1, no offset.
-        self.draw_label.set_pan_delta(
-            cx.cx,
-            scale,
-            Vec2f {
-                x: extra_offset.x,
-                y: extra_offset.y,
-            },
-        );
+        self.draw_label.set_pan_delta(cx.cx, xf.scale, xf.shift);
+        // The fade clock: every glyph carries its fade start as an instance
+        // value; the clock is the one per-frame uniform that moves them.
+        let clock = cx.seconds_since_app_start() as f32;
+        self.draw_label
+            .set_fade_clock(cx.cx, clock, LABEL_FADE_SECONDS as f32);
+        // The batch is a retained draw list: recorded when the plans, the
+        // clip, the theme or the shader changed, else re-presented under
+        // the uniforms staged above — a pan frame uploads no glyphs.
+        let (gen, set_index) = match set {
+            LabelSet::Live => (self.label_gen, 0),
+            LabelSet::Retiring(i) => (self.label_retiring.slots[i].gen, 1 + i),
+        };
+        let sig = LabelListSig {
+            gen,
+            clip: self.view_rect,
+            theme: self.effective_theme(),
+            dark_theme,
+            shader: self.draw_label.draw_super.draw_vars.draw_shader_id.is_some(),
+        };
+        let slot = set_index * 2 + usize::from(pin_phase);
+        let list = self.label_lists.lists[slot].get_or_insert_with(|| DrawList2d::new(cx));
+        let record = self.label_lists.sigs[slot] != Some(sig);
+        if list.begin_maybe(cx, record).is_not_redrawing() {
+            self.draw_label.refresh_glyph_batch(cx, list.id());
+            return;
+        }
         self.draw_label.begin_glyph_batch(cx);
-        for i in 0..self.scratch_accepted_plans.len() {
-            let (_, start, end, color_class, post_icon, upright, anchor, baked_lift) =
-                self.scratch_accepted_plans[i];
-            if post_icon != pin_phase {
+        // Retiring glyphs all sink from the moment the set was retired;
+        // live glyphs rise from their own birth (long past for survivors).
+        let (plans, glyphs, fade_at, fade_in): (&[LabelPlan], &[PathGlyphInstance], Option<f32>, f32) =
+            match set {
+                LabelSet::Live => (&self.scratch_accepted_plans, &self.path_glyphs, None, 1.0),
+                LabelSet::Retiring(i) => {
+                    let retiring = &self.label_retiring.slots[i];
+                    (
+                        &retiring.plans,
+                        &retiring.glyphs,
+                        retiring.since.map(|since| since as f32),
+                        -1.0,
+                    )
+                }
+            };
+        for plan in plans {
+            if plan.post_icon != pin_phase {
                 continue;
             }
-            self.draw_label.lift = baked_lift;
-            let glyphs = &self.path_glyphs[start..end];
-            let billboard = pin_phase && upright;
+            self.draw_label.lift = plan.baked_lift;
+            self.draw_label.fade_at = fade_at.unwrap_or(plan.born as f32);
+            self.draw_label.fade_in = fade_in;
+            let glyphs = &glyphs[plan.glyph_start..plan.glyph_end];
+            let billboard = pin_phase && plan.upright;
             // In-pin text sits on a solid pin color: no halo underdraw.
-            if color_class != LABEL_CLASS_PIN {
+            if plan.color_class != LABEL_CLASS_PIN {
                 self.draw_label.draw_super.color = halo_color;
                 for offset in HALO_OFFSETS {
                     let off = Vec2f {
@@ -4890,30 +9884,38 @@ impl MapView {
                     };
                     if billboard {
                         self.draw_label
-                            .draw_path_glyphs_billboard(cx, glyphs, 1.0, off, anchor);
-                    } else if upright {
+                            .draw_path_glyphs_billboard(cx, glyphs, 1.0, off, plan.anchor);
+                    } else if plan.upright {
                         self.draw_label
-                            .draw_path_glyphs_upright(cx, glyphs, 1.0, off, anchor);
+                            .draw_path_glyphs_upright(cx, glyphs, 1.0, off, plan.anchor);
                     } else {
                         self.draw_label.draw_path_glyphs_scaled(cx, glyphs, 1.0, off);
                     }
                 }
             }
             self.draw_label.draw_super.color =
-                label_class_color(color_class, label_color, dark_theme);
+                label_class_color(plan.color_class, label_color, dark_theme);
             let zero = Vec2f { x: 0.0, y: 0.0 };
             if billboard {
                 self.draw_label
-                    .draw_path_glyphs_billboard(cx, glyphs, 1.0, zero, anchor);
-            } else if upright {
+                    .draw_path_glyphs_billboard(cx, glyphs, 1.0, zero, plan.anchor);
+            } else if plan.upright {
                 self.draw_label
-                    .draw_path_glyphs_upright(cx, glyphs, 1.0, zero, anchor);
+                    .draw_path_glyphs_upright(cx, glyphs, 1.0, zero, plan.anchor);
             } else {
                 self.draw_label.draw_path_glyphs_scaled(cx, glyphs, 1.0, zero);
             }
         }
         self.draw_label.lift = 0.0;
+        self.draw_label.fade_at = 0.0;
+        self.draw_label.fade_in = 0.0;
         self.draw_label.end_glyph_batch(cx);
+        // One paint-order step per glyph call, as the immediate batch took.
+        let list_id = list.id();
+        let calls = cx.draw_lists[list_id].draw_items.len() as u32;
+        cx.draw_lists[list_id].zbias_hold = Some(calls);
+        list.end(cx);
+        self.label_lists.sigs[slot] = Some(sig);
     }
 
     fn store_label_cache(&mut self, draw_tiles: &[TileKey], view_zoom: f64, map_offset: Vec2d) {
@@ -4925,6 +9927,7 @@ impl MapView {
         self.label_cache_tiles.clear();
         self.label_cache_tiles.extend_from_slice(draw_tiles);
         self.label_cache_generation = self.tiles_generation;
+        self.label_gen = self.label_gen.wrapping_add(1);
     }
 
     fn collect_label_candidates(
@@ -5265,7 +10268,7 @@ impl MapView {
                 // panning doesn't flicker between competing candidates.
                 if self
                     .prev_label_keys
-                    .contains(&stable_label_key(name_key, &label.road_kind))
+                    .contains_key(&stable_label_key(name_key, &label.road_kind))
                 {
                     score += 350.0;
                 }
@@ -5514,7 +10517,17 @@ impl MapView {
             }
         }
 
-        let counters = (ready, loading, failed, retrying, exhausted, features);
+        let counters = (
+            ready,
+            loading,
+            failed,
+            retrying,
+            exhausted,
+            features,
+            self.memory_pressure.level as usize,
+            self.memory_pressure.deferred.len(),
+            self.memory_pressure.events.min(usize::MAX as u64) as usize,
+        );
         let lp = self.label_perf;
         // Skip format! if nothing changed since the last call
         if counters == self.prev_status_counters
@@ -5527,9 +10540,11 @@ impl MapView {
         self.prev_status_label_perf = lp;
 
         self.status = format!(
-            "Amsterdam [{}|{}] z{:.2} (req:{})  ready:{}  loading:{}  failed:{}(retry:{} stuck:{})  features:{}  labels(tile:{} scan:{} cand:{}/{} shape:{}/{}(b:{}) draw:{} glyphs:{} rej:r{} ps{} p{} o{} c{} b{})",
+            "Amsterdam [{}|{}] z{:.2} (req:{})  ready:{}  loading:{}  failed:{}(retry:{} stuck:{})  memory:lod{} deferred{} events{}  features:{}  labels(tile:{} scan:{} cand:{}/{} shape:{}/{}(b:{}) draw:{} glyphs:{} rej:r{} ps{} p{} o{} c{} b{})",
             self.source_mode_label(), self.theme_label(), self.view_zoom(), self.request_zoom_level(),
-            ready, loading, failed, retrying, exhausted, features,
+            ready, loading, failed, retrying, exhausted,
+            self.memory_pressure.level, self.memory_pressure.deferred.len(), self.memory_pressure.events,
+            features,
             lp.labels_in_tiles, lp.labels_scanned, lp.candidates_kept, lp.candidates,
             lp.shaped_ok, lp.shaped_attempts, lp.shape_budget, lp.drawn_labels, lp.drawn_glyphs,
             lp.rejected_repeat, lp.rejected_pre_short, lp.rejected_plan_none,
@@ -5590,57 +10605,87 @@ impl MapView {
     }
 
     fn request_zoom_level(&self) -> u32 {
+        self.request_zoom_level_for_platform(cfg!(target_arch = "wasm32"))
+    }
+
+    fn request_zoom_level_for_platform(&self, is_web: bool) -> u32 {
         let mut zoom = self.view_zoom().round() as u32;
         if self.use_local_mbtiles {
             // Honor the archive's declared zoom range: a single-zoom detail
             // archive (minzoom=maxzoom=14) must never be asked for z13/z12 —
             // those rows cannot exist and only produce missing-tile spam.
-            let (min_zoom, max_zoom) = self
+            let range = self
                 .local_source_zoom_range
                 .unwrap_or((LOCAL_MBTILES_MIN_ZOOM, LOCAL_MBTILES_MAX_ZOOM));
-            zoom = zoom.clamp(min_zoom, max_zoom);
+            let (min_zoom, max_zoom) = if range.0 <= range.1 && range.1 <= 30 {
+                range
+            } else {
+                (LOCAL_MBTILES_MIN_ZOOM, LOCAL_MBTILES_MAX_ZOOM)
+            };
+            zoom = zoom.max(min_zoom).min(max_zoom);
+            if is_web {
+                let separate_detail = self
+                    .tile_source_config
+                    .as_ref()
+                    .is_some_and(needs_separate_detail_archive);
+                // Detail is required only for an unpressured source request
+                // at z14 or above. A view nominally at z12 can pressure its
+                // base request to z11 even when a separate z14-only detail
+                // archive is configured.
+                let required_detail_range = (separate_detail && zoom >= 14).then(|| {
+                    self.detail_archive
+                        .as_ref()
+                        .and_then(MapTileArchive::zoom_range)
+                });
+                zoom = pressure_source_zoom_for_archives(
+                    zoom,
+                    Some((min_zoom, max_zoom)),
+                    required_detail_range,
+                    self.memory_pressure.level,
+                );
+                // A combined archive carries its building/detail plane in
+                // z14 tiles. Keep that plane while a close tilted 3D view
+                // needs it, but only after metadata explicitly confirms z14
+                // exists; transient unknown and narrower regional sources
+                // retain their existing clamping contract.
+                let combined_detail_floor = self
+                    .local_source_zoom_range
+                    .filter(|(min, max)| {
+                        min <= max
+                            && *max <= 30
+                            && *min <= COMBINED_ARCHIVE_DETAIL_MIN_ZOOM
+                            && COMBINED_ARCHIVE_DETAIL_MIN_ZOOM <= *max
+                    })
+                    .and_then(|_| {
+                        (self.nominal_3d_buildings_active()
+                            && self
+                                .tile_source_config
+                                .as_ref()
+                                .is_some_and(detail_matches_base))
+                        .then_some(COMBINED_ARCHIVE_DETAIL_MIN_ZOOM)
+                    });
+                if let Some(floor) = combined_detail_floor {
+                    zoom = zoom.max(floor);
+                }
+            }
         }
         zoom
     }
 
-    /// Read the active archive's declared minzoom/maxzoom once per path.
-    /// Opening is cheap (metadata B-tree only); absent/invalid metadata
-    /// falls back to the compiled-in range.
-    fn ensure_local_zoom_range(&mut self, active_path: &str, mbtiles_path: &Path) {
-        let file_exists = mbtiles_path.is_file()
-            || makepad_mbtile_reader::TileArchiveReader::is_mkmap_path(mbtiles_path);
-        let same_path = self
-            .local_source_zoom_range_path
-            .as_deref()
-            .is_some_and(|p| p == active_path);
-        // Re-attempt only on a path change, or when the archive appears after
-        // a missing-file attempt (e.g. a conversion finishing mid-session).
-        if same_path && (self.local_source_zoom_range_checked || !file_exists) {
-            return;
-        }
-        self.local_source_zoom_range_path = Some(active_path.to_string());
-        self.local_source_zoom_range = None;
-        self.local_source_zoom_range_checked = file_exists;
-        if !file_exists {
-            return;
-        }
-        let range = makepad_mbtile_reader::TileArchiveReader::open(mbtiles_path)
-            .ok()
-            .and_then(|mut reader| reader.get_metadata().ok())
-            .and_then(|metadata| {
-                let min = metadata.get("minzoom")?.trim().parse::<u32>().ok()?;
-                let max = metadata.get("maxzoom")?.trim().parse::<u32>().ok()?;
-                (min <= max).then_some((min, max))
-            });
+    /// Adopt minzoom/maxzoom from the asynchronously parsed root index.
+    fn ensure_local_zoom_range(&mut self) {
+        let range = self.base_archive.as_ref().and_then(MapTileArchive::zoom_range);
         if let Some((min, max)) = range {
             self.local_source_zoom_range = Some((min, max));
-            if (min, max) != (LOCAL_MBTILES_MIN_ZOOM, LOCAL_MBTILES_MAX_ZOOM) {
-                log!(
-                    "MapView: {} declares zoom range z{}-z{}; clamping tile requests",
-                    active_path,
-                    min,
-                    max
-                );
+            if self.local_source_logged_zoom_range != Some((min, max)) {
+                if (min, max) != (LOCAL_MBTILES_MIN_ZOOM, LOCAL_MBTILES_MAX_ZOOM) {
+                    log!(
+                        "MapView: archive declares zoom range z{}-z{}; clamping tile requests",
+                        min,
+                        max
+                    );
+                }
+                self.local_source_logged_zoom_range = Some((min, max));
             }
         }
     }
@@ -5648,6 +10693,20 @@ impl MapView {
     /// View-zoom bucket the tile styling (widths, AA, outlines) is built for.
     /// Beyond the source max zoom the same z14 tiles are re-styled per bucket.
     fn render_bucket(&self) -> u32 {
+        self.render_bucket_for_platform(cfg!(target_arch = "wasm32"))
+    }
+
+    fn nominal_render_bucket(&self) -> u32 {
+        (self.view_zoom().round() as u32).min(18)
+    }
+
+    fn nominal_3d_buildings_active(&self) -> bool {
+        self.buildings_3d
+            && self.tilt > 0.0
+            && self.nominal_render_bucket() >= BUILDING_3D_MIN_ZOOM
+    }
+
+    fn render_bucket_for_platform(&self, is_web: bool) -> u32 {
         // TWO keyframe buckets above the mid-zooms: 14 (view < 15.5) and
         // 16 (view >= 15.5, through the max zoom). Faces/strokes morph to
         // the live zoom on the GPU, icons carry their zoom floors and
@@ -5659,7 +10718,21 @@ impl MapView {
         // classic vector maps; GPU-expanded strokes stay smooth through
         // the crossings and the face morph remains an opt-in experiment
         // (/tmp/mp_face_morph) rather than the shipping path.
-        (self.view_zoom().round() as u32).min(18)
+        let bucket = self.nominal_render_bucket();
+        if is_web && self.memory_pressure.level > 0 {
+            // One lower styling bucket sheds the most expensive street-only
+            // detail. A nominally close tilted 3D view keeps the minimum
+            // building bucket; further pressure is handled by bounded
+            // payload admission and source LOD where metadata permits.
+            let pressured = bucket.saturating_sub(1);
+            if self.nominal_3d_buildings_active() {
+                pressured.max(BUILDING_3D_MIN_ZOOM)
+            } else {
+                pressured
+            }
+        } else {
+            bucket
+        }
     }
 
     fn source_mode_label(&self) -> &'static str {
@@ -5771,6 +10844,7 @@ impl MapView {
                 height: Size::Fixed(rect.size.y),
                 margin: Inset::default(),
                 metrics: Metrics::default(),
+                ..Default::default()
             },
             Layout {
                 clip_x: true,
@@ -5912,6 +10986,7 @@ impl MapView {
         self.fly = None;
         self.center_norm = lon_lat_to_normalized(lon, lat);
         self.wrap_and_clamp_center();
+        self.note_shimmer_activity(cx);
         self.sync_camera_fields();
         self.emit_viewport_changed(cx);
         self.redraw(cx);
@@ -5924,6 +10999,7 @@ impl MapView {
             return;
         }
         self.rotation = rotation;
+        self.note_shimmer_activity(cx);
         self.redraw(cx);
     }
 
@@ -5943,6 +11019,7 @@ impl MapView {
             return;
         }
         self.tilt = tilt;
+        self.note_shimmer_activity(cx);
         self.redraw(cx);
     }
 
@@ -5956,35 +11033,50 @@ impl MapView {
     /// (First-run bake: the app starts with no archive at all and points
     /// the view at the one it just built.) Empty strings clear the
     /// optional detail/bridge-dz sources.
-    pub fn set_source_paths(&mut self, cx: &mut Cx, base: &str, detail: &str, bridge_dz: &str) {
-        if self.mbtiles_path == base
-            && self.detail_mbtiles_path == detail
-            && self.bridge_dz_mbtiles_path == bridge_dz
-        {
+    pub fn set_source_config(&mut self, cx: &mut Cx, config: TileSourceConfig) {
+        if self.tile_source_config.as_ref() == Some(&config) {
             return;
         }
-        self.mbtiles_path = base.to_string();
-        self.detail_mbtiles_path = detail.to_string();
-        self.bridge_dz_mbtiles_path = bridge_dz.to_string();
+        self.install_archive_source(cx, config);
         self.tiles.clear();
         self.local_requested_tiles.clear();
         self.local_missing_tiles.clear();
+        self.archive_pending_tiles.clear();
+        self.memory_pressure = MapMemoryPressure::default();
         self.local_source_missing_logged = false;
         // Force the zoom-range probe to re-read: the new archive declares
         // its own minzoom/maxzoom (a city extract is not the planet).
         self.local_source_zoom_range = None;
+        self.local_source_logged_zoom_range = None;
         self.local_source_zoom_range_path = None;
         self.local_source_zoom_range_checked = false;
         self.redraw(cx);
     }
 
+    pub fn source_config(&self) -> Option<&TileSourceConfig> {
+        self.tile_source_config.as_ref()
+    }
+
+    pub fn set_source_paths(&mut self, cx: &mut Cx, base: &str, detail: &str, bridge_dz: &str) {
+        self.set_source_config(
+            cx,
+            TileSourceConfig::LocalArchive {
+                mbtiles_path: base.to_string(),
+                detail_mbtiles_path: detail.to_string(),
+                bridge_dz_path: bridge_dz.to_string(),
+            },
+        );
+    }
+
     /// Swap the active geodata overlays; stale tiles keep rendering while
     /// rebuilt ones stream in with the new layer set.
-    pub fn set_overlay_paths(&mut self, cx: &mut Cx, paths: &str) {
-        if self.overlay_mbtiles_paths == paths {
+    pub fn set_overlays(&mut self, cx: &mut Cx, overlays: Vec<OverlaySource>) {
+        if self.overlays == overlays {
             return;
         }
-        self.overlay_mbtiles_paths = paths.to_string();
+        self.overlays = overlays;
+        self.install_overlay_sources(cx);
+        self.archive_pending_tiles.clear();
         self.restyle_tiles_keep_stale(cx);
     }
 
@@ -6019,13 +11111,14 @@ impl MapView {
         }
         self.local_requested_tiles.clear();
         self.pending_ready_tiles.clear();
+        self.clear_memory_deferrals();
         self.label_cache_valid = false;
         self.redraw(cx);
     }
 
-    /// Invalidate only the tilt-dependent tile overlay. Ready tiles retain
-    /// their bucket and stable road-core cache, while the epoch bump rejects
-    /// any in-flight bake from the previous camera mode.
+    /// Invalidate tilt-dependent baked data. Ready tiles retain their bucket;
+    /// a 3D-only change can reuse the road core, while a fringe change forces
+    /// it to rebuild. The epoch bump rejects in-flight work from the old mode.
     fn restyle_mode_overlay_keep_stale(&mut self, cx: &mut Cx) {
         self.style_epoch = self.style_epoch.wrapping_add(1);
         if self.style_epoch == 0 {
@@ -6035,6 +11128,7 @@ impl MapView {
             .retain(|_, entry| matches!(entry.state, TileLoadState::Ready { .. }));
         self.local_requested_tiles.clear();
         self.pending_ready_tiles.clear();
+        self.clear_memory_deferrals();
         self.label_cache_valid = false;
         self.redraw(cx);
     }
@@ -6401,8 +11495,101 @@ impl MapView {
         );
     }
 
-    /// Install the rain nowcast animation frames (BGRA u32 texels) covering
-    /// the given lon/lat bbox; empty = disable. Frames advance every 220 ms.
+    /// Start a radar sequence without allocating any frame textures. Frames
+    /// may then arrive in any order through `set_rain_frame`.
+    pub fn set_rain_sequence(
+        &mut self,
+        cx: &mut Cx,
+        mut minutes: Vec<i64>,
+        width: usize,
+        height: usize,
+        hires_size: Option<(usize, usize)>,
+        bbox: (f64, f64, f64, f64),
+    ) -> bool {
+        if minutes.iter().any(|minute| !(0..=1440).contains(minute))
+            || radar_sequence_resident_bytes(minutes.len(), (width, height), hires_size).is_none()
+        {
+            return false;
+        }
+
+        minutes.sort_unstable();
+        minutes.dedup();
+        cx.stop_timer(self.rain_timer);
+        self.rain_frames.clear();
+        self.rain_sequence_minutes = minutes;
+        self.rain_frame_index = 0;
+        self.rain_bbox = bbox;
+        self.rain_tex_size = (width, height);
+        self.rain_expected_hires_size = hires_size;
+        self.rain_sequence_budgeted = true;
+        self.rain_now_hires = None;
+        self.redraw(cx);
+        true
+    }
+
+    /// Move one decoded frame into one texture. Existing textures keep their
+    /// identity; a duplicate minute replaces only that minute's texture.
+    pub fn set_rain_frame(&mut self, cx: &mut Cx, minute: i64, data: Vec<u32>) -> bool {
+        let Some(frame_bytes) = radar_texture_bytes(self.rain_tex_size) else {
+            return false;
+        };
+        let Some(expected_pixels) = self.rain_tex_size.0.checked_mul(self.rain_tex_size.1) else {
+            return false;
+        };
+        if data.len() != expected_pixels
+            || self.rain_sequence_minutes.binary_search(&minute).is_err()
+        {
+            return false;
+        }
+
+        let position = self
+            .rain_frames
+            .binary_search_by_key(&minute, |frame| frame.minute);
+        let prospective_count = self.rain_frames.len() + usize::from(position.is_err());
+        let hires_bytes = self
+            .rain_now_hires
+            .as_ref()
+            .and_then(|(_, size)| radar_texture_bytes(*size))
+            .unwrap_or(0);
+        if prospective_count
+            .checked_mul(frame_bytes)
+            .and_then(|bytes| bytes.checked_add(hires_bytes))
+            .is_none_or(|bytes| bytes > MAX_RADAR_RESIDENT_BYTES)
+        {
+            return false;
+        }
+
+        let texture = Texture::new_with_format(
+            cx,
+            TextureFormat::VecBGRAu8_32 {
+                data: Some(data),
+                width: self.rain_tex_size.0,
+                height: self.rain_tex_size.1,
+                updated: TextureUpdated::Full,
+            },
+        );
+        let was_empty = self.rain_frames.is_empty();
+        match position {
+            Ok(index) => self.rain_frames[index].texture = texture,
+            Err(index) => {
+                if !self.rain_frames.is_empty() && index <= self.rain_frame_index {
+                    self.rain_frame_index += 1;
+                }
+                self.rain_frames.insert(index, RainFrame { minute, texture });
+            }
+        }
+        if was_empty {
+            let interval = RAIN_FRAME_REAL_SECONDS / self.effective_weather_timelapse();
+            self.rain_interval_current = interval;
+            self.rain_timer = cx.start_interval(interval);
+        }
+        self.redraw(cx);
+        true
+    }
+
+    /// Install the complete rain nowcast animation (BGRA u32 texels). On web
+    /// this compatibility path validates the whole batch before replacing
+    /// state; native retains its historical admission behavior.
     pub fn set_rain_frames(
         &mut self,
         cx: &mut Cx,
@@ -6410,31 +11597,71 @@ impl MapView {
         width: usize,
         height: usize,
         bbox: (f64, f64, f64, f64),
-    ) {
+    ) -> bool {
+        let is_web = cx.os_type().is_web();
+        self.set_rain_frames_for_platform(cx, frames, width, height, bbox, is_web)
+    }
+
+    fn set_rain_frames_for_platform(
+        &mut self,
+        cx: &mut Cx,
+        frames: Vec<Vec<u32>>,
+        width: usize,
+        height: usize,
+        bbox: (f64, f64, f64, f64),
+        is_web: bool,
+    ) -> bool {
+        if frames.is_empty() {
+            cx.stop_timer(self.rain_timer);
+            self.rain_frames.clear();
+            self.rain_sequence_minutes.clear();
+            self.rain_frame_index = 0;
+            self.rain_bbox = bbox;
+            self.rain_tex_size = (1, 1);
+            self.rain_expected_hires_size = None;
+            self.rain_sequence_budgeted = false;
+            self.rain_now_hires = None;
+            self.redraw(cx);
+            return true;
+        }
+
+        if is_web
+            && !radar_legacy_batch_admitted(
+                frames.iter().map(Vec::len),
+                (width, height),
+                None,
+            )
+        {
+            return false;
+        }
+
         cx.stop_timer(self.rain_timer);
         self.rain_frames.clear();
+        self.rain_sequence_minutes.clear();
         self.rain_frame_index = 0;
         self.rain_bbox = bbox;
         self.rain_tex_size = (width.max(1), height.max(1));
-        for data in frames {
-            self.rain_frames.push(Texture::new_with_format(
-                cx,
-                TextureFormat::VecBGRAu8_32 {
-                    data: Some(data),
-                    width,
-                    height,
-                    updated: TextureUpdated::Full,
-                },
-            ));
+        self.rain_expected_hires_size = None;
+        self.rain_sequence_budgeted = false;
+        for (minute, data) in frames.into_iter().enumerate() {
+            self.rain_frames.push(RainFrame {
+                minute: minute as i64,
+                texture: Texture::new_with_format(
+                    cx,
+                    TextureFormat::VecBGRAu8_32 {
+                        data: Some(data),
+                        width,
+                        height,
+                        updated: TextureUpdated::Full,
+                    },
+                ),
+            });
         }
-        if !self.rain_frames.is_empty() {
-            let interval = RAIN_FRAME_REAL_SECONDS / self.effective_weather_timelapse();
-            self.rain_interval_current = interval;
-            self.rain_timer = cx.start_interval(interval);
-        } else {
-            self.rain_now_hires = None;
-        }
+        let interval = RAIN_FRAME_REAL_SECONDS / self.effective_weather_timelapse();
+        self.rain_interval_current = interval;
+        self.rain_timer = cx.start_interval(interval);
         self.redraw(cx);
+        true
     }
 
     /// Install (or clear) the hi-res dual-radar "now" image, drawn instead of
@@ -6443,9 +11670,36 @@ impl MapView {
         &mut self,
         cx: &mut Cx,
         texels: Option<(Vec<u32>, usize, usize)>,
-    ) {
-        self.rain_now_hires = texels.map(|(data, width, height)| {
-            (
+    ) -> bool {
+        let is_web = cx.os_type().is_web();
+        self.set_rain_now_hires_for_platform(cx, texels, is_web)
+    }
+
+    fn set_rain_now_hires_for_platform(
+        &mut self,
+        cx: &mut Cx,
+        texels: Option<(Vec<u32>, usize, usize)>,
+        is_web: bool,
+    ) -> bool {
+        let Some((data, width, height)) = texels else {
+            self.rain_now_hires = None;
+            self.redraw(cx);
+            return true;
+        };
+        let size = (width, height);
+        if !self.rain_sequence_budgeted {
+            if is_web
+                && (!radar_texel_payload_admitted(data.len(), size)
+                    || radar_sequence_resident_bytes(
+                        self.rain_frames.len(),
+                        self.rain_tex_size,
+                        Some(size),
+                    )
+                    .is_none())
+            {
+                return false;
+            }
+            self.rain_now_hires = Some((
                 Texture::new_with_format(
                     cx,
                     TextureFormat::VecBGRAu8_32 {
@@ -6456,9 +11710,47 @@ impl MapView {
                     },
                 ),
                 (width.max(1), height.max(1)),
-            )
-        });
+            ));
+            self.redraw(cx);
+            return true;
+        }
+        let Some(hires_bytes) = radar_texture_bytes(size) else {
+            return false;
+        };
+        let Some(expected_pixels) = width.checked_mul(height) else {
+            return false;
+        };
+        if data.len() != expected_pixels
+            || self
+                .rain_expected_hires_size
+                .is_some_and(|expected| expected != size)
+        {
+            return false;
+        }
+        let regular_bytes = self
+            .rain_frames
+            .len()
+            .checked_mul(radar_texture_bytes(self.rain_tex_size).unwrap_or(0));
+        if regular_bytes
+            .and_then(|bytes| bytes.checked_add(hires_bytes))
+            .is_none_or(|bytes| bytes > MAX_RADAR_RESIDENT_BYTES)
+        {
+            return false;
+        }
+        self.rain_now_hires = Some((
+            Texture::new_with_format(
+                cx,
+                TextureFormat::VecBGRAu8_32 {
+                    data: Some(data),
+                    width,
+                    height,
+                    updated: TextureUpdated::Full,
+                },
+            ),
+            size,
+        ));
         self.redraw(cx);
+        true
     }
 
     pub fn set_map_zoom(&mut self, cx: &mut Cx, zoom: f64) {
@@ -6467,7 +11759,8 @@ impl MapView {
         self.fly = None;
         self.zoom = zoom.clamp(min_zoom, max_zoom);
         self.last_zoom_change_frame = self.frame_counter;
-        self.last_zoom_change_time = Some(std::time::Instant::now());
+        self.last_zoom_change_time = Some(cx.seconds_since_app_start());
+        self.note_shimmer_activity(cx);
         cx.stop_timer(self.zoom_settle_timer);
         self.zoom_settle_timer = cx.start_timeout(0.15);
         self.emit_viewport_changed(cx);
@@ -6492,14 +11785,16 @@ impl MapView {
         };
         let duration = (0.55 + 0.22 * arc + (dist_px / 6000.0).min(0.6)).min(2.4);
         self.fly = Some(FlyTo {
-            started: std::time::Instant::now(),
+            started: cx.seconds_since_app_start(),
             duration,
             from_center: self.center_norm,
             to_center,
             from_zoom,
             to_zoom,
             arc,
+            anchor: None,
         });
+        self.note_shimmer_activity(cx);
         cx.stop_timer(self.fly_timer);
         self.fly_timer = cx.start_timeout(0.016);
         self.redraw(cx);
@@ -6511,15 +11806,22 @@ impl MapView {
         };
         let min_zoom = self.min_zoom.max(0.0);
         let max_zoom = self.max_zoom.max(min_zoom);
-        let t = (fly.started.elapsed().as_secs_f64() / fly.duration).clamp(0.0, 1.0);
+        let now = cx.seconds_since_app_start();
+        let t = ((now - fly.started).max(0.0) / fly.duration).clamp(0.0, 1.0);
         let e = t * t * (3.0 - 2.0 * t);
-        self.center_norm = fly.from_center + (fly.to_center - fly.from_center) * e;
         let zoom = fly.from_zoom + (fly.to_zoom - fly.from_zoom) * e
             - fly.arc * (std::f64::consts::PI * e).sin();
         self.zoom = zoom.clamp(min_zoom, max_zoom);
+        self.center_norm = if let Some((anchor_norm, anchor_rel)) = fly.anchor {
+            let world_size = tile_world_size_zoom(self.zoom);
+            (anchor_norm * world_size - anchor_rel) / world_size
+        } else {
+            fly.from_center + (fly.to_center - fly.from_center) * e
+        };
         self.wrap_and_clamp_center();
         self.last_zoom_change_frame = self.frame_counter;
-        self.last_zoom_change_time = Some(std::time::Instant::now());
+        self.last_zoom_change_time = Some(now);
+        self.note_shimmer_activity(cx);
         if t >= 1.0 {
             self.fly = None;
             self.center_norm = fly.to_center;
@@ -6648,6 +11950,24 @@ impl MapViewRef {
         }
     }
 
+    pub fn set_roads_visible(&self, cx: &mut Cx, visible: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_roads_visible(cx, visible);
+        }
+    }
+
+    pub fn set_labels_visible(&self, cx: &mut Cx, visible: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_labels_visible(cx, visible);
+        }
+    }
+
+    pub fn set_buildings_3d(&self, cx: &mut Cx, visible: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_buildings_3d(cx, visible);
+        }
+    }
+
     /// The Inception fold on/off (tweens; close-3D only — see MapView).
     pub fn set_space_warp(&self, cx: &mut Cx, on: bool) {
         if let Some(mut inner) = self.borrow_mut() {
@@ -6686,9 +12006,9 @@ impl MapViewRef {
         None
     }
 
-    pub fn set_overlay_paths(&self, cx: &mut Cx, paths: &str) {
+    pub fn set_overlays(&self, cx: &mut Cx, overlays: Vec<OverlaySource>) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.set_overlay_paths(cx, paths);
+            inner.set_overlays(cx, overlays);
         }
     }
 
@@ -6698,6 +12018,31 @@ impl MapViewRef {
         }
     }
 
+    pub fn set_source_config(&self, cx: &mut Cx, config: TileSourceConfig) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_source_config(cx, config);
+        }
+    }
+
+    pub fn set_rain_sequence(
+        &self,
+        cx: &mut Cx,
+        minutes: Vec<i64>,
+        width: usize,
+        height: usize,
+        hires_size: Option<(usize, usize)>,
+        bbox: (f64, f64, f64, f64),
+    ) -> bool {
+        self.borrow_mut().is_some_and(|mut inner| {
+            inner.set_rain_sequence(cx, minutes, width, height, hires_size, bbox)
+        })
+    }
+
+    pub fn set_rain_frame(&self, cx: &mut Cx, minute: i64, data: Vec<u32>) -> bool {
+        self.borrow_mut()
+            .is_some_and(|mut inner| inner.set_rain_frame(cx, minute, data))
+    }
+
     pub fn set_rain_frames(
         &self,
         cx: &mut Cx,
@@ -6705,16 +12050,18 @@ impl MapViewRef {
         width: usize,
         height: usize,
         bbox: (f64, f64, f64, f64),
-    ) {
-        if let Some(mut inner) = self.borrow_mut() {
-            inner.set_rain_frames(cx, frames, width, height, bbox);
-        }
+    ) -> bool {
+        self.borrow_mut()
+            .is_some_and(|mut inner| inner.set_rain_frames(cx, frames, width, height, bbox))
     }
 
-    pub fn set_rain_now_hires(&self, cx: &mut Cx, texels: Option<(Vec<u32>, usize, usize)>) {
-        if let Some(mut inner) = self.borrow_mut() {
-            inner.set_rain_now_hires(cx, texels);
-        }
+    pub fn set_rain_now_hires(
+        &self,
+        cx: &mut Cx,
+        texels: Option<(Vec<u32>, usize, usize)>,
+    ) -> bool {
+        self.borrow_mut()
+            .is_some_and(|mut inner| inner.set_rain_now_hires(cx, texels))
     }
 
     pub fn set_terrain_overlay(&self, cx: &mut Cx, data: TerrainOverlayData) {
@@ -6833,8 +12180,869 @@ fn label_class_color(color_class: u8, default_color: Vec4f, dark_theme: bool) ->
 }
 
 #[cfg(test)]
+// Native map tests use wall-clock values only to make temporary paths unique.
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 mod tests {
-    use super::{tile_span_with_prefetch, TILE_SIZE};
+    use super::*;
+
+    use makepad_mbtile_reader::MbtilesWriter;
+
+    fn touch_pair(a: Vec2d, b: Vec2d) -> TouchPair {
+        TouchPair {
+            a: TouchSample { uid: 1, abs: a },
+            b: TouchSample { uid: 2, abs: b },
+        }
+    }
+
+    #[test]
+    fn map_touch_classifier_distinguishes_pinch_rotate_and_tilt() {
+        let start = touch_pair(dvec2(-50.0, 0.0), dvec2(50.0, 0.0));
+        assert_eq!(
+            classify_touch_gesture(
+                start,
+                touch_pair(dvec2(-70.0, 0.0), dvec2(70.0, 0.0)),
+            ),
+            TouchGestureMode::Pinch,
+        );
+
+        let angle = 30.0_f64.to_radians();
+        let rotated = dvec2(angle.cos() * 50.0, angle.sin() * 50.0);
+        assert_eq!(
+            classify_touch_gesture(start, touch_pair(-rotated, rotated)),
+            TouchGestureMode::Rotate,
+        );
+
+        assert_eq!(
+            classify_touch_gesture(
+                start,
+                touch_pair(dvec2(-50.0, 25.0), dvec2(50.0, 25.0)),
+            ),
+            TouchGestureMode::Tilt,
+        );
+    }
+
+    #[test]
+    fn map_touch_rotation_dead_zone_does_not_steal_a_pinch() {
+        let start = touch_pair(dvec2(-50.0, 0.0), dvec2(50.0, 0.0));
+        let angle = 4.0_f64.to_radians();
+        let radius = 70.0;
+        let rotated = dvec2(angle.cos() * radius, angle.sin() * radius);
+        assert_eq!(
+            classify_touch_gesture(start, touch_pair(-rotated, rotated)),
+            TouchGestureMode::Pinch,
+        );
+    }
+
+    #[test]
+    fn map_pinch_zoom_keeps_the_midpoint_point_fixed() {
+        let start_center = dvec2(0.52, 0.37);
+        let start_midpoint_rel = dvec2(80.0, -45.0);
+        let current_midpoint_rel = dvec2(115.0, -20.0);
+        let old_world_size = 256.0 * 2.0_f64.powf(12.0);
+        let new_world_size = 256.0 * 2.0_f64.powf(13.25);
+        let anchor_norm = start_center + start_midpoint_rel / old_world_size;
+        let new_center = pinch_anchor_center_norm(
+            start_center,
+            start_midpoint_rel,
+            current_midpoint_rel,
+            old_world_size,
+            new_world_size,
+        );
+        let landed_rel = (anchor_norm - new_center) * new_world_size;
+        assert!((landed_rel - current_midpoint_rel).length() < 1e-9);
+    }
+
+    fn test_map(cx: &mut Cx) -> MapView {
+        cx.init_cx_os();
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            MapView::script_new_with_default(vm)
+        })
+    }
+
+    #[test]
+    fn map_typed_shader_layouts_match_upload_strides() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let map = test_map(&mut cx);
+        let fill = geometry_layout(&cx, &map.draw_fill.draw_vars).expect("fill shader initialised");
+        let face = geometry_layout(&cx, &map.draw_face.draw_vars).expect("face shader initialised");
+        let road = geometry_layout(&cx, &map.draw_road.draw_vars).expect("road shader initialised");
+        let roof = geometry_layout(&cx, &map.draw_roof.draw_vars).expect("roof shader initialised");
+        let prop_shader = map.draw_prop.draw_vars.draw_shader_id.expect("prop shader initialised");
+        let prop_instances = &cx.draw_shaders[prop_shader.index].mapping.instances;
+        let wall_shader = map.draw_wall.draw_vars.draw_shader_id.expect("wall shader initialised");
+        let wall_instances = &cx.draw_shaders[wall_shader.index].mapping.instances;
+        let shadow_shader = map.draw_shadow.draw_vars.draw_shader_id.expect("wall shadow shader initialised");
+        let shadow_instances = &cx.draw_shaders[shadow_shader.index].mapping.instances;
+        assert_eq!(fill.stride_bytes, 16);
+        assert_eq!(face.stride_bytes, 16);
+        assert_eq!(road.stride_bytes, 28);
+        assert_eq!(roof.stride_bytes, 16);
+        assert_ne!(
+            map.draw_face.draw_vars.draw_shader_id,
+            map.draw_road.draw_vars.draw_shader_id,
+            "the face drawer compiles its own vertex program"
+        );
+        assert_eq!(
+            face.inputs.iter().map(|input| input.attr_format).collect::<Vec<_>>(),
+            vec![
+                DrawShaderAttrFormat::I16x2,
+                DrawShaderAttrFormat::U8x4Norm,
+                DrawShaderAttrFormat::F16x2,
+                DrawShaderAttrFormat::F16x2,
+            ]
+        );
+        assert_eq!(
+            fill.inputs.iter().map(|input| input.attr_format).collect::<Vec<_>>(),
+            vec![
+                DrawShaderAttrFormat::I16x2,
+                DrawShaderAttrFormat::U8x4Norm,
+                DrawShaderAttrFormat::F16x2,
+                DrawShaderAttrFormat::U16x2,
+            ]
+        );
+        assert_eq!(
+            road.inputs.iter().map(|input| input.attr_format).collect::<Vec<_>>(),
+            vec![
+                DrawShaderAttrFormat::I16x2,
+                DrawShaderAttrFormat::F16x2,
+                DrawShaderAttrFormat::U8x4Norm,
+                DrawShaderAttrFormat::F16x2,
+                DrawShaderAttrFormat::F32x1,
+                DrawShaderAttrFormat::F16x2,
+                DrawShaderAttrFormat::F16x2,
+            ]
+        );
+        assert_eq!(
+            roof.inputs.iter().map(|input| input.attr_format).collect::<Vec<_>>(),
+            vec![
+                DrawShaderAttrFormat::I16x2,
+                DrawShaderAttrFormat::U8x4Norm,
+                DrawShaderAttrFormat::F32x1,
+                DrawShaderAttrFormat::F16x2,
+            ]
+        );
+        assert_eq!(
+            prop_instances
+                .inputs
+                .iter()
+                .find(|input| input.id == live_id!(inst_color))
+                .map(|input| input.attr_format),
+            Some(DrawShaderAttrFormat::F32x1),
+        );
+        for (id, format) in [
+            (live_id!(inst_a), DrawShaderAttrFormat::F32x2),
+            (live_id!(inst_b), DrawShaderAttrFormat::F32x2),
+            (live_id!(inst_heights), DrawShaderAttrFormat::F32x2),
+            (live_id!(inst_ao), DrawShaderAttrFormat::F32x1),
+            (live_id!(inst_color), DrawShaderAttrFormat::F32x1),
+            (live_id!(inst_zbias), DrawShaderAttrFormat::F32x1),
+        ] {
+            assert_eq!(
+                wall_instances.inputs.iter().find(|input| input.id == id).map(|input| input.attr_format),
+                Some(format),
+            );
+        }
+        for (id, format) in [
+            (live_id!(inst_a), DrawShaderAttrFormat::F32x2),
+            (live_id!(inst_b), DrawShaderAttrFormat::F32x2),
+            (live_id!(inst_heights), DrawShaderAttrFormat::F32x2),
+            (live_id!(inst_zbias), DrawShaderAttrFormat::F32x1),
+        ] {
+            assert_eq!(
+                shadow_instances.inputs.iter().find(|input| input.id == id).map(|input| input.attr_format),
+                Some(format),
+            );
+        }
+        assert_eq!(MAP_WALL_INSTANCE_BYTES, 20);
+    }
+
+    fn temp_mbtiles_with_zoom(
+        name: &str,
+        min_zoom: &str,
+        max_zoom: &str,
+        tile_zoom: u8,
+    ) -> std::path::PathBuf {
+        let nonce = Cx::time_now().to_bits();
+        let path = std::path::PathBuf::from(format!("target/{name}-{nonce}.mbtiles"));
+        std::fs::create_dir_all("target").unwrap();
+        let mut writer = MbtilesWriter::create(&path).unwrap();
+        writer.set_metadata("minzoom", min_zoom);
+        writer.set_metadata("maxzoom", max_zoom);
+        writer
+            .write_tile_encoded(tile_zoom, 0, 0, &[])
+            .unwrap();
+        writer.finish().unwrap();
+        path
+    }
+
+    fn temp_mbtiles(name: &str) -> std::path::PathBuf {
+        temp_mbtiles_with_zoom(name, "0", "0", 0)
+    }
+
+    #[test]
+    fn fringe_bake_mode_hysteresis_table() {
+        let cases = [
+            (0.0, true, true),
+            (24.9, true, true),
+            (25.0, true, true),
+            (29.9, true, true),
+            (30.0, false, true),
+            (35.0, false, true),
+            (40.0, false, true),
+            (40.1, false, false),
+            (60.0, false, false),
+        ];
+        for (tilt, from_false, from_true) in cases {
+            assert_eq!(want_fringe_for_tilt(tilt, false), from_false, "tilt {tilt} from false");
+            assert_eq!(want_fringe_for_tilt(tilt, true), from_true, "tilt {tilt} from true");
+        }
+    }
+
+    #[test]
+    fn archive_priority_is_centre_out_in_tilted_screen_space() {
+        let mut tiles = vec![
+            TileKey { z: 2, x: 2, y: 1 },
+            TileKey { z: 2, x: 1, y: 2 },
+            TileKey { z: 2, x: 1, y: 1 },
+        ];
+        sort_tiles_center_out(&mut tiles, 2, dvec2(0.375, 0.375), (1.0, 0.0), 0.25);
+        assert_eq!(
+            tiles,
+            [
+                TileKey { z: 2, x: 1, y: 1 },
+                TileKey { z: 2, x: 1, y: 2 },
+                TileKey { z: 2, x: 2, y: 1 },
+            ]
+        );
+    }
+
+    #[test]
+    fn map_memory_budgets_match_the_baseline_and_scale() {
+        const MIB: usize = 1024 * 1024;
+
+        let baseline = MapMemoryBudgets::from_total(1536 * MIB, false);
+        assert_eq!(baseline.upload, 24 * MIB);
+        assert_eq!(baseline.pending, 384 * MIB);
+        assert_eq!(baseline.tile_cache, 1200 * MIB);
+        assert_eq!(baseline.http_tile_cache, 240 * MIB);
+
+        let scaled = MapMemoryBudgets::from_total(512 * MIB, false);
+        assert_eq!(scaled.upload, 8 * MIB);
+        assert_eq!(scaled.pending, 128 * MIB);
+        assert_eq!(scaled.tile_cache, 400 * MIB);
+        assert_eq!(scaled.http_tile_cache, 80 * MIB);
+
+        let small_web = MapMemoryBudgets::from_total(512 * MIB, true);
+        assert_eq!(small_web.upload, 8 * MIB);
+        assert_eq!(small_web.pending, 24 * MIB);
+        assert_eq!(small_web.tile_cache, 96 * MIB);
+        assert_eq!(small_web.http_tile_cache, 80 * MIB);
+
+        assert_eq!(baseline.archive_cache, 96 * MIB);
+        assert_eq!(scaled.archive_cache, 32 * MIB);
+        let phone = MapMemoryBudgets::from_total(320 * MIB, true);
+        assert_eq!(phone.archive_cache, 20 * MIB);
+        assert_eq!(phone.tile_cache, 60 * MIB);
+        assert_eq!(phone.pending, 15 * MIB);
+        assert_eq!(phone.upload, 5 * MIB);
+        assert_eq!(phone.bake_slots, 1);
+        let desktop_web = MapMemoryBudgets::from_total(1024 * MIB, true);
+        assert_eq!(desktop_web.upload, 32 * MIB);
+        assert_eq!(desktop_web.pending, 64 * MIB);
+        assert_eq!(desktop_web.tile_cache, 384 * MIB);
+        assert_eq!(desktop_web.http_tile_cache, 384 * MIB);
+        assert_eq!(desktop_web.archive_cache, 48 * MIB);
+        assert_eq!(desktop_web.bake_slots, 2);
+        let large_desktop_web = MapMemoryBudgets::from_total(2048 * MIB, true);
+        assert_eq!(large_desktop_web.upload, 32 * MIB);
+        assert_eq!(large_desktop_web.pending, 64 * MIB);
+        assert_eq!(large_desktop_web.tile_cache, 384 * MIB);
+        assert_eq!(large_desktop_web.http_tile_cache, 384 * MIB);
+        assert_eq!(large_desktop_web.archive_cache, 48 * MIB);
+        assert_eq!(large_desktop_web.bake_slots, 2);
+        assert_eq!(baseline.bake_slots, 8);
+    }
+
+    #[test]
+    fn web_pending_cap_drops_even_one_oversized_result_native_keeps_compatibility() {
+        let mut web = vec![65usize];
+        let dropped = pending_byte_cap(&mut web, 48, false, |bytes| *bytes);
+        assert!(web.is_empty());
+        assert_eq!(dropped, [65]);
+
+        let mut native = vec![65usize];
+        let dropped = pending_byte_cap(&mut native, 48, true, |bytes| *bytes);
+        assert_eq!(native, [65]);
+        assert!(dropped.is_empty());
+
+        let mut batch = vec![20usize, 20, 20, 20];
+        let dropped = pending_byte_cap(&mut batch, 48, false, |bytes| *bytes);
+        assert_eq!(batch, [20, 20]);
+        assert_eq!(dropped, [20, 20]);
+        assert!(batch.iter().sum::<usize>() <= 48);
+    }
+
+    #[test]
+    fn web_upload_drain_never_bypasses_budget_for_first_tile() {
+        let mut pending = vec![9usize, 2];
+        let stats = drain_pending_ready_tiles(
+            &mut pending,
+            8,
+            false,
+            |bytes| *bytes,
+            |_| panic!("oversized web tile must not upload"),
+        );
+        assert_eq!(stats.count, 0);
+        assert_eq!(pending, [9, 2]);
+
+        pending[0] = 8;
+        let stats = drain_pending_ready_tiles(&mut pending, 8, false, |bytes| *bytes, |_| 0.0);
+        assert_eq!(stats.count, 1);
+        assert_eq!(stats.bytes, 8);
+        assert_eq!(pending, [2]);
+    }
+
+    #[test]
+    fn final_admission_rechecks_payload_after_ui_thread_growth() {
+        let mut buffers = TileBuffers::default();
+        let initial_bytes = buffers.allocated_byte_size();
+        let limit = initial_bytes + 128;
+        assert!(initial_bytes <= limit);
+
+        // Cached road arrows are appended only in insert_ready_tile, after
+        // worker/staging admission. Model that exact growth edge here.
+        let cached_indices = (0..1_024).collect::<Vec<u32>>();
+        let cached_vertices = vec![0.0; crate::makepad_draw::vector::VECTOR_FLOATS_PER_VERTEX * 1_024];
+        buffers.append_cached_road_icons(&cached_indices, &cached_vertices);
+        let grown_bytes = buffers.allocated_byte_size();
+        assert!(grown_bytes > limit);
+
+        // Native keeps the historical uncapped path byte-for-byte.
+        assert!(admit_final_ready_tile_payload(&mut buffers, None));
+        assert_eq!(buffers.allocated_byte_size(), grown_bytes);
+        assert_eq!(buffers.memory_lod, 0);
+
+        // Web re-applies the finite degradation policy before any Geometry
+        // is created, leaving a stable admitted result instead of rebaking.
+        assert!(admit_final_ready_tile_payload(&mut buffers, Some(limit)));
+        assert!(buffers.allocated_byte_size() <= limit);
+        assert_eq!(buffers.memory_lod, 1);
+        let bounded_bytes = buffers.allocated_byte_size();
+        assert!(admit_final_ready_tile_payload(&mut buffers, Some(limit)));
+        assert_eq!(buffers.allocated_byte_size(), bounded_bytes);
+    }
+
+    #[test]
+    fn web_space_warp_budget_uses_only_tile_headroom_and_native_has_none() {
+        assert_eq!(space_warp_refinement_budget(None, 123), None);
+        let budget = space_warp_refinement_budget(Some(10 * MIB_BYTES), MIB_BYTES).unwrap();
+        assert_eq!(
+            budget.remaining_bytes(),
+            WEB_SPACE_WARP_REFINEMENT_MAX_BYTES
+        );
+        assert_eq!(
+            budget.remaining_work(),
+            WEB_SPACE_WARP_REFINEMENT_MAX_WORK
+        );
+        let tight = space_warp_refinement_budget(Some(MIB_BYTES), MIB_BYTES - 17).unwrap();
+        assert_eq!(tight.remaining_bytes(), 17);
+    }
+
+    #[test]
+    fn pressure_zoom_honors_single_zoom_archive_contract_and_is_bounded() {
+        assert_eq!(pressure_source_zoom(16, Some((10, 16)), 1), 15);
+        assert_eq!(pressure_source_zoom(16, Some((10, 16)), 3), 13);
+        assert_eq!(pressure_source_zoom(11, Some((10, 16)), 3), 10);
+        assert_eq!(pressure_source_zoom(14, Some((14, 14)), 3), 14);
+        assert_eq!(pressure_source_zoom(17, None, 3), 17);
+        assert_eq!(pressure_source_zoom(17, Some((20, 3)), 3), 17);
+        assert_eq!(
+            pressure_source_zoom_for_archives(14, Some((10, 16)), Some(Some((14, 14))), 1),
+            14,
+        );
+        assert_eq!(
+            pressure_source_zoom_for_archives(14, Some((10, 16)), Some(None), 1),
+            14,
+        );
+        assert_eq!(
+            pressure_source_zoom_for_archives(14, Some((10, 16)), Some(Some((10, 14))), 1),
+            13,
+        );
+    }
+
+    #[test]
+    fn pressured_request_keeps_separate_detail_archive_contract() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut map = test_map(&mut cx);
+        map.set_source_config(
+            &mut cx,
+            TileSourceConfig::HttpArchive {
+                root_url: "https://tiles.invalid/base.mkmap".to_string(),
+                detail_root_url: "https://tiles.invalid/detail.mkmap".to_string(),
+                bridge_dz_path: String::new(),
+            },
+        );
+        map.local_source_zoom_range = Some((10, 16));
+        map.memory_pressure.level = 1;
+
+        assert!(map.detail_archive.is_some());
+        map.zoom = 12.0;
+        assert_eq!(map.request_zoom_level_for_platform(true), 11);
+
+        map.zoom = 14.0;
+        assert_eq!(map.render_bucket_for_platform(true), 13);
+        assert_eq!(map.request_zoom_level_for_platform(true), 14);
+
+        // Without a separate-detail contract the same web pressure remains
+        // free to lower the base request.
+        map.tile_source_config = Some(TileSourceConfig::http_archive(
+            "https://tiles.invalid/base.mkmap",
+        ));
+        assert_eq!(map.request_zoom_level_for_platform(true), 13);
+    }
+
+    #[test]
+    fn incremental_radar_frames_keep_order_and_existing_texture_identity() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut map = test_map(&mut cx);
+        let bbox = (0.0, 48.0, 10.0, 56.0);
+        assert!(map.set_rain_sequence(&mut cx, vec![10, 0, 5], 2, 1, None, bbox));
+
+        assert!(map.set_rain_frame(&mut cx, 10, vec![10, 10]));
+        let ten_id = map.rain_frames[0].texture.texture_id();
+        assert!(map.set_rain_frame(&mut cx, 0, vec![0, 0]));
+        assert_eq!(
+            map.rain_frames.iter().map(|frame| frame.minute).collect::<Vec<_>>(),
+            [0, 10],
+        );
+        assert_eq!(map.rain_frames[1].texture.texture_id(), ten_id);
+
+        let zero_id = map.rain_frames[0].texture.texture_id();
+        assert!(map.set_rain_frame(&mut cx, 5, vec![5, 5]));
+        let five_id = map.rain_frames[1].texture.texture_id();
+        assert_eq!(map.rain_frames[0].texture.texture_id(), zero_id);
+        assert_eq!(map.rain_frames[2].texture.texture_id(), ten_id);
+
+        assert!(map.set_rain_frame(&mut cx, 5, vec![6, 6]));
+        assert_eq!(
+            map.rain_frames.iter().map(|frame| frame.minute).collect::<Vec<_>>(),
+            [0, 5, 10],
+        );
+        assert_eq!(map.rain_frames[0].texture.texture_id(), zero_id);
+        assert_ne!(map.rain_frames[1].texture.texture_id(), five_id);
+        assert_eq!(map.rain_frames[2].texture.texture_id(), ten_id);
+        assert!(!map.set_rain_frame(&mut cx, 15, vec![15, 15]));
+        assert!(!map.set_rain_frame(&mut cx, 5, vec![5]));
+
+        assert!(map.set_rain_sequence(&mut cx, vec![20, 0], 2, 1, None, bbox));
+        assert!(map.rain_frames.is_empty());
+        assert_eq!(map.rain_sequence_minutes, [0, 20]);
+    }
+
+    #[test]
+    fn radar_sequence_runtime_admission_is_atomic_and_budgeted() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut map = test_map(&mut cx);
+        let bbox = (0.0, 48.0, 10.0, 56.0);
+
+        assert_eq!(
+            radar_sequence_resident_bytes(1, (8191, 2048), Some((2048, 1))),
+            Some(MAX_RADAR_RESIDENT_BYTES),
+        );
+        assert!(map.set_rain_sequence(
+            &mut cx,
+            vec![0],
+            8191,
+            2048,
+            Some((2048, 1)),
+            bbox,
+        ));
+        assert_eq!(map.rain_sequence_minutes, [0]);
+
+        assert!(!map.set_rain_sequence(
+            &mut cx,
+            vec![0],
+            8191,
+            2048,
+            Some((2049, 1)),
+            bbox,
+        ));
+        assert_eq!(map.rain_sequence_minutes, [0]);
+        assert_eq!(map.rain_expected_hires_size, Some((2048, 1)));
+        assert_eq!(radar_sequence_resident_bytes(usize::MAX, (1, 1), None), None);
+    }
+
+    #[test]
+    fn legacy_web_radar_admission_is_checked_and_atomic() {
+        let pixels = 1024 * 1024;
+        assert!(radar_legacy_batch_admitted(
+            std::iter::repeat_n(pixels, 16),
+            (1024, 1024),
+            None,
+        ));
+        assert!(!radar_legacy_batch_admitted(
+            std::iter::repeat_n(pixels, 17),
+            (1024, 1024),
+            None,
+        ));
+        assert!(!radar_legacy_batch_admitted(
+            [pixels - 1].into_iter(),
+            (1024, 1024),
+            None,
+        ));
+
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut map = test_map(&mut cx);
+        let bbox = (0.0, 48.0, 10.0, 56.0);
+        assert!(map.set_rain_frames_for_platform(
+            &mut cx,
+            vec![vec![1, 2]],
+            2,
+            1,
+            bbox,
+            true,
+        ));
+        let frame_id = map.rain_frames[0].texture.texture_id();
+        assert!(!map.set_rain_frames_for_platform(
+            &mut cx,
+            vec![vec![3]],
+            2,
+            1,
+            (1.0, 49.0, 9.0, 55.0),
+            true,
+        ));
+        assert_eq!(map.rain_frames[0].texture.texture_id(), frame_id);
+        assert_eq!(map.rain_bbox, bbox);
+
+        assert!(map.set_rain_now_hires_for_platform(
+            &mut cx,
+            Some((vec![0; 4], 2, 2)),
+            true,
+        ));
+        let hires_id = map.rain_now_hires.as_ref().unwrap().0.texture_id();
+        assert!(!map.set_rain_now_hires_for_platform(
+            &mut cx,
+            Some((vec![0; 3], 2, 2)),
+            true,
+        ));
+        assert_eq!(
+            map.rain_now_hires.as_ref().unwrap().0.texture_id(),
+            hires_id,
+        );
+    }
+
+    #[test]
+    fn web_tile_admission_uses_actual_resident_demand_and_stays_bounded() {
+        const MIB: usize = 1024 * 1024;
+        let budgets = MapMemoryBudgets::from_total(1024 * MIB, true);
+        assert_eq!(
+            ready_tile_admission_limit(budgets, budgets.tile_cache, 0, true),
+            Some(32 * MIB)
+        );
+        assert_eq!(
+            ready_tile_admission_limit(budgets, budgets.tile_cache, 370 * MIB, true),
+            Some(14 * MIB)
+        );
+        assert_eq!(
+            ready_tile_admission_limit(budgets, budgets.tile_cache, 384 * MIB, true),
+            Some(0)
+        );
+        assert_eq!(
+            ready_tile_admission_limit(budgets, budgets.tile_cache, usize::MAX, false),
+            None
+        );
+    }
+
+    fn route_3d_combined_http_map(cx: &mut Cx) -> MapView {
+        let mut map = test_map(cx);
+        map.set_source_config(
+            cx,
+            TileSourceConfig::http_archive(
+                "https://tiles.invalid/world-20260903.mkmap",
+            ),
+        );
+        map.center_norm = lon_lat_to_normalized(4.9041, 52.3676);
+        map.zoom = 15.6;
+        map.tilt = 60.0;
+        map.buildings_3d = true;
+        map.local_source_zoom_range = Some((0, 14));
+        map
+    }
+
+    #[test]
+    fn web_route_3d_combined_archive_keeps_detail_and_building_floors() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut map = route_3d_combined_http_map(&mut cx);
+
+        for zoom in [15.6, 15.0] {
+            map.zoom = zoom;
+            for level in 0..=WEB_SOURCE_LOD_MAX {
+                map.memory_pressure.level = level;
+                assert_eq!(map.request_zoom_level_for_platform(true), 14);
+                assert!(
+                    map.render_bucket_for_platform(true) >= BUILDING_3D_MIN_ZOOM,
+                    "zoom {zoom} pressure level {level} disabled 3D buildings"
+                );
+            }
+        }
+
+        map.zoom = 15.6;
+        map.memory_pressure = MapMemoryPressure::default();
+        map.frame_counter = 1;
+        map.note_memory_pressure_for_platform(&mut cx, "test", true);
+        assert_eq!(map.memory_pressure.level, 1);
+        let settled_frame = map.memory_pressure.last_level_change_frame;
+        map.frame_counter += 1;
+        map.note_memory_pressure_for_platform(&mut cx, "test", true);
+        assert_eq!(map.memory_pressure.level, 1);
+        assert_eq!(map.memory_pressure.last_level_change_frame, settled_frame);
+
+        // At exactly z15 both floors are already effective, so pressure is
+        // recorded without scheduling an identical restyle/re-request.
+        map.zoom = 15.0;
+        map.memory_pressure = MapMemoryPressure::default();
+        map.frame_counter += 1;
+        map.note_memory_pressure_for_platform(&mut cx, "test", true);
+        assert_eq!(map.memory_pressure.level, 0);
+        assert_eq!(map.memory_pressure.last_level_change_frame, 0);
+    }
+
+    #[test]
+    fn web_3d_floors_preserve_flat_midzoom_and_archive_contracts() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut map = route_3d_combined_http_map(&mut cx);
+
+        // Flat and nominally mid-zoom views retain ordinary source/style
+        // coarsening even if the building layer toggle is on.
+        map.tilt = 0.0;
+        map.memory_pressure.level = 3;
+        assert_eq!(map.request_zoom_level_for_platform(true), 11);
+        assert_eq!(map.render_bucket_for_platform(true), 15);
+        map.tilt = 60.0;
+        map.zoom = 14.0;
+        assert_eq!(map.request_zoom_level_for_platform(true), 11);
+        assert_eq!(map.render_bucket_for_platform(true), 13);
+
+        // An unparsed combined root does not advertise a z14 floor, and a
+        // narrower regional archive must never be promoted to z14.
+        map.zoom = 15.6;
+        map.local_source_zoom_range = None;
+        map.memory_pressure.level = 1;
+        assert_eq!(map.request_zoom_level_for_platform(true), 13);
+        map.local_source_zoom_range = Some((0, 13));
+        assert_eq!(map.request_zoom_level_for_platform(true), 12);
+
+        // A declared single zoom remains exact under every pressure level.
+        map.local_source_zoom_range = Some((14, 14));
+        for level in 0..=WEB_SOURCE_LOD_MAX {
+            map.memory_pressure.level = level;
+            assert_eq!(map.request_zoom_level_for_platform(true), 14);
+        }
+
+        // A separate detail archive keeps its existing unknown-metadata
+        // protection; the combined-only floor does not participate.
+        map.set_source_config(
+            &mut cx,
+            TileSourceConfig::HttpArchive {
+                root_url: "https://tiles.invalid/base.mkmap".to_string(),
+                detail_root_url: "https://tiles.invalid/detail.mkmap".to_string(),
+                bridge_dz_path: String::new(),
+            },
+        );
+        map.zoom = 15.6;
+        map.tilt = 60.0;
+        map.buildings_3d = true;
+        map.local_source_zoom_range = Some((0, 14));
+        for level in 0..=WEB_SOURCE_LOD_MAX {
+            map.memory_pressure.level = level;
+            assert_eq!(map.request_zoom_level_for_platform(true), 14);
+        }
+    }
+
+    #[test]
+    fn dense_route_visible_set_without_payloads_stays_pressure_free() {
+        const MIB: usize = 1024 * 1024;
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut map = route_3d_combined_http_map(&mut cx);
+        let rect = Rect {
+            pos: dvec2(0.0, 0.0),
+            size: dvec2(4096.0, 2160.0),
+        };
+        map.visible_tiles = map.visible_tile_keys(rect);
+
+        let budgets = MapMemoryBudgets::from_total(1024 * MIB, true);
+        let resident = map.resident_tile_budget(budgets);
+        assert!(
+            map.visible_tiles.len().saturating_mul(budgets.upload) > resident,
+            "fixture must exercise the removed hypothetical dense-set trigger"
+        );
+        let available = ready_tile_admission_limit(
+            budgets,
+            resident,
+            0,
+            true,
+        )
+        .unwrap();
+        assert_eq!(available, budgets.upload);
+        assert_eq!(map.memory_pressure.level, 0);
+        assert_eq!(map.memory_pressure.events, 0);
+    }
+
+    #[test]
+    fn memory_deferred_tile_never_stays_loading_and_becomes_retryable() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut map = test_map(&mut cx);
+        let key = TileKey { z: 14, x: 1, y: 2 };
+        map.frame_counter = 10;
+        map.tiles.insert(
+            key,
+            TileEntry {
+                state: TileLoadState::LoadingLocal,
+                last_used: 10,
+                attempts: 0,
+                retry_after: 0,
+                bytes: 0,
+                bucket: 14,
+                baked_3d: false,
+                baked_fringe: true,
+                road_core_cached: false,
+                road_icon_indices: Vec::new(),
+                road_icon_vertices: Vec::new(),
+                fade: None,
+                draw: TileDrawLists::default(),
+            },
+        );
+        map.local_requested_tiles.insert(key, 0.0);
+
+        map.defer_tile_for_memory(key, "synthetic batch cap");
+        assert!(!map.tiles.contains_key(&key));
+        assert!(!map.local_requested_tiles.contains_key(&key));
+        assert!(map.memory_pressure.deferred.contains_key(&key));
+
+        map.frame_counter = 10 + MEMORY_PRESSURE_RETRY_FRAMES - 1;
+        map.expire_memory_deferrals(&cx);
+        assert!(map.memory_pressure.deferred.contains_key(&key));
+        map.frame_counter += 1;
+        map.expire_memory_deferrals(&cx);
+        assert!(!map.memory_pressure.deferred.contains_key(&key));
+
+        // Mode churn is another recovery edge: its old result is obsolete,
+        // so it clears the pressure retry gate as well as every Loading
+        // placeholder. Repeating the transition remains idempotent.
+        map.memory_pressure
+            .deferred
+            .insert(key, MemoryDeferral::Until(u64::MAX));
+        map.restyle_mode_overlay_keep_stale(&mut cx);
+        map.restyle_mode_overlay_keep_stale(&mut cx);
+        assert!(map.memory_pressure.deferred.is_empty());
+        assert!(map
+            .tiles
+            .values()
+            .all(|entry| !matches!(entry.state, TileLoadState::LoadingLocal | TileLoadState::LoadingNetwork)));
+    }
+
+    #[test]
+    fn exhausted_memory_deferral_waits_for_headroom_or_policy_change() {
+        let policy = TileAdmissionPolicy {
+            render_bucket: 14,
+            source_zoom: 13,
+            style_epoch: 7,
+            buildings_3d: true,
+        };
+        let blocker = ExhaustionBlocker {
+            failed_limit: 8 * 1024 * 1024,
+            required_bytes: 12 * 1024 * 1024,
+            policy,
+        };
+
+        // Frame passage and a merely larger-but-still-insufficient limit do
+        // not schedule identical rebakes of the same rejected payload.
+        assert!(!blocker.retry_ready(Some(blocker.failed_limit), policy));
+        assert!(!blocker.retry_ready(Some(blocker.required_bytes - 1), policy));
+        assert!(blocker.retry_ready(Some(blocker.required_bytes), policy));
+
+        let changed_policy = TileAdmissionPolicy {
+            style_epoch: policy.style_epoch + 1,
+            ..policy
+        };
+        assert!(blocker.retry_ready(Some(blocker.failed_limit), changed_policy));
+    }
+
+    #[test]
+    fn map_ready_tile_queue_meters_nine_arrivals_in_ring_order() {
+        struct FakeResult {
+            bytes: usize,
+            upload_seconds: f64,
+        }
+
+        let key = |x, y| TileKey { z: 3, x, y };
+        let visible = vec![key(4, 4), key(4, 3), key(3, 4), key(5, 4), key(4, 5)];
+        let arrivals = [
+            key(4, 6),
+            key(5, 4),
+            key(2, 4),
+            key(4, 4),
+            key(6, 4),
+            key(4, 3),
+            key(4, 2),
+            key(4, 5),
+            key(3, 4),
+        ];
+        let mut pending = arrivals
+            .into_iter()
+            .map(|key| {
+                (
+                    key,
+                    FakeResult {
+                        bytes: 4_000_000,
+                        upload_seconds: 0.0001,
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        sort_ready_tiles_for_insert(
+            &mut pending,
+            &visible,
+            dvec2(4.5 / 8.0, 4.5 / 8.0),
+            (1.0, 0.0),
+            1.0,
+        );
+
+        let mut inserted = Vec::new();
+        let mut frames = 0;
+        while !pending.is_empty() {
+            frames += 1;
+            let stats = drain_pending_ready_tiles(
+                &mut pending,
+                MapMemoryBudgets::from_total(1536 * 1024 * 1024, false).upload,
+                true,
+                |(_, ready)| ready.bytes,
+                |(key, ready)| {
+                    inserted.push(key);
+                    ready.upload_seconds
+                },
+            );
+            assert!((1..=READY_TILE_INSERTS_PER_FRAME).contains(&stats.count));
+        }
+
+        assert!(frames >= 3);
+        assert_eq!(frames, 5);
+        assert_eq!(
+            inserted,
+            [
+                key(4, 4),
+                key(4, 3),
+                key(3, 4),
+                key(5, 4),
+                key(4, 5),
+                key(4, 2),
+                key(2, 4),
+                key(6, 4),
+                key(4, 6),
+            ]
+        );
+    }
 
     #[test]
     fn tile_span_keeps_exactly_one_prefetch_tile_for_partial_edge_tiles() {
@@ -6847,5 +13055,313 @@ mod tests {
     fn tile_span_keeps_one_prefetch_tile_at_exact_boundaries() {
         let (min, max) = tile_span_with_prefetch(TILE_SIZE, TILE_SIZE * 2.0);
         assert_eq!((min, max), (0, 2));
+    }
+
+    #[test]
+    fn source_shape_recognizes_archive_formats() {
+        assert!(!is_mkmap_path_shape("local/maps/example-base.mbtiles"));
+        assert!(is_mkmap_path_shape("local/maps/world.mkmap"));
+        assert!(is_mkmap_path_shape("local/maps/world/root.mkidx"));
+    }
+
+    #[test]
+    fn map_tile_job_panic_marks_the_tile_failed() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut map = test_map(&mut cx);
+        let key = TileKey { z: 14, x: 8414, y: 5384 };
+        map.submit_tile_job(&mut cx, key, || panic!("synthetic tile bake failure"))
+            .unwrap();
+
+        for _ in 0..2_000 {
+            map.handle_tile_worker_messages(&mut cx);
+            if map
+                .tiles
+                .get(&key)
+                .is_some_and(|entry| matches!(entry.state, TileLoadState::Failed { .. }))
+                && map.tile_queue.in_flight() == 0
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(map
+            .tiles
+            .get(&key)
+            .is_some_and(|entry| matches!(entry.state, TileLoadState::Failed { .. })));
+        assert_eq!(map.tile_queue.in_flight(), 0);
+    }
+
+    #[test]
+    fn map_overlay_archive_fetches_its_maxzoom_ancestor() {
+        let key = TileKey {
+            z: 17,
+            x: 65_793,
+            y: 43_117,
+        };
+        assert_eq!(overlay_fetch_key(key, (7, 14)), Some(TileKey {
+            z: 14,
+            x: key.x >> 3,
+            y: key.y >> 3,
+        }));
+        assert_eq!(overlay_fetch_key(key, (18, 20)), None);
+    }
+
+    #[test]
+    fn map_view_dispatches_hosted_overlays_through_archive_reader() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut map = test_map(&mut cx);
+        map.zoom = 1.0;
+        map.set_source_config(
+            &mut cx,
+            TileSourceConfig::http_archive("https://tiles.invalid/world.mkmap"),
+        );
+        map.set_overlays(
+            &mut cx,
+            vec![
+                OverlaySource::with_option(
+                    "chargers",
+                    TileSourceConfig::http_archive("https://tiles.invalid/chargers.mkmap"),
+                    Some("fast"),
+                ),
+                OverlaySource::new(
+                    "nature",
+                    TileSourceConfig::local_archive("local/overlays/nature.mbtiles"),
+                ),
+            ],
+        );
+        let key = TileKey { z: 1, x: 0, y: 0 };
+        map.visible_tiles = vec![key];
+        map.request_visible_tiles_from_local_source(&mut cx);
+
+        assert_eq!(map.overlay_archives.len(), 2);
+        assert_eq!(map.overlay_archives[0].name, "chargers");
+        assert_eq!(map.overlay_archives[0].filter, 1);
+        assert_eq!(
+            map.overlay_archives[0]
+                .archive
+                .as_ref()
+                .unwrap()
+                .waiter_count(),
+            1
+        );
+        assert_eq!(
+            map.overlay_archives[1].local_mbtiles_path.as_deref(),
+            Some("local/overlays/nature.mbtiles")
+        );
+        assert_eq!(map.archive_pending_tiles[&key].overlays.len(), 1);
+    }
+
+    #[test]
+    fn malformed_zoom_state_cannot_invert_request_clamping() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut map = test_map(&mut cx);
+        map.use_local_mbtiles = true;
+        map.zoom = 17.0;
+        map.local_source_zoom_range = Some((20, 3));
+        assert_eq!(map.request_zoom_level(), LOCAL_MBTILES_MAX_ZOOM);
+        map.local_source_zoom_range = Some((0, 31));
+        assert_eq!(map.request_zoom_level(), LOCAL_MBTILES_MAX_ZOOM);
+    }
+
+    #[test]
+    fn archive_watcher_rejects_malformed_mbtiles_zoom_metadata() {
+        let path = temp_mbtiles_with_zoom("map-view-invalid-watch-zoom", "20", "3", 0);
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut map = test_map(&mut cx);
+        map.set_source_config(
+            &mut cx,
+            TileSourceConfig::LocalArchive {
+                mbtiles_path: path.to_string_lossy().into_owned(),
+                detail_mbtiles_path: String::new(),
+                bridge_dz_path: String::new(),
+            },
+        );
+        map.local_source_zoom_range = Some((4, 6));
+        map.local_source_zoom_range_checked = true;
+        map.archive_watch_mtime = archive_mtime(&path);
+
+        <MapView as Widget>::handle_event(
+            &mut map,
+            &mut cx,
+            &Event::Startup,
+            &mut Scope::empty(),
+        );
+        assert!(map.archive_watch_in_flight);
+        for _ in 0..2_000 {
+            <MapView as Widget>::handle_event(
+                &mut map,
+                &mut cx,
+                &Event::Startup,
+                &mut Scope::empty(),
+            );
+            if !map.archive_watch_in_flight {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(!map.archive_watch_in_flight);
+        assert_eq!(map.local_source_zoom_range, Some((4, 6)));
+        map.zoom = 5.0;
+        assert!((4..=6).contains(&map.request_zoom_level()));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn legacy_mbtiles_installed_on_map_view_dispatches_legacy_worker() {
+        let path = temp_mbtiles("map-view-legacy-dispatch");
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut map = test_map(&mut cx);
+        map.zoom = 0.0;
+        map.set_source_config(
+            &mut cx,
+            TileSourceConfig::LocalArchive {
+                mbtiles_path: path.to_string_lossy().into_owned(),
+                detail_mbtiles_path: String::new(),
+                bridge_dz_path: String::new(),
+            },
+        );
+        map.local_source_zoom_range = Some((0, 0));
+        let key = TileKey { z: 0, x: 0, y: 0 };
+        map.visible_tiles = vec![key];
+        map.request_visible_tiles_from_local_source(&mut cx);
+        assert!(map.base_archive.is_none());
+        assert!(map.archive_pending_tiles.is_empty());
+        let mut message = None;
+        for _ in 0..2_000 {
+            if let Ok(received) = map.tile_worker_rx.try_recv() {
+                message = Some(received);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(matches!(
+            message,
+            Some(TileWorkerMessage::LocalBatchLoaded { loaded, .. }) if loaded.len() == 1
+        ));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn map_view_source_switch_reuses_archive_pool() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut map = test_map(&mut cx);
+        map.set_source_config(&mut cx, TileSourceConfig::http_archive("https://one.invalid/map"));
+        let first = map.archive_worker_pool.as_ref().unwrap().clone();
+        map.set_source_config(&mut cx, TileSourceConfig::http_archive("https://two.invalid/map"));
+        let second = map.archive_worker_pool.as_ref().unwrap();
+        assert!(first.ptr_eq(second));
+    }
+
+    #[test]
+    fn detail_equal_to_base_issues_one_archive_request() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut map = test_map(&mut cx);
+        map.zoom = 14.0;
+        map.set_source_config(
+            &mut cx,
+            TileSourceConfig::http_archive("https://tiles.invalid/world.mkmap"),
+        );
+        let key = TileKey { z: 14, x: 0, y: 0 };
+        map.visible_tiles = vec![key];
+        map.request_visible_tiles_from_local_source(&mut cx);
+        assert!(map.detail_archive.is_none());
+        assert_eq!(map.base_archive.as_ref().unwrap().source_request_count(), 1);
+        assert!(map.archive_pending_tiles[&key].reuse_base_as_detail);
+    }
+
+    #[test]
+    fn same_zoom_pan_prunes_queued_build_and_loading_placeholder() {
+        let path = temp_mbtiles_with_zoom("map-view-same-zoom-prune", "3", "3", 3);
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut map = test_map(&mut cx);
+        map.zoom = 3.0;
+        map.set_source_config(
+            &mut cx,
+            TileSourceConfig::LocalArchive {
+                mbtiles_path: path.to_string_lossy().into_owned(),
+                detail_mbtiles_path: String::new(),
+                bridge_dz_path: String::new(),
+            },
+        );
+        map.local_source_zoom_range = Some((3, 3));
+        // Park every pool worker so tile builds stay staged in the map's
+        // queue, where a pan can still prune them.
+        let pool = cx.task_pool();
+        let thread_count = pool.worker_count();
+        let reached = Arc::new(std::sync::Barrier::new(thread_count + 1));
+        let release = Arc::new(std::sync::Barrier::new(thread_count + 1));
+        for _ in 0..thread_count {
+            let reached = reached.clone();
+            let release = release.clone();
+            pool.submit(Lane::Light, move || {
+                reached.wait();
+                release.wait();
+            })
+            .unwrap()
+            .detach();
+        }
+        reached.wait();
+        let rect = Rect {
+            pos: dvec2(0.0, 0.0),
+            size: dvec2(64.0, 64.0),
+        };
+        map.set_center(&mut cx, -90.0, 0.0);
+        map.ensure_visible_tiles(&mut cx, rect);
+        let requested_before = map
+            .local_requested_tiles
+            .keys()
+            .copied()
+            .collect::<HashSet<_>>();
+        assert!(!requested_before.is_empty());
+
+        map.set_center(&mut cx, 0.0, 0.0);
+        map.ensure_visible_tiles(&mut cx, rect);
+        let stale = requested_before
+            .into_iter()
+            .filter(|key| !map.visible_tiles.contains(key))
+            .collect::<Vec<_>>();
+        assert!(!stale.is_empty());
+        // With every worker parked the queue hands over at most one job (its
+        // window never closes below one); everything staged is pruned.
+        let handed_over = map.tile_queue.in_flight();
+        assert!(handed_over <= 1, "saturated pool, yet {handed_over} tile jobs were handed over");
+        let leaked = stale
+            .iter()
+            .filter(|key| map.local_requested_tiles.contains_key(key))
+            .count();
+        assert!(leaked <= handed_over, "{leaked} stale builds survived the pan");
+        for key in &stale {
+            if !map.local_requested_tiles.contains_key(key) {
+                assert!(!map.tiles.contains_key(key));
+            }
+        }
+        assert!(map
+            .local_requested_tiles
+            .keys()
+            .any(|key| map.visible_tiles.contains(key)));
+
+        map.visible_tiles.clear();
+        map.request_visible_tiles_from_local_source(&mut cx);
+        assert!(map.local_requested_tiles.len() <= handed_over);
+        release.wait();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn http_archive_waiting_for_dispatch_has_no_enqueue_watchdog() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut map = test_map(&mut cx);
+        map.zoom = 1.0;
+        map.set_source_config(
+            &mut cx,
+            TileSourceConfig::http_archive("https://never.invalid/world.mkmap"),
+        );
+        let key = TileKey { z: 1, x: 0, y: 0 };
+        map.visible_tiles = vec![key];
+        map.request_visible_tiles_from_local_source(&mut cx);
+        assert_eq!(map.base_archive.as_ref().unwrap().waiter_count(), 1);
+        assert!(map.archive_request_watchdog_handle.is_none());
+        assert!(map.local_requested_tiles.contains_key(&key));
+        assert!(map.archive_pending_tiles.contains_key(&key));
     }
 }

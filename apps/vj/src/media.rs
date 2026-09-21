@@ -17,17 +17,27 @@
 
 use crate::cue::SlotId;
 use crate::decks::DeckId;
-use crate::mixer::{Mixer, TrackPcm, MAX_VIDEO_PLAYBACK_RATE, MIN_VIDEO_PLAYBACK_RATE};
+use crate::mixer::{
+    Mixer, StreamPcm, TrackPcm, MAX_VIDEO_PLAYBACK_RATE, MIN_VIDEO_PLAYBACK_RATE,
+    STREAM_CHUNK_FRAMES,
+};
 use crate::pads::PadKey;
+use crate::wave_analysis::{WaveHop, WaveHopBuilder, ZOOM_COLS_PER_SEC};
 use makepad_asset_data::{AssetRevisionId, MediaType, ThumbnailCells};
-use makepad_audio_decode::{decode_audio_limited, AudioFormat, Limits as AudioLimits};
+use makepad_audio_decode::{
+    decode_audio_limited, mp3::Mp3Decoder, vorbis::VorbisDecoder, AudioFormat,
+    Limits as AudioLimits,
+};
+use makepad_widgets::makepad_platform::thread::{Lane, TaskPool, ThreadOptions, ThreadSpawner};
 use makepad_widgets::makepad_platform::video_file::{nv12, VideoFileDecoder, VideoFileInfo};
-use std::collections::VecDeque;
+use std::cell::RefCell;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, Instant};
+use crate::clock::Instant;
+use std::time::Duration;
 
 const RING_FRAMES: usize = 3;
 
@@ -265,7 +275,11 @@ impl PlayMode {
 /// is the true worst case. 16 GB holds ~9 s of a Retina screen capture
 /// (3034×1882, 22.8 MB/frame), ~30 s of 1920×1080, minutes of 1280×704.
 /// Bigger clips fall through to the seek-bounce tier below.
-const MAX_PINGPONG_CACHE_BYTES: usize = 16 * 1024 * 1024 * 1024;
+const MAX_PINGPONG_CACHE_BYTES: usize = if usize::BITS >= 64 {
+    17_179_869_184_u64
+} else {
+    (usize::MAX - 1) as u64
+} as usize;
 
 /// Seek-bounce (tier 3): how far one reverse hop reaches back. Two seconds
 /// is a typical GOP, so most of what the in-seek discard walk decodes is
@@ -280,7 +294,11 @@ const REVERSE_WINDOW_100NS: i64 = 20_000_000;
 /// a frame, ~57-frame GOP ≈ 1.3 GB decoded) used to hit the old 96 MB cap
 /// after FOUR frames, so every 1.6 s GOP decode served 4 frames and reverse
 /// ran at 1/25 speed. 4 GB holds several such GOPs — and ~2 s of 4K60.
-const REVERSE_WINDOW_MAX_BYTES: usize = 4 * 1024 * 1024 * 1024;
+const REVERSE_WINDOW_MAX_BYTES: usize = if usize::BITS >= 64 {
+    4_294_967_296_u64
+} else {
+    (usize::MAX - 1) as u64
+} as usize;
 
 struct SlotShared {
     stop: AtomicBool,
@@ -382,6 +400,8 @@ impl SlotPlayer {
         mixer: Mixer,
         loop_on: bool,
         start_paused: bool,
+        spawner: ThreadSpawner,
+        pool: TaskPool,
     ) -> Result<SlotPlayer, String> {
         let input = DecoderInput::prepare(Path::new(path), media)?;
         let info = VideoFileDecoder::open(&input.path)
@@ -423,9 +443,12 @@ impl SlotPlayer {
         mixer.set_slot_paused(slot, start_paused);
         let thread_shared = shared.clone();
         let thread_mixer = mixer.clone();
-        std::thread::Builder::new()
-            .name(format!("vj-slot-{:?}", slot))
-            .spawn(move || decode_loop(slot, input, thread_mixer, thread_shared))
+        // The slot's decode loop lives as long as the slot; its repeat-cache
+        // fills are heavy pool jobs.
+        let options = ThreadOptions { name: Some("vj-slot-decode".into()), ..Default::default() };
+        spawner
+            .spawn_worker(options, move || decode_loop(slot, input, thread_mixer, thread_shared, pool))
+            .map(|handle| handle.detach())
             .map_err(|e| e.to_string())?;
         Ok(SlotPlayer {
             width: info.width,
@@ -454,7 +477,7 @@ impl SlotPlayer {
     }
 
     pub fn failure(&self) -> Option<String> {
-        self.shared.failure.lock().unwrap().clone()
+        self.shared.failure.try_lock().ok()?.clone()
     }
 
     pub fn set_paused(&mut self, paused: bool) {
@@ -481,7 +504,11 @@ impl SlotPlayer {
     pub fn needs_frame_pump(&self) -> bool {
         !self.shared.paused.load(Ordering::Acquire)
             && (!self.shared.end_of_stream.load(Ordering::Acquire)
-                || !self.shared.frames.lock().unwrap().is_empty())
+                || self
+                    .shared
+                    .frames
+                    .try_lock()
+                    .map_or(true, |frames| !frames.is_empty()))
     }
 
     /// Ask for this clip's loop to be CLOSED: when the repeat window is
@@ -514,7 +541,9 @@ impl SlotPlayer {
     /// The eager repeat cache, once complete — the tweener reads frame
     /// pairs straight out of it.
     pub fn cache_frames(&self) -> Option<Arc<Vec<Frame>>> {
-        self.shared.repeat_cache.lock().unwrap().frames.clone()
+        // The fill thread holds this while it works; a frame in which it
+        // does simply reads as "not yet" instead of waiting on it.
+        self.shared.repeat_cache.try_lock().ok()?.frames.clone()
     }
 
     /// A stable identity for this player (this cue of this clip): the
@@ -703,7 +732,7 @@ impl SlotPlayer {
         if self.shared.paused.load(Ordering::Acquire) {
             return None;
         }
-        let mut frames = self.shared.frames.lock().unwrap();
+        let mut frames = self.shared.frames.try_lock().ok()?;
         let first_pts = frames.front()?.pts_100ns;
         // A large backward pts jump means the stream restarted (loop or
         // seek): rebase the clock there.
@@ -764,7 +793,13 @@ impl Drop for SlotPlayer {
     }
 }
 
-fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<SlotShared>) {
+fn decode_loop(
+    slot: SlotId,
+    input: DecoderInput,
+    mixer: Mixer,
+    shared: Arc<SlotShared>,
+    pool: TaskPool,
+) {
     let path = &input.path;
     let mut decoder = match VideoFileDecoder::open(path) {
         Ok(d) => d,
@@ -794,7 +829,7 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
         }
         // The eager fill worker: spawned/refreshed here (a no-op lock
         // when settled). Trim-epoch invalidation lives inside it.
-        ensure_repeat_fill(&shared, path, &info);
+        ensure_repeat_fill(&shared, path, &info, &pool);
         // Seek: reopen and discard up to the target.
         let seek = shared.seek_100ns.swap(-1, Ordering::AcqRel);
         if seek >= 0 {
@@ -803,7 +838,7 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
                     decoder = d;
                     audio_eos = !info.has_audio;
                     shared.frames.lock().unwrap().clear();
-                    mixer.flush_slot_audio(slot);
+                    mixer.flush_slot_audio_from_worker(slot);
                     // Discard video frames strictly before the target.
                     loop {
                         if shared.stop.load(Ordering::Acquire) {
@@ -910,6 +945,10 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
                 Instant::now() >= preroll_deadline,
             );
             shared.preroll_status.store(status as u8, Ordering::Release);
+            // Native-only: `decode_loop` returns at the top on wasm32
+            // (`VideoFileDecoder::open` is a Windows / macOS / Linux stub
+            // there and always fails), so nothing below that point runs.
+            #[cfg(not(target_arch = "wasm32"))]
             std::thread::sleep(Duration::from_millis(8));
             continue;
         }
@@ -952,6 +991,8 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
             }
         }
         if shared.frames.lock().unwrap().len() >= RING_FRAMES {
+            // Native-only: see the preroll wait above.
+            #[cfg(not(target_arch = "wasm32"))]
             std::thread::sleep(Duration::from_millis(4));
             continue;
         }
@@ -1199,6 +1240,8 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
                         return;
                     }
                     if mixer.slot_buffered_secs(slot) > AUDIO_AHEAD_SECS {
+                        // Native-only: see the preroll wait above.
+                        #[cfg(not(target_arch = "wasm32"))]
                         std::thread::sleep(Duration::from_millis(20));
                         continue;
                     }
@@ -1234,6 +1277,8 @@ fn decode_loop(slot: SlotId, input: DecoderInput, mixer: Mixer, shared: Arc<Slot
                         shared.end_of_stream.store(false, Ordering::Release);
                         break;
                     }
+                    // Native-only: see the preroll wait above.
+                    #[cfg(not(target_arch = "wasm32"))]
                     std::thread::sleep(Duration::from_millis(20));
                 }
                 match VideoFileDecoder::open(&path) {
@@ -1276,7 +1321,12 @@ struct RepeatCacheSlot {
 /// iteration. Cheap when settled (one lock). The budget verdict is
 /// ARITHMETIC — window length × NV12 frame bytes — so an over-budget clip
 /// is known the instant it is cued, not minutes into a decode.
-fn ensure_repeat_fill(shared: &Arc<SlotShared>, path: &str, info: &VideoFileInfo) {
+fn ensure_repeat_fill(
+    shared: &Arc<SlotShared>,
+    path: &str,
+    info: &VideoFileInfo,
+    pool: &TaskPool,
+) {
     if PlayMode::from_u8(shared.mode.load(Ordering::Acquire)) == PlayMode::Once {
         return;
     }
@@ -1324,14 +1374,19 @@ fn ensure_repeat_fill(shared: &Arc<SlotShared>, path: &str, info: &VideoFileInfo
     }
     let shared = shared.clone();
     let path = path.to_string();
-    let _ = std::thread::Builder::new().name("vj-cache-fill".into()).spawn(move || {
+    match pool.submit(Lane::Heavy, move || {
         let t0 = Instant::now();
         let ok = repeat_fill_worker(&shared, &path, epoch, t_in, t_out, open_ended);
         shared.repeat_cache.lock().unwrap().filling = false;
         if tl_on() {
             eprintln!("tl fill done ok={ok} in {}ms", t0.elapsed().as_millis());
         }
-    });
+    }) {
+        Ok(handle) => handle.detach(),
+        Err(error) => {
+            makepad_widgets::log!("vj repeat-cache worker unavailable: {error}");
+        }
+    }
 }
 
 /// The fill itself: a PRIVATE decoder, video track only, running at
@@ -1522,7 +1577,14 @@ fn park_while_resident(shared: &Arc<SlotShared>, has_audio: bool) {
         if shared.repeat_cache.lock().unwrap().frames.is_none() {
             return;
         }
+        // Native-only: called only from `decode_loop`, which returns
+        // before this point on wasm32 (`VideoFileDecoder` is a Windows /
+        // macOS / Linux stub there, so `VideoFileDecoder::open` always
+        // fails first).
+        #[cfg(not(target_arch = "wasm32"))]
         std::thread::sleep(Duration::from_millis(8));
+        #[cfg(target_arch = "wasm32")]
+        return;
     }
 }
 
@@ -1562,16 +1624,22 @@ fn seek_bounce_playback(
             || (has_audio && !shared.muted.load(Ordering::Acquire))
     }
     /// Pause-aware ring backpressure; true = exit requested.
+    // Native-only: `seek_bounce_playback` (and this nested `wait_ring`) is
+    // only ever called from `decode_loop`, which returns before this point
+    // on wasm32 (`VideoFileDecoder::open` is a Windows / macOS / Linux
+    // stub there and always fails).
     fn wait_ring(shared: &SlotShared, has_audio: bool, epoch0: u64) -> bool {
         loop {
             if must_exit(shared, has_audio, epoch0) {
                 return true;
             }
             if shared.paused.load(Ordering::Acquire) {
+                #[cfg(not(target_arch = "wasm32"))]
                 std::thread::sleep(Duration::from_millis(8));
                 continue;
             }
             if shared.frames.lock().unwrap().len() >= RING_FRAMES {
+                #[cfg(not(target_arch = "wasm32"))]
                 std::thread::sleep(Duration::from_millis(4));
                 continue;
             }
@@ -1682,6 +1750,8 @@ fn seek_bounce_playback(
             }
             scratching = scratch_on;
             if shared.paused.load(Ordering::Acquire) && !scratching {
+                // Native-only: see the comment on `wait_ring` above.
+                #[cfg(not(target_arch = "wasm32"))]
                 std::thread::sleep(Duration::from_millis(8));
                 continue;
             }
@@ -1752,11 +1822,15 @@ fn seek_bounce_playback(
                     // Ping-pong: the leg ends when the last resident
                     // frame has been served; a pinned scratch just holds.
                     if scratching {
+                        // Native-only: see the comment on `wait_ring` above.
+                        #[cfg(not(target_arch = "wasm32"))]
                         std::thread::sleep(Duration::from_millis(4));
                         continue;
                     }
                     break;
                 } else {
+                    // Native-only: see the comment on `wait_ring` above.
+                    #[cfg(not(target_arch = "wasm32"))]
                     std::thread::sleep(Duration::from_millis(2));
                     continue;
                 }
@@ -1839,6 +1913,8 @@ fn seek_bounce_playback(
                 }
             } else {
                 // Ring full, window decoded, resident still serving.
+                // Native-only: see the comment on `wait_ring` above.
+                #[cfg(not(target_arch = "wasm32"))]
                 std::thread::sleep(Duration::from_millis(2));
             }
         }
@@ -1950,12 +2026,23 @@ pub fn decode_audio_clip(
     media: MediaType,
     max_frames: usize,
 ) -> Result<TrackPcm, String> {
+    decode_audio_source(&DecodeSource::Path(path.clone()), media, max_frames)
+}
+
+fn decode_audio_source(
+    source: &DecodeSource,
+    media: MediaType,
+    max_frames: usize,
+) -> Result<TrackPcm, String> {
     match media {
         MediaType::Wav => {
-            let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+            let bytes = source.read_bytes()?;
             parse_wav(&bytes, max_frames)
         }
         MediaType::Mp4 => {
+            let DecodeSource::Path(path) = source else {
+                return Err("hardware MP4 audio decode is unavailable for in-memory web blobs".into());
+            };
             // Cache objects are digest-only names; AVURLAsset keys off the
             // extension. Lease a typed hard link the same way video slots do.
             let input = DecoderInput::prepare(path, MediaType::Mp4)?;
@@ -1988,7 +2075,7 @@ pub fn decode_audio_clip(
         // MP3 and Ogg Vorbis go through the repo's own decoders, the same way
         // WAV does: whole file in, interleaved PCM out, no platform codec.
         MediaType::Mp3 | MediaType::Ogg => {
-            let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+            let bytes = source.read_bytes()?;
             let format = if matches!(media, MediaType::Mp3) {
                 AudioFormat::Mp3
             } else {
@@ -2012,6 +2099,363 @@ pub fn decode_audio_clip(
             Ok(TrackPcm { frames, sample_rate: audio.rate.max(1) })
         }
         other => Err(format!("unsupported audio media {other:?}")),
+    }
+}
+
+impl DecodeSource {
+    fn read_bytes(&self) -> Result<Vec<u8>, String> {
+        match self {
+            Self::Path(path) => std::fs::read(path).map_err(|error| error.to_string()),
+            Self::Bytes(bytes) => Ok(bytes.to_vec()),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// streaming deck decode
+// ---------------------------------------------------------------------------
+
+/// How much of a track must be in before the deck opens on it. From then on
+/// the decoder stays ahead by construction: the voice waits at the decoded
+/// edge rather than ever reading past it.
+pub const PLAYABLE_LEAD_SECS: f64 = 2.5;
+
+/// Cuts a decoder's output into ordered [`DeckChunk`]s for the deck while
+/// keeping the whole track for the analysis that needs it entire. The
+/// worker's side of the stream; [`DeckStream`] is the UI's.
+struct StreamCutter<'a> {
+    frames: Vec<[i16; 2]>,
+    sample_rate: u32,
+    total_hint: Option<usize>,
+    max_frames: usize,
+    emitted: usize,
+    seq: u32,
+    hops: WaveHopBuilder,
+    /// `None` for a decode nobody is listening to chunk by chunk (the stems
+    /// prefetch): the track is still assembled, nothing is copied out.
+    sink: Option<&'a mut dyn FnMut(DeckChunk)>,
+}
+
+impl<'a> StreamCutter<'a> {
+    fn new(
+        sample_rate: u32,
+        total_hint: Option<usize>,
+        max_frames: usize,
+        sink: Option<&'a mut dyn FnMut(DeckChunk)>,
+    ) -> StreamCutter<'a> {
+        let sample_rate = sample_rate.max(1);
+        let total_hint = total_hint.filter(|frames| *frames > 0).map(|frames| frames.min(max_frames));
+        StreamCutter {
+            frames: Vec::with_capacity(total_hint.unwrap_or(0)),
+            sample_rate,
+            total_hint,
+            max_frames,
+            emitted: 0,
+            seq: 0,
+            hops: WaveHopBuilder::new(sample_rate),
+            sink,
+        }
+    }
+
+    #[inline]
+    fn push(&mut self, frame: [i16; 2]) -> Result<(), String> {
+        if self.frames.len() >= self.max_frames {
+            return Err("audio clip exceeds the decode budget".into());
+        }
+        self.frames.push(frame);
+        Ok(())
+    }
+
+    /// Send every whole chunk that is in, keeping `holdback` frames back —
+    /// the gapless tail an MP3 only knows to trim once its end is reached.
+    fn flush(&mut self, holdback: usize) {
+        while self.frames.len().saturating_sub(holdback) >= self.emitted + STREAM_CHUNK_FRAMES {
+            self.emit(self.emitted + STREAM_CHUNK_FRAMES, false);
+        }
+    }
+
+    fn emit(&mut self, end: usize, last: bool) {
+        let Some(sink) = self.sink.as_mut() else {
+            self.emitted = end;
+            return;
+        };
+        let slice = &self.frames[self.emitted..end];
+        let mut hops = Vec::with_capacity(slice.len() / self.hops.hop_frames() + 1);
+        self.hops.push(slice, &mut hops);
+        if last {
+            self.hops.finish(&mut hops);
+        }
+        sink(DeckChunk {
+            seq: self.seq,
+            sample_rate: self.sample_rate,
+            total_frames_hint: self.total_hint,
+            frames: Arc::new(slice.to_vec()),
+            hops,
+            last,
+        });
+        self.seq += 1;
+        self.emitted = end;
+    }
+
+    /// The end of the stream: drop `trim_tail` frames, send what is left as
+    /// the last chunk (empty when a full chunk was the end) and hand back
+    /// the whole track.
+    fn finish(mut self, trim_tail: usize, what: &str) -> Result<TrackPcm, String> {
+        let keep = self.frames.len().saturating_sub(trim_tail).max(self.emitted);
+        self.frames.truncate(keep);
+        if self.frames.is_empty() {
+            return Err(format!("{what} decoded to zero frames"));
+        }
+        self.emit(self.frames.len(), true);
+        Ok(TrackPcm { frames: self.frames, sample_rate: self.sample_rate })
+    }
+}
+
+/// Decode a deck track, delivering it in order through `sink` as it comes
+/// off the decoder and returning it whole at the end. WAV parses at once
+/// and streams from memory; MP3 and Ogg Vorbis run the repo's progressive
+/// decoders frame by frame; MP4/M4A pulls the platform decoder's audio
+/// chunks. Native and web share every line of it.
+fn decode_deck_stream(
+    source: &DecodeSource,
+    media: MediaType,
+    max_frames: usize,
+    sink: Option<&mut dyn FnMut(DeckChunk)>,
+) -> Result<TrackPcm, String> {
+    let sample = |v: f32| (v.clamp(-1.0, 1.0) * 32767.0) as i16;
+    match media {
+        MediaType::Wav => {
+            let bytes = source.read_bytes()?;
+            let parsed = parse_wav(&bytes, max_frames)?;
+            let total = parsed.frames.len();
+            let mut cutter = StreamCutter::new(parsed.sample_rate, Some(total), max_frames, sink);
+            cutter.frames = parsed.frames;
+            cutter.flush(0);
+            cutter.finish(0, "wav")
+        }
+        MediaType::Mp4 => {
+            let DecodeSource::Path(path) = source else {
+                return Err("hardware MP4 audio decode is unavailable for in-memory web blobs".into());
+            };
+            // Cache objects are digest-only names; AVURLAsset keys off the
+            // extension. Lease a typed hard link the same way video slots do.
+            let input = DecoderInput::prepare(path, MediaType::Mp4)?;
+            let mut decoder = VideoFileDecoder::open(&input.path).map_err(|e| e.to_string())?;
+            let info = decoder.info().clone();
+            if !info.has_audio {
+                return Err("mp4 has no audio track".into());
+            }
+            // The rate is the first chunk's word, not the container's: some
+            // platform decoders advertise one and deliver another.
+            let mut cutter: Option<StreamCutter> = None;
+            let mut sink = sink;
+            loop {
+                match decoder.next_audio().map_err(|e| e.to_string())? {
+                    None => break,
+                    Some(chunk) => {
+                        let rate = chunk.sample_rate.max(1);
+                        let cutter = match cutter.as_mut() {
+                            Some(cutter) if cutter.sample_rate != rate => {
+                                return Err("mp4 audio changes sample rate mid-stream".into());
+                            }
+                            Some(cutter) => cutter,
+                            None => {
+                                let hint = (info.duration_100ns > 0).then(|| {
+                                    (info.duration_100ns as f64 / 10_000_000.0 * rate as f64) as usize
+                                });
+                                cutter.insert(StreamCutter::new(rate, hint, max_frames, sink.take()))
+                            }
+                        };
+                        let ch = chunk.channels.max(1) as usize;
+                        for frame in chunk.samples.chunks_exact(ch) {
+                            cutter.push([frame[0], frame[ch - 1]])?;
+                        }
+                        cutter.flush(0);
+                    }
+                }
+            }
+            match cutter {
+                Some(cutter) => cutter.finish(0, "mp4 audio"),
+                None => Err("mp4 audio decoded to zero frames".into()),
+            }
+        }
+        MediaType::Mp3 => {
+            let bytes = source.read_bytes()?;
+            let mut decoder =
+                Mp3Decoder::with_limits(&bytes, AudioLimits::with_max_frames(max_frames))
+                    .map_err(|e| e.to_string())?;
+            let rate = decoder.rate();
+            let hint = makepad_audio_decode::mp3::probe_duration(&bytes)
+                .ok()
+                .map(|secs| (secs * rate as f64) as usize);
+            // The gapless tail is trimmed once the end is known; those
+            // frames are held back from the stream until then.
+            let (_, skip_back) = decoder.trim();
+            let skip_back = skip_back as usize;
+            let mut cutter = StreamCutter::new(rate, hint, max_frames, sink);
+            let (mut channels, mut frame_rate) = (0u16, 0u32);
+            while let Some(frame) = decoder.next_frame().map_err(|e| e.to_string())? {
+                if channels != 0 && (frame.channels != channels || frame.rate != frame_rate) {
+                    return Err("mp3: format changes mid-stream".into());
+                }
+                channels = frame.channels;
+                frame_rate = frame.rate;
+                let ch = channels.max(1) as usize;
+                for pcm in frame.pcm.chunks_exact(ch) {
+                    cutter.push([sample(pcm[0]), sample(pcm[ch - 1])])?;
+                }
+                cutter.flush(skip_back);
+            }
+            cutter.finish(skip_back, "mp3")
+        }
+        MediaType::Ogg => {
+            let bytes = source.read_bytes()?;
+            let mut decoder =
+                VorbisDecoder::with_limits(&bytes, AudioLimits::with_max_frames(max_frames))
+                    .map_err(|e| e.to_string())?;
+            let channels = decoder.channels().max(1) as usize;
+            let hint = decoder.total_frames().map(|frames| frames as usize);
+            let mut cutter = StreamCutter::new(decoder.rate(), hint, max_frames, sink);
+            while let Some(block) = decoder.next_block().map_err(|e| e.to_string())? {
+                for pcm in block.chunks_exact(channels) {
+                    cutter.push([sample(pcm[0]), sample(pcm[channels - 1])])?;
+                }
+                cutter.flush(0);
+            }
+            cutter.finish(0, "ogg vorbis")
+        }
+        other => Err(format!("unsupported audio media {other:?}")),
+    }
+}
+
+/// The UI thread's side of a streaming deck decode. It takes the worker's
+/// chunks in order, keeps the table the mixer plays from — every chunk
+/// shared with it, nothing copied — and the waveform hops the picture is
+/// drawn from, and says when the deck may open.
+pub struct DeckStream {
+    pub gen: u64,
+    table: Arc<StreamPcm>,
+    next_seq: u32,
+    total_hint: Option<usize>,
+    playable: bool,
+    /// A chunk came out of order or after the end: the rest are dropped,
+    /// and the whole file installs when it lands, as it did before
+    /// streaming existed.
+    broken: bool,
+    pub hops: Vec<WaveHop>,
+}
+
+impl DeckStream {
+    pub fn new(gen: u64) -> DeckStream {
+        DeckStream {
+            gen,
+            table: Arc::new(StreamPcm::new(0, None)),
+            next_seq: 0,
+            total_hint: None,
+            playable: false,
+            broken: false,
+            hops: Vec::new(),
+        }
+    }
+
+    /// Take the next chunk. `Ok(true)` the one time the stream becomes
+    /// playable: the lead is in, or the whole (short) track is.
+    pub fn accept(&mut self, chunk: DeckChunk) -> Result<bool, String> {
+        if self.broken {
+            return Ok(false);
+        }
+        if self.table.complete {
+            self.broken = true;
+            return Err("a chunk arrived after the end of the stream".into());
+        }
+        if chunk.seq != self.next_seq {
+            self.broken = true;
+            return Err(format!(
+                "chunk {} arrived where {} was expected",
+                chunk.seq, self.next_seq
+            ));
+        }
+        if self.next_seq == 0 {
+            self.table = Arc::new(StreamPcm::new(chunk.sample_rate, chunk.total_frames_hint));
+        } else if chunk.sample_rate != self.table.sample_rate {
+            self.broken = true;
+            return Err("the sample rate changed mid-stream".into());
+        }
+        self.next_seq += 1;
+        if chunk.total_frames_hint.is_some() {
+            self.total_hint = chunk.total_frames_hint;
+        }
+        self.hops.extend(chunk.hops);
+        self.table = Arc::new(self.table.with_chunk(chunk.frames, chunk.last));
+        let became = !self.playable
+            && (self.table.seconds() >= PLAYABLE_LEAD_SECS || self.table.complete);
+        if became {
+            self.playable = true;
+        }
+        Ok(became)
+    }
+
+    /// The table the mixer plays from, as of the last chunk.
+    pub fn table(&self) -> Arc<StreamPcm> {
+        self.table.clone()
+    }
+
+    pub fn is_playable(&self) -> bool {
+        self.playable
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.table.complete
+    }
+
+    pub fn sample_rate(&self) -> u32 {
+        self.table.sample_rate
+    }
+
+    pub fn frames(&self) -> usize {
+        self.table.len
+    }
+
+    pub fn seconds(&self) -> f64 {
+        self.table.seconds()
+    }
+
+    /// The track's length as far as anyone knows: the container's claim
+    /// until the end, exact from then on.
+    pub fn expected_frames(&self) -> usize {
+        self.table.expected.max(self.table.len)
+    }
+
+    pub fn expected_seconds(&self) -> f64 {
+        self.table.expected_seconds()
+    }
+
+    /// Decoded over expected, when there is an expectation to measure by.
+    pub fn fraction(&self) -> Option<f32> {
+        if self.total_hint.is_none() && !self.table.complete {
+            return None;
+        }
+        let expected = self.expected_frames().max(1) as f64;
+        Some((self.table.len as f64 / expected).clamp(0.0, 1.0) as f32)
+    }
+
+    /// Waveform columns over the expected length — what the strip is
+    /// scaled to, so the picture fills in from the left.
+    pub fn wave_columns(&self) -> usize {
+        let secs = self.expected_frames() as f64 / self.table.sample_rate.max(1) as f64;
+        (secs * ZOOM_COLS_PER_SEC).ceil() as usize
+    }
+
+    /// Let the audio go once the whole file is on the deck. The hops stay:
+    /// they are the picture until the analysis replaces it.
+    pub fn release_audio(&mut self) {
+        self.table = Arc::new(StreamPcm {
+            sample_rate: self.table.sample_rate,
+            chunks: Vec::new(),
+            len: self.table.len,
+            expected: self.table.expected,
+            complete: self.table.complete,
+        });
     }
 }
 
@@ -2123,7 +2567,7 @@ pub fn waveform_bgra(
 /// Anything the UI thread does for longer than this in one go is a dropped
 /// frame the operator sees as a hitch — half a 60Hz frame, so the rest of
 /// the frame still has room to draw.
-pub const UI_STEP_BUDGET_MS: f32 = 8.0;
+pub const UI_STEP_BUDGET_MS: f32 = 7.5;
 
 /// One UI-thread step of a content load, timed.
 ///
@@ -2131,24 +2575,17 @@ pub const UI_STEP_BUDGET_MS: f32 = 8.0;
 /// pool; what is left on this thread is GPU work (buffer/texture creation)
 /// that cannot happen anywhere else. This says whether that is still true:
 /// the cost is folded into the F3 perf graph's own `load` channel, and a
-/// step over [`UI_STEP_BUDGET_MS`] names itself in the log, so a hitch is
-/// attributable from `/log` without the graph being open.
-/// `VJ_TRACE_LOAD=1` also logs the steps that stayed INSIDE the budget —
-/// how a before/after is measured once the hitches are gone.
-fn trace_load() -> bool {
-    static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *TRACE.get_or_init(|| std::env::var_os("VJ_TRACE_LOAD").is_some())
-}
+/// step is recorded in the F3 performance graph without emitting a
+/// per-item console line.
 
 #[must_use = "a step that is never `done` is never measured"]
 pub struct UiStep {
     t0: Instant,
-    what: &'static str,
 }
 
 impl UiStep {
-    pub fn new(what: &'static str) -> Self {
-        Self { t0: Instant::now(), what }
+    pub fn new(_what: &'static str) -> Self {
+        Self { t0: Instant::now() }
     }
 
     /// Close the step; returns its cost in milliseconds.
@@ -2156,16 +2593,7 @@ impl UiStep {
         let us = self.t0.elapsed().as_micros() as u64;
         let channel = cx.perf_monitor.channel("load", 0xff_b4_54);
         cx.perf_monitor.add(channel, us);
-        let ms = us as f32 / 1000.0;
-        if ms > UI_STEP_BUDGET_MS {
-            makepad_widgets::log!(
-                "ui-hitch: {} took {ms:.1}ms on the UI thread (budget {UI_STEP_BUDGET_MS:.1}ms)",
-                self.what
-            );
-        } else if trace_load() {
-            makepad_widgets::log!("ui-step: {} {ms:.2}ms", self.what);
-        }
-        ms
+        us as f32 / 1000.0
     }
 }
 
@@ -2174,11 +2602,11 @@ impl UiStep {
 // ---------------------------------------------------------------------------
 
 pub enum DecodeJob {
-    Deck { deck: DeckId, gen: u64, path: PathBuf, media: MediaType },
+    Deck { deck: DeckId, gen: u64, source: DecodeSource, media: MediaType },
     /// The headphone pre-listen: the same full decode as a deck, plus the
     /// overview strip for the mini player's seek bar.
-    Preview { gen: u64, path: PathBuf, media: MediaType },
-    Pad { pad: PadKey, gen: u64, revision: AssetRevisionId, path: PathBuf, media: MediaType },
+    Preview { gen: u64, source: DecodeSource, media: MediaType },
+    Pad { pad: PadKey, gen: u64, revision: AssetRevisionId, source: DecodeSource, media: MediaType },
     /// Read + parse + fully prepare a GLB for the 3D program slot: the UI
     /// thread only uploads the finished result.
     MeshPrep { gen: u64, path: PathBuf },
@@ -2219,11 +2647,50 @@ pub enum DecodeJob {
     /// doc comment.
     Thumb {
         revision: AssetRevisionId,
-        path: PathBuf,
+        source: DecodeSource,
         sheet: Option<(ThumbnailCells, f32)>,
         legacy_may_be_sheet: bool,
         epoch: u64,
+        /// A durable local result (not a viewport prefetch): keep it across
+        /// epoch changes and beyond the bounded disposable backlog. Effect
+        /// cache hits set this so a warm library is decoded in full instead
+        /// of silently throwing away everything beyond 64 entries.
+        keep_pending: bool,
     },
+}
+
+/// Verified encoded media can be backed by the native cache filesystem or
+/// by the portable static store's in-memory object cache. Audio/image
+/// decoders consume this one seam, so web callers never invent fake paths.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DecodeSource {
+    Path(PathBuf),
+    Bytes(Arc<[u8]>),
+}
+
+impl From<PathBuf> for DecodeSource {
+    fn from(path: PathBuf) -> Self {
+        Self::Path(path)
+    }
+}
+
+impl From<makepad_asset_client::BlobContent> for DecodeSource {
+    fn from(content: makepad_asset_client::BlobContent) -> Self {
+        match content {
+            makepad_asset_client::BlobContent::Bytes(bytes) => Self::Bytes(bytes),
+            #[cfg(not(target_arch = "wasm32"))]
+            makepad_asset_client::BlobContent::VerifiedPath(path) => Self::Path(path),
+        }
+    }
+}
+
+impl DecodeSource {
+    pub fn into_path(self) -> Option<PathBuf> {
+        match self {
+            Self::Path(path) => Some(path),
+            Self::Bytes(_) => None,
+        }
+    }
 }
 
 /// Largest GLB the mesh lane will lift into memory.
@@ -2282,7 +2749,32 @@ pub enum PreparedMesh {
     },
 }
 
+/// One ordered piece of a deck's decode, sent while the rest of the file is
+/// still being read. Every chunk is [`STREAM_CHUNK_FRAMES`] long except the
+/// last, which says so; `hops` are the waveform hops those frames make, so
+/// the picture can be drawn as the audio arrives.
+pub struct DeckChunk {
+    pub seq: u32,
+    pub sample_rate: u32,
+    /// The container's own length claim, frames, when it makes one. The
+    /// same on every chunk of a stream.
+    pub total_frames_hint: Option<usize>,
+    pub frames: Arc<Vec<[i16; 2]>>,
+    pub hops: Vec<WaveHop>,
+    pub last: bool,
+}
+
 pub enum DecodeDone {
+    /// A piece of a deck track, ahead of its `Deck` result. In order, and
+    /// only for real loads — the stems prefetch borrows the lane and gets
+    /// its answer whole.
+    DeckChunk {
+        deck: DeckId,
+        gen: u64,
+        chunk: Box<DeckChunk>,
+    },
+    /// The whole track, after its chunks: what the analysis, the stems and
+    /// everything else that needs the file entire is given.
     Deck {
         deck: DeckId,
         gen: u64,
@@ -2335,6 +2827,11 @@ pub enum DecodeDone {
     /// asks again next time it is wanted. Without this the drop was silent
     /// and the tile stayed blank for the rest of the session.
     ThumbDropped {
+        revision: AssetRevisionId,
+    },
+    /// A queued or active thumbnail decode exceeded its watchdog. Unlike an
+    /// epoch drop this is terminal for that request and must be shown/logged.
+    ThumbTimedOut {
         revision: AssetRevisionId,
     },
 }
@@ -2406,7 +2903,7 @@ fn build_level(
     };
     // The nav grid is the expensive part (a capsule probe per cell, a wall
     // probe per edge) and the reason this whole function is off-thread.
-    let started = std::time::Instant::now();
+    let started = crate::clock::Instant::now();
     let nav = NavGrid::build(&level, &cfg);
     let (nx, nz) = nav.dims();
     use makepad_widgets::log;
@@ -2577,9 +3074,64 @@ fn decode_thumb(
     sheet: Option<(ThumbnailCells, f32)>,
     legacy_may_be_sheet: bool,
 ) -> Result<ThumbPixels, String> {
-    let mut pixels = decode_thumb_full(path, sheet, legacy_may_be_sheet)?;
+    decode_thumb_source(
+        &DecodeSource::Path(path.clone()),
+        sheet,
+        legacy_may_be_sheet,
+    )
+}
+
+fn decode_thumb_source(
+    source: &DecodeSource,
+    sheet: Option<(ThumbnailCells, f32)>,
+    legacy_may_be_sheet: bool,
+) -> Result<ThumbPixels, String> {
+    let mut pixels = match source {
+        DecodeSource::Path(path) => decode_thumb_full(path, sheet, legacy_may_be_sheet)?,
+        DecodeSource::Bytes(bytes) => decode_thumb_image_bytes(bytes, sheet)?,
+    };
     fit_thumb_for_tiles(&mut pixels);
     Ok(pixels)
+}
+
+fn decode_thumb_image_bytes(
+    bytes: &[u8],
+    sheet: Option<(ThumbnailCells, f32)>,
+) -> Result<ThumbPixels, String> {
+    if bytes.len() as u64 > MAX_THUMB_BYTES {
+        return Err(format!("thumbnail over byte budget: {}", bytes.len()));
+    }
+    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
+        return Err("hardware video thumbnails are unavailable for in-memory web blobs".into());
+    }
+    let image = if bytes.starts_with(&[0xff, 0xd8]) {
+        makepad_widgets::ImageBuffer::from_jpg(bytes)
+    } else {
+        makepad_widgets::ImageBuffer::from_png(bytes)
+    }
+    .map_err(|error| format!("thumbnail decode failed: {error:?}"))?;
+    let (width, height) = (image.width, image.height);
+    if width == 0 || height == 0 || width > MAX_THUMB_DIM || height > MAX_THUMB_DIM {
+        return Err(format!("thumbnail dimensions out of bounds: {width}x{height}"));
+    }
+    let pixels = ThumbPixels {
+        bgra: image.data,
+        width,
+        height,
+        frames: Vec::new(),
+        fps: sheet.map_or(0.0, |(_, fps)| fps),
+    };
+    Ok(match sheet {
+        Some((cells, fps)) => declared_thumb(
+            pixels.width,
+            pixels.height,
+            &pixels.bgra,
+            cells,
+            fps,
+        )
+        .unwrap_or(pixels),
+        None => pixels,
+    })
 }
 
 /// Whole-integer box shrink so `w`x`h` fits [`MAX_TILE_TEX_DIM`]; 1 = leave
@@ -3229,28 +3781,35 @@ pub const THUMB_WIDTH_PERFORMING: usize = 2;
 /// current view — it was requested longest ago) is dropped to make room.
 /// Keeps a fast scroll from growing the backlog without limit.
 const MAX_PENDING_THUMBS: usize = 64;
+/// JPEG/PNG thumbnails are bounded to 8 MiB and normally take milliseconds.
+/// This catches a lost web worker without mistaking ordinary load for a hang.
+const THUMB_JOB_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct PendingThumb {
     revision: AssetRevisionId,
-    path: PathBuf,
+    source: DecodeSource,
     sheet: Option<(ThumbnailCells, f32)>,
     legacy_may_be_sheet: bool,
     epoch: u64,
+    keep_pending: bool,
+    submitted: Instant,
 }
 
 struct ThumbQueueState {
     /// Push at the back, pop from the back: a stack, not a FIFO queue.
     stack: VecDeque<PendingThumb>,
     newest_epoch: u64,
-    closed: bool,
     /// Decodes running right now, and how many may. The threads exist
     /// whatever the width is; narrowing just parks the surplus on the
     /// condvar, so widening again costs nothing.
-    active: usize,
-    width: usize,
+    active: HashMap<u64, (AssetRevisionId, Instant)>,
+    next_ticket: u64,
     /// Jobs thrown away UNSTARTED, waiting to be reported so the caller can
     /// clear their in-flight marks. A silent drop is a blank tile forever.
     dropped: Vec<AssetRevisionId>,
+    /// Watchdog failures, reported separately so the caller logs each once
+    /// and does not retry a poisoned cache item forever.
+    timed_out: Vec<AssetRevisionId>,
 }
 
 /// LIFO job source shared by the thumb lane's workers. See `DecodePool`'s
@@ -3258,6 +3817,8 @@ struct ThumbQueueState {
 struct ThumbQueue {
     state: Mutex<ThumbQueueState>,
     cv: Condvar,
+    width: AtomicUsize,
+    closed: AtomicBool,
 }
 
 impl ThumbQueue {
@@ -3266,94 +3827,184 @@ impl ThumbQueue {
             state: Mutex::new(ThumbQueueState {
                 stack: VecDeque::new(),
                 newest_epoch: 0,
-                closed: false,
-                active: 0,
-                width,
+                active: HashMap::new(),
+                next_ticket: 0,
                 dropped: Vec::new(),
+                timed_out: Vec::new(),
             }),
             cv: Condvar::new(),
+            width: AtomicUsize::new(width.max(1)),
+            closed: AtomicBool::new(false),
         }
     }
 
     /// How many workers may decode at once. Raising it wakes the parked
     /// ones; lowering it lets the ones already decoding finish.
     fn set_width(&self, width: usize) {
-        let mut state = self.state.lock().unwrap();
         let width = width.max(1);
-        if state.width == width {
+        if self.width.swap(width, Ordering::Release) == width {
             return;
         }
-        state.width = width;
-        drop(state);
         self.cv.notify_all();
     }
 
-    fn take_dropped(&self) -> Vec<AssetRevisionId> {
-        let mut state = self.state.lock().unwrap();
-        std::mem::take(&mut state.dropped)
-    }
-
-    /// One decode finished: free its slot and wake whoever is waiting.
-    fn finished(&self) {
-        let mut state = self.state.lock().unwrap();
-        state.active = state.active.saturating_sub(1);
-        drop(state);
-        self.cv.notify_one();
-    }
-
-    fn push(&self, job: PendingThumb) {
-        let mut state = self.state.lock().unwrap();
-        if job.epoch > state.newest_epoch {
-            state.newest_epoch = job.epoch;
-            // A new visible range makes every pending job for the old one
-            // dead weight. Dropping them HERE rather than at pop keeps the
-            // backlog honest: a fast scroll leaves no queue behind it.
-            let newest = state.newest_epoch;
-            let stale: Vec<AssetRevisionId> = state
-                .stack
-                .iter()
-                .filter(|j| j.epoch < newest)
-                .map(|j| j.revision)
-                .collect();
-            state.stack.retain(|j| j.epoch >= newest);
-            state.dropped.extend(stale);
+    /// Admit as many UI-staged jobs as one nonblocking lock attempt permits.
+    /// On contention the caller retains the complete batch and retries next
+    /// frame; the browser UI never spins or futex-waits on a worker.
+    fn try_push_batch(&self, jobs: &mut VecDeque<PendingThumb>) -> bool {
+        let mut state = match self.state.try_lock() {
+            Ok(state) => state,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return false,
+        };
+        while let Some(job) = jobs.pop_front() {
+            if job.epoch > state.newest_epoch {
+                state.newest_epoch = job.epoch;
+                // A new visible range makes old disposable work dead
+                // weight. Durable cache/render results are already in hand
+                // and must still become textures.
+                let newest = state.newest_epoch;
+                let stale: Vec<AssetRevisionId> = state
+                    .stack
+                    .iter()
+                    .filter(|j| !j.keep_pending && j.epoch < newest)
+                    .map(|j| j.revision)
+                    .collect();
+                state
+                    .stack
+                    .retain(|j| j.keep_pending || j.epoch >= newest);
+                state.dropped.extend(stale);
+            }
+            state.stack.push_back(job);
         }
-        state.stack.push_back(job);
-        while state.stack.len() > MAX_PENDING_THUMBS {
-            // Drop the oldest pending job — and SAY SO.
-            if let Some(job) = state.stack.pop_front() {
-                state.dropped.push(job.revision);
+        while state.stack.iter().filter(|job| !job.keep_pending).count()
+            > MAX_PENDING_THUMBS
+        {
+            // Drop the oldest DISPOSABLE pending job — and SAY SO. A warm
+            // FX cache may legitimately contain the whole bundled library.
+            let Some(index) = state.stack.iter().position(|job| !job.keep_pending) else {
+                break;
+            };
+            let job = state.stack.remove(index).expect("pending thumb index");
+            state.dropped.push(job.revision);
+        }
+        drop(state);
+        self.cv.notify_all();
+        true
+    }
+
+    /// Retire queued/active work whose worker or callback vanished. Like
+    /// admission, this is a single nonblocking UI poll; contention simply
+    /// leaves the records in place for the next frame.
+    fn poll_notifications(&self) -> Option<(Vec<AssetRevisionId>, Vec<AssetRevisionId>)> {
+        let mut state = match self.state.try_lock() {
+            Ok(state) => state,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        };
+        let queued: Vec<AssetRevisionId> = state
+            .stack
+            .iter()
+            .filter(|job| job.submitted.elapsed() >= THUMB_JOB_TIMEOUT)
+            .map(|job| job.revision)
+            .collect();
+        if !queued.is_empty() {
+            state
+                .stack
+                .retain(|job| job.submitted.elapsed() < THUMB_JOB_TIMEOUT);
+            state.timed_out.extend(queued);
+        }
+        let active: Vec<u64> = state
+            .active
+            .iter()
+            .filter_map(|(ticket, (_, started))| {
+                (started.elapsed() >= THUMB_JOB_TIMEOUT).then_some(*ticket)
+            })
+            .collect();
+        for ticket in active {
+            if let Some((revision, _)) = state.active.remove(&ticket) {
+                state.timed_out.push(revision);
             }
         }
+        let freed = !state.timed_out.is_empty();
+        let out = (
+            std::mem::take(&mut state.dropped),
+            std::mem::take(&mut state.timed_out),
+        );
+        drop(state);
+        if freed {
+            self.cv.notify_all();
+        }
+        Some(out)
+    }
+
+    /// One decode finished: free its slot. False means the UI watchdog
+    /// already retired it, so the late pixels must not be published.
+    fn finished(&self, ticket: u64) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let current = state.active.remove(&ticket).is_some();
+        drop(state);
         self.cv.notify_one();
+        current
     }
 
     /// Blocks until a live job is available or the queue is closed. Stale
     /// jobs (epoch older than the newest one this queue has seen) are
     /// popped and dropped in place, never decoded — they've certainly
     /// scrolled out of view by the time their turn comes.
-    fn pop(&self) -> Option<PendingThumb> {
-        let mut state = self.state.lock().unwrap();
+    fn pop(&self) -> Option<(u64, PendingThumb)> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         loop {
-            while state.active < state.width {
+            while state.active.len() < self.width.load(Ordering::Acquire) {
                 let Some(job) = state.stack.pop_back() else { break };
-                if job.epoch >= state.newest_epoch {
-                    state.active += 1;
-                    return Some(job);
+                if job.submitted.elapsed() >= THUMB_JOB_TIMEOUT {
+                    state.timed_out.push(job.revision);
+                    continue;
+                }
+                if job.keep_pending || job.epoch >= state.newest_epoch {
+                    let ticket = state.next_ticket;
+                    state.next_ticket = state.next_ticket.wrapping_add(1);
+                    state.active.insert(ticket, (job.revision, Instant::now()));
+                    return Some((ticket, job));
                 }
                 state.dropped.push(job.revision);
             }
-            if state.closed {
+            if self.closed.load(Ordering::Acquire) {
                 return None;
             }
-            state = self.cv.wait(state).unwrap();
+            // `close` takes this same lock around its store + notify (see
+            // below), so there is no notify/check race to guard with a
+            // timeout: every waiter here either observes `closed` already
+            // true above, or is woken by the notify that follows it.
+            state = self
+                .cv
+                .wait(state)
+                .unwrap_or_else(|error| error.into_inner());
         }
     }
 
     fn close(&self) {
-        let mut state = self.state.lock().unwrap();
-        state.closed = true;
+        // Set `closed` under the same lock `pop` holds while it checks the
+        // flag and waits, so a `close` racing a waiter can never land
+        // between that check and the wait: either it lands before (the
+        // waiter's next check sees `closed`) or after (the waiter is
+        // already parked on the condvar and this notify wakes it).
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        self.closed.store(true, Ordering::Release);
+        drop(state);
         self.cv.notify_all();
+    }
+
+    #[cfg(test)]
+    fn push(&self, job: PendingThumb) {
+        self.push_batch(vec![job]);
+    }
+
+    #[cfg(test)]
+    fn push_batch(&self, jobs: Vec<PendingThumb>) {
+        let mut jobs = jobs.into();
+        assert!(self.try_push_batch(&mut jobs));
+        assert!(jobs.is_empty());
     }
 }
 
@@ -3368,21 +4019,33 @@ fn test_sleep_marker(path: &Path) -> Option<Duration> {
     Some(Duration::from_millis(ms))
 }
 
-fn run_heavy_job(job: DecodeJob) -> DecodeDone {
+/// Run one job. `done` is for the pieces a deck decode sends ahead of its
+/// result; the result itself is returned.
+fn run_heavy_job(job: DecodeJob, done: &Sender<DecodeDone>) -> DecodeDone {
     match job {
-        DecodeJob::Deck { deck, gen, path, media } => {
-            let result = decode_audio_clip(&path, media, MAX_TRACK_FRAMES).map(|pcm| {
-                let peaks = wave_peaks(&pcm, WAVE_COLS);
-                (Arc::new(pcm), peaks)
-            });
+        DecodeJob::Deck { deck, gen, source, media } => {
+            // The stems prefetch borrows this lane under its own
+            // generation and wants the file whole; nothing listens to its
+            // chunks, so none are cut.
+            let streaming = gen != crate::stems::PREFETCH_GEN;
+            let mut sink = |chunk: DeckChunk| {
+                let _ = done.send(DecodeDone::DeckChunk { deck, gen, chunk: Box::new(chunk) });
+            };
+            let sink: Option<&mut dyn FnMut(DeckChunk)> =
+                if streaming { Some(&mut sink) } else { None };
+            let result =
+                decode_deck_stream(&source, media, MAX_TRACK_FRAMES, sink).map(|pcm| {
+                    let peaks = wave_peaks(&pcm, WAVE_COLS);
+                    (Arc::new(pcm), peaks)
+                });
             DecodeDone::Deck { deck, gen, result }
         }
-        DecodeJob::Pad { pad, gen, revision, path, media } => {
-            let result = decode_audio_clip(&path, media, MAX_PAD_FRAMES).map(Arc::new);
+        DecodeJob::Pad { pad, gen, revision, source, media } => {
+            let result = decode_audio_source(&source, media, MAX_PAD_FRAMES).map(Arc::new);
             DecodeDone::Pad { pad, gen, revision, result }
         }
-        DecodeJob::Preview { gen, path, media } => {
-            let result = decode_audio_clip(&path, media, MAX_TRACK_FRAMES).map(|pcm| {
+        DecodeJob::Preview { gen, source, media } => {
+            let result = decode_audio_source(&source, media, MAX_TRACK_FRAMES).map(|pcm| {
                 let peaks = preview_wave_bins(&pcm, PREVIEW_WAVE_COLS);
                 (Arc::new(pcm), peaks)
             });
@@ -3436,11 +4099,9 @@ fn run_heavy_job(job: DecodeJob) -> DecodeDone {
 ///   decode that is already wanted must never be starved by ordering games.
 /// - the THUMB lane is a small, dedicated pool (also sized by `lane_sizes`)
 ///   that only ever decodes `DecodeJob::Thumb`. Its pending jobs live on a
-///   bounded LIFO stack (`ThumbQueue`), not a queue: the tile under the
-///   operator's eye right now decodes before ones they scrolled past a
-///   moment ago, and a job whose `epoch` has been superseded by a newer one
-///   is skipped — never decoded — instead of wasting a worker on a tile
-///   that has already scrolled away. See `ThumbQueue` and
+///   LIFO stack (`ThumbQueue`), not a queue: disposable catalog prefetches
+///   are epoch-pruned and capped, while durable local FX sheets survive
+///   both policies so a warm cache drains in full. See `ThumbQueue` and
 ///   `MAX_PENDING_THUMBS` for the exact rules.
 ///
 /// Memory: a thumb decodes to at most `MAX_THUMB_DIM² × 4` bytes of BGRA
@@ -3450,7 +4111,12 @@ fn run_heavy_job(job: DecodeJob) -> DecodeDone {
 /// 4 workers.
 pub struct DecodePool {
     heavy_tx: Sender<DecodeJob>,
+    heavy_rx: Option<Receiver<DecodeJob>>,
     thumb_queue: Arc<ThumbQueue>,
+    /// UI-owned admission buffer. Moving a batch into the worker queue is a
+    /// best-effort `try_lock`; contention keeps it here for the next poll.
+    thumb_staged: RefCell<VecDeque<PendingThumb>>,
+    done_tx: Sender<DecodeDone>,
     rx: Receiver<DecodeDone>,
 }
 
@@ -3462,58 +4128,99 @@ impl Default for DecodePool {
 
 impl DecodePool {
     pub fn new() -> DecodePool {
-        let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-        let (heavy_workers, thumb_workers) = lane_sizes(cpus);
-
         let (heavy_tx, job_rx) = channel::<DecodeJob>();
         let (done_tx, rx) = channel::<DecodeDone>();
+        DecodePool {
+            heavy_tx,
+            heavy_rx: Some(job_rx),
+            thumb_queue: Arc::new(ThumbQueue::new(1)),
+            thumb_staged: RefCell::new(VecDeque::new()),
+            done_tx,
+            rx,
+        }
+    }
+
+    /// Start the CPU lanes through Makepad's native/web-worker executor.
+    /// Construction starts no OS primitive, so the web build never falls
+    /// through the standard-library launcher and silently loses its decoder.
+    pub fn start(&mut self, spawner: ThreadSpawner) {
+        let Some(job_rx) = self.heavy_rx.take() else { return };
+        let (heavy_workers, thumb_workers) = lane_sizes(spawner.available_parallelism().get());
+        self.thumb_queue.set_width(thumb_workers);
         let job_rx = Arc::new(Mutex::new(job_rx));
         for i in 0..heavy_workers {
             let jobs = job_rx.clone();
-            let done = done_tx.clone();
-            let _ = std::thread::Builder::new()
-                .name(format!("vj-decode-heavy-{i}"))
-                .spawn(move || loop {
+            let done = self.done_tx.clone();
+            let options = ThreadOptions { name: Some(format!("vj-decode-{i}").into()), ..Default::default() };
+            match spawner.spawn_worker(options, move || loop {
                     let job = {
                         let guard = jobs.lock().unwrap();
                         guard.recv()
                     };
                     let Ok(job) = job else { return };
-                    let out = run_heavy_job(job);
+                    let out = run_heavy_job(job, &done);
                     if done.send(out).is_err() {
                         return;
                     }
-                });
+                }) {
+                Ok(handle) => handle.detach(),
+                Err(error) => makepad_widgets::log!("vj decode worker {i} unavailable: {error}"),
+            }
         }
 
-        let thumb_queue = Arc::new(ThumbQueue::new(thumb_workers));
         for i in 0..thumb_workers {
-            let queue = thumb_queue.clone();
-            let done = done_tx.clone();
-            let _ = std::thread::Builder::new()
-                .name(format!("vj-decode-thumb-{i}"))
-                .spawn(move || loop {
-                    let Some(job) = queue.pop() else { return };
-                    let result = decode_thumb(&job.path, job.sheet, job.legacy_may_be_sheet);
-                    queue.finished();
+            let queue = self.thumb_queue.clone();
+            let done = self.done_tx.clone();
+            let options = ThreadOptions { name: Some(format!("vj-thumb-{i}").into()), ..Default::default() };
+            match spawner.spawn_worker(options, move || loop {
+                    let Some((ticket, job)) = queue.pop() else { return };
+                    let result = decode_thumb_source(&job.source, job.sheet, job.legacy_may_be_sheet);
+                    if !queue.finished(ticket) {
+                        continue;
+                    }
                     let out = DecodeDone::Thumb { revision: job.revision, result };
                     if done.send(out).is_err() {
                         return;
                     }
-                });
+                }) {
+                Ok(handle) => handle.detach(),
+                Err(error) => makepad_widgets::log!("vj thumbnail worker {i} unavailable: {error}"),
+            }
         }
-
-        DecodePool { heavy_tx, thumb_queue, rx }
     }
 
     pub fn submit(&self, job: DecodeJob) {
-        match job {
-            DecodeJob::Thumb { revision, path, sheet, legacy_may_be_sheet, epoch } => {
-                self.thumb_queue
-                    .push(PendingThumb { revision, path, sheet, legacy_may_be_sheet, epoch });
-            }
-            other => {
-                let _ = self.heavy_tx.send(other);
+        self.submit_batch(std::iter::once(job));
+    }
+
+    /// Submit related thumbnail work as one queue operation. This matters
+    /// for a warm FX cache: IndexedDB can return hundreds of JPEGs together,
+    /// and the UI thread stages that set without touching a worker-owned lock.
+    /// [`Self::poll`] transfers it with one nonblocking attempt per frame.
+    pub fn submit_batch(&self, jobs: impl IntoIterator<Item = DecodeJob>) {
+        let submitted = Instant::now();
+        let mut thumbs = self.thumb_staged.borrow_mut();
+        for job in jobs {
+            match job {
+                DecodeJob::Thumb {
+                    revision,
+                    source,
+                    sheet,
+                    legacy_may_be_sheet,
+                    epoch,
+                    keep_pending,
+                } => thumbs.push_back(PendingThumb {
+                    revision,
+                    source,
+                    sheet,
+                    legacy_may_be_sheet,
+                    epoch,
+                    keep_pending,
+                    submitted,
+                }),
+                other => {
+                    let _ = self.heavy_tx.send(other);
+                }
             }
         }
     }
@@ -3526,12 +4233,33 @@ impl DecodePool {
     }
 
     pub fn poll(&self) -> Vec<DecodeDone> {
-        let mut out: Vec<DecodeDone> = self
-            .thumb_queue
-            .take_dropped()
-            .into_iter()
-            .map(|revision| DecodeDone::ThumbDropped { revision })
+        let mut staged = self.thumb_staged.borrow_mut();
+        let expired: Vec<AssetRevisionId> = staged
+            .iter()
+            .filter(|job| job.submitted.elapsed() >= THUMB_JOB_TIMEOUT)
+            .map(|job| job.revision)
             .collect();
+        if !expired.is_empty() {
+            staged.retain(|job| job.submitted.elapsed() < THUMB_JOB_TIMEOUT);
+        }
+        self.thumb_queue.try_push_batch(&mut staged);
+        drop(staged);
+        let mut out: Vec<DecodeDone> = expired
+            .into_iter()
+            .map(|revision| DecodeDone::ThumbTimedOut { revision })
+            .collect();
+        if let Some((dropped, timed_out)) = self.thumb_queue.poll_notifications() {
+            out.extend(
+                dropped
+                    .into_iter()
+                    .map(|revision| DecodeDone::ThumbDropped { revision }),
+            );
+            out.extend(
+                timed_out
+                    .into_iter()
+                    .map(|revision| DecodeDone::ThumbTimedOut { revision }),
+            );
+        }
         loop {
             match self.rx.try_recv() {
                 Ok(done) => out.push(done),
@@ -4084,7 +4812,7 @@ mod tests {
         let warm = decode_thumb(&path, Some((cells, 30.0)), false).expect("decodes");
         assert_eq!(warm.frames.len(), n, "the full declared sheet");
         let runs = 5;
-        let t0 = std::time::Instant::now();
+        let t0 = crate::clock::Instant::now();
         for _ in 0..runs {
             let p = decode_thumb(&path, Some((cells, 30.0)), false).unwrap();
             assert_eq!(p.frames.len(), n);
@@ -4094,13 +4822,13 @@ mod tests {
         // The split, so the LRU budget can be sized against the part that
         // scales: session open (codec setup, fixed) vs frame pull (hw
         // decode) vs conversion+placement (CPU, ours).
-        let t_open = std::time::Instant::now();
+        let t_open = crate::clock::Instant::now();
         for _ in 0..runs {
             let d = VideoFileDecoder::open(path.to_str().unwrap()).unwrap();
             drop(d);
         }
         let open_ms = t_open.elapsed().as_secs_f64() * 1000.0 / runs as f64;
-        let t_pull = std::time::Instant::now();
+        let t_pull = crate::clock::Instant::now();
         for _ in 0..runs {
             let mut d = VideoFileDecoder::open(path.to_str().unwrap()).unwrap();
             let mut got = 0;
@@ -4191,21 +4919,40 @@ mod tests {
         std::fs::write(&bad, b"not a wav").unwrap();
 
         let pool = DecodePool::new();
-        pool.submit(DecodeJob::Deck { deck: DeckId::A, gen: 7, path: good, media: MediaType::Wav });
+        pool.submit(DecodeJob::Deck {
+            deck: DeckId::A,
+            gen: 7,
+            source: good.into(),
+            media: MediaType::Wav,
+        });
         pool.submit(DecodeJob::Pad {
             pad: PadKey::from_bytes([2; 16]),
             gen: 9,
             revision: AssetRevisionId::from_bytes([3; 32]),
-            path: bad,
+            source: bad.into(),
             media: MediaType::Wav,
         });
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let deadline = crate::clock::Instant::now() + Duration::from_secs(10);
         let mut results = Vec::new();
-        while results.len() < 2 && std::time::Instant::now() < deadline {
-            results.extend(pool.poll());
+        let mut chunks = Vec::new();
+        while results.len() < 2 && crate::clock::Instant::now() < deadline {
+            for done in pool.poll() {
+                match done {
+                    DecodeDone::DeckChunk { deck, gen, chunk } => {
+                        assert_eq!((deck, gen), (DeckId::A, 7));
+                        chunks.push(chunk);
+                    }
+                    other => results.push(other),
+                }
+            }
             std::thread::sleep(Duration::from_millis(10));
         }
         assert_eq!(results.len(), 2);
+        // The stream precedes the whole: one (short, last) chunk of 50.
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].last);
+        assert_eq!(chunks[0].frames.len(), 50);
+        assert_eq!(chunks[0].total_frames_hint, Some(50));
         for done in results {
             match done {
                 DecodeDone::Deck { deck, gen, result } => {
@@ -4214,6 +4961,7 @@ mod tests {
                     assert_eq!(pcm.frames.len(), 50);
                     assert_eq!(peaks.len(), WAVE_COLS);
                 }
+                DecodeDone::DeckChunk { .. } => unreachable!("chunks were set aside"),
                 DecodeDone::Pad { gen, result, .. } => {
                     assert_eq!(gen, 9);
                     assert!(result.is_err(), "bad wav must fail");
@@ -4225,11 +4973,139 @@ mod tests {
                 | DecodeDone::Billboard { .. }
                 | DecodeDone::FlowClip { .. }
                 | DecodeDone::Thumb { .. }
-                | DecodeDone::ThumbDropped { .. } => {
+                | DecodeDone::ThumbDropped { .. }
+                | DecodeDone::ThumbTimedOut { .. } => {
                     panic!("no mesh/flow/thumb job submitted")
                 }
             }
         }
+    }
+
+    /// A synthetic chunk of `frames` frames at `rate`, numbered `seq`.
+    fn chunk(seq: u32, rate: u32, frames: usize, hint: Option<usize>, last: bool) -> DeckChunk {
+        DeckChunk {
+            seq,
+            sample_rate: rate,
+            total_frames_hint: hint,
+            frames: Arc::new(vec![[seq as i16 + 1, 0]; frames]),
+            hops: vec![WaveHop::default(); frames / (rate as usize / 100).max(1)],
+            last,
+        }
+    }
+
+    #[test]
+    fn a_stream_opens_on_the_lead_and_grows_to_its_end() {
+        let rate = 48_000;
+        let hint = Some(STREAM_CHUNK_FRAMES * 2 + 1_000);
+        let mut stream = DeckStream::new(3);
+        // One full chunk at 48 kHz is ~2.73 s: past the lead.
+        assert!(STREAM_CHUNK_FRAMES as f64 / rate as f64 >= PLAYABLE_LEAD_SECS);
+        assert_eq!(stream.accept(chunk(0, rate, STREAM_CHUNK_FRAMES, hint, false)), Ok(true));
+        assert!(stream.is_playable() && !stream.is_complete());
+        assert_eq!(stream.frames(), STREAM_CHUNK_FRAMES);
+        assert_eq!(stream.expected_frames(), hint.unwrap());
+        let fraction = stream.fraction().expect("a hinted stream measures its progress");
+        assert!((fraction - STREAM_CHUNK_FRAMES as f32 / hint.unwrap() as f32).abs() < 1e-4);
+        // The picture is scaled to the expectation, not to what is in.
+        let expected_cols = (hint.unwrap() as f64 / rate as f64 * ZOOM_COLS_PER_SEC).ceil() as usize;
+        assert_eq!(stream.wave_columns(), expected_cols);
+        assert!(stream.hops.len() < expected_cols);
+
+        // Playable is announced once; growth is silent.
+        assert_eq!(stream.accept(chunk(1, rate, STREAM_CHUNK_FRAMES, hint, false)), Ok(false));
+        assert_eq!(stream.table().chunks.len(), 2);
+        // The end: a short last chunk fixes the length exactly, even when
+        // the container over-claimed.
+        assert_eq!(stream.accept(chunk(2, rate, 500, hint, true)), Ok(false));
+        assert!(stream.is_complete());
+        assert_eq!(stream.frames(), STREAM_CHUNK_FRAMES * 2 + 500);
+        assert_eq!(stream.expected_frames(), stream.frames());
+        assert_eq!(stream.fraction(), Some(1.0));
+        assert!(stream.accept(chunk(3, rate, 10, hint, true)).is_err(), "nothing follows the end");
+        // Releasing the audio keeps the geometry for the picture.
+        stream.release_audio();
+        assert!(stream.table().chunks.is_empty());
+        assert_eq!(stream.expected_frames(), STREAM_CHUNK_FRAMES * 2 + 500);
+    }
+
+    #[test]
+    fn a_short_track_opens_on_its_last_chunk_and_the_mixer_table_reads_it() {
+        let rate = 48_000;
+        let mut stream = DeckStream::new(1);
+        // Under the lead, but whole: playable at once.
+        assert_eq!(stream.accept(chunk(0, rate, 4_800, None, true)), Ok(true));
+        assert!(stream.is_playable() && stream.is_complete());
+        assert_eq!(stream.fraction(), Some(1.0));
+        let table = stream.table();
+        assert_eq!(table.len, 4_800);
+        assert!(table.complete);
+        assert!((table.seconds() - 0.1).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_chunk_out_of_order_breaks_the_stream_quietly() {
+        let rate = 44_100;
+        let mut stream = DeckStream::new(9);
+        assert_eq!(stream.accept(chunk(0, rate, STREAM_CHUNK_FRAMES, None, false)), Ok(true));
+        // No hint and not complete: nothing to measure progress by.
+        assert_eq!(stream.fraction(), None);
+        assert_eq!(stream.expected_frames(), STREAM_CHUNK_FRAMES);
+        let error = stream.accept(chunk(2, rate, STREAM_CHUNK_FRAMES, None, false)).unwrap_err();
+        assert!(error.contains("expected"), "{error}");
+        // The table stands as it was; later chunks are dropped without a word.
+        assert_eq!(stream.frames(), STREAM_CHUNK_FRAMES);
+        assert_eq!(stream.accept(chunk(3, rate, STREAM_CHUNK_FRAMES, None, false)), Ok(false));
+        assert_eq!(stream.frames(), STREAM_CHUNK_FRAMES);
+        assert!(!stream.is_complete());
+    }
+
+    #[test]
+    fn the_cutter_streams_a_wav_in_order_and_returns_it_whole() {
+        let dir = std::env::temp_dir().join(format!("vj_stream_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Two full chunks and a tail, every frame numbered by position.
+        let total = STREAM_CHUNK_FRAMES * 2 + 12_345;
+        let frames: Vec<(i16, i16)> =
+            (0..total).map(|i| ((i % 30_000) as i16, -((i % 30_000) as i16))).collect();
+        let path = dir.join("numbered.wav");
+        std::fs::write(&path, wav_pcm16(&frames, 44_100)).unwrap();
+
+        let mut chunks: Vec<DeckChunk> = Vec::new();
+        let mut sink = |chunk: DeckChunk| chunks.push(chunk);
+        let pcm = decode_deck_stream(
+            &DecodeSource::Path(path.clone()),
+            MediaType::Wav,
+            MAX_TRACK_FRAMES,
+            Some(&mut sink),
+        )
+        .expect("the numbered wav decodes");
+        assert_eq!(pcm.frames.len(), total);
+        assert_eq!(chunks.len(), 3);
+        let mut assembled: Vec<[i16; 2]> = Vec::new();
+        let mut hops = 0usize;
+        for (index, chunk) in chunks.iter().enumerate() {
+            assert_eq!(chunk.seq as usize, index);
+            assert_eq!(chunk.sample_rate, 44_100);
+            assert_eq!(chunk.total_frames_hint, Some(total));
+            assert_eq!(chunk.last, index == 2);
+            assert_eq!(chunk.frames.len(), if chunk.last { 12_345 } else { STREAM_CHUNK_FRAMES });
+            assembled.extend_from_slice(&chunk.frames);
+            hops += chunk.hops.len();
+        }
+        // The chunks ARE the track, in order, and the hops cover it once.
+        assert_eq!(assembled, pcm.frames);
+        assert_eq!(hops, total.div_ceil(441));
+
+        // Nobody listening: the same track, no chunks cut.
+        let whole = decode_deck_stream(
+            &DecodeSource::Path(path),
+            MediaType::Wav,
+            MAX_TRACK_FRAMES,
+            None,
+        )
+        .expect("decodes without a sink");
+        assert_eq!(whole.frames, pcm.frames);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -4252,28 +5128,30 @@ mod tests {
         for i in 0..3u32 {
             queue.push(PendingThumb {
                 revision: AssetRevisionId::from_bytes([i as u8; 32]),
-                path: PathBuf::from(format!("w{i}.png")),
+                source: PathBuf::from(format!("w{i}.png")).into(),
                 sheet: None,
                 legacy_may_be_sheet: false,
                 epoch: 0,
+                keep_pending: false,
+                submitted: Instant::now(),
             });
         }
         // Width 1: one job out, and the next only after it finishes.
-        let first = queue.pop().expect("first job");
+        let (first_ticket, first) = queue.pop().expect("first job");
         {
             let state = queue.state.lock().unwrap();
-            assert_eq!(state.active, 1);
+            assert_eq!(state.active.len(), 1);
             assert_eq!(state.stack.len(), 2);
         }
-        queue.finished();
-        let second = queue.pop().expect("second job");
+        assert!(queue.finished(first_ticket));
+        let (_, second) = queue.pop().expect("second job");
         assert_ne!(first.revision, second.revision);
         // Widening lets a third start while the second is still running.
         queue.set_width(4);
-        let third = queue.pop().expect("third job");
+        let (_, third) = queue.pop().expect("third job");
         assert_ne!(second.revision, third.revision);
         let state = queue.state.lock().unwrap();
-        assert_eq!(state.active, 2, "the second and third; the first reported finished");
+        assert_eq!(state.active.len(), 2, "the second and third; the first reported finished");
         assert!(state.stack.is_empty());
     }
 
@@ -4285,34 +5163,40 @@ mod tests {
         let stale = AssetRevisionId::from_bytes([1u8; 32]);
         queue.push(PendingThumb {
             revision: stale,
-            path: PathBuf::from("stale.png"),
+            source: PathBuf::from("stale.png").into(),
             sheet: None,
             legacy_may_be_sheet: false,
             epoch: 1,
+            keep_pending: false,
+            submitted: Instant::now(),
         });
         // A newer epoch retires the pending job for the old one.
         queue.push(PendingThumb {
             revision: AssetRevisionId::from_bytes([2u8; 32]),
-            path: PathBuf::from("live.png"),
+            source: PathBuf::from("live.png").into(),
             sheet: None,
             legacy_may_be_sheet: false,
             epoch: 2,
+            keep_pending: false,
+            submitted: Instant::now(),
         });
-        assert_eq!(queue.take_dropped(), vec![stale]);
-        assert!(queue.take_dropped().is_empty(), "reported once, not forever");
+        assert_eq!(queue.poll_notifications().unwrap().0, vec![stale]);
+        assert!(queue.poll_notifications().unwrap().0.is_empty(), "reported once, not forever");
 
         // Overflow drops the OLDEST pending job — and says which.
         let queue = ThumbQueue::new(4);
         for i in 0..(MAX_PENDING_THUMBS + 2) {
             queue.push(PendingThumb {
                 revision: AssetRevisionId::from_bytes([i as u8; 32]),
-                path: PathBuf::from(format!("o{i}.png")),
+                source: PathBuf::from(format!("o{i}.png")).into(),
                 sheet: None,
                 legacy_may_be_sheet: false,
                 epoch: 5,
+                keep_pending: false,
+                submitted: Instant::now(),
             });
         }
-        let dropped = queue.take_dropped();
+        let dropped = queue.poll_notifications().unwrap().0;
         assert_eq!(dropped.len(), 2, "two over the cap, two reported");
         assert_eq!(dropped[0], AssetRevisionId::from_bytes([0u8; 32]));
     }
@@ -4327,15 +5211,21 @@ mod tests {
         for i in 0..10u32 {
             queue.push(PendingThumb {
                 revision: AssetRevisionId::from_bytes([i as u8; 32]),
-                path: PathBuf::from(format!("t{i}.png")),
+                source: PathBuf::from(format!("t{i}.png")).into(),
                 sheet: None,
                 legacy_may_be_sheet: false,
                 epoch: 0,
+                keep_pending: false,
+                submitted: Instant::now(),
             });
         }
         for expect in (0..10u32).rev() {
-            let job = queue.pop().expect("job available");
-            assert_eq!(job.path, PathBuf::from(format!("t{expect}.png")), "must be newest-first");
+            let (_, job) = queue.pop().expect("job available");
+            assert_eq!(
+                job.source,
+                DecodeSource::Path(PathBuf::from(format!("t{expect}.png"))),
+                "must be newest-first"
+            );
         }
 
         // Staleness: jobs stamped with an epoch older than the newest one
@@ -4344,21 +5234,25 @@ mod tests {
         for i in 0..5u32 {
             queue.push(PendingThumb {
                 revision: AssetRevisionId::from_bytes([i as u8; 32]),
-                path: PathBuf::from(format!("old{i}.png")),
+                source: PathBuf::from(format!("old{i}.png")).into(),
                 sheet: None,
                 legacy_may_be_sheet: false,
                 epoch: 1,
+                keep_pending: false,
+                submitted: Instant::now(),
             });
         }
         queue.push(PendingThumb {
             revision: AssetRevisionId::from_bytes([9; 32]),
-            path: PathBuf::from("fresh.png"),
+            source: PathBuf::from("fresh.png").into(),
             sheet: None,
             legacy_may_be_sheet: false,
             epoch: 2,
+            keep_pending: false,
+            submitted: Instant::now(),
         });
-        let job = queue.pop().expect("the fresh-epoch job survives");
-        assert_eq!(job.path, PathBuf::from("fresh.png"));
+        let (_, job) = queue.pop().expect("the fresh-epoch job survives");
+        assert_eq!(job.source, DecodeSource::Path(PathBuf::from("fresh.png")));
         assert!(
             queue.state.lock().unwrap().stack.is_empty(),
             "stale jobs must be dropped when popped, not left behind"
@@ -4369,19 +5263,111 @@ mod tests {
         for i in 0..(MAX_PENDING_THUMBS + 3) {
             queue.push(PendingThumb {
                 revision: AssetRevisionId::from_bytes([0; 32]),
-                path: PathBuf::from(format!("p{i}.png")),
+                source: PathBuf::from(format!("p{i}.png")).into(),
                 sheet: None,
                 legacy_may_be_sheet: false,
                 epoch: 0,
+                keep_pending: false,
+                submitted: Instant::now(),
             });
         }
         let remaining = queue.state.lock().unwrap();
         assert_eq!(remaining.stack.len(), MAX_PENDING_THUMBS);
         assert_eq!(
-            remaining.stack.front().unwrap().path,
-            PathBuf::from("p3.png"),
+            remaining.stack.front().unwrap().source,
+            DecodeSource::Path(PathBuf::from("p3.png")),
             "the three oldest (p0..p2) must have been dropped to stay at the cap"
         );
+    }
+
+    #[test]
+    fn fx_thumb_cache_batch_survives_pending_cap_and_epoch_changes() {
+        const CACHED: usize = 249;
+        let queue = ThumbQueue::new(CACHED + 1);
+        queue.push_batch(
+            (0..CACHED)
+                .map(|i| PendingThumb {
+                    revision: AssetRevisionId::from_bytes([i as u8; 32]),
+                    source: PathBuf::from(format!("cached{i}.jpg")).into(),
+                    sheet: None,
+                    legacy_may_be_sheet: false,
+                    epoch: 1,
+                    keep_pending: true,
+                    submitted: Instant::now(),
+                })
+                .collect(),
+        );
+        // A scroll still retires an old disposable prefetch, but it must
+        // not retire any already-read local cache value.
+        let stale = AssetRevisionId::from_bytes([250; 32]);
+        queue.push(PendingThumb {
+            revision: stale,
+            source: PathBuf::from("stale-prefetch.jpg").into(),
+            sheet: None,
+            legacy_may_be_sheet: false,
+            epoch: 1,
+            keep_pending: false,
+            submitted: Instant::now(),
+        });
+        queue.push(PendingThumb {
+            revision: AssetRevisionId::from_bytes([251; 32]),
+            source: PathBuf::from("new-prefetch.jpg").into(),
+            sheet: None,
+            legacy_may_be_sheet: false,
+            epoch: 2,
+            keep_pending: false,
+            submitted: Instant::now(),
+        });
+        assert_eq!(queue.poll_notifications().unwrap().0, vec![stale]);
+        let state = queue.state.lock().unwrap();
+        assert_eq!(
+            state.stack.iter().filter(|job| job.keep_pending).count(),
+            CACHED,
+            "the complete warm-cache batch must remain queued"
+        );
+        assert_eq!(state.stack.len(), CACHED + 1);
+    }
+
+    #[test]
+    fn fx_thumb_batch_retries_queue_lock_contention_without_loss() {
+        let queue = ThumbQueue::new(2);
+        let revision = AssetRevisionId::from_bytes([77; 32]);
+        let mut jobs = VecDeque::from([PendingThumb {
+            revision,
+            source: PathBuf::from("cached.jpg").into(),
+            sheet: None,
+            legacy_may_be_sheet: false,
+            epoch: 1,
+            keep_pending: true,
+            submitted: Instant::now(),
+        }]);
+        let guard = queue.state.lock().unwrap();
+        assert!(!queue.try_push_batch(&mut jobs));
+        assert_eq!(jobs.len(), 1, "contention must leave the UI batch intact");
+        drop(guard);
+        assert!(queue.try_push_batch(&mut jobs));
+        assert!(jobs.is_empty());
+        assert_eq!(queue.state.lock().unwrap().stack.len(), 1);
+    }
+
+    #[test]
+    fn fx_thumb_pending_timeout_is_reported_once_and_releases_the_queue() {
+        let queue = ThumbQueue::new(2);
+        let revision = AssetRevisionId::from_bytes([88; 32]);
+        queue.push(PendingThumb {
+            revision,
+            source: PathBuf::from("stalled.jpg").into(),
+            sheet: None,
+            legacy_may_be_sheet: false,
+            epoch: 1,
+            keep_pending: true,
+            submitted: Instant::now() - Duration::from_secs(11),
+        });
+        let (dropped, timed_out) = queue.poll_notifications().unwrap();
+        assert!(dropped.is_empty());
+        assert_eq!(timed_out, vec![revision]);
+        assert!(queue.state.lock().unwrap().stack.is_empty());
+        assert!(queue.poll_notifications().unwrap().1.is_empty(), "reported once");
     }
 
     #[test]
@@ -4403,10 +5389,11 @@ mod tests {
             std::fs::write(&path, b"not an image").unwrap();
             pool.submit(DecodeJob::Thumb {
                 revision: AssetRevisionId::from_bytes([i as u8; 32]),
-                path,
+                source: path.into(),
                 sheet: None,
                 legacy_may_be_sheet: true,
                 epoch: 0,
+                keep_pending: false,
             });
         }
 
@@ -4441,10 +5428,11 @@ mod tests {
             std::fs::write(&path, b"not an image").unwrap();
             pool.submit(DecodeJob::Thumb {
                 revision: AssetRevisionId::from_bytes([i as u8; 32]),
-                path,
+                source: path.into(),
                 sheet: None,
                 legacy_may_be_sheet: true,
                 epoch: 0,
+                keep_pending: false,
             });
         }
         pool.submit(DecodeJob::MeshPrep {
@@ -4654,8 +5642,7 @@ mod tests {
     }
 
     fn library_billboard(name: &str) -> Option<PathBuf> {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../local/ai_content_library")
+        let path = makepad_asset_client::paths::library_root()
             .join(name);
         path.exists().then_some(path)
     }
@@ -4837,6 +5824,8 @@ mod mode_flip_tests {
             mixer,
             true,  // loop on
             false, // playing
+            crate::test_thread_spawner(),
+            crate::test_task_pool(),
         )
         .expect("open");
         player.set_muted(true);

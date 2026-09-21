@@ -11,8 +11,8 @@ use makepad_map_build::{nav_build, native, versatiles};
 
 use makepad_fast_inflate::gzip_compress;
 use makepad_mbtile_reader::{MbtilesReader, MbtilesWriter};
-use serde_json::{Map, Value};
-use std::collections::BTreeMap;
+use makepad_micro_serde::{DeJson, JsonValue, SerJson};
+use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -23,12 +23,12 @@ const USAGE: &str = "\
 Usage:
   makepad-map-tiles versatiles <source.versatiles> <output.mbtiles> [options]
   makepad-map-tiles pbf-detail <source.osm.pbf> <output.mbtiles> --store <directory> [options]
-  makepad-map-tiles pbf-base <source.osm.pbf> <output.mbtiles> --store <directory> [options]
+  makepad-map-tiles pbf-base <source.osm.pbf> <output.mbtiles> --store <directory> [options] [--full]
   makepad-map-tiles ocean-tiles <simplified.shp> <full.shp> <out-low.mbtiles> <out-high.mbtiles>
   makepad-map-tiles inspect-pbf <source.osm.pbf>
   makepad-map-tiles audit-pbf <source.osm.pbf>
   makepad-map-tiles probe-mbtiles <source.mbtiles> <z/x/y>
-  makepad-map-tiles testmap [--dir DIR] [--name NAME] [--url URL] [--keep-store]
+  makepad-map-tiles testmap [--dir DIR] [--name NAME] [--url URL] [--keep-store] [--full]
   makepad-map-tiles nav-build <source.osm.pbf> <basename> [--bbox w,s,e,n] [--skip-addresses]
   makepad-map-tiles nav-probe <basename> search <query...> [--near lon,lat]
   makepad-map-tiles nav-probe <basename> route <lon,lat> <lon,lat> [--mode car|bike|foot]
@@ -75,9 +75,10 @@ PBF detail options:
   --store DIRECTORY              Required bounded-memory scratch directory
   --zoom N                       Detail tile zoom (default: 14)
   --sort-memory-mib N            Per-block external-sort memory (default: 256)
+  --full                         Preserve all source tags and provenance
 
 PBF base options (reuses a completed pbf-detail store; emits base layers
-z0..=14 plus the all-tag detail layers at z14 into ONE brotli archive):
+z0..=14 plus renderer-consumed detail layers at z14 into ONE brotli archive):
   --store DIRECTORY              Required completed pbf-detail store
   --bbox w,s,e,n                 Geographic extract (default: whole store)
   --brotli-quality N             Brotli quality 0-11 (default: 11)
@@ -85,6 +86,7 @@ z0..=14 plus the all-tag detail layers at z14 into ONE brotli archive):
   --threads N                    Worker threads (default: all cores)
   --max-zoom N                   Top zoom (default: 14; below 14 skips detail)
   --sort-memory-mib N            Per-block external-sort memory (default: 128)
+  --full                         Preserve all source tags and provenance
 
 General:
   -h, --help                     Show this help
@@ -284,6 +286,7 @@ fn parse_detail_options(args: &[String]) -> Result<native::DetailOptions, String
     let mut zoom = None;
     let mut sort_memory_mib = None;
     let mut no_tiles = false;
+    let mut full = false;
     let mut index = 3;
     while index < args.len() {
         match args[index].as_str() {
@@ -321,6 +324,10 @@ fn parse_detail_options(args: &[String]) -> Result<native::DetailOptions, String
                 no_tiles = true;
                 index += 1;
             }
+            "--full" => {
+                full = true;
+                index += 1;
+            }
             value => return Err(format!("unknown pbf-detail argument '{value}'\n\n{USAGE}")),
         }
     }
@@ -333,6 +340,7 @@ fn parse_detail_options(args: &[String]) -> Result<native::DetailOptions, String
         options.sort_memory_mib = sort_memory_mib;
     }
     options.no_tiles = no_tiles;
+    options.full = full;
     Ok(options)
 }
 
@@ -350,6 +358,7 @@ fn parse_base_options(args: &[String]) -> Result<native::BaseOptions, String> {
     let mut max_zoom = None;
     let mut sort_memory_mib = None;
     let mut baseline = None;
+    let mut full = false;
     let mut index = 3;
     while index < args.len() {
         let take_value = |name: &str, index: usize| -> Result<&String, String> {
@@ -381,6 +390,10 @@ fn parse_base_options(args: &[String]) -> Result<native::BaseOptions, String> {
             }
             "--dict" => {
                 use_dict = true;
+                index += 1;
+            }
+            "--full" => {
+                full = true;
                 index += 1;
             }
             "--threads" => {
@@ -424,6 +437,7 @@ fn parse_base_options(args: &[String]) -> Result<native::BaseOptions, String> {
     let mut options = native::default_base_options(source, output, store);
     options.bbox = bbox;
     options.use_dict = use_dict;
+    options.full = full;
     if let Some(quality) = brotli_quality {
         options.brotli_quality = quality;
     }
@@ -894,9 +908,11 @@ fn add_metadata(
     max_zoom: u8,
 ) -> Result<(), String> {
     let source = if source_json.is_empty() {
-        Value::Object(Map::new())
+        JsonValue::Object(HashMap::new())
     } else {
-        serde_json::from_slice(source_json)
+        let text = std::str::from_utf8(source_json)
+            .map_err(|err| format!("parse source TileJSON metadata: {err}"))?;
+        JsonValue::deserialize_json(text)
             .map_err(|err| format!("parse source TileJSON metadata: {err}"))?
     };
     let source_object = source.as_object();
@@ -931,7 +947,7 @@ fn add_metadata(
         writer.set_metadata("author", "OpenStreetMap contributors");
     }
 
-    let mut json_metadata = Map::new();
+    let mut json_metadata = HashMap::new();
     if let Some(object) = source_object {
         for key in ["vector_layers", "tilestats"] {
             if let Some(value) = object.get(key) {
@@ -940,17 +956,13 @@ fn add_metadata(
         }
     }
     json_metadata
-        .entry("vector_layers")
-        .or_insert_with(|| Value::Array(Vec::new()));
-    writer.set_metadata(
-        "json",
-        serde_json::to_string(&json_metadata)
-            .map_err(|err| format!("serialize MBTiles JSON metadata: {err}"))?,
-    );
+        .entry("vector_layers".to_string())
+        .or_insert_with(|| JsonValue::Array(Vec::new()));
+    writer.set_metadata("json", JsonValue::Object(json_metadata).serialize_json());
     Ok(())
 }
 
-fn json_string<'a>(object: Option<&'a Map<String, Value>>, key: &str) -> Option<&'a str> {
+fn json_string<'a>(object: Option<&'a HashMap<String, JsonValue>>, key: &str) -> Option<&'a str> {
     object?.get(key)?.as_str()
 }
 

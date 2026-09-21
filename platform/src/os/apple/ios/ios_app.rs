@@ -172,8 +172,9 @@ impl IosClasses {
 /// Text input events from iOS UITextInput, queued to avoid re-entrancy
 #[derive(Debug, Clone)]
 pub enum IosTextInputEvent {
-    /// Full text+selection state forwarded from the UITextView (text, start, end)
-    SelectionChanged(String, usize, usize),
+    /// Full text+selection state forwarded from the UITextView (text, start,
+    /// end), plus the marked-text range while the keyboard is composing.
+    SelectionChanged(String, usize, usize, Option<(usize, usize)>),
     /// Key event routed through the queue (Return)
     KeyEvent(KeyCode),
 }
@@ -349,6 +350,8 @@ impl IosApp {
             (*view_ctrl_obj).set_ivar::<BOOL>("_prefersHomeIndicatorAutoHidden", NO);
             // 0 = UIStatusBarStyleDefault (system-managed light/dark).
             (*view_ctrl_obj).set_ivar::<i64>("_preferredStatusBarStyle", 0);
+            // UIRectEdgeNone: the OS keeps every edge gesture until an app asks.
+            (*view_ctrl_obj).set_ivar::<u64>("_preferredScreenEdgesDeferringSystemGestures", 0);
 
             let () = msg_send![view_ctrl_obj, setView: mtk_view_obj];
 
@@ -672,17 +675,23 @@ impl IosApp {
         radius: Vec2d,
         force: f64,
     ) {
+        // The point's time is WHEN IT WAS LAST SEEN, not when the finger
+        // landed: a gesture's duration and release velocity are read from
+        // it, and a finger that keeps its landing time looks instantaneous
+        // however long it moved.
+        let time = self.time_now();
         if let Some(touch) = self.touches.iter_mut().find(|v| v.uid == uid) {
             touch.state = state;
             touch.abs = abs;
             touch.radius = radius;
             touch.force = force;
+            touch.time = time;
         } else {
             self.touches.push(TouchPoint {
                 state,
                 abs,
                 uid,
-                time: self.time_now(),
+                time,
                 rotation_angle: 0.0,
                 force,
                 radius,
@@ -1003,20 +1012,27 @@ impl IosApp {
         }
     }
 
-    pub fn set_ime_text(text: String, selection_start: usize, selection_end: usize) {
+    pub fn set_ime_text(
+        text: String,
+        selection_start: usize,
+        selection_end: usize,
+        composition: Option<(usize, usize)>,
+    ) {
         // Push makepad's text + selection into the UITextView. char offsets → UTF-16
         // for NSRange. The programmatic_update guard makes the delegate callbacks
         // this triggers skip forwarding the change back to makepad (no echo loop).
-        let selection_start_utf16: usize = text
-            .chars()
-            .take(selection_start)
-            .map(|c| c.len_utf16())
-            .sum();
-        let selection_end_utf16: usize = text
-            .chars()
-            .take(selection_end)
-            .map(|c| c.len_utf16())
-            .sum();
+        let utf16_offset = |chars: usize| -> usize {
+            text.chars().take(chars).map(|c| c.len_utf16()).sum()
+        };
+        let selection_start_utf16 = utf16_offset(selection_start);
+        let selection_end_utf16 = utf16_offset(selection_end);
+        // The keyboard's composition, if the widget still has one: written back as
+        // marked text, so a programmatic edit beside it doesn't commit it.
+        let composition = composition.filter(|(start, end)| end > start).map(|(start, end)| {
+            let around: String = text.chars().take(start).chain(text.chars().skip(end)).collect();
+            let composed: String = text.chars().skip(start).take(end - start).collect();
+            (around, composed, utf16_offset(start), utf16_offset(end))
+        });
 
         // Snapshot the view + freshness state under one borrow, then message UIKit
         // outside it (the writes' delegate callbacks can re-enter IOS_APP).
@@ -1070,9 +1086,20 @@ impl IosApp {
             };
             (*view).set_ivar::<BOOL>("programmatic_update", YES);
             if live_text != text {
-                let ns_text = str_to_nsstring(&text);
-                let () = msg_send![view, setText: ns_text];
-                let () = msg_send![view, setSelectedRange: range];
+                if let Some((around, composed, start_utf16, end_utf16)) = composition {
+                    // Write the text around the composition, then mark the composed
+                    // part again at its place; UIKit puts the caret after it.
+                    let ns_around = str_to_nsstring(&around);
+                    let () = msg_send![view, setText: ns_around];
+                    let () = msg_send![view, setSelectedRange: NSRange { location: start_utf16 as u64, length: 0 }];
+                    let ns_composed = str_to_nsstring(&composed);
+                    let composed_selection = NSRange { location: (end_utf16 - start_utf16) as u64, length: 0 };
+                    let () = msg_send![view, setMarkedText: ns_composed selectedRange: composed_selection];
+                } else {
+                    let ns_text = str_to_nsstring(&text);
+                    let () = msg_send![view, setText: ns_text];
+                    let () = msg_send![view, setSelectedRange: range];
+                }
                 wrote_text = true;
             } else if live_sel.location != range.location || live_sel.length != range.length {
                 // Same text already: only move the selection if it actually differs
@@ -1219,13 +1246,18 @@ impl IosApp {
         self.start_timer(IOS_TEXT_EVENT_DRAIN_TIMER_ID, 0.0, false);
     }
 
-    pub fn send_text_selection_changed(text: String, start: usize, end: usize) {
+    pub fn send_text_selection_changed(
+        text: String,
+        start: usize,
+        end: usize,
+        composition: Option<(usize, usize)>,
+    ) {
         let _ = IOS_APP.try_with(|app| {
             if let Ok(mut app_ref) = app.try_borrow_mut() {
                 if let Some(ref mut app) = *app_ref {
                     app.last_forwarded_text = Some(text.clone());
                     app.queued_text_events
-                        .push(IosTextInputEvent::SelectionChanged(text, start, end));
+                        .push(IosTextInputEvent::SelectionChanged(text, start, end, composition));
                     app.schedule_text_event_drain();
                 }
             }
@@ -1353,6 +1385,28 @@ impl IosApp {
             unsafe {
                 (*vc).set_ivar::<i64>("_preferredStatusBarStyle", style);
                 let () = msg_send![vc, setNeedsStatusBarAppearanceUpdate];
+            }
+        }
+    }
+
+    /// The screen edges whose system gestures the OS should defer (a
+    /// `UIRectEdge` bit set): the view controller answers
+    /// `preferredScreenEdgesDeferringSystemGestures` with it, and UIKit is
+    /// told to ask again. Same borrow pattern as `set_fullscreen`.
+    pub fn set_deferred_system_gesture_edges(edges: u64) {
+        let vc = IOS_APP
+            .try_with(|app| {
+                app.try_borrow()
+                    .ok()
+                    .and_then(|app_ref| app_ref.as_ref()?.view_controller)
+            })
+            .ok()
+            .flatten();
+
+        if let Some(vc) = vc {
+            unsafe {
+                (*vc).set_ivar::<u64>("_preferredScreenEdgesDeferringSystemGestures", edges);
+                let () = msg_send![vc, setNeedsUpdateOfScreenEdgesDeferringSystemGestures];
             }
         }
     }

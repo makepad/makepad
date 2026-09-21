@@ -1,0 +1,15 @@
+# One picture per line: url<TAB>title<TAB>link. Bare URLs work too.
+# These are public-domain paintings served by Wikimedia Commons, asked for
+# at a modest width so a first bake is quick and gentle.
+https://commons.wikimedia.org/wiki/Special:FilePath/Claude%20Monet%2C%20Impression%2C%20soleil%20levant.jpg?width=1600	Impression, Sunrise	https://commons.wikimedia.org/wiki/File:Claude_Monet,_Impression,_soleil_levant.jpg
+https://commons.wikimedia.org/wiki/Special:FilePath/Meisje%20met%20de%20parel.jpg?width=1600	Girl with a Pearl Earring	https://commons.wikimedia.org/wiki/File:Meisje_met_de_parel.jpg
+https://commons.wikimedia.org/wiki/Special:FilePath/The%20Great%20Wave%20off%20Kanagawa.jpg?width=1600	The Great Wave off Kanagawa	https://commons.wikimedia.org/wiki/File:The_Great_Wave_off_Kanagawa.jpg
+https://commons.wikimedia.org/wiki/Special:FilePath/Mona%20Lisa%2C%20by%20Leonardo%20da%20Vinci%2C%20from%20C2RMF%20retouched.jpg?width=1600	Mona Lisa	https://commons.wikimedia.org/wiki/File:Mona_Lisa,_by_Leonardo_da_Vinci,_from_C2RMF_retouched.jpg
+https://commons.wikimedia.org/wiki/Special:FilePath/The%20Night%20Watch%20-%20HD.jpg?width=1600	The Night Watch	https://commons.wikimedia.org/wiki/File:The_Night_Watch_-_HD.jpg
+https://commons.wikimedia.org/wiki/Special:FilePath/Gustav%20Klimt%20016.jpg?width=1600	The Kiss	https://commons.wikimedia.org/wiki/File:The_Kiss_-_Gustav_Klimt_-_Google_Cultural_Institute.jpg
+https://commons.wikimedia.org/wiki/Special:FilePath/Edvard%20Munch%2C%201893%2C%20The%20Scream%2C%20oil%2C%20tempera%20and%20pastel%20on%20cardboard%2C%2091%20x%2073%20cm%2C%20National%20Gallery%20of%20Norway.jpg?width=1600	The Scream	https://commons.wikimedia.org/wiki/File:Edvard_Munch,_1893,_The_Scream.jpg
+https://commons.wikimedia.org/wiki/Special:FilePath/Sandro%20Botticelli%20-%20La%20nascita%20di%20Venere%20-%20Google%20Art%20Project%20-%20edited.jpg?width=1600	The Birth of Venus	https://commons.wikimedia.org/wiki/File:Sandro_Botticelli_-_La_nascita_di_Venere.jpg
+https://commons.wikimedia.org/wiki/Special:FilePath/Caspar%20David%20Friedrich%20-%20Wanderer%20above%20the%20sea%20of%20fog.jpg?width=1600	Wanderer above the Sea of Fog	https://commons.wikimedia.org/wiki/File:Caspar_David_Friedrich_-_Wanderer_above_the_sea_of_fog.jpg
+https://commons.wikimedia.org/wiki/Special:FilePath/Van%20Gogh%20-%20Starry%20Night%20-%20Google%20Art%20Project.jpg?width=1600	The Starry Night (drawing)	https://commons.wikimedia.org/wiki/File:Van_Gogh_-_Starry_Night_-_Google_Art_Project.jpg
+https://commons.wikimedia.org/wiki/Special:FilePath/Nighthawks%20by%20Edward%20Hopper%201942.jpg?width=1600	Nighthawks	https://commons.wikimedia.org/wiki/File:Nighthawks_by_Edward_Hopper_1942.jpg
+https://commons.wikimedia.org/wiki/Special:FilePath/Georges%20Seurat%20-%20A%20Sunday%20on%20La%20Grande%20Jatte%20--%201884%20-%20Google%20Art%20Project.jpg?width=1600	A Sunday Afternoon on La Grande Jatte	https://commons.wikimedia.org/wiki/File:A_Sunday_on_La_Grande_Jatte,_Georges_Seurat,_1884.jpg

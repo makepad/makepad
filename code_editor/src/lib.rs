@@ -5,6 +5,7 @@ pub mod char;
 pub mod code_editor;
 pub mod code_view;
 pub mod decoration;
+pub mod diff;
 pub mod document;
 pub mod draw_selection;
 pub mod history;

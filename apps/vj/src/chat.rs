@@ -18,6 +18,7 @@
 
 use makepad_chat_ui::{ChatFeed, FeedConfig, NoClientTools};
 use makepad_asset_client::{ApiEndpoints, ChatAttachment};
+use makepad_widgets::Cx;
 use std::path::PathBuf;
 
 /// The transcript and its rate meter are the shared component's; this app
@@ -34,11 +35,18 @@ pub struct ChatBridge {
 impl ChatBridge {
     /// The store session is up: open the chat on its broker. The session
     /// itself is created lazily, on the first turn.
-    pub fn connect(&mut self, endpoints: ApiEndpoints, token: Option<String>, cache: PathBuf) {
+    pub fn connect(
+        &mut self,
+        cx: &Cx,
+        endpoints: ApiEndpoints,
+        token: Option<String>,
+        cache: PathBuf,
+    ) {
         ChatData::set_status("Asset server connected · opening Qwen on the first message");
         self.feed = Some(ChatFeed::start(
             FeedConfig::new(endpoints, token, cache, "gen", "vj"),
             Box::new(NoClientTools),
+            cx.thread_spawner(),
         ));
     }
 

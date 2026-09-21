@@ -775,6 +775,7 @@ mod tests {
             variants: 1,
             text: String::new(),
             voice: String::new(),
+            language: String::new(),
             speed: 1.0,
             emotion: None,
             seconds: None,
@@ -787,6 +788,7 @@ mod tests {
             motion_mode: None,
             peer_sources: Vec::new(),
             peer_tickets: Vec::new(),
+            pixal: None,
         };
         let err = match named_input(&params, INPUT_IMAGE) {
             Err(err) => err,

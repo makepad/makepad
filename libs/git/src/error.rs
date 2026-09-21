@@ -3,6 +3,9 @@ use std::io;
 
 #[derive(Debug)]
 pub enum GitError {
+    Cancelled,
+    /// Internal admission refusal, converted to coverage by bounded diffs.
+    TreeDiffLimit(crate::diff::TreeDiffExhaustion),
     Io(io::Error),
     InvalidObjectId(String),
     InvalidObject(String),
@@ -16,6 +19,8 @@ pub enum GitError {
 impl fmt::Display for GitError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            GitError::Cancelled => write!(f, "cancelled"),
+            GitError::TreeDiffLimit(reason) => write!(f, "tree diff limit: {:?}", reason),
             GitError::Io(e) => write!(f, "IO error: {}", e),
             GitError::InvalidObjectId(s) => write!(f, "invalid object id: {}", s),
             GitError::InvalidObject(s) => write!(f, "invalid object: {}", s),

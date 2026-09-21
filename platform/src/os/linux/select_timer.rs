@@ -1,6 +1,30 @@
-use std::{collections::VecDeque, mem, os::raw::c_int, ptr, time::Instant};
+use std::{collections::VecDeque, mem, os::raw::c_int, ptr, sync::OnceLock, time::Instant};
 
 use self::super::libc_sys;
+
+fn ui_wake_pipe() -> [c_int; 2] {
+    static PIPE: OnceLock<[c_int; 2]> = OnceLock::new();
+    *PIPE.get_or_init(|| unsafe {
+        let mut fds = [-1, -1];
+        if libc_sys::pipe(fds.as_mut_ptr()) == 0 {
+            for fd in fds {
+                let flags = libc_sys::fcntl(fd, libc_sys::F_GETFL);
+                let _ = libc_sys::fcntl(fd, libc_sys::F_SETFL, flags | libc_sys::O_NONBLOCK);
+            }
+        }
+        fds
+    })
+}
+
+pub(crate) fn wake_ui_event_loop() {
+    let write_fd = ui_wake_pipe()[1];
+    if write_fd >= 0 {
+        let byte = 1_u8;
+        unsafe {
+            let _ = libc_sys::write(write_fd, (&byte as *const u8).cast(), 1);
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 pub struct SelectTimer {
@@ -27,6 +51,18 @@ impl SelectTimers {
     }
 
     pub fn select(&mut self, fd: c_int) {
+        self.select_fds(std::iter::once(fd));
+    }
+
+    pub fn select_fds(&mut self, input_fds: impl IntoIterator<Item = c_int>) {
+        self.select_fds_capped(input_fds, None);
+    }
+
+    /// Like `select_fds`, but never sleeps longer than `max_timeout` seconds.
+    /// The direct renderer uses a sub-millisecond cap to retry a GPU that is
+    /// still presenting, while input and the wake pipe interrupt it as usual.
+    pub fn select_fds_capped(&mut self, input_fds: impl IntoIterator<Item = c_int>, max_timeout: Option<f64>) {
+        let mut max_fd = -1;
         let mut fds = mem::MaybeUninit::uninit();
         unsafe {
             libc_sys::FD_ZERO(fds.as_mut_ptr());
@@ -35,22 +71,42 @@ impl SelectTimers {
             //       Only makepad-studio does that, but it doesn't use this function.
             //       If we leave this here, it locks one CPU core to 100% when stdin is `/dev/null`,
             //       which occurs any time an app is run from a DE/WM and not a terminal
-            libc_sys::FD_SET(fd, fds.as_mut_ptr());
+            for fd in input_fds {
+                if fd >= 0 && fd < libc_sys::FD_SETSIZE as c_int {
+                    libc_sys::FD_SET(fd, fds.as_mut_ptr());
+                    max_fd = max_fd.max(fd);
+                }
+            }
+            let wake_fd = ui_wake_pipe()[0];
+            if wake_fd >= 0 {
+                libc_sys::FD_SET(wake_fd, fds.as_mut_ptr());
+            }
         }
         //libc_sys::FD_SET(self.signal_fds[0], fds.as_mut_ptr());
         // If there are any timers, we set the timeout for select to the `delta_timeout`
         // of the first timer that should be fired. Otherwise, we set the timeout to
         // None, so that select will block indefinitely.
-        let mut timeout = self.timers.front().map(|timer| libc_sys::timeval {
-            // `tv_sec` is in seconds, so take the integer part of `delta_timeout`
-            tv_sec: timer.delta_timeout.trunc() as libc_sys::time_t,
-            // `tv_usec` is in microseconds, so take the fractional part of
-            // `delta_timeout` 1000000.0.
-            tv_usec: (timer.delta_timeout.fract() * 1000_000.0) as libc_sys::time_t,
-        });
+        let mut timeout = self
+            .timers
+            .front()
+            .map(|timer| timer.delta_timeout)
+            .into_iter()
+            .chain(max_timeout)
+            .reduce(f64::min)
+            .map(|seconds| {
+                let seconds = seconds.max(0.0);
+                libc_sys::timeval {
+                    // `tv_sec` is in seconds, so take the integer part of the delay
+                    tv_sec: seconds.trunc() as libc_sys::time_t,
+                    // `tv_usec` is in microseconds, so take the fractional part of
+                    // the delay 1000000.0.
+                    tv_usec: (seconds.fract() * 1000_000.0) as libc_sys::time_t,
+                }
+            });
         let _nfds = unsafe {
+            let wake_fd = ui_wake_pipe()[0];
             libc_sys::select(
-                fd + 1,
+                max_fd.max(wake_fd) + 1,
                 fds.as_mut_ptr(),
                 ptr::null_mut(),
                 ptr::null_mut(),
@@ -60,6 +116,13 @@ impl SelectTimers {
                     .unwrap_or(ptr::null_mut()),
             )
         };
+        let wake_fd = ui_wake_pipe()[0];
+        if wake_fd >= 0 {
+            let mut buffer = [0_u8; 64];
+            unsafe {
+                while libc_sys::read(wake_fd, buffer.as_mut_ptr().cast(), buffer.len()) > 0 {}
+            }
+        }
     }
 
     pub fn time_now(&self) -> f64 {

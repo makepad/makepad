@@ -149,7 +149,7 @@ pub trait VideoFrameDecoder: Send {
 pub trait MediaVideoEncoder: Send + Sync {
     fn push_frame(&self, frame: CameraFrameRef<'_>);
 
-    #[cfg(all(any(target_os = "macos", target_os = "ios"), not(headless)))]
+    #[cfg(all(any(target_os = "macos", target_os = "ios"), not(gpusim)))]
     fn push_apple_pixel_buffer(
         &self,
         _pixel_buffer: crate::os::apple::apple_sys::CVPixelBufferRef,
@@ -214,14 +214,14 @@ pub trait MediaPlaybackSession {
         None
     }
     /// Optional Apple zero-copy present: biplanar NV12 `CVPixelBuffer` from VideoToolbox.
-    #[cfg(all(any(target_os = "macos", target_os = "ios"), not(headless)))]
+    #[cfg(all(any(target_os = "macos", target_os = "ios"), not(gpusim)))]
     fn take_metal_nv12_frame(&mut self) -> Option<crate::gpu_texture::MetalNv12Frame> {
         None
     }
     /// Optional Linux zero-copy present: NV12 DMA-Buf planes → `TEXTURE_EXTERNAL_OES`.
     ///
     /// Platform poll uses [`crate::os::linux::linux_video_gpu::present_dmabuf_nv12`].
-    #[cfg(all(target_os = "linux", not(any(target_env = "ohos", linux_direct))))]
+    #[cfg(all(target_os = "linux", not(any(target_env = "ohos", linux_direct, gpusim))))]
     fn take_linux_dmabuf_nv12_frame(
         &mut self,
     ) -> Option<crate::os::linux::linux_video_gpu::LinuxDmabufNv12Frame> {
@@ -230,7 +230,7 @@ pub trait MediaPlaybackSession {
     /// Optional Linux zero-copy present: share-group GLMemory RGBA texture.
     ///
     /// Platform poll uses [`crate::os::linux::linux_video_gpu::present_gl_memory_rgba`].
-    #[cfg(all(target_os = "linux", not(any(target_env = "ohos", linux_direct))))]
+    #[cfg(all(target_os = "linux", not(any(target_env = "ohos", linux_direct, gpusim))))]
     fn take_linux_gl_memory_rgba_frame(
         &mut self,
     ) -> Option<crate::os::linux::linux_video_gpu::LinuxGlMemoryRgbaFrame> {

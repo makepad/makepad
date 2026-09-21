@@ -1,0 +1,6 @@
+# QS-BT1 runtime 0483:a110 only. Do not match STM32 DFU bootloader a10f.
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="0483", ATTR{idProduct}=="a110", GROUP="uucp", MODE="0660", TAG+="uaccess"
+
+# G-Belt FTDI 0403:939b: register the tty driver on add; access by USB serial.
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="0403", ATTR{idProduct}=="939b", RUN+="/usr/local/sbin/makepad-gbelt-bind"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="939b", ATTRS{serial}!="", GROUP="uucp", MODE="0660", TAG+="uaccess", SYMLINK+="makepad/gbelt-%s{serial}"

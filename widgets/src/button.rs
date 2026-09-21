@@ -479,6 +479,11 @@ pub struct Button {
     icon_walk: Walk,
     #[live]
     label_walk: Walk,
+    /// Per-row horizontal alignment of the label, which only shows once the text
+    /// wraps onto more rows; give `label_walk` a `Fill` width so the rows have
+    /// room to move within.
+    #[live]
+    label_align: Align,
     #[walk]
     walk: Walk,
 
@@ -619,6 +624,43 @@ impl Widget for Button {
                 self.animator_play(cx, ids!(focus.off));
                 self.draw_bg.redraw(cx);
             }
+            // A focused button activates from the keyboard, with the keys the web and the
+            // desktop toolkits use. Holding the key repeats the press, so repeats are ignored.
+            Hit::KeyDown(ke) if self.enabled && is_activation_key(ke.key_code) && !ke.is_repeat => {
+                cx.widget_action_with_data(
+                    &self.action_data,
+                    uid,
+                    ButtonAction::Pressed(ke.modifiers),
+                );
+                cx.widget_to_script_call(uid, NIL, self.source.clone(), self.on_press.clone(), &[]);
+                if self.trigger_on_press {
+                    cx.widget_to_script_call(
+                        uid,
+                        NIL,
+                        self.source.clone(),
+                        self.on_click.clone(),
+                        &[],
+                    );
+                }
+                self.animator_play(cx, ids!(hover.down));
+            }
+            Hit::KeyUp(ke) if self.enabled && is_activation_key(ke.key_code) => {
+                cx.widget_action_with_data(
+                    &self.action_data,
+                    uid,
+                    ButtonAction::Clicked(ke.modifiers),
+                );
+                if !self.trigger_on_press {
+                    cx.widget_to_script_call(
+                        uid,
+                        NIL,
+                        self.source.clone(),
+                        self.on_click.clone(),
+                        &[],
+                    );
+                }
+                self.animator_play(cx, ids!(hover.off));
+            }
             Hit::FingerDown(fe) if self.enabled && fe.is_primary_hit() => {
                 if self.grab_key_focus {
                     cx.set_key_focus(self.draw_bg.area());
@@ -639,7 +681,6 @@ impl Widget for Button {
                     );
                 }
                 self.animator_play(cx, ids!(hover.down));
-                self.set_key_focus(cx);
             }
             Hit::FingerHoverIn(_) => {
                 if self.enabled {
@@ -705,7 +746,7 @@ impl Widget for Button {
         self.draw_bg.begin(cx, walk, self.layout);
         self.draw_icon.draw_walk(cx, self.icon_walk);
         self.draw_text
-            .draw_walk(cx, self.label_walk, Align::default(), self.text.as_ref());
+            .draw_walk(cx, self.label_walk, self.label_align, self.text.as_ref());
         self.draw_bg.end(cx);
         cx.add_nav_stop(self.draw_bg.area(), NavRole::TextInput, Inset::default());
         DrawStep::done()
@@ -722,12 +763,18 @@ impl Widget for Button {
     }
 }
 
+/// The keys that activate the focused button: `Space`, like a checkbox, and
+/// `Enter`, like following a link.
+fn is_activation_key(key_code: KeyCode) -> bool {
+    matches!(key_code, KeyCode::Space | KeyCode::ReturnKey | KeyCode::NumpadEnter)
+}
+
 impl Button {
     pub fn draw_button(&mut self, cx: &mut Cx2d, label: &str) {
         self.draw_bg.begin(cx, self.walk, self.layout);
         self.draw_icon.draw_walk(cx, self.icon_walk);
         self.draw_text
-            .draw_walk(cx, self.label_walk, Align::default(), label);
+            .draw_walk(cx, self.label_walk, self.label_align, label);
         self.draw_bg.end(cx);
     }
 

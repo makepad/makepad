@@ -3,7 +3,7 @@ use crate::{
     cx_api::{CxOsApi, CxOsOp},
     draw_pass::{CxDrawPassColorTexture, CxDrawPassParent, DrawPassClearColor},
     event::Event,
-    event::{WindowGeom, WindowGeomChangeEvent},
+    event::{WindowGeom},
     makepad_math::*,
     makepad_micro_serde::*,
     os::{
@@ -15,7 +15,6 @@ use crate::{
     web_socket::WebSocketMessage,
     window::CxWindowPool,
 };
-use crate::makepad_objc_sys::{msg_send, sel, sel_impl};
 use makepad_studio_protocol::{AppToStudio, GCSample, StudioToApp, StudioToAppVec};
 
 /// Local swapchain for client-side texture management
@@ -41,29 +40,33 @@ impl StdinWindow {
     }
 }
 
-/// Startup-order trace for the drag-stall hunt: appends timestamped lines
-/// to the file named by MAKEPAD_STUDIO_TRACE. Free when the env var is
-/// unset (one static branch).
+/// Startup-order trace for the drag-stall hunt. Appends timestamped lines
+/// under `~/.makepad/logs/studio/` when the `studio` topic is enabled.
 pub(crate) fn stdin_trace(line: &str) {
     use std::io::Write;
     use std::sync::{Mutex, OnceLock};
-    static FILE: OnceLock<Option<Mutex<std::fs::File>>> = OnceLock::new();
-    let file = FILE.get_or_init(|| {
-        std::env::var("MAKEPAD_STUDIO_TRACE").ok().and_then(|p| {
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(p)
-                .ok()
-                .map(Mutex::new)
-        })
-    });
-    let Some(file) = file else { return };
+    static FILE: OnceLock<Mutex<Option<std::fs::File>>> = OnceLock::new();
+    if !crate::makepad_error_log::trace_enabled("studio") {
+        return;
+    }
+    let file = FILE.get_or_init(|| Mutex::new(None));
+    let Ok(mut file) = file.lock() else { return };
+    if file.is_none() {
+        let dir = crate::log::trace_log_dir("studio");
+        if std::fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+        *file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("stdin.log"))
+            .ok();
+    }
     let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs_f64() * 1000.0)
         .unwrap_or(0.0);
-    if let Ok(mut f) = file.lock() {
+    if let Some(f) = file.as_mut() {
         let _ = writeln!(f, "{:.2} C {}", ms % 1.0e7, line);
     }
 }
@@ -87,17 +90,13 @@ impl Cx {
         stdin_windows: &mut [StdinWindow],
         time: f32,
     ) {
-        // Safety flush for frame-batched offscreen passes (see macos.rs).
-        if let Some(shared) = metal_cx.frame_command_buffer.take() {
-            let () = unsafe { msg_send![shared, commit] };
-            let () = unsafe { msg_send![shared, release] };
-        }
         //self.demo_time_repaint = false;
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
         for &draw_pass_id in &passes_todo {
-            self.passes[draw_pass_id].set_time(time as f32);
+            let uniforms_gen = self.next_uniform_gen();
+            self.passes[draw_pass_id].set_time(time as f32, uniforms_gen);
             match self.passes[draw_pass_id].parent.clone() {
                 CxDrawPassParent::Xr => {}
                 CxDrawPassParent::Window(window_id) => {
@@ -120,6 +119,7 @@ impl Cx {
                             let pass_rect = self.get_pass_rect(draw_pass_id, dpi_factor).unwrap();
 
                             let future_presentable_draw = PresentableDraw {
+                                sequence: 0,
                                 target_id: current_image.id,
                                 window_id: window_id.id(),
                                 width: (pass_rect.size.x * dpi_factor) as u32,
@@ -178,28 +178,39 @@ impl Cx {
             match incoming {
                 WebSocketMessage::Binary(data) => match StudioToAppVec::deserialize_bin(&data) {
                     Ok(msgs) => {
+                        // The whole queued backlog at once, collapsed to one
+                        // Tick and the latest pointer position, so a slow
+                        // frame never pays for the ticks it missed.
+                        let mut batch = msgs.0;
+                        let closed = self.stdin_drain_host_batches(&mut batch);
+                        let queued = batch.len();
+                        Self::stdin_coalesce_host_batch(&mut batch);
                         {
-                            // One compact line per batch: M=mouse move, T=tick.
+                            // One compact line per batch: M=mouse move, T=tick,
+                            // Q=queued before coalescing.
                             let mut m = 0usize;
                             let mut t = 0usize;
                             let mut o = 0usize;
-                            for msg in &msgs.0 {
+                            for msg in &batch {
                                 match msg {
                                     StudioToApp::MouseMove(_) => m += 1,
                                     StudioToApp::Tick => t += 1,
                                     _ => o += 1,
                                 }
                             }
-                            if m > 0 || o > 0 {
-                                stdin_trace(&format!("rx m={} t={} o={}", m, t, o));
+                            if m > 0 || o > 0 || queued != batch.len() {
+                                stdin_trace(&format!("rx m={} t={} o={} q={}", m, t, o, queued));
                             }
                         }
-                        for msg in msgs.0 {
+                        for msg in batch {
                             if self.stdin_handle_host_to_stdin(msg, metal_cx, &mut stdin_windows) {
                                 return;
                             }
                         }
                         self.handle_actions();
+                        if closed {
+                            break;
+                        }
                     }
                     Err(err) => {
                         crate::error!(
@@ -257,7 +268,7 @@ impl Cx {
                 let (window_id, pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
                 let dpi_factor = self.windows[window_id].window_geom.dpi_factor.max(1.0);
                 let tweak_ray = crate::event::TweakRayEvent {
-                    abs: dvec2(e.x - pos.x, e.y - pos.y),
+                    abs: self.stdin_pointer_abs(dvec2(e.x, e.y), pos, window_id),
                     window_id,
                     modifiers: e.modifiers.into_key_modifiers(),
                     time: e.time,
@@ -280,6 +291,10 @@ impl Cx {
                 let (window_id, pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
                 return self.dispatch_studio_msg(msg, window_id, pos);
             }
+            StudioToApp::Pinch(ref e) => {
+                let (window_id, pos) = self.windows.window_id_contains(dvec2(e.x, e.y));
+                return self.dispatch_studio_msg(msg, window_id, pos);
+            }
             // Stdin-specific: window geometry and swapchain management.
             StudioToApp::WindowGeomChange {
                 dpi_factor,
@@ -291,19 +306,15 @@ impl Cx {
             } => {
                 let window_id = CxWindowPool::from_usize(window_id);
                 if self.windows.is_valid(window_id) {
-                    let old_geom = self.windows[window_id].window_geom.clone();
-                    let new_geom = WindowGeom {
-                        position: dvec2(0.0, 0.0),
-                        dpi_factor,
-                        inner_size: dvec2(width, height),
-                        ..Default::default()
-                    };
-                    self.windows[window_id].window_geom = new_geom.clone();
-                    let re = WindowGeomChangeEvent {
+                    let re = self.windows.stdin_apply_native_geom(
                         window_id,
-                        new_geom,
-                        old_geom,
-                    };
+                        WindowGeom {
+                            position: dvec2(0.0, 0.0),
+                            dpi_factor,
+                            inner_size: dvec2(width, height),
+                            ..Default::default()
+                        },
+                    );
                     if re.old_geom.dpi_factor != re.new_geom.dpi_factor
                         || re.old_geom.inner_size != re.new_geom.inner_size
                     {
@@ -355,10 +366,14 @@ impl Cx {
                         }
                     }
                 }
-                if SignalToUI::check_and_clear_ui_signal() {
+                let internal_signal = SignalToUI::check_and_clear_internal_signal();
+                let ui_signal = SignalToUI::check_and_clear_ui_signal();
+                if internal_signal || ui_signal {
                     self.handle_termination_signal();
                     self.handle_media_signals();
                     self.handle_script_signals();
+                }
+                if ui_signal {
                     self.call_event_handler(&Event::Signal);
                 }
                 if SignalToUI::check_and_clear_action_signal() {
@@ -430,6 +445,9 @@ impl Cx {
                 {
                     Self::stdin_send_to_host(AppToStudio::RequestAnimationFrame);
                 }
+                // One Tick consumed: the host sends the next one on this,
+                // never ahead of it (run_view.rs tick pacing).
+                Self::stdin_send_to_host(AppToStudio::TickDone);
             }
             // All other variants (Key*, Text*, Screenshot, WidgetTreeDump,
             // Kill, KeepAlive, LiveChange, None) handled by shared dispatch.

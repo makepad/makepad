@@ -93,6 +93,45 @@ fn widget_screen_rect(area: &Area, cx: &Cx) -> Option<Rect> {
     Some(rect)
 }
 
+/// Snapshot coordinates follow the rendered 2D draw-list transform. Areas
+/// intentionally retain local coordinates for canvas hosts' inverse-mapped
+/// input, so this conversion must not change `Area` or ordinary hit-testing.
+fn widget_snapshot_rect(area: &Area, cx: &Cx) -> Option<Rect> {
+    let rect = widget_screen_rect(area, cx)?;
+    let draw_list = &cx.draw_lists[area.draw_list_id()?];
+    // This is the final uniform consumed by the shader. Parent transforms are
+    // already assigned to children by set_view_transform, not composed here.
+    let matrix = draw_list.draw_list_uniforms.view_transform;
+    if matrix.v == Mat4f::identity().v {
+        return Some(rect);
+    }
+    if !matrix.v.iter().all(|value| value.is_finite()) {
+        return None;
+    }
+    // Preserve the existing reporting for 3D/perspective lists: projecting
+    // those correctly also needs the pass camera and the widget's draw depth.
+    if matrix.v[3] != 0.0 || matrix.v[7] != 0.0 || matrix.v[11] != 0.0
+        || matrix.v[15] != 1.0 || matrix.v[8] != 0.0 || matrix.v[9] != 0.0
+    {
+        return Some(rect);
+    }
+    let mut min = dvec2(f64::INFINITY, f64::INFINITY);
+    let mut max = dvec2(f64::NEG_INFINITY, f64::NEG_INFINITY);
+    for corner in [rect.pos, rect.pos + dvec2(rect.size.x, 0.0),
+        rect.pos + dvec2(0.0, rect.size.y), rect.pos + rect.size]
+    {
+        let point = dvec2(
+            corner.x * matrix.v[0] as f64 + corner.y * matrix.v[4] as f64 + matrix.v[12] as f64,
+            corner.x * matrix.v[1] as f64 + corner.y * matrix.v[5] as f64 + matrix.v[13] as f64,
+        );
+        if !point.x.is_finite() || !point.y.is_finite() { return None; }
+        min.x = min.x.min(point.x); min.y = min.y.min(point.y);
+        max.x = max.x.max(point.x); max.y = max.y.max(point.y);
+    }
+    let rect = Rect { pos: min, size: max - min };
+    (rect.size.x > 0.0 && rect.size.y > 0.0).then_some(rect)
+}
+
 // ============================================================================
 // WidgetTree: persistent graph + dense query index
 // ============================================================================
@@ -2334,7 +2373,7 @@ impl WidgetTree {
                 // Clipped geometry only — a row a `PortalList` drew past its
                 // viewport edge reports nothing rather than a full-size rect
                 // sitting on top of whatever really is drawn there.
-                match widget_screen_rect(&widget.area(), cx) {
+                match widget_snapshot_rect(&widget.area(), cx) {
                     Some(rect) => (
                         rect.pos.x.round() as i64,
                         rect.pos.y.round() as i64,
@@ -2805,6 +2844,15 @@ impl WidgetTreeState {
 
 pub trait CxWidgetExt {
     fn widget_tree(&self) -> &WidgetTree;
+    /// Inspect current branches eligible for interaction, including window focus.
+    /// Call outside widget dispatch/draw, while the UI root is unborrowed;
+    /// this does not use cached geometry or tree indices.
+    /// Repeated queries for the same widget reuse one weak path, checking current
+    /// eligibility and child membership at each ancestor. A new or changed path
+    /// falls back to a live search.
+    /// Warm queries enumerate only children along that path; worst-case searches
+    /// remain linear in the active hierarchy.
+    fn widget_is_active(&self, uid: WidgetUid) -> bool;
     fn widget_tree_mark_dirty(&mut self, uid: WidgetUid);
     fn widget_tree_insert_child(&mut self, parent_uid: WidgetUid, name: LiveId, widget: WidgetRef);
     fn widget_tree_insert_child_deep(
@@ -2841,9 +2889,22 @@ pub struct FlatTreeRow {
     pub has_children: bool,
 }
 
+#[derive(Default)]
+struct UiRoot {
+    widget: WidgetWeakRef,
+    // Cache a route, never visibility: every query validates the live path.
+    active_path: RefCell<Vec<WidgetWeakRef>>,
+}
+
+fn cancel_scope_resolver(cx: &Cx, candidate: &dyn Fn(u64) -> Option<u64>) -> Option<u64> {
+    cx.get_global_ref::<UiRoot>()?.widget.upgrade()?.resolve_cancel_scope(candidate)
+}
+
 pub fn set_ui_root(cx: &mut Cx, ui: &WidgetRef) {
     let state = get_or_init_state(cx);
     state.tree.set_root_widget(ui.clone());
+    *cx.global::<UiRoot>() = UiRoot { widget: ui.downgrade(), ..Default::default() };
+    cx.cancel_scope_resolver = Some(cancel_scope_resolver);
     cx.widget_tree_dump_callback = Some(compact_widget_tree_dump_callback);
     cx.widget_query_callback = Some(widget_query_callback);
     cx.widget_snapshot_callback = Some(widget_snapshot_callback);
@@ -2853,6 +2914,19 @@ pub fn set_ui_root(cx: &mut Cx, ui: &WidgetRef) {
 }
 
 impl CxWidgetExt for Cx {
+    fn widget_is_active(&self, uid: WidgetUid) -> bool {
+        let Some(ui) = self.get_global_ref::<UiRoot>() else { return false; };
+        let Some(root) = ui.widget.upgrade() else { return false; };
+        let mut uncached = Vec::new();
+        let mut cached = ui.active_path.try_borrow_mut().ok();
+        let path = cached.as_deref_mut().unwrap_or(&mut uncached);
+        if root.active_path_is_valid(uid, path) {
+            return true;
+        }
+        path.clear();
+        root.find_active_widget(uid, path)
+    }
+
     fn widget_tree(&self) -> &WidgetTree {
         if self.widget_tree_ptr.is_null() {
             static EMPTY: std::sync::OnceLock<WidgetTree> = std::sync::OnceLock::new();
@@ -2884,6 +2958,10 @@ impl CxWidgetExt for Cx {
 }
 
 impl<'a, 'b> CxWidgetExt for Cx2d<'a, 'b> {
+    fn widget_is_active(&self, uid: WidgetUid) -> bool {
+        { let cx: &Cx = self; cx.widget_is_active(uid) }
+    }
+
     fn widget_tree(&self) -> &WidgetTree {
         let cx: &Cx = self;
         if cx.widget_tree_ptr.is_null() {
@@ -2919,6 +2997,10 @@ impl<'a, 'b> CxWidgetExt for Cx2d<'a, 'b> {
 }
 
 impl<'a, 'b> CxWidgetExt for Cx3d<'a, 'b> {
+    fn widget_is_active(&self, uid: WidgetUid) -> bool {
+        { let cx: &Cx = self; cx.widget_is_active(uid) }
+    }
+
     fn widget_tree(&self) -> &WidgetTree {
         let cx: &Cx = self;
         if cx.widget_tree_ptr.is_null() {
@@ -2962,6 +3044,65 @@ mod tests {
     use super::*;
     use crate::widget::{DrawStepApi, WidgetRef, WidgetUid};
     use crate::{DrawStep, Widget, WidgetNode};
+
+    fn snapshot_area(cx: &mut Cx) -> (DrawList, Area) {
+        let list = DrawList::new(cx);
+        let draw_list = &mut cx.draw_lists[list.id()];
+        draw_list.redraw_id = 1;
+        draw_list.rect_areas.push(CxRectArea {
+            rect: Rect { pos: dvec2(32768.0, 32768.0), size: dvec2(200.0, 100.0) },
+            draw_clip: (dvec2(32788.0, 32778.0), dvec2(32928.0, 32848.0)),
+        });
+        let area = Area::Rect(RectArea { draw_list_id: list.id(), rect_id: 0, redraw_id: 1 });
+        (list, area)
+    }
+
+    fn snapshot_camera() -> Mat4f {
+        let mut matrix = Mat4f::identity();
+        matrix.v[0] = 2.0;
+        matrix.v[5] = 2.0;
+        matrix.v[12] = -65000.0;
+        matrix.v[13] = -64900.0;
+        matrix
+    }
+
+    #[test]
+    fn snapshot_rect_applies_zoom_and_translation_after_local_clipping() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (list, area) = snapshot_area(&mut cx);
+        list.set_view_transform_self_only(&mut cx, &snapshot_camera());
+        assert_eq!(widget_snapshot_rect(&area, &cx), Some(Rect {
+            pos: dvec2(576.0, 656.0), size: dvec2(280.0, 140.0),
+        }));
+        // Canvas hit-testing still receives the original local rectangle.
+        assert_eq!(area.clipped_rect(&cx), Rect {
+            pos: dvec2(32788.0, 32778.0), size: dvec2(140.0, 70.0),
+        });
+    }
+
+    #[test]
+    fn snapshot_rect_identity_preserves_clipping_and_stale_visibility() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (list, area) = snapshot_area(&mut cx);
+        assert_eq!(widget_snapshot_rect(&area, &cx), widget_screen_rect(&area, &cx));
+        cx.draw_lists[list.id()].redraw_id = 2;
+        assert_eq!(widget_snapshot_rect(&area, &cx), None);
+    }
+
+    #[test]
+    fn snapshot_rect_uses_final_child_uniform_without_composing_its_parent() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let parent = DrawList::new(&mut cx);
+        let (child, area) = snapshot_area(&mut cx);
+        cx.draw_lists[child.id()].codeflow_parent_id = Some(parent.id());
+        // Draw-list transforms are absolute. Traversing this parent and
+        // multiplying again would send the reported child off the window.
+        parent.set_view_transform_self_only(&mut cx, &snapshot_camera());
+        child.set_view_transform_self_only(&mut cx, &snapshot_camera());
+        assert_eq!(widget_snapshot_rect(&area, &cx), Some(Rect {
+            pos: dvec2(576.0, 656.0), size: dvec2(280.0, 140.0),
+        }));
+    }
 
     // Minimal Widget impl for testing
     struct TestWidget {
@@ -3130,13 +3271,19 @@ mod tests {
 
     #[test]
     fn test_observe_and_find_single_node() {
+        // A search never matches its own root (`collect_within_graph_with_skip`
+        // skips the `is_root` frame), so the node is found from its parent.
         let tree = WidgetTree::default();
+        let root_uid = WidgetUid::new();
         let uid = WidgetUid::new();
         let w = make_widget(uid, vec![]);
-        tree.observe_node(uid, name("root"), w.clone(), None);
-        let found = tree.find_within(uid, &[name("root")]);
+        let root = make_widget(root_uid, vec![(name("node"), w.clone())]);
+        tree.observe_node(root_uid, name("root"), root.clone(), None);
+        tree.observe_node(uid, name("node"), w.clone(), Some(root_uid));
+        let found = tree.find_within(root_uid, &[name("node")]);
         assert!(!found.is_empty());
         assert_eq!(found.widget_uid(), uid);
+        assert!(tree.find_within(root_uid, &[name("root")]).is_empty());
     }
 
     #[test]
@@ -3254,13 +3401,23 @@ mod tests {
     #[test]
     fn test_property_patch_no_structural_rebuild() {
         let tree = WidgetTree::default();
+        let root_uid = WidgetUid::new();
         let uid = WidgetUid::new();
         let w = make_widget(uid, vec![]);
-        tree.observe_node(uid, name("node"), w.clone(), None);
+        // The parent's own child list is what a refresh reads names from, so
+        // it is shared with the test and renamed alongside the observation.
+        let children = std::rc::Rc::new(std::cell::RefCell::new(vec![(name("node"), w.clone())]));
+        let root = make_dynamic_widget(root_uid, children.clone());
+        tree.observe_node(root_uid, name("root"), root.clone(), None);
+        tree.observe_node(uid, name("node"), w.clone(), Some(root_uid));
+        // A first lookup settles the root's children into the graph; the
+        // helper then clears every derived cache but keeps that graph.
+        assert!(!tree.find_within(root_uid, &[name("node")]).is_empty());
         stabilize_graph_cache(&tree);
 
         // Re-observe same node with different name (property change)
-        tree.observe_node(uid, name("renamed"), w.clone(), None);
+        children.borrow_mut()[0].0 = name("renamed");
+        tree.observe_node(uid, name("renamed"), w.clone(), Some(root_uid));
 
         {
             let inner = tree.inner.borrow();
@@ -3268,12 +3425,13 @@ mod tests {
             assert!(!inner.structure_dirty);
         }
 
-        let found = tree.find_within(uid, &[name("renamed")]);
+        // Searched from the parent: a search never matches its own root.
+        let found = tree.find_within(root_uid, &[name("renamed")]);
         assert!(!found.is_empty());
         assert_eq!(found.widget_uid(), uid);
 
         // Old name should not find it
-        let old = tree.find_within(uid, &[name("node")]);
+        let old = tree.find_within(root_uid, &[name("node")]);
         assert!(old.is_empty());
     }
 

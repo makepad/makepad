@@ -31,6 +31,8 @@
 //!            --evict (drop the file from the page cache before each run),
 //!            --verify (mincore residency before/after each run)
 
+#[cfg(unix)]
+mod unix_bench {
 use std::path::Path;
 use std::time::Instant;
 
@@ -46,9 +48,7 @@ mod sys {
     pub const MAP_SHARED: c_int = 1;
     pub const MADV_WILLNEED: c_int = 3;
     pub const MADV_SEQUENTIAL: c_int = 2;
-    pub const MADV_DONTNEED: c_int = 4;
     pub const MS_INVALIDATE: c_int = 0x0002;
-    pub const MS_KILLPAGES: c_int = 0x0004;
 
     #[repr(C)]
     pub struct Radvisory {
@@ -179,7 +179,7 @@ impl Dest {
     }
 }
 
-fn main() {
+pub fn main() {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.is_empty() {
         eprintln!(
@@ -701,4 +701,16 @@ fn evict_file(path: &Path, bytes: u64) -> Result<(usize, usize, usize), String> 
     }
     let (after, _) = map.residency();
     Ok((before, after, pages))
+}
+
+}
+
+#[cfg(unix)]
+fn main() {
+    unix_bench::main()
+}
+
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("mac-storage-bench is a unix-only tool (raw open/read syscalls)");
 }

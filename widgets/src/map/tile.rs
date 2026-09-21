@@ -1,10 +1,15 @@
 use super::geometry::*;
+use super::tile_draw::TileDrawLists;
 use super::icons::*;
 use super::label::*;
 use super::style::*;
 use crate::makepad_draw::vector::{
     append_expanded_stroke_geometry, append_tessellated_geometry,
-    append_tessellated_geometry_decked, compute_clip_radii, pack_vector_vertices,
+    append_tessellated_geometry_decked, compute_clip_radii, map_fill_variant_code,
+    is_compact_face_record, is_compact_roof_record, pack_face_vertices, pack_fill_vertices,
+    pack_road_vertices, pack_roof_vertices, pack_vector_vertices,
+    FACE_TYPED_VERTEX_BYTES, FILL_TYPED_VERTEX_BYTES, ROAD_TYPED_VERTEX_BYTES,
+    ROOF_TYPED_VERTEX_BYTES, MAP_VERTEX_POSITION_SCALE,
     VECTOR_PACKED_FLOATS_PER_VERTEX,
     tessellate_path_fill, LineCap, LineJoin, Tessellator, VVertex,
     VectorPath, VectorRenderParams, VECTOR_ANALYTIC_FRINGE_STROKE_MULT,
@@ -14,9 +19,53 @@ use crate::makepad_draw::*;
 use crate::makepad_platform::makepad_micro_serde::*;
 use makepad_fast_inflate::{gzip_decompress_vec, zlib_decompress_vec};
 use makepad_mbtile_reader::{MbtilesReader, TileArchiveReader};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt::Write as FmtWrite;
 use std::fs;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+#[cfg(test)]
+use std::alloc::{GlobalAlloc, Layout, System};
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+#[cfg(test)]
+struct MapCountingAllocator;
+
+#[cfg(test)]
+static MAP_COUNT_ALLOCATIONS: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static MAP_ALLOCATION_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+// SAFETY: every operation is forwarded unchanged to `System` with the exact
+// pointer and `Layout` supplied by the allocator contract; the wrapper only
+// increments an atomic counter before allocation/reallocation calls.
+#[cfg(test)]
+unsafe impl GlobalAlloc for MapCountingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        if MAP_COUNT_ALLOCATIONS.load(Ordering::Relaxed) {
+            MAP_ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
+        System.alloc(layout)
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        System.dealloc(ptr, layout)
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        if MAP_COUNT_ALLOCATIONS.load(Ordering::Relaxed) {
+            MAP_ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
+        System.realloc(ptr, layout, new_size)
+    }
+}
+
+#[cfg(test)]
+#[global_allocator]
+static MAP_TEST_ALLOCATOR: MapCountingAllocator = MapCountingAllocator;
 
 pub const OVERPASS_ENDPOINTS: &[&str] = &["https://overpass.kumi.systems/api/interpreter"];
 pub const MAX_PENDING_REQUESTS: usize = 2;
@@ -39,8 +88,6 @@ pub const BUILDING_OUTLINE_MIN_ZOOM: u32 = 15;
 pub const BUILDING_OUTLINE_WIDTH_PX: f32 = 0.9;
 pub const EARCUT_MAX_RINGS: usize = 500;
 
-const MVT_INTERNAL_FEATURE_KEY: &str = "__mp_feature";
-const MVT_INTERNAL_RING_INDEX_KEY: &str = "__mp_ring";
 /// Stable tilt-mode road depth bands. Unlike the old per-tile face ladder,
 /// these values depend only on road semantics, so padded copies and adjacent
 /// tiles render a shared surface at exactly the same depth.
@@ -57,11 +104,6 @@ const ROAD_STROKE_PASS_DEPTH_OFFSET: f32 = 0.02;
 // The icon draw call is +0.04 above the casing call in MapView. Subtract it
 // from arrow param5, then restore only this tiny own-surface decal epsilon.
 const ARROW_ICON_PASS_DEPTH_OFFSET: f32 = 0.04;
-/// Baked shadow decals (T3): above the entire grounded road micro-depth
-/// ladder (strokes reach 0.22 + 0.146 rank micro) so shadows darken the
-/// streets they fall across, but below lifted bridge decks (param5 + 0.30
-/// bumps) so a deck still draws over the shadow pooling under it.
-const SHADOW_DECAL_DEPTH: f32 = 0.40;
 /// Extruded building surfaces (walls, roofs, canopy balls): above every
 /// ground DECAL including shadows. A wall pixel N px up its quad carries
 /// the depth of ground N px behind it, so any decal with a bigger param5
@@ -69,8 +111,6 @@ const SHADOW_DECAL_DEPTH: f32 = 0.40;
 /// camera rotation puts that decal behind the building on screen.
 const BUILDING_SURFACE_DEPTH: f32 = 0.50;
 const ARROW_DECAL_DEPTH_EPSILON: f32 = 0.0001;
-const MVT_INTERNAL_FIDX_KEY: &str = "__mp_fidx";
-const MVT_INTERNAL_PIDX_KEY: &str = "__mp_pidx";
 
 // --- Tile state types ---
 
@@ -79,21 +119,48 @@ pub enum TileLoadState {
     LoadingNetwork,
     LoadingLocal,
     Ready {
-        fill_geometry: Option<Geometry>,
-        casing_geometry: Option<Geometry>,
-        stroke_geometry: Option<Geometry>,
+        fill_geometry: Vec<Geometry>,
+        /// Non-fill records formerly interleaved with ground fills (building
+        /// outline strokes), retained on the generic vector layout.
+        fill_misc_geometry: Option<Geometry>,
+        /// Grounded road-union faces on the 16-byte face layout, drawn in
+        /// the casing pass just before `casing_geometry`.
+        face_geometry: Vec<Geometry>,
+        casing_geometry: Vec<Geometry>,
+        stroke_geometry: Vec<Geometry>,
         icon_geometry: Option<Geometry>,
         /// Street-band icons (zoom floor > ICON_HIGH_BAND_FLOOR) — drawn
         /// only when the view can actually reveal them.
         icon_high_geometry: Option<Geometry>,
+        /// Instanced POI symbols (records only; the meshes are shared per
+        /// slot on the view), same band split as the vertex streams.
+        icon_instances: Vec<IconInstances>,
+        icon_high_instances: Vec<IconInstances>,
+        /// Tree/signal contact-shadow disc instance records.
+        shadow_disc_instances: Vec<f32>,
         /// Analytic AA fringes — skipped at strong tilt where blur and
         /// density hide 1px edge AA.
-        fringe_geometry: Option<Geometry>,
+        fringe_geometry: Vec<Geometry>,
         /// 3D volume geometry, distance-faded from the view focus.
-        fill_3d_geometry: Option<Geometry>,
+        fill_3d_geometry: Vec<Geometry>,
+        /// Lifted records that need the generic vector layout.
+        fill_3d_misc_geometry: Option<Geometry>,
         wall_geometry: Option<Geometry>,
+        /// Building walls as compact typed instance records.
+        wall_instances: Vec<MapWallInstance>,
         tree_geometry: Option<Geometry>,
         tree_cross_geometry: Option<Geometry>,
+        /// The tile's street-tree templates (near ring / mid ring) and the
+        /// per-tree records placing them.
+        tree_template_geometry: Option<Geometry>,
+        tree_cross_template_geometry: Option<Geometry>,
+        tree_instances: Vec<f32>,
+        /// Shared crossed-quad marker stalk and complete stoplight meshes,
+        /// placed by compact per-prop instance records.
+        stalk_template_geometry: Option<Geometry>,
+        stalk_instances: Vec<MapPropInstance>,
+        stoplight_template_geometry: Option<Geometry>,
+        stoplight_instances: Vec<MapPropInstance>,
         feature_count: usize,
         labels: Vec<TileLabel>,
         pin_hits: Vec<PinHit>,
@@ -123,19 +190,43 @@ pub struct TileEntry {
     pub bucket: u32,
     /// This bake carries 3D extrusions (buildings/trees/signals).
     pub baked_3d: bool,
+    /// This bake carries the analytic road-fringe stream.
+    pub baked_fringe: bool,
     /// Whether casing/stroke GPU geometry and the CPU road-arrow subset are
-    /// available for a same-bucket 2D/3D overlay-only rebake.
+    /// available for a same-bucket 2D/3D overlay-only rebake when the fringe
+    /// mode also matches.
     pub road_core_cached: bool,
     pub road_icon_indices: Vec<u32>,
     pub road_icon_vertices: Vec<f32>,
     /// Cross-fade state: the replaced generation's geometry stays drawable
     /// underneath while the new one fades in.
     pub fade: Option<TileFade>,
+    /// The tile's retained draw lists, one per carto pass: recorded when
+    /// this entry's content is first drawn, re-attached with fresh uniforms
+    /// on every later frame, freed with the entry.
+    pub draw: TileDrawLists,
+}
+
+impl TileEntry {
+    /// Logical resident geometry including the outgoing generation retained
+    /// for a cross-fade. This deliberately overcounts a road-core reuse fade
+    /// rather than hiding its transient double ownership from the budget.
+    pub fn working_set_bytes(&self) -> usize {
+        self.bytes
+            .saturating_add(self.fade.as_ref().map_or(0, |fade| fade.bytes))
+    }
+
+    /// The cross-fade is over: the outgoing generation leaves the draw, so
+    /// every retained list is recorded again on its next frame.
+    pub fn end_fade(&mut self) {
+        self.fade = None;
+        self.draw.invalidate();
+    }
 }
 
 #[derive(Debug)]
 pub struct TileFade {
-    pub started: std::time::Instant,
+    pub started: f64,
     /// Render bucket the outgoing geometry was styled for, so its stroke
     /// widths can be corrected while it fades out.
     pub bucket: u32,
@@ -147,10 +238,16 @@ pub struct TileFade {
     /// core. They stay fully opaque and at full height while only the
     /// mode-dependent fill/icon overlay cross-fades.
     pub reuse_road_core: bool,
-    pub fill_geometry: Option<Geometry>,
-    pub casing_geometry: Option<Geometry>,
-    pub stroke_geometry: Option<Geometry>,
+    pub bytes: usize,
+    pub fill_geometry: Vec<Geometry>,
+    pub fill_misc_geometry: Option<Geometry>,
+    pub face_geometry: Vec<Geometry>,
+    pub casing_geometry: Vec<Geometry>,
+    pub stroke_geometry: Vec<Geometry>,
     pub icon_geometry: Option<Geometry>,
+    /// The outgoing generation's instanced symbols (low band only: the
+    /// street band is gated by zoom, not faded).
+    pub icon_instances: Vec<IconInstances>,
 }
 
 #[derive(Debug)]
@@ -184,6 +281,11 @@ pub enum TileWorkerMessage {
         tile_key: TileKey,
         error: String,
     },
+    TileJobPanicked {
+        style_epoch: u64,
+        tile_key: TileKey,
+        error: String,
+    },
 }
 
 #[derive(Debug)]
@@ -195,6 +297,417 @@ pub struct LoadedLocalTile {
 // --- Internal data types ---
 
 #[derive(Debug)]
+struct TagArena {
+    strings: String,
+    keys: Vec<(u32, u32)>,
+    values: Vec<(u32, u32)>,
+    pairs: Vec<(u16, u32)>,
+}
+
+#[derive(Default)]
+struct TagArenaBuffers {
+    strings: String,
+    keys: Vec<(u32, u32)>,
+    values: Vec<(u32, u32)>,
+    pairs: Vec<(u16, u32)>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct OutputCapacityHints {
+    labels: usize,
+    pin_hits: usize,
+    icon_jobs: usize,
+    tree_points: usize,
+    signal_points: usize,
+    fill_indices: usize,
+    fill_vertices: usize,
+    casing_indices: usize,
+    casing_vertices: usize,
+    stroke_indices: usize,
+    stroke_vertices: usize,
+    icon_indices: usize,
+    icon_vertices: usize,
+    shadow_instances: usize,
+    wall_instances: usize,
+    tree_template_vertices: usize,
+    tree_template_indices: usize,
+    tree_cross_template_vertices: usize,
+    tree_cross_template_indices: usize,
+    tree_instances: usize,
+    stalk_instances: usize,
+    stoplight_instances: usize,
+    road_icon_indices: usize,
+    road_icon_vertices: usize,
+}
+
+impl TagArena {
+    fn string(&self, range: (u32, u32)) -> Option<&str> {
+        self.strings.get(range.0 as usize..range.1 as usize)
+    }
+
+    fn key(&self, id: u16) -> Option<&str> {
+        self.string(*self.keys.get(id as usize)?)
+    }
+
+    fn value(&self, id: u32) -> Option<&str> {
+        self.string(*self.values.get(id as usize)?)
+    }
+}
+
+impl Drop for TagArena {
+    fn drop(&mut self) {
+        let mut buffers = TagArenaBuffers {
+            strings: std::mem::take(&mut self.strings),
+            keys: std::mem::take(&mut self.keys),
+            values: std::mem::take(&mut self.values),
+            pairs: std::mem::take(&mut self.pairs),
+        };
+        buffers.strings.clear();
+        buffers.keys.clear();
+        buffers.values.clear();
+        buffers.pairs.clear();
+        // `try_with` also makes this safe during thread-local destruction.
+        let _ = BAKE_SCRATCH.try_with(|slot| slot.borrow_mut().tag_arenas.push(buffers));
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum SyntheticLayer {
+    MicroPois,
+    BarrierLine,
+    StreetPolygons,
+    AttractionArea,
+    TourismBoundary,
+    Platforms,
+    DetailLand,
+    DetailBuildings,
+}
+
+impl SyntheticLayer {
+    fn from_str(value: &'static str) -> Self {
+        match value {
+            "micro_pois" => Self::MicroPois,
+            "barrier_line" => Self::BarrierLine,
+            "street_polygons" => Self::StreetPolygons,
+            "attraction_area" => Self::AttractionArea,
+            "tourism_boundary" => Self::TourismBoundary,
+            "platforms" => Self::Platforms,
+            "detail_land" => Self::DetailLand,
+            "detail_buildings" => Self::DetailBuildings,
+            _ => unreachable!("unknown synthetic map layer {value}"),
+        }
+    }
+
+    fn value(self) -> &'static str {
+        match self {
+            Self::MicroPois => "micro_pois",
+            Self::BarrierLine => "barrier_line",
+            Self::StreetPolygons => "street_polygons",
+            Self::AttractionArea => "attraction_area",
+            Self::TourismBoundary => "tourism_boundary",
+            Self::Platforms => "platforms",
+            Self::DetailLand => "detail_land",
+            Self::DetailBuildings => "detail_buildings",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+enum TagStorage {
+    Arena { arena: Arc<TagArena>, range: Range<u32> },
+    Owned(Arc<HashMap<String, String>>),
+}
+
+/// Cheap feature-local view into one layer's decoded key/value tables.
+/// Cloning a view only increments the layer arena's refcount; tag strings
+/// and pairs remain shared by every point/path emitted for that feature.
+#[derive(Clone, Debug)]
+pub struct TagView {
+    storage: TagStorage,
+    layer_override: Option<SyntheticLayer>,
+}
+
+impl TagView {
+    fn from_arena(arena: Arc<TagArena>, range: Range<u32>) -> Self {
+        Self { storage: TagStorage::Arena { arena, range }, layer_override: None }
+    }
+
+    fn from_owned(tags: HashMap<String, String>) -> Self {
+        Self { storage: TagStorage::Owned(Arc::new(tags)), layer_override: None }
+    }
+
+    fn set_layer(&mut self, layer: &'static str) {
+        self.layer_override = Some(SyntheticLayer::from_str(layer));
+    }
+
+    pub fn get(&self, key: &str) -> Option<&str> {
+        if key == "layer" {
+            if let Some(layer) = self.layer_override {
+                return Some(layer.value());
+            }
+        }
+        match &self.storage {
+            TagStorage::Arena { arena, range } => arena.pairs
+                [range.start as usize..range.end as usize]
+                .iter()
+                .rev()
+                .find_map(|&(key_id, value_id)| {
+                    (arena.key(key_id)? == key).then(|| arena.value(value_id)).flatten()
+                }),
+            TagStorage::Owned(tags) => tags.get(key).map(String::as_str),
+        }
+    }
+
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.get(key).is_some()
+    }
+
+    pub fn iter(&self) -> TagIter<'_> {
+        let inner = match &self.storage {
+            TagStorage::Arena { arena, range } => TagIterInner::Arena {
+                arena,
+                cursor: range.start as usize,
+                end: range.end as usize,
+            },
+            TagStorage::Owned(tags) => TagIterInner::Owned(tags.iter()),
+        };
+        TagIter { tags: self, inner, yielded_override: false }
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &str> {
+        self.iter().map(|(key, _)| key)
+    }
+
+    pub fn to_owned_map(&self) -> HashMap<String, String> {
+        self.iter().map(|(key, value)| (key.to_string(), value.to_string())).collect()
+    }
+}
+
+impl From<HashMap<String, String>> for TagView {
+    fn from(tags: HashMap<String, String>) -> Self {
+        Self::from_owned(tags)
+    }
+}
+
+impl TagLookup for TagView {
+    fn get(&self, key: &str) -> Option<&str> {
+        self.get(key)
+    }
+}
+
+/// Compatibility name used by the existing tile feature structs and sinks.
+pub type TagSet = TagView;
+
+enum TagIterInner<'a> {
+    Arena { arena: &'a TagArena, cursor: usize, end: usize },
+    Owned(std::collections::hash_map::Iter<'a, String, String>),
+}
+
+pub struct TagIter<'a> {
+    tags: &'a TagView,
+    inner: TagIterInner<'a>,
+    yielded_override: bool,
+}
+
+#[derive(Default)]
+struct BakeScratch {
+    key_ids: Vec<Option<u16>>,
+    value_ids: Vec<Option<u32>>,
+    wanted_values: Vec<bool>,
+    raw_tag_pairs: Vec<(u16, u32)>,
+    geometry_cmds: Vec<u32>,
+    geometry_path: Vec<(i32, i32)>,
+    static_tag_values: Vec<(&'static str, u32)>,
+    tag_arenas: Vec<TagArenaBuffers>,
+    way_buffers: Vec<Vec<TileWay>>,
+    point_buffers: Vec<Vec<((f32, f32), TagSet)>>,
+    way_point_buffers: Vec<Vec<(f32, f32)>>,
+    way_dz_buffers: Vec<Vec<f32>>,
+    output_hints: HashMap<(u32, bool, bool), OutputCapacityHints>,
+    tess_vertices: Vec<VVertex>,
+    tess_indices: Vec<u32>,
+}
+
+thread_local! {
+    /// One scratch allocation set per pool worker. Leases return their
+    /// cleared buffers on drop, including parse errors, so consecutive tile
+    /// jobs reuse capacity without synchronization or global allocator work.
+    static BAKE_SCRATCH: std::cell::RefCell<BakeScratch> = Default::default();
+}
+
+#[derive(Default)]
+struct ParseScratchLease {
+    key_ids: Vec<Option<u16>>,
+    value_ids: Vec<Option<u32>>,
+    wanted_values: Vec<bool>,
+    raw_tag_pairs: Vec<(u16, u32)>,
+    geometry_cmds: Vec<u32>,
+    geometry_path: Vec<(i32, i32)>,
+    static_tag_values: Vec<(&'static str, u32)>,
+}
+
+impl ParseScratchLease {
+    fn take() -> Self {
+        BAKE_SCRATCH.with(|slot| {
+            let mut scratch = slot.borrow_mut();
+            Self {
+                key_ids: std::mem::take(&mut scratch.key_ids),
+                value_ids: std::mem::take(&mut scratch.value_ids),
+                wanted_values: std::mem::take(&mut scratch.wanted_values),
+                raw_tag_pairs: std::mem::take(&mut scratch.raw_tag_pairs),
+                geometry_cmds: std::mem::take(&mut scratch.geometry_cmds),
+                geometry_path: std::mem::take(&mut scratch.geometry_path),
+                static_tag_values: std::mem::take(&mut scratch.static_tag_values),
+            }
+        })
+    }
+}
+
+impl Drop for ParseScratchLease {
+    fn drop(&mut self) {
+        self.key_ids.clear();
+        self.value_ids.clear();
+        self.wanted_values.clear();
+        self.raw_tag_pairs.clear();
+        self.geometry_cmds.clear();
+        self.geometry_path.clear();
+        self.static_tag_values.clear();
+        BAKE_SCRATCH.with(|slot| {
+            let mut scratch = slot.borrow_mut();
+            scratch.key_ids = std::mem::take(&mut self.key_ids);
+            scratch.value_ids = std::mem::take(&mut self.value_ids);
+            scratch.wanted_values = std::mem::take(&mut self.wanted_values);
+            scratch.raw_tag_pairs = std::mem::take(&mut self.raw_tag_pairs);
+            scratch.geometry_cmds = std::mem::take(&mut self.geometry_cmds);
+            scratch.geometry_path = std::mem::take(&mut self.geometry_path);
+            scratch.static_tag_values = std::mem::take(&mut self.static_tag_values);
+        });
+    }
+}
+
+fn take_tag_arena_buffers() -> TagArenaBuffers {
+    BAKE_SCRATCH.with(|slot| slot.borrow_mut().tag_arenas.pop().unwrap_or_default())
+}
+
+fn take_way_geometry_buffers(source_len: usize) -> (Vec<(f32, f32)>, Vec<f32>) {
+    BAKE_SCRATCH.with(|slot| {
+        let mut scratch = slot.borrow_mut();
+        let mut points = scratch.way_point_buffers.pop().unwrap_or_default();
+        let mut dz = scratch.way_dz_buffers.pop().unwrap_or_default();
+        points.clear();
+        dz.clear();
+        let needed = source_len.saturating_add(1);
+        if points.capacity() < needed {
+            points.reserve(needed);
+        }
+        (points, dz)
+    })
+}
+
+fn recycle_way_points(mut points: Vec<(f32, f32)>) {
+    points.clear();
+    let _ = BAKE_SCRATCH.try_with(|slot| slot.borrow_mut().way_point_buffers.push(points));
+}
+
+fn recycle_way_dz(mut dz: Vec<f32>) {
+    dz.clear();
+    let _ = BAKE_SCRATCH.try_with(|slot| slot.borrow_mut().way_dz_buffers.push(dz));
+}
+
+fn output_capacity_hints(
+    render_zoom: u32,
+    buildings_3d: bool,
+    build_road_core: bool,
+) -> OutputCapacityHints {
+    BAKE_SCRATCH.with(|slot| {
+        slot.borrow()
+            .output_hints
+            .get(&(render_zoom, buildings_3d, build_road_core))
+            .copied()
+            .unwrap_or_default()
+    })
+}
+
+fn remember_output_capacity_hints(
+    render_zoom: u32,
+    buildings_3d: bool,
+    build_road_core: bool,
+    hints: OutputCapacityHints,
+) {
+    BAKE_SCRATCH.with(|slot| {
+        slot.borrow_mut()
+            .output_hints
+            .insert((render_zoom, buildings_3d, build_road_core), hints);
+    });
+}
+
+fn take_tess_scratch() -> (Vec<VVertex>, Vec<u32>) {
+    BAKE_SCRATCH.with(|slot| {
+        let mut scratch = slot.borrow_mut();
+        (
+            std::mem::take(&mut scratch.tess_vertices),
+            std::mem::take(&mut scratch.tess_indices),
+        )
+    })
+}
+
+fn recycle_tess_scratch(vertices: &mut Vec<VVertex>, indices: &mut Vec<u32>) {
+    vertices.clear();
+    indices.clear();
+    BAKE_SCRATCH.with(|slot| {
+        let mut scratch = slot.borrow_mut();
+        scratch.tess_vertices = std::mem::take(vertices);
+        scratch.tess_indices = std::mem::take(indices);
+    });
+}
+
+impl<'a> Iterator for TagIter<'a> {
+    type Item = (&'a str, &'a str);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let next = match &mut self.inner {
+                TagIterInner::Owned(iter) => {
+                    iter.next().map(|(key, value)| (key.as_str(), value.as_str()))
+                }
+                TagIterInner::Arena { arena, cursor, end } => {
+                    let index = *cursor;
+                    if index >= *end {
+                        None
+                    } else {
+                        *cursor += 1;
+                        let (key_id, value_id) = arena.pairs[index];
+                        let key = arena.key(key_id)?;
+                        // HashMap insertion semantics: for duplicate keys the
+                        // last pair in the feature wins.
+                        if arena.pairs[index + 1..*end]
+                            .iter()
+                            .any(|&(later, _)| later == key_id)
+                        {
+                            continue;
+                        }
+                        Some((key, arena.value(value_id)?))
+                    }
+                }
+            };
+            if let Some((key, value)) = next {
+                if self.tags.layer_override.is_some() && key == "layer" {
+                    continue;
+                }
+                return Some((key, value));
+            }
+            if !self.yielded_override {
+                self.yielded_override = true;
+                if let Some(layer) = self.tags.layer_override {
+                    return Some(("layer", layer.value()));
+                }
+            }
+            return None;
+        }
+    }
+}
+
+#[derive(Debug)]
 struct WayData {
     nodes: Vec<i64>,
     tags: HashMap<String, String>,
@@ -203,7 +716,7 @@ struct WayData {
 
 /// A tappable pin baked into a tile: normalized world position + the
 /// attributes the info bubble shows.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PinHit {
     pub norm: (f64, f64),
     pub info: Vec<(String, String)>,
@@ -234,7 +747,53 @@ fn split_fringe_band(
     vertices: &mut Vec<f32>,
     indices: &mut Vec<u32>,
 ) -> (Vec<f32>, Vec<u32>) {
-    split_band_by(vertices, indices, |record| record[8] > 1.5e6)
+    let vert_count = vertices.len() / VECTOR_FLOATS_PER_VERTEX;
+    let is_fringe = vertices
+        .chunks_exact(VECTOR_FLOATS_PER_VERTEX)
+        .map(|record| record[8] > 1.5e6)
+        .collect::<Vec<_>>();
+    if !is_fringe.iter().any(|&fringe| fringe) {
+        return (Vec::new(), Vec::new());
+    }
+
+    let mut casing_vertices = Vec::new();
+    let mut fringe_vertices = Vec::new();
+    let mut casing_remap = vec![u32::MAX; vert_count];
+    let mut fringe_remap = vec![u32::MAX; vert_count];
+    let mut referenced = vec![false; vert_count];
+    for &index in indices.iter() {
+        referenced[index as usize] = true;
+    }
+    for (index, record) in vertices.chunks_exact(VECTOR_FLOATS_PER_VERTEX).enumerate() {
+        if is_fringe[index] && !referenced[index] {
+            continue;
+        }
+        let (output, remap) = if is_fringe[index] {
+            (&mut fringe_vertices, &mut fringe_remap)
+        } else {
+            (&mut casing_vertices, &mut casing_remap)
+        };
+        remap[index] = (output.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
+        output.extend_from_slice(record);
+    }
+
+    let mut casing_indices = Vec::new();
+    let mut fringe_indices = Vec::new();
+    for triangle in indices.chunks_exact(3) {
+        let fringe = is_fringe[triangle[0] as usize];
+        debug_assert!(triangle
+            .iter()
+            .all(|&index| is_fringe[index as usize] == fringe));
+        let (output, remap) = if fringe {
+            (&mut fringe_indices, &fringe_remap)
+        } else {
+            (&mut casing_indices, &casing_remap)
+        };
+        output.extend(triangle.iter().map(|&index| remap[index as usize]));
+    }
+    *vertices = casing_vertices;
+    *indices = casing_indices;
+    (fringe_vertices, fringe_indices)
 }
 
 fn split_band_by(
@@ -293,15 +852,455 @@ fn split_band_by(
     (high_vertices, high_indices)
 }
 
-#[derive(Debug)]
+/// Partition triangles by a predicate over all three vertex records. A
+/// vertex shared by triangles in different bands is copied into each band;
+/// no triangle can carry a record that did not participate in its decision.
+fn split_band_by_all(
+    vertices: &mut Vec<f32>,
+    indices: &mut Vec<u32>,
+    predicate: impl Fn(&[f32]) -> bool,
+) -> (Vec<f32>, Vec<u32>) {
+    let vert_count = vertices.len() / VECTOR_FLOATS_PER_VERTEX;
+    let is_high = vertices
+        .chunks_exact(VECTOR_FLOATS_PER_VERTEX)
+        .map(predicate)
+        .collect::<Vec<_>>();
+    let record = |index: u32| {
+        let start = index as usize * VECTOR_FLOATS_PER_VERTEX;
+        &vertices[start..start + VECTOR_FLOATS_PER_VERTEX]
+    };
+    let any_high = indices
+        .chunks_exact(3)
+        .any(|tri| tri.iter().all(|&index| is_high[index as usize]));
+    if !any_high {
+        return (Vec::new(), Vec::new());
+    }
+
+    let mut low_vertices = Vec::new();
+    let mut low_indices = Vec::new();
+    let mut high_vertices = Vec::new();
+    let mut high_indices = Vec::new();
+    let mut low_remap = vec![u32::MAX; vert_count];
+    let mut high_remap = vec![u32::MAX; vert_count];
+    for tri in indices.chunks_exact(3) {
+        let high = tri.iter().all(|&index| is_high[index as usize]);
+        let (band_vertices, band_indices, remap) = if high {
+            (&mut high_vertices, &mut high_indices, &mut high_remap)
+        } else {
+            (&mut low_vertices, &mut low_indices, &mut low_remap)
+        };
+        for &old in tri {
+            let slot = &mut remap[old as usize];
+            if *slot == u32::MAX {
+                *slot = (band_vertices.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
+                band_vertices.extend_from_slice(record(old));
+            }
+            band_indices.push(*slot);
+        }
+    }
+    *vertices = low_vertices;
+    *indices = low_indices;
+    (high_vertices, high_indices)
+}
+
+/// Floats per icon instance: anchor xy, screen-px offset xy, scale, the
+/// param4 composite (zoom floor + pin lift), zbias, unorm8x4 colour.
+pub const ICON_INSTANCE_FLOATS: usize = 8;
+
+/// Floats per contact-shadow disc instance: centre xy, tile-local radius,
+/// and centre strength. A shared unit quad supplies the four mesh vertices.
+pub const SHADOW_DISC_INSTANCE_FLOATS: usize = 4;
+
+/// Floats per street-tree instance: anchor xy and the zbias shift. Every
+/// tree in a tile is the same mesh (`tree_template` near, `tree_cross_template`
+/// at the mid LOD ring), drawn once per record with the anchor added in the
+/// vertex shader.
+pub const TREE_INSTANCE_FLOATS: usize = 3;
+const WEB_TREE_EXPANDED_TRIANGLE_LIMIT: usize = 1_000_000;
+
+fn expanded_tree_triangle_count(
+    template_index_count: usize,
+    instance_float_count: usize,
+) -> Option<usize> {
+    if template_index_count % 3 != 0 || instance_float_count % TREE_INSTANCE_FLOATS != 0 {
+        return None;
+    }
+    (template_index_count / 3).checked_mul(instance_float_count / TREE_INSTANCE_FLOATS)
+}
+
+fn thin_tree_instances_evenly(instances: &mut Vec<f32>, keep: usize) {
+    if instances.len() % TREE_INSTANCE_FLOATS != 0 {
+        instances.clear();
+        return;
+    }
+    let instance_count = instances.len() / TREE_INSTANCE_FLOATS;
+    if keep >= instance_count {
+        return;
+    }
+    let Some(capacity) = keep.checked_mul(TREE_INSTANCE_FLOATS) else {
+        instances.clear();
+        return;
+    };
+    let mut thinned = Vec::with_capacity(capacity);
+    for output_index in 0..keep {
+        // Even sampling keeps the retained records spread across the tile's
+        // deterministic source order rather than clustering at its start.
+        let source_index = ((output_index as u128 * instance_count as u128) / keep as u128)
+            as usize;
+        let start = source_index * TREE_INSTANCE_FLOATS;
+        thinned.extend_from_slice(&instances[start..start + TREE_INSTANCE_FLOATS]);
+    }
+    *instances = thinned;
+}
+
+fn cap_expanded_tree_triangles_for_web(
+    is_web: bool,
+    tree_template_indices: &mut Vec<u32>,
+    tree_template_vertices: &mut Vec<f32>,
+    tree_cross_template_indices: &[u32],
+    tree_cross_template_vertices: &[f32],
+    tree_instances: &mut Vec<f32>,
+) {
+    if !is_web
+        || expanded_tree_triangle_count(tree_template_indices.len(), tree_instances.len())
+            .is_some_and(|count| count <= WEB_TREE_EXPANDED_TRIANGLE_LIMIT)
+    {
+        return;
+    }
+
+    // Keep every tree when the existing crossed-quad LOD is sufficient.
+    // Only pathological counts need deterministic whole-record thinning.
+    tree_template_indices.clear();
+    tree_template_indices.extend_from_slice(tree_cross_template_indices);
+    tree_template_vertices.clear();
+    tree_template_vertices.extend_from_slice(tree_cross_template_vertices);
+    if tree_template_indices.len() % 3 != 0
+        || tree_instances.len() % TREE_INSTANCE_FLOATS != 0
+    {
+        tree_instances.clear();
+        return;
+    }
+    let triangles_per_instance = tree_template_indices.len() / 3;
+    if triangles_per_instance == 0 {
+        return;
+    }
+    thin_tree_instances_evenly(
+        tree_instances,
+        WEB_TREE_EXPANDED_TRIANGLE_LIMIT / triangles_per_instance,
+    );
+}
+
+/// One building-wall edge. Positions use the map's 1/64-tile-unit fixed
+/// point convention and heights use unsigned centimetres (the source is
+/// clamped to 220 m). Counter-clockwise (courtyard) edges are reversed when
+/// packed, so the shader can recover the original outward normal as the
+/// right-hand perpendicular of `b - a`. Z bias is stored in
+/// `VECTOR_ZBIAS_STEP` ticks, matching compact roof records.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[repr(C)]
+pub struct MapWallInstance {
+    pub a: I16x2,
+    pub b: I16x2,
+    pub heights: U16x2,
+    pub ao_zbias: F16x2,
+    pub color: UNorm8x4,
+}
+
+pub const MAP_WALL_INSTANCE_BYTES: usize = std::mem::size_of::<MapWallInstance>();
+
+impl MapWallInstance {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        a: (f32, f32),
+        b: (f32, f32),
+        base_m: f32,
+        height_m: f32,
+        color: [f32; 4],
+        ao_bottom: f32,
+        clockwise: bool,
+        zbias: f32,
+    ) -> Self {
+        let pack_position = |(x, y): (f32, f32)| {
+            let x = x * MAP_VERTEX_POSITION_SCALE;
+            let y = y * MAP_VERTEX_POSITION_SCALE;
+            debug_assert!((i16::MIN as f32..=i16::MAX as f32).contains(&x));
+            debug_assert!((i16::MIN as f32..=i16::MAX as f32).contains(&y));
+            I16x2::from_f32(x, y)
+        };
+        let (a, b) = if clockwise { (a, b) } else { (b, a) };
+        Self {
+            a: pack_position(a),
+            b: pack_position(b),
+            heights: U16x2::from_f32(base_m * 100.0, height_m * 100.0),
+            ao_zbias: F16x2::from_f32(
+                ao_bottom,
+                (zbias / VECTOR_ZBIAS_STEP).round(),
+            ),
+            color: UNorm8x4::from_f32(color[0], color[1], color[2], color[3]),
+        }
+    }
+
+    pub fn unpack_position(position: I16x2) -> Vec2f {
+        vec2(
+            position.x as f32 / MAP_VERTEX_POSITION_SCALE,
+            position.y as f32 / MAP_VERTEX_POSITION_SCALE,
+        )
+    }
+
+    pub fn unpack_heights(&self) -> (f32, f32) {
+        (self.heights.x as f32 * 0.01, self.heights.y as f32 * 0.01)
+    }
+}
+
+/// One marker stalk or stoplight placement. `size.x` scales the template's
+/// tile-local xy offsets (the stalk arm; 1 for a stoplight), while `size.y`
+/// scales its normalized metre height (the stalk lift or stoplight height).
+/// Colour is retained as UNorm8x4 and bitcast into the renderer's f32-backed
+/// instance buffer at draw time.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[repr(C)]
+pub struct MapPropInstance {
+    pub anchor: Vec2f,
+    pub size: Vec2f,
+    pub color: UNorm8x4,
+    pub zbias: f32,
+}
+
+pub const MAP_PROP_INSTANCE_BYTES: usize = std::mem::size_of::<MapPropInstance>();
+
+impl MapPropInstance {
+    fn new(anchor: (f32, f32), size: (f32, f32), color: [f32; 4], zbias: f32) -> Self {
+        Self {
+            anchor: vec2(anchor.0, anchor.1),
+            size: vec2(size.0, size.1),
+            color: UNorm8x4::from_f32(color[0], color[1], color[2], color[3]),
+            zbias,
+        }
+    }
+}
+
+/// One symbol mesh drawn N times: the mesh lives once on the GPU (per
+/// registry slot), every placement is an 8-float instance record instead of
+/// a copy of the tessellated SVG at 48 bytes a vertex.
+#[derive(Debug, PartialEq, Clone, Default)]
+pub struct IconInstances {
+    pub mesh_slot: u16,
+    pub data: Vec<f32>,
+}
+
+impl IconInstances {
+    pub fn count(&self) -> usize {
+        self.data.len() / ICON_INSTANCE_FLOATS
+    }
+}
+
+/// One independently uploaded piece of a typed map stream. Indices are
+/// always local to this chunk and therefore always fit the WebGL2/Metal u16
+/// path.
+#[derive(Debug, PartialEq, Clone, Default)]
+pub struct TypedStreamChunk {
+    pub indices: Vec<u16>,
+    pub vertices: Vec<u8>,
+}
+
+/// A triangle stream split at bake time so no geometry upload needs u32
+/// indices. The original vertex count is retained only to report the small
+/// number of boundary vertices copied into more than one chunk.
+#[derive(Debug, PartialEq, Clone, Default)]
+pub struct TypedStream {
+    pub chunks: Vec<TypedStreamChunk>,
+    source_vertex_count: usize,
+    duplicate_vertex_count: usize,
+}
+
+impl TypedStream {
+    const MAX_VERTICES_PER_CHUNK: usize = u16::MAX as usize;
+
+    pub fn from_u32(indices: Vec<u32>, vertices: Vec<u8>, stride: usize) -> Self {
+        debug_assert!(stride > 0 && vertices.len() % stride == 0);
+        debug_assert!(indices.len() % 3 == 0);
+        let source_vertex_count = vertices.len() / stride;
+        debug_assert!(indices.iter().all(|&index| (index as usize) < source_vertex_count));
+        if indices.is_empty() && vertices.is_empty() {
+            return Self::default();
+        }
+        if source_vertex_count <= Self::MAX_VERTICES_PER_CHUNK {
+            return Self {
+                chunks: vec![TypedStreamChunk {
+                    indices: indices.into_iter().map(|index| index as u16).collect(),
+                    vertices,
+                }],
+                source_vertex_count,
+                duplicate_vertex_count: 0,
+            };
+        }
+
+        let mut chunks = Vec::new();
+        let mut remap = HashMap::<u32, u16>::new();
+        let mut referenced = HashSet::<u32>::new();
+        let mut duplicate_vertex_count = 0usize;
+        let mut chunk_indices = Vec::new();
+        let mut chunk_vertices = Vec::new();
+        for triangle in indices.chunks_exact(3) {
+            let mut additional = 0usize;
+            for (position, &index) in triangle.iter().enumerate() {
+                if !remap.contains_key(&index)
+                    && !triangle[..position].iter().any(|&earlier| earlier == index)
+                {
+                    additional += 1;
+                }
+            }
+            if !chunk_indices.is_empty()
+                && remap.len() + additional > Self::MAX_VERTICES_PER_CHUNK
+            {
+                chunks.push(TypedStreamChunk {
+                    indices: std::mem::take(&mut chunk_indices),
+                    vertices: std::mem::take(&mut chunk_vertices),
+                });
+                remap.clear();
+            }
+            for &source_index in triangle {
+                let local_index = if let Some(&local_index) = remap.get(&source_index) {
+                    local_index
+                } else {
+                    let local_index = remap.len() as u16;
+                    let start = source_index as usize * stride;
+                    chunk_vertices.extend_from_slice(&vertices[start..start + stride]);
+                    remap.insert(source_index, local_index);
+                    if !referenced.insert(source_index) {
+                        duplicate_vertex_count += 1;
+                    }
+                    local_index
+                };
+                chunk_indices.push(local_index);
+            }
+        }
+        if !chunk_indices.is_empty() {
+            chunks.push(TypedStreamChunk {
+                indices: chunk_indices,
+                vertices: chunk_vertices,
+            });
+        }
+        debug_assert!(chunks.iter().all(|chunk| chunk.vertices.len() / stride < 65_536));
+        Self {
+            chunks,
+            source_vertex_count,
+            duplicate_vertex_count,
+        }
+    }
+
+    pub fn vertex_count(&self, stride: usize) -> usize {
+        self.chunks.iter().map(|chunk| chunk.vertices.len() / stride).sum()
+    }
+
+    pub fn source_vertex_count(&self) -> usize {
+        self.source_vertex_count
+    }
+
+    pub fn duplicate_vertex_count(&self) -> usize {
+        self.duplicate_vertex_count
+    }
+
+    pub fn index_count(&self) -> usize {
+        self.chunks.iter().map(|chunk| chunk.indices.len()).sum()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.chunks.is_empty()
+    }
+
+    pub fn vertex_records(&self, stride: usize) -> impl Iterator<Item = &[u8]> {
+        self.chunks
+            .iter()
+            .flat_map(move |chunk| chunk.vertices.chunks_exact(stride))
+    }
+
+    #[cfg(test)]
+    fn indexed_vertex_bytes(&self, stride: usize) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.index_count() * stride);
+        for chunk in &self.chunks {
+            for &index in &chunk.indices {
+                let start = index as usize * stride;
+                out.extend_from_slice(&chunk.vertices[start..start + stride]);
+            }
+        }
+        out
+    }
+
+    pub fn byte_size(&self) -> usize {
+        self.chunks
+            .iter()
+            .map(|chunk| chunk.vertices.len() + chunk.indices.len() * 2)
+            .sum()
+    }
+
+    /// Allocator-live bytes held by this stream. Pending-tile pressure must
+    /// use capacities rather than lengths: builders deliberately reserve for
+    /// dense tiles, and `truncate` alone otherwise leaves the peak resident.
+    pub fn allocated_byte_size(&self) -> usize {
+        self.chunks.capacity() * std::mem::size_of::<TypedStreamChunk>()
+            + self
+                .chunks
+                .iter()
+                .map(|chunk| chunk.vertices.capacity() + chunk.indices.capacity() * 2)
+                .sum::<usize>()
+    }
+
+    fn shrink_to_fit(&mut self) {
+        for chunk in &mut self.chunks {
+            chunk.indices.shrink_to_fit();
+            chunk.vertices.shrink_to_fit();
+        }
+        self.chunks.shrink_to_fit();
+    }
+
+    pub fn unchunked_byte_size(&self, stride: usize) -> usize {
+        self.source_vertex_count * stride
+            + self.index_count()
+                * if self.source_vertex_count < 65_536 { 2 } else { 4 }
+    }
+
+    /// Reassemble chunks into a u32-indexed stream for CPU transforms such
+    /// as space-warp subdivision. Boundary copies remain harmless distinct
+    /// vertices and triangle order is unchanged.
+    pub fn into_u32(self, stride: usize) -> (Vec<u32>, Vec<u8>) {
+        let index_count = self.index_count();
+        let vertex_bytes = self.chunks.iter().map(|chunk| chunk.vertices.len()).sum();
+        let mut indices = Vec::with_capacity(index_count);
+        let mut vertices = Vec::with_capacity(vertex_bytes);
+        let mut vertex_offset = 0u32;
+        for chunk in self.chunks {
+            indices.extend(chunk.indices.into_iter().map(|index| vertex_offset + index as u32));
+            vertex_offset += (chunk.vertices.len() / stride) as u32;
+            vertices.extend(chunk.vertices);
+        }
+        (indices, vertices)
+    }
+}
+
+#[derive(Debug, PartialEq, Default)]
 pub struct TileBuffers {
     pub pin_hits: Vec<PinHit>,
-    pub fill_indices: Vec<u32>,
-    pub fill_vertices: Vec<f32>,
-    pub casing_indices: Vec<u32>,
-    pub casing_vertices: Vec<f32>,
-    pub stroke_indices: Vec<u32>,
-    pub stroke_vertices: Vec<f32>,
+    pub fill: TypedStream,
+    pub fill_misc_indices: Vec<u32>,
+    pub fill_misc_vertices: Vec<f32>,
+    /// Typed 16-byte `FaceVertexTyped` records: the grounded shape-0
+    /// Boolean union faces split out of the casing pass (see
+    /// `is_compact_face_record`). Drawn by the casing pass first, so the
+    /// faces keep their place under the pass's expandable strokes.
+    pub face: TypedStream,
+    /// Typed 28-byte `RoadVertexTyped` records: GPU-expandable strokes
+    /// (shape >= 100) and the shape-0 union records the face layout cannot
+    /// carry (lifted faces, deck fascia walls).
+    pub casing: TypedStream,
+    /// Typed 28-byte `RoadVertexTyped` records. Rails, dashed tunnels
+    /// and other patterned lines go through `append_expanded_stroke_geometry`
+    /// (shape 11/12 become 111/112); plaza fills are shape-0. Oneway arrows
+    /// stay in `icon_*` / `road_icon_*`. No leftover non-road shapes, so
+    /// there is no `stroke_misc` stream.
+    pub stroke: TypedStream,
+    /// Vertex-baked symbols that must ride the map plane: road-surface
+    /// decals (oneway arrows). Free-standing POI symbols are instances.
     pub icon_indices: Vec<u32>,
     pub icon_vertices: Vec<f32>,
     /// Street-band icons (per-vertex zoom floor > ICON_HIGH_BAND_FLOOR):
@@ -310,22 +1309,51 @@ pub struct TileBuffers {
     /// band below the floor instead of vertex-processing it every frame.
     pub icon_high_indices: Vec<u32>,
     pub icon_high_vertices: Vec<f32>,
-    /// Analytic AA fringes split from `casing_*` (see split_fringe_band).
-    pub fringe_indices: Vec<u32>,
-    pub fringe_vertices: Vec<f32>,
+    /// Instanced POI symbols, grouped per mesh slot; the same band split as
+    /// the vertex streams (floor <= ICON_HIGH_BAND_FLOOR here).
+    pub icon_instances: Vec<IconInstances>,
+    pub icon_high_instances: Vec<IconInstances>,
+    /// Tree/signal contact-shadow discs, drawn only into the shadow mask.
+    pub shadow_disc_instances: Vec<f32>,
+    /// Analytic AA fringes split from `casing_*` (see split_fringe_band),
+    /// stored as typed 28-byte `RoadVertexTyped` records and drawn
+    /// with `DrawMapRoad` (same shader as casing/stroke; 25° tilt gate).
+    pub fringe: TypedStream,
     /// 3D volume geometry (walls/roofs/trees/skirts): distance-faded under
     /// tilt so the far field skips its vertex mass.
-    pub fill_3d_indices: Vec<u32>,
-    pub fill_3d_vertices: Vec<f32>,
+    pub fill_3d: TypedStream,
+    /// Lifted records that cannot use `RoofVertexTyped`.
+    pub fill_3d_misc_indices: Vec<u32>,
+    pub fill_3d_misc_vertices: Vec<f32>,
     /// Building walls (MAT_WALL) — skipped at the mid LOD ring.
     pub wall_indices: Vec<u32>,
     pub wall_vertices: Vec<f32>,
+    /// Building walls as compact typed edge records; drawn with the wall
+    /// band's LOD gate.
+    pub wall_instances: Vec<MapWallInstance>,
     /// Full canopy balls (MAT_CANOPY) — near ring only.
     pub tree_indices: Vec<u32>,
     pub tree_vertices: Vec<f32>,
     /// Crossed-quad tree stand-ins for the mid/far rings.
     pub tree_cross_indices: Vec<u32>,
     pub tree_cross_vertices: Vec<f32>,
+    /// One street tree at the origin (trunk + canopy ball, GPU-packed) and
+    /// its crossed-quad stand-in; `tree_instances` places them.
+    pub tree_template_indices: Vec<u32>,
+    pub tree_template_vertices: Vec<f32>,
+    pub tree_cross_template_indices: Vec<u32>,
+    pub tree_cross_template_vertices: Vec<f32>,
+    pub tree_instances: Vec<f32>,
+    /// One unit crossed-quad stalk; instances carry anchor, arm, lift,
+    /// colour and the original painter-order depth.
+    pub stalk_template_indices: Vec<u32>,
+    pub stalk_template_vertices: Vec<f32>,
+    pub stalk_instances: Vec<MapPropInstance>,
+    /// One complete pole + green/amber/red light template; instances carry
+    /// anchor, total height and painter-order depth.
+    pub stoplight_template_indices: Vec<u32>,
+    pub stoplight_template_vertices: Vec<f32>,
+    pub stoplight_instances: Vec<MapPropInstance>,
     /// Stable oneway-arrow subset of `icon_*`. The UI keeps this small CPU
     /// copy beside the resident GPU road meshes, then appends it to a
     /// mode-only 2D/3D icon rebake without regenerating the road Boolean.
@@ -338,6 +1366,11 @@ pub struct TileBuffers {
     pub labels: Vec<TileLabel>,
     /// View-zoom bucket this tile's styling was built for.
     pub render_zoom: u32,
+    /// 0 for the full bake, 1 for optional/metadata shedding, 2 when a whole
+    /// principal feature group was removed. This is carried to the UI so
+    /// pressure is observable and can raise the bounded source/render LOD
+    /// rather than reload forever.
+    pub memory_lod: u8,
     /// Compact per-stage build timing ("stage:ms stage:ms ..."), filled for
     /// builds over ~100ms — carried into the SLOW-tile log so a slow build
     /// is replayable headlessly without re-hitting it in-app.
@@ -345,31 +1378,369 @@ pub struct TileBuffers {
 }
 
 impl TileBuffers {
+    /// Byte sizes for the report's fourteen named mesh streams. The typed
+    /// streams include their chunk-local u16 indices; legacy streams remain
+    /// f32 vertices with u32 indices.
+    pub fn stream_bytes(&self) -> [usize; 14] {
+        [
+            self.fill.byte_size(),
+            (self.fill_misc_vertices.len() + self.fill_misc_indices.len()) * 4,
+            self.face.byte_size(),
+            self.casing.byte_size(),
+            self.stroke.byte_size(),
+            self.fringe.byte_size(),
+            (self.icon_vertices.len() + self.icon_indices.len()) * 4,
+            (self.icon_high_vertices.len() + self.icon_high_indices.len()) * 4,
+            (self.road_icon_vertices.len() + self.road_icon_indices.len()) * 4,
+            self.fill_3d.byte_size(),
+            (self.fill_3d_misc_vertices.len() + self.fill_3d_misc_indices.len()) * 4,
+            (self.wall_vertices.len() + self.wall_indices.len()) * 4,
+            (self.tree_vertices.len() + self.tree_indices.len()) * 4,
+            (self.tree_cross_vertices.len() + self.tree_cross_indices.len()) * 4,
+        ]
+    }
+
+    /// Footprint the same streams would have had before typed u16 chunking.
+    pub fn unchunked_stream_bytes(&self) -> [usize; 14] {
+        [
+            self.fill.unchunked_byte_size(FILL_TYPED_VERTEX_BYTES),
+            (self.fill_misc_vertices.len() + self.fill_misc_indices.len()) * 4,
+            self.face.unchunked_byte_size(FACE_TYPED_VERTEX_BYTES),
+            self.casing.unchunked_byte_size(ROAD_TYPED_VERTEX_BYTES),
+            self.stroke.unchunked_byte_size(ROAD_TYPED_VERTEX_BYTES),
+            self.fringe.unchunked_byte_size(ROAD_TYPED_VERTEX_BYTES),
+            (self.icon_vertices.len() + self.icon_indices.len()) * 4,
+            (self.icon_high_vertices.len() + self.icon_high_indices.len()) * 4,
+            (self.road_icon_vertices.len() + self.road_icon_indices.len()) * 4,
+            self.fill_3d.unchunked_byte_size(ROOF_TYPED_VERTEX_BYTES),
+            (self.fill_3d_misc_vertices.len() + self.fill_3d_misc_indices.len()) * 4,
+            (self.wall_vertices.len() + self.wall_indices.len()) * 4,
+            (self.tree_vertices.len() + self.tree_indices.len()) * 4,
+            (self.tree_cross_vertices.len() + self.tree_cross_indices.len()) * 4,
+        ]
+    }
+
+    pub fn typed_duplicate_vertices(&self) -> usize {
+        self.fill.duplicate_vertex_count()
+            + self.face.duplicate_vertex_count()
+            + self.casing.duplicate_vertex_count()
+            + self.stroke.duplicate_vertex_count()
+            + self.fringe.duplicate_vertex_count()
+            + self.fill_3d.duplicate_vertex_count()
+    }
+
+    pub fn typed_source_vertices(&self) -> usize {
+        self.fill.source_vertex_count()
+            + self.face.source_vertex_count()
+            + self.casing.source_vertex_count()
+            + self.stroke.source_vertex_count()
+            + self.fringe.source_vertex_count()
+            + self.fill_3d.source_vertex_count()
+    }
+
+    pub fn max_typed_chunk_count(&self) -> usize {
+        [
+            self.fill.chunks.len(),
+            self.face.chunks.len(),
+            self.casing.chunks.len(),
+            self.stroke.chunks.len(),
+            self.fringe.chunks.len(),
+            self.fill_3d.chunks.len(),
+        ]
+        .into_iter()
+        .max()
+        .unwrap_or(0)
+    }
+
     /// Geometry byte footprint (vertex + index data).
     pub fn byte_size(&self) -> usize {
-        (self.fill_indices.len()
-            + self.fill_vertices.len()
-            + self.casing_indices.len()
-            + self.casing_vertices.len()
-            + self.stroke_indices.len()
-            + self.stroke_vertices.len()
-            + self.icon_indices.len()
-            + self.icon_high_indices.len()
-            + self.icon_high_vertices.len()
-            + self.fringe_indices.len()
-            + self.fringe_vertices.len()
-            + self.fill_3d_indices.len()
-            + self.fill_3d_vertices.len()
-            + self.wall_indices.len()
-            + self.wall_vertices.len()
-            + self.tree_indices.len()
-            + self.tree_vertices.len()
-            + self.tree_cross_indices.len()
-            + self.tree_cross_vertices.len()
-            + self.icon_vertices.len()
-            + self.road_icon_indices.len()
-            + self.road_icon_vertices.len())
-            * 4
+        self.stream_bytes().into_iter().sum::<usize>()
+            + (self.shadow_disc_instances.len()
+                + self.tree_template_indices.len()
+                + self.tree_template_vertices.len()
+                + self.tree_cross_template_indices.len()
+                + self.tree_cross_template_vertices.len()
+                + self.tree_instances.len()
+                + self.icon_instance_floats())
+                * 4
+            + (self.stalk_template_indices.len()
+                + self.stalk_template_vertices.len()
+                + self.stoplight_template_indices.len()
+                + self.stoplight_template_vertices.len())
+                * 4
+            + (self.stalk_instances.len() + self.stoplight_instances.len())
+                * MAP_PROP_INSTANCE_BYTES
+            + self.wall_instances.len() * MAP_WALL_INSTANCE_BYTES
+    }
+
+    /// Allocator-live working set while a finished bake waits for upload.
+    /// Unlike `byte_size`, this includes spare capacity and label/pin-owned
+    /// strings, which are significant in an overzoomed city tile.
+    pub fn allocated_byte_size(&self) -> usize {
+        let vec_bytes = |len: usize, item: usize| len.saturating_mul(item);
+        let typed = self.fill.allocated_byte_size()
+            + self.face.allocated_byte_size()
+            + self.casing.allocated_byte_size()
+            + self.stroke.allocated_byte_size()
+            + self.fringe.allocated_byte_size()
+            + self.fill_3d.allocated_byte_size();
+        let u32s = self.fill_misc_indices.capacity()
+            + self.icon_indices.capacity()
+            + self.icon_high_indices.capacity()
+            + self.fill_3d_misc_indices.capacity()
+            + self.wall_indices.capacity()
+            + self.tree_indices.capacity()
+            + self.tree_cross_indices.capacity()
+            + self.tree_template_indices.capacity()
+            + self.tree_cross_template_indices.capacity()
+            + self.stalk_template_indices.capacity()
+            + self.stoplight_template_indices.capacity()
+            + self.road_icon_indices.capacity();
+        let f32s = self.fill_misc_vertices.capacity()
+            + self.icon_vertices.capacity()
+            + self.icon_high_vertices.capacity()
+            + self.shadow_disc_instances.capacity()
+            + self.fill_3d_misc_vertices.capacity()
+            + self.wall_vertices.capacity()
+            + self.tree_vertices.capacity()
+            + self.tree_cross_vertices.capacity()
+            + self.tree_template_vertices.capacity()
+            + self.tree_cross_template_vertices.capacity()
+            + self.tree_instances.capacity()
+            + self.stalk_template_vertices.capacity()
+            + self.stoplight_template_vertices.capacity()
+            + self.road_icon_vertices.capacity();
+        let icon_groups = (self.icon_instances.capacity() + self.icon_high_instances.capacity())
+            * std::mem::size_of::<IconInstances>()
+            + self
+                .icon_instances
+                .iter()
+                .chain(self.icon_high_instances.iter())
+                .map(|group| vec_bytes(group.data.capacity(), 4))
+                .sum::<usize>();
+        let labels = self.labels.capacity() * std::mem::size_of::<TileLabel>()
+            + self
+                .labels
+                .iter()
+                .map(|label| {
+                    label.text.capacity()
+                        + label.source_layer.capacity()
+                        + label.road_kind.capacity()
+                        + label.name_key.capacity()
+                        + label.path_points.capacity() * std::mem::size_of::<(f32, f32)>()
+                })
+                .sum::<usize>();
+        let pins = self.pin_hits.capacity() * std::mem::size_of::<PinHit>()
+            + self
+                .pin_hits
+                .iter()
+                .map(|pin| {
+                    pin.info.capacity() * std::mem::size_of::<(String, String)>()
+                        + pin
+                            .info
+                            .iter()
+                            .map(|(key, value)| key.capacity() + value.capacity())
+                            .sum::<usize>()
+                })
+                .sum::<usize>();
+        typed
+            .saturating_add(vec_bytes(u32s, 4))
+            .saturating_add(vec_bytes(f32s, 4))
+            .saturating_add(icon_groups)
+            .saturating_add(vec_bytes(
+                self.wall_instances.capacity(),
+                std::mem::size_of::<MapWallInstance>(),
+            ))
+            .saturating_add(vec_bytes(
+                self.stalk_instances.capacity() + self.stoplight_instances.capacity(),
+                std::mem::size_of::<MapPropInstance>(),
+            ))
+            .saturating_add(labels)
+            .saturating_add(pins)
+            .saturating_add(self.stage_summary.capacity())
+    }
+
+    /// Bound a finished tile before it crosses the worker-to-UI channel.
+    /// Capacity is reclaimed before visible content. Optional decoration and
+    /// metadata are then shed in finite stages. Principal geometry is never
+    /// prefix-truncated: if complete ground/roads fit, the complete building
+    /// structural group may be omitted; otherwise the over-limit result is
+    /// left intact for the caller to defer at a coarser source/style LOD.
+    pub fn degrade_to_memory_limit(&mut self, limit: usize) -> u8 {
+        if self.allocated_byte_size() <= limit {
+            return self.memory_lod;
+        }
+
+        self.shrink_memory_vectors();
+        if self.allocated_byte_size() <= limit {
+            return self.memory_lod;
+        }
+
+        self.memory_lod = self.memory_lod.max(1);
+        self.icon_high_indices.clear();
+        self.icon_high_vertices.clear();
+        self.icon_high_instances.clear();
+        self.fringe = TypedStream::default();
+        self.shadow_disc_instances.clear();
+        self.tree_indices.clear();
+        self.tree_vertices.clear();
+        self.tree_cross_indices.clear();
+        self.tree_cross_vertices.clear();
+        self.tree_template_indices.clear();
+        self.tree_template_vertices.clear();
+        self.tree_cross_template_indices.clear();
+        self.tree_cross_template_vertices.clear();
+        self.tree_instances.clear();
+        self.stalk_template_indices.clear();
+        self.stalk_template_vertices.clear();
+        self.stalk_instances.clear();
+        self.stoplight_template_indices.clear();
+        self.stoplight_template_vertices.clear();
+        self.stoplight_instances.clear();
+        self.shrink_memory_vectors();
+        if self.allocated_byte_size() <= limit {
+            return self.memory_lod;
+        }
+
+        // Labels and hit metadata are useful but not worth displacing the
+        // actual map under pressure. This remains LOD 1 because no principal
+        // geometry has been removed.
+        self.labels.clear();
+        self.pin_hits.clear();
+        self.stage_summary.clear();
+        self.icon_instances.clear();
+        self.icon_high_instances.clear();
+        self.icon_indices.clear();
+        self.icon_vertices.clear();
+        self.road_icon_indices.clear();
+        self.road_icon_vertices.clear();
+        self.shrink_memory_vectors();
+        if self.allocated_byte_size() <= limit {
+            return self.memory_lod;
+        }
+
+        // Use actual demand rather than fixed stream percentages. Roofs and
+        // both wall encodings are one structural feature group: retain all
+        // of it, or remove all of it when doing so admits complete ground and
+        // roads. If even ground/roads do not fit, the caller must defer the
+        // tile; emitting arbitrary triangle prefixes creates corrupt-looking
+        // roads and irreconcilable roof/wall subsets.
+        let building_bytes = self.building_structure_allocated_bytes();
+        let ground_and_roads_bytes = self
+            .allocated_byte_size()
+            .saturating_sub(building_bytes);
+        if building_bytes > 0 && ground_and_roads_bytes <= limit {
+            self.clear_building_structure();
+            self.shrink_memory_vectors();
+            self.memory_lod = 2;
+        }
+        self.memory_lod
+    }
+
+    fn building_structure_allocated_bytes(&self) -> usize {
+        self.fill_3d
+            .allocated_byte_size()
+            .saturating_add(
+                (self.fill_3d_misc_indices.capacity()
+                    + self.fill_3d_misc_vertices.capacity()
+                    + self.wall_indices.capacity()
+                    + self.wall_vertices.capacity())
+                    .saturating_mul(4),
+            )
+            .saturating_add(
+                self.wall_instances
+                    .capacity()
+                    .saturating_mul(MAP_WALL_INSTANCE_BYTES),
+            )
+    }
+
+    fn clear_building_structure(&mut self) {
+        self.fill_3d = TypedStream::default();
+        self.fill_3d_misc_indices.clear();
+        self.fill_3d_misc_vertices.clear();
+        self.wall_indices.clear();
+        self.wall_vertices.clear();
+        self.wall_instances.clear();
+    }
+
+    fn shrink_memory_vectors(&mut self) {
+        self.fill.shrink_to_fit();
+        self.face.shrink_to_fit();
+        self.casing.shrink_to_fit();
+        self.stroke.shrink_to_fit();
+        self.fringe.shrink_to_fit();
+        self.fill_3d.shrink_to_fit();
+        macro_rules! shrink {
+            ($($field:ident),+ $(,)?) => {$(
+                self.$field.shrink_to_fit();
+            )+};
+        }
+        shrink!(
+            pin_hits,
+            fill_misc_indices,
+            fill_misc_vertices,
+            icon_indices,
+            icon_vertices,
+            icon_high_indices,
+            icon_high_vertices,
+            shadow_disc_instances,
+            icon_instances,
+            icon_high_instances,
+            fill_3d_misc_indices,
+            fill_3d_misc_vertices,
+            wall_indices,
+            wall_vertices,
+            wall_instances,
+            tree_indices,
+            tree_vertices,
+            tree_cross_indices,
+            tree_cross_vertices,
+            tree_template_indices,
+            tree_template_vertices,
+            tree_cross_template_indices,
+            tree_cross_template_vertices,
+            tree_instances,
+            stalk_template_indices,
+            stalk_template_vertices,
+            stalk_instances,
+            stoplight_template_indices,
+            stoplight_template_vertices,
+            stoplight_instances,
+            road_icon_indices,
+            road_icon_vertices,
+            labels,
+        );
+        for group in self
+            .icon_instances
+            .iter_mut()
+            .chain(self.icon_high_instances.iter_mut())
+        {
+            group.data.shrink_to_fit();
+        }
+        for label in &mut self.labels {
+            label.text.shrink_to_fit();
+            label.source_layer.shrink_to_fit();
+            label.road_kind.shrink_to_fit();
+            label.path_points.shrink_to_fit();
+            label.name_key.shrink_to_fit();
+        }
+        for pin in &mut self.pin_hits {
+            pin.info.shrink_to_fit();
+            for (key, value) in &mut pin.info {
+                key.shrink_to_fit();
+                value.shrink_to_fit();
+            }
+        }
+        self.stage_summary.shrink_to_fit();
+    }
+
+    /// Instance floats across both icon bands.
+    pub fn icon_instance_floats(&self) -> usize {
+        self.icon_instances
+            .iter()
+            .chain(self.icon_high_instances.iter())
+            .map(|group| group.data.len())
+            .sum()
     }
 
     /// Restore the cached road decals after a mode-only overlay bake. Road
@@ -401,7 +1772,6 @@ impl TileBuffers {
 
 #[derive(Clone, Debug)]
 struct StrokeDrawJob {
-    sort_rank: i16,
     style: StrokeStyle,
     points: Vec<(f32, f32)>,
     /// Physical solid-road geometry joins its tier's boolean surface mesh.
@@ -493,11 +1863,9 @@ const NO_CASING_BITS: u32 = u32::MAX;
 /// shader (faces only widen; strokes keep the exact curve).
 pub const FACE_MORPH_CLASS_OFFSET: f32 = 4.0;
 
-/// Cascade-input dump lever: env for headless runs, file flag for
-/// studio-launched apps (their env is the studio's).
+/// Cascade-input dump lever.
 fn cascade_dump_armed() -> bool {
-    std::env::var_os("MAKEPAD_CASCADE_DUMP").is_some()
-        || std::path::Path::new("/tmp/mp_cascade_dump").exists()
+    crate::makepad_platform::makepad_error_log::trace_enabled("map.cascade")
 }
 
 /// Theme-stable identity of one road-surface union tier. NO resolved
@@ -521,7 +1889,7 @@ pub(crate) struct RoadSurfaceKey {
 impl RoadSurfaceKey {
     fn from_way(
         style: StrokeStyle,
-        tags: &HashMap<String, String>,
+        tags: &impl TagLookup,
         dz: Option<&[f32]>,
     ) -> Self {
         let bridge = tag_is_truthy(tags, "bridge");
@@ -638,10 +2006,10 @@ fn road_surface_param5(key: RoadSurfaceKey, phase: u8) -> f32 {
 /// select paint groups inside the shared pipeline, not a different renderer.
 /// Patterned/dashed passes remain vector overlays.
 fn is_solid_road_surface(
-    tags: &HashMap<String, String>,
+    tags: &impl TagLookup,
     style: &StrokeStyle,
 ) -> bool {
-    let layer = tags.get("layer").map(String::as_str).unwrap_or("");
+    let layer = tags.get("layer").unwrap_or("");
     tags.contains_key("highway")
         // Road-area polygons already enter the union as their complete
         // plaza contour. Treating their styled outline as a second physical
@@ -687,8 +2055,8 @@ struct RoadJoinMeta {
 }
 
 impl RoadJoinMeta {
-    fn from_tags(tags: &HashMap<String, String>) -> Self {
-        let highway = tags.get("highway").map(String::as_str);
+    fn from_tags(tags: &impl TagLookup) -> Self {
+        let highway = tags.get("highway");
         let family = match highway {
             Some("motorway" | "motorway_link") => RoadJoinFamily::Motorway,
             Some("trunk" | "trunk_link") => RoadJoinFamily::Trunk,
@@ -1466,10 +2834,12 @@ fn endpoint_continuation_grade_corrections(
             }
         }
     }
-    by_end
+    let mut corrections: Vec<_> = by_end
         .into_iter()
         .map(|(end, target_dz)| RoadTierGradeCorrection { end, target_dz })
-        .collect()
+        .collect();
+    corrections.sort_unstable_by_key(|correction| correction.end);
+    corrections
 }
 
 /// Move one endpoint to a through-road deck and taper that correction
@@ -1711,7 +3081,7 @@ pub fn build_tile_buffers_from_body(
 
     let mut nodes = HashMap::<i64, (f64, f64)>::new();
     let mut ways = Vec::<WayData>::new();
-    let mut tagged_points = Vec::<((f32, f32), HashMap<String, String>)>::new();
+    let mut tagged_points = Vec::<((f32, f32), TagSet)>::new();
 
     for element in parsed.elements {
         match element.kind.as_str() {
@@ -1720,7 +3090,7 @@ pub fn build_tile_buffers_from_body(
                     nodes.insert(element.id, (lon, lat));
                     if let Some(tags) = element.tags {
                         let world = lon_lat_to_world(lon, lat, tile_key.z) - tile_origin;
-                        tagged_points.push(((world.x as f32, world.y as f32), tags));
+                        tagged_points.push(((world.x as f32, world.y as f32), tags.into()));
                     }
                 }
             }
@@ -1749,17 +3119,19 @@ pub fn build_tile_buffers_from_body(
         let points = projected.into_iter().map(|(_, point)| point).collect();
         tile_ways.push(TileWay {
             points,
-            tags: way.tags,
+            tags: way.tags.into(),
             closed: way.closed,
             dz: None,
             fidx: None,
+            feature_group: None,
+            ring_index: None,
         });
     }
 
     Ok(build_tile_buffers_from_features(
         tile_key,
-        tile_ways,
-        tagged_points,
+        &tile_ways,
+        &tagged_points,
         theme,
         render_zoom,
         false,
@@ -1795,6 +3167,40 @@ pub fn build_tile_buffers_from_mvt(
     theme: &CompiledMapTheme,
     render_zoom: u32,
     buildings_3d: bool,
+    want_fringe: bool,
+    build_road_core: bool,
+) -> Result<TileBuffers, String> {
+    build_tile_buffers_from_mvt_with_parser(
+        parse_mvt_tile_erased,
+        tile_key,
+        raw_tile_data,
+        detail_tile_data,
+        bridge_dz_tile_data,
+        bridge_dz_covered,
+        overlay_tiles,
+        theme,
+        render_zoom,
+        buildings_3d,
+        want_fringe,
+        build_road_core,
+    )
+}
+
+type MvtParseFn = fn(&[u8], TileKey, &mut dyn MvtSink) -> Result<(), String>;
+
+#[allow(clippy::too_many_arguments)]
+fn build_tile_buffers_from_mvt_with_parser(
+    parse_mvt: MvtParseFn,
+    tile_key: TileKey,
+    raw_tile_data: &[u8],
+    detail_tile_data: Option<&[u8]>,
+    bridge_dz_tile_data: Option<&[u8]>,
+    bridge_dz_covered: bool,
+    overlay_tiles: &[OverlayTileData],
+    theme: &CompiledMapTheme,
+    render_zoom: u32,
+    buildings_3d: bool,
+    want_fringe: bool,
     build_road_core: bool,
 ) -> Result<TileBuffers, String> {
     let have_charger_overlay = overlay_tiles.iter().any(|overlay| overlay.has_chargers);
@@ -1806,9 +3212,13 @@ pub fn build_tile_buffers_from_mvt(
     // features. 3D/terrain ignores the stream — drape and extrusion re-grid
     // from the rings. MAKEPAD_NO_BAKED_FILLS=1 is the kill switch (also the
     // A/B lever for benchmarks).
+    #[cfg(not(target_arch = "wasm32"))]
     static NO_BAKED_FILLS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    #[cfg(not(target_arch = "wasm32"))]
     let no_baked =
         *NO_BAKED_FILLS.get_or_init(|| std::env::var("MAKEPAD_NO_BAKED_FILLS").is_ok());
+    #[cfg(target_arch = "wasm32")]
+    let no_baked = false;
     let baked_fills: Vec<BakedFillFeature> = if buildings_3d || no_baked {
         Vec::new()
     } else {
@@ -1820,9 +3230,13 @@ pub fn build_tile_buffers_from_mvt(
     // A bucket missing from the stream or any signature mismatch falls
     // back to the runtime cascade. MAKEPAD_NO_BAKED_FACES=1 is the kill
     // switch / A/B lever.
+    #[cfg(not(target_arch = "wasm32"))]
     static NO_BAKED_FACES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    #[cfg(not(target_arch = "wasm32"))]
     let no_baked_faces =
         *NO_BAKED_FACES.get_or_init(|| std::env::var("MAKEPAD_NO_BAKED_FACES").is_ok());
+    #[cfg(target_arch = "wasm32")]
+    let no_baked_faces = false;
     let baked_faces = if !no_baked_faces
         && (10..=18).contains(&render_zoom)
         && !faces_bake_sink_armed()
@@ -1853,7 +3267,7 @@ pub fn build_tile_buffers_from_mvt(
         }
     }
     profiler.lap("dz-parse", "");
-    parse_mvt_tile(&pbf_data, tile_key, &mut collector)?;
+    parse_mvt(&pbf_data, tile_key, &mut collector)?;
     profiler.lap("mvt-parse", "");
     // Compose micro-POIs (trees, benches, bins…) and, in 2.5D mode, building
     // footprints with real heights from the all-tag detail archive over the
@@ -1875,7 +3289,8 @@ pub fn build_tile_buffers_from_mvt(
         || collect_detail_corridors
     {
         if let Some(detail_data) = detail_tile_data {
-            if let Err(err) = merge_detail_features(
+            if let Err(err) = merge_detail_features_with_parser(
+                parse_mvt,
                 detail_data,
                 tile_key,
                 render_scale,
@@ -1916,14 +3331,20 @@ pub fn build_tile_buffers_from_mvt(
         }
     }
     profiler.lap("overlay-merge", "");
+    if faces_bake_sink_armed() {
+        // Field 101 contains road regions and dissolved building groups,
+        // never labels, POIs, trees, signals, or their contact shadows.
+        collector.points.clear();
+    }
     Ok(build_tile_buffers_from_features_profiled(
         profiler,
         tile_key,
-        collector.ways,
-        collector.points,
+        &collector.ways,
+        &collector.points,
         theme,
         render_zoom,
         buildings_3d,
+        want_fringe,
         build_road_core,
         bridge_corridors,
         bridge_dz_covered,
@@ -1953,7 +3374,8 @@ impl MvtSink for BridgeDzCollector {
         _tile_key: TileKey,
         extent: u32,
         points: &[(i32, i32)],
-        tags: HashMap<String, String>,
+        tags: TagSet,
+        meta: MvtPathMeta,
         close: bool,
     ) {
         if points.len() < 2 {
@@ -1968,7 +3390,9 @@ impl MvtSink for BridgeDzCollector {
             tags,
             closed: close,
             dz: None,
-            fidx: None,
+            fidx: Some(meta.feature_index),
+            feature_group: meta.feature_group,
+            ring_index: Some(meta.path_index),
         });
     }
 
@@ -1977,7 +3401,7 @@ impl MvtSink for BridgeDzCollector {
         _tile_key: TileKey,
         _extent: u32,
         _point: (i32, i32),
-        _tags: HashMap<String, String>,
+        _tags: TagSet,
     ) {
     }
 }
@@ -1991,7 +3415,7 @@ struct BaseDzProfile {
 fn base_dz_profile_from_way(
     way: TileWay,
 ) -> Option<((String, u32, u32), BaseDzProfile)> {
-    if way.tags.get("layer").map(|v| v.as_str()) != Some("base_dz") {
+    if way.tags.get("layer") != Some("base_dz") {
         return None;
     }
     let (Some(layer), Some(fidx), Some(pidx), Some(dz)) = (
@@ -2019,7 +3443,7 @@ fn base_dz_profile_from_way(
         return None;
     }
     Some((
-        (layer.clone(), fidx, pidx),
+        (layer.to_string(), fidx, pidx),
         BaseDzProfile { points: way.points, decks },
     ))
 }
@@ -2034,7 +3458,7 @@ fn parse_base_dz_map(
     let mut collector = BridgeDzCollector { next_feature_id: 1, ways: Vec::new() };
     parse_mvt_tile(&pbf_data, tile_key, &mut collector)?;
     let mut map = HashMap::new();
-    for way in collector.ways {
+    for way in collector.ways.drain(..) {
         if let Some((key, profile)) = base_dz_profile_from_way(way) {
             map.insert(key, profile);
         }
@@ -2155,8 +3579,8 @@ fn parse_bridge_dz_corridors(
     };
     let units_per_m = (TILE_SIZE / tile_span_m.max(1.0)) as f32;
     let mut corridors = Vec::new();
-    for way in collector.ways {
-        if way.tags.get("layer").map(|v| v.as_str()) != Some("bridge_dz") {
+    for way in collector.ways.drain(..) {
+        if way.tags.get("layer") != Some("bridge_dz") {
             continue;
         }
         let Some(dz_tag) = way.tags.get("dz") else {
@@ -2199,17 +3623,18 @@ fn merge_overlay_features(
     overlay: &OverlayTileData,
     tile_key: TileKey,
     render_scale: f32,
-    points: &mut Vec<((f32, f32), HashMap<String, String>)>,
+    points: &mut Vec<((f32, f32), TagSet)>,
     ways: &mut Vec<TileWay>,
 ) -> Result<(), String> {
-    let pbf_data = decode_vector_tile_payload(&overlay.raw)?;
+    let raw = overlay.raw.decode()?;
+    let pbf_data = decode_vector_tile_payload(&raw)?;
     let mut collector = MvtLocalCollector::new(render_scale);
     parse_mvt_tile(&pbf_data, tile_key, &mut collector)?;
     let scale = (1u32 << overlay.shift) as f32;
     let offset_x = overlay.quadrant_x as f32 * TILE_SIZE as f32;
     let offset_y = overlay.quadrant_y as f32 * TILE_SIZE as f32;
     let transform = |p: (f32, f32)| (p.0 * scale - offset_x, p.1 * scale - offset_y);
-    for (point, tags) in collector.points {
+    for (point, tags) in collector.points.drain(..) {
         let point = transform(point);
         if point.0 < -32.0
             || point.1 < -32.0
@@ -2219,7 +3644,7 @@ fn merge_overlay_features(
             continue;
         }
         if overlay.filter != 0
-            && tags.get("layer").map(|v| v.as_str()) == Some("chargers")
+            && tags.get("layer") == Some("chargers")
         {
             let kw = tags
                 .get("max_kw")
@@ -2232,7 +3657,7 @@ fn merge_overlay_features(
         }
         points.push((point, tags));
     }
-    for mut way in collector.ways {
+    for mut way in collector.ways.drain(..) {
         for point in way.points.iter_mut() {
             *point = transform(*point);
         }
@@ -2246,6 +3671,7 @@ fn merge_overlay_features(
 /// extractor ignores that layer, so base-poi labels are never duplicated),
 /// and in 2.5D mode building polygons retagged `detail_buildings`.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn merge_detail_features(
     detail_data: &[u8],
     tile_key: TileKey,
@@ -2253,17 +3679,72 @@ fn merge_detail_features(
     want_points: bool,
     want_buildings: bool,
     collect_corridors: bool,
-    points: &mut Vec<((f32, f32), HashMap<String, String>)>,
+    points: &mut Vec<((f32, f32), TagSet)>,
     ways: &mut Vec<TileWay>,
     corridors: &mut Vec<BridgeCorridor>,
 ) -> Result<(), String> {
-    let census_start = ways.len();
+    merge_detail_features_with_parser(
+        parse_mvt_tile_erased,
+        detail_data,
+        tile_key,
+        render_scale,
+        want_points,
+        want_buildings,
+        collect_corridors,
+        points,
+        ways,
+        corridors,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn merge_detail_features_with_parser(
+    parse_mvt: MvtParseFn,
+    detail_data: &[u8],
+    tile_key: TileKey,
+    render_scale: f32,
+    want_points: bool,
+    want_buildings: bool,
+    collect_corridors: bool,
+    points: &mut Vec<((f32, f32), TagSet)>,
+    ways: &mut Vec<TileWay>,
+    corridors: &mut Vec<BridgeCorridor>,
+) -> Result<(), String> {
+    let collector = parse_detail_features_with_parser(
+        parse_mvt,
+        detail_data,
+        tile_key,
+        render_scale,
+        want_points,
+        want_buildings,
+        collect_corridors,
+    )?;
+    merge_detail_features_from_collector(
+        collector,
+        tile_key,
+        render_scale,
+        want_points,
+        want_buildings,
+        collect_corridors,
+        points,
+        ways,
+        corridors,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_detail_features_with_parser(
+    parse_mvt: MvtParseFn,
+    detail_data: &[u8],
+    tile_key: TileKey,
+    render_scale: f32,
+    want_points: bool,
+    want_buildings: bool,
+    collect_corridors: bool,
+) -> Result<MvtLocalCollector, String> {
     let pbf_data = decode_vector_tile_payload(detail_data)?;
     let mut collector = MvtLocalCollector::new(render_scale);
     let render_zoom = tile_key.z as f32 + render_scale.max(1e-6).log2();
-    // Keyframe icon horizon (see icon_inclusion_zoom): from bucket 16 the
-    // buffers carry all street icons; the shader reveals by live zoom.
-    let icon_horizon = if render_zoom >= 16.0 { 18.0 } else { render_zoom };
     // Combined archives carry base AND detail layers in one tile; this
     // pass only consumes the raw osm_* layers, and of those only the
     // geometry classes the flags below reach:
@@ -2277,7 +3758,27 @@ fn merge_detail_features(
         lines: collect_corridors || want_platform_zoom,
         polygons: want_buildings || want_platform_zoom || want_points,
     };
-    parse_mvt_tile(&pbf_data, tile_key, &mut collector)?;
+    parse_mvt(&pbf_data, tile_key, &mut collector)?;
+    Ok(collector)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn merge_detail_features_from_collector(
+    mut collector: MvtLocalCollector,
+    tile_key: TileKey,
+    render_scale: f32,
+    want_points: bool,
+    want_buildings: bool,
+    collect_corridors: bool,
+    points: &mut Vec<((f32, f32), TagSet)>,
+    ways: &mut Vec<TileWay>,
+    corridors: &mut Vec<BridgeCorridor>,
+) -> Result<(), String> {
+    let census_start = ways.len();
+    let render_zoom = tile_key.z as f32 + render_scale.max(1e-6).log2();
+    // Keyframe icon horizon (see icon_inclusion_zoom): from bucket 16 the
+    // buffers carry all street icons; the shader reveals by live zoom.
+    let icon_horizon = if render_zoom >= 16.0 { 18.0 } else { render_zoom };
     for way in &collector.ways {
         if !collect_corridors {
             break;
@@ -2286,10 +3787,10 @@ fn merge_detail_features(
             continue;
         }
         let tags = &way.tags;
-        if tags.get("layer").map(|v| v.as_str()) != Some("osm_lines") {
+        if tags.get("layer") != Some("osm_lines") {
             continue;
         }
-        let bridge = tags.get("bridge").map(|v| v.as_str()).unwrap_or("");
+        let bridge = tags.get("bridge").unwrap_or("");
         if !(bridge == "yes" || bridge == "viaduct") {
             continue;
         }
@@ -2332,8 +3833,8 @@ fn merge_detail_features(
         });
     }
     if want_points {
-        for (point, mut tags) in collector.points {
-            if tags.get("layer").map(|value| value.as_str()) != Some("osm_points") {
+        for (point, mut tags) in collector.points.drain(..) {
+            if tags.get("layer") != Some("osm_points") {
                 continue;
             }
             // Attraction nodes (zoo animals) carry a label with no icon.
@@ -2351,7 +3852,7 @@ fn merge_detail_features(
                     }
                 }
             }
-            tags.insert("layer".to_string(), "micro_pois".to_string());
+            tags.set_layer("micro_pois");
             points.push((point, tags));
         }
     }
@@ -2359,7 +3860,7 @@ fn merge_detail_features(
     // 2D and 3D modes; buildings only when the 3D pass wants them.
     let want_platforms = render_zoom >= 15.5;
     if want_buildings || want_platforms || want_points {
-        for mut way in collector.ways {
+        for mut way in collector.ways.drain(..) {
             // Polygon-anchored POIs (parking lots and garages, shops and
             // offices mapped on their building) icon at the centroid like
             // carto; the icon-collision pass dedups against any base node.
@@ -2367,11 +3868,11 @@ fn merge_detail_features(
                 // Underground garages span whole blocks; carto shows their
                 // entrance node, not a centroid P in the middle of nowhere.
                 let underground =
-                    way.tags.get("parking").map(|v| v.as_str()) == Some("underground");
+                    way.tags.get("parking") == Some("underground");
                 if let Some((icon, _)) = micro_icon_for_tags(&way.tags).filter(|_| !underground) {
                     if icon_horizon >= micro_icon_min_zoom(icon) && way.points.len() >= 3 {
                         let mut tags = way.tags.clone();
-                        tags.insert("layer".to_string(), "micro_pois".to_string());
+                        tags.set_layer("micro_pois");
                         points.push((ring_centroid(&way.points), tags));
                     }
                 }
@@ -2379,7 +3880,7 @@ fn merge_detail_features(
             // Plain building ways AND assembled multipolygon relations
             // (palaces, courtyarded blocks) both carry building geometry.
             let from_polygons = matches!(
-                way.tags.get("layer").map(|value| value.as_str()),
+                way.tags.get("layer"),
                 Some("osm_polygons") | Some("osm_relation_polygons")
             );
             // Pedestrian squares mapped as highway=pedestrian + area=yes
@@ -2392,19 +3893,18 @@ fn merge_detail_features(
                 if let Some(barrier) = way.tags.get("barrier") {
                     if want_platforms
                         && matches!(
-                            barrier.as_str(),
+                            barrier,
                             "wall" | "fence" | "retaining_wall" | "city_wall" | "hedge"
                         )
                     {
-                        way.tags
-                            .insert("layer".to_string(), "barrier_line".to_string());
+                        way.tags.set_layer("barrier_line");
                         ways.push(way);
                     }
                     continue;
                 }
                 let is_ped_area = tag_is_truthy(&way.tags, "area")
                     && matches!(
-                        way.tags.get("highway").map(|v| v.as_str()),
+                        way.tags.get("highway"),
                         Some("pedestrian" | "footway")
                     );
                 // Attractions are areas by convention; clipping may have
@@ -2412,7 +3912,7 @@ fn merge_detail_features(
                 let is_attraction_ring = way.tags.contains_key("name")
                     && (way.tags.contains_key("attraction")
                         || way.tags.contains_key("zoo")
-                        || way.tags.get("tourism").map(|v| v.as_str()) == Some("attraction"));
+                        || way.tags.get("tourism") == Some("attraction"));
                 let target_layer = if is_ped_area {
                     Some("street_polygons")
                 } else if is_attraction_ring {
@@ -2427,7 +3927,7 @@ fn merge_detail_features(
                             way.points.push(first);
                         }
                         way.closed = true;
-                        way.tags.insert("layer".to_string(), layer.to_string());
+                        way.tags.set_layer(layer);
                         ways.push(way);
                     }
                 }
@@ -2440,11 +3940,11 @@ fn merge_detail_features(
             if !ring_closed {
                 continue;
             }
-            let is_platform = way.tags.get("railway").map(|v| v.as_str()) == Some("platform")
-                || way.tags.get("public_transport").map(|v| v.as_str()) == Some("platform");
+            let is_platform = way.tags.get("railway") == Some("platform")
+                || way.tags.get("public_transport") == Some("platform");
             if is_platform {
                 if want_platforms {
-                    way.tags.insert("layer".to_string(), "platforms".to_string());
+                    way.tags.set_layer("platforms");
                     ways.push(way);
                 }
                 continue;
@@ -2453,23 +3953,22 @@ fn merge_detail_features(
             // the z14 base tiles; at street zoom the detail archive fills
             // them back in. Bigger landuse stays with the base tile.
             let is_green_patch = matches!(
-                way.tags.get("landuse").map(|v| v.as_str()),
+                way.tags.get("landuse"),
                 Some("grass" | "village_green" | "flowerbed" | "meadow")
             ) || matches!(
-                way.tags.get("leisure").map(|v| v.as_str()),
+                way.tags.get("leisure"),
                 Some("garden")
             ) || matches!(
-                way.tags.get("natural").map(|v| v.as_str()),
+                way.tags.get("natural"),
                 Some("scrub" | "heath" | "shrubbery" | "sand" | "beach" | "shingle")
             );
             // Zoo perimeter draws carto's purple boundary line.
             if matches!(
-                way.tags.get("tourism").map(|v| v.as_str()),
+                way.tags.get("tourism"),
                 Some("zoo" | "theme_park")
             ) {
                 if want_platforms {
-                    way.tags
-                        .insert("layer".to_string(), "tourism_boundary".to_string());
+                    way.tags.set_layer("tourism_boundary");
                     ways.push(way);
                 }
                 continue;
@@ -2490,19 +3989,18 @@ fn merge_detail_features(
             let is_attraction = way.tags.contains_key("name")
                 && (way.tags.contains_key("attraction")
                     || way.tags.contains_key("zoo")
-                    || way.tags.get("tourism").map(|v| v.as_str()) == Some("attraction"))
+                    || way.tags.get("tourism") == Some("attraction"))
                 && !(want_buildings && (is_building || is_building_part));
             if is_attraction {
                 if want_platforms {
-                    way.tags
-                        .insert("layer".to_string(), "attraction_area".to_string());
+                    way.tags.set_layer("attraction_area");
                     ways.push(way);
                 }
                 continue;
             }
             if is_green_patch {
                 if want_platforms {
-                    way.tags.insert("layer".to_string(), "detail_land".to_string());
+                    way.tags.set_layer("detail_land");
                     ways.push(way);
                 }
                 continue;
@@ -2511,13 +4009,12 @@ fn merge_detail_features(
             // base generalizes away; route them into the existing street-
             // area pipeline so fill, rank and labels all apply.
             let is_pedestrian_area = matches!(
-                way.tags.get("highway").map(|v| v.as_str()),
+                way.tags.get("highway"),
                 Some("pedestrian" | "footway")
-            ) || way.tags.get("place").map(|v| v.as_str()) == Some("square");
+            ) || way.tags.get("place") == Some("square");
             if is_pedestrian_area {
                 if want_platforms {
-                    way.tags
-                        .insert("layer".to_string(), "street_polygons".to_string());
+                    way.tags.set_layer("street_polygons");
                     ways.push(way);
                 }
                 continue;
@@ -2530,7 +4027,7 @@ fn merge_detail_features(
             }
             // Underground volumes (metro halls mapped as building:part,
             // parking cellars) must never extrude above ground.
-            if way.tags.get("location").map(|v| v.as_str()) == Some("underground")
+            if way.tags.get("location") == Some("underground")
                 || way
                     .tags
                     .get("osm_layer")
@@ -2538,21 +4035,20 @@ fn merge_detail_features(
             {
                 continue;
             }
-            way.tags
-                .insert("layer".to_string(), "detail_buildings".to_string());
+            way.tags.set_layer("detail_buildings");
             ways.push(way);
         }
     }
-    // MAKEPAD_DETAIL_KEY_CENSUS=1: distinct tag keys on forwarded detail
+    // Distinct tag keys on forwarded detail
     // ways — the ground truth for the parse whitelist above.
-    if std::env::var_os("MAKEPAD_DETAIL_KEY_CENSUS").is_some() {
+    if crate::makepad_platform::makepad_error_log::trace_enabled("map.census") {
         let mut census = std::collections::BTreeMap::<String, usize>::new();
         for way in ways.iter().skip(census_start) {
             for key in way.tags.keys() {
-                *census.entry(key.clone()).or_default() += 1;
+                *census.entry(key.to_string()).or_default() += 1;
             }
         }
-        eprintln!("DETAIL-KEY-CENSUS z{}/{}/{}: {census:?}", tile_key.z, tile_key.x, tile_key.y);
+        trace!("map.census", "z{}/{}/{}: {:?}", tile_key.z, tile_key.x, tile_key.y, census);
     }
     Ok(())
 }
@@ -2718,7 +4214,7 @@ fn chaikin_smooth_dz(
 
 /// Building height in meters from OSM tags: explicit `height`, else
 /// `building:levels` × 3m + roof allowance, else a modest default.
-fn building_height_m(tags: &HashMap<String, String>) -> f32 {
+fn building_height_m(tags: &impl TagLookup) -> f32 {
     if let Some(height) = tags.get("height") {
         let digits: String = height
             .trim()
@@ -2743,7 +4239,7 @@ fn building_height_m(tags: &HashMap<String, String>) -> f32 {
 
 /// Base height (bottom of the volume) for building:part features:
 /// `min_height` meters, else `building:min_level` x 3m.
-fn building_min_height_m(tags: &HashMap<String, String>) -> f32 {
+fn building_min_height_m(tags: &impl TagLookup) -> f32 {
     if let Some(min_height) = tags.get("min_height") {
         let digits: String = min_height
             .trim()
@@ -2922,217 +4418,26 @@ fn append_wall_quad(
     *zbias += VECTOR_ZBIAS_STEP;
 }
 
-/// T3 contact-shadow decal: a radial-gradient dark disc on the ground
-/// (alpha `strength` at center, 0 at the rim), material 6 so its darkness
-/// rides the live shadow uniform. A triangle fan — no tessellator involved.
-fn append_ground_shadow_disc(
-    center: (f32, f32),
-    radius_units: f32,
-    strength: f32,
-    depth_micro: f32,
-    out_vertices: &mut Vec<f32>,
-    out_indices: &mut Vec<u32>,
-    zbias: &mut f32,
-) {
-    const SEGS: u32 = 10;
-    let base = (out_vertices.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
-    let mut push_vertex = |x: f32, y: f32, alpha: f32| {
-        out_vertices.extend_from_slice(&[
-            x,
-            y,
-            0.5,
-            1.0,
-            0.0,
-            0.0,
-            0.0,
-            alpha,
-            1e6,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            MAT_SHADOW,
-            0.0,
-            depth_micro,
-            radius_units * 2.0,
-            *zbias,
-        ]);
-    };
-    push_vertex(center.0, center.1, strength);
-    for seg in 0..SEGS {
-        let a = seg as f32 / SEGS as f32 * std::f32::consts::TAU;
-        push_vertex(center.0 + a.cos() * radius_units, center.1 + a.sin() * radius_units, 0.0);
-    }
-    for seg in 0..SEGS {
-        let next = (seg + 1) % SEGS;
-        out_indices.extend_from_slice(&[base, base + 1 + seg, base + 1 + next]);
-    }
-    *zbias += VECTOR_ZBIAS_STEP;
-}
-
-/// Clip, winding-normalize and tessellate boolean shadow shapes into the
-/// icon buffer as material-6 decals. The boolean Difference can hand back
-/// hole rings wound like outers; un-normalized they invert the fill and
-/// paint self-overlapping wedges that z-fight (sharp corner lines +
-/// striping seen in review). Outer ring positive, holes negative.
+/// One building wall edge as a compact typed instance record:
+/// the shader builds the quad, lifts the top by the height and shades the
+/// bottom by the AO term — the same vertices `append_wall_quad` used to
+/// write. Takes the same zbias step so sibling geometry keeps its order.
 #[allow(clippy::too_many_arguments)]
-fn emit_shadow_shapes(
-    shapes: Vec<Vec<Vec<[f64; 2]>>>,
-    clip_bounds: GeoBounds,
-    aa: f32,
-    tolerance: f32,
-    path: &mut VectorPath,
-    tess: &mut Tessellator,
-    tess_verts: &mut Vec<VVertex>,
-    tess_indices: &mut Vec<u32>,
-    out_vertices: &mut Vec<f32>,
-    out_indices: &mut Vec<u32>,
+fn push_wall_instance(
+    out: &mut Vec<MapWallInstance>,
+    a: (f32, f32),
+    b: (f32, f32),
+    base_m: f32,
+    height_m: f32,
+    color: [f32; 4],
+    ao_bottom: f32,
+    clockwise: bool,
     zbias: &mut f32,
 ) {
-    for shape in shapes {
-        let mut any_ring = false;
-        for (ring_index, ring) in shape.iter().enumerate() {
-            let pts: Vec<(f32, f32)> = ring
-                .iter()
-                .map(|p| (p[0] as f32, p[1] as f32))
-                .collect();
-            let mut clipped = clip_ring_to_rect(&pts, clip_bounds);
-            if clipped.len() < 3 {
-                continue;
-            }
-            let area = polygon_signed_area(&clipped);
-            // Needle filter: the boolean leaves hair-thin slivers where a
-            // projected edge grazes a footprint. Average width below ~a
-            // decimeter of tile space reads as a dark pin — drop it.
-            let mut perimeter = 0.0f64;
-            for i in 0..clipped.len() {
-                let a = clipped[i];
-                let b = clipped[(i + 1) % clipped.len()];
-                perimeter +=
-                    (((b.0 - a.0) * (b.0 - a.0) + (b.1 - a.1) * (b.1 - a.1)) as f64).sqrt();
-            }
-            let min_width = (aa as f64 * 0.8).max(0.05);
-            if area.abs() < 0.02 || area.abs() / perimeter.max(1e-6) < min_width {
-                if ring_index == 0 {
-                    break;
-                }
-                continue;
-            }
-            if (ring_index == 0 && area < 0.0) || (ring_index > 0 && area > 0.0) {
-                clipped.reverse();
-            }
-            emit_path(path, &clipped, true);
-            any_ring = true;
-        }
-        if !any_ring {
-            continue;
-        }
-        // Bevel joins: after the footprint subtraction the shadow boundary
-        // meets building corners at acute angles, and a miter fringe
-        // extrudes long dark spikes past the silhouette.
-        tessellate_path_fill(
-            path,
-            tess,
-            tess_verts,
-            tess_indices,
-            LineJoin::Bevel,
-            1.0,
-            aa,
-            false,
-            tolerance,
-        );
-        // ICON buffer (pass 3, after the road strokes), like the district
-        // tints: in a city almost all ground between buildings is road
-        // surface, and a shadow in the fill pass would be painted over by
-        // every street. Full-dark premultiplied black; the material-6
-        // shader branch scales it by the live shadow_alpha uniform.
-        append_tessellated_geometry(
-            tess_verts,
-            tess_indices,
-            out_vertices,
-            out_indices,
-            VectorRenderParams {
-                color: [0.0, 0.0, 0.0, 1.0],
-                stroke_mult: 1e6,
-                shape_id: 0.0,
-                params: [0.0, 0.0, 0.0, MAT_SHADOW, 0.0, SHADOW_DECAL_DEPTH],
-                zbias: *zbias,
-            },
-        );
-        *zbias += VECTOR_ZBIAS_STEP;
-    }
-}
-
-/// Miter-offset a positively wound ring outward by `amount` (tile units).
-/// Used to dilate the footprints subtracted from the shadow union: real
-/// sub-meter slits between abutting building sections otherwise collect
-/// shadow and read as dark hairline spikes between the walls.
-fn dilate_ring(ring: &[(f32, f32)], amount: f32) -> Vec<(f32, f32)> {
-    let n = ring.len();
-    if n < 3 || amount <= 0.0 {
-        return ring.to_vec();
-    }
-    let edge_normal = |i: usize| -> Option<(f32, f32)> {
-        let a = ring[i % n];
-        let b = ring[(i + 1) % n];
-        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
-        let len = (dx * dx + dy * dy).sqrt();
-        if len < 1e-4 {
-            return None;
-        }
-        // Outward normal of a positively wound (y-down clockwise) ring.
-        Some((dy / len, -dx / len))
-    };
-    let mut out = Vec::with_capacity(n);
-    for i in 0..n {
-        let prev = (0..n)
-            .map(|k| (i + n - 1 - k) % n)
-            .find_map(edge_normal)
-            .unwrap_or((0.0, 0.0));
-        let next = (0..n).map(|k| (i + k) % n).find_map(edge_normal).unwrap_or(prev);
-        let (mx, my) = (prev.0 + next.0, prev.1 + next.1);
-        let len = (mx * mx + my * my).sqrt();
-        if len < 1e-4 {
-            out.push(ring[i]);
-            continue;
-        }
-        let scale = (2.0 / len).min(2.0);
-        out.push((
-            ring[i].0 + mx / len * amount * scale,
-            ring[i].1 + my / len * amount * scale,
-        ));
-    }
-    out
-}
-
-/// Even-odd point-in-shapes over i_overlay output (outer rings + holes):
-/// used to drop contact-shadow discs for trees already standing inside a
-/// building's cast shadow (stacked decals double-darken and z-fight).
-fn point_in_shadow_shapes(p: (f32, f32), shapes: &[Vec<Vec<[f64; 2]>>]) -> bool {
-    let (px, py) = (p.0 as f64, p.1 as f64);
-    for shape in shapes {
-        let mut inside = false;
-        for ring in shape {
-            let n = ring.len();
-            if n < 3 {
-                continue;
-            }
-            let mut j = n - 1;
-            for i in 0..n {
-                let (xi, yi) = (ring[i][0], ring[i][1]);
-                let (xj, yj) = (ring[j][0], ring[j][1]);
-                if (yi > py) != (yj > py) && px < xi + (py - yi) / (yj - yi) * (xj - xi) {
-                    inside = !inside;
-                }
-                j = i;
-            }
-        }
-        if inside {
-            return true;
-        }
-    }
-    false
+    out.push(MapWallInstance::new(
+        a, b, base_m, height_m, color, ao_bottom, clockwise, *zbias,
+    ));
+    *zbias += VECTOR_ZBIAS_STEP;
 }
 
 /// T2 roof-edge/parapet AO: a gradient quad strip hugging the roof outline,
@@ -3255,7 +4560,7 @@ fn append_roof_edge_ao(
 /// A way in tile-local coordinates ready for styling/tessellation.
 pub struct TileWay {
     pub points: Vec<(f32, f32)>,
-    pub tags: HashMap<String, String>,
+    pub tags: TagSet,
     pub closed: bool,
     /// Baked per-vertex deck height (m), aligned with `points` — from the
     /// base_dz overlay join. The way lifts off its own profile.
@@ -3264,14 +4569,603 @@ pub struct TileWay {
     /// the baked fill stream (protobuf field 100, payload v2-fills-1).
     /// None for ways that did not come from a plain base-tile decode.
     pub fidx: Option<u32>,
+    /// Parse-local polygon identity and ring order, kept as integers instead
+    /// of allocating internal string tags for every emitted ring.
+    pub feature_group: Option<u64>,
+    pub ring_index: Option<u32>,
 }
 
-/// Stage clock for MP_TILE_PROFILE=1: per-stage wall time to stderr, so the
+/// Stage clock for `map.tile_profile`: per-stage wall time, so the
 /// generator's cost distribution is measurable headless and in-app alike.
+struct ProfileClock(f64);
+
+impl ProfileClock {
+    fn now() -> Self {
+        Self(Cx::monotonic_now())
+    }
+
+    fn elapsed_seconds(&self) -> f64 {
+        Cx::monotonic_now() - self.0
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn profile_clock_elapsed_is_non_negative() {
+    let clock = ProfileClock::now();
+    assert!(clock.elapsed_seconds() >= 0.0);
+}
+
+#[cfg(test)]
+#[test]
+fn typed_stream_keeps_small_mesh_as_one_u16_chunk() {
+    let stream = TypedStream::from_u32(vec![0, 1, 2], vec![0; 65_535 * 4], 4);
+    assert_eq!(stream.chunks.len(), 1);
+    assert_eq!(stream.chunks[0].vertices.len(), 65_535 * 4);
+    assert_eq!(stream.chunks[0].indices, vec![0, 1, 2]);
+    assert_eq!(stream.byte_size(), 65_535 * 4 + 3 * 2);
+}
+
+#[cfg(test)]
+#[test]
+fn typed_stream_chunks_70k_vertices_without_splitting_triangles() {
+    const VERTICES: u32 = 70_000;
+    let mut vertices = Vec::with_capacity(VERTICES as usize * 4);
+    for index in 0..VERTICES {
+        vertices.extend_from_slice(&index.to_le_bytes());
+    }
+    let mut indices = Vec::with_capacity((VERTICES as usize - 2) * 3);
+    for index in 1..VERTICES - 1 {
+        indices.extend_from_slice(&[0, index, index + 1]);
+    }
+
+    let stream = TypedStream::from_u32(indices.clone(), vertices, 4);
+    assert!(stream.chunks.len() > 1);
+    assert!(stream.chunks.iter().all(|chunk| {
+        chunk.vertices.len() / 4 < 65_536
+            && chunk.indices.len() % 3 == 0
+            && chunk.indices.iter().all(|&index| index as usize * 4 < chunk.vertices.len())
+    }));
+
+    let reassembled: Vec<u32> = stream
+        .chunks
+        .iter()
+        .flat_map(|chunk| {
+            chunk.indices.iter().map(|&index| {
+                let start = index as usize * 4;
+                u32::from_le_bytes(chunk.vertices[start..start + 4].try_into().unwrap())
+            })
+        })
+        .collect();
+    assert_eq!(reassembled, indices);
+    assert_eq!(stream.index_count(), indices.len());
+    assert_eq!(stream.source_vertex_count(), VERTICES as usize);
+    assert!(stream.duplicate_vertex_count() > 0);
+    assert!(stream.byte_size() < stream.unchunked_byte_size(4));
+}
+
+#[cfg(test)]
+#[test]
+fn map_prop_instance_packing_roundtrips() {
+    use std::mem::{align_of, offset_of, size_of};
+
+    let logical_color = [0.17, 0.41, 0.73, 1.0];
+    let packed = MapPropInstance::new(
+        (123.25, -4.5),
+        (0.125, 42.75),
+        logical_color,
+        37.0 * VECTOR_ZBIAS_STEP,
+    );
+    assert_eq!(size_of::<MapPropInstance>(), 24);
+    assert_eq!(MAP_PROP_INSTANCE_BYTES, 24);
+    assert_eq!(align_of::<MapPropInstance>(), 4);
+    assert_eq!(offset_of!(MapPropInstance, anchor), 0);
+    assert_eq!(offset_of!(MapPropInstance, size), 8);
+    assert_eq!(offset_of!(MapPropInstance, color), 16);
+    assert_eq!(offset_of!(MapPropInstance, zbias), 20);
+    assert_eq!(packed.anchor, vec2(123.25, -4.5));
+    assert_eq!(packed.size, vec2(0.125, 42.75));
+    let color = packed.color.to_f32();
+    for (actual, expected) in [color.0, color.1, color.2, color.3]
+        .into_iter()
+        .zip(logical_color)
+    {
+        assert!((actual - expected).abs() <= 0.5 / 255.0 + f32::EPSILON);
+    }
+    let color_lane = u32::from_le_bytes(packed.color.0);
+    assert_eq!(UNorm8x4(f32::from_bits(color_lane).to_bits().to_le_bytes()), packed.color);
+    assert_eq!(packed.zbias, 37.0 * VECTOR_ZBIAS_STEP);
+}
+
+#[cfg(test)]
+#[test]
+fn map_wall_instance_packing_roundtrips() {
+    use std::mem::{align_of, offset_of, size_of};
+
+    let logical_a = (123.25, -4.5);
+    let logical_b = (124.5, 2.25);
+    let logical_heights = (12.34, 83.125);
+    let logical_color = [0.17, 0.41, 0.73, 1.0];
+    let logical_ao = 0.77;
+    let zbias = 321.0 * VECTOR_ZBIAS_STEP;
+    let packed = MapWallInstance::new(
+        logical_a,
+        logical_b,
+        logical_heights.0,
+        logical_heights.1,
+        logical_color,
+        logical_ao,
+        true,
+        zbias,
+    );
+
+    assert_eq!(size_of::<MapWallInstance>(), 20);
+    assert_eq!(MAP_WALL_INSTANCE_BYTES, 20);
+    assert_eq!(align_of::<MapWallInstance>(), 2);
+    assert_eq!(offset_of!(MapWallInstance, a), 0);
+    assert_eq!(offset_of!(MapWallInstance, b), 4);
+    assert_eq!(offset_of!(MapWallInstance, heights), 8);
+    assert_eq!(offset_of!(MapWallInstance, ao_zbias), 12);
+    assert_eq!(offset_of!(MapWallInstance, color), 16);
+
+    let a = MapWallInstance::unpack_position(packed.a);
+    let b = MapWallInstance::unpack_position(packed.b);
+    for (actual, expected) in [(a.x, logical_a.0), (a.y, logical_a.1), (b.x, logical_b.0), (b.y, logical_b.1)] {
+        assert!((actual - expected).abs() <= 0.5 / MAP_VERTEX_POSITION_SCALE);
+    }
+    let heights = packed.unpack_heights();
+    assert!((heights.0 - logical_heights.0).abs() <= 0.005);
+    assert!((heights.1 - logical_heights.1).abs() <= 0.005);
+    let (ao, zbias_ticks) = packed.ao_zbias.to_f32();
+    assert!((ao - logical_ao).abs() <= 0.0005);
+    assert!((zbias_ticks * VECTOR_ZBIAS_STEP - zbias).abs() <= VECTOR_ZBIAS_STEP * 0.5);
+    let color = packed.color.to_f32();
+    for (actual, expected) in [color.0, color.1, color.2, color.3]
+        .into_iter()
+        .zip(logical_color)
+    {
+        assert!((actual - expected).abs() <= 0.5 / 255.0 + f32::EPSILON);
+    }
+
+    let courtyard = MapWallInstance::new(
+        logical_a,
+        logical_b,
+        0.0,
+        8.0,
+        logical_color,
+        1.0,
+        false,
+        0.0,
+    );
+    assert_eq!(courtyard.a, packed.b);
+    assert_eq!(courtyard.b, packed.a);
+}
+
+#[cfg(test)]
+#[test]
+fn lifted_marker_emits_one_stalk_instance_and_no_generic_3d_misc() {
+    let tags = TagSet::from(HashMap::from([
+        ("layer".to_string(), "pois".to_string()),
+        ("amenity".to_string(), "cafe".to_string()),
+        ("name".to_string(), "Stalk fixture".to_string()),
+    ]));
+    let buffers = build_tile_buffers_from_features(
+        TileKey { z: 14, x: 8414, y: 5384 },
+        &[],
+        &[((128.0, 96.0), tags)],
+        &probe_compiled_theme(),
+        16,
+        true,
+        true,
+        Vec::new(),
+        false,
+        false,
+        Vec::new(),
+        None,
+    );
+    assert_eq!(buffers.stalk_instances.len(), 1);
+    assert_eq!(buffers.stalk_instances[0].anchor, vec2(128.0, 96.0));
+    assert_eq!(buffers.stalk_instances[0].size.y, 18.0);
+    assert!(!buffers.stalk_template_indices.is_empty());
+    assert!(buffers.fill_3d_misc_indices.is_empty());
+    assert!(buffers.fill_3d_misc_vertices.is_empty());
+}
+
+#[cfg(test)]
+#[test]
+fn compact_fill_record_roundtrips_within_packed_precision() {
+    use crate::makepad_draw::vector::{
+        pack_fill_record, unpack_fill_depths, unpack_typed_position,
+    };
+
+    let mut record = [0.0f32; VECTOR_FLOATS_PER_VERTEX];
+    record[0] = 123.25;
+    record[1] = -45.5;
+    record[2] = 0.37;
+    record[4..8].copy_from_slice(&[0.13, 0.47, 0.81, 0.62]);
+    record[8] = 1e6;
+    record[10] = 30.0;
+    record[14] = 5.0;
+    record[16] = 0.00873;
+    record[18] = 0.004321;
+
+    let packed = pack_fill_record(&record).unwrap();
+    assert_eq!(
+        std::mem::size_of::<crate::makepad_draw::geometry::geometry_gen::FillVertexTyped>(),
+        16
+    );
+    let pos = unpack_typed_position(packed.pos);
+    assert!((pos.0 - record[0]).abs() <= 1.0 / 64.0);
+    assert!((pos.1 - record[1]).abs() <= 1.0 / 64.0);
+    let (code, coverage) = packed.params.to_f32();
+    assert_eq!(code, 30.0);
+    assert!((coverage - record[2]).abs() <= 0.00025);
+    let rgba = packed.color.to_f32();
+    for (channel, unpacked) in record[4..8]
+        .iter()
+        .zip([rgba.0, rgba.1, rgba.2, rgba.3])
+    {
+        assert!((unpacked - channel).abs() <= 0.5 / 255.0 + f32::EPSILON);
+    }
+    let (zbias, param5) = unpack_fill_depths(packed.zbias);
+    assert!((zbias - record[18]).abs() <= VECTOR_ZBIAS_STEP * 0.5 + f32::EPSILON);
+    assert!((param5 - record[16]).abs() <= 0.000005 + f32::EPSILON);
+}
+
+#[cfg(test)]
+#[test]
+fn road_vertex_pack_round_trips_deck_depth_ticks_uv_and_pixel_fields() {
+    use crate::makepad_draw::geometry::geometry_gen::RoadVertexTyped;
+    use crate::makepad_draw::vector::{
+        decode_road_vertex, ROAD_PARAM_KIND_SCALE, ROAD_TYPED_VERTEX_BYTES,
+    };
+
+    assert_eq!(std::mem::size_of::<RoadVertexTyped>(), 28);
+    let mut record = [0.0f32; VECTOR_FLOATS_PER_VERTEX];
+    record[0] = 14.0;
+    record[1] = 27.0;
+    record[2] = 0.25;
+    record[3] = 0.625;
+    record[4..8].copy_from_slice(&[0.1, 0.3, 0.7, 1.0]);
+    record[9] = 511.5;
+    record[10] = 112.0;
+    record[12] = -1.75;
+    record[13] = 2.5;
+    record[14] = 1.0;
+    record[15] = 100.25;
+    record[16] = 0.384;
+    record[18] = 321.0 * VECTOR_ZBIAS_STEP;
+    let packed = pack_road_vertices(&record);
+    assert_eq!(packed.len(), ROAD_TYPED_VERTEX_BYTES);
+    let packed = decode_road_vertex(&packed);
+    let (ox, oy) = packed.off.to_f32();
+    assert!((ox + 1.75).abs() < 0.002 && (oy - 2.5).abs() < 0.002);
+    let rgba = packed.color.to_f32();
+    for (actual, expected) in [rgba.0, rgba.1, rgba.2, rgba.3]
+        .into_iter()
+        .zip([0.1f32, 0.3, 0.7, 1.0])
+    {
+        assert!((actual - expected).abs() <= 0.5 / 255.0 + f32::EPSILON);
+    }
+    let (meta, stroke_dist) = packed.params.to_f32();
+    assert_eq!(meta, 1.0 + 64.0 * 3.0 + 1024.0);
+    assert_eq!(stroke_dist, record[9]);
+    assert_eq!(packed.deck, 100.25);
+    let (param5, zbias_ticks) = packed.depth.to_f32();
+    assert!((param5 - record[16]).abs() < 0.0002);
+    assert_eq!(zbias_ticks, 321.0);
+    let (u, v) = packed.uv.to_f32();
+    assert!((u - record[2]).abs() < 0.001);
+    assert!((v - record[3]).abs() < 0.001);
+
+    record[2] = -1.0;
+    record[3] = 0.375;
+    record[8] = VECTOR_ANALYTIC_FRINGE_STROKE_MULT;
+    record[10] = 0.0;
+    record[14] = 3.0;
+    let packed = decode_road_vertex(&pack_road_vertices(&record));
+    let (meta, coverage) = packed.params.to_f32();
+    assert_eq!(meta, 24.0 + ROAD_PARAM_KIND_SCALE * 2.0);
+    assert_eq!(coverage, 0.0);
+    let (u, v) = packed.uv.to_f32();
+    assert_eq!(u, -1.0);
+    assert!((v - 0.375).abs() < 0.001);
+
+    record[2] = 0.5;
+    record[8] = 1e6;
+    record[12] = 0.35;
+    record[14] = 7.0;
+    let packed = decode_road_vertex(&pack_road_vertices(&record));
+    let (meta, emissive) = packed.params.to_f32();
+    assert_eq!(meta, 8.0 * 7.0 + ROAD_PARAM_KIND_SCALE);
+    assert!((emissive - 0.35).abs() < 0.001);
+}
+
+#[cfg(test)]
+#[test]
+fn split_fringe_band_then_road_pack_round_trips() {
+    use crate::makepad_draw::vector::{
+        decode_road_vertex, ROAD_PARAM_KIND_SCALE, ROAD_TYPED_VERTEX_BYTES,
+    };
+
+    fn push_record(buf: &mut Vec<f32>, x: f32, u: f32, stroke_mult: f32) {
+        let mut record = [0.0f32; VECTOR_FLOATS_PER_VERTEX];
+        record[0] = x;
+        record[1] = 20.0;
+        record[2] = u;
+        record[4..8].copy_from_slice(&[0.2, 0.4, 0.6, 1.0]);
+        record[8] = stroke_mult;
+        buf.extend_from_slice(&record);
+    }
+
+    let mut vertices = Vec::new();
+    push_record(&mut vertices, 10.0, 0.5, 1e6);
+    push_record(&mut vertices, 12.0, 0.5, 1e6);
+    push_record(&mut vertices, 11.0, 0.5, 1e6);
+    push_record(&mut vertices, 11.0, 0.0, VECTOR_ANALYTIC_FRINGE_STROKE_MULT);
+    push_record(&mut vertices, 15.0, -1.0, VECTOR_ANALYTIC_FRINGE_STROKE_MULT);
+    push_record(&mut vertices, 13.0, -0.5, VECTOR_ANALYTIC_FRINGE_STROKE_MULT);
+    let mut indices = vec![0, 1, 2, 3, 4, 5];
+    let (fringe_vertices, fringe_indices) = split_fringe_band(&mut vertices, &mut indices);
+
+    assert_eq!(vertices.len(), VECTOR_FLOATS_PER_VERTEX * 3);
+    assert_eq!(indices, vec![0, 1, 2]);
+    assert_eq!(fringe_vertices.len(), VECTOR_FLOATS_PER_VERTEX * 3);
+    assert_eq!(fringe_indices, vec![0, 1, 2]);
+
+    let packed_body = pack_road_vertices(&vertices);
+    assert_eq!(packed_body.len(), ROAD_TYPED_VERTEX_BYTES * 3);
+    let (meta, coverage) = decode_road_vertex(&packed_body).params.to_f32();
+    assert_eq!(meta, ROAD_PARAM_KIND_SCALE);
+    assert!((coverage - 0.5).abs() < 0.001);
+
+    let packed_fringe = pack_road_vertices(&fringe_vertices);
+    assert_eq!(packed_fringe.len(), ROAD_TYPED_VERTEX_BYTES * 3);
+    let (meta0, cov0) = decode_road_vertex(&packed_fringe).params.to_f32();
+    let (meta1, cov1) = decode_road_vertex(&packed_fringe[ROAD_TYPED_VERTEX_BYTES..]).params.to_f32();
+    assert_eq!(meta0, ROAD_PARAM_KIND_SCALE * 2.0);
+    assert_eq!(meta1, ROAD_PARAM_KIND_SCALE * 2.0);
+    assert!((cov0 - 1.0).abs() < 0.001);
+    assert_eq!(cov1, 0.0);
+}
+
+#[cfg(test)]
+#[test]
+fn map_face_band_split_requires_all_three_triangle_records() {
+    use crate::makepad_draw::vector::{
+        pack_road_record, FACE_TYPED_VERTEX_BYTES, ROAD_KIND_FILL,
+        ROAD_PARAM_KIND_SCALE,
+    };
+
+    // RoadPaintEvent::Face emits this exact record shape for a deck field
+    // crossing ground: fill uv throughout, but a per-vertex ramp height.
+    let verts = [
+        VVertex { x: 0.0, y: 0.0, u: 0.5, v: 1.0, ..Default::default() },
+        VVertex { x: 1.0, y: 0.0, u: 0.5, v: 1.0, ..Default::default() },
+        VVertex { x: 0.0, y: 1.0, u: 0.5, v: 1.0, ..Default::default() },
+        VVertex { x: 2.0, y: 0.0, u: 0.5, v: 1.0, ..Default::default() },
+        VVertex { x: 3.0, y: 0.0, u: 0.5, v: 1.0, ..Default::default() },
+        VVertex { x: 2.0, y: 1.0, u: 0.5, v: 1.0, ..Default::default() },
+    ];
+    let source_indices = [0, 1, 2, 3, 4, 5];
+    let decks = [0.0, 0.25, 0.5, 0.0, 0.0, 0.0];
+    let mut casing_vertices = Vec::new();
+    let mut casing_indices = Vec::new();
+    append_tessellated_geometry_decked(
+        &verts,
+        &source_indices,
+        &mut casing_vertices,
+        &mut casing_indices,
+        VectorRenderParams {
+            color: [0.2, 0.4, 0.6, 1.0],
+            stroke_mult: 1e6,
+            shape_id: 0.0,
+            params: [0.0; 6],
+            zbias: 0.0,
+        },
+        Some(&decks),
+    );
+
+    let emitted = casing_vertices.clone();
+    let (face_vertices, face_indices) = split_band_by_all(
+        &mut casing_vertices,
+        &mut casing_indices,
+        is_compact_face_record,
+    );
+
+    assert_eq!(casing_indices, [0, 1, 2], "the mixed ramp triangle stays on the road path");
+    assert_eq!(face_indices, [0, 1, 2], "the wholly compact triangle moves to the face path");
+    assert_eq!(casing_vertices, emitted[..3 * VECTOR_FLOATS_PER_VERTEX]);
+    assert_eq!(face_vertices, emitted[3 * VECTOR_FLOATS_PER_VERTEX..]);
+    for (record, expected_deck) in emitted
+        .chunks_exact(VECTOR_FLOATS_PER_VERTEX)
+        .take(3)
+        .zip(decks)
+    {
+        let road = pack_road_record(record);
+        assert_eq!(road.off.to_f32(), (0.0, 0.0));
+        assert_eq!(road.deck, expected_deck);
+        assert_eq!(road.uv.to_f32(), (0.5, 1.0));
+        assert_eq!(road.params.to_f32().0, ROAD_PARAM_KIND_SCALE * ROAD_KIND_FILL);
+    }
+    assert_eq!(pack_face_vertices(&face_vertices).len(), 3 * FACE_TYPED_VERTEX_BYTES);
+}
+
+/// A primary road (a union tier) crossing nothing, and a tram line (a
+/// patterned stroke that stays on the road layout).
+#[cfg(test)]
+fn primary_road_and_tram_bake(want_fringe: bool) -> TileBuffers {
+    let ways = vec![
+        TileWay {
+            points: vec![(24.0, 128.0), (232.0, 128.0)],
+            tags: HashMap::from([
+                ("layer".to_string(), "streets".to_string()),
+                ("highway".to_string(), "primary".to_string()),
+            ])
+            .into(),
+            closed: false,
+            dz: None,
+            fidx: None,
+            feature_group: None,
+            ring_index: None,
+        },
+        TileWay {
+            points: vec![(24.0, 80.0), (232.0, 80.0)],
+            tags: HashMap::from([
+                ("layer".to_string(), "streets".to_string()),
+                ("highway".to_string(), "tram".to_string()),
+                ("rail".to_string(), "true".to_string()),
+            ])
+            .into(),
+            closed: false,
+            dz: None,
+            fidx: None,
+            feature_group: None,
+            ring_index: None,
+        },
+    ];
+    build_tile_buffers_from_features_profiled(
+        TileProfiler::new(),
+        TileKey { z: 14, x: 0, y: 0 },
+        &ways,
+        &Vec::new(),
+        &probe_compiled_theme(),
+        16,
+        false,
+        want_fringe,
+        true,
+        Vec::new(),
+        false,
+        false,
+        Vec::new(),
+        None,
+    )
+}
+
+#[cfg(test)]
+#[test]
+fn fringe_free_bake_keeps_road_core_byte_identical() {
+    let with_fringe = primary_road_and_tram_bake(true);
+    let without_fringe = primary_road_and_tram_bake(false);
+    assert!(!with_fringe.fringe.is_empty());
+    assert!(with_fringe.fringe.index_count() > 0);
+    assert!(!with_fringe.stroke.is_empty());
+    assert!(with_fringe.stroke.index_count() > 0);
+    assert!(without_fringe.fringe.is_empty());
+    assert_eq!(without_fringe.face, with_fringe.face);
+    assert_eq!(without_fringe.casing, with_fringe.casing);
+    assert_eq!(without_fringe.stroke, with_fringe.stroke);
+}
+
+/// Every stream a face bake touches, checked against what the road layout
+/// would have held: each face record reads back as exactly one road record
+/// (offset 0, deck 0, uv (0.5, 1), fill kind), the road layout keeps nothing
+/// the face layout could carry, and the face indices are whole triangles
+/// over the face vertices.
+#[cfg(test)]
+fn assert_face_stream_is_the_road_form(buffers: &TileBuffers, what: &str) -> usize {
+    use crate::makepad_draw::vector::{
+        decode_face_vertex, decode_road_vertex, face_record_from_road, road_record_from_face,
+        FACE_IMPLICIT_DECK, FACE_IMPLICIT_OFF, FACE_IMPLICIT_UV, ROAD_KIND_FILL,
+        ROAD_PARAM_KIND_SCALE,
+    };
+    let face_count = buffers.face.vertex_count(FACE_TYPED_VERTEX_BYTES);
+    for stream_chunk in &buffers.face.chunks {
+        assert_eq!(stream_chunk.vertices.len() % FACE_TYPED_VERTEX_BYTES, 0, "{what}");
+        assert_eq!(stream_chunk.indices.len() % 3, 0, "{what}");
+        let chunk_vertex_count = stream_chunk.vertices.len() / FACE_TYPED_VERTEX_BYTES;
+        assert!(
+            stream_chunk.indices.iter().all(|&index| (index as usize) < chunk_vertex_count),
+            "{what}: face index out of range"
+        );
+    }
+    for chunk in buffers.face.vertex_records(FACE_TYPED_VERTEX_BYTES) {
+        let face = decode_face_vertex(chunk);
+        let road = road_record_from_face(face);
+        assert_eq!(face_record_from_road(road), Some(face), "{what}");
+        assert_eq!(road.off, FACE_IMPLICIT_OFF, "{what}");
+        assert_eq!(road.deck.to_bits(), FACE_IMPLICIT_DECK.to_bits(), "{what}");
+        assert_eq!(road.uv.to_f32(), FACE_IMPLICIT_UV, "{what}");
+        let (meta, aux) = face.params.to_f32();
+        assert_eq!((meta / ROAD_PARAM_KIND_SCALE).floor(), ROAD_KIND_FILL, "{what}: kind");
+        let material = ((meta % 64.0) / 8.0).floor();
+        if material < 6.5 {
+            // Non-emissive faces carry their coverage, which is the fill uv.
+            assert_eq!(aux, FACE_IMPLICIT_UV.0, "{what}: coverage");
+        }
+    }
+    for chunk in buffers.casing.vertex_records(ROAD_TYPED_VERTEX_BYTES) {
+        assert!(
+            face_record_from_road(decode_road_vertex(chunk)).is_none(),
+            "{what}: a face record stayed on the road layout"
+        );
+    }
+    face_count
+}
+
+#[cfg(test)]
+#[test]
+fn union_faces_take_the_face_layout_and_keep_their_road_form() {
+    use crate::makepad_draw::vector::{decode_road_vertex, ROAD_PARAM_EXPANDED_FLAG};
+    let buffers = primary_road_and_tram_bake(true);
+    let face_count = assert_face_stream_is_the_road_form(&buffers, "primary + tram");
+    assert!(face_count > 0, "the primary road's union faces");
+    assert_eq!(
+        buffers.stream_bytes()[2],
+        buffers.face.byte_size()
+    );
+    // The road layout keeps the expandable strokes (the tram's dashes among
+    // them) exactly as before the split.
+    let expanded = buffers
+        .casing
+        .vertex_records(ROAD_TYPED_VERTEX_BYTES)
+        .chain(buffers.stroke.vertex_records(ROAD_TYPED_VERTEX_BYTES))
+        .filter(|chunk| decode_road_vertex(chunk).params.to_f32().0 >= ROAD_PARAM_EXPANDED_FLAG)
+        .count();
+    assert!(expanded > 0);
+}
+
+#[cfg(test)]
+#[test]
+fn compact_roof_record_keeps_exact_height_and_rejects_extra_depth() {
+    use crate::makepad_draw::vector::{
+        pack_roof_record, unpack_typed_position,
+    };
+
+    let mut record = [0.0f32; VECTOR_FLOATS_PER_VERTEX];
+    record[0] = 123.25;
+    record[1] = -45.5;
+    record[2] = 0.5;
+    record[3] = 1.0;
+    record[4..8].copy_from_slice(&[0.13, 0.47, 0.81, 1.0]);
+    record[8] = 1e6;
+    record[14] = MAT_ROOF;
+    record[15] = 83.125;
+    record[16] = BUILDING_SURFACE_DEPTH + 0.30;
+    record[17] = 90.0;
+    record[18] = 0.0015;
+
+    let packed = pack_roof_record(&record).unwrap();
+    assert_eq!(
+        std::mem::size_of::<crate::makepad_draw::geometry::geometry_gen::RoofVertexTyped>(),
+        16
+    );
+    let pos = unpack_typed_position(packed.pos);
+    assert!((pos.0 - record[0]).abs() <= 1.0 / 64.0);
+    assert!((pos.1 - record[1]).abs() <= 1.0 / 64.0);
+    assert_eq!(packed.height, record[15]);
+    let (material, zbias_ticks) = packed.params.to_f32();
+    assert_eq!(material, MAT_ROOF);
+    assert_eq!(zbias_ticks, 1500.0);
+
+    record[16] += DEPTH_MICRO_PER_RANK;
+    assert!(pack_roof_record(&record).is_none());
+}
+
 struct TileProfiler {
     on: bool,
-    last: std::time::Instant,
-    start: std::time::Instant,
+    last: ProfileClock,
+    start: ProfileClock,
     /// Always recorded (cheap): fuels the SLOW-tile replay log even when
     /// stage printing is off.
     laps: Vec<(&'static str, f64)>,
@@ -3279,23 +5173,19 @@ struct TileProfiler {
 
 impl TileProfiler {
     fn new() -> TileProfiler {
-        let now = std::time::Instant::now();
-        // File flag reaches studio-launched apps where env vars cannot.
         TileProfiler {
-            on: std::env::var_os("MP_TILE_PROFILE").is_some()
-                || std::env::var_os("MAKEPAD_TILE_STAGES").is_some()
-                || std::path::Path::new("/tmp/mp_tile_profile").exists(),
-            last: now,
-            start: now,
+            on: crate::makepad_platform::makepad_error_log::trace_enabled("map.tile_profile"),
+            last: ProfileClock::now(),
+            start: ProfileClock::now(),
             laps: Vec::new(),
         }
     }
     fn lap(&mut self, name: &'static str, extra: &str) {
-        let now = std::time::Instant::now();
-        let ms = (now - self.last).as_secs_f64() * 1000.0;
+        let now = ProfileClock::now();
+        let ms = self.last.elapsed_seconds() * 1000.0;
         self.laps.push((name, ms));
         if self.on {
-            eprintln!("MPPROF {name} {ms:.1}ms {extra}");
+            trace!("map.tile_profile", "{name} {ms:.1}ms {extra}");
         }
         self.last = now;
     }
@@ -3318,70 +5208,22 @@ impl TileProfiler {
         if !self.on {
             return;
         }
-        eprintln!(
-            "MPPROF TOTAL z{}/{}/{} {:.1}ms {extra}",
+        trace!(
+            "map.tile_profile",
+            "TOTAL z{}/{}/{} {:.1}ms {extra}",
             tile_key.z,
             tile_key.x,
             tile_key.y,
-            self.start.elapsed().as_secs_f64() * 1000.0
+            self.start.elapsed_seconds() * 1000.0
         );
     }
-}
-
-/// Deck (overpass) ground-shadow shapes: chunked dissolve of the swept
-/// slab quads, minus grounded building footprints. Deterministic per
-/// (tile, bucket) — baked into the shadow section at capture time; the
-/// runtime only runs this on a shadow-bake MISS.
-fn dissolve_deck_shadows(
-    deck_shadow_paths: Vec<Vec<[f64; 2]>>,
-    building_shadow_footprints: &[Vec<[f64; 2]>],
-) -> Vec<Vec<Vec<[f64; 2]>>> {
-    use i_overlay::core::fill_rule::FillRule as IoFillRule;
-    use i_overlay::core::overlay_rule::OverlayRule;
-    use i_overlay::float::simplify::SimplifyShape;
-    use i_overlay::float::single::SingleFloatOverlay;
-    const DECK_SHADOW_CHUNK: usize = 3000;
-    let mut shapes = if deck_shadow_paths.len() <= DECK_SHADOW_CHUNK {
-        deck_shadow_paths.simplify_shape(IoFillRule::NonZero)
-    } else {
-        let mut acc: Vec<Vec<Vec<[f64; 2]>>> = Vec::new();
-        for chunk in deck_shadow_paths.chunks(DECK_SHADOW_CHUNK) {
-            let part = chunk.to_vec().simplify_shape(IoFillRule::NonZero);
-            if acc.is_empty() {
-                acc = part;
-            } else {
-                let part_paths: Vec<Vec<[f64; 2]>> = part
-                    .iter()
-                    .flat_map(|shape| shape.iter().cloned())
-                    .collect();
-                acc = part_paths.overlay(&acc, OverlayRule::Union, IoFillRule::NonZero);
-            }
-        }
-        acc
-    };
-    if !building_shadow_footprints.is_empty() {
-        let mut acc = shapes;
-        for chunk in building_shadow_footprints.chunks(DECK_SHADOW_CHUNK) {
-            let subject: Vec<Vec<[f64; 2]>> = acc
-                .iter()
-                .flat_map(|shape| shape.iter().cloned())
-                .collect();
-            acc = subject.overlay(
-                &chunk.to_vec().simplify_shape(IoFillRule::NonZero),
-                OverlayRule::Difference,
-                IoFillRule::NonZero,
-            );
-        }
-        shapes = acc;
-    }
-    shapes
 }
 
 #[allow(clippy::too_many_arguments)]
 fn build_tile_buffers_from_features(
     tile_key: TileKey,
-    tile_ways: Vec<TileWay>,
-    tagged_points: Vec<((f32, f32), HashMap<String, String>)>,
+    tile_ways: &[TileWay],
+    tagged_points: &[((f32, f32), TagSet)],
     theme: &CompiledMapTheme,
     render_zoom: u32,
     buildings_3d: bool,
@@ -3400,6 +5242,7 @@ fn build_tile_buffers_from_features(
         theme,
         render_zoom,
         buildings_3d,
+        true,
         build_road_core,
         bridge_corridors,
         bridge_dz_covered,
@@ -3416,11 +5259,12 @@ fn build_tile_buffers_from_features(
 fn build_tile_buffers_from_features_profiled(
     mut profiler: TileProfiler,
     tile_key: TileKey,
-    tile_ways: Vec<TileWay>,
-    tagged_points: Vec<((f32, f32), HashMap<String, String>)>,
+    tile_ways: &[TileWay],
+    tagged_points: &[((f32, f32), TagSet)],
     theme: &CompiledMapTheme,
     render_zoom: u32,
     buildings_3d: bool,
+    want_fringe: bool,
     build_road_core: bool,
     bridge_corridors: Vec<BridgeCorridor>,
     bridge_dz_covered: bool,
@@ -3428,6 +5272,7 @@ fn build_tile_buffers_from_features_profiled(
     baked_fills: Vec<BakedFillFeature>,
     baked_faces: Option<BakedFacesBucket>,
 ) -> TileBuffers {
+    let capacity_hints = output_capacity_hints(render_zoom, buildings_3d, build_road_core);
     // How much this tile gets magnified on screen at the styled view zoom.
     let render_scale = 2.0_f64
         .powi(render_zoom as i32 - tile_key.z as i32)
@@ -3477,18 +5322,32 @@ fn build_tile_buffers_from_features_profiled(
     // Four bucket pixels still project to at least ~0.59 px at the maximum
     // 78-degree pitch (including half-bucket underscale); signed-u/fwidth
     // keeps only the final one-pixel coverage ramp visible.
-    let analytic_fringe_units = ANALYTIC_FRINGE_CARRIER_PX / render_scale;
+    let analytic_fringe_units = if want_fringe {
+        ANALYTIC_FRINGE_CARRIER_PX / render_scale
+    } else {
+        0.0
+    };
     let tolerance = DEFAULT_FLATTEN_TOLERANCE / render_scale;
 
-    let mut labels = Vec::<TileLabel>::new();
-    let mut pin_hits = Vec::<PinHit>::new();
-    let mut icon_jobs =
-        Vec::<((f32, f32), &'static IconMesh, u8, u8, f32, u8, f32, f32, f32, f32)>::new();
-    let mut tree_points_3d = Vec::<(f32, f32)>::new();
-    let mut signal_points_3d = Vec::<(f32, f32)>::new();
-    for (point, tags) in &tagged_points {
+    let mut labels = Vec::<TileLabel>::with_capacity(capacity_hints.labels);
+    let mut pin_hits = Vec::<PinHit>::with_capacity(capacity_hints.pin_hits);
+    let mut icon_jobs = Vec::<(
+        (f32, f32),
+        &'static IconMesh,
+        u8,
+        u8,
+        f32,
+        u8,
+        f32,
+        f32,
+        f32,
+        f32,
+    )>::with_capacity(capacity_hints.icon_jobs);
+    let mut tree_points_3d = Vec::<(f32, f32)>::with_capacity(capacity_hints.tree_points);
+    let mut signal_points_3d = Vec::<(f32, f32)>::with_capacity(capacity_hints.signal_points);
+    for (point, tags) in tagged_points {
         let mut label_point = *point;
-        let layer = tags.get("layer").map(|value| value.as_str()).unwrap_or("");
+        let layer = tags.get("layer").unwrap_or("");
         // Overlay points (chargers, transit stops) show earlier than the
         // dense base-POI iconography. Chargers tier by power: an ultra-fast
         // site matters at road-trip zoom, a street post doesn't.
@@ -3586,7 +5445,7 @@ fn build_tile_buffers_from_features_profiled(
                             if charger_kw >= 50.0 { 26.0f32 } else { 20.0 }
                         } else if layer == "stops" {
                             12.0
-                        } else if tags.get("layer").map(|v| v.as_str()) == Some("pois") {
+                        } else if tags.get("layer") == Some("pois") {
                             18.0
                         } else {
                             0.0
@@ -3634,7 +5493,7 @@ fn build_tile_buffers_from_features_profiled(
                         for key in ["name", "operator", "city", "max_kw", "evses", "connectors"] {
                             if let Some(value) = tags.get(key) {
                                 if !value.trim().is_empty() {
-                                    info.push((key.to_string(), value.clone()));
+                                    info.push((key.to_string(), value.to_string()));
                                 }
                             }
                         }
@@ -3757,24 +5616,46 @@ fn build_tile_buffers_from_features_profiled(
     // winding-consistent by construction. This lets fill() derive the AA
     // fill-side sign from ring orientation instead of O(V^2) probing.
     tess.set_trust_fill_winding(true);
-    let mut tess_verts = Vec::<VVertex>::new();
-    let mut tess_indices = Vec::<u32>::new();
+    let (mut tess_verts, mut tess_indices) = take_tess_scratch();
+    tess_verts.clear();
+    tess_indices.clear();
 
-    // NOTE: do NOT pre-reserve these to "final" sizes. A generous
-    // reservation (tried at up to 24M floats) made 12 concurrent builders
-    // first-touch ~240MB of fresh zero pages each and serialized the whole
-    // pool on the kernel fault path — the buildings stage went 340ms ->
-    // 3000ms in-app while staying at 11ms in the serial harness.
-    let mut fill_indices = Vec::<u32>::new();
-    let mut fill_vertices = Vec::<f32>::new();
-    let mut casing_indices = Vec::<u32>::new();
-    let mut casing_vertices = Vec::<f32>::new();
-    let mut stroke_indices = Vec::<u32>::new();
-    let mut stroke_vertices = Vec::<f32>::new();
-    let mut icon_indices = Vec::<u32>::new();
-    let mut icon_vertices = Vec::<f32>::new();
-    let mut road_icon_indices = Vec::<u32>::new();
-    let mut road_icon_vertices = Vec::<f32>::new();
+    // The previous tile in this worker's same render/mode bucket is a tight
+    // capacity predictor. Unlike the old multi-million-element blanket
+    // reserve, it avoids realloc growth without overcommitting every worker.
+    let mut fill_indices = Vec::<u32>::with_capacity(capacity_hints.fill_indices);
+    let mut fill_vertices = Vec::<f32>::with_capacity(capacity_hints.fill_vertices);
+    let mut casing_indices = Vec::<u32>::with_capacity(capacity_hints.casing_indices);
+    let mut casing_vertices = Vec::<f32>::with_capacity(capacity_hints.casing_vertices);
+    let mut stroke_indices = Vec::<u32>::with_capacity(capacity_hints.stroke_indices);
+    let mut stroke_vertices = Vec::<f32>::with_capacity(capacity_hints.stroke_vertices);
+    let mut icon_indices = Vec::<u32>::with_capacity(capacity_hints.icon_indices);
+    let mut icon_vertices = Vec::<f32>::with_capacity(capacity_hints.icon_vertices);
+    let mut shadow_disc_instances =
+        Vec::<f32>::with_capacity(capacity_hints.shadow_instances);
+    // Building walls as compact typed instance records.
+    let mut wall_instances =
+        Vec::<MapWallInstance>::with_capacity(capacity_hints.wall_instances);
+    // Street trees: one template mesh per LOD ring + TREE_INSTANCE_FLOATS per tree.
+    let mut tree_template_vertices =
+        Vec::<f32>::with_capacity(capacity_hints.tree_template_vertices);
+    let mut tree_template_indices =
+        Vec::<u32>::with_capacity(capacity_hints.tree_template_indices);
+    let mut tree_cross_template_vertices =
+        Vec::<f32>::with_capacity(capacity_hints.tree_cross_template_vertices);
+    let mut tree_cross_template_indices =
+        Vec::<u32>::with_capacity(capacity_hints.tree_cross_template_indices);
+    let mut tree_instances = Vec::<f32>::with_capacity(capacity_hints.tree_instances);
+    let mut stalk_template_vertices = Vec::<f32>::new();
+    let mut stalk_template_indices = Vec::<u32>::new();
+    let mut stalk_instances =
+        Vec::<MapPropInstance>::with_capacity(capacity_hints.stalk_instances);
+    let mut stoplight_template_vertices = Vec::<f32>::new();
+    let mut stoplight_template_indices = Vec::<u32>::new();
+    let mut stoplight_instances =
+        Vec::<MapPropInstance>::with_capacity(capacity_hints.stoplight_instances);
+    let mut road_icon_indices = Vec::<u32>::with_capacity(capacity_hints.road_icon_indices);
+    let mut road_icon_vertices = Vec::<f32>::with_capacity(capacity_hints.road_icon_vertices);
     let mut fill_zbias = 0.0_f32;
     let mut casing_zbias = 0.0_f32;
     let mut stroke_zbias = 0.0_f32;
@@ -3798,7 +5679,7 @@ fn build_tile_buffers_from_features_profiled(
     // blocks) keep their holes.
     let has_detail_buildings = tile_ways
         .iter()
-        .any(|way| way.tags.get("layer").map(|v| v.as_str()) == Some("detail_buildings"));
+        .any(|way| way.tags.get("layer") == Some("detail_buildings"));
     struct BuildingGroup {
         rings: Vec<FillRing>,
         height_m: f32,
@@ -3806,13 +5687,13 @@ fn build_tile_buffers_from_features_profiled(
         is_part: bool,
     }
     let mut building_groups = Vec::<BuildingGroup>::new();
-    let mut building_group_lookup = HashMap::<String, usize>::new();
+    let mut building_group_lookup = HashMap::<u64, usize>::new();
     // Building-age layer active: index BAG polygons by quantized centroid
     // so extruded buildings can pick up their bouwjaar tint (BAG footprints
     // match OSM buildings nearly 1:1).
     let mut bag_centroid_colors = HashMap::<(i32, i32), u32>::new();
     for way in tile_ways.iter() {
-        if way.tags.get("layer").map(|v| v.as_str()) == Some("bag")
+        if way.tags.get("layer") == Some("bag")
             && way.closed
             && way.points.len() >= 3
         {
@@ -3827,7 +5708,7 @@ fn build_tile_buffers_from_features_profiled(
     // Fill pass
     let mut fill_groups = Vec::<FillFeatureGroup>::new();
     let mut plaza_rings: Vec<(u32, f32, Vec<(f32, f32)>, Option<Vec<f32>>)> = Vec::new();
-    let mut fill_group_lookup = HashMap::<(String, u32, u32), usize>::new();
+    let mut fill_group_lookup = HashMap::<(u64, u32, u32), usize>::new();
     // Baked fill join: (baker Layer discriminant, per-layer feature index).
     let baked_fill_lookup: HashMap<(u8, u32), usize> = baked_fills
         .iter()
@@ -3836,7 +5717,7 @@ fn build_tile_buffers_from_features_profiled(
         .collect();
     for (order, prepared_way) in prepared.iter().enumerate() {
         let way = &tile_ways[prepared_way.way_index];
-        if way.tags.get("layer").map(|v| v.as_str()) == Some("detail_buildings") {
+        if way.tags.get("layer") == Some("detail_buildings") {
             let Some(mut ring_points) = normalize_polygon_ring(&prepared_way.points) else {
                 continue;
             };
@@ -3852,10 +5733,8 @@ fn build_tile_buffers_from_features_profiled(
                 continue;
             }
             let feature_key = way
-                .tags
-                .get(MVT_INTERNAL_FEATURE_KEY)
-                .cloned()
-                .unwrap_or_else(|| format!("bldg:{}", prepared_way.way_index));
+                .feature_group
+                .unwrap_or(u64::MAX - prepared_way.way_index as u64);
             let group_index =
                 if let Some(index) = building_group_lookup.get(&feature_key).copied() {
                     index
@@ -3873,11 +5752,7 @@ fn build_tile_buffers_from_features_profiled(
                     });
                     index
                 };
-            let ring_order = way
-                .tags
-                .get(MVT_INTERNAL_RING_INDEX_KEY)
-                .and_then(|value| value.parse::<usize>().ok())
-                .unwrap_or(order);
+            let ring_order = way.ring_index.map(|value| value as usize).unwrap_or(order);
             building_groups[group_index].rings.push(FillRing {
                 order: ring_order,
                 points: ring_points,
@@ -3909,7 +5784,7 @@ fn build_tile_buffers_from_features_profiled(
 
         let area_label_ok = render_zoom >= 15
             || matches!(
-                way.tags.get("layer").map(|value| value.as_str()),
+                way.tags.get("layer"),
                 Some("natura2000" | "wetlands")
             );
         if area_label_ok {
@@ -3917,7 +5792,7 @@ fn build_tile_buffers_from_features_profiled(
                 labels.push(label);
             }
         }
-        let source_layer = way.tags.get("layer").map(String::as_str).unwrap_or("");
+        let source_layer = way.tags.get("layer").unwrap_or("");
         if !structural_bridge_area_visible(source_layer, buildings_3d) {
             continue;
         }
@@ -3925,10 +5800,8 @@ fn build_tile_buffers_from_features_profiled(
             continue;
         };
         let feature_key = way
-            .tags
-            .get(MVT_INTERNAL_FEATURE_KEY)
-            .cloned()
-            .unwrap_or_else(|| format!("way:{}", prepared_way.way_index));
+            .feature_group
+            .unwrap_or(u64::MAX - prepared_way.way_index as u64);
         let pattern = fill_pattern_shape(&way.tags);
         let alpha = fill_alpha_for_tags(&way.tags);
         let group_key = (feature_key, color, pattern.to_bits() ^ alpha.to_bits());
@@ -3937,7 +5810,7 @@ fn build_tile_buffers_from_features_profiled(
         } else {
             let index = fill_groups.len();
             fill_group_lookup.insert(group_key, index);
-            let mvt_layer = way.tags.get("layer").map(|v| v.as_str()).unwrap_or("");
+            let mvt_layer = way.tags.get("layer").unwrap_or("");
             let deckable =
                 matches!(mvt_layer, "street_polygons" | "streets_med" | "streets_low")
                     && !tag_is_truthy(&way.tags, "tunnel");
@@ -3964,7 +5837,7 @@ fn build_tile_buffers_from_features_profiled(
                 baked,
                 material: fill_material_for_tags(&way.tags),
                 late: matches!(
-                    way.tags.get("layer").map(|v| v.as_str()),
+                    way.tags.get("layer"),
                     Some("gemeenten" | "wijken" | "buurten")
                 ),
                 deck_m,
@@ -3978,7 +5851,7 @@ fn build_tile_buffers_from_features_profiled(
         // Road-surface polygons join the road tier unions instead of the
         // fill pipeline: the junction plaza and its road class must be ONE
         // surface (2D reference: plazas paint over minor-road centers).
-        let plaza_layer = way.tags.get("layer").map(|v| v.as_str()).unwrap_or("");
+        let plaza_layer = way.tags.get("layer").unwrap_or("");
         if build_road_core
             && matches!(plaza_layer, "street_polygons" | "streets_med" | "streets_low")
             && !tag_is_truthy(&way.tags, "tunnel")
@@ -3992,11 +5865,7 @@ fn build_tile_buffers_from_features_profiled(
             ));
             continue;
         }
-        let ring_order = way
-            .tags
-            .get(MVT_INTERNAL_RING_INDEX_KEY)
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(order);
+        let ring_order = way.ring_index.map(|value| value as usize).unwrap_or(order);
         let signed_area = polygon_signed_area(&ring_points);
         if signed_area.abs() <= POLYGON_AREA_EPSILON {
             continue;
@@ -4034,6 +5903,11 @@ fn build_tile_buffers_from_features_profiled(
 
     for (order_pos, group_index) in fill_order.into_iter().enumerate() {
         let group = &fill_groups[group_index];
+        if faces_bake_sink_armed() {
+            // Plaza rings were captured above; all other fill meshes are
+            // runtime output and are not part of the face stream.
+            continue;
+        }
         // A same-bucket 2D/3D switch reuses the resident road core. Its
         // deckable street-area fills already live in the stable stroke
         // geometry and must not be emitted a second time.
@@ -4233,26 +6107,13 @@ fn build_tile_buffers_from_features_profiled(
     // as fill_3d so distant tiles under tilt can skip/fade it.
     let fill_3d_vert_start = fill_vertices.len();
     let fill_3d_index_start = fill_indices.len();
-    let mut tree_cross_vertices: Vec<f32> = Vec::new();
-    let mut tree_cross_indices: Vec<u32> = Vec::new();
+    let tree_cross_vertices: Vec<f32> = Vec::new();
+    let tree_cross_indices: Vec<u32> = Vec::new();
 
-    // Cast-shadow union outlines, kept for the tree/signal contact discs:
-    // a tree already standing in a building's shadow must not stack its
-    // own disc on top (double-darkening + equal-depth z-fight).
-    let mut building_shadow_shapes: Vec<Vec<Vec<[f64; 2]>>> = Vec::new();
-    // Shadow input signature captured when the runtime pipeline runs, so
-    // the faces-bake sink stores it with the shapes.
-    let mut captured_shadow_sig = 0u64;
-    // Baked shadows consumed: gates the runtime deck-shadow dissolve off
-    // (the baked shapes already contain the deck set).
-    let mut shadow_baked_hit = false;
     // v4 building-dissolve capture: filled in the buildings block (jobs
     // are local there), consumed by the bake sink.
     let mut captured_building_sig = 0u64;
     let mut captured_building_groups: Vec<BakedBuildingGroup> = Vec::new();
-    // Grounded building footprints (positive winding), kept so deck
-    // shadows can subtract them exactly like the building shadows did.
-    let mut building_shadow_footprints: Vec<Vec<[f64; 2]>> = Vec::new();
     // 2.5D building extrusion: per-edge flat-shaded walls (exterior rings
     // AND courtyard holes), then the roof with holes preserved, lifted by
     // height (the tilt shader does the lifting per frame, so tilt animates
@@ -4403,294 +6264,6 @@ fn build_tile_buffers_from_features_profiled(
                 .atan();
             (crate::map::geometry::TILE_SIZE * n / (40_075_016.686 * lat.cos())) as f32
         };
-        let base_color = theme.building_fill_color().unwrap_or(0xd9d0c9);
-        // The one SceneSun: walls shade by their outward normal against its
-        // horizontal direction (defaults reproduce the legacy NW sun).
-        let sun_2d = theme.shiny.sun.dir_2d();
-        let (light_x, light_y) = (sun_2d.x, sun_2d.y);
-        // T3 building shadows: no shadow map, no second scene pass —
-        // project each exterior roof ring along the sun's ground direction
-        // by height * shadow_len, dissolve footprint + projection +
-        // silhouette quads for the whole tile into ONE union (overlapping
-        // shadows must not double-darken), and emit it as an ordinary
-        // ground fill, material 6, whose alpha rides the live shadow
-        // uniform. Drawn before the walls/roofs so buildings paint over
-        // their own footprint's shadow.
-        if theme.shiny.bake_shadows && buildings_3d && render_zoom >= 14 {
-            use i_overlay::core::fill_rule::FillRule as IoFillRule;
-            use i_overlay::core::overlay_rule::OverlayRule;
-            use i_overlay::float::simplify::SimplifyShape;
-            use i_overlay::float::single::SingleFloatOverlay;
-            let len_per_m = theme.shiny.sun.shadow_len_per_m();
-            let (sx, sy) = (-sun_2d.x, -sun_2d.y);
-            // Floor the silhouette simplification: shadows never need
-            // footprint micro-detail, and sub-meter edges spawn needle
-            // slivers out of the boolean at high overzoom.
-            let shadow_min_edge = (1.2 / render_scale).max(0.35);
-            // Signature over everything the sweep+dissolve consumes: job
-            // rings and heights, sun, scale, simplification floor. On a
-            // baked match the entire boolean pipeline below is skipped and
-            // the baked shapes/footprints substitute — the 0.2-2.6s tail
-            // the in-app slow-tile log kept catching on building-dense
-            // tiles.
-            let shadow_sig = {
-                use std::hash::Hasher;
-                let mut h = FnvStdHasher(0xcbf2_9ce4_8422_2325);
-                h.write(&sun_2d.x.to_bits().to_le_bytes());
-                h.write(&sun_2d.y.to_bits().to_le_bytes());
-                h.write(&len_per_m.to_bits().to_le_bytes());
-                h.write(&shadow_min_edge.to_bits().to_le_bytes());
-                h.write(&building_units_per_m.to_bits().to_le_bytes());
-                h.write(&render_scale.to_bits().to_le_bytes());
-                h.write(&(building_jobs.len() as u32).to_le_bytes());
-                // Hash job content UNCONDITIONALLY: the bake sink runs with
-                // faces_bake_sink_armed() true, and a sink-gated filter here
-                // made the baker store a jobs-less signature no runtime could
-                // ever match — the shadow bake was dead weight in the stream.
-                for job in building_jobs.iter() {
-                    h.write(&job.height_m.to_bits().to_le_bytes());
-                    h.write(&job.base_m.to_bits().to_le_bytes());
-                    h.write(&(job.polygon.len() as u32).to_le_bytes());
-                    for ring in &job.polygon {
-                        h.write(&(ring.len() as u32).to_le_bytes());
-                        for &(x, y) in ring {
-                            h.write(&x.to_bits().to_le_bytes());
-                            h.write(&y.to_bits().to_le_bytes());
-                        }
-                    }
-                }
-                h.0
-            };
-            let baked_shadow = (!faces_bake_sink_armed())
-                .then(|| baked_faces.as_ref())
-                .flatten()
-                .filter(|bake| {
-                    bake.bucket == render_zoom && bake.shadow_signature == shadow_sig
-                });
-            if let Some(bake) = baked_shadow {
-                shadow_baked_hit = true;
-                building_shadow_footprints = bake.shadow_footprints.clone();
-                building_shadow_shapes = bake.shadow_shapes.clone();
-                profiler.lap("b-sh-baked", &format!("shapes={}", building_shadow_shapes.len()));
-                let fill_clip_bounds =
-                    tile_clip_bounds((1.0 / render_scale).min(FILL_CLIP_OVERLAP));
-                let shadow_aa = (1.2 * building_units_per_m).max(aa_units);
-                emit_shadow_shapes(
-                    bake.shadow_shapes.clone(),
-                    fill_clip_bounds,
-                    shadow_aa,
-                    tolerance,
-                    &mut path,
-                    &mut tess,
-                    &mut tess_verts,
-                    &mut tess_indices,
-                    &mut icon_vertices,
-                    &mut icon_indices,
-                    &mut icon_zbias,
-                );
-                feature_count += 1;
-            } else {
-            captured_shadow_sig = shadow_sig;
-            let mut paths: Vec<Vec<[f64; 2]>> = Vec::new();
-            let mut push_positive = |ring: &mut Vec<[f64; 2]>| {
-                // NonZero dissolve: every contributing path must wind
-                // positive or it would subtract instead of add.
-                let mut area = 0.0f64;
-                for i in 0..ring.len() {
-                    let a = ring[i];
-                    let b = ring[(i + 1) % ring.len()];
-                    area += a[0] * b[1] - b[0] * a[1];
-                }
-                if area < 0.0 {
-                    ring.reverse();
-                }
-                paths.push(std::mem::take(ring));
-            };
-            // No sink gate here: the WHOLE POINT of the bake is to run this
-            // sweep offline. Gated, the baker captured deck-only shadow sets
-            // (invisible while the sig bug masked it with permanent misses).
-            for job in building_jobs.iter() {
-                let height = job.height_m;
-                if height <= 0.5 {
-                    continue;
-                }
-                let d = len_per_m * height * building_units_per_m;
-                // LOD: shadows that could not show at this magnification
-                // don't earn their union cost.
-                if d * render_scale < 2.0 {
-                    continue;
-                }
-                for ring in &job.polygon {
-                    // Courtyard holes: skip — at casting sun angles the
-                    // court is mostly self-shadowed anyway.
-                    if polygon_signed_area(ring) <= 0.0 {
-                        continue;
-                    }
-                    let ring = simplify_wall_ring(ring, shadow_min_edge);
-                    let n = ring.len();
-                    if n < 3 {
-                        continue;
-                    }
-                    // The swept hull needs all three parts: footprint,
-                    // TRANSLATED footprint, and the connecting edge quads.
-                    // (A single Minkowski-sweep path was tried and REVERTED:
-                    // epsilon-concave rings hand i_overlay self-crossing
-                    // near-degenerate polygons and the dissolve explodes to
-                    // 10-15s. The real fix for shadow cost is baking the
-                    // dissolved shadow shapes per bucket, not a cleverer
-                    // runtime construction.)
-                    let mut scratch: Vec<[f64; 2]> = ring
-                        .iter()
-                        .map(|p| [p.0 as f64, p.1 as f64])
-                        .collect();
-                    push_positive(&mut scratch);
-                    let mut roof: Vec<[f64; 2]> = ring
-                        .iter()
-                        .map(|p| [(p.0 + sx * d) as f64, (p.1 + sy * d) as f64])
-                        .collect();
-                    push_positive(&mut roof);
-                    for i in 0..n {
-                        let a = ring[i];
-                        let b = ring[(i + 1) % n];
-                        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
-                        let len = (dx * dx + dy * dy).sqrt();
-                        if len < 1e-4 {
-                            continue;
-                        }
-                        if (dy / len) * sx + (-dx / len) * sy <= 0.02 {
-                            continue;
-                        }
-                        let mut quad = vec![
-                            [a.0 as f64, a.1 as f64],
-                            [b.0 as f64, b.1 as f64],
-                            [(b.0 + sx * d) as f64, (b.1 + sy * d) as f64],
-                            [(a.0 + sx * d) as f64, (a.1 + sy * d) as f64],
-                        ];
-                        push_positive(&mut quad);
-                    }
-                }
-            }
-            profiler.lap("b-sh-sweep", &format!("paths={}", paths.len()));
-            if !paths.is_empty() {
-                // Chunked dissolve (union-mesh lesson: the solver
-                // degenerates on ring soups past a few thousand rings).
-                const SHADOW_DISSOLVE_CHUNK: usize = 3000;
-                let mut shapes = if paths.len() <= SHADOW_DISSOLVE_CHUNK {
-                    paths.simplify_shape(IoFillRule::NonZero)
-                } else {
-                    let mut acc: Vec<Vec<Vec<[f64; 2]>>> = Vec::new();
-                    for chunk in paths.chunks(SHADOW_DISSOLVE_CHUNK) {
-                        let part = chunk.to_vec().simplify_shape(IoFillRule::NonZero);
-                        if acc.is_empty() {
-                            acc = part;
-                        } else {
-                            let part_paths: Vec<Vec<[f64; 2]>> = part
-                                .iter()
-                                .flat_map(|shape| shape.iter().cloned())
-                                .collect();
-                            acc = part_paths.overlay(&acc, OverlayRule::Union, IoFillRule::NonZero);
-                        }
-                    }
-                    acc
-                };
-                // Subtract every grounded building footprint: a shadow
-                // must never cover a building's own ground. Roofs sit at
-                // param5 0.05 + a LIFT-scaled depth term that vanishes
-                // overhead (tilt -> 0), so a decal left under a neighbor
-                // building would depth-win and blotch its roof.
-                let mut footprints: Vec<Vec<[f64; 2]>> = Vec::new();
-                for job in &building_jobs {
-                    if job.height_m <= 0.05 || job.base_m > 0.5 {
-                        continue;
-                    }
-                    for ring in &job.polygon {
-                        if polygon_signed_area(ring) <= 0.0 {
-                            continue;
-                        }
-                        let ring = simplify_wall_ring(ring, shadow_min_edge);
-                        if ring.len() < 3 {
-                            continue;
-                        }
-                        // Dilate ~0.5 m: sub-meter slits between abutting
-                        // sections must not collect shadow (they render as
-                        // dark vertical spikes between the walls). The
-                        // matching pull-back at real wall bases is ~2 px.
-                        let ring = dilate_ring(&ring, 0.5 * building_units_per_m);
-                        let mut fp: Vec<[f64; 2]> = ring
-                            .iter()
-                            .map(|p| [p.0 as f64, p.1 as f64])
-                            .collect();
-                        let mut area = 0.0f64;
-                        for i in 0..fp.len() {
-                            let a = fp[i];
-                            let b = fp[(i + 1) % fp.len()];
-                            area += a[0] * b[1] - b[0] * a[1];
-                        }
-                        if area < 0.0 {
-                            fp.reverse();
-                        }
-                        footprints.push(fp);
-                    }
-                }
-                profiler.lap("b-sh-dissolve", "");
-                if !footprints.is_empty() {
-                    let mut acc = shapes;
-                    for chunk in footprints.chunks(SHADOW_DISSOLVE_CHUNK) {
-                        let subject: Vec<Vec<[f64; 2]>> = acc
-                            .iter()
-                            .flat_map(|shape| shape.iter().cloned())
-                            .collect();
-                        acc = subject.overlay(
-                            &chunk.to_vec().simplify_shape(IoFillRule::NonZero),
-                            OverlayRule::Difference,
-                            IoFillRule::NonZero,
-                        );
-                    }
-                    shapes = acc;
-                }
-                building_shadow_footprints = footprints;
-                profiler.lap("b-sh-diff", "");
-                let fill_clip_bounds =
-                    tile_clip_bounds((1.0 / render_scale).min(FILL_CLIP_OVERLAP));
-                // ~1.2 m analytic AA fringe softens the shadow edge.
-                let shadow_aa = (1.2 * building_units_per_m).max(aa_units);
-                // Morphological opening (~0.35 m erode + dilate): the
-                // boolean leaves hair-thin shadow tendrils ATTACHED to the
-                // main body wherever walls run nearly parallel across a
-                // narrow passage — per-ring sliver filters can't touch
-                // welded appendages, an opening removes anything under
-                // ~0.7 m wide wherever it hides.
-                {
-                    use i_overlay::mesh::outline::offset::OutlineOffset;
-                    use i_overlay::mesh::style::OutlineStyle;
-                    let open_r = (0.5 * building_units_per_m) as f64;
-                    let eroded = shapes.outline(&OutlineStyle::new(-open_r));
-                    if !eroded.is_empty() {
-                        shapes = eroded.outline(&OutlineStyle::new(open_r));
-                    } else {
-                        shapes = Vec::new();
-                    }
-                }
-                building_shadow_shapes = shapes.clone();
-                profiler.lap("b-sh-open", "");
-                emit_shadow_shapes(
-                    shapes,
-                    fill_clip_bounds,
-                    shadow_aa,
-                    tolerance,
-                    &mut path,
-                    &mut tess,
-                    &mut tess_verts,
-                    &mut tess_indices,
-                    &mut icon_vertices,
-                    &mut icon_indices,
-                    &mut icon_zbias,
-                );
-                feature_count += 1;
-            }
-            }
-        }
-        profiler.lap("b-shadow", "");
         // v4 block dissolve: same-height touching buildings union at BAKE
         // time so shared interior walls never reach the extruder. Runtime
         // pays ZERO booleans — a signature HIT swaps the eligible jobs for
@@ -4855,6 +6428,19 @@ fn build_tile_buffers_from_features_profiled(
                 profiler.lap("b-dissolved", &format!("groups={}", bake.buildings.len()));
             }
         }
+        // The offline sink consumes only the dissolved building groups
+        // above. Walls, roofs and their AO are derived again by the renderer
+        // and must not be tessellated into throwaway TileBuffers here.
+        let derived_building_jobs: &[BuildingJob] = if faces_bake_sink_armed() {
+            &[]
+        } else {
+            &building_jobs
+        };
+        let base_color = theme.building_fill_color().unwrap_or(0xd9d0c9);
+        // The one SceneSun: walls shade by their outward normal against its
+        // horizontal direction (defaults reproduce the legacy NW sun).
+        let sun_2d = theme.shiny.sun.dir_2d();
+        let (light_x, light_y) = (sun_2d.x, sun_2d.y);
         // T2 vertical AO: ground-contact vertices darken so buildings sit
         // in the scene instead of floating. Sections starting above ground
         // (bridge decks, tower setbacks) fade the effect out.
@@ -4871,7 +6457,7 @@ fn build_tile_buffers_from_features_profiled(
         // wall rings for courtyards under ~5 px; roofs keep full detail.
         let wall_min_edge = 1.2 / render_scale;
         let wall_min_hole_extent = 5.0 / render_scale;
-        for job in &building_jobs {
+        for job in derived_building_jobs {
             // Building-age layer tints the 3D model itself (walls shade
             // from the same hue via the normal lighting math).
             let roof_color = hex_to_premul_rgba(job.tint.unwrap_or(base_color), 1.0);
@@ -4932,17 +6518,15 @@ fn build_tile_buffers_from_features_profiled(
                         roof_color[2] * shade,
                         1.0,
                     ];
-                    append_wall_quad(
+                    push_wall_instance(
+                        &mut wall_instances,
                         a,
                         b,
                         job.base_m,
                         job.height_m,
                         wall_color,
                         wall_ao(job.base_m),
-                        (nx, ny),
-                        MAT_WALL,
-                        &mut fill_vertices,
-                        &mut fill_indices,
+                        clockwise,
                         &mut fill_zbias,
                     );
                 }
@@ -5025,33 +6609,21 @@ fn build_tile_buffers_from_features_profiled(
         };
 
         let trunk_ao = if theme.shiny.bake_ao { 0.78 } else { 1.0 };
-        // T3 tree contact shadows: a soft dark disc under each canopy,
-        // nudged along the shadow direction — "the tree stands on the
-        // ground" for a dozen vertices per tree.
+        // T3 tree contact shadows: a soft instanced disc under each canopy,
+        // nudged along the shadow direction so the tree sits on the ground.
         if theme.shiny.bake_shadows {
             let sun_2d = theme.shiny.sun.dir_2d();
-            for (index, (x, y)) in tree_points_3d.iter().enumerate() {
+            for (x, y) in &tree_points_3d {
                 let center = (
                     *x - sun_2d.x * 2.2 * units_per_m,
                     *y - sun_2d.y * 2.2 * units_per_m,
                 );
-                if point_in_shadow_shapes(center, &building_shadow_shapes) {
-                    continue;
-                }
-                // Full-strength center (the live shadow uniform is the
-                // brightness knob), canopy-sized, offset like a canopy
-                // hanging 7.5-11 m up would cast. The per-disc depth step
-                // keeps overlapping discs (tree rows) from z-fighting each
-                // other or the building shadow union underneath.
-                append_ground_shadow_disc(
-                    center,
+                shadow_disc_instances.extend_from_slice(&[
+                    center.0,
+                    center.1,
                     3.4 * units_per_m,
                     1.0,
-                    SHADOW_DECAL_DEPTH + 0.005 + (index % 8) as f32 * 5e-4,
-                    &mut icon_vertices,
-                    &mut icon_indices,
-                    &mut icon_zbias,
-                );
+                ]);
             }
         }
         // Every street tree is the same mesh (shading depends on normals
@@ -5106,59 +6678,72 @@ fn build_tile_buffers_from_features_profiled(
                 &mut template_indices,
                 &mut template_zbias,
             );
-            // Mid/far-ring stand-in: two crossed vertical quads per tree
-            // (canopy color, canopy material) — 8 verts vs ~70.
+            // Mid/far-ring stand-in: the trunk plus two crossed vertical
+            // quads (canopy color, canopy material) — 8 verts vs ~70. Both
+            // templates sit at the origin; the GPU adds the anchor per
+            // instance (TREE_INSTANCE_FLOATS), so a park tile carries one
+            // tree mesh, not thousands.
             let cross_r = 2.6 * units_per_m;
-            for (x, y) in tree_points_3d.iter() {
+            let mut cross_zbias = 0.0f32;
+            for (a, b, normal) in [
+                ((-arm, 0.0), (arm, 0.0), (0.0, 0.0)),
+                ((0.0, -arm), (0.0, arm), (0.0, 0.0)),
+            ] {
                 append_wall_quad(
-                    (*x - cross_r, *y),
-                    (*x + cross_r, *y),
-                    1.5,
-                    11.0,
-                    canopy_color,
+                    a,
+                    b,
+                    0.0,
+                    7.5,
+                    trunk_color,
                     trunk_ao,
-                    (0.0, 1.0),
-                    MAT_CANOPY,
-                    &mut tree_cross_vertices,
-                    &mut tree_cross_indices,
-                    &mut fill_zbias,
-                );
-                append_wall_quad(
-                    (*x, *y - cross_r),
-                    (*x, *y + cross_r),
-                    1.5,
-                    11.0,
-                    canopy_color,
-                    trunk_ao,
-                    (1.0, 0.0),
-                    MAT_CANOPY,
-                    &mut tree_cross_vertices,
-                    &mut tree_cross_indices,
-                    &mut fill_zbias,
+                    normal,
+                    MAT_NONE,
+                    &mut tree_cross_template_vertices,
+                    &mut tree_cross_template_indices,
+                    &mut cross_zbias,
                 );
             }
-            let floats = template_verts.len();
-            fill_vertices.reserve(floats * tree_points_3d.len());
-            fill_indices.reserve(template_indices.len() * tree_points_3d.len());
+            for (a, b, normal) in [
+                ((-cross_r, 0.0), (cross_r, 0.0), (0.0, 1.0)),
+                ((0.0, -cross_r), (0.0, cross_r), (1.0, 0.0)),
+            ] {
+                append_wall_quad(
+                    a,
+                    b,
+                    1.5,
+                    11.0,
+                    canopy_color,
+                    trunk_ao,
+                    normal,
+                    MAT_CANOPY,
+                    &mut tree_cross_template_vertices,
+                    &mut tree_cross_template_indices,
+                    &mut cross_zbias,
+                );
+            }
+            let template_step = template_zbias.max(cross_zbias);
+            tree_instances.reserve(tree_points_3d.len() * TREE_INSTANCE_FLOATS);
             for (instance, (x, y)) in tree_points_3d.iter().enumerate() {
-                let base_vert =
-                    (fill_vertices.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
-                let zbias_shift = fill_zbias + instance as f32 * template_zbias;
-                let start = fill_vertices.len();
-                fill_vertices.extend_from_slice(&template_verts);
-                for record in fill_vertices[start..].chunks_exact_mut(VECTOR_FLOATS_PER_VERTEX)
-                {
-                    record[0] += *x;
-                    record[1] += *y;
-                    record[18] += zbias_shift;
-                }
-                fill_indices
-                    .extend(template_indices.iter().map(|i| i + base_vert));
+                tree_instances.extend_from_slice(&[
+                    *x,
+                    *y,
+                    fill_zbias + instance as f32 * template_step,
+                ]);
                 feature_count += 1;
             }
-            fill_zbias += tree_points_3d.len() as f32 * template_zbias;
+            fill_zbias += tree_points_3d.len() as f32 * template_step;
+            tree_template_vertices = template_verts;
+            tree_template_indices = template_indices;
         }
     }
+    cap_expanded_tree_triangles_for_web(
+        cfg!(target_arch = "wasm32"),
+        &mut tree_template_indices,
+        &mut tree_template_vertices,
+        &tree_cross_template_indices,
+        &tree_cross_template_vertices,
+        &mut tree_instances,
+    );
 
     // Dynamic stalk heights: every flying marker clears the building under
     // it by ~8 m (a 100 m tower gets a 108 m pin), plus a small
@@ -5167,7 +6752,9 @@ fn build_tile_buffers_from_features_profiled(
     // icons x groups x rings, and the icon horizon multiplied the icon
     // side by ~10 (75ms on center tiles). A point query now touches one
     // cell's candidates.
-    let lift_grid: CellMap<Vec<u32>> = {
+    let lift_grid: CellMap<Vec<u32>> = if faces_bake_sink_armed() {
+        CellMap::default()
+    } else {
         const LIFT_CELL: f32 = 24.0;
         let mut grid: CellMap<Vec<u32>> = CellMap::default();
         for (group_index, group) in building_groups.iter().enumerate() {
@@ -5271,8 +6858,9 @@ fn build_tile_buffers_from_features_profiled(
             }
         }
     }
-    // Marker stalks (3D mode): thin dark lines from the ground point up to
-    // every floating marker.
+    // Marker stalks (3D mode): one typed placement per floating marker. A
+    // single unit crossed-quad template replaces the two baked wall quads
+    // formerly repeated at every marker.
     if buildings_3d {
         let has_pins = icon_jobs.iter().any(|job| job.9 > 0.0);
         if has_pins {
@@ -5283,6 +6871,22 @@ fn build_tile_buffers_from_features_profiled(
             let units_per_m =
                 (crate::map::geometry::TILE_SIZE * n / (40_075_016.686 * lat.cos())) as f32;
             let stalk_color = hex_to_premul_rgba(0x4a5058, 1.0);
+            let mut template_zbias = 0.0;
+            for (a, b) in [((-1.0, 0.0), (1.0, 0.0)), ((0.0, -1.0), (0.0, 1.0))] {
+                append_wall_quad(
+                    a,
+                    b,
+                    0.0,
+                    1.0,
+                    [1.0; 4],
+                    1.0,
+                    (0.0, 0.0),
+                    MAT_NONE,
+                    &mut stalk_template_vertices,
+                    &mut stalk_template_indices,
+                    &mut template_zbias,
+                );
+            }
             for (job_index, job) in icon_jobs.iter().enumerate() {
                 let lift = job_lifts[job_index];
                 if lift <= 0.0 {
@@ -5290,40 +6894,24 @@ fn build_tile_buffers_from_features_profiled(
                 }
                 // Chargers get a slightly heavier stalk than POI markers.
                 let arm = if job.5 == 2 || job.5 == 3 { 0.22 } else { 0.14 } * units_per_m;
-                let (x, y) = job.0;
-                append_wall_quad(
-                    (x - arm, y),
-                    (x + arm, y),
-                    0.0,
-                    lift,
+                stalk_instances.push(MapPropInstance::new(
+                    job.0,
+                    (arm, lift),
                     stalk_color,
-                    1.0,
-                    (0.0, 0.0),
-                    MAT_NONE,
-                    &mut fill_vertices,
-                    &mut fill_indices,
-                    &mut fill_zbias,
-                );
-                append_wall_quad(
-                    (x, y - arm),
-                    (x, y + arm),
-                    0.0,
-                    lift,
-                    stalk_color,
-                    1.0,
-                    (0.0, 0.0),
-                    MAT_NONE,
-                    &mut fill_vertices,
-                    &mut fill_indices,
-                    &mut fill_zbias,
-                );
+                    fill_zbias,
+                ));
+                // Preserve the exact painter-ladder progression paid by the
+                // two removed append_wall_quad calls.
+                fill_zbias += VECTOR_ZBIAS_STEP;
+                fill_zbias += VECTOR_ZBIAS_STEP;
             }
         }
     }
 
-    // Little 3D stoplights (tilt mode): a slim dark pole with the classic
-    // three lights stacked on top — red above amber above green.
+    // Little 3D stoplights (tilt mode): one complete shared pole + three
+    // light template, with one typed placement per signal point.
     if !signal_points_3d.is_empty() {
+        const STOPLIGHT_HEIGHT_M: f32 = 5.7;
         let n = (1u32 << tile_key.z) as f64;
         let lat = (std::f64::consts::PI * (1.0 - 2.0 * (tile_key.y as f64 + 0.5) / n))
             .sinh()
@@ -5340,67 +6928,61 @@ fn build_tile_buffers_from_features_profiled(
         // T3: soft contact shadow under each stoplight pole.
         if theme.shiny.bake_shadows {
             let sun_2d = theme.shiny.sun.dir_2d();
-            for (index, (x, y)) in signal_points_3d.iter().enumerate() {
+            for (x, y) in &signal_points_3d {
                 let center = (
                     *x - sun_2d.x * 0.9 * units_per_m,
                     *y - sun_2d.y * 0.9 * units_per_m,
                 );
-                if point_in_shadow_shapes(center, &building_shadow_shapes) {
-                    continue;
-                }
-                append_ground_shadow_disc(
-                    center,
+                shadow_disc_instances.extend_from_slice(&[
+                    center.0,
+                    center.1,
                     1.3 * units_per_m,
                     0.9,
-                    SHADOW_DECAL_DEPTH + 0.005 + (index % 8) as f32 * 5e-4,
-                    &mut icon_vertices,
-                    &mut icon_indices,
-                    &mut icon_zbias,
-                );
+                ]);
             }
         }
+        let mut template_zbias = 0.0;
+        for (a, b) in [((-arm, 0.0), (arm, 0.0)), ((0.0, -arm), (0.0, arm))] {
+            append_wall_quad(
+                a,
+                b,
+                0.0,
+                3.2 / STOPLIGHT_HEIGHT_M,
+                pole_color,
+                1.0,
+                (0.0, 0.0),
+                MAT_NONE,
+                &mut stoplight_template_vertices,
+                &mut stoplight_template_indices,
+                &mut template_zbias,
+            );
+        }
+        for (color, height_m) in lights {
+            append_ball(
+                (0.0, 0.0),
+                0.5 * units_per_m,
+                0.5 / STOPLIGHT_HEIGHT_M,
+                height_m / STOPLIGHT_HEIGHT_M,
+                color,
+                8,
+                4,
+                &theme.shiny.sun,
+                MAT_NONE,
+                &mut stoplight_template_vertices,
+                &mut stoplight_template_indices,
+                &mut template_zbias,
+            );
+        }
         for (x, y) in &signal_points_3d {
-            append_wall_quad(
-                (*x - arm, *y),
-                (*x + arm, *y),
-                0.0,
-                3.2,
-                pole_color,
-                1.0,
-                (0.0, 0.0),
-                MAT_NONE,
-                &mut fill_vertices,
-                &mut fill_indices,
-                &mut fill_zbias,
-            );
-            append_wall_quad(
-                (*x, *y - arm),
-                (*x, *y + arm),
-                0.0,
-                3.2,
-                pole_color,
-                1.0,
-                (0.0, 0.0),
-                MAT_NONE,
-                &mut fill_vertices,
-                &mut fill_indices,
-                &mut fill_zbias,
-            );
-            for (color, height_m) in lights {
-                append_ball(
-                    (*x, *y),
-                    0.5 * units_per_m,
-                    0.5,
-                    height_m,
-                    color,
-                    8,
-                    4,
-                    &theme.shiny.sun,
-                    MAT_NONE,
-                    &mut fill_vertices,
-                    &mut fill_indices,
-                    &mut fill_zbias,
-                );
+            stoplight_instances.push(MapPropInstance::new(
+                (*x, *y),
+                (1.0, STOPLIGHT_HEIGHT_M),
+                [1.0; 4],
+                fill_zbias,
+            ));
+            // Two pole quads plus three light balls each took one step.
+            for _ in 0..5 {
+                fill_zbias += VECTOR_ZBIAS_STEP;
             }
             feature_count += 1;
         }
@@ -5411,14 +6993,16 @@ fn build_tile_buffers_from_features_profiled(
     let mut arrow_jobs = Vec::<ArrowDrawJob>::new();
     for prepared_way in &prepared {
         let way = &tile_ways[prepared_way.way_index];
-        if let Some(label) = extract_way_label(&way.tags, &prepared_way.points) {
-            labels.push(label);
+        if !faces_bake_sink_armed() {
+            if let Some(label) = extract_way_label(&way.tags, &prepared_way.points) {
+                labels.push(label);
+            }
         }
         // Detail building footprints are a mode-specific fill overlay. A
         // handful inherit highway-like OSM tags; letting those fall through
         // stroke styling made the supposedly stable road core differ between
         // flat and tilted bakes and could add spurious road slivers.
-        if way.tags.get("layer").map(String::as_str) == Some("detail_buildings") {
+        if way.tags.get("layer") == Some("detail_buildings") {
             continue;
         }
         // Road labels are mode-independent but are cheap to extract. Keep
@@ -5433,7 +7017,7 @@ fn build_tile_buffers_from_features_profiled(
         // street polygons and their centerline stroke style is None, but
         // the direction arrows must survive.
         let implicit_oneway = matches!(
-            way.tags.get("junction").map(|v| v.as_str()),
+            way.tags.get("junction"),
             Some("roundabout") | Some("circular")
         );
         let arrow_reverse = (render_zoom >= 15
@@ -5480,7 +7064,6 @@ fn build_tile_buffers_from_features_profiled(
                 px_to_units,
             ) {
                 stroke_jobs.push(StrokeDrawJob {
-                    sort_rank: dots.sort_rank,
                     style: dots,
                     points: prepared_way.points.clone(),
                     solid_road_surface: false,
@@ -5507,7 +7090,6 @@ fn build_tile_buffers_from_features_profiled(
                 };
             }
             stroke_jobs.push(StrokeDrawJob {
-                sort_rank: style.sort_rank,
                 style,
                 points: prepared_way.points.clone(),
                 solid_road_surface,
@@ -5543,9 +7125,9 @@ fn build_tile_buffers_from_features_profiled(
     profiler.lap("buildings", &format!("fill={}KB", fill_3d_vertices.len() * 4 / 1024));
 
     let mut union_tiers =
-        HashMap::<RoadSurfaceKey, (StrokeStyle, Vec<(Vec<(f32, f32)>, Option<Vec<f32>>)>)>::new();
-    let mut union_way_meta = HashMap::<RoadSurfaceKey, Vec<RoadJoinMeta>>::new();
-    let mut grouped_strokes = HashMap::<StrokeStyleKey, (StrokeStyle, Vec<Vec<(f32, f32)>>)>::new();
+        BTreeMap::<RoadSurfaceKey, (StrokeStyle, Vec<(Vec<(f32, f32)>, Option<Vec<f32>>)>)>::new();
+    let mut union_way_meta = BTreeMap::<RoadSurfaceKey, Vec<RoadJoinMeta>>::new();
+    let mut grouped_strokes = BTreeMap::<StrokeStyleKey, (StrokeStyle, Vec<Vec<(f32, f32)>>)>::new();
     for job in stroke_jobs {
         if job.solid_road_surface {
             let key = job
@@ -5565,7 +7147,6 @@ fn build_tile_buffers_from_features_profiled(
     for (_key, (style, polylines)) in grouped_strokes {
         for points in merge_stroke_polylines(&polylines) {
             merged_stroke_jobs.push(StrokeDrawJob {
-                sort_rank: style.sort_rank,
                 style,
                 points,
                 solid_road_surface: false,
@@ -5578,13 +7159,7 @@ fn build_tile_buffers_from_features_profiled(
 
     // Deterministic paint order: rank, then style bits (HashMap iteration
     // order must not leak into the render).
-    merged_stroke_jobs.sort_unstable_by_key(|job| {
-        (
-            job.sort_rank,
-            job.style.center.color,
-            job.style.center.width.to_bits(),
-        )
-    });
+    merged_stroke_jobs.sort_unstable_by_key(|job| StrokeStyleKey::from(job.style));
     let clip_bounds = tile_clip_bounds(ROAD_PAINT_CLIP_PADDING);
     // Overzoomed tiles magnify the source tile's coordinate quantization
     // into visibly angular curves (ovals read as polygons at 8-16x). A
@@ -5623,9 +7198,12 @@ fn build_tile_buffers_from_features_profiled(
     // deck profile. MVT feature boundaries often put a slip-road endpoint
     // against the middle of its mainline's segment rather than at a shared
     // node, so the exact-node joint pass below cannot discover this case.
-    let mut join_ways: Vec<RoadTierJoinWay> = union_tiers
+    let mut sorted_tier_keys: Vec<RoadSurfaceKey> = union_tiers.keys().copied().collect();
+    sorted_tier_keys.sort_unstable();
+    let mut join_ways: Vec<RoadTierJoinWay> = sorted_tier_keys
         .iter()
-        .flat_map(|(key, (style, ways))| {
+        .flat_map(|key| {
+            let (style, ways) = &union_tiers[key];
             let half_width = style
                 .casing
                 .map_or(style.center.width, |casing| {
@@ -5968,27 +7546,6 @@ fn build_tile_buffers_from_features_profiled(
         dz_fields.push(DzField::build(&ways_ref, half_width + 2.0, union_clip));
     }
     profiler.lap("rf-fields", "");
-    // T3 deck shadows: elevated road segments project along the sun by
-    // their per-vertex height, so overpasses ground themselves the way
-    // buildings do. Collected as slab quads per lifted segment (grounded
-    // stretches skip, so approaches don't shade their own surface).
-    let mut deck_shadow_paths: Vec<Vec<[f64; 2]>> = Vec::new();
-    let deck_shadow_ctx = if theme.shiny.bake_shadows && buildings_3d && render_zoom >= 14 {
-        let n = (1u32 << tile_key.z) as f64;
-        let lat = (std::f64::consts::PI * (1.0 - 2.0 * (tile_key.y as f64 + 0.5) / n))
-            .sinh()
-            .atan();
-        let units_per_m =
-            (crate::map::geometry::TILE_SIZE * n / (40_075_016.686 * lat.cos())) as f32;
-        let sun_2d = theme.shiny.sun.dir_2d();
-        Some((
-            -sun_2d.x,
-            -sun_2d.y,
-            theme.shiny.sun.shadow_len_per_m() * units_per_m,
-        ))
-    } else {
-        None
-    };
     for pass in 0..2u8 {
         for (tier_index, (tier_key, style, ways)) in smoothed_tiers.iter().enumerate() {
             let (color, width, depth_micro) = if pass == 0 {
@@ -6027,52 +7584,6 @@ fn build_tile_buffers_from_features_profiled(
             } else {
                 road_ribbon_rings(&ribbons, (width * 0.5).max(0.05), union_clip)
             };
-            if pass == 1 {
-                if let Some((sx, sy, len_per_m_units)) = deck_shadow_ctx {
-                    let hw = (width * 0.5).max(0.05);
-                    for (points, dz) in ways.iter() {
-                        let Some(dz) = dz.as_ref() else { continue };
-                        for i in 0..points.len().saturating_sub(1) {
-                            // Cap the projected height: solver outliers
-                            // (20 m+ dz spikes exist in the archive) turned
-                            // one segment into a canal-spanning slab.
-                            let (da, db) = (dz[i].min(6.0), dz[i + 1].min(6.0));
-                            if da < 0.5 && db < 0.5 {
-                                continue;
-                            }
-                            if dz[i] > 12.0 || dz[i + 1] > 12.0 {
-                                continue;
-                            }
-                            let a = points[i];
-                            let b = points[i + 1];
-                            let (ex, ey) = (b.0 - a.0, b.1 - a.1);
-                            let l = (ex * ex + ey * ey).sqrt();
-                            if l < 1e-4 {
-                                continue;
-                            }
-                            let (px, py) = (-ey / l * hw, ex / l * hw);
-                            let (oax, oay) = (sx * da * len_per_m_units, sy * da * len_per_m_units);
-                            let (obx, oby) = (sx * db * len_per_m_units, sy * db * len_per_m_units);
-                            let mut quad = vec![
-                                [(a.0 + px + oax) as f64, (a.1 + py + oay) as f64],
-                                [(b.0 + px + obx) as f64, (b.1 + py + oby) as f64],
-                                [(b.0 - px + obx) as f64, (b.1 - py + oby) as f64],
-                                [(a.0 - px + oax) as f64, (a.1 - py + oay) as f64],
-                            ];
-                            let mut area = 0.0f64;
-                            for j in 0..quad.len() {
-                                let p0 = quad[j];
-                                let p1 = quad[(j + 1) % quad.len()];
-                                area += p0[0] * p1[1] - p1[0] * p0[1];
-                            }
-                            if area < 0.0 {
-                                quad.reverse();
-                            }
-                            deck_shadow_paths.push(quad);
-                        }
-                    }
-                }
-            }
             let skirt_joints: Vec<RoadSkirtJoint> = ways
                 .iter()
                 .enumerate()
@@ -6168,55 +7679,62 @@ fn build_tile_buffers_from_features_profiled(
         } else {
             compute_visible_regions(&groups)
         };
-        // The baked shadow set = building shadows ++ dissolved deck
-        // shadows (concat matches the runtime's two separate emits
-        // exactly, overlap behavior included).
-        let mut shadow_shapes = building_shadow_shapes.clone();
-        if !deck_shadow_paths.is_empty() {
-            shadow_shapes.extend(dissolve_deck_shadows(
-                std::mem::take(&mut deck_shadow_paths),
-                &building_shadow_footprints,
-            ));
-        }
         let bucket = BakedFacesBucket {
             bucket: render_zoom,
             signature: input_sig,
             regions,
-            shadow_signature: captured_shadow_sig,
-            shadow_shapes,
-            shadow_footprints: building_shadow_footprints.clone(),
+            shadow_signature: 0,
+            shadow_shapes: Vec::new(),
+            shadow_footprints: Vec::new(),
             building_signature: captured_building_sig,
             buildings: std::mem::take(&mut captured_building_groups),
         };
         FACES_BAKE_SINK.with(|sink| *sink.borrow_mut() = Some(Some(bucket)));
+        recycle_tess_scratch(&mut tess_verts, &mut tess_indices);
         return TileBuffers {
             pin_hits: Vec::new(),
-            fill_indices: Vec::new(),
-            fill_vertices: Vec::new(),
-            casing_indices: Vec::new(),
-            casing_vertices: Vec::new(),
-            stroke_indices: Vec::new(),
-            stroke_vertices: Vec::new(),
+            fill: TypedStream::default(),
+            fill_misc_indices: Vec::new(),
+            fill_misc_vertices: Vec::new(),
+            face: TypedStream::default(),
+            casing: TypedStream::default(),
+            stroke: TypedStream::default(),
             icon_indices: Vec::new(),
             icon_vertices: Vec::new(),
             icon_high_indices: Vec::new(),
             icon_high_vertices: Vec::new(),
-            fringe_indices: Vec::new(),
-            fringe_vertices: Vec::new(),
-            fill_3d_indices: Vec::new(),
-            fill_3d_vertices: Vec::new(),
+            shadow_disc_instances: Vec::new(),
+            icon_instances: Vec::new(),
+            icon_high_instances: Vec::new(),
+            fringe: TypedStream::default(),
+            fill_3d: TypedStream::default(),
+            fill_3d_misc_indices: Vec::new(),
+            fill_3d_misc_vertices: Vec::new(),
             wall_indices: Vec::new(),
             wall_vertices: Vec::new(),
+            wall_instances: Vec::new(),
             tree_indices: Vec::new(),
             tree_vertices: Vec::new(),
             tree_cross_indices: Vec::new(),
             tree_cross_vertices: Vec::new(),
+            tree_template_indices: Vec::new(),
+            tree_template_vertices: Vec::new(),
+            tree_cross_template_indices: Vec::new(),
+            tree_cross_template_vertices: Vec::new(),
+            tree_instances: Vec::new(),
+            stalk_template_indices: Vec::new(),
+            stalk_template_vertices: Vec::new(),
+            stalk_instances: Vec::new(),
+            stoplight_template_indices: Vec::new(),
+            stoplight_template_vertices: Vec::new(),
+            stoplight_instances: Vec::new(),
             road_icon_indices: Vec::new(),
             road_icon_vertices: Vec::new(),
             mode_overlay_only: false,
             feature_count: 0,
             labels: Vec::new(),
             render_zoom,
+            memory_lod: 0,
             stage_summary: String::new(),
         };
     }
@@ -6227,8 +7745,7 @@ fn build_tile_buffers_from_features_profiled(
         // styling at runtime. Guarded by the group-structure signature (and
         // the stream's coordinate checksum at parse time); any mismatch
         // falls back to the runtime cascade.
-        // MAKEPAD_CASCADE_DUMP=1 (or `touch /tmp/mp_cascade_dump` for
-        // studio-launched apps): structural dump of the cascade input —
+        // Structural dump of the cascade input —
         // diff two runs (e.g. light vs night) to find what diverges.
         if cascade_dump_armed() {
             for (key, _, ways) in &smoothed_tiers {
@@ -6237,7 +7754,8 @@ fn build_tile_buffers_from_features_profiled(
                     .iter()
                     .filter(|(_, dz)| dz.is_some())
                     .count();
-                eprintln!(
+                trace!(
+                    "map.cascade",
                     "CASCADE-TIER class={:08x} rank={} cw={:08x} caw={:08x} v={:?} l={} ways={} pts={} dz={}",
                     key.class_id,
                     key.sort_rank,
@@ -6251,7 +7769,8 @@ fn build_tile_buffers_from_features_profiled(
                 );
             }
             let plaza_pts: usize = plaza_rings.iter().map(|(_, _, p, _)| p.len()).sum();
-            eprintln!(
+            trace!(
+                "map.cascade",
                 "CASCADE-PLAZA count={} pts={} joints={} portals={}",
                 plaza_rings.len(),
                 plaza_pts,
@@ -6268,7 +7787,8 @@ fn build_tile_buffers_from_features_profiled(
                         (*max_dz >= LIFT_COVER_M) as u8 | (((*min_dz <= -LIFT_COVER_M) as u8) << 1)
                     })
                     .collect();
-                eprintln!(
+                trace!(
+                    "map.cascade",
                     "CASCADE-GROUP {gi}: phase={} rank={} field={} hw={} rings={:?} lift={:?}",
                     group.phase, group.rank, group.field, group.half_width, ring_lens, lift_bits
                 );
@@ -6277,8 +7797,9 @@ fn build_tile_buffers_from_features_profiled(
         let baked = baked_faces.as_ref().filter(|bake| {
             let ok = bake.bucket == render_zoom && bake.signature == input_sig;
             if !ok && profiler.on {
-                eprintln!(
-                    "MPPROF cascade-baked-MISS bucket {} vs rz {} sig {:016x} vs runtime {:016x} regions {} groups {}",
+                trace!(
+                    "map.tile_profile",
+                    "cascade-baked-MISS bucket {} vs rz {} sig {:016x} vs runtime {:016x} regions {} groups {}",
                     bake.bucket,
                     render_zoom,
                     bake.signature,
@@ -6292,7 +7813,7 @@ fn build_tile_buffers_from_features_profiled(
         match baked {
             Some(bake) => {
                 if profiler.on {
-                    eprintln!("MPPROF cascade-baked regions={}", bake.regions.len());
+                    trace!("map.tile_profile", "cascade-baked regions={}", bake.regions.len());
                 }
                 // Group count is pinned by the input signature; an index
                 // past it means a corrupt stream (already checksum-guarded
@@ -6349,7 +7870,7 @@ fn build_tile_buffers_from_features_profiled(
     let cap_eps = 0.05_f32;
     // Sort key gains a level-class prefix: sunk faces (tunnels) paint
     // before ALL surface content — under plazas, casings, everything.
-    let events_build_clock = std::time::Instant::now();
+    let events_build_clock = ProfileClock::now();
     let mut events: Vec<((u8, u8, i16, u8, u32), RoadPaintEvent<'_>)> = Vec::new();
     for (face_index, face) in faces.iter().enumerate() {
         let level_class = if face.level < 0 { 0u8 } else { 1 };
@@ -6401,31 +7922,6 @@ fn build_tile_buffers_from_features_profiled(
         }
     }
     events.sort_by_key(|(key, _)| *key);
-
-    // Dissolve + emit the collected deck shadows (minus building
-    // footprints, same rule as building shadows: never on a roof).
-    // On a shadow-bake HIT the baked shapes already contain the deck
-    // shadows (concatenated at capture) — the dissolve is bake/MISS-only.
-    if !shadow_baked_hit && !deck_shadow_paths.is_empty() {
-        let shapes = dissolve_deck_shadows(
-            std::mem::take(&mut deck_shadow_paths),
-            &building_shadow_footprints,
-        );
-        let fill_clip_bounds = tile_clip_bounds((1.0 / render_scale).min(FILL_CLIP_OVERLAP));
-        emit_shadow_shapes(
-            shapes,
-            fill_clip_bounds,
-            aa_units,
-            tolerance,
-            &mut path,
-            &mut tess,
-            &mut tess_verts,
-            &mut tess_indices,
-            &mut icon_vertices,
-            &mut icon_indices,
-            &mut icon_zbias,
-        );
-    }
 
     // Corridor bbox prefilter: deck matching is O(verts x corridors) per
     // stroke, and most strokes are nowhere near a bridge. One cheap bbox
@@ -6498,12 +7994,12 @@ fn build_tile_buffers_from_features_profiled(
     let mut prof_fringe_ms = 0.0f64;
     let mut prof_stroke_arm_ms = 0.0f64;
     let mut prof_face_arm_ms = 0.0f64;
-    let prof_events_build_ms = events_build_clock.elapsed().as_secs_f64() * 1e3;
-    let events_loop_clock = std::time::Instant::now();
+    let prof_events_build_ms = events_build_clock.elapsed_seconds() * 1e3;
+    let events_loop_clock = ProfileClock::now();
     for ((_, phase, _, _, _), event) in &events {
         match event {
             RoadPaintEvent::Face(face_index) => {
-                let whole_face_clock = std::time::Instant::now();
+                let whole_face_clock = ProfileClock::now();
                 let face = &faces[*face_index];
                 let face_param5 =
                     road_semantic_param5(face.level, face.phase, face.depth_micro);
@@ -6537,7 +8033,7 @@ fn build_tile_buffers_from_features_profiled(
                                 field.active_near(min_x, min_y, max_x, max_y)
                             } =>
                         {
-                            let clock = std::time::Instant::now();
+                            let clock = ProfileClock::now();
                             sub_verts = face.verts.clone();
                             sub_indices = face.indices.clone();
                             if face.morph_offsets.len() == face.verts.len()
@@ -6555,20 +8051,20 @@ fn build_tile_buffers_from_features_profiled(
                                 sub_offsets = Vec::new();
                                 subdivide_face_mesh(&mut sub_verts, &mut sub_indices, 3.0, field);
                             }
-                            prof_subdiv_ms += clock.elapsed().as_secs_f64() * 1000.0;
-                            let clock = std::time::Instant::now();
+                            prof_subdiv_ms += clock.elapsed_seconds() * 1000.0;
+                            let clock = ProfileClock::now();
                             let deck: Vec<f32> = sub_verts
                                 .iter()
                                 .map(|v| field.sample(v.x, v.y))
                                 .collect();
-                            prof_sample_ms += clock.elapsed().as_secs_f64() * 1000.0;
+                            prof_sample_ms += clock.elapsed_seconds() * 1000.0;
                             prof_face_verts_out += sub_verts.len();
                             let displaced = deck.iter().any(|&d| d.abs() > 0.05);
                             (&sub_verts, &sub_indices, displaced.then_some(deck))
                         }
                         _ => (&face.verts, &face.indices, None),
                     };
-                let face_clock = std::time::Instant::now();
+                let face_clock = ProfileClock::now();
                 // Deck side walls first (under the face): top verts (v=0)
                 // ride the deck field, bottom verts (v=1) stay grounded —
                 // flat mode collapses them, tilt reveals the wall. Closes
@@ -6634,8 +8130,8 @@ fn build_tile_buffers_from_features_profiled(
                         }
                     }
                 }
-                prof_skirt_ms += face_clock.elapsed().as_secs_f64() * 1e3;
-                let face_clock = std::time::Instant::now();
+                prof_skirt_ms += face_clock.elapsed_seconds() * 1e3;
+                let face_clock = ProfileClock::now();
                 // Morphable body: non-emissive faces whose offsets are
                 // 1:1 with the emitted verts — the dz-subdivided path
                 // carries them through midpoint averaging, so decked city
@@ -6647,11 +8143,15 @@ fn build_tile_buffers_from_features_profiled(
                 } else {
                     &face.morph_offsets
                 };
+                #[cfg(not(target_arch = "wasm32"))]
                 static FACE_MORPH: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                #[cfg(not(target_arch = "wasm32"))]
                 let face_morph_on = *FACE_MORPH.get_or_init(|| {
                     std::env::var_os("MAKEPAD_FACE_MORPH").is_some()
                         || std::path::Path::new("/tmp/mp_face_morph").exists()
                 });
+                #[cfg(target_arch = "wasm32")]
+                let face_morph_on = false;
                 let body_morph = face_morph_on
                     && face.emissive <= 0.001
                     && body_offsets.len() == verts.len()
@@ -6703,11 +8203,11 @@ fn build_tile_buffers_from_features_profiled(
                     );
                 }
                 casing_zbias += VECTOR_ZBIAS_STEP;
-                prof_body_ms += face_clock.elapsed().as_secs_f64() * 1e3;
-                let face_clock = std::time::Instant::now();
+                prof_body_ms += face_clock.elapsed_seconds() * 1e3;
+                let face_clock = ProfileClock::now();
                 // AA skirt: same slot, next zbias step — blends this face's
                 // boundary over whatever the ladder painted below it.
-                if !face.fringe_verts.is_empty() {
+                if want_fringe && !face.fringe_verts.is_empty() {
                     let mut fringe_verts;
                     let mut fringe_indices;
                     let (fr_verts, fr_indices, fr_deck): (&[VVertex], &[u32], Option<Vec<f32>>) =
@@ -6807,10 +8307,12 @@ fn build_tile_buffers_from_features_profiled(
                             fr_deck.as_deref(),
                         );
                     }
-                    casing_zbias += VECTOR_ZBIAS_STEP;
                 }
-                prof_fringe_ms += face_clock.elapsed().as_secs_f64() * 1e3;
-                prof_face_arm_ms += whole_face_clock.elapsed().as_secs_f64() * 1e3;
+                // Reserve the fringe's rank even when this bake omits its
+                // geometry, keeping every later road-core record identical.
+                casing_zbias += VECTOR_ZBIAS_STEP;
+                prof_fringe_ms += face_clock.elapsed_seconds() * 1e3;
+                prof_face_arm_ms += whole_face_clock.elapsed_seconds() * 1e3;
                 feature_count += 1;
             }
             RoadPaintEvent::Stroke {
@@ -6819,7 +8321,7 @@ fn build_tile_buffers_from_features_profiled(
                 start_cap,
                 end_cap,
             } => {
-                let arm_clock = std::time::Instant::now();
+                let arm_clock = ProfileClock::now();
                 let near_corridor = stroke_corridors_available && part_near_corridor(part);
                 let param5 = if pass.deck_m < 0.0 {
                     // Patterned tunnels have no physical sunk mesh; keep
@@ -6852,13 +8354,13 @@ fn build_tile_buffers_from_features_profiled(
                     &mut casing_zbias,
                     param5,
                 );
-                prof_stroke_arm_ms += arm_clock.elapsed().as_secs_f64() * 1e3;
+                prof_stroke_arm_ms += arm_clock.elapsed_seconds() * 1e3;
                 feature_count += 1;
             }
         }
     }
 
-    let prof_events_loop_ms = events_loop_clock.elapsed().as_secs_f64() * 1e3;
+    let prof_events_loop_ms = events_loop_clock.elapsed_seconds() * 1e3;
     let sp = crate::map::geometry::stroke_prof_take();
     profiler.lap(
         "emit",
@@ -6930,6 +8432,8 @@ fn build_tile_buffers_from_features_profiled(
     }
 
     // Pass 3: POI symbols — zoom-constant vector icons, drawn above strokes.
+    // Instanced: the mesh lives once on the GPU, each placement is a record.
+    let mut icon_groups = Vec::<IconInstances>::new();
     for (job_index, (anchor, mesh, color_class, _, _, two_tone, kw, stalls, zoom_floor, _)) in
         icon_jobs.iter().enumerate()
     {
@@ -6937,25 +8441,27 @@ fn build_tile_buffers_from_features_profiled(
         // The lift rides in param4's hundreds (0.25 m quanta) so the zoom
         // floor keeps its low digits.
         let param4_encoded = zoom_floor + (pin_lift_m * 4.0).round() * 100.0;
-        append_icon_mesh(
+        push_icon_instance(
+            &mut icon_groups,
             mesh,
             *anchor,
+            (0.0, 0.0),
+            1.0,
             hex_to_premul_rgba(poi_class_hex(*color_class), 1.0),
             param4_encoded,
-            &mut icon_vertices,
-            &mut icon_indices,
             &mut icon_zbias,
         );
         // carto trees: light canopy disc with a dark center dot.
         if *two_tone == 1 {
             if let Some(core) = icon_mesh("tree_core") {
-                append_icon_mesh(
+                push_icon_instance(
+                    &mut icon_groups,
                     core,
                     *anchor,
+                    (0.0, 0.0),
+                    1.0,
                     hex_to_premul_rgba(0x4c7a4c, 1.0),
                     param4_encoded,
-                    &mut icon_vertices,
-                    &mut icon_indices,
                     &mut icon_zbias,
                 );
             }
@@ -6967,13 +8473,14 @@ fn build_tile_buffers_from_features_profiled(
         if *two_tone == 2 || *two_tone == 3 {
             let bolt_name = if *two_tone == 2 { "charger_bolt_fast" } else { "charger_bolt_ac" };
             if let Some(bolt) = icon_mesh(bolt_name) {
-                append_icon_mesh(
+                push_icon_instance(
+                    &mut icon_groups,
                     bolt,
                     *anchor,
+                    (0.0, 0.0),
+                    1.0,
                     hex_to_premul_rgba(0xffffff, 1.0),
                     param4_encoded,
-                    &mut icon_vertices,
-                    &mut icon_indices,
                     &mut icon_zbias,
                 );
             }
@@ -7103,9 +8610,9 @@ fn build_tile_buffers_from_features_profiled(
     compact_tile_labels(&mut labels);
 
     profiler.lap("tail", "");
-    // MAKEPAD_TILE_HASH=1: fnv over every emitted buffer, printed on the
+    // FNV over every emitted buffer, printed on the
     // TOTAL line — the bit-identity oracle for geometry-path refactors.
-    let buffer_hash = if std::env::var_os("MAKEPAD_TILE_HASH").is_some() {
+    let buffer_hash = if crate::makepad_platform::makepad_error_log::trace_enabled("map.tile_hash") {
         let mut h = 0xcbf29ce484222325u64;
         let mut eat = |bytes: &[u8]| {
             for &b in bytes {
@@ -7122,6 +8629,7 @@ fn build_tile_buffers_from_features_profiled(
                 eat(&i.to_le_bytes());
             }
         }
+        trace!("map.tile_hash", "z{}/{}/{} hash={:016x}", tile_key.z, tile_key.x, tile_key.y, h);
         format!(" hash={h:016x}")
     } else {
         String::new()
@@ -7139,19 +8647,63 @@ fn build_tile_buffers_from_features_profiled(
         ),
     );
 
-    let stage_summary = if profiler.start.elapsed().as_secs_f64() * 1e3 > 100.0 {
+    let stage_summary = if profiler.start.elapsed_seconds() * 1e3 > 100.0 {
         profiler.summary()
     } else {
         String::new()
     };
+    remember_output_capacity_hints(
+        render_zoom,
+        buildings_3d,
+        build_road_core,
+        OutputCapacityHints {
+            labels: labels.len(),
+            pin_hits: pin_hits.len(),
+            icon_jobs: icon_jobs.len(),
+            tree_points: tree_points_3d.len(),
+            signal_points: signal_points_3d.len(),
+            fill_indices: fill_indices.len() + fill_3d_indices.len(),
+            fill_vertices: fill_vertices.len() + fill_3d_vertices.len(),
+            casing_indices: casing_indices.len(),
+            casing_vertices: casing_vertices.len(),
+            stroke_indices: stroke_indices.len(),
+            stroke_vertices: stroke_vertices.len(),
+            icon_indices: icon_indices.len(),
+            icon_vertices: icon_vertices.len(),
+            shadow_instances: shadow_disc_instances.len(),
+            wall_instances: wall_instances.len(),
+            tree_template_vertices: tree_template_vertices.len(),
+            tree_template_indices: tree_template_indices.len(),
+            tree_cross_template_vertices: tree_cross_template_vertices.len(),
+            tree_cross_template_indices: tree_cross_template_indices.len(),
+            tree_instances: tree_instances.len(),
+            stalk_instances: stalk_instances.len(),
+            stoplight_instances: stoplight_instances.len(),
+            road_icon_indices: road_icon_indices.len(),
+            road_icon_vertices: road_icon_vertices.len(),
+        },
+    );
     let mut icon_vertices = icon_vertices;
     let mut icon_indices = icon_indices;
     let (icon_high_vertices, icon_high_indices) =
         split_icon_band(&mut icon_vertices, &mut icon_indices);
+    let (icon_instances, icon_high_instances) = split_icon_instance_band(icon_groups);
     let mut casing_vertices = casing_vertices;
     let mut casing_indices = casing_indices;
-    let (fringe_vertices, fringe_indices) =
-        split_fringe_band(&mut casing_vertices, &mut casing_indices);
+    let (fringe_vertices, fringe_indices) = if want_fringe {
+        split_fringe_band(&mut casing_vertices, &mut casing_indices)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    // Grounded union faces take the 16-byte face layout. Deck fields can
+    // cross zero inside one ramp triangle, so only triangles whose THREE
+    // records project losslessly may enter the compact stream. Mixed
+    // triangles stay on the road layout and shared vertices are copied.
+    let (face_vertices, face_indices) = split_band_by_all(
+        &mut casing_vertices,
+        &mut casing_indices,
+        is_compact_face_record,
+    );
     // 3D band sub-splits by material (param3, slot 14): walls skip at the
     // mid LOD ring ("roofs only"), canopy balls swap to crossed quads far
     // out. Materials were authored per-append so the predicate is exact.
@@ -7167,47 +8719,94 @@ fn build_tile_buffers_from_features_profiled(
         &mut fill_3d_indices,
         |record| record[14] > 3.5 && record[14] < 4.5,
     );
+    // Ordinary lifted shape-0 roofs use the 16-byte typed roof layout.
+    // Parapet depth variants and any future gradient or patterned roof stay
+    // on the generic vector path; stalks and signals now have instance bands.
+    let (fill_3d_misc_vertices, fill_3d_misc_indices) = split_band_by(
+        &mut fill_3d_vertices,
+        &mut fill_3d_indices,
+        |record| !is_compact_roof_record(record),
+    );
+    // The ground stream is compact only for polygon-fill variants. Building
+    // outline strokes are the sole generic records emitted into this pass;
+    // keep them in a sibling stream so their stroke expansion stays intact.
+    let mut fill_vertices = fill_vertices;
+    let mut fill_indices = fill_indices;
+    let (fill_misc_vertices, fill_misc_indices) = split_band_by(
+        &mut fill_vertices,
+        &mut fill_indices,
+        |record| map_fill_variant_code(record).is_none(),
+    );
     // GPU-pack on the builder thread: uploads ship pre-packed bytes (the
     // main-thread pack was 10-15ms per street tile and throttled the
     // upload drain to one tile per frame).
-    let fill_vertices = pack_vector_vertices(&fill_vertices);
-    let fill_3d_vertices = pack_vector_vertices(&fill_3d_vertices);
-    let casing_vertices = pack_vector_vertices(&casing_vertices);
-    let stroke_vertices = pack_vector_vertices(&stroke_vertices);
+    let fill_vertices = pack_fill_vertices(&fill_vertices);
+    let fill_misc_vertices = pack_vector_vertices(&fill_misc_vertices);
+    let fill_3d_vertices = pack_roof_vertices(&fill_3d_vertices);
+    let fill_3d_misc_vertices = pack_vector_vertices(&fill_3d_misc_vertices);
+    debug_assert!(casing_vertices
+        .chunks_exact(VECTOR_FLOATS_PER_VERTEX)
+        .all(|record| record[10].abs() < 0.5 || record[10] >= 99.5));
+    debug_assert!(stroke_vertices
+        .chunks_exact(VECTOR_FLOATS_PER_VERTEX)
+        .all(|record| record[10].abs() < 0.5 || record[10] >= 99.5));
+    debug_assert!(fringe_vertices
+        .chunks_exact(VECTOR_FLOATS_PER_VERTEX)
+        .all(|record| record[10].abs() < 0.5 || record[10] >= 99.5));
+    let face_vertices = pack_face_vertices(&face_vertices);
+    let casing_vertices = pack_road_vertices(&casing_vertices);
+    let stroke_vertices = pack_road_vertices(&stroke_vertices);
     let icon_vertices = pack_vector_vertices(&icon_vertices);
     let icon_high_vertices = pack_vector_vertices(&icon_high_vertices);
-    let fringe_vertices = pack_vector_vertices(&fringe_vertices);
+    let fringe_vertices = pack_road_vertices(&fringe_vertices);
     let wall_vertices = pack_vector_vertices(&wall_vertices);
     let tree_vertices = pack_vector_vertices(&tree_vertices);
     let tree_cross_vertices = pack_vector_vertices(&tree_cross_vertices);
+    recycle_tess_scratch(&mut tess_verts, &mut tess_indices);
     TileBuffers {
         pin_hits,
-        fill_indices,
-        fill_vertices,
-        casing_indices,
-        casing_vertices,
-        stroke_indices,
-        stroke_vertices,
+        fill: TypedStream::from_u32(fill_indices, fill_vertices, FILL_TYPED_VERTEX_BYTES),
+        fill_misc_indices,
+        fill_misc_vertices,
+        face: TypedStream::from_u32(face_indices, face_vertices, FACE_TYPED_VERTEX_BYTES),
+        casing: TypedStream::from_u32(casing_indices, casing_vertices, ROAD_TYPED_VERTEX_BYTES),
+        stroke: TypedStream::from_u32(stroke_indices, stroke_vertices, ROAD_TYPED_VERTEX_BYTES),
         icon_indices,
         icon_vertices,
         icon_high_indices,
         icon_high_vertices,
-        fringe_indices,
-        fringe_vertices,
-        fill_3d_indices,
-        fill_3d_vertices,
+        shadow_disc_instances,
+        icon_instances,
+        icon_high_instances,
+        fringe: TypedStream::from_u32(fringe_indices, fringe_vertices, ROAD_TYPED_VERTEX_BYTES),
+        fill_3d: TypedStream::from_u32(fill_3d_indices, fill_3d_vertices, ROOF_TYPED_VERTEX_BYTES),
+        fill_3d_misc_indices,
+        fill_3d_misc_vertices,
         wall_indices,
         wall_vertices,
+        wall_instances,
         tree_indices,
         tree_vertices,
         tree_cross_indices,
         tree_cross_vertices,
+        tree_template_indices,
+        tree_template_vertices: pack_vector_vertices(&tree_template_vertices),
+        tree_cross_template_indices,
+        tree_cross_template_vertices: pack_vector_vertices(&tree_cross_template_vertices),
+        tree_instances,
+        stalk_template_indices,
+        stalk_template_vertices: pack_vector_vertices(&stalk_template_vertices),
+        stalk_instances,
+        stoplight_template_indices,
+        stoplight_template_vertices: pack_vector_vertices(&stoplight_template_vertices),
+        stoplight_instances,
         road_icon_indices,
         road_icon_vertices,
         mode_overlay_only: !build_road_core,
         feature_count,
         labels,
         render_zoom,
+        memory_lod: 0,
         stage_summary,
     }
 }
@@ -7407,137 +9006,81 @@ fn append_oneway_arrow(
     *zbias += VECTOR_ZBIAS_STEP;
 }
 
-fn append_icon_mesh(
-    mesh: &IconMesh,
-    anchor: (f32, f32),
-    color: [f32; 4],
-    min_zoom: f32,
-    out_vertices: &mut Vec<f32>,
-    out_indices: &mut Vec<u32>,
-    zbias: &mut f32,
-) {
-    append_icon_mesh_offset(
-        mesh,
-        anchor,
-        (0.0, 0.0),
-        color,
-        min_zoom,
-        out_vertices,
-        out_indices,
-        zbias,
-    )
-}
+/// Tilt depth of a free-standing symbol: a SMALL camera-ward bias, enough to
+/// clear the marker's own ground pixel, small enough that buildings
+/// meaningfully in front still occlude. The instanced icon shader carries it
+/// as a constant; keep the two in lockstep.
+pub const ICON_INSTANCE_DEPTH_BIAS: f32 = 0.35;
+/// Clip radius (screen px) of a free-standing symbol: generous, avoids
+/// view-edge pop-in. Shader twin in `DrawMapIcon`.
+pub const ICON_INSTANCE_CLIP_RADIUS: f32 = 24.0;
 
-/// Like append_icon_mesh with an extra SCREEN-px offset added to every
-/// vertex — lets shared meshes (digits) compose inside a pin badge while
-/// staying zoom-constant with it.
-#[allow(clippy::too_many_arguments)]
-fn append_icon_mesh_offset(
-    mesh: &IconMesh,
-    anchor: (f32, f32),
-    screen_offset: (f32, f32),
-    color: [f32; 4],
-    min_zoom: f32,
-    out_vertices: &mut Vec<f32>,
-    out_indices: &mut Vec<u32>,
-    zbias: &mut f32,
-) {
-    append_icon_mesh_offset_scaled(
-        mesh,
-        anchor,
-        screen_offset,
-        1.0,
-        color,
-        min_zoom,
-        out_vertices,
-        out_indices,
-        zbias,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn append_icon_mesh_offset_scaled(
+/// One symbol placement: the mesh stays on the GPU, this is the 8-float
+/// instance record (see `ICON_INSTANCE_FLOATS`). Every placement still takes
+/// its own zbias step so draw order matches the vertex-baked path.
+fn push_icon_instance(
+    groups: &mut Vec<IconInstances>,
     mesh: &IconMesh,
     anchor: (f32, f32),
     screen_offset: (f32, f32),
     scale: f32,
     color: [f32; 4],
     min_zoom: f32,
-    out_vertices: &mut Vec<f32>,
-    out_indices: &mut Vec<u32>,
     zbias: &mut f32,
 ) {
-    // Template cache: for a given (mesh, color, scale, offset) every
-    // instance differs only in anchor, zoom floor and zbias. City-center
-    // tiles at the icon horizon write tens of MB of icon vertices — the
-    // per-vertex construction loop was ~half of the emit stage. Build the
-    // 19-float block once, memcpy, patch 4 slots.
-    thread_local! {
-        static ICON_TEMPLATES: std::cell::RefCell<
-            HashMap<(usize, [u32; 4], u32, u32, u32), Vec<f32>>,
-        > = std::cell::RefCell::new(HashMap::new());
-    }
-    let base = (out_vertices.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
-    let key = (
-        mesh as *const IconMesh as usize,
-        [
-            color[0].to_bits(),
-            color[1].to_bits(),
-            color[2].to_bits(),
-            color[3].to_bits(),
-        ],
-        scale.to_bits(),
-        screen_offset.0.to_bits(),
-        screen_offset.1.to_bits(),
-    );
-    ICON_TEMPLATES.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        let template = cache.entry(key).or_insert_with(|| {
-            let mut block = Vec::with_capacity(mesh.verts.len() * VECTOR_FLOATS_PER_VERTEX);
-            for vertex in &mesh.verts {
-                block.extend_from_slice(&[
-                    0.0,
-                    0.0,
-                    vertex.u,
-                    vertex.v,
-                    color[0],
-                    color[1],
-                    color[2],
-                    color[3],
-                    1e6, // stroke_mult: fill
-                    vertex.stroke_dist,
-                    ICON_SHAPE_ID,
-                    0.0, // param0: solid color
-                    // param1/2: screen-px offset from the anchor
-                    vertex.x * scale + screen_offset.0,
-                    vertex.y * scale + screen_offset.1,
-                    0.0,
-                    // param4: per-instance view-zoom floor (patched); the
-                    // shader collapses the vertex below it.
-                    0.0,
-                    // Tilt depth: a SMALL camera-ward bias -- enough to
-                    // clear the marker's own ground pixel, small enough
-                    // that buildings meaningfully in FRONT still occlude.
-                    0.35,
-                    24.0, // clip_radius: generous, avoids view-edge pop-in
-                    0.0,
-                ]);
-            }
-            block
-        });
-        let start = out_vertices.len();
-        out_vertices.extend_from_slice(template);
-        for record in out_vertices[start..].chunks_exact_mut(VECTOR_FLOATS_PER_VERTEX) {
-            record[0] = anchor.0;
-            record[1] = anchor.1;
-            record[15] = min_zoom;
-            record[18] = *zbias;
+    let mesh_slot = icon_mesh_slot(mesh);
+    let group = match groups.iter_mut().position(|group| group.mesh_slot == mesh_slot) {
+        Some(index) => &mut groups[index],
+        None => {
+            groups.push(IconInstances {
+                mesh_slot,
+                data: Vec::new(),
+            });
+            groups.last_mut().unwrap()
         }
-    });
-    for index in &mesh.indices {
-        out_indices.push(base + index);
-    }
+    };
+    group.data.extend_from_slice(&[
+        anchor.0,
+        anchor.1,
+        screen_offset.0,
+        screen_offset.1,
+        scale,
+        min_zoom,
+        *zbias,
+        crate::makepad_draw::vector::pack_unorm8x4(color[0], color[1], color[2], color[3]),
+    ]);
     *zbias += VECTOR_ZBIAS_STEP;
+}
+
+/// Split instance groups into the two icon bands by the record's zoom floor
+/// (param4 composite), mirroring `split_icon_band` for vertex streams.
+fn split_icon_instance_band(groups: Vec<IconInstances>) -> (Vec<IconInstances>, Vec<IconInstances>) {
+    let mut low = Vec::new();
+    let mut high = Vec::new();
+    for group in groups {
+        let mut low_data = Vec::new();
+        let mut high_data = Vec::new();
+        for record in group.data.chunks_exact(ICON_INSTANCE_FLOATS) {
+            if record[5] > ICON_HIGH_BAND_FLOOR {
+                high_data.extend_from_slice(record);
+            } else {
+                low_data.extend_from_slice(record);
+            }
+        }
+        if !low_data.is_empty() {
+            low.push(IconInstances {
+                mesh_slot: group.mesh_slot,
+                data: low_data,
+            });
+        }
+        if !high_data.is_empty() {
+            high.push(IconInstances {
+                mesh_slot: group.mesh_slot,
+                data: high_data,
+            });
+        }
+    }
+    (low, high)
 }
 
 fn project_way_points_with_nodes(
@@ -7584,7 +9127,8 @@ fn project_way_points_with_nodes(
 /// the ancestor shift (0 = exact zoom) and the quadrant offsets that map the
 /// ancestor's local space into this tile's.
 pub struct OverlayTileData {
-    pub raw: Vec<u8>,
+    /// Decoded on the bake job (`TileBlob::decode`), never on the UI thread.
+    pub raw: super::archive::TileBlob,
     pub shift: u32,
     pub quadrant_x: u32,
     pub quadrant_y: u32,
@@ -7606,6 +9150,158 @@ fn overlay_zoom_range(reader: &mut MbtilesReader) -> (u32, u32) {
     (parse("minzoom", 0), parse("maxzoom", 30))
 }
 
+/// Build one tile from bytes already supplied by the asynchronous `.mkmap`
+/// archive. Local MBTiles bridge/overlay sidecars remain worker-only inputs.
+pub fn build_local_tile_from_archive_bytes(
+    tile_key: TileKey,
+    base: Option<std::sync::Arc<[u8]>>,
+    detail: Option<std::sync::Arc<[u8]>>,
+    detail_mbtiles_path: Option<&Path>,
+    bridge_dz_mbtiles_path: Option<&Path>,
+    mut overlay_tiles: Vec<OverlayTileData>,
+    overlay_paths: &[String],
+    theme: &CompiledMapTheme,
+    render_zoom: u32,
+    buildings_3d: bool,
+    want_fringe: bool,
+    build_road_core: bool,
+) -> Result<Option<LoadedLocalTile>, String> {
+    for path in overlay_paths.iter().filter(|path| !path.is_empty()) {
+        let (file, filter) = match path.split_once('?') {
+            Some((file, "fast")) => (file, 1_u8),
+            Some((file, "slow")) => (file, 2),
+            Some((file, _)) => (file, 0),
+            None => (path.as_str(), 0),
+        };
+        let Ok(mut reader) = MbtilesReader::open(Path::new(file)) else {
+            continue;
+        };
+        let (min_zoom, max_zoom) = overlay_zoom_range(&mut reader);
+        if tile_key.z < min_zoom {
+            continue;
+        }
+        let shift = tile_key.z.saturating_sub(max_zoom);
+        let fetch_z = tile_key.z - shift;
+        let fetch_x = (tile_key.x as u32 >> shift) as i64;
+        let fetch_y = (tile_key.y as u32 >> shift) as i64;
+        let tms_row = (1_i64 << fetch_z) - 1 - fetch_y;
+        if let Ok(Some(raw)) = reader.get_tile_decoded(fetch_z as i64, fetch_x, tms_row) {
+            overlay_tiles.push(OverlayTileData {
+                raw: raw.into(),
+                shift,
+                quadrant_x: tile_key.x as u32 - ((fetch_x as u32) << shift),
+                quadrant_y: tile_key.y as u32 - ((fetch_y as u32) << shift),
+                filter,
+                has_chargers: file.contains("chargers"),
+            });
+        }
+    }
+
+    let Some(base) = base else {
+        if overlay_tiles.is_empty() {
+            return Ok(None);
+        }
+        let buffers = build_tile_buffers_from_mvt(
+            tile_key,
+            &[],
+            None,
+            None,
+            false,
+            &overlay_tiles,
+            theme,
+            render_zoom,
+            buildings_3d,
+            want_fringe,
+            build_road_core,
+        )?;
+        return Ok(Some(LoadedLocalTile { tile_key, buffers }));
+    };
+
+    let mut bridge_dz = bridge_dz_mbtiles_path
+        .filter(|path| path.is_file())
+        .and_then(|path| MbtilesReader::open(path).ok())
+        .and_then(|mut reader| {
+            let meta = reader.get_metadata().unwrap_or_default();
+            let zoom = meta.get("minzoom").and_then(|z| z.parse::<u32>().ok())?;
+            let bounds: Vec<f64> = meta
+                .get("bounds")?
+                .split(',')
+                .filter_map(|value| value.trim().parse().ok())
+                .collect();
+            (bounds.len() == 4)
+                .then_some((reader, zoom, [bounds[0], bounds[1], bounds[2], bounds[3]]))
+        });
+    let (bridge_dz_raw, bridge_dz_covered) = if let Some((reader, zoom, bounds)) = bridge_dz.as_mut()
+    {
+        if tile_key.z == *zoom {
+            let n = (1_u64 << tile_key.z) as f64;
+            let west = tile_key.x as f64 / n * 360.0 - 180.0;
+            let east = (tile_key.x as f64 + 1.0) / n * 360.0 - 180.0;
+            let lat = |y: f64| {
+                (std::f64::consts::PI * (1.0 - 2.0 * y / n))
+                    .sinh()
+                    .atan()
+                    .to_degrees()
+            };
+            let north = lat(tile_key.y as f64);
+            let south = lat(tile_key.y as f64 + 1.0);
+            let covered = west >= bounds[0]
+                && east <= bounds[2]
+                && south >= bounds[1]
+                && north <= bounds[3];
+            if covered {
+                let tms_row = (1_i64 << tile_key.z) - 1 - tile_key.y as i64;
+                (
+                    reader
+                        .get_tile_decoded(tile_key.z as i64, tile_key.x as i64, tms_row)
+                        .ok()
+                        .flatten(),
+                    true,
+                )
+            } else {
+                (None, false)
+            }
+        } else {
+            (None, false)
+        }
+    } else {
+        (None, false)
+    };
+    let detail_needed = render_zoom >= ICON_MIN_ZOOM
+        || render_zoom >= 16
+        || (buildings_3d && render_zoom >= BUILDING_3D_MIN_ZOOM)
+        || !bridge_dz_covered;
+    let detail = if detail.is_none() && detail_needed {
+        detail_mbtiles_path
+            .filter(|path| path.is_file())
+            .and_then(|path| MbtilesReader::open(path).ok())
+            .and_then(|mut reader| {
+                let tms_row = (1_i64 << tile_key.z) - 1 - tile_key.y as i64;
+                reader
+                    .get_tile_decoded(tile_key.z as i64, tile_key.x as i64, tms_row)
+                    .ok()
+                    .flatten()
+                    .map(std::sync::Arc::from)
+            })
+    } else {
+        detail
+    };
+    let buffers = build_tile_buffers_from_mvt(
+        tile_key,
+        &base,
+        detail_needed.then_some(detail.as_deref()).flatten(),
+        bridge_dz_raw.as_deref(),
+        bridge_dz_covered,
+        &overlay_tiles,
+        theme,
+        render_zoom,
+        buildings_3d,
+        want_fringe,
+        build_road_core,
+    )?;
+    Ok(Some(LoadedLocalTile { tile_key, buffers }))
+}
+
 pub fn load_local_tile_batch(
     mbtiles_path: &Path,
     detail_mbtiles_path: Option<&Path>,
@@ -7615,6 +9311,7 @@ pub fn load_local_tile_batch(
     theme: &CompiledMapTheme,
     render_zoom: u32,
     buildings_3d: bool,
+    want_fringe: bool,
     build_road_core: bool,
 ) -> Result<(Vec<LoadedLocalTile>, Vec<TileKey>), String> {
     if requested.is_empty() {
@@ -7704,7 +9401,7 @@ pub fn load_local_tile_batch(
             let tms_row = (1_i64 << fetch_z) - 1 - fetch_y;
             if let Ok(Some(raw)) = reader.get_tile_decoded(fetch_z as i64, fetch_x, tms_row) {
                 out.push(OverlayTileData {
-                    raw,
+                    raw: raw.into(),
                     shift,
                     quadrant_x: (tile_key.x as u32) - ((fetch_x as u32) << shift),
                     quadrant_y: (tile_key.y as u32) - ((fetch_y as u32) << shift),
@@ -7795,6 +9492,7 @@ pub fn load_local_tile_batch(
                         theme,
                         render_zoom,
                         buildings_3d,
+                        want_fringe,
                         build_road_core,
                     ) {
                         Ok(buffers) => loaded.push(LoadedLocalTile { tile_key, buffers }),
@@ -7802,7 +9500,7 @@ pub fn load_local_tile_batch(
                     }
                     continue;
                 };
-                let t_build = std::time::Instant::now();
+                let t_build = ProfileClock::now();
                 let (bridge_dz_raw, bridge_dz_covered) = fetch_bridge_dz(tile_key);
                 let detail_needed = render_zoom >= ICON_MIN_ZOOM
                     || render_zoom >= 16
@@ -7839,12 +9537,13 @@ pub fn load_local_tile_batch(
                     theme,
                     render_zoom,
                     buildings_3d,
+                    want_fringe,
                     build_road_core,
                 ) {
                     Ok(buffers) => {
                         // Slow-tile forensics: anything over 150ms is worth a
                         // line — which tile, how many bytes, what it holds.
-                        let build_ms = t_build.elapsed().as_secs_f64() * 1e3;
+                        let build_ms = t_build.elapsed_seconds() * 1e3;
                         if build_ms > 150.0 {
                             // Everything needed to replay this exact build
                             // headlessly, plus the ready-to-paste command.
@@ -7869,7 +9568,7 @@ pub fn load_local_tile_batch(
                                 format!(" TILE_PROFILE_OVERLAYS=\"{}\"", overlay_paths.join(";"))
                             };
                             log!(
-                                "MapView: SLOW tile z{} x{} y{}: {:.0}ms build rz{} {} raw {} detail {} | stages: {} | repro: MAKEPAD_TILE_STAGES=1 TILE_PROFILE_ARCHIVE={}{}{}{} TILE_PROFILE_KEYS=\"{},{},{}\" TILE_PROFILE_RENDER_ZOOM={} TILE_PROFILE_3D={} cargo test -p makepad-widgets --features maps --release profile_tile_build -- --ignored --nocapture",
+                                "MapView: SLOW tile z{} x{} y{}: {:.0}ms build rz{} {} raw {} detail {} | stages: {} | repro: MAKEPAD_TRACE=map.tile_profile TILE_PROFILE_ARCHIVE={}{}{}{} TILE_PROFILE_KEYS=\"{},{},{}\" TILE_PROFILE_RENDER_ZOOM={} TILE_PROFILE_3D={} cargo test -p makepad-widgets --features maps --release profile_tile_build -- --ignored --nocapture",
                                 tile_key.z,
                                 tile_key.x,
                                 tile_key.y,
@@ -8001,6 +9700,7 @@ pub fn load_local_tile_batch(
                 theme,
                 render_zoom,
                 buildings_3d,
+                want_fringe,
                 build_road_core,
             ) {
                 Ok(buffers) => {
@@ -8034,6 +9734,130 @@ pub fn load_local_tile_batch(
     Ok((loaded, decode_failed))
 }
 
+#[cfg(test)]
+mod local_archive_regression_tests {
+    use super::*;
+    use makepad_mbtile_reader::MbtilesWriter;
+
+    fn test_mbtiles(name: &str, with_tile: bool) -> std::path::PathBuf {
+        test_mbtiles_with_payload(name, with_tile.then_some(&[][..]))
+    }
+
+    fn test_mbtiles_with_payload(
+        name: &str,
+        tile: Option<&[u8]>,
+    ) -> std::path::PathBuf {
+        // Unique per process AND per call: tests run in parallel, and a
+        // wall-clock nonce collides within the same tick.
+        static NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = format!(
+            "{}-{}",
+            std::process::id(),
+            NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
+        let path = std::path::PathBuf::from(format!("target/{name}-{id}.mbtiles"));
+        let mut writer = MbtilesWriter::create(&path).unwrap();
+        writer.set_metadata("minzoom", "0");
+        writer.set_metadata("maxzoom", "0");
+        if let Some(tile) = tile {
+            writer.write_tile_encoded(0, 0, 0, tile).unwrap();
+        }
+        writer.finish().unwrap();
+        path
+    }
+
+    fn protobuf_varint(mut value: u64, out: &mut Vec<u8>) {
+        while value >= 0x80 {
+            out.push((value as u8) | 0x80);
+            value >>= 7;
+        }
+        out.push(value as u8);
+    }
+
+    fn protobuf_varint_field(field: u64, value: u64, out: &mut Vec<u8>) {
+        protobuf_varint(field << 3, out);
+        protobuf_varint(value, out);
+    }
+
+    fn protobuf_bytes_field(field: u64, value: &[u8], out: &mut Vec<u8>) {
+        protobuf_varint((field << 3) | 2, out);
+        protobuf_varint(value.len() as u64, out);
+        out.extend_from_slice(value);
+    }
+
+    fn nonempty_polygon_mvt() -> Vec<u8> {
+        let mut geometry = Vec::new();
+        for value in [9, 20, 20, 26, 200, 0, 0, 200, 199, 0, 15] {
+            protobuf_varint(value, &mut geometry);
+        }
+        let mut feature = Vec::new();
+        protobuf_varint_field(3, 3, &mut feature);
+        protobuf_bytes_field(4, &geometry, &mut feature);
+        let mut layer = Vec::new();
+        protobuf_bytes_field(1, b"natura2000", &mut layer);
+        protobuf_bytes_field(2, &feature, &mut layer);
+        protobuf_varint_field(5, 4096, &mut layer);
+        protobuf_varint_field(15, 2, &mut layer);
+        let mut tile = Vec::new();
+        protobuf_bytes_field(3, &layer, &mut tile);
+        tile
+    }
+
+    #[test]
+    fn archive_overlay_only_build_ignores_detail_like_legacy_branch() {
+        let base = test_mbtiles("archive-missing-base", false);
+        let overlay_payload = nonempty_polygon_mvt();
+        let overlay = test_mbtiles_with_payload("archive-overlay", Some(&overlay_payload));
+        let overlay_paths = vec![overlay.to_string_lossy().into_owned()];
+        let key = TileKey { z: 0, x: 0, y: 0 };
+        let build = |detail| {
+            build_local_tile_from_archive_bytes(
+                key,
+                None,
+                detail,
+                None,
+                None,
+                Vec::new(),
+                &overlay_paths,
+                &CompiledMapTheme::default(),
+                0,
+                false,
+                true,
+                false,
+            )
+            .unwrap()
+            .unwrap()
+            .buffers
+        };
+        let (mut legacy, failed) = load_local_tile_batch(
+            &base,
+            None,
+            None,
+            &overlay_paths,
+            &[key],
+            &CompiledMapTheme::default(),
+            0,
+            false,
+            true,
+            false,
+        )
+        .unwrap();
+        assert!(failed.is_empty());
+        let mut legacy = legacy.pop().unwrap().buffers;
+        let mut archive = build(None);
+        let mut with_unusable_detail = build(Some(vec![0xff, 0xff, 0xff].into()));
+        assert!(legacy.feature_count > 0);
+        assert!(!legacy.fill.is_empty());
+        legacy.stage_summary.clear();
+        archive.stage_summary.clear();
+        with_unusable_detail.stage_summary.clear();
+        assert_eq!(legacy, archive);
+        assert_eq!(archive, with_unusable_detail);
+        std::fs::remove_file(base).unwrap();
+        std::fs::remove_file(overlay).unwrap();
+    }
+}
+
 // --- MVT (Mapbox Vector Tile) parsing ---
 
 /// Receives decoded MVT features (tile-local integer geometry + tags).
@@ -8053,14 +9877,15 @@ pub trait MvtSink {
     /// of keys per feature (multilingual names, addr:*) that no consumer
     /// below the icon zooms ever reads.
     fn tag_key_whitelist(&self, _layer_name: &str) -> Option<&'static [&'static str]> {
-        None
+        Some(point_keys())
     }
     fn add_path(
         &mut self,
         tile_key: TileKey,
         extent: u32,
         points: &[(i32, i32)],
-        tags: HashMap<String, String>,
+        tags: TagSet,
+        meta: MvtPathMeta,
         close: bool,
     );
     fn add_point(
@@ -8068,8 +9893,16 @@ pub trait MvtSink {
         tile_key: TileKey,
         extent: u32,
         point: (i32, i32),
-        tags: HashMap<String, String>,
+        tags: TagSet,
     );
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MvtPathMeta {
+    pub feature_index: u32,
+    pub path_index: u32,
+    /// Parse-local identity shared by all rings of one polygon feature.
+    pub feature_group: Option<u64>,
 }
 
 /// Collects MVT features directly in tile-local f32 coordinates with
@@ -8094,12 +9927,46 @@ enum LayerParseFilter {
     DetailLayers { points: bool, lines: bool, polygons: bool },
 }
 
+const DETAIL_WAY_KEYS: &[&str] = &[
+    "layer", "bridge", "tunnel", "highway", "railway", "width", "barrier", "area",
+    "name", "attraction", "zoo", "tourism", "public_transport", "landuse", "leisure",
+    "natural", "building", "building:part", "height", "building:levels", "min_height",
+    "building:min_level", "location", "place", "parking", "surface", "access", "service",
+    "link", "rail", "waterway", "ref", "boundary", "class", "subclass", "kind",
+    "junction", "oneway", "oneway_reverse", "mode", "osm_layer", "bouwjaar",
+    "aantal_inwoners", "buurtcode", "wijkcode", "gemeentecode", "naam", "naam_n2k",
+    "buurtnaam", "wijknaam", "gemeentenaam",
+    "__makepad_osm_id", "__makepad_osm_type", "L", "F", "P", "dz", "hw",
+];
+
+const DETAIL_POINT_EXTRA_KEYS: &[&str] = &[
+    "amenity", "brand", "craft", "entrance", "historic", "max_kw", "office", "operator",
+    "shop", "kerb", "bus", "shelter", "housename", "housenumber", "station",
+    "population", "evses", "city", "connectors", "name:latin", "name:en", "name_int",
+];
+
+static POINT_KEYS: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+
+fn point_keys() -> &'static [&'static str] {
+    POINT_KEYS
+        .get_or_init(|| {
+            let mut keys = DETAIL_WAY_KEYS.to_vec();
+            keys.extend_from_slice(DETAIL_POINT_EXTRA_KEYS);
+            keys
+        })
+        .as_slice()
+}
+
+pub(super) fn warm_tile_registries() {
+    let _ = point_keys();
+}
+
 struct MvtLocalCollector {
     layer_filter: LayerParseFilter,
     min_dist_sq: f32,
     next_feature_id: u64,
     ways: Vec<TileWay>,
-    points: Vec<((f32, f32), HashMap<String, String>)>,
+    points: Vec<((f32, f32), TagSet)>,
     /// Baked dense deck profiles keyed (source layer, feature index, path
     /// index) — validated and substituted during collection.
     base_dz: HashMap<(String, u32, u32), BaseDzProfile>,
@@ -8108,14 +9975,46 @@ struct MvtLocalCollector {
 impl MvtLocalCollector {
     fn new(render_scale: f32) -> Self {
         let min_dist = 0.35 / render_scale.max(0.001);
+        let (mut ways, mut points) = BAKE_SCRATCH.with(|slot| {
+            let mut scratch = slot.borrow_mut();
+            (
+                scratch.way_buffers.pop().unwrap_or_default(),
+                scratch.point_buffers.pop().unwrap_or_default(),
+            )
+        });
+        ways.clear();
+        points.clear();
         Self {
             layer_filter: LayerParseFilter::All,
             min_dist_sq: min_dist * min_dist,
             next_feature_id: 1,
-            ways: Vec::new(),
-            points: Vec::new(),
+            ways,
+            points,
             base_dz: HashMap::new(),
         }
+    }
+}
+
+impl Drop for MvtLocalCollector {
+    fn drop(&mut self) {
+        while let Some(way) = self.ways.pop() {
+            let TileWay { points, tags, dz, .. } = way;
+            // Drop the tag view before borrowing the scratch slot: the
+            // last arena reference recycles its own buffers into that slot.
+            drop(tags);
+            recycle_way_points(points);
+            if let Some(dz) = dz {
+                recycle_way_dz(dz);
+            }
+        }
+        self.points.clear();
+        let mut ways = std::mem::take(&mut self.ways);
+        let mut points = std::mem::take(&mut self.points);
+        let _ = BAKE_SCRATCH.try_with(|slot| {
+            let mut scratch = slot.borrow_mut();
+            scratch.way_buffers.push(std::mem::take(&mut ways));
+            scratch.point_buffers.push(std::mem::take(&mut points));
+        });
     }
 }
 
@@ -8144,49 +10043,9 @@ impl MvtSink for MvtLocalCollector {
     }
 
     fn tag_key_whitelist(&self, _layer_name: &str) -> Option<&'static [&'static str]> {
-        // Every key the detail-merge way consumers (corridors, barriers,
-        // platforms, attraction/pedestrian/green rings, building extrusion)
-        // or downstream styling of their rewritten layers can read. Point
-        // features are the one consumer with an open-ended key set
-        // (micro_icon_for_tags), so the whitelist only arms when the point
-        // layers are off — below the icon zooms, exactly where the tag mass
-        // hurts.
-        const DETAIL_WAY_KEYS: &[&str] = &[
-            "layer", "bridge", "tunnel", "highway", "railway", "width", "barrier", "area",
-            "name", "attraction", "zoo", "tourism", "public_transport", "landuse",
-            "leisure", "natural", "building", "building:part", "height",
-            "building:levels", "min_height", "building:min_level", "location", "place",
-            "parking", "surface", "access", "service", "link", "rail", "waterway", "ref",
-        ];
-        // Point layers add the (bounded) icon-matcher key set: every key
-        // icons.rs or the point/attraction routing in merge_detail_features
-        // reads. micro POIs carry dozens of address/name-translation tags
-        // that nothing consumes — at the kf16 icon horizon this parse was
-        // ~140ms/tile with the whitelist forced off.
-        const DETAIL_POINT_EXTRA_KEYS: &[&str] = &[
-            "amenity", "brand", "craft", "entrance", "historic", "max_kw", "office",
-            "operator", "shop", "osm_layer", "kerb", "bus", "shelter",
-        ];
-        static POINT_KEYS: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
-        static NO_WHITELIST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        if *NO_WHITELIST
-            .get_or_init(|| std::env::var_os("MAKEPAD_NO_TAG_WHITELIST").is_some())
-        {
-            return None;
-        }
-        match self.layer_filter {
-            LayerParseFilter::DetailLayers { points: false, .. } => Some(DETAIL_WAY_KEYS),
-            LayerParseFilter::DetailLayers { points: true, .. } => Some(
-                POINT_KEYS
-                    .get_or_init(|| {
-                        let mut keys: Vec<&'static str> = DETAIL_WAY_KEYS.to_vec();
-                        keys.extend_from_slice(DETAIL_POINT_EXTRA_KEYS);
-                        keys
-                    })
-                    .as_slice(),
-            ),
-            _ => None,
-        }
+        // Applied in every parse mode. This is the complete bounded union
+        // consumed by styling, labels, overlays, detail merge and icons.
+        Some(point_keys())
     }
 
     fn add_path(
@@ -8194,7 +10053,8 @@ impl MvtSink for MvtLocalCollector {
         _tile_key: TileKey,
         extent: u32,
         points: &[(i32, i32)],
-        mut tags: HashMap<String, String>,
+        tags: TagSet,
+        meta: MvtPathMeta,
         close: bool,
     ) {
         if points.len() < 2 {
@@ -8203,54 +10063,32 @@ impl MvtSink for MvtLocalCollector {
         // Baked dz joins on (source layer, feature idx, path idx). Its dense
         // geometry replaces the sparse base path only when both raw
         // endpoints still match, so a stale bake fails closed.
-        let feature_index = tags.remove(MVT_INTERNAL_FIDX_KEY);
-        let path_index = tags.remove(MVT_INTERNAL_PIDX_KEY);
         let scale = TILE_SIZE as f32 / extent.max(1) as f32;
         let profile = if self.base_dz.is_empty() {
             None
         } else {
-            match (tags.get("layer"), feature_index.as_deref(), path_index) {
-                (Some(layer), Some(fidx), Some(pidx)) => {
-                    match (fidx.parse::<u32>(), pidx.parse::<u32>()) {
-                        (Ok(fidx), Ok(pidx)) => self
-                            .base_dz
-                            .get(&(layer.clone(), fidx, pidx))
-                            .and_then(|profile| {
-                                base_dz_profile_projected_points(
-                                    profile, points, scale, close,
-                                )
-                                .map(|projected| BaseDzProfile {
-                                    points: projected,
-                                    decks: profile.decks.clone(),
-                                })
-                            }),
-                        _ => None,
-                    }
-                }
-                _ => None,
-            }
+            tags.get("layer").and_then(|layer| {
+                self.base_dz
+                    .get(&(layer.to_string(), meta.feature_index, meta.path_index))
+                    .and_then(|profile| {
+                        base_dz_profile_projected_points(profile, points, scale, close).map(
+                            |projected| BaseDzProfile {
+                                points: projected,
+                                decks: profile.decks.clone(),
+                            },
+                        )
+                    })
+            })
         };
-        let source: Vec<((f32, f32), Option<f32>)> = if let Some(profile) = profile {
-            profile
-                .points
-                .into_iter()
-                .zip(profile.decks.into_iter().map(Some))
-                .collect()
-        } else {
-            points
-                .iter()
-                .map(|&(x, y)| ((x as f32 * scale, y as f32 * scale), None))
-                .collect()
-        };
-        let mut out = Vec::<(f32, f32)>::with_capacity(source.len() + 1);
-        let mut out_dz = Vec::<f32>::new();
+        let source_len = profile.as_ref().map_or(points.len(), |profile| profile.points.len());
+        let (mut out, mut out_dz) = take_way_geometry_buffers(source_len);
         let mut last: Option<(f32, f32)> = None;
-        for (point, deck) in source {
+        let mut push_point = |point: (f32, f32), deck: Option<f32>| {
             if let Some(prev) = last {
                 let dx = point.0 - prev.0;
                 let dy = point.1 - prev.1;
                 if dx * dx + dy * dy < self.min_dist_sq {
-                    continue;
+                    return;
                 }
             }
             out.push(point);
@@ -8258,8 +10096,19 @@ impl MvtSink for MvtLocalCollector {
                 out_dz.push(deck);
             }
             last = Some(point);
+        };
+        if let Some(profile) = profile {
+            for (point, deck) in profile.points.into_iter().zip(profile.decks) {
+                push_point(point, Some(deck));
+            }
+        } else {
+            for &(x, y) in points {
+                push_point((x as f32 * scale, y as f32 * scale), None);
+            }
         }
         if out.len() < 2 {
+            recycle_way_points(out);
+            recycle_way_dz(out_dz);
             return;
         }
         if close {
@@ -8270,17 +10119,25 @@ impl MvtSink for MvtLocalCollector {
                 }
             }
             if out.len() < 4 {
+                recycle_way_points(out);
+                recycle_way_dz(out_dz);
                 return;
             }
         }
-        let dz = (!out_dz.is_empty() && out_dz.iter().any(|&v| v.abs() > 0.05))
-            .then_some(out_dz);
+        let dz = if !out_dz.is_empty() && out_dz.iter().any(|&v| v.abs() > 0.05) {
+            Some(out_dz)
+        } else {
+            recycle_way_dz(out_dz);
+            None
+        };
         self.ways.push(TileWay {
             points: out,
             tags,
             closed: close,
             dz,
-            fidx: feature_index.as_deref().and_then(|v| v.parse::<u32>().ok()),
+            fidx: Some(meta.feature_index),
+            feature_group: meta.feature_group,
+            ring_index: Some(meta.path_index),
         });
     }
 
@@ -8289,7 +10146,7 @@ impl MvtSink for MvtLocalCollector {
         _tile_key: TileKey,
         extent: u32,
         point: (i32, i32),
-        tags: HashMap<String, String>,
+        tags: TagSet,
     ) {
         let scale = TILE_SIZE as f32 / extent.max(1) as f32;
         self.points
@@ -8328,37 +10185,6 @@ impl MvtGeomType {
     }
 }
 
-#[derive(Clone, Debug)]
-enum MvtValue {
-    String(String),
-    Float(f32),
-    Double(f64),
-    Int(i64),
-    UInt(u64),
-    SInt(i64),
-    Bool(bool),
-}
-
-impl MvtValue {
-    fn to_tag_string(&self) -> String {
-        match self {
-            Self::String(value) => value.clone(),
-            Self::Float(value) => format!("{}", value),
-            Self::Double(value) => format!("{}", value),
-            Self::Int(value) => format!("{}", value),
-            Self::UInt(value) => format!("{}", value),
-            Self::SInt(value) => format!("{}", value),
-            Self::Bool(value) => {
-                if *value {
-                    "true".to_string()
-                } else {
-                    "false".to_string()
-                }
-            }
-        }
-    }
-}
-
 // --- Baked painter-cascade faces (payload v2-faces-1) ----------------------
 // The road painter-order union cascade (compute_visible_regions) is fully
 // deterministic per (tile bytes, bridge-dz bytes, style structure, render
@@ -8393,6 +10219,31 @@ pub fn bake_tile_paint_faces(
     theme: &CompiledMapTheme,
     bucket: u32,
 ) -> Option<BakedFacesBucket> {
+    try_bake_tile_paint_faces(
+        tile_key,
+        raw_tile_data,
+        detail_tile_data,
+        bridge_dz_tile_data,
+        bridge_dz_covered,
+        theme,
+        bucket,
+    )
+    .ok()
+    .flatten()
+}
+
+/// Fallible face-bake entry used by the offline worker. The Option wrapper
+/// above remains convenient for probes; production baking must retain the
+/// tile-build error text so it can skip and report that tile.
+pub fn try_bake_tile_paint_faces(
+    tile_key: TileKey,
+    raw_tile_data: &[u8],
+    detail_tile_data: Option<&[u8]>,
+    bridge_dz_tile_data: Option<&[u8]>,
+    bridge_dz_covered: bool,
+    theme: &CompiledMapTheme,
+    bucket: u32,
+) -> Result<Option<BakedFacesBucket>, String> {
     FACES_BAKE_SINK.with(|sink| *sink.borrow_mut() = Some(None));
     let result = build_tile_buffers_from_mvt(
         tile_key,
@@ -8408,12 +10259,11 @@ pub fn bake_tile_paint_faces(
         // tier inputs — the faces signature — are building-independent.
         true,
         true,
+        true,
     );
     let captured = FACES_BAKE_SINK.with(|sink| sink.borrow_mut().take());
-    match (result, captured) {
-        (Ok(_), Some(bucket)) => bucket,
-        _ => None,
-    }
+    result?;
+    Ok(captured.flatten())
 }
 
 const BAKED_FACES_FIELD: u32 = 101;
@@ -8593,11 +10443,9 @@ pub struct BakedFacesBucket {
     pub bucket: u32,
     pub signature: u64,
     pub regions: Vec<VisibleRegions>,
-    /// Baked T3 building-shadow output (v3): the dissolved+opened shadow
-    /// shapes and the grounded footprints the deck-shadow pass subtracts.
-    /// Guarded by their own input signature — buildings and roads change
-    /// independently. Night themes leave shadows unsubmitted; the shapes
-    /// bake once under the standard sun.
+    /// Reserved v3 compatibility slots. Building and deck shadows are now
+    /// derived by the draw-time shadow mask, so v4 writers leave these
+    /// fields empty and the parser accepts them only for old archives.
     pub shadow_signature: u64,
     pub shadow_shapes: Vec<Vec<Vec<[f64; 2]>>>,
     pub shadow_footprints: Vec<Vec<[f64; 2]>>,
@@ -8667,6 +10515,39 @@ pub fn encode_baked_faces_field(buckets: &[BakedFacesBucket]) -> Vec<u8> {
     write_faces_varint(blob.len() as u64, &mut field);
     field.extend_from_slice(&blob);
     field
+}
+
+#[cfg(test)]
+#[test]
+fn trimmed_v4_and_legacy_v3_face_streams_parse_with_empty_shadow_sections() {
+    let bucket = BakedFacesBucket {
+        bucket: 16,
+        signature: 7,
+        regions: Vec::new(),
+        shadow_signature: 0,
+        shadow_shapes: Vec::new(),
+        shadow_footprints: Vec::new(),
+        building_signature: 11,
+        buildings: Vec::new(),
+    };
+    let v4 = encode_baked_faces_field(&[bucket]);
+    let parsed = parse_baked_faces(&v4, 16).expect("trimmed v4 stream");
+    assert!(parsed.shadow_shapes.is_empty());
+    assert!(parsed.shadow_footprints.is_empty());
+    assert_eq!(parsed.building_signature, 11);
+
+    // A v3 body ends after the same empty shadow sections. Reuse the v4
+    // encoder with an empty v4 extension; v3 ignores that zero-valued tail
+    // and validates the same coordinate checksum.
+    let mut v3 = v4;
+    let mut pos = 0;
+    let _field_key = read_pb_varint(&v3, &mut pos).unwrap();
+    let _blob_len = read_pb_varint(&v3, &mut pos).unwrap();
+    v3[pos] = 3;
+    let parsed = parse_baked_faces(&v3, 16).expect("legacy v3 stream");
+    assert!(parsed.shadow_shapes.is_empty());
+    assert_eq!(parsed.building_signature, 0);
+    assert!(parsed.buildings.is_empty());
 }
 
 fn read_shapes(
@@ -9081,7 +10962,7 @@ fn emit_baked_fill_body(
 pub fn parse_mvt_tile(
     tile_data: &[u8],
     tile_key: TileKey,
-    builder: &mut impl MvtSink,
+    builder: &mut (impl MvtSink + ?Sized),
 ) -> Result<(), String> {
     let mut pos = 0_usize;
     while pos < tile_data.len() {
@@ -9099,17 +10980,25 @@ pub fn parse_mvt_tile(
     Ok(())
 }
 
+fn parse_mvt_tile_erased(
+    tile_data: &[u8],
+    tile_key: TileKey,
+    builder: &mut dyn MvtSink,
+) -> Result<(), String> {
+    parse_mvt_tile(tile_data, tile_key, builder)
+}
+
 fn parse_mvt_layer(
     layer_data: &[u8],
     tile_key: TileKey,
-    builder: &mut impl MvtSink,
+    builder: &mut (impl MvtSink + ?Sized),
 ) -> Result<(), String> {
     let mut pos = 0_usize;
     let mut layer_name = String::new();
     let mut extent = 4096_u32;
     let mut features = Vec::<&[u8]>::new();
-    let mut keys = Vec::<String>::new();
-    let mut values = Vec::<MvtValue>::new();
+    let mut raw_keys = Vec::<&[u8]>::new();
+    let mut raw_values = Vec::<&[u8]>::new();
 
     while pos < layer_data.len() {
         let key = read_pb_varint(layer_data, &mut pos)?;
@@ -9121,14 +11010,8 @@ fn parse_mvt_layer(
                 layer_name = String::from_utf8_lossy(slice).into_owned();
             }
             (2, 2) => features.push(read_pb_len_slice(layer_data, &mut pos)?),
-            (3, 2) => {
-                let slice = read_pb_len_slice(layer_data, &mut pos)?;
-                keys.push(String::from_utf8_lossy(slice).into_owned());
-            }
-            (4, 2) => {
-                let value = parse_mvt_value(read_pb_len_slice(layer_data, &mut pos)?)?;
-                values.push(value);
-            }
+            (3, 2) => raw_keys.push(read_pb_len_slice(layer_data, &mut pos)?),
+            (4, 2) => raw_values.push(read_pb_len_slice(layer_data, &mut pos)?),
             (5, 0) => extent = read_pb_varint(layer_data, &mut pos)? as u32,
             _ => skip_pb_field(layer_data, &mut pos, wire)?,
         }
@@ -9140,178 +11023,473 @@ fn parse_mvt_layer(
     if !builder.wants_layer(&layer_name) {
         return Ok(());
     }
-    // Key-level lazy skip: one bool per key-table entry.
-    let key_wanted: Option<Vec<bool>> = builder.tag_key_whitelist(&layer_name).map(|whitelist| {
-        keys.iter()
-            .map(|key| whitelist.contains(&key.as_str()))
-            .collect()
-    });
+    let mut scratch = ParseScratchLease::take();
+    // Resolve raw key-table slots to compact ids once. Even a sink asking
+    // for all tags is capped by the engine's consumer whitelist: discarded
+    // keys and the values referenced only by them are never decoded.
+    let sink_whitelist = builder.tag_key_whitelist(&layer_name).unwrap_or(point_keys());
+    let TagArenaBuffers { mut strings, mut keys, mut values, mut pairs } =
+        take_tag_arena_buffers();
+    strings.clear();
+    keys.clear();
+    values.clear();
+    pairs.clear();
+    let key_ids = &mut scratch.key_ids;
+    key_ids.clear();
+    if key_ids.capacity() < raw_keys.len() {
+        key_ids.reserve(raw_keys.len());
+    }
+    for raw in raw_keys {
+        let wanted = std::str::from_utf8(raw).ok().filter(|key| {
+            point_keys().contains(key) && sink_whitelist.contains(key)
+        });
+        if let Some(key) = wanted {
+            let id = arena_key_id(&mut strings, &mut keys, key)?;
+            key_ids.push(Some(id));
+        } else {
+            key_ids.push(None);
+        }
+    }
+
+    let raw_pairs = &mut scratch.raw_tag_pairs;
+    raw_pairs.clear();
+    let wanted_values = &mut scratch.wanted_values;
+    wanted_values.clear();
+    wanted_values.resize(raw_values.len(), false);
+    let mut pending = Vec::<PendingMvtFeature<'_>>::with_capacity(features.len());
     for (feature_index, feature_data) in features.into_iter().enumerate() {
-        parse_mvt_feature(
+        if let Some(feature) = scan_mvt_feature(
             feature_index as u32,
             feature_data,
+            &key_ids,
+            raw_pairs,
+            wanted_values,
+        )? {
+            pending.push(feature);
+        }
+    }
+
+    let value_ids = &mut scratch.value_ids;
+    value_ids.clear();
+    value_ids.resize(raw_values.len(), None);
+    for (raw_index, (raw, wanted)) in raw_values
+        .into_iter()
+        .zip(wanted_values.iter().copied())
+        .enumerate()
+    {
+        if wanted {
+            let value_id = parse_mvt_value_into(raw, &mut strings, &mut values)?;
+            value_ids[raw_index] = Some(value_id);
+        }
+    }
+
+    let needed_pairs = raw_pairs.len() + pending.len() * 2;
+    if pairs.capacity() < needed_pairs {
+        pairs.reserve(needed_pairs);
+    }
+    let layer_key = arena_key_id(&mut strings, &mut keys, "layer")?;
+    let layer_value = arena_value_id(&mut strings, &mut values, &layer_name)?;
+    let static_values = &mut scratch.static_tag_values;
+    static_values.clear();
+    for feature in &mut pending {
+        let start = pairs.len();
+        for &(key_id, raw_value_id) in
+            &raw_pairs[feature.raw_tags.start..feature.raw_tags.end]
+        {
+            if let Some(value_id) = value_ids.get(raw_value_id as usize).copied().flatten() {
+                pairs.push((key_id, value_id));
+            }
+        }
+        normalize_arena_tags(
             &layer_name,
-            &keys,
-            &values,
-            key_wanted.as_deref(),
+            feature.geom_type,
+            &mut strings,
+            &mut keys,
+            &mut values,
+            static_values,
+            layer_key,
+            layer_value,
+            &mut pairs,
+            start,
+        )?;
+        feature.tags = u32::try_from(start).map_err(|_| "mvt tag arena exceeds u32".to_string())?
+            ..u32::try_from(pairs.len()).map_err(|_| "mvt tag arena exceeds u32".to_string())?;
+    }
+
+    let arena = Arc::new(TagArena { strings, keys, values, pairs });
+    for feature in pending {
+        parse_mvt_feature(
+            feature,
+            arena.clone(),
             extent,
             tile_key,
             builder,
+            &mut scratch.geometry_cmds,
+            &mut scratch.geometry_path,
         )?;
     }
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn parse_mvt_feature(
+struct PendingMvtFeature<'a> {
     feature_index: u32,
-    feature_data: &[u8],
-    layer_name: &str,
-    keys: &[String],
-    values: &[MvtValue],
-    key_wanted: Option<&[bool]>,
-    extent: u32,
-    tile_key: TileKey,
-    builder: &mut impl MvtSink,
-) -> Result<(), String> {
-    let mut pos = 0_usize;
-    let mut feature_id: Option<u64> = None;
-    let mut tag_indexes = Vec::<u32>::new();
-    let mut geom_type = MvtGeomType::Unknown;
-    let mut geometry_cmds = Vec::<u32>::new();
+    geom_type: MvtGeomType,
+    geometry: &'a [u8],
+    raw_tags: Range<usize>,
+    tags: Range<u32>,
+}
 
+fn scan_mvt_feature<'a>(
+    feature_index: u32,
+    feature_data: &'a [u8],
+    key_ids: &[Option<u16>],
+    raw_pairs: &mut Vec<(u16, u32)>,
+    wanted_values: &mut [bool],
+) -> Result<Option<PendingMvtFeature<'a>>, String> {
+    let start = raw_pairs.len();
+    let mut pos = 0_usize;
+    let mut geom_type = MvtGeomType::Unknown;
+    let mut geometry = &[][..];
     while pos < feature_data.len() {
         let key = read_pb_varint(feature_data, &mut pos)?;
         let field = (key >> 3) as u32;
         let wire = (key & 0x7) as u8;
         match (field, wire) {
-            (1, 0) => feature_id = Some(read_pb_varint(feature_data, &mut pos)?),
             (2, 2) => {
                 let packed = read_pb_len_slice(feature_data, &mut pos)?;
-                tag_indexes = read_packed_u32(packed)?;
+                let mut tag_pos = 0;
+                while tag_pos < packed.len() {
+                    let key_index = read_pb_varint(packed, &mut tag_pos)? as usize;
+                    if tag_pos >= packed.len() {
+                        break;
+                    }
+                    let value_index = read_pb_varint(packed, &mut tag_pos)? as usize;
+                    let Some(Some(key_id)) = key_ids.get(key_index) else {
+                        continue;
+                    };
+                    if value_index >= wanted_values.len() {
+                        continue;
+                    }
+                    wanted_values[value_index] = true;
+                    raw_pairs.push((*key_id, value_index as u32));
+                }
             }
             (3, 0) => geom_type = MvtGeomType::from_u64(read_pb_varint(feature_data, &mut pos)?),
-            (4, 2) => {
-                let packed = read_pb_len_slice(feature_data, &mut pos)?;
-                geometry_cmds = read_packed_u32(packed)?;
-            }
+            (4, 2) => geometry = read_pb_len_slice(feature_data, &mut pos)?,
             _ => skip_pb_field(feature_data, &mut pos, wire)?,
         }
     }
-
     if geom_type == MvtGeomType::Unknown {
-        return Ok(());
+        raw_pairs.truncate(start);
+        return Ok(None);
     }
+    Ok(Some(PendingMvtFeature {
+        feature_index,
+        geom_type,
+        geometry,
+        raw_tags: start..raw_pairs.len(),
+        tags: 0..0,
+    }))
+}
 
-    let mut tags = HashMap::<String, String>::new();
-    for pair in tag_indexes.chunks_exact(2) {
-        let key_index = pair[0] as usize;
-        let value_index = pair[1] as usize;
-        if let Some(wanted) = key_wanted {
-            if !wanted.get(key_index).copied().unwrap_or(false) {
-                continue;
-            }
-        }
-        let Some(key) = keys.get(key_index) else {
-            continue;
-        };
-        let Some(value) = values.get(value_index) else {
-            continue;
-        };
-        tags.insert(key.clone(), value.to_tag_string());
-    }
-    normalize_mvt_tags(layer_name, geom_type, &mut tags);
-
-    let paths = decode_mvt_geometry(&geometry_cmds, geom_type)?;
-    if geom_type == MvtGeomType::Point {
+fn parse_mvt_feature(
+    feature: PendingMvtFeature<'_>,
+    arena: Arc<TagArena>,
+    extent: u32,
+    tile_key: TileKey,
+    builder: &mut (impl MvtSink + ?Sized),
+    geometry_cmds: &mut Vec<u32>,
+    geometry_path: &mut Vec<(i32, i32)>,
+) -> Result<(), String> {
+    let tags = TagSet::from_arena(arena, feature.tags);
+    if feature.geom_type == MvtGeomType::Point {
         if !should_emit_mvt_point_label_feature(&tags) {
             return Ok(());
         }
-        for path in paths {
-            let Some(point) = path.first().copied() else {
-                continue;
-            };
+        decode_mvt_points(feature.geometry, |point| {
             builder.add_point(tile_key, extent, point, tags.clone());
-        }
+        })?;
         return Ok(());
     }
 
-    let polygon_feature_key = if geom_type == MvtGeomType::Polygon {
-        let raw_id = feature_id.unwrap_or_else(|| builder.alloc_feature_id());
-        Some(format!("{}:{}", layer_name, raw_id))
+    read_packed_u32_into(feature.geometry, geometry_cmds)?;
+    let feature_group = if feature.geom_type == MvtGeomType::Polygon {
+        Some(builder.alloc_feature_id())
     } else {
         None
     };
-
-    for (ring_index, mut path) in paths.into_iter().enumerate() {
+    decode_mvt_geometry_each(
+        geometry_cmds.as_slice(),
+        feature.geom_type,
+        geometry_path,
+        |ring_index, path| {
         if path.len() < 2 {
-            continue;
+            return;
         }
-        let close = geom_type == MvtGeomType::Polygon;
-        if close && path.first().copied() != path.last().copied() {
-            if let Some(first) = path.first().copied() {
-                path.push(first);
-            }
-        }
+        let close = feature.geom_type == MvtGeomType::Polygon;
         if close && path.len() < 4 {
-            continue;
+            return;
         }
-        let mut path_tags = tags.clone();
-        if let Some(feature_key) = &polygon_feature_key {
-            path_tags.insert(MVT_INTERNAL_FEATURE_KEY.to_string(), feature_key.clone());
-            path_tags.insert(
-                MVT_INTERNAL_RING_INDEX_KEY.to_string(),
-                ring_index.to_string(),
-            );
-        }
-        // Join keys for the baked base_dz overlay: feature index within
-        // the source layer + path index within the feature, in decode
-        // order (the bake tool enumerates identically).
-        path_tags.insert(MVT_INTERNAL_FIDX_KEY.to_string(), feature_index.to_string());
-        path_tags.insert(MVT_INTERNAL_PIDX_KEY.to_string(), ring_index.to_string());
-        builder.add_path(tile_key, extent, &path, path_tags, close);
-    }
+        builder.add_path(
+            tile_key,
+            extent,
+            path,
+            tags.clone(),
+            MvtPathMeta {
+                feature_index: feature.feature_index,
+                path_index: ring_index as u32,
+                feature_group,
+            },
+            close,
+        );
+        },
+    )?;
 
     Ok(())
 }
 
-fn normalize_mvt_tags(
+fn decode_mvt_geometry_each(
+    commands: &[u32],
+    geom_type: MvtGeomType,
+    path: &mut Vec<(i32, i32)>,
+    mut emit: impl FnMut(usize, &[(i32, i32)]),
+) -> Result<(), String> {
+    path.clear();
+    let mut x = 0_i32;
+    let mut y = 0_i32;
+    let mut index = 0_usize;
+    let mut path_index = 0_usize;
+    let flush = |path: &mut Vec<(i32, i32)>, path_index: &mut usize, emit: &mut dyn FnMut(usize, &[(i32, i32)])| {
+        if path.is_empty() {
+            return;
+        }
+        emit(*path_index, path);
+        *path_index += 1;
+        path.clear();
+    };
+    while index < commands.len() {
+        let header = commands[index];
+        index += 1;
+        let command_id = header & 0x7;
+        let count = header >> 3;
+        match command_id {
+            1 => {
+                for _ in 0..count {
+                    flush(path, &mut path_index, &mut emit);
+                    if index + 1 >= commands.len() {
+                        return Err("mvt geometry move_to missing arguments".to_string());
+                    }
+                    x = x.wrapping_add(zigzag_decode_u32(commands[index]));
+                    y = y.wrapping_add(zigzag_decode_u32(commands[index + 1]));
+                    index += 2;
+                    path.push((x, y));
+                }
+            }
+            2 => {
+                for _ in 0..count {
+                    if index + 1 >= commands.len() {
+                        return Err("mvt geometry line_to missing arguments".to_string());
+                    }
+                    x = x.wrapping_add(zigzag_decode_u32(commands[index]));
+                    y = y.wrapping_add(zigzag_decode_u32(commands[index + 1]));
+                    index += 2;
+                    path.push((x, y));
+                }
+            }
+            7 => {
+                if geom_type == MvtGeomType::Polygon && !path.is_empty() {
+                    let first = path[0];
+                    if path.last().copied() != Some(first) {
+                        path.push(first);
+                    }
+                }
+            }
+            _ => return Err(format!("mvt geometry unknown command {}", command_id)),
+        }
+    }
+    flush(path, &mut path_index, &mut emit);
+    Ok(())
+}
+
+fn decode_mvt_points(
+    commands: &[u8],
+    mut emit: impl FnMut((i32, i32)),
+) -> Result<(), String> {
+    let mut pos = 0_usize;
+    let mut x = 0_i32;
+    let mut y = 0_i32;
+    while pos < commands.len() {
+        let header = read_pb_varint(commands, &mut pos)? as u32;
+        let command_id = header & 0x7;
+        let count = header >> 3;
+        match command_id {
+            1 => {
+                for _ in 0..count {
+                    x = x.wrapping_add(zigzag_decode_u32(
+                        read_pb_varint(commands, &mut pos)? as u32,
+                    ));
+                    y = y.wrapping_add(zigzag_decode_u32(
+                        read_pb_varint(commands, &mut pos)? as u32,
+                    ));
+                    emit((x, y));
+                }
+            }
+            7 => {}
+            _ => return Err(format!("mvt point geometry unknown command {}", command_id)),
+        }
+    }
+    Ok(())
+}
+
+fn push_arena_string(
+    strings: &mut String,
+    ranges: &mut Vec<(u32, u32)>,
+    value: &str,
+) -> Result<u32, String> {
+    let start = u32::try_from(strings.len()).map_err(|_| "mvt string arena exceeds u32".to_string())?;
+    strings.push_str(value);
+    let end = u32::try_from(strings.len()).map_err(|_| "mvt string arena exceeds u32".to_string())?;
+    let id = u32::try_from(ranges.len()).map_err(|_| "mvt string table exceeds u32".to_string())?;
+    ranges.push((start, end));
+    Ok(id)
+}
+
+fn arena_string<'a>(
+    strings: &'a str,
+    ranges: &[(u32, u32)],
+    id: u32,
+) -> Option<&'a str> {
+    let range = *ranges.get(id as usize)?;
+    strings.get(range.0 as usize..range.1 as usize)
+}
+
+fn arena_key_id(
+    strings: &mut String,
+    keys: &mut Vec<(u32, u32)>,
+    key: &str,
+) -> Result<u16, String> {
+    if let Some(index) = keys
+        .iter()
+        .position(|&(start, end)| strings.get(start as usize..end as usize) == Some(key))
+    {
+        return u16::try_from(index).map_err(|_| "mvt key table exceeds u16".to_string());
+    }
+    let id = u16::try_from(keys.len()).map_err(|_| "mvt key table exceeds u16".to_string())?;
+    push_arena_string(strings, keys, key)?;
+    Ok(id)
+}
+
+fn arena_value_id(
+    strings: &mut String,
+    values: &mut Vec<(u32, u32)>,
+    value: &str,
+) -> Result<u32, String> {
+    if let Some(index) = values.iter().position(|&range| {
+        strings.get(range.0 as usize..range.1 as usize) == Some(value)
+    }) {
+        return u32::try_from(index).map_err(|_| "mvt value table exceeds u32".to_string());
+    }
+    push_arena_string(strings, values, value)
+}
+
+fn arena_tag_value_id(
+    strings: &str,
+    keys: &[(u32, u32)],
+    pairs: &[(u16, u32)],
+    start: usize,
+    key: &str,
+) -> Option<u32> {
+    pairs[start..].iter().rev().find_map(|&(key_id, value_id)| {
+        (arena_string(strings, keys, key_id as u32)? == key).then_some(value_id)
+    })
+}
+
+fn arena_ensure_tag(
+    strings: &mut String,
+    keys: &mut Vec<(u32, u32)>,
+    values: &mut Vec<(u32, u32)>,
+    static_values: &mut Vec<(&'static str, u32)>,
+    pairs: &mut Vec<(u16, u32)>,
+    start: usize,
+    key: &str,
+    value: &'static str,
+) -> Result<(), String> {
+    if arena_tag_value_id(strings, keys, pairs, start, key).is_none() {
+        let key_id = arena_key_id(strings, keys, key)?;
+        let value_id = if let Some(id) = static_values
+            .iter()
+            .find_map(|&(known, id)| (known == value).then_some(id))
+        {
+            id
+        } else {
+            let id = arena_value_id(strings, values, value)?;
+            static_values.push((value, id));
+            id
+        };
+        pairs.push((key_id, value_id));
+    }
+    Ok(())
+}
+
+fn arena_ensure_tag_value_id(
+    strings: &mut String,
+    keys: &mut Vec<(u32, u32)>,
+    pairs: &mut Vec<(u16, u32)>,
+    start: usize,
+    key: &str,
+    value_id: u32,
+) -> Result<(), String> {
+    if arena_tag_value_id(strings, keys, pairs, start, key).is_none() {
+        pairs.push((arena_key_id(strings, keys, key)?, value_id));
+    }
+    Ok(())
+}
+
+fn normalize_arena_tags(
     layer_name: &str,
     geom_type: MvtGeomType,
-    tags: &mut HashMap<String, String>,
-) {
+    strings: &mut String,
+    keys: &mut Vec<(u32, u32)>,
+    values: &mut Vec<(u32, u32)>,
+    static_values: &mut Vec<(&'static str, u32)>,
+    layer_key: u16,
+    layer_value: u32,
+    pairs: &mut Vec<(u16, u32)>,
+    start: usize,
+) -> Result<(), String> {
     // The source-layer name OWNS the "layer" key. OSM's own layer=-1/1
     // stacking tag collides with it and silently broke recognition of any
     // layer-tagged feature (the Artis zoo way, bridges, tunnels) — keep
     // the OSM value under "osm_layer" instead.
-    if let Some(previous) = tags.insert("layer".to_string(), layer_name.to_string()) {
-        if previous != layer_name {
-            tags.insert("osm_layer".to_string(), previous);
+    let previous_layer = arena_tag_value_id(strings, keys, pairs, start, "layer");
+    pairs.push((layer_key, layer_value));
+    if let Some(previous) = previous_layer {
+        if arena_string(strings, values, previous).is_some_and(|value| value != layer_name) {
+            let osm_layer = arena_key_id(strings, keys, "osm_layer")?;
+            pairs.push((osm_layer, previous));
         }
     }
 
     match layer_name {
         "building" | "buildings" => {
-            tags.entry("building".to_string())
-                .or_insert_with(|| "yes".to_string());
+            arena_ensure_tag(strings, keys, values, static_values, pairs, start, "building", "yes")?;
         }
         "water" | "water_polygons" | "water_polygons_labels" | "ocean" => {
             if geom_type == MvtGeomType::Polygon {
-                tags.entry("natural".to_string())
-                    .or_insert_with(|| "water".to_string());
+                arena_ensure_tag(strings, keys, values, static_values, pairs, start, "natural", "water")?;
             } else {
-                tags.entry("waterway".to_string())
-                    .or_insert_with(|| "river".to_string());
+                arena_ensure_tag(strings, keys, values, static_values, pairs, start, "waterway", "river")?;
             }
         }
         "waterway" | "water_lines" | "water_lines_labels" | "dam_lines" | "pier_lines" => {
-            let value = tags
-                .get("kind")
-                .cloned()
-                .or_else(|| tags.get("subclass").cloned())
-                .or_else(|| tags.get("class").cloned())
-                .unwrap_or_else(|| "river".to_string());
-            tags.entry("waterway".to_string()).or_insert(value);
+            let value_id = ["kind", "subclass", "class"]
+                .into_iter()
+                .find_map(|key| arena_tag_value_id(strings, keys, pairs, start, key));
+            if let Some(value_id) = value_id {
+                arena_ensure_tag_value_id(strings, keys, pairs, start, "waterway", value_id)?;
+            } else {
+                arena_ensure_tag(strings, keys, values, static_values, pairs, start, "waterway", "river")?;
+            }
         }
         "transportation"
         | "transportation_name"
@@ -9325,46 +11503,49 @@ fn normalize_mvt_tags(
         | "aerialways"
         | "ferries"
         | "public_transport" => {
-            let value = tags
-                .get("kind")
-                .cloned()
-                .or_else(|| tags.get("subclass").cloned())
-                .or_else(|| tags.get("class").cloned())
-                .unwrap_or_else(|| "residential".to_string());
-            tags.entry("highway".to_string())
-                .or_insert_with(|| normalize_highway_kind(&value));
+            let value_id = ["kind", "subclass", "class"]
+                .into_iter()
+                .find_map(|key| arena_tag_value_id(strings, keys, pairs, start, key));
+            if let Some(value_id) = value_id {
+                let value = arena_string(strings, values, value_id).unwrap_or("");
+                if let Some(normalized) = normalized_highway_static(value) {
+                    arena_ensure_tag(strings, keys, values, static_values, pairs, start, "highway", normalized)?;
+                } else {
+                    arena_ensure_tag_value_id(strings, keys, pairs, start, "highway", value_id)?;
+                }
+            } else {
+                arena_ensure_tag(strings, keys, values, static_values, pairs, start, "highway", "residential")?;
+            }
         }
         "railway" => {
-            tags.entry("railway".to_string())
-                .or_insert_with(|| "rail".to_string());
+            arena_ensure_tag(strings, keys, values, static_values, pairs, start, "railway", "rail")?;
         }
         "park" => {
-            tags.entry("leisure".to_string())
-                .or_insert_with(|| "park".to_string());
+            arena_ensure_tag(strings, keys, values, static_values, pairs, start, "leisure", "park")?;
         }
         "landuse" | "landcover" | "land" | "sites" | "pois" => {
-            let value = tags
-                .get("kind")
-                .cloned()
-                .or_else(|| tags.get("class").cloned())
-                .or_else(|| tags.get("subclass").cloned())
-                .unwrap_or_else(|| "residential".to_string());
-            if is_leisure_kind(&value) {
-                tags.entry("leisure".to_string())
-                    .or_insert_with(|| "park".to_string());
+            let value_id = ["kind", "class", "subclass"]
+                .into_iter()
+                .find_map(|key| arena_tag_value_id(strings, keys, pairs, start, key));
+            let value = value_id.and_then(|id| arena_string(strings, values, id));
+            if value.is_some_and(is_leisure_kind) {
+                arena_ensure_tag(strings, keys, values, static_values, pairs, start, "leisure", "park")?;
+            } else if let Some(value_id) = value_id {
+                arena_ensure_tag_value_id(strings, keys, pairs, start, "landuse", value_id)?;
             } else {
-                tags.entry("landuse".to_string()).or_insert(value);
+                arena_ensure_tag(strings, keys, values, static_values, pairs, start, "landuse", "residential")?;
             }
         }
         _ => {}
     }
+    Ok(())
 }
 
-fn should_emit_mvt_point_label_feature(tags: &HashMap<String, String>) -> bool {
+fn should_emit_mvt_point_label_feature(tags: &impl TagLookup) -> bool {
     let Some(layer) = tags.get("layer") else {
         return false;
     };
-    match layer.as_str() {
+    match layer {
         "addresses" => tags
             .get("housenumber")
             .or_else(|| tags.get("housename"))
@@ -9386,17 +11567,15 @@ fn should_emit_mvt_point_label_feature(tags: &HashMap<String, String>) -> bool {
     }
 }
 
-fn normalize_highway_kind(kind: &str) -> String {
+fn normalized_highway_static(kind: &str) -> Option<&'static str> {
     match kind {
-        "motorway_link" => "motorway".to_string(),
-        "trunk_link" => "trunk".to_string(),
-        "primary_link" => "primary".to_string(),
-        "secondary_link" => "secondary".to_string(),
-        "tertiary_link" => "tertiary".to_string(),
-        "major_road" => "primary".to_string(),
-        "minor_road" => "residential".to_string(),
-        "path" => "path".to_string(),
-        other => other.to_string(),
+        "motorway_link" => Some("motorway"),
+        "trunk_link" => Some("trunk"),
+        "primary_link" | "major_road" => Some("primary"),
+        "secondary_link" => Some("secondary"),
+        "tertiary_link" => Some("tertiary"),
+        "minor_road" => Some("residential"),
+        _ => None,
     }
 }
 
@@ -9407,9 +11586,74 @@ fn is_leisure_kind(kind: &str) -> bool {
     )
 }
 
-fn parse_mvt_value(bytes: &[u8]) -> Result<MvtValue, String> {
+fn push_arena_display(
+    strings: &mut String,
+    values: &mut Vec<(u32, u32)>,
+    value: impl std::fmt::Display,
+) -> Result<u32, String> {
+    let start = u32::try_from(strings.len()).map_err(|_| "mvt string arena exceeds u32".to_string())?;
+    write!(strings, "{value}").map_err(|_| "failed to format mvt value".to_string())?;
+    let end = u32::try_from(strings.len()).map_err(|_| "mvt string arena exceeds u32".to_string())?;
+    let id = u32::try_from(values.len()).map_err(|_| "mvt value table exceeds u32".to_string())?;
+    values.push((start, end));
+    Ok(id)
+}
+
+fn parse_mvt_value_into(
+    bytes: &[u8],
+    strings: &mut String,
+    values: &mut Vec<(u32, u32)>,
+) -> Result<u32, String> {
     let mut pos = 0_usize;
-    let mut value = MvtValue::String(String::new());
+    let mut value_id = None;
+    while pos < bytes.len() {
+        let key = read_pb_varint(bytes, &mut pos)?;
+        let field = (key >> 3) as u32;
+        let wire = (key & 0x7) as u8;
+        value_id = Some(match (field, wire) {
+            (1, 2) => {
+                let slice = read_pb_len_slice(bytes, &mut pos)?;
+                let value = String::from_utf8_lossy(slice);
+                push_arena_string(strings, values, &value)?
+            }
+            (2, 5) => push_arena_display(
+                strings,
+                values,
+                f32::from_bits(read_pb_fixed32(bytes, &mut pos)?),
+            )?,
+            (3, 1) => push_arena_display(
+                strings,
+                values,
+                f64::from_bits(read_pb_fixed64(bytes, &mut pos)?),
+            )?,
+            (4, 0) => push_arena_display(strings, values, read_pb_varint(bytes, &mut pos)? as i64)?,
+            (5, 0) => push_arena_display(strings, values, read_pb_varint(bytes, &mut pos)?)?,
+            (6, 0) => push_arena_display(
+                strings,
+                values,
+                zigzag_decode_u64(read_pb_varint(bytes, &mut pos)?),
+            )?,
+            (7, 0) => push_arena_string(
+                strings,
+                values,
+                if read_pb_varint(bytes, &mut pos)? != 0 { "true" } else { "false" },
+            )?,
+            _ => {
+                skip_pb_field(bytes, &mut pos, wire)?;
+                continue;
+            }
+        });
+    }
+    match value_id {
+        Some(id) => Ok(id),
+        None => push_arena_string(strings, values, ""),
+    }
+}
+
+#[cfg(test)]
+fn parse_mvt_value(bytes: &[u8]) -> Result<String, String> {
+    let mut pos = 0_usize;
+    let mut value = String::new();
     while pos < bytes.len() {
         let key = read_pb_varint(bytes, &mut pos)?;
         let field = (key >> 3) as u32;
@@ -9417,20 +11661,27 @@ fn parse_mvt_value(bytes: &[u8]) -> Result<MvtValue, String> {
         match (field, wire) {
             (1, 2) => {
                 let slice = read_pb_len_slice(bytes, &mut pos)?;
-                value = MvtValue::String(String::from_utf8_lossy(slice).into_owned());
+                value = String::from_utf8_lossy(slice).into_owned();
             }
-            (2, 5) => value = MvtValue::Float(f32::from_bits(read_pb_fixed32(bytes, &mut pos)?)),
-            (3, 1) => value = MvtValue::Double(f64::from_bits(read_pb_fixed64(bytes, &mut pos)?)),
-            (4, 0) => value = MvtValue::Int(read_pb_varint(bytes, &mut pos)? as i64),
-            (5, 0) => value = MvtValue::UInt(read_pb_varint(bytes, &mut pos)?),
-            (6, 0) => value = MvtValue::SInt(zigzag_decode_u64(read_pb_varint(bytes, &mut pos)?)),
-            (7, 0) => value = MvtValue::Bool(read_pb_varint(bytes, &mut pos)? != 0),
+            (2, 5) => value = f32::from_bits(read_pb_fixed32(bytes, &mut pos)?).to_string(),
+            (3, 1) => value = f64::from_bits(read_pb_fixed64(bytes, &mut pos)?).to_string(),
+            (4, 0) => value = (read_pb_varint(bytes, &mut pos)? as i64).to_string(),
+            (5, 0) => value = read_pb_varint(bytes, &mut pos)?.to_string(),
+            (6, 0) => value = zigzag_decode_u64(read_pb_varint(bytes, &mut pos)?).to_string(),
+            (7, 0) => {
+                value = if read_pb_varint(bytes, &mut pos)? != 0 {
+                    "true".to_string()
+                } else {
+                    "false".to_string()
+                }
+            }
             _ => skip_pb_field(bytes, &mut pos, wire)?,
         }
     }
     Ok(value)
 }
 
+#[cfg(test)]
 fn decode_mvt_geometry(
     commands: &[u32],
     geom_type: MvtGeomType,
@@ -9502,13 +11753,13 @@ fn zigzag_decode_u64(value: u64) -> i64 {
     ((value >> 1) as i64) ^ (-((value & 1) as i64))
 }
 
-fn read_packed_u32(bytes: &[u8]) -> Result<Vec<u32>, String> {
+fn read_packed_u32_into(bytes: &[u8], out: &mut Vec<u32>) -> Result<(), String> {
+    out.clear();
     let mut pos = 0_usize;
-    let mut out = Vec::new();
     while pos < bytes.len() {
         out.push(read_pb_varint(bytes, &mut pos)? as u32);
     }
-    Ok(out)
+    Ok(())
 }
 
 fn read_pb_fixed32(bytes: &[u8], pos: &mut usize) -> Result<u32, String> {
@@ -9604,6 +11855,860 @@ fn skip_pb_field(bytes: &[u8], pos: &mut usize, wire: u8) -> Result<(), String> 
 }
 
 #[cfg(test)]
+mod tag_arena_tests {
+    use super::*;
+
+    fn varint(mut value: u64, out: &mut Vec<u8>) {
+        while value >= 0x80 {
+            out.push(value as u8 | 0x80);
+            value >>= 7;
+        }
+        out.push(value as u8);
+    }
+
+    fn bytes_field(field: u64, value: &[u8], out: &mut Vec<u8>) {
+        varint(field << 3 | 2, out);
+        varint(value.len() as u64, out);
+        out.extend_from_slice(value);
+    }
+
+    fn value_string(value: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        bytes_field(1, value.as_bytes(), &mut out);
+        out
+    }
+
+    fn duplicate_and_unwanted_tag_tile() -> Vec<u8> {
+        let mut packed_tags = Vec::new();
+        // name=first, discard=secret, name=second, amenity=bench.
+        for value in [0, 0, 1, 1, 3, 2, 2, 3] {
+            varint(value, &mut packed_tags);
+        }
+        let mut geometry = Vec::new();
+        for value in [9, 0, 0] {
+            varint(value, &mut geometry);
+        }
+        let mut feature = Vec::new();
+        bytes_field(2, &packed_tags, &mut feature);
+        varint(3 << 3, &mut feature);
+        varint(1, &mut feature);
+        bytes_field(4, &geometry, &mut feature);
+
+        let mut layer = Vec::new();
+        bytes_field(1, b"osm_points", &mut layer);
+        bytes_field(2, &feature, &mut layer);
+        for key in ["name", "discard", "amenity", "name"] {
+            bytes_field(3, key.as_bytes(), &mut layer);
+        }
+        for value in ["first", "secret", "second", "bench"] {
+            bytes_field(4, &value_string(value), &mut layer);
+        }
+        varint(5 << 3, &mut layer);
+        varint(4096, &mut layer);
+        varint(15 << 3, &mut layer);
+        varint(2, &mut layer);
+
+        let mut tile = Vec::new();
+        bytes_field(3, &layer, &mut tile);
+        tile
+    }
+
+    #[test]
+    fn arena_view_matches_owned_map_after_whitelist_and_duplicate_resolution() {
+        #[derive(Default)]
+        struct Sink {
+            tags: Option<TagSet>,
+        }
+        impl MvtSink for Sink {
+            fn alloc_feature_id(&mut self) -> u64 { 1 }
+            fn add_path(
+                &mut self,
+                _tile_key: TileKey,
+                _extent: u32,
+                _points: &[(i32, i32)],
+                _tags: TagSet,
+                _meta: MvtPathMeta,
+                _close: bool,
+            ) {}
+            fn add_point(
+                &mut self,
+                _tile_key: TileKey,
+                _extent: u32,
+                _point: (i32, i32),
+                tags: TagSet,
+            ) {
+                self.tags = Some(tags);
+            }
+        }
+
+        let mut sink = Sink::default();
+        parse_mvt_tile(
+            &duplicate_and_unwanted_tag_tile(),
+            TileKey { z: 14, x: 0, y: 0 },
+            &mut sink,
+        )
+        .unwrap();
+        let tags = sink.tags.unwrap();
+        let expected = HashMap::from([
+            ("name".to_string(), "second".to_string()),
+            ("amenity".to_string(), "bench".to_string()),
+            ("layer".to_string(), "osm_points".to_string()),
+        ]);
+        assert_eq!(tags.get("name"), Some("second"));
+        assert!(tags.contains_key("amenity"));
+        assert!(!tags.contains_key("discard"));
+        assert_eq!(tags.to_owned_map(), expected);
+        assert_eq!(tags.iter().count(), expected.len());
+    }
+
+    fn legacy_parse_mvt_tile(
+        tile_data: &[u8],
+        tile_key: TileKey,
+        builder: &mut dyn MvtSink,
+    ) -> Result<(), String> {
+        let mut tile_pos = 0;
+        while tile_pos < tile_data.len() {
+            let key = read_pb_varint(tile_data, &mut tile_pos)?;
+            if ((key >> 3) as u32, (key & 7) as u8) != (3, 2) {
+                skip_pb_field(tile_data, &mut tile_pos, (key & 7) as u8)?;
+                continue;
+            }
+            let layer_data = read_pb_len_slice(tile_data, &mut tile_pos)?;
+            let mut pos = 0;
+            let mut layer_name = String::new();
+            let mut extent = 4096_u32;
+            let mut features = Vec::<&[u8]>::new();
+            let mut keys = Vec::<String>::new();
+            let mut values = Vec::<String>::new();
+            while pos < layer_data.len() {
+                let key = read_pb_varint(layer_data, &mut pos)?;
+                let field = (key >> 3) as u32;
+                let wire = (key & 7) as u8;
+                match (field, wire) {
+                    (1, 2) => {
+                        layer_name = String::from_utf8_lossy(
+                            read_pb_len_slice(layer_data, &mut pos)?,
+                        )
+                        .into_owned();
+                    }
+                    (2, 2) => features.push(read_pb_len_slice(layer_data, &mut pos)?),
+                    (3, 2) => keys.push(
+                        String::from_utf8_lossy(read_pb_len_slice(layer_data, &mut pos)?)
+                            .into_owned(),
+                    ),
+                    (4, 2) => values.push(parse_mvt_value(
+                        read_pb_len_slice(layer_data, &mut pos)?,
+                    )?),
+                    (5, 0) => extent = read_pb_varint(layer_data, &mut pos)? as u32,
+                    _ => skip_pb_field(layer_data, &mut pos, wire)?,
+                }
+            }
+            // This intentionally matches the old order: every key/value
+            // table was decoded before an unwanted layer was rejected.
+            if !builder.wants_layer(&layer_name) {
+                continue;
+            }
+            for (feature_index, feature) in features.into_iter().enumerate() {
+                let mut pos = 0;
+                let mut tag_indexes = Vec::<u32>::new();
+                let mut geometry = Vec::<u32>::new();
+                let mut geom_type = MvtGeomType::Unknown;
+                while pos < feature.len() {
+                    let key = read_pb_varint(feature, &mut pos)?;
+                    let field = (key >> 3) as u32;
+                    let wire = (key & 7) as u8;
+                    match (field, wire) {
+                        (2, 2) => read_packed_u32_into(
+                            read_pb_len_slice(feature, &mut pos)?,
+                            &mut tag_indexes,
+                        )?,
+                        (3, 0) => {
+                            geom_type = MvtGeomType::from_u64(read_pb_varint(feature, &mut pos)?)
+                        }
+                        (4, 2) => read_packed_u32_into(
+                            read_pb_len_slice(feature, &mut pos)?,
+                            &mut geometry,
+                        )?,
+                        _ => skip_pb_field(feature, &mut pos, wire)?,
+                    }
+                }
+                if geom_type == MvtGeomType::Unknown {
+                    continue;
+                }
+                let mut tags = HashMap::<String, String>::new();
+                for pair in tag_indexes.chunks_exact(2) {
+                    let Some(key) = keys.get(pair[0] as usize) else { continue };
+                    let Some(value) = values.get(pair[1] as usize) else { continue };
+                    tags.insert(key.clone(), value.clone());
+                }
+                legacy_normalize_mvt_tags(&layer_name, geom_type, &mut tags);
+                let paths = decode_mvt_geometry(&geometry, geom_type)?;
+                if geom_type == MvtGeomType::Point {
+                    if !should_emit_mvt_point_label_feature(&tags) {
+                        continue;
+                    }
+                    for path in paths {
+                        if let Some(point) = path.first().copied() {
+                            builder.add_point(
+                                tile_key,
+                                extent.max(1),
+                                point,
+                                TagSet::from(tags.clone()),
+                            );
+                        }
+                    }
+                    continue;
+                }
+                let feature_group = (geom_type == MvtGeomType::Polygon)
+                    .then(|| builder.alloc_feature_id());
+                for (path_index, path) in paths.into_iter().enumerate() {
+                    if path.len() < 2 || (geom_type == MvtGeomType::Polygon && path.len() < 4) {
+                        continue;
+                    }
+                    builder.add_path(
+                        tile_key,
+                        extent.max(1),
+                        &path,
+                        TagSet::from(tags.clone()),
+                        MvtPathMeta {
+                            feature_index: feature_index as u32,
+                            path_index: path_index as u32,
+                            feature_group,
+                        },
+                        geom_type == MvtGeomType::Polygon,
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn legacy_normalize_mvt_tags(
+        layer_name: &str,
+        geom_type: MvtGeomType,
+        tags: &mut HashMap<String, String>,
+    ) {
+        if let Some(previous) = tags.insert("layer".to_string(), layer_name.to_string()) {
+            if previous != layer_name {
+                tags.insert("osm_layer".to_string(), previous);
+            }
+        }
+        let first = |tags: &HashMap<String, String>, keys: &[&str]| {
+            keys.iter().find_map(|key| tags.get(*key).cloned())
+        };
+        match layer_name {
+            "building" | "buildings" => {
+                tags.entry("building".to_string()).or_insert_with(|| "yes".to_string());
+            }
+            "water" | "water_polygons" | "water_polygons_labels" | "ocean" => {
+                let (key, value) = if geom_type == MvtGeomType::Polygon {
+                    ("natural", "water")
+                } else {
+                    ("waterway", "river")
+                };
+                tags.entry(key.to_string()).or_insert_with(|| value.to_string());
+            }
+            "waterway" | "water_lines" | "water_lines_labels" | "dam_lines" | "pier_lines" => {
+                let value = first(tags, &["kind", "subclass", "class"])
+                    .unwrap_or_else(|| "river".to_string());
+                tags.entry("waterway".to_string()).or_insert(value);
+            }
+            "transportation"
+            | "transportation_name"
+            | "road"
+            | "streets"
+            | "street_polygons"
+            | "street_labels"
+            | "street_labels_points"
+            | "streets_polygons_labels"
+            | "bridges"
+            | "aerialways"
+            | "ferries"
+            | "public_transport" => {
+                let value = first(tags, &["kind", "subclass", "class"])
+                    .unwrap_or_else(|| "residential".to_string());
+                let value = normalized_highway_static(&value).unwrap_or(&value).to_string();
+                tags.entry("highway".to_string()).or_insert(value);
+            }
+            "railway" => {
+                tags.entry("railway".to_string()).or_insert_with(|| "rail".to_string());
+            }
+            "park" => {
+                tags.entry("leisure".to_string()).or_insert_with(|| "park".to_string());
+            }
+            "landuse" | "landcover" | "land" | "sites" | "pois" => {
+                let value = first(tags, &["kind", "class", "subclass"])
+                    .unwrap_or_else(|| "residential".to_string());
+                if is_leisure_kind(&value) {
+                    tags.entry("leisure".to_string()).or_insert_with(|| "park".to_string());
+                } else {
+                    tags.entry("landuse".to_string()).or_insert(value);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn count_allocations<T>(f: impl FnOnce() -> T) -> (usize, T) {
+        MAP_ALLOCATION_COUNT.store(0, Ordering::Relaxed);
+        MAP_COUNT_ALLOCATIONS.store(true, Ordering::SeqCst);
+        let value = f();
+        MAP_COUNT_ALLOCATIONS.store(false, Ordering::SeqCst);
+        (MAP_ALLOCATION_COUNT.load(Ordering::Relaxed), value)
+    }
+
+    /// The 25 Amsterdam fixtures, the start view's tilted bake and the flat
+    /// bake: every grounded union face rides the face layout and reads back
+    /// as the road record it stood for, nothing the face layout could carry
+    /// stays on the road layout, and the face stream — tilt-invariant road
+    /// core — is byte-identical between the two bakes.
+    #[test]
+    #[ignore]
+    fn amsterdam_union_faces_ride_the_face_layout() {
+        let theme = probe_compiled_theme();
+        let mut face_records = 0usize;
+        let mut tilted_bytes = 0usize;
+        let mut flat_bytes = 0usize;
+        let mut wall_instances = 0usize;
+        for x in 8412..=8416 {
+            for y in 5382..=5386 {
+                let key = TileKey { z: 14, x, y };
+                let path = format!("../seed-files/amsterdam-tiles/z14-x{x}-y{y}.decoded");
+                let data = std::fs::read(&path)
+                    .unwrap_or_else(|err| panic!("failed to read {path}: {err}"));
+                let bake = |buildings_3d: bool, want_fringe: bool| {
+                    build_tile_buffers_from_mvt(
+                        key,
+                        &data,
+                        Some(&data),
+                        None,
+                        false,
+                        &[],
+                        &theme,
+                        16,
+                        buildings_3d,
+                        want_fringe,
+                        true,
+                    )
+                    .unwrap_or_else(|err| panic!("bake {path}: {err}"))
+                };
+                let tilted = bake(true, false);
+                let flat = bake(false, true);
+                let tilted_faces =
+                    assert_face_stream_is_the_road_form(&tilted, &format!("{path} tilted"));
+                let flat_faces =
+                    assert_face_stream_is_the_road_form(&flat, &format!("{path} flat"));
+                assert_eq!(tilted_faces, flat_faces, "{path}");
+                assert_eq!(
+                    tilted.face.indexed_vertex_bytes(FACE_TYPED_VERTEX_BYTES),
+                    flat.face.indexed_vertex_bytes(FACE_TYPED_VERTEX_BYTES),
+                    "{path}"
+                );
+                face_records += tilted_faces;
+                tilted_bytes += tilted.byte_size();
+                flat_bytes += flat.byte_size();
+                wall_instances += tilted.wall_instances.len();
+            }
+        }
+        println!("face records across the 25 fixtures: {face_records}");
+        let wall_bytes = wall_instances * MAP_WALL_INSTANCE_BYTES;
+        let legacy_wall_bytes = wall_instances * 11 * std::mem::size_of::<f32>();
+        println!(
+            "25-fixture bytes: tilted {:.1} MiB (legacy {:.1}), flat {:.1} MiB, wall_inst {:.1} MiB (legacy {:.1})",
+            tilted_bytes as f64 / (1024.0 * 1024.0),
+            (tilted_bytes + legacy_wall_bytes - wall_bytes) as f64 / (1024.0 * 1024.0),
+            flat_bytes as f64 / (1024.0 * 1024.0),
+            wall_bytes as f64 / (1024.0 * 1024.0),
+            legacy_wall_bytes as f64 / (1024.0 * 1024.0),
+        );
+        assert!(face_records > 0);
+    }
+
+    /// Opt-in admission-quality report for the complete Amsterdam start scene.
+    /// Set `MAKEPAD_MAP_QUALITY_SCENE=center` for the dense five-tile cross;
+    /// the default is the full 5x5 fixture grid.
+    #[test]
+    #[ignore]
+    fn amsterdam_complete_scene_quality_at_memory_limits() {
+        #[derive(Clone, Copy, Default)]
+        struct Quality {
+            allocated: usize,
+            bytes: usize,
+            walls: usize,
+            roofs: usize,
+            ground: usize,
+            roads: [usize; 3],
+        }
+        let assert_valid_indices = |buffers: &TileBuffers, what: &str| {
+            for (name, stream, stride) in [
+                ("fill", &buffers.fill, FILL_TYPED_VERTEX_BYTES),
+                ("face", &buffers.face, FACE_TYPED_VERTEX_BYTES),
+                ("casing", &buffers.casing, ROAD_TYPED_VERTEX_BYTES),
+                ("stroke", &buffers.stroke, ROAD_TYPED_VERTEX_BYTES),
+                ("fringe", &buffers.fringe, ROAD_TYPED_VERTEX_BYTES),
+                ("fill_3d", &buffers.fill_3d, ROOF_TYPED_VERTEX_BYTES),
+            ] {
+                for chunk in &stream.chunks {
+                    assert_eq!(chunk.vertices.len() % stride, 0, "{what} {name} stride");
+                    assert_eq!(chunk.indices.len() % 3, 0, "{what} {name} triangles");
+                    let vertices = chunk.vertices.len() / stride;
+                    assert!(chunk.indices.iter().all(|&i| (i as usize) < vertices),
+                        "{what} {name} index out of range");
+                }
+            }
+            for (name, indices, vertices, stride) in [
+                ("fill_misc", &buffers.fill_misc_indices, &buffers.fill_misc_vertices, VECTOR_PACKED_FLOATS_PER_VERTEX),
+                ("icon", &buffers.icon_indices, &buffers.icon_vertices, VECTOR_PACKED_FLOATS_PER_VERTEX),
+                ("icon_high", &buffers.icon_high_indices, &buffers.icon_high_vertices, VECTOR_PACKED_FLOATS_PER_VERTEX),
+                ("fill_3d_misc", &buffers.fill_3d_misc_indices, &buffers.fill_3d_misc_vertices, VECTOR_PACKED_FLOATS_PER_VERTEX),
+                ("wall", &buffers.wall_indices, &buffers.wall_vertices, VECTOR_PACKED_FLOATS_PER_VERTEX),
+                ("tree", &buffers.tree_indices, &buffers.tree_vertices, VECTOR_PACKED_FLOATS_PER_VERTEX),
+                ("tree_cross", &buffers.tree_cross_indices, &buffers.tree_cross_vertices, VECTOR_PACKED_FLOATS_PER_VERTEX),
+                ("tree_template", &buffers.tree_template_indices, &buffers.tree_template_vertices, VECTOR_PACKED_FLOATS_PER_VERTEX),
+                ("tree_cross_template", &buffers.tree_cross_template_indices, &buffers.tree_cross_template_vertices, VECTOR_PACKED_FLOATS_PER_VERTEX),
+                ("stalk_template", &buffers.stalk_template_indices, &buffers.stalk_template_vertices, VECTOR_PACKED_FLOATS_PER_VERTEX),
+                ("stoplight_template", &buffers.stoplight_template_indices, &buffers.stoplight_template_vertices, VECTOR_PACKED_FLOATS_PER_VERTEX),
+                ("road_icon", &buffers.road_icon_indices, &buffers.road_icon_vertices, VECTOR_FLOATS_PER_VERTEX),
+            ] {
+                assert_eq!(vertices.len() % stride, 0, "{what} {name} stride");
+                assert_eq!(indices.len() % 3, 0, "{what} {name} triangles");
+                assert!(indices.iter().all(|&i| (i as usize) < vertices.len() / stride),
+                    "{what} {name} index out of range");
+            }
+        };
+        let scene = std::env::var("MAKEPAD_MAP_QUALITY_SCENE")
+            .unwrap_or_else(|_| "full".to_string());
+        let coordinates: Vec<(i32, i32)> = match scene.as_str() {
+            "full" => (8412..=8416)
+                .flat_map(|x| (5382..=5386).map(move |y| (x, y)))
+                .collect(),
+            "center" => vec![(8414, 5384), (8413, 5384), (8415, 5384),
+                (8414, 5383), (8414, 5385)],
+            value => panic!("MAKEPAD_MAP_QUALITY_SCENE must be full or center, got {value}"),
+        };
+        let fixtures: Vec<_> = coordinates.into_iter().map(|(x, y)| {
+            let path = format!("../seed-files/amsterdam-tiles/z14-x{x}-y{y}.decoded");
+            let data = std::fs::read(&path)
+                .unwrap_or_else(|err| panic!("required quality fixture {path} is missing: {err}"));
+            (TileKey { z: 14, x, y }, path, data)
+        }).collect();
+        let theme = probe_compiled_theme();
+        let bake = |key, path: &str, data: &[u8], bucket| {
+            build_tile_buffers_from_mvt(
+                key, data, Some(data), None, false, &[], &theme, bucket,
+                true, false, true,
+            ).unwrap_or_else(|err| panic!("quality bake {path} bucket {bucket}: {err}"))
+        };
+        let measure = |buffers: &TileBuffers| Quality {
+            allocated: buffers.allocated_byte_size(),
+            bytes: buffers.byte_size(),
+            walls: buffers.wall_instances.len(),
+            roofs: buffers.fill_3d.index_count() + buffers.fill_3d_misc_indices.len(),
+            ground: buffers.fill.index_count() + buffers.fill_misc_indices.len(),
+            roads: [buffers.face.index_count(), buffers.casing.index_count(),
+                buffers.stroke.index_count()],
+        };
+        let sum = |rows: &[(TileKey, Quality)]| rows.iter().fold(Quality::default(), |mut a, (_, q)| {
+            a.allocated += q.allocated; a.bytes += q.bytes; a.walls += q.walls;
+            a.roofs += q.roofs; a.ground += q.ground;
+            for i in 0..3 { a.roads[i] += q.roads[i]; }
+            a
+        });
+        let percent = |kept: usize, total: usize| if total == 0 { 100.0 }
+            else { kept as f64 * 100.0 / total as f64 };
+
+        for bucket in [15, 16] {
+            let mut baseline = Vec::with_capacity(fixtures.len());
+            for (key, path, data) in &fixtures {
+                let buffers = bake(*key, path, data, bucket);
+                assert_valid_indices(&buffers, path);
+                let q = measure(&buffers);
+                println!("QUALITY tile z14/{}/{} bucket={bucket} baseline allocated={} bytes={} walls={} roof_idx={} ground_idx={} road_idx(face/casing/stroke)={}/{}/{}",
+                    key.x, key.y, q.allocated, q.bytes, q.walls, q.roofs, q.ground,
+                    q.roads[0], q.roads[1], q.roads[2]);
+                baseline.push((*key, q));
+            }
+            let base = sum(&baseline);
+            let base_max = baseline.iter().max_by_key(|(_, q)| q.allocated).unwrap();
+            println!("QUALITY scene={scene} tiles={} bucket={bucket} baseline allocated_sum={} allocated_max={}@z14/{}/{} bytes_sum={} walls={} roofs={}",
+                baseline.len(), base.allocated, base_max.1.allocated, base_max.0.x,
+                base_max.0.y, base.bytes, base.walls, base.roofs);
+            for limit_mib in [8usize, 16, 24, 32] {
+                let limit = limit_mib * 1024 * 1024;
+                let mut retained = Vec::with_capacity(fixtures.len());
+                for (key, path, data) in &fixtures {
+                    let mut buffers = bake(*key, path, data, bucket);
+                    let lod = buffers.degrade_to_memory_limit(limit);
+                    assert_valid_indices(&buffers, path);
+                    let q = measure(&buffers);
+                    println!("QUALITY tile z14/{}/{} bucket={bucket} limit={}MiB lod={lod} allocated={} bytes={} walls={} roof_idx={} ground_idx={} road_idx(face/casing/stroke)={}/{}/{}",
+                        key.x, key.y, limit_mib, q.allocated, q.bytes, q.walls, q.roofs,
+                        q.ground, q.roads[0], q.roads[1], q.roads[2]);
+                    retained.push((*key, q));
+                }
+                let kept = sum(&retained);
+                if limit_mib >= 16 { assert_eq!((kept.walls, kept.roofs, kept.ground, kept.roads), (base.walls, base.roofs, base.ground, base.roads), "normal desktop allowance must preserve the complete scene"); }
+                let max = retained.iter().max_by_key(|(_, q)| q.allocated).unwrap();
+                println!("QUALITY scene={scene} tiles={} bucket={bucket} limit={}MiB allocated_sum={} allocated_max={}@z14/{}/{} vs_baseline={:+.1}% bytes_sum={} walls={}/{} ({:.1}%) roofs={}/{} ({:.1}%)",
+                    retained.len(), limit_mib, kept.allocated, max.1.allocated, max.0.x,
+                    max.0.y, percent(kept.allocated, base.allocated) - 100.0, kept.bytes,
+                    kept.walls, base.walls, percent(kept.walls, base.walls),
+                    kept.roofs, base.roofs, percent(kept.roofs, base.roofs));
+            }
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn detail_parse_merge_allocations_drop_by_at_least_100x() {
+        let data = std::fs::read("../seed-files/amsterdam-tiles/z14-x8414-y5384.decoded")
+            .expect("Amsterdam allocation fixture is missing");
+        let key = TileKey { z: 14, x: 8414, y: 5384 };
+
+        let run_mvt_parse = |parse_mvt: MvtParseFn| {
+            let mut collector = MvtLocalCollector::new(4.0);
+            collector.layer_filter = LayerParseFilter::BaseNoDetailLayers;
+            parse_mvt(&data, key, &mut collector).unwrap();
+            (collector.points.len(), collector.ways.len())
+        };
+        let run_detail_merge = |parse_mvt: MvtParseFn| {
+            let mut points = Vec::new();
+            let mut ways = Vec::new();
+            let mut corridors = Vec::new();
+            merge_detail_features_with_parser(
+                parse_mvt,
+                &data,
+                key,
+                4.0,
+                true,
+                true,
+                true,
+                &mut points,
+                &mut ways,
+                &mut corridors,
+            )
+            .unwrap();
+            (points.len(), ways.len(), corridors.len())
+        };
+
+        // Warm thread-local feature, arena and path capacities before
+        // measuring the steady-state worker path.
+        let _ = run_mvt_parse(legacy_parse_mvt_tile);
+        let _ = run_mvt_parse(parse_mvt_tile_erased);
+        let _ = run_detail_merge(legacy_parse_mvt_tile);
+        let _ = run_detail_merge(parse_mvt_tile_erased);
+
+        let legacy_parse_start = std::time::Instant::now();
+        let (legacy_parse_allocs, legacy_parse_checksum) =
+            count_allocations(|| run_mvt_parse(legacy_parse_mvt_tile));
+        let legacy_parse_elapsed = legacy_parse_start.elapsed();
+        let arena_parse_start = std::time::Instant::now();
+        let (arena_parse_allocs, arena_parse_checksum) =
+            count_allocations(|| run_mvt_parse(parse_mvt_tile_erased));
+        let arena_parse_elapsed = arena_parse_start.elapsed();
+        assert_eq!(arena_parse_checksum, legacy_parse_checksum);
+
+        let legacy_merge_start = std::time::Instant::now();
+        let (legacy_merge_allocs, legacy_merge_checksum) =
+            count_allocations(|| run_detail_merge(legacy_parse_mvt_tile));
+        let legacy_merge_elapsed = legacy_merge_start.elapsed();
+        let arena_merge_start = std::time::Instant::now();
+        let (arena_merge_allocs, arena_merge_checksum) =
+            count_allocations(|| run_detail_merge(parse_mvt_tile_erased));
+        let arena_merge_elapsed = arena_merge_start.elapsed();
+        assert_eq!(arena_merge_checksum, legacy_merge_checksum);
+
+        let legacy_total = legacy_parse_allocs + legacy_merge_allocs;
+        let arena_total = arena_parse_allocs + arena_merge_allocs;
+        println!(
+            "mvt-parse: legacy={} allocs {:?}, arena={} allocs {:?}; detail-merge: legacy={} allocs {:?}, arena={} allocs {:?}; total={} -> {} ({:.1}x fewer)",
+            legacy_parse_allocs,
+            legacy_parse_elapsed,
+            arena_parse_allocs,
+            arena_parse_elapsed,
+            legacy_merge_allocs,
+            legacy_merge_elapsed,
+            arena_merge_allocs,
+            arena_merge_elapsed,
+            legacy_total,
+            arena_total,
+            legacy_total as f64 / arena_total.max(1) as f64,
+        );
+        assert!(
+            legacy_total >= arena_total.saturating_mul(100),
+            "expected >=100x fewer allocations, got legacy={legacy_total} arena={arena_total}"
+        );
+    }
+
+    fn percentile_ms(samples: &mut [std::time::Duration], percentile: usize) -> f64 {
+        samples.sort_unstable();
+        let index = (samples.len() - 1) * percentile / 100;
+        samples[index].as_secs_f64() * 1000.0
+    }
+
+    fn assert_tile_buffers_equal(actual: &TileBuffers, legacy: &TileBuffers, path: &str) {
+        macro_rules! same_vec {
+            ($field:ident) => {
+                if actual.$field != legacy.$field {
+                    let first = actual
+                        .$field
+                        .iter()
+                        .zip(&legacy.$field)
+                        .position(|(left, right)| left != right);
+                    panic!(
+                        "bake parity failed for {path}: {} differs (arena {}, legacy {}, first {:?}: {:?} vs {:?})",
+                        stringify!($field),
+                        actual.$field.len(),
+                        legacy.$field.len(),
+                        first,
+                        first.and_then(|index| actual.$field.get(index)),
+                        first.and_then(|index| legacy.$field.get(index)),
+                    );
+                }
+            };
+        }
+        macro_rules! same_float_vec {
+            ($field:ident) => {
+                if actual.$field.len() != legacy.$field.len()
+                    || actual
+                        .$field
+                        .iter()
+                        .zip(&legacy.$field)
+                        .any(|(left, right)| left.to_bits() != right.to_bits())
+                {
+                    let first = actual
+                        .$field
+                        .iter()
+                        .zip(&legacy.$field)
+                        .position(|(left, right)| left.to_bits() != right.to_bits());
+                    panic!(
+                        "bake parity failed for {path}: {} differs (arena {}, legacy {}, first {:?})",
+                        stringify!($field),
+                        actual.$field.len(),
+                        legacy.$field.len(),
+                        first,
+                    );
+                }
+            };
+        }
+        macro_rules! same_typed_stream {
+            ($field:ident, $stride:expr) => {{
+                let actual_triangles = actual.$field.indexed_vertex_bytes($stride);
+                let legacy_triangles = legacy.$field.indexed_vertex_bytes($stride);
+                assert_eq!(
+                    actual_triangles, legacy_triangles,
+                    "bake parity failed for {path}: {} triangle list differs",
+                    stringify!($field),
+                );
+            }};
+        }
+        same_vec!(pin_hits);
+        same_typed_stream!(fill, FILL_TYPED_VERTEX_BYTES);
+        same_vec!(fill_misc_indices);
+        same_float_vec!(fill_misc_vertices);
+        same_typed_stream!(face, FACE_TYPED_VERTEX_BYTES);
+        same_typed_stream!(casing, ROAD_TYPED_VERTEX_BYTES);
+        same_typed_stream!(stroke, ROAD_TYPED_VERTEX_BYTES);
+        same_vec!(icon_indices);
+        same_float_vec!(icon_vertices);
+        same_vec!(icon_high_indices);
+        same_float_vec!(icon_high_vertices);
+        for (field, actual_instances, legacy_instances) in [
+            ("icon_instances", &actual.icon_instances, &legacy.icon_instances),
+            (
+                "icon_high_instances",
+                &actual.icon_high_instances,
+                &legacy.icon_high_instances,
+            ),
+        ] {
+            assert_eq!(actual_instances.len(), legacy_instances.len(), "{field}: {path}");
+            for (index, (actual_instance, legacy_instance)) in
+                actual_instances.iter().zip(legacy_instances).enumerate()
+            {
+                assert_eq!(actual_instance.mesh_slot, legacy_instance.mesh_slot, "{field} slot {path} #{index}");
+                assert!(
+                    actual_instance.data.len() == legacy_instance.data.len()
+                        && actual_instance
+                            .data
+                            .iter()
+                            .zip(&legacy_instance.data)
+                            .all(|(left, right)| left.to_bits() == right.to_bits()),
+                    "{field} data {path} #{index}"
+                );
+            }
+        }
+        same_float_vec!(shadow_disc_instances);
+        same_typed_stream!(fringe, ROAD_TYPED_VERTEX_BYTES);
+        same_typed_stream!(fill_3d, ROOF_TYPED_VERTEX_BYTES);
+        same_vec!(fill_3d_misc_indices);
+        same_float_vec!(fill_3d_misc_vertices);
+        same_vec!(wall_indices);
+        same_float_vec!(wall_vertices);
+        same_vec!(wall_instances);
+        same_vec!(tree_indices);
+        same_float_vec!(tree_vertices);
+        same_vec!(tree_cross_indices);
+        same_float_vec!(tree_cross_vertices);
+        same_vec!(tree_template_indices);
+        same_float_vec!(tree_template_vertices);
+        same_vec!(tree_cross_template_indices);
+        same_float_vec!(tree_cross_template_vertices);
+        same_float_vec!(tree_instances);
+        same_vec!(stalk_template_indices);
+        same_float_vec!(stalk_template_vertices);
+        same_vec!(stalk_instances);
+        same_vec!(stoplight_template_indices);
+        same_float_vec!(stoplight_template_vertices);
+        same_vec!(stoplight_instances);
+        same_vec!(road_icon_indices);
+        same_float_vec!(road_icon_vertices);
+        same_vec!(labels);
+        assert_eq!(actual.feature_count, legacy.feature_count, "feature count: {path}");
+        assert_eq!(actual.render_zoom, legacy.render_zoom, "render zoom: {path}");
+        assert_eq!(actual.mode_overlay_only, legacy.mode_overlay_only, "mode: {path}");
+    }
+
+    #[test]
+    #[ignore]
+    fn amsterdam_tilebuffers_are_identical_and_detail_stage_is_timed() {
+        let theme = CompiledMapTheme::default();
+        let mut legacy_parse_times = Vec::with_capacity(25);
+        let mut arena_parse_times = Vec::with_capacity(25);
+        let mut legacy_merge_times = Vec::with_capacity(25);
+        let mut arena_merge_times = Vec::with_capacity(25);
+        let mut max_wall_height_error = 0.0f32;
+
+        for x in 8412..=8416 {
+            for y in 5382..=5386 {
+                let key = TileKey { z: 14, x, y };
+                let path = format!(
+                    "../seed-files/amsterdam-tiles/z14-x{x}-y{y}.decoded"
+                );
+                let data = std::fs::read(&path)
+                    .unwrap_or_else(|err| panic!("failed to read {path}: {err}"));
+
+                let collect = |parse_mvt: MvtParseFn| {
+                    let mut collector = MvtLocalCollector::new(4.0);
+                    collector.layer_filter = LayerParseFilter::BaseNoDetailLayers;
+                    let start = std::time::Instant::now();
+                    parse_mvt(&data, key, &mut collector).unwrap();
+                    (collector, start.elapsed())
+                };
+                let (legacy_collector, legacy_parse_elapsed) = collect(legacy_parse_mvt_tile);
+                let (arena_collector, arena_parse_elapsed) = collect(parse_mvt_tile_erased);
+                for way in &arena_collector.ways {
+                    if way.tags.contains_key("building")
+                        || way.tags.contains_key("building:part")
+                    {
+                        for height in [
+                            building_height_m(&way.tags),
+                            building_min_height_m(&way.tags),
+                        ] {
+                            let unpacked = U16x2::from_f32(height * 100.0, 0.0).x as f32 * 0.01;
+                            max_wall_height_error =
+                                max_wall_height_error.max((unpacked - height).abs());
+                        }
+                    }
+                }
+                legacy_parse_times.push(legacy_parse_elapsed);
+                arena_parse_times.push(arena_parse_elapsed);
+                assert_eq!(
+                    arena_collector.ways.len(),
+                    legacy_collector.ways.len(),
+                    "base way count: {path}"
+                );
+                for (index, (arena_way, legacy_way)) in arena_collector
+                    .ways
+                    .iter()
+                    .zip(&legacy_collector.ways)
+                    .enumerate()
+                {
+                    let mut legacy_tags = legacy_way.tags.to_owned_map();
+                    legacy_tags.retain(|key, _| point_keys().contains(&key.as_str()));
+                    assert_eq!(arena_way.tags.to_owned_map(), legacy_tags, "base tags {path} #{index}");
+                    assert_eq!(arena_way.points, legacy_way.points, "base points {path} #{index}");
+                    assert_eq!(arena_way.closed, legacy_way.closed, "base closed {path} #{index}");
+                    assert_eq!(arena_way.fidx, legacy_way.fidx, "base fidx {path} #{index}");
+                    assert_eq!(arena_way.ring_index, legacy_way.ring_index, "base ring {path} #{index}");
+                }
+
+                let measure = |parse_mvt: MvtParseFn| {
+                    let mut points = Vec::new();
+                    let mut ways = Vec::new();
+                    let mut corridors = Vec::new();
+                    let start = std::time::Instant::now();
+                    merge_detail_features_with_parser(
+                        parse_mvt,
+                        &data,
+                        key,
+                        4.0,
+                        true,
+                        true,
+                        true,
+                        &mut points,
+                        &mut ways,
+                        &mut corridors,
+                    )
+                    .unwrap();
+                    start.elapsed()
+                };
+                legacy_merge_times.push(measure(legacy_parse_mvt_tile));
+                arena_merge_times.push(measure(parse_mvt_tile_erased));
+
+                let build = |parse_mvt: MvtParseFn| {
+                    build_tile_buffers_from_mvt_with_parser(
+                        parse_mvt,
+                        key,
+                        &data,
+                        Some(&data),
+                        None,
+                        false,
+                        &[],
+                        &theme,
+                        16,
+                        true,
+                        true,
+                        true,
+                    )
+                    .unwrap()
+                };
+                let mut legacy = build(legacy_parse_mvt_tile);
+                let mut arena = build(parse_mvt_tile_erased);
+                let mut arena_repeat = build(parse_mvt_tile_erased);
+                // Wall time is deliberately the only non-deterministic
+                // TileBuffers field; all streams, labels, pin hits and icon
+                // instances remain in this equality assertion.
+                legacy.stage_summary.clear();
+                arena.stage_summary.clear();
+                arena_repeat.stage_summary.clear();
+                assert_tile_buffers_equal(&arena, &arena_repeat, &format!("{path} (repeat)"));
+                assert_tile_buffers_equal(&arena, &legacy, &path);
+            }
+        }
+
+        let legacy_parse_median = percentile_ms(&mut legacy_parse_times, 50);
+        let legacy_parse_p95 = percentile_ms(&mut legacy_parse_times, 95);
+        let arena_parse_median = percentile_ms(&mut arena_parse_times, 50);
+        let arena_parse_p95 = percentile_ms(&mut arena_parse_times, 95);
+        let legacy_merge_median = percentile_ms(&mut legacy_merge_times, 50);
+        let legacy_merge_p95 = percentile_ms(&mut legacy_merge_times, 95);
+        let arena_merge_median = percentile_ms(&mut arena_merge_times, 50);
+        let arena_merge_p95 = percentile_ms(&mut arena_merge_times, 95);
+        println!(
+            "Amsterdam mvt-parse (25 tiles): legacy median={legacy_parse_median:.3}ms p95={legacy_parse_p95:.3}ms; arena median={arena_parse_median:.3}ms p95={arena_parse_p95:.3}ms"
+        );
+        println!(
+            "Amsterdam detail-merge (25 tiles): legacy median={legacy_merge_median:.3}ms p95={legacy_merge_p95:.3}ms; arena median={arena_merge_median:.3}ms p95={arena_merge_p95:.3}ms"
+        );
+        println!(
+            "Amsterdam wall height centimetre-U16 max error: {:.6} m",
+            max_wall_height_error
+        );
+        assert!(max_wall_height_error <= 0.005);
+    }
+}
+
+#[cfg(test)]
 mod bridge_probe_tests {
     use super::*;
 
@@ -9654,7 +12759,7 @@ mod bridge_probe_tests {
             let clip_bounds = tile_clip_bounds(FILL_CLIP_OVERLAP);
             for (order, way) in collector.ways.iter().enumerate() {
                 let Some(fidx) = way.fidx else { continue };
-                let layer = way.tags.get("layer").map(String::as_str).unwrap_or("");
+                let layer = way.tags.get("layer").unwrap_or("");
                 let Some(layer_id) = baked_layer_discriminant(layer) else {
                     continue;
                 };
@@ -9671,11 +12776,7 @@ mod bridge_probe_tests {
                 if signed_area.abs() <= POLYGON_AREA_EPSILON {
                     continue;
                 }
-                let ring_order = way
-                    .tags
-                    .get(MVT_INTERNAL_RING_INDEX_KEY)
-                    .and_then(|v| v.parse::<usize>().ok())
-                    .unwrap_or(order);
+                let ring_order = way.ring_index.map(|value| value as usize).unwrap_or(order);
                 rings_of.entry((layer_id, fidx)).or_default().push(FillRing {
                     order: ring_order,
                     points: ring_points,
@@ -9860,7 +12961,7 @@ mod bridge_probe_tests {
                 Default::default();
             let mut point_layers: std::collections::BTreeMap<String, usize> = Default::default();
             for (_pos, tags) in &collector.points {
-                let layer = tags.get("layer").cloned().unwrap_or_default();
+                let layer = tags.get("layer").unwrap_or_default().to_owned();
                 *point_layers.entry(layer).or_default() += 1;
             }
             for (layer, count) in &point_layers {
@@ -9891,8 +12992,8 @@ mod bridge_probe_tests {
                         .get("natural")
                         .or_else(|| tags.get("amenity"))
                         .or_else(|| tags.get("highway"))
-                        .cloned()
-                        .unwrap_or_else(|| "other".into());
+                        .unwrap_or("other")
+                        .to_owned();
                     *kinds.entry(kind).or_default() += 1;
                 }
                 println!("  DETAIL-MERGE points={} ways={}", points.len(), ways.len());
@@ -9902,7 +13003,7 @@ mod bridge_probe_tests {
             }
             let mut street_kind: std::collections::BTreeMap<String, usize> = Default::default();
             for way in &collector.ways {
-                let layer = way.tags.get("layer").cloned().unwrap_or_default();
+                let layer = way.tags.get("layer").unwrap_or_default().to_owned();
                 let e = per_layer.entry(layer.clone()).or_default();
                 e.0 += 1;
                 e.1 += way.points.len();
@@ -9911,8 +13012,8 @@ mod bridge_probe_tests {
                         .tags
                         .get("kind")
                         .or_else(|| way.tags.get("highway"))
-                        .cloned()
-                        .unwrap_or_default();
+                        .unwrap_or_default()
+                        .to_owned();
                     *street_kind.entry(kind).or_default() += 1;
                 }
             }
@@ -9988,11 +13089,11 @@ mod bridge_probe_tests {
                 let parsed = parse_baked_faces(&with_field, bucket).expect("parse baked");
                 assert_eq!(parsed.regions.len(), region_count);
                 let runtime = build_tile_buffers_from_mvt(
-                    key, &pbf, Some(&pbf), dz_raw.as_deref(), dz_covered, &[], &theme, bucket, false, true,
+                    key, &pbf, Some(&pbf), dz_raw.as_deref(), dz_covered, &[], &theme, bucket, false, true, true,
                 )
                 .unwrap();
                 let runtime2 = build_tile_buffers_from_mvt(
-                    key, &pbf, Some(&pbf), dz_raw.as_deref(), dz_covered, &[], &theme, bucket, false, true,
+                    key, &pbf, Some(&pbf), dz_raw.as_deref(), dz_covered, &[], &theme, bucket, false, true, true,
                 )
                 .unwrap();
                 let baked_build = build_tile_buffers_from_mvt(
@@ -10006,6 +13107,7 @@ mod bridge_probe_tests {
                     bucket,
                     false,
                     true,
+                    true,
                 )
                 .unwrap();
                 // Emission ORDER is not deterministic run-to-run in
@@ -10016,59 +13118,63 @@ mod bridge_probe_tests {
                 // runtime-vs-runtime must show the same equivalence as
                 // baked-vs-runtime (proving the bake adds no divergence
                 // beyond the pre-existing jitter).
-                let vert_multiset = |verts: &[f32]| -> Vec<Vec<u32>> {
-                    let mut rows: Vec<Vec<u32>> = verts
-                        .chunks_exact(VECTOR_FLOATS_PER_VERTEX)
+                let vert_multiset = |stream: &TypedStream, stride: usize, depth_at: usize| -> Vec<Vec<u8>> {
+                    let mut rows: Vec<Vec<u8>> = stream
+                        .vertex_records(stride)
                         .map(|chunk| {
                             chunk
                                 .iter()
                                 .enumerate()
-                                .filter(|(i, _)| *i != 16 && *i != 18)
-                                .map(|(_, v)| v.to_bits())
+                                .filter(|(i, _)| !(depth_at..depth_at + 4).contains(i))
+                                .map(|(_, &byte)| byte)
                                 .collect()
                         })
                         .collect();
                     rows.sort_unstable();
                     rows
                 };
-                for (name, a, b, c) in [
+                for (name, a, b, c, stride, depth_at) in [
                     (
                         "casing",
-                        &runtime.casing_vertices,
-                        &runtime2.casing_vertices,
-                        &baked_build.casing_vertices,
+                        &runtime.casing,
+                        &runtime2.casing,
+                        &baked_build.casing,
+                        ROAD_TYPED_VERTEX_BYTES,
+                        20,
                     ),
                     (
                         "stroke",
-                        &runtime.stroke_vertices,
-                        &runtime2.stroke_vertices,
-                        &baked_build.stroke_vertices,
+                        &runtime.stroke,
+                        &runtime2.stroke,
+                        &baked_build.stroke,
+                        ROAD_TYPED_VERTEX_BYTES,
+                        20,
                     ),
                     (
                         "fill",
-                        &runtime.fill_vertices,
-                        &runtime2.fill_vertices,
-                        &baked_build.fill_vertices,
+                        &runtime.fill,
+                        &runtime2.fill,
+                        &baked_build.fill,
+                        FILL_TYPED_VERTEX_BYTES,
+                        12,
                     ),
                 ] {
-                    let ma = vert_multiset(a);
+                    let ma = vert_multiset(a, stride, depth_at);
                     assert_eq!(
                         ma,
-                        vert_multiset(b),
+                        vert_multiset(b, stride, depth_at),
                         "{name} runtime-vs-runtime multiset diverged z{z} {x}/{y} b{bucket}"
                     );
-                    let mc = vert_multiset(c);
+                    let mc = vert_multiset(c, stride, depth_at);
                     if ma != mc {
                         let only_a: Vec<_> = ma.iter().filter(|r| !mc.contains(r)).take(3).collect();
                         let only_c: Vec<_> = mc.iter().filter(|r| !ma.contains(r)).take(3).collect();
                         println!("{name}: rows {} vs {}", ma.len(), mc.len());
                         for r in &only_a {
-                            let f: Vec<f32> = r.iter().map(|&b| f32::from_bits(b)).collect();
-                            println!("  only-runtime: {:?}", &f[..8.min(f.len())]);
+                            println!("  only-runtime: {:?}", &r[..16.min(r.len())]);
                         }
                         for r in &only_c {
-                            let f: Vec<f32> = r.iter().map(|&b| f32::from_bits(b)).collect();
-                            println!("  only-baked:   {:?}", &f[..8.min(f.len())]);
+                            println!("  only-baked:   {:?}", &r[..16.min(r.len())]);
                         }
                         panic!("{name} baked-vs-runtime multiset diverged z{z} {x}/{y} b{bucket}");
                     }
@@ -10091,31 +13197,144 @@ mod bridge_probe_tests {
     }
 
     #[test]
+    fn web_tree_triangle_cap_preserves_ordinary_instances_and_native_tiles() {
+        let mut near_indices = vec![0u32; 12 * 3];
+        let mut near_vertices = vec![1.0f32; 9];
+        let cross_indices = vec![0u32; 8 * 3];
+        let cross_vertices = vec![2.0f32; 6];
+        let mut instances = vec![3.0f32; 24 * TREE_INSTANCE_FLOATS];
+        let original_indices = near_indices.clone();
+        let original_vertices = near_vertices.clone();
+        let original_instances = instances.clone();
+
+        cap_expanded_tree_triangles_for_web(
+            true,
+            &mut near_indices,
+            &mut near_vertices,
+            &cross_indices,
+            &cross_vertices,
+            &mut instances,
+        );
+        assert_eq!(near_indices, original_indices);
+        assert_eq!(near_vertices, original_vertices);
+        assert_eq!(instances, original_instances);
+        assert_eq!(expanded_tree_triangle_count(near_indices.len(), instances.len()), Some(288));
+
+        near_indices = vec![0u32; 148 * 3];
+        near_vertices = vec![1.0f32; 9];
+        instances = vec![3.0f32; 7_000 * TREE_INSTANCE_FLOATS];
+        let native_indices = near_indices.clone();
+        let native_instances = instances.clone();
+        cap_expanded_tree_triangles_for_web(
+            false,
+            &mut near_indices,
+            &mut near_vertices,
+            &cross_indices,
+            &cross_vertices,
+            &mut instances,
+        );
+        assert_eq!(near_indices, native_indices);
+        assert_eq!(instances, native_instances);
+    }
+
+    #[test]
+    fn web_tree_triangle_cap_uses_crossed_lod_before_thinning() {
+        let mut near_indices = vec![0u32; 148 * 3];
+        let mut near_vertices = vec![1.0f32; 9];
+        let cross_indices = vec![0u32; 8 * 3];
+        let cross_vertices = vec![2.0f32; 6];
+        let mut instances = vec![3.0f32; 10_000 * TREE_INSTANCE_FLOATS];
+
+        cap_expanded_tree_triangles_for_web(
+            true,
+            &mut near_indices,
+            &mut near_vertices,
+            &cross_indices,
+            &cross_vertices,
+            &mut instances,
+        );
+        assert_eq!(near_indices, cross_indices);
+        assert_eq!(near_vertices, cross_vertices);
+        assert_eq!(instances.len(), 10_000 * TREE_INSTANCE_FLOATS);
+        assert_eq!(expanded_tree_triangle_count(near_indices.len(), instances.len()), Some(80_000));
+    }
+
+    #[test]
+    fn web_tree_triangle_cap_thins_complete_records_with_exact_accounting() {
+        let source_count = 130_003usize;
+        let mut near_indices = vec![0u32; 148 * 3];
+        let mut near_vertices = vec![1.0f32; 9];
+        let cross_indices = vec![0u32; 8 * 3];
+        let cross_vertices = vec![2.0f32; 6];
+        let mut instances = Vec::with_capacity(source_count * TREE_INSTANCE_FLOATS);
+        for index in 0..source_count {
+            instances.extend_from_slice(&[index as f32, 0.0, 1.0]);
+        }
+
+        cap_expanded_tree_triangles_for_web(
+            true,
+            &mut near_indices,
+            &mut near_vertices,
+            &cross_indices,
+            &cross_vertices,
+            &mut instances,
+        );
+        let kept = WEB_TREE_EXPANDED_TRIANGLE_LIMIT / 8;
+        assert_eq!(near_indices, cross_indices);
+        assert_eq!(instances.len(), kept * TREE_INSTANCE_FLOATS);
+        assert_eq!(instances.len() % TREE_INSTANCE_FLOATS, 0);
+        assert_eq!(
+            expanded_tree_triangle_count(near_indices.len(), instances.len()),
+            Some(WEB_TREE_EXPANDED_TRIANGLE_LIMIT),
+        );
+        assert_eq!(instances[0], 0.0);
+        let expected_last = (((kept - 1) as u128 * source_count as u128) / kept as u128) as f32;
+        assert_eq!(instances[(kept - 1) * TREE_INSTANCE_FLOATS], expected_last);
+        assert_eq!(expanded_tree_triangle_count(4, instances.len()), None);
+        assert_eq!(expanded_tree_triangle_count(3, instances.len() + 1), None);
+    }
+
+    #[test]
     fn mode_overlay_appends_cached_road_icons_with_rebased_indices() {
         let mut buffers = TileBuffers {
             pin_hits: Vec::new(),
-            fill_indices: Vec::new(),
-            fill_vertices: Vec::new(),
-            casing_indices: Vec::new(),
-            casing_vertices: Vec::new(),
-            stroke_indices: Vec::new(),
-            stroke_vertices: Vec::new(),
+            fill: TypedStream::default(),
+            fill_misc_indices: Vec::new(),
+            fill_misc_vertices: Vec::new(),
+            face: TypedStream::default(),
+            casing: TypedStream::default(),
+            stroke: TypedStream::default(),
             // icon_vertices holds GPU-PACKED records post-finalize; the
             // cached road decals stay logical 19-float and pack on append.
             icon_indices: vec![0],
             icon_vertices: vec![1.0; VECTOR_PACKED_FLOATS_PER_VERTEX],
             icon_high_indices: Vec::new(),
             icon_high_vertices: Vec::new(),
-            fringe_indices: Vec::new(),
-            fringe_vertices: Vec::new(),
-            fill_3d_indices: Vec::new(),
-            fill_3d_vertices: Vec::new(),
+            shadow_disc_instances: Vec::new(),
+            icon_instances: Vec::new(),
+            icon_high_instances: Vec::new(),
+            fringe: TypedStream::default(),
+            fill_3d: TypedStream::default(),
+            fill_3d_misc_indices: Vec::new(),
+            fill_3d_misc_vertices: Vec::new(),
             wall_indices: Vec::new(),
             wall_vertices: Vec::new(),
+            wall_instances: Vec::new(),
             tree_indices: Vec::new(),
             tree_vertices: Vec::new(),
             tree_cross_indices: Vec::new(),
             tree_cross_vertices: Vec::new(),
+            tree_template_indices: Vec::new(),
+            tree_template_vertices: Vec::new(),
+            tree_cross_template_indices: Vec::new(),
+            tree_cross_template_vertices: Vec::new(),
+            tree_instances: Vec::new(),
+            stalk_template_indices: Vec::new(),
+            stalk_template_vertices: Vec::new(),
+            stalk_instances: Vec::new(),
+            stoplight_template_indices: Vec::new(),
+            stoplight_template_vertices: Vec::new(),
+            stoplight_instances: Vec::new(),
             stage_summary: String::new(),
             road_icon_indices: Vec::new(),
             road_icon_vertices: Vec::new(),
@@ -10123,6 +13342,7 @@ mod bridge_probe_tests {
             feature_count: 0,
             labels: Vec::new(),
             render_zoom: 17,
+            memory_lod: 0,
         };
         let road_vertices = vec![2.0; VECTOR_FLOATS_PER_VERTEX * 2];
         buffers.append_cached_road_icons(&[0, 1], &road_vertices);
@@ -10133,6 +13353,186 @@ mod bridge_probe_tests {
         );
         assert_eq!(buffers.road_icon_indices, vec![0, 1]);
         assert_eq!(buffers.road_icon_vertices, road_vertices);
+    }
+
+    fn pressure_test_stream(triangles: usize, stride: usize) -> TypedStream {
+        let vertex_count = triangles * 3;
+        TypedStream::from_u32(
+            (0..vertex_count as u32).collect(),
+            vec![0u8; vertex_count * stride],
+            stride,
+        )
+    }
+
+    fn pressure_test_principal_buffers(triangles: usize) -> TileBuffers {
+        let mut buffers = TileBuffers::default();
+        buffers.fill = pressure_test_stream(triangles, FILL_TYPED_VERTEX_BYTES);
+        buffers.face = pressure_test_stream(triangles, FACE_TYPED_VERTEX_BYTES);
+        buffers.casing = pressure_test_stream(triangles, ROAD_TYPED_VERTEX_BYTES);
+        buffers.stroke = pressure_test_stream(triangles, ROAD_TYPED_VERTEX_BYTES);
+        buffers.fill_3d = pressure_test_stream(triangles, ROOF_TYPED_VERTEX_BYTES);
+        buffers.fill_3d_misc_indices = vec![0, 1, 2];
+        buffers.fill_3d_misc_vertices =
+            vec![0.0; VECTOR_PACKED_FLOATS_PER_VERTEX * 3];
+        buffers.wall_indices = vec![0, 1, 2];
+        buffers.wall_vertices = vec![0.0; VECTOR_PACKED_FLOATS_PER_VERTEX * 3];
+        buffers.wall_instances = vec![MapWallInstance::default(); triangles];
+        buffers
+    }
+
+    fn principal_record_counts(buffers: &TileBuffers) -> [usize; 15] {
+        [
+            buffers.fill.index_count(),
+            buffers.fill.vertex_count(FILL_TYPED_VERTEX_BYTES),
+            buffers.face.index_count(),
+            buffers.face.vertex_count(FACE_TYPED_VERTEX_BYTES),
+            buffers.casing.index_count(),
+            buffers.casing.vertex_count(ROAD_TYPED_VERTEX_BYTES),
+            buffers.stroke.index_count(),
+            buffers.stroke.vertex_count(ROAD_TYPED_VERTEX_BYTES),
+            buffers.fill_3d.index_count(),
+            buffers.fill_3d.vertex_count(ROOF_TYPED_VERTEX_BYTES),
+            buffers.fill_3d_misc_indices.len(),
+            buffers.fill_3d_misc_vertices.len(),
+            buffers.wall_indices.len(),
+            buffers.wall_vertices.len(),
+            buffers.wall_instances.len(),
+        ]
+    }
+
+    #[test]
+    fn memory_limit_reclaims_spare_capacity_before_geometry() {
+        let mut buffers = pressure_test_principal_buffers(8);
+        buffers.shrink_memory_vectors();
+        let compact_limit = buffers.allocated_byte_size();
+        let expected = principal_record_counts(&buffers);
+
+        for stream in [
+            &mut buffers.fill,
+            &mut buffers.face,
+            &mut buffers.casing,
+            &mut buffers.stroke,
+            &mut buffers.fill_3d,
+        ] {
+            stream.chunks.reserve(32);
+            for chunk in &mut stream.chunks {
+                chunk.indices.reserve(4_096);
+                chunk.vertices.reserve(64 * 1_024);
+            }
+        }
+        buffers.wall_indices.reserve(4_096);
+        buffers.wall_vertices.reserve(16 * 1_024);
+        buffers.wall_instances.reserve(4_096);
+        assert!(buffers.allocated_byte_size() > compact_limit);
+
+        assert_eq!(buffers.degrade_to_memory_limit(compact_limit), 0);
+        assert!(buffers.allocated_byte_size() <= compact_limit);
+        assert_eq!(principal_record_counts(&buffers), expected);
+    }
+
+    #[test]
+    fn metadata_trim_that_fits_preserves_all_principal_geometry() {
+        let mut buffers = pressure_test_principal_buffers(8);
+        buffers.shrink_memory_vectors();
+        let principal_limit = buffers.allocated_byte_size();
+        let expected = principal_record_counts(&buffers);
+        buffers.labels.push(TileLabel {
+            text: "label".repeat(2_048),
+            priority: 0,
+            source_layer: "synthetic".repeat(512),
+            road_kind: "residential".repeat(512),
+            color_class: 0,
+            path_points: vec![(0.0, 0.0); 1_024],
+            name_key: "name".repeat(2_048),
+            bbox: (0.0, 0.0, 1.0, 1.0),
+            lift_m: 0.0,
+        });
+        buffers.icon_indices = vec![0, 1, 2];
+        buffers.icon_vertices = vec![0.0; VECTOR_PACKED_FLOATS_PER_VERTEX * 3];
+        assert!(buffers.allocated_byte_size() > principal_limit);
+
+        assert_eq!(buffers.degrade_to_memory_limit(principal_limit), 1);
+        assert!(buffers.allocated_byte_size() <= principal_limit);
+        assert_eq!(principal_record_counts(&buffers), expected);
+        assert!(buffers.labels.is_empty());
+        assert!(buffers.icon_indices.is_empty());
+        assert!(buffers.icon_vertices.is_empty());
+    }
+
+    #[test]
+    fn hard_limit_removes_the_whole_building_structure_or_defers() {
+        let mut bounded = pressure_test_principal_buffers(64);
+        bounded.shrink_memory_vectors();
+        let complete_ground_and_roads = bounded
+            .allocated_byte_size()
+            .saturating_sub(bounded.building_structure_allocated_bytes());
+        let road_counts = principal_record_counts(&bounded)[..8].to_vec();
+        assert_eq!(bounded.degrade_to_memory_limit(complete_ground_and_roads), 2);
+        assert!(bounded.allocated_byte_size() <= complete_ground_and_roads);
+        assert_eq!(
+            &principal_record_counts(&bounded)[..8],
+            road_counts.as_slice()
+        );
+        assert!(bounded.fill_3d.is_empty());
+        assert!(bounded.fill_3d_misc_indices.is_empty());
+        assert!(bounded.fill_3d_misc_vertices.is_empty());
+        assert!(bounded.wall_indices.is_empty());
+        assert!(bounded.wall_vertices.is_empty());
+        assert!(bounded.wall_instances.is_empty());
+
+        let mut deferred = pressure_test_principal_buffers(64);
+        deferred.shrink_memory_vectors();
+        let expected = principal_record_counts(&deferred);
+        let impossible_limit = complete_ground_and_roads / 2;
+        assert_eq!(deferred.degrade_to_memory_limit(impossible_limit), 1);
+        assert!(deferred.allocated_byte_size() > impossible_limit);
+        assert_eq!(principal_record_counts(&deferred), expected);
+    }
+
+    #[test]
+    fn dense_synthetic_tile_defers_instead_of_truncating_principal_streams() {
+        fn dense_stream(triangles: usize, stride: usize) -> TypedStream {
+            pressure_test_stream(triangles, stride)
+        }
+
+        let mut buffers = TileBuffers::default();
+        buffers.render_zoom = 16;
+        buffers.fill = dense_stream(3_000, FILL_TYPED_VERTEX_BYTES);
+        buffers.face = dense_stream(3_000, FACE_TYPED_VERTEX_BYTES);
+        buffers.casing = dense_stream(3_000, ROAD_TYPED_VERTEX_BYTES);
+        buffers.stroke = dense_stream(3_000, ROAD_TYPED_VERTEX_BYTES);
+        buffers.fringe = dense_stream(3_000, ROAD_TYPED_VERTEX_BYTES);
+        buffers.fill_3d = dense_stream(3_000, ROOF_TYPED_VERTEX_BYTES);
+        buffers.labels = (0..2_000)
+            .map(|index| TileLabel {
+                text: format!("dense label {index}"),
+                priority: 0,
+                source_layer: "synthetic".to_string(),
+                road_kind: "residential".to_string(),
+                color_class: 0,
+                path_points: vec![(0.0, 0.0); 8],
+                name_key: format!("dense label {index}"),
+                bbox: (0.0, 0.0, 1.0, 1.0),
+                lift_m: 0.0,
+            })
+            .collect();
+        let before = buffers.allocated_byte_size();
+        let principal_before = principal_record_counts(&buffers);
+        let limit = 192 * 1024;
+        let level = buffers.degrade_to_memory_limit(limit);
+
+        assert!(before > limit);
+        assert_eq!(level, 1);
+        assert!(buffers.allocated_byte_size() > limit);
+        assert_eq!(principal_record_counts(&buffers), principal_before);
+        assert!(buffers.fringe.is_empty());
+        assert!(buffers.labels.is_empty());
+
+        // Reapplying the finite policy is stable while the caller defers it.
+        let deferred = buffers.allocated_byte_size();
+        assert_eq!(buffers.degrade_to_memory_limit(limit), 1);
+        assert_eq!(buffers.allocated_byte_size(), deferred);
+        assert_eq!(principal_record_counts(&buffers), principal_before);
     }
 
     #[test]
@@ -10402,17 +13802,15 @@ mod bridge_probe_tests {
             decks: vec![5.5, 0.0, 5.5],
         };
         let tags = || {
-            HashMap::from([
-                ("layer".to_string(), "streets".to_string()),
-                (MVT_INTERNAL_FIDX_KEY.to_string(), "0".to_string()),
-                (MVT_INTERNAL_PIDX_KEY.to_string(), "0".to_string()),
-            ])
+            TagSet::from(HashMap::from([("layer".to_string(), "streets".to_string())]))
         };
         let raw = [(0, 0), (2048, 0)];
 
         let mut collector = MvtLocalCollector::new(1.0);
         collector.base_dz.insert(key.clone(), profile.clone());
-        collector.add_path(TileKey { z: 14, x: 0, y: 0 }, 4096, &raw, tags(), false);
+        collector.add_path(
+            TileKey { z: 14, x: 0, y: 0 }, 4096, &raw, tags(), MvtPathMeta::default(), false,
+        );
         assert_eq!(collector.ways[0].points, profile.points);
         assert_eq!(collector.ways[0].dz.as_deref(), Some(profile.decks.as_slice()));
 
@@ -10429,6 +13827,7 @@ mod bridge_probe_tests {
             4096,
             &raw,
             tags(),
+            MvtPathMeta::default(),
             false,
         );
         assert_eq!(stale_endpoint.ways[0].points, [(0.0, 0.0), (128.0, 0.0)]);
@@ -10448,6 +13847,7 @@ mod bridge_probe_tests {
             4096,
             &bent_raw,
             tags(),
+            MvtPathMeta::default(),
             false,
         );
         assert_eq!(
@@ -10476,6 +13876,7 @@ mod bridge_probe_tests {
             4096,
             &diagonal_raw,
             tags(),
+            MvtPathMeta::default(),
             false,
         );
         assert_eq!(
@@ -11133,8 +14534,8 @@ mod bridge_probe_tests {
     }
 
     /// Headless generator probe: build real tiles with the mirrored live
-    /// theme, print per-stage timings (MP_TILE_PROFILE=1) and buffer sizes.
-    /// Run: MP_TILE_PROFILE=1 cargo test -p makepad-widgets --features maps \
+    /// theme, print per-stage timings (`MAKEPAD_TRACE=map.tile_profile`) and buffer sizes.
+    /// Run: MAKEPAD_TRACE=map.tile_profile cargo test -p makepad-widgets --features maps \
     ///   --release union_perf_probe -- --ignored --nocapture
     #[test]
     #[ignore]
@@ -11162,7 +14563,7 @@ mod bridge_probe_tests {
             let dzt = dz.get_tile(z as i64, tx, tms).ok().flatten();
             for render_zoom in [14u32, 17] {
                 let key = TileKey { z, x: tx as i32, y: ty as i32 };
-                let clock = std::time::Instant::now();
+                let clock = Cx::monotonic_now();
                 let buffers = build_tile_buffers_from_mvt(
                     key,
                     &raw,
@@ -11174,10 +14575,11 @@ mod bridge_probe_tests {
                     render_zoom,
                     true,
                     true,
+                    true,
                 )
                 .unwrap();
-                let full_ms = clock.elapsed().as_secs_f64() * 1000.0;
-                let overlay_clock = std::time::Instant::now();
+                let full_ms = (Cx::monotonic_now() - clock) * 1000.0;
+                let overlay_clock = Cx::monotonic_now();
                 let overlay = build_tile_buffers_from_mvt(
                     key,
                     &raw,
@@ -11188,19 +14590,20 @@ mod bridge_probe_tests {
                     &theme,
                     render_zoom,
                     false,
+                    true,
                     false,
                 )
                 .unwrap();
-                let overlay_ms = overlay_clock.elapsed().as_secs_f64() * 1000.0;
+                let overlay_ms = (Cx::monotonic_now() - overlay_clock) * 1000.0;
                 assert!(overlay.mode_overlay_only);
-                assert!(overlay.casing_vertices.is_empty());
-                assert!(overlay.stroke_vertices.is_empty());
+                assert!(overlay.casing.is_empty());
+                assert!(overlay.stroke.is_empty());
                 assert!(overlay.road_icon_vertices.is_empty());
                 println!(
                     "PROBE {name} z14/{tx}/{ty} rz{render_zoom}: full={full_ms:.0}ms mode-overlay={overlay_ms:.0}ms fill={}KB casing={}KB stroke={}KB icon={}KB",
-                    (buffers.fill_vertices.len() + buffers.fill_indices.len()) * 4 / 1024,
-                    (buffers.casing_vertices.len() + buffers.casing_indices.len()) * 4 / 1024,
-                    (buffers.stroke_vertices.len() + buffers.stroke_indices.len()) * 4 / 1024,
+                    buffers.fill.byte_size() / 1024,
+                    buffers.casing.byte_size() / 1024,
+                    buffers.stroke.byte_size() / 1024,
                     (buffers.icon_vertices.len() + buffers.icon_indices.len()) * 4 / 1024,
                 );
             }
@@ -11235,7 +14638,7 @@ mod bridge_probe_tests {
             parse_mvt_tile(&pbf, key, &mut collector).unwrap();
             println!("=== tile {tx}/{ty} target local ({lx:.0},{ly:.0})");
             for way in &collector.ways {
-                if way.tags.get("layer").map(|v| v.as_str()) != Some("base_dz") {
+                if way.tags.get("layer") != Some("base_dz") {
                     continue;
                 }
                 let near = way.points.iter().any(|&(px, py)| {
@@ -11255,9 +14658,9 @@ mod bridge_probe_tests {
                 }
                 println!(
                     "L={} F={} P={} closed={} pts={} start=({:.0},{:.0}) end=({:.0},{:.0}) dz={:?}",
-                    way.tags.get("L").map(|v| v.as_str()).unwrap_or(""),
-                    way.tags.get("F").map(|v| v.as_str()).unwrap_or(""),
-                    way.tags.get("P").map(|v| v.as_str()).unwrap_or(""),
+                    way.tags.get("L").unwrap_or(""),
+                    way.tags.get("F").unwrap_or(""),
+                    way.tags.get("P").unwrap_or(""),
                     way.closed,
                     way.points.len(),
                     way.points.first().map(|p| p.0).unwrap_or(0.0),
@@ -11277,6 +14680,9 @@ mod bridge_probe_tests {
     #[ignore]
     fn seam_probe() {
         use super::*;
+        use crate::makepad_draw::vector::{
+            decode_road_vertex, unpack_typed_position, ROAD_TYPED_VERTEX_BYTES,
+        };
         let maps = Path::new("../examples/map/local/maps");
         let mut base = MbtilesReader::open(&maps.join("europe-shortbread.mbtiles")).unwrap();
         let mut detail = MbtilesReader::open(&maps.join("europe-osm-detail.mbtiles")).unwrap();
@@ -11298,14 +14704,18 @@ mod bridge_probe_tests {
             18,
             true,
             true,
+            true,
         )
         .unwrap();
         let mut rows: Vec<(i32, i32, f32, i32, u32)> = Vec::new();
-        for chunk in buffers.casing_vertices.chunks_exact(19) {
-            let (x, y, deck, p5) = (chunk[0], chunk[1], chunk[15], chunk[16]);
-            let color = ((chunk[4] * 255.0) as u32) << 16
-                | ((chunk[5] * 255.0) as u32) << 8
-                | (chunk[6] * 255.0) as u32;
+        for chunk in buffers.casing.vertex_records(ROAD_TYPED_VERTEX_BYTES) {
+            let vertex = decode_road_vertex(chunk);
+            let (x, y) = unpack_typed_position(vertex.pos);
+            let deck = vertex.deck;
+            let p5 = vertex.depth.to_f32().0;
+            let color = (vertex.color.0[0] as u32) << 16
+                | (vertex.color.0[1] as u32) << 8
+                | vertex.color.0[2] as u32;
             if deck > 0.3 && (120.0..262.0).contains(&x) && (170.0..255.0).contains(&y) {
                 rows.push((
                     x.round() as i32,
@@ -11370,18 +14780,21 @@ mod bridge_probe_tests {
             18,
             true,
             true,
+            true,
         )
         .unwrap();
         let mut band: Vec<(char, f32, f32, f32, u32)> = Vec::new();
         for (tag, buffers, x_off) in
             [('A', &buffers, 0.0f32), ('B', &buffers_b, 256.0)]
         {
-            for chunk in buffers.casing_vertices.chunks_exact(19) {
-                let (x, y, deck) = (chunk[0], chunk[1], chunk[15]);
+            for chunk in buffers.casing.vertex_records(ROAD_TYPED_VERTEX_BYTES) {
+                let vertex = decode_road_vertex(chunk);
+                let (x, y) = unpack_typed_position(vertex.pos);
+                let deck = vertex.deck;
                 let gx = x + x_off;
-                let color = ((chunk[4] * 255.0) as u32) << 16
-                    | ((chunk[5] * 255.0) as u32) << 8
-                    | (chunk[6] * 255.0) as u32;
+                let color = (vertex.color.0[0] as u32) << 16
+                    | (vertex.color.0[1] as u32) << 8
+                    | vertex.color.0[2] as u32;
                 // Road surface colors only (motorway center + casing).
                 if deck > 0.3
                     && (252.0..261.0).contains(&gx)
@@ -11429,7 +14842,7 @@ mod bridge_probe_tests {
                 _k: TileKey,
                 _e: u32,
                 _p: (i32, i32),
-                _t: HashMap<String, String>,
+                _t: TagSet,
             ) {
             }
             fn add_path(
@@ -11437,10 +14850,11 @@ mod bridge_probe_tests {
                 _k: TileKey,
                 _e: u32,
                 _pts: &[(i32, i32)],
-                tags: HashMap<String, String>,
+                tags: TagSet,
+                _meta: MvtPathMeta,
                 _close: bool,
             ) {
-                let bridge = tags.get("bridge").map(|v| v.as_str()).unwrap_or("");
+                let bridge = tags.get("bridge").unwrap_or("");
                 if bridge == "yes" || bridge == "viaduct" {
                     let mut kv: Vec<String> = tags
                         .iter()
@@ -11476,7 +14890,7 @@ mod bridge_probe_tests {
         let ocean_ways: Vec<_> = collector
             .ways
             .iter()
-            .filter(|way| way.closed && way.tags.get("natural").map(String::as_str) == Some("water"))
+            .filter(|way| way.closed && way.tags.get("natural") == Some("water"))
             .collect();
         println!("coastal z14: {} ocean ways", ocean_ways.len());
         assert!(!ocean_ways.is_empty());
@@ -11496,7 +14910,7 @@ mod bridge_probe_tests {
             .unwrap()
             .expect("z9 ancestor ocean tile missing");
         let overlay = OverlayTileData {
-            raw: araw,
+            raw: araw.into(),
             shift,
             quadrant_x: vx - (fx << shift),
             quadrant_y: vy - (fy << shift),
@@ -11515,7 +14929,7 @@ mod bridge_probe_tests {
         .unwrap();
         let water: Vec<_> = ways
             .iter()
-            .filter(|way| way.tags.get("natural").map(String::as_str) == Some("water"))
+            .filter(|way| way.tags.get("natural") == Some("water"))
             .collect();
         println!("shifted z9->z14: {} water ways, {} pts first", water.len(),
             water.first().map(|w| w.points.len()).unwrap_or(0));
@@ -11541,6 +14955,7 @@ mod bridge_probe_tests {
                 &theme,
                 8,
                 false,
+                true,
                 false,
             )
             .unwrap();
@@ -11555,6 +14970,7 @@ mod bridge_probe_tests {
     #[ignore] // needs local bake output
     fn probe_bridge_dz_load() {
         use super::*;
+        use crate::makepad_draw::vector::{decode_road_vertex, ROAD_TYPED_VERTEX_BYTES};
         let path = std::path::Path::new("../local/maps/nl-bridge-dz.mbtiles");
         assert!(path.is_file(), "no bake output at {}", path.display());
         let mut reader = MbtilesReader::open(path).unwrap();
@@ -11593,15 +15009,15 @@ mod bridge_probe_tests {
             17,
             true,
             true,
+            true,
         )
         .unwrap();
         println!("loaded {} failed {}", loaded.len(), failed.len());
         let buffers = &loaded[0].buffers;
-        let floats_per_vertex = 19;
         let mut decked = 0usize;
         let mut max_deck = 0.0f32;
-        for chunk in buffers.stroke_vertices.chunks_exact(floats_per_vertex) {
-            let deck = chunk[15];
+        for chunk in buffers.stroke.vertex_records(ROAD_TYPED_VERTEX_BYTES) {
+            let deck = decode_road_vertex(chunk).deck;
             if deck > 0.3 {
                 decked += 1;
                 max_deck = max_deck.max(deck);
@@ -11609,7 +15025,7 @@ mod bridge_probe_tests {
         }
         println!(
             "stroke verts {} decked {} max {:.1}",
-            buffers.stroke_vertices.len() / floats_per_vertex,
+            buffers.stroke.vertex_count(ROAD_TYPED_VERTEX_BYTES),
             decked,
             max_deck
         );
@@ -11637,26 +15053,19 @@ mod bridge_probe_tests {
                 _tile_key: TileKey,
                 _extent: u32,
                 points: &[(i32, i32)],
-                tags: HashMap<String, String>,
+                tags: TagSet,
+                meta: MvtPathMeta,
                 _close: bool,
             ) {
-                let (Some(layer), Some(fidx), Some(pidx)) = (
-                    tags.get("layer"),
-                    tags.get(MVT_INTERNAL_FIDX_KEY),
-                    tags.get(MVT_INTERNAL_PIDX_KEY),
-                ) else {
+                let Some(layer) = tags.get("layer") else {
                     return;
                 };
-                let key = (
-                    layer.clone(),
-                    fidx.parse::<u32>().unwrap_or(9999),
-                    pidx.parse::<u32>().unwrap_or(9999),
-                );
-                if tags.get("layer").map(|v| v.as_str()) == Some("streets") {
+                let key = (layer.to_owned(), meta.feature_index, meta.path_index);
+                if tags.get("layer") == Some("streets") {
                     if let Some(value) = tags.get("oneway") {
                         self.oneway += 1;
-                        if !self.oneway_values.contains(value) {
-                            self.oneway_values.push(value.clone());
+                        if !self.oneway_values.iter().any(|item| item == value) {
+                            self.oneway_values.push(value.to_owned());
                         }
                     }
                 }
@@ -11691,7 +15100,7 @@ mod bridge_probe_tests {
                 _tile_key: TileKey,
                 _extent: u32,
                 _point: (i32, i32),
-                _tags: HashMap<String, String>,
+                _tags: TagSet,
             ) {
             }
         }
@@ -11718,12 +15127,13 @@ mod bridge_probe_tests {
         );
 
         // Oneway arrows: count map-aligned icon glyphs and their lifts.
+        use crate::makepad_draw::vector::unpack_pair_f16;
         let mut arrows = 0;
         let mut lifted_arrows = 0;
-        for chunk in buffers.icon_vertices.chunks_exact(floats_per_vertex) {
-            let shape = chunk[10];
-            let param3 = chunk[14];
-            let param4 = chunk[15];
+        for chunk in buffers.icon_vertices.chunks_exact(VECTOR_PACKED_FLOATS_PER_VERTEX) {
+            let shape = unpack_pair_f16(chunk[6]).1;
+            let param3 = unpack_pair_f16(chunk[8]).0;
+            let param4 = chunk[9];
             if (shape - 20.0).abs() < 0.1 && (param3 - 2.0).abs() < 0.1 {
                 arrows += 1;
                 if param4.abs() > 0.05 {
@@ -11763,7 +15173,7 @@ mod bridge_probe_tests {
                 _k: TileKey,
                 _e: u32,
                 _p: (i32, i32),
-                _t: HashMap<String, String>,
+                _t: TagSet,
             ) {
             }
             fn add_path(
@@ -11771,11 +15181,12 @@ mod bridge_probe_tests {
                 _k: TileKey,
                 _e: u32,
                 _pts: &[(i32, i32)],
-                tags: HashMap<String, String>,
+                tags: TagSet,
+                _meta: MvtPathMeta,
                 _close: bool,
             ) {
-                let layer = tags.get("layer").cloned().unwrap_or_default();
-                let name = tags.get("name").cloned().unwrap_or_default();
+                let layer = tags.get("layer").unwrap_or_default().to_owned();
+                let name = tags.get("name").unwrap_or_default().to_owned();
                 let interesting = name.contains("brug")
                     || name.contains("Europaboulevard")
                     || tags.contains_key("bridge");
@@ -11810,12 +15221,12 @@ mod bridge_probe_tests {
         parse_mvt_tile(&pbf, key, &mut collector).unwrap();
         let mut by_layer = std::collections::HashMap::<String, usize>::new();
         for way in &collector.ways {
-            let layer = way.tags.get("layer").cloned().unwrap_or_default();
+            let layer = way.tags.get("layer").unwrap_or_default().to_owned();
             *by_layer.entry(layer).or_default() += 1;
             if way.tags.contains_key("building:part") {
                 println!(
                     "PART layer={} closed={} pts={} id={:?} h={:?} min={:?}",
-                    way.tags.get("layer").cloned().unwrap_or_default(),
+                    way.tags.get("layer").unwrap_or_default(),
                     way.closed,
                     way.points.len(),
                     way.tags.get("__makepad_osm_id"),
@@ -11846,8 +15257,8 @@ mod bridge_probe_tests {
                 let mut collector = MvtLocalCollector::new(1.0);
                 parse_mvt_tile(&pbf, key, &mut collector).unwrap();
                 for (_, tags) in &collector.points {
-                    if tags.get("layer").map(|v| v.as_str()) == Some("place_labels") {
-                        let name = tags.get("name").cloned().unwrap_or_default();
+                    if tags.get("layer") == Some("place_labels") {
+                        let name = tags.get("name").unwrap_or_default();
                         if name.contains("Amsterdam") || name.contains("Haarlem") {
                             let mut t: Vec<_> = tags.iter().collect();
                             t.sort();
@@ -11871,6 +15282,7 @@ mod bridge_probe_tests {
                 &theme,
                 z as u32,
                 false,
+                true,
                 true,
             )
             .unwrap();
@@ -11918,6 +15330,7 @@ mod bridge_probe_tests {
             12,
             false,
             true,
+            true,
         )
         .unwrap();
         for tile in &loaded.0 {
@@ -11925,7 +15338,7 @@ mod bridge_probe_tests {
                 "tile z{} icons {} strokes {} labels {}",
                 tile.tile_key.z,
                 tile.buffers.icon_vertices.len() / VECTOR_FLOATS_PER_VERTEX,
-                tile.buffers.stroke_vertices.len() / VECTOR_FLOATS_PER_VERTEX,
+                tile.buffers.stroke.vertex_count(ROAD_TYPED_VERTEX_BYTES),
                 tile.buffers.labels.len()
             );
         }
@@ -11949,7 +15362,7 @@ mod bridge_probe_tests {
             .unwrap();
         let key = TileKey { z: z as u32, x: x as i32, y: y as i32 };
         let overlay_tiles = vec![OverlayTileData {
-            raw: ov,
+            raw: ov.into(),
             shift: 0,
             quadrant_x: 0,
             quadrant_y: 0,
@@ -11967,6 +15380,7 @@ mod bridge_probe_tests {
             &theme,
             12,
             false,
+            true,
             true,
         )
         .unwrap();
@@ -12087,9 +15501,9 @@ mod bridge_probe_tests {
                 println!("{:<16} missing", format!("z{z} {x}/{y}"));
                 continue;
             };
-            let t0 = std::time::Instant::now();
+            let t0 = Cx::monotonic_now();
             let raw = reader.decode_tile(&blob).unwrap();
-            let decode_ms = t0.elapsed().as_secs_f64() * 1e3;
+            let decode_ms = (Cx::monotonic_now() - t0) * 1e3;
             let key = TileKey { z: z as u32, x: x as i32, y: y as i32 };
             let mut best = f64::MAX;
             let mut last = None;
@@ -12121,7 +15535,7 @@ mod bridge_probe_tests {
                 let mut best = f64::MAX;
                 let mut last = None;
                 for _ in 0..reps {
-                    let t1 = std::time::Instant::now();
+                    let t1 = Cx::monotonic_now();
                     // Combined archives are their own detail source (the
                     // app passes the same path for both).
                     let detail_env = std::env::var("TILE_PROFILE_DETAIL_ARCHIVE").ok();
@@ -12140,9 +15554,10 @@ mod bridge_probe_tests {
                         render_zoom,
                         force_3d,
                         true,
+                        true,
                     )
                     .unwrap();
-                    best = best.min(t1.elapsed().as_secs_f64() * 1e3);
+                    best = best.min((Cx::monotonic_now() - t1) * 1e3);
                     last = loaded.into_iter().next().map(|t| t.buffers);
                 }
                 let Some(buffers) = last else {
@@ -12158,7 +15573,7 @@ mod bridge_probe_tests {
                     best,
                     best,
                     buffers.feature_count,
-                    buffers.fill_vertices.len() / VECTOR_FLOATS_PER_VERTEX,
+                    buffers.fill.vertex_count(FILL_TYPED_VERTEX_BYTES),
                 );
                 continue;
             }
@@ -12167,7 +15582,7 @@ mod bridge_probe_tests {
                 dr.decode_tile(&blob).ok()
             });
             for _ in 0..reps {
-                let t1 = std::time::Instant::now();
+                let t1 = Cx::monotonic_now();
                 let detail = if detail_reader.is_some() {
                     // Old two-archive pattern: detail strictly from its own
                     // archive (may be absent for a tile).
@@ -12186,9 +15601,10 @@ mod bridge_probe_tests {
                     render_zoom,
                     force_3d,
                     true,
+                    true,
                 )
                 .unwrap();
-                best = best.min(t1.elapsed().as_secs_f64() * 1e3);
+                best = best.min((Cx::monotonic_now() - t1) * 1e3);
                 last = Some(buffers);
             }
             let buffers = last.unwrap();
@@ -12201,7 +15617,7 @@ mod bridge_probe_tests {
                 best,
                 best,
                 buffers.feature_count,
-                buffers.fill_vertices.len() / VECTOR_FLOATS_PER_VERTEX,
+                buffers.fill.vertex_count(FILL_TYPED_VERTEX_BYTES),
             );
             println!(
                 "                  icons {} labels {}",
@@ -12215,6 +15631,9 @@ mod bridge_probe_tests {
     #[test]
     #[ignore]
     fn weesperplein_tear_probe() {
+        use crate::makepad_draw::vector::{
+            decode_road_vertex, unpack_typed_position, ROAD_TYPED_VERTEX_BYTES,
+        };
         let base = std::path::Path::new("../local/maps/europe-shortbread.mbtiles");
         let detail = std::path::Path::new("../local/maps/europe-osm-detail.mbtiles");
         let dz_name = std::env::var("TEAR_DZ")
@@ -12251,40 +15670,44 @@ mod bridge_probe_tests {
                 .unwrap_or(17),
             true,
             true,
+            true,
         )
         .unwrap();
         // Group decked vertices (param4 > 0.3) per buffer by quantized
         // color + param5, print bbox + deck range — who lifts where.
-        for (name, verts) in [
-            ("casing", &buffers.casing_vertices),
-            ("stroke", &buffers.stroke_vertices),
+        for (name, stream) in [
+            ("casing", &buffers.casing),
+            ("stroke", &buffers.stroke),
         ] {
             use std::collections::HashMap;
             let mut groups: HashMap<(u32, u32, u32), (f32, f32, f32, f32, f32, f32, usize)> =
                 HashMap::new();
-            for v in verts.chunks_exact(VECTOR_FLOATS_PER_VERTEX) {
-                let deck = v[15];
+            for record in stream.vertex_records(ROAD_TYPED_VERTEX_BYTES) {
+                let vertex = decode_road_vertex(record);
+                let pos = unpack_typed_position(vertex.pos);
+                let deck = vertex.deck;
                 // Weesperplein plaza window; report every vertex incl.
                 // grounded so the full layer stack is visible.
                 let win = std::env::var("TEAR_WIN").unwrap_or_else(|_| "88,118,86,120".to_string());
                 let mut wv = win.split(',').map(|v| v.parse::<f32>().unwrap());
                 let (wx0, wx1, wy0, wy1) = (wv.next().unwrap(), wv.next().unwrap(), wv.next().unwrap(), wv.next().unwrap());
-                if v[0] < wx0 || v[0] > wx1 || v[1] < wy0 || v[1] > wy1 {
+                if pos.0 < wx0 || pos.0 > wx1 || pos.1 < wy0 || pos.1 > wy1 {
                     continue;
                 }
                 let _ = deck;
-                let color_key = ((v[4] * 15.0) as u32) << 8
-                    | ((v[5] * 15.0) as u32) << 4
-                    | (v[6] * 15.0) as u32;
-                let p5_key = (v[16] * 1000.0) as u32;
-                let shape_key = v[10] as u32;
+                let color = vertex.color.to_f32();
+                let color_key = ((color.0 * 15.0) as u32) << 8
+                    | ((color.1 * 15.0) as u32) << 4
+                    | (color.2 * 15.0) as u32;
+                let p5_key = (vertex.depth.to_f32().0 * 1000.0) as u32;
+                let shape_key = vertex.params.to_f32().0 as u32;
                 let entry = groups
                     .entry((color_key, p5_key, shape_key))
                     .or_insert((f32::MAX, f32::MAX, f32::MIN, f32::MIN, f32::MAX, f32::MIN, 0));
-                entry.0 = entry.0.min(v[0]);
-                entry.1 = entry.1.min(v[1]);
-                entry.2 = entry.2.max(v[0]);
-                entry.3 = entry.3.max(v[1]);
+                entry.0 = entry.0.min(pos.0);
+                entry.1 = entry.1.min(pos.1);
+                entry.2 = entry.2.max(pos.0);
+                entry.3 = entry.3.max(pos.1);
                 entry.4 = entry.4.min(deck);
                 entry.5 = entry.5.max(deck);
                 entry.6 += 1;
@@ -12297,43 +15720,52 @@ mod bridge_probe_tests {
                     *p5 as f32 / 1000.0
                 );
             }
-            println!("-- {name} total verts {}", verts.len() / VECTOR_FLOATS_PER_VERTEX);
+            println!("-- {name} total verts {}", stream.vertex_count(ROAD_TYPED_VERTEX_BYTES));
         }
         // SVG dump of the window's triangles in draw order (casing pass):
         // the tear must show as literal holes/overdraw in here.
         {
             use std::fmt::Write as _;
-            let (verts, indices) = (&buffers.casing_vertices, &buffers.casing_indices);
             let vb_env = std::env::var("TEAR_VB").unwrap_or_else(|_| "86 84 36 40".to_string());
             let mut svg = format!(
                 "<svg xmlns='http://www.w3.org/2000/svg' viewBox='{vb_env}' width='1440' height='1600'>\n",
             );
             let mut tris = 0usize;
-            for tri in indices.chunks_exact(3) {
-                let v0 = &verts[tri[0] as usize * VECTOR_FLOATS_PER_VERTEX..];
-                let v1 = &verts[tri[1] as usize * VECTOR_FLOATS_PER_VERTEX..];
-                let v2 = &verts[tri[2] as usize * VECTOR_FLOATS_PER_VERTEX..];
+            for stream_chunk in &buffers.casing.chunks {
+            for tri in stream_chunk.indices.chunks_exact(3) {
+                let decode = |index: u16| {
+                    let at = index as usize * ROAD_TYPED_VERTEX_BYTES;
+                    decode_road_vertex(&stream_chunk.vertices[at..at + ROAD_TYPED_VERTEX_BYTES])
+                };
+                let v0 = decode(tri[0]);
+                let v1 = decode(tri[1]);
+                let v2 = decode(tri[2]);
+                let p0 = unpack_typed_position(v0.pos);
+                let p1 = unpack_typed_position(v1.pos);
+                let p2 = unpack_typed_position(v2.pos);
                 let vb = std::env::var("TEAR_VB").unwrap_or_else(|_| "86 84 36 40".to_string());
                 let mut vbv = vb.split(' ').map(|v| v.parse::<f32>().unwrap());
                 let (bx, by, bw, bh) = (vbv.next().unwrap(), vbv.next().unwrap(), vbv.next().unwrap(), vbv.next().unwrap());
-                let inside = |v: &[f32]| {
-                    v[0] > bx && v[0] < bx + bw && v[1] > by && v[1] < by + bh
+                let inside = |v: (f32, f32)| {
+                    v.0 > bx && v.0 < bx + bw && v.1 > by && v.1 < by + bh
                 };
-                if !(inside(v0) || inside(v1) || inside(v2)) {
+                if !(inside(p0) || inside(p1) || inside(p2)) {
                     continue;
                 }
-                let a = v0[7].max(0.001);
+                let color = v0.color.to_f32();
+                let a = color.3.max(0.001);
                 let rgb = (
-                    (v0[4] / a * 255.0).min(255.0) as u8,
-                    (v0[5] / a * 255.0).min(255.0) as u8,
-                    (v0[6] / a * 255.0).min(255.0) as u8,
+                    (color.0 / a * 255.0).min(255.0) as u8,
+                    (color.1 / a * 255.0).min(255.0) as u8,
+                    (color.2 / a * 255.0).min(255.0) as u8,
                 );
                 let _ = write!(
                     svg,
                     "<polygon points='{:.2},{:.2} {:.2},{:.2} {:.2},{:.2}' fill='rgb({},{},{})' fill-opacity='{:.2}'/>\n",
-                    v0[0], v0[1], v1[0], v1[1], v2[0], v2[1], rgb.0, rgb.1, rgb.2, a
+                    p0.0, p0.1, p1.0, p1.1, p2.0, p2.1, rgb.0, rgb.1, rgb.2, a
                 );
                 tris += 1;
+            }
             }
             svg.push_str("</svg>\n");
             let out = format!(
@@ -12375,18 +15807,14 @@ mod bridge_probe_tests {
             17,
             true,
             true,
+            true,
         )
         .unwrap();
-        let shadow_verts = buffers
-            .icon_vertices
-            .chunks_exact(VECTOR_FLOATS_PER_VERTEX)
-            .filter(|v| v[14] > 5.5 && v[14] < 6.5)
-            .count();
         println!(
-            "fill verts {} icon verts {} shadow verts {}",
-            buffers.fill_vertices.len() / VECTOR_FLOATS_PER_VERTEX,
-            buffers.icon_vertices.len() / VECTOR_FLOATS_PER_VERTEX,
-            shadow_verts
+            "fill verts {} icon verts {} shadow_disc instances {}",
+            buffers.fill.vertex_count(FILL_TYPED_VERTEX_BYTES),
+            buffers.icon_vertices.len() / VECTOR_PACKED_FLOATS_PER_VERTEX,
+            buffers.shadow_disc_instances.len() / SHADOW_DISC_INSTANCE_FLOATS,
         );
     }
 
@@ -12415,6 +15843,7 @@ mod bridge_probe_tests {
             &theme,
             17,
             false,
+            true,
             true,
         )
         .unwrap();
@@ -12458,7 +15887,7 @@ mod bridge_probe_tests {
                         .get("__makepad_osm_id")
                         .and_then(|v| v.parse::<i64>().ok())
                     {
-                        if way.tags.get("__makepad_osm_type").map(|v| v.as_str()) == Some("way") {
+                        if way.tags.get("__makepad_osm_type") == Some("way") {
                             max_id = max_id.max(id);
                         }
                         if id == 1391036659 {
@@ -12483,7 +15912,7 @@ mod bridge_probe_tests {
             let mut admitted = 0;
             let mut labeled = 0;
             for way in &ways {
-                if way.tags.get("layer").map(|v| v.as_str()) == Some("attraction_area") {
+                if way.tags.get("layer") == Some("attraction_area") {
                     admitted += 1;
                     let ring = normalize_polygon_ring(&way.points);
                     let label = ring.as_ref().and_then(|ring| {

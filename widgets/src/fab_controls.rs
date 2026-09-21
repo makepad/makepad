@@ -26,7 +26,8 @@
 use crate::button::ButtonAction;
 use crate::widget_tree::CxWidgetExt;
 use crate::{
-    animator::*, makepad_derive_widget::*, makepad_draw::*, text_input::*, view::View, widget::*,
+    animator::*, makepad_derive_widget::*, makepad_draw::ime::TextInputConfig, makepad_draw::*,
+    text_input::*, view::View, widget::*,
 };
 use crate::makepad_script::script;
 
@@ -919,6 +920,15 @@ pub struct FabValueInput {
     walk: Walk,
     #[layout]
     layout: Layout,
+    /// A host can swap the field for another control in the same slot.
+    #[live(true)]
+    #[visible]
+    visible: bool,
+
+    /// Held during either a drag or text editing, so cancel never also
+    /// dismisses the surrounding popup or modal.
+    #[rust]
+    cancel_scope: Option<CancelScope>,
 
     #[live]
     label: String,
@@ -1067,6 +1077,21 @@ impl FabValueInput {
         self.value
     }
 
+    /// Focus/IME state of the private text editor used while a scrub field is
+    /// being typed. Canvas hosts cannot discover this child through the
+    /// public widget tree because it is embedded directly, not a WidgetRef.
+    pub fn text_ime_anchor(&self, cx: &Cx) -> Option<(Area, Rect, TextInputConfig)> {
+        let area = self.text_input.area();
+        if !self.editing || area.is_empty() || !cx.has_key_focus(area) {
+            return None;
+        }
+        Some((
+            area,
+            self.text_input.cursor_rect_in_absolute(cx)?,
+            self.text_input.ime_config(),
+        ))
+    }
+
     fn publish(&mut self, cx: &mut Cx, uid: WidgetUid, v: f64, ended: bool) {
         if (v - self.value).abs() > f64::EPSILON {
             self.value = v;
@@ -1089,6 +1114,9 @@ impl FabValueInput {
 
     pub fn begin_edit(&mut self, cx: &mut Cx) {
         self.drag = None;
+        if self.cancel_scope.is_none() {
+            self.cancel_scope = Some(self.begin_cancel_scope(cx));
+        }
         self.editing = true;
         let full = self.format_full();
         self.text_input.set_is_numeric_only(cx, true);
@@ -1102,6 +1130,7 @@ impl FabValueInput {
 
     fn end_edit(&mut self, cx: &mut Cx) {
         self.editing = false;
+        self.cancel_scope = None;
         self.text_input.set_is_read_only(cx, true);
         self.text_input.set_is_numeric_only(cx, false);
         self.sync_text(cx);
@@ -1142,6 +1171,7 @@ impl FabValueInput {
     }
 
     fn cancel_drag(&mut self, cx: &mut Cx, uid: WidgetUid) {
+        self.cancel_scope = None;
         if let Some(drag) = self.drag.take() {
             if drag.engaged {
                 // Early cancel (Escape / right-click): the button is still
@@ -1156,6 +1186,9 @@ impl FabValueInput {
 
 impl Widget for FabValueInput {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        if !self.visible {
+            return DrawStep::done();
+        }
         // The fill claims "this range means something": only bounded fields
         // paint one.
         self.draw_bg.fill = if self.show_fill && self.max > self.min {
@@ -1173,10 +1206,15 @@ impl Widget for FabValueInput {
             let fs = self.draw_text.text_style.font_size as f64;
             let value_reserve = (self.format().chars().count() as f64 + 0.5) * fs * 0.72 + 6.0;
             let label_w = (row - pad - value_reserve).max(0.0);
-            let mut label_walk = Walk::fit();
-            label_walk.width = Size::Fixed(label_w);
-            self.draw_text
-                .draw_walk(cx, label_walk, Align::default(), &self.label);
+            // A label that cannot fit is not drawn at all: a crushed "w"
+            // renders as a stray dot beside the number.
+            let needed = self.label.chars().count() as f64 * fs * 0.62 + 2.0;
+            if label_w >= needed {
+                let mut label_walk = Walk::fit();
+                label_walk.width = Size::Fixed(label_w);
+                self.draw_text
+                    .draw_walk(cx, label_walk, Align::default(), &self.label);
+            }
         }
         let iw = self.text_input.walk(cx);
         let _ = self.text_input.draw_walk(cx, &mut Scope::empty(), iw);
@@ -1205,6 +1243,15 @@ impl Widget for FabValueInput {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
+        if (self.editing || self.drag.is_some())
+            && crate::modal::ModalAction::is_dismissal(event)
+        {
+            self.cancel_drag(cx, uid);
+            if self.editing {
+                self.end_edit(cx);
+            }
+            return;
+        }
 
         // Double-click = RESET, detected on the raw press so it works in
         // every state (the second press of a double-click lands while the
@@ -1223,6 +1270,7 @@ impl Widget for FabValueInput {
                         cx.revert_key_focus();
                     }
                     self.drag = None;
+                    self.cancel_scope = None;
                     cx.widget_action(uid, FabValueInputAction::Reset);
                     return;
                 }
@@ -1245,15 +1293,39 @@ impl Widget for FabValueInput {
             }
         }
 
-        // Escape or a right-button press cancels an in-flight drag and
+        if self.editing
+            && self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s))
+            && (matches!(event, Event::KeyDown(ke) if ke.key_code == KeyCode::Escape)
+                || event.back_pressed())
+        {
+            self.end_edit(cx);
+            cx.revert_key_focus();
+            return;
+        }
+
+        // Escape, Back or a right-button press cancels an in-flight drag and
         // restores the pressed value.
         if self.drag.is_some() {
             match event {
-                Event::KeyDown(ke) if ke.key_code == KeyCode::Escape => {
+                Event::KeyDown(ke)
+                    if ke.key_code == KeyCode::Escape
+                        && self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s)) =>
+                {
+                    self.cancel_drag(cx, uid);
+                    return;
+                }
+                Event::BackPressed { .. }
+                    if self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s))
+                        && event.back_pressed() =>
+                {
                     self.cancel_drag(cx, uid);
                     return;
                 }
                 Event::MouseDown(me) if me.button.is_secondary() => {
+                    self.cancel_drag(cx, uid);
+                    return;
+                }
+                Event::WindowLostFocus(_) => {
                     self.cancel_drag(cx, uid);
                     return;
                 }
@@ -1292,7 +1364,9 @@ impl Widget for FabValueInput {
                         }
                     }
                     TextInputAction::Escaped => {
-                        if self.editing {
+                        if self.editing
+                            && self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s))
+                        {
                             self.end_edit(cx);
                             cx.revert_key_focus();
                         }
@@ -1344,6 +1418,9 @@ impl Widget for FabValueInput {
                     shift: fe.modifiers.shift,
                     raw_value: self.value,
                 });
+                // The next event may already be Escape; ownership is captured
+                // before dispatch, so the scope must exist before this returns.
+                self.cancel_scope = Some(self.begin_cancel_scope(cx));
                 self.animator_play(cx, ids!(hover.down));
             }
             Hit::FingerMove(fe) => {
@@ -1400,6 +1477,7 @@ impl Widget for FabValueInput {
                 cx.repin_mouse_pointer();
             }
             Hit::FingerUp(fe) => {
+                self.cancel_scope = None;
                 let Some(drag) = self.drag.take() else {
                     return;
                 };
@@ -1445,12 +1523,7 @@ impl FabValueInputRef {
     }
 
     pub fn ended(&self, actions: &Actions) -> Option<f64> {
-        if let Some(item) = actions.find_widget_action(self.widget_uid()) {
-            if let FabValueInputAction::Ended(v) = item.cast() {
-                return Some(v);
-            }
-        }
-        None
+        ended_value(actions, self.widget_uid())
     }
 
     pub fn set_value(&self, cx: &mut Cx, v: f64) {
@@ -1462,6 +1535,15 @@ impl FabValueInputRef {
     pub fn value(&self) -> f64 {
         self.borrow().map_or(0.0, |i| i.value())
     }
+}
+
+fn ended_value(actions: &Actions, uid: WidgetUid) -> Option<f64> {
+    for action in actions.filter_widget_actions_cast::<FabValueInputAction>(uid) {
+        if let FabValueInputAction::Ended(v) = action {
+            return Some(v);
+        }
+    }
+    None
 }
 
 // ===========================================================================
@@ -1852,6 +1934,10 @@ pub struct FabColorPick {
     overlay_list: Option<DrawList2d>,
     #[rust]
     open: bool,
+    /// Held while the popover is open, so `Escape` reverts this picker rather
+    /// than dismissing whatever it was opened in front of.
+    #[rust]
+    cancel_scope: Option<CancelScope>,
     #[rust]
     hsv: [f32; 3],
     #[rust(1.0)]
@@ -1922,7 +2008,11 @@ impl FabColorPick {
             return;
         }
         let uid = self.widget_uid();
+        self.popover.handle_event(cx,
+            &Event::Actions(vec![Box::new(crate::modal::ModalAction::Dismissed)]),
+            &mut Scope::empty());
         self.open = false;
+        self.cancel_scope = None;
         self.draw_swatch.open = 0.0;
         cx.widget_action(uid, FabColorPickAction::Closed);
         if let Some(list) = &self.overlay_list {
@@ -1987,6 +2077,7 @@ impl FabColorPick {
             return;
         }
         self.open = true;
+        self.cancel_scope = Some(self.begin_cancel_scope(cx));
         self.opened_value = self.rgba();
         self.draw_swatch.open = 1.0;
         self.sync_pending = true;
@@ -2011,6 +2102,9 @@ impl FabColorPick {
         if !self.open {
             return;
         }
+        self.popover.handle_event(cx,
+            &Event::Actions(vec![Box::new(crate::modal::ModalAction::Dismissed)]),
+            &mut Scope::empty());
         let uid = self.widget_uid();
         if revert {
             let original = self.opened_value;
@@ -2021,6 +2115,7 @@ impl FabColorPick {
             self.publish(cx, uid, true);
         }
         self.open = false;
+        self.cancel_scope = None;
         self.draw_swatch.open = 0.0;
         cx.widget_action(uid, FabColorPickAction::Closed);
         if let Some(list) = &self.overlay_list {
@@ -2121,14 +2216,19 @@ impl Widget for FabColorPick {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
+        if self.open && crate::modal::ModalAction::is_dismissal(event) {
+            self.close_popover(cx, true);
+            return;
+        }
 
         if self.open {
-            // Escape reverts and closes, from anywhere.
-            if let Event::KeyDown(ke) = event {
-                if ke.key_code == KeyCode::Escape {
-                    self.close_popover(cx, true);
-                    return;
-                }
+            // Only the owner can consume Back or act on Escape.
+            if self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s))
+                && (matches!(event, Event::KeyDown(ke) if ke.key_code == KeyCode::Escape)
+                    || event.back_pressed())
+            {
+                self.close_popover(cx, true);
+                return;
             }
             // A press outside the panel and the swatch commits and closes.
             if let Event::MouseDown(me) = event {
@@ -2404,5 +2504,25 @@ mod tests {
         assert_eq!(field_zone(5.0, 200.0, 20.0), FieldZone::Decrement);
         assert_eq!(field_zone(100.0, 200.0, 20.0), FieldZone::Middle);
         assert_eq!(field_zone(195.0, 200.0, 20.0), FieldZone::Increment);
+    }
+
+    #[test]
+    fn ended_finds_commit_after_changed_action() {
+        let uid = WidgetUid(17);
+        let actions: ActionsBuf = vec![
+            Box::new(WidgetAction {
+                data: None,
+                action: Box::new(FabValueInputAction::Changed(72.0)),
+                widget_uid: uid,
+                group: None,
+            }),
+            Box::new(WidgetAction {
+                data: None,
+                action: Box::new(FabValueInputAction::Ended(73.0)),
+                widget_uid: uid,
+                group: None,
+            }),
+        ];
+        assert_eq!(ended_value(&actions, uid), Some(73.0));
     }
 }

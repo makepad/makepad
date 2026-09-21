@@ -17,16 +17,6 @@ impl Cx {
         &mut self.script_data.std
     }
 
-    fn with_script_std_vm<R>(
-        &mut self,
-        f: impl FnOnce(&mut Cx, &mut ScriptStd, &mut Option<Box<ScriptVmBase>>) -> R,
-    ) -> R {
-        let host = self as *mut Cx;
-        let std = &mut self.script_data.std as *mut ScriptStd;
-        let script_vm = &mut self.script_vm as *mut Option<Box<ScriptVmBase>>;
-        unsafe { f(&mut *host, &mut *std, &mut *script_vm) }
-    }
-
     /// Whether the script VM is currently held (`take()`n) by an enclosing
     /// `with_vm`/`eval` on this thread, i.e. calling `with_vm` now would be
     /// re-entrant and panic. Lets a call site that can degrade gracefully
@@ -41,9 +31,7 @@ impl Cx {
             self.script_vm.is_some(),
             std::panic::Location::caller(),
         );
-        self.with_script_std_vm(|host, std, script_vm| {
-            makepad_script_std::with_vm_and_async(host, std, script_vm, f)
-        })
+        makepad_script_std::with_vm_and_async(self, f)
     }
 
     #[track_caller]
@@ -52,17 +40,13 @@ impl Cx {
             self.script_vm.is_some(),
             std::panic::Location::caller(),
         );
-        self.with_script_std_vm(|host, std, script_vm| {
-            makepad_script_std::with_vm(host, std, script_vm, f)
-        })
+        makepad_script_std::with_vm(self, f)
     }
 
     /// Like [`Cx::with_vm`], but returns `None` instead of panicking when the
     /// VM is already held (swapped off) by an enclosing `with_vm`/`eval`.
     pub fn try_with_vm<R, F: FnOnce(&mut ScriptVm) -> R>(&mut self, f: F) -> Option<R> {
-        self.with_script_std_vm(|host, std, script_vm| {
-            makepad_script_std::try_with_vm(host, std, script_vm, f)
-        })
+        makepad_script_std::try_with_vm(self, f)
     }
 
     #[track_caller]
@@ -75,9 +59,7 @@ impl Cx {
             self.script_vm.is_some(),
             std::panic::Location::caller(),
         );
-        self.with_script_std_vm(|host, std, script_vm| {
-            makepad_script_std::with_vm_thread(host, std, script_vm, thread_id, f)
-        })
+        makepad_script_std::with_vm_thread(self, thread_id, f)
     }
 
     #[track_caller]
@@ -86,9 +68,7 @@ impl Cx {
             self.script_vm.is_some(),
             std::panic::Location::caller(),
         );
-        self.with_script_std_vm(|host, std, script_vm| {
-            makepad_script_std::eval(host, std, script_vm, script_mod)
-        })
+        makepad_script_std::eval(self, script_mod)
     }
 
     pub fn add_script_task_on_thread_completed_hook(
@@ -111,21 +91,15 @@ impl Cx {
     }
 
     pub(crate) fn handle_script_tasks(&mut self) {
-        self.with_script_std_vm(|host, std, script_vm| {
-            makepad_script_std::handle_script_tasks(host, std, script_vm)
-        });
+        makepad_script_std::handle_script_tasks(self);
     }
 
     pub(crate) fn handle_script_signals(&mut self) {
-        self.with_script_std_vm(|host, std, script_vm| {
-            makepad_script_std::pump(host, std, script_vm)
-        });
+        makepad_script_std::pump(self);
     }
 
     pub(crate) fn handle_script_web_socket_event(&mut self, event: NetworkResponse) {
-        self.with_script_std_vm(|host, std, script_vm| {
-            makepad_script_std::handle_script_web_socket_event(host, std, script_vm, event)
-        });
+        makepad_script_std::handle_script_web_socket_event(self, event);
     }
 
     #[allow(unused)]
@@ -145,22 +119,22 @@ impl Cx {
 
             if self.script_data.resources.is_http_resource(request_id) {
                 let resource_info = {
-                    let handle = self
+                    let path = self
                         .script_data
                         .resources
                         .http_resources
                         .iter()
                         .find(|r| r.request_id == request_id)
-                        .map(|r| r.handle);
-                    if let Some(handle) = handle {
+                        .map(|r| r.abs_path.as_str());
+                    if let Some(path) = path {
                         let resources = self.script_data.resources.resources.borrow();
-                        if let Some(res) = resources.iter().find(|r| r.has_handle(handle)) {
+                        if let Some(res) = resources.iter().find(|r| r.abs_path == path) {
                             format!(
                                 "abs_path={} web_url={:?} dependency_path={:?}",
                                 res.abs_path, res.web_url, res.dependency_path
                             )
                         } else {
-                            format!("handle={:?} (resource entry not found)", handle)
+                            format!("path={:?} (resource entry not found)", path)
                         }
                     } else {
                         "unknown resource".to_string()
@@ -172,7 +146,7 @@ impl Cx {
                             if (200..300).contains(&res.status_code) {
                                 self.script_data
                                     .resources
-                                    .handle_http_response(request_id, body.clone());
+                                    .handle_http_response(request_id, body.to_vec());
                             } else {
                                 crate::log!(
                                     "Script resource HTTP load failed: status={} {}",
@@ -212,9 +186,7 @@ impl Cx {
             }
         }
 
-        self.with_script_std_vm(|host, std, script_vm| {
-            makepad_script_std::handle_script_network_events(host, std, script_vm, responses)
-        });
+        makepad_script_std::handle_script_network_events(self, responses);
     }
 
     /// Run the script network handlers against whichever VM is currently *installed*
@@ -229,8 +201,70 @@ impl Cx {
     /// loads — those live on `Cx::script_data.resources` and are handled once, for the
     /// app VM, before the event is dispatched to the widget tree.
     pub fn handle_script_network_events_for_current_vm(&mut self, responses: &[NetworkResponse]) {
-        self.with_script_std_vm(|host, std, script_vm| {
-            makepad_script_std::handle_script_network_events(host, std, script_vm, responses)
+        makepad_script_std::handle_script_network_events(self, responses);
+    }
+}
+
+#[cfg(test)]
+mod unwind_tests {
+    use crate::*;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    fn heap_key(cx: &mut Cx) -> usize {
+        cx.with_vm(|vm| vm.bx.heap.heap_key())
+    }
+
+    /// A closure handed to `with_vm` panics inside a `catch_unwind` (the
+    /// platforms' event catchers): the VM is parked back on `Cx` — the
+    /// same heap, not a fresh one — and the next `with_vm` works.
+    #[test]
+    fn a_panic_inside_with_vm_leaves_the_vm_parked_on_cx() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let key = heap_key(&mut cx);
+        let caught = catch_unwind(AssertUnwindSafe(|| cx.with_vm(|_vm| panic!("a native panicked under with_vm"))));
+        assert!(caught.is_err());
+        assert!(!cx.is_script_vm_held(), "the VM is back on Cx after the unwind");
+        assert_eq!(heap_key(&mut cx), key, "the same heap came back");
+
+        // The same through `eval`, `try_with_vm` and a thread entry.
+        let caught = catch_unwind(AssertUnwindSafe(|| cx.try_with_vm(|_vm| panic!("under try_with_vm"))));
+        assert!(caught.is_err());
+        assert!(!cx.is_script_vm_held());
+        let caught = catch_unwind(AssertUnwindSafe(|| cx.with_vm_and_async(|_vm| panic!("under with_vm_and_async"))));
+        assert!(caught.is_err());
+        assert!(!cx.is_script_vm_held());
+        assert_eq!(heap_key(&mut cx), key);
+        // A re-entrant call is still diagnosed, so the holder bookkeeping
+        // came back with the VM too.
+        let caught = catch_unwind(AssertUnwindSafe(|| cx.with_vm(|vm| vm.cx_mut().with_vm(|_| ()))));
+        assert!(caught.is_err(), "a raw cx_mut re-entry is still refused");
+        assert!(!cx.is_script_vm_held());
+        assert_eq!(heap_key(&mut cx), key);
+    }
+
+    /// The panic starts under `with_cx_mut`, where the VM sits on `Cx` and
+    /// the `ScriptVm` holds a placeholder: the real VM is what survives.
+    #[test]
+    fn a_panic_under_with_cx_mut_keeps_the_real_vm() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let key = heap_key(&mut cx);
+        let caught = catch_unwind(AssertUnwindSafe(|| {
+            cx.with_vm(|vm| vm.with_cx_mut(|_cx| panic!("a native panicked under with_cx_mut")))
+        }));
+        assert!(caught.is_err());
+        assert!(!cx.is_script_vm_held());
+        assert_eq!(heap_key(&mut cx), key, "the parked VM, not the placeholder, is on Cx");
+        // Nested: the inner `with_vm` under `with_cx_mut` is where it starts.
+        let caught = catch_unwind(AssertUnwindSafe(|| {
+            cx.with_vm(|vm| vm.with_cx_mut(|cx| cx.with_vm(|_vm| panic!("two levels down"))))
+        }));
+        assert!(caught.is_err());
+        assert!(!cx.is_script_vm_held());
+        assert_eq!(heap_key(&mut cx), key);
+        // And the VM still runs script afterwards.
+        cx.with_vm(|vm| {
+            let value = vm.eval(script! { 1 + 2 });
+            assert_eq!(value.as_f64(), Some(3.0));
         });
     }
 }

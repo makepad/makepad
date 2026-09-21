@@ -9,7 +9,10 @@ use makepad_widgets::text::{
 use makepad_widgets::*;
 use std::path::Path;
 
-app_main!(App);
+app_main!(
+    App,
+    font_assets: ["makepad_widgets/resources/jetbrains_mono_variable.ttf", MATH_VIEW_FONT_ASSET]
+);
 
 script_mod! {
     use mod.prelude.widgets.*

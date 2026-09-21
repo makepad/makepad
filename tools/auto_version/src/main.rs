@@ -68,19 +68,6 @@ fn main() {
         new_sha1: String,
     }
     
-    let target_deps = [
-        "dependencies.",
-        "target.wasm32-unknown-unknown.dependencies.",
-        "target.aarch64-apple-darwin.dependencies.",
-        "target.x86_64-apple-darwin.dependencies.",
-        "target.x86_64-apple-ios.dependencies.",
-        "target.aarch64-apple-ios-sim.dependencies.",
-        "target.aarch64-apple-ios.dependencies.",
-        "target.aarch64-unknown-linux-gnu.dependencies.",
-        "target.'cfg(windows)'.dependencies.makepad-futures-legacy.",
-        "target.'cfg(windows)'.dependencies.makepad-windows.",
-        "target.'cfg(windows)'.dependencies.windows-targets."
-    ];
     
     let mut ver_crates = Vec::new();
     
@@ -96,14 +83,14 @@ fn main() {
             }
         };
 
-        let old_sha1 = if let Some(Toml::Str(ver, _)) = toml.get("package.metadata.makepad-auto-version") {
+        let old_sha1 = if let Some(Toml::Str(ver, _)) = toml.get_path(&["package", "metadata", "makepad-auto-version"]) {
             ver.to_string()
         }
         else {
             continue;
         };
-        let package_name = toml.get("package.name").unwrap().clone().into_str().unwrap();
-        let package_version = toml.get("package.version").unwrap().clone().into_str().unwrap();
+        let package_name = toml.get_path(&["package", "name"]).unwrap().clone().into_str().unwrap();
+        let package_version = toml.get_path(&["package", "version"]).unwrap().clone().into_str().unwrap();
 
         // hash all the rs files
         let mut sha1 = sha1::Sha1::new();
@@ -114,13 +101,16 @@ fn main() {
         let data = sha1.finalise();
         let new_sha1 = String::from_utf8(base64::base64_encode(&data, &base64::BASE64_URL_SAFE)).unwrap();
         let mut deps = Vec::new();
-        // scan our toml file for all dependencies
-        for key in toml.keys() {
-            for pref in target_deps {
-                if let Some(pref) = key.strip_prefix(pref) {
-                    if let Some(dep) = pref.strip_suffix(".version") {
-                        println!("GOT DEP {}", dep.to_string());
-                        deps.push(dep.to_string());
+        // every dependency declared with a version, in any dependency table
+        for table in dependency_tables(&toml) {
+            let segments: Vec<&str> = table.iter().map(String::as_str).collect();
+            if let Some(Toml::Table(entries)) = toml.get_path(&segments) {
+                for (dep, value) in entries {
+                    if let Toml::Table(dep_table) = value {
+                        if dep_table.contains_key("version") {
+                            println!("GOT DEP {}", dep);
+                            deps.push(dep.clone());
+                        }
                     }
                 }
             }
@@ -162,18 +152,28 @@ fn main() {
         }
         if any_dep_changed(c, &ver_crates) {
             let ver = c.package_version.strip_prefix("0.").unwrap().strip_suffix(".0").unwrap();
-            let version: u64 = ver.parse().unwrap();
+            let _: u64 = ver.parse().unwrap();
             
             let next_version = format!("1.0.0");//, version + 1);
             //let next_version = format!("0.4.0");
             
-            patch_cargo(&c.cargo, "package.version", &next_version, write);
-            patch_cargo(&c.cargo, "package.metadata.makepad-auto-version", &c.new_sha1, write);
-            // now lets version-up everyone elses dependency on this crate
-            for pref in target_deps {
-                let dep_version = format!("{}{}.version", pref, c.package_name);
-                for o in &ver_crates {
-                    patch_cargo(&o.cargo, &dep_version, &next_version, write);
+            patch_cargo(&c.cargo, &["package", "version"], &next_version, write);
+            patch_cargo(&c.cargo, &["package", "metadata", "makepad-auto-version"], &c.new_sha1, write);
+            // now lets version-up everyone elses dependency on this crate, in
+            // whichever dependency table declares it with a version
+            for o in &ver_crates {
+                let other = fs::read_to_string(&o.cargo).unwrap();
+                let Ok(other_toml) = makepad_toml_parser::parse_toml(&other) else {
+                    continue;
+                };
+                for table in dependency_tables(&other_toml) {
+                    let mut path = table.clone();
+                    path.push(c.package_name.clone());
+                    path.push("version".to_string());
+                    let segments: Vec<&str> = path.iter().map(String::as_str).collect();
+                    if other_toml.get_path(&segments).is_some() {
+                        patch_cargo(&o.cargo, &segments, &next_version, write);
+                    }
                 }
             }
         }
@@ -182,22 +182,43 @@ fn main() {
     println!("Done");
 }
 
-fn patch_cargo(cargo: &Path, toml_path: &str, with: &str, write: bool) {
-    let old_cargo = fs::read_to_string(cargo).unwrap();
-    let toml = makepad_toml_parser::parse_toml(&old_cargo).unwrap();
-    
-    if let Some(Toml::Str(_, span)) = toml.get(toml_path) {
-        let mut new_cargo = String::new();
-        for (i, c) in old_cargo.chars().enumerate() {
-            if i == span.start {
-                for c in with.chars() {
-                    new_cargo.push(c);
+/// Every dependency table of a manifest as a key path: `dependencies`,
+/// `dev-dependencies`, `build-dependencies` and each `target.<cfg>.<kind>`
+/// table that is present.
+fn dependency_tables(toml: &makepad_toml_parser::TomlDocument) -> Vec<Vec<String>> {
+    let kinds = ["dependencies", "dev-dependencies", "build-dependencies"];
+    let mut tables = Vec::new();
+    for kind in kinds {
+        if let Some(Toml::Table(_)) = toml.get_path(&[kind]) {
+            tables.push(vec![kind.to_string()]);
+        }
+    }
+    if let Some(Toml::Table(targets)) = toml.get_path(&["target"]) {
+        for (target, value) in targets {
+            if let Toml::Table(table) = value {
+                for kind in kinds {
+                    if let Some(Toml::Table(_)) = table.get(kind) {
+                        tables.push(vec!["target".to_string(), target.clone(), kind.to_string()]);
+                    }
                 }
             }
-            if i < span.start || i >= span.start + span.len - 2 {
-                new_cargo.push(c);
-            }
         }
+    }
+    tables
+}
+
+fn patch_cargo(cargo: &Path, toml_path: &[&str], with: &str, write: bool) {
+    let old_cargo = fs::read_to_string(cargo).unwrap();
+    let toml = makepad_toml_parser::parse_toml(&old_cargo).unwrap();
+
+    if let Some(Toml::Str(_, span)) = toml.get_path(toml_path) {
+        // The span covers the quoted lexeme in bytes; replace the whole string.
+        let mut new_cargo = String::with_capacity(old_cargo.len() + with.len());
+        new_cargo.push_str(&old_cargo[..span.start]);
+        new_cargo.push('"');
+        new_cargo.push_str(with);
+        new_cargo.push('"');
+        new_cargo.push_str(&old_cargo[span.start + span.len..]);
         // lets write it back to disk
         if write {
             fs::File::create(cargo).unwrap().write_all(new_cargo.as_bytes()).unwrap();
@@ -208,4 +229,3 @@ fn patch_cargo(cargo: &Path, toml_path: &str, with: &str, write: bool) {
         }
     }
 }
-

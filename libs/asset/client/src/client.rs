@@ -26,6 +26,9 @@ use crate::dto::{
 };
 use crate::error::{ClientError, ClientResult};
 use crate::http::HttpLimits;
+use crate::location::{
+    BaseUrl, ClientLocation, ClientMode, CAPABILITY_STATIC_SITE_SESSION,
+};
 use crate::util::now_ms;
 use crate::wire;
 use makepad_asset_data::{
@@ -40,6 +43,10 @@ use std::time::Duration;
 
 #[derive(Clone, Debug)]
 pub struct ClientConfig {
+    /// `None` selects the native endpoints passed to [`AssetClient::connect`].
+    /// `Native` is authoritative over that compatibility argument; the
+    /// static constructor records its validated URL here.
+    pub location: Option<ClientLocation>,
     pub cache_root: PathBuf,
     pub cache: CacheBudgets,
     pub http: HttpLimits,
@@ -59,6 +66,7 @@ pub struct ClientConfig {
 impl ClientConfig {
     pub fn new(cache_root: impl Into<PathBuf>) -> Self {
         Self {
+            location: None,
             cache_root: cache_root.into(),
             cache: CacheBudgets::default_v1(),
             http: HttpLimits::default_v1(),
@@ -69,7 +77,20 @@ impl ClientConfig {
         }
     }
 
-    fn validate(&self) -> ClientResult<()> {
+    /// Select the credential-free static HTTP + memory-cache runtime.
+    /// Drive it with [`crate::ClientRuntime::start_static`] and `poll`;
+    /// blocking [`AssetClient`] construction deliberately remains native-
+    /// server-only.
+    pub fn static_site(base_url: BaseUrl) -> Self {
+        let mut config = Self::new(PathBuf::new());
+        config.location = Some(ClientLocation::StaticSite(base_url));
+        config
+    }
+
+    pub(crate) fn validate(&self) -> ClientResult<()> {
+        if matches!(self.location, Some(ClientLocation::StaticSite(_))) && self.token.is_some() {
+            return Err(ClientError::InvalidInput { what: "static site bearer token" });
+        }
         self.cache.validate()?;
         self.http.validate()?;
         if self.max_transfer_attempts == 0 || self.blob_body_deadline_ms == 0 {
@@ -84,13 +105,17 @@ impl ClientConfig {
 /// [`ClientError::WrongServerCursor`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PageCursor {
-    server_id: [u8; 16],
-    token: String,
+    pub(crate) server_id: [u8; 16],
+    pub(crate) token: String,
 }
 
 impl PageCursor {
     pub fn server_id(&self) -> &[u8; 16] {
         &self.server_id
+    }
+
+    pub(crate) fn token(&self) -> &str {
+        &self.token
     }
 }
 
@@ -259,6 +284,17 @@ impl AssetClient {
         expected_server: Option<[u8; 16]>,
     ) -> ClientResult<AssetClient> {
         config.validate()?;
+        if matches!(config.location, Some(ClientLocation::StaticSite(_))) {
+            return Err(ClientError::Unavailable {
+                capability: CAPABILITY_STATIC_SITE_SESSION,
+                mode: ClientMode::StaticWeb,
+            });
+        }
+        let endpoints = match config.location.as_ref() {
+            Some(ClientLocation::Native(endpoints)) => *endpoints,
+            Some(ClientLocation::StaticSite(_)) => unreachable!(),
+            None => endpoints,
+        };
         let cache = ContentCache::open(&config.cache_root, config.cache, now_ms())?;
         let api = Api::with_keep_alive(
             endpoints,
@@ -414,6 +450,11 @@ impl AssetClient {
         let raw = self.unwrap_cursor(cursor)?;
         let page = self.api.assets_page(namespace, raw, limit)?;
         Ok(AssetsPage { assets: page.assets, next: self.wrap_cursor(page.cursor) })
+    }
+
+    /// Run one bounded read-only catalog query through the connected store.
+    pub fn assets_query(&self, sql: &str) -> ClientResult<crate::dto::AssetsQueryDto> {
+        self.api.assets_query(sql)
     }
 
     pub fn asset_detail(&self, id: &makepad_asset_data::AssetId) -> ClientResult<AssetDetailDto> {
@@ -999,7 +1040,7 @@ impl AssetClient {
         abort: &dyn Fn() -> bool,
     ) -> ClientResult<PathBuf> {
         let digest = *blob.as_bytes();
-        let mut writer = self.cache().open_partial(&digest)?;
+        let mut writer = self.cache().open_partial_at(&digest, now_ms())?;
 
         // A partial already at/above the expected size cannot be extended by
         // a range request; it is either complete (commit will prove it) or

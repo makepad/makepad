@@ -1,16 +1,23 @@
 //! Backend-neutral model-weight disk layer. One home for every weight
 //! format parser in the tree (safetensors, GGUF, torch zip/pickle, npy),
 //! the mmap machinery, and the WeightSet API models load through.
-//! No GPU dependencies — the cuda/metal stores consume views produced here.
+//! No GPU dependencies — the cuda/metal stores consume views produced here,
+//! and the backend-neutral CPU quant kernels (`quant`, `quant_iq`), the
+//! accel vocabulary (`accel`) and the op profiler (`prof`) live here so no
+//! GPU store has to depend on another one for them.
 //! Plan of record: /aiarch.md
 //!
 //! Populated by the restructure lanes: formats/ (safetensors, gguf, torch,
 //! npy), mmap.rs, weight_set.rs.
 
+pub mod accel;
 pub mod bulk_read;
 pub mod formats;
 pub mod mmap;
+pub mod prof;
 pub mod quant;
+pub mod quant_iq;
+pub mod quant_iq_tables;
 
 // The safetensors slice is the only format lane T2 re-points consumers to;
 // re-export its types at the crate root so `use makepad_ai_loader::X`

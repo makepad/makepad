@@ -2,7 +2,7 @@ use crate::{
     event::window::PopupDismissedEvent,
     event::{
         DragEvent, DropEvent, GameInputConnectedEvent, KeyEvent, MouseDownEvent, MouseMoveEvent,
-        MouseUpEvent, ScrollEvent, TextClipboardEvent, TextInputEvent, TimerEvent,
+        MouseUpEvent, PinchEvent, ScrollEvent, TextClipboardEvent, TextInputEvent, TimerEvent,
         WindowCloseRequestedEvent, WindowClosedEvent, WindowDragQueryEvent, WindowGeomChangeEvent,
     },
     makepad_live_id::*,
@@ -20,6 +20,7 @@ pub enum MacosEvent {
     WindowResizeLoopStop(WindowId),
     WindowGeomChange(WindowGeomChangeEvent),
     WindowClosed(WindowClosedEvent),
+    WindowMiniaturizeChange,
     Paint,
     /// One window's display link fired: paint THAT window at its own flip,
     /// with the flip's target timestamp (app-time domain). CAMetalDisplayLink
@@ -38,6 +39,7 @@ pub enum MacosEvent {
     MouseUp(MouseUpEvent),
     MouseMove(MouseMoveEvent),
     Scroll(ScrollEvent),
+    Pinch(PinchEvent),
 
     WindowDragQuery(WindowDragQueryEvent),
     WindowCloseRequested(WindowCloseRequestedEvent),

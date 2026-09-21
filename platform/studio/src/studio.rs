@@ -1,4 +1,5 @@
 use crate::cursor::MouseCursor;
+use crate::gpu::{AppToHostGpu, HostToAppGpu};
 use crate::hub_protocol::FrameCodec;
 use crate::keyboard::{KeyEvent, TextInputEvent};
 use crate::mouse::KeyModifiers;
@@ -215,12 +216,25 @@ pub struct RemoteWheel {
     pub brake: f32,
     pub clutch: f32,
     pub steer_force: f32,
+    pub buttons: u32,
+}
+
+/// A flight stick's state (see the platform's `JoystickState`).
+#[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
+pub struct RemoteJoystick {
+    pub x: f32,
+    pub y: f32,
+    pub twist: f32,
+    pub throttle: f32,
+    pub hat: u8,
+    pub buttons: u32,
 }
 
 #[derive(Clone, Copy, Debug, SerBin, DeBin, SerJson, DeJson, PartialEq)]
 pub enum RemoteGameInput {
     Gamepad(RemoteGamepad),
     Wheel(RemoteWheel),
+    Joystick(RemoteJoystick),
 }
 
 impl Default for RemoteGameInput {
@@ -237,6 +251,30 @@ pub struct RemoteScroll {
     pub x: f64,
     pub y: f64,
     pub is_mouse: bool,
+    pub modifiers: RemoteKeyModifiers,
+}
+
+/// The phase of a trackpad pinch (the platform's `PinchEvent`, shared here
+/// like `KeyModifiers` so a remote pinch needs no conversion).
+#[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq, Eq)]
+pub enum PinchPhase {
+    /// Two fingers started pinching; the scale is 1.
+    #[default]
+    Begin,
+    /// The fingers moved; the scale is the change since the previous event.
+    Update,
+    /// The fingers lifted, or the system cancelled the gesture; the scale is 1.
+    End,
+}
+
+#[derive(Clone, Copy, Debug, Default, SerBin, DeBin, SerJson, DeJson, PartialEq)]
+pub struct RemotePinch {
+    pub time: f64,
+    pub x: f64,
+    pub y: f64,
+    /// Multiplicative, relative to the previous event of the gesture.
+    pub scale: f64,
+    pub phase: PinchPhase,
     pub modifiers: RemoteKeyModifiers,
 }
 
@@ -271,6 +309,11 @@ pub enum AppToStudio {
     DrawCompleteAndFlip(PresentableDraw),
     /// Application-defined response to a `StudioToApp::Custom` event.
     Custom(String),
+    Gpu(AppToHostGpu),
+    /// The child consumed one `StudioToApp::Tick` (timers, draw, repaint).
+    /// The host paces its next Tick on this, so a slow child never has
+    /// more than one frame's worth of ticks and pointer moves queued.
+    TickDone,
 }
 
 #[derive(SerBin, DeBin, SerJson, DeJson, Debug, Clone)]
@@ -415,6 +458,7 @@ pub enum StudioToApp {
     TextCopy,
     TextCut,
     Scroll(RemoteScroll),
+    Pinch(RemotePinch),
     /// The full set of game controllers Studio can see, resent whenever it
     /// changes. Level state rather than edges, because that is what the OS
     /// APIs report and what `Cx::game_input_states` hands back.
@@ -424,6 +468,7 @@ pub enum StudioToApp {
     #[default]
     None,
     Kill,
+    Gpu(HostToAppGpu),
 }
 
 #[derive(SerBin, DeBin, SerJson, DeJson)]

@@ -15,7 +15,6 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::time::Instant;
 
 pub use makepad_gif::DecodingError as GifDecodeErrors;
 pub use makepad_webp::DecodingError as WebpDecodeErrors;
@@ -111,12 +110,19 @@ fn backend_uploads_cpu_mip_chain() -> bool {
 /// zune's default cap; lets us reject decompression-bomb headers before
 /// allocating anything.
 const MAX_IMAGE_DIMENSION: usize = 16384;
-/// Hard upper bound on a decoded image or animation atlas in bytes (the RGBA
-/// size of a 16384x16384 image).
-const MAX_IMAGE_DECODED_BYTES: usize = 1024 * 1024 * 1024;
-/// Hard upper bound on total pixels in a decoded buffer or animation atlas
-/// (268M px = 1 GiB as RGBA u32).
-const MAX_IMAGE_PIXELS: usize = MAX_IMAGE_DECODED_BYTES / 4;
+/// Hard upper bound on a decoded image or animation atlas in bytes. Browser
+/// textures have a tighter admission limit; native retains the existing 1 GiB
+/// cap (the RGBA size of a 16384x16384 image).
+const WEB_MAX_IMAGE_DECODED_BYTES: usize = 64 * 1024 * 1024;
+const NATIVE_MAX_IMAGE_DECODED_BYTES: usize = 1024 * 1024 * 1024;
+const MAX_IMAGE_DECODED_BYTES: usize = if cfg!(target_arch = "wasm32") {
+    WEB_MAX_IMAGE_DECODED_BYTES
+} else {
+    NATIVE_MAX_IMAGE_DECODED_BYTES
+};
+const IMAGE_RGBA_BYTES_PER_PIXEL: usize = std::mem::size_of::<u32>();
+/// Hard upper bound on total pixels in a decoded buffer or animation atlas.
+const MAX_IMAGE_PIXELS: usize = MAX_IMAGE_DECODED_BYTES / IMAGE_RGBA_BYTES_PER_PIXEL;
 /// Hard upper bound on animation frames. Pixel caps alone do not account for
 /// per-frame Vec overhead, which matters for malicious tiny-frame animations.
 const MAX_IMAGE_FRAMES: usize = 4096;
@@ -132,28 +138,53 @@ fn png_decoder_options() -> DecoderOptions {
     decoder_options().png_set_strip_to_8bit(true)
 }
 
-/// Validates `width`/`height` against the caps and returns `width * height`,
-/// rejecting zero, oversized, or overflowing dimensions before any allocation.
-fn checked_pixel_count(width: usize, height: usize) -> Result<usize, ImageError> {
+fn checked_rgba_byte_len(pixel_count: usize, max_decoded_bytes: usize) -> Option<usize> {
+    pixel_count
+        .checked_mul(IMAGE_RGBA_BYTES_PER_PIXEL)
+        .filter(|&bytes| bytes <= max_decoded_bytes)
+}
+
+/// Validates `width`/`height` against the supplied decoded-byte policy and
+/// returns `width * height`, rejecting invalid dimensions before allocation.
+fn checked_pixel_count_with_limit(
+    width: usize,
+    height: usize,
+    max_decoded_bytes: usize,
+) -> Result<usize, ImageError> {
     if width == 0 || height == 0 || width > MAX_IMAGE_DIMENSION || height > MAX_IMAGE_DIMENSION {
         return Err(ImageError::DimensionsTooLarge { width, height });
     }
-    width
+    let pixels = width
         .checked_mul(height)
-        .filter(|&pixels| pixels <= MAX_IMAGE_PIXELS)
+        .ok_or(ImageError::DimensionsTooLarge { width, height })?;
+    checked_rgba_byte_len(pixels, max_decoded_bytes)
+        .map(|_| pixels)
         .ok_or(ImageError::DimensionsTooLarge { width, height })
+}
+
+fn checked_pixel_count(width: usize, height: usize) -> Result<usize, ImageError> {
+    checked_pixel_count_with_limit(width, height, MAX_IMAGE_DECODED_BYTES)
 }
 
 /// Computes an animation atlas's `(total_width, total_height)` for `frame_count`
 /// frames of `width`x`height`. Rejects zero-width frames (avoids divide-by-zero)
-/// and atlases exceeding [`MAX_IMAGE_PIXELS`] (avoids overflow / OOM from a
+/// and atlases exceeding the decoded-byte policy (avoids overflow / OOM from a
 /// malicious frame count).
 fn animation_atlas_layout(
     frame_count: usize,
     width: usize,
     height: usize,
 ) -> Result<(usize, usize), ImageError> {
-    checked_pixel_count(width, height)?;
+    animation_atlas_layout_with_limit(frame_count, width, height, MAX_IMAGE_DECODED_BYTES)
+}
+
+fn animation_atlas_layout_with_limit(
+    frame_count: usize,
+    width: usize,
+    height: usize,
+    max_decoded_bytes: usize,
+) -> Result<(usize, usize), ImageError> {
+    checked_pixel_count_with_limit(width, height, max_decoded_bytes)?;
     if frame_count == 0 || frame_count > MAX_IMAGE_FRAMES {
         return Err(ImageError::DimensionsTooLarge { width, height });
     }
@@ -168,7 +199,8 @@ fn animation_atlas_layout(
         .ok_or(ImageError::DimensionsTooLarge { width, height })?;
     if total_width
         .checked_mul(total_height)
-        .is_none_or(|pixels| pixels > MAX_IMAGE_PIXELS)
+        .and_then(|pixels| checked_rgba_byte_len(pixels, max_decoded_bytes))
+        .is_none()
     {
         return Err(ImageError::DimensionsTooLarge {
             width: total_width,
@@ -471,6 +503,7 @@ impl ImageBuffer {
         let frame_pixels = checked_pixel_count(width, height)?;
         let buf_size = decoder
             .output_buffer_size()
+            .filter(|&len| len <= MAX_IMAGE_DECODED_BYTES)
             .ok_or(ImageError::WebpDecode(WebpDecodeErrors::ImageTooLarge))?;
 
         if !decoder.is_animated() {
@@ -530,7 +563,7 @@ impl ImageBuffer {
         let max_frames = (MAX_IMAGE_PIXELS / frame_pixels).max(1).min(MAX_IMAGE_FRAMES);
         let mut frames = Vec::new();
         let mut frame_delays = Vec::new();
-        let mut canvas = vec![0u8; width * height * 4];
+        let mut canvas = vec![0u8; frame_pixels * IMAGE_RGBA_BYTES_PER_PIXEL];
 
         while let Some(frame) = decoder.read_next_frame().map_err(ImageError::GifDecode)? {
             if frames.len() >= max_frames {
@@ -712,7 +745,9 @@ pub struct AsyncImageLoad {
 
 pub struct ImageCache {
     pub map: HashMap<PathBuf, ImageCacheEntry>,
-    pub thread_pool: Option<TagThreadPool<PathBuf>>,
+    /// Decodes staged newest-first in front of the runtime pool's light
+    /// lane; a re-request of the same path replaces the staged decode.
+    pub decode_queue: TaskQueue<PathBuf>,
     pub pending_http_requests: HashMap<LiveId, PathBuf>,
 }
 
@@ -730,7 +765,7 @@ impl ImageCache {
     pub fn new() -> Self {
         Self {
             map: HashMap::new(),
-            thread_pool: None,
+            decode_queue: TaskQueue::new(Lane::Light, MAX_POOL_WORKERS, 1024),
             pending_http_requests: HashMap::new(),
         }
     }
@@ -792,6 +827,7 @@ pub enum ImageError {
     DataTooLarge { bytes: usize, limit: usize },
     UnsupportedFormat,
     Http(String),
+    Worker(String),
 }
 
 pub enum AsyncLoadResult {
@@ -823,7 +859,7 @@ fn image_decode_debug_enabled() -> bool {
 }
 
 #[inline]
-fn decode_timing_start() -> Option<Instant> {
+fn decode_timing_start() -> Option<f64> {
     if !image_decode_debug_enabled() {
         return None;
     }
@@ -833,16 +869,16 @@ fn decode_timing_start() -> Option<Instant> {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        Some(Instant::now())
+        Some(Cx::monotonic_now())
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn headless_mode_enabled() -> bool {
+fn gpusim_mode_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
         std::env::var("MAKEPAD")
-            .map(|value| value.eq_ignore_ascii_case("headless"))
+            .map(|value| value.eq_ignore_ascii_case("gpusim"))
             .unwrap_or(false)
     })
 }
@@ -1235,6 +1271,46 @@ mod tests {
     use super::*;
     use makepad_gif::{Encoder, Frame};
     use std::borrow::Cow;
+
+    #[test]
+    fn web_decoded_image_policy_boundaries() {
+        let boundary_pixels = 4096 * 4096;
+        assert_eq!(
+            checked_pixel_count_with_limit(4096, 4096, WEB_MAX_IMAGE_DECODED_BYTES).unwrap(),
+            boundary_pixels
+        );
+        assert!(checked_rgba_byte_len(
+            boundary_pixels + 1,
+            WEB_MAX_IMAGE_DECODED_BYTES
+        )
+        .is_none());
+        assert!(checked_rgba_byte_len(usize::MAX, WEB_MAX_IMAGE_DECODED_BYTES).is_none());
+        assert_eq!(
+            checked_pixel_count_with_limit(2048, 2560, WEB_MAX_IMAGE_DECODED_BYTES).unwrap(),
+            2048 * 2560
+        );
+
+        assert!(animation_atlas_layout_with_limit(
+            16,
+            1024,
+            1024,
+            WEB_MAX_IMAGE_DECODED_BYTES
+        )
+        .is_ok());
+        assert!(animation_atlas_layout_with_limit(
+            17,
+            1024,
+            1024,
+            WEB_MAX_IMAGE_DECODED_BYTES
+        )
+        .is_err());
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn native_decoded_image_policy_remains_one_gibibyte() {
+        assert_eq!(MAX_IMAGE_DECODED_BYTES, NATIVE_MAX_IMAGE_DECODED_BYTES);
+    }
 
     fn single_frame_gif() -> Vec<u8> {
         let palette = [0x00, 0x00, 0x00, 0xff, 0x00, 0x00];
@@ -1698,25 +1774,14 @@ mod tests {
     }
 }
 
-fn ensure_thread_pool(cx: &mut Cx) {
-    ensure_image_cache_inner(cx);
-    if cx.get_global::<ImageCache>().thread_pool.is_none() {
-        let threads = cx.cpu_cores().max(3) - 2;
-        cx.get_global::<ImageCache>().thread_pool = Some(TagThreadPool::new(cx, threads));
-    }
-}
-
 fn spawn_decode_job<D>(cx: &mut Cx, image_path: PathBuf, data: Arc<D>)
 where
     D: AsRef<[u8]> + Send + Sync + ?Sized + 'static,
 {
-    ensure_thread_pool(cx);
+    ensure_image_cache_inner(cx);
     let image_size_bytes = (*data).as_ref().len();
-    cx.get_global::<ImageCache>()
-        .thread_pool
-        .as_mut()
-        .unwrap()
-        .execute_rev(image_path, move |image_path| {
+    let task_key = image_path.clone();
+    let job = move || {
             let start = decode_timing_start();
             if image_decode_debug_enabled() {
                 log!(
@@ -1740,7 +1805,7 @@ where
                     log!(
                         "ImageCache: decode_done key={} elapsed_ms={:.1} {}",
                         image_path.display(),
-                        start.elapsed().as_secs_f64() * 1000.0,
+                        (Cx::monotonic_now() - start) * 1000.0,
                         status
                     );
                 } else {
@@ -1755,7 +1820,22 @@ where
                 image_path,
                 result: RefCell::new(Some(result)),
             });
-        });
+        };
+    let pool = cx.task_pool();
+    if pool.is_open() {
+        let queue = &mut cx.get_global::<ImageCache>().decode_queue;
+        queue.set_in_flight_limit(pool.worker_count());
+        if let Err(error) = queue.push(&pool, task_key.clone(), true, QueueOrder::Lifo, job) {
+            Cx::post_action(AsyncImageLoad {
+                image_path: task_key,
+                result: RefCell::new(Some(Err(ImageError::Worker(error.to_string())))),
+            });
+        }
+    } else {
+        // A non-threaded wasm build has an explicit serial path for this pure
+        // CPU decode.
+        job();
+    }
 }
 
 pub fn ensure_image_cache(cx: &mut Cx) {
@@ -1768,6 +1848,9 @@ pub fn process_async_image_load(
     result: Result<ImageBuffer, ImageError>,
 ) {
     ensure_image_cache_inner(cx);
+    // A finished decode frees a slot: hand the next staged one over.
+    let pool = cx.task_pool();
+    cx.get_global::<ImageCache>().decode_queue.pump(&pool);
     if let Ok(data) = result {
         let width = data.width;
         let height = data.height;
@@ -1778,7 +1861,7 @@ pub fn process_async_image_load(
                 log!(
                     "ImageCache: gpu_commit key={} elapsed_ms={:.1} size={}x{}",
                     image_path.display(),
-                    upload_start.elapsed().as_secs_f64() * 1000.0,
+                    (Cx::monotonic_now() - upload_start) * 1000.0,
                     width,
                     height
                 );
@@ -1901,12 +1984,12 @@ where
     }
 
     // On wasm, decode synchronously on the UI thread since thread pools
-    // are not reliably available. Also decode synchronously for headless
+    // are not reliably available. Also decode synchronously for gpusim
     // single-frame runs so textured output is available in the first emitted PNG.
     #[cfg(target_arch = "wasm32")]
     let force_sync = true;
     #[cfg(not(target_arch = "wasm32"))]
-    let force_sync = headless_mode_enabled();
+    let force_sync = gpusim_mode_enabled();
 
     if force_sync {
         let image = decode_image_buffer(image_path, bytes)?;
@@ -2018,7 +2101,7 @@ pub fn handle_image_cache_network_responses(cx: &mut Cx, e: &NetworkResponsesEve
                             continue;
                         }
                         cache.map.remove(&image_path);
-                        decode_queue.push((image_path, Arc::new(body.clone())));
+                        decode_queue.push((image_path, Arc::new(body.to_vec())));
                     } else {
                         cache.map.remove(&image_path);
                     }

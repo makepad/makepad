@@ -14,14 +14,13 @@
 //! layer's contract is just: freshest N frames on disk + an index.
 //!
 //! Auth: KNMI's Open Data API wants an API key. Priority: explicit config >
-//! `KNMI_API_KEY` env var > the public anonymous key KNMI documents on the
-//! developer portal (shared, 50 req/min across all anonymous users — fine
+//! the public anonymous key KNMI documents on the developer portal (shared,
+//! 50 req/min across all anonymous users — fine
 //! for one poll per 5 minutes, but register a free personal key for real
 //! deployments).
 
+use makepad_micro_serde::*;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Public anonymous key from developer.dataplatform.knmi.nl (shared quota).
 pub const KNMI_ANONYMOUS_KEY: &str = "eyJvcmciOiI1ZTU1NGUxOTI3NGE5NjAwMDEyYTNlYjEiLCJpZCI6IjUzYTg1ZDBhMmQ5YzRkYzJiYWNlNzQ4NTQ2Zjk4ODExIiwiaCI6Im11cm11cjEyOCJ9";
@@ -109,7 +108,6 @@ impl RadarConfig {
     fn resolved_key(&self) -> String {
         self.api_key
             .clone()
-            .or_else(|| std::env::var("KNMI_API_KEY").ok().filter(|k| !k.is_empty()))
             .unwrap_or_else(|| KNMI_ANONYMOUS_KEY.to_string())
     }
     fn dir(&self) -> PathBuf {
@@ -180,7 +178,7 @@ impl RadarSync {
         let list_url = format!(
             "{API_BASE}/datasets/{dataset}/versions/{version}/files?maxKeys={max_keys}&orderBy=created&sorting=desc"
         );
-        let listing: serde_json::Value = api_get_json(&list_url, &key)?;
+        let listing: JsonValue = api_get_json(&list_url, &key)?;
         let files = listing
             .get("files")
             .and_then(|f| f.as_array())
@@ -202,7 +200,7 @@ impl RadarSync {
                 let url_url = format!(
                     "{API_BASE}/datasets/{dataset}/versions/{version}/files/{filename}/url"
                 );
-                let url_response: serde_json::Value = api_get_json(&url_url, &key)?;
+                let url_response: JsonValue = api_get_json(&url_url, &key)?;
                 let Some(signed) = url_response
                     .get("temporaryDownloadUrl")
                     .and_then(|u| u.as_str())
@@ -253,7 +251,7 @@ impl RadarSync {
         let Ok(text) = std::fs::read_to_string(self.index_path()) else {
             return (0, Vec::new());
         };
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        let Ok(value) = JsonValue::deserialize_json(&text) else {
             return (0, Vec::new());
         };
         let last_poll = value
@@ -286,79 +284,73 @@ impl RadarSync {
     }
 
     fn write_index(&self, last_poll: u64, frames: &[RadarFrame]) -> Result<(), String> {
-        let value = serde_json::json!({
-            "last_poll_unix": last_poll,
-            "dataset": self.config.dataset.cache_subdir(),
-            "frames": frames.iter().map(|f| serde_json::json!({
-                "filename": f.filename,
-                "created_unix": f.created_unix,
-                "bytes": f.bytes,
-            })).collect::<Vec<_>>(),
-        });
-        std::fs::write(
-            self.index_path(),
-            serde_json::to_string_pretty(&value).unwrap(),
-        )
-        .map_err(|e| format!("write index: {e}"))
+        let index = RadarIndex {
+            last_poll_unix: last_poll,
+            dataset: self.config.dataset.cache_subdir().to_string(),
+            frames: frames
+                .iter()
+                .map(|f| RadarIndexFrame {
+                    filename: f.filename.clone(),
+                    created_unix: f.created_unix,
+                    bytes: f.bytes,
+                })
+                .collect(),
+        };
+        std::fs::write(self.index_path(), index.serialize_json_pretty())
+            .map_err(|e| format!("write index: {e}"))
     }
 }
 
-fn api_get_json(url: &str, key: &str) -> Result<serde_json::Value, String> {
+/// `index.json` in the cache directory: what is on disk and when the API
+/// was last asked. Read back field by field (`read_index`), so a frame
+/// entry that lost its file or a field is skipped instead of failing the
+/// whole index.
+#[derive(SerJson)]
+struct RadarIndex {
+    last_poll_unix: u64,
+    dataset: String,
+    frames: Vec<RadarIndexFrame>,
+}
+
+#[derive(SerJson)]
+struct RadarIndexFrame {
+    filename: String,
+    created_unix: u64,
+    bytes: u64,
+}
+
+fn api_get_json(url: &str, key: &str) -> Result<JsonValue, String> {
     // Pace every request; on a 429 (the shared anonymous key saturates), back
     // off once and retry before giving up.
     for attempt in 0..2 {
         std::thread::sleep(std::time::Duration::from_secs(1));
-        let output = Command::new("curl")
-            .arg("-fsS")
-            .arg("--connect-timeout")
-            .arg("15")
-            .arg("--max-time")
-            .arg("60")
-            .arg("-A")
-            .arg(crate::fetch::USER_AGENT)
-            .arg("-H")
-            .arg(format!("Authorization: {key}"))
-            .arg(url)
-            .output()
-            .map_err(|e| format!("curl: {e}"))?;
-        if output.status.success() {
-            return serde_json::from_slice(&output.stdout)
-                .map_err(|e| format!("KNMI API json: {e}"));
+        let response = crate::http_fetch::get(url, Some(key), 2 * 1024 * 1024)?;
+        if (200..300).contains(&response.status) {
+            let text = std::str::from_utf8(&response.body)
+                .map_err(|e| format!("KNMI API json: {e}"))?;
+            return JsonValue::deserialize_json(text).map_err(|e| format!("KNMI API json: {e}"));
         }
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        if attempt == 0 && stderr.contains("429") {
+        if attempt == 0 && response.status == 429 {
             std::thread::sleep(std::time::Duration::from_secs(8));
             continue;
         }
-        return Err(format!("KNMI API {url}: {} {stderr}", output.status));
+        return Err(format!("KNMI API returned HTTP {}", response.status));
     }
     unreachable!()
 }
 
 fn download(url: &str, dest: &Path) -> Result<(), String> {
     let part = dest.with_extension("part");
-    let status = Command::new("curl")
-        .arg("-fsSL")
-        .arg("--connect-timeout")
-        .arg("15")
-        .arg("-A")
-        .arg(crate::fetch::USER_AGENT)
-        .arg("-o")
-        .arg(&part)
-        .arg(url)
-        .status()
-        .map_err(|e| format!("curl: {e}"))?;
-    if !status.success() {
-        return Err(format!("download failed: {status}"));
+    let response = crate::http_fetch::get(url, None, 64 * 1024 * 1024)?;
+    if !(200..300).contains(&response.status) {
+        return Err(format!("download returned HTTP {}", response.status));
     }
+    std::fs::write(&part, response.body).map_err(|e| format!("write download: {e}"))?;
     std::fs::rename(&part, dest).map_err(|e| format!("rename: {e}"))
 }
 
 fn now_unix() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    crate::clock::now_unix()
 }
 
 /// Parse "2026-07-28T12:00:00+00:00" (KNMI `created`) to unix seconds.

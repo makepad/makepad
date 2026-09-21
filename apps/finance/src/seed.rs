@@ -12,12 +12,11 @@
 //! empty current month. The generator is seeded and deterministic, so the
 //! same day always produces the same file and a screenshot is reproducible.
 //!
-//! Everything here is ordinary ledger data written through the ordinary
-//! [`crate::db`] paths. There is no "demo mode" in the app: the rows are
-//! real rows, editable and deletable like any other.
+//! Generation is pure. Native first-run persistence writes the resulting
+//! ledger through the ordinary database paths, while demo builds can use it
+//! directly without a filesystem.
 
 use crate::date::{self, Day};
-use crate::db::Db;
 use crate::model::*;
 use crate::money::{Currency, EUR};
 
@@ -92,15 +91,14 @@ struct Cats {
     insurance: Id,
 }
 
-/// Fill an empty file with a generated household. Returns a one-line
-/// summary for the status bar.
-pub fn populate(db: &mut Db, years: i32) -> Result<String, String> {
-    let today = date::today();
+/// Generate a complete household ledger deterministically for `today`.
+pub fn generate(years: i32, today: Day) -> Ledger {
     let start = date::month_start(date::add_months(today, -(years * 12 - 1)));
     let currency = EUR;
+    let mut ledger = Ledger { base_currency: currency, ..Ledger::default() };
 
-    let accounts = insert_accounts(db, currency, start)?;
-    let cats = insert_categories(db)?;
+    let accounts = insert_accounts(&mut ledger.accounts, currency, start);
+    let cats = insert_categories(&mut ledger.categories.categories);
     let mut rng = Rng::new(0x5EED_F1_A2_C3);
 
     let mut txns: Vec<Transaction> = Vec::new();
@@ -131,29 +129,18 @@ pub fn populate(db: &mut Db, years: i32) -> Result<String, String> {
         };
     }
     txns.sort_by_key(|t| t.date);
+    for (index, txn) in txns.iter_mut().enumerate() {
+        txn.id = index as Id + 1;
+    }
+    add_splits(&mut txns, &cats);
 
-    let count = txns.len();
-    db.transact(|conn| {
-        for txn in &txns {
-            crate::db::insert_transaction_on(conn, txn)?;
-        }
-        Ok(())
-    })?;
-    // Splits need the ids the insert assigned, so they go in a second pass
-    // over the file rather than being carried along.
-    add_splits(db, &cats)?;
-
-    insert_budgets(db, &cats, today, years)?;
-    insert_rules(db, &cats)?;
-    insert_scheduled(db, &accounts, &cats, today)?;
-    db.set_setting("base_currency", currency.code)?;
-
-    Ok(format!(
-        "{count} transactions across {} accounts, {} to {}",
-        accounts.all().len(),
-        date::format_short(start),
-        date::format_short(today)
-    ))
+    ledger.transactions = txns;
+    ledger.budgets = generate_budgets(&cats, today, years);
+    ledger.rules = generate_rules(&cats);
+    ledger.scheduled = generate_scheduled(&accounts, &cats, today);
+    ledger.categories.categories.sort_by_key(|category| (category.sort_order, category.id));
+    ledger.scheduled.sort_by_key(|item| (item.next_due, item.id));
+    ledger
 }
 
 struct Accounts {
@@ -180,91 +167,99 @@ impl Accounts {
     }
 }
 
-fn insert_accounts(db: &mut Db, currency: Currency, start: Day) -> Result<Accounts, String> {
+fn insert_accounts(accounts: &mut Vec<Account>, currency: Currency, start: Day) -> Accounts {
     let mut make = |name: &str,
                     kind: AccountKind,
                     institution: &str,
                     opening: i64,
-                    order: i32|
-     -> Result<Id, String> {
+                    order: i32| {
         let mut account = Account::new(name, kind, currency);
+        account.id = accounts.len() as Id + 1;
         account.institution = institution.to_string();
         account.opening_balance = opening;
         account.opening_date = start - 1;
         account.sort_order = order;
-        db.insert_account(&account)
+        let id = account.id;
+        accounts.push(account);
+        id
     };
-    Ok(Accounts {
-        checking: make("Everyday", AccountKind::Checking, "ING", 342_150, 0)?,
-        savings: make("Savings", AccountKind::Savings, "ING", 1_480_000, 1)?,
-        card: make("Rewards Card", AccountKind::CreditCard, "Amex", -84_320, 2)?,
-        cash: make("Cash", AccountKind::Cash, "", 12_000, 3)?,
-        brokerage: make("Brokerage", AccountKind::Investment, "DEGIRO", 2_650_000, 4)?,
+    Accounts {
+        checking: make("Everyday", AccountKind::Checking, "ING", 342_150, 0),
+        savings: make("Savings", AccountKind::Savings, "ING", 1_480_000, 1),
+        card: make("Rewards Card", AccountKind::CreditCard, "Amex", -84_320, 2),
+        cash: make("Cash", AccountKind::Cash, "", 12_000, 3),
+        brokerage: make("Brokerage", AccountKind::Investment, "DEGIRO", 2_650_000, 4),
         // A mortgage is a debt: negative, and paid down over the run.
-        mortgage: make("Mortgage", AccountKind::Loan, "Rabobank", -24_800_000, 5)?,
-        house: make("Apartment", AccountKind::Asset, "", 41_500_000, 6)?,
-    })
+        mortgage: make("Mortgage", AccountKind::Loan, "Rabobank", -24_800_000, 5),
+        house: make("Apartment", AccountKind::Asset, "", 41_500_000, 6),
+    }
 }
 
-fn insert_categories(db: &mut Db) -> Result<Cats, String> {
-    let mut group = |name: &str, kind: CategoryKind, order: i32| -> Result<Id, String> {
+fn insert_categories(categories: &mut Vec<Category>) -> Cats {
+    let mut group = |name: &str, kind: CategoryKind, order: i32| {
         let mut category = Category::group(name, kind);
+        category.id = categories.len() as Id + 1;
         category.sort_order = order;
-        db.insert_category(&category)
+        let id = category.id;
+        categories.push(category);
+        id
     };
-    let income = group("Income", CategoryKind::Income, 0)?;
-    let housing = group("Housing", CategoryKind::Expense, 1)?;
-    let food = group("Food", CategoryKind::Expense, 2)?;
-    let transport = group("Transport", CategoryKind::Expense, 3)?;
-    let shopping = group("Shopping", CategoryKind::Expense, 4)?;
-    let health = group("Health", CategoryKind::Expense, 5)?;
-    let fun = group("Fun", CategoryKind::Expense, 6)?;
-    let travel = group("Travel", CategoryKind::Expense, 7)?;
-    let money = group("Money", CategoryKind::Expense, 8)?;
-    let family = group("Family", CategoryKind::Expense, 9)?;
+    let income = group("Income", CategoryKind::Income, 0);
+    let housing = group("Housing", CategoryKind::Expense, 1);
+    let food = group("Food", CategoryKind::Expense, 2);
+    let transport = group("Transport", CategoryKind::Expense, 3);
+    let shopping = group("Shopping", CategoryKind::Expense, 4);
+    let health = group("Health", CategoryKind::Expense, 5);
+    let fun = group("Fun", CategoryKind::Expense, 6);
+    let travel = group("Travel", CategoryKind::Expense, 7);
+    let money = group("Money", CategoryKind::Expense, 8);
+    let family = group("Family", CategoryKind::Expense, 9);
+    drop(group);
 
     let mut child = |name: &str,
                      parent: Id,
                      kind: CategoryKind,
                      rollover: bool,
-                     order: i32|
-     -> Result<Id, String> {
+                     order: i32| {
         let mut category = Category::child(name, parent, kind);
+        category.id = categories.len() as Id + 1;
         category.budgeted = kind == CategoryKind::Expense;
         category.rollover = rollover;
         category.sort_order = order;
-        db.insert_category(&category)
+        let id = category.id;
+        categories.push(category);
+        id
     };
 
-    Ok(Cats {
-        salary: child("Salary", income, CategoryKind::Income, false, 0)?,
-        interest: child("Interest", income, CategoryKind::Income, false, 1)?,
-        housing: child("Mortgage", housing, CategoryKind::Expense, false, 0)?,
-        utilities: child("Energy", housing, CategoryKind::Expense, false, 1)?,
-        internet: child("Internet", housing, CategoryKind::Expense, false, 2)?,
-        phone: child("Phone", housing, CategoryKind::Expense, false, 3)?,
-        groceries: child("Groceries", food, CategoryKind::Expense, false, 0)?,
-        restaurants: child("Restaurants", food, CategoryKind::Expense, false, 1)?,
-        coffee: child("Coffee", food, CategoryKind::Expense, false, 2)?,
-        household: child("Household", shopping, CategoryKind::Expense, false, 0)?,
-        fuel: child("Fuel", transport, CategoryKind::Expense, false, 0)?,
-        transit: child("Transit", transport, CategoryKind::Expense, false, 1)?,
+    Cats {
+        salary: child("Salary", income, CategoryKind::Income, false, 0),
+        interest: child("Interest", income, CategoryKind::Income, false, 1),
+        housing: child("Mortgage", housing, CategoryKind::Expense, false, 0),
+        utilities: child("Energy", housing, CategoryKind::Expense, false, 1),
+        internet: child("Internet", housing, CategoryKind::Expense, false, 2),
+        phone: child("Phone", housing, CategoryKind::Expense, false, 3),
+        groceries: child("Groceries", food, CategoryKind::Expense, false, 0),
+        restaurants: child("Restaurants", food, CategoryKind::Expense, false, 1),
+        coffee: child("Coffee", food, CategoryKind::Expense, false, 2),
+        household: child("Household", shopping, CategoryKind::Expense, false, 0),
+        fuel: child("Fuel", transport, CategoryKind::Expense, false, 0),
+        transit: child("Transit", transport, CategoryKind::Expense, false, 1),
         // Car maintenance is lumpy, so it rolls over: three quiet months
         // pay for the fourth.
-        car: child("Car upkeep", transport, CategoryKind::Expense, true, 2)?,
-        clothing: child("Clothing", shopping, CategoryKind::Expense, false, 1)?,
-        electronics: child("Electronics", shopping, CategoryKind::Expense, true, 2)?,
-        pharmacy: child("Pharmacy", health, CategoryKind::Expense, false, 0)?,
-        gym: child("Gym", health, CategoryKind::Expense, false, 1)?,
-        streaming: child("Streaming", fun, CategoryKind::Expense, false, 0)?,
-        events: child("Going out", fun, CategoryKind::Expense, false, 1)?,
-        flights: child("Flights", travel, CategoryKind::Expense, true, 0)?,
-        hotels: child("Hotels", travel, CategoryKind::Expense, true, 1)?,
-        fees: child("Bank fees", money, CategoryKind::Expense, false, 0)?,
-        insurance: child("Insurance", money, CategoryKind::Expense, false, 1)?,
-        gifts: child("Gifts", family, CategoryKind::Expense, true, 0)?,
-        childcare: child("Childcare", family, CategoryKind::Expense, false, 1)?,
-    })
+        car: child("Car upkeep", transport, CategoryKind::Expense, true, 2),
+        clothing: child("Clothing", shopping, CategoryKind::Expense, false, 1),
+        electronics: child("Electronics", shopping, CategoryKind::Expense, true, 2),
+        pharmacy: child("Pharmacy", health, CategoryKind::Expense, false, 0),
+        gym: child("Gym", health, CategoryKind::Expense, false, 1),
+        streaming: child("Streaming", fun, CategoryKind::Expense, false, 0),
+        events: child("Going out", fun, CategoryKind::Expense, false, 1),
+        flights: child("Flights", travel, CategoryKind::Expense, true, 0),
+        hotels: child("Hotels", travel, CategoryKind::Expense, true, 1),
+        fees: child("Bank fees", money, CategoryKind::Expense, false, 0),
+        insurance: child("Insurance", money, CategoryKind::Expense, false, 1),
+        gifts: child("Gifts", family, CategoryKind::Expense, true, 0),
+        childcare: child("Childcare", family, CategoryKind::Expense, false, 1),
+    }
 }
 
 /// A payday that lands on a working day: paid on the 25th, moved back to
@@ -388,7 +383,7 @@ fn daily_life(
             let mut txn = Transaction::new(
                 if rng.chance(15) { accounts.cash } else { accounts.card },
                 day,
-                rng.pick(&SUPERMARKETS),
+                *rng.pick(&SUPERMARKETS),
                 -amount,
             );
             txn.category = Some(cats.groceries);
@@ -397,7 +392,7 @@ fn daily_life(
         // Coffee on working days.
         if weekday < 5 && rng.chance(55) {
             let mut txn =
-                Transaction::new(accounts.card, day, rng.pick(&CAFES), -rng.between(280, 720));
+                Transaction::new(accounts.card, day, *rng.pick(&CAFES), -rng.between(280, 720));
             txn.category = Some(cats.coffee);
             txns.push(txn);
         }
@@ -407,7 +402,7 @@ fn daily_life(
             let mut txn = Transaction::new(
                 accounts.card,
                 day,
-                rng.pick(&RESTAURANTS),
+                *rng.pick(&RESTAURANTS),
                 -rng.between(2_200, 8_900),
             );
             txn.category = Some(cats.restaurants);
@@ -660,39 +655,40 @@ fn mortgage(
 
 /// Turn a handful of supermarket trips into split transactions, so the
 /// split UI has real examples the moment the app opens.
-fn add_splits(db: &mut Db, cats: &Cats) -> Result<(), String> {
-    let ledger = db.load()?;
-    let candidates: Vec<Transaction> = ledger
-        .transactions
-        .iter()
+fn add_splits(transactions: &mut [Transaction], cats: &Cats) {
+    let mut next_split_id = 1;
+    for txn in transactions
+        .iter_mut()
         .filter(|t| {
             t.category == Some(cats.groceries) && t.amount < -7_000 && t.splits.is_empty()
         })
         .take(6)
-        .cloned()
-        .collect();
-    for mut txn in candidates {
+    {
         // A third of a big shop was household goods, not food.
         let household = txn.amount / 3;
         let food = txn.amount - household;
         txn.splits = vec![
-            Split { id: 0, category: Some(cats.groceries), amount: food, memo: "Food".into() },
             Split {
-                id: 0,
+                id: next_split_id,
+                category: Some(cats.groceries),
+                amount: food,
+                memo: "Food".into(),
+            },
+            Split {
+                id: next_split_id + 1,
                 category: Some(cats.household),
                 amount: household,
                 memo: "Cleaning, paper".into(),
             },
         ];
+        next_split_id += 2;
         debug_assert_eq!(txn.split_imbalance(), 0);
-        db.update_transaction(&txn)?;
     }
-    Ok(())
 }
 
 /// Budgets for every month of history, so the budget screen opens on real
 /// numbers and the "assigned vs spent" bars mean something.
-fn insert_budgets(db: &mut Db, cats: &Cats, today: Day, years: i32) -> Result<(), String> {
+fn generate_budgets(cats: &Cats, today: Day, years: i32) -> Vec<BudgetEntry> {
     let plan: [(Id, i64); 17] = [
         (cats.housing, 92_400),
         (cats.utilities, 14_000),
@@ -714,23 +710,23 @@ fn insert_budgets(db: &mut Db, cats: &Cats, today: Day, years: i32) -> Result<()
     ];
     let months = years * 12;
     let first = date::month_key(date::add_months(today, -(months - 1)));
-    db.transact(|_conn| Ok(()))?;
+    let mut budgets = Vec::new();
     for offset in 0..months {
         let month = first + offset;
         for (category, assigned) in plan {
-            db.insert_budget(&BudgetEntry {
+            budgets.push(BudgetEntry {
                 category,
                 month,
                 assigned,
                 rollover: matches!(category, c if c == cats.car),
-            })?;
+            });
         }
     }
-    Ok(())
+    budgets
 }
 
 /// The rules a person would have written after a month of imports.
-fn insert_rules(db: &mut Db, cats: &Cats) -> Result<(), String> {
+fn generate_rules(cats: &Cats) -> Vec<Rule> {
     let rules = [
         ("Albert Heijn", "AH TO GO", Some(cats.groceries), Some("Albert Heijn")),
         ("Shell", "SHELL NEDERLAND", Some(cats.fuel), Some("Shell")),
@@ -738,9 +734,10 @@ fn insert_rules(db: &mut Db, cats: &Cats) -> Result<(), String> {
         ("Netflix", "NETFLIX.COM", Some(cats.streaming), Some("Netflix")),
         ("Amazon", "AMZN MKTP", Some(cats.household), Some("Amazon")),
     ];
+    let mut generated = Vec::new();
     for (index, (name, pattern, category, rename)) in rules.into_iter().enumerate() {
-        db.insert_rule(&Rule {
-            id: 0,
+        generated.push(Rule {
+            id: index as Id + 1,
             name: name.to_string(),
             match_on: MatchOn::Raw,
             how: MatchHow::Contains,
@@ -754,13 +751,13 @@ fn insert_rules(db: &mut Db, cats: &Cats) -> Result<(), String> {
             priority: index as i32,
             enabled: true,
             hits: 0,
-        })?;
+        });
     }
-    Ok(())
+    generated
 }
 
 /// The recurring bills, as the app's detector would have found them.
-fn insert_scheduled(db: &mut Db, accounts: &Accounts, cats: &Cats, today: Day) -> Result<(), String> {
+fn generate_scheduled(accounts: &Accounts, cats: &Cats, today: Day) -> Vec<Scheduled> {
     let next = |day: u32| -> Day {
         let (y, m, _) = date::to_ymd(today);
         let candidate = date::from_ymd(y, m, day.min(date::days_in_month(y, m)));
@@ -781,9 +778,11 @@ fn insert_scheduled(db: &mut Db, accounts: &Accounts, cats: &Cats, today: Day) -
         (accounts.card, "SportCity", -2_995, cats.gym, next(18)),
         (accounts.checking, "Bergman Design BV", 492_400, cats.salary, next(25)),
     ];
-    for (account, payee, amount, category, due) in items {
-        db.insert_scheduled(&Scheduled {
-            id: 0,
+    items
+        .into_iter()
+        .enumerate()
+        .map(|(index, (account, payee, amount, category, due))| Scheduled {
+            id: index as Id + 1,
             account,
             payee: payee.to_string(),
             amount,
@@ -794,28 +793,143 @@ fn insert_scheduled(db: &mut Db, accounts: &Accounts, cats: &Cats, today: Day) -
             auto_post: false,
             enabled: true,
             detected: true,
-        })?;
-    }
-    Ok(())
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::{HashMap, HashSet};
 
-    fn temp_db(name: &str) -> (Db, std::path::PathBuf) {
-        let mut path = std::env::temp_dir();
-        path.push(format!("finance-seed-{name}-{}.db", std::process::id()));
-        let _ = std::fs::remove_file(&path);
-        (Db::open(&path).expect("open"), path)
+    fn fingerprint(ledger: &Ledger) -> u64 {
+        // Every model here derives Debug over all of its named fields. Sort
+        // each table by its durable key, then length-frame and hash those
+        // complete structural records so neither ordering nor concatenation
+        // ambiguity can hide a difference.
+        let mut rows = vec![format!("currency:{:?}", ledger.base_currency)];
+
+        let mut accounts: Vec<_> = ledger.accounts.iter().collect();
+        accounts.sort_by_key(|account| account.id);
+        rows.extend(accounts.into_iter().map(|account| format!("account:{account:?}")));
+
+        let mut categories: Vec<_> = ledger.categories.categories.iter().collect();
+        categories.sort_by_key(|category| category.id);
+        rows.extend(categories.into_iter().map(|category| format!("category:{category:?}")));
+
+        let mut transactions = ledger.transactions.clone();
+        transactions.sort_by_key(|txn| txn.id);
+        for txn in &mut transactions {
+            txn.splits.sort_by_key(|split| split.id);
+        }
+        rows.extend(transactions.into_iter().map(|txn| format!("transaction:{txn:?}")));
+
+        let mut payees: Vec<_> = ledger.payees.iter().collect();
+        payees.sort_by_key(|payee| payee.id);
+        rows.extend(payees.into_iter().map(|payee| format!("payee:{payee:?}")));
+
+        let mut budgets = ledger.budgets.clone();
+        budgets.sort_by_key(|budget| (budget.category, budget.month));
+        rows.extend(budgets.into_iter().map(|budget| format!("budget:{budget:?}")));
+
+        let mut rules: Vec<_> = ledger.rules.iter().collect();
+        rules.sort_by_key(|rule| rule.id);
+        rows.extend(rules.into_iter().map(|rule| format!("rule:{rule:?}")));
+
+        let mut scheduled: Vec<_> = ledger.scheduled.iter().collect();
+        scheduled.sort_by_key(|item| item.id);
+        rows.extend(scheduled.into_iter().map(|item| format!("scheduled:{item:?}")));
+
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        for row in rows {
+            for byte in (row.len() as u64).to_le_bytes().into_iter().chain(row.bytes()) {
+                hash ^= u64::from(byte);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+        hash
+    }
+
+    fn entity_ids(ledger: &Ledger) -> Vec<(&'static str, Vec<Id>)> {
+        vec![
+            ("accounts", ledger.accounts.iter().map(|item| item.id).collect()),
+            (
+                "categories",
+                ledger.categories.categories.iter().map(|item| item.id).collect(),
+            ),
+            ("transactions", ledger.transactions.iter().map(|item| item.id).collect()),
+            (
+                "splits",
+                ledger
+                    .transactions
+                    .iter()
+                    .flat_map(|txn| txn.splits.iter().map(|split| split.id))
+                    .collect(),
+            ),
+            ("payees", ledger.payees.iter().map(|item| item.id).collect()),
+            ("rules", ledger.rules.iter().map(|item| item.id).collect()),
+            ("scheduled", ledger.scheduled.iter().map(|item| item.id).collect()),
+        ]
+    }
+
+    fn assert_unique_ids(ledger: &Ledger) {
+        for (kind, ids) in entity_ids(ledger) {
+            let mut unique = HashSet::new();
+            for id in ids {
+                assert_ne!(id, NO_ID, "{kind} contains an unassigned id");
+                assert!(unique.insert(id), "duplicate {kind} id {id}");
+            }
+        }
+        let budget_keys: HashSet<_> =
+            ledger.budgets.iter().map(|entry| (entry.category, entry.month)).collect();
+        assert_eq!(budget_keys.len(), ledger.budgets.len(), "duplicate budget key");
+    }
+
+    fn assert_references_resolve(ledger: &Ledger) {
+        let accounts: HashSet<_> = ledger.accounts.iter().map(|account| account.id).collect();
+        let categories: HashSet<_> =
+            ledger.categories.categories.iter().map(|category| category.id).collect();
+        for category in &ledger.categories.categories {
+            if let Some(parent) = category.parent {
+                assert!(categories.contains(&parent), "missing parent category {parent}");
+            }
+        }
+        for txn in &ledger.transactions {
+            assert!(accounts.contains(&txn.account), "missing transaction account {}", txn.account);
+            if let Some(category) = txn.category {
+                assert!(categories.contains(&category), "missing transaction category {category}");
+            }
+            for split in &txn.splits {
+                if let Some(category) = split.category {
+                    assert!(categories.contains(&category), "missing split category {category}");
+                }
+            }
+        }
+        for payee in &ledger.payees {
+            if let Some(category) = payee.default_category {
+                assert!(categories.contains(&category), "missing payee category {category}");
+            }
+        }
+        for budget in &ledger.budgets {
+            assert!(categories.contains(&budget.category), "missing budget category");
+        }
+        for rule in &ledger.rules {
+            if let Some(category) = rule.set_category {
+                assert!(categories.contains(&category), "missing rule category {category}");
+            }
+        }
+        for item in &ledger.scheduled {
+            assert!(accounts.contains(&item.account), "missing scheduled account");
+            if let Some(category) = item.category {
+                assert!(categories.contains(&category), "missing scheduled category");
+            }
+        }
     }
 
     #[test]
     fn the_demo_file_is_a_coherent_household() {
-        let (mut db, path) = temp_db("household");
-        let summary = populate(&mut db, DEFAULT_YEARS).expect("populate");
-        assert!(summary.contains("transactions"));
-        let ledger = db.load().expect("load");
+        let today = date::from_ymd(2026, 8, 28);
+        let ledger = generate(DEFAULT_YEARS, today);
 
         // Enough to fill every screen.
         assert!(
@@ -831,12 +945,18 @@ mod tests {
 
         // Every transfer pair balances — the invariant the whole
         // net-worth number rests on.
-        let groups: std::collections::HashSet<Id> =
-            ledger.transactions.iter().filter_map(|t| t.transfer_group).collect();
-        assert!(groups.len() > 20, "expected many transfers, got {}", groups.len());
-        for group in groups {
-            assert!(ledger.transfer_is_balanced(group), "transfer {group} does not cancel");
+        let mut groups: HashMap<Id, Vec<&Transaction>> = HashMap::new();
+        for txn in ledger.transactions.iter().filter(|txn| txn.transfer_group.is_some()) {
+            groups.entry(txn.transfer_group.unwrap()).or_default().push(txn);
         }
+        assert!(groups.len() > 20, "expected many transfers, got {}", groups.len());
+        for (group, rows) in groups {
+            assert_eq!(rows.len(), 2, "transfer {group} must have exactly two rows");
+            assert_eq!(rows[0].amount, -rows[1].amount, "transfer {group} must cancel");
+        }
+
+        assert_unique_ids(&ledger);
+        assert_references_resolve(&ledger);
 
         // Splits sum to their transaction.
         let split_count = ledger.transactions.iter().filter(|t| t.is_split()).count();
@@ -854,10 +974,9 @@ mod tests {
             ledger.balance(mortgage.id) > mortgage.opening_balance,
             "the mortgage should have been paid down"
         );
-        assert!(ledger.net_worth_on(date::today()) > 0);
+        assert!(ledger.net_worth_on(today) > 0);
 
         // Nothing in the future, and history reaches back two years.
-        let today = date::today();
         assert!(ledger.transactions.iter().all(|t| t.date <= today));
         let oldest = ledger.transactions.iter().map(|t| t.date).min().unwrap();
         assert!(today - oldest > 660, "expected ~2 years of history");
@@ -872,23 +991,16 @@ mod tests {
             .iter()
             .any(|t| t.cleared == Cleared::Reconciled));
         assert!(ledger.cleared_balance(checking.id) != ledger.balance(checking.id));
-
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn the_same_seed_produces_the_same_file() {
-        let (mut a, path_a) = temp_db("determinism-a");
-        let (mut b, path_b) = temp_db("determinism-b");
-        populate(&mut a, 1).expect("a");
-        populate(&mut b, 1).expect("b");
-        let one = a.load().expect("load a");
-        let two = b.load().expect("load b");
-        assert_eq!(one.transactions.len(), two.transactions.len());
-        let sum_a: i64 = one.transactions.iter().map(|t| t.amount).sum();
-        let sum_b: i64 = two.transactions.iter().map(|t| t.amount).sum();
-        assert_eq!(sum_a, sum_b);
-        let _ = std::fs::remove_file(&path_a);
-        let _ = std::fs::remove_file(&path_b);
+        let today = date::from_ymd(2026, 8, 28);
+        let one = generate(2, today);
+        let two = generate(2, today);
+        assert_eq!(fingerprint(&one), fingerprint(&two));
+        assert_eq!(entity_ids(&one), entity_ids(&two), "generated ids must be stable");
+        assert_unique_ids(&one);
+        assert_unique_ids(&two);
     }
 }

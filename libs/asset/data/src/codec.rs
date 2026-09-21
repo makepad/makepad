@@ -36,6 +36,9 @@ pub(crate) const MAGIC: [u8; 4] = *b"MPC1";
 /// pixels and guessing. Appended after the five fields a thumbnail has always
 /// carried, which stay in place, at their width, in their order.
 pub const CONTENT_SCHEMA_VERSION: u16 = 4;
+/// Oldest canonical content schema this build can migrate while decoding.
+/// Schema v3 differs from v4 only by the absence of thumbnail views.
+pub const MIN_READABLE_CONTENT_SCHEMA_VERSION: u16 = 3;
 
 /// Document kind tags, so one manifest kind can never be decoded as another.
 pub(crate) mod dockind {
@@ -142,6 +145,7 @@ impl CanonWriter {
 pub(crate) struct CanonReader<'a> {
     buf: &'a [u8],
     pos: usize,
+    schema_version: u16,
 }
 
 impl<'a> CanonReader<'a> {
@@ -153,7 +157,7 @@ impl<'a> CanonReader<'a> {
                 found: buf.len() as u64,
             });
         }
-        let mut r = Self { buf, pos: 0 };
+        let mut r = Self { buf, pos: 0, schema_version: 0 };
         let magic = r.take(4, "magic")?;
         if magic != MAGIC {
             return Err(AssetDataError::BadMagic);
@@ -166,10 +170,15 @@ impl<'a> CanonReader<'a> {
             });
         }
         let version = r.u16("schema version")?;
-        if version != CONTENT_SCHEMA_VERSION {
+        if !(MIN_READABLE_CONTENT_SCHEMA_VERSION..=CONTENT_SCHEMA_VERSION).contains(&version) {
             return Err(AssetDataError::UnsupportedSchema { found: version });
         }
+        r.schema_version = version;
         Ok(r)
+    }
+
+    pub fn schema_version(&self) -> u16 {
+        self.schema_version
     }
 
     fn take(&mut self, n: usize, what: &'static str) -> Result<&'a [u8], AssetDataError> {

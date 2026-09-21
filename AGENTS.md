@@ -1,931 +1,229 @@
 # Makepad Agent Runbook
 
-> **Driving a running app: use `--remote`.** Every makepad app started with
-> `--remote` serves a tiny localhost HTTP control surface: window list, PNG
-> grabs, real mouse/key/text injection, widget rects, log tail, graceful quit.
-> It replaces `screencapture -l`, `winid.swift`, CGEvent scripting and the
-> studio websocket bridge for all agent work. Full spec: [App Remote Control](#app-remote-control---remote).
+Repository-wide rules. Read the linked references when the task needs them;
+use current source for API signatures and working examples.
 
-## Execution Policy
-- Launch UI programs as standalone release binaries from this checkout. Do
-  not use the Studio remote bridge, `ObserveMount`, `RunItem`, or any
-  `cargo-makepad studio` websocket client.
-- Launch with `--remote` whenever you intend to look at or drive the app,
-  and finish with `GET /gq`. **Nothing of yours may outlive your task** —
-  never leave a test window on the user's screen.
-- Always use release builds for runtime validation, profiling, benchmarks,
-  timing checks, or any performance-sensitive command. Use `--release`
-  unless the user explicitly asks for a debug build.
-- Build with `cargo build --release -p <package>`, then launch the
-  resulting executable so its provenance is unambiguous. Do not use raw
-  `cargo run` / `cargo makepad` to start a UI you will keep inspecting.
-- Stop or replace an older standalone instance of the same target before
-  launching a freshly built one.
-- Keep an interactive standalone app running when the user asks to play
-  with it. Use a separate self-terminating capture run only when a
-  screenshot is also needed.
-- `cargo check` or `cargo build` never counts as UI verification. After
-  changing UI/runtime code, rebuild and relaunch before trusting what you
-  see. Do not keep inspecting an older already-running binary.
-- Command-line-only tasks (builds, tests, linting, file ops, grep, etc.)
-  can be run directly in the shell.
-- A standalone app's built-in screenshot/capture hook is valid for visual
-  inspection.
-- When adding a new example crate, update both the Cargo workspace and
+## Local work and documentation
+
+- Plans go in `local/plans/<topic>.md`.
+- Other task design documents and reports go in `local/agent_state/<topic>/`.
+  Keep these local; do not publish them as hosted pages or artifacts.
+- Keep reusable repository documentation in tracked files. Do not make the
+  workflow depend on helper scripts or state that may disappear with `local/`.
+- When adding an example crate, update its Cargo workspace and
   `makepad.splash`.
-
-## Standalone Launch
-1. `cargo build --release -p <package>` from this checkout.
-2. Kill any older process of that same executable.
-3. Run `target/release/<bin> --remote` from the repo root (so resource paths
-   resolve), parse the port from the startup line, drive it over HTTP.
-4. After code changes, repeat 1–3 before drawing conclusions.
-5. `GET /gq` when you are done. Always.
-
-## App Remote Control (`--remote`)
-
-Any makepad app launched with `--remote` runs a localhost HTTP server inside
-the process and prints one line before the UI appears:
-
-```
-[makepad-remote] listening on 127.0.0.1:53412 pid=9931 app=makepad-example-splash grabs=/var/folders/…/T/makepad-remote/makepad-example-splash-9931
-```
-
-Port, pid, app name and the grab directory — everything needed to drive and
-clean up the instance, with no discovery step. `--remote=PORT` pins the port;
-`MAKEPAD_REMOTE=1` (or `=PORT`) does the same via the environment. No app code
-is involved: it lives in `app_main!`, so every app gets it for free.
-
-### Cheat sheet
-
-Every route is a plain `GET`. Every answer is **one line of JSON** with short
-keys and real numbers. Errors are `{"err":"..."}` with HTTP 404.
-`GET /` returns this table as plain text, so an agent that finds the port
-learns the whole API in one request.
-
-| Route | Answer | Notes |
-|---|---|---|
-| `/` `/help` | plain-text cheat sheet | self-describing; read this first |
-| `/s` `?w=ID` | `{"app":…,"pid":…,"w":[{"i":0,"t":"Title","sz":[w,h],"px":[w,h],"dpi":2,"pos":[x,y]}]}` | `sz` = layout points, `px` = physical pixels |
-| `/g` `?w=&scale=&raw=` | `{"png":"/abs/path.png","w":0,"sz":[w,h]}` | writes a file and returns the **path** (agents read images as files). `raw=1` sends `image/png` bytes instead. `scale=0.5` halves it |
-| `/gq` `?w=&scale=` | `{"png":[paths…],"quit":1}` | **grab every window, then quit.** The canonical last call of a session |
-| `/m` `?k=&x=&y=&w=&b=&dx=&dy=&wait=` | `{"ok":1,"f":frame}` | `k=move\|down\|up\|click\|scroll`; `b=0` left, `1` right, `2` middle |
-| `/click` `?x=&y=&w=&wait=` | `{"ok":1}` | alias for `/m?k=click` (move + down + up) |
-| `/k` `?t=TEXT` or `?k=down\|up\|press&c=CODE` | `{"ok":1}` | `t=` goes through the IME text path; `c=` takes `KeyA`/`a`/`enter`/`Escape`/`ArrowLeft`/`F1`/`Key1`… plus `&shift=1&ctrl=1&alt=1&cmd=1` |
-| `/t` `?t=TEXT` | `{"ok":1}` | same as `/k?t=` |
-| `/snap` `?q=&w=&all=` | `{"s":[{"i":"id","ty":"Button","r":[x,y,w,h],"w":0,"t":"Click me"}]}` | **how you find things to click.** `q=` filters id/type/text; rects are window-local, ready to feed to `/click` |
-| `/d` `/dump` | plain text widget tree | one indented line per widget, ending `x y w h` |
-| `/log` `?n=50&since=N` | `{"n":lastseq,"l":["[E] …"]}` | ring buffer of the app's own log output — see errors without owning stdout |
-| `/close` `?w=ID` | `{"ok":1}` | closes one window the normal way |
-| `/quit` | `{"ok":1}` | graceful shutdown, no final grab |
-
-Add `&wait=1` to any input route to have it answer only **after the next frame
-is drawn**, so a following `/g` sees the result with no `sleep`.
-Add `&w=ID` to target a window; omit it for the first one.
-`POST` the same routes with a flat JSON body (`{"x":10,"y":20}`) when quoting a
-query string is painful; the key names are the long ones (`window`, `kind`,
-`button`, `text`, `code`).
-
-### The standard pattern
-
-```bash
-cargo build --release -p makepad-example-splash
-./target/release/makepad-example-splash --remote > /tmp/app.log 2>&1 &
-sleep 4
-P=$(grep -o 'listening on 127.0.0.1:[0-9]*' /tmp/app.log | grep -o '[0-9]*$')
-
-curl -s "http://127.0.0.1:$P/s"                      # {"app":…,"w":[{"i":0,…}]}
-curl -s "http://127.0.0.1:$P/snap?q=press_demo"      # find the button's rect
-curl -s "http://127.0.0.1:$P/click?x=352&y=472&wait=1"
-curl -s "http://127.0.0.1:$P/snap?q=press_status"    # assert the app reacted
-curl -s "http://127.0.0.1:$P/log?n=20"               # any errors?
-curl -s "http://127.0.0.1:$P/gq?scale=0.5"           # final PNGs + quit
-```
-
-Read the returned `png` path with your image tool. `tools/remote_smoke.sh` is
-this pattern as an executable end-to-end test across three example apps.
-
-### Rules
-
-- **Close what you open.** When you are done with an instance you launched,
-  `GET /gq` (or `/close` each window, then `/quit`). Never leave test windows
-  on the user's screen, and never `pkill` when the protocol is available.
-- **Never touch an instance the user is running.** Launch your own.
-- **A vanished window or app with `[makepad-remote] user closed …` in the log
-  means the human dismissed it — it was in their way.** Do **not** treat that
-  as a crash and do **not** relaunch it. The app prints
-  `[makepad-remote] user closed window 1 ("Inspector Panel")` and, when that
-  was the last window, `[makepad-remote] app exit: user closed the last
-  window`. Both lines go to stdout with or without `--remote`, and into the
-  `/log` ring. While the app lives, `/s?w=1` on such a window answers
-  `{"err":"window 1 closed by user"}` rather than "no window 1".
-- **`--remote` windows are tagged.** Their title gets a ` [remote]` suffix
-  (both the OS title bar and makepad's own caption bar) so a human who finds
-  one lingering knows it is an agent instance and can close it guilt-free.
-  `--remote-title-tag=NAME` changes the tag; `--remote-title-tag=off` removes
-  it.
-
-### Semantics worth knowing
-
-- **Coordinates** are layout points, window-local, y down — the same space
-  `MouseDownEvent.abs` uses, and the same space `/snap` reports rects in. No
-  dpi maths: a rect from `/snap` goes straight into `/click`.
-- **Window ids** are stable `usize` slots (`/s` `"i"`). Every window-targeting
-  route takes `w=`; omitting it means the first created window. A request for
-  a window that never existed 404s with `{"err":"no window 3"}`.
-- **Input takes the real path.** Events are injected through
-  `Cx::dispatch_studio_msg`, the same function the studio bridge uses, with
-  the same `fingers` bookkeeping — so hits, capture, tap counts and gestures
-  behave exactly as they do for a human. `/click` sends move + down + up so
-  hover-dependent widgets see what they expect.
-- **Grabs are real frames**, read back from the window's own presented
-  drawable on the frame after the request (the studio screenshot pipeline,
-  extended with per-window targeting). The UI thread is never blocked; the
-  HTTP thread waits. Grabs are written to
-  `$TMPDIR/makepad-remote/<app>-<pid>/grab-w<window>-<seq>.png`, monotonically
-  numbered, with the last 32 per window retained.
-- **Backends:** macOS/Metal is fully supported. Linux GL and Vulkan support
-  grabs too. Windows/D3D11 has no screenshot readback yet, so `/g` there times
-  out with `{"err":"grab timeout …"}` while every other route works. Android,
-  OHOS and wasm compile to a no-op.
-- **Cost when idle is zero.** The event loop only upshifts its paint clock
-  while a remote request is in flight.
-
-### Studio remote bridge (the older path)
-
-The studio (`studio/desktop` + `studio/hub`) drives a hosted app over a
-websocket with the `StudioToApp` / `AppToStudio` protocol
-(`platform/studio/src/studio.rs`): `MouseDown/Up/Move/Scroll`, `KeyDown/Up`,
-`TextInput`, `TextCopy/Cut`, `GameInput`, `Screenshot`, `RunViewFrameRequest`,
-`WidgetTreeDump`, `WidgetQuery`, `WidgetSnapshot`, `LiveChange`, `Custom`,
-`Kill`, plus the shared-swapchain messages `Swapchain` / `WindowGeomChange` /
-`Tick`. `libs/makepad_test` is the programmatic client for it
-(`TestApp::try_click_center`, `try_type_text`, `try_screenshot`, …) and
-`examples/*/tests/ui.rs` are its test suites.
-
-`--remote` reuses that vocabulary — the same message types, the same injection
-function, the same screenshot pipeline — but exposes it as HTTP on the app
-itself, with no studio, no hub, no build ids, and with per-window targeting
-that the studio path lacks. Use `--remote` for agent work; the studio bridge
-remains for the studio and for `libs/makepad_test`.
-
-## CLAUDE.md Body
-The following is the current body of CLAUDE.md included verbatim for agent guidance parity.
-
-# Makepad Project Guide
-
-## Important: When Converting Syntax
-
-**Always search for existing usage patterns in the NEW crates (widgets, code_editor, studio) before making syntax changes.** The old `widgets` and `live_design!` syntax is deprecated. When unsure about the correct syntax for something, grep for similar usage in `widgets/src/` to find the correct pattern.
-
-```bash
-# Example: find how texture declarations work in new system
-grep -r "texture_2d" widgets/src/
-```
-
-**Critical: Always use `Name: value` syntax, never `Name = value`.** The old `Key = Value` syntax no longer works. For named widget instances, use `name := Type{...}` syntax.
-
-## Running UI Programs
-
-Launch UI apps as standalone release binaries from this checkout. Do not
-use the Studio remote bridge.
-
-```bash
-cargo build --release -p makepad-app-asset-ui
-# stop any older instance of the same binary, then:
-./target/release/makepad-app-asset-ui
-```
-
-For one-shot visual smoke of a small example:
-
-```bash
-RUST_BACKTRACE=1 cargo run -p makepad-example-splash --release & PID=$!; sleep 15; kill $PID 2>/dev/null; echo "Process $PID killed"
-```
-
-To look at or drive a running app, add `--remote`: the app serves a localhost
-HTTP control surface (window list, PNG grabs, real mouse/key/text injection,
-widget rects, log tail) and prints its port on startup. Finish every session
-with `GET /gq`, which grabs each window and quits — never leave a test window
-on screen. Full protocol: repo-root `AGENTS.md`.
-
-```bash
-./target/release/makepad-example-splash --remote > /tmp/app.log 2>&1 &
-P=$(grep -o 'listening on 127.0.0.1:[0-9]*' /tmp/app.log | grep -o '[0-9]*$')
-curl -s "http://127.0.0.1:$P/"          # cheat sheet
-curl -s "http://127.0.0.1:$P/gq"        # final grab + quit
-```
-
-When measuring runtime or performance, prefer `--release`.
-
-## Cargo.toml Setup
-
-```toml
-[package]
-name = "makepad-example-myapp"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-makepad-widgets = { path = "../../widgets" }
-```
-
-
-## Widgets DSL (script_mod!)
-
-The new DSL uses `script_mod!` macro with runtime script evaluation instead of the old `live_design!` compile-time macros.
-
-### Imports and App Setup
-
-```rust
-use makepad_widgets::*;
-
-app_main!(App);
-
-script_mod!{
-    use mod.prelude.widgets.*
-    
-    load_all_resources() do #(App::script_component(vm)){
-        ui: Root{
-            main_window := Window{
-                window.inner_size: vec2(800, 600)
-                body +: {
-                    // UI content here
-                }
-            }
-        }
-    }
-}
-
-impl App {
-    fn run(vm: &mut ScriptVm) -> Self {
-        crate::makepad_widgets::script_mod(vm);  // Register all widgets
-        // Platform-specific initialization goes here (e.g., vm.cx().start_stdin_service() for macos)
-        App::from_script_mod(vm, self::script_mod)
-    }
-}
-
-#[derive(Script, ScriptHook)]
-pub struct App {
-    #[live] ui: WidgetRef,
-}
-
-impl MatchEvent for App {
-    fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        // Handle widget actions
-    }
-}
-
-impl AppMain for App {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        self.match_event(cx, event);
-        self.ui.handle_event(cx, event, &mut Scope::empty());
-    }
-}
-```
-
-### Available Widgets (widgets/src/lib.rs)
-
-Core: `View`, `SolidView`, `RoundedView`, `ScrollXView`, `ScrollYView`, `ScrollXYView`
-Text: `Label`, `H1`, `H2`, `H3`, `LinkLabel`, `TextInput`
-Buttons: `Button`, `ButtonFlat`, `ButtonFlatter`
-Toggles: `CheckBox`, `Toggle`, `RadioButton`
-Input: `Slider`, `DropDown`
-Layout: `Splitter`, `FoldButton`, `FoldHeader`, `Hr`
-Lists: `PortalList`
-Navigation: `StackNavigation`, `ExpandablePanel`
-Overlays: `Modal`, `Tooltip`, `PopupNotification`
-Dock: `Dock`, `DockSplitter`, `DockTabs`, `DockTab`
-Media: `Image`, `Icon`, `LoadingSpinner`
-Special: `FileTree`, `PageFlip`, `CachedWidget`
-Window: `Window`, `Root`
-Markup: `Html`, `Markdown` (feature-gated)
-
-### Widget Definition Pattern
-
-```rust
-// Rust struct
-#[derive(Script, ScriptHook, Widget)]
-pub struct MyWidget {
-    #[source] source: ScriptObjectRef,  // Required for script integration
-    #[walk] walk: Walk,
-    #[layout] layout: Layout,
-    #[redraw] #[live] draw_bg: DrawQuad,
-    #[live] draw_text: DrawText,
-    #[rust] my_state: i32,  // Runtime-only field
-}
-
-// For widgets with animations, add Animator derive:
-#[derive(Script, ScriptHook, Widget, Animator)]
-pub struct AnimatedWidget {
-    #[source] source: ScriptObjectRef,
-    #[apply_default] animator: Animator,
-    // ...
-}
-```
-
-### Script Module Structure
-
-```rust
-script_mod!{
-    use mod.prelude.widgets_internal.*  // For internal widget definitions
-    use mod.widgets.*                    // Access other widgets
-    
-    // Register base widget (connects Rust struct to script)
-    mod.widgets.MyWidgetBase = #(MyWidget::register_widget(vm))
-    
-    // Create styled variant with defaults
-    mod.widgets.MyWidget = set_type_default() do mod.widgets.MyWidgetBase{
-        width: Fill
-        height: Fit
-        padding: theme.space_2
-        
-        draw_bg +: {
-            color: theme.color_bg_app
-        }
-    }
-}
-```
-
-### Key Syntax Differences (Old vs New)
-
-| Old (live_design!) | New (script_mod!) |
-|-------------------|-------------------|
-| `<BaseWidget>` | `mod.widgets.BaseWidget{ }` |
-| `{{StructName}}` | `#(Struct::register_widget(vm))` |
-| `(THEME_COLOR_X)` | `theme.color_x` |
-| `<THEME_FONT>` | `theme.font_regular` |
-| `instance hover: 0.0` | `hover: instance(0.0)` |
-| `uniform color: #fff` | `color: uniform(#fff)` |
-| `draw_bg: { }` (replace) | `draw_bg +: { }` (merge) |
-| `default: off` | `default: @off` |
-| `fn pixel(self)` | `pixel: fn()` |
-| `item.apply_over(cx, live!{...})` | `script_apply_eval!(cx, item, {...})` |
-
-### Runtime Property Updates with script_apply_eval!
-
-Use `script_apply_eval!` macro to dynamically update widget properties at runtime:
-```rust
-// Old system (live! macro with apply_over)
-item.apply_over(cx, live!{
-    height: (height)
-    draw_bg: {is_even: (if is_even {1.0} else {0.0})}
-});
-
-// New system (script_apply_eval! macro)
-script_apply_eval!(cx, item, {
-    height: #(height)
-    draw_bg: {is_even: #(if is_even {1.0} else {0.0})}
-});
-
-// For colors, use #(color) syntax
-let color = self.color_focus;
-script_apply_eval!(cx, item, {
-    draw_bg: {
-        color: #(color)
-    }
-});
-```
-
-Note: In `script_apply_eval!`, use `#(expr)` for Rust expression interpolation instead of `(expr)`.
-
-### Theme Access
-
-Always use `theme.` prefix:
-```rust
-color: theme.color_bg_app
-padding: theme.space_2
-font_size: theme.font_size_p
-text_style: theme.font_regular
-```
-
-### Property Merging with `+:`
-
-The `+:` operator merges with parent instead of replacing:
-```rust
-mod.widgets.MyButton = mod.widgets.Button{
-    draw_bg +: {
-        color: #f00  // Only overrides color, keeps other draw_bg properties
-    }
-}
-```
-
-### Shader Instance vs Uniform
-
-- `instance(value)` - Per-draw-call value (can vary per widget instance)
-- `uniform(value)` - Shared across all instances using same shader
-
-```rust
-draw_bg +: {
-    hover: instance(0.0)           // Each button has its own hover state
-    color: uniform(theme.color_x)  // Shared base color
-    color_hover: instance(theme.color_y)  // Per-instance if color varies
-}
-```
-
-### Animator Definition
-
-```rust
-animator: Animator{
-    hover: {
-        default: @off
-        off: AnimatorState{
-            from: {all: Forward {duration: 0.1}}
-            apply: {
-                draw_bg: {hover: 0.0}
-                draw_text: {hover: 0.0}
-            }
-        }
-        on: AnimatorState{
-            from: {all: Snap}  // Instant transition
-            apply: {
-                draw_bg: {hover: 1.0}
-                draw_text: {hover: 1.0}
-            }
-        }
-    }
-}
-```
-
-### Shader Functions
-
-```rust
-draw_bg +: {
-    pixel: fn() {
-        let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-        sdf.box(0.0, 0.0, self.rect_size.x, self.rect_size.y, 4.0)
-        sdf.fill(self.color.mix(self.color_hover, self.hover))
-        return sdf.result
-    }
-}
-```
-
-Note: Use `.method()` not `::method()` in shaders.
-
-### Color Mixing (Method Chaining)
-
-```rust
-// Old nested style (avoid)
-mix(mix(mix(color1, color2, hover), color3, down), color4, focus)
-
-// New chained style (preferred)
-color1.mix(color2, hover).mix(color3, down).mix(color4, focus)
-```
-
-### App Structure Pattern
-
-```rust
-script_mod!{
-    use mod.prelude.widgets.*
-    
-    load_all_resources() do #(App::script_component(vm)){
-        ui: Root{
-            main_window := Window{
-                window.inner_size: vec2(1000, 700)
-                body +: {
-                    // Your UI here
-                    MyWidget{}
-                }
-            }
-        }
-    }
-}
-
-impl App {
-    fn run(vm: &mut ScriptVm) -> Self {
-        crate::makepad_widgets::script_mod(vm);
-        // Platform-specific initialization (e.g., vm.cx().start_stdin_service() for macos)
-        App::from_script_mod(vm, self::script_mod)
-    }
-}
-
-#[derive(Script, ScriptHook)]
-pub struct App {
-    #[live] ui: WidgetRef,
-}
-
-impl MatchEvent for App {
-    fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
-        if self.ui.button(ids!(my_button)).clicked(actions) {
-            log!("Button clicked!");
-        }
-    }
-}
-
-impl AppMain for App {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        self.match_event(cx, event);
-        self.ui.handle_event(cx, event, &mut Scope::empty());
-    }
-}
-```
-
-### Widget ID References
-
-Use `:=` for named widget instances:
-```rust
-// In DSL
-my_button := Button{text: "Click"}
-
-// In Rust code
-self.ui.button(ids!(my_button)).clicked(actions)
-```
-
-### Template Definitions in Dock
-
-Templates inside Dock are local; use `let` bindings at script level for reusable components:
-```rust
-script_mod!{
-    // Reusable at script level
-    let MyPanel = SolidView{
-        width: Fill
-        height: Fill
-        // ...
-    }
-    
-    // Use directly
-    body +: {
-        MyPanel{}  // Works because it's a let binding
-    }
-}
-```
-
-### Custom Draw Widget Example
-
-```rust
-#[derive(Script, ScriptHook, Widget)]
-pub struct CustomDraw {
-    #[walk] walk: Walk,
-    #[layout] layout: Layout,
-    #[redraw] #[live] draw_quad: DrawQuad,
-    #[rust] area: Area,
-}
-
-impl Widget for CustomDraw {
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
-        cx.begin_turtle(walk, self.layout);
-        let rect = cx.turtle().rect();
-        self.draw_quad.draw_abs(cx, rect);
-        cx.end_turtle_with_area(&mut self.area);
-        DrawStep::done()
-    }
-    
-    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
-}
-```
-
-### Script Object Storage: map vs vec
-
-In script objects, properties are stored in two different places:
-- **`map`**: Contains `key: value` pairs (regular properties)
-- **`vec`**: Contains named template items (via `:=` syntax)
-
-This distinction is important when working with `on_after_apply` or inspecting script objects directly.
-
-### Templates in List Widgets (PortalList, FlatList)
-
-In list widgets, named IDs (using `:=`) define **templates** that are stored in the widget's `templates` HashMap. These are NOT regular properties - they go into the script object's vec and are collected via `on_after_apply`.
-
-```rust
-// In script_mod! - defining templates for a list
-my_list := PortalList {
-    // Regular properties (go into struct fields)
-    width: Fill
-    height: Fill
-    scroll_bar: mod.widgets.ScrollBar {}
-    
-    // Templates (named with :=) - stored in templates HashMap, NOT struct fields
-    Item := View {
-        height: 40
-        title := Label { text: "Default" }
-    }
-    Header := View {
-        draw_bg: { color: #333 }
-    }
-}
-```
-
-The templates are collected in `on_after_apply`:
-```rust
-impl ScriptHook for PortalList {
-    fn on_after_apply(&mut self, vm: &mut ScriptVm, apply: &Apply, scope: &mut Scope, value: ScriptValue) {
-        if let Some(obj) = value.as_object() {
-            vm.vec_with(obj, |_vm, vec| {
-                for kv in vec {
-                    if let Some(id) = kv.key.as_id() {
-                        self.templates.insert(id, kv.value);
-                    }
-                }
-            });
-        }
-    }
-}
-```
-
-Then used during drawing:
-```rust
-while let Some(item_id) = list.next_visible_item(cx) {
-    let item = list.item(cx, item_id, id!(Item));
-    item.label(ids!(title)).set_text(cx, &format!("Item {}", item_id));
-    item.draw_all(cx, &mut Scope::empty());
-}
-```
-
-**Key distinction**: Regular properties like `scroll_bar: mod.widgets.ScrollBar {}` are applied directly to struct fields. Template definitions like `Item := View {...}` are stored separately for dynamic instantiation.
-
-### PortalList Usage
-
-```rust
-#[derive(Script, ScriptHook, Widget)]
-pub struct MyList {
-    #[deref] view: View,
-}
-
-impl Widget for MyList {
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
-            if let Some(mut list) = item.borrow_mut::<PortalList>() {
-                list.set_item_range(cx, 0, 100);  // 100 items
-                
-                while let Some(item_id) = list.next_visible_item(cx) {
-                    let item = list.item(cx, item_id, id!(Item));
-                    item.label(ids!(title)).set_text(cx, &format!("Item {}", item_id));
-                    item.draw_all(cx, &mut Scope::empty());
-                }
-            }
-        }
-        DrawStep::done()
-    }
-}
-```
-
-### FileTree Usage
-
-```rust
-impl Widget for FileTreeDemo {
-    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        while self.file_tree.draw_walk(cx, scope, walk).is_step() {
-            self.file_tree.set_folder_is_open(cx, live_id!(root), true, Animate::No);
-            // Draw nodes recursively
-            self.draw_node(cx, live_id!(root));
-        }
-        DrawStep::done()
-    }
-}
-```
-
-### Registering Custom Draw Shaders
-
-For custom draw types with shader fields, use `script_shader`:
-
-```rust
-script_mod!{
-    use mod.prelude.widgets_internal.*
-    
-    // Register custom draw shader
-    set_type_default() do #(DrawMyShader::script_shader(vm)){
-        ..mod.draw.DrawQuad  // Inherit from DrawQuad
-    }
-    
-    // Register widget that uses it
-    mod.widgets.MyWidgetBase = #(MyWidget::register_widget(vm))
-}
-
-#[derive(Script, ScriptHook)]
-#[repr(C)]
-struct DrawMyShader {
-    #[deref] draw_super: DrawQuad,
-    #[live] my_param: f32,
-}
-```
-
-### Registering Components (non-Widget)
-
-For structs that aren't full widgets but need script registration:
-
-```rust
-script_mod!{
-    // For components (not widgets)
-    mod.widgets.MyComponentBase = #(MyComponent::script_component(vm))
-    
-    // For widgets (implements Widget trait)
-    mod.widgets.MyWidgetBase = #(MyWidget::register_widget(vm))
-}
-```
-
-### Script Prelude Modules
-
-Two prelude modules available:
-- `mod.prelude.widgets_internal.*` - For internal widget library development
-- `mod.prelude.widgets.*` - For app development (includes all widgets)
-
-```rust
-script_mod!{
-    // App development - use widgets prelude
-    use mod.prelude.widgets.*
-    
-    // Or for widget library internals
-    use mod.prelude.widgets_internal.*
-    use mod.widgets.*
-}
-```
-
-### Default Enum Values
-
-For enums with a `None` variant that need `Default`, use standard Rust `#[default]` attribute instead of `DefaultNone` derive:
-
-```rust
-// Correct - use #[default] attribute on the None variant
-#[derive(Clone, Copy, Debug, PartialEq, Default)]
-pub enum MyAction {
-    SomeAction,
-    AnotherAction,
-    #[default]
-    None,
-}
-
-// Wrong - don't use DefaultNone derive
-#[derive(Clone, Copy, Debug, PartialEq, DefaultNone)]  // Don't do this
-pub enum MyAction {
-    SomeAction,
-    None,
-}
-```
-
-### Multi-Module Script Registration Pattern
-
-When refactoring a multi-file project (like studio) from `live_design!` to `script_mod!`:
-
-1. **Each widget module** defines its own `script_mod!` that registers to `mod.widgets.*`:
-```rust
-// In studio_editor.rs
-script_mod! {
-    use mod.prelude.widgets_internal.*
-    use mod.widgets.*
-    
-    mod.widgets.StudioCodeEditorBase = #(StudioCodeEditor::register_widget(vm))
-    mod.widgets.StudioCodeEditor = set_type_default() do mod.widgets.StudioCodeEditorBase {
-        editor := CodeEditor {}
-    }
-}
-```
-
-2. **The lib.rs** aggregates all widget script_mods:
-```rust
-pub fn script_mod(vm: &mut ScriptVm) {
-    crate::module1::script_mod(vm);
-    crate::module2::script_mod(vm);
-    // ... all widget modules
-}
-```
-
-3. **The app.rs** calls them in correct order:
-```rust
-impl App {
-    fn run(vm: &mut ScriptVm) -> Self {
-        crate::makepad_widgets::script_mod(vm);  // Base widgets first
-        crate::script_mod(vm);                    // Your widget modules
-        crate::app_ui::script_mod(vm);            // UI that uses the widgets
-        App::from_script_mod(vm, self::script_mod)
-    }
-}
-```
-
-4. **The app_ui.rs** can then use registered widgets:
-```rust
-script_mod! {
-    use mod.prelude.widgets.*
-    // Now StudioCodeEditor is available from mod.widgets
-    
-    let EditorContent = View {
-        editor := StudioCodeEditor {}
-    }
-}
-```
-
-### Cross-Module Sharing via `mod` Object
-
-**IMPORTANT**: `use crate.module.*` does NOT work in script_mod. The `crate.` prefix is not available.
-
-To share definitions between script_mod blocks in different files, store them in the `mod` object:
-
-```rust
-// In app_ui.rs - export to mod.widgets namespace
-script_mod! {
-    use mod.prelude.widgets.*
-    
-    // This makes AppUI available as mod.widgets.AppUI
-    mod.widgets.AppUI = Window{
-        // ...
-    }
-}
-
-// In app.rs - import via mod.widgets
-script_mod! {
-    use mod.prelude.widgets.*
-    use mod.widgets.*  // Now AppUI is in scope
-    
-    load_all_resources() do #(App::script_component(vm)){
-        ui: Root{ AppUI{} }
-    }
-}
-```
-
-The `mod` object is the only way to share data between script_mod blocks.
-
-### Prelude Alias Syntax
-
-When defining a prelude, use `name:mod.path` to create an alias:
-```rust
-mod.prelude.widgets = {
-    ..mod.std,           // Spread all of mod.std into scope
-    theme:mod.theme,     // Create 'theme' as alias for mod.theme
-    draw:mod.draw,       // Create 'draw' as alias for mod.draw
-}
-```
-
-Without the alias (just `mod.theme,`), the module is included but has no name - you can't access it!
-
-### Let Bindings are Local
-
-`let` bindings in script_mod are LOCAL to that script_mod block. They cannot be:
-- Accessed from other script_mod blocks
-- Used as property values directly (e.g., `content +: MyLetBinding` won't work)
-
-To use a `let` binding, instantiate it: `MyLetBinding{}` or store it in `mod.*` for cross-module access.
-
-### Debug Logging with `~`
-
-Use `~expression` to log the value of an expression during script evaluation:
-```rust
-script_mod! {
-    ~mod.theme           // Logs the theme object
-    ~mod.prelude.widgets // Logs what's in the prelude
-    ~some_variable       // Logs a variable's value (or "not found" error)
-}
-```
-
-### Common Pitfalls
-
-**Widget ID references**: Named widget instances use `:=` in the DSL and plain names in Rust id macros:
-- DSL defines `code_block := View { ... }` → Rust uses `id!(code_block)`
-- DSL defines `my_button := Button { ... }` → Rust uses `ids!(my_button)`
-
-1. **Missing `#[source]`**: All Script-derived structs need `#[source] source: ScriptObjectRef`
-
-2. **Template scope**: Templates defined inside Dock aren't available outside; use `let` at script level
-
-3. **Uniform vs Instance**: Use `instance()` for per-widget varying colors (like hover states on backgrounds)
-
-4. **Forgot `+:`**: Without `+:`, you replace the entire property instead of merging
-
-5. **Theme access**: Always `theme.color_x`, never `THEME_COLOR_X` or `(theme.color_x)`
-
-6. **Missing widget registration**: Call `crate::makepad_widgets::script_mod(vm)` in `App::run()` before your own `script_mod`. Note: the old `live_design!` system and its crates are archived under `old/`
-
-7. **Draw shader repr**: Custom draw shaders need `#[repr(C)]` for correct memory layout
-
-8. **DefaultNone derive**: Don't use `DefaultNone` derive - use standard `#[derive(Default)]` with `#[default]` attribute on the `None` variant
-
-9. **Script_mod call order**: Widget modules must be registered BEFORE UI modules that use them. Always call `lib.rs::script_mod` before `app_ui::script_mod`
-
-10. **`pub` keyword invalid in script_mod**: Don't use `pub mod.widgets.X = ...`, just use `mod.widgets.X = ...`. Visibility is controlled by the Rust module system, not script_mod.
-
-11. **Syntax for Inset/Align/Walk**: Use constructor syntax - `margin: Inset{left: 10}` not `margin: {left: 10}`, `align: Align{x: 0.5 y: 0.5}` not `align: {x: 0.5, y: 0.5}`
-
-12. **Cursor values**: Use `cursor: MouseCursor.Hand` not `cursor: Hand` or `cursor: @Hand`
-
-13. **Resource paths**: Use `crate_resource("self://path")` not `dep("crate://self/path")`
-
-14. **Texture declarations in shaders**: Use `tex: texture_2d(float)` not `tex: texture2d`
-
-15. **Enums not exposed to script**: Some Rust enums like `PopupMenuPosition::BelowInput` may not be exposed to script. If you get "not found" errors on enum variants, just remove the property and use the default
-
-17. **Shader `mod` vs `modf`**: The Makepad shader language uses `modf(a, b)` for float modulo, NOT `mod(a, b)`. Similarly, use `atan2(y, x)` not `atan(y, x)` for two-argument arctangent. `atan(x)` (single arg) is also available. `fract(x)` works as expected.
-
-16. **Draw shader struct field ordering**: In `#[repr(C)]` draw shader structs that extend another draw shader via `#[deref]`, NEVER place `#[rust]` or other non-instance data AFTER `DrawVars` and the instance fields. The system uses an unsafe pointer trick in `DrawVars::as_slice()` that reads contiguously past the end of `dyn_instances` into the subsequent `#[live]` fields. Any non-instance data between `DrawVars` and the instance fields will corrupt the GPU instance buffer. Put all extra data (like `#[rust]`, `#[live]` non-instance fields such as resource handles, booleans, etc.) BEFORE the `#[deref]` field, and only `#[live]` instance fields (the ones that map to shader inputs) AFTER.
-    ```rust
-    // CORRECT - non-instance data before deref, instance fields after
-    #[derive(Script, ScriptHook)]
-    #[repr(C)]
-    pub struct MyDrawShader {
-        #[live] pub svg: Option<ScriptHandleRef>,  // non-instance, BEFORE deref
-        #[rust] my_state: bool,                     // non-instance, BEFORE deref
-        #[deref] pub draw_super: DrawVector,        // contains DrawVars + base instance fields
-        #[live] pub tint: Vec4f,                    // instance field, AFTER deref - OK
-    }
-
-    // WRONG - rust data after instance fields breaks the memory layout
-    #[derive(Script, ScriptHook)]
-    #[repr(C)]
-    pub struct MyDrawShader {
-        #[deref] pub draw_super: DrawVector,
-        #[live] pub tint: Vec4f,      // instance field
-        #[rust] my_state: bool,       // BAD: sits between tint and the next shader's fields
-    }
-    ```
-
-18. **Don't put comments or blank lines before the first real code in `script!`/`script_mod!`**: Rust's proc macro token stream strips comments entirely — they produce no tokens. This shifts error column/line info because the span tracking starts from the first actual token. Always start with real code (e.g., `use mod.std.assert`) immediately after the opening brace.
-
-19. **WARNING: Hex colors containing the letter `e` in `script_mod!`**: The Rust tokenizer interprets `e` or `E` in hex color literals as a scientific notation exponent, causing parse errors like `expected at least one digit in exponent`. For example, `#2ecc71` fails because `2e` looks like the start of `2e<exponent>`. **Use the `#x` prefix** to escape this: write `#x2ecc71` instead of `#x2ecc71`. This applies to any hex color where a digit is immediately followed by `e`/`E` (e.g., `#1e1e2e`, `#4466ee`, `#7799ee`, `#bb99ee`). Colors without `e` (like `#ff4444`, `#44cc44`) work fine with plain `#`.
-
-20. **Shader enums**: Prefer `match` on enum values with `_ =>` as the catch-all arm, not `if/else` chains over integer-like values. If enum `match` fails in shader compilation, treat it as a compiler bug: add or extend a `platform/script/test` case and fix the shader compiler path instead of rewriting shader logic to `if/else`.
+- Prefer `rg` / `rg --files` for source searches. Check existing patterns in
+  `widgets/src/`, `code_editor/`, and `apps/director/` before changing Splash syntax.
+  The archived `old/` tree is not the reference for current widget APIs.
+
+## Current agent workflow
+
+- Codex manages the work and reviews Fable's designs and results.
+- Fable designs and executes the difficult implementation work.
+- Grok handles bounded mechanical work and validation under precise briefs.
+- Keep one persistent Fable session for related tasks; send follow-ups to that
+  session or resume it with its existing context. Do not repeatedly start fresh
+  Fable sessions and repay the same input context. Idle without polling/model
+  turns while waiting for related work.
+- This is the user's current workflow (2026-09-16) and supersedes older role
+  assignments in local skills or memories. Preserve the manager/implementer split.
+
+## Software installation requires explicit approval
+
+- NEVER install, upgrade, bootstrap, or download and run external software
+  without the user's prior explicit approval for that software and installation.
+  This includes tools, applications, runtimes, SDKs, plugins, package-manager
+  installs, and third-party tools compiled from downloaded source.
+- This rule applies equally to system-wide, user-local, virtual-environment,
+  repository-local, and temporary installations. Putting an executable in
+  `local/`, `/tmp`, or `~/.local/`, or avoiding administrator privileges, does
+  not make it exempt. Compiling a third-party tool for local use counts as
+  installation even without a package manager.
+- A feature request, permission to build/test, or a missing dependency is NOT
+  installation approval. Before installing, explain the software and version,
+  source, installation location, purpose, and commands or system changes, then
+  wait for explicit approval. Do not silently add a required external runtime
+  tool to Studio or another app as a workaround.
+- Use already-installed tools and normal builds of this repository where
+  possible. If additional software is needed, leave installation pending and
+  explain the limitation; continue independent work. Approval already given
+  for the specific installation remains valid within its stated scope.
+
+## Commit content and Studio iteration history
+
+- NEVER create or publish additional public branches in `makepad/makepad`.
+  Use only the established `local` → `work` → `dev` workflow. `local` remains
+  private and must never be pushed. Feature, test, release, packaging, and
+  distribution work do not authorize another public branch; using a separate
+  checkout or worktree does not change this rule.
+- Keep AI-generated Markdown, plans, reports, scratch helpers, logs, recordings,
+  captures, build output, and other temporary artifacts out of commits. Existing
+  instruction files such as `AGENTS.md` are the Markdown exception. Preserve
+  existing tracked documentation and incoming human/external changes; do not
+  blanket-delete files or ignore every Markdown path.
+- NEVER commit third-party source snapshots (`cargo vendor` output, copied
+  crates, SDK trees), model weights, datasets, media dumps, or any other bulk
+  import. GitHub keeps every pushed blob, so one such commit bloats every
+  clone of the repository forever. Dependencies come from crates.io or from
+  in-repo `libs/` ports; offline mirrors live outside the tree. Read
+  `git diff --stat` before every commit and stop on paths you did not write;
+  a chain that carries such content is rewritten before it is pushed, never
+  fixed with a follow-up delete.
+- Run the existing repository tests for validation. Do not add generated test
+  files, inline test code, or test scaffolding unless the user explicitly requests
+  that change. Preserve existing tests; do not remove or weaken them to pass.
+- Studio's source hierarchy is `local` → `work` → `dev`: `local` records every
+  build iteration, `work` contains coherent feature commits, and `dev` contains
+  lower-frequency, validated milestones and incoming external PRs.
+- NEVER push `local`, its private flow branches, or checkpoint/archive refs.
+  Never merge private checkpoint ancestry into a public branch. Promote only
+  by squash from `local` into `work`, then squash feature groups from `work`
+  into named `dev` milestones. Fetch/sync incoming `work` and `dev` changes
+  without rewriting published history or discarding unrelated work.
+- For Studio-managed flow builds, use this order: platform build checks,
+  rustfmt on changed Rust, repeat checks if formatting changed the source,
+  commit the exact eligible source to `local`, release binary build, existing
+  native tests, then launch. Record the checkpoint hash with the binary and
+  its evidence. Reuse bounded worktrees; never create one per build.
+- Agents may code, check, and build the next revision while its previous app
+  is running. When the replacement is ready, gracefully close and restart
+  that workflow's app without asking the user to close it. Verify the old
+  process exits and launch the replacement with the same workspace and state.
+  This applies to Studio flows and standalone evaluations.
+- A validated revision requires `cargo check` for its supported platforms with
+  zero warnings/errors, the existing native tests on the current host, and a
+  release build/runtime check when applicable. Use the repository's actual
+  package/target support matrix. Missing SDKs, runners, or required tests are
+  blocked coverage, not passes. Do not suppress warnings to obtain a green gate.
+- Validate the exact resulting source for each feature/milestone promotion so
+  `dev` remains useful for bisecting. Public squash/push operations must expose
+  their source, destination, included changes, validation, and conflicts.
+- Agents working in Studio flows must also follow
+  [Director flow instructions](apps/director/AGENTS.md). This covers todo deltas,
+  terminal image delivery, test ownership, recordings, and revision feedback.
+
+## Builds and runtime verification
+
+- Use printf-style debugging (`log!`, `eprintln!`, or equivalent tracing).
+  Do not launch or attach a debugger such as LLDB or GDB; debugger access
+  triggers system permission popups.
+
+- Use release builds for runtime validation, profiling, benchmarks, and
+  timing checks unless the user explicitly requests debug.
+- Build with `cargo build --release -p <package>` from the package's owning
+  workspace, then launch the resulting standalone executable from this
+  checkout. Check the target directory and resource working directory;
+  some apps have their own workspace.
+- Use the WM’s Cargo launch path for its hosted apps: `cargo run --release`
+  builds each app on demand, and the WM shows compilation while it starts.
+  Do not collect prebuilt app binaries for a WM session.
+- Outside that WM workflow, do not use `cargo run`, `cargo makepad`, or the
+  Studio remote bridge (`ObserveMount`, `RunItem`, websocket clients) for UI inspection.
+- After UI/runtime changes, rebuild and relaunch before drawing conclusions.
+  A successful build/check alone does not verify UI behavior.
+- Exercise the relevant interaction and inspect logs; capture a frame when
+  visual verification is needed. Avoid unrelated or routine captures.
+- Command-line builds, tests, linting, and file operations run directly in
+  the shell.
+- Rendering is verified on the real GPU backend, never on the gpusim
+  raster (the CPU simulated-GPU backend, `MAKEPAD=gpusim`, formerly called
+  "headless"; user, 2026-09-11: "chasing bugs in headless is useless"). Any
+  picture, pixel, outline, colour, LOD, tile or frame-timing question is
+  answered with an owned `--remote` instance of the release build on the
+  native backend (Metal here) and `/g` / `/gseq` grabs, compared in RGB.
+  `MAKEPAD=gpusim` suites are for logic and data-structure tests only
+  (layout, budgets, orderings, parsers); a gpusim raster gate never
+  stands in for a GPU proof and is never used to diagnose a rendering bug.
+  The window need not be visible: a hidden instance (`MAKEPAD_HIDE_WINDOWS=1`)
+  on the native backend is the normal pixel-proof rig; `/g` forces a present
+  (about 2 s per grab on a hidden window). Only rest/settle timing proofs
+  need a window that presents on its own. Close it with `/gq`.
+
+## App ownership, focus, and screenshots
+
+- Launch any app you intend to inspect or drive with `--remote`.
+- Do not drive or stop unrelated user instances. For an app in the active
+  development workflow, close and restart it when the replacement is ready;
+  no separate user-close confirmation is required. Before a fresh launch,
+  gracefully close the previous workflow instance and verify its exit.
+- Remote windows stay visible but unfocused. Do not activate them or use
+  `MAKEPAD_FOCUS=1` unless the user explicitly asks to bring one forward.
+- Before remote automation, read `/activity` and preserve its `user_seq` as
+  `if_user_seq` on mutating requests. HTTP 409 or a changed response
+  `X-Makepad-User-Seq` means the human intervened: stop the test and leave
+  that instance running. Do not refresh the counter and retry, force-quit,
+  or restart it automatically. Resume with a fresh counter only after the
+  user hands control back. See [App remote control](docs/agents/app-remote.md).
+- Subagent verification runs use `MAKEPAD_HIDE_WINDOWS=1 <bin> --remote`.
+  Only the main session opens a visible inspection window; avoid duplicates.
+- Capture only the app's own drawable through `/g`, `/gq`, `/tweak/grab`,
+  or an app-provided capture hook. OS/window/display screenshots are forbidden.
+  If native chrome or another app matters, ask the user for an image.
+- A `user closed` log entry means the human dismissed the window. Do not
+  interpret it as a crash or relaunch it.
+- Finish test sessions with `GET /gq` (grab and quit). If grabbing is
+  unavailable, use `/close` and/or `/quit`. Verify your process exits;
+  only fall back to stopping its exact owned PID if graceful cleanup fails.
+- The exception is an app the user explicitly asks to keep open for them:
+  hand off that instance and close any separate test/capture instances.
+  Otherwise, no process you launch may outlive the task.
+
+## Remote control quick start
+
+1. Build the release binary and launch your own instance with `--remote`.
+2. Read its startup line for port, PID, and grab directory.
+3. Fetch `GET /` for the running binary's current protocol.
+4. Use `/snap?q=...` to find widget rectangles, then inject input.
+5. Inspect results through snapshots/logs and, when needed, `/g`.
+6. Finish with `/gq` and confirm shutdown.
+
+Coordinates are window-local layout points; no DPI conversion is needed.
+Add `wait=1` to input requests to wait for the resulting frame.
+
+Read [App remote control](docs/agents/app-remote.md) for routes and examples,
+or [Tweaker](docs/agents/tweaker.md) for live styling and source write-back.
+
+## Threading and realtime ownership
+
+- The UI thread never takes a `Mutex`, `RwLock`, or `Condvar` another thread
+  can hold, and never waits on a channel.
+- UI-to-worker/audio commands use bounded, non-blocking sends. Report a
+  full queue and retain/retry the command on a subsequent frame.
+- Workers/audio publish snapshots through atomics, a triple buffer, or a
+  channel consumed with `try_recv`.
+- Large payloads (PCM, stems, grids, images) travel as `Arc` through
+  channels. Return replaced payloads so the UI disposes of them; never
+  perform their final drop on a realtime callback.
+- A realtime audio callback owns its state, does not allocate on its hot
+  path, and never takes a lock the UI or a worker can hold.
+- Use one mechanism on native and wasm. Do not retain a desktop shared-lock
+  path alongside a wasm workaround. UI/audio threads must not use
+  `Atomics.wait` or spin-wait fallbacks.
+- `lock_from_ui` is allowed only for state provably touched by the UI alone.
+- Do not spawn a temporary thread for each job. Use `cx.thread_spawner()`,
+  the pool TaskHandle API, or a long-lived platform worker fed by a channel.
+
+## Splash and shader essentials
+
+- Use `script_mod!` and current widget APIs. For object properties use
+  `name: value`; for named widget instances use `name := Type{...}`.
+  Module assignments such as `mod.widgets.Name = ...` are valid.
+- Merge typed properties with `+:` when preserving inherited fields:
+  `draw_bg +: {color: #f00}`. Use typed layout values such as
+  `padding: Inset{left: 10}` and `align: Align{x: 0.5 y: 0.5}`.
+- Use `theme.*`, `instance(...)` for per-draw values, and `uniform(...)`
+  for values shared by a shader's instances.
+- Use `#(expr)` for Rust interpolation. In Rust macros, use the `#x`
+  color prefix when a digit followed by `e`/`E` would trigger exponent
+  tokenization, e.g. `#x1e1e2e`.
+- Register widget/component modules before UI that uses them. Match the
+  current app's startup and lookup signatures rather than copying old ones.
+- Custom draw shaders need `#[repr(C)]`. Put non-instance fields BEFORE
+  the `#[deref]` draw base, and only shader instance fields AFTER it.
+  The instance buffer is read contiguously; incorrect order corrupts it.
+- Prefer enum `match` with a catch-all in shaders. If supported enum
+  matching fails, add a compiler regression case and fix the compiler
+  instead of replacing it with integer-like `if/else` chains.
+
+Read [Splash and widget reference](docs/agents/splash.md) for examples,
+registration, templates, and links to the implementations.

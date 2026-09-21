@@ -7,9 +7,114 @@
 #[cfg(all(any(target_os = "linux", target_os = "windows"), makepad_ai_cuda_kernels))]
 pub use makepad_ai_cuda::launch::*;
 
+pub use makepad_ai_loader::accel::GemmPrecision;
+
+/// One linear of a device-resident ViT layer: a row-major `[n, k]` weight in
+/// a ggml dtype, its output width and its bias (empty for none).
+#[derive(Clone, Copy)]
+pub struct GpuVitLinear<'a> {
+    pub w_bytes: &'a [u8],
+    pub w_ggml_type: u32,
+    pub n: usize,
+    pub bias: &'a [f32],
+}
+
+/// One pre-norm ViT layer with rotary attention and a SwiGLU feed-forward:
+/// `x += out(attn(rope(q(n1)), rope(k(n1)), v(n1)))`, then
+/// `x += down(silu(gate(n2)) * up(n2))`; LayerNorm affines on both norms,
+/// layer scales folded into `out`/`down`.
+#[derive(Clone, Copy)]
+pub struct GpuVitLayer<'a> {
+    pub norm1_w: &'a [f32],
+    pub norm1_b: &'a [f32],
+    pub q: GpuVitLinear<'a>,
+    pub k: GpuVitLinear<'a>,
+    pub v: GpuVitLinear<'a>,
+    pub out: GpuVitLinear<'a>,
+    pub norm2_w: &'a [f32],
+    pub norm2_b: &'a [f32],
+    pub gate: GpuVitLinear<'a>,
+    pub up: GpuVitLinear<'a>,
+    pub down: GpuVitLinear<'a>,
+}
+
+/// One linear of a device-resident two-way decoder layer: an f32 `[n, k]`
+/// weight tensor and an optional `[1, n]` bias, both long-lived.
+#[derive(Clone, Copy)]
+pub struct GpuTwoWayLinear<'a> {
+    pub weight: &'a GpuTensor,
+    pub bias: Option<&'a GpuTensor>,
+}
+
+#[derive(Clone, Copy)]
+pub struct GpuTwoWayAttention<'a> {
+    pub q: GpuTwoWayLinear<'a>,
+    pub k: GpuTwoWayLinear<'a>,
+    pub v: GpuTwoWayLinear<'a>,
+    pub out: GpuTwoWayLinear<'a>,
+}
+
+/// One SAM-style two-way decoder layer: token self-attention (queries and
+/// keys carry the token PE when `pe_on_self`), token-to-image
+/// cross-attention (query = LN(hidden) + token PE, key = LN(context) +
+/// image PE, value = LN(context)), an erf-GELU feed-forward, and `ln_final`
+/// on the result. `ln_pe_1`/`ln_pe_2` normalise the two PEs.
+#[derive(Clone, Copy)]
+pub struct GpuTwoWayLayer<'a> {
+    pub ln_pe_1: (&'a [f32], &'a [f32]),
+    pub ln_pe_2: (&'a [f32], &'a [f32]),
+    pub ln1: (&'a [f32], &'a [f32]),
+    pub ln2_1: (&'a [f32], &'a [f32]),
+    pub ln2_2: (&'a [f32], &'a [f32]),
+    pub ln3: (&'a [f32], &'a [f32]),
+    pub ln_final: (&'a [f32], &'a [f32]),
+    pub self_attn: GpuTwoWayAttention<'a>,
+    pub cross_attn: GpuTwoWayAttention<'a>,
+    pub ffn_first: GpuTwoWayLinear<'a>,
+    pub ffn_second: GpuTwoWayLinear<'a>,
+    pub n_head: usize,
+    pub eps: f32,
+    pub pe_on_self: bool,
+}
+
+/// One two-way decoder layer in one backend call, returning
+/// `(hidden, ln_final(hidden))`. The Metal tensor backend runs it
+/// device-resident; CUDA declines and the caller keeps its per-op path.
+#[cfg(all(any(target_os = "linux", target_os = "windows"), makepad_ai_cuda_kernels))]
+pub fn gpu_two_way_layer_resident(
+    _hidden: &GpuTensor,
+    _token_pe: &GpuTensor,
+    _context: &GpuTensor,
+    _context_pe: &GpuTensor,
+    _layer: &GpuTwoWayLayer<'_>,
+) -> Result<(GpuTensor, GpuTensor), String> {
+    Err("gpu_two_way_layer_resident: CUDA runs the per-op path".to_string())
+}
+
+/// A whole ViT stack in one backend call (see `GpuVitLayer`): the Metal
+/// tensor backend runs it device-resident in one command buffer; CUDA
+/// declines (its per-op `gpu_*` path is already resident) and the caller
+/// keeps its per-op path.
+#[cfg(all(any(target_os = "linux", target_os = "windows"), makepad_ai_cuda_kernels))]
+#[allow(clippy::too_many_arguments)]
+pub fn gpu_vit_backbone_resident(
+    _x: &GpuTensor,
+    _n_head: usize,
+    _rot_half: usize,
+    _cos: &GpuTensor,
+    _sin: &GpuTensor,
+    _layers: &[GpuVitLayer<'_>],
+    _final_norm_w: &[f32],
+    _final_norm_b: &[f32],
+    _eps: f32,
+) -> Result<GpuTensor, String> {
+    Err("gpu_vit_backbone_resident: CUDA runs the per-op path".to_string())
+}
+
 #[cfg(not(all(any(target_os = "linux", target_os = "windows"), makepad_ai_cuda_kernels)))]
 mod imp {
-    use makepad_ai_cuda::accel::{AffineQuantizedMatmulRowsSpec, AffineQuantizedMatmulSpec};
+    use super::GemmPrecision;
+    use makepad_ai_loader::accel::{AffineQuantizedMatmulRowsSpec, AffineQuantizedMatmulSpec};
 
     pub struct CudaBuffer;
     pub struct CudaMappedHostU32Buffer;
@@ -1973,8 +2078,6 @@ mod imp {
     pub struct GpuTensor {
         pub(crate) rows: usize,
         pub(crate) cols: usize,
-        pub(crate) data: std::cell::RefCell<Vec<f32>>,
-        pub(crate) u32s: std::cell::RefCell<Vec<u32>>,
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -2031,6 +2134,20 @@ mod imp {
             Err(GPU_UNAVAILABLE.to_string())
         }
     }
+
+    pub fn gpu_pixal_naf_sample(
+        _q: &GpuTensor, _k: &GpuTensor, _v: &GpuTensor, _uv: &GpuTensor,
+        _width: usize, _height: usize, _low_width: usize, _low_height: usize,
+        _heads: usize, _kernel: usize,
+    ) -> Result<GpuTensor, String> { Err(GPU_UNAVAILABLE.to_string()) }
+
+    pub fn gpu_pixal_rope(_x: &GpuTensor, _periods: &GpuTensor, _width: usize, _height: usize) -> Result<GpuTensor,String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
+    pub fn gpu_pixal_pool(
+        _x: &GpuTensor, _width: usize, _height: usize, _out_width: usize, _out_height: usize,
+    ) -> Result<GpuTensor,String> { Err(GPU_UNAVAILABLE.to_string()) }
 
     pub fn gpu_skintokens_michelangelo_fourier(
         _condition: &GpuTensor,
@@ -2276,6 +2393,16 @@ mod imp {
         }
     }
 
+    pub fn gpu_linear_nt_cached_with_precision(
+        _x: &GpuTensor,
+        _cache_namespace: &str,
+        _parts: &[GpuLinearPart<'_>],
+        _bias: &[f32],
+        _precision: GemmPrecision,
+    ) -> Result<GpuTensor, String> {
+        gpu_linear_nt_cached(_x, _cache_namespace, _parts, _bias)
+    }
+
     pub fn gpu_linear_nt_cached_f16(
         _x: &GpuTensor,
         _cache_namespace: &str,
@@ -2290,6 +2417,16 @@ mod imp {
         {
             Err(GPU_UNAVAILABLE.to_string())
         }
+    }
+
+    pub fn gpu_linear_nt_cached_f16_with_precision(
+        _x: &GpuTensor,
+        _cache_namespace: &str,
+        _parts: &[GpuLinearPart<'_>],
+        _bias: &[f32],
+        _precision: GemmPrecision,
+    ) -> Result<GpuTensor, String> {
+        gpu_linear_nt_cached_f16(_x, _cache_namespace, _parts, _bias)
     }
 
     pub fn gpu_gelu_bias_f16(
@@ -2326,7 +2463,14 @@ mod imp {
         _add: &[f32],
         _eps: f32,
     ) -> Result<GpuTensor, String> {
-        Err(GPU_UNAVAILABLE.to_string())
+        #[cfg(target_os = "macos")]
+        {
+            return makepad_ai_metal::gpu_tensor::layer_norm_mul_add(_x, _mul, _add, _eps);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(GPU_UNAVAILABLE.to_string())
+        }
     }
 
     pub fn gpu_layer_norm_mul_add_cached(
@@ -2337,7 +2481,14 @@ mod imp {
         _add: &[f32],
         _eps: f32,
     ) -> Result<GpuTensor, String> {
-        Err(GPU_UNAVAILABLE.to_string())
+        #[cfg(target_os = "macos")]
+        {
+            return makepad_ai_metal::gpu_tensor::layer_norm_mul_add(_x, _mul, _add, _eps);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(GPU_UNAVAILABLE.to_string())
+        }
     }
 
     pub fn gpu_layer_norm_pytorch(
@@ -2754,7 +2905,14 @@ mod imp {
         _cos_table: &GpuTensor,
         _sin_table: &GpuTensor,
     ) -> Result<GpuTensor, String> {
-        Err(GPU_UNAVAILABLE.to_string())
+        #[cfg(target_os = "macos")]
+        {
+            return makepad_ai_metal::gpu_tensor::rope_half(_x, _head_count, _rot_half, _cos_table, _sin_table);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(GPU_UNAVAILABLE.to_string())
+        }
     }
 
     pub fn gpu_rope_half_bf16(
@@ -3027,6 +3185,10 @@ mod imp {
         Ok(())
     }
 
+    pub fn gpu_release_cached() -> Result<usize, String> {
+        Ok(0)
+    }
+
     pub fn gpu_attention_packed_causal(
         _q: &GpuTensor,
         _k: &GpuTensor,
@@ -3106,6 +3268,7 @@ mod imp {
         _scale: f32,
         _motion_tokens: usize,
         _band_radius: usize,
+        _f16_attention_operands: bool,
     ) -> Result<GpuTensor, String> {
         Err(GPU_UNAVAILABLE.to_string())
     }
@@ -3196,6 +3359,129 @@ mod imp {
         #[cfg(target_os = "macos")]
         {
             return makepad_ai_metal::gpu_tensor::gelu(_x);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(GPU_UNAVAILABLE.to_string())
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn gpu_vit_backbone_resident(
+        _x: &GpuTensor,
+        _n_head: usize,
+        _rot_half: usize,
+        _cos: &GpuTensor,
+        _sin: &GpuTensor,
+        _layers: &[super::GpuVitLayer<'_>],
+        _final_norm_w: &[f32],
+        _final_norm_b: &[f32],
+        _eps: f32,
+    ) -> Result<GpuTensor, String> {
+        #[cfg(target_os = "macos")]
+        {
+            use makepad_ai_metal::gpu_tensor::{VitLayerRef, VitLinearRef};
+            fn lin<'a>(l: &super::GpuVitLinear<'a>) -> VitLinearRef<'a> {
+                VitLinearRef {
+                    w_bytes: l.w_bytes,
+                    w_ggml_type: l.w_ggml_type,
+                    n: l.n,
+                    bias: l.bias,
+                }
+            }
+            let layers: Vec<VitLayerRef<'_>> = _layers
+                .iter()
+                .map(|l| VitLayerRef {
+                    norm1_w: l.norm1_w,
+                    norm1_b: l.norm1_b,
+                    q: lin(&l.q),
+                    k: lin(&l.k),
+                    v: lin(&l.v),
+                    out: lin(&l.out),
+                    norm2_w: l.norm2_w,
+                    norm2_b: l.norm2_b,
+                    gate: lin(&l.gate),
+                    up: lin(&l.up),
+                    down: lin(&l.down),
+                })
+                .collect();
+            return makepad_ai_metal::gpu_tensor::vit_backbone_resident(
+                _x,
+                _n_head,
+                _rot_half,
+                _cos,
+                _sin,
+                &layers,
+                _final_norm_w,
+                _final_norm_b,
+                _eps,
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(GPU_UNAVAILABLE.to_string())
+        }
+    }
+
+    pub fn gpu_two_way_layer_resident(
+        _hidden: &GpuTensor,
+        _token_pe: &GpuTensor,
+        _context: &GpuTensor,
+        _context_pe: &GpuTensor,
+        _layer: &super::GpuTwoWayLayer<'_>,
+    ) -> Result<(GpuTensor, GpuTensor), String> {
+        #[cfg(target_os = "macos")]
+        {
+            use makepad_ai_metal::gpu_tensor::{DecAttnRef, DecLinearRef, TwoWayLayerRef};
+            fn lin<'a>(l: &super::GpuTwoWayLinear<'a>) -> DecLinearRef<'a> {
+                DecLinearRef {
+                    weight: l.weight,
+                    bias: l.bias,
+                }
+            }
+            fn attn<'a>(a: &super::GpuTwoWayAttention<'a>) -> DecAttnRef<'a> {
+                DecAttnRef {
+                    q: lin(&a.q),
+                    k: lin(&a.k),
+                    v: lin(&a.v),
+                    out: lin(&a.out),
+                }
+            }
+            let l = _layer;
+            let layer = TwoWayLayerRef {
+                ln_pe_1: l.ln_pe_1,
+                ln_pe_2: l.ln_pe_2,
+                ln1: l.ln1,
+                ln2_1: l.ln2_1,
+                ln2_2: l.ln2_2,
+                ln3: l.ln3,
+                ln_final: l.ln_final,
+                self_attn: attn(&l.self_attn),
+                cross_attn: attn(&l.cross_attn),
+                ffn_first: lin(&l.ffn_first),
+                ffn_second: lin(&l.ffn_second),
+                n_head: l.n_head,
+                eps: l.eps,
+                pe_on_self: l.pe_on_self,
+            };
+            return makepad_ai_metal::gpu_tensor::two_way_layer_resident(
+                _hidden,
+                _token_pe,
+                _context,
+                _context_pe,
+                &layer,
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(GPU_UNAVAILABLE.to_string())
+        }
+    }
+
+    pub fn gpu_add_cols_broadcast(_x: &GpuTensor, _bias: &GpuTensor) -> Result<GpuTensor, String> {
+        #[cfg(target_os = "macos")]
+        {
+            return makepad_ai_metal::gpu_tensor::add_cols_broadcast(_x, _bias);
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -4106,6 +4392,10 @@ mod imp {
     }
 
     pub fn gpu_pool_clear() {}
+
+    pub fn gpu_pool_trim() -> usize {
+        0
+    }
 
     pub fn gpu_pool_cap_override(_bytes: Option<usize>) {}
 }

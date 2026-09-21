@@ -1,20 +1,42 @@
 workspace.members = [
     # === app ===
-    "apps/mpbrowser",
-    "apps/mpterm",
-    "apps/mpwm",
+    "apps/browser",
+    "apps/terminal",
+    "apps/wm",
+    "apps/wm-all",
+    "apps/wm-dyn",
+    "apps/wm-dyn/engine",
+    "apps/aichat",
     "apps/finance",
-    "apps/mpsheets",
-    "libs/mp_theme",
-    "libs/mp_wm_api",
-    "apps/mptask",
-    "apps/mpimage",
-    "apps/mpvideo",
-    "apps/mppdf",
-    "apps/mpfiles",
+    "apps/sheets",
+    "apps/photos",
+    "apps/clock",
+    "apps/weather",
+    "apps/mail",
+    "apps/notes",
+    "apps/calendar",
+    "apps/reminders",
+    "apps/calculator",
+    "libs/wm_theme",
+    "libs/civil_time",
+    "libs/wm_api",
+    "libs/app_module",
+    "apps/task",
+    "apps/image",
+    "apps/video",
+    "apps/pdf",
+    "apps/files",
+    "libs/diskmap",
+    "libs/workspace",
+    "libs/code_arch",
+    "libs/code_language",
+    "libs/search",
+    "libs/tar",
     "apps/route",
     "apps/asset-ui",
     "apps/asset-server",
+    "apps/flow-server",
+    "libs/media_view",
     "apps/ai-hub",
     "apps/vj",
     "apps/mixer",
@@ -28,20 +50,28 @@ workspace.members = [
     "libs/asset/store",
     "libs/asset/chat",
     "libs/chat_ui",
+    "libs/ai/hub_ui",
+    "libs/ai/services",
     "libs/asset/annotate",
     "libs/render",
     "libs/raytrace",
     "libs/fab",
     "libs/fab_tour",
     "apps/fab/loaders/gltf",
-    "libs/sim",
-    "libs/sim/math",
+    "libs/scene",
+    "libs/soft_body",
     "libs/show_control",
     "libs/asset/creator",
+    "libs/bounded_http",
+    "libs/flow",
     "libs/strict_json",
+    "libs/loader_bundle",
     # === remesh (FaithC port) / xatlas (jpcy port) ===
     "libs/remesh",
     "libs/xatlas",
+    # Editable polygon topology and worker-owned model documents.
+    "libs/mesh_edit",
+    "libs/model",
     # === examples ===
     "examples/teamtalk",
     "examples/automate",
@@ -82,11 +112,13 @@ workspace.members = [
     "examples/render_to_texture",
     # === digital-fabrication product ===
     "apps/fab",
+    "apps/fabric",
+    "libs/fabric/measure",
+    "libs/fabric/draft",
     # === xr app ===
     "xr",
-    # === studio ===
-    "studio/hub",
-    "studio/desktop",
+    # === director ===
+    "apps/director",
     # === own SQLite-format database engine (P0 reader, sqlq CLI) ===
     "libs/sqlite_query",
     # === headless music score engine ===
@@ -94,6 +126,8 @@ workspace.members = [
     "libs/score_layout",
     "libs/score_play",
     "libs/score_render",
+    "libs/score_view",
+    "libs/score_view/tests/embed_app",
     "libs/score_ai",
     "libs/score_import",
     "libs/score_pdf",
@@ -102,6 +136,8 @@ workspace.members = [
     "libs/midi_file",
     "libs/soundfont",
     "libs/piano_model",
+    "libs/drumkit",
+    "libs/drumkit_phys",
     "libs/musicxml",
     # === own MP3 / Ogg Vorbis decoders ===
     "libs/audio_decode",
@@ -111,6 +147,7 @@ workspace.members = [
     "libs/audio_lyrics",
     # === stems + lyrics side-channel bake/publish (asset-ui + VJ) ===
     "libs/audio_sidechannels",
+    "libs/vj_analysis",
     "libs/teamtalk",
     # === pictures of audio (spectrogram, wave strip, composite) ===
     "libs/audio_picture",
@@ -123,21 +160,33 @@ workspace.members = [
     "libs/frametween",
     # === archive.org search + download content input (VJ / asset-ui) ===
     "libs/archive_org",
+    # === image tile wall: HEVC tape atlases + baker CLI + TileGrid widget
+    # (the engine extracted from the Source Library picture wall) ===
+    "libs/image_tiles",
+    "examples/image_tiles",
     # === mp4 sample index for range-streaming playback ===
     "libs/mp4_index",
     # === necessary tools ===
     "platform/video",
     "tools/cargo_makepad",
+    "tools/makepad_builder",
     # === OSM PBF -> tile archive + nav artifact bake passes (CLI + in-app) ===
     "libs/map_build",
     "tools/map_tiles",
     "tools/map_bake",
     "tools/remote",
+    "tools/screen",
+    "tools/dj_pack",
+    "libs/system_speech",
     # === tests ===
     "platform/script/test",
 ]
 
 workspace.exclude = [
+    # Private Scope (the Architecture map) and its code-intelligence crates.
+    # Clone into apps/scope; path deps stay ../../ like a subdirectory. Not a
+    # required member so a clean makepad tree still loads.
+    "apps/scope",
     # Private Arcade frontend. Clone into apps/sandbox; path deps stay ../../
     # like a subdirectory. Not a required member so a clean makepad tree
     # still loads.
@@ -145,13 +194,14 @@ workspace.exclude = [
     # Private Source Library picture wall. Same shape as sandbox: clone into
     # apps/source-library; path deps stay ../../.
     "apps/source-library",
+    # Private Stage performance app. Own workspace with ../../ path deps.
+    "apps/stage",
     "libs/terminal_core",
     # standalone GPU generate service (own workspace, like diffusion)
     "libs/ai/hub",
     "libs/diffusion",
     # the AI model workspace (loader + cuda/metal stores + model crates) — aiarch.md
     "libs/ai",
-    "libs/voice",
     "widgets/test",
     "libs/stitch",
     "libs/wasm_bridge/test",
@@ -242,7 +292,6 @@ workspace.exclude = [
     "libs/linux/wayland-protocols",
     "libs/linux/wayland-sys",
     "tools/windows_strip",
-    "tools/web_server",
     "tools/file_router",
     "tools/wasm_strip",
 ]
@@ -267,6 +316,9 @@ strip = true
 [profile.profile]
 inherits = "release"
 debug = true
+
+[profile.test.package.makepad-stitch]
+opt-level = 1
 
 #[profile.dev.package.makepad-live-tokenizer]
 #opt-level = 3

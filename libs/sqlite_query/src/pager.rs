@@ -8,12 +8,11 @@
 
 use crate::error::{Error, Result};
 use crate::journal::{self, Journal};
-use crate::lock::{process_lock, FileLock, LockLevel, ProcessLock};
+use crate::lock::{FileLock, LockLevel, ProcessLock};
+use crate::storage::{PageStore, PageStoreSet, StoreKind, StoreOpenOptions};
 use crate::wal::{ShmGuard, Wal};
 use crate::value::{be_u16, be_u32, TextEncoding};
 use std::collections::{HashMap, VecDeque};
-use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -226,7 +225,8 @@ impl PageCache {
 /// that currently live only in its write-ahead log.
 pub struct Pager {
     path: PathBuf,
-    file: File,
+    stores: Arc<dyn PageStoreSet>,
+    file: Arc<dyn PageStore>,
     header: DbHeader,
     usable: usize,
     page_size: usize,
@@ -295,15 +295,33 @@ pub const DEFAULT_CACHE_PAGES: usize = 256;
 /// Frames after which a commit checkpoints the log, matching SQLite's default.
 pub const DEFAULT_AUTOCHECKPOINT: u32 = 1000;
 
+/// What every write path answers on a connection opened read-only: the
+/// file is never touched, no journal or WAL is created.
+pub const READ_ONLY_CONNECTION: &str =
+    "read-only connection: the database was opened without write access";
+
 impl Pager {
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn open(path: &Path) -> Result<Pager> {
         Pager::open_with_cache(path, DEFAULT_CACHE_PAGES)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn open_with_cache(path: &Path, cache_pages: usize) -> Result<Pager> {
-        let mut file = File::open(path)?;
+        let stores: Arc<dyn PageStoreSet> = Arc::new(crate::storage::FileStoreSet::new(path));
+        Self::open_store_with_cache(stores, cache_pages)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn open_store_with_cache(
+        stores: Arc<dyn PageStoreSet>,
+        cache_pages: usize,
+    ) -> Result<Pager> {
+        let file = stores
+            .open(StoreKind::Main, StoreOpenOptions::READ_ONLY)?
+            .ok_or_else(|| Error::Io(std::io::Error::from(std::io::ErrorKind::NotFound)))?;
         let mut hdr = [0u8; HEADER_SIZE];
-        match file.read_exact(&mut hdr) {
+        match file.read_at(0, &mut hdr) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                 return Err(Error::NotADatabase)
@@ -314,7 +332,10 @@ impl Pager {
         let page_size = header.page_size as usize;
         let usable = header.usable_size();
         let mut pager = Pager {
-            path: path.to_path_buf(),
+            path: stores
+                .path(StoreKind::Main)
+                .unwrap_or_else(|| PathBuf::from(":memory:")),
+            stores,
             file,
             header,
             usable,
@@ -330,7 +351,7 @@ impl Pager {
             write: None,
         };
         pager.begin_read()?;
-        if pager.journal_is_hot(path)? {
+        if pager.journal_is_hot()? {
             return Err(Error::Busy(
                 "database has a hot journal and must be recovered by a writer".into(),
             ));
@@ -340,14 +361,14 @@ impl Pager {
 
     /// A journal is hot only when its writer is gone: nobody holds RESERVED
     /// across processes and no connection in this process is mid-transaction.
-    fn journal_is_hot(&mut self, path: &Path) -> Result<bool> {
-        if !journal::hot_journal_exists(path) {
+    fn journal_is_hot(&mut self) -> Result<bool> {
+        if !journal::hot_journal_exists(self.stores.as_ref()) {
             return Ok(false);
         }
-        if crate::lock::process_lock(path).is_write_held() {
+        if self.stores.process_lock().is_write_held() {
             return Ok(false);
         }
-        Ok(!crate::lock::reserved_lock_held(&self.file)?)
+        Ok(!crate::lock::reserved_lock_held(self.file.as_ref())?)
     }
 
     /// The identity of the committed snapshot currently visible. Computed
@@ -382,12 +403,12 @@ impl Pager {
                     wal.refresh()?;
                     Some(wal)
                 }
-                None => Wal::open(&self.path, self.header.page_size, writable)?,
+                None => Wal::open_with(self.stores.clone(), self.header.page_size, writable)?,
             }
         } else {
             None
         };
-        let file_len = self.file.metadata()?.len();
+        let file_len = self.file.len()?;
         let file_pages = (file_len / self.page_size as u64) as u32;
         self.page_count = match &wal {
             // A log with committed frames carries the authoritative size.
@@ -437,8 +458,7 @@ impl Pager {
     /// snapshot. Cheap enough to call between statements on a live database.
     pub fn refresh(&mut self) -> Result<()> {
         let mut hdr = [0u8; HEADER_SIZE];
-        self.file.seek(SeekFrom::Start(0))?;
-        self.file.read_exact(&mut hdr)?;
+        self.file.read_at(0, &mut hdr)?;
         let header = DbHeader::parse(&hdr)?;
         if header.page_size != self.header.page_size {
             return Err(Error::corrupt("page size changed under an open reader"));
@@ -522,8 +542,7 @@ impl Pager {
         };
         if !from_wal {
             let offset = (pgno as u64 - 1) * self.page_size as u64;
-            self.file.seek(SeekFrom::Start(offset))?;
-            match self.file.read_exact(&mut buf) {
+            match self.file.read_at(offset, &mut buf) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                     return Err(Error::corrupt(format!(
@@ -552,6 +571,18 @@ mod tests {
         assert!(DbHeader::parse(&buf).is_err());
     }
 
+    #[test]
+    fn allocation_skips_the_one_gib_lock_byte_page() {
+        for page_size in [512usize, 4096, 65536] {
+            let lock_page = ((1u64 << 30) / page_size as u64 + 1) as u32;
+            assert_eq!(
+                next_page_number(lock_page - 1, page_size),
+                lock_page + 1
+            );
+            assert_eq!(next_page_number(lock_page - 2, page_size), lock_page - 1);
+        }
+    }
+
 }
 
 // ---------------------------------------------------------------------------
@@ -563,18 +594,42 @@ impl Pager {
     /// Open a database for reading and writing. A hot journal left by a crashed
     /// writer is rolled back first, so the file is always consistent by the
     /// time this returns.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn open_rw(path: &Path, busy_timeout: Duration) -> Result<Pager> {
         Pager::open_rw_with_cache(path, busy_timeout, DEFAULT_CACHE_PAGES)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn open_rw_with_cache(
         path: &Path,
         busy_timeout: Duration,
         cache_pages: usize,
     ) -> Result<Pager> {
-        let file = File::options().read(true).write(true).open(path)?;
+        let stores: Arc<dyn PageStoreSet> = Arc::new(crate::storage::FileStoreSet::new(path));
+        Self::open_store_rw_with_cache(stores, busy_timeout, cache_pages)
+    }
+
+    pub(crate) fn open_store_rw(
+        stores: Arc<dyn PageStoreSet>,
+        busy_timeout: Duration,
+    ) -> Result<Pager> {
+        Self::open_store_rw_with_cache(stores, busy_timeout, DEFAULT_CACHE_PAGES)
+    }
+
+    pub(crate) fn open_store_rw_with_cache(
+        stores: Arc<dyn PageStoreSet>,
+        busy_timeout: Duration,
+        cache_pages: usize,
+    ) -> Result<Pager> {
+        let file = stores
+            .open(StoreKind::Main, StoreOpenOptions::READ_WRITE)?
+            .ok_or_else(|| Error::Io(std::io::Error::from(std::io::ErrorKind::NotFound)))?;
+        let process_lock = stores.process_lock();
         let mut pager = Pager {
-            path: path.to_path_buf(),
+            path: stores
+                .path(StoreKind::Main)
+                .unwrap_or_else(|| PathBuf::from(":memory:")),
+            stores,
             file,
             header: DbHeader {
                 page_size: 4096,
@@ -606,7 +661,7 @@ impl Pager {
             busy_timeout,
             autocheckpoint: DEFAULT_AUTOCHECKPOINT,
             write: Some(WriteSupport {
-                process_lock: process_lock(path),
+                process_lock,
                 holds_process_write: false,
                 tx: None,
             }),
@@ -632,9 +687,11 @@ impl Pager {
             return Ok(());
         }
         let writable = self.write.is_some();
+        #[cfg(not(target_arch = "wasm32"))]
         let deadline = std::time::Instant::now() + self.busy_timeout;
+        #[allow(clippy::never_loop)]
         let guard = loop {
-            if let Some(g) = ShmGuard::acquire(&self.path, writable)? {
+            if let Some(g) = ShmGuard::acquire_with(self.stores.clone(), writable)? {
                 break Some(g);
             }
             if !writable {
@@ -642,12 +699,20 @@ impl Pager {
                 // it: frames are checksum-validated either way.
                 break None;
             }
-            if std::time::Instant::now() >= deadline {
-                return Err(Error::Busy(
-                    "another connection is using this database's write-ahead log".into(),
-                ));
+            // The browser store has one owner: nobody else can be holding the log.
+            #[cfg(target_arch = "wasm32")]
+            return Err(Error::Busy(
+                "another connection is using this database's write-ahead log".into(),
+            ));
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                if std::time::Instant::now() >= deadline {
+                    return Err(Error::Busy(
+                        "another connection is using this database's write-ahead log".into(),
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(2));
             }
-            std::thread::sleep(Duration::from_millis(2));
         };
         self.shm = guard;
         if !writable {
@@ -660,10 +725,10 @@ impl Pager {
         // per statement, fsync included). Only a connection that has no
         // handle yet needs to find out whether a usable log exists.
         if self.wal.is_none() {
-            if Wal::open(&self.path, self.header.page_size, true)?.is_none() {
+            if Wal::open_with(self.stores.clone(), self.header.page_size, true)?.is_none() {
                 // No usable log yet: start one.
                 let salt = (journal_nonce(), journal_nonce().rotate_left(7));
-                let wal = Wal::create(&self.path, self.header.page_size, 0, salt)?;
+                let wal = Wal::create_with(self.stores.clone(), self.header.page_size, 0, salt)?;
                 self.wal = Some(wal);
             }
         }
@@ -675,7 +740,7 @@ impl Pager {
     /// exclusive access.
     pub fn set_journal_mode(&mut self, wal: bool) -> Result<&'static str> {
         if self.write.is_none() {
-            return Err(Error::unsupported("database opened read-only"));
+            return Err(Error::unsupported(READ_ONLY_CONNECTION));
         }
         if self.in_transaction() {
             return Err(Error::sql("cannot change journal mode inside a transaction"));
@@ -690,7 +755,7 @@ impl Pager {
                 busy_timeout,
                 ..
             } = self;
-            if !lock.acquire(file, LockLevel::Exclusive, *busy_timeout)? {
+            if !lock.acquire(file.as_ref(), LockLevel::Exclusive, *busy_timeout)? {
                 return Err(Error::Busy(
                     "cannot change journal mode while others are using the database".into(),
                 ));
@@ -700,9 +765,8 @@ impl Pager {
             let mut header = self.page(1)?.to_vec();
             header[18] = 2;
             header[19] = 2;
-            self.file.seek(SeekFrom::Start(0))?;
-            self.file.write_all(&header)?;
-            crate::sync::sync(&self.file)?;
+            self.file.write_at(0, &header)?;
+            self.file.sync()?;
             self.invalidate_cache();
             self.reload_header()?;
             self.acquire_wal_ownership()?;
@@ -712,7 +776,7 @@ impl Pager {
         }
         {
             let Pager { file, lock, .. } = self;
-            lock.downgrade_to_shared(file)?;
+            lock.downgrade_to_shared(file.as_ref())?;
         }
         Ok(self.journal_mode())
     }
@@ -726,7 +790,7 @@ impl Pager {
         let Some(wal) = self.wal.as_mut() else {
             return Ok(0);
         };
-        let moved = wal.checkpoint(&mut self.file)?;
+        let moved = wal.checkpoint(self.file.as_ref())?;
         self.invalidate_cache();
         self.reload_header()?;
         self.load_snapshot()?;
@@ -744,7 +808,7 @@ impl Pager {
                 busy_timeout,
                 ..
             } = self;
-            if !lock.acquire(file, LockLevel::Exclusive, *busy_timeout)? {
+            if !lock.acquire(file.as_ref(), LockLevel::Exclusive, *busy_timeout)? {
                 return Err(Error::Busy(
                     "cannot convert a WAL database while others are using it".into(),
                 ));
@@ -753,7 +817,7 @@ impl Pager {
         let pages = self.page_count;
         // Fold the log into the database file.
         if let Some(mut wal) = self.wal.take() {
-            wal.checkpoint(&mut self.file)?;
+            wal.checkpoint(self.file.as_ref())?;
             wal.remove()?;
         }
         // Stamp the file as rollback-journal and bump the change counter.
@@ -764,26 +828,24 @@ impl Pager {
         header[24..28].copy_from_slice(&counter.to_be_bytes());
         header[28..32].copy_from_slice(&pages.to_be_bytes());
         header[92..96].copy_from_slice(&counter.to_be_bytes());
-        self.file.seek(SeekFrom::Start(0))?;
-        self.file.write_all(&header)?;
-        crate::sync::sync(&self.file)?;
+        self.file.write_at(0, &header)?;
+        self.file.sync()?;
         // The log is gone; so is any shared-memory index of it.
         self.shm = None;
-        let _ = std::fs::remove_file(crate::wal::shm_path(&self.path));
+        let _ = self.stores.remove(StoreKind::Shm);
         self.invalidate_cache();
         self.reload_header()?;
         self.load_snapshot()?;
         {
             let Pager { file, lock, .. } = self;
-            lock.downgrade_to_shared(file)?;
+            lock.downgrade_to_shared(file.as_ref())?;
         }
         Ok(())
     }
 
     fn reload_header(&mut self) -> Result<()> {
         let mut hdr = [0u8; HEADER_SIZE];
-        self.file.seek(SeekFrom::Start(0))?;
-        match self.file.read_exact(&mut hdr) {
+        match self.file.read_at(0, &mut hdr) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                 return Err(Error::NotADatabase)
@@ -799,14 +861,12 @@ impl Pager {
     /// Roll back a journal left behind by a crashed writer, under an exclusive
     /// lock so no one else is reading the half-written file.
     fn recover_hot_journal(&mut self) -> Result<()> {
-        let jpath = journal::journal_path(&self.path);
-        if !journal::hot_journal_exists(&self.path) {
+        if !journal::hot_journal_exists(self.stores.as_ref()) {
             // An empty or headerless journal file is just litter.
-            let _ = std::fs::remove_file(&jpath);
+            let _ = self.stores.remove(StoreKind::Journal);
             return Ok(());
         }
-        let path = self.path.clone();
-        if !self.journal_is_hot(&path)? {
+        if !self.journal_is_hot()? {
             // Another connection is writing right now; leave its journal alone.
             return Ok(());
         }
@@ -822,24 +882,30 @@ impl Pager {
                 busy_timeout,
                 ..
             } = self;
-            if !lock.acquire(file, LockLevel::Exclusive, *busy_timeout)? {
+            if !lock.acquire(file.as_ref(), LockLevel::Exclusive, *busy_timeout)? {
                 return Err(Error::Busy(
                     "another process is recovering this database".into(),
                 ));
             }
         }
-        journal::rollback(&mut self.file, &jpath)?;
-        std::fs::remove_file(&jpath).ok();
+        journal::rollback(self.file.as_ref(), self.stores.as_ref())?;
+        self.stores.remove(StoreKind::Journal).ok();
         self.invalidate_cache();
         {
             let Pager { file, lock, .. } = self;
-            lock.release(file)?;
+            lock.release(file.as_ref())?;
         }
         Ok(())
     }
 
     pub fn is_writable(&self) -> bool {
         self.write.is_some()
+    }
+
+    /// How long a lock is waited for; a read-only pager starts at the
+    /// default the read-write opener takes explicitly.
+    pub fn set_busy_timeout(&mut self, busy_timeout: Duration) {
+        self.busy_timeout = busy_timeout;
     }
 
     pub fn in_transaction(&self) -> bool {
@@ -849,7 +915,7 @@ impl Pager {
     fn write_support(&mut self) -> Result<&mut WriteSupport> {
         self.write
             .as_mut()
-            .ok_or_else(|| Error::unsupported("database opened read-only"))
+            .ok_or_else(|| Error::unsupported(READ_ONLY_CONNECTION))
     }
 
     /// Take a read lock and move to the newest committed content. Readers of a
@@ -876,7 +942,7 @@ impl Pager {
                 ..
             } = self;
             if lock.level() < LockLevel::Shared
-                && !lock.acquire(file, LockLevel::Shared, *busy_timeout)?
+                && !lock.acquire(file.as_ref(), LockLevel::Shared, *busy_timeout)?
             {
                 return Err(Error::Busy("database is locked".into()));
             }
@@ -938,7 +1004,7 @@ impl Pager {
         }
         if immediate {
             if self.write.is_none() {
-                return Err(Error::unsupported("database opened read-only"));
+                return Err(Error::unsupported(READ_ONLY_CONNECTION));
             }
             let Pager {
                 file,
@@ -946,13 +1012,16 @@ impl Pager {
                 busy_timeout,
                 ..
             } = self;
-            if !lock.acquire(file, LockLevel::Reserved, *busy_timeout)? {
+            if !lock.acquire(file.as_ref(), LockLevel::Reserved, *busy_timeout)? {
                 return Err(Error::Busy("another writer holds the database".into()));
             }
         }
         let pages = self.page_count;
         let nonce = journal_nonce();
-        let journal = Journal::create(&self.path, self.page_size, pages, nonce)?;
+        // Memory databases deliberately keep rollback-journal mode: the
+        // journal is simply another PageStore, so atomic rollback semantics do
+        // not require either a filesystem or a WAL.
+        let journal = Journal::create_with(self.stores.clone(), self.page_size, pages, nonce)?;
         let w = self.write_support()?;
         w.tx = Some(WriteTx {
             journal: Some(journal),
@@ -979,7 +1048,7 @@ impl Pager {
         // Reserve the write lock lazily for a deferred transaction.
         {
             if self.write.is_none() {
-                return Err(Error::unsupported("database opened read-only"));
+                return Err(Error::unsupported(READ_ONLY_CONNECTION));
             }
             let Pager {
                 file,
@@ -988,7 +1057,7 @@ impl Pager {
                 ..
             } = self;
             if lock.level() < LockLevel::Reserved
-                && !lock.acquire(file, LockLevel::Reserved, *busy_timeout)?
+                && !lock.acquire(file.as_ref(), LockLevel::Reserved, *busy_timeout)?
             {
                 return Err(Error::Busy("another writer holds the database".into()));
             }
@@ -1035,8 +1104,7 @@ impl Pager {
     fn read_page_from_file(&mut self, pgno: u32) -> Result<Vec<u8>> {
         let mut buf = vec![0u8; self.page_size];
         let offset = (pgno as u64 - 1) * self.page_size as u64;
-        self.file.seek(SeekFrom::Start(offset))?;
-        match self.file.read_exact(&mut buf) {
+        match self.file.read_at(offset, &mut buf) {
             Ok(()) => Ok(buf),
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(buf),
             Err(e) => Err(Error::Io(e)),
@@ -1054,10 +1122,7 @@ impl Pager {
         if !self.in_transaction() {
             return Err(Error::sql("no write transaction is open"));
         }
-        let pgno = self.page_count + 1;
-        // The page holding the 1 GiB lock byte is never allocated.
-        let lock_page = (1u64 << 30) / self.page_size as u64 + 1;
-        let pgno = if pgno as u64 == lock_page { pgno + 1 } else { pgno };
+        let pgno = next_page_number(self.page_count, self.page_size);
         let empty = vec![0u8; self.page_size];
         self.page_count = pgno;
         self.write_page(pgno, &empty)?;
@@ -1085,7 +1150,7 @@ impl Pager {
             }
             {
                 let Pager { file, lock, .. } = self;
-                lock.downgrade_to_shared(file)?;
+                lock.downgrade_to_shared(file.as_ref())?;
             }
             self.release_process_write();
             return Ok(());
@@ -1123,7 +1188,7 @@ impl Pager {
                 busy_timeout,
                 ..
             } = self;
-            if !lock.acquire(file, LockLevel::Exclusive, *busy_timeout)? {
+            if !lock.acquire(file.as_ref(), LockLevel::Exclusive, *busy_timeout)? {
                 return Err(Error::Busy("readers are still using the database".into()));
             }
         }
@@ -1143,8 +1208,7 @@ impl Pager {
                 continue;
             }
             let offset = (pgno as u64 - 1) * self.page_size as u64;
-            self.file.seek(SeekFrom::Start(offset))?;
-            self.file.write_all(&data)?;
+            self.file.write_at(offset, &data)?;
             write_step();
             pages = pages.max(pgno);
         }
@@ -1154,15 +1218,14 @@ impl Pager {
             data[24..28].copy_from_slice(&counter.to_be_bytes());
             data[28..32].copy_from_slice(&pages.to_be_bytes());
             data[92..96].copy_from_slice(&counter.to_be_bytes());
-            self.file.seek(SeekFrom::Start(0))?;
-            self.file.write_all(&data)?;
+            self.file.write_at(0, &data)?;
             write_step();
             self.header = DbHeader::parse(&data)?;
             let page: Arc<[u8]> = Arc::from(data.into_boxed_slice());
             self.cache.insert(1, page);
         }
-        self.file.set_len(pages as u64 * self.page_size as u64)?;
-        crate::sync::sync(&self.file)?;
+        self.file.truncate(pages as u64 * self.page_size as u64)?;
+        self.file.sync()?;
         write_step();
         self.invalidate_cache();
         // 4. the commit point
@@ -1177,7 +1240,7 @@ impl Pager {
         self.page_count = pages;
         {
             let Pager { file, lock, .. } = self;
-            lock.downgrade_to_shared(file)?;
+            lock.downgrade_to_shared(file.as_ref())?;
         }
         self.release_process_write();
         Ok(())
@@ -1247,7 +1310,22 @@ impl Pager {
             }
         }
     }
+}
 
+/// A connection dropped mid-transaction (an error propagated out of a write,
+/// a thread unwinding) must not keep the file's in-process write slot: the
+/// registry outlives every connection, so a leaked slot answers "another
+/// connection in this process is writing" to every later opener of that path
+/// for the life of the process. Rolling back also restores spilled pages and
+/// clears the journal, the same recovery the next opener would otherwise do.
+impl Drop for Pager {
+    fn drop(&mut self) {
+        let _ = self.rollback();
+        self.release_process_write();
+    }
+}
+
+impl Pager {
     /// Undo the open transaction. Pages that were only staged in memory are
     /// dropped; anything already spilled to the file is restored from the
     /// journal.
@@ -1255,16 +1333,16 @@ impl Pager {
         if !self.in_transaction() {
             return Ok(());
         }
-        let (journal_path, spilled) = {
+        let (has_journal, spilled) = {
             let w = self.write_support()?;
             let tx = w.tx.as_ref().expect("transaction");
             (
-                tx.journal.as_ref().map(|j| j.path().to_path_buf()),
+                tx.journal.is_some(),
                 tx.spilled,
             )
         };
-        if let (Some(path), true) = (journal_path.as_ref(), spilled) {
-            journal::rollback(&mut self.file, path)?;
+        if has_journal && spilled {
+            journal::rollback(self.file.as_ref(), self.stores.as_ref())?;
         }
         {
             let w = self.write_support()?;
@@ -1281,7 +1359,7 @@ impl Pager {
         self.load_snapshot()?;
         {
             let Pager { file, lock, .. } = self;
-            lock.downgrade_to_shared(file)?;
+            lock.downgrade_to_shared(file.as_ref())?;
         }
         self.release_process_write();
         Ok(())
@@ -1302,7 +1380,7 @@ impl Pager {
         }
         {
             let Pager { file, lock, .. } = self;
-            lock.release(file)?;
+            lock.release(file.as_ref())?;
         }
         if self.write.is_none() {
             self.shm = None;
@@ -1321,9 +1399,23 @@ impl Pager {
     }
 }
 
+/// SQLite reserves the page containing its 1 GiB lock bytes. Keeping this
+/// calculation independent of the backend prevents an in-memory store from
+/// accidentally allocating that page just because it has no OS file locks.
+fn next_page_number(current: u32, page_size: usize) -> u32 {
+    let next = current + 1;
+    let lock_page = (1u64 << 30) / page_size as u64 + 1;
+    if next as u64 == lock_page {
+        next + 1
+    } else {
+        next
+    }
+}
+
 /// The journal checksum nonce. It only has to differ between transactions so a
 /// stale record cannot pass a fresh checksum; time plus pid gives that without
 /// a random source.
+#[cfg(not(target_arch = "wasm32"))]
 fn journal_nonce() -> u32 {
     use std::time::{SystemTime, UNIX_EPOCH};
     let t = SystemTime::now()
@@ -1331,4 +1423,13 @@ fn journal_nonce() -> u32 {
         .map(|d| d.subsec_nanos() ^ d.as_secs() as u32)
         .unwrap_or(0x5a5a_5a5a);
     t ^ (std::process::id().wrapping_mul(2654435761))
+}
+
+/// The browser has neither a clock nor a pid here; a stepping counter still
+/// differs between transactions, which is all the nonce is for.
+#[cfg(target_arch = "wasm32")]
+fn journal_nonce() -> u32 {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static NEXT: AtomicU32 = AtomicU32::new(0x5a5a_5a5a);
+    NEXT.fetch_add(0x9e37_79b9, Ordering::Relaxed)
 }

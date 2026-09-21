@@ -3,25 +3,362 @@ use {
         cx::Cx, id_pool::*, makepad_error_log::*, makepad_math::*, makepad_script::*,
         os::CxOsTexture, script::vm::*,
     },
-    std::rc::Rc,
+    std::{
+        rc::Rc,
+        sync::{
+            atomic::{AtomicU64, Ordering},
+            Arc,
+        },
+    },
 };
 
 /// Upload decoded images as mipmapped textures (`VecMipBGRAu8_32`) so minifying them on low-DPI
 /// screens uses a mip chain instead of aliasing into a blocky look. Only helps when the source
-/// has detail over the display size. Default on for OpenGL only; override with `MAKEPAD_IMAGE_MIPMAPS`.
+/// has detail over the display size. Override with `MAKEPAD_IMAGE_MIPMAPS`.
 pub fn image_cache_use_mipmaps() -> bool {
     if let Ok(v) = std::env::var("MAKEPAD_IMAGE_MIPMAPS") {
         return matches!(v.trim(), "1" | "true" | "on" | "yes");
     }
-    // The platform crate can see the `use_vulkan` cfg the draw crate cannot, so the gate lives here.
-    cfg!(all(target_os = "linux", not(use_vulkan)))
+    // Every Linux backend builds the chain: OpenGL with `glGenerateMipmap`,
+    // Vulkan by blitting each level from the one above
+    // (`CxVulkan::record_mip_chain`), the simulated GPU in software. So the
+    // gate is the platform, not the API chosen at startup, and the decode
+    // worker can ask it without a `Cx`.
+    cfg!(target_os = "linux")
 }
 
+/// A shared, reusable texture handle. GPU storage is allocated lazily by rendering.
+///
+/// [`Texture::release`] retires the current allocation, including through every
+/// clone of this handle. The handle and its format/CPU pixels remain valid; the
+/// next upload or render allocates fresh storage. Render contents are lost and
+/// `InitWith` clears again. Release after removing retained readers/producers:
+/// a retained pass that still uses this handle may allocate it again.
+///
+/// Lifetime serials belong to one `Cx`, start at zero, and count submitted GPU
+/// command buffers (Metal), render passes (GL/D3D11/WebGL), or software frames
+/// (gpusim), not Draw events. Recording a pass is not submitting it. Sample
+/// `Cx::frame_submission_serial` after rendering, then acknowledge only serials
+/// at or below `Cx::frame_completion_serial`. Completion of N covers every
+/// submission <= N on the renderer's ordered queue. These are completion, not
+/// successful-rendering, guarantees; a device error can discard work.
+///
+/// Metal uses command-buffer completion handlers. GL uses zero-timeout sync
+/// fences and D3D11 uses EVENT queries. No backend guesses a frame delay.
+/// Poll completion while work is pending, including when no redraw is needed:
+/// it inserts at most one outstanding fence and reclaims retired allocations.
+/// Unavailable/failed fences leave the completed serial unchanged. Gpusim
+/// completes synchronously. WebGL deletion safely delegates in-flight ownership
+/// to the browser/driver. The Rust bridge does not report
+/// actual allocation sizes. Completion uses the nonblocking WebGL2 fence
+/// bridge; allocated bytes return `None` (pool totals omit these unknown allocations). Do not use
+/// WebGL pool totals for admission. Vulkan/OHOS/direct-DRM support is not implemented.
+///
+/// Byte counts describe allocated texture storage, including mip levels, cube
+/// faces and known backend capacity, not CPU source pixels, upload staging,
+/// driver metadata or total VRAM residency. Metal reports `allocatedSize`;
+/// GL/D3D report texel storage (opaque driver padding is not queryable).
+/// Gpusim reports its actual float raster/conversion buffers. Pool totals
+/// include reusable free slots, previous resources and pending retirements.
+/// Call completion polling before measuring to collect finished retirements.
+/// GL measurements require this renderer's context to be current; otherwise
+/// they return `None`. Release before changing dimensions to keep the old
+/// allocation charged during reallocation. Command-buffer-only copies created
+/// by ordinary implicit reallocations are not separately counted by the pool.
+/// Native retirement conservatively covers the latest queue buffer, including
+/// a Metal batch still being encoded, which can be later than the last reader.
+/// Shared/video/external formats are managed by their owners and release is a
+/// no-op for those formats.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Texture(Rc<PoolId>);
 
+#[cfg(all(target_os = "linux", use_vulkan))]
+pub(crate) struct WeakTexture(std::rc::Weak<PoolId>);
+
+#[cfg(all(target_os = "linux", use_vulkan))]
+impl WeakTexture {
+    pub(crate) fn upgrade(&self) -> Option<Texture> {
+        self.0.upgrade().map(Texture)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Copy)]
 pub struct TextureId(pub(crate) usize, u64);
+
+/// A request accepted by one `Cx`. Tickets are never reused by that context.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ReadbackTicket(pub u64);
+
+/// Capture the pending producer, or copy the last rendered allocation when
+/// there is no dirty producer. `next_render` explicitly waits for the next
+/// execution of the attachment's pass (it does not request a repaint).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ReadbackRequest {
+    pub next_render: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadbackError {
+    UnsupportedBackend,
+    UnsupportedFormat,
+    InvalidSize,
+    NotRendered,
+    Backpressure,
+    Cancelled,
+    AllocationChanged,
+    DeviceLost,
+    Failed,
+}
+
+impl std::fmt::Display for ReadbackError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "texture readback: {self:?}")
+    }
+}
+impl std::error::Error for ReadbackError {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadbackChannelOrder { Bgra, Rgba }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadbackOrigin { TopLeft, BottomLeft }
+
+/// Raw, unmodified UNORM8 attachment bytes, including the attachment's alpha
+/// convention. An error is a terminal result for the ticket, with no payload.
+#[derive(Debug)]
+pub struct TextureReadback {
+    pub ticket: ReadbackTicket,
+    pub allocation_generation: u64,
+    /// Actual producing submission, in this Cx's renderer serial domain.
+    pub producer_serial: u64,
+    pub width: usize,
+    pub height: usize,
+    pub stride: usize,
+    pub channel_order: ReadbackChannelOrder,
+    pub origin: ReadbackOrigin,
+    pub data: Result<Arc<[u8]>, ReadbackError>,
+}
+
+/// Per-context limits. Admission reserves staging AND result capacity before
+/// returning a ticket. Keep/retry a rejected request after draining results.
+pub const TEXTURE_READBACK_MAX_BYTES: usize = 32 * 1024 * 1024;
+pub const TEXTURE_READBACK_MAX_REQUESTS: usize = 256;
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TextureReadbackUsage {
+    pub requests: usize,
+    /// Includes queued, in-flight and undelivered results. Each reservation
+    /// covers a staging allocation and, independently, its CPU result.
+    pub reserved_bytes: usize,
+}
+
+pub(crate) struct ReadbackSlot {
+    pub legacy: bool,
+    pub texture: Texture,
+    pub pass: Option<crate::draw_pass::DrawPassId>,
+    pub pass_generation: Option<u64>,
+    pub next_render: bool,
+    pub previous_serial: u64,
+    pub pending: bool,
+    pub cancelled: bool,
+    pub reserved_bytes: usize,
+    pub result: TextureReadback,
+    pub receive: Option<std::sync::mpsc::Receiver<Result<Arc<[u8]>, ReadbackError>>>,
+}
+
+#[derive(Default)]
+pub(crate) struct TextureReadbacks {
+    pub next_ticket: u64,
+    pub slots: Vec<ReadbackSlot>,
+    pub reserved_bytes: usize,
+}
+
+/// A one-shot completion sender. Capacity is reserved per ticket; unrelated
+/// completions can never fill it. A dropped sender becomes an explicit error
+/// when the owning renderer polls the receiver.
+#[cfg(any(gpusim, not(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux"))))))]
+pub(crate) struct ReadbackCompletion(
+    pub std::sync::mpsc::SyncSender<Result<Arc<[u8]>, ReadbackError>>,
+);
+
+#[cfg(any(gpusim, not(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux"))))))]
+impl ReadbackCompletion {
+    pub fn finish(self, result: Result<Arc<[u8]>, ReadbackError>) {
+        // There is exactly one producer and one message in this channel. The
+        // only possible send failure is teardown of the owning Cx.
+        let _ = self.0.try_send(result);
+        crate::thread::SignalToUI::set_ui_signal();
+    }
+}
+
+#[cfg(any(gpusim, not(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux"))))))]
+pub(crate) struct ReadbackWork {
+    pub ticket: ReadbackTicket,
+    pub texture_id: TextureId,
+    pub width: usize,
+    pub height: usize,
+    pub reserved_bytes: usize,
+    pub completion: ReadbackCompletion,
+}
+
+impl Cx {
+    pub(crate) fn validate_pending_readbacks(&mut self) {
+        for index in 0..self.textures.1.readbacks.slots.len() {
+            let slot = &self.textures.1.readbacks.slots[index];
+            if !slot.pending { continue; }
+            let id = slot.texture.texture_id();
+            let texture = &self.textures[id];
+            let error = if texture.allocation_generation > slot.result.allocation_generation
+                || (texture.allocation_generation == slot.result.allocation_generation && texture.alloc.is_none()) {
+                Some(ReadbackError::AllocationChanged)
+            } else if let Some(pass) = slot.pass {
+                let valid = self.passes.0.pool.get(pass.0).is_some_and(|entry| Some(entry.generation) == slot.pass_generation)
+                    && !self.passes.0.is_free(pass.0)
+                    && self.passes[pass].color_textures.iter().any(|attachment| attachment.texture.texture_id() == id);
+                if !valid { Some(ReadbackError::Cancelled) }
+                else if !slot.next_render && !self.passes[pass].paint_dirty && texture.producer_serial == slot.previous_serial {
+                    Some(ReadbackError::NotRendered)
+                } else { None }
+            } else { None };
+            if let Some(error) = error {
+                let slot = &mut self.textures.1.readbacks.slots[index];
+                slot.pending = false;
+                slot.result.data = Err(error);
+            }
+        }
+    }
+
+    #[cfg(not(gpusim))]
+    pub(crate) fn readback_pass_submitted(&mut self, pass: crate::draw_pass::DrawPassId, serial: u64) {
+        for color in &self.passes[pass].color_textures {
+            self.textures[color.texture.texture_id()].producer_serial = serial;
+        }
+    }
+
+    #[cfg(any(gpusim, not(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux"))))))]
+    pub(crate) fn take_readback_work(&mut self, pass: Option<crate::draw_pass::DrawPassId>, order: ReadbackChannelOrder, origin: ReadbackOrigin) -> Vec<ReadbackWork> {
+        let mut work = Vec::new();
+        for index in 0..self.textures.1.readbacks.slots.len() {
+            let slot = &self.textures.1.readbacks.slots[index];
+            if !slot.pending || slot.pass != pass { continue; }
+            let id = slot.texture.texture_id();
+            let texture = &self.textures[id];
+            let error = if texture.allocation_generation != slot.result.allocation_generation {
+                Some(ReadbackError::AllocationChanged)
+            } else if texture.alloc.as_ref().is_none_or(|alloc| alloc.width != slot.result.width || alloc.height != slot.result.height)
+                || texture.producer_serial == 0 || (pass.is_some() && texture.producer_serial <= slot.previous_serial) {
+                Some(ReadbackError::NotRendered)
+            } else { None };
+            let serial = texture.producer_serial;
+            let slot = &mut self.textures.1.readbacks.slots[index];
+            slot.pending = false;
+            if let Some(error) = error {
+                slot.result.data = Err(error);
+                crate::thread::SignalToUI::set_ui_signal();
+                continue;
+            }
+            slot.result.producer_serial = serial;
+            slot.result.channel_order = order;
+            slot.result.origin = origin;
+            let (send, receive) = std::sync::mpsc::sync_channel(1);
+            slot.receive = Some(receive);
+            work.push(ReadbackWork { ticket: slot.result.ticket, texture_id: id, width: slot.result.width, height: slot.result.height,
+                reserved_bytes: slot.reserved_bytes, completion: ReadbackCompletion(send) });
+        }
+        work
+    }
+
+    #[cfg(not(gpusim))]
+    pub(crate) fn fail_pending_readbacks(&mut self, error: ReadbackError) {
+        for slot in &mut self.textures.1.readbacks.slots {
+            if slot.pending { slot.pending = false; slot.result.data = Err(error); }
+        }
+        crate::thread::SignalToUI::set_ui_signal();
+    }
+}
+
+#[cfg(all(not(gpusim), any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux")))))]
+impl Cx {
+    pub(crate) fn poll_texture_readbacks(&mut self) {
+        self.fail_pending_readbacks(ReadbackError::UnsupportedBackend);
+    }
+}
+
+#[cfg(all(not(gpusim), not(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux")))), any(target_os = "linux", target_os = "android", target_os = "windows")))]
+pub(crate) type ReadbackCopyJob = Box<dyn FnOnce() + Send>;
+
+/// One lazy, long-lived worker per renderer. It copies mapped leases and
+/// wakes the renderer to poll GPU fences, but never calls a graphics API.
+#[cfg(all(not(gpusim), not(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux")))), any(target_os = "linux", target_os = "android", target_os = "windows")))]
+pub(crate) struct ReadbackWorker {
+    send: std::sync::mpsc::SyncSender<Option<ReadbackCopyJob>>,
+    active: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(all(not(gpusim), not(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux")))), any(target_os = "linux", target_os = "android", target_os = "windows")))]
+impl ReadbackWorker {
+    pub fn new(cx: &Cx) -> Result<Self, ReadbackError> {
+        use std::sync::{atomic::AtomicBool, mpsc};
+        let (send, receive) = mpsc::sync_channel::<Option<ReadbackCopyJob>>(TEXTURE_READBACK_MAX_REQUESTS + 1);
+        let active = Arc::new(AtomicBool::new(false));
+        let running = active.clone();
+        cx.thread_spawner().spawn_worker(crate::thread::ThreadOptions::default(), move || {
+            loop {
+                let message = if running.load(Ordering::Acquire) {
+                    receive.recv_timeout(std::time::Duration::from_millis(4))
+                } else { receive.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected) };
+                match message {
+                    Ok(Some(job)) => {
+                        // A failed copy drops its one-shot sender, which the
+                        // renderer converts to a terminal error. Keep the
+                        // worker available for the remaining leases.
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+                        crate::thread::SignalToUI::set_ui_signal();
+                    }
+                    Ok(None) => {}
+                    Err(mpsc::RecvTimeoutError::Timeout) => crate::thread::SignalToUI::set_ui_signal(),
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+        }).map_err(|_| ReadbackError::Failed)?.detach();
+        Ok(Self { send, active })
+    }
+
+    pub fn set_active(&self, active: bool) {
+        let was_active = self.active.swap(active, Ordering::AcqRel);
+        if active && !was_active {
+            // If full, queued jobs already wake the worker.
+            let _ = self.send.try_send(None);
+        }
+    }
+
+    /// Return the owned job on backpressure so the renderer retains its lease.
+    pub fn try_copy(&self, job: ReadbackCopyJob) -> Result<(), (ReadbackCopyJob, bool)> {
+        match self.send.try_send(Some(job)) {
+            Ok(()) => Ok(()),
+            Err(std::sync::mpsc::TrySendError::Full(Some(job))) => Err((job, false)),
+            Err(std::sync::mpsc::TrySendError::Disconnected(Some(job))) => Err((job, true)),
+            _ => unreachable!(),
+        }
+    }
+}
+
+/// Only called by a copy worker while its backend retains the mapped resource.
+#[cfg(all(not(gpusim), not(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux")))), any(target_os = "linux", target_os = "android", target_os = "windows")))]
+pub(crate) unsafe fn copy_readback_rows(address: usize, pitch: usize, width: usize, height: usize) -> Arc<[u8]> {
+    let mut bytes = Arc::<[u8]>::new_uninit_slice(width * height * 4);
+    let dst = Arc::get_mut(&mut bytes).unwrap().as_mut_ptr().cast::<u8>();
+    for y in 0..height {
+        std::ptr::copy_nonoverlapping((address as *const u8).add(y * pitch), dst.add(y * width * 4), width * 4);
+    }
+    bytes.assume_init()
+}
+
+impl TextureId {
+    pub(crate) fn from_pool_slot(index: usize, generation: u64) -> Self {
+        Self(index, generation)
+    }
+}
 
 impl Default for TextureId {
     /// Returns a sentinel `TextureId` that does not correspond to any allocated texture.
@@ -32,15 +369,165 @@ impl Default for TextureId {
 }
 
 impl Texture {
+    #[cfg(all(target_os = "linux", use_vulkan))]
+    pub(crate) fn downgrade(&self) -> WeakTexture {
+        WeakTexture(Rc::downgrade(&self.0))
+    }
+    pub fn readers(&self) -> usize {
+        Rc::strong_count(&self.0)
+    }
     pub fn texture_id(&self) -> TextureId {
         TextureId(self.0.id, self.0.generation)
+    }
+
+    /// Queue a full RenderBGRAu8 attachment without waiting for the GPU. The
+    /// request follows its pending producer, or issues only an ordered copy
+    /// when already rendered. Other formats return UnsupportedFormat.
+    ///
+    /// Admission reserves bounded staging/result bytes and pins this handle.
+    /// Backpressure accepts no ticket: retain the request and retry after
+    /// draining results. Every accepted ticket yields exactly one result,
+    /// including cancellation, allocation changes and device errors. Poll
+    /// `Cx::try_take_texture_readbacks` on Event::Signal. No redraw is needed
+    /// for a copy of an existing allocation.
+    pub fn read_back(&self, cx: &mut Cx, request: ReadbackRequest) -> Result<ReadbackTicket, ReadbackError> {
+        let id = self.texture_id();
+        let TextureFormat::RenderBGRAu8 { size, .. } = &cx.textures[id].format else {
+            return Err(ReadbackError::UnsupportedFormat);
+        };
+        let producer = cx.passes.id_iter().find(|pass| {
+            !cx.passes.0.is_free(pass.0) && cx.passes[*pass].color_textures.iter()
+                .any(|attachment| attachment.texture.texture_id() == id)
+        });
+        let pending_pass = producer.filter(|pass| request.next_render || cx.passes[*pass].paint_dirty);
+        if request.next_render && producer.is_none() {
+            return Err(ReadbackError::NotRendered);
+        }
+        let (width, height) = match size {
+            TextureSize::Fixed { width, height } => (*width, *height),
+            TextureSize::Auto => {
+                if let Some(pass) = pending_pass {
+                    let dpi = cx.passes[pass].dpi_factor.unwrap_or(1.0);
+                    let rect = cx.get_pass_rect(pass, dpi).ok_or(ReadbackError::InvalidSize)?;
+                    ((rect.size.x * dpi) as usize, (rect.size.y * dpi) as usize)
+                } else {
+                    let alloc = cx.textures[id].alloc.as_ref().ok_or(ReadbackError::NotRendered)?;
+                    (alloc.width, alloc.height)
+                }
+            }
+        };
+        if width == 0 || height == 0 || width > i32::MAX as usize || height > i32::MAX as usize {
+            return Err(ReadbackError::InvalidSize);
+        }
+        let row = width.checked_mul(4).ok_or(ReadbackError::InvalidSize)?;
+        // Covers row padding through 4 KiB on native staging textures. Drivers
+        // with a larger mapped pitch fail explicitly before copying memory.
+        let reserved_bytes = row.checked_add(4095).and_then(|row| (row & !4095).checked_mul(height))
+            .ok_or(ReadbackError::InvalidSize)?;
+        let texture = &cx.textures[id];
+        let reallocate = texture.alloc != texture.format.as_render_alloc(width, height);
+        if pending_pass.is_none() && (reallocate || texture.producer_serial == 0) {
+            return Err(ReadbackError::NotRendered);
+        }
+        let generation = texture.allocation_generation.saturating_add(u64::from(reallocate));
+        let producer_serial = if pending_pass.is_some() { 0 } else { texture.producer_serial };
+        let previous_serial = texture.producer_serial;
+        let pass_generation = pending_pass.map(|pass| cx.passes.0.pool[pass.0].generation);
+        let state = &mut cx.textures.1.readbacks;
+        if state.slots.len() >= TEXTURE_READBACK_MAX_REQUESTS || reserved_bytes > TEXTURE_READBACK_MAX_BYTES.saturating_sub(state.reserved_bytes) {
+            return Err(ReadbackError::Backpressure);
+        }
+        let ticket = ReadbackTicket(state.next_ticket.checked_add(1).ok_or(ReadbackError::Backpressure)?);
+        state.next_ticket = ticket.0;
+        state.reserved_bytes += reserved_bytes;
+        state.slots.push(ReadbackSlot {
+            legacy: false,
+            texture: self.clone(), pass: pending_pass, pending: true, cancelled: false,
+            pass_generation, next_render: request.next_render, previous_serial,
+            reserved_bytes, receive: None,
+            result: TextureReadback {
+                ticket, allocation_generation: generation, producer_serial, width, height,
+                stride: row, channel_order: ReadbackChannelOrder::Bgra, origin: ReadbackOrigin::TopLeft,
+                data: Err(ReadbackError::NotRendered),
+            },
+        });
+        cx.poll_texture_readbacks();
+        Ok(ticket)
     }
 }
 
 #[derive(Default)]
-pub struct CxTexturePool(pub(crate) IdPool<CxTexture>);
+pub struct CxTexturePool(pub(crate) IdPool<CxTexture>, pub(crate) TextureLifetime);
+
+#[derive(Default)]
+pub(crate) struct FrameSerials {
+    pub(crate) submitted: AtomicU64,
+    pub(crate) completed: AtomicU64,
+    #[cfg(all(
+        not(gpusim),
+        any(target_os = "macos", target_os = "ios", target_os = "tvos")
+    ))]
+    pub(crate) encoded: AtomicU64,
+}
+
+impl FrameSerials {
+    #[cfg(any(
+        test,
+        gpusim,
+        not(any(target_os = "macos", target_os = "ios", target_os = "tvos"))
+    ))]
+    pub(crate) fn submit(&self) -> u64 {
+        // Submission has one writer (the renderer/UI thread); only completion
+        // callbacks write concurrently, to the separate completed atomic.
+        let serial = self.submitted.load(Ordering::Relaxed).saturating_add(1);
+        self.submitted.store(serial, Ordering::Release);
+        serial
+    }
+
+    #[cfg(any(test, gpusim, use_vulkan, not(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux"))))))]
+    pub(crate) fn complete(&self, serial: u64) {
+        self.completed.fetch_max(
+            serial.min(self.submitted.load(Ordering::Acquire)),
+            Ordering::Release,
+        );
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct TextureLifetime {
+    pub(crate) serials: Arc<FrameSerials>,
+    pub(crate) retired: Vec<RetiredTexture>,
+    pub(crate) readbacks: TextureReadbacks,
+    #[cfg(all(not(gpusim), any(target_os = "macos", target_os = "ios", target_os = "tvos")))]
+    pub(crate) metal_readbacks: crate::os::apple::metal::MetalReadbacks,
+    #[cfg(all(not(gpusim), not(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux")))), any(target_os = "linux", target_os = "android")))]
+    pub(crate) gl_readbacks: crate::os::linux::opengl::GlReadbacks,
+    #[cfg(all(not(gpusim), target_os = "windows"))]
+    pub(crate) d3d_readbacks: crate::os::windows::d3d11::D3dReadbacks,
+    #[cfg(all(
+        not(gpusim),
+        not(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux")))),
+        any(target_os = "linux", target_os = "android")
+    ))]
+    pub(crate) gl: crate::os::linux::opengl::TextureFence,
+    #[cfg(all(not(gpusim), target_os = "windows"))]
+    pub(crate) d3d: Option<(u64, windows::Win32::Graphics::Direct3D11::ID3D11Query)>,
+}
+
+pub(crate) struct RetiredTexture {
+    #[cfg(any(gpusim, not(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux"))))))]
+    pub(crate) serial: u64,
+    pub(crate) bytes: u64,
+    pub(crate) os: CxOsTexture,
+}
 
 impl CxTexturePool {
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn id_at_index(&self, index: usize) -> Option<TextureId> {
+        let slot = self.0.pool.get(index)?;
+        (!self.0.is_free(index)).then_some(TextureId(index, slot.generation))
+    }
+
     // Allocates a new texture in the pool, potentially reusing an existing texture slot.
     ///
     /// This method attempts to find a compatible texture slot for reuse. If found, it preserves
@@ -192,6 +679,12 @@ pub enum TextureFormat {
         size: TextureSize,
         initial: bool,
     },
+    /// Depth attachment retained for later comparison sampling. Ordinary UI
+    /// depth stays attachment-only; use texture_depth().sample_compare in Splash.
+    DepthD32Sampled {
+        size: TextureSize,
+        initial: bool,
+    },
     RenderBGRAu8 {
         size: TextureSize,
         initial: bool,
@@ -276,6 +769,9 @@ impl std::fmt::Debug for TextureFormat {
             TextureFormat::DepthD32 { size, .. } => {
                 write!(f, "TextureFormat::DepthD32(size:{:?})", size)
             }
+            TextureFormat::DepthD32Sampled { size, .. } => {
+                write!(f, "TextureFormat::DepthD32Sampled(size:{:?})", size)
+            }
             TextureFormat::RenderBGRAu8 { size, .. } => {
                 write!(f, "TextureFormat::RenderBGRAu8(size:{:?})", size)
             }
@@ -342,6 +838,7 @@ pub enum TextureCategory {
     Render,
     RenderCube,
     DepthBuffer,
+    DepthBufferSampled,
     Shared,
     Video,
 }
@@ -349,6 +846,7 @@ pub enum TextureCategory {
 impl PartialEq for TextureCategory {
     fn eq(&self, other: &TextureCategory) -> bool {
         match self {
+            Self::DepthBufferSampled => matches!(other, Self::DepthBufferSampled),
             Self::Vec { .. } => {
                 if let Self::Vec { .. } = other {
                     true
@@ -417,7 +915,7 @@ impl PartialEq for TextureCategory {
 /// slug glyph atlas grows by appending rows and marks only those dirty) —
 /// has nothing to keep and must upload the whole image regardless of the
 /// rect. Every backend honors that (GL `glTexImage2D`, D3D11's realloc path,
-/// the headless mirror rebuild, Metal's `vec_fresh`).
+/// the gpusim mirror rebuild, Metal's `vec_fresh`).
 #[derive(Clone, Copy, Debug)]
 pub enum TextureUpdated {
     Empty,
@@ -473,6 +971,18 @@ pub(crate) enum TexturePixel {
 }
 
 impl CxTexture {
+    #[cfg(any(gpusim, not(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux"))))))]
+    pub(crate) fn reset_allocation(&mut self) {
+        self.allocation_generation = self.allocation_generation.saturating_add(1);
+        self.producer_serial = 0;
+        self.alloc = None;
+        if self.format.is_vec() {
+            self.set_updated(TextureUpdated::Full);
+        } else if self.format.is_render() || self.format.is_depth() {
+            self.set_initial(true);
+        }
+    }
+
     #[allow(unused)]
     pub(crate) fn updated(&self) -> TextureUpdated {
         match self.format {
@@ -491,7 +1001,7 @@ impl CxTexture {
     #[allow(unused)]
     pub(crate) fn initial(&mut self) -> bool {
         match self.format {
-            TextureFormat::DepthD32 { initial, .. } => initial,
+            TextureFormat::DepthD32 { initial, .. } | TextureFormat::DepthD32Sampled { initial, .. } => initial,
             TextureFormat::RenderBGRAu8 { initial, .. } => initial,
             TextureFormat::RenderCubeBGRAu8 { initial, .. } => initial,
             TextureFormat::RenderRGBAf16 { initial, .. } => initial,
@@ -519,7 +1029,7 @@ impl CxTexture {
 
     pub fn set_initial(&mut self, initial: bool) {
         *match &mut self.format {
-            TextureFormat::DepthD32 { initial, .. } => initial,
+            TextureFormat::DepthD32 { initial, .. } | TextureFormat::DepthD32Sampled { initial, .. } => initial,
             TextureFormat::RenderBGRAu8 { initial, .. } => initial,
             TextureFormat::RenderCubeBGRAu8 { initial, .. } => initial,
             TextureFormat::RenderRGBAf16 { initial, .. } => initial,
@@ -569,6 +1079,8 @@ impl CxTexture {
     pub(crate) fn alloc_render(&mut self, width: usize, height: usize) -> bool {
         if let Some(alloc) = self.format.as_render_alloc(width, height) {
             if self.alloc.is_none() || self.alloc.as_ref().unwrap() != &alloc {
+                self.allocation_generation = self.allocation_generation.saturating_add(1);
+                self.producer_serial = 0;
                 self.alloc = Some(alloc);
                 return true;
             }
@@ -617,6 +1129,26 @@ impl CxTexture {
 }
 
 impl TextureFormat {
+    /// CPU pixel bytes this format currently holds (capacity, not length).
+    pub(crate) fn cpu_data_bytes(&self) -> usize {
+        match self {
+            TextureFormat::VecBGRAu8_32 { data, .. }
+            | TextureFormat::VecCubeBGRAu8_32 { data, .. }
+            | TextureFormat::VecMipBGRAu8_32 { data, .. } => data
+                .as_ref()
+                .map_or(0, |data| data.capacity().saturating_mul(4)),
+            TextureFormat::VecMipRGBAf32 { data, .. }
+            | TextureFormat::VecRGBAf32 { data, .. }
+            | TextureFormat::VecRf32 { data, .. } => data
+                .as_ref()
+                .map_or(0, |data| data.capacity().saturating_mul(4)),
+            TextureFormat::VecRu8 { data, .. } | TextureFormat::VecRGu8 { data, .. } => {
+                data.as_ref().map_or(0, |data| data.capacity())
+            }
+            _ => 0,
+        }
+    }
+
     pub fn is_shared(&self) -> bool {
         match self {
             Self::SharedBGRAu8 { .. } => true,
@@ -650,9 +1182,13 @@ impl TextureFormat {
 
     pub fn is_depth(&self) -> bool {
         match self {
-            Self::DepthD32 { .. } => true,
+            Self::DepthD32 { .. } | Self::DepthD32Sampled { .. } => true,
             _ => false,
         }
+    }
+
+    pub fn is_sampled_depth(&self) -> bool {
+        matches!(self, Self::DepthD32Sampled { .. })
     }
 
     pub fn is_video(&self) -> bool {
@@ -702,9 +1238,10 @@ impl TextureFormat {
     /// Fixed target.
     pub fn render_fixed_width_height(&self) -> Option<(usize, usize)> {
         match self {
-            Self::RenderBGRAu8 { size: TextureSize::Fixed { width, height }, .. } => {
-                Some((*width, *height))
-            }
+            Self::RenderBGRAu8 {
+                size: TextureSize::Fixed { width, height },
+                ..
+            } => Some((*width, *height)),
             _ => None,
         }
     }
@@ -818,13 +1355,13 @@ impl TextureFormat {
     #[allow(unused)]
     pub(crate) fn as_depth_alloc(&self, width: usize, height: usize) -> Option<TextureAlloc> {
         match self {
-            Self::DepthD32 { size, .. } => {
+            Self::DepthD32 { size, .. } | Self::DepthD32Sampled { size, .. } => {
                 let (width, height) = size.width_height(width, height);
                 Some(TextureAlloc {
                     width,
                     height,
                     pixel: TexturePixel::D32,
-                    category: TextureCategory::DepthBuffer,
+                    category: if self.is_sampled_depth() { TextureCategory::DepthBufferSampled } else { TextureCategory::DepthBuffer },
                 })
             }
             _ => None,
@@ -900,6 +1437,20 @@ impl Texture {
         cx.null_texture()
     }
 
+    /// Retire GPU storage without invalidating this handle. See [`Texture`].
+    /// This does not submit recorded passes or request a redraw. Reclamation is
+    /// nonblocking and is collected by `Cx::frame_completion_serial` polling.
+    pub fn release(&self, cx: &mut Cx) {
+        cx.release_texture_allocation(self.texture_id());
+    }
+
+    /// Bytes in the current backend allocation, or `None` when unallocated or
+    /// externally managed/unsupported. Pending retirements are charged only to
+    /// `Cx::texture_pool_bytes`, not to this handle's new allocation.
+    pub fn allocated_bytes(&self, cx: &Cx) -> Option<u64> {
+        cx.texture_allocation_bytes(self.texture_id())
+    }
+
     pub fn new_with_format(cx: &mut Cx, format: TextureFormat) -> Self {
         let texture = cx.textures.alloc(format);
         texture
@@ -909,12 +1460,25 @@ impl Texture {
         cx.textures[self.texture_id()].animation = animation;
     }
 
+    /// Mark a render target as an application-held cache (see
+    /// `CxTexture::retained_render_target`).
+    pub fn set_retained_render_target(&self, cx: &mut Cx, retained: bool) {
+        cx.textures[self.texture_id()].retained_render_target = retained;
+    }
+
     pub fn animation<'a>(&self, cx: &'a mut Cx) -> &'a Option<TextureAnimation> {
         &cx.textures[self.texture_id()].animation
     }
 
     pub fn get_format<'a>(&self, cx: &'a mut Cx) -> &'a mut TextureFormat {
         &mut cx.textures[self.texture_id()].format
+    }
+
+    /// The texels the backend allocated for this texture (a render target
+    /// after its first pass), `None` before any allocation: a cache that
+    /// sizes its UVs by a declared size can check the two agree.
+    pub fn allocated_size(&self, cx: &Cx) -> Option<(usize, usize)> {
+        cx.textures[self.texture_id()].alloc.as_ref().map(|a| (a.width, a.height))
     }
 
     pub fn take_vec_u32(&self, cx: &mut Cx) -> Vec<u32> {
@@ -1031,7 +1595,13 @@ impl Texture {
 pub struct CxTexture {
     pub(crate) format: TextureFormat,
     pub(crate) alloc: Option<TextureAlloc>,
+    pub(crate) allocation_generation: u64,
+    pub(crate) producer_serial: u64,
     pub(crate) animation: Option<TextureAnimation>,
+    /// A render target the application keeps as a cache: a software backend
+    /// never releases its framebuffer for idleness or budget while the
+    /// handle lives (GPU backends keep every target anyway).
+    pub(crate) retained_render_target: bool,
     pub os: CxOsTexture,
     pub previous_platform_resource: Option<CxOsTexture>,
 }
@@ -1039,6 +1609,28 @@ pub struct CxTexture {
 #[cfg(test)]
 mod tests {
     use super::{TextureFormat, TextureUpdated, TextureWrap};
+
+    #[test]
+    fn frame_serials_are_monotonic_and_completion_is_bounded() {
+        use super::FrameSerials;
+        use std::sync::atomic::Ordering;
+        let serials = FrameSerials::default();
+        assert_eq!(serials.submitted.load(Ordering::Acquire), 0);
+        serials.complete(100);
+        assert_eq!(serials.completed.load(Ordering::Acquire), 0);
+        assert_eq!(serials.submit(), 1);
+        assert_eq!(serials.submit(), 2);
+        serials.complete(2);
+        serials.complete(1); // A late callback cannot move the frontier back.
+        assert_eq!(serials.completed.load(Ordering::Acquire), 2);
+        assert_eq!(serials.submit(), 3);
+        serials.complete(u64::MAX);
+        assert_eq!(serials.completed.load(Ordering::Acquire), 3);
+        serials.submitted.store(u64::MAX, Ordering::Release);
+        assert_eq!(serials.submit(), u64::MAX);
+        serials.complete(u64::MAX);
+        assert_eq!(serials.completed.load(Ordering::Acquire), u64::MAX);
+    }
 
     #[test]
     fn mip_format_reports_wrap() {
@@ -1070,5 +1662,85 @@ mod tests {
             .wrap(),
             TextureWrap::ClampToEdge
         );
+    }
+}
+
+#[cfg(all(
+    not(gpusim),
+    not(target_arch = "wasm32"),
+    not(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux")))),
+    any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "tvos",
+        target_os = "linux",
+        target_os = "android",
+        target_os = "windows"
+    )
+))]
+impl Cx {
+    pub(crate) fn texture_allocation_bytes(&self, id: TextureId) -> Option<u64> {
+        #[cfg(target_os = "linux")]
+        if self.os.vulkan_active() {
+            return None;
+        }
+        let texture = &self.textures[id];
+        if !(texture.format.is_render() || texture.format.is_vec() || texture.format.is_depth()) {
+            return None;
+        }
+        texture.os.allocated_bytes(self)
+    }
+
+    pub(crate) fn release_texture_allocation(&mut self, id: TextureId) {
+        // Vulkan retires texture resources on its own frame path.
+        #[cfg(target_os = "linux")]
+        if self.os.vulkan_active() {
+            return;
+        }
+        if !(self.textures[id].format.is_render()
+            || self.textures[id].format.is_vec()
+            || self.textures[id].format.is_depth())
+        {
+            return;
+        }
+        if self.textures[id].alloc.is_none()
+            && self.textures[id].previous_platform_resource.is_none()
+        {
+            self.textures[id].reset_allocation();
+            return;
+        }
+        self.poll_texture_lifetimes();
+        self.detach_released_texture(id);
+        let serial = self.frame_submission_serial();
+        #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+        let serial = serial.max(self.textures.1.serials.encoded.load(Ordering::Acquire));
+        let texture = &mut self.textures[id];
+        let os = std::mem::take(&mut texture.os);
+        let previous = texture.previous_platform_resource.take();
+        texture.reset_allocation();
+        for os in Some(os).into_iter().chain(previous) {
+            let bytes = os.allocated_bytes(self).unwrap_or(0);
+            self.textures
+                .1
+                .retired
+                .push(RetiredTexture { serial, bytes, os });
+        }
+        self.poll_texture_lifetimes();
+    }
+}
+
+// Renderer backends outside the supported lifetime matrix fail closed.
+#[cfg(all(not(gpusim), any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux")))))]
+impl Cx {
+    pub(crate) fn poll_texture_lifetimes(&mut self) {}
+    pub(crate) fn release_texture_allocation(&mut self, _id: TextureId) {}
+    pub(crate) fn texture_allocation_bytes(&self, _id: TextureId) -> Option<u64> {
+        None
+    }
+}
+#[cfg(all(not(gpusim), any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux")))))]
+impl CxOsTexture {
+    pub(crate) fn allocated_bytes(&self, _cx: &Cx) -> Option<u64> {
+        None
     }
 }

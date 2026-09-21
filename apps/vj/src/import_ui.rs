@@ -40,11 +40,11 @@
 
 use crate::media_scan::{self, FileOutcome, FileProgress, ImportCtx, MediaFile, MediaScan};
 use makepad_asset_client::{ApiEndpoints, AssetClient, ClientConfig};
+use makepad_widgets::makepad_platform::thread::{Lane, TaskPool};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
-use std::thread;
 
 /// What the panel is doing right now.
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -129,6 +129,7 @@ pub struct ImportPanel {
     pub status: String,
     cancel: Arc<AtomicBool>,
     rx: Option<Receiver<Msg>>,
+    pool: Option<TaskPool>,
 }
 
 impl Default for ImportPanel {
@@ -141,11 +142,16 @@ impl Default for ImportPanel {
             status: "drop a folder here, or type a path".to_string(),
             cancel: Arc::new(AtomicBool::new(false)),
             rx: None,
+            pool: None,
         }
     }
 }
 
 impl ImportPanel {
+    pub fn set_task_pool(&mut self, pool: TaskPool) {
+        self.pool = Some(pool);
+    }
+
     pub fn set_path(&mut self, path: impl Into<String>) {
         self.path = path.into();
         if !self.phase.busy() {
@@ -187,6 +193,7 @@ impl ImportPanel {
     /// Begin an import. `endpoints`/`token`/`server_id` come from the live
     /// session, so the worker talks to exactly the store the UI is showing —
     /// embedded or remote, it makes no difference here.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn start(
         &mut self,
         endpoints: ApiEndpoints,
@@ -218,15 +225,29 @@ impl ImportPanel {
 
         let cache = cache_parent.join("import-cache");
         let convert = self.convert_video;
-        thread::Builder::new()
-            .name("vj-media-import".into())
-            .spawn(move || {
+        let pool = self
+            .pool
+            .clone()
+            .ok_or_else(|| self.refuse("import worker is not started"))?;
+        pool.submit(Lane::Heavy, move || {
                 let verdict =
                     run(&root, endpoints, server_id, token, cache, convert, &tx, &cancel);
                 let _ = tx.send(Msg::Finished(verdict));
             })
-            .map_err(|e| self.refuse(format!("cannot start the import thread: {e}")))?;
+            .map(|handle| handle.detach())
+            .map_err(|e| self.refuse(format!("cannot start the import job: {e}")))?;
         Ok(())
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn start(
+        &mut self,
+        _endpoints: ApiEndpoints,
+        _server_id: [u8; 16],
+        _token: Option<String>,
+        _cache_parent: PathBuf,
+    ) -> Result<(), String> {
+        Err(self.refuse("folder import unavailable on web"))
     }
 
     fn refuse(&mut self, why: impl Into<String>) -> String {

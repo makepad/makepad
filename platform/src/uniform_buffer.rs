@@ -13,6 +13,65 @@ pub struct UniformBuffer(Rc<PoolId>);
 pub struct UniformBufferId(pub(crate) usize, u64);
 
 impl UniformBuffer {
+    pub fn readers(&self) -> usize {
+        Rc::strong_count(&self.0)
+    }
+    /// Release an unreferenced immutable buffer only after the supported
+    /// backend's real queue is complete. Return CPU storage for worker disposal.
+    pub fn release_if_unused(&self, cx: &mut Cx) -> Option<Vec<u8>> {
+        if self.readers() != 1
+            || cfg!(all(
+                not(gpusim),
+                any(
+                    linux_direct,
+                    target_env = "ohos",
+                    all(use_vulkan, not(target_os = "linux"))
+                )
+            ))
+        {
+            return None;
+        }
+        // A Vulkan-capable desktop Linux build chooses its API at startup; the
+        // serial-based release below is only valid while OpenGL is rendering.
+        #[cfg(all(
+            use_vulkan,
+            target_os = "linux",
+            not(any(gpusim, linux_direct, target_env = "ohos"))
+        ))]
+        if cx.os.vulkan_active() {
+            return None;
+        }
+        let submitted = cx.frame_submission_serial();
+        #[cfg(all(
+            not(gpusim),
+            any(target_os = "macos", target_os = "ios", target_os = "tvos")
+        ))]
+        let submitted = submitted.max(
+            cx.textures
+                .1
+                .serials
+                .encoded
+                .load(std::sync::atomic::Ordering::Acquire),
+        );
+        if submitted > cx.frame_completion_serial() {
+            return None;
+        }
+        let id = self.uniform_buffer_id();
+        #[cfg(all(
+            not(gpusim),
+            not(linux_direct),
+            not(target_env = "ohos"),
+            any(
+                target_os = "linux",
+                all(target_os = "android", not(use_vulkan))
+            )
+        ))]
+        cx.uniform_buffers[id].os.buffer.free_resources(cx.os.gl());
+        let buffer = &mut cx.uniform_buffers[id];
+        buffer.os = CxOsUniformBuffer::default();
+        buffer.generation = 0;
+        Some(std::mem::take(&mut buffer.data))
+    }
     pub fn new(cx: &mut Cx) -> Self {
         cx.uniform_buffers.alloc()
     }
@@ -22,11 +81,16 @@ impl UniformBuffer {
     }
 
     pub fn clear(&self, cx: &mut Cx) {
-        cx.uniform_buffers[self.uniform_buffer_id()].data.clear();
+        self.set_bytes(cx, &[]);
     }
 
     pub fn set_bytes(&self, cx: &mut Cx, data: &[u8]) {
+        if cx.uniform_buffers[self.uniform_buffer_id()].data == data {
+            return;
+        }
+        let generation = cx.next_uniform_gen();
         let cx_uniform_buffer = &mut cx.uniform_buffers[self.uniform_buffer_id()];
+        cx_uniform_buffer.generation = generation;
         cx_uniform_buffer.data.clear();
         cx_uniform_buffer.data.extend_from_slice(data);
     }
@@ -98,6 +162,7 @@ impl std::ops::IndexMut<UniformBufferId> for CxUniformBufferPool {
 
 #[derive(Default)]
 pub struct CxUniformBuffer {
+    pub generation: u64,
     pub data: Vec<u8>,
     pub os: CxOsUniformBuffer,
 }

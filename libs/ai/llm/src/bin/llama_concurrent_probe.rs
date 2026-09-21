@@ -1,8 +1,7 @@
 //! Reproduce the route-app shape: two LlamaSessions (dispatcher + gate) in
 //! ONE process, generating concurrently on their own threads. Compares the
 //! big model's tokens against a solo-run reference to detect cross-session
-//! interference. Run with/without MAKEPAD_LLAMA_NO_MMAP=1 to A/B the mmap
-//! weight path.
+//! interference while sharing the mmap-backed weight path.
 
 use makepad_ai_llm::{LlamaModel, LlamaSession, LlamaSessionConfig, LlamaVocab};
 use std::sync::atomic::{AtomicBool, Ordering};

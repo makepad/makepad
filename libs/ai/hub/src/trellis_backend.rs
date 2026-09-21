@@ -62,6 +62,7 @@ pub struct MeshJob {
     pub decimation_target: usize,
     /// Baked atlas size in texels.
     pub texture_size: usize,
+    pub pixal: Option<crate::protocol::PixalOptionsJson>,
 }
 
 /// Default face target for textured mesh output: mid game-asset density
@@ -99,7 +100,7 @@ impl TrellisBackend {
     pub fn new_trellis(model_id: &str) -> Self {
         Self {
             model_id: model_id.to_string(),
-            gen: Gen::Trellis(trellis_gen::TrellisGen::new()),
+            gen: Gen::Trellis(trellis_gen::TrellisGen::new(model_id.starts_with("pixal3d"))),
         }
     }
 }
@@ -729,6 +730,17 @@ impl ContentBackend for TrellisBackend {
         // request-path tests without needing a GPU.
         let segmented = alpha_is_segmented(&rgba);
 
+        if let Some(options) = &params.pixal {
+            if !self.model_id.starts_with("pixal3d") {
+                return Err(AssetAiError::Params("pixal options require a Pixal3D model".into()));
+            }
+            if options.resolution.is_some_and(|n| ![1024,1536].contains(&n))
+                || options.camera_fov.is_some_and(|v| !v.is_finite() || !(1.0..=170.0).contains(&v))
+                || options.shape_steps.is_some_and(|n| !(1..=100).contains(&n)) {
+                return Err(AssetAiError::Params("invalid Pixal3D resolution, camera FOV or shape steps".into()));
+            }
+        }
+
         let job = MeshJob {
             rgba,
             width,
@@ -736,6 +748,7 @@ impl ContentBackend for TrellisBackend {
             seed: params.seed,
             remesh_resolution: resolve_remesh(params.remesh_resolution),
             segmented,
+            pixal: params.pixal.clone(),
             texture: params.texture.unwrap_or(true),
             decimation_target: params
                 .decimation_target
@@ -795,7 +808,7 @@ mod trellis_gen {
         t2_dual_grid_to_mesh, t2_fdg_fields, t2_mesh_to_glb_colored, t2_yup, T2VoxelSampler,
     };
     use makepad_ai_trellis::trellis_pipeline::{
-        t2_chw_to_tokens, t2_run_ss_cancel, t2_sample_flow_cancel, t2_sample_flow_concat_ctl,
+        t2_chw_to_tokens, t2_run_ss_projected_cancel, t2_sample_flow_projected_ctl,
     };
     use makepad_ai_trellis::trellis_slat::T2SparseDec;
     use makepad_ai_trellis::trellis_vae::T2SsDec;
@@ -853,6 +866,7 @@ mod trellis_gen {
     }
 
     pub struct TrellisGen {
+        pixal: bool,
         paths: Option<Paths>,
         /// The large DiT/sparse-decoder matrices live in makepad-ggml's
         /// thread-local device cache after the first generation. Keep this
@@ -876,8 +890,9 @@ mod trellis_gen {
     }
 
     impl TrellisGen {
-        pub fn new() -> Self {
+        pub fn new(pixal: bool) -> Self {
             Self {
+                pixal,
                 paths: None,
                 resident: false,
             }
@@ -889,7 +904,7 @@ mod trellis_gen {
 
         /// Evict every TRELLIS namespace populated by the generation path.
         /// DINO and the dense SS decoder are owned GPU tensors and drop at the
-        /// end of a job; the six namespaces below are the persistent part.
+        /// end of a job; the namespaces below are the persistent part.
         /// This must run on the service worker thread which performed the
         /// generation because both caches are thread-local by design.
         pub fn unload(&mut self) -> Result<(), AssetAiError> {
@@ -898,7 +913,7 @@ mod trellis_gen {
             };
 
             unload_birefnet().map_err(diffusion_err)?;
-            for namespace in ["t2ss", "t2lr", "t2hr", "t2tex", "t2sdec", "t2tdec"] {
+            for namespace in ["t2ss", "t2lr", "t2hr", "t2tex", "t2sdec", "t2tdec", "p3ss", "p3lr", "p3hr", "p3tex", "p3naf"] {
                 gpu_weight_cache_evict_prefix(&format!("{namespace}::"))
                     .map_err(trellis_err)?;
             }
@@ -1002,8 +1017,16 @@ mod trellis_gen {
             // DINO resize the silhouette still kisses the O-Voxel wall and
             // decodes as a unit-cube floor sheet. Scale the border with the
             // cropped subject instead.
-            let border = t2_subject_border(pre.width.min(pre.height));
+            let border = if self.pixal { ((pre.width.max(pre.height) as f32)*0.05).ceil() as usize } else {t2_subject_border(pre.width.min(pre.height))};
             let pre = t2_pad_black(&pre, border).map_err(trellis_err)?;
+
+            let options=job.pixal.clone().unwrap_or_default();
+            let resolution=if self.pixal {options.resolution.unwrap_or(1024) as usize} else {1024};
+            let camera=makepad_ai_trellis::pixal3d::PixalCamera::from_fov(options.camera_fov.unwrap_or(49.13) as f32).map_err(trellis_err)?;
+            let to_yup=|p| if self.pixal {p} else {t2_yup(p)};
+            let load_flow=|path:&std::path::Path,prefix:&str| {
+                if self.pixal {TrellisWeights::load_prefix(path,prefix)} else {TrellisWeights::load(path)}
+            };
 
             // Model prepare, one progress tick + cancel boundary per
             // component (headers/host tensors here; the GB-class weight
@@ -1028,8 +1051,8 @@ mod trellis_gen {
             };
             cancel.check()?;
             progress(&format!("load ss-flow 2/{loads}"), 0.04);
-            let ss_weights = TrellisWeights::load(&paths.ss_flow).map_err(trellis_err)?;
-            let ss_dit = T2Dit::prepare(ss_weights, "t2ss", T2_SS_CHANNELS, T2_SS_CHANNELS)
+            let ss_weights = load_flow(&paths.ss_flow,"model.structure_model.").map_err(trellis_err)?;
+            let ss_dit = T2Dit::prepare(ss_weights, if self.pixal {"p3ss"} else {"t2ss"}, T2_SS_CHANNELS, T2_SS_CHANNELS)
                 .map_err(trellis_err)?;
             cancel.check()?;
             progress(&format!("load ss-dec 3/{loads}"), 0.05);
@@ -1037,8 +1060,8 @@ mod trellis_gen {
             let ss_dec = T2SsDec::prepare(&dec_weights).map_err(trellis_err)?;
             cancel.check()?;
             progress(&format!("load lr-flow 4/{loads}"), 0.06);
-            let lr_weights = TrellisWeights::load(&paths.lr_flow).map_err(trellis_err)?;
-            let lr_dit = T2Dit::prepare(lr_weights, "t2lr", T2_SLAT_CHANNELS, T2_SLAT_CHANNELS)
+            let lr_weights = load_flow(&paths.lr_flow,"model.img2shape_512.").map_err(trellis_err)?;
+            let lr_dit = T2Dit::prepare(lr_weights, if self.pixal {"p3lr"} else {"t2lr"}, T2_SLAT_CHANNELS, T2_SLAT_CHANNELS)
                 .map_err(trellis_err)?;
             cancel.check()?;
             progress(&format!("load shape-dec 5/{loads}"), 0.07);
@@ -1047,18 +1070,18 @@ mod trellis_gen {
                 T2SparseDec::prepare(shape_dec_weights, "t2sdec", 7, true).map_err(trellis_err)?;
             cancel.check()?;
             progress(&format!("load hr-flow 6/{loads}"), 0.08);
-            let hr_weights = TrellisWeights::load(&paths.hr_flow).map_err(trellis_err)?;
-            let hr_dit = T2Dit::prepare(hr_weights, "t2hr", T2_SLAT_CHANNELS, T2_SLAT_CHANNELS)
+            let hr_weights = load_flow(&paths.hr_flow,"model.img2shape.").map_err(trellis_err)?;
+            let hr_dit = T2Dit::prepare(hr_weights, if self.pixal {"p3hr"} else {"t2hr"}, T2_SLAT_CHANNELS, T2_SLAT_CHANNELS)
                 .map_err(trellis_err)?;
             cancel.check()?;
             // Tex flow + decoder only when the job wants texture: the extra
             // ~3.5GB of weights never streams for untextured jobs.
             let tex = if job.texture {
                 progress(&format!("load tex-flow 7/{loads}"), 0.085);
-                let tex_weights = TrellisWeights::load(&paths.tex_flow).map_err(trellis_err)?;
+                let tex_weights = load_flow(&paths.tex_flow,"model.shape2txt.").map_err(trellis_err)?;
                 let tex_dit = T2Dit::prepare(
                     tex_weights,
-                    "t2tex",
+                    if self.pixal {"p3tex"} else {"t2tex"},
                     T2_TEX_IN_CHANNELS,
                     T2_SLAT_CHANNELS,
                 )
@@ -1096,11 +1119,37 @@ mod trellis_gen {
             let cond_1024 = t2_upload_cond(&cond_1024_host).map_err(trellis_err)?;
             let neg_1024 = t2_upload_cond(&vec![0.0; cond_1024_host.len()]).map_err(trellis_err)?;
 
+            let pixal_cond = if self.pixal {
+                Some((
+                    makepad_ai_trellis::pixal_naf::PixalConditioning::new(&cond_512_host,&input_512,512).map_err(trellis_err)?,
+                    makepad_ai_trellis::pixal_naf::PixalConditioning::new(&cond_1024_host,&input_1024,1024).map_err(trellis_err)?,
+                    makepad_ai_trellis::pixal_naf::PixalNaf::prepare(&dino_weights).map_err(trellis_err)?,
+                ))
+            } else {None};
+            drop(dino);
+            let (cond_512,neg_512,cond_1024,neg_1024)=match &pixal_cond {
+                Some((lo,hi,_))=>(&lo.global,&lo.negative,&hi.global,&hi.negative),
+                None=>(&cond_512,&neg_512,&cond_1024,&neg_1024),
+            };
+            let project=|coords:&[[i32;3]],grid:usize,stage:usize| {
+                match &pixal_cond {
+                    Some((lo,hi,naf))=> {
+                        let (cond,target)=match stage {0=>(lo,None),1=>(lo,Some((naf,512))),2=>(hi,Some((naf,512))),_=>(hi,Some((naf,1024)))};
+                        cond.project(camera,coords,grid,target).map(Some).map_err(trellis_err)
+                    }
+                    None=>Ok(None),
+                }
+            };
+            let mut stage_noise=|count:usize,seed:u64| {
+                if self.pixal { let mut rng=H3NoiseRng::new(seed); (0..count).map(|_|rng.next_normal()).collect() }
+                else { draw(count) }
+            };
+            let ss_projection=project(&makepad_ai_trellis::trellis::t2_ss_grid_coords(),16,0)?;
             // Sparse structure stage (22 forwards + conv3d decode).
             progress("ss 0/22", 0.1);
-            let noise_chw = draw(T2_SS_TOKENS * T2_SS_CHANNELS);
+            let noise_chw = stage_noise(T2_SS_TOKENS * T2_SS_CHANNELS,options.structure_seed.unwrap_or(job.seed));
             let noise_tokens = t2_chw_to_tokens(&noise_chw, T2_SS_CHANNELS, T2_SS_TOKENS);
-            let ss = t2_run_ss_cancel(
+            let ss = t2_run_ss_projected_cancel(
                 &ss_dit,
                 &ss_dec,
                 &noise_tokens,
@@ -1109,6 +1158,7 @@ mod trellis_gen {
                 &T2_SS_SAMPLER,
                 32,
                 &cancelled,
+                ss_projection.as_ref(),
                 |fwd, _, _, _| {
                     let done = (fwd + 1).min(22);
                     progress(
@@ -1118,6 +1168,7 @@ mod trellis_gen {
                 },
             )
             .map_err(diffusion_err)?;
+            drop(ss_projection);
             if ss.coords.is_empty() {
                 return Err(AssetAiError::Backend(
                     "trellis: ss stage produced no active voxels".to_string(),
@@ -1138,17 +1189,20 @@ mod trellis_gen {
             // LR shape flow at the SS coords.
             progress("shape_lr 0/21", 0.18);
             let lr_rope = t2_upload_rope(&t2_rope_tables(&ss.coords)).map_err(trellis_err)?;
-            let mut lr = draw(ss.coords.len() * T2_SLAT_CHANNELS);
-            t2_sample_flow_cancel(
+            let mut lr = stage_noise(ss.coords.len() * T2_SLAT_CHANNELS,job.seed);
+            let lr_projection=project(&ss.coords,32,1)?;
+            t2_sample_flow_projected_ctl(
                 &lr_dit,
                 &mut lr,
                 ss.coords.len(),
+                None,
                 &cond_512,
                 &neg_512,
                 &lr_rope,
                 &T2_SHAPE_SAMPLER,
                 false,
                 &cancelled,
+                lr_projection.as_ref(),
                 |fwd, _, _, _| {
                     let done = (fwd + 1).min(21);
                     progress(
@@ -1158,6 +1212,7 @@ mod trellis_gen {
                 },
             )
             .map_err(diffusion_err)?;
+            drop(lr_projection);
             denorm(&mut lr);
 
             // Cascade upsample -> HR token coords.
@@ -1166,33 +1221,39 @@ mod trellis_gen {
             let hr_grid_coords = shape_dec
                 .upsample(&lr, ss.coords.clone(), 4)
                 .map_err(diffusion_err)?;
-            let hr_coords = t2_quantize_unique_coords(&hr_grid_coords, 512, 1024);
+            let hr_coords = if self.pixal {makepad_ai_trellis::pixal3d::pixal_quantize_unique_coords(&hr_grid_coords,512,resolution).map_err(trellis_err)?} else {t2_quantize_unique_coords(&hr_grid_coords, 512, resolution)};
             if hr_coords.is_empty() {
                 return Err(AssetAiError::Backend(
                     "trellis: cascade upsample produced no tokens".to_string(),
                 ));
             }
 
-            // HR shape flow at 1024.
+            // HR shape flow at the requested cascade resolution.
             cancel.check()?;
-            progress("shape_hr 0/21", 0.30);
+            let hr_config=if self.pixal {makepad_ai_trellis::trellis::T2SamplerConfig{steps:options.shape_steps.unwrap_or(20) as usize,..T2_SHAPE_SAMPLER}} else {T2_SHAPE_SAMPLER};
+            let hr_forwards:usize=makepad_ai_trellis::trellis_pipeline::t2_step_plan(&hr_config)
+                .iter().map(|(_,_,_,cfg)|if *cfg {2} else {1}).sum();
+            progress(&format!("shape_hr 0/{hr_forwards}"), 0.30);
             let hr_rope = t2_upload_rope(&t2_rope_tables(&hr_coords)).map_err(trellis_err)?;
-            let mut hr = draw(hr_coords.len() * T2_SLAT_CHANNELS);
-            t2_sample_flow_cancel(
+            let mut hr = stage_noise(hr_coords.len() * T2_SLAT_CHANNELS,job.seed);
+            let hr_projection=project(&hr_coords,resolution/16,2)?;
+            t2_sample_flow_projected_ctl(
                 &hr_dit,
                 &mut hr,
                 hr_coords.len(),
+                None,
                 &cond_1024,
                 &neg_1024,
                 &hr_rope,
-                &T2_SHAPE_SAMPLER,
+                &hr_config,
                 false,
                 &cancelled,
+                hr_projection.as_ref(),
                 |fwd, _, _, _| {
-                    let done = (fwd + 1).min(21);
+                    let done = (fwd + 1).min(hr_forwards);
                     progress(
-                        &format!("shape_hr {done}/21"),
-                        0.30 + 0.22 * (done as f64 / 21.0),
+                        &format!("shape_hr {done}/{hr_forwards}"),
+                        0.30 + 0.22 * (done as f64 / hr_forwards as f64),
                     )
                 },
             )
@@ -1201,6 +1262,7 @@ mod trellis_gen {
             // reference renormalizes with the shape stats — identical to the
             // pre-denorm samples). Snapshot before denorm.
             let hr_normalized = job.texture.then(|| hr.clone());
+            drop(hr_projection);
             denorm(&mut hr);
 
             // Sparse FDG decode. The decode phase rotates GB-class voxel
@@ -1235,8 +1297,9 @@ mod trellis_gen {
                 (Some((tex_dit, tex_dec)), Some(concat_cond)) => {
                     cancel.check()?;
                     progress("tex 0/12", 0.63);
-                    let mut x = draw(hr_coords.len() * T2_SLAT_CHANNELS);
-                    t2_sample_flow_concat_ctl(
+                    let mut x = stage_noise(hr_coords.len() * T2_SLAT_CHANNELS,options.texture_seed.unwrap_or(job.seed.wrapping_add(1)));
+                    let tex_projection=project(&hr_coords,resolution/16,3)?;
+                    t2_sample_flow_projected_ctl(
                         tex_dit,
                         &mut x,
                         hr_coords.len(),
@@ -1247,6 +1310,7 @@ mod trellis_gen {
                         &T2_TEX_SAMPLER,
                         false,
                         &cancelled,
+                        tex_projection.as_ref(),
                         |fwd, _, _, _| {
                             let done = (fwd + 1).min(12);
                             progress(
@@ -1256,6 +1320,7 @@ mod trellis_gen {
                         },
                     )
                     .map_err(diffusion_err)?;
+                    drop(tex_projection);
                     for row in x.chunks_exact_mut(T2_SLAT_CHANNELS) {
                         for (value, (mean, std)) in row
                             .iter_mut()
@@ -1304,7 +1369,7 @@ mod trellis_gen {
             cancel.check()?;
             progress("mesh", 0.87);
             let fields = t2_fdg_fields(&feats).map_err(trellis_err)?;
-            let mesh = t2_dual_grid_to_mesh(&voxel_coords, &fields, 1024).map_err(trellis_err)?;
+            let mesh = t2_dual_grid_to_mesh(&voxel_coords, &fields, resolution).map_err(trellis_err)?;
             // MeshJob None is the explicit raw escape hatch. Avoid building
             // the enormous raw GLB at all for normal jobs; the old path made
             // a ~100 MiB intermediate only to parse it back into FaithC.
@@ -1314,6 +1379,10 @@ mod trellis_gen {
                         .map(|row| [row[0], row[1], row[2]])
                         .collect()
                 });
+                if self.pixal {
+                    let indices:Vec<u32>=mesh.faces.iter().flatten().copied().collect();
+                    return Ok(makepad_gltf::write_glb_mesh_colored(&mesh.vertices,&indices,voxel_rgb.as_deref()));
+                }
                 return Ok(t2_mesh_to_glb_colored(&mesh, voxel_rgb.as_deref()));
             };
 
@@ -1482,7 +1551,7 @@ mod trellis_gen {
                 Some(pbr) => {
                     cancel.check()?;
                     coarse.emit("bake: sampler", 0.966);
-                    let sampler = T2VoxelSampler::new(&voxel_coords, pbr, 6, 1024)
+                    let sampler = T2VoxelSampler::new(&voxel_coords, pbr, 6, resolution)
                         .map_err(trellis_err)?;
                     let sample = |p: [f32; 3]| -> Option<[f32; 6]> {
                         // Reference contract: simplified/remeshed texels are
@@ -1552,10 +1621,10 @@ mod trellis_gen {
                         let normals: Vec<[f32; 3]> = baked
                             .source_vertex
                             .iter()
-                            .map(|&v| t2_yup(pre_normals[v as usize]))
+                            .map(|&v| to_yup(pre_normals[v as usize]))
                             .collect();
                         let exported_positions: Vec<[f32; 3]> =
-                            baked.positions.iter().copied().map(t2_yup).collect();
+                            baked.positions.iter().copied().map(to_yup).collect();
                         makepad_gltf::write_glb_mesh_textured(
                             &makepad_gltf::GlbTexturedMesh {
                                 positions: &exported_positions,
@@ -1581,7 +1650,7 @@ mod trellis_gen {
                             colors.push([out[0], out[1], out[2]]);
                         }
                         let exported_positions: Vec<[f32; 3]> =
-                            dp.iter().copied().map(t2_yup).collect();
+                            dp.iter().copied().map(to_yup).collect();
                         makepad_gltf::write_glb_mesh_colored(
                             &exported_positions,
                             &di,
@@ -1601,10 +1670,10 @@ mod trellis_gen {
                             let pre_normals = makepad_gltf::compute_vertex_normals(&dp, &di);
                             let normals: Vec<[f32; 3]> = src
                                 .iter()
-                                .map(|&v| t2_yup(pre_normals[v as usize]))
+                                .map(|&v| to_yup(pre_normals[v as usize]))
                                 .collect();
                             let exported_positions: Vec<[f32; 3]> =
-                                pos.iter().copied().map(t2_yup).collect();
+                                pos.iter().copied().map(to_yup).collect();
                             makepad_gltf::write_glb_mesh_unwrapped(
                                 &exported_positions,
                                 Some(&normals),
@@ -1620,7 +1689,7 @@ mod trellis_gen {
                                 unwrap_budget.as_secs()
                             );
                             let exported_positions: Vec<[f32; 3]> =
-                                dp.iter().copied().map(t2_yup).collect();
+                                dp.iter().copied().map(to_yup).collect();
                             makepad_gltf::write_glb_mesh(&exported_positions, &di)
                         }
                     }
@@ -1717,6 +1786,48 @@ mod tests {
         assert_eq!(artifacts[0].content_type, "model/gltf-binary");
         assert_eq!(artifacts[0].ext, "glb");
         assert_eq!(artifacts[0].bytes, b"GLBSTUB");
+    }
+
+    #[test]
+    fn pixal_settings_reach_the_native_job_without_seed_truncation() {
+        let mut backend = TrellisBackend::with_stub("pixal3d", Box::new(|job: &MeshJob, _: ProgressSink| {
+            let options = job.pixal.as_ref().unwrap();
+            assert_eq!(job.seed, u64::MAX);
+            assert_eq!(options.resolution, Some(1536));
+            assert_eq!(options.camera_fov, Some(42.5));
+            assert_eq!(options.structure_seed, Some(56));
+            assert_eq!(options.texture_seed, Some(u64::MAX - 1));
+            assert_eq!(options.shape_steps, Some(20));
+            Ok(b"GLBSTUB".to_vec())
+        }));
+        let params = mesh_params(GenerateRequestJson {
+            model: "pixal3d".into(), input_b64: Some(b64(&tiny_png())), seed: Some(u64::MAX),
+            pixal: Some(crate::protocol::PixalOptionsJson {
+                resolution: Some(1536), camera_fov: Some(42.5), structure_seed: Some(56),
+                texture_seed: Some(u64::MAX - 1), shape_steps: Some(20),
+            }), ..Default::default()
+        });
+        backend.generate(&params, &mut |_, _| {}, &CancelToken::new()).unwrap();
+    }
+
+    #[test]
+    fn invalid_pixal_settings_refuse_before_generation() {
+        use crate::protocol::PixalOptionsJson;
+        for (model, options) in [
+            ("trellis-2", PixalOptionsJson::default()),
+            ("pixal3d", PixalOptionsJson { resolution: Some(512), ..Default::default() }),
+            ("pixal3d", PixalOptionsJson { camera_fov: Some(0.0), ..Default::default() }),
+            ("pixal3d", PixalOptionsJson { shape_steps: Some(0), ..Default::default() }),
+        ] {
+            let mut backend = TrellisBackend::with_stub(model, Box::new(|_: &MeshJob, _: ProgressSink| {
+                panic!("invalid Pixal3D request reached the model")
+            }));
+            let params = mesh_params(GenerateRequestJson {
+                model: model.into(), input_b64: Some(b64(&tiny_png())), pixal: Some(options),
+                ..Default::default()
+            });
+            assert!(matches!(backend.generate(&params, &mut |_, _| {}, &CancelToken::new()), Err(AssetAiError::Params(_))));
+        }
     }
 
     #[test]
@@ -2021,8 +2132,7 @@ mod tests {
     #[cfg(feature = "mesh")]
     #[test]
     fn saved_yoshi_clean_and_floor_regression_match_quality_gate_when_present() {
-        let library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../local/ai_content_library");
+        let library = makepad_asset_client::paths::library_root();
         let verify = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../local/character_verify");
         let accepted = [

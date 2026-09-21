@@ -9,13 +9,49 @@ homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "ue5pTU0e_KaMiNqLQpo2CaD-WeQ="
 
+[features]
+# Desktop Linux binaries carry both renderers and choose when they start:
+# Vulkan when a hardware device answers, OpenGL ES otherwise (no driver, only
+# a software rasterizer, an X11 session). `MAKEPAD_GPU=auto|gl|vulkan`
+# overrides that at run time; see os/linux/gpu_preference.rs. On by default so
+# a distributed binary gets the faster API wherever one exists, without the
+# app or its user configuring anything.
+#
+# The feature only takes effect on the windowed desktop Linux backend, which is
+# the one with that fallback (see build.rs); OpenHarmony, Android, the direct
+# (DRM/KMS) renderer and other Linux triples keep OpenGL ES. `MAKEPAD=gl` at
+# build time produces an OpenGL-only binary, which an app needs today if it
+# uses the Video widget or `Texture::read_back`: neither is implemented on the
+# Vulkan renderer yet (`MAKEPAD_GPU=gl` does the same at run time).
+default = ["vulkan"]
+vulkan = []
+
+# AppKit cursor creation must run on the process main thread.
+[[test]]
+name = "macos_cursors"
+harness = false
+
+# Measure wake-up latency on the process main thread, without a UI backend.
+[[test]]
+name = "pool_latency"
+harness = false
+
+# Exercise the production watchdog on the process main thread without a GPU.
+[[test]]
+name = "ui_hang"
+harness = false
+
+[[test]]
+name = "metal_alloc_probe"
+harness = false
+
 [dependencies]
 makepad-studio-protocol = { path = "./studio", version = "0.1.0" }
 makepad-futures = { path = "../libs/futures", version = "1.0.0" }
 makepad-shared-bytes = { path = "../libs/shared_bytes", version = "1.0.0" }
 makepad-script-std = { path = "./script/std", version = "1.0.0" }
 makepad-network = { path = "./network", version = "1.0.0", features = ["script"] }
-makepad-video = { path = "./video", version = "1.0.0" }
+makepad-video = { package = "makepad-platform-video", path = "./video", version = "1.0.0" }
 makepad-script = { path="./script", version="1.0.0"}
 makepad-live-reload-core = { path = "../libs/live_reload_core", version = "0.1.0" }
 makepad-zune-png = { path = "../libs/zune/zune-png", version = "0.5.2" }
@@ -65,6 +101,9 @@ wayland-protocols = { path = "../libs/linux/wayland-protocols", features = ["cli
 wayland-egl = { path = "../libs/linux/wayland-egl" }
 naga = { path = "../libs/vulkan/naga", version = "27.0", features = ["wgsl-in", "spv-out"]}
 
+[target.'cfg(target_os = "linux")'.dependencies]
+ash = { path = "../libs/vulkan/ash", version = "0.38" }
+
 [target.'cfg(target_os = "android")'.dependencies]
 ## Note: we must not use local 'path' dependencies on `makepad-jni-sys` or `makepad-android-state`
 ## in order to guarantee that only one instance of each crate exists in the app binary.
@@ -78,9 +117,6 @@ hilog-sys = "0.1.1"
 napi-derive-ohos = "0.0.9"
 napi-ohos = "0.1.3"
 ohos-sys = { version = "0.2.1", features = ["xcomponent"] }
-
-[target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
-ctrlc = { version = "3.4", features = ["termination"] }
 
 [target.'cfg(windows)'.dependencies.makepad-futures-legacy]
 path = "../libs/futures_legacy"
@@ -140,7 +176,5 @@ features = [
     "Storage_Streams",
 ]
 
-## The vast majority of the Rust ecosystem is currently on
-## `windows-targets` v0.52.*, so we use that version to avoid duplicates.
-[target.'cfg(windows)'.dependencies.windows-targets]
-version = "0.52"
+[target.'cfg(windows)'.dependencies.windows-link]
+path = "../libs/windows/windows-link"

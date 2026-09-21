@@ -180,7 +180,7 @@ where
     P0: IntoParam<HWND>,
     P1: IntoParam<IDropTarget>,
 {
-    ::windows_targets::link!("ole32.dll" "system" fn RegisterDragDrop(hwnd : HWND, pdroptarget : * mut::core::ffi::c_void) -> HRESULT);
+    ::windows_link::link!("ole32.dll" "system" fn RegisterDragDrop(hwnd : HWND, pdroptarget : * mut::core::ffi::c_void) -> HRESULT);
     RegisterDragDrop(hwnd.into_param().abi(), pdroptarget.into_param().abi()).ok()
 }
 */
@@ -227,7 +227,9 @@ pub struct Win32Window {
     /// on the way out rather than on every step; a programmatic move, which sets no such
     /// state, publishes immediately.
     pub in_size_move: Cell<bool>,
-    pub ignore_wmsize: usize,
+    /// Creation adjusts native chrome, client size and screen placement before
+    /// publishing one final geometry. Do not queue those provisional sizes.
+    initializing: bool,
     pub hwnd: HWND,
     pub track_mouse_event: bool,
     pub is_fullscreen: bool,
@@ -611,7 +613,7 @@ impl Win32Window {
             geom_event_gen: Cell::new(0),
             is_closing: Cell::new(false),
             in_size_move: Cell::new(false),
-            ignore_wmsize: 0,
+            initializing: false,
             hwnd,
             track_mouse_event: false,
             is_fullscreen,
@@ -675,7 +677,7 @@ impl Win32Window {
             geom_event_gen: Cell::new(0),
             is_closing: Cell::new(false),
             in_size_move: Cell::new(false),
-            ignore_wmsize: 0,
+            initializing: false,
             hwnd,
             track_mouse_event: false,
             is_fullscreen: false,
@@ -687,6 +689,7 @@ impl Win32Window {
 
     // initialize GWLP_USERDATA and registration of global stuff, then set inner size
     pub fn init(&mut self, size: Vec2d) {
+        self.initializing = true;
         unsafe { SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, self as *const _ as isize) };
 
         with_win32_app(|app| app.dpi_functions.enable_non_client_dpi_scaling(self.hwnd));
@@ -709,6 +712,8 @@ impl Win32Window {
             // window is the system's to place.
             self.fit_to_screens();
         }
+        self.last_window_geom = self.get_window_geom();
+        self.initializing = false;
     }
 
     /// Moves and resizes the window so it sits entirely within one display's work area.
@@ -1782,6 +1787,9 @@ impl Win32Window {
     /// geometry is unchanged, which is also what makes this safe to call for a minimize,
     /// where `outer_rect` keeps answering from the restored placement.
     pub fn send_move_event(&mut self) {
+        if self.initializing {
+            return;
+        }
         let new_geom = self.get_window_geom();
         if new_geom == self.last_window_geom {
             return;
@@ -1796,6 +1804,12 @@ impl Win32Window {
     }
 
     pub fn send_change_event(&mut self) {
+        // Reentrant callbacks are queued until CreateWindow completes. Sending
+        // provisional geometry here would replay older sizes AFTER the final
+        // creation event, corrupting stateful consumers such as ConPTY.
+        if self.initializing {
+            return;
+        }
         // Record that a geometry event is published (see `geom_event_gen`).
         self.geom_event_gen.set(self.geom_event_gen.get().wrapping_add(1));
         // The window/caption geometry changed; drop the WM_NCHITTEST hit-test cache and bump its

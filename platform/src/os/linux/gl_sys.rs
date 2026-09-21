@@ -51,6 +51,8 @@ pub type GLsizeiptr = isize;
 
 pub const TRUE: GLboolean = 1;
 pub const ARRAY_BUFFER: GLenum = 0x8892;
+pub const COPY_READ_BUFFER: GLenum = 0x8F36;
+pub const COPY_WRITE_BUFFER: GLenum = 0x8F37;
 pub const ELEMENT_ARRAY_BUFFER: GLenum = 0x8893;
 pub const TEXTURE0: GLenum = 0x84C0;
 pub const TEXTURE_2D: GLenum = 0x0DE1;
@@ -63,6 +65,7 @@ pub const TEXTURE_CUBE_MAP_POSITIVE_Z: GLenum = 0x8519;
 pub const TEXTURE_CUBE_MAP_NEGATIVE_Z: GLenum = 0x851A;
 pub const TRIANGLES: GLenum = 0x0004;
 pub const UNSIGNED_INT: GLenum = 0x1405;
+pub const UNSIGNED_SHORT: GLenum = 0x1403;
 pub const INT: GLenum = 0x1404;
 pub const DEPTH_TEST: GLenum = 0x0B71;
 pub const LEQUAL: GLenum = 0x0203;
@@ -279,6 +282,14 @@ pub type TglGetTexLevelParameteriv =
     unsafe extern "C" fn(target: GLenum, level: GLint, pname: GLenum, params: *mut GLint) -> ();
 pub type TglDeleteTextures = unsafe extern "C" fn(n: GLsizei, textures: *const GLuint) -> ();
 pub type TglGenBuffers = unsafe extern "C" fn(n: GLsizei, buffers: *mut GLuint) -> ();
+pub type TglCopyBufferSubData = unsafe extern "C" fn(
+    read_target: GLenum,
+    write_target: GLenum,
+    read_offset: isize,
+    write_offset: isize,
+    size: isize,
+);
+pub type TglBufferSubData = unsafe extern "C" fn(target: GLenum, offset: isize, size: isize, data: *const std::ffi::c_void);
 pub type TglBufferData = unsafe extern "C" fn(
     target: GLenum,
     size: GLsizeiptr,
@@ -454,6 +465,8 @@ pub struct LibGl {
     pub glGetTexLevelParameteriv: TglGetTexLevelParameteriv,
     pub glGenBuffers: TglGenBuffers,
     pub glBufferData: TglBufferData,
+    pub glBufferSubData: TglBufferSubData,
+    pub glCopyBufferSubData: TglCopyBufferSubData,
     pub glUniform1i: TglUniform1i,
     pub glGetError: TglGetError,
     pub glGenSamplers: Option<TglGenSamplers>,
@@ -732,6 +745,13 @@ impl LibGl {
             glDeleteTextures: load!(loadfn, TglDeleteTextures, "glDeleteTextures")?,
             glGenBuffers: load!(loadfn, TglGenBuffers, "glGenBuffers", "glGenBuffersARB")?,
             glBufferData: load!(loadfn, TglBufferData, "glBufferData", "glBufferDataARB")?,
+            glBufferSubData: load!(loadfn, TglBufferSubData, "glBufferSubData", "glBufferSubDataARB")?,
+            glCopyBufferSubData: load!(
+                loadfn,
+                TglCopyBufferSubData,
+                "glCopyBufferSubData",
+                "glCopyBufferSubDataNV"
+            )?,
             glUniform1i: load!(loadfn, TglUniform1i, "glUniform1i", "glUniform1iARB")?,
             glGetError: load!(loadfn, TglGetError, "glGetError")?,
             glGenSamplers: load!(loadfn, TglGenSamplers, "glGenSamplers").ok(),

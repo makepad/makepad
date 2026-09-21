@@ -20,6 +20,13 @@ use std::env;
 // separately can only ever agree by luck.
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(makepad_llama_cuda_kernels)");
+    // makepad-ai-cuda is a Linux/Windows-only dependency, so the handshake
+    // below cannot arrive elsewhere; the explicit check keeps the cfg's
+    // meaning ("CUDA kernels linked") readable without that knowledge.
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os != "linux" && target_os != "windows" {
+        return;
+    }
     if env::var("DEP_MAKEPAD_AI_CUDA_KERNELS").as_deref() != Ok("1") {
         return;
     }

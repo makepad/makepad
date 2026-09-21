@@ -27,6 +27,7 @@ script_mod! {
         fit_pan: vec2(0.0, 0.0)
         async_load: 0.0
         rotation: 0.0
+        sample_mode: 0.0
         image_dim_w: 0.0
         image_dim_h: 0.0
 
@@ -91,6 +92,8 @@ pub struct DrawImage {
     async_load: f32,
     #[live]
     pub rotation: f32,
+    #[live]
+    pub sample_mode: f32,
     /// When non-zero, `get_color` rotates the image rigidly (aspect-correct):
     /// the image of this pixel size is rotated by `rotation` and inscribed in the
     /// quad, instead of rotating texture UVs in normalized space (which squishes
@@ -134,9 +137,9 @@ pub struct Image {
     #[live]
     pub draw_bg: DrawImage,
     #[live]
-    min_width: u64,
+    placeholder_width: u64,
     #[live]
-    min_height: u64,
+    placeholder_height: u64,
     #[live(1.0)]
     width_scale: f64,
     #[live(ImageAnimation::BounceFps(25.0))]
@@ -222,6 +225,19 @@ impl ImageCacheImpl for Image {
 }
 
 impl Image {
+    /// Updates layout and aspect fitting without evaluating script. This is
+    /// useful for widgets owned by an isolated VM: their typed Rust state can
+    /// be changed safely even while the host VM is active.
+    pub fn set_walk_and_fit(&mut self, cx: &mut Cx, walk: Walk, fit: ImageFit) {
+        self.walk = walk;
+        self.fit = fit;
+        self.redraw(cx);
+    }
+
+    pub fn fit(&self) -> ImageFit {
+        self.fit
+    }
+
     fn load_from_resource(&mut self, cx: &mut Cx) {
         if self.src_loaded {
             return;
@@ -231,15 +247,16 @@ impl Image {
             return;
         };
         let handle = handle_ref.as_handle();
-        let data = if let Some(data) = cx.get_resource(handle) {
+        let heap_key = handle_ref.heap_key();
+        let data = if let Some(data) = cx.get_resource(heap_key, handle) {
             data
         } else {
-            cx.load_script_resource(handle);
-            match cx.get_resource(handle) {
+            cx.load_script_resource(heap_key, handle);
+            match cx.get_resource(heap_key, handle) {
                 Some(data) => data,
                 None => {
                     let resources = cx.script_data.resources.resources.borrow();
-                    if let Some(res) = resources.iter().find(|r| r.has_handle(handle)) {
+                    if let Some(res) = resources.iter().find(|r| r.has_handle(heap_key, handle)) {
                         if res.is_error() {
                             drop(resources);
                             self.src_loaded = true;
@@ -258,7 +275,7 @@ impl Image {
             let resources = cx.script_data.resources.resources.borrow();
             resources
                 .iter()
-                .find(|r| r.has_handle(handle))
+                .find(|r| r.has_handle(heap_key, handle))
                 .map(|r| PathBuf::from(&r.abs_path))
                 .unwrap_or_else(|| PathBuf::from("http_resource"))
         };
@@ -370,7 +387,7 @@ impl Widget for Image {
                 let (texture_width, texture_height) = image_texture
                     .get_format(cx)
                     .vec_width_height()
-                    .unwrap_or((self.min_width as usize, self.min_height as usize));
+                    .unwrap_or((self.placeholder_width as usize, self.placeholder_height as usize));
                 if let Some(animation) = image_texture.animation(cx).clone() {
                     let delta = if let Some(last_time) = &self.last_time {
                         nf.time - last_time
@@ -600,6 +617,7 @@ impl Image {
         if !self.visible {
             return DrawStep::done();
         }
+        walk = cx.resolve_walk(walk, ResolveAt::BeforeBegin);
         let svg_time = self.svg_time as f32;
         if let Some(draw_svg) = self.draw_svg.as_mut() {
             draw_svg.draw_walk_time(cx, walk, svg_time);
@@ -636,7 +654,7 @@ impl Image {
                 // has real dimensions too — without this it sized as
                 // min_* (usually zero) and the picture silently vanished.
                 .or_else(|| image_texture.get_format(cx).render_fixed_width_height())
-                .unwrap_or((self.min_width as usize, self.min_height as usize));
+                .unwrap_or((self.placeholder_width as usize, self.placeholder_height as usize));
             if let Some(animation) = image_texture.animation(cx) {
                 let (w, h) = (animation.width as f64, animation.height as f64);
                 self.next_frame = cx.new_next_frame();
@@ -656,21 +674,16 @@ impl Image {
             }
         } else {
             self.draw_bg.draw_vars.empty_texture(0);
-            (self.min_width as f64 / dpi, self.min_height as f64 / dpi)
+            (
+                self.placeholder_width as f64 / dpi,
+                self.placeholder_height as f64 / dpi,
+            )
         };
 
         let aspect = width / height;
-        // When `walk.height` is `Size::Fit { max: Some(m) }`, the rect returned by
-        // `peek_walk_turtle` has `size.y == NaN` (Fit evaluates to NaN — see
-        // `Turtle::next_walk_height`), so the max would otherwise be ignored by the
-        // aspect calculations below. Treat it as the effective vertical bound so
-        // the image scales proportionally instead of rendering at its natural
-        // height and getting clipped by an outer view.
-        let height_cap = if let Size::Fit { max: Some(fb), .. } = walk.height {
-            fb.eval_height(cx).unwrap_or(f64::INFINITY)
-        } else {
-            f64::INFINITY
-        };
+        // A Fit height peeks as NaN, so use its effective content-box max
+        // (including a Walk-level max) while preserving intrinsic aspect.
+        let height_cap = cx.walk_max_height(walk).unwrap_or(f64::INFINITY);
         let avail_height = if rect.size.y.is_nan() {
             height_cap
         } else {
@@ -860,6 +873,13 @@ pub enum AsyncLoad {
 }
 
 impl ImageRef {
+    /// See [`Image::set_walk_and_fit`].
+    pub fn set_walk_and_fit(&self, cx: &mut Cx, walk: Walk, fit: ImageFit) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_walk_and_fit(cx, walk, fit);
+        }
+    }
+
     /// Loads the image at the given `image_path` resource into this `ImageRef`.
     pub fn load_image_dep_by_path(&self, cx: &mut Cx, image_path: &str) -> Result<(), ImageError> {
         if let Some(mut inner) = self.borrow_mut() {
@@ -1068,5 +1088,37 @@ impl ImageRef {
         } else {
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod flattened_walk_collision_tests {
+    use super::*;
+
+    #[test]
+    fn image_exposes_walk_bounds_and_distinct_placeholder_dimensions() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            crate::script_mod(vm);
+            Image::script_proto(vm);
+            let props = &vm
+                .bx
+                .heap
+                .registered_type(Image::script_type_id_static())
+                .unwrap()
+                .props
+                .props;
+            for field in [
+                live_id!(min_width),
+                live_id!(max_width),
+                live_id!(min_height),
+                live_id!(max_height),
+                live_id!(aspect),
+                live_id!(placeholder_width),
+                live_id!(placeholder_height),
+            ] {
+                assert!(props.contains_key(&field), "missing flattened/reflected field {field:?}");
+            }
+        });
     }
 }

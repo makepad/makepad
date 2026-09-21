@@ -7,13 +7,14 @@ impl Cx {
         frame: &CxOpenXrFrame,
     ) {
         let draw_list_id = self.passes[draw_pass_id].main_draw_list_id.unwrap();
+        let uniforms_gen = self.next_uniform_gen();
         {
             let session = self.os.openxr.session.as_ref().unwrap();
             let gl = &self.os.display.as_ref().unwrap().libgl;
             let dpi_factor = self.passes[draw_pass_id].dpi_factor.unwrap();
             let pass = &mut self.passes[draw_pass_id];
 
-            pass.set_dpi_factor(dpi_factor);
+            pass.set_dpi_factor(dpi_factor, uniforms_gen);
             pass.paint_dirty = true;
             pass.os.shader_variant = SHADER_VARIANT_XR;
 

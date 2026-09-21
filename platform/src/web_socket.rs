@@ -31,6 +31,7 @@ pub type WebSocket = u64;
 
 #[derive(Debug)]
 enum StudioWebSocketThreadMsg {
+    #[cfg(any(not(target_arch = "wasm32"), target_feature = "atomics"))]
     AppToStudio { message: AppToStudio },
     Terminate,
 }
@@ -106,6 +107,7 @@ pub(crate) fn consume_studio_socket_response(
     }
 }
 
+#[cfg(any(not(target_arch = "wasm32"), target_feature = "atomics"))]
 fn recv_studio_thread_msg(
     rx: &Receiver<StudioWebSocketThreadMsg>,
     timeout: Duration,
@@ -120,19 +122,44 @@ fn recv_studio_thread_msg(
         if timeout == Duration::MAX {
             return rx.recv().map_err(|_| RecvTimeoutError::Disconnected);
         }
+        recv_studio_thread_msg_timed(
+            rx,
+            timeout,
+            Cx::monotonic_now,
+            std::thread::park_timeout,
+        )
+    }
+}
 
-        let deadline = Cx::time_now() + timeout.as_secs_f64();
-        loop {
-            match rx.try_recv() {
-                Ok(msg) => return Ok(msg),
-                Err(TryRecvError::Empty) => {
-                    if Cx::time_now() >= deadline {
-                        return Err(RecvTimeoutError::Timeout);
-                    }
-                    std::thread::yield_now();
+#[cfg(any(test, all(target_arch = "wasm32", target_feature = "atomics")))]
+fn recv_studio_thread_msg_timed<T, N, P>(
+    rx: &Receiver<T>,
+    timeout: Duration,
+    mut now: N,
+    mut park: P,
+) -> Result<T, RecvTimeoutError>
+where
+    N: FnMut() -> f64,
+    P: FnMut(Duration),
+{
+    let deadline = now() + timeout.as_secs_f64();
+    loop {
+        match rx.try_recv() {
+            Ok(msg) => return Ok(msg),
+            Err(TryRecvError::Empty) => {
+                let remaining_secs = (deadline - now()).max(0.0);
+                if remaining_secs == 0.0 {
+                    return Err(RecvTimeoutError::Timeout);
                 }
-                Err(TryRecvError::Disconnected) => return Err(RecvTimeoutError::Disconnected),
+                let remaining = Duration::from_secs_f64(
+                    remaining_secs.min(timeout.as_secs_f64()),
+                );
+                // The mpsc sender does not unpark this futex wait. A message
+                // arriving here waits out the collect window and joins the
+                // current batch before the deadline is checked again.
+                park(remaining);
             }
+            Err(TryRecvError::Disconnected) => return Err(RecvTimeoutError::Disconnected),
         }
     }
 }
@@ -218,18 +245,27 @@ impl Cx {
                 samples.drain(0..remove);
             }
         }
-        SignalToUI::set_ui_signal();
+        SignalToUI::set_internal_signal();
     }
 
+    #[cfg(any(not(target_arch = "wasm32"), target_feature = "atomics"))]
     fn run_studio_websocket_thread(&mut self) {
+        let mut sender = STUDIO_WEB_SOCKET_THREAD_SENDER.lock().unwrap();
+        if sender.is_some() {
+            return;
+        }
         let (tx, rx) = channel();
-        *STUDIO_WEB_SOCKET_THREAD_SENDER.lock().unwrap() = Some(tx);
+        *sender = Some(tx);
+        drop(sender);
 
-        self.spawn_thread(move || {
+        if let Ok(task) = self.spawn_worker(move || {
             let mut app_to_studio = AppToStudioVec(Vec::new());
             let mut first_message_time = None;
             let default_collect_time = Duration::from_millis(16);
-            let urgent_collect_time = Duration::from_millis(1);
+            // Frame delivery and tick credit are latency-sensitive control
+            // messages. Flush them immediately, including any older logs in
+            // the batch, instead of delaying every hosted frame by 1 ms.
+            let urgent_collect_time = Duration::ZERO;
             let mut collect_time = default_collect_time;
             let mut cycle_time = Duration::MAX;
 
@@ -237,7 +273,7 @@ impl Cx {
                 match recv_studio_thread_msg(&rx, cycle_time) {
                     Ok(StudioWebSocketThreadMsg::AppToStudio { message }) => {
                         if first_message_time.is_none() {
-                            first_message_time = Some(Cx::time_now());
+                            first_message_time = Some(Cx::monotonic_now());
                         }
                         if matches!(
                             &message,
@@ -245,6 +281,7 @@ impl Cx {
                                 | AppToStudio::AfterStartup
                                 | AppToStudio::RequestAnimationFrame
                                 | AppToStudio::DrawCompleteAndFlip(_)
+                                | AppToStudio::TickDone
                         ) {
                             collect_time = urgent_collect_time;
                         }
@@ -259,7 +296,7 @@ impl Cx {
                 }
 
                 if let Some(first_time) = first_message_time {
-                    if (Cx::time_now() - first_time) >= collect_time.as_secs_f64() {
+                    if (Cx::monotonic_now() - first_time) >= collect_time.as_secs_f64() {
                         if studio_ws_send_binary(app_to_studio.serialize_bin()).is_err() {
                             STUDIO_WEB_SOCKET_CONNECTED.store(false, Ordering::SeqCst);
                             break;
@@ -272,12 +309,16 @@ impl Cx {
                 }
             }
             *STUDIO_WEB_SOCKET_THREAD_SENDER.lock().unwrap() = None;
-        });
+        }) {
+            task.detach();
+        }
     }
+
+    #[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
+    fn run_studio_websocket_thread(&mut self) {}
 
     fn start_studio_websocket(&mut self, studio_http: &str) {
         if studio_http.is_empty() {
-            crate::log!("studio websocket disabled: empty studio_http");
             return;
         }
         self.studio_http = studio_http.into();
@@ -288,18 +329,35 @@ impl Cx {
             STUDIO_WEB_SOCKET_CONNECTED.store(false, Ordering::SeqCst);
             let mut request = HttpRequest::new(studio_http.to_string(), HttpMethod::GET);
             request.set_websocket_transport(WebSocketTransport::PlainTcp);
-            *STUDIO_NET_RUNTIME.lock().unwrap() = Some(self.net.clone());
-            if let Err(err) = self.net.ws_open(LiveId(STUDIO_SOCKET_ID), request) {
-                crate::error!("could not open studio websocket: {err}");
-                HAS_STUDIO_WEB_SOCKET.store(false, Ordering::SeqCst);
-                STUDIO_WEB_SOCKET_CONNECTED.store(false, Ordering::SeqCst);
-                *STUDIO_NET_RUNTIME.lock().unwrap() = None;
+            let network = self.net.clone();
+            #[cfg(all(target_os = "linux", not(target_env = "ohos"), not(gpusim), linux_direct, use_vulkan))]
+            let network = if crate::app_main::should_run_stdin_loop_from_env() {
+                // GPU handoff must keep receiving control while application
+                // networking callbacks are paused. A separate runtime owns
+                // the control socket; ordinary responses keep their original
+                // queue and are dispatched after the handoff.
+                let network = Arc::new(NetworkRuntime::new(Default::default()));
+                self.os.gpu_control_net = Some(network.clone());
+                network
+            } else { network };
+            *STUDIO_NET_RUNTIME.lock().unwrap() = Some(network.clone());
+            match network.ws_open(LiveId(STUDIO_SOCKET_ID), request) {
+                Ok(()) => self.run_studio_websocket_thread(),
+                Err(err) => {
+                    crate::error!("could not open studio websocket: {err}");
+                    HAS_STUDIO_WEB_SOCKET.store(false, Ordering::SeqCst);
+                    STUDIO_WEB_SOCKET_CONNECTED.store(false, Ordering::SeqCst);
+                    *STUDIO_NET_RUNTIME.lock().unwrap() = None;
+                }
             }
         }
     }
 
     pub fn stop_studio_websocket(&mut self) {
-        let _ = self.net.ws_close(LiveId(STUDIO_SOCKET_ID));
+        let network = self.net.clone();
+        #[cfg(all(target_os = "linux", not(target_env = "ohos"), not(gpusim), linux_direct, use_vulkan))]
+        let network = self.os.gpu_control_net.take().unwrap_or(network);
+        let _ = network.ws_close(LiveId(STUDIO_SOCKET_ID));
         *STUDIO_NET_RUNTIME.lock().unwrap() = None;
         HAS_STUDIO_WEB_SOCKET.store(false, Ordering::SeqCst);
         STUDIO_WEB_SOCKET_CONNECTED.store(false, Ordering::SeqCst);
@@ -311,29 +369,53 @@ impl Cx {
 
     #[cfg(any(target_os = "tvos", target_os = "ios"))]
     pub fn start_studio_websocket_delayed(&mut self) {
+        if self.studio_http.is_empty() {
+            return;
+        }
         HAS_STUDIO_WEB_SOCKET.store(true, Ordering::SeqCst);
         STUDIO_WEB_SOCKET_CONNECTED.store(false, Ordering::SeqCst);
         let mut request = HttpRequest::new(self.studio_http.clone(), HttpMethod::GET);
         request.set_websocket_transport(WebSocketTransport::PlainTcp);
         *STUDIO_NET_RUNTIME.lock().unwrap() = Some(self.net.clone());
-        if let Err(err) = self.net.ws_open(LiveId(STUDIO_SOCKET_ID), request) {
-            crate::error!("could not open delayed studio websocket: {err}");
-            HAS_STUDIO_WEB_SOCKET.store(false, Ordering::SeqCst);
-            STUDIO_WEB_SOCKET_CONNECTED.store(false, Ordering::SeqCst);
-            *STUDIO_NET_RUNTIME.lock().unwrap() = None;
+        match self.net.ws_open(LiveId(STUDIO_SOCKET_ID), request) {
+            Ok(()) => self.run_studio_websocket_thread(),
+            Err(err) => {
+                crate::error!("could not open delayed studio websocket: {err}");
+                HAS_STUDIO_WEB_SOCKET.store(false, Ordering::SeqCst);
+                STUDIO_WEB_SOCKET_CONNECTED.store(false, Ordering::SeqCst);
+                *STUDIO_NET_RUNTIME.lock().unwrap() = None;
+            }
         }
     }
 
     pub fn init_websockets(&mut self, studio_http: &str) {
-        self.run_studio_websocket_thread();
         self.start_studio_websocket(studio_http);
     }
 
     #[cfg(not(target_os = "android"))]
     #[cfg_attr(any(target_arch = "wasm32", target_os = "ios"), allow(dead_code))]
+    #[cfg(all(not(gpusim), any(not(linux_direct), use_vulkan)))]
+    #[cfg(not(all(target_os = "linux", linux_direct, use_vulkan)))]
     pub(crate) fn recv_studio_websocket_message(&mut self) -> Option<WebSocketMessage> {
+        self.receive_studio_websocket_message(true)
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[cfg_attr(any(target_arch = "wasm32", target_os = "ios"), allow(dead_code))]
+    #[cfg(all(not(gpusim), any(not(linux_direct), use_vulkan)))]
+    pub(crate) fn try_recv_studio_websocket_message(&mut self) -> Option<WebSocketMessage> {
+        self.receive_studio_websocket_message(false)
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[cfg_attr(any(target_arch = "wasm32", target_os = "ios"), allow(dead_code))]
+    #[cfg(all(not(gpusim), any(not(linux_direct), use_vulkan)))]
+    fn receive_studio_websocket_message(&mut self, wait: bool) -> Option<WebSocketMessage> {
         loop {
-            let response = self.net.recv().ok()?;
+            let network = &self.net;
+            #[cfg(all(target_os = "linux", not(target_env = "ohos"), not(gpusim), linux_direct, use_vulkan))]
+            let network = self.os.gpu_control_net.as_ref().unwrap_or(network);
+            let response = if wait { network.recv().ok()? } else { network.try_recv()? };
             match response {
                 NetworkResponse::WsOpened { socket_id } if socket_id.0 == STUDIO_SOCKET_ID => {
                     STUDIO_WEB_SOCKET_CONNECTED.store(true, Ordering::SeqCst);
@@ -387,10 +469,70 @@ impl Cx {
             return;
         }
 
+        #[cfg(any(not(target_arch = "wasm32"), target_feature = "atomics"))]
         if let Some(sender) = STUDIO_WEB_SOCKET_THREAD_SENDER.lock().unwrap().as_ref() {
             let _ = sender.send(StudioWebSocketThreadMsg::AppToStudio { message: msg });
-        } else {
-            let _ = studio_ws_send_binary(AppToStudioVec(vec![msg]).serialize_bin());
+            return;
         }
+        let _ = studio_ws_send_binary(AppToStudioVec(vec![msg]).serialize_bin());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn timed_wait_receives_message_before_deadline() {
+        let (tx, rx) = channel();
+        let now = Cell::new(0.0);
+        let parked = Cell::new(false);
+        let result = recv_studio_thread_msg_timed(
+            &rx,
+            Duration::from_millis(16),
+            || now.get(),
+            |remaining| {
+                parked.set(true);
+                tx.send(7).unwrap();
+                now.set(now.get() + remaining.as_secs_f64() * 0.5);
+            },
+        );
+        assert_eq!(result.unwrap(), 7);
+        assert!(parked.get());
+    }
+
+    #[test]
+    fn timed_wait_reaches_deadline() {
+        let (_tx, rx) = channel::<u8>();
+        let now = Cell::new(0.0);
+        let result = recv_studio_thread_msg_timed(
+            &rx,
+            Duration::from_millis(16),
+            || now.get(),
+            |remaining| now.set(now.get() + remaining.as_secs_f64()),
+        );
+        assert!(matches!(result, Err(RecvTimeoutError::Timeout)));
+    }
+
+    #[test]
+    fn timed_wait_reports_disconnect() {
+        let (tx, rx) = channel::<u8>();
+        drop(tx);
+        let result = recv_studio_thread_msg_timed(
+            &rx,
+            Duration::from_millis(16),
+            || 0.0,
+            |_| panic!("a disconnected channel must not park"),
+        );
+        assert!(matches!(result, Err(RecvTimeoutError::Disconnected)));
+    }
+
+    #[test]
+    fn empty_studio_url_spawns_no_thread() {
+        assert!(STUDIO_WEB_SOCKET_THREAD_SENDER.lock().unwrap().is_none());
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_websockets("");
+        assert!(STUDIO_WEB_SOCKET_THREAD_SENDER.lock().unwrap().is_none());
     }
 }

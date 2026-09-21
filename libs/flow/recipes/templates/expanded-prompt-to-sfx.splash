@@ -1,0 +1,17 @@
+use mod.flow.*
+
+/** The sound idea to expand and synthesize. */
+let prompt = Input{ type: @text default: "a heavy steel hatch slams in a concrete tunnel" }
+let expand = Llm{
+    system: "Rewrite the prompt as one concise sound-design cue with source, space, texture, and dynamics. Return only the cue."
+    prompt: prompt.text()
+}
+let sfx = Sfx{ prompt: expand.text() seconds: 4.0 }
+/** Publish the sound effect into the flow asset library. */
+let published = Publish{ value: sfx.audio() namespace: "flows" tags: ["flow", "sfx"] }
+
+Flow{
+    label: "Expanded prompt to sound effect"
+    brief: "Expands a sound idea into a production cue and synthesizes a four-second effect."
+    prompt, expand, sfx, published
+}

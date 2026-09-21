@@ -1,7 +1,7 @@
 use crate::event::game_input::GameInputState;
 
 #[cfg(any(
-    headless,
+    gpusim,
     not(any(
         target_os = "windows",
         target_os = "macos",
@@ -16,10 +16,39 @@ pub trait CxGameInputApi {
     fn game_input_state_mut(&mut self, index: usize) -> Option<&mut GameInputState>;
     fn game_input_states(&mut self) -> &[GameInputState];
     fn game_input_states_mut(&mut self) -> &mut [GameInputState];
+    /// Device identities parallel to `game_input_states()` (same index order).
+    fn game_input_infos(&mut self) -> Vec<crate::event::game_input::GameInputInfo> {
+        Vec::new()
+    }
+    /// An output-report handle for the device with `id`, when the platform
+    /// drives it over raw HID (a force-feedback wheel). None elsewhere.
+    fn game_input_output(
+        &mut self,
+        _id: crate::makepad_live_id::LiveId,
+    ) -> Option<crate::event::game_input::GameInputOutput> {
+        None
+    }
+    /// Haptic actuator capabilities for a controller. Raw-HID wheel output
+    /// uses `game_input_output` instead and can run at the same time.
+    fn gamepad_haptic_capabilities(
+        &mut self,
+        _id: crate::makepad_live_id::LiveId,
+    ) -> crate::event::game_input::GamepadHapticCapabilities {
+        Default::default()
+    }
+    /// Queue one short haptic sample. Implementations must not block the UI
+    /// thread; unsupported devices simply return false.
+    fn gamepad_haptic_pulse(
+        &mut self,
+        _id: crate::makepad_live_id::LiveId,
+        _pulse: crate::event::game_input::GamepadHapticPulse,
+    ) -> bool {
+        false
+    }
 }
 
 #[cfg(any(
-    headless,
+    gpusim,
     not(any(
         target_os = "windows",
         target_os = "macos",
@@ -30,7 +59,7 @@ pub trait CxGameInputApi {
 /// These platforms have no native game-input backend, but an app hosted by
 /// Studio still gets controllers: Studio reads them and forwards the state, so
 /// a Linux app run from Studio on a machine whose Studio can see a pad works
-/// even though the same app run standalone would see nothing. The headless
+/// even though the same app run standalone would see nothing. The gpusim
 /// backend also has no native game input and uses the same remote fallback.
 impl CxGameInputApi for Cx {
     fn game_input_state(&mut self, index: usize) -> Option<&GameInputState> {

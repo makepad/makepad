@@ -1,14 +1,5 @@
-/// Metal backend debug breadcrumbs (init, dispatch choices). Off by default —
-/// set GGML_METAL_TRACE=1 to enable, mirroring MAKEPAD_CUDA_TRACE.
-fn log_metal_trace() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var_os("GGML_METAL_TRACE").is_some()
-            || std::env::var_os("MAKEPAD_MUSIC3_TRACE").is_some()
-    })
-}
-
 /// Missing-kernel fallbacks fire per matmul; print each distinct message once.
+#[cfg(target_os = "macos")]
 fn log_metal_error_once(msg: impl std::fmt::Display) {
     use std::collections::HashSet;
     use std::sync::{Mutex, OnceLock};
@@ -23,16 +14,12 @@ fn log_metal_error_once(msg: impl std::fmt::Display) {
     }
 }
 
-#[allow(dead_code)]
-fn log_mul_mat_requested() -> bool {
-    log_metal_trace()
-}
-
 pub fn is_available() -> bool {
     cfg!(target_os = "macos")
 }
 
-use makepad_ai_cuda::prof;
+use crate::gpu_types::GpuTensor;
+use makepad_ai_loader::prof;
 
 fn prof_rec(cat: usize, start: std::time::Instant, f32_count: usize) {
     prof::record(cat, start, (f32_count * 4) as u64);
@@ -345,6 +332,119 @@ pub fn clear_decoder_kv_cache() {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// One linear of a device-resident two-way decoder layer: an f32 `[n, k]`
+/// weight tensor (cached on the device under its content identity) and an
+/// optional `[1, n]` bias.
+#[derive(Clone, Copy)]
+pub struct DecLinearRef<'a> {
+    pub weight: &'a GpuTensor,
+    pub bias: Option<&'a GpuTensor>,
+}
+
+#[derive(Clone, Copy)]
+pub struct DecAttnRef<'a> {
+    pub q: DecLinearRef<'a>,
+    pub k: DecLinearRef<'a>,
+    pub v: DecLinearRef<'a>,
+    pub out: DecLinearRef<'a>,
+}
+
+/// One SAM-style two-way decoder layer over `hidden` `[n_tok, dim]` with
+/// image context `[n_ctx, ctx_dim]`: token self-attention (queries/keys
+/// carry the token PE when `pe_on_self`), token-to-image cross-attention
+/// (query = LN(hidden) + token PE, key = LN(context) + image PE, value =
+/// LN(context)), an erf-GELU feed-forward, then `ln_final`. All norms are
+/// LayerNorm with affines; `ln_pe_1`/`ln_pe_2` normalise the two PEs.
+#[derive(Clone, Copy)]
+pub struct TwoWayLayerRef<'a> {
+    pub ln_pe_1: (&'a [f32], &'a [f32]),
+    pub ln_pe_2: (&'a [f32], &'a [f32]),
+    pub ln1: (&'a [f32], &'a [f32]),
+    pub ln2_1: (&'a [f32], &'a [f32]),
+    pub ln2_2: (&'a [f32], &'a [f32]),
+    pub ln3: (&'a [f32], &'a [f32]),
+    pub ln_final: (&'a [f32], &'a [f32]),
+    pub self_attn: DecAttnRef<'a>,
+    pub cross_attn: DecAttnRef<'a>,
+    pub ffn_first: DecLinearRef<'a>,
+    pub ffn_second: DecLinearRef<'a>,
+    pub n_head: usize,
+    pub eps: f32,
+    pub pe_on_self: bool,
+}
+
+/// Runs one two-way decoder layer device-resident (one command buffer,
+/// weights cached) and returns `(hidden, ln_final(hidden))`, both
+/// `[n_tok, dim]`.
+#[allow(clippy::too_many_arguments)]
+pub fn try_two_way_layer_resident_f32(
+    hidden: &[f32],
+    token_pe: &[f32],
+    context: &[f32],
+    context_pe: &[f32],
+    n_tok: usize,
+    dim: usize,
+    n_ctx: usize,
+    ctx_dim: usize,
+    layer: &TwoWayLayerRef<'_>,
+) -> Option<(Vec<f32>, Vec<f32>)> {
+    imp::try_two_way_layer_resident_f32(
+        hidden, token_pe, context, context_pe, n_tok, dim, n_ctx, ctx_dim, layer,
+    )
+}
+
+/// One linear of a device-resident ViT layer: a row-major `[n, k]` weight in
+/// a ggml dtype, its output width and its bias (empty for none).
+#[derive(Clone, Copy)]
+pub struct VitLinearRef<'a> {
+    pub w_bytes: &'a [u8],
+    pub w_ggml_type: u32,
+    pub n: usize,
+    pub bias: &'a [f32],
+}
+
+/// One pre-norm ViT layer with rotary attention and a SwiGLU feed-forward
+/// (the DINOv3 block): `x += out(attn(rope(q(n1)), rope(k(n1)), v(n1)))`,
+/// then `x += down(silu(gate(n2)) * up(n2))`, both norms LayerNorm with an
+/// affine. Layer scales are expected folded into `out` and `down`.
+#[derive(Clone, Copy)]
+pub struct VitLayerRef<'a> {
+    pub norm1_w: &'a [f32],
+    pub norm1_b: &'a [f32],
+    pub q: VitLinearRef<'a>,
+    pub k: VitLinearRef<'a>,
+    pub v: VitLinearRef<'a>,
+    pub out: VitLinearRef<'a>,
+    pub norm2_w: &'a [f32],
+    pub norm2_b: &'a [f32],
+    pub gate: VitLinearRef<'a>,
+    pub up: VitLinearRef<'a>,
+    pub down: VitLinearRef<'a>,
+}
+
+/// Runs a whole ViT stack device-resident: `x` (`[seq_len, n_state]`) goes
+/// up once, every layer encodes into one command buffer against cached
+/// weights, and only the final normalised activations come back.
+/// `cos`/`sin` are `[seq_len, rot_half]` rotate-half tables.
+#[allow(clippy::too_many_arguments)]
+pub fn try_vit_backbone_resident_f32(
+    x: &[f32],
+    seq_len: usize,
+    n_state: usize,
+    n_head: usize,
+    rot_half: usize,
+    cos: &[f32],
+    sin: &[f32],
+    layers: &[VitLayerRef<'_>],
+    final_norm_w: &[f32],
+    final_norm_b: &[f32],
+    eps: f32,
+) -> Option<Vec<f32>> {
+    imp::try_vit_backbone_resident_f32(
+        x, seq_len, n_state, n_head, rot_half, cos, sin, layers, final_norm_w, final_norm_b, eps,
+    )
+}
+
 pub fn try_flash_attn_f32_self_kv_cache(
     layer: usize,
     q: &[f32],
@@ -721,7 +821,7 @@ mod tests {
     }
 }
 
-#[cfg(all(not(target_os = "macos"), makepad_ai_cuda_kernels))]
+#[cfg(all(any(target_os = "linux", target_os = "windows"), makepad_ai_cuda_kernels))]
 mod imp {
     use makepad_ai_cuda as cuda;
     use std::cell::RefCell;
@@ -1042,6 +1142,38 @@ mod imp {
     pub(super) fn clear_decoder_kv_cache() {}
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn try_vit_backbone_resident_f32(
+        _x: &[f32],
+        _seq_len: usize,
+        _n_state: usize,
+        _n_head: usize,
+        _rot_half: usize,
+        _cos: &[f32],
+        _sin: &[f32],
+        _layers: &[super::VitLayerRef<'_>],
+        _final_norm_w: &[f32],
+        _final_norm_b: &[f32],
+        _eps: f32,
+    ) -> Option<Vec<f32>> {
+        None
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn try_two_way_layer_resident_f32(
+        _hidden: &[f32],
+        _token_pe: &[f32],
+        _context: &[f32],
+        _context_pe: &[f32],
+        _n_tok: usize,
+        _dim: usize,
+        _n_ctx: usize,
+        _ctx_dim: usize,
+        _layer: &super::TwoWayLayerRef<'_>,
+    ) -> Option<(Vec<f32>, Vec<f32>)> {
+        None
+    }
+
     pub(super) fn try_flash_attn_f32_self_kv_cache(
         _layer: usize,
         _q: &[f32],
@@ -1393,7 +1525,10 @@ mod imp {
 // "not handled" so callers fall back to their CPU paths, matching the
 // old makepad-ggml stub semantics. See makepad-ai-cuda/build.rs for the
 // links-metadata handshake that drives the cfg.
-#[cfg(all(not(target_os = "macos"), not(makepad_ai_cuda_kernels)))]
+#[cfg(not(any(
+    target_os = "macos",
+    all(any(target_os = "linux", target_os = "windows"), makepad_ai_cuda_kernels)
+)))]
 #[allow(unused_variables)]
 mod imp {
     pub(super) fn try_matmul_nn_f32(
@@ -1596,6 +1731,38 @@ mod imp {
 
     pub(super) fn clear_decoder_kv_cache() {}
 
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn try_vit_backbone_resident_f32(
+        _x: &[f32],
+        _seq_len: usize,
+        _n_state: usize,
+        _n_head: usize,
+        _rot_half: usize,
+        _cos: &[f32],
+        _sin: &[f32],
+        _layers: &[super::VitLayerRef<'_>],
+        _final_norm_w: &[f32],
+        _final_norm_b: &[f32],
+        _eps: f32,
+    ) -> Option<Vec<f32>> {
+        None
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn try_two_way_layer_resident_f32(
+        _hidden: &[f32],
+        _token_pe: &[f32],
+        _context: &[f32],
+        _context_pe: &[f32],
+        _n_tok: usize,
+        _dim: usize,
+        _n_ctx: usize,
+        _ctx_dim: usize,
+        _layer: &super::TwoWayLayerRef<'_>,
+    ) -> Option<(Vec<f32>, Vec<f32>)> {
+        None
+    }
+
     pub(super) fn try_flash_attn_f32_self_kv_cache(
         _layer: usize,
         _q: &[f32],
@@ -1743,7 +1910,7 @@ mod imp {
 
 #[cfg(target_os = "macos")]
 mod imp {
-    use makepad_ai_cuda::quant::{
+    use makepad_ai_loader::quant::{
         block_elements, block_size, f32_to_f16, ggml_type_name, GGML_TYPE_BF16, GGML_TYPE_F16,
         GGML_TYPE_F32, GGML_TYPE_I32, GGML_TYPE_Q2_K, GGML_TYPE_Q3_K, GGML_TYPE_Q4_0,
         GGML_TYPE_Q4_1, GGML_TYPE_Q4_K, GGML_TYPE_Q5_0, GGML_TYPE_Q5_1, GGML_TYPE_Q5_K,
@@ -1755,7 +1922,6 @@ mod imp {
     use std::collections::HashMap;
     use std::ffi::{c_char, c_void, CStr};
     use std::ptr::NonNull;
-    use std::sync::OnceLock;
     use std::thread;
     use std::time::Duration;
 
@@ -1790,6 +1956,13 @@ mod imp {
     const OP_FLASH_ATTN_EXT_VEC_NCPSG: i32 = 32;
     const OP_UNARY_NUM_GELU: i16 = 103;
     const OP_UNARY_NUM_SILU: i16 = 106;
+    /// Persistent-scratch tag range `[VIT_TAG_BASE, VIT_TAG_BASE + 20)` of the
+    /// resident ViT stack (`vit_layer_from_buffer_f32`).
+    const VIT_TAG_BASE: u8 = 200;
+    const OP_UNARY_NUM_GELU_ERF: i16 = 104;
+    /// Cached-affine tag range `[TWO_WAY_TAG_BASE, TWO_WAY_TAG_BASE + 14)` of
+    /// the resident two-way decoder layer.
+    const TWO_WAY_TAG_BASE: u8 = 180;
     const SCRATCH_FLASH_PAD: u8 = 1;
     const SCRATCH_FLASH_BLK: u8 = 2;
     const SCRATCH_FLASH_TMP: u8 = 3;
@@ -2105,6 +2278,15 @@ mod imp {
     #[derive(Copy, Clone)]
     struct KArgsFlashAttnExtVecReduce {
         nrows: i32,
+    }
+
+    #[repr(C)]
+    #[derive(Copy, Clone)]
+    struct KArgsRopeHalfTables {
+        token_count: i32,
+        head_count: i32,
+        head_dim: i32,
+        rot_half: i32,
     }
 
     #[repr(C)]
@@ -2780,11 +2962,6 @@ mod imp {
     /// only matters for one-off giants (DiT prefill strips).
     const POOL_CAP_BYTES: usize = 1280 * 1024 * 1024;
 
-    fn pool_disabled() -> bool {
-        static OFF: OnceLock<bool> = OnceLock::new();
-        *OFF.get_or_init(|| std::env::var_os("MAKEPAD_MUSIC3_NO_POOL").is_some())
-    }
-
     struct MetalContext {
         device: StrongId,
         command_queue: StrongId,
@@ -2871,10 +3048,6 @@ mod imp {
                         Self::compile_library(device.as_id(), &source)?
                     }
                 };
-
-                if super::log_metal_trace() {
-                    eprintln!("[ggml][metal] backend initialized (shared kernels)");
-                }
 
                 return Ok(Self {
                     device,
@@ -3041,14 +3214,12 @@ mod imp {
         /// touching the Metal allocator.
         fn pool_take(&mut self, byte_len: usize) -> Result<StrongId, String> {
             let need = byte_len.max(4);
-            if !pool_disabled() {
-                if let Some(i) = self
-                    .pool_free
-                    .iter()
-                    .position(|p| p.cap_bytes == need)
-                {
-                    return Ok(self.pool_free.swap_remove(i).buf);
-                }
+            if let Some(i) = self
+                .pool_free
+                .iter()
+                .position(|p| p.cap_bytes == need)
+            {
+                return Ok(self.pool_free.swap_remove(i).buf);
             }
             self.new_buffer_with_length(need)
         }
@@ -3068,9 +3239,6 @@ mod imp {
         /// Park a transient buffer until the next queue wait proves the GPU
         /// is done with it.
         fn pool_give(&mut self, buf: StrongId) {
-            if pool_disabled() {
-                return;
-            }
             let cap_bytes = unsafe {
                 let len: u64 = msg_send![buf.as_id(), length];
                 len as usize
@@ -3893,11 +4061,6 @@ mod imp {
             ne0: i32,
             ne1: i32,
         ) -> Result<(), String> {
-            static LOG_ONCE: OnceLock<()> = OnceLock::new();
-            if super::log_metal_trace() && LOG_ONCE.set(()).is_ok() {
-                eprintln!("[ggml][metal] mul_mat dispatch: mul_mv_ext");
-            }
-
             let nsg = 2i32;
             let nxpsg = if ne00 % 256 == 0 && ne11 < 3 {
                 16i32
@@ -4019,11 +4182,6 @@ mod imp {
             ne0: i32,
             ne1: i32,
         ) -> Result<(), String> {
-            static LOG_ONCE: OnceLock<()> = OnceLock::new();
-            if super::log_metal_trace() && LOG_ONCE.set(()).is_ok() {
-                eprintln!("[ggml][metal] mul_mat dispatch: mul_mm");
-            }
-
             let bc_inp = ne00 % 32 != 0;
             let bc_out = ne0 % 64 != 0 || ne1 % 32 != 0;
 
@@ -4140,11 +4298,6 @@ mod imp {
             ne0: i32,
             ne1: i32,
         ) -> Result<(), String> {
-            static LOG_ONCE: OnceLock<()> = OnceLock::new();
-            if super::log_metal_trace() && LOG_ONCE.set(()).is_ok() {
-                eprintln!("[ggml][metal] mul_mat dispatch: mul_mv");
-            }
-
             let (nsg, nr0, nr1, smem, suffix) = match src0 {
                 Src0Type::F32 | Src0Type::F16 | Src0Type::BF16 => {
                     if ne00 < 32 {
@@ -4387,6 +4540,613 @@ mod imp {
             }
 
             self.end_command_encoder(encoder_handles)
+        }
+
+        /// Rotate-half rope from per-token cos/sin tables on a row-major
+        /// `[token_count, head_count * head_dim]` f32 buffer; `dst_id` may be
+        /// `x_id` (each thread owns both halves of its pair).
+        #[allow(clippy::too_many_arguments)]
+        fn dispatch_rope_half_tables_f32(
+            &mut self,
+            x_id: ObjcId,
+            cos_id: ObjcId,
+            sin_id: ObjcId,
+            dst_id: ObjcId,
+            token_count: usize,
+            head_count: usize,
+            head_dim: usize,
+            rot_half: usize,
+        ) -> Result<(), String> {
+            if token_count == 0 || head_count == 0 {
+                return Ok(());
+            }
+            if rot_half * 2 > head_dim {
+                return Err(format!(
+                    "rope_half_tables: rot_half {} exceeds half of head_dim {}",
+                    rot_half, head_dim
+                ));
+            }
+            let name = "kernel_makepad_rope_half_tables_f32";
+            let (pipeline, _smem, _nr0, _nr1, _nsg) =
+                self.get_or_compile_cached_pipeline(name.to_string(), name, &[], 0, 0, 0, 0)?;
+            let args = KArgsRopeHalfTables {
+                token_count: i32::try_from(token_count)
+                    .map_err(|_| format!("rope token_count too large: {}", token_count))?,
+                head_count: i32::try_from(head_count)
+                    .map_err(|_| format!("rope head_count too large: {}", head_count))?,
+                head_dim: i32::try_from(head_dim)
+                    .map_err(|_| format!("rope head_dim too large: {}", head_dim))?,
+                rot_half: i32::try_from(rot_half)
+                    .map_err(|_| format!("rope rot_half too large: {}", rot_half))?,
+            };
+            let (_command_buffer, encoder, encoder_handles) = self.begin_command_encoder()?;
+            unsafe {
+                let _: () = msg_send![encoder, setComputePipelineState: pipeline];
+                let _: () = msg_send![
+                    encoder,
+                    setBytes: &args as *const KArgsRopeHalfTables as *const c_void
+                    length: std::mem::size_of::<KArgsRopeHalfTables>() as u64
+                    atIndex: 0u64
+                ];
+                let _: () = msg_send![encoder, setBuffer: x_id offset: 0u64 atIndex: 1u64];
+                let _: () = msg_send![encoder, setBuffer: cos_id offset: 0u64 atIndex: 2u64];
+                let _: () = msg_send![encoder, setBuffer: sin_id offset: 0u64 atIndex: 3u64];
+                let _: () = msg_send![encoder, setBuffer: dst_id offset: 0u64 atIndex: 4u64];
+                let nth_max = Self::pipeline_max_threads(pipeline).max(1u64);
+                let nth = (rot_half.max(1) as u64).min(nth_max).min(256);
+                let tgs = MTLSize {
+                    width: token_count as u64,
+                    height: head_count as u64,
+                    depth: 1,
+                };
+                let tpg = MTLSize {
+                    width: nth,
+                    height: 1,
+                    depth: 1,
+                };
+                let _: () = msg_send![
+                    encoder,
+                    dispatchThreadgroups: tgs
+                    threadsPerThreadgroup: tpg
+                ];
+            }
+            self.end_command_encoder(encoder_handles)
+        }
+
+        fn vit_linear_from_buffer(
+            &mut self,
+            src_id: ObjcId,
+            m: usize,
+            k: usize,
+            lin: &super::VitLinearRef<'_>,
+            weight_tag: u8,
+            bias_tag: u8,
+        ) -> Result<StrongId, String> {
+            let bias = if lin.bias.is_empty() {
+                None
+            } else {
+                Some(lin.bias)
+            };
+            self.linear_from_src_buffer(
+                src_id,
+                m,
+                k,
+                lin.w_bytes,
+                lin.w_ggml_type,
+                lin.n,
+                bias,
+                weight_tag,
+                bias_tag,
+            )
+        }
+
+        /// One resident ViT layer (see `VitLayerRef`), updating `x_id` in
+        /// place. The seven GEMM outputs use `tag_base + {2,4,6,8,12,14,16}`
+        /// as their persistent scratch tags; a stack reuses one `tag_base`
+        /// because layers execute sequentially inside the batch.
+        #[allow(clippy::too_many_arguments)]
+        fn vit_layer_from_buffer_f32(
+            &mut self,
+            x_id: ObjcId,
+            seq_len: usize,
+            n_state: usize,
+            n_head: usize,
+            rot_half: usize,
+            cos_id: ObjcId,
+            sin_id: ObjcId,
+            layer: &super::VitLayerRef<'_>,
+            eps: f32,
+            tag_base: u8,
+        ) -> Result<(), String> {
+            let head_dim = n_state / n_head;
+            let x_shape = shape4_from_row_major(&[seq_len, n_state], 4)?;
+            let ln_shape = shape4_from_row_major(&[n_state], 4)?;
+            let norm_bytes = x_shape
+                .numel
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or_else(|| "overflow computing vit norm buffer bytes".to_string())?;
+
+            // Attention: n1 = LN(x); x += out(attn(rope(q), rope(k), v)).
+            let n1_w = self.get_or_create_cached_f32_buffer(layer.norm1_w, tag_base)?;
+            let n1_b = self.get_or_create_cached_f32_buffer(layer.norm1_b, tag_base + 1)?;
+            let norm0_id = self.get_or_create_scratch_buffer(SCRATCH_ENC_NORM0, norm_bytes)?;
+            self.dispatch_norm_f32(
+                x_id, n1_w, n1_b, norm0_id, &x_shape, &ln_shape, &ln_shape, eps, 3,
+            )?;
+            let q = self.vit_linear_from_buffer(
+                norm0_id, seq_len, n_state, &layer.q, tag_base + 2, tag_base + 3,
+            )?;
+            let k = self.vit_linear_from_buffer(
+                norm0_id, seq_len, n_state, &layer.k, tag_base + 4, tag_base + 5,
+            )?;
+            let v = self.vit_linear_from_buffer(
+                norm0_id, seq_len, n_state, &layer.v, tag_base + 6, tag_base + 7,
+            )?;
+            if rot_half > 0 {
+                self.dispatch_rope_half_tables_f32(
+                    q.as_id(), cos_id, sin_id, q.as_id(), seq_len, n_head, head_dim, rot_half,
+                )?;
+                self.dispatch_rope_half_tables_f32(
+                    k.as_id(), cos_id, sin_id, k.as_id(), seq_len, n_head, head_dim, rot_half,
+                )?;
+            }
+            let scale = 1.0 / (head_dim as f32).sqrt();
+            let attn = self.flash_attn_f32_from_buffers(
+                q.as_id(), k.as_id(), v.as_id(), seq_len, seq_len, n_head, head_dim, scale,
+            )?;
+            let out = self.vit_linear_from_buffer(
+                attn.as_id(), seq_len, n_state, &layer.out, tag_base + 8, tag_base + 9,
+            )?;
+            self.dispatch_bin_f32(0, x_id, out.as_id(), x_id, &x_shape, &x_shape)?;
+
+            // Feed-forward: n2 = LN(x); x += down(silu(gate(n2)) * up(n2)).
+            let n2_w = self.get_or_create_cached_f32_buffer(layer.norm2_w, tag_base + 10)?;
+            let n2_b = self.get_or_create_cached_f32_buffer(layer.norm2_b, tag_base + 11)?;
+            let norm1_id = self.get_or_create_scratch_buffer(SCRATCH_ENC_NORM1, norm_bytes)?;
+            self.dispatch_norm_f32(
+                x_id, n2_w, n2_b, norm1_id, &x_shape, &ln_shape, &ln_shape, eps, 3,
+            )?;
+            let gate = self.vit_linear_from_buffer(
+                norm1_id, seq_len, n_state, &layer.gate, tag_base + 12, tag_base + 13,
+            )?;
+            let up = self.vit_linear_from_buffer(
+                norm1_id, seq_len, n_state, &layer.up, tag_base + 14, tag_base + 15,
+            )?;
+            let ff_shape = shape4_from_row_major(&[seq_len, layer.gate.n], 4)?;
+            self.dispatch_unary_f32(OP_UNARY_NUM_SILU, gate.as_id(), gate.as_id(), &ff_shape)?;
+            self.dispatch_bin_f32(2, gate.as_id(), up.as_id(), gate.as_id(), &ff_shape, &ff_shape)?;
+            let down = self.vit_linear_from_buffer(
+                gate.as_id(), seq_len, layer.gate.n, &layer.down, tag_base + 16, tag_base + 17,
+            )?;
+            self.dispatch_bin_f32(0, x_id, down.as_id(), x_id, &x_shape, &x_shape)?;
+            Ok(())
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn vit_backbone_resident_f32(
+            &mut self,
+            x: &[f32],
+            seq_len: usize,
+            n_state: usize,
+            n_head: usize,
+            rot_half: usize,
+            cos: &[f32],
+            sin: &[f32],
+            layers: &[super::VitLayerRef<'_>],
+            final_norm_w: &[f32],
+            final_norm_b: &[f32],
+            eps: f32,
+        ) -> Result<Vec<f32>, String> {
+            if seq_len == 0 || n_state == 0 || n_head == 0 || n_state % n_head != 0 {
+                return Err(format!(
+                    "invalid vit dimensions: seq_len={}, n_state={}, n_head={}",
+                    seq_len, n_state, n_head
+                ));
+            }
+            let head_dim = n_state / n_head;
+            if rot_half * 2 > head_dim {
+                return Err(format!(
+                    "vit rot_half {} exceeds half of head_dim {}",
+                    rot_half, head_dim
+                ));
+            }
+            let x_need = seq_len
+                .checked_mul(n_state)
+                .ok_or_else(|| "overflow computing vit x size".to_string())?;
+            if x.len() != x_need {
+                return Err(format!("vit x len mismatch: got {}, expected {}", x.len(), x_need));
+            }
+            let table_need = seq_len * rot_half;
+            if cos.len() != table_need || sin.len() != table_need {
+                return Err(format!(
+                    "vit rope table len mismatch: cos {} sin {} expected {}",
+                    cos.len(),
+                    sin.len(),
+                    table_need
+                ));
+            }
+            if final_norm_w.len() != n_state || final_norm_b.len() != n_state {
+                return Err("vit final layernorm affine size mismatch".to_string());
+            }
+            for (index, layer) in layers.iter().enumerate() {
+                let lin_ok = |lin: &super::VitLinearRef<'_>, n: usize| {
+                    lin.n == n && (lin.bias.is_empty() || lin.bias.len() == n)
+                };
+                if layer.norm1_w.len() != n_state
+                    || layer.norm1_b.len() != n_state
+                    || layer.norm2_w.len() != n_state
+                    || layer.norm2_b.len() != n_state
+                    || !lin_ok(&layer.q, n_state)
+                    || !lin_ok(&layer.k, n_state)
+                    || !lin_ok(&layer.v, n_state)
+                    || !lin_ok(&layer.out, n_state)
+                    || layer.gate.n == 0
+                    || !lin_ok(&layer.gate, layer.gate.n)
+                    || !lin_ok(&layer.up, layer.gate.n)
+                    || !lin_ok(&layer.down, n_state)
+                {
+                    return Err(format!("vit layer {} has mismatched shapes", index));
+                }
+            }
+
+            let x_shape = shape4_from_row_major(&[seq_len, n_state], 4)?;
+            let ln_shape = shape4_from_row_major(&[n_state], 4)?;
+            let x_buf = self.new_buffer_with_bytes(f32_slice_as_bytes(x))?;
+            let (cos_buf, sin_buf) = if rot_half > 0 {
+                (
+                    Some(self.new_buffer_with_bytes(f32_slice_as_bytes(cos))?),
+                    Some(self.new_buffer_with_bytes(f32_slice_as_bytes(sin))?),
+                )
+            } else {
+                (None, None)
+            };
+            let out_buf = self.new_buffer_with_length(x_need * std::mem::size_of::<f32>())?;
+            let cos_id = cos_buf.as_ref().map(|b| b.as_id()).unwrap_or(x_buf.as_id());
+            let sin_id = sin_buf.as_ref().map(|b| b.as_id()).unwrap_or(x_buf.as_id());
+            let x_id = x_buf.as_id();
+            let out_id = out_buf.as_id();
+            self.with_batch(|ctx| {
+                for layer in layers {
+                    ctx.vit_layer_from_buffer_f32(
+                        x_id, seq_len, n_state, n_head, rot_half, cos_id, sin_id, layer, eps,
+                        VIT_TAG_BASE,
+                    )?;
+                }
+                let fw = ctx.get_or_create_cached_f32_buffer(final_norm_w, VIT_TAG_BASE + 18)?;
+                let fb = ctx.get_or_create_cached_f32_buffer(final_norm_b, VIT_TAG_BASE + 19)?;
+                ctx.dispatch_norm_f32(
+                    x_id, fw, fb, out_id, &x_shape, &ln_shape, &ln_shape, eps, 3,
+                )
+            })?;
+            let out = self.read_f32_buffer(out_id, x_need)?;
+            drop(cos_buf);
+            drop(sin_buf);
+            drop(x_buf);
+            drop(out_buf);
+            Ok(out)
+        }
+
+        /// `C(m, n) = X(m, k) @ W^T` from device buffers: `src0_id` holds the
+        /// `[n, k]` weight in `src0_ggml_type`, `src1_id` the f32 `[m, k]`
+        /// input, and the f32 `[m, n]` result lands in `dst_id`.
+        #[allow(clippy::too_many_arguments)]
+        fn matmul_nt_into_buffer(
+            &mut self,
+            src0_ggml_type: u32,
+            src0_id: ObjcId,
+            src1_id: ObjcId,
+            dst_id: ObjcId,
+            m: usize,
+            k: usize,
+            n: usize,
+        ) -> Result<(), String> {
+            let src0 = src0_type_from_ggml(src0_ggml_type).ok_or_else(|| {
+                format!("unsupported src0 ggml_type for metal matmul: {}", src0_ggml_type)
+            })?;
+            let (src0_row_bytes, nb00) = src0_layout_bytes_per_row(src0, k)?;
+            let ne00 = i32::try_from(k).map_err(|_| format!("k too large: {}", k))?;
+            let ne01 = i32::try_from(n).map_err(|_| format!("n too large: {}", n))?;
+            let ne10 = ne00;
+            let ne11 = i32::try_from(m).map_err(|_| format!("m too large: {}", m))?;
+            let ne0 = ne01;
+            let ne1 = ne11;
+            let nb01 = src0_row_bytes as u64;
+            let nb10 = 4u64;
+            let nb11 = (k as u64)
+                .checked_mul(4)
+                .ok_or_else(|| "overflow computing nb11".to_string())?;
+            if can_use_mul_mv_ext(src0, ne00, ne11) {
+                self.dispatch_mul_mv_ext(
+                    src0, src0_id, src1_id, dst_id, ne00, ne01, ne10, ne11, nb00, nb01, nb10,
+                    nb11, ne0, ne1,
+                )
+            } else if ne00 >= 64 && ne11 > 8 {
+                match self.dispatch_mul_mm(
+                    src0, src0_id, src1_id, dst_id, ne00, ne01, nb01, 1, nb10, nb11, ne0, ne1,
+                ) {
+                    Ok(()) => Ok(()),
+                    Err(e) => {
+                        super::log_metal_error_once(format!(
+                            "[ggml][metal] mul_mm failed for type {:?}, falling back to mul_mv: {}",
+                            src0, e
+                        ));
+                        self.dispatch_mul_mv(
+                            src0, src0_id, src1_id, dst_id, ne00, ne01, ne10, ne11, nb00, nb01,
+                            nb10, nb11, ne0, ne1,
+                        )
+                    }
+                }
+            } else {
+                self.dispatch_mul_mv(
+                    src0, src0_id, src1_id, dst_id, ne00, ne01, ne10, ne11, nb00, nb01, nb10,
+                    nb11, ne0, ne1,
+                )
+            }
+        }
+
+        /// The f32 contents of a host-backed tensor as little-endian bytes.
+        fn tensor_f32_bytes(t: &crate::gpu_types::GpuTensor) -> Result<Vec<u8>, String> {
+            let data = t
+                .data
+                .try_borrow()
+                .map_err(|_| "metal GpuTensor already borrowed".to_string())?;
+            let mut bytes = Vec::with_capacity(data.len() * 4);
+            for value in data.iter() {
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            Ok(bytes)
+        }
+
+        /// A pooled f32 `[rows, cols]` buffer registered in `keep` (given back
+        /// to the pool after the layer's read-back).
+        fn two_way_scratch(
+            &mut self,
+            rows: usize,
+            cols: usize,
+            keep: &mut Vec<StrongId>,
+        ) -> Result<ObjcId, String> {
+            let bytes = rows
+                .checked_mul(cols)
+                .and_then(|v| v.checked_mul(4))
+                .ok_or_else(|| "overflow computing two-way scratch bytes".to_string())?;
+            let buf = self.pool_take(bytes)?;
+            let id = buf.as_id();
+            keep.push(buf);
+            Ok(id)
+        }
+
+        fn two_way_linear(
+            &mut self,
+            src_id: ObjcId,
+            m: usize,
+            lin: &super::DecLinearRef<'_>,
+            keep: &mut Vec<StrongId>,
+        ) -> Result<ObjcId, String> {
+            let n = lin.weight.rows;
+            let k = lin.weight.cols;
+            let weight = lin.weight;
+            let w_id = self.get_or_create_named_weight_buffer(
+                "two_way",
+                &format!("w{}", weight.id.get()),
+                || Self::tensor_f32_bytes(weight),
+            )?;
+            let dst_id = self.two_way_scratch(m, n, keep)?;
+            self.matmul_nt_into_buffer(GGML_TYPE_F32, w_id, src_id, dst_id, m, k, n)?;
+            if let Some(bias) = lin.bias {
+                if bias.rows * bias.cols != n {
+                    return Err(format!(
+                        "two-way linear bias {}x{} does not match n {}",
+                        bias.rows, bias.cols, n
+                    ));
+                }
+                let b_id = self.get_or_create_named_weight_buffer(
+                    "two_way",
+                    &format!("b{}", bias.id.get()),
+                    || Self::tensor_f32_bytes(bias),
+                )?;
+                let dst_shape = shape4_from_row_major(&[m, n], 4)?;
+                let b_shape = shape4_from_row_major(&[n], 4)?;
+                self.dispatch_bin_f32(0, dst_id, b_id, dst_id, &dst_shape, &b_shape)?;
+            }
+            Ok(dst_id)
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn two_way_norm(
+            &mut self,
+            src_id: ObjcId,
+            rows: usize,
+            cols: usize,
+            affine: (&[f32], &[f32]),
+            tag: u8,
+            eps: f32,
+            keep: &mut Vec<StrongId>,
+        ) -> Result<ObjcId, String> {
+            if affine.0.len() != cols || affine.1.len() != cols {
+                return Err(format!(
+                    "two-way layernorm affine {}/{} does not match {} cols",
+                    affine.0.len(),
+                    affine.1.len(),
+                    cols
+                ));
+            }
+            let w_id = self.get_or_create_cached_f32_buffer(affine.0, tag)?;
+            let b_id = self.get_or_create_cached_f32_buffer(affine.1, tag + 1)?;
+            let dst_id = self.two_way_scratch(rows, cols, keep)?;
+            let x_shape = shape4_from_row_major(&[rows, cols], 4)?;
+            let ln_shape = shape4_from_row_major(&[cols], 4)?;
+            self.dispatch_norm_f32(
+                src_id, w_id, b_id, dst_id, &x_shape, &ln_shape, &ln_shape, eps, 3,
+            )?;
+            Ok(dst_id)
+        }
+
+        fn two_way_add(
+            &mut self,
+            a_id: ObjcId,
+            b_id: ObjcId,
+            dst_id: ObjcId,
+            rows: usize,
+            cols: usize,
+        ) -> Result<(), String> {
+            let shape = shape4_from_row_major(&[rows, cols], 4)?;
+            self.dispatch_bin_f32(0, a_id, b_id, dst_id, &shape, &shape)
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn two_way_layer_resident_f32(
+            &mut self,
+            hidden: &[f32],
+            token_pe: &[f32],
+            context: &[f32],
+            context_pe: &[f32],
+            n_tok: usize,
+            dim: usize,
+            n_ctx: usize,
+            ctx_dim: usize,
+            layer: &super::TwoWayLayerRef<'_>,
+        ) -> Result<(Vec<f32>, Vec<f32>), String> {
+            if n_tok == 0 || dim == 0 || n_ctx == 0 || ctx_dim == 0 || layer.n_head == 0 {
+                return Err("two-way layer: empty dimension".to_string());
+            }
+            let tok_elems = n_tok * dim;
+            let ctx_elems = n_ctx * ctx_dim;
+            if hidden.len() != tok_elems || token_pe.len() != tok_elems {
+                return Err(format!(
+                    "two-way layer: hidden {} / token_pe {} vs {}x{}",
+                    hidden.len(),
+                    token_pe.len(),
+                    n_tok,
+                    dim
+                ));
+            }
+            if context.len() != ctx_elems || context_pe.len() != ctx_elems {
+                return Err(format!(
+                    "two-way layer: context {} / context_pe {} vs {}x{}",
+                    context.len(),
+                    context_pe.len(),
+                    n_ctx,
+                    ctx_dim
+                ));
+            }
+            let sa = &layer.self_attn;
+            let ca = &layer.cross_attn;
+            let inner = sa.q.weight.rows;
+            if inner == 0 || inner % layer.n_head != 0 {
+                return Err(format!(
+                    "two-way layer: attention width {} not divisible by {} heads",
+                    inner, layer.n_head
+                ));
+            }
+            let head_dim = inner / layer.n_head;
+            if !flash_attn_supported_head_dim(head_dim) {
+                return Err(format!("two-way layer: head dim {} unsupported", head_dim));
+            }
+            let shape_ok = |lin: &super::DecLinearRef<'_>, n: usize, k: usize| {
+                lin.weight.rows == n && lin.weight.cols == k
+            };
+            if !shape_ok(&sa.q, inner, dim)
+                || !shape_ok(&sa.k, inner, dim)
+                || !shape_ok(&sa.v, inner, dim)
+                || !shape_ok(&sa.out, dim, inner)
+                || !shape_ok(&ca.q, inner, dim)
+                || !shape_ok(&ca.k, inner, ctx_dim)
+                || !shape_ok(&ca.v, inner, ctx_dim)
+                || !shape_ok(&ca.out, dim, inner)
+                || layer.ffn_first.weight.cols != dim
+                || !shape_ok(&layer.ffn_second, dim, layer.ffn_first.weight.rows)
+            {
+                return Err("two-way layer: weight shapes do not match the layer".to_string());
+            }
+            let ffn_width = layer.ffn_first.weight.rows;
+            let scale = 1.0 / (head_dim as f32).sqrt();
+            let eps = layer.eps;
+            let tag = TWO_WAY_TAG_BASE;
+
+            let mut keep: Vec<StrongId> = Vec::new();
+            let x_buf = self.pool_take_filled(f32_slice_as_bytes(hidden))?;
+            let tpe_buf = self.pool_take_filled(f32_slice_as_bytes(token_pe))?;
+            let ctx_buf = self.pool_take_filled(f32_slice_as_bytes(context))?;
+            let cpe_buf = self.pool_take_filled(f32_slice_as_bytes(context_pe))?;
+            let normed_buf = self.pool_take(tok_elems * 4)?;
+            let x_id = x_buf.as_id();
+            let normed_id = normed_buf.as_id();
+
+            let run = self.with_batch(|ctx| {
+                let keep = &mut keep;
+                // Positional embeddings, normalised once per layer.
+                let tpe_n = ctx.two_way_norm(tpe_buf.as_id(), n_tok, dim, layer.ln_pe_1, tag, eps, keep)?;
+                let ipe_n =
+                    ctx.two_way_norm(cpe_buf.as_id(), n_ctx, ctx_dim, layer.ln_pe_2, tag + 2, eps, keep)?;
+
+                // Token self-attention.
+                let n1 = ctx.two_way_norm(x_id, n_tok, dim, layer.ln1, tag + 4, eps, keep)?;
+                let qk = if layer.pe_on_self {
+                    let qk = ctx.two_way_scratch(n_tok, dim, keep)?;
+                    ctx.two_way_add(n1, tpe_n, qk, n_tok, dim)?;
+                    qk
+                } else {
+                    n1
+                };
+                let q = ctx.two_way_linear(qk, n_tok, &sa.q, keep)?;
+                let k = ctx.two_way_linear(qk, n_tok, &sa.k, keep)?;
+                let v = ctx.two_way_linear(n1, n_tok, &sa.v, keep)?;
+                let attn = ctx.flash_attn_f32_from_buffers(
+                    q, k, v, n_tok, n_tok, layer.n_head, head_dim, scale,
+                )?;
+                let o = ctx.two_way_linear(attn.as_id(), n_tok, &sa.out, keep)?;
+                ctx.two_way_add(x_id, o, x_id, n_tok, dim)?;
+                drop(attn);
+
+                // Token-to-image cross-attention.
+                let q2n = ctx.two_way_norm(x_id, n_tok, dim, layer.ln2_1, tag + 6, eps, keep)?;
+                let q2 = ctx.two_way_scratch(n_tok, dim, keep)?;
+                ctx.two_way_add(q2n, tpe_n, q2, n_tok, dim)?;
+                let cn = ctx.two_way_norm(ctx_buf.as_id(), n_ctx, ctx_dim, layer.ln2_2, tag + 8, eps, keep)?;
+                let kx = ctx.two_way_scratch(n_ctx, ctx_dim, keep)?;
+                ctx.two_way_add(cn, ipe_n, kx, n_ctx, ctx_dim)?;
+                let q = ctx.two_way_linear(q2, n_tok, &ca.q, keep)?;
+                let k = ctx.two_way_linear(kx, n_ctx, &ca.k, keep)?;
+                let v = ctx.two_way_linear(cn, n_ctx, &ca.v, keep)?;
+                let attn = ctx.flash_attn_f32_from_buffers(
+                    q, k, v, n_tok, n_ctx, layer.n_head, head_dim, scale,
+                )?;
+                let o = ctx.two_way_linear(attn.as_id(), n_tok, &ca.out, keep)?;
+                ctx.two_way_add(x_id, o, x_id, n_tok, dim)?;
+                drop(attn);
+
+                // Feed-forward with the exact GELU.
+                let n3 = ctx.two_way_norm(x_id, n_tok, dim, layer.ln3, tag + 10, eps, keep)?;
+                let f = ctx.two_way_linear(n3, n_tok, &layer.ffn_first, keep)?;
+                let f_shape = shape4_from_row_major(&[n_tok, ffn_width], 4)?;
+                ctx.dispatch_unary_f32(OP_UNARY_NUM_GELU_ERF, f, f, &f_shape)?;
+                let f2 = ctx.two_way_linear(f, n_tok, &layer.ffn_second, keep)?;
+                ctx.two_way_add(x_id, f2, x_id, n_tok, dim)?;
+
+                // Final norm, read back alongside the hidden state.
+                let fw = ctx.get_or_create_cached_f32_buffer(layer.ln_final.0, tag + 12)?;
+                let fb = ctx.get_or_create_cached_f32_buffer(layer.ln_final.1, tag + 13)?;
+                let x_shape = shape4_from_row_major(&[n_tok, dim], 4)?;
+                let ln_shape = shape4_from_row_major(&[dim], 4)?;
+                ctx.dispatch_norm_f32(
+                    x_id, fw, fb, normed_id, &x_shape, &ln_shape, &ln_shape, eps, 3,
+                )
+            });
+            let result = run.and_then(|()| {
+                let hidden_out = self.read_f32_buffer(x_id, tok_elems)?;
+                let normed_out = self.read_f32_buffer(normed_id, tok_elems)?;
+                Ok((hidden_out, normed_out))
+            });
+            // Everything above waited on the queue, so the transients are free.
+            let _ = self.wait_queue_idle();
+            for buf in keep.drain(..) {
+                self.pool_give(buf);
+            }
+            for buf in [x_buf, tpe_buf, ctx_buf, cpe_buf, normed_buf] {
+                self.pool_give(buf);
+            }
+            self.pool_recycle();
+            result
         }
 
         fn dispatch_cpy_f32_to_f16(
@@ -7568,20 +8328,17 @@ mod imp {
             let used_mul_mv_ext = can_use_mul_mv_ext(src0, ne00, ne11);
             let used_mul_mm = ne00 >= 64 && ne11 > 8;
 
-            let (kernel, compute_res) = if used_mul_mv_ext {
-                (
-                    "mul_mv_ext",
-                    self.dispatch_mul_mv_ext(
+            let compute_res = if used_mul_mv_ext {
+                self.dispatch_mul_mv_ext(
                         src0, src0_id, src1_id, dst_id, ne00, ne01, ne10, ne11, nb00, nb01, nb10,
                         nb11, ne0, ne1,
-                    ),
-                )
+                    )
             } else if used_mul_mm {
                 match self.dispatch_mul_mm(
                     src0, src0_id, src1_id, dst_id, ne00, ne01, nb01, 1, nb10, nb11, ne0, ne1,
                 ) {
-                    Ok(()) => ("mul_mm", Ok(())),
-                    Err(e) => ("mul_mv", {
+                    Ok(()) => Ok(()),
+                    Err(e) => {
                         super::log_metal_error_once(format!(
                             "[ggml][metal] mul_mm failed for type {:?}, falling back to mul_mv: {}",
                             src0, e
@@ -7590,30 +8347,15 @@ mod imp {
                             src0, src0_id, src1_id, dst_id, ne00, ne01, ne10, ne11, nb00, nb01,
                             nb10, nb11, ne0, ne1,
                         )
-                    }),
+                    }
                 }
             } else {
-                (
-                    "mul_mv",
-                    self.dispatch_mul_mv(
+                self.dispatch_mul_mv(
                         src0, src0_id, src1_id, dst_id, ne00, ne01, ne10, ne11, nb00, nb01, nb10,
                         nb11, ne0, ne1,
-                    ),
-                )
+                    )
             };
             compute_res?;
-            if super::log_mul_mat_requested() {
-                eprintln!(
-                    "[ggml][metal] mul_mat kernel={} src0={} src1=f32 ne00={} ne01={} ne11={} ne12=1 nb01={} nb11={}",
-                    kernel,
-                    src0_type_name(src0),
-                    ne00,
-                    ne01,
-                    ne11,
-                    nb01,
-                    nb11
-                );
-            }
             drop(src0_temp);
             if let Some(dst_buffer) = dst_temp {
                 Ok(dst_buffer)
@@ -8874,6 +9616,47 @@ mod imp {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn try_vit_backbone_resident_f32(
+        x: &[f32],
+        seq_len: usize,
+        n_state: usize,
+        n_head: usize,
+        rot_half: usize,
+        cos: &[f32],
+        sin: &[f32],
+        layers: &[super::VitLayerRef<'_>],
+        final_norm_w: &[f32],
+        final_norm_b: &[f32],
+        eps: f32,
+    ) -> Option<Vec<f32>> {
+        with_context(|ctx| {
+            ctx.vit_backbone_resident_f32(
+                x, seq_len, n_state, n_head, rot_half, cos, sin, layers, final_norm_w,
+                final_norm_b, eps,
+            )
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn try_two_way_layer_resident_f32(
+        hidden: &[f32],
+        token_pe: &[f32],
+        context: &[f32],
+        context_pe: &[f32],
+        n_tok: usize,
+        dim: usize,
+        n_ctx: usize,
+        ctx_dim: usize,
+        layer: &super::TwoWayLayerRef<'_>,
+    ) -> Option<(Vec<f32>, Vec<f32>)> {
+        with_context(|ctx| {
+            ctx.two_way_layer_resident_f32(
+                hidden, token_pe, context, context_pe, n_tok, dim, n_ctx, ctx_dim, layer,
+            )
+        })
+    }
+
     pub(super) fn try_flash_attn_f32_self_kv_cache(
         layer: usize,
         q: &[f32],

@@ -2,7 +2,7 @@
 //!
 //! The layout engine emits one immutable [`PaintList`] per page. Rendering is
 //! deliberately split into deterministic planning and backend replay, so the
-//! GPU and `MAKEPAD=headless` consume exactly the same culled, batched geometry.
+//! GPU and `MAKEPAD=gpusim` consume exactly the same culled, batched geometry.
 
 mod batch;
 mod cache;

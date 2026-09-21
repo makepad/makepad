@@ -165,6 +165,11 @@ pub struct StackNavigationView {
     #[rust]
     state: StackNavigationViewState,
 
+    /// Held from the start of opening until this view is hidden. Acquiring it
+    /// before the animation keeps popups opened during the slide in front.
+    #[rust]
+    cancel_scope: Option<CancelScope>,
+
     /// The UID of the parent navigation.
     #[rust]
     parent_navigation_uid: Option<WidgetUid>,
@@ -276,12 +281,19 @@ impl Widget for StackNavigationView {
 
 impl StackNavigationView {
     fn hide_stack_view(&mut self, cx: &mut Cx) {
+        self.dismiss_transient_children(cx);
         self.animator_play(cx, ids!(slide.hide));
 
         cx.widget_action(
             self.widget_uid(),
             StackNavigationTransitionAction::HideBegin,
         );
+    }
+
+    fn dismiss_transient_children(&mut self, cx: &mut Cx) {
+        self.view.handle_event(cx,
+            &Event::Actions(vec![Box::new(crate::modal::ModalAction::Dismissed)]),
+            &mut Scope::empty());
     }
 
     fn handle_stack_view_closure_request(
@@ -294,10 +306,23 @@ impl StackNavigationView {
         // * the back navigation button/gesture occurred,
         // * the left_button was clicked,
         // * the "back" button on the mouse was clicked.
+        if self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s))
+            && self.is_animating()
+        {
+            // Navigation cannot change mid-transition, but Back must not fall
+            // through to the outgoing view or the operating system.
+            event.back_pressed();
+            return;
+        }
         if matches!(self.state, StackNavigationViewState::Active) {
-            if event.back_pressed()
+            // Ownership decides, so a modal or pane opened over this view keeps the press
+            // and this view stays put. Checked before `back_pressed()`, which consumes.
+            let owns_back = self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s));
+            if (owns_back && (event.back_pressed()
+                    || matches!(event, Event::MouseUp(mouse) if mouse.button.is_back())))
+                // The left button is an explicit click on this view's own header, not a
+                // gesture something in front of it could have a better claim to.
                 || matches!(event, Event::Actions(actions) if self.button(cx, ids!(left_button)).clicked(&actions))
-                || matches!(event, Event::MouseUp(mouse) if mouse.button.is_back())
             {
                 cx.widget_action(self.widget_uid(), StackNavigationAction::Pop);
             }
@@ -308,9 +333,14 @@ impl StackNavigationView {
         if self.state == StackNavigationViewState::Active
             && self.animator.in_state(cx, ids!(slide.hide))
         {
-            if self.offset > self.offset_to_hide {
+            if self.offset >= self.offset_to_hide || !self.is_animating() {
                 self.view.visible = false;
                 self.redraw(cx);
+                // The animator's fixed target may be smaller than a wide window.
+                // Completion still hides the view and must release its scope,
+                // including standalone views with no parent to notify.
+                self.animator_cut(cx, ids!(slide.hide));
+                self.set_nav_state(cx, StackNavigationViewState::Inactive);
 
                 // Dispatch HideEnd with the parent navigation's UID
                 let hide_end_action = if let Some(parent_uid) = self.parent_navigation_uid {
@@ -324,9 +354,6 @@ impl StackNavigationView {
                 };
 
                 cx.widget_action(self.widget_uid(), hide_end_action);
-
-                self.animator_cut(cx, ids!(slide.hide));
-                self.state = StackNavigationViewState::Inactive;
             }
         }
     }
@@ -338,9 +365,27 @@ impl StackNavigationView {
             const OPENING_OFFSET_THRESHOLD: f64 = 0.5;
             if self.offset < OPENING_OFFSET_THRESHOLD {
                 cx.widget_action(self.widget_uid(), StackNavigationTransitionAction::ShowDone);
-                self.state = StackNavigationViewState::Active;
+                self.set_nav_state(cx, StackNavigationViewState::Active);
             }
         }
+    }
+
+    /// Finish a state transition without replacing a scope already acquired by
+    /// `show`: doing so would overtake children opened during the animation.
+    fn set_nav_state(&mut self, cx: &mut Cx, state: StackNavigationViewState) {
+        match state {
+            StackNavigationViewState::Active => {
+                if self.cancel_scope.is_none() {
+                    self.cancel_scope = Some(self.begin_cancel_scope_for(cx, CancelScopeKind::Back));
+                }
+            }
+            StackNavigationViewState::Inactive => {
+                if let Some(scope) = self.cancel_scope.take() {
+                    cx.end_cancel_scope(scope);
+                }
+            }
+        }
+        self.state = state;
     }
 
     fn is_animating(&self) -> bool {
@@ -353,7 +398,8 @@ impl StackNavigationViewRef {
         if let Some(mut inner) = self.borrow_mut() {
             inner.view.visible = true;
             inner.offset_to_hide = view_width;
-            inner.state = StackNavigationViewState::Inactive;
+            inner.set_nav_state(cx, StackNavigationViewState::Inactive);
+            inner.cancel_scope = Some(inner.begin_cancel_scope_for(cx, CancelScopeKind::Back));
 
             // Force-reset the animator by cutting to show (offset=0) first,
             // then cutting to hide, then playing show. This ensures the animator
@@ -399,7 +445,7 @@ impl StackNavigationViewRef {
             inner.view.visible = true;
             inner.offset_to_hide = view_width;
             inner.offset = 0.0;
-            inner.state = StackNavigationViewState::Active;
+            inner.set_nav_state(cx, StackNavigationViewState::Active);
             inner.animator_cut(cx, ids!(slide.show));
             inner.redraw(cx);
         }
@@ -407,10 +453,13 @@ impl StackNavigationViewRef {
 
     pub fn hide_immediately(&self, cx: &mut Cx, view_width: f64) {
         if let Some(mut inner) = self.borrow_mut() {
+            if inner.view.visible {
+                inner.dismiss_transient_children(cx);
+            }
             inner.offset_to_hide = view_width;
             inner.offset = view_width;
             inner.view.visible = false;
-            inner.state = StackNavigationViewState::Inactive;
+            inner.set_nav_state(cx, StackNavigationViewState::Inactive);
             inner.animator_cut(cx, ids!(slide.hide));
             inner.redraw(cx);
         }
@@ -568,6 +617,23 @@ impl WidgetNode for StackNavigation {
         }
     }
 
+    fn cancel_children_impl(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
+        if !self.view.visible {
+            return false;
+        }
+        let active = match self.transition {
+            Some(StackNavigationTransition::Push { incoming, .. }) => incoming,
+            Some(StackNavigationTransition::Pop { outgoing, .. }) => outgoing,
+            None => self.current_view.unwrap_or(id!(root_view)),
+        };
+        if let Some(widget) = self.dynamic_views.get(&active) {
+            visit(active, widget.clone());
+        } else if let Some((_, widget)) = self.view.children.iter().find(|(id, _)| *id == active) {
+            visit(active, widget.clone());
+        }
+        true
+    }
+
     fn redraw(&mut self, cx: &mut Cx) {
         for (_id, widget_ref) in self.get_visible_views(cx).iter() {
             widget_ref.redraw(cx);
@@ -584,7 +650,9 @@ impl WidgetMatchEvent for StackNavigation {
                         StackNavigationAction::Push(view_id) => {
                             self.push_view(view_id, cx);
                         }
-                        StackNavigationAction::Pop => {
+                        StackNavigationAction::Pop
+                            if self.view_id_for_widget_uid(cx, widget_action.widget_uid).is_some() =>
+                        {
                             self.pop_to_root(cx);
                         }
                         StackNavigationAction::PopToRoot => {

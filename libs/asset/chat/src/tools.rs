@@ -17,6 +17,9 @@ use makepad_asset_client::OperationId;
 use makepad_asset_data::{AssetAlias, AssetId, AssetRevisionId, ScalePreset};
 use std::str::FromStr;
 
+mod editable;
+pub use editable::ModelDocumentTool;
+
 /// Prompt-facing description of one tool (rendered into the provider's
 /// system text by `toolcall::render_system` / [`render_native_system`]).
 #[derive(Clone, Debug)]
@@ -36,7 +39,7 @@ pub struct ToolDef {
 
 /// The complete reviewed CSG teaching payload. Keep this one block small
 /// enough to sit beside the whole game API in a 12k local-model context.
-pub const CSG_MODEL_TOOL_DOC: &str = r#"CSG MODELLING (csg.* only inside model.build source). Every model you build is STORED under its title (alias gen/csg/<title-slug>) with its editable source. So when the user asks for something you may have modelled before ("a dog" again), asset.search the noun FIRST: found and good as-is -> place it with world.place; found but needs changes (color, size, style) -> model.fetch its source, edit, model.build with the SAME title (revises the same asset) or a NEW title for a variant. Only model from scratch when search finds nothing usable. Build SOLIDS from primitives, shape them with booleans/transforms, then name them into PARTS; the parts ARE the model. Metres, Y-up, y=0 floor. Solids are immutable values. One color per part: differently colored details are separate overlapping parts. box/cylinder/extrude stand on y=0 centered x,z; sphere/torus center at origin; lathe uses profile y. Declare at least one part. Budgets enforce ops, parts, triangles and 30 s.
+pub const CSG_MODEL_TOOL_DOC: &str = r#"CSG MODELLING (csg.* only inside model.build source). Models and editable source are stored at gen/csg/<title-slug>. asset.search first; reuse with world.place, or model.fetch then edit and model.build with the SAME title to revise that asset (NEW title for a variant). Build immutable SOLIDS, then name them into PARTS. Metres, Y-up, y=0 floor, face +Z. One color per part; differently colored details are separate parts. box/cylinder/extrude stand on y=0 centered x,z; sphere/torus center at origin; lathe uses profile y. Declare at least one part. Budgets: 2000 ops, 32 parts, 150000 triangles, 12000 source bytes, 30s including binding.
 csg.box({size}) -> solid; size vec3 metres
 csg.sphere({r, seg}) -> solid
 csg.cylinder({r, h, r2, seg}) -> solid; r2 tapers top (0 cone); low seg makes prisms
@@ -60,17 +63,9 @@ let field=|p,c,k| {let a=length(p-c)-0.55 let b=length(p+c)-0.55 let h=clamp(0.5
 let blob=csg.implicit(field,{bounds:[vec3(-1,-0.8,-0.8),vec3(1,0.8,0.8)],res:32,uniforms:[vec3(0.32,0,0),0.22]})
 csg.part("blend",blob,{color:#55aadd})
 
-MUG:
-let outer = csg.cylinder({r: 0.045, h: 0.09})
-let handle = csg.move(csg.rotate(csg.torus({r: 0.03, tube: 0.008}), {x: 90}), vec3(0.055, 0.045, 0))
-let bore = csg.move(csg.cylinder({r: 0.038, h: 0.09}), vec3(0, 0.008, 0))
-csg.part("mug", csg.difference(csg.union(outer, handle), bore), {color: #4477aa})
+Without joints, animated limbs must be PARTS; csg.anim is rigid node motion.
 
-FACING: author every model FACING +Z (head/nose/windshield toward +z) —
-the engine turns it to its travel direction; anything else walks sideways.
-Animated limbs must be PARTS — geometry unioned into a solid cannot move.
-
-DOG (hierarchy, +z facing, animated legs; diagonal legs share phase):
+DOG (rigid parts, +z facing; diagonal legs share phase):
 csg.part("body",csg.move(csg.box({size:vec3(0.24,0.22,0.5)}),vec3(0,0.28,0)),{color:#8b5a2b})
 let leg=csg.cylinder({r:0.035,h:0.24})
 for i in 0..4 {
@@ -80,16 +75,16 @@ for i in 0..4 {
   csg.part(n,csg.move(leg,vec3(x,0,z)),{color:#5a351d,parent:"body",pivot:vec3(x,0.26,z)})
   csg.anim(n,{kind:"swing",axis:"x",degrees:if i==0||i==3 {30} else {-30},hz:2})
 }
-csg.part("head",csg.union(csg.move(csg.sphere({r:0.11}),vec3(0,0.52,0.3)),csg.move(csg.box({size:vec3(0.1,0.08,0.12)}),vec3(0,0.44,0.38))),{color:#8b5a2b,parent:"body",pivot:vec3(0,0.5,0.26)})
-csg.part("nose",csg.move(csg.sphere({r:0.025}),vec3(0,0.5,0.45)),{color:#1a1a1a,parent:"head"})
-let ear=csg.box({size:vec3(0.05,0.1,0.03)})
-csg.part("ear-l",csg.move(ear,vec3(-0.09,0.54,0.27)),{color:#5a351d,parent:"head",pivot:vec3(-0.09,0.64,0.27)})
-csg.part("ear-r",csg.move(ear,vec3(0.09,0.54,0.27)),{color:#5a351d,parent:"head",pivot:vec3(0.09,0.64,0.27)})
-let tail=csg.rotate(csg.cylinder({r:0.025,r2:0.008,h:0.18}),{x:-40})
-csg.part("tail",csg.move(tail,vec3(-0.25,0.36,0)),{color:#8b5a2b,parent:"body",pivot:vec3(-0.25,0.36,0)})
-csg.anim("ear-l",{kind:"swing",axis:"x",degrees:25,hz:1.2})
-csg.anim("ear-r",{kind:"swing",axis:"x",degrees:25,hz:1.2})
-csg.anim("tail",{kind:"swing",axis:"y",degrees:40,hz:3})"#;
+csg.part("head",csg.move(csg.sphere({r:0.11}),vec3(0,0.52,0.3)),{color:#8b5a2b,parent:"body"})
+
+WEIGHTED RIG (optional, nonhumanoid names allowed):
+csg.joint(name,{pos:vec3,parent?}); MODEL-space rest positions +/-50m, identity rest rotation/scale; parent may be declared later. Local offsets and inverse binds are computed.
+csg.bind(part,{joints:[names],radius:0.1}); smooth automatic binding ONLY to selected joints. Each joint owns parent-to-joint segment (root is point). Weight=1/(distanceSquared+radiusSquared); keep top four, normalize; ties use joint declaration order. Radius 0.001..50m. Approximation, not anatomical rigging; provide enough mesh subdivisions to bend.
+csg.bind(part,{rigid:"joint"}); rigid shell override, exactly one influence
+csg.bind(part,{weights:[{joint:"a",weight:0.25},{joint:"b",weight:0.75}]}); exact whole-part 1..4 weights summing to one. Exact binds override automatic calls regardless of order; last exact wins. One mode per bind call.
+csg.clip(name,[{joint:"a",axis:"z",keys:[vec2(0,0),vec2(0.5,45),vec2(1,0)]}]); keys=(seconds,degrees), local-axis rotations with quaternion interpolation. Start 0, strictly increasing through <=60s; degrees +/-180, steps <=180; channels end together. One rotation channel per joint per clip.
+Rig limits: 64 joints, 16 clips, 128 keys/channel, 4096 total keys. All parts MUST bind; use rigid for shells. No part parent/pivot/csg.anim in rig documents. Opaque colors preserved in embedded palette. Invalid rigs fail; previews remain rigid until final skin. No joints means unchanged legacy rigid behavior.
+For walking characters name clips idle and walk (both required by existing character loader); game.character({model:"gen/csg/title",player:true}) or world.spawn({model:"gen/csg/title",form:"character"}). See libs/csg/csg/examples/spriglet.splash for editable original seedling."#;
 
 /// The allowlist, in the order it is documented to the model.
 pub fn definitions() -> Vec<ToolDef> {
@@ -285,9 +280,12 @@ pub fn definitions() -> Vec<ToolDef> {
         ToolDef {
             name: "character.generate",
             api_name: "character_generate",
-            description: "Generate a playable character: expanded prompt → image → \
-                          matte → mesh → rig → motion. Use when the user asks for a \
-                          character, avatar, or playable figure.",
+            description: "Generate and publish a character through expanded prompt → image → \
+                          matte → mesh → rig → motion. Waits for owned jobs and returns \
+                          intermediate aliases/revisions and measured skin/clip/playable metadata. \
+                          Text-driven: attached chat images are not passed to this generator. \
+                          For editable modeling from a visual reference use model.open/apply. \
+                          Unavailable stages are reported honestly; creation does not place it.",
             args_doc: r#"{"prompt": "armored fox ranger, standing idle"}"#,
             parameters: schema_object(
                 vec![
@@ -546,20 +544,31 @@ pub fn definitions() -> Vec<ToolDef> {
 /// row/step/deadline budgets bound what that SQL may then cost.
 pub const MAX_QUERY_SQL_BYTES: usize = 4096;
 /// Most placements one `world.place` call may carry (a fence is one call,
-/// not one call per segment — tool rounds are budgeted).
+/// not one call per segment — batching saves tokens and latency).
 pub const MAX_WORLD_PLACEMENTS: usize = 64;
 
 /// The GAME session's tool vocabulary: catalog lookups, one deliberately
-/// narrow queued-generation entry point, and the game extension. The richer
+/// narrow owned-generation entry point, and the game extension. The richer
 /// Asset UI generation controls remain app-local and `llm.consult` remains
 /// unavailable here.
 pub fn game_definitions() -> Vec<ToolDef> {
-    const KEEP: &[&str] = &["asset.search", "asset.inspect"];
+    const KEEP: &[&str] = &["asset.search", "asset.inspect", "character.generate"];
     definitions()
         .into_iter()
         .filter(|d| KEEP.contains(&d.name))
         .chain(sandbox_definitions())
         .collect()
+}
+
+/// Advertised only by a game client with a configured escalation target.
+pub fn delegation_definition() -> ToolDef {
+    ToolDef {
+        name: "agent.delegate",
+        api_name: "agent_delegate",
+        description: "Delegate a complex task such as modeling, rigging or difficult scripting to the cloud agent chosen in Settings. It can use the game tools and receives this conversation, current world context and accepted reference images. Include the objective, selected reference labels, constraints and expected result. Ordinary game chatter, level layout and generating image choices stay with you.",
+        args_doc: r#"{"task":"Build the chosen design as a rigged model, using the accepted reference image..."}"#,
+        parameters: schema_object(vec![("task", schema_string_len("Complete task and acceptance criteria; name the selected reference", 1, 8192))], &["task"], Some(false)),
+    }
 }
 
 /// The game-session tool extension: read-only SQL over the live asset
@@ -572,10 +581,11 @@ pub fn sandbox_definitions() -> Vec<ToolDef> {
         ToolDef {
             name: "content.generate",
             api_name: "content_generate",
-            description: "Queue ONE expensive asset-generation pipeline after searching the \
-                          library and finding no suitable asset. Returns immediately with a job \
-                          id; the asset appears in the library when the pipeline finishes. Tell \
-                          the player it is generating. Never call speculatively.",
+            description: "Run ONE owned asset-generation pipeline after searching the library. \
+                          Character: expanded prompt → image → matte → mesh → rig → motion; \
+                          prop: image → mesh; sound: audio. Waits for completion and publication, \
+                          returning aliases/revisions and measured character metadata. Missing \
+                          capabilities return Unavailable. Creation is separate from placement.",
             args_doc: r#"{"kind": "character", "prompt": "...", "dim_height": 1.75}"#,
             parameters: schema_object(
                 vec![
@@ -592,7 +602,7 @@ pub fn sandbox_definitions() -> Vec<ToolDef> {
                     ),
                     (
                         "dim_height",
-                        schema_number("optional intended height in metres, 0.01..=100"),
+                        schema_number("intended placement height in metres, 0.01..=100; returned as metadata, does not resize mesh or image pixels"),
                     ),
                 ],
                 &["kind", "prompt"],
@@ -718,6 +728,13 @@ pub fn sandbox_definitions() -> Vec<ToolDef> {
             ),
         },
         ToolDef {
+            name: "world.render",
+            api_name: "world_render",
+            description: "See the actual bound world as an image. map is an orthographic top-down view fitting all loaded terrain and geometry, north (-Z) up. player captures the current player's rendered view. perspective uses eye and target in world metres. Read-only: never moves the player or their camera. Returns image pixels, framing bounds, revision and readiness facts. Inspect map after creating/rebuilding a level, then player or chosen perspectives for scenery, and correct layout defects before finishing. Large maps may need closer perspective views for detail. Only the currently loaded game/sub-world can be rendered.",
+            args_doc: r#"{"view":"map"} or {"view":"perspective","eye":[20,8,20],"target":[0,1,0]}"#,
+            parameters: schema_object(vec![("view", json::obj(vec![("type", json::s("string")), ("enum", Value::Arr(["map", "player", "perspective"].iter().map(|v| json::s(*v)).collect()))])), ("eye", schema_pos()), ("target", schema_pos())], &[], Some(false)),
+        },
+        ToolDef {
             name: "world.list",
             api_name: "world_list",
             description: "List the current AI placements in the world (id, model, pos, \
@@ -736,8 +753,9 @@ pub fn sandbox_definitions() -> Vec<ToolDef> {
                           class — a later game.chaser/sentry/follower call retunes \
                           them), everything else is a grounded prop at a sane scale. Use \
                           form: \"follower\" for a character body that follows the player; \
-                          rigged and unrigged loadable models both work as bodies. Query the catalog for the \
-                          canon_alias first. If no suitable creature asset exists and a \
+                          rigged and unrigged loadable models both work as bodies. Use the returned publication alias directly after model.jobs reports \
+                          result.placeable_now:true; pass form: \"car\" for a custom modeled vehicle. \
+                          For reused art, query the catalog for canon_alias first. If no suitable creature asset exists and a \
                           primitive part-built creature is wanted, use world.add_addon \
                           with the worked game-context example instead. Use \
                           world.set_source only for NEW levels or \
@@ -799,8 +817,12 @@ pub fn sandbox_definitions() -> Vec<ToolDef> {
                           game.part_swing for gait, and give the body a follower/chaser/ \
                           pacer class. Never reposition parts from game.on_tick. PLACE \
                           spawned creatures NEAR THE PLAYER: `let p = game.player_pos()` \
-                          then pos: p + vec3(2, 0.55, 0) — an absolute guess like \
-                          vec3(0,0,2) lands 50 m away where nobody sees it.",
+                          then pos: p + vec3(2, 0.55, 0) for game.mover/game.character \
+                          (their y is absolute) — an absolute guess like vec3(0,0,2) \
+                          lands 50 m away where nobody sees it. game.model's pos.y is \
+                          height ABOVE the ground: use vec3(p.x + 2, 0, p.z) there, \
+                          never p + vec3(...) — p.y is an absolute feet height and \
+                          buries the model.",
             args_doc: r#"{"name": "forest", "src": "for i in 0..12 {\n  game.model(\"kenney/nature-kit/tree_oak\", {pos: vec3(i * 3, 0, 8), scale: 2})\n}"}"#,
             parameters: schema_object(
                 vec![
@@ -850,6 +872,58 @@ pub fn sandbox_definitions() -> Vec<ToolDef> {
             parameters: schema_object(vec![], &[], Some(false)),
         },
         ToolDef {
+            name: "world.api",
+            api_name: "world_api",
+            description: "Read-only discovery of the running engine's actual game verb signatures, docs and examples, plus source/CSG chat tool contracts. Query a verb or topic (game.ui, shader, race, model.build); empty query browses. Follow next_cursor with the SAME query. Documentation does not grant mutation permission or change Guided/Expert policy.",
+            args_doc: r#"{"query":"game.ui","limit":8,"cursor":0}"#,
+            parameters: schema_object(vec![
+                ("query", schema_string_len("verb name or search words; empty browses", 0, MAX_WORLD_API_QUERY_BYTES as i64)),
+                ("limit", schema_integer_range("maximum entries per page; default 8", 1, 20)),
+                ("cursor", schema_integer_range("next_cursor from the previous page; default 0", 0, 1_000_000)),
+            ], &[], Some(false)),
+        },
+        ToolDef {
+            name: "world.get_plan",
+            api_name: "world_get_plan",
+            description: "Read the running map's PLAN: the normalized world.plan input \
+                          (v, seed, biome, terrain, landforms, water, corridors, places, \
+                          dressing — every feature with its id), its `revision`, the last \
+                          solve's `diagnostics` and the engine's `capabilities` (the kinds \
+                          it accepts). THE way to inspect or change a map: call it, edit \
+                          the object it returns, send it back with world.set_plan.",
+            args_doc: r#"{}"#,
+            parameters: schema_object(vec![], &[], Some(false)),
+        },
+        ToolDef {
+            name: "world.set_plan",
+            api_name: "world_set_plan",
+            description: "Replace the running map's plan with a COMPLETE edited plan object \
+                          (start from world.get_plan's `plan`) and re-solve the map. \
+                          `revision` MUST be the revision world.get_plan returned — a stale \
+                          revision is refused and nothing changes; read again. The engine \
+                          writes the world.plan call into the level source itself and keeps \
+                          everything after it (player, cars, logic). Every feature needs a \
+                          unique `id`; a kind outside `capabilities` is refused by name; \
+                          errors refuse the WHOLE plan (nothing changes). Returns the new \
+                          `revision`, the resolved plan, `diagnostics` and `committed: true` \
+                          only once the world is built and installed. Corridors default to \
+                          required: true here; set required: false to permit an explicit \
+                          optional omission. Inspect fulfilled separately from installed.",
+            args_doc: r#"{"revision": 3, "plan": {"v": 1, "seed": 7, "biome": "alpine", "terrain": {"size": 200, "relief": "hilly"}, "water": [{"id": "brook", "kind": "river", "from": "west", "to": "east", "width": 9}], "corridors": [{"id": "high", "kind": "road", "from": "north", "to": "mill:east"}], "places": [{"id": "mill", "kind": "village", "at": "brook:south_bank", "size": "small"}]}, "note": "removed the railway"}"#,
+            parameters: schema_object(
+                vec![
+                    (
+                        "plan",
+                        plan_schema(),
+                    ),
+                    ("revision", schema_integer_range("the `revision` world.get_plan returned (0 for a level with no plan yet)", 0, 1_000_000_000)),
+                    ("note", schema_string_len("one line saying what changed", 1, 200)),
+                ],
+                &["plan", "revision"],
+                Some(false),
+            ),
+        },
+        ToolDef {
             name: "world.set_source",
             api_name: "world_set_source",
             description: "Replace the running game's splash source with a COMPLETE new \
@@ -865,13 +939,11 @@ pub fn sandbox_definitions() -> Vec<ToolDef> {
                           source under 12000 bytes. Splash has NO ternary `?:` — use \
                           if/else; loops are `for i in 0..n {}`. BIG builds: prefer 2-3 \
                           world.add_addon chunks over one giant world.set_source — long \
-                          single calls can truncate. EVERY level starts with \
-                          game.terrain({...}) (or streams a map with game.map): \
-                          game.village / game.city / game.town / game.scatter place \
-                          buildings but create NO ground — the engine adds a flat \
-                          default terrain to a floorless level and tells you. Only when \
-                          the user EXPLICITLY asks for no ground (space, skydiving) put \
-                          the line `// ground: none` in the source.",
+                          single calls can truncate. Guided/Auto adds default terrain \
+                          when no ground is declared (unless `// ground: none`). Expert \
+                          preserves exact source: deliberate floorless layouts and custom \
+                          assembly need no special comments. In every mode preserve \
+                          authored scripts and generated code not targeted by the edit.",
             args_doc: r#"{"source": "game.sky({})\ngame.terrain({size: 120, cells: 65, smooth: true})\n...", "note": "village level v1"}"#,
             parameters: schema_object(
                 vec![
@@ -947,6 +1019,7 @@ pub fn sandbox_definitions() -> Vec<ToolDef> {
             ),
         },
     ];
+    defs.extend(editable::definitions());
     for def in &mut defs {
         if def.name.starts_with("world.") && def.name != "world.new_level" {
             add_optional_sub(&mut def.parameters);
@@ -982,6 +1055,7 @@ pub const MAX_NEW_LEVEL_TITLE_BYTES: usize = 80;
 pub const MAX_ADDON_SRC_BYTES: usize = 4_000;
 pub const MAX_MODEL_SOURCE_BYTES: usize = 12_000;
 pub const MAX_MODEL_TITLE_BYTES: usize = 80;
+pub const MAX_WORLD_API_QUERY_BYTES: usize = 160;
 
 fn schema_world_place_item() -> Value {
     schema_object(
@@ -1091,13 +1165,18 @@ pub fn canonical_from_api_name(api_name: &str) -> Option<&'static str> {
         "operation_cancel" => Some("operation.cancel"),
         "operation_retry" => Some("operation.retry"),
         "llm_consult" => Some("llm.consult"),
+        "agent_delegate" => Some("agent.delegate"),
         "query_assets" => Some("assets.query"),
         "assets_schema" => Some("assets.schema"),
         "world_place" => Some("world.place"),
         "world_remove" => Some("world.remove"),
         "world_move" => Some("world.move"),
         "world_list" => Some("world.list"),
+        "world_render" => Some("world.render"),
         "world_get_source" => Some("world.get_source"),
+        "world_api" => Some("world.api"),
+        "world_get_plan" => Some("world.get_plan"),
+        "world_set_plan" => Some("world.set_plan"),
         "world_set_source" => Some("world.set_source"),
         "world_new_level" => Some("world.new_level"),
         "world_set_player_model" => Some("world.set_player_model"),
@@ -1106,6 +1185,17 @@ pub fn canonical_from_api_name(api_name: &str) -> Option<&'static str> {
         "world_add_addon" => Some("world.add_addon"),
         "model_build" => Some("model.build"),
         "model_fetch" => Some("model.fetch"),
+        "model_open" => Some("model.open"),
+        "model_apply" => Some("model.apply"),
+        "model_texture" => Some("model.texture"),
+        "model_render" => Some("model.render"),
+        "model_concepts" => Some("model.concepts"),
+        "model_inspect" => Some("model.inspect"),
+        "model_history" => Some("model.history"),
+        "model_close" => Some("model.close"),
+        "model_publish" => Some("model.publish"),
+        "model_jobs" => Some("model.jobs"),
+        "model_cancel" => Some("model.cancel"),
         _ => None,
     }
 }
@@ -1477,6 +1567,7 @@ pub enum ContentToolCall {
     OperationRetry { operation: OperationId },
     /// Local session delegates a text-only generation to OpenAI or Grok.
     LlmConsult { task: ConsultTask, prompt: String, provider: Option<ProviderKind> },
+    AgentDelegate { task: String },
     /// One read-only SELECT over the live catalog (sandbox sessions only;
     /// the executor's SQL engine enforces read-only at the AST level).
     AssetsQuery { sql: String },
@@ -1486,6 +1577,8 @@ pub enum ContentToolCall {
     ModelBuild { title: String, source: String },
     /// Fetch the authoritative CSG source for an existing generated alias.
     ModelFetch { alias: AssetAlias },
+    /// Bounded editable-document command, executed by the game-owned worker.
+    ModelDocument { tool: ModelDocumentTool, args: Value },
     /// Place models into the running game world (sandbox sessions only).
     WorldPlace { items: Vec<WorldPlaceItem> },
     /// Remove placements by id or by tag (exactly one of the two).
@@ -1494,8 +1587,20 @@ pub enum ContentToolCall {
     WorldMove { id: u64, pos: Option<[f64; 3]>, yaw_deg: Option<f64>, scale: Option<f64> },
     /// List current placements.
     WorldList,
+    /// Render the bound live world for visual review without moving the player.
+    WorldRender { view: String, eye: Option<[f64; 3]>, target: Option<[f64; 3]> },
     /// Read the running game's splash source (sandbox sessions only).
     WorldGetSource,
+    /// Read-only live engine vocabulary lookup; never evaluates source.
+    WorldApi { query: String, limit: u32, cursor: u32 },
+    /// Read the running map's plan (normalized world.plan input, revision,
+    /// diagnostics, capabilities) — sandbox sessions only.
+    WorldGetPlan,
+    /// Replace the running map's plan with a complete edited plan object,
+    /// guarded by the revision it was read at (a stale revision is refused).
+    /// The plan is a typed JSON object the client validated by shape; the
+    /// engine's schema check refuses the rest by name.
+    WorldSetPlan { plan: Value, revision: u64, note: Option<String> },
     /// Replace the running game's splash source — the level-authoring
     /// primary path (sandbox sessions only; evaluated with last-good
     /// rollback on the client).
@@ -1674,15 +1779,21 @@ impl ContentToolCall {
             ContentToolCall::OperationCancel { .. } => "operation.cancel",
             ContentToolCall::OperationRetry { .. } => "operation.retry",
             ContentToolCall::LlmConsult { .. } => "llm.consult",
+            ContentToolCall::AgentDelegate { .. } => "agent.delegate",
             ContentToolCall::AssetsQuery { .. } => "assets.query",
             ContentToolCall::AssetsSchema => "assets.schema",
             ContentToolCall::ModelBuild { .. } => "model.build",
             ContentToolCall::ModelFetch { .. } => "model.fetch",
+            ContentToolCall::ModelDocument { tool, .. } => tool.name(),
             ContentToolCall::WorldPlace { .. } => "world.place",
             ContentToolCall::WorldRemove { .. } => "world.remove",
             ContentToolCall::WorldMove { .. } => "world.move",
             ContentToolCall::WorldList => "world.list",
+            ContentToolCall::WorldRender { .. } => "world.render",
             ContentToolCall::WorldGetSource => "world.get_source",
+            ContentToolCall::WorldApi { .. } => "world.api",
+            ContentToolCall::WorldGetPlan => "world.get_plan",
+            ContentToolCall::WorldSetPlan { .. } => "world.set_plan",
             ContentToolCall::WorldSetSource { .. } => "world.set_source",
             ContentToolCall::WorldNewLevel { .. } => "world.new_level",
             ContentToolCall::WorldSetPlayerModel { .. } => "world.set_player_model",
@@ -1703,6 +1814,10 @@ impl ContentToolCall {
         }
         if args.to_json().len() > MAX_TOOL_JSON_BYTES {
             return Err("tool arguments too large".to_string());
+        }
+        if let Some(tool) = ModelDocumentTool::from_name(name) {
+            editable::validate(tool, args)?;
+            return Ok(ContentToolCall::ModelDocument { tool, args: args.clone() });
         }
         if name.starts_with("world.")
             && name != "world.generate"
@@ -1926,6 +2041,12 @@ impl ContentToolCall {
                 check_known(args, &["operation"], "operation.retry argument")?;
                 Ok(ContentToolCall::OperationRetry { operation: need_op(args)? })
             }
+            "agent.delegate" => {
+                check_known(args, &["task"], "agent.delegate argument")?;
+                let task = need_str(args, "task", 8192)?;
+                if task.trim().is_empty() { return Err("task must not be empty".into()); }
+                Ok(ContentToolCall::AgentDelegate { task })
+            }
             "llm.consult" => {
                 check_known(args, &["task", "prompt", "provider"], "llm.consult argument")?;
                 let task = ConsultTask::from_slug(need_str(args, "task", 16)?.as_str())
@@ -2043,6 +2164,19 @@ impl ContentToolCall {
                 }
                 Ok(ContentToolCall::WorldMove { id, pos, yaw_deg, scale })
             }
+            "world.render" => {
+                check_known(args, &["view", "eye", "target"], "world.render argument")?;
+                let view = optional_str(args, "view")?.unwrap_or("map");
+                if !matches!(view, "map" | "player" | "perspective") { return Err("view must be map, player or perspective".into()); }
+                let eye = args.get("eye").map(|v| need_pos(&json::obj(vec![("pos", v.clone())]))).transpose()?;
+                let target = args.get("target").map(|v| need_pos(&json::obj(vec![("pos", v.clone())]))).transpose()?;
+                if (view == "perspective") != (eye.is_some() && target.is_some()) || (view != "perspective" && (eye.is_some() || target.is_some())) {
+                    return Err("perspective requires eye and target; map/player fit the camera automatically".into());
+                }
+                if eye.iter().chain(target.iter()).flatten().any(|v| !v.is_finite() || v.abs() > 100_000.) { return Err("camera coordinates must be finite world metres within 100000".into()); }
+                if let (Some(a), Some(b)) = (eye, target) { if (0..3).map(|i|(a[i]-b[i]).powi(2)).sum::<f64>() < 0.01 { return Err("eye and target must differ".into()); } }
+                Ok(ContentToolCall::WorldRender { view: view.into(), eye, target })
+            }
             "world.list" => {
                 check_known(args, &[], "world.list argument")?;
                 Ok(ContentToolCall::WorldList)
@@ -2050,6 +2184,45 @@ impl ContentToolCall {
             "world.get_source" => {
                 check_known(args, &[], "world.get_source argument")?;
                 Ok(ContentToolCall::WorldGetSource)
+            }
+            "world.api" => {
+                check_known(args, &["query", "limit", "cursor"], "world.api argument")?;
+                let query = optional_str(args, "query")?.unwrap_or("");
+                if query.len() > MAX_WORLD_API_QUERY_BYTES {
+                    return Err("world.api query exceeds 160 bytes".into());
+                }
+                Ok(ContentToolCall::WorldApi { query: query.to_string(),
+                    limit: optional_u32(args, "limit", 1, 20)?.unwrap_or(8),
+                    cursor: optional_u32(args, "cursor", 0, 1_000_000)?.unwrap_or(0) })
+            }
+            "world.get_plan" => {
+                check_known(args, &[], "world.get_plan argument")?;
+                Ok(ContentToolCall::WorldGetPlan)
+            }
+            "world.set_plan" => {
+                check_known(args, &["plan", "revision", "note"], "world.set_plan argument")?;
+                let mut plan = args
+                    .get("plan")
+                    .cloned()
+                    .ok_or_else(|| "plan is required (start from world.get_plan's `plan`)".to_string())?;
+                validate_plan_shape(&plan)?;
+                normalize_plan_requirements(&mut plan);
+                let revision = match args.get("revision") {
+                    Some(Value::Int(n)) if *n >= 0 => *n as u64,
+                    Some(Value::F64(f)) if *f >= 0.0 && f.fract() == 0.0 => *f as u64,
+                    Some(_) => return Err("revision must be a non-negative integer".to_string()),
+                    None => return Err("revision is required — the `revision` world.get_plan returned".to_string()),
+                };
+                let note = optional_str(args, "note")?
+                    .map(|n| {
+                        if n.len() > 200 {
+                            Err("note too long".to_string())
+                        } else {
+                            Ok(n.to_string())
+                        }
+                    })
+                    .transpose()?;
+                Ok(ContentToolCall::WorldSetPlan { plan, revision, note })
             }
             "model.build" => {
                 check_known(args, &["title", "source"], "model.build argument")?;
@@ -2457,6 +2630,264 @@ fn parse_operation_create(args: &Value) -> Result<ContentToolCall, String> {
     Ok(ContentToolCall::OperationCreate { kind, inputs, params, publication, idempotency_key })
 }
 
+/// The plan object's SHAPE, checked where the model authors it — so a
+/// malformed plan never reaches the game: an object of known top-level
+/// fields, feature lists of objects that each carry a unique non-empty
+/// string `id` and only the fields their category has, bounded in size.
+/// Kinds, anchors and ranges are the engine's schema check (it names the
+/// capability set); this is the part that stops a typo cold.
+pub fn validate_plan_shape(plan: &Value) -> Result<(), String> {
+    validate_plan_schema(plan, &plan_schema(), "plan")?;
+    const TOP: &[&str] = &["v", "seed", "biome", "biomes", "terrain", "landforms", "water", "corridors", "places", "dressing"];
+    const BIOME: &[&str] = &["id", "kind", "at", "pos", "r"];
+    const LANDFORM: &[&str] = &["id", "kind", "at", "pos", "r", "height"];
+    const WATER: &[&str] = &["id", "kind", "from", "to", "at", "pos", "path", "width", "depth"];
+    const CORRIDOR: &[&str] = &["id", "kind", "required", "from", "to", "through", "path", "closed", "size", "radius", "width", "lift_height", "loops", "corkscrews"];
+    const PLACE: &[&str] = &["id", "kind", "at", "pos", "size", "density", "class"];
+    const TERRAIN: &[&str] = &["size", "relief", "amp", "cells", "base"];
+    const DRESSING: &[&str] = &["forest", "models", "biome"];
+    const MAX_FEATURES: usize = 64;
+    const MAX_POINTS: usize = 600;
+    let Value::Obj(pairs) = plan else {
+        return Err("plan must be an object".to_string());
+    };
+    for (key, _) in pairs {
+        if !TOP.contains(&key.as_str()) {
+            return Err(format!("unknown plan field '{}' (fields: {})", bounded(key, 32), TOP.join(", ")));
+        }
+    }
+    match plan.get("v") {
+        None | Some(Value::Null) | Some(Value::Int(1)) => {}
+        Some(Value::F64(f)) if *f == 1.0 => {}
+        Some(_) => return Err("plan.v must be 1".to_string()),
+    }
+    for (key, allowed) in [("terrain", TERRAIN), ("dressing", DRESSING)] {
+        match plan.get(key) {
+            None | Some(Value::Null) => {}
+            Some(v) => check_known(v, allowed, &format!("plan.{key} field"))?,
+        }
+    }
+    let mut ids: Vec<&str> = Vec::new();
+    let mut points = 0usize;
+    for (key, allowed) in [("biomes", BIOME), ("landforms", LANDFORM), ("water", WATER), ("corridors", CORRIDOR), ("places", PLACE)] {
+        let items = match plan.get(key) {
+            None | Some(Value::Null) => continue,
+            Some(Value::Arr(items)) => items,
+            Some(_) => return Err(format!("plan.{key} must be a list of objects")),
+        };
+        for (i, item) in items.iter().enumerate() {
+            let Value::Obj(fields) = item else {
+                return Err(format!("plan.{key}[{i}] must be an object"));
+            };
+            for (field, _) in fields {
+                if !allowed.contains(&field.as_str()) {
+                    return Err(format!(
+                        "plan.{key}[{i}] has no field '{}' (fields: {})",
+                        bounded(field, 32),
+                        allowed.join(", ")
+                    ));
+                }
+            }
+            let id = item.get("id").and_then(Value::as_str).unwrap_or("");
+            if id.is_empty() {
+                return Err(format!("plan.{key}[{i}] needs a non-empty string `id` — anchors and edits name it"));
+            }
+            if id.len() > 48 || id.contains(':') || id.contains('@') || id.chars().any(char::is_whitespace) {
+                return Err(format!("plan.{key}[{i}] id '{}' must be one word without ':' or '@'", bounded(id, 48)));
+            }
+            if ids.contains(&id) {
+                return Err(format!("plan.{key}[{i}] repeats the id '{id}' — every feature needs its own"));
+            }
+            ids.push(id);
+            if let Some(kind) = item.get("kind") {
+                if !kind.is_null() && kind.as_str().is_none() {
+                    return Err(format!("plan.{key}[{i}].kind must be a string"));
+                }
+            }
+            if let Some(Value::Arr(path)) = item.get("path") {
+                points += path.len();
+                if path.iter().any(|p| !matches!(p, Value::Arr(xyz) if xyz.len() == 3 && xyz.iter().all(|n| matches!(n, Value::Int(_) | Value::F64(_))))) {
+                    return Err(format!("plan.{key}[{i}].path must be a list of [x, y, z] numbers"));
+                }
+            }
+            for field in ["from", "to", "at", "pos"] {
+                if let Some(Value::Str(anchor)) = item.get(field) {
+                    if !valid_plan_anchor(anchor) { return Err(format!("plan.{key}[{i}].{field}: invalid anchor '{anchor}'")); }
+                }
+            }
+            if let Some(Value::Arr(through)) = item.get("through") {
+                points += through.len();
+                for a in through {
+                    if let Value::Str(anchor) = a {
+                        if !valid_plan_anchor(anchor) { return Err(format!("plan.{key}[{i}].through: invalid anchor '{anchor}'")); }
+                    }
+                }
+            }
+        }
+    }
+    if ids.len() > MAX_FEATURES {
+        return Err(format!("a plan holds at most {MAX_FEATURES} features"));
+    }
+    if points > MAX_POINTS {
+        return Err(format!("a plan's paths hold at most {MAX_POINTS} points in total"));
+    }
+    Ok(())
+}
+
+
+fn plan_number(description: &str, min: f64, max: f64) -> Value {
+    json::obj(vec![("type", json::s("number")), ("description", json::s(description)),
+        ("minimum", Value::F64(min)), ("maximum", Value::F64(max))])
+}
+
+fn plan_nullable(schema: Value) -> Value {
+    json::obj(vec![("anyOf", Value::Arr(vec![schema, json::obj(vec![("type", json::s("null"))])]))])
+}
+
+const PLAN_COMPASS: &[&str] = &["north", "south", "east", "west", "northeast", "northwest", "southeast", "southwest",
+    "north_east", "north_west", "south_east", "south_west", "n", "s", "e", "w", "ne", "nw", "se", "sw", "centre", "center", "middle"];
+const PLAN_PARTS: &[&str] = &["east_bank", "west_bank", "north_bank", "south_bank", "source", "mouth", "start", "end", "peak", "summit"];
+
+fn valid_plan_anchor(s: &str) -> bool {
+    let valid_id = |id: &str| !id.is_empty() && !id.contains(':') && !id.contains('@') && !id.chars().any(char::is_whitespace);
+    if let Some((id, t)) = s.split_once('@') {
+        return valid_id(id) && t.parse::<f32>().is_ok_and(|t| t.is_finite() && (0.0..=1.0).contains(&t));
+    }
+    if let Some((id, part)) = s.split_once(':') {
+        return valid_id(id) && (PLAN_PARTS.contains(&part) || PLAN_COMPASS.contains(&part));
+    }
+    PLAN_COMPASS.contains(&s)
+}
+
+/// The tool schema and its nested value validator share this definition.
+/// Cross-feature anchors, kind-specific constraints and geometry are checked
+/// by the engine. Limits describe accepted tool input, before engine assists.
+fn plan_schema() -> Value {
+    let coord = || schema_array_bounded("position [x, y, z] in metres", 3, 3,
+        plan_number("finite coordinate", -3.4e38, 3.4e38));
+    let anchor = || {
+        let pattern = format!(r"^({}|[^:@\s]+:({}|{})|[^:@\s]+@(0(\.[0-9]+)?|1(\.0+)?|\.[0-9]+))$",
+            PLAN_COMPASS.join("|"), PLAN_PARTS.join("|"), PLAN_COMPASS.join("|"));
+        json::obj(vec![("anyOf", Value::Arr(vec![
+            schema_string_pattern("compass; river:bank/source/mouth; place:compass; landform:peak; corridor:start/end/centre or id@fraction (0..1)", 1, 128, &pattern),
+            coord(),
+        ]))])
+    };
+    let path = || schema_array_bounded("authored waypoints; at most 600 path/through points across the plan", 0, 600, coord());
+    let kinds = |values: &[&str]| schema_string_enum("supported kind", values);
+    let feature = |mut fields: Vec<(&str, Value)>| {
+        fields.insert(0, ("id", schema_string_pattern("unique across every category; stable identity for edits", 1, 48, r"^[^:@\s]+$")));
+        schema_object(fields.into_iter().map(|(k, v)| (k, if k == "id" { v } else { plan_nullable(v) })).collect(), &["id"], Some(false))
+    };
+    let biomes = ["temperate", "alpine", "desert", "woodland", "tundra"];
+    let required = json::obj(vec![("type", json::s("boolean")),
+        ("description", json::s("true refuses the whole plan if this route cannot be built; false permits an explicit omission; legacy source defaults false")),
+        ("default", Value::Bool(true))]);
+    let categories = vec![
+        ("biomes", feature(vec![("kind", kinds(&biomes)), ("at", anchor()), ("pos", anchor()), ("r", plan_number("radius", 4.0, 2000.0))])),
+        ("landforms", feature(vec![("kind", kinds(&["mountain", "hill", "ridge", "valley", "crater", "plateau"])), ("at", anchor()), ("pos", anchor()),
+            ("r", plan_number("radius", 4.0, 300.0)), ("height", plan_number("height", -3.4e38, 3.4e38))])),
+        ("water", feature(vec![("kind", kinds(&["river", "lake", "canal"])), ("from", anchor()), ("to", anchor()), ("at", anchor()), ("pos", anchor()),
+            ("path", path()), ("width", plan_number("width", 4.0, 80.0)), ("depth", plan_number("depth", 0.8, 12.0))])),
+        ("corridors", feature(vec![("kind", kinds(&["road", "highway", "rail", "monorail", "path", "coaster"])),
+            ("required", required), ("from", anchor()), ("to", anchor()), ("through", schema_array_bounded("ordered anchors", 0, 600, anchor())),
+            ("path", path()), ("closed", json::obj(vec![("type", json::s("boolean"))])),
+            ("size", plan_number("seeded railway loop size; 0 selects default", 0.0, 600.0)),
+            ("radius", plan_number("rounding radius", 4.0, 60.0)), ("width", plan_number("width; road/rail minimum 3, footpath minimum 1.5", 1.5, 30.0)),
+            ("lift_height", plan_number("coaster lift", 6.0, 60.0)), ("loops", schema_integer_range("coaster loops", 0, 3)),
+            ("corkscrews", schema_integer_range("coaster corkscrews", 0, 3))])),
+        ("places", feature(vec![("kind", kinds(&["town", "village", "city", "airfield", "airstrip", "helipad"])), ("at", anchor()), ("pos", anchor()),
+            ("size", json::obj(vec![("anyOf", Value::Arr(vec![kinds(&["tiny", "small", "medium", "large", "big"]), plan_number("size in metres; airfields derive size from class", 0.0, 2000.0)]))])),
+            ("density", plan_number("density; 0 selects default", 0.0, 1.0)), ("class", kinds(&["", "light", "regional"]))])),
+    ];
+    let mut fields = vec![
+        ("v", schema_integer_range("schema version", 1, 1)), ("seed", schema_integer_range("deterministic seed", 0, 1_000_000_000)),
+        ("biome", kinds(&biomes)),
+        ("terrain", schema_object(vec![("size", plan_number("map side length", 60.0, 600.0)),
+            ("relief", kinds(&["", "flat", "rolling", "hilly", "mountain"])), ("amp", plan_number("relief amplitude", 0.0, 60.0)),
+            ("cells", plan_number("terrain samples per side", 33.0, 129.0)), ("base", plan_number("ground elevation", -3.4e38, 3.4e38))], &[], Some(false))),
+        ("dressing", schema_object(vec![("forest", plan_number("forest density", 0.0, 1.0)),
+            ("models", schema_array_bounded("model aliases", 0, 64, schema_string_len("alias", 1, 256))),
+            ("biome", schema_string("vegetation biome override, e.g. forest, meadow, conifer"))], &[], Some(false))),
+    ];
+    for (key, schema) in categories {
+        fields.push((key, schema_array_bounded("at most 64 features across all categories; non-corridor features are always required", 0, 64, schema)));
+    }
+    schema_object(fields.into_iter().map(|(k, v)| (k, plan_nullable(v))).collect(), &[], Some(false))
+}
+
+fn plan_numeric(v: &Value) -> Option<f64> {
+    match v { Value::Int(n) => Some(*n as f64), Value::F64(n) => Some(*n), _ => None }
+}
+
+/// Validate the subset of JSON Schema used above, so schema types, ranges,
+/// enums, field lists and required keys cannot drift from tool acceptance.
+fn validate_plan_schema(v: &Value, schema: &Value, path: &str) -> Result<(), String> {
+    let err = || format!("{path} does not match its plan schema");
+    if let Some(variants) = schema.get("anyOf").and_then(Value::as_arr) {
+        return if variants.iter().any(|s| validate_plan_schema(v, s, path).is_ok()) { Ok(()) } else { Err(err()) };
+    }
+    if let Some(values) = schema.get("enum").and_then(Value::as_arr) {
+        if !values.contains(v) { return Err(err()); }
+    }
+    match schema.get("type").and_then(Value::as_str) {
+        Some("null") if v.is_null() => {}
+        Some("boolean") if matches!(v, Value::Bool(_)) => {}
+        Some("number" | "integer") => {
+            let n = plan_numeric(v).ok_or_else(err)?;
+            if !n.is_finite() || (schema.get("type").and_then(Value::as_str) == Some("integer") && n.fract() != 0.0)
+                || schema.get("minimum").and_then(plan_numeric).is_some_and(|lo| n < lo)
+                || schema.get("maximum").and_then(plan_numeric).is_some_and(|hi| n > hi) { return Err(err()); }
+        }
+        Some("string") => {
+            let s = v.as_str().ok_or_else(err)?;
+            if schema.get("minLength").and_then(Value::as_i64).is_some_and(|lo| s.len() < lo as usize)
+                || schema.get("maxLength").and_then(Value::as_i64).is_some_and(|hi| s.len() > hi as usize) { return Err(err()); }
+            // The two patterns here describe ids and anchors; semantic
+            // validation below checks them without a regex dependency.
+        }
+        Some("array") => {
+            let items = v.as_arr().ok_or_else(err)?;
+            if schema.get("minItems").and_then(Value::as_i64).is_some_and(|lo| items.len() < lo as usize)
+                || schema.get("maxItems").and_then(Value::as_i64).is_some_and(|hi| items.len() > hi as usize) { return Err(err()); }
+            if let Some(item_schema) = schema.get("items") {
+                for (i, item) in items.iter().enumerate() { validate_plan_schema(item, item_schema, &format!("{path}[{i}]"))?; }
+            }
+        }
+        Some("object") => {
+            let Value::Obj(fields) = v else { return Err(err()) };
+            let props = schema.get("properties").unwrap();
+            for (key, value) in fields {
+                let Some(prop) = props.get(key) else { return Err(format!("{path} has no field '{key}'")); };
+                validate_plan_schema(value, prop, &format!("{path}.{key}"))?;
+            }
+            if let Some(required) = schema.get("required").and_then(Value::as_arr) {
+                for key in required.iter().filter_map(Value::as_str) {
+                    if v.get(key).is_none() { return Err(format!("{path} needs {key}")); }
+                }
+            }
+        }
+        _ => return Err(err()),
+    }
+    Ok(())
+}
+
+/// New guided requests require routes unless the author explicitly opts out.
+/// Normalized legacy plans already carry false and retain their behavior.
+pub fn normalize_plan_requirements(plan: &mut Value) {
+    if let Value::Obj(top) = plan {
+        if let Some((_, Value::Arr(corridors))) = top.iter_mut().find(|(k, _)| k == "corridors") {
+            for c in corridors {
+                if let Value::Obj(fields) = c {
+                    if let Some((_, value)) = fields.iter_mut().find(|(k, _)| k == "required") {
+                        if value.is_null() { *value = Value::Bool(true); }
+                    } else { fields.push(("required".into(), Value::Bool(true))); }
+                }
+            }
+        }
+    }
+}
+
 fn check_known(v: &Value, allowed: &[&str], what: &str) -> Result<(), String> {
     let Value::Obj(pairs) = v else {
         return Err(format!("{what} must be an object"));
@@ -2808,6 +3239,7 @@ pub fn encode_args(call: &ContentToolCall) -> Value {
             }
             json::obj(pairs)
         }
+        ContentToolCall::AgentDelegate { task } => json::obj(vec![("task", json::s(task.clone()))]),
         ContentToolCall::AssetsQuery { sql } => json::obj(vec![("sql", json::s(sql.clone()))]),
         ContentToolCall::AssetsSchema => Value::Obj(Vec::new()),
         ContentToolCall::ModelBuild { title, source } => json::obj(vec![
@@ -2817,6 +3249,7 @@ pub fn encode_args(call: &ContentToolCall) -> Value {
         ContentToolCall::ModelFetch { alias } => {
             json::obj(vec![("alias", json::s(alias.to_string()))])
         }
+        ContentToolCall::ModelDocument { args, .. } => args.clone(),
         ContentToolCall::WorldPlace { items } => json::obj(vec![(
             "items",
             Value::Arr(
@@ -2868,7 +3301,25 @@ pub fn encode_args(call: &ContentToolCall) -> Value {
             json::obj(pairs)
         }
         ContentToolCall::WorldList => Value::Obj(Vec::new()),
+        ContentToolCall::WorldRender { view, eye, target } => {
+            let mut fields = vec![("view", json::s(view))];
+            if let Some(v) = eye { fields.push(("eye", Value::Arr(v.iter().map(|n| Value::F64(*n)).collect()))); }
+            if let Some(v) = target { fields.push(("target", Value::Arr(v.iter().map(|n| Value::F64(*n)).collect()))); }
+            json::obj(fields)
+        }
         ContentToolCall::WorldGetSource => Value::Obj(Vec::new()),
+        ContentToolCall::WorldApi { query, limit, cursor } => json::obj(vec![
+            ("query", json::s(query.clone())), ("limit", Value::Int(*limit as i64)),
+            ("cursor", Value::Int(*cursor as i64)),
+        ]),
+        ContentToolCall::WorldGetPlan => Value::Obj(Vec::new()),
+        ContentToolCall::WorldSetPlan { plan, revision, note } => {
+            let mut pairs = vec![("plan", plan.clone()), ("revision", Value::Int(*revision as i64))];
+            if let Some(n) = note {
+                pairs.push(("note", json::s(n.clone())));
+            }
+            json::obj(pairs)
+        }
         ContentToolCall::WorldSetSource { source, note } => {
             let mut pairs = vec![("source", json::s(source.clone()))];
             if let Some(n) = note {

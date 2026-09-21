@@ -15,10 +15,7 @@ use {
         makepad_math::{Vec2d, Vec4f},
         makepad_script::{
             apply::Apply,
-            shader::{
-                ShaderFnCompiler, ShaderMode, ShaderOutput,
-                ShaderType,
-            },
+            shader::{ShaderFnCompiler, ShaderMode, ShaderOutput, ShaderType},
             shader_backend::ShaderBackend,
             shader_output::TextureType,
             trap::NoTrap,
@@ -44,9 +41,17 @@ use crate::os::linux::vulkan_naga::CxVulkanShaderBinary;
 impl DrawVars {
     pub(crate) fn compile_shader(&mut self, vm: &mut ScriptVm, _apply: &Apply, value: ScriptValue) {
         if let Some(io_self) = value.as_object() {
+            // The object cache is keyed by HEAP as well as object: a splash
+            // isolate has its own heap, and an object index there says
+            // nothing about the same index in the app heap.
+            let heap_key = vm.bx.heap.heap_key();
             {
                 let cx = vm.host.cx();
-                if let Some(&shader_id) = cx.draw_shaders.cache_object_id_to_shader.get(&io_self) {
+                if let Some(&shader_id) = cx
+                    .draw_shaders
+                    .cache_object_id_to_shader
+                    .get(&(heap_key, io_self))
+                {
                     self.finalize_cached_shader(vm, shader_id);
                     return;
                 }
@@ -59,7 +64,7 @@ impl DrawVars {
                     let cx = vm.host.cx_mut();
                     cx.draw_shaders
                         .cache_object_id_to_shader
-                        .insert(io_self, shader_id);
+                        .insert((heap_key, io_self), shader_id);
                     self.finalize_cached_shader(vm, shader_id);
                     return;
                 }
@@ -68,7 +73,20 @@ impl DrawVars {
             let mut output = ShaderOutput::default();
             output.backend = ShaderBackend::Glsl;
             output.const_table = vm.host.cx().shader_const_table_mode();
-            output.use_vulkan = cfg!(use_vulkan);
+            // Shader source for the API this process renders with, not the one
+            // the binary was built with: a Vulkan-capable build that fell back
+            // to OpenGL ES compiles plain GLSL. Only desktop Linux chooses at
+            // startup; an Android or Quest Vulkan build always renders with
+            // Vulkan, so it keeps the compiled answer.
+            #[cfg(use_vulkan)]
+            {
+                output.use_vulkan =
+                    !cfg!(target_os = "linux") || vm.host.cx().os.vulkan_active();
+            }
+            #[cfg(not(use_vulkan))]
+            {
+                output.use_vulkan = false;
+            }
             output.pre_collect_rust_instance_io(vm, io_self);
             output.pre_collect_shader_io(vm, io_self);
 
@@ -118,8 +136,11 @@ impl DrawVars {
             let mut compiled_vulkan_shader: [Option<CxVulkanShaderBinary>;
                 NUM_SHADER_VARIANTS] = std::array::from_fn(|_| None);
 
+            // Only while this process renders with Vulkan; a Vulkan-capable
+            // desktop Linux build that fell back to OpenGL ES compiles GLSL
+            // below instead. Android and Quest have no such fallback.
             #[cfg(use_vulkan)]
-            {
+            if !cfg!(target_os = "linux") || vm.host.cx().os.vulkan_active() {
                 for (shader_variant, xr_multiview) in [false, true].into_iter().enumerate() {
                     match crate::os::linux::vulkan_naga::compile_draw_shader_wgsl_to_spirv(
                         vm,
@@ -151,14 +172,20 @@ impl DrawVars {
                 }
             }
 
-            if std::env::var_os("MAKEPAD_DUMP_GLSL_IR").is_some() {
-                crate::log!("---- Linux GLSL IR io list ----");
+            if crate::makepad_error_log::trace_enabled("shader.glsl_ir") {
+                crate::trace!("shader.glsl_ir", "---- Linux GLSL IR io list ----");
                 for io in &output.io {
-                    crate::log!("io kind={:?} name={} ty={:?}", io.kind, io.name, io.ty);
+                    crate::trace!(
+                        "shader.glsl_ir",
+                        "io kind={:?} name={} ty={:?}",
+                        io.kind,
+                        io.name,
+                        io.ty
+                    );
                 }
-                crate::log!("---- Linux GLSL IR functions ----");
+                crate::trace!("shader.glsl_ir", "---- Linux GLSL IR functions ----");
                 for f in &output.functions {
-                    crate::log!("{} {{\n{}\n}}", f.call_sig, f.out);
+                    crate::trace!("shader.glsl_ir", "{} {{\n{}\n}}", f.call_sig, f.out);
                 }
             }
 
@@ -181,7 +208,7 @@ impl DrawVars {
                     let cx = vm.host.cx_mut();
                     cx.draw_shaders
                         .cache_object_id_to_shader
-                        .insert(io_self, shader_id);
+                        .insert((heap_key, io_self), shader_id);
                     cx.draw_shaders
                         .cache_functions_to_shader
                         .insert(fnhash, shader_id);
@@ -253,6 +280,7 @@ impl DrawVars {
             };
 
             let cx = vm.host.cx_mut();
+            mapping.scope_uniforms_gen = cx.next_uniform_gen();
             let index = cx.draw_shaders.shaders.len();
             cx.draw_shaders.shaders.push(CxDrawShader {
                 debug_id: LiveId(0),
@@ -263,7 +291,7 @@ impl DrawVars {
             let shader_id = DrawShaderId { index };
             cx.draw_shaders
                 .cache_object_id_to_shader
-                .insert(io_self, shader_id);
+                .insert((heap_key, io_self), shader_id);
             cx.draw_shaders
                 .cache_functions_to_shader
                 .insert(fnhash, shader_id);
@@ -354,6 +382,119 @@ impl Cx {
 
     pub(crate) fn render_view(
         &mut self,
+        pass: DrawPassId,
+        list: DrawListId,
+        zbias: &mut f32,
+        step: f32,
+    ) {
+        if !self.draw_lists.1.allocations.has_device_limit() {
+            let reported = self.retained_adapter_bytes();
+            let allowance = if reported != 0 {
+                reported as usize
+            } else {
+                self.memory_budget()
+            };
+            self.draw_lists
+                .1
+                .allocations
+                .set_device_limit(allowance / 4);
+            // The one derived limit of the publication registry (contract §7).
+            self.publications.set_envelope(allowance / 4);
+            crate::log!("retained-upload budgets: adapter_bytes={} process_allowance={} allocation_limit={} source={}", reported, self.memory_budget(), allowance / 4, if reported != 0 { "GL_NVX_gpu_memory_info" } else { "process_allowance_fallback" });
+        }
+        self.draw_lists.1.allocations.collect_for_frame(
+            self.repaint_id,
+            self.textures
+                .1
+                .serials
+                .completed
+                .load(std::sync::atomic::Ordering::Acquire),
+        );
+        self.draw_lists.1.allocations.collect_backlog(
+            self.repaint_id,
+            self.textures
+                .1
+                .serials
+                .completed
+                .load(std::sync::atomic::Ordering::Acquire),
+            8,
+        );
+        let pool = self.task_pool();
+        let gl = self.os.gl();
+        if self
+            .draw_lists
+            .retire_free_items(&pool, self.repaint_id, |os| {
+                if let Some(vao) = os.vao.take() {
+                    vao.free(gl);
+                }
+                os.inst_vb.free_resources(gl);
+                std::mem::take(&mut os.inst_vb)
+            })
+        {
+            crate::trace!("gl.repaint", "retirements pending: {}", self.draw_lists.instance_retirement_terms());
+            self.demo_time_repaint = true;
+        }
+        self.render_view_inner(pass, list, zbias, step);
+        let serial = self.textures.1.serials.submit();
+        self.readback_pass_submitted(pass, serial);
+        // Complete the previous frame's fence and arm one for this frame. Without
+        // this poll on the paint path the completion serial never advanced, so
+        // released instance allocations (one per upload) were never collected:
+        // the retirement queue grew without bound and its "still pending" answer
+        // kept the window repainting at rest. (The direct and OpenHarmony
+        // renderers do not track texture lifetimes.)
+        #[cfg(not(any(
+            linux_direct,
+            target_env = "ohos",
+            all(use_vulkan, not(target_os = "linux"))
+        )))]
+        self.poll_texture_lifetimes_for(false);
+    }
+
+    fn retained_adapter_bytes(&self) -> u64 {
+        #[cfg(not(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux")))))]
+        {
+            #[cfg(target_os = "linux")]
+            let display = self.os.opengl_cx.as_ref();
+            #[cfg(target_os = "android")]
+            let display = self.os.display.as_ref();
+            let Some(display) = display else {
+                return 0;
+            };
+            let Some(get_proc) = display.libegl.eglGetProcAddress else {
+                return 0;
+            };
+            unsafe {
+                let integer = get_proc(c"glGetIntegerv".as_ptr());
+                let string_i = get_proc(c"glGetStringi".as_ptr());
+                if integer.is_null() || string_i.is_null() {
+                    return 0;
+                }
+                let integer = std::mem::transmute::<
+                    *mut std::ffi::c_void,
+                    unsafe extern "C" fn(u32, *mut i32),
+                >(integer);
+                let string_i = std::mem::transmute::<
+                    *mut std::ffi::c_void,
+                    unsafe extern "C" fn(u32, u32) -> *const c_char,
+                >(string_i);
+                let mut count = 0;
+                integer(0x821D, &mut count); // GL_NUM_EXTENSIONS
+                for index in 0..count.clamp(0, 4096) as u32 {
+                    let name = string_i(gl_sys::EXTENSIONS, index);
+                    if !name.is_null() && CStr::from_ptr(name) == c"GL_NVX_gpu_memory_info" {
+                        let mut kib = 0;
+                        integer(0x9048, &mut kib); // TOTAL_AVAILABLE_MEMORY_NVX
+                        return kib.max(0) as u64 * 1024;
+                    }
+                }
+            }
+        }
+        0
+    }
+
+    fn render_view_inner(
+        &mut self,
         draw_pass_id: DrawPassId,
         draw_list_id: DrawListId,
         zbias: &mut f32,
@@ -361,6 +502,10 @@ impl Cx {
     ) {
         let mut to_dispatch = Vec::new();
         //self.draw_lists[draw_list_id].draw_list_uniforms.view_transform = Mat4f::identity();
+        let _phase = crate::thread::ui_hang::ui_phase_detail(
+            crate::thread::UiPhase::DrawList,
+            draw_list_id.index() as u32,
+        );
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_order_len = self.draw_lists[draw_list_id].draw_item_order_len();
         // Exploded z-layer view: z is the call's nesting depth, not paint order.
@@ -373,6 +518,7 @@ impl Cx {
             .update_uniform_buffer(self.os.gl(), draw_list.draw_list_uniforms.as_slice());
 
         for order_index in 0..draw_order_len {
+            let uniforms_gen = self.next_uniform_gen();
             let Some(draw_item_id) =
                 self.draw_lists[draw_list_id].draw_item_id_at_order_index(order_index)
             else {
@@ -382,6 +528,12 @@ impl Cx {
                 .kind
                 .sub_list()
             {
+                // A retained sub-list its owner dropped between the parent's
+                // last record and this paint: the slot may already hold
+                // another widget's list. Nothing to draw here.
+                if self.draw_lists.is_id_freed(sub_list_id) {
+                    continue;
+                }
                 let child_resets_zbias = self.draw_lists[sub_list_id].reset_zbias;
                 let mut own_zbias = 0.0f32;
                 let child_zbias = if child_resets_zbias {
@@ -392,11 +544,21 @@ impl Cx {
                 // An overlay list carries a depth floor: this is what makes it
                 // composite above body content that uses `draw_depth`.
                 self.draw_lists[sub_list_id].raise_zbias_to_floor(child_zbias);
-                self.render_view(draw_pass_id, sub_list_id, child_zbias, zbias_step);
+                // A retained list is one unit of paint order: its calls all
+                // take the counter at entry, it advances by the layers the
+                // list reported. See `CxDrawList::zbias_hold`.
+                if let Some(steps) = self.draw_lists[sub_list_id].zbias_hold {
+                    let mut held = *child_zbias;
+                    self.render_view_inner(draw_pass_id, sub_list_id, &mut held, 0.0);
+                    *child_zbias += steps as f32 * zbias_step;
+                } else {
+                    self.render_view_inner(draw_pass_id, sub_list_id, child_zbias, zbias_step);
+                }
             } else {
                 let gl = self.os.gl();
 
-                let draw_list = &mut self.draw_lists[draw_list_id];
+                let (draw_list, upload_budget) =
+                    self.draw_lists.list_and_upload_budget(draw_list_id);
                 let draw_item = &mut draw_list.draw_items[draw_item_id];
 
                 let draw_call = if let Some(draw_call) = draw_item.kind.draw_call_mut() {
@@ -410,75 +572,157 @@ impl Cx {
                     // shader didnt compile somehow
                     continue;
                 }
-                if sh.mapping.uses_time {
-                    self.demo_time_repaint = true;
-                }
                 let shp = &mut self.draw_shaders.os_shaders[sh.os_shader_id.unwrap()];
                 shp.ensure_gl_shader_sources(self.os.gl(), &self.os_type);
                 shp.refresh_scope_uniforms(self.os.gl(), &sh.mapping);
 
                 let shader_variant = self.passes[draw_pass_id].os.shader_variant;
 
-                let shgl = if sh.mapping.flags.async_compile {
-                    shp.ensure_gl_shader_started(
-                        self.os.gl(),
-                        shader_variant,
-                        &sh.mapping,
-                        &self.os_type,
-                    );
-                    shp.poll_gl_shader_ready(
-                        self.os.gl(),
-                        shader_variant,
-                        &sh.mapping,
-                        &self.os_type,
-                    );
-                    let Some(shgl) = shp.gl_shader[shader_variant]
-                        .as_ref()
-                        .and_then(GlShaderState::as_ready)
-                    else {
-                        self.demo_time_repaint = true;
-                        continue;
-                    };
-                    shgl
-                } else {
-                    if shp.gl_shader[shader_variant].is_none() {
-                        shp.gl_shader[shader_variant] = Some(GlShaderState::Ready(GlShader::new(
-                            self.os.gl(),
-                            &shp.vertex[shader_variant],
-                            &shp.pixel[shader_variant],
-                            &sh.mapping,
-                            &self.os_type,
-                        )));
-                    }
-                    shp.gl_shader[shader_variant]
-                        .as_ref()
-                        .and_then(GlShaderState::as_ready)
-                        .unwrap()
+                shp.ensure_gl_shader_started(
+                    self.os.gl(),
+                    shader_variant,
+                    &sh.mapping,
+                    &self.os_type,
+                );
+                shp.poll_gl_shader_ready(self.os.gl(), shader_variant, &sh.mapping, &self.os_type);
+                let Some(shgl) = shp.gl_shader[shader_variant]
+                    .as_ref()
+                    .and_then(GlShaderState::as_ready)
+                else {
+                    crate::trace!("gl.repaint", "shader not ready");
+                    self.demo_time_repaint = true;
+                    continue;
                 };
-                let trace_draw = std::env::var_os("MAKEPAD_GL_DRAW_TRACE").is_some();
+                let trace_draw = crate::makepad_error_log::trace_enabled("gl.draw");
 
-                if draw_call.instance_dirty || draw_item.os.inst_vb.gl_buffer.is_none() {
-                    draw_call.instance_dirty = false;
-                    draw_item
-                        .os
-                        .inst_vb
-                        .update_array_buffer(gl, draw_item.instances.as_ref().unwrap());
+                // A refused retained allocation leaves this item without
+                // instance storage (or with the previous, smaller backing).
+                // It must not be drawn this frame: the VAO would bind a
+                // missing buffer, or read past the old one.
+                let mut upload_refused = false;
+                'instance_upload: {
+                    if (draw_call.instance_dirty
+                        || draw_item.os.inst_vb.gl_buffer.is_none()
+                        || draw_item.retained_gpu_evicted)
+                        && !(draw_item.retained_gpu_evicted
+                            && draw_item.retained_instances.is_some()
+                            && draw_item.retained_instance_count == 0)
+                    {
+                        upload_budget.allocations.collect_for_frame(
+                            self.repaint_id,
+                            self.textures
+                                .1
+                                .serials
+                                .completed
+                                .load(std::sync::atomic::Ordering::Acquire),
+                        );
+                        let bytes = draw_item.retained_instances.as_ref().map_or_else(
+                            || draw_item.instances.as_ref().map_or(0, |v| v.len() * 4),
+                            |p| p.byte_len(),
+                        );
+                        let retained_plan = draw_item
+                            .retained_instances
+                            .as_ref()
+                            .and_then(|publication| {
+                                draw_item.os.inst_vb.retained_upload_plan(publication)
+                            });
+                        let replaces =
+                            draw_item
+                                .retained_instances
+                                .as_ref()
+                                .is_none_or(|publication| {
+                                    draw_item
+                                        .os
+                                        .inst_vb
+                                        .retained_replaces(publication, retained_plan.as_ref())
+                                });
+                        let charge = if replaces {
+                            let capacity = if draw_item.retained_instances.is_some() {
+                                bytes.next_power_of_two().max(256)
+                            } else {
+                                bytes
+                            };
+                            let charge = upload_budget.allocations.reserve_visible(capacity);
+                            Some(charge)
+                        } else {
+                            None
+                        };
+                        // What this copy costs feeds the producers' pacing
+                        // (contract §8): summed per frame, recorded at the
+                        // pass's end.
+                        let copy_started = std::time::Instant::now();
+                        let uploaded = if let Some(retained) = &draw_item.retained_instances {
+                            let Some(uploaded) =
+                                draw_item.os.inst_vb.update_retained_array(
+                                    gl,
+                                    retained,
+                                    retained_plan,
+                                    replaces,
+                                )
+                            else {
+                                crate::trace!("gl.repaint", "retained upload pending");
+                                draw_item.instance_upload_pending = true;
+                                self.demo_time_repaint = true;
+                                upload_refused = true;
+                                break 'instance_upload;
+                            };
+                            uploaded
+                        } else {
+                            draw_item
+                                .os
+                                .inst_vb
+                                .update_array_buffer(gl, draw_item.instances.as_deref().unwrap());
+                            bytes
+                        };
+                        if let Some(charge) = charge {
+                            draw_item.os.inst_vb.charge = Some(charge);
+                        }
+                        draw_call.instance_dirty = false;
+                        draw_item.retained_instance_id = draw_item
+                            .retained_instances
+                            .as_ref()
+                            .map_or(0, |value| value.id());
+                        draw_item.resident_schema = draw_item.retained_schema;
+                        draw_item.retained_gpu_evicted = false;
+                        draw_item.instance_upload_pending = false;
+                        upload_budget.stats.bytes =
+                            upload_budget.stats.bytes.saturating_add(uploaded);
+                        upload_budget.stats.install_us =
+                            upload_budget.stats.install_us.saturating_add(
+                                copy_started.elapsed().as_micros().min(u64::MAX as u128) as u64,
+                            );
+                    }
+                }
+                // Update the zbias uniform. The upload happens below, under the dirty
+                // gate, so the change is latched in `uniforms_dirty`: this call may
+                // still be skipped (no instances, stale geometry) and
+                // `resolve_zbias` reports a change only once.
+                if draw_call.resolve_zbias(*zbias, sploded, uniforms_gen) {
+                    draw_call.uniforms_dirty = true;
+                }
+                *zbias += zbias_step;
+                if upload_refused {
+                    continue;
                 }
 
-                // update the zbias uniform if we have it.
-                draw_call.resolve_zbias(*zbias, sploded);
-                *zbias += zbias_step;
-
-                draw_item
-                    .os
-                    .draw_call_uniforms
-                    .update_uniform_buffer(gl, draw_call.draw_call_uniforms.as_slice());
-
-                let instances = (draw_item.instances.as_ref().unwrap().len()
-                    / sh.mapping.instances.total_slots) as u64;
+                let instances = if draw_item.retained_instances.is_some() {
+                    draw_item.retained_instance_count as u64
+                } else {
+                    (draw_item.instances.as_ref().map_or(0, |v| v.len())
+                        / sh.mapping.instances.total_slots) as u64
+                };
 
                 if instances == 0 {
                     continue;
+                }
+                // A time-driven shader keeps the pass repainting at display rate,
+                // but only while it has something to draw: the Vulkan backend
+                // checks after the empty-call skips too. Checking before them let a
+                // hidden loading spinner (zero instances, `draw_pass.time` in its
+                // shader) keep an OpenGL window presenting forever at rest.
+                if sh.mapping.uses_time {
+                    crate::trace!("gl.repaint", "shader uses time");
+                    self.demo_time_repaint = true;
                 }
 
                 if sh.mapping.flags.debug_draw {
@@ -487,7 +731,11 @@ impl Cx {
                         draw_item_id,
                         sh,
                         draw_call,
-                        draw_item.instances.as_ref().unwrap(),
+                        draw_item
+                            .retained_instances
+                            .as_ref()
+                            .map(|v| v.data())
+                            .unwrap_or_else(|| draw_item.instances.as_deref().unwrap()),
                         instances as usize,
                     );
                 }
@@ -498,25 +746,70 @@ impl Cx {
                     continue;
                 };
 
+                if self.geometries.skip_stale(geometry_id) {
+                    continue;
+                }
                 let geometry = &mut self.geometries[geometry_id];
+                // Typed geometry (a byte layout, u16 indices) uploads as-is;
+                // the GL attribute pointers still assume f32-lane records,
+                // so a compact shader layout stays gated.
+                if !crate::geometry::geometry_backend_supports_compact(
+                    geometry,
+                    "opengl",
+                    sh.mapping.geometry_is_compact(),
+                ) {
+                    continue;
+                }
+                if !crate::geometry::geometry_layout_matches_shader(
+                    geometry,
+                    &sh.mapping.geometries,
+                ) {
+                    continue;
+                }
+                let index_gl_type = match geometry.index_width {
+                    2 => gl_sys::UNSIGNED_SHORT,
+                    4 => gl_sys::UNSIGNED_INT,
+                    width => {
+                        crate::error!("invalid resident index width {width}; skipping draw");
+                        continue;
+                    }
+                };
                 if geometry.dirty_vertices || geometry.os.vb.gl_buffer.is_none() {
-                    geometry.os.vb.update_array_buffer(gl, &geometry.vertices);
+                    geometry
+                        .os
+                        .vb
+                        .update_array_buffer_bytes(gl, geometry.vertices.as_bytes());
                     geometry.dirty_vertices = false;
                 }
                 if geometry.dirty_indices || geometry.os.ib.gl_buffer.is_none() {
-                    geometry.os.ib.update_index_buffer(gl, &geometry.indices);
+                    match &geometry.indices {
+                        crate::geometry::IndexData::U32(indices) => {
+                            geometry.os.ib.update_index_buffer(gl, indices);
+                        }
+                        crate::geometry::IndexData::U16(indices) => {
+                            geometry.os.ib.update_index_buffer_u16(gl, indices);
+                        }
+                    }
                     geometry.dirty_indices = false;
                 }
                 geometry.dirty = geometry.dirty_vertices || geometry.dirty_indices;
 
-                let indices = geometry.indices.len();
+                let indices = geometry.index_count;
 
-                if draw_call.uniforms_dirty {
+                // `DrawCallUniforms` used to be re-uploaded unconditionally above and
+                // then a second time here, so every draw call reallocated its uniform
+                // buffer (glBufferData) once or twice per frame whether or not anything
+                // in it had changed. Upload once: when the dirty flag is set (a zbias
+                // shift sets it above), or when the buffer does not exist yet.
+                let uniforms_dirty = draw_call.uniforms_dirty;
+                if uniforms_dirty || draw_item.os.draw_call_uniforms.gl_buffer.is_none() {
                     draw_call.uniforms_dirty = false;
                     draw_item
                         .os
                         .draw_call_uniforms
                         .update_uniform_buffer(gl, draw_call.draw_call_uniforms.as_slice());
+                }
+                if uniforms_dirty || draw_item.os.user_uniforms.gl_buffer.is_none() {
                     draw_item
                         .os
                         .user_uniforms
@@ -564,7 +857,10 @@ impl Cx {
                         for attr in &shgl.geometries {
                             if let Some(loc) = attr.loc {
                                 match attr.attr_format {
-                                    DrawShaderAttrFormat::Float => {
+                                    DrawShaderAttrFormat::F32x1
+                                    | DrawShaderAttrFormat::F32x2
+                                    | DrawShaderAttrFormat::F32x3
+                                    | DrawShaderAttrFormat::F32x4 => {
                                         (gl.glVertexAttribPointer)(
                                             loc,
                                             attr.size,
@@ -574,7 +870,7 @@ impl Cx {
                                             attr.offset as *const () as *const _,
                                         );
                                     }
-                                    DrawShaderAttrFormat::UInt => {
+                                    DrawShaderAttrFormat::U32x1 => {
                                         (gl.glVertexAttribIPointer)(
                                             loc,
                                             attr.size,
@@ -583,7 +879,7 @@ impl Cx {
                                             attr.offset as *const () as *const _,
                                         );
                                     }
-                                    DrawShaderAttrFormat::SInt => {
+                                    DrawShaderAttrFormat::I32x1 => {
                                         (gl.glVertexAttribIPointer)(
                                             loc,
                                             attr.size,
@@ -592,6 +888,7 @@ impl Cx {
                                             attr.offset as *const () as *const _,
                                         );
                                     }
+                                    _ => {}
                                 }
                                 (gl.glEnableVertexAttribArray)(loc);
                             }
@@ -600,7 +897,10 @@ impl Cx {
                         for attr in &shgl.instances {
                             if let Some(loc) = attr.loc {
                                 match attr.attr_format {
-                                    DrawShaderAttrFormat::Float => {
+                                    DrawShaderAttrFormat::F32x1
+                                    | DrawShaderAttrFormat::F32x2
+                                    | DrawShaderAttrFormat::F32x3
+                                    | DrawShaderAttrFormat::F32x4 => {
                                         (gl.glVertexAttribPointer)(
                                             loc,
                                             attr.size,
@@ -610,7 +910,7 @@ impl Cx {
                                             attr.offset as *const () as *const _,
                                         );
                                     }
-                                    DrawShaderAttrFormat::UInt => {
+                                    DrawShaderAttrFormat::U32x1 => {
                                         (gl.glVertexAttribIPointer)(
                                             loc,
                                             attr.size,
@@ -619,7 +919,7 @@ impl Cx {
                                             attr.offset as *const () as *const _,
                                         );
                                     }
-                                    DrawShaderAttrFormat::SInt => {
+                                    DrawShaderAttrFormat::I32x1 => {
                                         (gl.glVertexAttribIPointer)(
                                             loc,
                                             attr.size,
@@ -628,6 +928,7 @@ impl Cx {
                                             attr.offset as *const () as *const _,
                                         );
                                     }
+                                    _ => {}
                                 }
                                 (gl.glEnableVertexAttribArray)(loc);
                                 (gl.glVertexAttribDivisor)(loc, 1 as gl_sys::GLuint);
@@ -641,7 +942,8 @@ impl Cx {
                         (gl.glBindBuffer)(gl_sys::ELEMENT_ARRAY_BUFFER, 0);
                     }
                     if trace_draw {
-                        crate::log!(
+                        crate::trace!(
+                            "gl.draw",
                             "GL VAO rebuilt shader={} vao={:?} geom_vb={:?} inst_vb={:?} geom_ib={:?}",
                             draw_call.draw_shader_id.index,
                             vao.vao,
@@ -654,14 +956,18 @@ impl Cx {
                 unsafe {
                     (gl.glUseProgram)(shgl.program);
                     (gl.glBindVertexArray)(draw_item.os.vao.as_ref().unwrap().vao.unwrap());
-                    let instances = (draw_item.instances.as_ref().unwrap().len()
-                        / sh.mapping.instances.total_slots)
-                        as u64;
                     (gl.glDepthMask)(if draw_call.options.depth_write {
                         gl_sys::TRUE
                     } else {
                         0 as gl_sys::GLboolean
                     });
+                    // Blending is the pass default (`set_default_depth_and_blend_mode`);
+                    // only an `alpha_blend: false` call touches the state, and it
+                    // restores it after its draw below, so the default path issues
+                    // no extra GL calls.
+                    if !draw_call.options.alpha_blend {
+                        (gl.glDisable)(gl_sys::BLEND);
+                    }
                     if draw_call.options.backface_culling {
                         (gl.glEnable)(gl_sys::CULL_FACE);
                         (gl.glCullFace)(gl_sys::BACK);
@@ -690,10 +996,17 @@ impl Cx {
                             {
                                 let cx_uniform_buffer =
                                     &mut self.uniform_buffers[uniform_buffer.uniform_buffer_id()];
-                                cx_uniform_buffer
-                                    .os
-                                    .buffer
-                                    .update_uniform_buffer_bytes(gl, &cx_uniform_buffer.data);
+                                if cx_uniform_buffer.os.uploaded_generation
+                                    != cx_uniform_buffer.generation
+                                    || cx_uniform_buffer.os.buffer.gl_buffer.is_none()
+                                {
+                                    cx_uniform_buffer
+                                        .os
+                                        .buffer
+                                        .update_uniform_buffer_bytes(gl, &cx_uniform_buffer.data);
+                                    cx_uniform_buffer.os.uploaded_generation =
+                                        cx_uniform_buffer.generation;
+                                }
                                 binding.bind_buffer(gl, &cx_uniform_buffer.os.buffer);
                             } else {
                                 binding.bind_buffer(gl, &OpenglBuffer::default());
@@ -789,7 +1102,8 @@ impl Cx {
                         }
                     }
                     if trace_draw {
-                        crate::log!(
+                        crate::trace!(
+                            "gl.draw",
                             "GL draw shader={} variant={} indices={} instances={} textures={}",
                             draw_call.draw_shader_id.index,
                             shader_variant,
@@ -802,18 +1116,45 @@ impl Cx {
                     (gl.glDrawElementsInstanced)(
                         gl_sys::TRIANGLES,
                         indices as i32,
-                        gl_sys::UNSIGNED_INT,
+                        index_gl_type,
                         ptr::null(),
                         instances as i32,
                     );
+                    draw_item.consumed_instance_id = draw_item.retained_instance_id;
+                    draw_item.consumed_schema = draw_item.resident_schema;
+                    draw_item.consumed_serial = self
+                        .textures
+                        .1
+                        .serials
+                        .submitted
+                        .load(std::sync::atomic::Ordering::Acquire)
+                        + 1;
+                    if let Some(charge) = &draw_item.os.inst_vb.charge {
+                        charge.submitted(draw_item.consumed_serial);
+                    }
+                    draw_item.consumed_uniforms_gen = draw_call.uniforms_gen;
+                    if let Some((block, _)) = draw_item.shared.as_ref() {
+                        // The lease's receipt: this backend encodes and
+                        // submits in the same call, under the pass's serial.
+                        let receipt = block.receipt();
+                        receipt.mark_encoded(draw_item.consumed_serial);
+                        receipt.mark_submitted(draw_item.consumed_serial, draw_call.uniforms_gen);
+                    }
 
                     (gl.glBindVertexArray)(0);
                     (gl.glUseProgram)(0);
                     (gl.glDepthMask)(gl_sys::TRUE);
+                    if !draw_call.options.alpha_blend {
+                        (gl.glEnable)(gl_sys::BLEND);
+                    }
                 }
             }
         }
         for event in to_dispatch.iter() {
+            // Video-handle callbacks can call release/poll reentrantly. Give
+            // commands already emitted a serial before handing control out;
+            // the outer pass's later commands get the next submission serial.
+            self.textures.1.serials.submit();
             self.call_event_handler(&event);
         }
     }
@@ -840,16 +1181,23 @@ impl Cx {
     ) -> Option<(Vec2d, f64)> {
         let dpi_factor = self.passes[draw_pass_id].dpi_factor.unwrap();
         let pass_rect = self.get_pass_rect(draw_pass_id, dpi_factor).unwrap();
+        let repaint_id = self.repaint_id;
+        self.record_publication_copies();
         let pass = &mut self.passes[draw_pass_id];
         pass.paint_dirty = false;
+        // the bake transaction's paint receipt (whole draws: ranges ignored)
+        pass.painted_serial = repaint_id;
         pass.os.shader_variant = SHADER_VARIANT_WINDOW;
 
         if pass_rect.size.x < 0.5 || pass_rect.size.y < 0.5 {
             return None;
         }
 
+        let ortho_uniforms_gen = self.next_uniform_gen();
+        let dpi_uniforms_gen = self.next_uniform_gen();
+        let pass = &mut self.passes[draw_pass_id];
         if !pass.keep_camera_matrix {
-            pass.set_ortho_matrix(pass_rect.pos, pass_rect.size);
+            pass.set_ortho_matrix(pass_rect.pos, pass_rect.size, ortho_uniforms_gen);
             if to_texture {
                 // OFFSCREEN passes render UPSIDE DOWN on GL: an FBO's rows
                 // are stored bottom-up, so inverting the projection's Y
@@ -865,7 +1213,7 @@ impl Cx {
                 m[13] = -m[13];
             }
         }
-        pass.set_dpi_factor(dpi_factor);
+        pass.set_dpi_factor(dpi_factor, dpi_uniforms_gen);
 
         pass.os
             .pass_uniforms
@@ -943,8 +1291,9 @@ impl Cx {
                     clear_flags |= gl_sys::COLOR_BUFFER_BIT;
                 }
             }
-            self.textures[color_texture.texture.texture_id()].os.rendered_top_left =
-                rows_top_left;
+            self.textures[color_texture.texture.texture_id()]
+                .os
+                .rendered_top_left = rows_top_left;
             if let Some(gl_texture) = self.textures[color_texture.texture.texture_id()]
                 .os
                 .gl_texture
@@ -984,6 +1333,18 @@ impl Cx {
                     cxtexture.update_depth_stencil(gl, size.x as usize, size.y as usize);
                     clear_depth = _clear_depth;
                     clear_flags |= gl_sys::DEPTH_BUFFER_BIT;
+                }
+            }
+            let depth = &self.textures[depth_texture.texture_id()];
+            if depth.format.is_sampled_depth() {
+                unsafe {
+                    (gl.glFramebufferTexture2D)(
+                        gl_sys::FRAMEBUFFER,
+                        gl_sys::DEPTH_ATTACHMENT,
+                        gl_sys::TEXTURE_2D,
+                        depth.os.gl_texture.unwrap_or(0),
+                        0,
+                    );
                 }
             }
         } else {
@@ -1054,6 +1415,10 @@ impl Cx {
             (self.os.gl().glBindFramebuffer)(gl_sys::FRAMEBUFFER, 0);
             //(gl.glFinish)();
         }
+        #[cfg(not(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux")))))]
+        if !self.textures.1.readbacks.slots.is_empty() {
+            self.gl_capture_texture_readbacks(Some(draw_pass_id));
+        }
     }
 
     pub fn opengl_compile_shaders(&mut self) {
@@ -1092,9 +1457,6 @@ impl Cx {
             };
 
             if let Some(os_shader_id) = os_shader_id {
-                if !mapping.flags.async_compile {
-                    continue;
-                }
                 let os_shader = &mut self.draw_shaders.os_shaders[os_shader_id];
                 os_shader.ensure_gl_shader_started(
                     self.os.gl(),
@@ -1112,6 +1474,7 @@ impl Cx {
                     os_shader.gl_shader[SHADER_VARIANT_WINDOW],
                     Some(GlShaderState::Pending(_))
                 ) {
+                    crate::trace!("gl.repaint", "shader compile pending");
                     self.demo_time_repaint = true;
                 }
             }
@@ -1120,11 +1483,8 @@ impl Cx {
         for shader_index in 0..self.draw_shaders.shaders.len() {
             let (mapping, os_shader_id) = {
                 let cx_shader = &self.draw_shaders.shaders[shader_index];
-                (cx_shader.mapping.clone(), cx_shader.os_shader_id)
+                (&cx_shader.mapping, cx_shader.os_shader_id)
             };
-            if !mapping.flags.async_compile {
-                continue;
-            }
             let Some(os_shader_id) = os_shader_id else {
                 continue;
             };
@@ -1143,6 +1503,7 @@ impl Cx {
                     os_shader.gl_shader[SHADER_VARIANT_WINDOW],
                     Some(GlShaderState::Pending(_))
                 ) {
+                    crate::trace!("gl.repaint", "shader compile pending");
                     self.demo_time_repaint = true;
                 }
             }
@@ -1482,11 +1843,12 @@ impl GlShader {
 
         #[cfg(target_os = "android")]
         let log_shader_builds = matches!(_os_type, OsType::Android(_))
-            && std::env::var_os("MAKEPAD_LOG_GL_SHADER_BUILDS").is_some();
+            && crate::makepad_error_log::trace_enabled("gl.shader_builds");
 
         #[cfg(target_os = "android")]
         if log_shader_builds {
-            crate::log!(
+            crate::trace!(
+                "gl.shader_builds",
                 "GL shader build start renderer={} vertex_hash={:016x} vertex_len={} fragment_hash={:016x} fragment_len={} vertex_preview={:?} fragment_preview={:?}",
                 get_gl_string(gl, gl_sys::RENDERER),
                 vertex_hash.0,
@@ -1505,7 +1867,8 @@ impl GlShader {
             let vertex_lengths = [vertex_len];
             #[cfg(target_os = "android")]
             if log_shader_builds {
-                crate::log!(
+                crate::trace!(
+                    "gl.shader_builds",
                     "GL shader upload vertex shader={} hash={:016x} len={}",
                     vs,
                     vertex_hash.0,
@@ -1515,7 +1878,8 @@ impl GlShader {
             (gl.glShaderSource)(vs, 1, vertex_ptrs.as_ptr(), vertex_lengths.as_ptr());
             #[cfg(target_os = "android")]
             if log_shader_builds {
-                crate::log!(
+                crate::trace!(
+                    "gl.shader_builds",
                     "GL shader compile vertex shader={} hash={:016x}",
                     vs,
                     vertex_hash.0
@@ -1529,7 +1893,8 @@ impl GlShader {
             let pixel_lengths = [pixel_len];
             #[cfg(target_os = "android")]
             if log_shader_builds {
-                crate::log!(
+                crate::trace!(
+                    "gl.shader_builds",
                     "GL shader upload fragment shader={} hash={:016x} len={}",
                     fs,
                     pixel_hash.0,
@@ -1539,7 +1904,8 @@ impl GlShader {
             (gl.glShaderSource)(fs, 1, pixel_ptrs.as_ptr(), pixel_lengths.as_ptr());
             #[cfg(target_os = "android")]
             if log_shader_builds {
-                crate::log!(
+                crate::trace!(
+                    "gl.shader_builds",
                     "GL shader compile fragment shader={} hash={:016x}",
                     fs,
                     pixel_hash.0
@@ -1716,10 +2082,6 @@ impl GlShader {
         mapping: &CxDrawShaderMapping,
         os_type: &OsType,
     ) -> GlShaderState {
-        if let Some(program) = Self::read_program_cache(gl, vertex, pixel, os_type) {
-            return GlShaderState::Ready(Self::build_from_program(gl, program, mapping));
-        }
-
         if Self::supports_parallel_compile(gl) {
             return GlShaderState::Pending(Self::start_pending_program_compile(
                 gl, vertex, pixel, os_type,
@@ -1839,23 +2201,30 @@ impl GlShader {
         let has_errors = info
             .lines()
             .any(|line| line.to_ascii_lowercase().contains("error"));
-        let dump_sources = std::env::var_os("MAKEPAD_LOG_GLSL_SOURCES").is_some();
+        let dump_sources = crate::makepad_error_log::trace_enabled("shader.glsl_sources");
 
-        if has_errors || dump_sources {
+        if has_errors {
             let kind = if compile { "compile" } else { "link" };
-            crate::warning!(
-                "GLSL {} {} info:\n{}",
+            crate::warning!("GLSL {} {} info:\n{}", kind, stage_name, info);
+        }
+        if dump_sources && !has_errors {
+            let kind = if compile { "compile" } else { "link" };
+            crate::trace!(
+                "shader.glsl_sources",
+                "GLSL {} {} info:\n(no compiler errors)",
+                kind,
+                stage_name
+            );
+        }
+        if dump_sources && !source.is_empty() {
+            let kind = if compile { "compile" } else { "link" };
+            crate::trace!(
+                "shader.glsl_sources",
+                "GLSL {} {} source:\n{}",
                 kind,
                 stage_name,
-                if has_errors {
-                    info
-                } else {
-                    "(no compiler errors)\n".to_string()
-                }
+                source
             );
-            if dump_sources && !source.is_empty() {
-                crate::warning!("GLSL {} {} source:\n{}", kind, stage_name, source);
-            }
         }
     }
 
@@ -1902,7 +2271,7 @@ impl GlShader {
 
         let stride = (slots * mem::size_of::<f32>()) as i32;
         let num_attr = ceil_div4(slots);
-        let trace_draw = std::env::var_os("MAKEPAD_GL_DRAW_TRACE").is_some();
+        let trace_draw = crate::makepad_error_log::trace_enabled("gl.draw");
         for i in 0..num_attr {
             let mut name0 = prefix.to_string();
             name0.push_str(&i.to_string());
@@ -1915,7 +2284,8 @@ impl GlShader {
             unsafe {
                 let loc = (gl.glGetAttribLocation)(program, name0.as_ptr() as *const _);
                 if trace_draw {
-                    crate::log!(
+                    crate::trace!(
+                        "gl.draw",
                         "GL attrib program={} name={} loc={} size={} stride={} offset={} format={:?}",
                         program,
                         name0.trim_end_matches('\0'),
@@ -1923,7 +2293,7 @@ impl GlShader {
                         size,
                         stride,
                         (i * 4 * mem::size_of::<f32>()),
-                        DrawShaderAttrFormat::Float
+                        DrawShaderAttrFormat::F32x4
                     );
                 }
                 attribs.push(OpenglAttribute {
@@ -1932,7 +2302,7 @@ impl GlShader {
                     offset: (i * 4 * mem::size_of::<f32>()) as usize,
                     size: size,
                     stride: stride,
-                    attr_format: DrawShaderAttrFormat::Float,
+                    attr_format: DrawShaderAttrFormat::F32x4,
                 })
             }
         }
@@ -1967,7 +2337,10 @@ impl GlShader {
         gl_texture_slots
     }
 
-    pub fn opengl_create_samplers(_gl: &LibGl, mapping: &CxDrawShaderMapping) -> Vec<OpenglSampler> {
+    pub fn opengl_create_samplers(
+        _gl: &LibGl,
+        mapping: &CxDrawShaderMapping,
+    ) -> Vec<OpenglSampler> {
         // Rely on per-texture filter+wrap (set in update_vec_texture) instead of GL sampler objects:
         // some Mesa drivers ignore the sampler MIN_FILTER and point-sample minified textures.
         vec![OpenglSampler::default(); mapping.textures.len()]
@@ -2056,8 +2429,16 @@ impl CxOsDrawShader {
         mapping: &CxDrawShaderMapping,
         os_type: &OsType,
     ) {
-        let Some(GlShaderState::Pending(pending)) = self.gl_shader[shader_variant].take() else {
+        // Check before taking: taking a Ready value here would drop a live
+        // pipeline on every frame and leave this variant permanently missing.
+        if !matches!(
+            self.gl_shader[shader_variant],
+            Some(GlShaderState::Pending(_))
+        ) {
             return;
+        }
+        let Some(GlShaderState::Pending(pending)) = self.gl_shader[shader_variant].take() else {
+            unreachable!()
         };
 
         if !pending.is_complete(gl) {
@@ -2114,8 +2495,7 @@ impl CxOsDrawShader {
         let listed_external = get_gl_string(gl, gl_sys::EXTENSIONS)
             .split_whitespace()
             .any(|ext| {
-                ext == "GL_OES_EGL_image_external"
-                    || ext == "GL_OES_EGL_image_external_essl3"
+                ext == "GL_OES_EGL_image_external" || ext == "GL_OES_EGL_image_external_essl3"
             });
         let is_external_texture_supported = listed_external
             || matches!(os_type, OsType::Android(params) if !params.is_emulator)
@@ -2215,6 +2595,7 @@ impl CxOsDrawShader {
         // shader hits this on ES-only hosts.
         let sampler_precision = "
             precision highp sampler2D;
+            precision highp sampler2DShadow;
             precision highp sampler2DArray;
             precision highp samplerCube;
             ";
@@ -2391,6 +2772,20 @@ pub struct CxOsDrawCall {
     pub user_uniforms: OpenglBuffer,
     pub inst_vb: OpenglBuffer,
     pub vao: Option<CxOsDrawCallVao>,
+    #[cfg(test)]
+    pub uniforms_recording_gen: Option<u64>,
+    #[cfg(test)]
+    pub draw_call_uniforms_gen: Option<u64>,
+    #[cfg(test)]
+    pub user_uniforms_gen: Option<u64>,
+}
+
+impl CxOsDrawCall {
+    /// This backend keeps no per-publication backing lease on a draw item
+    /// (contract §10): nothing to release when the item's lease clears.
+    pub(crate) fn take_backing(&mut self) -> Option<u64> {
+        None
+    }
 }
 
 impl CxOsDrawCall {
@@ -2405,6 +2800,7 @@ impl CxOsDrawCall {
 #[derive(Default, Clone)]
 pub struct CxOsUniformBuffer {
     pub buffer: OpenglBuffer,
+    pub uploaded_generation: u64,
 }
 
 /// Column-major identity 4x4 — default SurfaceTexture UV transform (Android OES).
@@ -2415,6 +2811,7 @@ pub const OES_ST_IDENTITY: [f32; 16] = [
 
 #[derive(Clone)]
 pub struct CxOsTexture {
+    allocation_target: u32,
     pub gl_texture: Option<u32>,
     /// This texture was last rendered by a Y-inverted offscreen pass, so
     /// its rows are stored TOP-LEFT (Metal/D3D order) — readback must not
@@ -2446,6 +2843,7 @@ pub struct CxOsTexture {
 impl Default for CxOsTexture {
     fn default() -> Self {
         Self {
+            allocation_target: gl_sys::TEXTURE_2D,
             gl_texture: None,
             rendered_top_left: false,
             gl_texture_owned: true,
@@ -2520,6 +2918,12 @@ impl CxTexture {
             needs_realloc = true;
         }
 
+        self.os.allocation_target = if matches!(self.format, TextureFormat::VecCubeBGRAu8_32 { .. })
+        {
+            gl_sys::TEXTURE_CUBE_MAP
+        } else {
+            gl_sys::TEXTURE_2D
+        };
         if let TextureFormat::VecCubeBGRAu8_32 {
             width,
             height,
@@ -2598,16 +3002,8 @@ impl CxTexture {
                 crate::texture::TextureWrap::Repeat => gl_sys::REPEAT as i32,
                 crate::texture::TextureWrap::ClampToEdge => gl_sys::CLAMP_TO_EDGE as i32,
             };
-            (gl.glTexParameteri)(
-                gl_sys::TEXTURE_2D,
-                gl_sys::TEXTURE_WRAP_S,
-                wrap,
-            );
-            (gl.glTexParameteri)(
-                gl_sys::TEXTURE_2D,
-                gl_sys::TEXTURE_WRAP_T,
-                wrap,
-            );
+            (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_S, wrap);
+            (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_WRAP_T, wrap);
 
             // Set texture parameters based on the format
             let (
@@ -3065,27 +3461,11 @@ impl CxTexture {
                 };
                 (gl.glBindTexture)(target, self.os.gl_texture.unwrap());
 
-                (gl.glTexParameteri)(
-                    target,
-                    gl_sys::TEXTURE_WRAP_S,
-                    gl_sys::CLAMP_TO_EDGE as i32,
-                );
-                (gl.glTexParameteri)(
-                    target,
-                    gl_sys::TEXTURE_WRAP_T,
-                    gl_sys::CLAMP_TO_EDGE as i32,
-                );
+                (gl.glTexParameteri)(target, gl_sys::TEXTURE_WRAP_S, gl_sys::CLAMP_TO_EDGE as i32);
+                (gl.glTexParameteri)(target, gl_sys::TEXTURE_WRAP_T, gl_sys::CLAMP_TO_EDGE as i32);
 
-                (gl.glTexParameteri)(
-                    target,
-                    gl_sys::TEXTURE_MIN_FILTER,
-                    gl_sys::LINEAR as i32,
-                );
-                (gl.glTexParameteri)(
-                    target,
-                    gl_sys::TEXTURE_MAG_FILTER,
-                    gl_sys::LINEAR as i32,
-                );
+                (gl.glTexParameteri)(target, gl_sys::TEXTURE_MIN_FILTER, gl_sys::LINEAR as i32);
+                (gl.glTexParameteri)(target, gl_sys::TEXTURE_MAG_FILTER, gl_sys::LINEAR as i32);
 
                 (gl.glBindTexture)(target, 0);
 
@@ -3119,6 +3499,7 @@ impl CxTexture {
             } else {
                 gl_sys::TEXTURE_2D
             };
+            self.os.allocation_target = texture_target;
             unsafe { (gl.glBindTexture)(texture_target, self.os.gl_texture.unwrap()) };
             match &alloc.pixel {
                 TexturePixel::BGRAu8 | TexturePixel::RGBAf16 | TexturePixel::RGBAf32 => unsafe {
@@ -3243,6 +3624,52 @@ impl CxTexture {
     fn update_depth_stencil(&mut self, gl: &LibGl, width: usize, height: usize) {
         if self.alloc_depth(width, height) {
             let alloc = self.alloc.as_ref().unwrap();
+            if self.format.is_sampled_depth() {
+                unsafe {
+                    if self.os.gl_texture.is_none() {
+                        let mut texture = 0;
+                        (gl.glGenTextures)(1, &mut texture);
+                        self.os.gl_texture = Some(texture);
+                    }
+                    (gl.glBindTexture)(gl_sys::TEXTURE_2D, self.os.gl_texture.unwrap());
+                    (gl.glTexImage2D)(
+                        gl_sys::TEXTURE_2D,
+                        0,
+                        gl_sys::DEPTH_COMPONENT32F as i32,
+                        alloc.width as i32,
+                        alloc.height as i32,
+                        0,
+                        0x1902,
+                        gl_sys::FLOAT,
+                        std::ptr::null(),
+                    );
+                    (gl.glTexParameteri)(
+                        gl_sys::TEXTURE_2D,
+                        gl_sys::TEXTURE_MIN_FILTER,
+                        gl_sys::LINEAR as i32,
+                    );
+                    (gl.glTexParameteri)(
+                        gl_sys::TEXTURE_2D,
+                        gl_sys::TEXTURE_MAG_FILTER,
+                        gl_sys::LINEAR as i32,
+                    );
+                    (gl.glTexParameteri)(
+                        gl_sys::TEXTURE_2D,
+                        gl_sys::TEXTURE_WRAP_S,
+                        gl_sys::CLAMP_TO_EDGE as i32,
+                    );
+                    (gl.glTexParameteri)(
+                        gl_sys::TEXTURE_2D,
+                        gl_sys::TEXTURE_WRAP_T,
+                        gl_sys::CLAMP_TO_EDGE as i32,
+                    );
+                    // GL_TEXTURE_COMPARE_MODE / GL_COMPARE_REF_TO_TEXTURE / GL_TEXTURE_COMPARE_FUNC.
+                    (gl.glTexParameteri)(gl_sys::TEXTURE_2D, 0x884c, 0x884e);
+                    (gl.glTexParameteri)(gl_sys::TEXTURE_2D, 0x884d, gl_sys::LEQUAL as i32);
+                    (gl.glBindTexture)(gl_sys::TEXTURE_2D, 0);
+                }
+                return;
+            }
             match &alloc.pixel {
                 TexturePixel::D32 => unsafe {
                     if self.os.gl_renderbuffer.is_none() {
@@ -3301,9 +3728,140 @@ impl CxOsPass {
 #[derive(Default, Clone)]
 pub struct OpenglBuffer {
     pub gl_buffer: Option<u32>,
+    pub retained_capacity: usize,
+    pub retained_publication: Option<crate::retained_instances::RetainedInstances>,
+    pub retained_count: usize,
+    pub charge: Option<crate::retained_instances::RetainedAllocation>,
 }
 
 impl OpenglBuffer {
+    /// The diff against what this buffer already holds, or `None` when there
+    /// is nothing resident to diff against. `upload_plan` hashes every segment
+    /// of the previous publication, so a frame computes it once per buffer and
+    /// hands the result to both `retained_replaces` and
+    /// `update_retained_array`; it used to be derived three times per changed
+    /// buffer per frame, which was the largest single cost of a heavy repaint.
+    fn retained_upload_plan(
+        &self,
+        publication: &crate::retained_instances::RetainedInstances,
+    ) -> Option<crate::retained_instances::InstanceUploadPlan> {
+        self.gl_buffer
+            .and(self.retained_publication.as_ref())
+            .map(|previous| publication.upload_plan(previous))
+    }
+
+    /// `plan` must come from `retained_upload_plan` for the same publication,
+    /// with no upload to this buffer in between.
+    fn retained_replaces(
+        &self,
+        publication: &crate::retained_instances::RetainedInstances,
+        plan: Option<&crate::retained_instances::InstanceUploadPlan>,
+    ) -> bool {
+        self.gl_buffer.is_none()
+            || publication.byte_len() > self.retained_capacity
+            || match (self.retained_publication.as_ref(), plan) {
+                (Some(previous), Some(plan)) => {
+                    !plan.can_update_in_place()
+                        || plan
+                            .writes
+                            .iter()
+                            .any(|range| range.start < previous.float_len())
+                }
+                _ => true,
+            }
+    }
+
+    /// `plan` and `replaces` as returned by `retained_upload_plan` and
+    /// `retained_replaces` for this publication.
+    pub fn update_retained_array(
+        &mut self,
+        gl: &LibGl,
+        publication: &crate::retained_instances::RetainedInstances,
+        plan: Option<crate::retained_instances::InstanceUploadPlan>,
+        replaces: bool,
+    ) -> Option<usize> {
+        let previous = self.gl_buffer;
+        let previous_capacity = self.retained_capacity;
+        let mut uploaded = 0;
+        unsafe {
+            if replaces {
+                self.alloc_gl_buffer(gl);
+                self.retained_capacity = publication.byte_len().next_power_of_two().max(256);
+                (gl.glBindBuffer)(gl_sys::COPY_WRITE_BUFFER, self.gl_buffer.unwrap());
+                (gl.glBufferData)(
+                    gl_sys::COPY_WRITE_BUFFER,
+                    self.retained_capacity as _,
+                    std::ptr::null(),
+                    gl_sys::STATIC_DRAW,
+                );
+                let allocation_error = (gl.glGetError)();
+                if allocation_error != 0 {
+                    let failed = self.gl_buffer.take().unwrap();
+                    (gl.glBindBuffer)(gl_sys::COPY_WRITE_BUFFER, 0);
+                    (gl.glDeleteBuffers)(1, &failed);
+                    self.gl_buffer = previous;
+                    self.retained_capacity = previous_capacity;
+                    crate::error!("retained GL buffer allocation failed: {allocation_error:#x}");
+                    return None;
+                }
+                if let (Some(previous), Some(plan)) = (previous, &plan) {
+                    (gl.glBindBuffer)(gl_sys::COPY_READ_BUFFER, previous);
+                    for copy in &plan.copies {
+                        (gl.glCopyBufferSubData)(
+                            gl_sys::COPY_READ_BUFFER,
+                            gl_sys::COPY_WRITE_BUFFER,
+                            (copy.source.start * 4) as _,
+                            (copy.destination * 4) as _,
+                            (copy.source.len() * 4) as _,
+                        );
+                    }
+                    (gl.glBindBuffer)(gl_sys::COPY_READ_BUFFER, 0);
+                }
+            } else {
+                (gl.glBindBuffer)(gl_sys::COPY_WRITE_BUFFER, self.gl_buffer.unwrap());
+            }
+            let full = vec![0..publication.float_len()];
+            let writes = plan
+                .as_ref()
+                .map_or(full.as_slice(), |plan| plan.writes.as_slice());
+            for range in writes {
+                for (offset, data) in publication.data_slices(range.clone()) {
+                    for (chunk_index, chunk) in data.chunks(64 * 1024).enumerate() {
+                        (gl.glBufferSubData)(
+                            gl_sys::COPY_WRITE_BUFFER,
+                            ((offset + chunk_index * 64 * 1024) * 4) as _,
+                            std::mem::size_of_val(chunk) as _,
+                            chunk.as_ptr().cast(),
+                        );
+                        uploaded += std::mem::size_of_val(chunk);
+                    }
+                }
+            }
+            let upload_error = (gl.glGetError)();
+            (gl.glBindBuffer)(gl_sys::COPY_WRITE_BUFFER, 0);
+            if upload_error != 0 {
+                if replaces {
+                    let failed = self.gl_buffer.take().unwrap();
+                    (gl.glDeleteBuffers)(1, &failed);
+                    self.gl_buffer = previous;
+                    self.retained_capacity = previous_capacity;
+                }
+                // Suffix failures leave the previous published prefix intact.
+                crate::error!("retained GL buffer upload failed: {upload_error:#x}");
+                return None;
+            }
+            // GL orders copies and subdata after earlier draws. Deleting the
+            // old name keeps its storage alive until those commands finish.
+            if replaces {
+                if let Some(previous) = previous {
+                    (gl.glDeleteBuffers)(1, &previous);
+                }
+            }
+        }
+        self.retained_publication = Some(publication.clone());
+        Some(uploaded)
+    }
+
     pub fn alloc_gl_buffer(&mut self, gl: &LibGl) {
         unsafe {
             let mut gl_buffer = 0;
@@ -3313,6 +3871,16 @@ impl OpenglBuffer {
     }
 
     pub fn update_array_buffer(&mut self, gl: &LibGl, data: &[f32]) {
+        self.update_array_buffer_bytes(gl, unsafe {
+            std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data))
+        });
+    }
+
+    /// A vertex record stream in its physical layout (typed geometry, or
+    /// the f32-lane path's bytes).
+    pub fn update_array_buffer_bytes(&mut self, gl: &LibGl, data: &[u8]) {
+        self.retained_capacity = 0;
+        self.retained_publication = None;
         if self.gl_buffer.is_none() {
             self.alloc_gl_buffer(gl);
         }
@@ -3320,7 +3888,7 @@ impl OpenglBuffer {
             (gl.glBindBuffer)(gl_sys::ARRAY_BUFFER, self.gl_buffer.unwrap());
             (gl.glBufferData)(
                 gl_sys::ARRAY_BUFFER,
-                (data.len() * mem::size_of::<f32>()) as gl_sys::GLsizeiptr,
+                data.len() as gl_sys::GLsizeiptr,
                 data.as_ptr() as *const _,
                 gl_sys::STATIC_DRAW,
             );
@@ -3356,6 +3924,20 @@ impl OpenglBuffer {
     }
 
     pub fn update_index_buffer(&mut self, gl: &LibGl, data: &[u32]) {
+        self.update_index_buffer_bytes(gl, unsafe {
+            std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data))
+        });
+    }
+
+    /// Compact (u16) indices; the draw selects `GL_UNSIGNED_SHORT` from the
+    /// geometry's resident index width.
+    pub fn update_index_buffer_u16(&mut self, gl: &LibGl, data: &[u16]) {
+        self.update_index_buffer_bytes(gl, unsafe {
+            std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data))
+        });
+    }
+
+    fn update_index_buffer_bytes(&mut self, gl: &LibGl, data: &[u8]) {
         if self.gl_buffer.is_none() {
             self.alloc_gl_buffer(gl);
         }
@@ -3363,7 +3945,7 @@ impl OpenglBuffer {
             (gl.glBindBuffer)(gl_sys::ELEMENT_ARRAY_BUFFER, self.gl_buffer.unwrap());
             (gl.glBufferData)(
                 gl_sys::ELEMENT_ARRAY_BUFFER,
-                (data.len() * mem::size_of::<u32>()) as gl_sys::GLsizeiptr,
+                data.len() as gl_sys::GLsizeiptr,
                 data.as_ptr() as *const _,
                 gl_sys::STATIC_DRAW,
             );
@@ -3446,5 +4028,677 @@ impl EglRenderBridge {
 
     pub fn egl_context(&self) -> *mut std::ffi::c_void {
         self.egl_context
+    }
+}
+
+// Resolved only for clients using the lifetime API; LibGl's ordinary draw path
+// gains no queries, scans, or fence calls. A zero timeout never waits for GPU work.
+#[cfg(not(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux")))))]
+#[derive(Default)]
+pub(crate) struct GlReadbacks {
+    functions: Option<GlReadbackFunctions>,
+    jobs: Vec<GlReadback>,
+    worker: Option<crate::texture::ReadbackWorker>,
+    device_lost: bool,
+}
+
+#[cfg(not(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux")))))]
+struct GlReadback {
+    work: crate::texture::ReadbackWork,
+    framebuffer: u32,
+    buffer: u32,
+    fence: GlSync,
+    mapped: bool,
+    copy: Option<crate::texture::ReadbackCopyJob>,
+    receive: Option<std::sync::mpsc::Receiver<std::sync::Arc<[u8]>>>,
+}
+
+#[cfg(not(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux")))))]
+#[derive(Clone, Copy)]
+struct GlReadbackFunctions {
+    framebuffer_status: unsafe extern "C" fn(u32) -> u32,
+    create: unsafe extern "C" fn(u32, u32) -> GlSync,
+    poll: unsafe extern "C" fn(GlSync, u32, u64) -> u32,
+    delete: unsafe extern "C" fn(GlSync),
+    current: unsafe extern "C" fn() -> GlSync,
+    integer: unsafe extern "C" fn(u32, *mut i32),
+    map: unsafe extern "C" fn(u32, isize, isize, u32) -> GlSync,
+    unmap: unsafe extern "C" fn(u32) -> u8,
+}
+
+#[cfg(not(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux")))))]
+impl Cx {
+    fn gl_readback_functions(
+        &mut self,
+    ) -> Result<GlReadbackFunctions, crate::texture::ReadbackError> {
+        use crate::texture::ReadbackError;
+        #[cfg(target_os = "linux")]
+        let display = self
+            .os
+            .opengl_cx
+            .as_ref()
+            .ok_or(ReadbackError::DeviceLost)?;
+        #[cfg(target_os = "android")]
+        let display = self.os.display.as_ref().ok_or(ReadbackError::DeviceLost)?;
+        let get_proc = display
+            .libegl
+            .eglGetProcAddress
+            .ok_or(ReadbackError::UnsupportedBackend)?;
+        let functions = &mut self.textures.1.gl_readbacks.functions;
+        unsafe {
+            if functions.is_none() {
+                macro_rules! resolve {
+                    ($name:expr, $ty:ty) => {{
+                        let pointer = get_proc($name.as_ptr());
+                        if pointer.is_null() {
+                            return Err(ReadbackError::UnsupportedBackend);
+                        }
+                        std::mem::transmute::<*mut std::ffi::c_void, $ty>(pointer)
+                    }};
+                }
+                *functions = Some(GlReadbackFunctions {
+                    framebuffer_status: resolve!(
+                        c"glCheckFramebufferStatus",
+                        unsafe extern "C" fn(u32) -> u32
+                    ),
+                    create: resolve!(c"glFenceSync", unsafe extern "C" fn(u32, u32) -> GlSync),
+                    poll: resolve!(
+                        c"glClientWaitSync",
+                        unsafe extern "C" fn(GlSync, u32, u64) -> u32
+                    ),
+                    delete: resolve!(c"glDeleteSync", unsafe extern "C" fn(GlSync)),
+                    current: resolve!(c"eglGetCurrentContext", unsafe extern "C" fn() -> GlSync),
+                    integer: resolve!(c"glGetIntegerv", unsafe extern "C" fn(u32, *mut i32)),
+                    map: resolve!(
+                        c"glMapBufferRange",
+                        unsafe extern "C" fn(u32, isize, isize, u32) -> GlSync
+                    ),
+                    unmap: resolve!(c"glUnmapBuffer", unsafe extern "C" fn(u32) -> u8),
+                });
+            }
+            let functions = functions.unwrap();
+            if (functions.current)() != display.egl_context {
+                // Keep pending work when a window temporarily owns the current
+                // context. No GL operation may run on the wrong context.
+                return Err(ReadbackError::Backpressure);
+            }
+            Ok(functions)
+        }
+    }
+
+    pub(crate) fn poll_texture_readbacks(&mut self) {
+        // Vulkan windows serve grabs from their swapchain capture, not from here.
+        #[cfg(target_os = "linux")]
+        if self.os.vulkan_active() {
+            self.fail_pending_readbacks(crate::texture::ReadbackError::UnsupportedBackend);
+            return;
+        }
+        if self.textures.1.readbacks.slots.is_empty()
+            && self.textures.1.gl_readbacks.jobs.is_empty()
+        {
+            return;
+        }
+        self.gl_capture_texture_readbacks(None);
+    }
+
+    fn gl_capture_texture_readbacks(&mut self, pass: Option<DrawPassId>) {
+        use crate::texture::{ReadbackChannelOrder, ReadbackError, ReadbackOrigin, ReadbackWorker};
+        if self.textures.1.gl_readbacks.jobs.is_empty()
+            && !self
+                .textures
+                .1
+                .readbacks
+                .slots
+                .iter()
+                .any(|slot| slot.pending && slot.pass == pass)
+        {
+            return;
+        }
+        if self.textures.1.gl_readbacks.device_lost {
+            self.fail_pending_readbacks(ReadbackError::DeviceLost);
+            self.gl_finish_lost_readback_leases();
+            return;
+        }
+        if self.textures.1.gl_readbacks.worker.is_none() {
+            match ReadbackWorker::new(self) {
+                Ok(worker) => self.textures.1.gl_readbacks.worker = Some(worker),
+                Err(error) => {
+                    self.fail_pending_readbacks(error);
+                    return;
+                }
+            }
+        }
+        self.textures
+            .1
+            .gl_readbacks
+            .worker
+            .as_ref()
+            .unwrap()
+            .set_active(true);
+        let functions = match self.gl_readback_functions() {
+            Ok(functions) => functions,
+            Err(ReadbackError::Backpressure) => return,
+            Err(error) => {
+                self.fail_pending_readbacks(error);
+                self.textures.1.gl_readbacks.device_lost = true;
+                self.gl_finish_lost_readback_leases();
+                return;
+            }
+        };
+        // A pass has a uniform row orientation. Current-allocation requests
+        // may refer to different passes; set each result from its native owner.
+        let work =
+            self.take_readback_work(pass, ReadbackChannelOrder::Rgba, ReadbackOrigin::TopLeft);
+        for work in work {
+            let origin = if self.textures[work.texture_id].os.rendered_top_left {
+                ReadbackOrigin::TopLeft
+            } else {
+                ReadbackOrigin::BottomLeft
+            };
+            for slot in &mut self.textures.1.readbacks.slots {
+                if slot.result.ticket == work.ticket {
+                    slot.result.origin = origin;
+                }
+            }
+            let Some(source) = self.textures[work.texture_id].os.gl_texture else {
+                work.completion.finish(Err(ReadbackError::NotRendered));
+                continue;
+            };
+            let gl = self.os.gl();
+            unsafe {
+                const PACK: u32 = 0x88eb; // GL_PIXEL_PACK_BUFFER
+                let mut framebuffer = 0;
+                let mut buffer = 0;
+                let mut old_fbo = 0;
+                let mut old_buffer = 0;
+                let mut old_pack = 0;
+                let mut old_row = 0;
+                let mut old_skip_rows = 0;
+                let mut old_skip_pixels = 0;
+                (functions.integer)(0x8caa, &mut old_fbo); // READ_FRAMEBUFFER_BINDING
+                (functions.integer)(0x88ed, &mut old_buffer);
+                (functions.integer)(0x0d05, &mut old_pack);
+                (functions.integer)(0x0d02, &mut old_row);
+                (functions.integer)(0x0d03, &mut old_skip_rows);
+                (functions.integer)(0x0d04, &mut old_skip_pixels);
+                (gl.glGenFramebuffers)(1, &mut framebuffer);
+                (gl.glGenBuffers)(1, &mut buffer);
+                (gl.glBindFramebuffer)(0x8ca8, framebuffer); // READ_FRAMEBUFFER
+                (gl.glFramebufferTexture2D)(
+                    0x8ca8,
+                    gl_sys::COLOR_ATTACHMENT0,
+                    gl_sys::TEXTURE_2D,
+                    source,
+                    0,
+                );
+                let complete = (functions.framebuffer_status)(0x8ca8) == 0x8cd5;
+                (gl.glBindBuffer)(PACK, buffer);
+                (gl.glBufferData)(
+                    PACK,
+                    (work.width * work.height * 4) as isize,
+                    std::ptr::null(),
+                    0x88e1,
+                ); // STREAM_READ
+                (gl.glPixelStorei)(0x0d05, 1);
+                (gl.glPixelStorei)(0x0d02, 0);
+                (gl.glPixelStorei)(0x0d03, 0);
+                (gl.glPixelStorei)(0x0d04, 0);
+                if complete {
+                    (gl.glReadPixels)(
+                        0,
+                        0,
+                        work.width as i32,
+                        work.height as i32,
+                        gl_sys::RGBA,
+                        gl_sys::UNSIGNED_BYTE,
+                        std::ptr::null_mut(),
+                    );
+                }
+                let fence = (functions.create)(0x9117, 0);
+                let error = (gl.glGetError)();
+                (gl.glPixelStorei)(0x0d05, old_pack);
+                (gl.glPixelStorei)(0x0d02, old_row);
+                (gl.glPixelStorei)(0x0d03, old_skip_rows);
+                (gl.glPixelStorei)(0x0d04, old_skip_pixels);
+                (gl.glBindBuffer)(PACK, old_buffer as u32);
+                (gl.glBindFramebuffer)(0x8ca8, old_fbo as u32);
+                if !complete || fence.is_null() || error != 0 {
+                    if !fence.is_null() {
+                        (functions.delete)(fence);
+                    }
+                    (gl.glDeleteBuffers)(1, &buffer);
+                    (gl.glDeleteFramebuffers)(1, &framebuffer);
+                    work.completion.finish(Err(if error == 0x0507 {
+                        ReadbackError::DeviceLost
+                    } else {
+                        ReadbackError::Failed
+                    }));
+                    continue;
+                }
+                (gl.glFlush)();
+                if pass.is_none() {
+                    self.textures.1.serials.submit();
+                }
+                // The dedicated FBO retains the exact source image after
+                // Texture::release; it survives until this fence/copy retires.
+                self.textures.1.gl_readbacks.jobs.push(GlReadback {
+                    work,
+                    framebuffer,
+                    buffer,
+                    fence,
+                    mapped: false,
+                    copy: None,
+                    receive: None,
+                });
+            }
+        }
+        self.gl_poll_readback_leases(functions);
+    }
+
+    fn gl_poll_readback_leases(&mut self, functions: GlReadbackFunctions) {
+        use crate::texture::ReadbackError;
+        if unsafe { (self.os.gl().glGetError)() } == 0x0507 {
+            // CONTEXT_LOST
+            self.textures.1.gl_readbacks.device_lost = true;
+            self.fail_pending_readbacks(ReadbackError::DeviceLost);
+            self.gl_finish_lost_readback_leases();
+            return;
+        }
+        let mut jobs = std::mem::take(&mut self.textures.1.gl_readbacks.jobs);
+        let mut pending = Vec::new();
+        let gl = self.os.gl();
+        let worker = self.textures.1.gl_readbacks.worker.as_ref().unwrap();
+        unsafe {
+            const PACK: u32 = 0x88eb;
+            let mut old_buffer = 0;
+            (functions.integer)(0x88ed, &mut old_buffer);
+            for mut job in jobs.drain(..) {
+                let mut result = None;
+                if !job.mapped {
+                    match (functions.poll)(job.fence, 0, 0) {
+                        0x911a | 0x911c => {
+                            (gl.glBindBuffer)(PACK, job.buffer);
+                            let length = job.work.width * job.work.height * 4;
+                            let address = (functions.map)(PACK, 0, length as isize, 1) as usize; // MAP_READ_BIT
+                            job.mapped = address != 0;
+                            if address == 0 || length > job.work.reserved_bytes {
+                                result = Some(Err(ReadbackError::Failed));
+                            } else {
+                                let width = job.work.width;
+                                let height = job.work.height;
+                                let (send, receive) = std::sync::mpsc::sync_channel(1);
+                                job.receive = Some(receive);
+                                // The renderer retains the mapped PBO and does
+                                // not unmap/delete it until this lease returns.
+                                job.copy = Some(Box::new(move || {
+                                    let bytes = crate::texture::copy_readback_rows(
+                                        address,
+                                        width * 4,
+                                        width,
+                                        height,
+                                    );
+                                    let _ = send.try_send(bytes);
+                                }));
+                            }
+                        }
+                        0x911b => {} // TIMEOUT_EXPIRED: zero wait, try next signal.
+                        _ => result = Some(Err(ReadbackError::DeviceLost)),
+                    }
+                }
+                if let Some(copy) = job.copy.take() {
+                    if let Err((copy, disconnected)) = worker.try_copy(copy) {
+                        if disconnected {
+                            drop(copy);
+                            result = Some(Err(ReadbackError::Failed));
+                        } else {
+                            job.copy = Some(copy);
+                        }
+                    }
+                }
+                if let Some(receive) = &job.receive {
+                    match receive.try_recv() {
+                        Ok(bytes) => result = Some(Ok(bytes)),
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            result = Some(Err(ReadbackError::Failed))
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                    }
+                }
+                if let Some(mut result) = result {
+                    if job.mapped {
+                        (gl.glBindBuffer)(PACK, job.buffer);
+                        if (functions.unmap)(PACK) == 0 {
+                            result = Err(ReadbackError::DeviceLost);
+                        }
+                    }
+                    (functions.delete)(job.fence);
+                    (gl.glDeleteBuffers)(1, &job.buffer);
+                    (gl.glDeleteFramebuffers)(1, &job.framebuffer);
+                    job.work.completion.finish(result);
+                } else {
+                    pending.push(job);
+                }
+            }
+            (gl.glBindBuffer)(PACK, old_buffer as u32);
+        }
+        worker.set_active(
+            !pending.is_empty()
+                || self
+                    .textures
+                    .1
+                    .readbacks
+                    .slots
+                    .iter()
+                    .any(|slot| slot.pending && slot.pass.is_none()),
+        );
+        self.textures.1.gl_readbacks.jobs = pending;
+    }
+
+    fn gl_finish_lost_readback_leases(&mut self) {
+        use crate::texture::ReadbackError;
+        let jobs = std::mem::take(&mut self.textures.1.gl_readbacks.jobs);
+        let mut pending = Vec::new();
+        for mut job in jobs {
+            // Never unmap while a worker still holds the pointer. A lost
+            // context owns destruction of its GL names; no further GL calls
+            // are issued, and this renderer cannot allocate new staging.
+            drop(job.copy.take());
+            if job.receive.as_ref().is_some_and(|receive| {
+                matches!(
+                    receive.try_recv(),
+                    Err(std::sync::mpsc::TryRecvError::Empty)
+                )
+            }) {
+                pending.push(job);
+            } else {
+                job.work.completion.finish(Err(ReadbackError::DeviceLost));
+            }
+        }
+        if let Some(worker) = &self.textures.1.gl_readbacks.worker {
+            worker.set_active(!pending.is_empty());
+        }
+        self.textures.1.gl_readbacks.jobs = pending;
+    }
+}
+
+#[cfg(not(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux")))))]
+type GlSync = *mut std::ffi::c_void;
+#[cfg(not(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux")))))]
+#[derive(Default)]
+pub(crate) struct TextureFence {
+    functions: Option<TextureFenceFunctions>,
+    pending: Option<(u64, GlSync)>,
+    framebuffers: Vec<u32>,
+}
+#[cfg(not(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux")))))]
+struct TextureFenceFunctions {
+    create: unsafe extern "C" fn(u32, u32) -> GlSync,
+    poll: unsafe extern "C" fn(GlSync, u32, u64) -> u32,
+    delete: unsafe extern "C" fn(GlSync),
+    current: unsafe extern "C" fn() -> GlSync,
+}
+#[cfg(not(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux")))))]
+impl CxOsTexture {
+    pub(crate) fn allocated_bytes(&self, cx: &Cx) -> Option<u64> {
+        #[cfg(target_os = "linux")]
+        if cx.os.vulkan_active() {
+            return None;
+        }
+        if self.gl_texture.is_none() && self.gl_renderbuffer.is_none() {
+            return None;
+        }
+        #[cfg(target_os = "linux")]
+        let display = cx.os.opengl_cx.as_ref()?;
+        #[cfg(target_os = "android")]
+        let display = cx.os.display.as_ref()?;
+        let get_proc = display.libegl.eglGetProcAddress?;
+        let gl = &display.libgl;
+        unsafe {
+            let current = get_proc(c"eglGetCurrentContext".as_ptr());
+            if current.is_null() {
+                return None;
+            }
+            let current = std::mem::transmute::<
+                *mut std::ffi::c_void,
+                unsafe extern "C" fn() -> GlSync,
+            >(current);
+            if current() != display.egl_context {
+                return None;
+            }
+            let get_integer = get_proc(c"glGetIntegerv".as_ptr());
+            if get_integer.is_null() {
+                return None;
+            }
+            let get_integer = std::mem::transmute::<
+                *mut std::ffi::c_void,
+                unsafe extern "C" fn(u32, *mut i32),
+            >(get_integer);
+            let mut total = 0u64;
+            let mut allocated = false;
+            if let Some(texture) = self.gl_texture.filter(|_| self.gl_texture_owned) {
+                let cube = self.allocation_target == gl_sys::TEXTURE_CUBE_MAP;
+                let mut previous = 0;
+                get_integer(if cube { 0x8514 } else { 0x8069 }, &mut previous);
+                (gl.glBindTexture)(self.allocation_target, texture);
+                let mut bound = 0;
+                get_integer(if cube { 0x8514 } else { 0x8069 }, &mut bound);
+                if bound as u32 != texture {
+                    (gl.glBindTexture)(self.allocation_target, previous as u32);
+                    return None;
+                }
+                for face in 0..if cube { 6 } else { 1 } {
+                    let target = if cube {
+                        gl_sys::TEXTURE_CUBE_MAP_POSITIVE_X + face
+                    } else {
+                        gl_sys::TEXTURE_2D
+                    };
+                    for level in 0..32 {
+                        let mut width = 0;
+                        let mut height = 0;
+                        (gl.glGetTexLevelParameteriv)(target, level, 0x1000, &mut width);
+                        (gl.glGetTexLevelParameteriv)(target, level, 0x1001, &mut height);
+                        if width <= 0 || height <= 0 {
+                            break;
+                        }
+                        allocated = true;
+                        // Actual component widths include conversion of unsized
+                        // formats. Missing channels report zero, including depth.
+                        let mut bits = 0u64;
+                        for parameter in [0x805c, 0x805d, 0x805e, 0x805f, 0x884a, 0x88f1] {
+                            let mut size = 0;
+                            (gl.glGetTexLevelParameteriv)(target, level, parameter, &mut size);
+                            bits += size.max(0) as u64;
+                        }
+                        total =
+                            total.saturating_add(width as u64 * height as u64 * bits.div_ceil(8));
+                        if width == 1 && height == 1 {
+                            break;
+                        }
+                    }
+                }
+                (gl.glBindTexture)(self.allocation_target, previous as u32);
+            }
+            if let Some(buffer) = self.gl_renderbuffer {
+                let query = get_proc(c"glGetRenderbufferParameteriv".as_ptr());
+                if query.is_null() {
+                    return None;
+                }
+                let query = std::mem::transmute::<
+                    *mut std::ffi::c_void,
+                    unsafe extern "C" fn(u32, u32, *mut i32),
+                >(query);
+                let mut previous = 0;
+                get_integer(0x8ca7, &mut previous); // RENDERBUFFER_BINDING
+                (gl.glBindRenderbuffer)(gl_sys::RENDERBUFFER, buffer);
+                let mut width = 0;
+                let mut height = 0;
+                query(gl_sys::RENDERBUFFER, 0x8d42, &mut width);
+                query(gl_sys::RENDERBUFFER, 0x8d43, &mut height);
+                let mut bits = 0u64;
+                for parameter in 0x8d50..=0x8d55 {
+                    let mut size = 0;
+                    query(gl_sys::RENDERBUFFER, parameter, &mut size);
+                    bits += size.max(0) as u64;
+                }
+                (gl.glBindRenderbuffer)(gl_sys::RENDERBUFFER, previous as u32);
+                if width > 0 && height > 0 {
+                    allocated = true;
+                    total = total.saturating_add(width as u64 * height as u64 * bits.div_ceil(8));
+                }
+            }
+            allocated.then_some(total)
+        }
+    }
+    fn destroy_released(&mut self, gl: &LibGl) {
+        if self.gl_texture_owned {
+            if let Some(texture) = self.gl_texture.take() {
+                unsafe {
+                    (gl.glDeleteTextures)(1, &texture);
+                }
+            }
+        }
+        if let Some(buffer) = self.gl_renderbuffer.take() {
+            unsafe {
+                (gl.glDeleteRenderbuffers)(1, &buffer);
+            }
+        }
+    }
+}
+#[cfg(not(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux")))))]
+impl Cx {
+    pub(crate) fn detach_released_texture(&mut self, id: crate::texture::TextureId) {
+        for slot in &mut self.passes.0.pool {
+            let pass = &mut slot.item;
+            if pass
+                .color_textures
+                .iter()
+                .any(|color| color.texture.texture_id() == id)
+                || pass
+                    .depth_texture
+                    .as_ref()
+                    .is_some_and(|depth| depth.texture_id() == id)
+            {
+                if let Some(framebuffer) = pass.os.gl_framebuffer.take() {
+                    self.textures.1.gl.framebuffers.push(framebuffer);
+                }
+            }
+        }
+    }
+
+    /// The explicit poll: `Cx::frame_completion_serial` and the texture release
+    /// path call this while they wait, so it always arms a fence for
+    /// outstanding work, as their contract promises.
+    pub(crate) fn poll_texture_lifetimes(&mut self) {
+        self.poll_texture_lifetimes_for(true);
+    }
+
+    /// `waiting` is false on the paint path, which polls once per frame and
+    /// only arms a fence (and pays for the flush behind it) while something it
+    /// can see is waiting on the completion serial.
+    fn poll_texture_lifetimes_for(&mut self, waiting: bool) {
+        // Vulkan retires its resources on its own frame path.
+        #[cfg(target_os = "linux")]
+        if self.os.vulkan_active() {
+            return;
+        }
+        // The adapter draws attached blocks here (no per-publication
+        // backing): dropped blocks release from this poll, contract §3.3.
+        self.publications.retire_without_backing();
+        #[cfg(target_os = "linux")]
+        let Some(display) = self.os.opengl_cx.as_ref() else {
+            return;
+        };
+        #[cfg(target_os = "android")]
+        let Some(display) = self.os.display.as_ref() else {
+            return;
+        };
+        let Some(get_proc) = display.libegl.eglGetProcAddress else {
+            return;
+        };
+        // Waiters the paint path can see: released retained-instance
+        // allocations awaiting collection, shared blocks awaiting retirement,
+        // and (checked below) retired textures.
+        let waiting = waiting
+            || self.draw_lists.1.allocations.has_pending_retirements()
+            || self.publications.has_retiring();
+        let state = &mut self.textures.1;
+        if state.gl.functions.is_none() {
+            unsafe {
+                let create = get_proc(c"glFenceSync".as_ptr());
+                let poll = get_proc(c"glClientWaitSync".as_ptr());
+                let delete = get_proc(c"glDeleteSync".as_ptr());
+                let current = get_proc(c"eglGetCurrentContext".as_ptr());
+                if create.is_null() || poll.is_null() || delete.is_null() || current.is_null() {
+                    return;
+                }
+                state.gl.functions = Some(TextureFenceFunctions {
+                    create: std::mem::transmute::<
+                        *mut std::ffi::c_void,
+                        unsafe extern "C" fn(u32, u32) -> GlSync,
+                    >(create),
+                    poll: std::mem::transmute::<
+                        *mut std::ffi::c_void,
+                        unsafe extern "C" fn(GlSync, u32, u64) -> u32,
+                    >(poll),
+                    delete: std::mem::transmute::<
+                        *mut std::ffi::c_void,
+                        unsafe extern "C" fn(GlSync),
+                    >(delete),
+                    current: std::mem::transmute::<
+                        *mut std::ffi::c_void,
+                        unsafe extern "C" fn() -> GlSync,
+                    >(current),
+                });
+            }
+        }
+        let functions = state.gl.functions.as_ref().unwrap();
+        unsafe {
+            if (functions.current)() != display.egl_context {
+                crate::trace!("gl.repaint", "lifetime poll: context not current");
+                return;
+            }
+            crate::trace!(
+                "gl.repaint",
+                "lifetime poll: submitted={} completed={} fence_pending={}",
+                state.serials.submitted.load(std::sync::atomic::Ordering::Acquire),
+                state.serials.completed.load(std::sync::atomic::Ordering::Acquire),
+                state.gl.pending.is_some()
+            );
+            for framebuffer in state.gl.framebuffers.drain(..) {
+                (display.libgl.glDeleteFramebuffers)(1, &framebuffer);
+            }
+            if let Some((serial, fence)) = state.gl.pending {
+                if matches!((functions.poll)(fence, 0, 0), 0x911a | 0x911c) {
+                    (functions.delete)(fence);
+                    state.gl.pending = None;
+                    state.serials.complete(serial);
+                }
+            }
+            let submitted = state
+                .serials
+                .submitted
+                .load(std::sync::atomic::Ordering::Acquire);
+            let completed = state
+                .serials
+                .completed
+                .load(std::sync::atomic::Ordering::Acquire);
+            if state.gl.pending.is_none()
+                && submitted > completed
+                && (waiting || !state.retired.is_empty())
+            {
+                let fence = (functions.create)(0x9117, 0); // SYNC_GPU_COMMANDS_COMPLETE
+                if !fence.is_null() {
+                    state.gl.pending = Some((submitted, fence));
+                    (display.libgl.glFlush)();
+                }
+            }
+            state.retired.retain_mut(|retired| {
+                if retired.serial > completed {
+                    return true;
+                }
+                retired.os.destroy_released(&display.libgl);
+                false
+            });
+        }
     }
 }

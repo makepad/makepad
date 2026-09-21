@@ -27,21 +27,26 @@
 //! weights (norms explicitly in f32). Here: weights stream from the f32
 //! shards converted to f16 into the device cache (each gemm sees f16
 //! operands, like autocast); activations/residual stay f32 on device; norms
-//! f32; blends and post_quant_conv host-side f32. FLUX_GEMM_F16ACC=0 gives
-//! f32-accumulate gemms (closest to torch autocast); the default f16-acc is
-//! the flux-proven speed path.
+//! f32; blends and post_quant_conv host-side f32. The VAE explicitly uses
+//! f16 accumulation while retaining f32 activations, matching the reference
+//! autocast path without process-global precision state.
 
 use crate::backend::{
-    gpu_add, gpu_attention_packed, gpu_concat_rows, gpu_conv2d_planar_cached, gpu_download,
-    gpu_gated_residual, gpu_gather_cols, gpu_gemm_f16acc_enabled, gpu_group_norm_planar,
-    gpu_layer_norm_mul_add, gpu_linear_nt_cached, gpu_rms_norm_mul, gpu_rope_half, gpu_silu,
+    gpu_add, gpu_attention_packed, gpu_attention_packed_flash2_d64, gpu_concat_rows, gpu_conv2d_planar_cached, gpu_download,
+    gpu_gated_residual, gpu_gather_cols, gpu_group_norm_planar, gpu_layer_norm_mul_add,
+    gpu_linear_nt_cached_with_precision, gpu_rms_norm_mul, gpu_rope_half, gpu_silu,
     gpu_slice_cols, gpu_slice_rows, gpu_swiglu_value_gate, gpu_upload, gpu_weight_cache_ensure,
-    GpuLinearPart, GpuTensor,
+    GemmPrecision, GpuLinearPart, GpuTensor,
 };
 use crate::h3::H3ShardedWeights;
 use crate::{DiffusionError, Result};
 use makepad_ai_common::quant::GGML_TYPE_F16;
 use makepad_ai_loader::MlxDType;
+
+pub const H3_VAE_PRECISION: GemmPrecision = GemmPrecision {
+    f16_accumulate: true,
+    f16_activations: false,
+};
 
 pub const H3_VAE_NAMESPACE: &str = "h3vae";
 pub const H3_VAE_LATENT_CHANNELS: usize = 24;
@@ -333,7 +338,7 @@ fn ensure_linear<'a>(
     k: usize,
     m: usize,
 ) -> Result<GpuLinearPart<'a>> {
-    let want_a16 = gpu_gemm_f16acc_enabled() && m > 1;
+    let want_a16 = H3_VAE_PRECISION.f16_accumulate && m > 1;
     let (dtype, _shape) = weights.tensor_dtype_shape(name)?;
     gpu_weight_cache_ensure(H3_VAE_NAMESPACE, name, GGML_TYPE_F16, n, k, want_a16, || {
         let raw = weights.tensor_bytes(name).map_err(|err| err.to_string())?;
@@ -373,7 +378,8 @@ fn linear_cached(
 ) -> Result<GpuTensor> {
     let part = ensure_linear(weights, name, n, x.cols(), x.rows())?;
     let parts = [part];
-    gpu_linear_nt_cached(x, H3_VAE_NAMESPACE, &parts, bias).map_err(DiffusionError::model)
+    gpu_linear_nt_cached_with_precision(x, H3_VAE_NAMESPACE, &parts, bias, H3_VAE_PRECISION)
+        .map_err(DiffusionError::model)
 }
 
 // ---------------------------------------------------------------------------
@@ -481,18 +487,11 @@ fn decoder_vit_forward_batch(
         .collect())
 }
 
-/// H3_VAE_PROFILE=1: print per-phase wall times of the decode.
-fn h3_vae_profile_enabled() -> bool {
-    matches!(std::env::var("H3_VAE_PROFILE"), Ok(value) if value == "1")
-}
-
 fn decoder_vit_forward_group(
     weights: &H3ShardedWeights,
     prepared: &H3VaeDecoderPrepared,
     tiles: &[&Vol], // post_quant_conv already applied; c = 24, same (f, h, w)
 ) -> Result<Vec<Vol>> {
-    let profile = h3_vae_profile_enabled();
-    let group_start = std::time::Instant::now();
     let batch = tiles.len();
     let (nf, th, tw) = (tiles[0].f, tiles[0].h, tiles[0].w);
     debug_assert!(tiles
@@ -516,7 +515,6 @@ fn decoder_vit_forward_group(
             }
         }
     }
-    let rows_built = std::time::Instant::now();
     let tokens_in = gpu_upload(&rows, batch * num_patches, H3_VAE_LATENT_CHANNELS)
         .map_err(DiffusionError::model)?;
     drop(rows);
@@ -618,8 +616,14 @@ fn decoder_vit_forward_group(
             ensure_linear(weights, &k_name, dim, dim, batch * seq)?,
             ensure_linear(weights, &v_name, dim, dim, batch * seq)?,
         ];
-        let qkv = gpu_linear_nt_cached(&normed, H3_VAE_NAMESPACE, &parts, &prepared.qkv_bias[layer])
-            .map_err(DiffusionError::model)?;
+        let qkv = gpu_linear_nt_cached_with_precision(
+            &normed,
+            H3_VAE_NAMESPACE,
+            &parts,
+            &prepared.qkv_bias[layer],
+            H3_VAE_PRECISION,
+        )
+        .map_err(DiffusionError::model)?;
         drop(normed);
         let q = gpu_slice_cols(&qkv, 0, dim).map_err(DiffusionError::model)?;
         let k = gpu_slice_cols(&qkv, dim, dim).map_err(DiffusionError::model)?;
@@ -648,11 +652,15 @@ fn decoder_vit_forward_group(
             .map_err(DiffusionError::model)?;
         let k = gpu_rope_half(&k, H3_VAE_HEADS, H3_VAE_ROT_HALF, &rope_cos, &rope_sin)
             .map_err(DiffusionError::model)?;
-        // head_dim 64 -> the composite (cublas + softmax) attention path.
-        // Per clip on row slices (see the module comment above): every clip
-        // sees the exact (S, 2048) call the sequential decoder made.
+        // Clips remain independent: concatenating their attention sequences
+        // would mix unrelated spatial tiles. Keep composite for numerical A/B.
+        let attention = if std::env::var("H3_VAE_ATTENTION").as_deref() == Ok("composite") {
+            gpu_attention_packed
+        } else {
+            gpu_attention_packed_flash2_d64
+        };
         let attn = if batch == 1 {
-            gpu_attention_packed(&q, &k, &v, H3_VAE_HEADS, scale)
+            attention(&q, &k, &v, H3_VAE_HEADS, scale)
                 .map_err(DiffusionError::model)?
         } else {
             let mut parts = Vec::with_capacity(batch);
@@ -664,7 +672,7 @@ fn decoder_vit_forward_group(
                 let v_clip =
                     gpu_slice_rows(&v, clip * seq, seq).map_err(DiffusionError::model)?;
                 parts.push(
-                    gpu_attention_packed(&q_clip, &k_clip, &v_clip, H3_VAE_HEADS, scale)
+                    attention(&q_clip, &k_clip, &v_clip, H3_VAE_HEADS, scale)
                         .map_err(DiffusionError::model)?,
                 );
             }
@@ -729,10 +737,8 @@ fn decoder_vit_forward_group(
         &prepared.proj_out_bias,
     )?;
     drop(hidden);
-    let submitted = std::time::Instant::now();
     let host = gpu_download(&projected).map_err(DiffusionError::model)?;
     drop(projected);
-    let downloaded = std::time::Instant::now();
 
     // Unpatchify per clip (register/cls rows dropped): row (f, y, x) holds
     // (c, pt, py, px) c-major -> (3, nf*4, th*16, tw*16).
@@ -760,15 +766,6 @@ fn decoder_vit_forward_group(
             }
         }
         outputs.push(out);
-    }
-    if profile {
-        eprintln!(
-            "[vae-profile] group b={batch}: rows {:.3}s submit {:.3}s device+dl {:.3}s unpatch {:.3}s",
-            (rows_built - group_start).as_secs_f64(),
-            (submitted - rows_built).as_secs_f64(),
-            (downloaded - submitted).as_secs_f64(),
-            downloaded.elapsed().as_secs_f64(),
-        );
     }
     Ok(outputs)
 }
@@ -952,29 +949,6 @@ pub struct H3VaeDecodeRun {
 /// Decode DENORMALIZED latents (24, T, lh, lw) into raw ImageNet-normalized
 /// frames. Mirrors `_decode`: post_quant_conv, temporal chunks of 5+2 latent
 /// frames -> 28 pixel frames, per-chunk frame slicing and 5-frame cross-fade.
-/// Restores an env var to its previous state on drop (scoped knob override).
-struct EnvGuard {
-    key: &'static str,
-    prev: Option<String>,
-}
-
-impl EnvGuard {
-    fn set(key: &'static str, value: &str) -> Self {
-        let prev = std::env::var(key).ok();
-        std::env::set_var(key, value);
-        Self { key, prev }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        match &self.prev {
-            Some(value) => std::env::set_var(self.key, value),
-            None => std::env::remove_var(self.key),
-        }
-    }
-}
-
 pub fn h3_vae_decode(
     weights: &H3ShardedWeights,
     prepared: &H3VaeDecoderPrepared,
@@ -1005,19 +979,6 @@ pub fn h3_vae_decode_ctrl(
     latent_width: usize,
     ctrl: Option<&mut H3VaeCtrl>,
 ) -> Result<H3VaeDecodeRun> {
-    // The reference decodes the video VAE under f16 AUTOCAST (weights f32,
-    // math f16) — H3's f16-overflow hazard is a DiT/TE activation property,
-    // not a VAE one. So the VAE stage scopes f16-accumulate gemms ON even
-    // when the surrounding pipeline pins FLUX_GEMM_F16ACC=0 for the DiT/TE
-    // (f32-acc gemms measured 4-5x slower here, and are LESS faithful to the
-    // reference's autocast). H3_VAE_F16ACC=0 opts back out. The f16 activation
-    // spine stays off: these ops were validated with f32 activations.
-    let vae_f16acc = std::env::var("H3_VAE_F16ACC")
-        .map(|value| value != "0")
-        .unwrap_or(true);
-    let _gemm_guard = vae_f16acc.then(|| EnvGuard::set("FLUX_GEMM_F16ACC", "1"));
-    let _act_guard = vae_f16acc.then(|| EnvGuard::set("FLUX_ACT_F16", "0"));
-
     let (c, lh, lw) = (H3_VAE_LATENT_CHANNELS, latent_height, latent_width);
     if latents.len() != c * num_latent_frames * lh * lw {
         return Err(DiffusionError::workflow(format!(
@@ -1048,8 +1009,6 @@ pub fn h3_vae_decode_ctrl(
         }
     }
 
-    let profile = h3_vae_profile_enabled();
-    let decode_start = std::time::Instant::now();
     let (pad_tokens, num_chunks) = h3_vae_chunk_plan(num_latent_frames);
     let z = if pad_tokens > 0 {
         let mut padded = Vol::zeros(c, num_latent_frames + pad_tokens, lh, lw);
@@ -1090,11 +1049,9 @@ pub fn h3_vae_decode_ctrl(
             all_tiles.extend(split_clip_tiles(&clip_latent, &tiling));
         }
     }
-    let prep_done = std::time::Instant::now();
     let mut tile_outputs =
         decoder_vit_forward_batch(weights, prepared, &all_tiles, ctrl)?.into_iter();
     drop(all_tiles);
-    let vit_done = std::time::Instant::now();
 
     let chunk_num_frames = H3_VAE_TOKENS_CHUNK * H3_VAE_PATCH_T; // 20
     let mut decoded: Vec<Vol> = Vec::new();
@@ -1163,16 +1120,6 @@ pub fn h3_vae_decode_ctrl(
     } else {
         raw
     };
-    if profile {
-        eprintln!(
-            "[vae-profile] decode: prep {:.3}s vit {:.3}s stitch+assemble {:.3}s total {:.3}s",
-            (prep_done - decode_start).as_secs_f64(),
-            (vit_done - prep_done).as_secs_f64(),
-            vit_done.elapsed().as_secs_f64(),
-            decode_start.elapsed().as_secs_f64(),
-        );
-    }
-
     Ok(H3VaeDecodeRun { raw })
 }
 

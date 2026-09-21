@@ -1,0 +1,42 @@
+# files — the file browser of the Makepad desktop: standalone window, and a
+# module (src/module.rs) the window manager seats in-process.
+
+[package]
+name = "makepad-files"
+version = "0.1.0"
+edition = "2021"
+default-run = "files"
+
+[[bin]]
+name = "files"
+path = "src/main.rs"
+required-features = ["standalone"]
+
+[lib]
+name = "makepad_files"
+path = "src/lib.rs"
+
+[features]
+dynamic-module = []
+default = ["standalone"]
+demo = []
+# The standalone window and the local model. A host that links the MODULE
+# (makepad-wm) leaves this off and gets the lib only.
+standalone = ["chat"]
+chat = ["dep:makepad-ai-hub"]
+
+[dependencies]
+makepad-widgets = { path = "../../widgets" }
+makepad-diskmap = { path = "../../libs/diskmap" }
+makepad-wm-theme = { path = "../../libs/wm_theme" }
+makepad-wm-api = { path = "../../libs/wm_api" }
+# The AI services wire: bounded read and confirmed mutation tools on the bus
+# (hosted port, id-correlated runner — see ai_service.rs).
+makepad-ai-services = { path = "../../libs/ai/services" }
+makepad-strict-json = { path = "../../libs/strict_json" }
+# The module contract: what the window manager seats in-process (src/module.rs).
+makepad-app-module = { path = "../../libs/app_module" }
+# The ask panel's local model: an in-process Qwen GGUF on makepad-ggml, loaded
+# only when the panel is first opened. Standalone only — a host that links the
+# MODULE leaves this off.
+makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false, features = ["llm"], optional = true }

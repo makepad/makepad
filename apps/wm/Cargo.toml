@@ -1,0 +1,52 @@
+# wm — makepad window manager. An Omarchy-behaving tiling window manager
+# built as a Makepad app.
+#
+# Nested mode (this crate, all desktop OSes): wm owns one OS window,
+# fullscreen it and it is the desktop. Tiles host other Makepad apps as
+# child processes through the Studio runview mechanism: a tiny in-process
+# websocket hub accepts `--stdin-loop` clients, each tile shares a GPU
+# swapchain (IOSurface / DXGI handle / DMA-BUF) with its child and forwards
+# input over the studio protocol.
+#
+# In-process mode (apps/wm-all, iOS and the web): the same desk hosts app
+# crates linked in as MODULES (libs/app_module), one splash isolate each,
+# drawn into the desk's own texture. This crate is a LIBRARY for that: the
+# `wm` binary here is the desktop build (src/main.rs), and an all-in-one
+# project links `makepad-wm` plus its app crates and sets the `WmBuild`
+# (src/build.rs). No app crate is a dependency of wm itself.
+#
+# Session mode (later, Linux only): the same layout/chrome/protocol with a
+# Wayland compositor display backend instead of a Makepad window. The
+# layout tree, keybindings, theming and client management are kept free of
+# nested-mode assumptions for that reason.
+
+[package]
+name = "makepad-wm"
+version = "0.1.0"
+edition = "2021"
+default-run = "wm"
+
+[lib]
+name = "makepad_wm"
+path = "src/lib.rs"
+
+[[bin]]
+name = "wm"
+path = "src/main.rs"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets" }
+makepad-studio-protocol = { path = "../../platform/studio" }
+makepad-network = { path = "../../platform/network" }
+makepad-wm-api = { path = "../../libs/wm_api" }
+# The AI services wire only: the WM relays frames between the aichat child and the apps.
+makepad-ai-services = { path = "../../libs/ai/services" }
+makepad-strict-json = { path = "../../libs/strict_json" }
+# In-process hosting (aicontrol §3): the module contract and the palette
+# applied into each instance's isolate. Which modules a build links is the
+# binary's say (src/build.rs), never a feature of this crate.
+makepad-app-module = { path = "../../libs/app_module" }
+makepad-wm-theme = { path = "../../libs/wm_theme" }
+libloading = { path = "../../libs/vulkan/libloading" }
+# The super-app unpacks its shipped toolchain and checkout with our own reader.
+makepad-tar = { path = "../../libs/tar" }

@@ -14,6 +14,7 @@ use crate::plan::Planner;
 use crate::schema::{IndexInfo, Schema, TableInfo};
 use crate::sql::ast::*;
 use crate::sql::parse::parse;
+use crate::storage::{MemoryStoreSet, PageStore, PageStoreSet, StoreKind, StoreOpenOptions};
 use crate::value::{
     apply_affinity, compare_records, encode_record, Collation, TextMode, Value,
 };
@@ -22,6 +23,7 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Most prepared statements kept per connection.
@@ -50,10 +52,109 @@ pub struct Connection {
 impl Connection {
     /// Open (or create) a database for reading and writing.
     pub fn open(path: &Path, busy_timeout: Duration) -> Result<Connection> {
-        if !path.exists() || std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) == 0 {
-            create_empty_database(path)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let stores: Arc<dyn PageStoreSet> =
+                Arc::new(crate::storage::FileStoreSet::new(path));
+            return Self::open_store(stores, busy_timeout);
         }
-        let mut pager = Pager::open_rw(path, busy_timeout)?;
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (path, busy_timeout);
+            Err(Error::unsupported(
+                "filesystem databases are unavailable on wasm32; use open_memory or open_with",
+            ))
+        }
+    }
+
+    /// Open an existing database for reading only: a library shipped inside
+    /// an application bundle, a file on a read-only volume, a database
+    /// another process owns. The main file is opened without write access
+    /// and never written, no journal or WAL is created (an existing WAL is
+    /// read for consistency, without its shared-memory lock when that
+    /// cannot be created), readers take SHARED locks only, and every
+    /// statement that would write answers [`crate::pager::READ_ONLY_CONNECTION`].
+    /// A hot journal left by a crashed writer is refused as busy: only a
+    /// writer may recover it. A missing or empty file is an error, never
+    /// created.
+    pub fn open_read_only(path: &Path, busy_timeout: Duration) -> Result<Connection> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let stores: Arc<dyn PageStoreSet> =
+                Arc::new(crate::storage::FileStoreSet::new(path));
+            return Self::open_store_read_only(stores, busy_timeout);
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (path, busy_timeout);
+            Err(Error::unsupported(
+                "filesystem databases are unavailable on wasm32; use open_memory or open_with",
+            ))
+        }
+    }
+
+    /// [`Connection::open_read_only`] over a caller-supplied store set.
+    pub fn open_store_read_only(
+        stores: Arc<dyn PageStoreSet>,
+        busy_timeout: Duration,
+    ) -> Result<Connection> {
+        let mut pager = Pager::open_store_with_cache(stores, crate::pager::DEFAULT_CACHE_PAGES)?;
+        pager.set_busy_timeout(busy_timeout);
+        pager.begin_read()?;
+        let schema = Schema::load(&mut pager)?;
+        let schema_cookie = pager.header().schema_cookie;
+        let mut connection = Connection {
+            pager,
+            schema,
+            schema_cookie,
+            plans: HashMap::new(),
+            limits: Limits::default(),
+            changes: 0,
+            total_changes: 0,
+            autocommit: true,
+        };
+        connection.release_idle_locks();
+        Ok(connection)
+    }
+
+    /// True for a connection from [`Connection::open_read_only`].
+    pub fn is_read_only(&self) -> bool {
+        !self.pager.is_writable()
+    }
+
+    /// Open a fresh database whose main file and rollback journal are memory
+    /// backed. The returned connection owns the store set.
+    pub fn open_memory() -> Result<Connection> {
+        Self::open_with(MemoryStoreSet::new())
+    }
+
+    /// Open (or initialize) a database supplied by the caller.
+    pub fn open_with<S: PageStoreSet + 'static>(store_set: S) -> Result<Connection> {
+        Self::open_with_timeout(store_set, Duration::from_secs(5))
+    }
+
+    pub fn open_with_timeout<S: PageStoreSet + 'static>(
+        store_set: S,
+        busy_timeout: Duration,
+    ) -> Result<Connection> {
+        Self::open_store(Arc::new(store_set), busy_timeout)
+    }
+
+    fn open_store(
+        stores: Arc<dyn PageStoreSet>,
+        busy_timeout: Duration,
+    ) -> Result<Connection> {
+        let main = stores
+            .open(StoreKind::Main, StoreOpenOptions::CREATE)?
+            .expect("create always returns a store");
+        if main.len()? == 0 {
+            initialize_store(main.as_ref())?;
+        }
+        // On POSIX, closing any descriptor for an inode releases this
+        // process's fcntl locks on it. Drop the initialization handle before
+        // the pager opens and locks its long-lived main-file handle.
+        drop(main);
+        let mut pager = Pager::open_store_rw(stores, busy_timeout)?;
         pager.begin_read()?;
         let schema = Schema::load(&mut pager)?;
         let schema_cookie = pager.header().schema_cookie;
@@ -331,6 +432,11 @@ impl Connection {
             .ok_or_else(|| Error::sql(format!("no such table: {name}")))?;
         if let Some(why) = &t.unsupported {
             return Err(Error::sql(format!("table {name} is unsupported: {why}")));
+        }
+        if t.without_rowid {
+            // Readable (see exec::scan_without_rowid); the key-ordered writer
+            // is not implemented.
+            return Err(Error::unsupported("writing to WITHOUT ROWID tables"));
         }
         if t.root_page == 0 {
             return Err(Error::sql(format!("table {name} has no b-tree")));
@@ -986,6 +1092,9 @@ impl Connection {
         if let Some(why) = &parsed.unsupported {
             return Err(Error::unsupported(why.clone()));
         }
+        if parsed.without_rowid {
+            return Err(Error::unsupported("creating WITHOUT ROWID tables"));
+        }
         let root = {
             let mut w = BtreeWriter::new(&mut self.pager);
             w.create_btree(false)?
@@ -1431,6 +1540,22 @@ fn split_statements(sql: &str) -> Vec<String> {
 /// Write a fresh, empty database: a 100-byte header and page 1 as an empty
 /// `sqlite_master` leaf.
 pub fn create_empty_database(path: &Path) -> Result<()> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let stores = crate::storage::FileStoreSet::new(path);
+        let file = stores
+            .open(StoreKind::Main, StoreOpenOptions::CREATE_TRUNCATE)?
+            .expect("create always returns a store");
+        return initialize_store(file.as_ref());
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = path;
+        Err(Error::unsupported("filesystem databases are unavailable on wasm32"))
+    }
+}
+
+fn initialize_store(store: &dyn PageStore) -> Result<()> {
     let page_size: usize = 4096;
     let mut page = vec![0u8; page_size];
     page[0..16].copy_from_slice(crate::pager::MAGIC);
@@ -1454,6 +1579,7 @@ pub fn create_empty_database(path: &Path) -> Result<()> {
     let content_start = page_size as u16;
     page[105..107].copy_from_slice(&content_start.to_be_bytes());
     page[107] = 0;
-    std::fs::write(path, &page)?;
+    store.truncate(0)?;
+    store.write_at(0, &page)?;
     Ok(())
 }

@@ -52,6 +52,24 @@ pub struct Font {
 }
 
 impl Font {
+    pub(super) fn worker_definition(&self) -> super::async_labels::FontSnapshot {
+        let (data, index, variations) = self.face.worker_source();
+        let (ascender, descender) = self.face.with_ttf_parser_face(|f| {
+            (
+                f.ascender() as f32 / self.units_per_em,
+                f.descender() as f32 / self.units_per_em,
+            )
+        });
+        super::async_labels::FontSnapshot {
+            id: self.id,
+            data,
+            index,
+            variations,
+            ascender_fudge: self.ascender_in_ems - ascender,
+            descender_fudge: self.descender_in_ems - descender,
+        }
+    }
+
     pub fn new(
         id: FontId,
         rasterizer: Rc<RefCell<Rasterizer>>,
@@ -356,5 +374,23 @@ mod tests {
             .rasterize_glyph(glyph_id, dpxs_per_em)
             .expect("emoji glyph should rasterize");
         assert_eq!(rasterized.atlas_kind, AtlasKind::Color);
+    }
+
+    #[test]
+    fn jetbrains_ui_symbol_fallback_has_permissive_license_and_required_cmap() {
+        let chars = ['⌘', '⇧', '⌥', '⌃', '⏎', '←', '→', '↑', '↓', '•', '…'];
+        let font = make_font(bundled_font_path("jetbrains_mono_variable.ttf"));
+        font.with_ttf_parser_face(|face| {
+            let license = face
+                .names()
+                .into_iter()
+                .find(|record| record.name_id == 13)
+                .and_then(|record| record.to_string())
+                .expect("UI fallback must carry its license in the font name table");
+            assert!(license.contains("SIL Open Font License, Version 1.1"));
+            for ch in chars {
+                assert!(face.glyph_index(ch).is_some(), "UI fallback is missing {ch:?}");
+            }
+        });
     }
 }

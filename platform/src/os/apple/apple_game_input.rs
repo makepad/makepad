@@ -31,6 +31,8 @@ pub struct AppleGameInput {
     gc_gamepads: Vec<GameInputInfo>,
     gc_states: Vec<GameInputState>,
     #[cfg(target_os = "macos")]
+    haptics: Vec<Option<AppleControllerHaptics>>,
+    #[cfg(target_os = "macos")]
     raw_hid: AppleRawHidInput,
 }
 
@@ -42,6 +44,8 @@ impl AppleGameInput {
             states: Vec::new(),
             gc_gamepads: Vec::new(),
             gc_states: Vec::new(),
+            #[cfg(target_os = "macos")]
+            haptics: Vec::new(),
             #[cfg(target_os = "macos")]
             raw_hid: AppleRawHidInput::new(),
         }
@@ -156,6 +160,8 @@ impl AppleGameInput {
         self.controllers.push(ptr);
         self.gc_states
             .push(GameInputState::Gamepad(GamepadState::default()));
+        #[cfg(target_os = "macos")]
+        self.haptics.push(unsafe { AppleControllerHaptics::new(ptr) });
     }
 
     pub fn on_disconnected(&mut self, info: &GameInputInfo) {
@@ -164,6 +170,8 @@ impl AppleGameInput {
             self.gc_gamepads.remove(index);
             self.controllers.remove(index);
             self.gc_states.remove(index);
+            #[cfg(target_os = "macos")]
+            self.haptics.remove(index);
             unsafe {
                 let _: () = msg_send![ptr, release];
             }
@@ -276,7 +284,254 @@ impl AppleGameInput {
 }
 
 #[cfg(target_os = "macos")]
+#[link(name = "GameController", kind = "framework")]
+unsafe extern "C" {
+    static GCHapticsLocalityDefault: ObjcId;
+    static GCHapticsLocalityLeftHandle: ObjcId;
+    static GCHapticsLocalityRightHandle: ObjcId;
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "CoreHaptics", kind = "framework")]
+unsafe extern "C" {
+    static CHHapticEventTypeHapticContinuous: ObjcId;
+    static CHHapticEventParameterIDHapticIntensity: ObjcId;
+    static CHHapticEventParameterIDHapticSharpness: ObjcId;
+}
+
+/// One platform-owned Core Haptics engine. Engines start asynchronously;
+/// the UI can keep polling/publishing without waiting for Bluetooth or the
+/// haptic server. Short retained players are reaped on the next sample.
+#[cfg(target_os = "macos")]
+struct AppleHapticChannel {
+    engine: ObjcId,
+    ready: Arc<AtomicBool>,
+    players: Vec<(ObjcId, std::time::Instant)>,
+}
+
+#[cfg(target_os = "macos")]
+impl AppleHapticChannel {
+    unsafe fn new(device_haptics: ObjcId, locality: ObjcId) -> Option<Self> {
+        let engine: ObjcId = msg_send![device_haptics, createEngineWithLocality: locality];
+        if engine == nil {
+            return None;
+        }
+        let _: ObjcId = msg_send![engine, retain];
+        let () = msg_send![engine, setPlaysHapticsOnly: YES];
+        let ready = Arc::new(AtomicBool::new(false));
+        let ready_cb = Arc::clone(&ready);
+        let completion = objc_block!(move |error: ObjcId| {
+            ready_cb.store(error == nil, Ordering::Release);
+        });
+        let () = msg_send![engine, startWithCompletionHandler: &completion];
+        Some(Self { engine, ready, players: Vec::new() })
+    }
+
+    unsafe fn pulse(&mut self, intensity: f32, sharpness: f32, duration_s: f32) -> bool {
+        let now = std::time::Instant::now();
+        self.players.retain(|(player, until)| {
+            if *until > now {
+                true
+            } else {
+                let _: () = msg_send![*player, release];
+                false
+            }
+        });
+        if !self.ready.load(Ordering::Acquire) || intensity <= 0.001 {
+            return self.ready.load(Ordering::Acquire);
+        }
+
+        let intensity_param: ObjcId = msg_send![class!(CHHapticEventParameter), alloc];
+        let intensity_param: ObjcId = msg_send![
+            intensity_param,
+            initWithParameterID: CHHapticEventParameterIDHapticIntensity
+            value: intensity.clamp(0.0, 1.0)
+        ];
+        let sharpness_param: ObjcId = msg_send![class!(CHHapticEventParameter), alloc];
+        let sharpness_param: ObjcId = msg_send![
+            sharpness_param,
+            initWithParameterID: CHHapticEventParameterIDHapticSharpness
+            value: sharpness.clamp(0.0, 1.0)
+        ];
+        let parameters: ObjcId = msg_send![class!(NSMutableArray), arrayWithCapacity: 2usize];
+        let () = msg_send![parameters, addObject: intensity_param];
+        let () = msg_send![parameters, addObject: sharpness_param];
+
+        let event: ObjcId = msg_send![class!(CHHapticEvent), alloc];
+        let duration = duration_s.clamp(0.01, 0.25) as f64;
+        let event: ObjcId = msg_send![
+            event,
+            initWithEventType: CHHapticEventTypeHapticContinuous
+            parameters: parameters
+            relativeTime: 0.0f64
+            duration: duration
+        ];
+        let events: ObjcId = msg_send![class!(NSArray), arrayWithObject: event];
+        let empty: ObjcId = msg_send![class!(NSArray), array];
+        let mut error: ObjcId = nil;
+        let pattern: ObjcId = msg_send![class!(CHHapticPattern), alloc];
+        let pattern: ObjcId = msg_send![
+            pattern,
+            initWithEvents: events
+            parameters: empty
+            error: &mut error
+        ];
+        let mut ok = pattern != nil && error == nil;
+        let player: ObjcId = if ok {
+            msg_send![self.engine, createPlayerWithPattern: pattern error: &mut error]
+        } else {
+            nil
+        };
+        if player != nil && error == nil {
+            let _: ObjcId = msg_send![player, retain];
+            let started: BOOL = msg_send![player, startAtTime: 0.0f64 error: &mut error];
+            ok = started == YES && error == nil;
+            if ok {
+                self.players.push((player, now + std::time::Duration::from_secs_f64(duration + 0.05)));
+            } else {
+                let _: () = msg_send![player, release];
+            }
+        } else {
+            ok = false;
+        }
+        let _: () = msg_send![intensity_param, release];
+        let _: () = msg_send![sharpness_param, release];
+        let _: () = msg_send![event, release];
+        if pattern != nil {
+            let _: () = msg_send![pattern, release];
+        }
+        ok
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for AppleHapticChannel {
+    fn drop(&mut self) {
+        unsafe {
+            for (player, _) in self.players.drain(..) {
+                let mut error: ObjcId = nil;
+                let _: BOOL = msg_send![player, stopAtTime: 0.0f64 error: &mut error];
+                let _: () = msg_send![player, release];
+            }
+            let () = msg_send![self.engine, stopWithCompletionHandler: nil];
+            let _: () = msg_send![self.engine, release];
+        }
+    }
+}
+
+/// Per-controller left/right handle channels. A controller with only the
+/// default locality uses one channel and receives the stronger side.
+#[cfg(target_os = "macos")]
+struct AppleControllerHaptics {
+    left: AppleHapticChannel,
+    right: Option<AppleHapticChannel>,
+}
+
+#[cfg(target_os = "macos")]
+impl AppleControllerHaptics {
+    unsafe fn new(controller: ObjcId) -> Option<Self> {
+        let selector = Sel::register("haptics");
+        if !msg_send![controller, respondsToSelector: selector] {
+            return None;
+        }
+        let haptics: ObjcId = msg_send![controller, haptics];
+        if haptics == nil {
+            return None;
+        }
+        let supported: ObjcId = msg_send![haptics, supportedLocalities];
+        let has_left: BOOL = msg_send![supported, containsObject: GCHapticsLocalityLeftHandle];
+        let has_right: BOOL = msg_send![supported, containsObject: GCHapticsLocalityRightHandle];
+        if has_left == YES && has_right == YES {
+            Some(Self {
+                left: AppleHapticChannel::new(haptics, GCHapticsLocalityLeftHandle)?,
+                right: AppleHapticChannel::new(haptics, GCHapticsLocalityRightHandle),
+            })
+        } else {
+            Some(Self {
+                left: AppleHapticChannel::new(haptics, GCHapticsLocalityDefault)?,
+                right: None,
+            })
+        }
+    }
+
+    fn capabilities(&self) -> GamepadHapticCapabilities {
+        GamepadHapticCapabilities { handles: true, separate_handles: self.right.is_some() }
+    }
+
+    unsafe fn pulse(&mut self, pulse: GamepadHapticPulse) -> bool {
+        if let Some(right) = &mut self.right {
+            let left_ok = self.left.pulse(pulse.left, pulse.sharpness, pulse.duration_s);
+            let right_ok = right.pulse(pulse.right, pulse.sharpness, pulse.duration_s);
+            left_ok && right_ok
+        } else {
+            self.left.pulse(pulse.left.max(pulse.right), pulse.sharpness, pulse.duration_s)
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
 const APPLE_RAW_HID_XBOX_VENDOR_ID: u32 = 0x045e;
+/// Racing-wheel vendors the raw HID path claims: their reports are parsed
+/// by HID usage (steering = X, pedals = the next axes, buttons = the button
+/// page) and the device is handed out for output reports — the way force
+/// feedback is driven, which the Game Controller framework does not
+/// expose. Logitech, Thrustmaster, Fanatec, Moza, Simucube, Asetek. A
+/// device from one of these vendors that is not a known wheel (a Logitech
+/// Extreme 3D, a Thrustmaster HOTAS) is a JOYSTICK, as is any other
+/// joystick-class device (primary usage Joystick or Multi-axis).
+#[cfg(target_os = "macos")]
+const APPLE_RAW_HID_WHEEL_VENDOR_IDS: [u32; 6] = [0x046d, 0x044f, 0x0eb7, 0x346e, 0x16d0, 0x2433];
+
+/// Is this vendor/product a racing wheel? Fanatec, Moza, Simucube and
+/// Asetek make nothing else; Logitech and Thrustmaster need their wheel
+/// product tables (the same ids the FFB protocols key on).
+#[cfg(target_os = "macos")]
+fn apple_raw_hid_is_wheel(vendor_id: u32, product_id: u32) -> bool {
+    match vendor_id {
+        0x0eb7 | 0x346e | 0x16d0 | 0x2433 => true,
+        // Logitech: WingMan FFG, MOMO, DFP, G25, DFGT, G27, MOMO2, G29,
+        // G920, G923 (PS), G923 (Xbox), Driving Force, Formula Force EX.
+        0x046d => matches!(
+            product_id,
+            0xc293 | 0xc295 | 0xc298 | 0xc299 | 0xc29a | 0xc29b | 0xca03 | 0xc24f | 0xc262 | 0xc266 | 0xc267 | 0xc294 | 0xc29c
+        ),
+        // Thrustmaster: T150, T300RS (3 modes), T500RS, TX, T248, TS-PC, T-GT, TMX, T80.
+        0x044f => matches!(
+            product_id,
+            0xb677 | 0xb66e | 0xb66f | 0xb65e | 0xb65d | 0xb669 | 0xb696 | 0xb689 | 0xb684 | 0xb67f | 0xb66d
+        ),
+        _ => false,
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum AppleRawHidKind {
+    Wheel,
+    Joystick,
+}
+#[cfg(target_os = "macos")]
+const HID_USAGE_GENERIC_DESKTOP_MULTI_AXIS: i32 = 0x08;
+#[cfg(target_os = "macos")]
+const HID_PAGE_GENERIC_DESKTOP: u32 = 0x01;
+#[cfg(target_os = "macos")]
+const HID_USAGE_PAGE_BUTTON: u32 = 0x09;
+#[cfg(target_os = "macos")]
+const HID_USAGE_X: u32 = 0x30;
+#[cfg(target_os = "macos")]
+const HID_USAGE_Y: u32 = 0x31;
+#[cfg(target_os = "macos")]
+const HID_USAGE_Z: u32 = 0x32;
+#[cfg(target_os = "macos")]
+const HID_USAGE_RX: u32 = 0x33;
+#[cfg(target_os = "macos")]
+const HID_USAGE_RY: u32 = 0x34;
+#[cfg(target_os = "macos")]
+const HID_USAGE_RZ: u32 = 0x35;
+#[cfg(target_os = "macos")]
+const HID_USAGE_SLIDER: u32 = 0x36;
+#[cfg(target_os = "macos")]
+const HID_USAGE_HAT: u32 = 0x39;
 #[cfg(target_os = "macos")]
 const HID_USAGE_PAGE_GENERIC_DESKTOP: i32 = 0x01;
 #[cfg(target_os = "macos")]
@@ -322,7 +577,7 @@ impl AppleRawHidInput {
 
     fn snapshot(&self) -> Vec<(GameInputInfo, GameInputState)> {
         if let Ok(shared) = self.shared.lock() {
-            return shared
+            let mut out: Vec<(GameInputInfo, GameInputState)> = shared
                 .devices
                 .iter()
                 .map(|device| {
@@ -332,8 +587,44 @@ impl AppleRawHidInput {
                     )
                 })
                 .collect();
+            out.extend(shared.wheels.iter().map(|wheel| {
+                let state = match wheel.kind {
+                    AppleRawHidKind::Wheel => GameInputState::Wheel(wheel.state.clone()),
+                    AppleRawHidKind::Joystick => GameInputState::Joystick(wheel.stick.clone()),
+                };
+                (wheel.info.clone(), state)
+            }));
+            return out;
         }
         Vec::new()
+    }
+
+    /// An output-report handle for a raw-HID device (wheels only — a pad's
+    /// rumble goes through the Game Controller framework, not here). The
+    /// closure locks the shared table for the duration of one SetReport, so
+    /// a device unplugged mid-write fails the write instead of dangling.
+    fn output_handle(&self, id: LiveId) -> Option<GameInputOutput> {
+        let shared = self.shared.lock().ok()?;
+        let wheel = shared.wheels.iter().find(|w| w.info.id == id)?;
+        let (vendor_id, product_id) = (wheel.vendor_id, wheel.product_id);
+        drop(shared);
+        let table = Arc::clone(&self.shared);
+        let send = Arc::new(move |report_id: u8, data: &[u8]| -> bool {
+            let Ok(shared) = table.lock() else { return false };
+            let Some(wheel) = shared.wheels.iter().find(|w| w.info.id == id) else {
+                return false;
+            };
+            unsafe {
+                IOHIDDeviceSetReport(
+                    wheel.device,
+                    kIOHIDReportTypeOutput,
+                    report_id as CFIndex,
+                    data.as_ptr(),
+                    data.len() as CFIndex,
+                ) == 0
+            }
+        });
+        Some(GameInputOutput::new(id, vendor_id, product_id, send))
     }
 
     fn stop(&mut self) {
@@ -411,7 +702,11 @@ impl AppleRawHidInput {
             HID_USAGE_PAGE_GENERIC_DESKTOP,
             HID_USAGE_GENERIC_DESKTOP_JOYSTICK,
         );
-        let values = [gamepad as *const _, joystick as *const _];
+        let multi_axis = Self::create_usage_matching_dict(
+            HID_USAGE_PAGE_GENERIC_DESKTOP,
+            HID_USAGE_GENERIC_DESKTOP_MULTI_AXIS,
+        );
+        let values = [gamepad as *const _, joystick as *const _, multi_axis as *const _];
         CFArrayCreate(
             ptr::null(),
             values.as_ptr(),
@@ -466,6 +761,22 @@ impl AppleRawHidInput {
     unsafe fn register_device(context: *mut std::ffi::c_void, device: IOHIDDeviceRef) {
         let callback_context = &*(context as *const AppleRawHidCallbackContext);
         let vendor_id = Self::device_u32_property(device, "VendorID");
+        let product_id = Self::device_u32_property(device, "ProductID");
+        let primary_usage = Self::device_u32_property(device, "PrimaryUsage") as i32;
+        let joystick_class = primary_usage == HID_USAGE_GENERIC_DESKTOP_JOYSTICK
+            || primary_usage == HID_USAGE_GENERIC_DESKTOP_MULTI_AXIS;
+        if apple_raw_hid_is_wheel(vendor_id, product_id) {
+            Self::register_axes_device(context, device, vendor_id, product_id, AppleRawHidKind::Wheel);
+            return;
+        }
+        if APPLE_RAW_HID_WHEEL_VENDOR_IDS.contains(&vendor_id) || joystick_class {
+            if vendor_id == APPLE_RAW_HID_XBOX_VENDOR_ID {
+                // An Xbox pad is a pad whatever it claims.
+            } else {
+                Self::register_axes_device(context, device, vendor_id, product_id, AppleRawHidKind::Joystick);
+                return;
+            }
+        }
         if vendor_id != APPLE_RAW_HID_XBOX_VENDOR_ID {
             return;
         }
@@ -531,6 +842,181 @@ impl AppleRawHidInput {
             let _ = IOHIDDeviceClose(entry.device, 0);
             CFRelease(entry.device as *const _);
         }
+        if let Some(index) = shared.wheels.iter().position(|entry| entry.device == device) {
+            let entry = shared.wheels.remove(index);
+            let _ = IOHIDDeviceClose(entry.device, 0);
+            CFRelease(entry.device as *const _);
+        }
+    }
+
+    /// A racing wheel: parsed by HID USAGE rather than a hand-decoded report,
+    /// because every brand lays its report out differently while all of
+    /// them declare X as the wheel and the pedals as the next generic-desktop
+    /// axes. Pedals rest at their logical MAXIMUM on Logitech (255 =
+    /// released) and at the minimum on others; the first value seen from an
+    /// untouched pedal decides, per axis (`rest_high`).
+    unsafe fn register_axes_device(
+        context: *mut std::ffi::c_void,
+        device: IOHIDDeviceRef,
+        vendor_id: u32,
+        product_id: u32,
+        kind: AppleRawHidKind,
+    ) {
+        let callback_context = &*(context as *const AppleRawHidCallbackContext);
+        let location_id = Self::device_u32_property(device, "LocationID");
+        let name = Self::device_string_property(device, "Product");
+        let info = GameInputInfo {
+            id: LiveId(if location_id != 0 {
+                ((vendor_id as u64) << 48) | ((product_id as u64) << 32) | location_id as u64
+            } else {
+                device as u64
+            }),
+            name: if name.is_empty() {
+                format!("{:?} {:04x}:{:04x}", kind, vendor_id, product_id)
+            } else {
+                format!("{name} {:04x}:{:04x}", vendor_id, product_id)
+            },
+        };
+        let mut shared = match callback_context.shared.lock() {
+            Ok(shared) => shared,
+            Err(_) => return,
+        };
+        if shared.wheels.iter().any(|entry| entry.device == device) {
+            return;
+        }
+        let _ = CFRetain(device as *const _);
+        let _ = IOHIDDeviceOpen(device, 0);
+        shared.wheels.push(AppleRawHidWheel {
+            device,
+            info,
+            vendor_id,
+            product_id,
+            kind,
+            state: WheelState::default(),
+            stick: JoystickState::default(),
+            pedal_rest: [None; 3],
+        });
+        IOHIDDeviceRegisterInputValueCallback(device, Some(raw_hid_value_callback), context);
+    }
+
+    unsafe fn handle_value(context: *mut std::ffi::c_void, sender: *mut std::ffi::c_void, value: IOHIDValueRef) {
+        let callback_context = &*(context as *const AppleRawHidCallbackContext);
+        let device = sender as IOHIDDeviceRef;
+        let element = IOHIDValueGetElement(value);
+        if element.is_null() {
+            return;
+        }
+        let page = IOHIDElementGetUsagePage(element);
+        let usage = IOHIDElementGetUsage(element);
+        let raw = IOHIDValueGetIntegerValue(value) as i64;
+        let lo = IOHIDElementGetLogicalMin(element) as i64;
+        let hi = IOHIDElementGetLogicalMax(element) as i64;
+        let mut shared = match callback_context.shared.lock() {
+            Ok(shared) => shared,
+            Err(_) => return,
+        };
+        let Some(wheel) = shared.wheels.iter_mut().find(|entry| entry.device == device) else {
+            return;
+        };
+        Self::apply_wheel_value(wheel, page, usage, raw, lo, hi);
+    }
+
+    /// Pure: one HID element value into the wheel's state. Steering is X
+    /// mapped to -1..1 over its logical range (a 900° wheel reports 0..65535
+    /// on Logitech, 16 bit either way). Pedals are the next three
+    /// generic-desktop axes in usage order; each becomes 0..1 pressed with
+    /// its resting end learned from the first sample.
+    fn apply_wheel_value(wheel: &mut AppleRawHidWheel, page: u32, usage: u32, raw: i64, lo: i64, hi: i64) {
+        let span = (hi - lo).max(1) as f32;
+        let unit = ((raw - lo) as f32 / span).clamp(0.0, 1.0);
+        if wheel.kind == AppleRawHidKind::Joystick {
+            return Self::apply_stick_value(wheel, page, usage, raw, lo, hi, unit);
+        }
+        match page {
+            HID_PAGE_GENERIC_DESKTOP => match usage {
+                HID_USAGE_X => wheel.state.steering = unit * 2.0 - 1.0,
+                HID_USAGE_Y | HID_USAGE_Z | HID_USAGE_RZ | HID_USAGE_RX | HID_USAGE_RY | HID_USAGE_SLIDER => {
+                    let slot = match usage {
+                        HID_USAGE_Y => 0,
+                        HID_USAGE_Z => 1,
+                        HID_USAGE_RZ => 2,
+                        // Wheels that put pedals on Rx/Ry/Slider (Thrustmaster)
+                        // still land throttle, brake, clutch in usage order.
+                        HID_USAGE_RX => 0,
+                        HID_USAGE_RY => 1,
+                        _ => 2,
+                    };
+                    let rest_high = *wheel.pedal_rest[slot].get_or_insert(unit > 0.5);
+                    let pressed = if rest_high { 1.0 - unit } else { unit };
+                    match slot {
+                        0 => wheel.state.throttle = pressed,
+                        1 => wheel.state.brake = pressed,
+                        _ => wheel.state.clutch = pressed,
+                    }
+                }
+                HID_USAGE_HAT => {
+                    // A hat is a direction 0..7 clockwise from up, `hi + 1`
+                    // (usually 8) when released; stash it in the top nibble
+                    // of the button mask so the app can read a d-pad.
+                    let dir = if raw < lo || raw > hi { 0xf } else { (raw - lo) as u32 & 0xf };
+                    wheel.state.buttons = (wheel.state.buttons & 0x0fff_ffff) | (dir << 28);
+                }
+                _ => {}
+            },
+            HID_USAGE_PAGE_BUTTON => {
+                if (1..=28).contains(&usage) {
+                    let bit = 1u32 << (usage - 1);
+                    if raw != 0 {
+                        wheel.state.buttons |= bit;
+                    } else {
+                        wheel.state.buttons &= !bit;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A flight stick by usage: X/Y the stick, Rz the twist, Slider (or Z
+    /// when there is no slider) the throttle lever, the hat, the buttons.
+    fn apply_stick_value(wheel: &mut AppleRawHidWheel, page: u32, usage: u32, raw: i64, lo: i64, hi: i64, unit: f32) {
+        let signed = unit * 2.0 - 1.0;
+        match page {
+            HID_PAGE_GENERIC_DESKTOP => match usage {
+                HID_USAGE_X => wheel.stick.x = signed,
+                HID_USAGE_Y => wheel.stick.y = signed,
+                HID_USAGE_RZ => wheel.stick.twist = signed,
+                // A throttle lever rests at its high end on most sticks
+                // (pulled back = max); report it 0..1 pushed forward.
+                HID_USAGE_SLIDER => wheel.stick.throttle = 1.0 - unit,
+                HID_USAGE_Z => {
+                    if wheel.stick.throttle == 0.0 || wheel.pedal_rest[0].is_none() {
+                        wheel.pedal_rest[0] = Some(true);
+                        wheel.stick.throttle = 1.0 - unit;
+                    }
+                }
+                HID_USAGE_HAT => {
+                    wheel.stick.hat = if raw < lo || raw > hi { 0xf } else { ((raw - lo) as u32 & 0xf) as u8 };
+                }
+                _ => {}
+            },
+            HID_USAGE_PAGE_BUTTON => {
+                if (1..=32).contains(&usage) {
+                    let bit = 1u32 << (usage - 1);
+                    if raw != 0 {
+                        wheel.stick.buttons |= bit;
+                    } else {
+                        wheel.stick.buttons &= !bit;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[allow(dead_code)]
+    fn infos(&self) -> Vec<GameInputInfo> {
+        self.snapshot().into_iter().map(|(info, _)| info).collect()
     }
 
     unsafe fn handle_report(
@@ -666,7 +1152,25 @@ impl Drop for AppleRawHidInput {
 #[derive(Default)]
 struct AppleRawHidShared {
     devices: Vec<AppleRawHidDevice>,
+    wheels: Vec<AppleRawHidWheel>,
 }
+
+#[cfg(target_os = "macos")]
+struct AppleRawHidWheel {
+    device: IOHIDDeviceRef,
+    info: GameInputInfo,
+    vendor_id: u32,
+    product_id: u32,
+    kind: AppleRawHidKind,
+    state: WheelState,
+    stick: JoystickState,
+    /// Per pedal (throttle, brake, clutch): does it rest at the HIGH end of
+    /// its range? Learned from the first sample, which arrives untouched.
+    pedal_rest: [Option<bool>; 3],
+}
+
+#[cfg(target_os = "macos")]
+unsafe impl Send for AppleRawHidWheel {}
 
 #[cfg(target_os = "macos")]
 struct AppleRawHidDevice {
@@ -706,6 +1210,19 @@ unsafe extern "C" fn raw_hid_device_removal_callback(
     if result == 0 {
         AppleRawHidInput::remove_device(context, device);
     }
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn raw_hid_value_callback(
+    context: *mut std::ffi::c_void,
+    result: IOReturn,
+    sender: *mut std::ffi::c_void,
+    value: IOHIDValueRef,
+) {
+    if result != 0 || value.is_null() {
+        return;
+    }
+    AppleRawHidInput::handle_value(context, sender, value);
 }
 
 #[cfg(target_os = "macos")]
@@ -770,5 +1287,51 @@ impl CxGameInputApi for Cx {
             return &mut game_input.states;
         }
         &mut []
+    }
+
+    fn game_input_infos(&mut self) -> Vec<GameInputInfo> {
+        if let Some(game_input) = &self.os.apple_game_input {
+            return game_input.gamepads.clone();
+        }
+        Vec::new()
+    }
+
+    fn game_input_output(&mut self, id: LiveId) -> Option<GameInputOutput> {
+        #[cfg(target_os = "macos")]
+        if let Some(game_input) = &self.os.apple_game_input {
+            return game_input.raw_hid.output_handle(id);
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = id;
+        None
+    }
+
+    fn gamepad_haptic_capabilities(&mut self, id: LiveId) -> GamepadHapticCapabilities {
+        #[cfg(target_os = "macos")]
+        if let Some(game_input) = &self.os.apple_game_input {
+            if let Some(index) = game_input.gc_gamepads.iter().position(|info| info.id == id) {
+                return game_input.haptics[index]
+                    .as_ref()
+                    .map(AppleControllerHaptics::capabilities)
+                    .unwrap_or_default();
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = id;
+        Default::default()
+    }
+
+    fn gamepad_haptic_pulse(&mut self, id: LiveId, pulse: GamepadHapticPulse) -> bool {
+        #[cfg(target_os = "macos")]
+        if let Some(game_input) = &mut self.os.apple_game_input {
+            if let Some(index) = game_input.gc_gamepads.iter().position(|info| info.id == id) {
+                if let Some(haptics) = &mut game_input.haptics[index] {
+                    return unsafe { haptics.pulse(pulse) };
+                }
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = (id, pulse);
+        false
     }
 }

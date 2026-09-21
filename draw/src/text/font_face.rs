@@ -24,6 +24,32 @@ pub struct FontFace {
     cached_coretext_face: RefCell<Option<Option<super::coretext::CoreTextFace>>>,
 }
 
+#[cfg(test)]
+mod mobile_font_tests {
+    use super::*;
+
+    #[test]
+    fn android_font_has_shaped_advances_and_outlines() {
+        let bytes = include_bytes!("../../../widgets/resources/RobotoFlex.ttf");
+        for weight in [400.0, 600.0] {
+            let mut face = FontFace::from_data_and_index(FontData::from_vec(bytes.to_vec()), 0).unwrap();
+            face.set_variations(&[(u32::from_be_bytes(*b"wght"), weight)]);
+            face.with_ttf_parser_face(|f| {
+                let id = f.glyph_index('B').unwrap();
+                println!("Roboto weight={weight} axes={} coordinates={} glyph={} advance={:?} bounds={:?}", f.variation_axes().len(), f.variation_coordinates().len(), id.0, f.glyph_hor_advance(id), f.glyph_bounding_box(id));
+                assert!(f.glyph_hor_advance(id).unwrap() > 0);
+                assert!(f.glyph_bounding_box(id).is_some(), "Roboto outline at weight {weight}");
+            });
+            face.with_rustybuzz_face(|f| {
+                let mut buffer = rustybuzz::UnicodeBuffer::new();
+                buffer.push_str("Browser 12:34");
+                let shaped = rustybuzz::shape(f, &[], buffer);
+                assert!(shaped.glyph_positions().iter().map(|p| p.x_advance).sum::<i32>() > 0);
+            });
+        }
+    }
+}
+
 struct ParsedFontFace {
     data: FontData,
     index: u32,
@@ -62,6 +88,14 @@ impl fmt::Debug for FontFace {
 }
 
 impl FontFace {
+    pub(super) fn worker_source(&self) -> (Vec<u8>, u32, Vec<(u32, f32)>) {
+        (
+            self.parsed.data.as_slice().to_vec(),
+            self.parsed.index,
+            self.variations.iter().map(|v| (v.tag.0, v.value)).collect(),
+        )
+    }
+
     pub fn from_data_and_index(data: FontData, index: u32) -> Option<Self> {
         let parsed_data = data.clone();
         let face = ttf_parser::Face::parse(parsed_data.as_slice(), index).ok()?;

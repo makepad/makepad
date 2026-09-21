@@ -1,6 +1,6 @@
 //! Thin desktop frontend for `makepad-score-ui`.
 
-use score_ui::font::{set_embedded_music_font, EmbeddedFont};
+use score_ui::font::ensure_default_font;
 use score_ui::library::BundledPiece;
 use score_ui::{apply_score_action, key_action, ScoreAction, ScoreAppState};
 use makepad_widgets::*;
@@ -21,22 +21,6 @@ app_main!(App);
 /// `resources/performances/LICENSE-piano-midi-de.txt`. The ShareAlike term
 /// binds adaptations of these files and does not reach this application's own
 /// source. [`PERFORMER_CREDIT`] is shown whenever one of them is opened.
-/// The notation font the application carries.
-///
-/// Bravura, by Steinberg Media Technologies, under the SIL Open Font License
-/// 1.1 — see `resources/fonts/OFL.txt`, which travels with it. It is the
-/// reference SMuFL font, and it is embedded rather than looked up so that a
-/// fresh checkout draws real notation on its first run instead of falling back
-/// to the built-in outlines. `MAKEPAD_SCORE_MUSIC_FONT` still overrides it.
-fn embedded_music_font() -> EmbeddedFont {
-    EmbeddedFont {
-        name: "Bravura",
-        otf: include_bytes!("../resources/fonts/bravura.otf"),
-        metadata: Some(include_bytes!("../resources/fonts/bravura_metadata.json")),
-        glyphnames: Some(include_bytes!("../resources/fonts/glyphnames.json")),
-    }
-}
-
 const PERFORMER_CREDIT: &str = "Performed by Bernd Krueger · piano-midi.de · CC BY-SA 3.0";
 
 const PERFORMANCES: &[BundledPiece] = &[
@@ -264,7 +248,7 @@ impl AppMain for App {
         // the moment a document exists, and the application's own state builds
         // one during construction — registering the built-in font in the first
         // event would be a frame too late, and the font resolves exactly once.
-        set_embedded_music_font(embedded_music_font());
+        ensure_default_font();
         makepad_widgets::script_mod(vm);
         score_ui::script_mod(vm);
         self::script_mod(vm)
@@ -328,18 +312,19 @@ mod tests {
     #[test]
     fn application_dsl_mounts_score_shell() {
         let mut cx = Cx::new(Box::new(|_cx: &mut Cx, _event: &Event| {}));
-        let mut std = ();
-        let mut vm = ScriptVm {
-            host: &mut cx,
-            std: &mut std,
-            bx: Box::new(ScriptVmBase::new()),
-        };
-        vm.bx.captured_errors = Some(Vec::new());
-        makepad_widgets::makepad_platform::script::script_mod(&mut vm);
-        makepad_widgets::script_mod(&mut vm);
-        score_ui::script_mod(&mut vm);
-        super::script_mod(&mut vm);
-        let errors = vm.take_errors();
+        let errors = cx.with_vm(|vm| {
+            vm.bx.captured_errors = Some(Vec::new());
+            makepad_widgets::makepad_platform::script::script_mod(vm);
+            makepad_widgets::script_mod(vm);
+            score_ui::script_mod(vm);
+            super::script_mod(vm);
+            vm.take_errors()
+        });
         assert!(errors.is_empty(), "score application DSL errors: {errors:#?}");
     }
+}
+
+#[cfg(test)]
+mod desktop_style_tests {
+    include!("../../../widgets/tests/support/app_style.rs");
 }

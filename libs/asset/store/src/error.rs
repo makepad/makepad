@@ -12,6 +12,14 @@ pub type ServerResult<T> = Result<T, ServerError>;
 pub enum ServerError {
     /// A content-contract decode/validate refusal, passed through verbatim.
     Content(AssetDataError),
+    /// An on-disk canonical document uses a content schema outside the
+    /// migration-on-read range this build supports.
+    UnsupportedContentSchema {
+        what: &'static str,
+        expected_min: u16,
+        expected_max: u16,
+        found: u16,
+    },
     /// A filesystem operation failed. Carries the operation name and the
     /// stable `std::io::ErrorKind`, not the OS message.
     Io {
@@ -64,6 +72,24 @@ impl std::fmt::Display for ServerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Content(e) => write!(f, "content: {e}"),
+            Self::UnsupportedContentSchema {
+                what,
+                expected_min,
+                expected_max,
+                found,
+            } => {
+                if expected_min == expected_max {
+                    write!(
+                        f,
+                        "unsupported content schema in {what}: expected {expected_min}, found {found}"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "unsupported content schema in {what}: expected {expected_min}..={expected_max}, found {found}"
+                    )
+                }
+            }
             Self::Io { op, kind } => write!(f, "io error in {op}: {kind:?}"),
             Self::Db { op, code } => write!(f, "database error in {op}: code {code}"),
             Self::DigestMismatch { what, .. } => write!(f, "digest mismatch for {what}"),
@@ -95,6 +121,29 @@ impl From<AssetDataError> for ServerError {
     fn from(e: AssetDataError) -> Self {
         Self::Content(e)
     }
+}
+
+/// Preserve ordinary content errors while giving a canonical-header schema
+/// refusal the exact on-disk location and supported version range.
+pub(crate) fn content_err_at(
+    what: &'static str,
+    bytes: &[u8],
+    error: AssetDataError,
+) -> ServerError {
+    if let AssetDataError::UnsupportedSchema { found } = error {
+        let header_version = bytes
+            .get(5..7)
+            .map(|value| u16::from_be_bytes([value[0], value[1]]));
+        if bytes.starts_with(b"MPC1") && header_version == Some(found) {
+            return ServerError::UnsupportedContentSchema {
+                what,
+                expected_min: makepad_asset_data::MIN_READABLE_CONTENT_SCHEMA_VERSION,
+                expected_max: makepad_asset_data::CONTENT_SCHEMA_VERSION,
+                found,
+            };
+        }
+    }
+    ServerError::Content(error)
 }
 
 /// Attach an operation name to an io::Error, keeping only its stable kind.

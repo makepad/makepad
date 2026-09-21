@@ -108,6 +108,90 @@ pub struct VectorVertexPacked {
     pub zbias: f32,
 }
 
+/// Typed map-fill vertex. Compact fields are converted to floats by vertex
+/// fetch; `pos` uses `MAP_VERTEX_POSITION_SCALE` fixed-point tile units.
+#[derive(Clone, Copy, Debug, PartialEq, Script, ScriptHook)]
+#[repr(C)]
+pub struct FillVertexTyped {
+    #[live]
+    pub pos: I16x2,
+    #[live]
+    pub color: UNorm8x4,
+    #[live]
+    pub params: F16x2,
+    #[live]
+    pub zbias: U16x2,
+}
+
+/// Typed map-road vertex. The deck remains exact `f32`; vertex fetch expands
+/// every compact field to the same logical float values used by the shader.
+#[derive(Clone, Copy, Debug, PartialEq, Script, ScriptHook)]
+#[repr(C)]
+pub struct RoadVertexTyped {
+    #[live]
+    pub pos: I16x2,
+    #[live]
+    pub off: F16x2,
+    #[live]
+    pub color: UNorm8x4,
+    #[live]
+    pub params: F16x2,
+    #[live]
+    pub deck: f32,
+    #[live]
+    pub depth: F16x2,
+    #[live]
+    pub uv: F16x2,
+}
+
+/// Typed road-union face vertex: the four `RoadVertexTyped` fields a
+/// grounded Boolean face actually varies. The road shader's other inputs
+/// are constants for such a record — zero expansion offset, zero deck, the
+/// tessellator's fill uv (0.5, 1) — and the face shader substitutes them,
+/// so a face record draws exactly as its 28-byte form did.
+#[derive(Clone, Copy, Debug, PartialEq, Script, ScriptHook)]
+#[repr(C)]
+pub struct FaceVertexTyped {
+    #[live]
+    pub pos: I16x2,
+    #[live]
+    pub color: UNorm8x4,
+    #[live]
+    pub params: F16x2,
+    #[live]
+    pub depth: F16x2,
+}
+
+/// Typed roof vertex. Height stays exact so instanced `f32` walls meet roofs.
+#[derive(Clone, Copy, Debug, PartialEq, Script, ScriptHook)]
+#[repr(C)]
+pub struct RoofVertexTyped {
+    #[live]
+    pub pos: I16x2,
+    #[live]
+    pub color: UNorm8x4,
+    #[live]
+    pub height: f32,
+    #[live]
+    pub params: F16x2,
+}
+
+/// Instanced symbol mesh vertex (map POI icons): screen-px offset from the
+/// instance anchor, f16 uv pair, stroke distance. 16 bytes; the anchor,
+/// colour, zoom floor and depth ride the instance instead of every vertex.
+#[derive(Clone, Script, ScriptHook)]
+pub struct IconVertexPacked {
+    #[live]
+    pub x: f32,
+    #[live]
+    pub y: f32,
+    /// f16(u) | f16(v)
+    #[live]
+    pub uv: f32,
+    #[live]
+    pub stroke_dist: f32,
+}
+
 #[derive(Clone, Script, ScriptHook)]
 pub struct PbrVertex {
     #[live]
@@ -215,6 +299,11 @@ pub struct GameMeshVertexSkin {
     /// surface through every pose because topology never changes.
     #[live]
     pub ao_uv: f32,
+    #[live]
+    pub color: f32,
+    #[live]
+    pub source_vertex: f32,
+
 }
 
 #[derive(Clone, Script, ScriptHook)]
@@ -280,6 +369,24 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     set_script_value_to_pod!(vm, geom.VectorVertexPacked);
     let vpgen = shared(vm, id!(VectorGeomPacked), GeometryGen::from_triangle_2d_packed);
     set_script_value!(vm, geom.VectorGeomPacked = vpgen);
+    set_script_value_to_pod!(vm, geom.FillVertexTyped);
+    let fpgen = shared(vm, id!(FillGeomTyped), GeometryGen::from_triangle_2d_fill_typed);
+    set_script_value!(vm, geom.FillGeomTyped = fpgen);
+    // Compact map-road geometry: vertex type + placeholder geom.
+    set_script_value_to_pod!(vm, geom.RoadVertexTyped);
+    let rpgen = shared(vm, id!(RoadGeomTyped), GeometryGen::from_triangle_2d_road_typed);
+    set_script_value!(vm, geom.RoadGeomTyped = rpgen);
+    // Road-union faces: the road record minus its constant fields.
+    set_script_value_to_pod!(vm, geom.FaceVertexTyped);
+    let fcgen = shared(vm, id!(FaceGeomTyped), GeometryGen::from_triangle_2d_face_typed);
+    set_script_value!(vm, geom.FaceGeomTyped = fcgen);
+    set_script_value_to_pod!(vm, geom.RoofVertexTyped);
+    let rpgen = shared(vm, id!(RoofGeomTyped), GeometryGen::from_triangle_2d_roof_typed);
+    set_script_value!(vm, geom.RoofGeomTyped = rpgen);
+    // Instanced icon meshes: vertex type + placeholder geom (the mesh is bound at draw time)
+    set_script_value_to_pod!(vm, geom.IconVertexPacked);
+    let ipgen = shared(vm, id!(IconGeomPacked), GeometryGen::from_triangle_2d_icon_packed);
+    set_script_value!(vm, geom.IconGeomPacked = ipgen);
     // PBR geometry: vertex type + placeholder geom (overridden at draw time)
     set_script_value_to_pod!(vm, geom.PbrVertex);
     let pgen = shared(vm, id!(PbrGeom), GeometryGen::from_triangle_pbr);
@@ -349,6 +456,50 @@ impl GeometryGen {
                 0.0,
                 0.0,
             ]));
+        }
+        g.indices.extend_from_slice(&[0, 1, 2]);
+        g
+    }
+
+    pub fn from_triangle_2d_icon_packed() -> GeometryGen {
+        let mut g = Self::default();
+        for _ in 0..3 {
+            g.vertices.extend_from_slice(&[0.0, 0.0, crate::vector::pack_pair_f16(0.5, 1.0), 0.0]);
+        }
+        g.indices.extend_from_slice(&[0, 1, 2]);
+        g
+    }
+
+    pub fn from_triangle_2d_fill_typed() -> GeometryGen {
+        let mut g = Self::default();
+        for _ in 0..3 {
+            g.vertices.extend_from_slice(&[0.0; 4]);
+        }
+        g.indices.extend_from_slice(&[0, 1, 2]);
+        g
+    }
+    pub fn from_triangle_2d_road_typed() -> GeometryGen {
+        let mut g = Self::default();
+        for _ in 0..3 {
+            g.vertices.extend_from_slice(&[0.0; 7]);
+        }
+        g.indices.extend_from_slice(&[0, 1, 2]);
+        g
+    }
+
+    pub fn from_triangle_2d_face_typed() -> GeometryGen {
+        let mut g = Self::default();
+        for _ in 0..3 {
+            g.vertices.extend_from_slice(&[0.0; 4]);
+        }
+        g.indices.extend_from_slice(&[0, 1, 2]);
+        g
+    }
+
+    pub fn from_triangle_2d_roof_typed() -> GeometryGen {
+        let mut g = Self::default();
+        for _ in 0..3 {
+            g.vertices.extend_from_slice(&[0.0; 4]);
         }
         g.indices.extend_from_slice(&[0, 1, 2]);
         g
@@ -450,7 +601,7 @@ impl GeometryGen {
         for _ in 0..3 {
             // pos, nrm, uv, joints(0,0,0,0), weights(1,0,0,0), ao_uv(0,0)
             g.vertices
-                .extend_from_slice(&[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, f32::from_bits(0xff), 0.0]);
+                .extend_from_slice(&[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, f32::from_bits(0xff), 0.0, f32::from_bits(0xffff_ffff), 0.0]);
         }
         g.indices.extend_from_slice(&[0, 1, 2]);
         g

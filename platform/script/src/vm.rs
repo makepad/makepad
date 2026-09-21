@@ -22,7 +22,7 @@ use std::any::Any;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Hash)]
 pub struct ScriptModKey {
@@ -220,27 +220,70 @@ impl ScriptCode {
     }
 }
 
+pub trait ScriptHost: Any {
+    fn as_any(&self) -> &dyn Any;
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+    fn script_std(&mut self) -> &mut dyn Any;
+    fn script_vm_slot(&mut self) -> &mut Option<Box<ScriptVmBase>>;
+}
+
+/// Small host container for standalone VMs that do not have an application
+/// host type of their own. Hosts without a standard library use `()` for
+/// `std`.
+pub struct ScriptVmHost<H: Any = (), S: Any = ()> {
+    pub host: H,
+    pub std: S,
+    pub script_vm: Option<Box<ScriptVmBase>>,
+}
+
+impl<H: Any, S: Any> ScriptVmHost<H, S> {
+    pub fn new(host: H, std: S) -> Self {
+        Self {
+            host,
+            std,
+            script_vm: None,
+        }
+    }
+}
+
+impl<H: Any, S: Any> ScriptHost for ScriptVmHost<H, S> {
+    fn as_any(&self) -> &dyn Any {
+        &self.host
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        &mut self.host
+    }
+
+    fn script_std(&mut self) -> &mut dyn Any {
+        &mut self.std
+    }
+
+    fn script_vm_slot(&mut self) -> &mut Option<Box<ScriptVmBase>> {
+        &mut self.script_vm
+    }
+}
+
 pub struct ScriptVm<'a> {
-    pub host: &'a mut dyn Any,
-    pub std: &'a mut dyn Any,
+    pub host: &'a mut dyn ScriptHost,
     pub bx: Box<ScriptVmBase>,
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct ScriptRunBudget {
-    pub soft_deadline: Instant,
-    pub hard_deadline: Instant,
+    pub soft_deadline: f64,
+    pub hard_deadline: f64,
     pub sample_interval_instructions: u32,
     pub instructions_until_sample: u32,
 }
 
 impl ScriptRunBudget {
     pub fn from_durations(soft: Duration, hard: Duration, sample_interval_instructions: u32) -> Self {
-        let now = Instant::now();
+        let now = crate::clock::monotonic_now();
         let sample_interval_instructions = sample_interval_instructions.max(1);
         Self {
-            soft_deadline: now + soft,
-            hard_deadline: now + hard,
+            soft_deadline: now + soft.as_secs_f64(),
+            hard_deadline: now + hard.as_secs_f64(),
             sample_interval_instructions,
             instructions_until_sample: sample_interval_instructions,
         }
@@ -751,7 +794,7 @@ impl<'a> ScriptVm<'a> {
         }
         budget.instructions_until_sample = budget.sample_interval_instructions;
 
-        let now = Instant::now();
+        let now = crate::clock::monotonic_now();
         if now >= budget.hard_deadline {
             return Some(ScriptRunBudgetHit::Hard);
         }
@@ -1630,11 +1673,9 @@ mod tests {
 
     #[test]
     fn script_apply_eval_refreshes_interpolated_values_on_reused_callsite() {
-        let mut host = ();
-        let mut std = ();
+        let mut host = ScriptVmHost::new((), ());
         let mut vm = ScriptVm {
             host: &mut host,
-            std: &mut std,
             bx: Box::new(ScriptVmBase::new()),
         };
 

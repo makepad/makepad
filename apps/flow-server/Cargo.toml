@@ -1,0 +1,9 @@
+[package]
+name = "makepad-flow-server"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+makepad-flow = { path = "../../libs/flow", features = ["host"] }
+makepad-asset-client = { path = "../../libs/asset/client" }

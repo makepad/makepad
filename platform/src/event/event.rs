@@ -16,6 +16,7 @@ use {
         makepad_script::*,
         midi::MidiPortsEvent,
         permission::PermissionResult,
+        storage::StorageResponsesEvent,
         video::VideoInputsEvent,
         window::WindowId,
     },
@@ -205,9 +206,18 @@ pub enum Event {
     /// Do not match upon or handle this event directly; instead use the family of
     /// `hit` functions ([`Event::hits()`]) and handle the returned [`Hit::FingerScroll`].
     Scroll(ScrollEvent), // this is the MouseWheel / touch scroll event sent by the OS
+    /// The raw event of a trackpad pinch (macOS magnify, Wayland pointer gestures).
+    ///
+    /// Do not match upon or handle this event directly; instead use the family of
+    /// `hit` functions ([`Event::hits()`]) and handle the returned [`Hit::FingerPinch`].
+    Pinch(PinchEvent),
 
     Timer(TimerEvent),
 
+    /// An app-facing channel has something for the UI thread: a `ToUISender`
+    /// sent, a task-pool job finished, a texture readback completed. This is a
+    /// broadcast to every widget with no payload, so each handler polls its
+    /// own queue. Makepad's own machinery never raises it.
     Signal,
     Trigger(TriggerEvent),
     MacosMenuCommand(LiveId),
@@ -236,6 +246,8 @@ pub enum Event {
     MidiPorts(MidiPortsEvent),
     VideoInputs(VideoInputsEvent),
     NetworkResponses(NetworkResponsesEvent),
+    /// Results of asynchronous operations submitted through [`Cx::storage`].
+    Storage(StorageResponsesEvent),
 
     VideoPlaybackPrepared(VideoPlaybackPreparedEvent),
     VideoTextureUpdated(VideoTextureUpdatedEvent),
@@ -250,7 +262,7 @@ pub enum Event {
 
     /// The "go back" navigational button or gesture was performed.
     ///
-    /// Tip: use the [`Event::consume_back_pressed()`] method to handle this event
+    /// Tip: use the [`Event::back_pressed()`] method to handle this event
     /// instead of matching on it directly.
     ///
     /// Once a widget has handled this event, it should set the `handled` flag to `true`
@@ -312,6 +324,7 @@ impl Event {
             23 => "TouchUpdate",
             24 => "LongPress",
             25 => "Scroll",
+            74 => "Pinch",
 
             26 => "Timer",
 
@@ -336,6 +349,7 @@ impl Event {
             42 => "MidiPorts",
             43 => "VideoInputs",
             44 => "NetworkResponses",
+            73 => "Storage",
 
             45 => "VideoPlaybackPrepared",
             46 => "VideoTextureUpdated",
@@ -403,6 +417,7 @@ impl Event {
             Self::TouchUpdate(_) => 23,
             Self::LongPress(_) => 24,
             Self::Scroll(_) => 25,
+            Self::Pinch(_) => 74,
 
             Self::Timer(_) => 26,
 
@@ -429,6 +444,7 @@ impl Event {
             Self::MidiPorts(_) => 42,
             Self::VideoInputs(_) => 43,
             Self::NetworkResponses(_) => 44,
+            Self::Storage(_) => 73,
 
             Self::VideoPlaybackPrepared(_) => 45,
             Self::VideoTextureUpdated(_) => 46,
@@ -514,6 +530,7 @@ pub enum Hit {
     ImeAction(ImeActionEvent),
 
     FingerScroll(FingerScrollEvent),
+    FingerPinch(FingerPinchEvent),
     FingerDown(FingerDownEvent),
     FingerMove(FingerMoveEvent),
     FingerHoverIn(FingerHoverEvent),
@@ -541,7 +558,10 @@ impl Event {
             | Self::MouseMove(_)
             | Self::TweakRay(_)
             | Self::TouchUpdate(_)
-            | Self::Scroll(_) => true,
+            | Self::Scroll(_)
+            | Self::Pinch(_)
+            | Self::BackPressed { .. } => true,
+            Self::KeyDown(key) | Self::KeyUp(key) if key.key_code == KeyCode::Escape => true,
             _ => false,
         }
     }

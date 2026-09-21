@@ -57,11 +57,10 @@ impl NetworkBackend for TestBackend {
 #[test]
 fn headless_http_request_resolves_promise_through_script_std() {
     let runtime = Arc::new(NetworkRuntime::with_backend(Arc::new(TestBackend)));
-    let mut host = ();
-    let mut std = ScriptStd::with_network_runtime(runtime);
-    let mut script_vm = Some(Box::new(ScriptVmBase::new()));
+    let mut host = ScriptVmHost::new((), ScriptStd::with_network_runtime(runtime));
+    host.script_vm = Some(Box::new(ScriptVmBase::new()));
 
-    let promise = with_vm(&mut host, &mut std, &mut script_vm, |vm| {
+    let promise = with_vm(&mut host, |vm| {
         script_mod(vm);
         vm.eval(script! {
             use mod.std
@@ -82,18 +81,19 @@ fn headless_http_request_resolves_promise_through_script_std() {
     let promise = promise
         .as_handle()
         .expect("script should return a promise handle");
-    assert_eq!(std.data.http_requests.len(), 1);
+    assert_eq!(host.std.data.http_requests.len(), 1);
 
-    let responses = pump_network_runtime(&mut host, &mut std, &mut script_vm);
+    let responses = pump_network_runtime(&mut host);
     assert_eq!(responses.len(), 1);
-    assert!(std.data.http_requests.is_empty());
+    assert!(host.std.data.http_requests.is_empty());
 
-    let tasks = std.data.tasks.tasks.borrow();
+    let tasks = host.std.data.tasks.tasks.borrow();
     let task = tasks
         .iter()
         .find(|task| task.handle == promise)
         .expect("promise task should exist");
-    match script_vm
+    match host
+        .script_vm
         .as_ref()
         .unwrap()
         .heap

@@ -1,10 +1,11 @@
 //! The TWEAKER — the design-feedback overlay every `--remote` app grows.
 //!
 //! Hardcoded into `Window` (like the caption bar: zero app wiring), inert
-//! unless the remote bridge is live, zero cost while off. The F12 key needs
-//! the dev overlays switched on (`makepad_platform::devtools`: `--devtools`,
-//! `MAKEPAD_DEVTOOLS=1`, or `--remote`); [`set_tweak_on`] is always there for
-//! an app that wants to open the panel itself. Turned on (F12 or
+//! unless the remote bridge is live, zero cost while off. The Shift+F10 / F12
+//! keys need the dev overlays switched on (`makepad_platform::devtools`:
+//! `--devtools`, `MAKEPAD_DEVTOOLS=1`, or `--remote`); [`set_tweak_on`] is
+//! always there for an app that wants to open the panel itself. Turned on
+//! (Shift+F10, F12 or
 //! `GET /tweak?on=1`), a person points at the UI and live-edits it while the
 //! AI watches the same session through the bridge:
 //!
@@ -51,6 +52,7 @@ use crate::tooltip::Tooltip;
 use crate::animator::{AnimatorState, Ease as AnimEase, Play};
 use crate::makepad_draw::makepad_platform::DrawShaderId;
 use crate::makepad_script::trap::NoTrap;
+use crate::makepad_micro_serde::*;
 use crate::makepad_script::{parse_doc_hint, ScriptHeap, ScriptMod, ScriptObject};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -96,7 +98,7 @@ enum PickStyle {
     PinnedQuiet,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, SerJson)]
 pub struct TweakDiffEntry {
     pub seq: u64,
     pub path: String,
@@ -160,7 +162,7 @@ pub struct TweakStroke {
 
 #[derive(Default)]
 struct TweakSession {
-    /// Guards against N windows toggling N times on one F12 event.
+    /// Guards against N windows toggling N times on one Shift+F10 event.
     toggle_event_id: u64,
     /// The pinned selection (click pins; remote applies re-pin by path).
     pinned: Option<TweakPick>,
@@ -230,6 +232,11 @@ struct TweakSession {
     /// held the edit; the release must reach it too or its buttons never
     /// complete a click.
     hold_up: bool,
+    /// The widget under the pointer at the last pick (the deepest hit, not
+    /// where the pin climbed to): click-to-climb continues only from the
+    /// same widget — a press on a different widget inside the pinned
+    /// container picks that widget.
+    climb_origin: u64,
     /// Sidebar width in points (0 = use the default).
     sidebar_width: f64,
     /// The on-canvas selection outline hides until this time: an edit was
@@ -263,6 +270,55 @@ fn session() -> &'static Mutex<TweakSession> {
     S.get_or_init(|| Mutex::new(TweakSession::default()))
 }
 
+/// A complete current design delta. Empty entries mean all edits were undone.
+/// No source files are written by the tweaker or this export.
+pub struct TweakFeedbackSnapshot {
+    pub generation: u64,
+    pub entries: Result<Vec<TweakDiffEntry>, String>,
+}
+
+/// Read only after a change, without waiting on the session lock. Keep the UI
+/// copy bounded; an oversized session is reported instead of partially exported.
+pub fn feedback_snapshot(after_generation: u64) -> Option<TweakFeedbackSnapshot> {
+    let s = session().try_lock().ok()?;
+    if s.apply_gen == after_generation {
+        return None;
+    }
+    let entries = (|| {
+        if s.diff.len() > 32768 {
+            return Err("Too many live tweak edits to export; reset unused changes".into());
+        }
+        let mut out: Vec<TweakDiffEntry> = Vec::new();
+        for entry in &s.diff {
+            if entry.path.len() + entry.prop.len() + entry.old.len() + entry.new.len()
+                + entry.origin.len() + entry.scope.len() > 8192 {
+                return Err("A live tweak value exceeds the feedback size limit".into());
+            }
+            if let Some(existing) = out.iter_mut().find(|e| e.path == entry.path && e.prop == entry.prop) {
+                existing.new = entry.new.clone();
+                existing.seq = entry.seq;
+                existing.origin = entry.origin.clone();
+                existing.scope = entry.scope.clone();
+                existing.siblings = entry.siblings;
+            } else {
+                if out.len() == 128 {
+                    return Err("More than 128 live tweak properties; reset unused changes before exporting".into());
+                }
+                out.push(entry.clone());
+            }
+        }
+        out.retain(|entry| entry.old != entry.new);
+        let bytes: usize = out.iter().map(|entry| entry.path.len() + entry.prop.len()
+            + entry.old.len() + entry.new.len() + entry.origin.len() + entry.scope.len()).sum();
+        if bytes > 8192 {
+            return Err("Live design changes exceed 8 KiB; reset unused changes before exporting".into());
+        }
+        Ok(out)
+    })();
+    Some(TweakFeedbackSnapshot { generation: s.apply_gen, entries })
+}
+
+
 const DEFAULT_SIDEBAR_WIDTH: f64 = 280.0;
 const SPLITTER_WIDTH: f64 = 5.0;
 
@@ -289,7 +345,7 @@ pub fn set_tweak_on(cx: &mut Cx, on: bool) {
             s.down_consumed = false;
             s.live_stroke = None;
             drop(s);
-            // F12 closes the whole design surface: the exploded view goes
+            // Shift+F10 closes the whole design surface: the exploded view goes
             // with the panel (deferred toggle — performed pre-dispatch at
             // the next event), the marks and the flat band with it, so
             // the app is never left tilted without its panel.
@@ -367,6 +423,9 @@ fn attached_cache() -> &'static Mutex<HashSet<DrawListId>> {
 /// attachment set the last EVENT computed (see `attached_lists_of`): the
 /// overlay draws mid-frame, when open lists are not yet linked.
 fn live_rect(cx: &Cx2d, widget: &WidgetRef) -> Rect {
+    if widget.try_widget_uid().is_none() {
+        return Rect::default();
+    }
     let attached = attached_cache().lock().unwrap().clone();
     if !attached.is_empty() && !widget.area().is_attached(cx, &attached) {
         return Rect::default();
@@ -603,6 +662,158 @@ fn resolve_pick(
     })
 }
 
+/// A TweakPick for a KNOWN widget (the climb's steps), same fields as a
+/// resolved one.
+fn pick_of_widget(
+    cx: &mut Cx,
+    widget: &WidgetRef,
+    abs: Vec2d,
+    window_id: usize,
+) -> Option<TweakPick> {
+    let uid = widget.try_widget_uid()?;
+    let rect = widget.area().clipped_rect_union(cx);
+    if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
+        return None;
+    }
+    let level = cx.sploded_depth_of(uid.0).unwrap_or(0);
+    let path_ids = cx.widget_tree().path_to(uid);
+    let path = if path_ids.is_empty() {
+        format!("uid:{}", uid.0)
+    } else {
+        path_ids
+            .iter()
+            .map(|id| live_id_token(*id))
+            .collect::<Vec<_>>()
+            .join(".")
+    };
+    let ty = widget
+        .widget_type_id()
+        .and_then(|type_id| widget_type_names(cx).get(&type_id).copied())
+        .map(live_id_token)
+        .unwrap_or_else(|| "-".to_string());
+    let band = resolve_band(cx, widget, rect, abs);
+    Some(TweakPick { uid: uid.0, path, ty, rect, window_id, band, level })
+}
+
+/// Window owns the inspector: reflecting it from the inspector's draw/event
+/// would re-enter Window's active mutable borrow. Remote edits run between
+/// events and may still target it; keep the last inspectable selection.
+fn pin_remote_edit(cx: &mut Cx, widget: &WidgetRef, path: &str) -> Option<&'static str> {
+    let ty = widget.widget_type_id();
+    let uid = widget.widget_uid().0;
+    let inspector_type = Some(std::any::TypeId::of::<Tweaker>());
+    let hosts_inspector = ty == Some(std::any::TypeId::of::<crate::window::Window>())
+        || ty == inspector_type
+        || cx.widget_tree().flat_tree(cx).iter().any(|row| {
+            cx.widget_tree().widget(WidgetUid(row.uid)).widget_type_id() == inspector_type
+                && is_ancestor_of(cx, uid, row.uid)
+        });
+    if hosts_inspector {
+        let reason = "Edit applied; the inspector cannot select itself or a container that owns it. Previous selection retained.";
+        session().lock().unwrap().vibe_status = reason.to_string();
+        return Some(reason);
+    }
+    let ty = ty
+        .and_then(|type_id| widget_type_names(cx).get(&type_id).copied())
+        .map(live_id_token)
+        .unwrap_or_else(|| "-".to_string());
+    let pick = TweakPick {
+        uid,
+        path: path.to_string(),
+        ty,
+        rect: widget.area().clipped_rect_union(cx),
+        window_id: 0,
+        band: None,
+        level: 0,
+    };
+    session().lock().unwrap().pinned = Some(pick);
+    None
+}
+
+/// Selection can also arrive from the tree or survive a reparent. Drop an
+/// unavailable target before any reflection, geometry, swatch or edit access;
+/// returning an empty reflection alone would leave the later reads unsafe.
+fn discard_unavailable_picks(cx: &mut Cx) {
+    let (pinned, hover) = {
+        let s = session().lock().unwrap();
+        (s.pinned.clone(), s.hover.clone())
+    };
+    let unavailable = |pick: &TweakPick| {
+        cx.widget_tree().widget(WidgetUid(pick.uid)).try_widget_uid().is_none()
+    };
+    let drop_pin = pinned.as_ref().is_some_and(unavailable);
+    let drop_hover = hover.as_ref().is_some_and(unavailable);
+    if drop_pin || drop_hover {
+        let mut s = session().lock().unwrap();
+        if drop_pin {
+            s.pinned = None;
+            s.vibe_status = "Selection is unavailable while its owner handles the inspector; select a child widget.".to_string();
+        }
+        if drop_hover {
+            s.hover = None;
+        }
+        drop(s);
+        cx.redraw_all();
+    }
+}
+
+fn require_tweak_target(widget: &WidgetRef) -> Result<(), String> {
+    if widget.try_widget_uid().is_none() {
+        return Err("widget is unavailable or currently handling an event/draw; apply between events".to_string());
+    }
+    Ok(())
+}
+
+/// Is `ancestor` on `uid`'s parent chain?
+fn is_ancestor_of(cx: &mut Cx, ancestor: u64, uid: u64) -> bool {
+    let mut cur = cx.widget_tree().parent_of(WidgetUid(uid));
+    for _ in 0..64 {
+        match cur {
+            Some(u) if u.0 == ancestor => return true,
+            Some(u) => cur = cx.widget_tree().parent_of(u),
+            None => return false,
+        }
+    }
+    false
+}
+
+/// The pin's next ancestor worth pinning: skips design-transparent views and
+/// zero-rect wrappers; `None` at the top (the caller wraps to the deepest).
+fn ancestor_pick(
+    cx: &mut Cx,
+    pin: &TweakPick,
+    abs: Vec2d,
+    window_id: usize,
+) -> Option<TweakPick> {
+    let mut cur = cx.widget_tree().parent_of(WidgetUid(pin.uid));
+    for _ in 0..64 {
+        let u = cur?;
+        // The window and above are chrome, not content — and the window is
+        // mutably borrowed mid-dispatch, so it must not even be touched
+        // (tree lookups only, no widget borrow, before deciding).
+        let above = cx.widget_tree().parent_of(u)?;
+        if cx.widget_tree().parent_of(above).is_none() {
+            return None;
+        }
+        let widget = cx.widget_tree().widget(u);
+        if widget.is_empty() {
+            return None;
+        }
+        if !is_design_transparent(&widget) {
+            if let Some(pick) = pick_of_widget(cx, &widget, abs, window_id) {
+                // An ancestor whose area misses the click (a splitter whose
+                // rect is only its grab bar) would throw the brackets to a
+                // far-away sliver — climb past it.
+                if pick.rect.contains(abs) {
+                    return Some(pick);
+                }
+            }
+        }
+        cur = cx.widget_tree().parent_of(u);
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // the Window seam — swallow pointer events before ordinary dispatch while
 // the overlay is on, so picking can never activate the app's widgets.
@@ -610,14 +821,14 @@ fn resolve_pick(
 
 /// Called by `Window::handle_event` in place of ordinary dispatch. Returns
 /// `true` when the event was swallowed (the window must NOT hand it to its
-/// view children). Off: one atomic load (plus an F12 check on key events).
+/// view children). Off: one atomic load (plus a shortcut check on key events).
 pub fn window_intercept(
     cx: &mut Cx,
     event: &Event,
     window_view: &mut View,
     window_id: WindowId,
 ) -> bool {
-    // F12 toggles the mode, bridge or no bridge: the design surface is
+    // Shift+F10 toggles the mode, bridge or no bridge: the design surface is
     // in-process and owes the remote nothing. Only the HTTP endpoints and
     // the AI vibecode loop need --remote; without it they simply are not
     // there, and the panel still is. It does need the dev overlays to be
@@ -625,14 +836,16 @@ pub fn window_intercept(
     // in a shipped app F12 belongs to the app, and `set_tweak_on` is still
     // there for one that wants to open the panel itself.
     //
-    // SHIFT+F12 is not ours: that is the screen recorder
+    // Ctrl+F10 is not ours: that is the screen recorder
     // (widgets/src/screen_cap.rs), and it must not drag the design surface
     // into every recording.
     if let Event::KeyDown(key_event) = event {
-        if key_event.key_code == KeyCode::F12
+        let f12 = key_event.key_code == KeyCode::F12
             && !key_event.modifiers.shift
-            && devtools::enabled()
-        {
+            && !key_event.modifiers.control
+            && !key_event.modifiers.alt
+            && !key_event.modifiers.logo;
+        if devtools::enabled() && (key_event.is_tweaker_toggle() || f12) {
             let flip = {
                 let mut s = session().lock().unwrap();
                 if s.toggle_event_id != cx.event_id() {
@@ -645,11 +858,26 @@ pub fn window_intercept(
             if flip {
                 set_tweak_on(cx, !tweak_is_on());
             }
+            if !tweak_is_on() {
+                if let Some((_, tweaker)) = window_view.children.iter()
+                    .find(|(id, _)| *id == live_id!(tweaker))
+                {
+                    if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
+                        tw.cancel_interactions(cx);
+                    }
+                }
+            }
             return true;
         }
         return false;
     }
     if !tweak_is_on() {
+        return false;
+    }
+    discard_unavailable_picks(cx);
+    // Region feedback owns this drag, including when the design panel is open.
+    let feedback = cx.global::<crate::ai_slot::AiSlotRequests>();
+    if feedback.feedback_selecting || feedback.select_region == Some(window_id.0) {
         return false;
     }
 
@@ -777,6 +1005,7 @@ pub fn window_intercept(
                 log!("TWEAK press {:.0},{:.0} with a stale splitter drag: ended, picking", abs.x, abs.y);
                 if let Some(mut tw) = tweaker.borrow_mut::<Tweaker>() {
                     tw.splitter_drag = false;
+                    tw.cancel_scope = None;
                 }
             } else {
                 if kind == PointerKind::Move {
@@ -1020,11 +1249,47 @@ pub fn window_intercept(
                 session().lock().unwrap().live_stroke = Some(stroke);
             } else {
                 let pick = resolve_pick(cx, &body, abs, window_id.id());
+                let deep_uid = pick.as_ref().map_or(0, |p| p.uid);
+                // CLICK-TO-CLIMB: clicking the SAME widget again walks the
+                // pin UP one ancestor per click — the only way a container
+                // fully covered by its children (the pane that draws the
+                // rounded background) can ever be reached. At the top the
+                // climb wraps back to the deepest pick. The climb continues
+                // only while the presses land on the widget it started from:
+                // a press on a different widget inside the pinned container
+                // picks that widget. (Every press inside the container used
+                // to climb — a click on a sibling button after re-clicking
+                // one landed on a bare View, and its draw_bg well was empty.)
+                let (pick, climbed) = {
+                    let (pinned, origin) = {
+                        let s = session().lock().unwrap();
+                        (s.pinned.clone(), s.climb_origin)
+                    };
+                    match (pick, pinned) {
+                        (Some(deep), Some(pin))
+                            if pin.window_id == window_id.id()
+                                && pin.rect.contains(abs)
+                                && (deep.uid == pin.uid
+                                    || (origin == deep.uid
+                                        && is_ancestor_of(cx, pin.uid, deep.uid))) =>
+                        {
+                            (
+                                Some(
+                                    ancestor_pick(cx, &pin, abs, window_id.id())
+                                        .unwrap_or(deep),
+                                ),
+                                true,
+                            )
+                        }
+                        (deep, _) => (deep, false),
+                    }
+                };
                 let mut s = session().lock().unwrap();
+                s.climb_origin = deep_uid;
                 match &pick {
                     Some(pick) => {
                         log!(
-                            "TWEAK pick {} ({}) rect {:.0},{:.0} {:.0}x{:.0}{}",
+                            "TWEAK pick {} ({}) rect {:.0},{:.0} {:.0}x{:.0}{}{}",
                             pick.path,
                             pick.ty,
                             pick.rect.pos.x,
@@ -1034,7 +1299,8 @@ pub fn window_intercept(
                             match &pick.band {
                                 Some(band) => format!(" band {band}"),
                                 None => String::new(),
-                            }
+                            },
+                            if climbed { " (climb)" } else { "" }
                         );
                         s.pinned = Some(pick.clone());
                     }
@@ -1764,7 +2030,7 @@ fn play_duration(play: Play) -> f64 {
 /// one slot, colours four (rgba 0..1), bools one.
 fn pose_values(vm: &mut ScriptVm, state: &AnimatorState, layer_id: LiveId) -> Vec<(LiveId, Vec<f32>)> {
     let mut out = Vec::new();
-    let Some(apply) = state.apply else { return out };
+    let Some(apply) = state.apply.as_ref().map(|apply| apply.as_object()) else { return out };
     let layer_value = vm.bx.heap.value(apply, layer_id.into(), NoTrap);
     let Some(layer_obj) = layer_value.as_object() else { return out };
     let mut keys: Vec<LiveId> = Vec::new();
@@ -1942,10 +2208,10 @@ impl MaterialMirror {
         }
         many.instances.extend_from_slice(&inst);
         let area = cx.end_many_instances(many);
-        if std::env::var_os("MAKEPAD_TWEAK_TRACE").is_some() {
+        if crate::makepad_platform::makepad_error_log::trace_enabled("tweak") {
             if let Area::Instance(ia) = area {
                 if let Some(dc) = cx.draw_lists[ia.draw_list_id].draw_items[ia.draw_item_id].draw_call() {
-                    log!("TWEAK trace swatch copy shader={:?} inst={:?} uniforms[..24]={:?}", dc.draw_shader_id, &inst, &dc.dyn_uniforms[..24]);
+                    trace!("tweak", "swatch copy shader={:?} inst={:?} uniforms[..24]={:?}", dc.draw_shader_id, &inst, &dc.dyn_uniforms[..24]);
                 }
             }
         }
@@ -1970,9 +2236,10 @@ fn capture_material_mirror(cx: &Cx, widget: &WidgetRef, area: Area, base: &DrawV
     if stride == 0 || inst.instance_offset + stride > buf.len() {
         return None;
     }
-    if std::env::var_os("MAKEPAD_TWEAK_TRACE").is_some() {
-        log!(
-            "TWEAK trace swatch source uid={} shader={:?} stride={} inst={:?} uniforms[..24]={:?}",
+    if crate::makepad_platform::makepad_error_log::trace_enabled("tweak") {
+        trace!(
+            "tweak",
+            "swatch source uid={} shader={:?} stride={} inst={:?} uniforms[..24]={:?}",
             widget.widget_uid().0,
             draw_call.draw_shader_id,
             stride,
@@ -2174,6 +2441,7 @@ fn pulse_slot_set(cx: &mut Cx, s: PulseSlot, v: [f32; 4]) {
             }
         }
         PulseSlot::Uni { list, item, at } => {
+            let uniforms_gen = cx.next_uniform_gen();
             let items = &mut cx.draw_lists[list].draw_items;
             if item >= items.len() {
                 return;
@@ -2181,15 +2449,16 @@ fn pulse_slot_set(cx: &mut Cx, s: PulseSlot, v: [f32; 4]) {
             if let Some(call) = items[item].kind.draw_call_mut() {
                 if let Some(dst) = call.dyn_uniforms.get_mut(at..at + 4) {
                     dst.copy_from_slice(&v);
-                    call.uniforms_dirty = true;
+                    call.mark_uniforms_dirty(uniforms_gen);
                 }
             }
         }
         PulseSlot::Scope { shader, at } => {
+            let uniforms_gen = cx.next_uniform_gen();
             if let Some(sh) = cx.draw_shaders.shaders.get_mut(shader) {
                 if let Some(dst) = sh.mapping.scope_uniforms_buf.get_mut(at..at + 4) {
                     dst.copy_from_slice(&v);
-                    sh.mapping.scope_uniforms_gen = sh.mapping.scope_uniforms_gen.wrapping_add(1);
+                    sh.mapping.scope_uniforms_gen = uniforms_gen;
                 }
             }
         }
@@ -2620,6 +2889,7 @@ fn const_lookup(cx: &mut Cx, widget: &WidgetRef, name: &str) -> Option<(DrawShad
 /// file:line and scope "shader" — every draw sharing that compiled shader
 /// changes with it. Returns (old, new).
 fn const_set(cx: &mut Cx, widget: &WidgetRef, path: &str, name: &str, value: Option<f64>, origin: &str) -> Result<(f32, f32), String> {
+    require_tweak_target(widget)?;
     let (shader, index, loc, initial, old) = const_lookup(cx, widget, name).ok_or_else(|| format!("no shader constant named {name:?} on this widget"))?;
     // Every site in the shader annotated with this name is the same knob.
     let sites: Vec<usize> = cx
@@ -3104,6 +3374,7 @@ fn chunk_callsite_line(code: &str) -> u32 {
 /// No diff, no log — [`apply_splash_chunk`] wraps this for user-visible
 /// edits; the tweaker's own scaffolding (body compression) uses it raw.
 fn eval_chunk(cx: &mut Cx, widget: &WidgetRef, chunk: &str) -> Result<(), String> {
+    require_tweak_target(widget)?;
     let chunk = chunk.trim();
     let body = if chunk.starts_with('{') {
         chunk.to_string()
@@ -3157,6 +3428,7 @@ pub fn apply_splash_chunk(
     chunk: &str,
     origin: &str,
 ) -> Result<Vec<TweakDiffEntry>, String> {
+    require_tweak_target(widget)?;
     let chunk = chunk.trim();
     let before = reflect_flat(cx, widget);
     // The draw shader compiles inside the apply itself, so an fn that names
@@ -3836,21 +4108,15 @@ pub fn tweak_callback(
                     )
                 };
                 let (old, new) = const_set(cx, &widget, &resolved_path, &cname, value, "remote")?;
-                session().lock().unwrap().pinned = Some(TweakPick {
-                    uid: widget.widget_uid().0,
-                    path: resolved_path.clone(),
-                    ty: String::new(),
-                    rect: widget.area().clipped_rect_union(cx),
-                    window_id: 0,
-                    band: None,
-                    level: 0,
-                });
+                let inspection = pin_remote_edit(cx, &widget, &resolved_path);
                 return Ok(format!(
-                    "{{\"ok\":1,\"path\":{},\"const\":{},\"old\":{},\"new\":{}}}",
+                    "{{\"ok\":1,\"path\":{},\"const\":{},\"old\":{},\"new\":{},\"selected\":{},\"inspection\":{}}}",
                     json_str(&resolved_path),
                     json_str(&cname),
                     fmt_f64(old as f64),
-                    fmt_f64(new as f64)
+                    fmt_f64(new as f64),
+                    inspection.is_none(),
+                    inspection.map(json_str).unwrap_or_else(|| "null".to_string())
                 ));
             }
             let applied = apply_splash_chunk(cx, &widget, &resolved_path, &chunk, "remote");
@@ -3871,28 +4137,13 @@ pub fn tweak_callback(
             let changed = applied?;
             // A fn rewrite from the AI shows in the source view as applied.
             record_fn_overrides(widget.widget_uid().0, &chunk);
-            {
-                let mut s = session().lock().unwrap();
-                let rect = widget.area().clipped_rect_union(cx);
-                let ty = widget
-                    .widget_type_id()
-                    .and_then(|type_id| widget_type_names(cx).get(&type_id).copied())
-                    .map(live_id_token)
-                    .unwrap_or_else(|| "-".to_string());
-                s.pinned = Some(TweakPick {
-                    uid: widget.widget_uid().0,
-                    path: resolved_path.clone(),
-                    ty,
-                    rect,
-                    window_id: 0,
-                    band: None,
-                    level: 0,
-                });
-            }
+            let inspection = pin_remote_edit(cx, &widget, &resolved_path);
             Ok(format!(
-                "{{\"ok\":1,\"path\":{},\"changed\":{}}}",
+                "{{\"ok\":1,\"path\":{},\"changed\":{},\"selected\":{},\"inspection\":{}}}",
                 json_str(&resolved_path),
-                diff_json(&changed)
+                diff_json(&changed),
+                inspection.is_none(),
+                inspection.map(json_str).unwrap_or_else(|| "null".to_string())
             ))
         }
         "diff" => {
@@ -4121,7 +4372,8 @@ impl Widget for TweakMaterialSwatch {
                         ],
                     };
                     let id = list.id();
-                    cx.draw_lists[id].draw_list_uniforms.view_transform = m;
+                    let uniforms_gen = cx.next_uniform_gen();
+                    cx.draw_lists[id].set_uniform_view_transform(&m, uniforms_gen);
                     // The scroll viewport's clip, seen through the
                     // magnifier: (screen - t) / k.
                     let clip = self.clip.map(|c| {
@@ -4733,7 +4985,7 @@ pub struct Tweaker {
     /// renderer; until then this is the mode flag + visual state).
     #[rust]
     sploded_armed: bool,
-    /// Which side-panel tab is active (persists across F12).
+    /// Which side-panel tab is active (persists across Shift+F10).
     #[rust]
     panel_tab: PanelTab,
     /// The shader tab's draw layer (clicking a material thumbnail switches
@@ -4825,6 +5077,9 @@ pub struct Tweaker {
     saved_body_right: Option<f64>,
     #[rust]
     splitter_drag: bool,
+    /// Held for as long as `splitter_drag` is, including the event that starts it.
+    #[rust]
+    cancel_scope: Option<CancelScope>,
 }
 
 impl ScriptHook for Tweaker {
@@ -6398,7 +6653,17 @@ impl Tweaker {
                 let doc = self.row_docs.get(&layer).cloned().unwrap_or_default();
                 // One line: the label ellipsises at its own width (max_lines
                 // 1); the whole doc rides on hover as a tooltip.
-                let doc_line = doc.lines().next().unwrap_or("").trim().to_string();
+                let mut doc_line = doc.lines().next().unwrap_or("").trim().to_string();
+                // A layer with no live draw call (a View with show_bg off,
+                // reached by the click-to-climb) has nothing to mirror: say
+                // so where the well would otherwise sit empty and silent.
+                {
+                    let widget = cx.widget_tree().widget(WidgetUid(self.rows_uid));
+                    let primary = self.materials.first().is_some_and(|m| *m == layer);
+                    if !widget.is_empty() && layer_shader_id(cx, &widget, &layer, primary).is_none() {
+                        doc_line = format!("{layer} is not drawn: no live draw call to mirror (show_bg off?)");
+                    }
+                }
                 col.child(live_id!(shader_doc)).set_text(cx, &doc_line);
                 // Flowing text: the source comment's hard breaks are not
                 // paragraph breaks.
@@ -7914,7 +8179,7 @@ impl Tweaker {
                         // body pick (drives 2D outline AND the 3D view).
                         let target = id.0;
                         let widget = cx.widget_tree().widget(WidgetUid(target));
-                        if !widget.is_empty() {
+                        if widget.try_widget_uid().is_some() {
                             let rect = widget.area().clipped_rect_union(cx);
                             let ids = cx.widget_tree().path_to(WidgetUid(target));
                             let path = ids
@@ -7946,7 +8211,7 @@ impl Tweaker {
                     FileTreeAction::NodeHovered(id) => {
                         // Tree hover: outline that widget in the body/3D.
                         let widget = cx.widget_tree().widget(WidgetUid(id.0));
-                        if !widget.is_empty() {
+                        if widget.try_widget_uid().is_some() {
                             let rect = widget.area().clipped_rect_union(cx);
                             if rect.size.x > 0.0 {
                                 session().lock().unwrap().hover = Some(TweakPick {
@@ -7976,7 +8241,7 @@ impl Tweaker {
             if self.sploded_uid != 0 && widget_action.widget_uid.0 == self.sploded_uid {
                 if let ButtonAction::Clicked(_) = widget_action.cast::<ButtonAction>() {
                     // The 2.5D exploded z-layer view. Inspection-only while
-                    // up (input belongs to the mode): exit with Esc or F10.
+                    // up (input belongs to the mode): exit with Escape or this button.
                     cx.sploded_toggle();
                     // The toggle is deferred to the next event; read the
                     // state it WILL have, not the one it still has.
@@ -8727,11 +8992,48 @@ impl Tweaker {
     }
 }
 
+impl Tweaker {
+    fn cancel_interactions(&mut self, cx: &mut Cx) {
+        self.splitter_drag = false;
+        self.cancel_scope = None;
+        self.open_popup = None;
+        if let Some(sidebar) = &self.sidebar {
+            sidebar.handle_event(cx,
+                &Event::Actions(vec![Box::new(crate::modal::ModalAction::Dismissed)]),
+                &mut Scope::empty());
+        }
+    }
+}
+
 impl Widget for Tweaker {
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+    fn visit_cancel(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
         if !tweak_is_on() {
+            return false;
+        }
+        if let Some(sidebar) = &self.sidebar {
+            visit(id!(sidebar), sidebar.clone());
+        }
+        if self.note_open {
+            if let Some(note) = &self.note_ui {
+                visit(id!(note), note.clone());
+            }
+        }
+        true
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        // Above the early return on purpose: F12 turns the panel off without
+        // clearing splitter_drag, and a stranded scope would wedge Escape app-wide.
+        if self.cancel_scope.is_some() && (!self.splitter_drag || !tweak_is_on()) {
+            if let Some(scope) = self.cancel_scope.take() {
+                cx.end_cancel_scope(scope);
+            }
+        }
+        if !tweak_is_on() {
+            self.splitter_drag = false;
             return;
         }
+        discard_unavailable_picks(cx);
         // An eyedropper sample in flight: apply it the moment the frame
         // has been read back, else look again next frame.
         let probe = session().lock().unwrap().eyedrop_probe.clone();
@@ -8900,6 +9202,7 @@ impl Widget for Tweaker {
                     && e.abs.y >= self.band.pos.y
                 {
                     self.splitter_drag = true;
+                    self.cancel_scope = Some(self.begin_cancel_scope(cx));
                 } else if e.abs.x > x
                     && !self
                         .open_popup
@@ -9158,7 +9461,7 @@ impl Widget for Tweaker {
                     match hover_target {
                         Some(target) => {
                             let widget = cx.widget_tree().widget(WidgetUid(target));
-                            if !widget.is_empty() {
+                            if widget.try_widget_uid().is_some() {
                                 let rect = widget.area().clipped_rect_union(cx);
                                 if rect.size.x > 0.0 {
                                     session().lock().unwrap().hover = Some(TweakPick {
@@ -9223,15 +9526,17 @@ impl Widget for Tweaker {
             }
             // ANY up releases the drag, wherever it lands — the capture
             // must never outlive the press.
-            Event::MouseUp(_) => {
+            Event::MouseUp(_) | Event::WindowLostFocus(_) => {
                 self.splitter_drag = false;
+                self.cancel_scope = None;
             }
-            // Safeties: focus loss or Escape frees the pointer too.
-            Event::WindowLostFocus(_) => {
+            _ if self.splitter_drag
+                && self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s))
+                && (matches!(event, Event::KeyDown(ke) if ke.key_code == KeyCode::Escape)
+                    || event.back_pressed()) =>
+            {
                 self.splitter_drag = false;
-            }
-            Event::KeyDown(ke) if ke.key_code == KeyCode::Escape && self.splitter_drag => {
-                self.splitter_drag = false;
+                self.cancel_scope = None;
             }
             _ => {}
         }
@@ -9320,9 +9625,15 @@ impl Widget for Tweaker {
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
         let on = tweak_is_on();
+        if on {
+            discard_unavailable_picks(cx);
+        }
         if on && !self.was_on {
             // Opening the panel lands the caret in the filter.
             self.focus_search_pending = true;
+        }
+        if !on && self.was_on {
+            self.cancel_interactions(cx);
         }
         self.was_on = on;
         let window_id = cx.get_current_window_id().map(|id| id.id());
@@ -9336,7 +9647,7 @@ impl Widget for Tweaker {
             // Tear the surface down for real: both overlay lists are
             // RETAINED by the window's overlay (a stored sub-list keeps its
             // slot and its last items), so skipping them here left the
-            // panel, the outlines and the note card painted after F12.
+            // panel, the outlines and the note card painted after Shift+F10.
             // Begin and end them empty so nothing of the mode remains.
             for list in [self.overlay_list.as_mut(), self.sidebar_list.as_mut()]
                 .into_iter()

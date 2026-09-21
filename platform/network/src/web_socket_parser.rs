@@ -1,5 +1,5 @@
 use crate::digest::{base64_encode, Sha1};
-use std::time::{SystemTime, UNIX_EPOCH};
+use makepad_live_id::LiveId;
 
 #[derive(Debug, PartialEq)]
 enum State {
@@ -149,11 +149,11 @@ impl WebSocketMessageHeader {
 
     // TODO Improve this using a proper random number generator
     fn random_byte() -> u8 {
-        let num = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("duration_since failed")
-            .subsec_nanos();
-        num as u8
+        let mut value = LiveId::unique().0.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        value ^= value >> 30;
+        value = value.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        value ^= value >> 27;
+        (value.wrapping_mul(0x94d0_49bb_1331_11eb) >> 56) as u8
     }
 }
 
@@ -205,8 +205,9 @@ impl WebSocketParser {
         let out_bytes = sha1.finalise();
         let base64 = base64_encode(&out_bytes);
         let response_ack = format!(
-            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n",
-            base64
+            "HTTP/1.1 101 Switching Protocols\r\n{}Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {}\r\n\r\n",
+            crate::utils::LOW_LEVEL_SECURITY_HEADERS,
+            base64,
         );
         response_ack
     }
@@ -380,5 +381,18 @@ impl WebSocketParser {
 impl Default for WebSocketParser {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WebSocketParser;
+
+    #[test]
+    fn upgrade_response_keeps_isolation_headers() {
+        let response = WebSocketParser::create_upgrade_response("dGhlIHNhbXBsZSBub25jZQ==");
+        assert!(response.starts_with("HTTP/1.1 101 Switching Protocols\r\n"));
+        assert!(response.contains("Cross-Origin-Opener-Policy: same-origin\r\n"));
+        assert!(response.contains("Cross-Origin-Embedder-Policy: require-corp\r\n"));
     }
 }

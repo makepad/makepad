@@ -12,61 +12,76 @@ use crate::{
     window::WindowId,
 };
 use std::{
-    collections::VecDeque,
+    rc::Rc,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, Mutex,
+        mpsc::{sync_channel, Receiver, SyncSender, TrySendError},
+        Arc,
     },
 };
 
-#[derive(Clone, Default)]
+/// The UI owns the receiver; only the bounded sender crosses to completion
+/// callbacks. Cloned pass descriptions remain on the UI thread.
+#[derive(Clone)]
 pub(crate) struct GpuTimeQuery {
-    samples_ms: Arc<Mutex<VecDeque<(u64, f64)>>>,
-    /// App-owned label for the pass content, captured at ENCODE time into
-    /// each completion sample. A pass replays on every window repaint, not
-    /// only when its owner rebuilt it, so completed durations cannot be
-    /// matched to submissions by arrival order — the tag travels with the
-    /// command buffer instead.
-    tag: Arc<AtomicU64>,
+    pub(crate) recorder: GpuTimeRecorder,
+    receiver: Rc<Receiver<(u64, f64)>>,
+    breakdown: Rc<Receiver<(u64, String)>>,
 }
-
+#[derive(Clone)]
+pub(crate) struct GpuTimeRecorder {
+    sender: SyncSender<(u64, f64)>,
+    breakdown: SyncSender<(u64, String)>,
+    tag: Arc<AtomicU64>,
+    dropped: Arc<AtomicU64>,
+}
+impl Default for GpuTimeQuery {
+    fn default() -> Self {
+        let (sender, receiver) = sync_channel(1024);
+        let (breakdown_sender, breakdown) = sync_channel(8);
+        Self {
+            recorder: GpuTimeRecorder {
+                sender,
+                breakdown: breakdown_sender,
+                tag: Arc::new(AtomicU64::new(0)),
+                dropped: Arc::new(AtomicU64::new(0)),
+            },
+            receiver: Rc::new(receiver),
+            breakdown: Rc::new(breakdown),
+        }
+    }
+}
 // Only backends that report command-buffer timing (Metal today) call the
 // recording half; the other backends still compile it.
 #[allow(dead_code)]
-impl GpuTimeQuery {
+impl GpuTimeRecorder {
+    pub(crate) fn record_breakdown(&self, tag: u64, line: String) {
+        if self.breakdown.try_send((tag, line)).is_err() {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
     pub(crate) fn record_seconds_tagged(&self, tag: u64, seconds: f64) {
         let ms = seconds * 1000.0;
         if !ms.is_finite() || ms < 0.0 {
             return;
         }
-        let mut samples = self
-            .samples_ms
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if samples.len() == 1024 {
-            samples.pop_front();
+        if matches!(self.sender.try_send((tag, ms)), Err(TrySendError::Full(_))) {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
         }
-        samples.push_back((tag, ms));
     }
-
-    pub(crate) fn set_tag(&self, tag: u64) {
-        self.tag.store(tag, Ordering::Relaxed);
-    }
-
     pub(crate) fn current_tag(&self) -> u64 {
         self.tag.load(Ordering::Relaxed)
     }
-
-    fn take_samples(&self) -> Vec<f64> {
-        self.take_tagged_samples().into_iter().map(|(_, ms)| ms).collect()
+}
+impl GpuTimeQuery {
+    fn set_tag(&self, tag: u64) {
+        self.recorder.tag.store(tag, Ordering::Relaxed);
     }
-
+    fn take_samples(&self) -> Vec<f64> {
+        self.receiver.try_iter().map(|(_, ms)| ms).collect()
+    }
     fn take_tagged_samples(&self) -> Vec<(u64, f64)> {
-        self.samples_ms
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .drain(..)
-            .collect()
+        self.receiver.try_iter().collect()
     }
 }
 
@@ -140,7 +155,15 @@ impl ScriptApply for DrawPass {
 
 impl DrawPass {
     pub fn new(cx: &mut Cx) -> Self {
-        cx.passes.alloc()
+        let uniforms_gen = cx.next_uniform_gen();
+        let pass = cx.passes.alloc();
+        // A recycled capture pass can carry a window-local transform and
+        // frozen attachments. A new owner must start with a clean pass.
+        cx.passes[pass.draw_pass_id()] = CxDrawPass {
+            pass_uniforms_gen: uniforms_gen,
+            ..Default::default()
+        };
+        pass
     }
 }
 
@@ -233,7 +256,7 @@ impl DrawPass {
     }
 
     pub fn new_with_name(cx: &mut Cx, name: &str) -> Self {
-        let pass = cx.passes.alloc();
+        let pass = Self::new(cx);
         pass.set_pass_name(cx, name);
         pass
     }
@@ -397,12 +420,7 @@ impl DrawPass {
     /// the command buffer's GPUStartTime/GPUEndTime; unsupported backends
     /// simply leave the sample queue empty.
     pub fn set_gpu_timing_enabled(&self, cx: &mut Cx, enabled: bool) {
-        let pass = &mut cx.passes[self.draw_pass_id()];
-        if enabled {
-            pass.gpu_time_query.get_or_insert_with(GpuTimeQuery::default);
-        } else {
-            pass.gpu_time_query = None;
-        }
+        cx.passes[self.draw_pass_id()].set_gpu_timing_enabled(enabled);
     }
 
     /// Drain completed command-buffer durations without blocking for work
@@ -485,8 +503,24 @@ pub struct DrawPassUniforms {
     pub dpi_factor: f32,
     #[live]
     pub dpi_dilate: f32,
+    /// The density the pass is shown at: `dpi_factor` for a pass painted
+    /// where it is displayed; for a pass rasterised at another density (a
+    /// cache sheet displayed scaled) the density of its display, so that a
+    /// shader's screen-space decisions do not follow the raster.
+    #[live]
+    pub display_dpi_factor: f32,
     #[live]
     pub time: f32,
+    /// App-controlled clock shared by every map draw in this pass. This is
+    /// deliberately separate from `time`: reading that field makes the
+    /// shader's static `uses_time` scan repaint the pass at display rate.
+    #[live]
+    pub shiny_time: f32,
+    // std140: the block ends on a vec4 boundary
+    #[live]
+    pub pad0: f32,
+    #[live]
+    pub pad1: f32,
     #[live]
     pub pad2: f32,
 }
@@ -516,6 +550,9 @@ pub struct CxDrawPass {
     pub depth_init: f64,
     pub clear_color: Vec4f,
     pub dpi_factor: Option<f64>,
+    /// The display density of a pass rasterised at another density (see
+    /// `DrawPassUniforms::display_dpi_factor`); `None` = shown as painted.
+    pub display_dpi_factor: Option<f64>,
     pub main_draw_list_id: Option<DrawListId>,
     pub parent: CxDrawPassParent,
     pub paint_dirty: bool,
@@ -524,16 +561,74 @@ pub struct CxDrawPass {
     /// blurs the world in realtime instead of holding the last rebuild —
     /// while texture caches, which exist to NOT re-render, stay untouched.
     pub live_with_parent: bool,
+    /// The draw list that last declared this pass a dependency through
+    /// `make_child_pass`, with that list's redraw id at the time. The parent
+    /// link above outlives the frame that made it, but the pass's output is
+    /// only consumed while the list that attached it still stands: once that
+    /// list is recorded again without re-attaching — the window stopped
+    /// capturing the gauss scene, the map stopped baking its shadow mask —
+    /// the pass is orphaned and must not be painted (see
+    /// `Cx::pass_attachment_is_stale`). `None` for a pass parented by a window
+    /// or by hand (`set_pass_parent`, a hand-built chain); those never go
+    /// stale.
+    pub attached_by: Option<(DrawListId, u64)>,
+    /// Set by `Cx::repaint_pass`: the caller asked for this pass by name, so
+    /// it paints once even while orphaned (a thumbnail sheet re-executed for
+    /// a texture readback). Cleared when the repaint order is computed.
+    pub repaint_requested: bool,
+    /// The repaint that last painted this pass whole (0 before the first).
+    /// A repaint the backend stopped — instances or uniforms not resident,
+    /// the submitter saturated — leaves it as it was, so a producer that
+    /// must know its output exists before using it (the map's tile bake
+    /// lands its cells only once its sheet was painted) compares this with
+    /// the value it saw when it attached the pass.
+    pub painted_serial: u64,
     pub pass_rect: Option<CxDrawPassRect>,
     pub view_shift: Vec2d,
     pub view_scale: Vec2d,
     pub pass_uniforms: DrawPassUniforms,
+    /// Replaced with a process-wide generation whenever the pass block changes.
+    pub pass_uniforms_gen: u64,
     pub zbias_step: f32,
-    /// Set while the F10 exploded z-layer view is up on this pass; `None` is
+    /// Set while the exploded z-layer view is up on this pass; `None` is
     /// ordinary flat 2D and leaves `camera_view` the identity it always was.
     pub sploded: Option<crate::sploded::SplodedParams>,
     pub os: CxOsPass,
     pub(crate) gpu_time_query: Option<GpuTimeQuery>,
+}
+
+impl CxDrawPass {
+    /// Opt in when a widget borrows its containing pass. No OS/GPU wait.
+    pub fn set_gpu_timing_enabled(&mut self, enabled: bool) {
+        if enabled {
+            self.gpu_time_query
+                .get_or_insert_with(GpuTimeQuery::default);
+        } else {
+            self.gpu_time_query = None;
+        }
+    }
+    pub fn set_gpu_time_tag(&self, tag: u64) {
+        if let Some(query) = &self.gpu_time_query {
+            query.set_tag(tag);
+        }
+    }
+    /// Drain completed samples into reusable caller storage. The queue is
+    /// bounded; missing samples remain missing rather than blocking a frame.
+    pub fn drain_gpu_time_samples(&self, out: &mut Vec<(u64, f64)>) {
+        if let Some(query) = &self.gpu_time_query {
+            out.extend(query.receiver.try_iter());
+        }
+    }
+    pub fn gpu_time_samples_dropped(&self) -> u64 {
+        self.gpu_time_query
+            .as_ref()
+            .map_or(0, |q| q.recorder.dropped.load(Ordering::Relaxed))
+    }
+    pub fn drain_gpu_breakdown(&self, out: &mut Vec<(u64, String)>) {
+        if let Some(query) = &self.gpu_time_query {
+            out.extend(query.breakdown.try_iter());
+        }
+    }
 }
 
 impl Default for CxDrawPass {
@@ -546,9 +641,11 @@ impl Default for CxDrawPass {
             zbias_step: 0.001,
             sploded: None,
             pass_uniforms: DrawPassUniforms::default(),
+            pass_uniforms_gen: 0,
             color_textures: Vec::new(),
             depth_texture: None,
             dpi_factor: None,
+            display_dpi_factor: None,
             clear_depth: DrawPassClearDepth::ClearWith(1.0),
             clear_color: Vec4f::default(),
             depth_init: 1.0,
@@ -558,6 +655,9 @@ impl Default for CxDrawPass {
             parent: CxDrawPassParent::None,
             paint_dirty: false,
             live_with_parent: false,
+            attached_by: None,
+            repaint_requested: false,
+            painted_serial: 0,
             pass_rect: None,
             os: CxOsPass::default(),
             gpu_time_query: None,
@@ -574,17 +674,35 @@ pub enum CxDrawPassParent {
 }
 
 impl CxDrawPass {
-    pub fn set_time(&mut self, time: f32) {
-        self.pass_uniforms.time = time;
+    #[inline]
+    pub fn mark_pass_uniforms_dirty(&mut self, uniforms_gen: u64) {
+        debug_assert_ne!(uniforms_gen, 0);
+        self.pass_uniforms_gen = uniforms_gen;
     }
 
-    pub fn set_dpi_factor(&mut self, dpi_factor: f64) {
+    pub fn set_time(&mut self, time: f32, uniforms_gen: u64) {
+        self.pass_uniforms.time = time;
+        self.mark_pass_uniforms_dirty(uniforms_gen);
+    }
+
+    pub fn set_dpi_factor(&mut self, dpi_factor: f64, uniforms_gen: u64) {
         let dpi_dilate = (2. - dpi_factor).max(0.).min(1.);
         self.pass_uniforms.dpi_factor = dpi_factor as f32;
         self.pass_uniforms.dpi_dilate = dpi_dilate as f32;
+        self.pass_uniforms.display_dpi_factor = self.display_dpi_factor.unwrap_or(dpi_factor) as f32;
+        self.mark_pass_uniforms_dirty(uniforms_gen);
     }
 
-    pub fn set_ortho_matrix(&mut self, offset: Vec2d, size: Vec2d) {
+    /// The display density of a pass rasterised at another density; `None`
+    /// returns the pass to "shown as painted".
+    pub fn set_display_dpi_factor(&mut self, display: Option<f64>, uniforms_gen: u64) {
+        self.display_dpi_factor = display;
+        self.pass_uniforms.display_dpi_factor =
+            display.unwrap_or(self.pass_uniforms.dpi_factor as f64) as f32;
+        self.mark_pass_uniforms_dirty(uniforms_gen);
+    }
+
+    pub fn set_ortho_matrix(&mut self, offset: Vec2d, size: Vec2d, uniforms_gen: u64) {
         let offset = offset + self.view_shift;
         let size = size * self.view_scale;
         let zero = Mat4f { v: [0.0; 16] };
@@ -615,5 +733,125 @@ impl CxDrawPass {
         self.pass_uniforms.depth_view_r = zero;
         self.pass_uniforms.camera_inv = Mat4f::identity();
         self.pass_uniforms.camera_inv_r = Mat4f::identity();
+        self.mark_pass_uniforms_dirty(uniforms_gen);
+    }
+}
+
+/// The size of a pass's depth attachment, in device pixels.
+///
+/// A pass rendering into a texture the caller chose takes that texture's
+/// allocation: the WM hands its clients power-of-two shared textures larger
+/// than the pass. A pass drawing into its own targets, or a window, sizes the
+/// depth buffer like its colour buffers, from the pass rect.
+// Only the D3D11 backend binds strict-size depth views; the other backends
+// clip to the smallest attachment and size depth from the pass.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn depth_attachment_size(
+    target_alloc: Option<(usize, usize)>,
+    pass_size: DVec2,
+    dpi_factor: f64,
+) -> (usize, usize) {
+    target_alloc.unwrap_or_else(|| {
+        let size = pass_size * dpi_factor;
+        (size.x as usize, size.y as usize)
+    })
+}
+
+#[cfg(test)]
+mod allocation_tests {
+    use super::*;
+
+    #[test]
+    fn a_recycled_capture_does_not_shift_the_next_compositor_pass() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let capture = DrawPass::new(&mut cx);
+        let id = capture.draw_pass_id();
+        let generation = cx.passes[id].pass_uniforms_gen;
+        cx.passes[id].view_shift = dvec2(82.0, 104.0);
+        cx.passes[id].view_scale = dvec2(0.5, 0.5);
+        cx.passes[id].pass_rect = Some(CxDrawPassRect::Size(dvec2(994.0, 644.0)));
+        cx.passes[id].keep_camera_matrix = true;
+        cx.passes[id].dont_clear = true;
+        drop(capture);
+
+        let scene = DrawPass::new(&mut cx);
+        assert_eq!(scene.draw_pass_id(), id);
+        let pass = &cx.passes[id];
+        assert_eq!(pass.view_shift, dvec2(0.0, 0.0));
+        assert_eq!(pass.view_scale, dvec2(1.0, 1.0));
+        assert!(pass.pass_rect.is_none());
+        assert!(!pass.keep_camera_matrix && !pass.dont_clear);
+        assert_ne!(pass.pass_uniforms_gen, generation);
+    }
+}
+
+#[cfg(test)]
+mod depth_attachment_size_tests {
+    use super::*;
+
+    #[test]
+    fn a_window_pass_sizes_depth_from_the_pass_rect() {
+        assert_eq!(
+            depth_attachment_size(None, dvec2(1126.0, 680.0), 2.0),
+            (2252, 1360)
+        );
+        assert_eq!(
+            depth_attachment_size(None, dvec2(800.0, 600.0), 1.0),
+            (800, 600)
+        );
+    }
+
+    #[test]
+    fn a_hosted_pass_sizes_depth_from_the_shared_texture_allocation() {
+        // The WM's Windows allocation for a 1126x680 tile at dpi 2.
+        assert_eq!(
+            depth_attachment_size(Some((4096, 2048)), dvec2(1126.0, 680.0), 2.0),
+            (4096, 2048)
+        );
+    }
+
+    #[test]
+    fn the_target_allocation_wins_even_when_smaller_than_the_pass() {
+        assert_eq!(
+            depth_attachment_size(Some((1024, 512)), dvec2(1126.0, 680.0), 2.0),
+            (1024, 512)
+        );
+    }
+}
+
+#[cfg(test)]
+mod gpu_time_tests {
+    use super::*;
+    #[test]
+    fn bounded_completion_samples_preserve_tags_and_report_full_queue() {
+        let mut pass = CxDrawPass::default();
+        pass.set_gpu_timing_enabled(true);
+        let recorder = pass.gpu_time_query.as_ref().unwrap().recorder.clone();
+        pass.set_gpu_time_tag(17);
+        let captured = recorder.current_tag();
+        pass.set_gpu_time_tag(18);
+        std::thread::spawn(move || {
+            for index in 0..1025 {
+                recorder.record_seconds_tagged(captured, index as f64 / 1000.0);
+            }
+            for invalid in [f64::NAN, f64::INFINITY, -1.0] {
+                recorder.record_seconds_tagged(99, invalid);
+            }
+        })
+        .join()
+        .unwrap();
+        assert_eq!(pass.gpu_time_samples_dropped(), 1);
+        let mut samples = Vec::with_capacity(1024);
+        pass.drain_gpu_time_samples(&mut samples);
+        assert_eq!(samples.len(), 1024);
+        for (index, (tag, ms)) in samples.iter().enumerate() {
+            assert_eq!(*tag, 17);
+            assert!((*ms - index as f64).abs() < 1e-9);
+        }
+        samples.clear();
+        pass.drain_gpu_time_samples(&mut samples);
+        assert!(samples.is_empty());
+        pass.set_gpu_timing_enabled(false);
+        assert_eq!(pass.gpu_time_samples_dropped(), 0);
     }
 }

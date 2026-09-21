@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 // Because this crate sets `links = "makepad_ai_cuda"`, the answer travels to
 // its immediate dependents as `DEP_MAKEPAD_AI_CUDA_KERNELS` (=1) and
 // `DEP_MAKEPAD_AI_CUDA_ARCH`. makepad-ai-llm, makepad-ai-metal,
-// makepad-ai-common and makepad-voice gate their CUDA code on exactly that
+// makepad-ai-common and makepad-ai-speech (whisper) gate their CUDA code on exactly that
 // and MUST NOT probe for a toolkit themselves: "nvcc exists on this machine"
 // and "kernels were built and will link" are different questions, and a
 // dependent that answers the first one locally is how a machine WITH the
@@ -51,9 +51,7 @@ fn main() {
     // CUDA DLLs on every machine it ships to. NO_CUDA forces the kernel-less
     // stub the no-toolkit path already produces; it outranks REQUIRE.
     if env_flag("MAKEPAD_GGML_NO_CUDA") {
-        println!(
-            "cargo:warning=makepad-ai-cuda: MAKEPAD_GGML_NO_CUDA set — building without CUDA kernels"
-        );
+        // Explicitly opting out is a normal configuration, not a compiler warning.
         return;
     }
     if target_os == "linux" || target_os == "windows" {
@@ -112,6 +110,7 @@ fn build_cuda_backends(target_os: &str, require_cuda: bool) {
         manifest_dir.join("kernels/rife.cu"),
         manifest_dir.join("kernels/roformer.cu"),
         manifest_dir.join("kernels/splat.cu"),
+        manifest_dir.join("kernels/pixal.cu"),
         manifest_dir.join("kernels/ssm_conv.cu"),
     ];
     for src_path in &src_paths {

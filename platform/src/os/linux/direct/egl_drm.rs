@@ -264,6 +264,7 @@ impl Drm {
 #[allow(non_snake_case)]
 #[allow(dead_code)]
 pub struct Egl {
+    pub libgl: std::rc::Rc<gl_sys::LibGl>,
     libegl: LibEgl,
     egl_display: egl_sys::EGLDisplay,
     egl_surface: egl_sys::EGLSurface,
@@ -368,7 +369,7 @@ impl Egl {
         }
         let egl_config = egl_config.unwrap();
 
-        let ctx_attribs = [egl_sys::EGL_CONTEXT_MAJOR_VERSION, 2, egl_sys::EGL_NONE];
+        let ctx_attribs = [egl_sys::EGL_CONTEXT_MAJOR_VERSION, 3, egl_sys::EGL_NONE];
 
         let egl_context = (libegl.eglCreateContext.unwrap())(
             egl_display,
@@ -398,12 +399,16 @@ impl Egl {
             return None;
         }
 
-        (gl.glload_with)(|s| {
-            let s = CString::new(s).unwrap();
-            unsafe { (libegl.eglGetProcAddress.unwrap())(s.as_ptr()) }
-        });
+        let libgl = gl_sys::LibGl::try_load(|names| {
+            names.iter().find_map(|name| {
+                let name = CString::new(*name).unwrap();
+                let pointer = (libegl.eglGetProcAddress.unwrap())(name.as_ptr());
+                (!pointer.is_null()).then_some(pointer)
+            }).unwrap_or(std::ptr::null_mut())
+        }).expect("Failed to load OpenGL ES entry points");
 
         Some(Self {
+            libgl: std::rc::Rc::new(libgl),
             libegl,
             egl_display,
             egl_surface,

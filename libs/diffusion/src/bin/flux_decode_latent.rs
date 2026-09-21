@@ -14,24 +14,32 @@ use std::path::Path;
 
 fn usage() -> ! {
     eprintln!(
-        "usage: flux-decode-latent <workflow.json> <comfy-root-or-model-root> <latent.bin> <output.png> [width height]"
+        "usage: flux-decode-latent <workflow.json> <comfy-root-or-model-root> <latent.bin> <output.png> [width height] [--latent-format packed|nchw]"
     );
     std::process::exit(1);
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let workflow_path = env::args().nth(1).unwrap_or_else(|| usage());
-    let root = env::args().nth(2).unwrap_or_else(|| usage());
-    let latent_path = env::args().nth(3).unwrap_or_else(|| usage());
-    let output_path = env::args().nth(4).unwrap_or_else(|| usage());
-    let width = env::args()
-        .nth(5)
+    let mut arguments: Vec<String> = env::args().skip(1).collect();
+    let latent_format = if let Some(index) = arguments.iter().position(|arg| arg == "--latent-format") {
+        if index + 1 >= arguments.len() { usage(); }
+        let value = arguments.remove(index + 1);
+        arguments.remove(index);
+        Some(value)
+    } else { None };
+    let workflow_path = arguments.first().cloned().unwrap_or_else(|| usage());
+    let root = arguments.get(1).cloned().unwrap_or_else(|| usage());
+    let latent_path = arguments.get(2).cloned().unwrap_or_else(|| usage());
+    let output_path = arguments.get(3).cloned().unwrap_or_else(|| usage());
+    let width = arguments
+        .get(4)
         .map(|value| value.parse::<u32>())
         .transpose()?;
-    let height = env::args()
-        .nth(6)
+    let height = arguments
+        .get(5)
         .map(|value| value.parse::<u32>())
         .transpose()?;
+    if arguments.len() > 6 { usage(); }
 
     let workflow = FluxWorkflow::from_file(&workflow_path)?;
     let roots = ComfyModelRoots::new(root);
@@ -42,7 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let latent_bytes = fs::read(Path::new(&latent_path))?;
     let latent_values = f32_bytes_to_vec(&latent_bytes)?;
-    let latent_format = env::var("FLUX_LATENT_FORMAT").unwrap_or_else(|_| {
+    let latent_format = latent_format.unwrap_or_else(|| {
         if latent_path.contains(".packed.") {
             "packed".to_string()
         } else {
@@ -59,7 +67,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?,
         "nchw" => latent_values,
         other => {
-            return Err(format!("unsupported FLUX_LATENT_FORMAT '{}'", other).into());
+            return Err(format!("unsupported latent format '{}'", other).into());
         }
     };
 

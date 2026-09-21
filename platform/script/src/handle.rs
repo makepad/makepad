@@ -12,6 +12,11 @@ use std::rc::Rc;
 pub struct ScriptHandleRef {
     pub(crate) roots: Rc<RefCell<HashMap<ScriptHandle, usize>>>,
     pub(crate) handle: ScriptHandle,
+    /// The heap this handle indexes (`ScriptHeap::heap_key`). A handle
+    /// VALUE means nothing outside its heap: two isolates hand out the same
+    /// numbers for different things, so anything Cx-owned that a handle
+    /// names (a resource's bytes) is looked up by heap and handle.
+    pub(crate) heap_key: usize,
 }
 
 impl From<ScriptHandleRef> for ScriptValue {
@@ -35,6 +40,7 @@ impl Clone for ScriptHandleRef {
         Self {
             roots: self.roots.clone(),
             handle: self.handle.clone(),
+            heap_key: self.heap_key,
         }
     }
 }
@@ -42,6 +48,10 @@ impl Clone for ScriptHandleRef {
 impl ScriptHandleRef {
     pub fn as_handle(&self) -> ScriptHandle {
         self.handle
+    }
+    /// The owning heap's identity, the pair a resource lookup needs.
+    pub fn heap_key(&self) -> usize {
+        self.heap_key
     }
 }
 

@@ -30,6 +30,18 @@ pub struct CxDraw<'a> {
     pub rustybuzz_buffer: Option<UnicodeBuffer>,
 }
 
+#[derive(Default)]
+struct CxDrawScratch {
+    pass_stack: Vec<PassStackItem>,
+    draw_list_stack: Vec<DrawListId>,
+    rustybuzz_buffer: Option<UnicodeBuffer>,
+}
+
+// Each nested context checks out its own storage. Capacity survives the
+// frame, including the pool inventory once its nesting high-water is known.
+#[derive(Default)]
+struct CxDrawScratchPool(Vec<CxDrawScratch>);
+
 impl<'a> Deref for CxDraw<'a> {
     type Target = Cx;
     fn deref(&self) -> &Self::Target {
@@ -47,6 +59,13 @@ impl<'a> Drop for CxDraw<'a> {
         if !self.fonts.borrow_mut().prepare_textures(self.cx) {
             self.cx.redraw_all();
         }
+        self.pass_stack.clear();
+        self.draw_list_stack.clear();
+        self.cx.global::<CxDrawScratchPool>().0.push(CxDrawScratch {
+            pass_stack: std::mem::take(&mut self.pass_stack),
+            draw_list_stack: std::mem::take(&mut self.draw_list_stack),
+            rustybuzz_buffer: self.rustybuzz_buffer.take(),
+        });
     }
 }
 
@@ -58,14 +77,18 @@ impl<'a> CxDraw<'a> {
         let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
         fonts.borrow_mut().prepare_atlases_if_needed(cx);
         let nav_tree_rc = cx.get_global::<CxNavTreeRc>().clone();
+        let mut scratch = cx.global::<CxDrawScratchPool>().0.pop().unwrap_or_default();
+        scratch.pass_stack.reserve(16);
+        scratch.draw_list_stack.reserve(64);
+        let rustybuzz_buffer = scratch.rustybuzz_buffer.take().or_else(|| Some(UnicodeBuffer::new()));
         Self {
             fonts,
             cx,
             draw_event,
-            pass_stack: Vec::new(),
-            draw_list_stack: Vec::with_capacity(64),
+            pass_stack: scratch.pass_stack,
+            draw_list_stack: scratch.draw_list_stack,
             nav_tree_rc,
-            rustybuzz_buffer: Some(UnicodeBuffer::new()),
+            rustybuzz_buffer,
         }
     }
 }
@@ -86,6 +109,7 @@ impl<'a> CxDraw<'a> {
             FontFamilyDefinition {
                 font_ids: vec![],
                 expected_member_count: 0,
+                diagnostics: Default::default(),
             },
         );
         cx.set_global(Rc::new(RefCell::new(fonts)));
@@ -101,14 +125,35 @@ impl<'a> CxDraw<'a> {
         self.pass_stack.last().unwrap().dpi_factor
     }
 
+    /// Re-target the current pass to rasterise at `dpi_factor`: the pass's
+    /// own density and the recording stack's dpi both change (an XR panel
+    /// drawing 2D children at its own density). Distinct from
+    /// `set_current_pass_display_dpi_factor`, which leaves the raster density
+    /// alone and only changes what screen-space decisions read.
     pub fn set_current_pass_dpi_factor(&mut self, dpi_factor: f64) {
         if let Some(pass_id) = self.pass_stack.last().map(|stack_item| stack_item.pass_id) {
             if let Some(stack_item) = self.pass_stack.last_mut() {
                 stack_item.dpi_factor = dpi_factor;
             }
+            let uniforms_gen = self.cx.next_uniform_gen();
             let cxpass = &mut self.passes[pass_id];
             cxpass.dpi_factor = Some(dpi_factor);
-            cxpass.set_dpi_factor(dpi_factor);
+            cxpass.set_dpi_factor(dpi_factor, uniforms_gen);
+        }
+    }
+
+    /// The current pass is rasterised at its own density but displayed at
+    /// `display`: `current_dpi_factor()` and the pass uniform
+    /// `display_dpi_factor` read the display density from here to the end
+    /// of the pass, the raster keeps the pass density. Every screen-space
+    /// decision (LOD, fades, minimum widths) taken while recording into
+    /// such a pass then matches the pass it is composited into.
+    pub fn set_current_pass_display_dpi_factor(&mut self, display: f64) {
+        if let Some(stack_item) = self.pass_stack.last_mut() {
+            stack_item.dpi_factor = display;
+            let pass_id = stack_item.pass_id;
+            let uniforms_gen = self.cx.next_uniform_gen();
+            self.passes[pass_id].set_display_dpi_factor(Some(display), uniforms_gen);
         }
     }
 
@@ -116,10 +161,15 @@ impl<'a> CxDraw<'a> {
         !self.pass_stack.is_empty()
     }
 
+    /// Declare `pass` a dependency of the pass being drawn, on behalf of the
+    /// draw list being recorded: call it on every draw that consumes the
+    /// pass's texture, whether or not the pass is begun again. A list that is
+    /// recorded again without it orphans the pass, which then stops painting
+    /// (`Cx::pass_attachment_is_stale`).
     pub fn make_child_pass(&mut self, pass: &DrawPass) {
-        let pass_id = self.pass_stack.last().unwrap().pass_id;
-        let cxpass = &mut self.passes[pass.draw_pass_id()];
-        cxpass.parent = CxDrawPassParent::DrawPass(pass_id);
+        let parent = self.pass_stack.last().unwrap().pass_id;
+        let attached_by = self.draw_list_stack.last().cloned();
+        self.cx.attach_child_pass(pass.draw_pass_id(), parent, attached_by);
     }
 
     pub fn begin_pass(&mut self, pass: &DrawPass, dpi_override: Option<f64>) {
@@ -144,6 +194,10 @@ impl<'a> CxDraw<'a> {
             }
         };
         self.passes[pass.draw_pass_id()].dpi_factor = Some(dpi_factor);
+        if self.passes[pass.draw_pass_id()].display_dpi_factor.is_some() {
+            let uniforms_gen = self.cx.next_uniform_gen();
+            self.passes[pass.draw_pass_id()].set_display_dpi_factor(None, uniforms_gen);
+        }
 
         self.pass_stack.push(PassStackItem {
             dpi_factor,
@@ -193,6 +247,39 @@ impl<'a> CxDraw<'a> {
             )
             .map(|v| v.size)
             .unwrap_or(dvec2(0.0, 0.0))
+    }
+
+    /// Returns the owning window's inner size in layout points. Texture and
+    /// cache passes deliberately walk through their parent-pass chain instead
+    /// of exposing their render-target size as viewport units. A pass tree
+    /// without a window uses its root pass rectangle.
+    pub fn owning_window_or_root_pass_size(&self) -> Vec2d {
+        let Some(stack_item) = self.pass_stack.last() else {
+            return dvec2(f64::NAN, f64::NAN);
+        };
+        let mut pass_id = stack_item.pass_id;
+        for _ in 0..25 {
+            match self.passes[pass_id].parent {
+                CxDrawPassParent::Window(window_id) => {
+                    return self.windows[window_id].get_inner_size();
+                }
+                CxDrawPassParent::DrawPass(parent) => pass_id = parent,
+                _ => {
+                    return self
+                        .get_pass_rect(pass_id, self.current_dpi_factor())
+                        .map(|rect| rect.size)
+                        .unwrap_or(dvec2(f64::NAN, f64::NAN));
+                }
+            }
+        }
+        dvec2(f64::NAN, f64::NAN)
+    }
+
+    /// The paint-order depth the current pass adds per draw call: what a
+    /// drawer that splits one call into several must take back off through
+    /// `draw_depth` for its later calls to keep the depth of the one call.
+    pub fn current_pass_zbias_step(&self) -> f32 {
+        self.cx.passes[self.pass_stack.last().unwrap().pass_id].zbias_step
     }
 
     pub fn append_sub_draw_list(&mut self, draw_list_2d: &DrawList2d) {

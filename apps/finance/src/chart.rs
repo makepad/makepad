@@ -233,9 +233,9 @@ script_mod! {
         width: Fill
         height: 6
         draw_meter +: {
-            color_track: #x272a35
-            color_fill: #x5e6ad2
-            color_marker: #xa2a8b8
+            color_track: mod.theme.color_inset
+            color_fill: mod.theme.color_focus
+            color_marker: mod.theme.color_text
         }
     }
 
@@ -246,10 +246,10 @@ script_mod! {
         color_line: #x3987e5
         color_fill: #x3987e5
         color_second: #xd95926
-        color_axis: #x6b7784
-        color_rule: #x2a323d
+        color_axis: mod.theme.color_text_disabled
+        color_rule: mod.theme.color_bevel_inset_2
         draw_text +: {
-            color: #x9aa7b4
+            color: mod.theme.color_text_disabled
             text_style: theme.font_regular{font_size: 7.5}
         }
     }

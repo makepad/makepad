@@ -82,6 +82,7 @@ impl Cx {
         d3d11_cx: &mut D3d11Cx,
         d3d11_windows: &mut Vec<D3d11Window>,
     ) -> EventFlow {
+        let _phase = crate::thread::ui_phase(crate::thread::UiPhase::NativeEvent);
         // Before anything touches the GPU. This is the one place holding both `&mut D3d11Cx`
         // and `&mut Vec<D3d11Window>` exclusively while nothing is mid-render — the wndproc
         // queues re-entrant events, `handle_platform_ops` only borrows the Cx immutably, and
@@ -265,6 +266,7 @@ impl Cx {
                         })
                 });
                 let primary = primary || !primary_alive;
+                with_win32_app(|app| app.frame_trace.flip_lead(time, flip_time));
                 self.os.link_scope = Some(window_id);
                 self.os.link_flip_time = Some(flip_time);
                 // The primary window's beat drives the WHOLE tick (video, next
@@ -376,10 +378,14 @@ impl Cx {
                 self.call_event_handler(&Event::Timer(e))
             }
             Win32Event::Signal => {
-                if SignalToUI::check_and_clear_ui_signal() {
+                let internal_signal = SignalToUI::check_and_clear_internal_signal();
+                let ui_signal = SignalToUI::check_and_clear_ui_signal();
+                if internal_signal || ui_signal {
                     self.handle_termination_signal();
                     self.handle_media_signals();
                     self.handle_script_signals();
+                }
+                if ui_signal {
                     self.call_event_handler(&Event::Signal);
                 }
                 if SignalToUI::check_and_clear_action_signal() {
@@ -566,6 +572,7 @@ impl Cx {
         // too would run every animation at N× speed in a multi-window app.
         if full {
             if self.new_next_frames.len() != 0 {
+                with_win32_app(|app| app.frame_trace.next_frame(time_now));
                 self.call_next_frame_event(time_now);
             }
             if self.os.video_players.values().any(|p| p.keep_polling()) {
@@ -587,10 +594,24 @@ impl Cx {
         // `any_passes_dirty` also paces a popup's waitless dropped-present retry.
         // While video is preparing/playing we keep re-arming NextFrame so Poll
         // does not drop into Wait; pace that like the 8 ms signal-poll timer.
+        // A window that cannot reach glass at all (minimized, hidden, or in a
+        // session the compositor has abandoned — a disconnected RDP desktop
+        // reports every present as DXGI_STATUS_OCCLUDED) presents nothing
+        // either, and its beat never signals; the 1 ms retry then spun this
+        // loop at ~600 Hz, stepping every NextFrame animation every 1.6 ms for
+        // nothing (measured: `MAKEPAD_TRACE=frames`, ticks/2s: drain=1265,
+        // next_frame gap 0-4 ms). Pace that like video and the idle beat
+        // timeout — 8 ms, the same cadence a hidden window keeps on macOS —
+        // and leave the 1 ms retry to a window that is on screen and merely
+        // dropped a frame.
         if !presented {
             let video_pacing = self.os.video_players.values().any(|p| p.keep_polling());
+            let nothing_can_present = !d3d11_windows.is_empty()
+                && d3d11_windows.iter().all(|w| {
+                    w.device_lost || w.occluded_since.is_some() || w.win32_window.is_iconic()
+                });
             if !self.new_next_frames.is_empty() || self.any_passes_dirty() || video_pacing {
-                let ms = if video_pacing { 8 } else { 1 };
+                let ms = if video_pacing || nothing_can_present { 8 } else { 1 };
                 std::thread::sleep(std::time::Duration::from_millis(ms));
             }
         }
@@ -605,6 +626,8 @@ impl Cx {
             } else {
                 BEAT_TIMEOUT_IDLE_MS
             };
+            let now = app.time_now();
+            app.frame_trace.maybe_print(now);
         });
 
         // Run script-VM garbage collection at a safe point after paint, matching
@@ -788,7 +811,8 @@ impl Cx {
                     }
                 }
             }
-            self.passes[*draw_pass_id].set_time(time_now);
+            let uniforms_gen = self.next_uniform_gen();
+            self.passes[*draw_pass_id].set_time(time_now, uniforms_gen);
             match self.passes[*draw_pass_id].parent.clone() {
                 CxDrawPassParent::Xr => {}
                 CxDrawPassParent::Window(window_id) => {
@@ -1373,13 +1397,6 @@ impl CxOsApi for Cx {
         self.native_load_dependencies();
 
         self.os.windows_game_input = Some(WindowsGameInput::init());
-    }
-
-    fn spawn_thread<F>(&mut self, f: F)
-    where
-        F: FnOnce() + Send + 'static,
-    {
-        std::thread::spawn(f);
     }
 
     fn seconds_since_app_start(&self) -> f64 {

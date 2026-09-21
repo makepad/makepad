@@ -892,8 +892,6 @@ fn program_mul_mat(
         && ne11 > 8
         && !src0.is_transposed()
         && !src1.is_transposed()
-        // Debug escape hatch for bisecting kernel-selection bugs.
-        && std::env::var("GGML_NO_MUL_MM").is_err()
     {
         let bc_inp = src0.ne[0] % 32 != 0;
         let bc_out = op.ne[0] % 64 != 0 || op.ne[1] % 32 != 0;
@@ -1928,10 +1926,6 @@ fn mul_mat_broadcast(src0: &Tensor, src1: &Tensor) -> Result<(i16, i16, i16, i16
 }
 
 fn use_mul_mv_ext(src0: &Tensor, src1: &Tensor) -> bool {
-    // Debug escape hatch for bisecting kernel-selection bugs.
-    if std::env::var("GGML_NO_MUL_MV_EXT").is_ok() {
-        return false;
-    }
     src1.desc.ty == TensorType::F32
         && src0.ne[0] % 128 == 0
         && ((matches!(
@@ -2324,6 +2318,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn mul_mat_selector_uses_mul_mm_when_feature_allows() {
         let mut ctx = ctx();
         let a = tensor(&mut ctx, TensorType::F16, &[128, 64, 1, 1]);

@@ -4,7 +4,14 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+[features]
+default = ["flow-host"]
+# Disable for a client-only creator that attaches to an existing flow-server.
+flow-host = ["makepad-flow/host", "makepad-flow/hub-chat"]
+
 [dependencies]
+makepad-micro-serde = { path = "../../micro_serde" }
+makepad-flow = { path = "../../flow", default-features = false, features = ["client"] }
 # The pipeline library drives compute through the hub…
 makepad-ai-hub = { path = "../../ai/hub", default-features = false }
 # …speaks strict JSON on every wire…
@@ -14,6 +21,9 @@ makepad-strict-json = { path = "../../strict_json" }
 makepad-asset-chat = { path = "../chat" }
 makepad-asset-client = { path = "../client" }
 makepad-asset-data = { path = "../data" }
+makepad-gltf = { path = "../../gltf" }
+makepad-render = { path = "../../render" }
+makepad-draw = { path = "../../../draw" }
 # The worker's own product builder + kind table, until P7 retires the rest.
 makepad-asset-importer = { path = "../importer", default-features = false }
 

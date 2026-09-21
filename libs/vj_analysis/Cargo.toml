@@ -1,0 +1,12 @@
+[package]
+name = "makepad-vj-analysis"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Headless reuse of the VJ track and loop-splat analysis"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets" }
+makepad-ai-beats = { path = "../ai/models/beats" }
+makepad-asset-data = { path = "../asset/data" }
+

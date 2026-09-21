@@ -17,7 +17,7 @@ use makepad_widgets::*;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
-app_main!(App);
+app_main!(App, font_assets: [MATH_VIEW_FONT_ASSET]);
 
 script_mod! {
     use mod.prelude.widgets.*
@@ -551,7 +551,9 @@ impl AiWorker {
     fn new(cx: &mut Cx) -> Self {
         let (command_tx, command_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
-        cx.spawn_thread(move || ai_worker_loop(command_rx, event_tx));
+        if let Ok(task) = cx.spawn_worker(move || ai_worker_loop(command_rx, event_tx)) {
+            task.detach();
+        }
         Self {
             command_tx,
             event_rx,

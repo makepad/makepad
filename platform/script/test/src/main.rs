@@ -7,10 +7,9 @@ use makepad_script::*;
 use std::collections::BTreeMap;
 
 pub fn main() {
-    let mut std = 0;
+    let mut host = ScriptVmHost::new(0, ());
     let vm = &mut ScriptVm {
-        host: &mut 0,
-        std: &mut std,
+        host: &mut host,
         bx: Box::new(ScriptVmBase::new()),
     };
 
@@ -3919,8 +3918,8 @@ pub fn main() {
             probe: fn() {
                 // The analytic-sky recipe: exp of a vec3, pow of a vec3 by a
                 // scalar. Unsuffixed these hit the scalar preamble fns and
-                // the whole shader fails the headless JIT (found live: a
-                // headless sweep died at the first game.sky).
+                // the whole shader fails the gpusim JIT (found live: a
+                // gpusim sweep died at the first game.sky).
                 let absorbed = exp(self.tint * -0.5)
                 let shaped = pow(absorbed, 0.75)
                 let leveled = log(absorbed + vec3(1.0, 1.0, 1.0))
@@ -4663,10 +4662,9 @@ pub fn main() {
     // (game.md M0 — 60Hz hosts must not grow the heap per tick)
     // ========================================
     {
-        let mut std0 = 0usize;
+        let mut host = ScriptVmHost::new(0, ());
         let vm = &mut ScriptVm {
-            host: &mut 0,
-            std: &mut std0,
+            host: &mut host,
             bx: Box::new(ScriptVmBase::new()),
         };
 
@@ -4857,10 +4855,9 @@ pub fn main() {
     // (game.md M0r — N callbacks share ONE tick pool host-side)
     // ========================================
     {
-        let mut std0 = 0usize;
+        let mut host = ScriptVmHost::new(0, ());
         let vm = &mut ScriptVm {
-            host: &mut 0,
-            std: &mut std0,
+            host: &mut host,
             bx: Box::new(ScriptVmBase::new()),
         };
         let exports = vm.heap_mut().new_object();

@@ -1,0 +1,17 @@
+use mod.flow.*
+
+/** The image idea to expand and paint. */
+let prompt = Input{ type: @text default: "a small brass robot on a workbench" }
+let expand = Llm{
+    system: "Rewrite the prompt as one vivid image description. Preserve the subject and add concrete light, material, and composition details."
+    prompt: prompt.text()
+}
+let image = Image{ prompt: expand.text() width: 512 height: 512 }
+/** Publish the generated picture into the flow asset library. */
+let published = Publish{ value: image.image() namespace: "flows" tags: ["flow", "image", "expanded"] }
+
+Flow{
+    label: "Expanded prompt to image"
+    brief: "Expands a short image idea and paints it at the creator's default canvas size."
+    prompt, expand, image, published
+}

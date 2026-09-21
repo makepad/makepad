@@ -348,6 +348,22 @@ impl CompiledHybridDecode {
         }
     }
 
+    pub fn execute_logits_only_with_layout_options(
+        &mut self,
+        input: LogitsProbeInput<'_>,
+        layout: &HybridDecodeBatchLayout,
+        skip_logits_readback: bool,
+    ) -> Result<HybridDecodeRun> {
+        match self {
+            Self::Metal(compiled) => compiled.execute_logits_only_with_layout(input, layout),
+            Self::Cuda(compiled) => compiled.execute_logits_only_with_layout_options(
+                input,
+                layout,
+                skip_logits_readback,
+            ),
+        }
+    }
+
     pub fn execute_with_layout(
         &mut self,
         input: LogitsProbeInput<'_>,

@@ -1,0 +1,1185 @@
+//! The generic retained-instance contract (cleanup lane DL-1, additive
+//! freeze): a producer publishes an immutable, refcounted block of instance
+//! data once; any number of draw items reference `(publication, first,
+//! count)`; the platform keeps one GPU buffer per live publication, created
+//! when the block is published, freed when the last reference drops and the
+//! last command buffer reading it has completed. Readiness, accounting and
+//! receipts are explicit; every policy (order, prefetch, eviction, pacing)
+//! lives with the producer.
+//!
+//! This module compiles next to `retained_instances` (the implementation the
+//! backends still consume). Nothing here is drawn yet: DL-3 gives each
+//! backend a backing per publication and DL-4 moves the code atlas onto it;
+//! DL-5 deletes the old machinery. Until then `SharedInstances::retained`
+//! adapts a publication onto the old attach path so both can coexist.
+//!
+//! Laws: no statics (identity comes from a context-owned counter that
+//! workers clone), no environment knobs, no constants that are not machine
+//! facts, no scene vocabulary.
+//!
+//! Retirement is driven by `PublishReceipt::retire_complete()` and the
+//! context's retire queue (`Publications::drain_retired`), never by
+//! `phase()`: a backing is freed only after the last reference dropped AND
+//! every submission that read it completed. A block drawn through the
+//! adapter (`SharedInstances::retained`) has no backing under this contract;
+//! its charge leaves the books at its last drop.
+
+use crate::texture::FrameSerials;
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering},
+    Arc, Mutex, OnceLock, Weak,
+};
+
+/// Where a publication's bytes are counted. One atomic owns the transition
+/// so a drop on a worker and a release on the backend thread never move the
+/// same bytes twice.
+const CHARGE_CHARGED: u8 = 0;
+const CHARGE_PENDING: u8 = 1;
+const CHARGE_RELEASED: u8 = 2;
+
+/// The context-owned identity source for publications. `Cx` owns one;
+/// workers clone it and mint ids without the context. Two contexts mint
+/// from two sources, so an id never crosses contexts by accident.
+#[derive(Clone, Debug)]
+pub struct PublicationIds(Arc<AtomicU64>);
+
+impl PublicationIds {
+    pub fn new() -> Self {
+        Self(Arc::new(AtomicU64::new(1)))
+    }
+    pub fn next(&self) -> u64 {
+        self.0.fetch_add(1, Ordering::Relaxed)
+    }
+    pub fn same_source(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Default for PublicationIds {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// What the producer tells the platform about a publication. None of it
+/// changes correctness: `order` and `keep` are the producer's own ranking
+/// for the producer's own scheduler to read back; `partial_ok` says the
+/// producer may attach a prefix of the block before the whole block is
+/// resident (never a partially uploaded buffer: the prefix must be ready).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PublishHints {
+    pub order: u32,
+    pub keep: u32,
+    pub partial_ok: bool,
+}
+
+/// Why a publish was refused. `NoRoom` carries the accounting at the time of
+/// refusal so the producer can rank its own victims; the platform evicts
+/// nothing on the producer's behalf.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PublishError {
+    InvalidStride,
+    Empty,
+    NoRoom {
+        requested: usize,
+        charged: usize,
+        pending_retirement: usize,
+        envelope: usize,
+    },
+}
+
+/// Where a publication is in its life. Phases only move forward; `Released`
+/// and `Failed` are terminal (`Failed` is explicit: a producer sees it and
+/// republishes). The phase is a reading for the producer; the backend
+/// retires on `retire_complete()`'s answer, never on `phase()`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReceiptPhase {
+    /// Published; the backing copy has not landed (asynchronous facility).
+    Pending,
+    /// Backing resident: drawable.
+    Ready,
+    /// A draw referencing it was encoded into the command buffer for
+    /// `serial`, not yet committed (backends that encode ahead of submit).
+    Encoded { serial: u64 },
+    /// A draw referencing it was submitted with `serial` (completion still
+    /// outstanding).
+    Submitted { serial: u64 },
+    /// Every submission that read it has completed: no longer in use on the
+    /// GPU. Completion never means "rendered" or "presented".
+    Complete,
+    /// Backing physically released; the charge is gone.
+    Released,
+    /// The upload or the backing failed; the producer must republish.
+    Failed,
+}
+
+struct Counters {
+    charged: AtomicUsize,
+    pending_retirement: AtomicUsize,
+    envelope: AtomicUsize,
+    live: AtomicUsize,
+    /// The backend's last copy measurement, packed `bytes << 32 | copy_ns`
+    /// (each saturated at u32) so a reader never sees a torn pair.
+    observation: AtomicU64,
+    /// Blocks drained by `retire_without_backing` whose release is still
+    /// refused (a submission that read them has not completed): re-asked
+    /// every poll, O(retiring), never a walk over live publications.
+    retiring: Mutex<Vec<(u64, PublishReceipt)>>,
+    /// Blocks whose last reference dropped while the backend may still hold
+    /// a backing: (id, receipt) appended at the drop, drained by the backend
+    /// once per frame (`Publications::drain_retired`). The receipt travels
+    /// with the id so a backend that never built a backing for the block can
+    /// still answer `retire_complete()` and release the charge. O(retired),
+    /// never a walk.
+    retired: Mutex<Vec<(u64, PublishReceipt)>>,
+}
+
+impl Counters {
+    fn retired(&self) -> std::sync::MutexGuard<'_, Vec<(u64, PublishReceipt)>> {
+        self.retired.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// One publication's state, shared by the block and its receipt. Every
+/// transition is a store on an atomic so a backend completion callback can
+/// advance it without the context.
+struct State {
+    ready: AtomicBool,
+    failed: AtomicBool,
+    /// The last reference dropped: no draw of this block can be recorded
+    /// any more. Set before the charge moves, so a concurrent
+    /// `retire_complete` on the backend thread sees it.
+    dropped: AtomicBool,
+    /// Drawn through the old attach path (`SharedInstances::retained`): no
+    /// backing under this contract, so the charge leaves the books at the
+    /// last drop instead of waiting for a backend release (contract §9).
+    adapter_owned: AtomicBool,
+    /// `CHARGE_CHARGED` → `CHARGE_PENDING` (last drop) → `CHARGE_RELEASED`
+    /// (backend release), or straight to released for a failed or
+    /// adapter-owned block. One compare-exchange per transition.
+    charge: AtomicU8,
+    /// The greatest frame serial whose command buffer encoded a draw of
+    /// this block (ahead of submission on backends that encode early).
+    encoded: AtomicU64,
+    /// The greatest frame serial of a submission that read this block.
+    submitted: AtomicU64,
+    /// The binding revision the newest submission used (uniform patches).
+    binding_revision: AtomicU64,
+    /// The bytes this block charges; fixed at publish.
+    bytes: usize,
+    counters: Arc<Counters>,
+}
+
+impl State {
+    /// Move the charge out of `CHARGE_CHARGED` or `CHARGE_PENDING` into
+    /// `to`, adjusting the context counters for the bucket it left. Returns
+    /// false when the charge was already released (or the exchange lost).
+    fn move_charge(&self, from: u8, to: u8) -> bool {
+        if self
+            .charge
+            .compare_exchange(from, to, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
+        match from {
+            CHARGE_CHARGED => {
+                self.counters.charged.fetch_sub(self.bytes, Ordering::AcqRel);
+            }
+            CHARGE_PENDING => {
+                self.counters.pending_retirement.fetch_sub(self.bytes, Ordering::AcqRel);
+            }
+            _ => {}
+        }
+        if to == CHARGE_PENDING {
+            self.counters.pending_retirement.fetch_add(self.bytes, Ordering::AcqRel);
+        }
+        true
+    }
+}
+
+struct Publication {
+    id: u64,
+    slots: usize,
+    data: Arc<[f32]>,
+    hints: PublishHints,
+    state: Arc<State>,
+    serials: Arc<FrameSerials>,
+    /// The old-path view of this block, built once: one old id per
+    /// publication for its lifetime, so the old attach path never mistakes
+    /// a re-record for a replacement.
+    adapter: OnceLock<crate::retained_instances::RetainedInstances>,
+}
+
+impl Drop for Publication {
+    /// The last reference is gone. A backend-backed block's charge moves
+    /// from `charged` to `pending_retirement` and its id joins the retire
+    /// queue until the backend reports the physical release
+    /// (`retire_complete`); a block a command buffer is still reading stays
+    /// charged as pending, never uncounted. An adapter-owned block has no
+    /// backing here: its charge leaves the books now (contract §9).
+    fn drop(&mut self) {
+        let state = &self.state;
+        state.dropped.store(true, Ordering::Release);
+        if state.adapter_owned.load(Ordering::Acquire) {
+            state.move_charge(CHARGE_CHARGED, CHARGE_RELEASED);
+        } else {
+            state.move_charge(CHARGE_CHARGED, CHARGE_PENDING);
+            if state.charge.load(Ordering::Acquire) != CHARGE_RELEASED {
+                let receipt = PublishReceipt { state: state.clone(), serials: self.serials.clone() };
+                state.counters.retired().push((self.id, receipt));
+            }
+        }
+        state.counters.live.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// An immutable, refcounted block of instance data. Cloning is a reference;
+/// the data never moves or copies after `publish`.
+#[derive(Clone)]
+pub struct SharedInstances(Arc<Publication>);
+
+/// A non-owning reference: reports whether the block is still alive and how
+/// many bytes it charges, without keeping it alive.
+#[derive(Clone)]
+pub struct WeakSharedInstances {
+    publication: Weak<Publication>,
+    bytes: usize,
+}
+
+impl std::fmt::Debug for SharedInstances {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedInstances")
+            .field("id", &self.id())
+            .field("byte_len", &self.byte_len())
+            .field("phase", &self.receipt().phase())
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for WeakSharedInstances {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WeakSharedInstances")
+            .field("bytes", &self.bytes)
+            .field("alive", &(self.publication.strong_count() != 0))
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for PublishReceipt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PublishReceipt").field("phase", &self.phase()).finish()
+    }
+}
+
+impl WeakSharedInstances {
+    pub fn upgrade(&self) -> Option<SharedInstances> {
+        self.publication.upgrade().map(SharedInstances)
+    }
+    pub fn live_bytes(&self) -> usize {
+        if self.publication.strong_count() > 0 {
+            self.bytes
+        } else {
+            0
+        }
+    }
+}
+
+impl SharedInstances {
+    pub fn id(&self) -> u64 {
+        self.0.id
+    }
+    pub fn slots(&self) -> usize {
+        self.0.slots
+    }
+    pub fn data(&self) -> &[f32] {
+        &self.0.data
+    }
+    /// Instances in the block.
+    pub fn count(&self) -> usize {
+        self.0.data.len() / self.0.slots
+    }
+    pub fn byte_len(&self) -> usize {
+        self.0.data.len() * std::mem::size_of::<f32>()
+    }
+    pub fn hints(&self) -> PublishHints {
+        self.0.hints
+    }
+    pub fn downgrade(&self) -> WeakSharedInstances {
+        WeakSharedInstances {
+            publication: Arc::downgrade(&self.0),
+            bytes: self.byte_len(),
+        }
+    }
+    /// References held (draw items, the producer, receipts do not count).
+    pub fn readers(&self) -> usize {
+        Arc::strong_count(&self.0)
+    }
+    pub fn receipt(&self) -> PublishReceipt {
+        PublishReceipt {
+            state: self.0.state.clone(),
+            serials: self.0.serials.clone(),
+        }
+    }
+    /// A draw references an instance-aligned slice: `(first, count)` is
+    /// validated against the block, never against the stride alone.
+    pub fn slice(&self, first: usize, count: usize) -> Option<std::ops::Range<usize>> {
+        let total = self.count();
+        (first <= total && count <= total - first).then(|| first..first + count)
+    }
+    /// Adapter for the old attach path (`add_retained_instances`): the same
+    /// payload as a `RetainedInstances`, without a copy, built once — every
+    /// call returns the same old id, so the old path sees one publication,
+    /// never a replacement per record. Marks the block adapter-owned: no
+    /// backing under this contract; the charge leaves the books at the last
+    /// drop (contract §9). DL-5 removes this.
+    pub fn retained(&self) -> crate::retained_instances::RetainedInstances {
+        self.0
+            .adapter
+            .get_or_init(|| {
+                self.0.state.adapter_owned.store(true, Ordering::Release);
+                crate::retained_instances::RetainedInstances::new(self.0.slots, self.0.data.clone())
+                    .expect("a published block has a valid stride")
+            })
+            .clone()
+    }
+}
+
+/// The receipt of a publication: readiness, submission, completion and
+/// release, each answered without the context. Backends advance it; the
+/// producer reads it for its settle and liveness proofs.
+#[derive(Clone)]
+pub struct PublishReceipt {
+    state: Arc<State>,
+    serials: Arc<FrameSerials>,
+}
+
+impl PublishReceipt {
+    pub fn upload_ready(&self) -> bool {
+        self.state.ready.load(Ordering::Acquire) && !self.state.failed.load(Ordering::Acquire)
+    }
+    pub fn failed(&self) -> bool {
+        self.state.failed.load(Ordering::Acquire)
+    }
+    pub fn released(&self) -> bool {
+        self.state.charge.load(Ordering::Acquire) == CHARGE_RELEASED
+    }
+    /// The last reference dropped: nothing can draw the block any more.
+    pub fn dropped(&self) -> bool {
+        self.state.dropped.load(Ordering::Acquire)
+    }
+    /// Drawn through `SharedInstances::retained()`: the old path owns the
+    /// backing; this contract only charges it while it lives.
+    pub fn adapter_owned(&self) -> bool {
+        self.state.adapter_owned.load(Ordering::Acquire)
+    }
+    /// The greatest frame serial whose command buffer holds an encoded draw
+    /// of the block; zero before any draw. Encoded is at least submitted.
+    pub fn encoded_serial(&self) -> u64 {
+        self.state.encoded.load(Ordering::Acquire)
+    }
+    /// The greatest frame serial of a submission that read the block; zero
+    /// before any draw.
+    pub fn submitted_serial(&self) -> u64 {
+        self.state.submitted.load(Ordering::Acquire)
+    }
+    pub fn binding_revision(&self) -> u64 {
+        self.state.binding_revision.load(Ordering::Acquire)
+    }
+    /// Every submission that read the block has completed. Completion is
+    /// "no longer in use", not "rendered". A block that was never encoded
+    /// is complete once its last reference dropped (nothing will read it);
+    /// while it lives it is not (a draw may still come).
+    pub fn draw_complete(&self) -> bool {
+        let submitted = self.submitted_serial();
+        if submitted == 0 {
+            return self.dropped() && self.encoded_serial() == 0;
+        }
+        self.serials.completed.load(Ordering::Acquire) >= submitted
+    }
+    /// A reading for the producer. Retirement is decided by
+    /// `retire_complete()`, never by comparing this with `Complete`.
+    pub fn phase(&self) -> ReceiptPhase {
+        if self.released() {
+            ReceiptPhase::Released
+        } else if self.failed() {
+            ReceiptPhase::Failed
+        } else if !self.upload_ready() {
+            ReceiptPhase::Pending
+        } else if self.submitted_serial() == 0 {
+            match self.encoded_serial() {
+                0 if self.dropped() => ReceiptPhase::Complete,
+                0 => ReceiptPhase::Ready,
+                serial => ReceiptPhase::Encoded { serial },
+            }
+        } else if self.encoded_serial() > self.submitted_serial() {
+            ReceiptPhase::Encoded {
+                serial: self.encoded_serial(),
+            }
+        } else if self.draw_complete() {
+            ReceiptPhase::Complete
+        } else {
+            ReceiptPhase::Submitted {
+                serial: self.submitted_serial(),
+            }
+        }
+    }
+    // --- backend side (DL-3 calls these; tests exercise them) ---
+    /// The backing copy landed: the block is drawable.
+    pub fn mark_ready(&self) {
+        self.state.ready.store(true, Ordering::Release);
+    }
+    /// The upload or the backing failed: terminal. `mark_ready` after it
+    /// never makes the block drawable. A no-op once released (a released
+    /// block is gone; phases only move forward).
+    pub fn mark_failed(&self) {
+        if self.released() {
+            return;
+        }
+        self.state.failed.store(true, Ordering::Release);
+    }
+    /// A draw that reads the block was encoded into the command buffer for
+    /// `serial` (before commit). Serials only move forward.
+    pub fn mark_encoded(&self, serial: u64) {
+        self.state.encoded.fetch_max(serial, Ordering::AcqRel);
+    }
+    /// A draw that reads the block was submitted with `serial` under
+    /// `binding_revision`. Serials only move forward; submission implies
+    /// encoding. The revision follows the newest serial: a late, older
+    /// submission regresses neither.
+    pub fn mark_submitted(&self, serial: u64, binding_revision: u64) {
+        self.state.encoded.fetch_max(serial, Ordering::AcqRel);
+        let previous = self.state.submitted.fetch_max(serial, Ordering::AcqRel);
+        if serial >= previous {
+            self.state
+                .binding_revision
+                .store(binding_revision, Ordering::Release);
+        }
+    }
+    /// The backend asks to free the backing. Refused (false) while a
+    /// reference is alive and the block has not failed, and while a
+    /// submission that read it is incomplete. On true the backing is gone
+    /// and the charge is off the books — released here and nowhere else,
+    /// exactly once; later calls answer true without touching the counters.
+    /// Retirement is driven by this answer, never by `phase()`.
+    pub fn retire_complete(&self) -> bool {
+        let state = &self.state;
+        if self.released() {
+            return true;
+        }
+        if !self.dropped() && !self.failed() {
+            return false;
+        }
+        let submitted = self.submitted_serial();
+        if submitted != 0 && self.serials.completed.load(Ordering::Acquire) < submitted {
+            return false;
+        }
+        loop {
+            match state.charge.load(Ordering::Acquire) {
+                CHARGE_RELEASED => return true,
+                CHARGE_PENDING => {
+                    if state.move_charge(CHARGE_PENDING, CHARGE_RELEASED) {
+                        return true;
+                    }
+                }
+                _ => {
+                    if state.move_charge(CHARGE_CHARGED, CHARGE_RELEASED) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A frame's claim on shared GPU storage (the uniform ring, staging): a
+/// slot leased under `serial` is reusable only once the serial frontier
+/// has completed. Nothing else decides reuse.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FrameLease {
+    pub serial: u64,
+}
+
+pub struct FrameLeases {
+    serials: Arc<FrameSerials>,
+    outstanding: Vec<FrameLease>,
+}
+
+impl FrameLeases {
+    pub(crate) fn new(serials: Arc<FrameSerials>) -> Self {
+        Self {
+            serials,
+            outstanding: Vec::new(),
+        }
+    }
+    /// Lease storage for the submission `serial` (the frame being encoded).
+    /// Outstanding leases are only ever removed by `collect()`: a backend
+    /// calls it once per frame, so the set stays the frames in flight
+    /// (`submitted − completed`), never more.
+    pub fn lease(&mut self, serial: u64) -> FrameLease {
+        let lease = FrameLease { serial };
+        self.outstanding.push(lease);
+        lease
+    }
+    pub fn reusable(&self, lease: FrameLease) -> bool {
+        self.serials.completed.load(Ordering::Acquire) >= lease.serial
+    }
+    /// Drop every lease whose frame completed; the number of slots that may
+    /// be reused now.
+    pub fn collect(&mut self) -> usize {
+        let completed = self.serials.completed.load(Ordering::Acquire);
+        let before = self.outstanding.len();
+        self.outstanding.retain(|lease| lease.serial > completed);
+        before - self.outstanding.len()
+    }
+    /// The oldest outstanding lease: the frame the ring must not overwrite.
+    pub fn tail(&self) -> Option<FrameLease> {
+        self.outstanding.iter().copied().min_by_key(|lease| lease.serial)
+    }
+    pub fn outstanding(&self) -> usize {
+        self.outstanding.len()
+    }
+}
+
+/// What the last frame's uploads cost, as the backend measured them
+/// (`Publications::record_observation`). The only input to pacing besides
+/// the frame's remaining time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UploadObservation {
+    pub bytes: usize,
+    pub copy_ns: u64,
+}
+
+/// Everything a producer needs to decide how much to publish this frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PublishBackpressure {
+    pub charged: usize,
+    pub pending_retirement: usize,
+    pub envelope: usize,
+    pub live: usize,
+    /// Frame time still available for copies, measured by the caller.
+    pub frame_remaining_ns: u64,
+    pub observed: UploadObservation,
+}
+
+impl PublishBackpressure {
+    pub fn room(&self) -> usize {
+        self.envelope
+            .saturating_sub(self.charged)
+            .saturating_sub(self.pending_retirement)
+    }
+}
+
+/// Bytes a producer may admit for upload this frame: the room under the
+/// envelope, and the bytes the observed copy rate fits into the remaining
+/// frame time. No constants: both inputs are measurements. With no
+/// observation yet the rate is unknown and the room alone bounds the frame
+/// (the first copy becomes the observation).
+pub fn upload_pacing(bp: &PublishBackpressure) -> usize {
+    let room = bp.room();
+    if bp.observed.bytes == 0 || bp.observed.copy_ns == 0 {
+        return room;
+    }
+    let bytes_per_ns = bp.observed.bytes as f64 / bp.observed.copy_ns as f64;
+    let fits = (bytes_per_ns * bp.frame_remaining_ns as f64) as usize;
+    room.min(fits)
+}
+
+/// The context's view of publication memory.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PublicationAccounting {
+    pub charged: usize,
+    pub pending_retirement: usize,
+    pub envelope: usize,
+    pub live: usize,
+}
+
+/// The context-owned registry: mints ids, charges and releases bytes, and
+/// refuses with `NoRoom` at the envelope. It never orders, evicts or
+/// schedules anything.
+pub struct Publications {
+    ids: PublicationIds,
+    serials: Arc<FrameSerials>,
+    counters: Arc<Counters>,
+}
+
+impl Publications {
+    pub(crate) fn new(serials: Arc<FrameSerials>) -> Self {
+        Self {
+            ids: PublicationIds::new(),
+            serials,
+            counters: Arc::new(Counters {
+                charged: AtomicUsize::new(0),
+                pending_retirement: AtomicUsize::new(0),
+                envelope: AtomicUsize::new(0),
+                live: AtomicUsize::new(0),
+                observation: AtomicU64::new(0),
+                retired: Mutex::new(Vec::new()),
+                retiring: Mutex::new(Vec::new()),
+            }),
+        }
+    }
+    /// The identity source for workers.
+    pub fn ids(&self) -> PublicationIds {
+        self.ids.clone()
+    }
+    /// The device envelope publications may charge in total: derived once
+    /// from the machine (`retained_instances::retained_device_envelope`),
+    /// never a constant. Zero means "not yet known": nothing is refused.
+    pub fn set_envelope(&self, bytes: usize) {
+        self.counters.envelope.store(bytes, Ordering::Release);
+    }
+    pub fn envelope(&self) -> usize {
+        self.counters.envelope.load(Ordering::Acquire)
+    }
+    pub fn accounting(&self) -> PublicationAccounting {
+        PublicationAccounting {
+            charged: self.counters.charged.load(Ordering::Acquire),
+            pending_retirement: self.counters.pending_retirement.load(Ordering::Acquire),
+            envelope: self.envelope(),
+            live: self.counters.live.load(Ordering::Acquire),
+        }
+    }
+    /// The backend records what the frame's copies cost (bytes copied and
+    /// the time they took), once per frame that copied anything. Producers
+    /// read it back through `backpressure()`. One packed atomic: a reader
+    /// never sees bytes from one frame and time from another.
+    pub fn record_observation(&self, observed: UploadObservation) {
+        let bytes = observed.bytes.min(u32::MAX as usize) as u64;
+        let copy_ns = observed.copy_ns.min(u32::MAX as u64);
+        self.counters
+            .observation
+            .store((bytes << 32) | copy_ns, Ordering::Release);
+    }
+    /// The backend's last copy measurement; default (no rate) before the
+    /// first copy.
+    pub fn last_observation(&self) -> UploadObservation {
+        let packed = self.counters.observation.load(Ordering::Acquire);
+        UploadObservation {
+            bytes: (packed >> 32) as usize,
+            copy_ns: packed & u32::MAX as u64,
+        }
+    }
+    /// The producer's pacing input: the accounting plus the backend's last
+    /// observation, against the frame time the caller still has.
+    pub fn backpressure(&self, frame_remaining_ns: u64) -> PublishBackpressure {
+        let a = self.accounting();
+        PublishBackpressure {
+            charged: a.charged,
+            pending_retirement: a.pending_retirement,
+            envelope: a.envelope,
+            live: a.live,
+            frame_remaining_ns,
+            observed: self.last_observation(),
+        }
+    }
+    /// Ids of blocks whose last reference dropped since the last drain and
+    /// whose backing the backend may still hold: (id, receipt) appended to
+    /// `out`. O(retired) per call; the backend drains once per frame and
+    /// calls `retire_complete()` on each receipt until it answers true — a
+    /// block it never built a backing for releases at once. Adapter-owned
+    /// blocks never appear (they have no backing here).
+    pub fn drain_retired(&self, out: &mut Vec<(u64, PublishReceipt)>) {
+        out.append(&mut self.counters.retired());
+    }
+    /// The per-frame retirement of a backend that keeps no per-publication
+    /// backing (it draws attached blocks through the adapter or the frame-ink
+    /// fallback): every dropped block is asked `retire_complete()` — released
+    /// at once when nothing read it or its last reader completed, re-asked
+    /// next poll otherwise — so its bytes never sit in `pending_retirement`
+    /// for ever and `publish` never refuses room that nothing holds. Returns
+    /// the blocks released. A backend with backings drains the queue itself
+    /// (`drain_retired`) and frees the backing first.
+    pub fn retire_without_backing(&self) -> usize {
+        let mut retiring = self
+            .counters
+            .retiring
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        retiring.append(&mut self.counters.retired());
+        let before = retiring.len();
+        retiring.retain(|(_, receipt)| !receipt.retire_complete());
+        before - retiring.len()
+    }
+    /// True while released blocks still wait on the completion serial. A
+    /// backend that arms its completion fence on demand keeps arming it while
+    /// this holds, or those blocks would never retire. (Today that backend is
+    /// OpenGL on Linux and Android.)
+    #[cfg(all(
+        not(gpusim),
+        any(target_os = "linux", target_os = "android"),
+        not(any(
+            linux_direct,
+            target_env = "ohos",
+            all(use_vulkan, not(target_os = "linux"))
+        ))
+    ))]
+    pub(crate) fn has_retiring(&self) -> bool {
+        !self
+            .counters
+            .retiring
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty()
+    }
+    /// Publish an immutable block. Validates the stride, charges the bytes
+    /// against the envelope (refusing with the accounting when they do not
+    /// fit), and returns the block whose receipt starts `Pending`. The
+    /// charge is taken with one `fetch_add` and rolled back on refusal, so
+    /// two publishers racing under the envelope never both pass.
+    pub fn publish(
+        &self,
+        slots: usize,
+        data: Arc<[f32]>,
+        hints: PublishHints,
+    ) -> Result<SharedInstances, PublishError> {
+        if slots == 0 || data.len() % slots != 0 {
+            return Err(PublishError::InvalidStride);
+        }
+        if data.is_empty() {
+            return Err(PublishError::Empty);
+        }
+        let bytes = data.len() * std::mem::size_of::<f32>();
+        let envelope = self.envelope();
+        let charged = self.counters.charged.fetch_add(bytes, Ordering::AcqRel);
+        let pending = self.counters.pending_retirement.load(Ordering::Acquire);
+        if envelope != 0 && charged.saturating_add(pending).saturating_add(bytes) > envelope {
+            self.counters.charged.fetch_sub(bytes, Ordering::AcqRel);
+            return Err(PublishError::NoRoom {
+                requested: bytes,
+                charged,
+                pending_retirement: pending,
+                envelope,
+            });
+        }
+        self.counters.live.fetch_add(1, Ordering::AcqRel);
+        Ok(SharedInstances(Arc::new(Publication {
+            id: self.ids.next(),
+            slots,
+            data,
+            hints,
+            state: Arc::new(State {
+                ready: AtomicBool::new(false),
+                failed: AtomicBool::new(false),
+                dropped: AtomicBool::new(false),
+                adapter_owned: AtomicBool::new(false),
+                charge: AtomicU8::new(CHARGE_CHARGED),
+                encoded: AtomicU64::new(0),
+                submitted: AtomicU64::new(0),
+                binding_revision: AtomicU64::new(0),
+                bytes,
+                counters: self.counters.clone(),
+            }),
+            serials: self.serials.clone(),
+            adapter: OnceLock::new(),
+        })))
+    }
+    /// Publish a block and mark it ready at once: the facility for a caller
+    /// whose backend copies synchronously inside its upload phase. In the
+    /// DL-1 freeze no backend copy exists yet, so this is `publish` +
+    /// `mark_ready()` and nothing more (contract §4).
+    pub fn publish_ready(
+        &self,
+        slots: usize,
+        data: Arc<[f32]>,
+        hints: PublishHints,
+    ) -> Result<SharedInstances, PublishError> {
+        let block = self.publish(slots, data, hints)?;
+        block.receipt().mark_ready();
+        Ok(block)
+    }
+    /// Frame leases over this context's serials (one set per ring the
+    /// backend keeps: uniforms, staging).
+    pub fn frame_leases(&self) -> FrameLeases {
+        FrameLeases::new(self.serials.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn registry() -> (Publications, Arc<FrameSerials>) {
+        let serials = Arc::new(FrameSerials::default());
+        (Publications::new(serials.clone()), serials)
+    }
+
+    #[test]
+    fn ids_are_context_owned_and_never_static() {
+        let (a, _) = registry();
+        let (b, _) = registry();
+        let pa = a.publish(2, vec![0.0; 4].into(), PublishHints::default()).unwrap();
+        let pb = b.publish(2, vec![0.0; 4].into(), PublishHints::default()).unwrap();
+        assert_eq!(pa.id(), 1);
+        assert_eq!(pb.id(), 1, "a second context starts its own id space");
+        assert!(!a.ids().same_source(&b.ids()));
+        let worker_ids = a.ids();
+        assert_eq!(worker_ids.next(), 2, "workers mint from the context's source");
+        assert_eq!(a.publish(2, vec![0.0; 2].into(), PublishHints::default()).unwrap().id(), 3);
+    }
+
+    #[test]
+    fn stride_and_slice_are_validated_at_publish() {
+        let (r, _) = registry();
+        assert_eq!(
+            r.publish(3, vec![0.0; 4].into(), PublishHints::default()).err(),
+            Some(PublishError::InvalidStride)
+        );
+        assert_eq!(
+            r.publish(0, vec![0.0; 4].into(), PublishHints::default()).err(),
+            Some(PublishError::InvalidStride)
+        );
+        assert_eq!(
+            r.publish(2, Vec::<f32>::new().into(), PublishHints::default()).err(),
+            Some(PublishError::Empty)
+        );
+        let block = r.publish(2, vec![0.0; 8].into(), PublishHints::default()).unwrap();
+        assert_eq!(block.count(), 4);
+        assert_eq!(block.slice(1, 3), Some(1..4));
+        assert_eq!(block.slice(4, 0), Some(4..4));
+        assert_eq!(block.slice(3, 2), None);
+        assert_eq!(block.byte_len(), 32);
+    }
+
+    #[test]
+    fn receipt_phases_only_move_forward() {
+        let (r, serials) = registry();
+        let block = r.publish(1, vec![1.0; 3].into(), PublishHints::default()).unwrap();
+        let receipt = block.receipt();
+        assert_eq!(receipt.phase(), ReceiptPhase::Pending);
+        assert!(!receipt.draw_complete());
+        receipt.mark_ready();
+        assert_eq!(receipt.phase(), ReceiptPhase::Ready);
+        let s1 = serials.submit();
+        receipt.mark_encoded(s1);
+        assert_eq!(receipt.phase(), ReceiptPhase::Encoded { serial: s1 });
+        assert!(!receipt.draw_complete(), "encoded is not submitted");
+        receipt.mark_submitted(s1, 7);
+        assert_eq!(receipt.encoded_serial(), s1);
+        assert_eq!(receipt.phase(), ReceiptPhase::Submitted { serial: s1 });
+        assert_eq!(receipt.binding_revision(), 7);
+        let s2 = serials.submit();
+        receipt.mark_submitted(s2, 8);
+        receipt.mark_submitted(s1, 9); // a late, older submission never regresses the serial
+        assert_eq!(receipt.submitted_serial(), s2);
+        assert_eq!(receipt.binding_revision(), 8, "the revision follows the newest serial");
+        serials.complete(s1);
+        assert!(!receipt.draw_complete(), "the newer submission is still in flight");
+        serials.complete(s2);
+        assert!(receipt.draw_complete());
+        assert_eq!(receipt.phase(), ReceiptPhase::Complete);
+        assert!(!receipt.retire_complete(), "complete but alive: the backing stays");
+        assert!(!receipt.released());
+    }
+
+    #[test]
+    fn retire_complete_is_refused_while_a_reference_lives() {
+        let (r, serials) = registry();
+        let block = r.publish(1, vec![0.0; 4].into(), PublishHints::default()).unwrap();
+        let receipt = block.receipt();
+        receipt.mark_ready();
+        assert!(!receipt.retire_complete(), "ready, never drawn, alive");
+        let s = serials.submit();
+        receipt.mark_submitted(s, 1);
+        serials.complete(s);
+        assert!(receipt.draw_complete());
+        assert!(!receipt.retire_complete(), "complete but still referenced");
+        assert_eq!(r.accounting().charged, 16);
+        drop(block);
+        assert!(receipt.dropped());
+        assert!(receipt.retire_complete(), "dropped and complete: released");
+        let a = r.accounting();
+        assert_eq!((a.charged, a.pending_retirement, a.live), (0, 0, 0));
+    }
+
+    #[test]
+    fn a_dropped_never_submitted_block_retires_and_reports_complete() {
+        let (r, _) = registry();
+        let block = r.publish_ready(1, vec![0.0; 4].into(), PublishHints::default()).unwrap();
+        let receipt = block.receipt();
+        let id = block.id();
+        assert_eq!(receipt.phase(), ReceiptPhase::Ready);
+        assert!(!receipt.draw_complete(), "alive: a draw may still come");
+        drop(block);
+        assert!(receipt.draw_complete(), "nothing read it and nothing will");
+        assert_eq!(receipt.phase(), ReceiptPhase::Complete);
+        let mut retired = Vec::new();
+        r.drain_retired(&mut retired);
+        assert_eq!(retired.iter().map(|(id, _)| *id).collect::<Vec<_>>(), vec![id]);
+        assert_eq!(r.accounting().pending_retirement, 16);
+        assert!(retired[0].1.retire_complete(), "the drained receipt answers for the block");
+        assert!(receipt.retire_complete(), "and the release is idempotent");
+        assert_eq!(receipt.phase(), ReceiptPhase::Released);
+        assert_eq!(r.accounting().pending_retirement, 0);
+        retired.clear();
+        r.drain_retired(&mut retired);
+        assert!(retired.is_empty(), "each drop is named once");
+    }
+
+    #[test]
+    fn a_backend_without_backings_releases_dropped_blocks_from_its_poll() {
+        let (r, serials) = registry();
+        let never_read = r.publish_ready(1, vec![0.0; 4].into(), PublishHints::default()).unwrap();
+        let read = r.publish_ready(1, vec![0.0; 4].into(), PublishHints::default()).unwrap();
+        let s = serials.submit();
+        read.receipt().mark_submitted(s, 1);
+        drop(never_read);
+        drop(read);
+        assert_eq!(r.accounting().pending_retirement, 32, "both dropped, both still on the books");
+        assert_eq!(r.retire_without_backing(), 1, "the never-read block goes at once");
+        assert_eq!(r.accounting().pending_retirement, 16, "the read block waits for its reader");
+        assert_eq!(r.retire_without_backing(), 0, "still reading");
+        serials.complete(s);
+        assert_eq!(r.retire_without_backing(), 1, "completed: released");
+        assert_eq!(r.accounting().pending_retirement, 0);
+        assert_eq!(r.retire_without_backing(), 0, "each drop is released once");
+    }
+
+    #[test]
+    fn a_failed_block_releases_while_alive_and_its_drop_releases_nothing_twice() {
+        let (r, _) = registry();
+        let block = r.publish(1, vec![0.0; 8].into(), PublishHints::default()).unwrap();
+        let receipt = block.receipt();
+        receipt.mark_failed();
+        assert_eq!(receipt.phase(), ReceiptPhase::Failed);
+        receipt.mark_ready();
+        assert!(!receipt.upload_ready(), "failed is terminal: ready never makes it drawable");
+        assert!(receipt.retire_complete(), "a failed backing may go while references live");
+        let a = r.accounting();
+        assert_eq!((a.charged, a.pending_retirement, a.live), (0, 0, 1));
+        assert_eq!(receipt.phase(), ReceiptPhase::Released);
+        drop(block);
+        let a = r.accounting();
+        assert_eq!((a.charged, a.pending_retirement, a.live), (0, 0, 0), "no double release");
+        let mut retired = Vec::new();
+        r.drain_retired(&mut retired);
+        assert!(retired.is_empty(), "a released block is not owed to the backend");
+    }
+
+    #[test]
+    fn mark_failed_is_a_no_op_once_released() {
+        let (r, serials) = registry();
+        let block = r.publish_ready(1, vec![0.0; 2].into(), PublishHints::default()).unwrap();
+        let receipt = block.receipt();
+        let s = serials.submit();
+        receipt.mark_submitted(s, 1);
+        serials.complete(s);
+        drop(block);
+        assert!(receipt.retire_complete());
+        receipt.mark_failed();
+        assert!(!receipt.failed());
+        assert_eq!(receipt.phase(), ReceiptPhase::Released, "phases only move forward");
+    }
+
+    #[test]
+    fn a_re_encode_after_submission_reports_encoded() {
+        let (r, serials) = registry();
+        let block = r.publish_ready(1, vec![0.0; 2].into(), PublishHints::default()).unwrap();
+        let receipt = block.receipt();
+        let s1 = serials.submit();
+        receipt.mark_submitted(s1, 1);
+        let s2 = serials.submit();
+        receipt.mark_encoded(s2);
+        assert_eq!(receipt.phase(), ReceiptPhase::Encoded { serial: s2 });
+        serials.complete(s1);
+        assert_eq!(receipt.phase(), ReceiptPhase::Encoded { serial: s2 }, "an encoded, uncommitted draw keeps the block in use");
+        receipt.mark_submitted(s2, 2);
+        serials.complete(s2);
+        assert_eq!(receipt.phase(), ReceiptPhase::Complete);
+    }
+
+    #[test]
+    fn hints_and_readers_round_trip() {
+        let (r, _) = registry();
+        let hints = PublishHints { order: 7, keep: 3, partial_ok: true };
+        let block = r.publish_ready(2, vec![0.0; 4].into(), hints).unwrap();
+        assert_eq!(block.hints(), hints);
+        assert!(block.receipt().upload_ready(), "publish_ready starts Ready");
+        assert_eq!(block.readers(), 1);
+        let item = block.clone();
+        assert_eq!(block.readers(), 2, "a draw item's reference is a reader");
+        let weak = block.downgrade();
+        assert_eq!(block.readers(), 2, "weak references are not readers");
+        drop(item);
+        assert_eq!(block.readers(), 1);
+        assert_eq!(weak.live_bytes(), 16);
+    }
+
+    #[test]
+    fn concurrent_publishes_never_exceed_the_envelope() {
+        let (r, _) = registry();
+        r.set_envelope(1000);
+        let r = Arc::new(r);
+        let workers: Vec<_> = (0..4)
+            .map(|_| {
+                let r = r.clone();
+                std::thread::spawn(move || {
+                    (0..40)
+                        .filter_map(|_| r.publish(1, vec![0.0; 10].into(), PublishHints::default()).ok())
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        let held: Vec<Vec<SharedInstances>> = workers.into_iter().map(|w| w.join().unwrap()).collect();
+        let admitted: usize = held.iter().map(|v| v.len()).sum();
+        assert_eq!(admitted, 25, "exactly the envelope's worth of 40-byte blocks");
+        assert_eq!(r.accounting().charged, 1000);
+        drop(held);
+        assert_eq!(r.accounting().charged, 0);
+        assert_eq!(r.accounting().pending_retirement, 1000);
+    }
+
+    #[test]
+    fn the_backend_observation_feeds_backpressure() {
+        let (r, _) = registry();
+        assert_eq!(r.last_observation(), UploadObservation::default());
+        let observed = UploadObservation { bytes: 3 << 20, copy_ns: 250_000 };
+        r.record_observation(observed);
+        assert_eq!(r.last_observation(), observed);
+        assert_eq!(r.backpressure(10).observed, observed);
+        r.record_observation(UploadObservation { bytes: usize::MAX, copy_ns: u64::MAX });
+        assert_eq!(
+            r.last_observation(),
+            UploadObservation { bytes: u32::MAX as usize, copy_ns: u32::MAX as u64 },
+            "saturated, never torn"
+        );
+    }
+
+    #[test]
+    fn retirement_waits_for_completion_and_releases_the_charge_once() {
+        let (r, serials) = registry();
+        r.set_envelope(1024);
+        let block = r.publish(1, vec![0.0; 16].into(), PublishHints::default()).unwrap();
+        let receipt = block.receipt();
+        assert_eq!(r.accounting().charged, 64);
+        receipt.mark_ready();
+        let s = serials.submit();
+        receipt.mark_submitted(s, 1);
+        drop(block);
+        let a = r.accounting();
+        assert_eq!((a.charged, a.pending_retirement, a.live), (0, 64, 0), "a dropped block stays charged as pending until released");
+        assert!(!receipt.retire_complete(), "still read by an incomplete submission");
+        assert_eq!(r.accounting().pending_retirement, 64);
+        serials.complete(s);
+        assert!(receipt.retire_complete());
+        assert!(receipt.retire_complete(), "idempotent");
+        let a = r.accounting();
+        assert_eq!((a.charged, a.pending_retirement), (0, 0));
+        assert_eq!(receipt.phase(), ReceiptPhase::Released);
+    }
+
+    #[test]
+    fn no_room_refuses_with_the_accounting_and_never_evicts() {
+        let (r, _) = registry();
+        r.set_envelope(100);
+        let a = r.publish(1, vec![0.0; 20].into(), PublishHints::default()).unwrap(); // 80 B
+        let err = r.publish(1, vec![0.0; 10].into(), PublishHints::default()).err(); // 40 B
+        assert_eq!(
+            err,
+            Some(PublishError::NoRoom {
+                requested: 40,
+                charged: 80,
+                pending_retirement: 0,
+                envelope: 100
+            })
+        );
+        drop(a);
+        // The dropped block's charge is pending until the backend releases it:
+        // room does not appear by dropping alone.
+        assert!(matches!(
+            r.publish(1, vec![0.0; 10].into(), PublishHints::default()).err(),
+            Some(PublishError::NoRoom { pending_retirement: 80, .. })
+        ));
+        let weak_alive = r.publish(1, vec![0.0; 5].into(), PublishHints::default()).unwrap();
+        let weak = weak_alive.downgrade();
+        assert_eq!(weak.live_bytes(), 20);
+        drop(weak_alive);
+        assert_eq!(weak.live_bytes(), 0);
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn unknown_envelope_refuses_nothing() {
+        let (r, _) = registry();
+        assert_eq!(r.envelope(), 0);
+        let big = r.publish(1, vec![0.0; 1 << 20].into(), PublishHints::default());
+        assert!(big.is_ok());
+        assert_eq!(r.accounting().charged, 4 << 20);
+    }
+
+    #[test]
+    fn leases_reuse_only_after_completion() {
+        let (_, serials) = registry();
+        let mut leases = FrameLeases::new(serials.clone());
+        let l1 = leases.lease(serials.submit());
+        let l2 = leases.lease(serials.submit());
+        assert_eq!(leases.tail(), Some(l1));
+        assert!(!leases.reusable(l1) && !leases.reusable(l2));
+        serials.complete(l1.serial);
+        assert!(leases.reusable(l1) && !leases.reusable(l2));
+        assert_eq!(leases.collect(), 1);
+        assert_eq!(leases.tail(), Some(l2));
+        serials.complete(l2.serial);
+        assert_eq!(leases.collect(), 1);
+        assert_eq!((leases.outstanding(), leases.tail()), (0, None));
+    }
+
+    #[test]
+    fn pacing_is_derived_from_room_and_the_observed_copy_rate() {
+        let (r, _) = registry();
+        r.set_envelope(1000);
+        let _held = r.publish(1, vec![0.0; 100].into(), PublishHints::default()).unwrap(); // 400 B
+        let bp = r.backpressure(1_000_000);
+        assert_eq!(bp.room(), 600);
+        assert_eq!(upload_pacing(&bp), 600, "no observation: the room bounds the frame");
+        // 1 MiB copied in 1 ms; 100 µs remaining fits 1 MiB / 10, capped by the room.
+        r.record_observation(UploadObservation { bytes: 1 << 20, copy_ns: 1_000_000 });
+        let bp = r.backpressure(100_000);
+        assert_eq!(upload_pacing(&bp), 600);
+        r.set_envelope(1 << 30);
+        let bp = r.backpressure(100_000);
+        let fits = (1usize << 20) / 10;
+        assert!((fits - 2..=fits + 2).contains(&upload_pacing(&bp)), "{}", upload_pacing(&bp));
+        let bp = r.backpressure(0);
+        assert_eq!(upload_pacing(&bp), 0, "no frame time left: nothing is admitted");
+    }
+
+    #[test]
+    fn the_adapter_keeps_the_payload_and_stride() {
+        let (r, _) = registry();
+        let block = r.publish_ready(2, vec![1.0, 2.0, 3.0, 4.0].into(), PublishHints::default()).unwrap();
+        assert!(block.receipt().upload_ready());
+        assert!(!block.receipt().adapter_owned());
+        let old = block.retained();
+        assert!(block.receipt().adapter_owned());
+        assert_eq!(old.slots(), 2);
+        assert_eq!(old.data(), block.data());
+        assert_eq!(old.count(), block.count());
+    }
+
+    #[test]
+    fn the_adapter_is_idempotent_and_releases_its_charge_on_drop() {
+        let (r, _) = registry();
+        r.set_envelope(1024);
+        let block = r.publish_ready(1, vec![0.0; 8].into(), PublishHints::default()).unwrap();
+        let first = block.retained();
+        let again = block.clone().retained();
+        assert_eq!(first.id(), again.id(), "one old id per publication for its lifetime");
+        let other = r.publish_ready(1, vec![0.0; 8].into(), PublishHints::default()).unwrap();
+        assert_ne!(other.retained().id(), first.id(), "a different publication is a replacement");
+        assert_eq!(r.accounting().charged, 64);
+        let receipt = block.receipt();
+        drop(block);
+        let a = r.accounting();
+        assert_eq!((a.charged, a.pending_retirement, a.live), (32, 0, 1), "an adapter-owned charge leaves outright");
+        assert!(receipt.released());
+        assert_eq!(receipt.phase(), ReceiptPhase::Released);
+        let mut retired = Vec::new();
+        r.drain_retired(&mut retired);
+        assert!(retired.is_empty(), "no backing under this contract, nothing to retire");
+        drop(first);
+        drop(again);
+        drop(other);
+        assert_eq!(r.accounting().charged, 0);
+    }
+}

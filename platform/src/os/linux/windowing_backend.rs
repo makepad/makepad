@@ -15,6 +15,9 @@ fn env_var_is_nonempty(name: &str) -> bool {
     std::env::var_os(name).is_some_and(|value| !value.is_empty())
 }
 
+#[cfg(use_vulkan)]
+use super::gpu_preference::{gpu_preference, GpuPreference};
+
 fn is_stdin_loop_mode() -> bool {
     crate::app_main::should_run_stdin_loop_from_env()
 }
@@ -64,7 +67,44 @@ pub enum WindowingProtocol {
 
 impl Cx {
     pub fn event_loop(cx: Rc<RefCell<Cx>>) {
+        // Hosted (`--stdin-loop`) rendering, chosen the same way as a window:
+        // Vulkan when a device answers, OpenGL ES otherwise, so a machine
+        // without a Vulkan driver still runs inside Studio or the wm. The
+        // OpenGL side falls through to the windowed loop below, which creates
+        // the EGL context before handing over to the same stdin loop.
+        #[cfg(use_vulkan)]
+        if is_stdin_loop_mode() && gpu_preference() != GpuPreference::OpenGl {
+            match super::vulkan::CxVulkan::new_offscreen() {
+                Ok(vulkan) => {
+                    let mut cx = cx.borrow_mut();
+                    cx.in_makepad_studio = true;
+                    cx.os_type = crate::cx::OsType::LinuxWindow(crate::cx::LinuxWindowParams {
+                        custom_window_chrome: false,
+                    });
+                    cx.os.vulkan = Some(vulkan);
+                    cx.os.gpu_backend = Some(crate::cx::GpuBackend::Vulkan);
+                    cx.stdin_event_loop();
+                    drop(cx.os.vulkan.take());
+                    return;
+                }
+                Err(error) if gpu_preference() == GpuPreference::Vulkan => {
+                    panic!("Offscreen Vulkan initialization failed: {error}")
+                }
+                Err(error) => {
+                    crate::log!("Vulkan unavailable ({error}); hosting with OpenGL ES");
+                }
+            }
+        }
         let protocol = detect_windowing_protocol();
+        // Vulkan windowing needs Wayland; an X11 session renders with OpenGL ES
+        // (the X11 loop creates its own EGL context) unless Vulkan was insisted on.
+        #[cfg(use_vulkan)]
+        if protocol != WindowingProtocol::Wayland {
+            if gpu_preference() == GpuPreference::Vulkan {
+                panic!("Linux Vulkan windowing requires Wayland; launch inside a Wayland session or build with MAKEPAD=linux_direct+vulkan for exclusive display access");
+            }
+            crate::log!("{protocol:?} session: Vulkan windowing needs Wayland; rendering with OpenGL ES");
+        }
 
         // Show environment variables
         match std::env::var("WAYLAND_DISPLAY") {
@@ -119,7 +159,10 @@ impl Cx {
         // Launch appropriate backend
         match protocol {
             WindowingProtocol::Wayland => Self::wayland_event_loop(cx),
-            WindowingProtocol::X11 => Self::x11_event_loop(cx),
+            WindowingProtocol::X11 => {
+                cx.borrow_mut().os.gpu_backend = Some(crate::cx::GpuBackend::OpenGl);
+                Self::x11_event_loop(cx)
+            }
         }
     }
 
@@ -145,13 +188,6 @@ impl CxOsApi for Cx {
         self.native_load_dependencies();
     }
 
-    fn spawn_thread<F>(&mut self, f: F)
-    where
-        F: FnOnce() + Send + 'static,
-    {
-        std::thread::spawn(f);
-    }
-
     fn seconds_since_app_start(&self) -> f64 {
         Instant::now()
             .duration_since(self.os.start_time.unwrap())
@@ -170,6 +206,12 @@ pub struct CxOs {
     pub(crate) stdin_timers: PollTimers,
     pub(crate) start_time: Option<Instant>,
     pub opengl_cx: Option<OpenglCx>,
+    #[cfg(use_vulkan)]
+    pub(crate) vulkan: Option<super::vulkan::CxVulkan>,
+    /// The GPU API the event loop settled on at startup (`None` until then):
+    /// a Vulkan-capable build renders with OpenGL ES when no usable device
+    /// answers. `Cx::gpu_backend` reports it from here.
+    pub(crate) gpu_backend: Option<crate::cx::GpuBackend>,
     pub(crate) video_players: HashMap<LiveId, LinuxVideoPlayer>,
     pub(crate) gstreamer: Option<LibGStreamer>,
 }
@@ -177,6 +219,21 @@ pub struct CxOs {
 impl CxOs {
     pub fn init(&mut self) {
         self.start_time = Some(Instant::now());
+    }
+
+    /// True while this process renders with Vulkan. A Vulkan-capable build
+    /// that fell back to OpenGL ES, and every OpenGL-only build, answer false.
+    pub(crate) fn vulkan_active(&self) -> bool {
+        #[cfg(use_vulkan)]
+        {
+            // The renderer is taken out of `CxOs` for the duration of a
+            // present; the recorded choice keeps the answer stable then.
+            self.vulkan.is_some() || matches!(self.gpu_backend, Some(crate::cx::GpuBackend::Vulkan))
+        }
+        #[cfg(not(use_vulkan))]
+        {
+            false
+        }
     }
 
     pub(crate) fn gl(&self) -> &super::super::gl_sys::LibGl {

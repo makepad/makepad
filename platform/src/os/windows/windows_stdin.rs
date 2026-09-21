@@ -4,7 +4,7 @@ use {
         cx_api::CxOsOp,
         draw_pass::CxDrawPassParent,
         event::Event,
-        event::{WindowGeom, WindowGeomChangeEvent},
+        event::{WindowGeom},
         makepad_math::*,
         makepad_micro_serde::*,
         os::{
@@ -60,7 +60,8 @@ impl Cx {
         self.repaint_id += 1;
         let time_now = time.time_now();
         for &draw_pass_id in &passes_todo {
-            self.passes[draw_pass_id].set_time(time_now as f32);
+            let uniforms_gen = self.next_uniform_gen();
+            self.passes[draw_pass_id].set_time(time_now as f32, uniforms_gen);
             match self.passes[draw_pass_id].parent.clone() {
                 CxDrawPassParent::Xr => {}
                 CxDrawPassParent::Window(window_id) => {
@@ -98,6 +99,7 @@ impl Cx {
                             let dpi_factor = self.passes[draw_pass_id].dpi_factor.unwrap();
                             let pass_rect = self.get_pass_rect(draw_pass_id, dpi_factor).unwrap();
                             let future_presentable_draw = PresentableDraw {
+                                sequence: 0,
                                 window_id: window_id.id(),
                                 target_id: img_id,
                                 width: (pass_rect.size.x * dpi_factor) as u32,
@@ -146,7 +148,13 @@ impl Cx {
             match incoming {
                 WebSocketMessage::Binary(data) => match StudioToAppVec::deserialize_bin(&data) {
                     Ok(msgs) => {
-                        for msg in msgs.0 {
+                        // The whole queued backlog at once, collapsed to one
+                        // Tick and the latest pointer position, so a slow
+                        // frame never pays for the ticks it missed.
+                        let mut batch = msgs.0;
+                        let closed = self.stdin_drain_host_batches(&mut batch);
+                        Self::stdin_coalesce_host_batch(&mut batch);
+                        for msg in batch {
                             if self.stdin_handle_host_to_stdin(
                                 msg,
                                 d3d11_cx,
@@ -157,6 +165,9 @@ impl Cx {
                             }
                         }
                         self.handle_actions();
+                        if closed {
+                            break;
+                        }
                     }
                     Err(err) => {
                         crate::error!(
@@ -250,19 +261,15 @@ impl Cx {
             } => {
                 let window_id = CxWindowPool::from_usize(window_id);
                 if self.windows.is_valid(window_id) {
-                    let old_geom = self.windows[window_id].window_geom.clone();
-                    let new_geom = WindowGeom {
-                        position: dvec2(0.0, 0.0),
-                        dpi_factor,
-                        inner_size: dvec2(width, height),
-                        ..Default::default()
-                    };
-                    self.windows[window_id].window_geom = new_geom.clone();
-                    let re = WindowGeomChangeEvent {
+                    let re = self.windows.stdin_apply_native_geom(
                         window_id,
-                        new_geom,
-                        old_geom,
-                    };
+                        WindowGeom {
+                            position: dvec2(0.0, 0.0),
+                            dpi_factor,
+                            inner_size: dvec2(width, height),
+                            ..Default::default()
+                        },
+                    );
                     if re.old_geom.dpi_factor != re.new_geom.dpi_factor
                         || re.old_geom.inner_size != re.new_geom.inner_size
                     {
@@ -303,10 +310,14 @@ impl Cx {
             }
             StudioToApp::RunViewFrameRequest(_) => {}
             StudioToApp::Tick => {
-                if SignalToUI::check_and_clear_ui_signal() {
+                let internal_signal = SignalToUI::check_and_clear_internal_signal();
+                let ui_signal = SignalToUI::check_and_clear_ui_signal();
+                if internal_signal || ui_signal {
                     self.handle_termination_signal();
                     self.handle_media_signals();
                     self.handle_script_signals();
+                }
+                if ui_signal {
                     self.call_event_handler(&Event::Signal);
                 }
                 if SignalToUI::check_and_clear_action_signal() {
@@ -375,6 +386,9 @@ impl Cx {
                 {
                     Self::stdin_send_to_host(AppToStudio::RequestAnimationFrame);
                 }
+                // One Tick consumed: the host sends the next one on this,
+                // never ahead of it (run_view.rs tick pacing).
+                Self::stdin_send_to_host(AppToStudio::TickDone);
             }
             // All other variants (Key*, Text*, Screenshot, WidgetTreeDump,
             // Kill, KeepAlive, LiveChange, None) handled by shared dispatch.

@@ -234,13 +234,124 @@ pub struct AnimatorState {
     pub ease: Option<Ease>,
     #[live]
     pub from: LiveIdMap<LiveId, Play>,
+    /// The state's target values. Held as a rooted ref, never a raw
+    /// `ScriptObject`: a runtime `script_apply_eval!` (an app resizing its
+    /// page slide distance, say) hands the animator objects from a temporary
+    /// eval tree that nothing else keeps alive. The next GC of that heap —
+    /// the app VM's after paint, an isolate's on any task pump — would free
+    /// them under a still-referencing state, and the next `play` would walk
+    /// a dead slot.
     #[live]
-    pub apply: Option<ScriptObject>,
+    pub apply: Option<ScriptObjectRef>,
     #[live]
     pub redraw: bool,
 }
 
 impl ScriptHook for AnimatorState {}
+
+#[cfg(test)]
+mod reload_tests {
+    use super::*;
+    use crate::widget_async::MAIN_SPLASH_VM_ID;
+
+    #[test]
+    fn running_animation_survives_collection_of_replaced_stylesheet() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (group, old_template) = cx.with_vm(|vm| {
+            let off = vm.bx.heap.new_object();
+            vm.bx.heap.set_value_def(off, id!(opacity).into(), 0.0.into());
+            let on = vm.bx.heap.new_object();
+            vm.bx.heap.set_value_def(on, id!(opacity).into(), 1.0.into());
+            let template = vm.bx.heap.new_object();
+            vm.bx.heap.set_value_def(template, id!(off).into(), off.into());
+            vm.bx.heap.set_value_def(template, id!(on).into(), on.into());
+            let mut group = AnimatorGroup { default: id!(off), ..Default::default() };
+            let off_ref = vm.bx.heap.new_object_ref(off);
+            let on_ref = vm.bx.heap.new_object_ref(on);
+            group.states.insert(id!(off), AnimatorState { apply: Some(off_ref), ..Default::default() });
+            group.states.insert(id!(on), AnimatorState { apply: Some(on_ref), ..Default::default() });
+            (group, vm.bx.heap.new_object_ref(template))
+        });
+        let mut animator = Animator { vm_id: MAIN_SPLASH_VM_ID, ..Default::default() };
+        animator.groups.insert(id!(hover), group);
+        animator.play(&mut cx, &[id!(hover), id!(on)], Some(Play::Forward { duration: 1.0 })).unwrap();
+
+        // A stylesheet reload replaces the groups and releases the old source.
+        // The in-flight track must keep its target alive until it finishes.
+        animator.groups.clear();
+        drop(old_template);
+        cx.with_vm(|vm| vm.gc());
+
+        for (frame, time, expected) in [(0, 0.0, 0.0), (1, 0.5, 0.5), (2, 1.1, 1.0)] {
+            let event = Event::NextFrame(NextFrameEvent {
+                frame,
+                time,
+                set: [animator.next_frame].into_iter().collect(),
+            });
+            let result = animator.handle_event(&mut cx, &event, &mut AnimatorAction::None).unwrap();
+            let value = cx.with_vm(|vm| {
+                vm.bx.heap.value(result.as_object().unwrap(), id!(opacity).into(), NoTrap).as_f64()
+            });
+            assert_eq!(value, Some(expected));
+        }
+        assert!(!animator.is_animating());
+    }
+
+    /// `{slide: {hide: {apply: {offset}}}}` as a widget stylesheet or a
+    /// runtime `script_apply_eval!` would hand it to the animator.
+    fn slide_tree(vm: &mut ScriptVm, offset: f64) -> ScriptObject {
+        let apply = vm.bx.heap.new_object();
+        vm.bx.heap.set_value_def(apply, id!(offset).into(), offset.into());
+        let hide = vm.bx.heap.new_object();
+        vm.bx.heap.set_value_def(hide, id!(apply).into(), apply.into());
+        let slide = vm.bx.heap.new_object();
+        vm.bx.heap.set_value_def(slide, id!(hide).into(), hide.into());
+        let tree = vm.bx.heap.new_object();
+        vm.bx.heap.set_value_def(tree, id!(slide).into(), slide.into());
+        tree
+    }
+
+    #[test]
+    fn eval_applied_state_survives_gc_before_play() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut animator = Animator { vm_id: MAIN_SPLASH_VM_ID, ..Default::default() };
+        // The stylesheet apply. The widget's source keeps this tree rooted.
+        let stylesheet = cx.with_vm(|vm| {
+            let tree = slide_tree(vm, 100.0);
+            animator.script_apply(vm, &Apply::New, &mut Scope::empty(), tree.into());
+            vm.bx.heap.new_object_ref(tree)
+        });
+        // A runtime re-target (an app resizing its page slide to the live
+        // width). The eval tree is temporary: after the apply nothing but the
+        // animator's state refers to it.
+        cx.with_vm(|vm| {
+            let tree = slide_tree(vm, 402.0);
+            animator.script_apply(vm, &Apply::Eval, &mut Scope::empty(), tree.into());
+        });
+        // The app VM collects after paint; an isolate on any task pump. Both
+        // happen between the re-target and the user's next tap.
+        cx.with_vm(|vm| vm.gc());
+
+        animator
+            .play(&mut cx, &[id!(slide), id!(hide)], Some(Play::Forward { duration: 1.0 }))
+            .expect("hide state still playable after gc");
+        let mut last = None;
+        for (frame, time) in [(0, 0.0), (1, 0.5), (2, 1.1)] {
+            let event = Event::NextFrame(NextFrameEvent {
+                frame,
+                time,
+                set: [animator.next_frame].into_iter().collect(),
+            });
+            let result = animator.handle_event(&mut cx, &event, &mut AnimatorAction::None).unwrap();
+            last = cx.with_vm(|vm| {
+                vm.bx.heap.value(result.as_object().unwrap(), id!(offset).into(), NoTrap).as_f64()
+            });
+        }
+        assert_eq!(last, Some(402.0));
+        assert!(!animator.is_animating());
+        drop(stylesheet);
+    }
+}
 
 /// Runtime state for a single animation track
 struct AnimatorTrack {
@@ -255,10 +366,9 @@ struct AnimatorTrack {
     /// The ease function
     ease: Ease,
     /// The target apply object (what we're animating to).
-    /// Held as a `ScriptObjectRef` for the same reason as `from_snapshot`: a
-    /// bare `ScriptObject` into the template dangles as soon as `script_mod`
-    /// re-runs (safe-area inset change, hot reload), and `interpolate_object`
-    /// walks it every frame.
+    /// Held as a `ScriptObjectRef` so a stylesheet reapply or a `script_mod`
+    /// re-run (safe-area inset change, hot reload) cannot dangle it while
+    /// `interpolate_object` walks it every frame.
     target_apply: ScriptObjectRef,
     /// The starting values SNAPSHOT (captured/copied when animation begins)
     /// This is a SEPARATE object from state_object - it must not be mutated during animation
@@ -399,7 +509,7 @@ impl ScriptApplyDefault for Animator {
             .copied()
             .unwrap_or(group.default);
         let state = group.states.get(&state_id)?;
-        Some(state.apply?.into())
+        Some(state.apply.as_ref()?.as_object().into())
     }
 }
 
@@ -466,7 +576,7 @@ impl Animator {
             .copied()
             .unwrap_or(group.default);
         let state = group.states.get(&state_id)?;
-        state.apply
+        state.apply.as_ref().map(|apply| apply.as_object())
     }
 
     /// Start animating to a new state
@@ -486,7 +596,7 @@ impl Animator {
         let target_state = group.states.get(&target_state_id)?;
 
         // Get the apply object
-        let target_apply = target_state.apply?;
+        let target_apply = target_state.apply.as_ref()?.as_object();
 
         // Find existing track for this group (if any)
         let existing_track_idx = self.tracks.iter().position(|t| t.group_id == group_id);
@@ -565,7 +675,10 @@ impl Animator {
 
             // Get the default state's apply for fallback values
             let default_state_id = group.default;
-            let default_apply = group.states.get(&default_state_id).and_then(|s| s.apply);
+            let default_apply = group
+                .states
+                .get(&default_state_id)
+                .and_then(|s| s.apply.as_ref().map(|apply| apply.as_object()));
 
             // For each key in target_apply (including prototype chain), get the "from" value:
             // 1. First try state_object (current animated values)
@@ -604,8 +717,9 @@ impl Animator {
                 },
             );
 
-            // Create ScriptObjectRefs to prevent GC from freeing either object
-            // out from under the running animation.
+            // Both inputs must outlive the stylesheet that started the track,
+            // and any later `script_mod` re-run, so GC cannot free them under
+            // the running animation.
             (
                 vm.bx.heap.new_object_ref(snapshot),
                 vm.bx.heap.new_object_ref(target_apply),
@@ -649,7 +763,7 @@ impl Animator {
         let target_state = group.states.get(&target_state_id)?;
 
         // Get the apply object
-        let target_apply = target_state.apply?;
+        let target_apply = target_state.apply.as_ref()?.as_object();
 
         // Set cursor if specified
         if let Some(cursor) = target_state.cursor {
@@ -728,6 +842,19 @@ impl Animator {
 
     /// Check if the animator is in a specific state
     pub fn in_state(&self, _cx: &Cx, state: &[LiveId; 2]) -> bool {
+        self.current_state_matches(state)
+    }
+
+    /// Inspect the requested state without a draw context. Cancel visibility must
+    /// follow a pending open/close even before its animation has drawn a frame.
+    pub(crate) fn in_state_id(&self, state: &[LiveId; 2]) -> bool {
+        if let Some(deferred) = self.deferred.iter().rev().find(|op| op.state[0] == state[0]) {
+            return deferred.state[1] == state[1];
+        }
+        self.current_state_matches(state)
+    }
+
+    fn current_state_matches(&self, state: &[LiveId; 2]) -> bool {
         let group_id = state[0];
         let state_id = state[1];
 

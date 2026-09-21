@@ -490,6 +490,7 @@ impl VjMeshView {
                                 color_adjust: vec4(0.0, 1.0, 1.0, 0.0),
                                 dynamic: false,
                                 depth_order: 0.0,
+                                custom_material: None,
                                 part_poses: Vec::new(),
                             });
                             self.status =
@@ -532,6 +533,7 @@ impl VjMeshView {
             color_adjust: vec4(0.0, 1.0, 1.0, 0.0),
             dynamic: false,
             depth_order: 0.0,
+            custom_material: None,
             part_poses: Vec::new(),
         });
         // A level's door parts are animated nodes, NOT part of the static

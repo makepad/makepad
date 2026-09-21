@@ -111,6 +111,22 @@ impl TrellisWeights {
         Ok(Self { path, header })
     }
 
+    /// A component of ComfyUI's combined checkpoint, without extracting or
+    /// duplicating its tensor payload. Offsets still address the source file.
+    pub fn load_prefix(path: impl AsRef<Path>, prefix: &str) -> Result<Self> {
+        let mut weights = Self::load(path)?;
+        weights.header.tensors = weights.header.tensors.into_iter()
+            .filter_map(|(name, entry)| name.strip_prefix(prefix)
+                .map(|name| (name.to_string(), entry)))
+            .collect();
+        if weights.header.tensors.is_empty() {
+            return Err(DiffusionError::model(format!(
+                "trellis component '{prefix}' not found in {}", weights.path.display()
+            )));
+        }
+        Ok(weights)
+    }
+
     pub fn has_tensor(&self, name: &str) -> bool {
         self.header.tensors.contains_key(name)
     }

@@ -12,7 +12,6 @@ use std::{
     os::fd::{AsFd, AsRawFd, FromRawFd},
     rc::Rc,
     sync::Arc,
-    sync::Mutex,
 };
 
 use wayland_client::{
@@ -33,6 +32,7 @@ use wayland_protocols::{
             wp_cursor_shape_manager_v1::{self, WpCursorShapeManagerV1},
         },
         fractional_scale::v1::client::{wp_fractional_scale_manager_v1, wp_fractional_scale_v1},
+        pointer_gestures::zv1::client::{zwp_pointer_gesture_pinch_v1, zwp_pointer_gestures_v1},
         primary_selection::zv1::client::{
             zwp_primary_selection_device_manager_v1, zwp_primary_selection_device_v1,
             zwp_primary_selection_offer_v1, zwp_primary_selection_source_v1,
@@ -51,8 +51,8 @@ use wayland_protocols::{
 use crate::{
     cx_native::EventFlow,
     event::{
-        PopupDismissReason, PopupDismissedEvent, ScrollEvent, ScrollPhase, WindowGeom,
-        TAP_COUNT_DISTANCE, TAP_COUNT_TIME,
+        PinchEvent, PinchPhase, PopupDismissReason, PopupDismissedEvent, ScrollEvent, ScrollPhase,
+        WindowGeom, TAP_COUNT_DISTANCE, TAP_COUNT_TIME,
     },
     select_timer::SelectTimers,
     wayland::wayland_app::WaylandApp,
@@ -337,11 +337,17 @@ pub(crate) struct WaylandState {
     pending_paste_text_input: Option<String>,
     /// Queued clipboard copy content waiting for a serial from keyboard/pointer.
     pub(crate) pending_clipboard_copy: Option<String>,
-    pub(crate) internal_drag_items: Option<Arc<Vec<DragItem>>>,
     pub(crate) clipboard_text: String,
     pub(crate) cursor_manager: Option<wp_cursor_shape_manager_v1::WpCursorShapeManagerV1>,
     pub(crate) cursor_shape: Option<wp_cursor_shape_device_v1::WpCursorShapeDeviceV1>,
     pub(crate) pointer: Option<wl_pointer::WlPointer>,
+    /// The touchpad gestures global (`zwp_pointer_gestures_v1`) when the compositor
+    /// offers one, and the pinch object it hands out for our pointer.
+    pub(crate) pointer_gestures: Option<zwp_pointer_gestures_v1::ZwpPointerGesturesV1>,
+    pub(crate) pinch_gesture: Option<zwp_pointer_gesture_pinch_v1::ZwpPointerGesturePinchV1>,
+    /// The pinch's scale at its previous update: the protocol reports the scale since
+    /// `begin`, `PinchEvent::scale` is the change since the previous event.
+    pub(crate) pinch_scale: f64,
     pub(crate) last_mouse_pos: Vec2d,
     pub(crate) pointer_serial: Option<u32>,
     pub(crate) pointer_enter_serial: Option<u32>,
@@ -420,7 +426,18 @@ pub(crate) struct WaylandState {
     /// yet. While a window is listed here the compositor is not ready for a new frame
     /// on that surface, so presenting it is skipped (its pass stays dirty). See the
     /// frame-callback pacing in `linux_wayland.rs`.
-    frame_callbacks_pending: Vec<WindowId>,
+    frame_callbacks_pending: Vec<(WindowId, usize)>,
+    /// Decides how many presents may await their `wl_surface::frame` callback
+    /// before a window's next present is held back; see `frame_pacer.rs`.
+    pub(crate) frame_pacer: super::frame_pacer::FramePacer,
+    /// The compositor advertises `wp_fifo_manager_v1`, so a FIFO swapchain
+    /// queues a present behind the previous one instead of blocking on it.
+    pub(crate) has_fifo_v1: bool,
+    /// Windows presented since the Paint arm last cleared this.
+    pub(crate) presents_this_cycle: usize,
+    /// When every surface became held back by the compositor (see the Paint
+    /// arm in `linux_wayland.rs`); `None` while at least one can present.
+    pub(crate) frame_gate_since: Option<std::time::Instant>,
     pub(crate) event_flow: EventFlow,
     pub(crate) event_loop_running: bool,
 
@@ -448,11 +465,13 @@ impl WaylandState {
             pending_clipboard_read: None,
             pending_paste_text_input: None,
             pending_clipboard_copy: None,
-            internal_drag_items: None,
             clipboard_text: String::new(),
             cursor_manager: None,
             cursor_shape: None,
             pointer: None,
+            pointer_gestures: None,
+            pinch_gesture: None,
+            pinch_scale: 1.0,
             decoration_manager: None,
             icon_manager: None,
             scale_manager: None,
@@ -492,6 +511,10 @@ impl WaylandState {
             scroll_gesture_active: false,
             scroll_stopped: false,
             frame_callbacks_pending: Vec::new(),
+            frame_pacer: super::frame_pacer::FramePacer::new(),
+            has_fifo_v1: false,
+            presents_this_cycle: 0,
+            frame_gate_since: None,
             event_flow: EventFlow::Wait,
             event_loop_running: true,
             key_repeat_rate: 25,
@@ -733,6 +756,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for WaylandState {
                     let shm = wl_registry.bind::<wl_shm::WlShm, _, _>(name, 1, qhandle, ());
                     state.shm = Some(shm);
                 }
+                // Not bound: the Vulkan swapchain uses it, the pacer only needs
+                // to know it is there.
+                "wp_fifo_manager_v1" => state.has_fifo_v1 = true,
                 "xdg_toplevel_icon_manager_v1" => {
                     let icon_manager = wl_registry
                         .bind::<xdg_toplevel_icon_manager_v1::XdgToplevelIconManagerV1, _, _>(
@@ -763,6 +789,20 @@ impl Dispatch<wl_registry::WlRegistry, ()> for WaylandState {
                     );
                     state.primary_selection_manager = Some(manager);
                     state.ensure_primary_selection_device(qhandle);
+                }
+                "zwp_pointer_gestures_v1" => {
+                    let manager = wl_registry.bind::<zwp_pointer_gestures_v1::ZwpPointerGesturesV1, _, _>(
+                        name,
+                        1,
+                        qhandle,
+                        (),
+                    );
+                    // The seat may have handed out the pointer before this global
+                    // arrived (the order is the compositor's); either side finishes.
+                    if let Some(pointer) = state.pointer.as_ref() {
+                        state.pinch_gesture = Some(manager.get_pinch_gesture(pointer, qhandle, ()));
+                    }
+                    state.pointer_gestures = Some(manager);
                 }
                 _ => {}
             }
@@ -1133,6 +1173,9 @@ impl Dispatch<wl_seat::WlSeat, ()> for WaylandState {
                 let pointer = seat.get_pointer(qhandle, ());
                 if let Some(manager) = state.cursor_manager.as_ref() {
                     state.cursor_shape = Some(manager.get_pointer(&pointer, qhandle, ()));
+                }
+                if let Some(manager) = state.pointer_gestures.as_ref() {
+                    state.pinch_gesture = Some(manager.get_pinch_gesture(&pointer, qhandle, ()));
                 }
                 state.pointer = Some(pointer);
             }
@@ -1888,20 +1931,6 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                                     modifiers: state.modifiers,
                                     time: state.time_now(),
                                 }));
-                                if btn == MouseButton::PRIMARY {
-                                    if let Some(items) = state.internal_drag_items.take() {
-                                        state.do_callback(XlibEvent::Drop(
-                                            window_id,
-                                            DropEvent {
-                                                modifiers: state.modifiers,
-                                                handled: Arc::new(Mutex::new(false)),
-                                                abs: state.last_mouse_pos,
-                                                items,
-                                            },
-                                        ));
-                                        state.do_callback(XlibEvent::DragEnd);
-                                    }
-                                }
                             }
                             WEnum::Unknown(_) | WEnum::Value(_) => {}
                         }
@@ -2040,8 +2069,8 @@ impl Dispatch<wl_callback::WlCallback, WindowId> for WaylandState {
         // pending flag; the Paint that follows event dispatch in the event loop presents
         // the window's pass if it is still dirty. The window may have been closed while
         // the callback was in flight, in which case there is nothing left to clear.
-        if let wl_callback::Event::Done { .. } = event {
-            state.clear_frame_callback_pending(*window_id);
+        if let wl_callback::Event::Done { callback_data } = event {
+            state.frame_callback_done(*window_id, callback_data);
         }
     }
 }
@@ -2065,6 +2094,52 @@ delegate_noop!(WaylandState: ignore wp_viewport::WpViewport);
 delegate_noop!(WaylandState: ignore wp_viewporter::WpViewporter);
 delegate_noop!(WaylandState: ignore wl_surface::WlSurface);
 delegate_noop!(WaylandState: ignore wp_cursor_shape_device_v1::WpCursorShapeDeviceV1);
+delegate_noop!(WaylandState: ignore zwp_pointer_gestures_v1::ZwpPointerGesturesV1);
+
+impl Dispatch<zwp_pointer_gesture_pinch_v1::ZwpPointerGesturePinchV1, ()> for WaylandState {
+    fn event(
+        state: &mut Self,
+        _: &zwp_pointer_gesture_pinch_v1::ZwpPointerGesturePinchV1,
+        event: zwp_pointer_gesture_pinch_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        // The protocol's `scale` is cumulative since `begin`; the platform's
+        // `PinchEvent::scale` is the change since the previous event. A cancelled
+        // gesture ends like a lifted one: the zoom stays where it got.
+        let (scale, phase) = match event {
+            zwp_pointer_gesture_pinch_v1::Event::Begin { .. } => {
+                state.pinch_scale = 1.0;
+                (1.0, PinchPhase::Begin)
+            }
+            zwp_pointer_gesture_pinch_v1::Event::Update { scale, .. } => {
+                let step = if state.pinch_scale > 0.0 { scale / state.pinch_scale } else { 1.0 };
+                state.pinch_scale = scale;
+                (step, PinchPhase::Update)
+            }
+            zwp_pointer_gesture_pinch_v1::Event::End { .. } => {
+                state.pinch_scale = 1.0;
+                (1.0, PinchPhase::End)
+            }
+            _ => return,
+        };
+        let Some(window_id) = state.pointer_window else {
+            return;
+        };
+        // Deliver any buffered motion first so the pinch lands at the current pointer.
+        state.flush_pending_motion();
+        let time = state.time_now();
+        state.do_callback(XlibEvent::Pinch(PinchEvent {
+            window_id,
+            abs: state.last_mouse_pos,
+            scale,
+            phase,
+            modifiers: state.modifiers,
+            time,
+        }));
+    }
+}
 delegate_noop!(WaylandState: ignore wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1);
 delegate_noop!(WaylandState: ignore wl_compositor::WlCompositor);
 delegate_noop!(WaylandState: ignore wl_region::WlRegion);
@@ -2187,10 +2262,6 @@ impl WaylandState {
         if let Some(text) = self.pending_clipboard_copy.take() {
             self.set_clipboard_text(qhandle, serial, text);
         }
-    }
-
-    pub(crate) fn start_internal_drag(&mut self, items: Vec<DragItem>) {
-        self.internal_drag_items = Some(Arc::new(items));
     }
 
     fn dispatch_paste_bytes(&mut self, mut bytes: Vec<u8>) {
@@ -2317,8 +2388,8 @@ impl WaylandState {
         }
     }
 
-    /// Dispatch the latest coalesced pointer motion (if any) as a single `MouseMove` (plus a `Drag`
-    /// while an internal drag is in flight), then clear it. Called once after the `wl_pointer` event
+    /// Dispatch the latest coalesced pointer motion (if any) as a single `MouseMove`, then clear it.
+    /// Called once after the `wl_pointer` event
     /// batch is drained and before any intervening button/leave, so a high-Hz mouse produces one
     /// hover hit-test per frame instead of one per queued motion. See [`Self::pending_motion`].
     pub(crate) fn flush_pending_motion(&mut self) {
@@ -2342,41 +2413,85 @@ impl WaylandState {
             time: self.time_now(),
             handled: Cell::new(Area::Empty),
         }));
-        if let Some(items) = self.internal_drag_items.as_ref() {
-            self.do_callback(XlibEvent::Drag(
-                window_id,
-                DragEvent {
-                    modifiers: self.modifiers,
-                    handled: Arc::new(Mutex::new(false)),
-                    abs: pos,
-                    items: items.clone(),
-                    response: Arc::new(Mutex::new(DragResponse::None)),
-                },
-            ));
-        }
     }
 
-    /// True while the given window's last presented frame awaits its `wl_surface::frame`
-    /// callback, meaning the compositor is not ready for another frame on that surface.
+    /// Presents of this window whose `wl_surface::frame` callback has not fired yet.
+    pub(crate) fn frame_callbacks_in_flight(&self, window_id: WindowId) -> usize {
+        self.frame_callbacks_pending
+            .iter()
+            .find(|(id, _)| *id == window_id)
+            .map_or(0, |(_, count)| *count)
+    }
+
+    /// Presents a window may have awaiting their callbacks right now.
+    fn frames_in_flight_allowed(&self) -> usize {
+        self.frame_pacer
+            .frames_in_flight(self.has_fifo_v1, std::time::Instant::now())
+            .max(1)
+    }
+
+    /// True while the window has as many presents awaiting their callbacks as the
+    /// pacer allows: the compositor has not consumed enough of them for another
+    /// present, so the window's pass stays dirty until a callback fires.
     pub(crate) fn is_frame_callback_pending(&self, window_id: WindowId) -> bool {
-        self.frame_callbacks_pending.contains(&window_id)
+        self.frame_callbacks_in_flight(window_id) >= self.frames_in_flight_allowed()
     }
 
     pub(crate) fn set_frame_callback_pending(&mut self, window_id: WindowId) {
-        if !self.frame_callbacks_pending.contains(&window_id) {
-            self.frame_callbacks_pending.push(window_id);
+        self.presents_this_cycle += 1;
+        match self.frame_callbacks_pending.iter_mut().find(|(id, _)| *id == window_id) {
+            Some((_, count)) => *count += 1,
+            None => self.frame_callbacks_pending.push((window_id, 1)),
         }
     }
 
-    /// Clear a window's pending frame callback. Called when the callback fires and when
-    /// a window is closed, since the compositor never fires callbacks for a destroyed
-    /// surface and a stale entry would keep the window's presents gated forever.
-    pub(crate) fn clear_frame_callback_pending(&mut self, window_id: WindowId) {
-        self.frame_callbacks_pending.retain(|id| *id != window_id);
+    /// One frame callback fired: the compositor consumed one present of the window.
+    pub(crate) fn frame_callback_done(&mut self, window_id: WindowId, compositor_ms: u32) {
+        self.frame_pacer
+            .callback_arrived(std::time::Instant::now(), compositor_ms);
+        if let Some((_, count)) = self.frame_callbacks_pending.iter_mut().find(|(id, _)| *id == window_id) {
+            *count = count.saturating_sub(1);
+        }
+        self.frame_callbacks_pending.retain(|(_, count)| *count > 0);
     }
 
+    /// Forget a window's pending frame callbacks. Called when a window is closed,
+    /// since the compositor never fires callbacks for a destroyed surface and a
+    /// stale entry would keep the window's presents gated forever.
+    pub(crate) fn clear_frame_callback_pending(&mut self, window_id: WindowId) {
+        self.frame_callbacks_pending.retain(|(id, _)| *id != window_id);
+    }
+
+    /// Some window is held back waiting for the compositor.
     pub(crate) fn any_frame_callback_pending(&self) -> bool {
-        !self.frame_callbacks_pending.is_empty()
+        let allowed = self.frames_in_flight_allowed();
+        self.frame_callbacks_pending
+            .iter()
+            .any(|(_, count)| *count >= allowed)
+    }
+
+    /// Every configured surface is held back waiting for the compositor: nothing
+    /// drawn now could be presented, so the app's next-frame and draw events can
+    /// wait for the next callback instead of producing a frame that is thrown away.
+    pub(crate) fn all_windows_frame_callback_pending(&self) -> bool {
+        let mut any = false;
+        for window in &self.windows {
+            if window.configured {
+                any = true;
+                if !self.is_frame_callback_pending(window.window_id) {
+                    return false;
+                }
+            }
+        }
+        for popup in &self.popups {
+            if popup.configured {
+                any = true;
+                if !self.is_frame_callback_pending(popup.window_id) {
+                    return false;
+                }
+            }
+        }
+        any
     }
 
     /// Called from the event loop when the key repeat timer fires.
