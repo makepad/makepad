@@ -1048,6 +1048,16 @@ impl XlibWindow {
         }));
     }
 
+    pub fn send_mouse_leave(&mut self, modifiers: KeyModifiers) {
+        self.do_callback(XlibEvent::MouseLeave(MouseLeaveEvent {
+            window_id: self.window_id,
+            abs: self.last_mouse_pos,
+            modifiers,
+            time: self.time_now(),
+            handled: Cell::new(Area::Empty),
+        }));
+    }
+
     pub fn send_close_requested_event(&mut self) -> bool {
         let accept_close = Rc::new(Cell::new(true));
         self.do_callback(XlibEvent::WindowCloseRequested(WindowCloseRequestedEvent {

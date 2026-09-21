@@ -60,6 +60,7 @@ use crate::{
     KeyCode, WindowCloseRequestedEvent, WindowGeomChangeEvent, WindowId, WindowMovedEvent,
 };
 
+use crate::event::MouseLeaveEvent;
 use super::super::windowing_backend::PIXELS_PER_WHEEL_DETENT;
 use super::opengl_wayland::{WaylandPopupWindow, WaylandWindow};
 
@@ -1711,6 +1712,18 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                 // Dispatch any buffered motion before the pointer leaves, so the final hover
                 // position is delivered to the right window first.
                 state.flush_pending_motion();
+                // Then say the pointer is gone, so whatever was hovered can drop its hover
+                // state. Without this the last hovered widget stays lit the whole time the
+                // pointer is away and only clears on the next motion after it comes back.
+                if let Some(window_id) = state.pointer_window {
+                    state.do_callback(XlibEvent::MouseLeave(MouseLeaveEvent {
+                        abs: state.last_mouse_pos,
+                        window_id,
+                        modifiers: state.modifiers,
+                        time: state.time_now(),
+                        handled: Cell::new(Area::Empty),
+                    }));
+                }
                 state.pointer_serial = Some(serial);
                 state.flush_pending_clipboard_copy(qhandle, serial);
                 state.pointer_window = None;

@@ -503,6 +503,16 @@ impl WaylandCx {
                 cx.fingers.mouse_up(button);
                 cx.fingers.cycle_hover_area(live_id!(mouse).into());
             }
+            XlibEvent::MouseLeave(mut e) => {
+                let mut cx = self.cx.borrow_mut();
+                cx.dpi_override_scale(&mut e.abs, e.window_id);
+                cx.call_event_handler(&Event::MouseLeave(e));
+                // Same pair as the MouseMove arm: the hover the widgets just dropped has to
+                // be committed, or `hover_last` still names it and the next motion reads as
+                // HoverOver instead of a fresh HoverIn.
+                cx.fingers.cycle_hover_area(live_id!(mouse).into());
+                cx.fingers.switch_captures();
+            }
             XlibEvent::Scroll(mut e) => {
                 let mut cx = self.cx.borrow_mut();
                 cx.dpi_override_scale(&mut e.abs, e.window_id);

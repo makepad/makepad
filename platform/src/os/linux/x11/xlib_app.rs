@@ -781,24 +781,16 @@ impl XlibApp {
                 x11_sys::EnterNotify => {}
                 x11_sys::LeaveNotify => {
                     let crossing = event.xcrossing;
-                    if crossing.detail == 4 {
-                        if let Some(_window_ptr) = self.window_map.get(&crossing.window) {
-                            //TODO figure this out
-                            /*
+                    // NotifyInferior means the pointer only crossed into a child of this
+                    // window, so it has not actually left. A grab/ungrab crossing is
+                    // bookkeeping rather than a real move, and acting on it would drop the
+                    // hover mid-drag.
+                    const NOTIFY_NORMAL: i32 = 0;
+                    const NOTIFY_INFERIOR: i32 = 2;
+                    if crossing.mode == NOTIFY_NORMAL && crossing.detail != NOTIFY_INFERIOR {
+                        if let Some(window_ptr) = self.window_map.get(&crossing.window) {
                             let window = &mut (**window_ptr);
-                            window.do_callback(Event::FingerHover(FingerHoverEvent {
-                                digit: 0,
-                                window_id: window.window_id,
-                                any_down: false,
-                                abs: window.last_mouse_pos,
-                                rel: window.last_mouse_pos,
-                                rect: Rect::default(),
-                                handled: false,
-                                hover_state: HoverState::Out,
-                                modifiers: KeyModifiers::default(),
-                                time: window.time_now()
-                            }));
-                            */
+                            window.send_mouse_leave(KeyModifiers::default());
                         }
                     }
                 }
