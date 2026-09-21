@@ -1,4 +1,5 @@
 // Shared checks warm the checkout's cache before any app script starts.
+// A compiler warning is orange, never red: only an error fails a check.
 use mod.std.*
 use mod.ci;
 
@@ -7,16 +8,13 @@ ci.warm({packages: ci.apps, targets: ci.host.targets})
 ci.exclusive()
 
 ci.step("check host", fn(){
-    ci.cargo(["check", "--workspace"], {
-        deny_warnings: ["makepad-platform", "makepad-draw", "makepad-widgets"]
-    })
+    ci.cargo(["check", "--workspace"])
 })
 
 // Each app owns its other-platform checks. These are the shared UI crates.
 ci.check_targets({
     packages: ["makepad-platform", "makepad-draw", "makepad-widgets"]
     targets: ci.host.targets
-    deny_warnings: ["makepad-platform", "makepad-draw", "makepad-widgets"]
 })
 
 ci.step("tests", fn(){

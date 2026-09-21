@@ -7,6 +7,9 @@ use std::{collections::{BTreeMap, BTreeSet}, path::{Path, PathBuf}, sync::Arc};
 pub enum Outcome {
     Cargo(Arc<CargoResult>),
     Warning(String),
+    /// The check does not apply to this package (a desktop-only app has no
+    /// library to check for web or mobile). Said on the step, never orange.
+    NotApplicable(String),
     Failed(String),
 }
 #[derive(Clone, Default)]
@@ -207,7 +210,7 @@ pub fn checks(
             let cached = memoize.then(|| cache.checks.get(&(package.clone(), check.label.clone()))).flatten();
             let outcome = if let Some(outcome) = cached { Some(outcome.clone()) }
             else if check.ty == cargo::BuildTy::Lib && missing_libs.contains(package) {
-                Some(Outcome::Warning(check.no_lib_detail(&[package.clone()])))
+                Some(Outcome::NotApplicable(check.no_lib_detail(&[package.clone()])))
             } else { check.skip.clone().map(Outcome::Warning) };
             if let Some(outcome) = outcome { outcomes.insert(package.clone(), outcome); }
             else {
@@ -394,7 +397,7 @@ mod tests {
         assert!(Arc::ptr_eq(hit, &cached));
         assert_eq!(hit.warnings, cached.warnings);
         assert_eq!(hit.errors, cached.errors);
-        assert!(matches!(&checks[1].1, Outcome::Warning(s) if s.contains("no lib target")));
+        assert!(matches!(&checks[1].1, Outcome::NotApplicable(s) if s.contains("no lib target")));
         let Outcome::Cargo(hit) = build(&mut child, &host(), "a", "a_bin", None, &Options::default()).unwrap() else { panic!() };
         assert!(Arc::ptr_eq(&hit, &cached));
         let linux = cargo::target_checks(&host(), &strings(&["x86_64-unknown-linux-gnu"]), &strings(&["a"]), false);

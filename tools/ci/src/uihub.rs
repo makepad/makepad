@@ -283,6 +283,12 @@ fn decode(session: &mut LlamaSession, control: &Control) -> Result<(String, usiz
     Ok((raw.trim().into(), n, start.elapsed().as_secs_f64()))
 }
 
+/// Is the vision model's whole file set on this machine?
+pub fn model_installed(model: &str) -> bool {
+    LocalModels::open()
+        .map(|local| matches!(local.install_state(model), InstallState::Installed))
+        .unwrap_or(false)
+}
 pub fn install(model: &str, accept: bool, control: &Control, notify: &Notify) -> Result<()> {
     let mut local = LocalModels::open().map_err(|e| e.to_string())?;
     let spec = local.spec(model).ok_or("unknown model")?.clone();
@@ -312,6 +318,7 @@ pub fn install(model: &str, accept: bool, control: &Control, notify: &Notify) ->
                         return Err("install finished without verified files".into());
                     }
                     notify(Update::Model(format!("{model}: installed")));
+                    notify(Update::ModelInstalled(true));
                     return Ok(());
                 }
                 InstallMsg::Failed(e) => {

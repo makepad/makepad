@@ -250,6 +250,10 @@ fn record_outcome(vm: &mut ScriptVm, outcome: &crate::cargo_cache::Outcome, opts
             warning(vm, detail);
             Ok(true)
         }
+        crate::cargo_cache::Outcome::NotApplicable(detail) => {
+            if let Some(i) = rt(vm).step { rt(vm).run.annotate(i, detail); }
+            Ok(false)
+        }
         crate::cargo_cache::Outcome::Failed(detail) => Err(detail.clone()),
     }
 }

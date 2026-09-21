@@ -26,37 +26,49 @@ script_mod! {
                 window.position: vec2(#(crate::window_geometry::geometry().x), #(crate::window_geometry::geometry().y))
                 window.inner_size: vec2(#(crate::window_geometry::geometry().width), #(crate::window_geometry::geometry().height))
                 body +: {
-                    flow: Down padding: 12 spacing: 10 show_bg: true
-                    draw_bg +: {color: #181b21}
-                    controls := View{
-                        width: Fill height: Fit spacing: 12
-                        run := Button{text: "Run now"}
-                        stop := Button{text: "Stop"}
-                        install := Button{text: "Install model (accept license)"}
-                        status := Label{width: Fill height: Fit text: "Starting watcher"}
-                    }
-                    branches := Label{width: Fill height: Fit text: "work — waiting" draw_text +: {text_style +: {font_size: 18}}}
-                    results := View{
-                        width: Fill height: Fill spacing: 12
+                    padding: 0 spacing: 0
+                    // An OLED shows this all day: near-black, grey text, and
+                    // nothing bright but a failed tile.
+                    SolidView{
+                        width: Fill height: Fill flow: Down padding: 12 spacing: 8
+                        draw_bg.color: #050607
+                        controls := View{
+                            width: Fill height: Fit spacing: 10 align: Align{y: 0.5}
+                            run := Button{text: "Run now"}
+                            stop := Button{text: "Stop"}
+                            install := Button{text: "Install model (accept license)" visible: false}
+                            status := Label{width: Fill height: Fit text: "Starting watcher" draw_text +: {color: #7d8590 text_style +: {font_size: 11}}}
+                        }
+                        branches := Label{width: Fill height: Fit text: "work — waiting" draw_text +: {color: #aab1bb text_style +: {font_size: 16}}}
+                        progress := Label{width: Fill height: Fit text: "" draw_text +: {color: #8e96a1 text_style +: {font_size: 13}}}
                         wall := CiWall{}
                         detail := View{
-                            width: 520 height: Fill flow: Down spacing: 8
-                            selected := Label{width: Fill height: Fit text: "Waiting for scripts" draw_text +: {text_style +: {font_size: 24}}}
-                            ScrollYView{
-                                width: Fill height: Fill
-                                steps := Label{width: Fill height: Fit text: "" draw_text +: {text_style +: {font_size: 15}}}
-                            }
-                            grab := Image{width: Fill height: 230 fit: ImageFit.Smallest}
+                            width: Fill height: 290 flow: Right spacing: 12
                             View{
-                                width: Fill height: Fit spacing: 8
-                                previous := Button{text: "Previous grab"}
-                                next := Button{text: "Next grab"}
-                                grab_path := Label{width: Fill height: Fit text: "No grab"}
+                                width: Fill height: Fill flow: Down spacing: 6
+                                selected := Label{width: Fill height: Fit text: "Waiting for scripts" draw_text +: {color: #c9ced6 text_style +: {font_size: 17}}}
+                                ScrollYView{
+                                    width: Fill height: Fill
+                                    steps := Label{width: Fill height: Fit text: "" draw_text +: {color: #8e96a1 text_style +: {font_size: 11}}}
+                                }
                             }
-                            model := Label{width: Fill height: Fit text: "Model idle"}
-                            ScrollYView{
-                                width: Fill height: 180 show_bg: true draw_bg +: {color: #11151a} padding: 8
-                                log := Label{width: Fill height: Fit text: "" draw_text +: {text_style +: {font_size: 11}}}
+                            View{
+                                width: 400 height: Fill flow: Down spacing: 6
+                                grab := Image{width: Fill height: 150 fit: ImageFit.Smallest}
+                                View{
+                                    width: Fill height: Fit spacing: 8 align: Align{y: 0.5}
+                                    previous := Button{text: "Previous grab"}
+                                    next := Button{text: "Next grab"}
+                                    grab_path := Label{width: Fill height: Fit text: "No grabs yet" draw_text +: {color: #7d8590 text_style +: {font_size: 10}}}
+                                }
+                                model := Label{width: Fill height: Fit text: "Model idle" draw_text +: {color: #7d8590 text_style +: {font_size: 10}}}
+                                SolidView{
+                                    width: Fill height: Fill draw_bg.color: #0b0d10 padding: 8
+                                    ScrollYView{
+                                        width: Fill height: Fill
+                                        log := Label{width: Fill height: Fit text: "" draw_text +: {color: #7d8590 text_style +: {font_size: 9}}}
+                                    }
+                                }
                             }
                         }
                     }
@@ -85,6 +97,15 @@ impl Worker {
                 let result = (|| {
                     let base = std::env::current_dir().map_err(|e| e.to_string())?;
                     let config = crate::Options::parse()?.config(&base, &worker_control)?;
+                    let installed = config.no_vision || crate::uihub::model_installed(&config.model);
+                    notify(Update::Model(if config.no_vision {
+                        "vision off (--no-vision)".into()
+                    } else if installed {
+                        format!("{}: installed", config.model)
+                    } else {
+                        format!("{}: NOT installed, vision checks are skipped", config.model)
+                    }));
+                    notify(Update::ModelInstalled(installed));
                     pipeline::watch_loop(base, config, commands, worker_control, notify.clone())
                 })();
                 if let Err(e) = result {
@@ -132,6 +153,13 @@ pub struct App {
     #[rust]
     shown: Option<PathBuf>,
 }
+/// What a tile is called: `apps/wm` is `wm`, the root script is `workspace`.
+fn short_name(name: &str) -> String {
+    match name {
+        "." | "" => "workspace".into(),
+        name => name.strip_prefix("apps/").unwrap_or(name).into(),
+    }
+}
 fn key(branch: &str, name: &str) -> String {
     format!("{branch}\n{name}")
 }
@@ -152,9 +180,9 @@ impl App {
             .map(|(key, state)| Tile {
                 key: key.clone(),
                 label: if multiple {
-                    key.replace('\n', " / ")
+                    format!("{} {}", key.split('\n').next().unwrap_or(""), short_name(&state.name))
                 } else {
-                    state.name.clone()
+                    short_name(&state.name)
                 },
                 state: state.clone(),
             })
@@ -199,32 +227,68 @@ impl App {
             self.selected = next;
         }
     }
+    /// How far the run is, in words: what is done, what failed, what runs now.
+    fn progress_line(&self) -> String {
+        let total = self.scripts.len();
+        let count = |v: &str| self.scripts.values().filter(|s| s.color_verdict() == v).count();
+        let (failed, warned, passed) = (count("red"), count("orange"), count("green"));
+        let done = failed + warned + passed;
+        if total == 0 {
+            return String::new();
+        }
+        let mut line = format!("{done} of {total} tested  ·  {passed} passed  ·  {warned} warnings  ·  {failed} failed");
+        for s in self.scripts.values().filter(|s| s.verdict == "running") {
+            let step = s.steps.iter().rev().find(|s| s.state == "running")
+                .map(|s| s.name.rsplit(" / ").next().unwrap_or(&s.name).to_string())
+                .unwrap_or_else(|| "starting".into());
+            let secs = s.started.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+            line.push_str(&format!("\nnow: {} — {step}  ({}m{:02}s)", short_name(&s.name), secs / 60, secs % 60));
+        }
+        line
+    }
     fn refresh(&mut self, cx: &mut Cx) {
         let branches = self
             .branches
             .iter()
             .map(|b| {
-                let age = if b.finished == 0 {
-                    "never run".into()
+                let running = self.scripts.iter().any(|(k, s)| {
+                    s.verdict == "running" && k.split('\n').next() == Some(b.name.as_str())
+                });
+                let words = if running {
+                    "testing now".to_string()
                 } else {
-                    format!("{}s ago", report::now().saturating_sub(b.finished))
+                    let verdict = match b.verdict.as_str() {
+                        "green" => "passing",
+                        "orange" => "passing with warnings",
+                        "red" => "FAILING",
+                        "running" => "testing now",
+                        _ => "not tested yet",
+                    };
+                    match report::now().saturating_sub(b.finished) {
+                        _ if b.finished == 0 => verdict.into(),
+                        s if s < 120 => format!("{verdict}  ·  tested {s}s ago"),
+                        s if s < 7200 => format!("{verdict}  ·  tested {} min ago", s / 60),
+                        s => format!("{verdict}  ·  tested {} h ago", s / 3600),
+                    }
                 };
-                format!(
-                    "{}  {}  {}  {age}",
-                    b.name,
-                    &b.tip[..b.tip.len().min(10)],
-                    b.verdict
-                )
+                format!("{}  {}  ·  {words}", b.name, &b.tip[..b.tip.len().min(10)])
             })
             .collect::<Vec<_>>()
             .join("    ");
         self.ui.label(cx, ids!(branches)).set_text(cx, &branches);
+        self.ui.label(cx, ids!(progress)).set_text(cx, &self.progress_line());
         let Some(state) = self.selected.as_ref().and_then(|k| self.scripts.get(k)) else {
             return;
         };
         self.ui
             .label(cx, ids!(selected))
-            .set_text(cx, &format!("{} — {}", state.name, state.color_verdict()));
+            .set_text(cx, &format!("{} — {}", state.name, match state.color_verdict() {
+                "green" => "passed",
+                "orange" => "passed with warnings",
+                "red" => "FAILED",
+                "running" => "testing now",
+                _ => "not tested yet",
+            }));
         let steps = state
             .steps
             .iter()
@@ -236,16 +300,24 @@ impl App {
                 } else {
                     s.seconds
                 };
-                format!(
-                    "{} — {} ({seconds:.1}s)\n{}\n{}",
+                // A failed or warned step says why; a passed one is one line.
+                let mut block = format!(
+                    "{} — {} ({seconds:.1}s)",
                     s.name.rsplit(" / ").next().unwrap_or(&s.name),
-                    s.state,
-                    s.command,
-                    s.detail
-                )
+                    s.state
+                );
+                if matches!(s.state.as_str(), "failed" | "warning" | "running") {
+                    for extra in [&s.command, &s.detail] {
+                        if !extra.is_empty() {
+                            block.push('\n');
+                            block.push_str(extra);
+                        }
+                    }
+                }
+                block
             })
             .collect::<Vec<_>>()
-            .join("\n\n");
+            .join("\n");
         self.ui.label(cx, ids!(steps)).set_text(cx, &steps);
         self.ui.label(cx, ids!(log)).set_text(cx, &state.log);
         let path = if state.grabs.is_empty() {
@@ -270,7 +342,7 @@ impl App {
                     self.dispatch(cx);
                 }
             } else {
-                self.ui.label(cx, ids!(grab_path)).set_text(cx, "No grab");
+                self.ui.label(cx, ids!(grab_path)).set_text(cx, "No grabs yet");
             }
         }
     }
@@ -398,12 +470,17 @@ impl App {
                 }
                 Update::Log(s) => self.log(cx, &s),
                 Update::Failed(s) => {
+                    // One line in the header; the whole text is in the log.
+                    let first: String = s.lines().next().unwrap_or("").chars().take(110).collect();
                     self.ui
                         .label(cx, ids!(status))
-                        .set_text(cx, &format!("FAILED: {s}"));
+                        .set_text(cx, &format!("Problem: {first}"));
                     self.log(cx, &s);
                 }
                 Update::Model(s) => self.ui.label(cx, ids!(model)).set_text(cx, &s),
+                Update::ModelInstalled(installed) => {
+                    self.ui.widget(cx, ids!(install)).set_visible(cx, !installed);
+                }
                 Update::Grab(path, bytes) => {
                     if self.shown.as_ref() == Some(&path) {
                         self.shown = None;
@@ -466,10 +543,6 @@ impl App {
 }
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
-        // On macOS maximize enters native fullscreen. Keep capture rigs hidden.
-        if std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_none() {
-            self.ui.window(cx, ids!(main_window)).maximize(cx);
-        }
         match Worker::start(cx) {
             Ok(w) => self.worker = Some(w),
             Err(e) => self.log(cx, &e),
@@ -529,11 +602,6 @@ impl AppMain for App {
                     .store(true, Ordering::Release);
                 return;
             }
-        }
-        if let Event::WindowGeomChange(ev) = event {
-            let width = (ev.new_geom.inner_size.x / 3.0).max(160.0);
-            let mut detail = self.ui.widget(cx, ids!(detail));
-            script_apply_eval!(cx,detail,{width: #(width)});
         }
         if matches!(event, Event::Signal) {
             self.drain(cx);

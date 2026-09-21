@@ -91,14 +91,13 @@ impl ScriptState {
             self.steps.iter().filter(|s| s.state == "failed").count(),
         )
     }
+    /// The colour of THIS run's result: green, orange, red, running or
+    /// waiting. A script that has not run yet is waiting (grey) whatever the
+    /// last run said about it: red is a failure, never "untested". What the
+    /// last run said lives on in `previous`.
     pub fn color_verdict(&self) -> &str {
-        if self.steps.iter().any(|s| s.state == "failed")
-            || self.verdict == "red"
-            || (self.previous == "red" && self.verdict != "green")
-        {
+        if self.steps.iter().any(|s| s.state == "failed") || self.verdict == "red" {
             "red"
-        } else if self.verdict == "running" {
-            &self.previous
         } else {
             &self.verdict
         }
@@ -155,8 +154,10 @@ impl ScriptState {
             }
         }
         if s.verdict == "running" {
-            s.verdict = "red".into();
-            s.detail = "previous run was interrupted".into();
+            // The app went away mid-script: that script was not tested.
+            s.verdict = "waiting".into();
+            s.detail = "the previous run was interrupted".into();
+            s.steps.clear();
         }
         Ok(s)
     }
@@ -199,6 +200,9 @@ pub enum Update {
     Failed(String),
     Grab(PathBuf, Arc<Vec<u8>>),
     Model(String),
+    /// Whether the vision model is on this machine: the window offers the
+    /// install only when it is not.
+    ModelInstalled(bool),
     Done(bool, PathBuf),
     Idle,
     Exited,
@@ -668,18 +672,22 @@ pub fn script_update(state: &mut ScriptState, update: &Update) -> bool {
 mod tests {
     use super::*;
     #[test]
-    fn persisted_red_survives_warning_and_restarted_running_state() {
+    fn a_tile_is_this_runs_result_and_an_interrupted_script_is_untested() {
         let mut s = ScriptState::waiting("apps/wm");
         s.previous = "red".into();
+        assert_eq!(s.color_verdict(), "waiting", "red last time is not red now");
         s.verdict = "orange".into();
-        assert_eq!(s.color_verdict(), "red");
+        assert_eq!(s.color_verdict(), "orange");
         let restored = ScriptState::from_json(&s.json()).unwrap();
-        assert_eq!(restored.color_verdict(), "red");
+        assert_eq!((restored.color_verdict(), restored.previous.as_str()), ("orange", "red"));
         s.verdict = "green".into();
         assert_eq!(s.color_verdict(), "green");
         s.verdict = "running".into();
+        assert_eq!(s.color_verdict(), "running");
         let restored = ScriptState::from_json(&s.json()).unwrap();
-        assert_eq!(restored.verdict, "red");
+        assert_eq!(restored.color_verdict(), "waiting");
+        s.verdict = "red".into();
+        assert_eq!(s.color_verdict(), "red");
     }
     #[test]
     fn finishing_a_sibling_preserves_active_steps() {

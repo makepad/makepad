@@ -114,11 +114,17 @@ fn execute(mut run: Run, config: Config, judge: Judge, script: Script, gate: &Ar
     drive::run_script(run, config, judge, &script, Some(permit))
 }
 fn collect(parent: &mut Run, mut child: Run, name: &str, previous: &str) {
-    if child.control.stopped() && !child.failed {
-        child.fail("stopped", "stopped by user");
-    }
+    // A script the user stopped was not tested. Its only "failures" are the
+    // commands the stop itself cut short, so it goes back to waiting (grey)
+    // and does not fail the run; a failure it had before the stop stays red.
+    let stopped_untested = child.control.stopped()
+        && !child.stages.iter().any(|s| s.state == "failed" && !s.detail.contains("stopped by user"));
     let mut state = child.summary(name);
     state.previous = previous.into();
+    if stopped_untested {
+        child.failed = false;
+        child.stages.retain(|s| matches!(s.state.as_str(), "passed" | "warning"));
+    }
     parent.failed |= child.failed;
     parent.stages.extend(child.stages.clone());
     parent.evidence.extend(child.evidence.clone());
@@ -131,6 +137,11 @@ fn collect(parent: &mut Run, mut child: Run, name: &str, previous: &str) {
         if state.detail.is_empty() {
             state.detail = "script finalization failed; see run log".into();
         }
+    } else if stopped_untested {
+        state.verdict = "waiting".into();
+        state.detail = "stopped before it finished".into();
+        state.steps.clear();
+        state.failed_at = 0;
     }
     if let Some(old) = parent.scripts.iter_mut().find(|s| s.name == name) {
         if state.failed_at == 0 {
@@ -156,7 +167,11 @@ pub fn run(
         .map(|s| {
             let mut state = ScriptState::waiting(&s.name);
             if let Some(old) = previous.iter().find(|old| old.name == s.name) {
-                state.previous = old.color_verdict().into();
+                // What the last FINISHED attempt said; an untested one says nothing.
+                state.previous = match old.color_verdict() {
+                    "waiting" | "running" => old.previous.clone(),
+                    verdict => verdict.into(),
+                };
                 state.detail = old.detail.clone();
                 state.failed_at = old.failed_at;
             }
