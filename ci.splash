@@ -3,7 +3,9 @@
 use mod.std.*
 use mod.ci;
 
-ci.warm({packages: ci.apps, targets: ci.host.targets})
+// Director drives cargo builds and child processes: a desktop tool, so it is
+// warmed for the desktop rows only, as its own script asks.
+ci.warm({packages: ci.apps, targets: ci.host.targets, desktop_only: ["makepad-director"]})
 
 ci.exclusive()
 

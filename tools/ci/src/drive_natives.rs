@@ -283,6 +283,26 @@ fn finish_batch(vm: &mut ScriptVm, i: usize, outcomes: Result<Vec<(String, crate
                 let note = format!("cached; failing here, told on their own tiles: {}", failing.join(", "));
                 rt(vm).run.annotate(i, &note);
             }
+            // An app's warnings are its own tile's. A LIBRARY's warnings have
+            // no tile of their own, so they are this script's: the workspace
+            // block goes yellow and names the crates.
+            let mut libraries = std::collections::BTreeMap::new();
+            for (_, outcome) in &outcomes {
+                if let crate::cargo_cache::Outcome::Cargo(r) = outcome {
+                    for (name, n) in &r.warnings {
+                        if *n > 0 && !outcomes.iter().any(|(package, _)| package == name) {
+                            let seen = libraries.entry(name.clone()).or_insert(0u64);
+                            *seen = (*seen).max(*n);
+                        }
+                    }
+                }
+            }
+            if !libraries.is_empty() {
+                let text = libraries.iter().map(|(name, n)| format!("{name}: {n} warnings")).collect::<Vec<_>>().join("\n");
+                rt(vm).run.annotate(i, &text);
+                warning(vm, &text);
+                orange = true;
+            }
         }
         Ok(outcomes) => for (package, outcome) in outcomes {
             match record_outcome(vm, &outcome, opts) {
@@ -318,8 +338,21 @@ fn check_targets(vm: &mut ScriptVm, v: ScriptValue, warm: bool) -> Result<()> {
     let manifest = if !warm && packages.len() == 1 {
         package_manifest(vm, &packages[0]).map(PathBuf::from)
     } else { None };
+    // Packages that are desktop tools (they drive cargo and child processes,
+    // and most of them is compiled out elsewhere): not checked for web, mobile
+    // or embedded rows, where they would only report their own absence.
+    let desktop_only = fields(vm, v, id!(desktop_only))?;
+    let all_packages = packages;
     let mut failed = false;
-    for check in cargo::target_checks(&host, &targets, &packages, workspace) {
+    for check in cargo::target_checks(&host, &targets, &all_packages, workspace) {
+        let narrowed = check.platform != cargo::Platform::Desktop && !desktop_only.is_empty();
+        let packages: Vec<String> = if narrowed {
+            all_packages.iter().filter(|p| !desktop_only.contains(p)).cloned().collect()
+        } else {
+            all_packages.clone()
+        };
+        let check = if narrowed { check.without_packages(&desktop_only) } else { check };
+        if packages.is_empty() && !workspace { continue; }
         let mut check_opts = opts.clone();
         check_opts.toolchain = check.toolchain.clone();
         check_opts.env.retain(|(key, _)| key != "MAKEPAD");
@@ -333,12 +366,12 @@ fn check_targets(vm: &mut ScriptVm, v: ScriptValue, warm: bool) -> Result<()> {
         failed |= finish_batch(vm, i, outcomes, &opts, warm);
     }
     if warm {
-        cargo::command_args(&crate::cargo_cache::release_args(&packages), &opts, &host.target)?;
+        cargo::command_args(&crate::cargo_cache::release_args(&all_packages), &opts, &host.target)?;
         if !rt(vm).validate {
             let r = rt(vm);
             let i = r.run.plan(&format!("{} / warm host builds", r.group));
             r.run.begin(i, "cargo build --release --bins (all app packages)");
-            let outcomes = crate::cargo_cache::warm_builds(&mut r.run, &host, &packages, &opts);
+            let outcomes = crate::cargo_cache::warm_builds(&mut r.run, &host, &all_packages, &opts);
             failed |= finish_batch(vm, i, outcomes, &opts, true);
         }
     }

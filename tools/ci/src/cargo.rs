@@ -310,6 +310,28 @@ pub struct TargetCheck {
     pub toolchain: Option<String>,
     pub skip: Option<String>,
 }
+impl TargetCheck {
+    /// The same check without some packages: a desktop tool is not asked to
+    /// compile for the web or a phone.
+    pub fn without_packages(mut self, skip: &[String]) -> Self {
+        let mut args = Vec::with_capacity(self.args.len());
+        let mut it = std::mem::take(&mut self.args).into_iter();
+        while let Some(arg) = it.next() {
+            if arg == "-p" {
+                if let Some(package) = it.next() {
+                    if !skip.contains(&package) {
+                        args.push(arg);
+                        args.push(package);
+                    }
+                }
+            } else {
+                args.push(arg);
+            }
+        }
+        self.args = args;
+        self
+    }
+}
 pub fn target_checks(
     host: &Host,
     targets: &[String],
@@ -424,6 +446,18 @@ pub fn binary_path(root: &std::path::Path, binary: &str) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_desktop_tool_is_left_out_of_a_check_without_disturbing_the_rest() {
+        let check = TargetCheck {
+            label: "wasm32-unknown-unknown".into(), ty: BuildTy::Lib, platform: Platform::Web,
+            args: ["check", "--target", "wasm32-unknown-unknown", "--lib", "-p", "makepad-wm", "-p", "makepad-director", "-p", "makepad-notes", "--message-format=json"]
+                .iter().map(|s| s.to_string()).collect(),
+            env: Vec::new(), toolchain: None, skip: None,
+        };
+        let narrowed = check.without_packages(&["makepad-director".to_string()]);
+        assert_eq!(narrowed.args.join(" "),
+            "check --target wasm32-unknown-unknown --lib -p makepad-wm -p makepad-notes --message-format=json");
+    }
     #[test]
     fn other_targets_are_check_only_and_host_is_omitted() {
         let host = Host {
