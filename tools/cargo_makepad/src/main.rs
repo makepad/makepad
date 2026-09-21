@@ -189,6 +189,9 @@ fn show_help() {
         "       --sdk-path=./android_33_sdk               The path to read/write the android SDK"
     );
     println!(
+        "                                                 (defaults to ~/.makepad/android_33_<host-os>)"
+    );
+    println!(
         "       --full-ndk                                Install the full NDK prebuilts for the selected Host OS (default is a minimal subset)."
     );
     println!(
