@@ -484,11 +484,13 @@ impl MenuModel {
         }
         items.extend(launcher::apps(launchable));
         items.push(MenuItem::new("desktop","Desktop style",MenuKind::Menu));
+        // One row per style. Dark or light is the appearance toggle's to
+        // say, not a second row here, and the black-orange theme is not
+        // offered from this menu.
         for style in crate::desktop::DesktopStyle::ALL {
+            if style == crate::desktop::DesktopStyle::BlackOrange { continue; }
             items.push(MenuItem::new(&format!("desktop.{}",style.id()),style.label(),MenuKind::Action));
         }
-        items.push(MenuItem::new("desktop.macos-dark","macOS · Dark",MenuKind::Action));
-        items.push(MenuItem::new("desktop.windows-dark","Windows · Dark",MenuKind::Action));
         if path.starts_with("style.theme") {
             items.extend(theme_items());
         }

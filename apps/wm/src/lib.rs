@@ -3080,7 +3080,8 @@ impl App {
         if target=="start.power" {self.toggle_shell_panel(cx,BarModule::Power);return;}
         if let Some(name) = target.strip_prefix("desktop.") {
             if let Some(style) = desktop::DesktopStyle::parse(name) {
-                if style.supports_dark() { self.state_mut().style.dark = name.ends_with("-dark"); }
+                // The appearance toggle owns dark or light; a style pick
+                // leaves it where it is.
                 self.set_desktop_style(cx, style);
                 return;
             }
