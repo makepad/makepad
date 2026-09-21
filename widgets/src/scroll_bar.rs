@@ -129,8 +129,9 @@ script_mod! {
         }
     }
 
-    /** The tab-bar scrollbar: the same handle, invisible until hovered. */
+    /** The tab-bar scrollbar: the strip scrolls, but there's no handle to grab. */
     mod.widgets.ScrollBarTabs = mod.widgets.ScrollBar {
+        show_handle: false
         draw_bg +: {
             /** dragging mix 0..1 step 0.01 */
             drag: instance(0.0)
