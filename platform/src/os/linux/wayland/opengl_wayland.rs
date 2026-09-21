@@ -682,6 +682,8 @@ impl WaylandWindow {
         position: Option<Vec2d>,
         title: &str,
         app_id: &str,
+        // The legacy maximize-or-fullscreen flag, same name and meaning as x11/win32.
+        // Like them we create MAXIMIZED for it, so a restored window keeps its chrome.
         is_fullscreen: bool,
         decoration_preference: WaylandDecorationPreference,
     ) -> WaylandWindow {
@@ -742,8 +744,8 @@ impl WaylandWindow {
                 surface_height,
                 should_show_csd_shadow(
                     uses_client_side_decorations,
-                    false,
                     is_fullscreen,
+                    false,
                     false,
                 ),
                 false,
@@ -751,7 +753,7 @@ impl WaylandWindow {
         }
 
         if is_fullscreen {
-            toplevel.set_fullscreen(None);
+            toplevel.set_maximized();
         }
         base_surface.commit();
 
@@ -816,8 +818,9 @@ impl WaylandWindow {
             decoration,
             uses_client_side_decorations,
             pending_client_side_decorations: None,
-            is_maximized: false,
-            is_fullscreen,
+            // Optimistic until the first configure; the compositor overwrites both.
+            is_maximized: is_fullscreen,
+            is_fullscreen: false,
             is_tiled: false,
             is_active: false,
             unavailable_resize_edges: 0,

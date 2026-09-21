@@ -864,11 +864,14 @@ impl WaylandCx {
                     // `get_pass_rect()` produce NaN once the flag is on.
                     let native_geom = window.window_geom.clone();
                     let uses_client_side_decorations = window.uses_client_side_decorations;
-                    let is_fullscreen = window.is_fullscreen;
+                    // A window is never born fullscreen -- creation only ever asks for
+                    // maximize -- but read it off the window rather than hardcoding false,
+                    // so this keeps tracking whatever `WaylandWindow::new` decided.
+                    let wayland_is_fullscreen = window.is_fullscreen;
                     state.windows.push(window);
                     let cx_window = &mut cx.windows[window_id];
                     cx_window.uses_client_side_decorations = uses_client_side_decorations;
-                    cx_window.wayland_is_fullscreen = is_fullscreen;
+                    cx_window.wayland_is_fullscreen = wayland_is_fullscreen;
                     cx_window.os_dpi_factor = Some(native_geom.dpi_factor);
                     let layout_geom = cx_window.native_window_geom_to_layout(native_geom);
                     cx_window.window_geom = layout_geom;

@@ -1398,7 +1398,7 @@ impl WindowRef {
             false
         }
     }
-    /// OS-native maximize (Windows: `ShowWindow(SW_MAXIMIZE)`; macOS: zoom).
+    /// OS-native maximize (Windows: `ShowWindow(SW_MAXIMIZE)`; macOS: `toggleFullScreen:`).
     /// Unlike `fullscreen()`/`disable_fullscreen()` (which push
     /// `FullscreenWindow`/`NormalizeWindow` — not handled by every
     /// backend), `maximize`/`restore` push the ops the Windows backend
@@ -1458,17 +1458,20 @@ impl WindowRef {
             inner.window.handle.normal(cx);
         }
     }
-    /// Configure the window's size and position, and whether it's fullscreen or not.
+    /// Configure the window's size, position, title, and whether it starts out big.
     ///
-    /// If `fullscreen` is `true`, the window will be set to the monitor's size and the
-    /// `inner_size` and `position` arguments will be ignored.
+    /// `fullscreen` is the legacy maximize-or-fullscreen flag that `is_fullscreen()`
+    /// reports back, so saving that value on exit and feeding it in here round-trips.
+    /// x11, Wayland and Win32 all create the window MAXIMIZED for it, keeping the title
+    /// bar and chrome buttons; only macOS takes it literally and enters fullscreen,
+    /// where AppKit still supplies an auto-hiding menu bar and traffic lights. Nothing
+    /// here ever produces a chromeless window the user can't get out of.
     ///
-    /// If `fullscreen` is `false`, the window will be set to the specified `inner_size`
-    /// and positioned at `position` on the screen.
+    /// `inner_size` and `position` still apply -- they become the geometry the window
+    /// un-maximizes back to. Wayland ignores `position`; the protocol has no way for a
+    /// client to place its own toplevel.
     ///
-    /// The `title` argument sets the window's title bar text.
-    ///
-    /// This only works in app startup.
+    /// This only works in app startup, before the window is created.
     pub fn configure_window(
         &self,
         cx: &mut Cx,
