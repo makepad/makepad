@@ -24,6 +24,44 @@ pub struct FontFace {
     cached_coretext_face: RefCell<Option<Option<super::coretext::CoreTextFace>>>,
 }
 
+#[cfg(all(test, target_os = "macos"))]
+mod coretext_gate_tests {
+    use super::*;
+
+    /// An ordinary face must never resolve a CoreText font: its space glyph
+    /// has no outline either, and the resolution is a cascade-list scan plus a
+    /// temp-file font load on the UI thread.
+    #[test]
+    fn an_ordinary_face_never_resolves_a_coretext_font() {
+        let bytes = include_bytes!("../../../widgets/resources/RobotoFlex.ttf");
+        let face = FontFace::from_data_and_index(FontData::from_vec(bytes.to_vec()), 0).unwrap();
+        assert!(!face.outlines_live_only_in_hvgl());
+        let space = face.with_ttf_parser_face(|f| f.glyph_index(' ').unwrap().0);
+        assert!(face.coretext_glyph_outline(space, 2048.0).is_none());
+        assert!(
+            matches!(*face.cached_coretext_face.borrow(), Some(None)),
+            "the gate must settle the cache without building a CoreTextFace"
+        );
+    }
+
+    /// PingFangUI.ttc on macOS 26+ is the face the fallback exists for.
+    #[test]
+    fn an_hvgl_only_system_face_passes_the_gate() {
+        const PINGFANG: &str = "/System/Library/PrivateFrameworks/FontServices.framework/Resources/Reserved/PingFangUI.ttc";
+        let Ok(data) = FontData::from_file_mmap_or_read(PINGFANG) else {
+            eprintln!("PingFangUI.ttc not present, skipping");
+            return;
+        };
+        let face = FontFace::from_data_and_index(data, 0).unwrap();
+        let has_glyf = face.with_ttf_parser_face(|f| f.tables().glyf.is_some());
+        if has_glyf {
+            eprintln!("this macOS still ships a glyf PingFang, skipping");
+            return;
+        }
+        assert!(face.outlines_live_only_in_hvgl());
+    }
+}
+
 #[cfg(test)]
 mod mobile_font_tests {
     use super::*;
@@ -178,6 +216,23 @@ impl FontFace {
         }
     }
 
+    /// Whether ttf_parser can never outline this face while CoreText can: no
+    /// `glyf`, `CFF` or `CFF2` table, and an `hvgl` table present. A bitmap
+    /// face (`sbix` emoji) has none of the four and stays out.
+    #[cfg(target_os = "macos")]
+    fn outlines_live_only_in_hvgl(&self) -> bool {
+        self.with_ttf_parser_face(|face| {
+            let tables = face.tables();
+            tables.glyf.is_none()
+                && tables.cff.is_none()
+                && tables.cff2.is_none()
+                && face
+                    .raw_face()
+                    .table(ttf_parser::Tag::from_bytes(b"hvgl"))
+                    .is_some()
+        })
+    }
+
     /// Outline a glyph via the CoreText fallback. Used only when ttf_parser
     /// finds no outline (fonts whose outlines live in Apple's proprietary
     /// `hvgl` table, e.g. PingFang on macOS 26+). The CTFont is built lazily
@@ -193,12 +248,21 @@ impl FontFace {
         {
             let mut cache = self.cached_coretext_face.borrow_mut();
             if cache.is_none() {
-                *cache = Some(super::coretext::CoreTextFace::new(
-                    self.parsed.data.as_slice(),
-                    self.parsed.index,
-                    units_per_em,
-                    &self.variations,
-                ));
+                // Every face gets here, not just an hvgl one: a space has no
+                // outline in any font. Resolving a CTFont for an ordinary face
+                // would cost a cascade-list scan and a temp-file font load on
+                // the UI thread to outline nothing, so only a face whose
+                // outlines live solely in `hvgl` is ever resolved.
+                *cache = Some(if self.outlines_live_only_in_hvgl() {
+                    super::coretext::CoreTextFace::new(
+                        self.parsed.data.as_slice(),
+                        self.parsed.index,
+                        units_per_em,
+                        &self.variations,
+                    )
+                } else {
+                    None
+                });
             }
         }
         let cache = self.cached_coretext_face.borrow();

@@ -3538,7 +3538,6 @@ impl FontFamily {
         let mut expected_member_count = 0;
         let family_id = self.to_font_family_id();
 
-        let font_dbg = std::env::var("MAKEPAD_FONT_DEBUG").is_ok();
         for member in &self.members {
             if let Some(lazy) = member.lazy {
                 if !fonts.lazy_font_is_requested(family_id, lazy) {
@@ -3558,15 +3557,14 @@ impl FontFamily {
 
             if !fonts.is_font_known(font_id) {
                 let font_data = cx.get_resource_font_bytes_by_path(&member.resource_path);
-                if font_dbg {
-                    eprintln!(
-                        "FONTDBG family={:?} member={} path={:?} bytes={:?}",
-                        self.id.0,
-                        member.id,
-                        member.resource_path,
-                        font_data.as_ref().map(|d| d.len()),
-                    );
-                }
+                crate::trace!(
+                    "font",
+                    "family={:?} member={} path={:?} bytes={:?}",
+                    self.id.0,
+                    member.id,
+                    member.resource_path,
+                    font_data.as_ref().map(|d| d.len())
+                );
 
                 if let Some(data) = font_data {
                     if std::env::var_os("MAKEPAD_TRACE_FONT_LOAD").is_some() {
@@ -3604,14 +3602,13 @@ impl FontFamily {
             }
         }
 
-        if font_dbg {
-            eprintln!(
-                "FONTDBG family={:?} defined with {}/{} members",
-                self.id.0,
-                font_ids.len(),
-                self.members.len(),
-            );
-        }
+        crate::trace!(
+            "font",
+            "family={:?} defined with {}/{} members",
+            self.id.0,
+            font_ids.len(),
+            expected_member_count
+        );
         fonts.set_font_family_definition(
             family_id,
             FontFamilyDefinition {
@@ -3824,11 +3821,8 @@ impl ScriptHook for FontFamily {
                         _ => None,
                     },
                 });
-            } else if std::env::var("MAKEPAD_FONT_DEBUG").is_ok() {
-                eprintln!(
-                    "FONTDBG family={:?} member {} DROPPED: res is None",
-                    self.id.0, i
-                );
+            } else {
+                crate::trace!("font", "family={:?} member {} dropped: res is None", self.id.0, i);
             }
         }
 
