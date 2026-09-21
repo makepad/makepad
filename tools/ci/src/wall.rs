@@ -14,7 +14,6 @@ script_mod! {
         width: Fill height: Fill
         draw_square +: {
             color: #3a3f46
-            previous: #0000
             pulse: 1.0
             progress: -1.0
             selected: 0.0
@@ -22,10 +21,6 @@ script_mod! {
                 let p = self.pos * self.rect_size
                 let edge = min(min(p.x, p.y), min(self.rect_size.x-p.x, self.rect_size.y-p.y))
                 if edge < 2.0 && self.selected > 0.5 {return #9aa1ab}
-                // What the last finished run said, while this run has not got here.
-                if self.previous.w > 0.5 && length(p - vec2(self.rect_size.x-15.0, 15.0)) < 6.0 {
-                    return vec4(self.previous.xyz, 1.0)
-                }
                 if self.progress >= 0.0 && p.y > self.rect_size.y-10.0 {
                     if self.pos.x < self.progress {return #8f98a3}
                     return #0009
@@ -46,8 +41,6 @@ pub struct DrawSquare {
     draw_super: DrawQuad,
     #[live]
     color: Vec4f,
-    #[live]
-    previous: Vec4f,
     #[live]
     pulse: f32,
     #[live]
@@ -125,7 +118,7 @@ const NAME_ADVANCE: f64 = 0.64;
 /// The name's font size in a tile: as large as the tile's height and a whole
 /// NAME_CHARS name allow.
 fn name_font(size: DVec2) -> f64 {
-    (size.y / 5.0).min((size.x - 34.0) / (NAME_CHARS * NAME_ADVANCE)).clamp(9.0, 24.0)
+    (size.y / 5.0).min((size.x - 20.0) / (NAME_CHARS * NAME_ADVANCE)).clamp(9.0, 24.0)
 }
 /// Columns and tile size. Every tile fits, fills its column, and is never
 /// taller than wide; among those the packing with the LARGEST NAME wins, since
@@ -186,13 +179,6 @@ impl Widget for CiWall {
             let verdict = tile.state.color_verdict();
             let running = verdict == "running";
             self.draw_square.color = colour(verdict);
-            self.draw_square.previous = if matches!(verdict, "waiting" | "running")
-                && matches!(tile.state.previous.as_str(), "green" | "orange" | "red")
-            {
-                colour(&tile.state.previous)
-            } else {
-                vec4(0., 0., 0., 0.)
-            };
             self.draw_square.pulse = if running {
                 0.86 + 0.14 * (self.time * 3.0).sin() as f32
             } else {
@@ -214,7 +200,7 @@ impl Widget for CiWall {
         self.draw_text.text_style.font_size = font as f32;
         self.draw_name.begin_many_instances(cx);
         for (tile, r) in self.tiles.iter().zip(&self.rects) {
-            let chars = ((r.size.x - 34.0 + 6.0) / (name_font * NAME_ADVANCE)).max(1.0) as usize;
+            let chars = ((r.size.x - 20.0) / (name_font * NAME_ADVANCE)).max(1.0) as usize;
             self.draw_name.color = ink(tile.state.color_verdict(), true);
             self.draw_name.draw_abs(cx, r.pos + dvec2(10.0, 8.0), &ellipsis(&tile.label, chars));
         }
@@ -243,12 +229,9 @@ impl Widget for CiWall {
                     clock(state.seconds),
                 ],
                 "green" => vec![format!("{p} passed"), clock(state.seconds)],
-                _ => vec![match state.previous.as_str() {
-                    "red" => "untested · failed last run",
-                    "orange" => "untested · warnings last run",
-                    "green" => "untested · passed last run",
-                    _ => "untested",
-                }.into()],
+                // Untested is grey and says so; what an earlier run said is
+                // history, told in the detail, never on the wall.
+                _ => vec!["untested".into()],
             };
             for (index, line) in lines.iter().filter(|l| !l.is_empty()).enumerate() {
                 let y = 10.0 + name_font * 1.55 + index as f64 * (font * 1.5);

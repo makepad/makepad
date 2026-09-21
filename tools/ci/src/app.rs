@@ -287,7 +287,12 @@ impl App {
                 "orange" => "passed with warnings",
                 "red" => "FAILED",
                 "running" => "testing now",
-                _ => "not tested yet",
+                _ => match state.previous.as_str() {
+                    "red" => "not tested yet (failed in the last finished run)",
+                    "orange" => "not tested yet (warnings in the last finished run)",
+                    "green" => "not tested yet (passed in the last finished run)",
+                    _ => "not tested yet",
+                },
             }));
         let steps = state
             .steps
