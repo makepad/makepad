@@ -374,6 +374,10 @@ impl Run {
         }
     }
     pub fn end(&mut self, i: usize, state: &str, detail: &str) {
+        // Once a run is stopped, whatever is still going fails for that reason
+        // alone: commands are cut short and apps are gone. That is not a test
+        // result, so it is recorded as skipped and never turns a tile red.
+        let state = if state == "failed" && self.control.stopped() { "skipped" } else { state };
         let s = &mut self.stages[i];
         s.seconds = s.started.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
         s.state = state.into();

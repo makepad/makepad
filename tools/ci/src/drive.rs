@@ -659,7 +659,9 @@ fn register(vm: &mut ScriptVm, target: Option<&Target>) {
         script_args!(target = NIL),
         |vm, args| {
             if !allow(vm) {
-                return NIL;
+                // Stopped or already failed: the script still holds an app,
+                // an inert one, so its later calls are not errors on nil.
+                return app_object(vm, usize::MAX);
             }
             let v = value(vm, args, id!(target));
             let r = natives::launch(vm, v);

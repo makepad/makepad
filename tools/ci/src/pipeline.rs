@@ -364,7 +364,16 @@ pub fn watch_loop(
             control.stop.store(false, Ordering::Release);
             let mut run_control = control.clone();
             run_control.model_cancel = makepad_ai_hub::backend::CancelToken::new();
+            let before = state.clone();
             let result = run_once(&base, &config, &branch, &tip, run_control, notify.clone());
+            if control.shutdown.load(Ordering::Acquire) {
+                // The process is going away mid-run. Nothing was tested to the
+                // end, so the last finished run stays the record and this tip
+                // stays untested: the next start runs it again.
+                watch::save_state(&base, &before)?;
+                break;
+            }
+            let stopped = control.stop.load(Ordering::Acquire);
             let entry = match result {
                 Ok(b) => b,
                 Err(e) => {
@@ -382,6 +391,13 @@ pub fn watch_loop(
                     }
                 }
             };
+            let mut entry = entry;
+            if stopped && entry.verdict != "red" {
+                // The user stopped it: what finished keeps its result, the
+                // rest is untested, and the branch says so instead of passing.
+                entry.verdict = "waiting".into();
+                entry.detail = "stopped before it finished".into();
+            }
             state.insert(branch, entry);
             watch::save_state(&base, &state)?;
             watch::publish(&state, &notify);
