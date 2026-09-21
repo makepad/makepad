@@ -2887,7 +2887,6 @@ impl Widget for TextFlowLink {
 #[cfg(test)]
 mod table_structure_tests {
     use super::*;
-    use crate::makepad_platform::*;
     use crate::script_eval;
 
     /// `Markdown`, `Html` and `RichTextEditor` reach TextFlow through a Rust

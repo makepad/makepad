@@ -333,8 +333,6 @@ impl SelectRef {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     /// The face never lies about a set: it names one value when one is
     /// chosen and counts them when more are, because naming one member of
     /// three is a lie about the other two.

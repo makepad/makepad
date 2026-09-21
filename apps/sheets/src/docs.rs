@@ -1,6 +1,8 @@
 //! The document source/sink boundary for native and bundled-demo builds.
 
-use crate::sheet::{self, Sheet, Workbook};
+#[cfg(any(not(target_arch = "wasm32"), feature = "demo", test))]
+use crate::sheet;
+use crate::sheet::{Sheet, Workbook};
 
 pub trait SheetDocs {
     fn initial(&self) -> Workbook;

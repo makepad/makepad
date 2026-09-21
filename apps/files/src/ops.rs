@@ -264,6 +264,7 @@ pub fn copy_tree(src: &Path, dst: &Path, cancel: &AtomicBool, on_bytes: &dyn Fn(
     }
     let meta = fs::symlink_metadata(src)?;
     if meta.file_type().is_symlink() {
+        #[cfg(any(unix, windows))]
         let link_target = fs::read_link(src)?;
         #[cfg(unix)]
         {

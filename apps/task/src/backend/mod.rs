@@ -87,7 +87,10 @@ pub struct MemInfo {
     pub available: u64,
     pub cache: u64,
     pub free: u64,
+    // Only the macOS sampler and parser tests currently use swap statistics.
+    #[cfg(any(target_os = "macos", test))]
     pub swap_total: u64,
+    #[cfg(any(target_os = "macos", test))]
     pub swap_used: u64,
 }
 

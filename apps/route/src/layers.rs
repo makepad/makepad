@@ -5,6 +5,7 @@
 //! Tools mutate `LayerState` and set `dirty`; the app applies the state to
 //! the MapView after each tool run and feeds worker results as they arrive.
 
+#[cfg(not(target_arch = "wasm32"))]
 use makepad_widgets::*;
 use crate::overlays::{OverlaySelection, OVERLAY_LAYERS};
 use std::path::PathBuf;
@@ -139,6 +140,7 @@ impl LayerState {
 /// GFS wind worker: 30 min disk-gated NOMADS polls, cached GRIB2 under
 /// `cache_dir`. Ends when the instance that started it is gone (its
 /// receiver dropped).
+#[cfg(not(target_arch = "wasm32"))]
 pub fn start_wind_worker(spawner: ThreadSpawner, sender: ToUISender<WindUpdate>, cache_dir: PathBuf) {
     let spawned = spawner.spawn_worker(
         ThreadOptions {

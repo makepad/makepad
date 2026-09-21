@@ -18872,10 +18872,6 @@ mod tests {
         });
     }
 
-    fn rect(x: f64, y: f64, w: f64, h: f64) -> Rect {
-        Rect { pos: dvec2(x, y), size: dvec2(w, h) }
-    }
-
     #[test]
     fn a_mention_lands_after_the_at_that_armed_it() {
         assert_eq!(insert_mention("look at @", "/a/b/c"), "look at @/a/b/c");

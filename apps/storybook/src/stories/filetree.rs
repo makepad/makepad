@@ -1,9 +1,10 @@
 //! The tree component's Files page: the working directory read into a
 //! file tree, ported from the widget zoo. The component's overview, the
 //! general tree, is `tree.rs`.
+use std::collections::HashMap;
+#[cfg(not(target_arch = "wasm32"))]
 use std::{
     cmp::Ordering,
-    collections::HashMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -205,6 +206,7 @@ impl StoryFileTree {
     /// Read the working directory into the tree, or a fixed sample where
     /// there is no file system.
     fn load_working_directory(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
         fn get_directory_entries(
             path: &Path,
             with_data: bool,

@@ -644,7 +644,9 @@ mod platform {
             // Filled from K32GetPerformanceInfo below, if it answers.
             cache: 0,
             // The page file total/available pair is Windows' commit charge.
+            #[cfg(test)]
             swap_total: status.ull_total_page_file.saturating_sub(status.ull_total_phys),
+            #[cfg(test)]
             swap_used: status
                 .ull_total_page_file
                 .saturating_sub(status.ull_avail_page_file)

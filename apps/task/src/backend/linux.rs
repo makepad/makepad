@@ -80,6 +80,7 @@ pub fn parse_meminfo(text: &str) -> MemInfo {
     let get = |name: &str| values.get(name).copied().unwrap_or(0);
     let total = get("MemTotal");
     let available = get("MemAvailable");
+    #[cfg(any(target_os = "macos", test))]
     let swap_total = get("SwapTotal");
     MemInfo {
         total,
@@ -87,7 +88,9 @@ pub fn parse_meminfo(text: &str) -> MemInfo {
         available,
         cache: get("Cached").saturating_add(get("SReclaimable")),
         free: get("MemFree"),
+        #[cfg(any(target_os = "macos", test))]
         swap_total,
+        #[cfg(any(target_os = "macos", test))]
         swap_used: swap_total.saturating_sub(get("SwapFree")),
     }
 }

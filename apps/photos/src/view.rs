@@ -22,7 +22,9 @@ use crate::library;
 use makepad_ai_services::wire::ToolResult;
 use makepad_image_tiles::library::ItemId;
 use makepad_image_tiles::{Library, TileGrid, TileGridAction};
-use makepad_widgets::makepad_platform::thread::{Lane, TaskHandle};
+#[cfg(not(target_arch = "wasm32"))]
+use makepad_widgets::makepad_platform::thread::Lane;
+use makepad_widgets::makepad_platform::thread::TaskHandle;
 use makepad_widgets::hosted_view::{HostedFace, HostedTransition};
 use makepad_widgets::*;
 use std::path::Path;

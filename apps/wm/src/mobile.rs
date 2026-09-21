@@ -618,7 +618,9 @@ mod tests {
         let turned = SafeAreaInsets { top: 0.0, right: 59.0, bottom: 21.0, left: 59.0 };
         dev.set_insets(turned);
         let app = app_rect(landscape, dev);
-        assert_eq!((app.pos.y, app.size.y), (0.0, landscape.size.y - 21.0));
+        // The native home gesture strip keeps its 28-point minimum even
+        // when the OS reports a smaller landscape inset.
+        assert_eq!((app.pos.y, app.size.y), (0.0, landscape.size.y - 28.0));
         assert!(card_rect(landscape, dev, 0.0, 0.0).pos.y >= app.pos.y);
     }
 
