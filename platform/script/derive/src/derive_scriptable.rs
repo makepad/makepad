@@ -180,7 +180,7 @@ fn derive_script_impl_inner(
             if field
                 .attrs
                 .iter()
-                .any(|a| a.name == "splat" || a.name == "walk" || a.name == "layout")
+                .any(|a| a.name == "script_splat" || a.name == "walk" || a.name == "layout")
             {
                 tb.add("<")
                     .stream(Some(field.ty.clone()))
@@ -260,11 +260,11 @@ fn derive_script_impl_inner(
                     .ident(&field.name)
                     .add(".script_to_value_props(vm, obj);");
             }
-            // Also cascade walk/layout/splat fields' properties to the object
+            // Also cascade walk/layout/script_splat fields' properties to the object
             if field
                 .attrs
                 .iter()
-                .find(|a| a.name == "walk" || a.name == "layout" || a.name == "splat")
+                .find(|a| a.name == "walk" || a.name == "layout" || a.name == "script_splat")
                 .is_some()
             {
                 tb.add("self.")
@@ -397,7 +397,7 @@ fn derive_script_impl_inner(
             if field
                 .attrs
                 .iter()
-                .find(|a| a.name == "walk" || a.name == "layout" || a.name == "splat")
+                .find(|a| a.name == "walk" || a.name == "layout" || a.name == "script_splat")
                 .is_some()
             {
                 tb.add("<")

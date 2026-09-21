@@ -7,12 +7,15 @@
 //! the single authority for `FileSnapshot::revision`.
 
 use makepad_code_editor::{document::PreparedDocument, session::PreparedView, CodeDocument, CodeSession};
-use makepad_widgets::makepad_platform::thread::{SignalToUI, TaskHandle, ThreadOptions, ThreadSpawner};
+use makepad_widgets::makepad_platform::thread::ThreadSpawner;
+use std::{path::{Path, PathBuf}, sync::Arc, time::Duration};
+#[cfg(not(target_arch = "wasm32"))]
+use makepad_widgets::makepad_platform::thread::{SignalToUI, TaskHandle, ThreadOptions};
+#[cfg(not(target_arch = "wasm32"))]
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
-    path::{Path, PathBuf},
-    sync::{atomic::{AtomicBool, Ordering}, mpsc::{self, Receiver, SyncSender, TrySendError}, Arc},
-    time::{Duration, Instant},
+    sync::{atomic::{AtomicBool, Ordering}, mpsc::{self, Receiver, SyncSender, TrySendError}},
+    time::Instant,
 };
 
 pub const MAX_DOCUMENTS: usize = 32;
@@ -21,7 +24,9 @@ pub const MAX_PENDING_SAVES: usize = 4;
 /// Fallback polling cadence for changes no watcher reported.
 pub const FALLBACK_INTERVAL: Duration = Duration::from_secs(5);
 /// One retry after an ENOENT read, for a replacement observed mid-rename.
+#[cfg(not(target_arch = "wasm32"))]
 const REPLACEMENT_RETRY: Duration = Duration::from_millis(20);
+#[cfg(not(target_arch = "wasm32"))]
 const MAX_PENDING_COMMANDS: usize = 16;
 
 #[derive(Clone, Debug)]
@@ -94,6 +99,7 @@ pub struct Delivery {
     pub prepared: Option<PreparedSnapshot>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 enum Command {
     Desired(Arc<Vec<PathBuf>>),
     Notify { path: PathBuf, epoch: u64, seq: u64 },
@@ -112,6 +118,7 @@ pub struct SaveResult {
     pub revision: Option<u64>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 struct SaveRequest {
     request_id: u64,
     path: PathBuf,
@@ -119,6 +126,7 @@ struct SaveRequest {
     text: Arc<String>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub struct DocumentWorker {
     commands: SyncSender<Command>,
     snapshots: Receiver<Delivery>,
@@ -137,6 +145,7 @@ pub struct DocumentWorker {
     task: TaskHandle<()>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl DocumentWorker {
     pub fn start(spawner: &ThreadSpawner) -> Result<Self, String> {
         Self::start_with_fallback(spawner, FALLBACK_INTERVAL)
@@ -144,29 +153,24 @@ impl DocumentWorker {
 
     /// `fallback` is the polling cadence for changes no watcher reported.
     pub fn start_with_fallback(spawner: &ThreadSpawner, fallback: Duration) -> Result<Self, String> {
-        #[cfg(target_arch = "wasm32")]
-        { let _ = (spawner, fallback); return Err("Local file watching is unavailable in this browser".into()); }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let (commands, rx) = mpsc::sync_channel(MAX_PENDING_COMMANDS);
-            // One slot per watchable document: a full watch set publishes in
-            // one wake instead of dripping four snapshots per 50 ms timeout.
-            let (tx, snapshots) = mpsc::sync_channel::<Delivery>(MAX_DOCUMENTS);
-            let (save_commands, save_rx) = mpsc::sync_channel(MAX_PENDING_SAVES);
-            let (save_tx, save_results) = mpsc::sync_channel(MAX_PENDING_SAVES);
-            let stop = Arc::new(AtomicBool::new(false));
-            let cancel = stop.clone();
-            let task = spawner.spawn_worker(
-                ThreadOptions { name: Some("studio-documents".into()), ..Default::default() },
-                move || run(rx, tx, save_rx, save_tx, cancel, fallback),
-            ).map_err(|e| e.to_string())?;
-            Ok(Self {
-                commands, snapshots, save_commands, save_results,
-                pending_saves: VecDeque::new(), outstanding_saves: BTreeMap::new(), next_save_id: 1,
-                desired: BTreeSet::new(), identities: BTreeMap::new(), retry: false,
-                pending_notify: BTreeMap::new(), pending_refresh: BTreeSet::new(), stop, task,
-            })
-        }
+        let (commands, rx) = mpsc::sync_channel(MAX_PENDING_COMMANDS);
+        // One slot per watchable document: a full watch set publishes in
+        // one wake instead of dripping four snapshots per 50 ms timeout.
+        let (tx, snapshots) = mpsc::sync_channel::<Delivery>(MAX_DOCUMENTS);
+        let (save_commands, save_rx) = mpsc::sync_channel(MAX_PENDING_SAVES);
+        let (save_tx, save_results) = mpsc::sync_channel(MAX_PENDING_SAVES);
+        let stop = Arc::new(AtomicBool::new(false));
+        let cancel = stop.clone();
+        let task = spawner.spawn_worker(
+            ThreadOptions { name: Some("studio-documents".into()), ..Default::default() },
+            move || run(rx, tx, save_rx, save_tx, cancel, fallback),
+        ).map_err(|e| e.to_string())?;
+        Ok(Self {
+            commands, snapshots, save_commands, save_results,
+            pending_saves: VecDeque::new(), outstanding_saves: BTreeMap::new(), next_save_id: 1,
+            desired: BTreeSet::new(), identities: BTreeMap::new(), retry: false,
+            pending_notify: BTreeMap::new(), pending_refresh: BTreeSet::new(), stop, task,
+        })
     }
 
     /// A watcher consumer reports that `path` changed on disk under the
@@ -344,13 +348,48 @@ impl DocumentWorker {
     pub fn watched_paths(&self) -> impl Iterator<Item = &PathBuf> { self.desired.iter() }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Drop for DocumentWorker {
     fn drop(&mut self) { self.request_stop(); }
 }
 
+// The browser cannot start a local filesystem worker. Keep the public API
+// available to portable callers without compiling its native queues or state.
+#[cfg(target_arch = "wasm32")]
+pub enum DocumentWorker {}
+
+#[cfg(target_arch = "wasm32")]
+impl DocumentWorker {
+    pub fn start(spawner: &ThreadSpawner) -> Result<Self, String> {
+        Self::start_with_fallback(spawner, FALLBACK_INTERVAL)
+    }
+
+    pub fn start_with_fallback(_spawner: &ThreadSpawner, _fallback: Duration) -> Result<Self, String> {
+        Err("Local file watching is unavailable in this browser".into())
+    }
+
+    pub fn notify_changed(&mut self, _path: PathBuf, _epoch: u64, _seq: u64) -> Result<(), String> {
+        match *self {}
+    }
+    pub fn watch(&mut self, _path: PathBuf) -> Result<(), String> { match *self {} }
+    pub fn unwatch(&mut self, _path: &Path) { match *self {} }
+    pub fn refresh(&mut self, _path: &Path) { match *self {} }
+    pub fn save(&mut self, _path: PathBuf, _expected_disk: Arc<String>, _text: Arc<String>) -> Result<u64, String> {
+        match *self {}
+    }
+    pub fn poll_saves(&mut self) -> Vec<SaveResult> { match *self {} }
+    pub fn poll(&mut self) -> Vec<Arc<FileSnapshot>> { match *self {} }
+    pub fn poll_prepared(&mut self) -> Vec<Delivery> { match *self {} }
+    pub fn request_stop(&self) { match *self {} }
+    pub fn is_finished(&self) -> bool { match *self {} }
+    pub fn watched_paths(&self) -> impl Iterator<Item = &PathBuf> { std::iter::empty() }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Debug, PartialEq)]
 struct Reading { text: Option<Arc<String>>, error: Option<String> }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Default)]
 struct Watch { canonical: Option<PathBuf>, last: Option<Reading> }
 

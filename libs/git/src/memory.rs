@@ -41,6 +41,8 @@ impl MemoryAccount {
     pub fn peak(&self) -> usize { self.0.peak.load(Ordering::Acquire) }
     pub fn same_account(&self, other: &Self) -> bool { Arc::ptr_eq(&self.0, &other.0) }
     pub fn try_reserve(&self, bytes: usize) -> Option<Reservation> {
+        // Keep fetch_update for older stable toolchains without try_update.
+        #[allow(deprecated)]
         let old = self.0.reserved.fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
             used.checked_add(bytes).filter(|next| *next <= self.capacity())
         }).ok()?;

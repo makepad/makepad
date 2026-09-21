@@ -602,15 +602,15 @@ macro_rules! impl_ser_de_ron_float {
     };
 }
 
-impl_ser_de_ron_unsigned!(usize, std::usize::MAX);
-impl_ser_de_ron_unsigned!(u64, std::u64::MAX);
-impl_ser_de_ron_unsigned!(u32, std::u32::MAX);
-impl_ser_de_ron_unsigned!(u16, std::u16::MAX);
-impl_ser_de_ron_unsigned!(u8, std::u8::MAX);
-impl_ser_de_ron_signed!(i64, std::i64::MIN, std::i64::MAX);
-impl_ser_de_ron_signed!(i32, std::i64::MIN, std::i64::MAX);
-impl_ser_de_ron_signed!(i16, std::i64::MIN, std::i64::MAX);
-impl_ser_de_ron_signed!(i8, std::i64::MIN, std::i8::MAX);
+impl_ser_de_ron_unsigned!(usize, usize::MAX);
+impl_ser_de_ron_unsigned!(u64, u64::MAX);
+impl_ser_de_ron_unsigned!(u32, u32::MAX);
+impl_ser_de_ron_unsigned!(u16, u16::MAX);
+impl_ser_de_ron_unsigned!(u8, u8::MAX);
+impl_ser_de_ron_signed!(i64, i64::MIN, i64::MAX);
+impl_ser_de_ron_signed!(i32, i64::MIN, i64::MAX);
+impl_ser_de_ron_signed!(i16, i64::MIN, i64::MAX);
+impl_ser_de_ron_signed!(i8, i64::MIN, i8::MAX);
 impl_ser_de_ron_float!(f64);
 impl_ser_de_ron_float!(f32);
 
