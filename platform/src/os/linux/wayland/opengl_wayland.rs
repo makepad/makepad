@@ -645,6 +645,9 @@ pub(crate) struct WaylandWindow {
     pub is_maximized: bool,
     pub is_fullscreen: bool,
     pub is_tiled: bool,
+    /// Last size the window actually floated at, i.e. what to go back to when it
+    /// leaves maximize/fullscreen and the compositor lets us pick.
+    pub floating_size: Vec2d,
     pub is_active: bool,
     pub unavailable_resize_edges: u8,
     pub xdg_surface: xdg_surface::XdgSurface,
@@ -822,6 +825,7 @@ impl WaylandWindow {
             is_maximized: is_fullscreen,
             is_fullscreen: false,
             is_tiled: false,
+            floating_size: inner_size,
             is_active: false,
             unavailable_resize_edges: 0,
             viewport,

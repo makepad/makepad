@@ -893,11 +893,6 @@ impl Dispatch<xdg_toplevel::XdgToplevel, WindowId> for WaylandState {
                     .iter_mut()
                     .find(|win| win.window_id == *window_id)
                 {
-                    let inner_size = if width > 0 && height > 0 {
-                        dvec2(width as f64, height as f64)
-                    } else {
-                        window.window_geom.inner_size
-                    };
                     let is_maximized =
                         WaylandState::xdg_toplevel_has_state(&states, 1 /* maximized */);
                     let is_fullscreen =
@@ -908,6 +903,21 @@ impl Dispatch<xdg_toplevel::XdgToplevel, WindowId> for WaylandState {
                     let constrained_edges =
                         xdg_toplevel_edge_mask(&states, 10 /* constrained_left */);
                     let unavailable_resize_edges = tiled_edges | constrained_edges;
+                    let is_floating = !is_maximized && !is_fullscreen && tiled_edges == 0;
+                    let inner_size = if width > 0 && height > 0 {
+                        dvec2(width as f64, height as f64)
+                    } else if is_floating {
+                        // 0x0 means "pick your own size", which is what we get on the way
+                        // out of maximize/fullscreen. Keeping the current size would leave
+                        // the window stuck at screen size with no way back down, so go back
+                        // to the last size it actually floated at.
+                        window.floating_size
+                    } else {
+                        window.window_geom.inner_size
+                    };
+                    if is_floating {
+                        window.floating_size = inner_size;
+                    }
                     let resize_was_disabled = window.is_maximized || window.is_fullscreen;
                     let resize_edges_changed =
                         window.unavailable_resize_edges != unavailable_resize_edges;
