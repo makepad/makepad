@@ -80,7 +80,18 @@ impl Runtime {
         }
         let remote = app.remote.as_ref().ok_or("remote unavailable")?;
         self.run.log(&format!("{} GET {route}", app.name));
-        let result = remote.request(route, mutate);
+        // An app that could not place an input on a frame (it was busy
+        // presenting) has done nothing and says "retry": ask again.
+        let mut attempt = 0;
+        let result = loop {
+            let result = remote.request(route, mutate);
+            let again = matches!(&result, Err(e) if e.to_string().contains("could not be submitted; retry"));
+            if !again || attempt == 5 {
+                break result;
+            }
+            attempt += 1;
+            std::thread::sleep(Duration::from_millis(300));
+        };
         if matches!(result, Err(Failure::Interrupted(_))) {
             app.interrupted = true;
             self.fatal = true;
@@ -1269,7 +1280,11 @@ mod tests {
             .collect();
         apps.sort();
         assert!(apps.len() >= 20, "the app scripts are missing: {apps:?}");
-        scripts.extend(apps.into_iter().map(|app| (format!("apps/{app}/ci.splash"), 2)));
+        // The terminal also builds the pty helper it starts its shell through.
+        scripts.extend(apps.into_iter().map(|app| {
+            let steps = if app == "terminal" { 3 } else { 2 };
+            (format!("apps/{app}/ci.splash"), steps)
+        }));
         for (path, count) in scripts.iter().map(|(path, count)| (path.as_str(), *count)) {
             let notify: Notify = Arc::new(|_| {});
             let run = Run::new(

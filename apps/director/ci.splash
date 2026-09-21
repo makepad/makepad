@@ -7,7 +7,12 @@ use mod.std.*
 use mod.ci;
 
 ci.step("check other platforms", fn(){
-    ci.check_targets({packages: ["makepad-director"] targets: ci.host.targets})
+    // Director drives cargo builds and child processes: a desktop tool. On web
+    // and mobile its worker layer is compiled out, so those rows say nothing.
+    ci.check_targets({
+        packages: ["makepad-director"]
+        targets: ["x86_64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-pc-windows-gnu", "x86_64-unknown-linux-gnu"]
+    })
 })
 
 let app = ci.launch({package: "makepad-director" binary: "director" cwd: "."})

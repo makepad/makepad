@@ -22,6 +22,8 @@ ci.step("check other platforms", fn(){
 // launch instant, so the waits below measure the app, not the compiler.
 ci.step("build the apps the desk will open", fn(){
     ci.build({package: "makepad-terminal" binary: "terminal"})
+    // The terminal starts its shell through this helper, next to it.
+    ci.build({package: "makepad-screen" binary: "makepad-screen"})
     ci.build({package: "makepad-browser" binary: "browser"})
 })
 

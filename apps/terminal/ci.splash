@@ -10,6 +10,12 @@ ci.step("check other platforms", fn(){
     ci.check_targets({packages: ["makepad-terminal"] targets: ci.host.targets})
 })
 
+// On macOS the terminal starts its shell through the pty helper that lives
+// next to it; an app build alone does not produce it.
+ci.step("build the pty helper", fn(){
+    ci.build({package: "makepad-screen" binary: "makepad-screen"})
+})
+
 let app = ci.launch({package: "makepad-terminal" binary: "terminal" cwd: "."})
 
 ci.step("comes up", fn(){
