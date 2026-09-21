@@ -203,6 +203,20 @@ or [Tweaker](docs/agents/tweaker.md) for live styling and source write-back.
 - Do not spawn a temporary thread for each job. Use `cx.thread_spawner()`,
   the pool TaskHandle API, or a long-lived platform worker fed by a channel.
 
+## Platform changes stay application-neutral
+
+- `platform/`, `widgets/`, `draw/`, and the other shared layers serve every
+  app. A change made there to speed up or fix one particular application is
+  not landed on the agent's own judgment: state the proposed platform change
+  and the app that motivated it, and get the user's feedback and checks
+  first.
+- Never leak application specifics into these layers: no app names, app
+  data shapes, app-only flags, or code paths that exist for one caller.
+  Express the need as a general facility with a general name, or keep the
+  code in the app.
+- Prove a platform optimisation on more than the app that asked for it
+  before it lands, and say in the commit which apps were checked.
+
 ## Splash and shader essentials
 
 - Use `script_mod!` and current widget APIs. For object properties use
