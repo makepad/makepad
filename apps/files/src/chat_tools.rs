@@ -971,8 +971,18 @@ mod tests {
     #[test]
     fn a_cancelled_walk_answers_at_once_and_says_it_is_a_floor() {
         // Cancel before the first child: the walk returns immediately and
-        // the summary carries the floor marker.
-        let home = model::home_dir();
+        // the summary carries the floor marker. The home is a made-up one
+        // under the temp dir: a walk of the real home descends into
+        // Desktop, Documents and Downloads, and on macOS the first look into
+        // those blocks on a permission dialog nobody at a CI box answers.
+        let root = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("files-chat-tools-cancel-{}", std::process::id()));
+        let home = root.join("home");
+        std::fs::create_dir_all(home.join("Documents/notes")).unwrap();
+        std::fs::create_dir_all(home.join("Downloads")).unwrap();
+        std::fs::write(home.join("Documents/notes/a.txt"), b"a").unwrap();
+        std::fs::write(home.join("Downloads/b.bin"), vec![0u8; 4096]).unwrap();
         let cancel = AtomicBool::new(true);
         let job = ToolJob {
             name: "treemap_summary".to_string(),
@@ -982,6 +992,7 @@ mod tests {
         };
         let started = makepad_widgets::Cx::monotonic_now();
         let outcome = run_with(&job, &cancel, &|_| {});
+        let _ = std::fs::remove_dir_all(&root);
         assert!(
             makepad_widgets::Cx::monotonic_now() - started < 2.0,
             "the flag must be honoured at once"
