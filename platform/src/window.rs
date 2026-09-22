@@ -655,6 +655,11 @@ impl WindowHandle {
         cx.windows[self.window_id()].main_pass_id = Some(pass.draw_pass_id());
         cx.passes[pass.draw_pass_id()].parent = CxDrawPassParent::Window(self.window_id());
     }
+    /// Startup-only: seeds what `CxOsOp::CreateWindow` builds the native window from.
+    ///
+    /// `is_fullscreen` is the legacy maximize-or-fullscreen flag `window_geom` reports.
+    /// x11/Wayland/Win32 create maximized for it, macOS creates fullscreen. See
+    /// `WindowRef::configure_window` for the full contract.
     pub fn configure_window(
         &mut self,
         cx: &mut Cx,

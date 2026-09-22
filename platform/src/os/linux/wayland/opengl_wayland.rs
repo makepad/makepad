@@ -645,6 +645,9 @@ pub(crate) struct WaylandWindow {
     pub is_maximized: bool,
     pub is_fullscreen: bool,
     pub is_tiled: bool,
+    /// Last size the window actually floated at, i.e. what to go back to when it
+    /// leaves maximize/fullscreen and the compositor lets us pick.
+    pub floating_size: Vec2d,
     pub is_active: bool,
     pub unavailable_resize_edges: u8,
     pub xdg_surface: xdg_surface::XdgSurface,
@@ -682,6 +685,8 @@ impl WaylandWindow {
         position: Option<Vec2d>,
         title: &str,
         app_id: &str,
+        // The legacy maximize-or-fullscreen flag, same name and meaning as x11/win32.
+        // Like them we create MAXIMIZED for it, so a restored window keeps its chrome.
         is_fullscreen: bool,
         decoration_preference: WaylandDecorationPreference,
     ) -> WaylandWindow {
@@ -742,8 +747,8 @@ impl WaylandWindow {
                 surface_height,
                 should_show_csd_shadow(
                     uses_client_side_decorations,
-                    false,
                     is_fullscreen,
+                    false,
                     false,
                 ),
                 false,
@@ -751,7 +756,7 @@ impl WaylandWindow {
         }
 
         if is_fullscreen {
-            toplevel.set_fullscreen(None);
+            toplevel.set_maximized();
         }
         base_surface.commit();
 
@@ -816,9 +821,11 @@ impl WaylandWindow {
             decoration,
             uses_client_side_decorations,
             pending_client_side_decorations: None,
-            is_maximized: false,
-            is_fullscreen,
+            // Optimistic until the first configure; the compositor overwrites both.
+            is_maximized: is_fullscreen,
+            is_fullscreen: false,
             is_tiled: false,
+            floating_size: inner_size,
             is_active: false,
             unavailable_resize_edges: 0,
             viewport,

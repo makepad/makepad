@@ -321,7 +321,10 @@ impl WaylandCx {
                         cx_window.os_dpi_factor = Some(re.new_geom.dpi_factor);
                         re.new_geom = cx_window.native_window_geom_to_layout(re.new_geom);
                     }
-                    if uses_csd && !is_fullscreen {
+                    // Also in fullscreen: we keep drawing our chrome there, and a click
+                    // lands on a button rather than starting a caption drag only if the
+                    // geom says where the buttons are.
+                    if uses_csd {
                         const BUTTONS_SIZE: Vec2d = Vec2d { x: 138.0, y: 29.0 };
                         re.new_geom.window_chrome_buttons = Rect {
                             pos: dvec2(re.new_geom.inner_size.x - BUTTONS_SIZE.x, 0.0),
@@ -499,6 +502,16 @@ impl WaylandCx {
                 cx.call_event_handler(&Event::MouseUp(e.into()));
                 cx.fingers.mouse_up(button);
                 cx.fingers.cycle_hover_area(live_id!(mouse).into());
+            }
+            XlibEvent::MouseLeave(mut e) => {
+                let mut cx = self.cx.borrow_mut();
+                cx.dpi_override_scale(&mut e.abs, e.window_id);
+                cx.call_event_handler(&Event::MouseLeave(e));
+                // Same pair as the MouseMove arm: the hover the widgets just dropped has to
+                // be committed, or `hover_last` still names it and the next motion reads as
+                // HoverOver instead of a fresh HoverIn.
+                cx.fingers.cycle_hover_area(live_id!(mouse).into());
+                cx.fingers.switch_captures();
             }
             XlibEvent::Scroll(mut e) => {
                 let mut cx = self.cx.borrow_mut();
@@ -864,11 +877,14 @@ impl WaylandCx {
                     // `get_pass_rect()` produce NaN once the flag is on.
                     let native_geom = window.window_geom.clone();
                     let uses_client_side_decorations = window.uses_client_side_decorations;
-                    let is_fullscreen = window.is_fullscreen;
+                    // A window is never born fullscreen -- creation only ever asks for
+                    // maximize -- but read it off the window rather than hardcoding false,
+                    // so this keeps tracking whatever `WaylandWindow::new` decided.
+                    let wayland_is_fullscreen = window.is_fullscreen;
                     state.windows.push(window);
                     let cx_window = &mut cx.windows[window_id];
                     cx_window.uses_client_side_decorations = uses_client_side_decorations;
-                    cx_window.wayland_is_fullscreen = is_fullscreen;
+                    cx_window.wayland_is_fullscreen = wayland_is_fullscreen;
                     cx_window.os_dpi_factor = Some(native_geom.dpi_factor);
                     let layout_geom = cx_window.native_window_geom_to_layout(native_geom);
                     cx_window.window_geom = layout_geom;
