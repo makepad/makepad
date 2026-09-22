@@ -2,6 +2,19 @@ use crate::{
     ffi, AudioCaptureConfig, AudioCaptureStats, AudioEvent, AudioFormat, AudioPacket,
     BootstrapResult, ConsoleMessage, Error, Evaluation, Frame, Result, TEXT_INPUT_MODE_NONE,
 };
+
+/// A diagnostic line on stderr that survives a closed pipe. A browser hosted
+/// by the window manager keeps painting for a moment after its host has gone
+/// and taken the pipe with it; `eprintln!` panics on that write ("failed
+/// printing to stderr"), and the panic took the browser down with a crash
+/// report on every quit of the desk.
+macro_rules! say {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr().lock(), $($arg)*);
+    }};
+}
+
 use libloading::Library;
 #[cfg(target_os = "macos")]
 use makepad_objc_sys::declare::ClassDecl;
@@ -2936,7 +2949,7 @@ unsafe extern "system" fn render_on_paint(
         if trace {
             makepad_error_log::trace!("cef", "{}", message);
         } else {
-            eprintln!("[makepad-cef] {message}");
+            say!("[makepad-cef] {message}");
         }
     }
     state.set_frame(Frame {
@@ -3071,7 +3084,7 @@ unsafe extern "system" fn render_on_accelerated_paint(
             if trace {
                 makepad_error_log::trace!("cef", "{}", message);
             } else {
-                eprintln!("[makepad-cef] {message}");
+                say!("[makepad-cef] {message}");
             }
         }
     }
@@ -3487,7 +3500,7 @@ pub fn flush_profile() {
         }
     }
     let flushed = flush_cookies(runtime);
-    eprintln!("[makepad-cef] profile: cookie store {flushed}");
+    say!("[makepad-cef] profile: cookie store {flushed}");
 }
 
 /// The cookie flush itself: asked of the global store, waited for on the
@@ -4607,7 +4620,7 @@ pub fn shutdown() {
     let left = runtime.live_browsers.load(Ordering::Acquire);
     let closed_ms = started.elapsed().as_millis();
     let flushed = flush_cookies(runtime);
-    eprintln!(
+    say!(
         "[makepad-cef] shutdown: {open} browsers open, {left} left after {closed_ms} ms; cookie store {flushed}"
     );
     let mut state = runtime.state.lock().unwrap();
