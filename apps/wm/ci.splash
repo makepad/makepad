@@ -56,6 +56,9 @@ ci.step("launch the terminal", fn(){
     wm.key("Space", {cmd: true})
     wm.type_text("terminal")
     wm.key("ReturnKey")
+    // The menu says what Return did; a launcher that lost the keys or
+    // picked nothing fails here, by name, not at the frame wait below.
+    wm.wait_log("shell menu activate apps.terminal", 20.0)
     // "launched" fires at spawn; the window is a compile placeholder until
     // the app draws. The WM says when it has: wait for that line.
     wm.wait_log("terminal client * first frame", 180.0)
@@ -68,6 +71,7 @@ ci.step("launch the browser", fn(){
     wm.key("Space", {cmd: true})
     wm.type_text("browser")
     wm.key("ReturnKey")
+    wm.wait_log("shell menu activate apps.browser", 20.0)
     wm.wait_log("browser client * first frame", 240.0)
     ci.sleep(4.0)
     let shot = wm.grab("browser")

@@ -570,6 +570,10 @@ pub struct App {
     /// The one-shot SUPER+ALT layer prefix (see binds.rs).
     #[rust]
     alt_armed: bool,
+    /// How many times the shell menu has opened: its open line carries the
+    /// number, so a script can wait for the one it asked for.
+    #[rust]
+    shell_menu_opens: u64,
     /// The bar was hidden because a window went fullscreen, not by
     /// SUPER+SHIFT+SPACE — so it comes back on its own.
     #[rust]
@@ -2975,10 +2979,13 @@ impl App {
                 m.open_at(cx, path, skin);
             }
         }
+        self.shell_menu_opens += 1;
+        log!("wm: shell menu open #{} at {path:?}", self.shell_menu_opens);
         self.redraw_all(cx);
     }
 
     fn close_shell_menu(&mut self, cx: &mut Cx) {
+        log!("wm: shell menu closed");
         let menu = self.ui.widget(cx, ids!(shell_menu));
         {
             let mut borrowed = menu.borrow_mut::<ShellMenu>();
@@ -3082,6 +3089,7 @@ impl App {
     /// What a menu row does. The ids are the jsonc's dotted paths, with
     /// `apps.<id>` and `style.theme[.import].<name>` from the providers.
     fn shell_menu_activate(&mut self, cx: &mut Cx, target: &str) {
+        log!("wm: shell menu activate {target}");
         if target=="start.documents" {self.launch_app(cx,"files");return;}
         if target=="start.power" {self.toggle_shell_panel(cx,BarModule::Power);return;}
         if let Some(name) = target.strip_prefix("desktop.") {

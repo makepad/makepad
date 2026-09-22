@@ -1392,6 +1392,13 @@ impl ShellMenu {
         if let Some(target) = self.model.activate() {
             self.model.close();
             cx.widget_action(self.uid, ShellMenuAction::Activate(target));
+        } else {
+            // Descended into a submenu, or nothing to activate: said, so a
+            // driver that typed a name and pressed Return can tell which.
+            log!(
+                "wm: shell menu Return activated nothing (filter {:?}, {} rows, selected {})",
+                self.model.filter, self.model.rows.len(), self.model.sel
+            );
         }
         self.gate.reset();
         self.redraw(cx);
