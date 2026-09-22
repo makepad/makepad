@@ -893,6 +893,12 @@ pub(crate) fn checkout_test_cx() -> PooledCx {
         cx.draw_lists = Default::default();
         cx.windows = Default::default();
         cx.new_draw_event = Default::default();
+        // The crate's own per-context state: the event id never moves
+        // between cases, so an Escape claim from the last case would refuse
+        // this one's; a root the last case drew must not resolve this
+        // one's cancel scopes.
+        overlay_place::reset_for_test(&mut cx);
+        widget_tree::reset_for_test(&mut cx);
         let _ = makepad_platform::shader_error::take();
         PooledCx { cx: Some(cx) }
     })

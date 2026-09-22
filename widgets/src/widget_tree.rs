@@ -3048,6 +3048,12 @@ struct UiRoot {
     active_path: RefCell<Vec<WidgetWeakRef>>,
 }
 
+/// Forget the root a previous case on a pooled test context drew.
+#[cfg(test)]
+pub(crate) fn reset_for_test(cx: &mut Cx) {
+    cx.set_global(UiRoot::default());
+}
+
 fn cancel_scope_resolver(cx: &Cx, candidate: &dyn Fn(u64) -> Option<u64>) -> Option<u64> {
     cx.get_global_ref::<UiRoot>()?.widget.upgrade()?.resolve_cancel_scope(candidate)
 }

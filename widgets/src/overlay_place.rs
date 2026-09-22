@@ -127,6 +127,15 @@ pub(crate) fn orphan_sweep_locks(areas: &[Area]) {
 /// this as each event reaches it, so a tree left with no overlay of the kind
 /// that was dropped still gets its input back; an overlay does it too before
 /// taking a lock of its own, for a tree with no window above it.
+/// Forget the last Escape claim and every orphaned lock: a pooled test
+/// context is handed to case after case without an event loop, so its
+/// event id never moves and the first case's claim would refuse every
+/// later case's Escape.
+#[cfg(test)]
+pub(crate) fn reset_for_test(cx: &mut Cx) {
+    cx.set_global(EscapeClaim::default());
+    let _ = ORPHANED_LOCKS.try_with(|orphans| orphans.borrow_mut().clear());
+}
 pub(crate) fn release_orphaned_sweep_locks(cx: &mut Cx) {
     let orphans = ORPHANED_LOCKS
         .try_with(|orphans| std::mem::take(&mut *orphans.borrow_mut()))
