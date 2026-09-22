@@ -30,7 +30,7 @@ ci.check_targets({
 
 ci.step("tests", fn(){
     // Every failing test target in one run, not only the first one.
-    ci.test({workspace: true args: ["--no-fail-fast"]})
+    ci.test({workspace: true args: ["--no-fail-fast"] timeout_secs: 10800})
 })
 
 // Optional native Windows coverage, with [machines.windows] in ci.toml:

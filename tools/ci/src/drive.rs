@@ -85,7 +85,9 @@ impl Runtime {
         let mut attempt = 0;
         let result = loop {
             let result = remote.request(route, mutate);
-            let again = matches!(&result, Err(e) if e.to_string().contains("could not be submitted; retry"));
+            // Every such answer of the bridge ends in "; retry" (an input frame
+            // or a grab it could not place, a grab budget that is full).
+            let again = matches!(&result, Err(e) if e.to_string().contains("; retry"));
             if !again || attempt == 5 {
                 break result;
             }

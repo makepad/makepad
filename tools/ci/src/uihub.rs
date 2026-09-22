@@ -219,8 +219,13 @@ impl UiHub {
             .session
             .append_tokens(&suffix)
             .map_err(|e| format!("prompt prefill: {e:?}"))?;
-        let (raw, tokens, decode_secs) = decode(&mut loaded.session, control)?;
-        let parsed = parse_verdict(&raw);
+        let (mut raw, tokens, decode_secs) = decode(&mut loaded.session, control)?;
+        let mut parsed = parse_verdict(&raw);
+        if parsed.is_err() {
+            let forced = force_verdict(&mut loaded.session, control)?;
+            raw = format!("{raw}\n[no verdict line; asked outright]\n{forced}");
+            parsed = parse_verdict(&forced);
+        }
         let mut reasons: Vec<String> = raw
             .lines()
             .filter(|s| s.starts_with("- "))
@@ -258,12 +263,26 @@ impl UiHub {
         decode(session, control).map(|(text, _, _)| text)
     }
 }
-fn decode(session: &mut LlamaSession, control: &Control) -> Result<(String, usize, f64)> {
+/// Has the text fallen into a loop? A small greedy model, asked to describe a
+/// picture, sometimes locks onto one short phrase and repeats it to the token
+/// cap ("-g -g -g -g"): the tail of `text` is then one short pattern, over and
+/// over. Whatever came before the loop is kept; the loop itself is not worth
+/// the time it takes to finish.
+pub fn is_looping(text: &str) -> bool {
+    const TAIL: usize = 48;
+    let bytes = text.as_bytes();
+    if bytes.len() < TAIL {
+        return false;
+    }
+    let tail = &bytes[bytes.len() - TAIL..];
+    (1..=TAIL / 4).any(|period| tail.chunks(period).all(|chunk| chunk == &tail[..chunk.len()]))
+}
+fn decode_limit(session: &mut LlamaSession, control: &Control, limit: usize) -> Result<(String, usize, f64)> {
     let start = Instant::now();
     let mut decoder = session.vocab().text_decoder();
     let mut raw = String::new();
     let mut n = 0;
-    while n < 160 {
+    while n < limit {
         control.check()?;
         if control.model_cancel.is_cancelled() {
             return Err("model cancelled".into());
@@ -277,10 +296,31 @@ fn decode(session: &mut LlamaSession, control: &Control) -> Result<(String, usiz
         n += 1;
         if let Some(text) = decoder.push_token(session.vocab(), token) {
             raw.push_str(&text);
+            if is_looping(&raw) {
+                break;
+            }
         }
     }
     raw.push_str(&decoder.finish());
     Ok((raw.trim().into(), n, start.elapsed().as_secs_f64()))
+}
+fn decode(session: &mut LlamaSession, control: &Control) -> Result<(String, usize, f64)> {
+    decode_limit(session, control, 160)
+}
+/// The verdict, asked for outright. When the free answer did not end in one
+/// (it looped, or ran to the cap mid-sentence), the conversation is continued
+/// with "VERDICT:" already written and the model finishes that line, so a
+/// judgement is never lost to the way it was phrased.
+fn force_verdict(session: &mut LlamaSession, control: &Control) -> Result<String> {
+    let ids = session
+        .vocab()
+        .tokenize("\nVERDICT:", false, false)
+        .map_err(|e| format!("tokenize: {e:?}"))?;
+    session
+        .append_tokens(&ids)
+        .map_err(|e| format!("verdict prefill: {e:?}"))?;
+    let (tail, _, _) = decode_limit(session, control, 4)?;
+    Ok(format!("VERDICT: {}", tail.trim()))
 }
 
 /// Is the vision model's whole file set on this machine?
@@ -354,6 +394,16 @@ pub fn peak_rss_bytes() -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_looping_answer_is_cut_and_a_verdict_line_is_still_read() {
+        assert!(is_looping("a command prompt line at the top reading sudo -g -g -g -g -g -g -g -g -g -g -g -g -g -g -g -g -g -g -g -g -g"));
+        assert!(is_looping(&"ab".repeat(40)));
+        assert!(!is_looping("1. The window shows a terminal with a prompt.\n2. Nothing else is open.\nVERDICT: YES"));
+        assert!(!is_looping("short"));
+        assert_eq!(parse_verdict("- looks fine\n[no verdict line; asked outright]\nVERDICT: YES"), Ok(true));
+        assert_eq!(parse_verdict("VERDICT: NO"), Ok(false));
+        assert!(parse_verdict("VERDICT: maybe").is_err());
+    }
     #[test]
     fn verdict_is_last_strict_marker() {
         assert_eq!(
