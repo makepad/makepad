@@ -60,6 +60,7 @@ use crate::{
     KeyCode, WindowCloseRequestedEvent, WindowGeomChangeEvent, WindowId, WindowMovedEvent,
 };
 
+use crate::event::MouseLeaveEvent;
 use super::super::windowing_backend::PIXELS_PER_WHEEL_DETENT;
 use super::opengl_wayland::{WaylandPopupWindow, WaylandWindow};
 
@@ -893,11 +894,6 @@ impl Dispatch<xdg_toplevel::XdgToplevel, WindowId> for WaylandState {
                     .iter_mut()
                     .find(|win| win.window_id == *window_id)
                 {
-                    let inner_size = if width > 0 && height > 0 {
-                        dvec2(width as f64, height as f64)
-                    } else {
-                        window.window_geom.inner_size
-                    };
                     let is_maximized =
                         WaylandState::xdg_toplevel_has_state(&states, 1 /* maximized */);
                     let is_fullscreen =
@@ -908,6 +904,21 @@ impl Dispatch<xdg_toplevel::XdgToplevel, WindowId> for WaylandState {
                     let constrained_edges =
                         xdg_toplevel_edge_mask(&states, 10 /* constrained_left */);
                     let unavailable_resize_edges = tiled_edges | constrained_edges;
+                    let is_floating = !is_maximized && !is_fullscreen && tiled_edges == 0;
+                    let inner_size = if width > 0 && height > 0 {
+                        dvec2(width as f64, height as f64)
+                    } else if is_floating {
+                        // 0x0 means "pick your own size", which is what we get on the way
+                        // out of maximize/fullscreen. Keeping the current size would leave
+                        // the window stuck at screen size with no way back down, so go back
+                        // to the last size it actually floated at.
+                        window.floating_size
+                    } else {
+                        window.window_geom.inner_size
+                    };
+                    if is_floating {
+                        window.floating_size = inner_size;
+                    }
                     let resize_was_disabled = window.is_maximized || window.is_fullscreen;
                     let resize_edges_changed =
                         window.unavailable_resize_edges != unavailable_resize_edges;
@@ -1701,6 +1712,18 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                 // Dispatch any buffered motion before the pointer leaves, so the final hover
                 // position is delivered to the right window first.
                 state.flush_pending_motion();
+                // Then say the pointer is gone, so whatever was hovered can drop its hover
+                // state. Without this the last hovered widget stays lit the whole time the
+                // pointer is away and only clears on the next motion after it comes back.
+                if let Some(window_id) = state.pointer_window {
+                    state.do_callback(XlibEvent::MouseLeave(MouseLeaveEvent {
+                        abs: state.last_mouse_pos,
+                        window_id,
+                        modifiers: state.modifiers,
+                        time: state.time_now(),
+                        handled: Cell::new(Area::Empty),
+                    }));
+                }
                 state.pointer_serial = Some(serial);
                 state.flush_pending_clipboard_copy(qhandle, serial);
                 state.pointer_window = None;
@@ -1813,9 +1836,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                                         .windows
                                         .iter()
                                         .find(|win| win.window_id == window_id)
-                                        .is_some_and(|win| {
-                                            win.uses_client_side_decorations && !win.is_fullscreen
-                                        });
+                                        .is_some_and(|win| win.uses_client_side_decorations);
                                     if uses_client_side_decorations {
                                         let response =
                                             Rc::new(Cell::new(WindowDragQueryResponse::NoAnswer));
@@ -1879,7 +1900,11 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
                                                     return;
                                                 }
                                                 if is_double_click {
-                                                    if window.is_maximized {
+                                                    // Fullscreen first: `set_maximized` under it
+                                                    // is a no-op, so the bar would look dead.
+                                                    if window.is_fullscreen {
+                                                        window.toplevel.unset_fullscreen();
+                                                    } else if window.is_maximized {
                                                         window.toplevel.unset_maximized();
                                                     } else {
                                                         window.toplevel.set_maximized();
